@@ -1,7 +1,9 @@
+pub mod elf;
 pub mod scheduler;
 pub mod tcb;
 
 use alloc::vec::Vec;
+pub use elf::{load_elf, ElfBinary, ElfError, ElfProcessImage};
 pub use scheduler::{TaskSnapshot, SCHEDULER};
 pub use tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
 
@@ -36,6 +38,16 @@ pub fn spawn(name: &'static str, entry_fn: fn(), priority: TaskPriority) -> Task
 pub fn spawn_user(name: &'static str, entry_fn: fn(), priority: TaskPriority) -> TaskId {
     let mut sched = SCHEDULER.lock();
     sched.spawn_user(name, entry_fn, priority)
+}
+
+/// Spawns a new unprivileged user process from an in-memory ELF64 binary image.
+pub fn spawn_elf(
+    name: &'static str,
+    elf_data: &[u8],
+    priority: TaskPriority,
+) -> Result<TaskId, &'static str> {
+    let mut sched = SCHEDULER.lock();
+    sched.spawn_elf(name, elf_data, priority)
 }
 
 /// Cooperatively yields the current task's timeslice to the next ready task.

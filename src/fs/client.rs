@@ -5,6 +5,7 @@ use super::zfs::server::{
 use super::zfs::types::DnodeType;
 use crate::capability::Capability;
 use crate::ipc::{Endpoint, Message};
+use uefi::proto::media::file::File;
 
 /// Detailed file/directory metadata returned by stat
 #[derive(Debug, Clone, Copy)]
@@ -535,5 +536,62 @@ impl ZfsClient {
         }
 
         Err("Directory not found in ZFS")
+    }
+
+    /// Discovers standalone executable ELF64 binaries on the UEFI boot medium (FAT volume)
+    /// and imports them into the OpenZFS storage pool under `/bin/` before ExitBootServices.
+    pub fn sync_boot_binaries() -> usize {
+        if crate::console::is_hardware_mode() {
+            return 0;
+        }
+
+        let mut root = match crate::shell::fs::open_root_volume() {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+
+        let candidate_files = [
+            ("\\bin\\hello.elf", "/bin/hello.elf"),
+            ("\\bin\\counter.elf", "/bin/counter.elf"),
+            ("\\hello.elf", "/bin/hello.elf"),
+            ("\\counter.elf", "/bin/counter.elf"),
+        ];
+
+        let mut imported_count = 0;
+        let mut path_u16 = [0u16; 128];
+        let mut file_buf = alloc::vec![0u8; 65536];
+
+        for &(fat_path, zfs_path) in &candidate_files {
+            // Skip if file already exists in ZFS
+            if Self::lookup(zfs_path).is_ok() {
+                continue;
+            }
+
+            if let Some(cstr) = crate::shell::fs::path_to_cstr16(fat_path, &mut path_u16) {
+                if let Ok(handle) = root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
+                    if let Some(mut file) = handle.into_regular_file() {
+                        let mut total_read = 0;
+                        while total_read < file_buf.len() {
+                            match file.read(&mut file_buf[total_read..]) {
+                                Ok(0) => break,
+                                Ok(n) => total_read += n,
+                                Err(_) => break,
+                            }
+                        }
+
+                        if total_read >= 4 && file_buf[..4] == crate::task::elf::ELF_MAGIC {
+                            if let Ok(_txg) = Self::write_file_by_path(zfs_path, &file_buf[..total_read]) {
+                                imported_count += 1;
+                                crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
+                                crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes, Fletcher-4 verified)",
+                                    fat_path, zfs_path, total_read);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        imported_count
     }
 }

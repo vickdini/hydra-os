@@ -448,6 +448,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage9-tcb" class="toc-link"><span class="toc-title">Task Control Block (TCB) & Thread State</span><span class="toc-sub">TCB architecture, register frame (TaskRegisters), lifecycle state machine, and heap stacks.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-scheduler" class="toc-link"><span class="toc-title">Preemptive Multitasking & Context Switching</span><span class="toc-sub">Round-robin timeslicing at 100 Hz, iretq context switching, idle task, and task commands (ps, spawn, kill).</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-sync" class="toc-link"><span class="toc-title">Synchronization Primitives & Wait Queues</span><span class="toc-sub">TaskState::Blocked wait queues, sleep Mutex, Semaphore, CondVar, and blocking rendezvous IPC.</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage9-elf" class="toc-link"><span class="toc-title">Userspace ELF64 Binary Loader & Execution</span><span class="toc-sub">Parsing standalone ELF64 binaries from ZFS, PIE relocation, Ring 3 memory mapping, and syscall execution.</span></a></li>
 <li class="toc-stage-header">Stage 10: Interactive Shell</li>
 <li class="toc-item"><a href="#doc-boot-stage10-shell" class="toc-link"><span class="toc-title">Interactive Microkernel Shell & Command REPL</span><span class="toc-sub">Command REPL, real-time memory/CPU inspection, CSpace manipulation, ZFS commands, and IPC testing.</span></a></li>
     </ul>
@@ -3770,8 +3771,348 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 
+<div id="doc-boot-stage9-elf" class="doc-section">
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
+    <h1>Userspace ELF64 Binary Loader &amp; Execution</h1>
+<h2>Overview</h2>
+<p>Hydra OS features an autonomous <strong>Userspace ELF64 Binary Loader</strong> capable of parsing, relocating, mapping, and executing standalone compiled x86_64 binaries directly from the OpenZFS storage medium (<code>hydrapool/bin</code>) in unprivileged <strong>Ring 3 (CPL = 3)</strong>.</p>
+<p>Unlike monolithic firmware environments where user programs must be compiled directly into the kernel executable (e.g. via <code>include_bytes!</code>), Hydra decouples userland binaries from kernel firmware. Standalone <code>.elf</code> executables reside on the boot medium, are synchronized into OpenZFS with Fletcher-4 checksum verification, and are dynamically spawned into isolated unprivileged tasks.</p>
+<p>The implementation is located across:
+- <strong>ELF64 Format Parser &amp; Loader</strong>: <a href="file:///d:/os/src/task/elf.rs"><code>src/task/elf.rs</code></a>
+- <strong>Task Control Block &amp; Stack Allocation</strong>: <a href="file:///d:/os/src/task/tcb.rs"><code>src/task/tcb.rs</code></a>
+- <strong>Scheduler Process Spawner</strong>: <a href="file:///d:/os/src/task/scheduler.rs"><code>src/task/scheduler.rs</code></a>
+- <strong>Hardware Syscall Trampoline &amp; Dispatcher</strong>: <a href="file:///d:/os/src/arch/syscall.rs"><code>src/arch/syscall.rs</code></a>
+- <strong>Interactive Shell Command</strong>: <a href="file:///d:/os/src/shell/commands/elf_cmd.rs"><code>src/shell/commands/elf_cmd.rs</code></a>
+- <strong>Direct Shell Invoker</strong>: <a href="file:///d:/os/src/shell/fs.rs"><code>src/shell/fs.rs</code></a></p>
+<hr />
+<h2>Architectural Flow &amp; Lifecycle</h2>
+<div class="codehilite"><pre><span></span><code><span class="n">sequenceDiagram</span>
+<span class="w">    </span><span class="n">autonumber</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Shell</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">Interactive</span><span class="w"> </span><span class="n">Shell</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">User</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">ZFS</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">ZFS</span><span class="w"> </span><span class="n">Client</span><span class="w"> </span><span class="p">(</span><span class="n">hydrapool</span><span class="o">/</span><span class="n">bin</span><span class="p">)</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Loader</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">ELF64</span><span class="w"> </span><span class="n">Parser</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">Loader</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Paging</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="mi">4</span><span class="o">-</span><span class="n">Level</span><span class="w"> </span><span class="n">Paging</span><span class="w"> </span><span class="n">Subsystem</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Sched</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">Preemptive</span><span class="w"> </span><span class="n">Scheduler</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">CPU</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">x86_64</span><span class="w"> </span><span class="n">CPU</span><span class="w"> </span><span class="p">(</span><span class="n">Ring</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">MSR</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">Syscall</span><span class="w"> </span><span class="n">MSR</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">Trampoline</span>
+
+<span class="w">    </span><span class="n">Shell</span><span class="o">-&gt;&gt;</span><span class="n">ZFS</span><span class="p">:</span><span class="w"> </span><span class="n">read_file_by_path</span><span class="p">(</span><span class="s2">"/bin/hello.elf"</span><span class="p">)</span>
+<span class="w">    </span><span class="n">ZFS</span><span class="o">--&gt;&gt;</span><span class="n">Shell</span><span class="p">:</span><span class="w"> </span><span class="n">Raw</span><span class="w"> </span><span class="n">binary</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="p">(</span><span class="n">Fletcher</span><span class="o">-</span><span class="mi">4</span><span class="w"> </span><span class="n">verified</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Shell</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">ElfBinary</span><span class="p">::</span><span class="n">parse</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Loader</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">Validate</span><span class="w"> </span><span class="n">ELF</span><span class="w"> </span><span class="n">Magic</span><span class="p">,</span><span class="w"> </span><span class="n">Class64</span><span class="p">,</span><span class="w"> </span><span class="n">Little</span><span class="o">-</span><span class="n">Endian</span><span class="p">,</span><span class="w"> </span><span class="n">EM_X86_64</span>
+<span class="w">    </span><span class="n">Shell</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">ElfBinary</span><span class="p">::</span><span class="n">load_into_process_image</span><span class="p">()</span>
+<span class="w">    </span><span class="n">Loader</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">Allocate</span><span class="w"> </span><span class="n">segment</span><span class="w"> </span><span class="n">buffers</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">copy</span><span class="w"> </span><span class="n">PT_LOAD</span><span class="w"> </span><span class="n">sections</span>
+<span class="w">    </span><span class="n">Loader</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">Zero</span><span class="o">-</span><span class="n">initialize</span><span class="w"> </span><span class="o">.</span><span class="n">bss</span><span class="w"> </span><span class="n">differences</span><span class="w"> </span><span class="p">(</span><span class="n">memsz</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">filesz</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Loader</span><span class="o">-&gt;&gt;</span><span class="n">Loader</span><span class="p">:</span><span class="w"> </span><span class="n">Allocate</span><span class="w"> </span><span class="mi">16</span><span class="w"> </span><span class="n">KiB</span><span class="w"> </span><span class="n">User</span><span class="w"> </span><span class="n">Stack</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">16</span><span class="w"> </span><span class="n">KiB</span><span class="w"> </span><span class="n">Kernel</span><span class="w"> </span><span class="n">Stack</span>
+<span class="w">    </span><span class="n">Loader</span><span class="o">-&gt;&gt;</span><span class="n">Paging</span><span class="p">:</span><span class="w"> </span><span class="n">Mark</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">frames</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">USER_ACCESSIBLE</span><span class="w"> </span><span class="p">(</span><span class="n">bit</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Shell</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="p">:</span><span class="w"> </span><span class="n">spawn_elf</span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">Priority</span><span class="p">::</span><span class="n">Normal</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Sched</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="p">:</span><span class="w"> </span><span class="n">Create</span><span class="w"> </span><span class="n">TCB</span><span class="w"> </span><span class="p">(</span><span class="n">CS</span><span class="o">=</span><span class="mh">0x23</span><span class="p">,</span><span class="w"> </span><span class="n">SS</span><span class="o">=</span><span class="mh">0x1B</span><span class="p">,</span><span class="w"> </span><span class="n">RFLAGS</span><span class="o">=</span><span class="mh">0x202</span><span class="p">,</span><span class="w"> </span><span class="n">RSP</span><span class="o">=</span><span class="n">UserStack</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Sched</span><span class="o">-&gt;&gt;</span><span class="n">CPU</span><span class="p">:</span><span class="w"> </span><span class="n">Context</span><span class="w"> </span><span class="n">switch</span><span class="w"> </span><span class="n">via</span><span class="w"> </span><span class="n">iretq</span><span class="w"> </span><span class="p">(</span><span class="n">Ring</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">Entry</span><span class="p">)</span>
+<span class="w">    </span><span class="n">CPU</span><span class="o">-&gt;&gt;</span><span class="n">CPU</span><span class="p">:</span><span class="w"> </span><span class="n">Execute</span><span class="w"> </span><span class="n">unprivileged</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="p">(</span><span class="n">_start</span><span class="p">)</span>
+<span class="w">    </span><span class="n">CPU</span><span class="o">-&gt;&gt;</span><span class="n">MSR</span><span class="p">:</span><span class="w"> </span><span class="n">syscall</span><span class="w"> </span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">g</span><span class="o">.</span><span class="w"> </span><span class="n">SYS_WRITE</span><span class="w"> </span><span class="ow">or</span><span class="w"> </span><span class="n">SYS_EXIT</span><span class="p">)</span>
+<span class="w">    </span><span class="n">MSR</span><span class="o">-&gt;&gt;</span><span class="n">MSR</span><span class="p">:</span><span class="w"> </span><span class="n">Hardware</span><span class="w"> </span><span class="n">switch</span><span class="p">:</span><span class="w"> </span><span class="n">CS</span><span class="o">=</span><span class="mh">0x8</span><span class="p">,</span><span class="w"> </span><span class="n">SS</span><span class="o">=</span><span class="mh">0x10</span><span class="p">,</span><span class="w"> </span><span class="n">RSP</span><span class="o">=</span><span class="n">KernelStack</span>
+<span class="w">    </span><span class="n">MSR</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="p">:</span><span class="w"> </span><span class="n">Dispatch</span><span class="w"> </span><span class="n">system</span><span class="w"> </span><span class="n">call</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">resume</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">terminate</span><span class="w"> </span><span class="n">task</span>
+</code></pre></div>
+
+<hr />
+<h2>ELF64 File Format Specification</h2>
+<p>The loader inspects and parses the standard 64-bit Executable and Linkable Format (ELF64):</p>
+<h3>1. ELF Header (<code>Elf64Header</code>)</h3>
+<p>Fixed 64-byte structure at byte offset 0 of the binary image:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+<th>Description</th>
+<th>Expected Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>e_ident</code></td>
+<td>16 bytes</td>
+<td>Magic number, architecture class, data encoding</td>
+<td><code>0x7f, 'E', 'L', 'F'</code>, <code>ELFCLASS64</code>, <code>ELFDATA2LSB</code></td>
+</tr>
+<tr>
+<td><code>e_type</code></td>
+<td>2 bytes</td>
+<td>Object file type</td>
+<td><code>ET_EXEC</code> (2, Fixed Addr) or <code>ET_DYN</code> (3, PIE)</td>
+</tr>
+<tr>
+<td><code>e_machine</code></td>
+<td>2 bytes</td>
+<td>Target CPU architecture</td>
+<td><code>EM_X86_64</code> (<code>0x003E</code>, AMD x86-64)</td>
+</tr>
+<tr>
+<td><code>e_version</code></td>
+<td>4 bytes</td>
+<td>ELF format version</td>
+<td><code>EV_CURRENT</code> (1)</td>
+</tr>
+<tr>
+<td><code>e_entry</code></td>
+<td>8 bytes</td>
+<td>Virtual address of the program entry point</td>
+<td>Runtime <code>_start</code> address</td>
+</tr>
+<tr>
+<td><code>e_phoff</code></td>
+<td>8 bytes</td>
+<td>Program header table offset in file</td>
+<td>Typically <code>0x40</code> (64 bytes)</td>
+</tr>
+<tr>
+<td><code>e_phentsize</code></td>
+<td>2 bytes</td>
+<td>Size of each program header entry</td>
+<td><code>56</code> bytes</td>
+</tr>
+<tr>
+<td><code>e_phnum</code></td>
+<td>2 bytes</td>
+<td>Number of program header entries</td>
+<td>Typically 4 to 8</td>
+</tr>
+</tbody>
+</table>
+<h3>2. Program Header Table (<code>Elf64ProgramHeader</code>)</h3>
+<p>Each entry occupies 56 bytes and defines a contiguous segment in the process memory layout:</p>
+<div class="codehilite"><pre><span></span><code><span class="cp">#[repr(C)]</span>
+<span class="cp">#[derive(Debug, Clone, Copy)]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Elf64ProgramHeader</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_type</span><span class="p">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w">    </span><span class="c1">// PT_LOAD (1), PT_DYNAMIC (2), etc.</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_flags</span><span class="p">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w">   </span><span class="c1">// PF_X (1), PF_W (2), PF_R (4)</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_offset</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">  </span><span class="c1">// Offset in binary file image</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_vaddr</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">   </span><span class="c1">// Virtual load address</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_paddr</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">   </span><span class="c1">// Physical address (ignored in long mode)</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_filesz</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">  </span><span class="c1">// Bytes stored in the file image</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_memsz</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">   </span><span class="c1">// Total bytes in virtual memory (memsz &gt;= filesz)</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">p_align</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w">   </span><span class="c1">// Segment alignment boundary</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2>Position-Independent Executables (PIE) &amp; Segment Relocation</h2>
+<p>Hydra compiles userland binaries targeting <code>x86_64-unknown-none</code> with position-independent executable flags (<code>ET_DYN</code>). Because standard UEFI firmware utilizes identity mapping across the physical address space, fixed-address binaries (<code>ET_EXEC</code> at <code>0x400000</code>) could collide with hardware-mapped MMIO or kernel structures.</p>
+<p>For <code>ET_DYN</code> binaries:
+1. The loader determines the virtual span required across all <code>PT_LOAD</code> segments (<code>max(p_vaddr + p_memsz) - min(p_vaddr)</code>).
+2. A backing buffer (<code>ElfProcessImage::image_buffer</code>) is allocated from the kernel heap.
+3. The load base <code>base_addr</code> is assigned to the pointer of this backing buffer.
+4. Each segment's file contents (<code>p_filesz</code>) are copied to <code>base_addr + p_vaddr</code>.
+5. Any remaining <code>.bss</code> bytes (<code>p_memsz - p_filesz</code>) are zeroed using <code>core::ptr::write_bytes()</code>.
+6. The runtime entry point is computed as <code>base_addr + header.e_entry</code>.
+7. Page table entries backing the segment buffer are updated with the <code>USER_ACCESSIBLE</code> bit (bit 2) so unprivileged Ring 3 instructions can read, write, and execute them without triggering <code>#PF (Page Fault)</code>.</p>
+<hr />
+<h2>Ring 3 Privilege Separation &amp; Stack Architecture</h2>
+<p>Hydra enforces hardware ring separation using the x86_64 Global Descriptor Table (GDT) and Model-Specific Registers (MSRs):</p>
+<h3>Segment Selectors</h3>
+<table>
+<thead>
+<tr>
+<th>Selector</th>
+<th>Value</th>
+<th>Privilege Level</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kernel Code (<code>CS</code>)</td>
+<td><code>0x08</code></td>
+<td>Ring 0</td>
+<td>Privileged microkernel instructions</td>
+</tr>
+<tr>
+<td>Kernel Data (<code>SS</code>)</td>
+<td><code>0x10</code></td>
+<td>Ring 0</td>
+<td>Privileged kernel stack and heap</td>
+</tr>
+<tr>
+<td>User Data (<code>SS</code>)</td>
+<td><code>0x18 | 3 = 0x1B</code></td>
+<td>Ring 3</td>
+<td>Unprivileged userland stack and heap</td>
+</tr>
+<tr>
+<td>User Code (<code>CS</code>)</td>
+<td><code>0x20 | 3 = 0x23</code></td>
+<td>Ring 3</td>
+<td>Unprivileged userland instruction stream</td>
+</tr>
+<tr>
+<td>TSS Selector (<code>TR</code>)</td>
+<td><code>0x28</code></td>
+<td>Ring 0</td>
+<td>64-bit Task State Segment (RSP0 for interrupts)</td>
+</tr>
+</tbody>
+</table>
+<h3>Dual Stack Architecture per User Task</h3>
+<p>Every userland task owns two distinct stacks:
+1. <strong>User Stack (16 KiB)</strong>: Initialized at <code>ElfProcessImage::initial_user_rsp</code> and loaded into <code>RSP</code> upon transition to Ring 3. User local variables, stack frames, and function call returns occur here.
+2. <strong>Kernel Stack (16 KiB)</strong>: Stored in <code>Task::kernel_stack_top</code> and loaded into <code>CURRENT_KERNEL_RSP</code> and the TSS <code>RSP0</code> pointer whenever the user process transitions to Ring 0 via hardware interrupts or <code>syscall</code>. This ensures that even if user code corrupts its user stack, the microkernel operates safely on an isolated, verified kernel stack.</p>
+<hr />
+<h2>Hardware System Call Interface (<code>syscall</code> / <code>sysretq</code>)</h2>
+<p>Ring 3 binaries communicate with the microkernel via the x86_64 <code>syscall</code> instruction. The CPU performs an atomic transition without the overhead of legacy software interrupt gates (<code>int 0x80</code>).</p>
+<h3>Model-Specific Register Configuration</h3>
+<p>During kernel initialization (<a href="file:///d:/os/src/arch/syscall.rs"><code>src/arch/syscall.rs</code></a>), the following MSRs are configured:</p>
+<ol>
+<li><strong><code>IA32_EFER</code> (<code>0xC0000080</code>)</strong>: Bit 0 (<code>SCE - System Call Extensions</code>) is asserted to enable the <code>syscall</code> and <code>sysretq</code> instructions.</li>
+<li><strong><code>IA32_STAR</code> (<code>0xC0000081</code>)</strong>:
+   - Bits <code>[47:32] = 0x0008</code> (Kernel CS selector; SS becomes <code>0x0010</code>).
+   - Bits <code>[63:48] = 0x0013</code> (User CS base selector; <code>sysretq</code> loads <code>SS = 0x1B</code> and <code>CS = 0x23</code>).</li>
+<li><strong><code>IA32_LSTAR</code> (<code>0xC0000082</code>)</strong>: Configured with the 64-bit linear entry point of <a href="file:///d:/os/src/arch/syscall.rs#L416-L477"><code>asm_syscall_entry</code></a>.</li>
+<li><strong><code>IA32_FMASK</code> (<code>0xC0000084</code>)</strong>: Configured to <code>0x00044700</code> to automatically mask interrupt flag (<code>IF</code>), trap flag (<code>TF</code>), direction flag (<code>DF</code>), and alignment check (<code>AC</code>) upon entry.</li>
+</ol>
+<h3>System Call Dispatch Table</h3>
+<table>
+<thead>
+<tr>
+<th>Syscall</th>
+<th>Number (<code>RAX</code>)</th>
+<th>Arguments</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SYS_YIELD</code></td>
+<td><code>1</code></td>
+<td>None</td>
+<td>Relinquishes current timeslice to next ready task</td>
+</tr>
+<tr>
+<td><code>SYS_SLEEP</code></td>
+<td><code>2</code></td>
+<td><code>RDI</code> = Milliseconds</td>
+<td>Blocks calling task for specified duration</td>
+</tr>
+<tr>
+<td><code>SYS_WRITE</code></td>
+<td><code>3</code></td>
+<td><code>RDI</code> = FD, <code>RSI</code> = Buffer Ptr, <code>RDX</code> = Length</td>
+<td>Writes data to console or pipe descriptor</td>
+</tr>
+<tr>
+<td><code>SYS_EXIT</code></td>
+<td><code>4</code></td>
+<td>None</td>
+<td>Terminates userland process permanently</td>
+</tr>
+<tr>
+<td><code>SYS_GETPID</code></td>
+<td><code>5</code></td>
+<td>None</td>
+<td>Returns active task ID</td>
+</tr>
+<tr>
+<td><code>SYS_UPTIME</code></td>
+<td><code>6</code></td>
+<td>None</td>
+<td>Returns elapsed PIT timer ticks</td>
+</tr>
+<tr>
+<td><code>SYS_OPEN</code></td>
+<td><code>9</code></td>
+<td><code>RDI</code> = Path Ptr, <code>RSI</code> = Length, <code>RDX</code> = Flags</td>
+<td>Opens file from OpenZFS storage</td>
+</tr>
+<tr>
+<td><code>SYS_CLOSE</code></td>
+<td><code>10</code></td>
+<td><code>RDI</code> = FD</td>
+<td>Closes open file descriptor</td>
+</tr>
+<tr>
+<td><code>SYS_READ</code></td>
+<td><code>11</code></td>
+<td><code>RDI</code> = FD, <code>RSI</code> = Buffer Ptr, <code>RDX</code> = Count</td>
+<td>Reads bytes from file descriptor</td>
+</tr>
+<tr>
+<td><code>SYS_PIPE</code></td>
+<td><code>12</code></td>
+<td><code>RDI</code> = Pointer to <code>[u64; 2]</code></td>
+<td>Creates anonymous unidirectional pipe</td>
+</tr>
+<tr>
+<td><code>SYS_DUP2</code></td>
+<td><code>13</code></td>
+<td><code>RDI</code> = Old FD, <code>RSI</code> = New FD</td>
+<td>Duplicates file descriptor</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Interactive Shell Commands &amp; Examples</h2>
+<h3>1. Inspecting ELF Headers (<code>elf --info</code>)</h3>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt;<span class="w"> </span>elf<span class="w"> </span>--info<span class="w"> </span>/bin/hello.elf
+
+<span class="o">============================================================</span>
+<span class="w"> </span><span class="o">[</span>+<span class="o">]</span><span class="w"> </span>HYDRA<span class="w"> </span>MICROKERNEL:<span class="w"> </span>ELF64<span class="w"> </span>BINARY<span class="w"> </span>INSPECTOR<span class="w"> </span><span class="p">&amp;</span><span class="w"> </span><span class="nv">LOADER</span><span class="w">     </span>
+<span class="o">============================================================</span>
+<span class="w">  </span>File<span class="w"> </span>Path<span class="w">       </span>:<span class="w"> </span>/bin/hello.elf
+<span class="w">  </span>File<span class="w"> </span>Size<span class="w">       </span>:<span class="w"> </span><span class="m">2344</span><span class="w"> </span>bytes<span class="w"> </span><span class="o">(</span>Verified<span class="w"> </span>via<span class="w"> </span>ZFS<span class="w"> </span>Fletcher-4<span class="o">)</span>
+<span class="w">  </span>Object<span class="w"> </span>Type<span class="w">     </span>:<span class="w"> </span>Shared<span class="w"> </span>Object<span class="w"> </span>/<span class="w"> </span>PIE<span class="w"> </span><span class="o">(</span>ET_DYN<span class="w"> </span>-<span class="w"> </span>Position-Independent<span class="o">)</span>
+<span class="w">  </span>Architecture<span class="w">    </span>:<span class="w"> </span>AMD<span class="w"> </span>x86-64<span class="w"> </span><span class="o">(</span>EM_X86_64,<span class="w"> </span><span class="m">64</span>-bit<span class="w"> </span>Little-Endian<span class="o">)</span>
+<span class="w">  </span>Entry<span class="w"> </span>Point<span class="w">     </span>:<span class="w"> </span>0x00000000000012b4
+<span class="w">  </span>Program<span class="w"> </span>Headers<span class="w"> </span>:<span class="w"> </span><span class="m">8</span><span class="w"> </span>entries<span class="w"> </span><span class="o">(</span>at<span class="w"> </span>file<span class="w"> </span>offset<span class="w"> </span>0x40<span class="o">)</span>
+
+<span class="w">  </span>Program<span class="w"> </span>Headers<span class="w"> </span>Table<span class="w"> </span><span class="o">(</span>Segments<span class="o">)</span>:
+<span class="w">    </span>IDX<span class="w">  </span>TYPE<span class="w">       </span>FILE_OFFSET<span class="w">        </span>VIRT_ADDR<span class="w">          </span>FILE_SZ<span class="w">    </span>MEM_SZ<span class="w">     </span>FLAGS
+<span class="w">    </span>--------------------------------------------------------------------------------
+<span class="w">    </span><span class="m">0</span><span class="w">    </span>PHDR<span class="w">       </span>0x0000000000000040<span class="w"> </span>0x0000000000000040<span class="w"> </span>0x000001c0<span class="w"> </span>0x000001c0<span class="w"> </span>R--<span class="w">   </span>
+<span class="w">    </span><span class="m">1</span><span class="w">    </span>PT_LOAD<span class="w">    </span>0x0000000000000000<span class="w"> </span>0x0000000000000000<span class="w"> </span>0x000002b4<span class="w"> </span>0x000002b4<span class="w"> </span>R--<span class="w">   </span>
+<span class="w">    </span><span class="m">2</span><span class="w">    </span>PT_LOAD<span class="w">    </span>0x00000000000002b4<span class="w"> </span>0x00000000000012b4<span class="w"> </span>0x0000001a<span class="w"> </span>0x0000001a<span class="w"> </span>R-X<span class="w">   </span>
+<span class="w">    </span><span class="m">3</span><span class="w">    </span>PT_LOAD<span class="w">    </span>0x00000000000002d0<span class="w"> </span>0x00000000000022d0<span class="w"> </span>0x000000a0<span class="w"> </span>0x00000d30<span class="w"> </span>RW-<span class="w">   </span>
+<span class="w">    </span><span class="m">4</span><span class="w">    </span>DYNAMIC<span class="w">    </span>0x00000000000002d0<span class="w"> </span>0x00000000000022d0<span class="w"> </span>0x000000a0<span class="w"> </span>0x000000a0<span class="w"> </span>RW-<span class="w">   </span>
+<span class="o">============================================================</span>
+</code></pre></div>
+
+<h3>2. Direct Execution from OpenZFS</h3>
+<p>Users can launch binaries directly by typing their name or path:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt;<span class="w"> </span>hello.elf
+<span class="o">[</span>*<span class="o">]</span><span class="w"> </span>Executing<span class="w"> </span>ELF64<span class="w"> </span>binary<span class="w"> </span><span class="s1">'hello.elf'</span><span class="w"> </span>from<span class="w"> </span>ZFS<span class="w"> </span>File<span class="w"> </span>Server<span class="w"> </span><span class="o">(</span>Dataset:<span class="w"> </span>hydrapool/bin,<span class="w"> </span><span class="m">2344</span><span class="w"> </span>bytes<span class="o">)</span>...
+<span class="o">[</span>+<span class="o">]</span><span class="w"> </span>Spawned<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>ELF<span class="w"> </span>process<span class="w"> </span><span class="c1">#2 ('hello.elf').</span>
+<span class="w">    </span>Privilege:<span class="w"> </span>Unprivileged<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="o">(</span><span class="nv">CS</span><span class="o">=</span>0x23,<span class="w"> </span><span class="nv">SS</span><span class="o">=</span>0x1B,<span class="w"> </span><span class="nv">RFLAGS</span><span class="o">=</span>0x202<span class="o">)</span>
+
+<span class="o">[</span>ELF64<span class="w"> </span>Userland<span class="o">]</span><span class="w"> </span>Greetings<span class="w"> </span>from<span class="w"> </span>standalone<span class="w"> </span>ELF64<span class="w"> </span>binary<span class="w"> </span><span class="k">in</span><span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span>!
+<span class="o">[</span>*<span class="o">]</span><span class="w"> </span>ELF<span class="w"> </span>process<span class="w"> </span><span class="c1">#2 completed and exited cleanly.</span>
+
+hydra:/bin&gt;<span class="w"> </span>counter.elf
+<span class="o">[</span>*<span class="o">]</span><span class="w"> </span>Executing<span class="w"> </span>ELF64<span class="w"> </span>binary<span class="w"> </span><span class="s1">'counter.elf'</span><span class="w"> </span>from<span class="w"> </span>ZFS<span class="w"> </span>File<span class="w"> </span>Server<span class="w"> </span><span class="o">(</span>Dataset:<span class="w"> </span>hydrapool/bin,<span class="w"> </span><span class="m">2544</span><span class="w"> </span>bytes<span class="o">)</span>...
+<span class="o">[</span>+<span class="o">]</span><span class="w"> </span>Spawned<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>ELF<span class="w"> </span>process<span class="w"> </span><span class="c1">#3 ('counter.elf').</span>
+<span class="w">    </span>Privilege:<span class="w"> </span>Unprivileged<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="o">(</span><span class="nv">CS</span><span class="o">=</span>0x23,<span class="w"> </span><span class="nv">SS</span><span class="o">=</span>0x1B,<span class="w"> </span><span class="nv">RFLAGS</span><span class="o">=</span>0x202<span class="o">)</span>
+<span class="o">[</span>ELF<span class="w"> </span>Counter<span class="o">]</span><span class="w"> </span>Starting<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>counting<span class="w"> </span>process...
+<span class="o">[</span>ELF<span class="w"> </span>Counter<span class="o">]</span><span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>countdown<span class="w"> </span>step<span class="w"> </span><span class="m">1</span>
+<span class="o">[</span>ELF<span class="w"> </span>Counter<span class="o">]</span><span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>countdown<span class="w"> </span>step<span class="w"> </span><span class="m">2</span>
+<span class="o">[</span>ELF<span class="w"> </span>Counter<span class="o">]</span><span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>countdown<span class="w"> </span>step<span class="w"> </span><span class="m">3</span>
+<span class="o">[</span>ELF<span class="w"> </span>Counter<span class="o">]</span><span class="w"> </span>Finished!<span class="w"> </span>Exiting<span class="w"> </span>unprivileged<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span>.
+<span class="o">[</span>*<span class="o">]</span><span class="w"> </span>ELF<span class="w"> </span>process<span class="w"> </span><span class="c1">#3 completed and exited cleanly.</span>
+</code></pre></div>
+
+<h3>3. Background Execution (<code>--bg</code>)</h3>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt;<span class="w"> </span>elf<span class="w"> </span>/bin/counter.elf<span class="w"> </span>--bg
+<span class="o">[</span>+<span class="o">]</span><span class="w"> </span>Spawned<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span>ELF<span class="w"> </span>process<span class="w"> </span><span class="c1">#4 ('/bin/counter.elf').</span>
+<span class="w">    </span>Privilege:<span class="w"> </span>Unprivileged<span class="w"> </span>Ring<span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="o">(</span><span class="nv">CS</span><span class="o">=</span>0x23,<span class="w"> </span><span class="nv">SS</span><span class="o">=</span>0x1B,<span class="w"> </span><span class="nv">RFLAGS</span><span class="o">=</span>0x202<span class="o">)</span>
+<span class="w">    </span>Running<span class="w"> </span><span class="k">in</span><span class="w"> </span>background.<span class="w"> </span>Type<span class="w"> </span><span class="s1">'ps'</span><span class="w"> </span>to<span class="w"> </span>inspect<span class="w"> </span>execution.
+hydra:/bin&gt;<span class="w"> </span>ps
+<span class="o">[</span>PID<span class="o">]</span><span class="w">   </span><span class="o">[</span>NAME<span class="o">]</span><span class="w">                  </span><span class="o">[</span>PRIORITY<span class="o">]</span><span class="w">      </span><span class="o">[</span>STATE<span class="o">]</span><span class="w">         </span><span class="o">[</span>TICKS<span class="o">]</span>
+<span class="m">0</span><span class="w">       </span>idle<span class="w">                    </span>Idle<span class="w">            </span>Ready<span class="w">           </span><span class="m">1420</span>
+<span class="m">1</span><span class="w">       </span>shell<span class="w">                   </span>Normal<span class="w">          </span>Running<span class="w">         </span><span class="m">389</span>
+<span class="m">4</span><span class="w">       </span>/bin/counter.elf<span class="w">        </span>Normal<span class="w">          </span>Sleeping<span class="o">(</span><span class="m">1450</span><span class="o">)</span><span class="w">  </span><span class="m">12</span>
+</code></pre></div>
+</div>
+
+
+
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #31</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #32</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

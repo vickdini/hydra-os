@@ -180,6 +180,7 @@ pub struct Task {
     pub regs: TaskRegisters,
     pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
     pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
+    pub user_image: Option<Box<[u8]>>,  // Backing segment buffer for ELF process image
     pub ticks_run: u64,
     pub timeslice_remaining: u32,
     pub cspace: Box<CapabilityTable>,
@@ -201,6 +202,7 @@ impl Task {
             regs,
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,
+            user_image: None,
             ticks_run: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),

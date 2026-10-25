@@ -172,20 +172,67 @@ pub fn execute_file(path: &str, args: &[&str]) -> Result<(), &'static str> {
 /// Returns true if a program was found and execution was attempted.
 pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellState) -> bool {
     // 1. Primary check: Query the Microkernel ZFS File Server via IPC
-    let zfs_candidates = [
-        command_name,
-        // Also try with .efi appended if not present
-        if command_name.ends_with(".efi") { command_name } else { "" }
-    ];
+    let mut zfs_candidates: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    zfs_candidates.push(alloc::string::String::from(command_name));
+    if !command_name.starts_with('/') {
+        zfs_candidates.push(alloc::format!("/bin/{}", command_name));
+    }
+    if !command_name.ends_with(".elf") {
+        zfs_candidates.push(alloc::format!("{}.elf", command_name));
+        if !command_name.starts_with('/') {
+            zfs_candidates.push(alloc::format!("/bin/{}.elf", command_name));
+        }
+    }
+    if !command_name.ends_with(".efi") {
+        zfs_candidates.push(alloc::format!("{}.efi", command_name));
+        if !command_name.starts_with('/') {
+            zfs_candidates.push(alloc::format!("/bin/{}.efi", command_name));
+        }
+    }
 
-    for &cand in &zfs_candidates {
-        if cand.is_empty() { continue; }
+    for cand in &zfs_candidates {
         if let Ok((obj_id, obj_type)) = crate::fs::client::ZfsClient::lookup(cand) {
             if obj_type == crate::fs::zfs::types::DnodeType::PlainFile {
-                let mut buffer = [0u8; 4096];
+                let mut buffer = alloc::vec![0u8; 65536];
                 let cap = state.cap_table.get(1).cloned();
                 if let Ok(bytes_read) = crate::fs::client::ZfsClient::read_file(obj_id, &mut buffer, cap) {
-                    if bytes_read >= 2 && buffer[0] == 0x4D && buffer[1] == 0x5A {
+                    if bytes_read >= 4 && buffer[..4] == crate::task::elf::ELF_MAGIC {
+                        set_color(Color::LightCyan, Color::Black);
+                        println!(
+                            "[*] Executing ELF64 binary '{}' from ZFS File Server (Dataset: hydrapool/bin, {} bytes)...",
+                            cand, bytes_read
+                        );
+
+                        if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                            set_color(Color::Yellow, Color::Black);
+                            println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
+                            return true;
+                        }
+
+                        let leaked_name: &'static str =
+                            alloc::boxed::Box::leak(alloc::string::String::from(cand.as_str()).into_boxed_str());
+                        match crate::task::spawn_elf(leaked_name, &buffer[..bytes_read], crate::task::TaskPriority::Normal) {
+                            Ok(pid) => {
+                                set_color(Color::LightGreen, Color::Black);
+                                println!("[+] Spawned Ring 3 ELF process #{} ('{}').", pid.0, leaked_name);
+                                println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B, RFLAGS=0x202)");
+                                let bg = args.iter().any(|&a| a == "--bg" || a == "-b" || a == "&");
+                                if bg {
+                                    println!("    Running in background. Type 'ps' to inspect execution.");
+                                } else {
+                                    crate::task::wait_task(pid);
+                                    set_color(Color::LightCyan, Color::Black);
+                                    println!("[*] ELF process #{} completed and exited cleanly.", pid.0);
+                                }
+                                return true;
+                            }
+                            Err(e) => {
+                                set_color(Color::LightRed, Color::Black);
+                                println!("[!] Failed to load ELF binary '{}': {}", cand, e);
+                                return true;
+                            }
+                        }
+                    } else if bytes_read >= 2 && buffer[0] == 0x4D && buffer[1] == 0x5A {
                         set_color(Color::LightCyan, Color::Black);
                         println!("[*] Executing '{}' from ZFS File Server (Dataset: hydrapool/bin, {} bytes, Fletcher-4 verified)...", cand, bytes_read);
                         if crate::console::is_hardware_mode() {

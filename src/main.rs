@@ -290,6 +290,7 @@ fn main() -> Status {
     console::set_color(Color::Yellow, Color::Black);
     println!("\n[*] Step 6: Initializing ZFS Microkernel File Server...");
     fs::init_server();
+    fs::ZfsClient::sync_boot_binaries();
     console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[+] ZFS File Server Online (Endpoint #{:#x}):",

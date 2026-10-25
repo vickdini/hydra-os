@@ -119,6 +119,7 @@ impl Scheduler {
             regs,
             stack: Some(stack),
             user_stack: None,
+            user_image: None,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
@@ -183,6 +184,7 @@ impl Scheduler {
             regs,
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
+            user_image: None,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
@@ -191,6 +193,67 @@ impl Scheduler {
 
         self.tasks.push(task);
         id
+    }
+
+    /// Spawns an unprivileged Ring 3 task from an in-memory ELF64 binary image.
+    ///
+    /// Parses the ELF64 headers and segments, allocates and maps loadable segments
+    /// with `USER_ACCESSIBLE` page table flags, initializes user stack, sets up
+    /// Ring 3 execution selectors (`CS = 0x23`, `SS = 0x1B`, `RFLAGS = 0x202`),
+    /// and enqueues the task in the scheduler's ready queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Descriptive name identifying the process in task diagnostics.
+    /// * `elf_data` - Raw bytes of the ELF64 executable file.
+    /// * `priority` - Task scheduling priority.
+    ///
+    /// # Returns
+    ///
+    /// Returns the assigned [`TaskId`] on success, or a static error description
+    /// if the binary is malformed or memory allocation failed.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error message if ELF parsing fails or segments cannot be mapped.
+    pub fn spawn_elf(
+        &mut self,
+        name: &'static str,
+        elf_data: &[u8],
+        priority: TaskPriority,
+    ) -> Result<TaskId, &'static str> {
+        let current_cr3 = Cr3::read().0.start_address().as_u64();
+        let image = super::elf::load_elf(elf_data).map_err(|e| e.as_str())?;
+
+        let id = TaskId(self.next_id);
+        self.next_id += 1;
+
+        let mut regs = TaskRegisters::empty();
+        regs.rip = image.entry_point;
+        regs.rsp = image.initial_user_rsp;
+        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
+        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.rflags = 0x202; // IF=1: Interrupts enabled
+        regs.cr3 = current_cr3;
+
+        let task = Task {
+            id,
+            name,
+            state: TaskState::Ready,
+            priority,
+            mode: PrivilegeMode::User,
+            regs,
+            stack: Some(image.kernel_stack),
+            user_stack: Some(image.user_stack),
+            user_image: image.allocated_image,
+            ticks_run: 0,
+            timeslice_remaining: self.default_timeslice,
+            cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+            fds: crate::fs::FdTable::new_default(),
+        };
+
+        self.tasks.push(task);
+        Ok(id)
     }
 
     /// Invoked on every IRQ 0 timer interrupt (100 Hz) to perform timeslice accounting and context switching.

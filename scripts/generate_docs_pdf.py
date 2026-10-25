@@ -249,6 +249,13 @@ DOCS_ORDER = [
         "subtitle": "TaskState::Blocked wait queues, sleep Mutex, Semaphore, CondVar, and blocking rendezvous IPC.",
     },
     {
+        "stage": "Stage 9: Multitasking & Scheduler",
+        "title": "Userspace ELF64 Binary Loader & Execution",
+        "file": "docs/src/task/elf.md",
+        "anchor": "doc-boot-stage9-elf",
+        "subtitle": "Parsing standalone ELF64 binaries from ZFS, PIE relocation, Ring 3 memory mapping, and syscall execution.",
+    },
+    {
         "stage": "Stage 10: Interactive Shell",
         "title": "Interactive Microkernel Shell & Command REPL",
         "file": "docs/src/shell.md",

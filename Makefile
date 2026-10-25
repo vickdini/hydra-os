@@ -20,13 +20,13 @@ build: $(EFI_BIN)
 	mmd -i $(IMG) ::/EFI ::/EFI/BOOT ::/bin ::/apps
 	mcopy -i $(IMG) $(DIST_DIR)/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $(IMG) esp/readme.txt ::/README.TXT
-	mcopy -i $(IMG) esp/bin/readme.txt ::/bin/README.TXT
+	mcopy -i $(IMG) esp/bin/* ::/bin/
 	# Create bootable UEFI ISO with El Torito EFI boot catalog
 	rm -rf $(DIST_DIR)/iso_root
 	mkdir -p $(DIST_DIR)/iso_root/EFI/BOOT $(DIST_DIR)/iso_root/bin $(DIST_DIR)/iso_root/apps
 	cp $(DIST_DIR)/bootx64.efi $(DIST_DIR)/iso_root/EFI/BOOT/BOOTX64.EFI
 	cp esp/readme.txt $(DIST_DIR)/iso_root/README.TXT
-	cp esp/bin/readme.txt $(DIST_DIR)/iso_root/bin/README.TXT
+	cp -r esp/bin/* $(DIST_DIR)/iso_root/bin/
 	cp $(IMG) $(DIST_DIR)/iso_root/efiboot.img
 	xorriso -as mkisofs -V "HYDRA" -e efiboot.img -no-emul-boot -isohybrid-gpt-basdat -o $(ISO) $(DIST_DIR)/iso_root
 	rm -rf $(DIST_DIR)/iso_root
