@@ -38,8 +38,187 @@ pub struct ZfsServer {
 }
 
 impl ZfsServer {
+    /// Attempts to restore an existing OpenZFS pool directly from the persistent storage device.
+    pub fn try_restore_from_disk(spa: &mut Spa) -> Option<(alloc::boxed::Box<Dmu>, u64, u64)> {
+        let mut block0 = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+        if spa.vdev.read_block(0, &mut block0).is_err() {
+            return None;
+        }
+
+        let label_ptr = block0.as_ptr() as *const crate::fs::zfs::types::VdevLabel;
+        let label = unsafe { core::ptr::read_unaligned(label_ptr) };
+
+        if !label.is_valid() {
+            return None;
+        }
+
+        // Verify checksum of label
+        let label_size_without_checksum = core::mem::size_of::<crate::fs::zfs::types::VdevLabel>()
+            - core::mem::size_of::<crate::fs::zfs::types::Fletcher4>();
+        let label_raw = unsafe {
+            core::slice::from_raw_parts(
+                &label as *const crate::fs::zfs::types::VdevLabel as *const u8,
+                label_size_without_checksum,
+            )
+        };
+        if crate::fs::zfs::types::Fletcher4::compute(label_raw) != label.checksum {
+            crate::console::set_color(
+                uefi::proto::console::text::Color::LightRed,
+                uefi::proto::console::text::Color::Black,
+            );
+            crate::println!("[!] Warning: VdevLabel checksum mismatch. Rebuilding pool.");
+            return None;
+        }
+
+        spa.active_uberblock = label.uberblock;
+        spa.allocated_blocks = (label.allocated_blocks as usize).max(crate::fs::zfs::spa::RESERVED_METADATA_BLOCKS);
+
+        let mut dmu = alloc::boxed::Box::new(Dmu::new());
+        dmu.next_obj_id = label.next_obj_id;
+
+        // Restore dnodes from Blocks 1..4
+        let dnodes_slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                dmu.dnodes.as_mut_ptr() as *mut u8,
+                core::mem::size_of::<[crate::fs::zfs::types::DnodePhys; crate::fs::zfs::dmu::MAX_OBJECTS]>(),
+            )
+        };
+        for (i, chunk) in dnodes_slice.chunks_mut(crate::fs::zfs::types::ZFS_BLOCK_SIZE).enumerate() {
+            let mut buf = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+            if spa.vdev.read_block(1 + i, &mut buf).is_ok() {
+                chunk.copy_from_slice(&buf[..chunk.len()]);
+            }
+        }
+
+        // Restore datasets from Block 5
+        let ds_slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                dmu.datasets.as_mut_ptr() as *mut u8,
+                core::mem::size_of::<[crate::fs::zfs::dmu::Dataset; crate::fs::zfs::dmu::MAX_DATASETS]>(),
+            )
+        };
+        let mut ds_buf = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+        if spa.vdev.read_block(5, &mut ds_buf).is_ok() {
+            ds_slice.copy_from_slice(&ds_buf[..ds_slice.len()]);
+        }
+
+        // Restore zap_dirs from Blocks 6..30
+        let zap_slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                dmu.zap_dirs.as_mut_ptr() as *mut u8,
+                core::mem::size_of::<crate::fs::zfs::zap::ZapDirectory>() * crate::fs::zfs::dmu::MAX_OBJECTS,
+            )
+        };
+        for (i, chunk) in zap_slice.chunks_mut(crate::fs::zfs::types::ZFS_BLOCK_SIZE).enumerate() {
+            let mut buf = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+            if spa.vdev.read_block(6 + i, &mut buf).is_ok() {
+                chunk.copy_from_slice(&buf[..chunk.len()]);
+            }
+        }
+
+        Some((dmu, label.root_dir_obj, label.bin_dir_obj))
+    }
+
+    /// Serializes and flushes all active DMU metadata, dnodes, and the VdevLabel to persistent storage.
+    pub fn sync_metadata(&mut self) -> Result<(), &'static str> {
+        // 1. Write dnodes (64 * 256 bytes = 16 KiB across Blocks 1..4)
+        let dnode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.dmu.dnodes.as_ptr() as *const u8,
+                core::mem::size_of::<[crate::fs::zfs::types::DnodePhys; crate::fs::zfs::dmu::MAX_OBJECTS]>(),
+            )
+        };
+        for (i, chunk) in dnode_bytes.chunks(crate::fs::zfs::types::ZFS_BLOCK_SIZE).enumerate() {
+            self.spa.vdev.write_block(1 + i, chunk)?;
+        }
+
+        // 2. Write datasets (Block 5)
+        let dataset_bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.dmu.datasets.as_ptr() as *const u8,
+                core::mem::size_of::<[crate::fs::zfs::dmu::Dataset; crate::fs::zfs::dmu::MAX_DATASETS]>(),
+            )
+        };
+        let mut ds_block = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+        let ds_len = dataset_bytes.len().min(crate::fs::zfs::types::ZFS_BLOCK_SIZE);
+        ds_block[..ds_len].copy_from_slice(&dataset_bytes[..ds_len]);
+        self.spa.vdev.write_block(5, &ds_block)?;
+
+        // 3. Write zap_dirs (Blocks 6..30)
+        let zap_bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.dmu.zap_dirs.as_ptr() as *const u8,
+                core::mem::size_of::<crate::fs::zfs::zap::ZapDirectory>() * crate::fs::zfs::dmu::MAX_OBJECTS,
+            )
+        };
+        for (i, chunk) in zap_bytes.chunks(crate::fs::zfs::types::ZFS_BLOCK_SIZE).enumerate() {
+            self.spa.vdev.write_block(6 + i, chunk)?;
+        }
+
+        // 4. Write VdevLabel (Block 0)
+        let mut label = crate::fs::zfs::types::VdevLabel {
+            magic: crate::fs::zfs::types::VDEV_LABEL_MAGIC,
+            pool_name: self.spa.pool_name,
+            uberblock: self.spa.active_uberblock,
+            root_dir_obj: self.root_dir_obj,
+            bin_dir_obj: self.bin_dir_obj,
+            next_obj_id: self.dmu.next_obj_id,
+            allocated_blocks: self.spa.allocated_blocks as u64,
+            checksum: crate::fs::zfs::types::Fletcher4::default(),
+        };
+
+        let label_size_without_checksum = core::mem::size_of::<crate::fs::zfs::types::VdevLabel>()
+            - core::mem::size_of::<crate::fs::zfs::types::Fletcher4>();
+        let label_raw = unsafe {
+            core::slice::from_raw_parts(
+                &label as *const crate::fs::zfs::types::VdevLabel as *const u8,
+                label_size_without_checksum,
+            )
+        };
+        label.checksum = crate::fs::zfs::types::Fletcher4::compute(label_raw);
+
+        let mut block0 = [0u8; crate::fs::zfs::types::ZFS_BLOCK_SIZE];
+        let label_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &label as *const crate::fs::zfs::types::VdevLabel as *const u8,
+                core::mem::size_of::<crate::fs::zfs::types::VdevLabel>(),
+            )
+        };
+        block0[..label_bytes.len()].copy_from_slice(label_bytes);
+        self.spa.vdev.write_block(0, &block0)?;
+
+        // 5. Hardware cache flush
+        self.spa.vdev.flush()?;
+
+        Ok(())
+    }
+
     pub fn new() -> Self {
         let mut spa = Spa::new("hydrapool");
+
+        // Attempt to mount existing pool from persistent storage media
+        if let Some((dmu, root_dir_obj, bin_dir_obj)) = Self::try_restore_from_disk(&mut spa) {
+            crate::console::set_color(
+                uefi::proto::console::text::Color::LightGreen,
+                uefi::proto::console::text::Color::Black,
+            );
+            crate::println!(
+                "[+] OpenZFS: Mounted existing persistent storage pool 'hydrapool' from ATA Hard Disk!"
+            );
+            crate::println!(
+                "    - Active TXG: #{}, Allocated Blocks: {} (Verified via Fletcher-4)",
+                spa.active_uberblock.txg,
+                spa.allocated_blocks
+            );
+            return Self {
+                spa,
+                dmu,
+                root_dir_obj,
+                bin_dir_obj,
+            };
+        }
+
+        // Initialize new pool hierarchy
         let mut dmu = alloc::boxed::Box::new(Dmu::new());
 
         // 1. Create root directory
@@ -91,12 +270,17 @@ impl ZfsServer {
             }
         }
 
-        Self {
+        let mut server = Self {
             spa,
             dmu,
             root_dir_obj: root_dir,
             bin_dir_obj: bin_dir,
-        }
+        };
+
+        // Write initial pool metadata to persistent media
+        let _ = server.sync_metadata();
+
+        server
     }
 
     /// Handles a single incoming IPC message sent to the ZFS File Server.

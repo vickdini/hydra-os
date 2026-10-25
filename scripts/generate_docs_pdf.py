@@ -208,11 +208,19 @@ DOCS_ORDER = [
     },
     {
         "stage": "Stage 8: File Server & Storage",
+        "title": "ATA / IDE PIO Hard Disk Block Driver",
+        "file": "docs/src/arch/ata.md",
+        "anchor": "doc-boot-stage8-ata",
+        "subtitle": "Legacy PC/AT I/O port command blocks (0x1F0/0x3F6), polled PIO transfers, and hardware persistent vdev.",
+    },
+    {
+        "stage": "Stage 8: File Server & Storage",
         "title": "ZFS Microkernel File Server Architecture",
         "file": "docs/src/zfs.md",
         "anchor": "doc-boot-stage8-zfs",
         "subtitle": "Microkernel ZFS File Server (Endpoint 0x20), CoW Merkle tree, Fletcher-4 checksums, and datasets.",
     },
+
     {
         "stage": "Stage 8: File Server & Storage",
         "title": "Unix File Descriptor Table & Shell Pipelines",

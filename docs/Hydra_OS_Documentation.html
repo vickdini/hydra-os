@@ -440,6 +440,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-msg" class="toc-link"><span class="toc-title">Fast Register Messages & Delegation</span><span class="toc-sub">Fast 4-word inline register payload, protocol labels, and transferred capability tokens.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-ep" class="toc-link"><span class="toc-title">Rendezvous Channels & Endpoints</span><span class="toc-sub">Circular FIFO ring buffers, rendezvous mailboxes, and thread-safe SharedEndpoint.</span></a></li>
 <li class="toc-stage-header">Stage 8: File Server & Storage</li>
+<li class="toc-item"><a href="#doc-boot-stage8-ata" class="toc-link"><span class="toc-title">ATA / IDE PIO Hard Disk Block Driver</span><span class="toc-sub">Legacy PC/AT I/O port command blocks (0x1F0/0x3F6), polled PIO transfers, and hardware persistent vdev.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage8-zfs" class="toc-link"><span class="toc-title">ZFS Microkernel File Server Architecture</span><span class="toc-sub">Microkernel ZFS File Server (Endpoint 0x20), CoW Merkle tree, Fletcher-4 checksums, and datasets.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage8-vfs" class="toc-link"><span class="toc-title">Unix File Descriptor Table & Shell Pipelines</span><span class="toc-sub">POSIX file descriptors (0..15), anonymous pipes (PipeBuffer), I/O redirection, and shell pipeline chains.</span></a></li>
 <li class="toc-stage-header">Stage 8b: Hardware Video & Framebuffer</li>
@@ -2887,8 +2888,194 @@ hydra&gt; unmap 0x7000000000
 
 
 
-<div id="doc-boot-stage8-zfs" class="doc-section">
+<div id="doc-boot-stage8-ata" class="doc-section">
     <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #25</div>
+    <h1>ATA / IDE PIO Hard Disk Block Driver</h1>
+<h2>1. Architectural Role &amp; Design Rationale</h2>
+<p>Hydra OS requires autonomous persistent secondary storage that remains fully functional after UEFI boot services are terminated (<code>ExitBootServices</code>). The <strong>ATA / IDE Programmed I/O (PIO)</strong> driver provides direct bare-metal block access to virtual and physical hard disk controllers (e.g. Intel PIIX3/PIIX4 IDE controllers or SATA controllers operating in IDE legacy compatibility mode) without any runtime BIOS/UEFI firmware dependencies.</p>
+<p>The driver acts as the physical block device backing the <strong>OpenZFS Storage Pool Allocator (SPA)</strong>, binding physical 512-byte sectors to ZFS 4096-byte virtual blocks (<code>vdev-ata-0</code>).</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                        Hydra Shell / Userland Apps                       |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|                  Microkernel ZFS Client &amp; DMU Subsystem                  |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|            OpenZFS Storage Pool Allocator (SPA - 32 MiB Pool)             |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|               ATA / IDE Block Driver (Polled PIO, Ring 0)                |
++--------------------------------------------------------------------------+
+                  │                                     │
+                  ▼                                     ▼
+     Command Ports (0x1F0..0x1F7)              Control Port (0x3F6)
+</code></pre></div>
+
+<hr />
+<h2>2. Port &amp; Register Specifications</h2>
+<p>The ATA driver communicates over the legacy PC/AT standard I/O port assignments:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;">Port</th>
+<th style="text-align: left;">Register Name</th>
+<th style="text-align: center;">Direction</th>
+<th style="text-align: left;">Function</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><code>0x1F0</code></td>
+<td style="text-align: left;">Data Register</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">16-bit PIO sector data transfer</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F1</code></td>
+<td style="text-align: left;">Error / Features</td>
+<td style="text-align: center;">Read / Write</td>
+<td style="text-align: left;">Pre-command features / Post-command error flags</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F2</code></td>
+<td style="text-align: left;">Sector Count</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">Number of 512-byte sectors to transfer (0 = 256 sectors)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F3</code></td>
+<td style="text-align: left;">LBA Low</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">Bits 0..7 of starting Logical Block Address</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F4</code></td>
+<td style="text-align: left;">LBA Mid</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">Bits 8..15 of starting Logical Block Address</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F5</code></td>
+<td style="text-align: left;">LBA High</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">Bits 16..23 of starting Logical Block Address</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F6</code></td>
+<td style="text-align: left;">Drive / Head</td>
+<td style="text-align: center;">Read/Write</td>
+<td style="text-align: left;">Bits 24..27 of LBA, Master/Slave select, and LBA flag (<code>0xE0</code>)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x1F7</code></td>
+<td style="text-align: left;">Status / Command</td>
+<td style="text-align: center;">Read / Write</td>
+<td style="text-align: left;">Drive status flags / Command dispatch register</td>
+</tr>
+<tr>
+<td style="text-align: center;"><code>0x3F6</code></td>
+<td style="text-align: left;">Control / Alt Status</td>
+<td style="text-align: center;">Write / Read</td>
+<td style="text-align: left;">Device Control (<code>nIEN</code>, <code>SRST</code>) / Alternate Status</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>3. Status Register &amp; Bit Definitions</h2>
+<p>The driver verifies device status before and after every hardware transaction:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;">Bit</th>
+<th style="text-align: left;">Name</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>7</strong></td>
+<td style="text-align: left;"><code>BSY</code> (Busy)</td>
+<td style="text-align: left;">Drive is executing an internal command; other registers invalid.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>6</strong></td>
+<td style="text-align: left;"><code>DRDY</code> (Device Ready)</td>
+<td style="text-align: left;">Drive is spun up, locked on track, and ready for commands.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>5</strong></td>
+<td style="text-align: left;"><code>DF</code> (Device Fault)</td>
+<td style="text-align: left;">Drive fault condition detected.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4</strong></td>
+<td style="text-align: left;"><code>DSC</code> / <code>SRV</code></td>
+<td style="text-align: left;">Drive seek complete / Service request.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>3</strong></td>
+<td style="text-align: left;"><code>DRQ</code> (Data Request)</td>
+<td style="text-align: left;">Drive is ready to transmit/receive data through port <code>0x1F0</code>.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>0</strong></td>
+<td style="text-align: left;"><code>ERR</code> (Error)</td>
+<td style="text-align: left;">An error occurred during the last dispatched command.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>4. Polled PIO Operation &amp; Interrupt Isolation</h2>
+<p>To maintain zero interrupt latency and absolute deterministic execution across CPU cores, the driver operates in <strong>Polled Programmed I/O (PIO)</strong> mode:</p>
+<ol>
+<li><strong>Hardware Interrupt Masking (<code>nIEN = 1</code>)</strong>:
+   During initialization, bit 1 (<code>nIEN</code>) of the Device Control Register (<code>0x3F6</code>) is set to <code>1</code>. This disables device hardware interrupts on IRQ 14, preventing spontaneous interrupts from preempting microkernel threads.</li>
+<li><strong>400ns Propagation Delays</strong>:
+   After writing to command or control registers, the driver performs four successive reads of the Alternate Status Register (<code>0x3F6</code>) to ensure the device logic has stabilized before polling the status register.</li>
+<li><strong>Spin-Wait Polling with Bounded Timeouts</strong>:
+   The driver spins using <code>core::hint::spin_loop()</code> until the <code>BSY</code> bit clears and <code>DRQ</code> asserts. If the drive fails to respond within 1,000,000 poll cycles, a descriptive timeout error is returned.</li>
+</ol>
+<hr />
+<h2>5. ATA Commands Implemented</h2>
+<ul>
+<li><strong><code>ATA_CMD_IDENTIFY</code> (<code>0xEC</code>)</strong>:
+  Dispatched on boot to probe drive presence, extract the ASCII model name (40 bytes), total sectors (LBA28 / LBA48), and verify that the connected device is an ATA hard disk (and not an ATAPI optical drive).</li>
+<li><strong><code>ATA_CMD_READ_SECTORS</code> (<code>0x20</code>) / <code>READ_SECTORS_EXT</code> (<code>0x24</code>)</strong>:
+  Reads contiguous 512-byte sectors into memory over the 16-bit data port <code>0x1F0</code>.</li>
+<li><strong><code>ATA_CMD_WRITE_SECTORS</code> (<code>0x30</code>) / <code>WRITE_SECTORS_EXT</code> (<code>0x34</code>)</strong>:
+  Writes contiguous 512-byte sectors from memory to magnetic/solid-state media.</li>
+<li><strong><code>ATA_CMD_CACHE_FLUSH</code> (<code>0xE7</code>) / <code>CACHE_FLUSH_EXT</code> (<code>0xEA</code>)</strong>:
+  Commands the on-disk volatile write cache to commit all modified sectors to non-volatile physical storage, providing strict ACID durability.</li>
+</ul>
+<hr />
+<h2>6. Shell &amp; Diagnostic Integration</h2>
+<p>The block device subsystem is exposed to userland and systems administrators via the <code>disks</code> (alias <code>storage</code>, <code>lsblk</code>) shell command:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt; disks
+=== Hydra OS Storage Subsystem &amp; Block Devices ===
+
+Device: /dev/hda (Primary Master ATA/IDE)
+  - Model:             QEMU HARDDISK
+  - Controller Port:   I/O Base 0x1F0, Control 0x3F6
+  - Capacity:          32 MiB (33554432 bytes)
+  - Total Sectors:     65536 (512 bytes/sector)
+  - Addressing:        LBA48 (48-bit Logical Block Addressing)
+  - I/O Mode:          Programmed I/O (Polled PIO, nIEN=1)
+  - Cache Flushing:    Hardware ATA CACHE FLUSH supported
+  - Vdev Association:  vdev-ata-0 -&gt; Backs OpenZFS pool 'hydrapool'
+  - Persistence:       ENABLED (Durably saved across reboots)
+</code></pre></div>
+</div>
+
+
+
+<div id="doc-boot-stage8-zfs" class="doc-section">
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #26</div>
     <h1>ZFS Microkernel File Server Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/fs/zfs/"><code>src/fs/zfs/</code></a> &amp; <a href="file:///d:/os/src/fs/client.rs"><code>src/fs/client.rs</code></a></li>
@@ -2934,15 +3121,24 @@ hydra&gt; unmap 0x7000000000
 <hr />
 <h2>2. ZFS Core Architecture</h2>
 <p>Hydra's ZFS implementation faithfully models the fundamental layers of OpenZFS:</p>
-<h3>1. Storage Pool Allocator (SPA)</h3>
+<h3>1. Storage Pool Allocator (SPA) &amp; Persistent Hardware Vdevs</h3>
 <ul>
-<li><strong>Storage Pool</strong>: Named <code>hydrapool</code> by default.</li>
-<li><strong>VDEV (Virtual Device)</strong>: Manages physical block storage or memory-backed frames.</li>
-<li><strong>Copy-on-Write (CoW)</strong>: Data blocks are never updated in-place. Writing allocates new blocks, preserves previous data for snapshots, and links to a new Merkle root.</li>
-<li><strong>Active Uberblock</strong>: The root of the storage pool (<code>magic: 0x00bab10c</code>, <code>version: 5000</code>). Every write transaction commits an incremented Transaction Group (<code>TXG</code>).</li>
+<li><strong>Storage Pool</strong>: Named <code>hydrapool</code> (expanded capacity: 32 MiB, 8,192 x 4096-byte blocks).</li>
+<li><strong>Persistent Vdev Architecture</strong>:</li>
+<li><code>vdev-ata-0</code>: Bare-metal hardware ATA PIO block device backing (<code>/dev/hda</code>). Sector I/O operations execute directly against physical/virtual hard disks with L1 memory caching and hardware write cache flushing (<code>CACHE FLUSH</code>).</li>
+<li><code>vdev-ramdisk-0</code>: Automatic fallback volatile 32 MiB memory buffer when no ATA controller or disk is detected.</li>
+<li><strong>Copy-on-Write (CoW)</strong>: Data blocks are never updated in-place. Writing allocates new blocks starting at Block 32, preserves previous data for snapshots, and links to a new Merkle root.</li>
+<li><strong>Active Uberblock &amp; Vdev Label</strong>:</li>
+<li><strong>Block 0</strong>: Houses the <code>VdevLabel</code> (<code>magic: 0x4859_4452_415a_4653</code> / <code>"HYDRAZFS"</code>), pool GUID, state, and the active <code>Uberblock</code>.</li>
+<li><strong>Blocks 1..4</strong>: Serialized dnodes (<code>DnodePhys</code> array).</li>
+<li><strong>Block 5</strong>: Serialized dataset structures.</li>
+<li><strong>Blocks 6..30</strong>: Serialized Micro-ZAP directories.</li>
+<li><strong>Blocks 32..8191</strong>: Dynamic CoW user data and payload blocks.</li>
+<li><strong>Cold Boot Restoration</strong>:
+  Upon kernel initialization, <code>ZfsServer::new()</code> reads Block 0 from the ATA hard disk. If a valid <code>VdevLabel</code> with matching Fletcher-4 checksum is verified, the server completely restores the persistent storage pool, all directories, datasets, and files.</li>
 </ul>
 <h3>2. Fletcher-4 End-to-End Checksums</h3>
-<p>Every block pointer (<code>blkptr_t</code>) carries a 256-bit Fletcher-4 checksum (4 parallel 64-bit accumulators):
+<p>Every block pointer (<code>blkptr_t</code>) and <code>VdevLabel</code> carries a 256-bit Fletcher-4 checksum (4 parallel 64-bit accumulators):
 $$\text{Fletcher-4: } a = \sum w_i, \quad b = \sum a_i, \quad c = \sum b_i, \quad d = \sum c_i$$
 Upon read operations, the ZFS File Server recalculates the checksum and detects any silent data corruption before returning data to the caller.</p>
 <h3>3. Data Management Unit (DMU) &amp; Dnodes</h3>
@@ -3024,49 +3220,52 @@ Upon read operations, the ZFS File Server recalculates the checksum and detects 
 - <strong>Write / CoW Transactions</strong>: Requires <code>Rights::WRITE</code>.
 - <strong>Snapshots</strong>: Requires <code>Rights::WRITE</code>.</p>
 <hr />
-<h2>5. Interactive Shell Commands</h2>
-<p>Hydra provides native user commands to interact with the ZFS File Server:</p>
-<div class="codehilite"><pre><span></span><code><span class="nt">hydra</span><span class="o">&gt;</span><span class="w"> </span><span class="nt">zpool</span><span class="w"> </span><span class="nt">status</span>
-<span class="w">  </span><span class="nt">pool</span><span class="o">:</span><span class="w"> </span><span class="nt">hydrapool</span>
-<span class="w"> </span><span class="nt">state</span><span class="o">:</span><span class="w"> </span><span class="nt">ONLINE</span>
-<span class="nt">status</span><span class="o">:</span><span class="w"> </span><span class="nt">The</span><span class="w"> </span><span class="nt">pool</span><span class="w"> </span><span class="nt">is</span><span class="w"> </span><span class="nt">operating</span><span class="w"> </span><span class="nt">normally</span><span class="w"> </span><span class="nt">via</span><span class="w"> </span><span class="nt">the</span><span class="w"> </span><span class="nt">Microkernel</span><span class="w"> </span><span class="nt">ZFS</span><span class="w"> </span><span class="nt">File</span><span class="w"> </span><span class="nt">Server</span><span class="o">.</span>
-<span class="nt">action</span><span class="o">:</span><span class="w"> </span><span class="nt">No</span><span class="w"> </span><span class="nt">known</span><span class="w"> </span><span class="nt">data</span><span class="w"> </span><span class="nt">errors</span><span class="w"> </span><span class="nt">detected</span><span class="o">;</span><span class="w"> </span><span class="nt">all</span><span class="w"> </span><span class="nt">blocks</span><span class="w"> </span><span class="nt">checksum-verified</span><span class="o">.</span>
-<span class="nt">config</span><span class="o">:</span>
-<span class="w">        </span><span class="nt">NAME</span><span class="w">                 </span><span class="nt">STATE</span><span class="w">     </span><span class="nt">READ</span><span class="w"> </span><span class="nt">WRITE</span><span class="w"> </span><span class="nt">CKSUM</span>
-<span class="w">        </span><span class="nt">hydrapool</span><span class="w">            </span><span class="nt">ONLINE</span><span class="w">       </span><span class="nt">0</span><span class="w">     </span><span class="nt">0</span><span class="w">     </span><span class="nt">0</span>
-<span class="w">          </span><span class="nt">vdev-ramdisk-0</span><span class="w">     </span><span class="nt">ONLINE</span><span class="w">       </span><span class="nt">0</span><span class="w">     </span><span class="nt">0</span><span class="w">     </span><span class="nt">0</span>
+<h2>5. Interactive Shell Commands &amp; Verification</h2>
+<p>Hydra provides native commands to inspect persistent storage, manage pools, and sync modified blocks:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt; disks
+=== Hydra OS Storage Subsystem &amp; Block Devices ===
 
-<span class="nt">Pool</span><span class="w"> </span><span class="nt">Properties</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nt">Metrics</span><span class="o">:</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Capacity</span><span class="o">:</span><span class="w">           </span><span class="nt">8</span><span class="w"> </span><span class="nt">MiB</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Allocated</span><span class="o">:</span><span class="w">          </span><span class="nt">128</span><span class="w"> </span><span class="nt">KiB</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Free</span><span class="w"> </span><span class="nt">Space</span><span class="o">:</span><span class="w">         </span><span class="nt">8064</span><span class="w"> </span><span class="nt">KiB</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Active</span><span class="w"> </span><span class="nt">Uberblock</span><span class="o">:</span><span class="w">   </span><span class="nt">TXG</span><span class="w"> </span><span class="p">#</span><span class="nn">2</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Checksum</span><span class="w"> </span><span class="nt">Algorithm</span><span class="o">:</span><span class="w"> </span><span class="nt">Fletcher-4</span><span class="w"> </span><span class="o">(</span><span class="nt">4x</span><span class="w"> </span><span class="nt">64-bit</span><span class="w"> </span><span class="nt">words</span><span class="o">)</span>
-<span class="w">  </span><span class="nt">-</span><span class="w"> </span><span class="nt">Allocation</span><span class="w"> </span><span class="nt">Policy</span><span class="o">:</span><span class="w">  </span><span class="nt">Copy-on-Write</span><span class="w"> </span><span class="o">(</span><span class="nt">CoW</span><span class="o">)</span><span class="w"> </span><span class="nt">Merkle</span><span class="w"> </span><span class="nt">Tree</span>
+Device: /dev/hda (Primary Master ATA/IDE)
+  - Model:             QEMU HARDDISK
+  - Controller Port:   I/O Base 0x1F0, Control 0x3F6
+  - Capacity:          32 MiB (33554432 bytes)
+  - Total Sectors:     65536 (512 bytes/sector)
+  - Addressing:        LBA48 (48-bit Logical Block Addressing)
+  - I/O Mode:          Programmed I/O (Polled PIO, nIEN=1)
+  - Cache Flushing:    Hardware ATA CACHE FLUSH supported
+  - Vdev Association:  vdev-ata-0 -&gt; Backs OpenZFS pool 'hydrapool'
+  - Persistence:       ENABLED (Durably saved across reboots)
 
-<span class="nt">hydra</span><span class="o">&gt;</span><span class="w"> </span><span class="nt">zfs</span><span class="w"> </span><span class="nt">list</span>
-<span class="nt">NAME</span><span class="w">                     </span><span class="nt">USED</span><span class="w">    </span><span class="nt">AVAIL</span><span class="w"> </span><span class="nt">MOUNTPOINT</span>
-<span class="nt">------------------------------------------------------------------</span>
-<span class="nt">hydrapool</span><span class="o">/</span><span class="nt">root</span><span class="w">           </span><span class="nt">128K</span><span class="w">    </span><span class="nt">8064K</span><span class="w"> </span><span class="o">/</span>
-<span class="nt">hydrapool</span><span class="o">/</span><span class="nt">bin</span><span class="w">            </span><span class="nt">128K</span><span class="w">    </span><span class="nt">8064K</span><span class="w"> </span><span class="o">/</span><span class="nt">bin</span>
+hydra:/bin&gt; zpool status
+  pool: hydrapool
+ state: ONLINE
+status: The pool is operating normally via the Microkernel ZFS File Server.
+config:
+        NAME                 STATE     READ WRITE CKSUM
+        hydrapool            ONLINE       0     0     0
+          vdev-ata-0         ONLINE       0     0     0 (Persistent ATA Hard Disk)
 
-<span class="nt">hydra</span><span class="o">&gt;</span><span class="w"> </span><span class="nt">zfs</span><span class="w"> </span><span class="nt">cat</span><span class="w"> </span><span class="nt">readme</span><span class="p">.</span><span class="nc">txt</span>
-<span class="nt">Hydra</span><span class="w"> </span><span class="nt">OS</span><span class="w"> </span><span class="nt">Default</span><span class="w"> </span><span class="nt">Filesystem</span><span class="o">:</span><span class="w"> </span><span class="nt">OpenZFS</span><span class="w"> </span><span class="nt">Architecture</span>
-<span class="nt">Integrated</span><span class="w"> </span><span class="nt">as</span><span class="w"> </span><span class="nt">an</span><span class="w"> </span><span class="nt">independent</span><span class="w"> </span><span class="nt">Microkernel</span><span class="w"> </span><span class="nt">File</span><span class="w"> </span><span class="nt">Server</span><span class="o">.</span>
-<span class="nt">All</span><span class="w"> </span><span class="nt">operations</span><span class="w"> </span><span class="nt">are</span><span class="w"> </span><span class="nt">verified</span><span class="w"> </span><span class="nt">via</span><span class="w"> </span><span class="nt">Fletcher-4</span><span class="w"> </span><span class="nt">checksums</span><span class="o">!</span>
+Pool Properties &amp; Metrics:
+  - Capacity:           32 MiB
+  - Allocated:          160 KiB
+  - Free Space:         32608 KiB
+  - Persistence Mode:   Hardware ATA Sector I/O (ACID Durable)
+  - Active Uberblock:   TXG #9
+  - Checksum Algorithm: Fletcher-4 (4x 64-bit words)
+  - Allocation Policy:  Copy-on-Write (CoW) Merkle Tree
 
-<span class="nt">hydra</span><span class="o">&gt;</span><span class="w"> </span><span class="nt">zfs</span><span class="w"> </span><span class="nt">write</span><span class="w"> </span><span class="nt">demo</span><span class="p">.</span><span class="nc">txt</span><span class="w"> </span><span class="s2">"Hello from ZFS on Hydra Microkernel!"</span>
-<span class="cp">[</span><span class="o">+</span><span class="cp">]</span><span class="w"> </span><span class="nt">CoW</span><span class="w"> </span><span class="nt">write</span><span class="w"> </span><span class="nt">committed</span><span class="w"> </span><span class="nt">to</span><span class="w"> </span><span class="nt">ZFS</span><span class="w"> </span><span class="nt">File</span><span class="w"> </span><span class="nt">Server</span><span class="o">!</span>
-<span class="w">    </span><span class="nt">-</span><span class="w"> </span><span class="nt">File</span><span class="o">:</span><span class="w"> </span><span class="s1">'demo.txt'</span><span class="w"> </span><span class="o">(</span><span class="nt">36</span><span class="w"> </span><span class="nt">bytes</span><span class="o">)</span>
-<span class="w">    </span><span class="nt">-</span><span class="w"> </span><span class="nt">Merkle</span><span class="w"> </span><span class="nt">Root</span><span class="w"> </span><span class="nt">Updated</span><span class="w"> </span><span class="nt">to</span><span class="w"> </span><span class="nt">TXG</span><span class="w"> </span><span class="p">#</span><span class="nn">3</span>
-<span class="w">    </span><span class="nt">-</span><span class="w"> </span><span class="nt">Fletcher-4</span><span class="w"> </span><span class="nt">Checksum</span><span class="w"> </span><span class="nt">computed</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nt">stored</span>
+hydra:/bin&gt; zfs cat persistent.txt
+hydraos-storage-success
+
+hydra:/bin&gt; sync
+[+] OpenZFS Storage: Synchronized all metadata, dnodes, and flushed ATA write caches to persistent media.
 </code></pre></div>
 </div>
 
 
 
 <div id="doc-boot-stage8-vfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #26</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #27</div>
     <h1>Unix File Descriptor Table &amp; Shell Pipelines</h1>
 <ul>
 <li><strong>Source Files</strong>: <a href="file:///d:/os/src/fs/fd.rs"><code>src/fs/fd.rs</code></a>, <a href="file:///d:/os/src/fs/pipe.rs"><code>src/fs/pipe.rs</code></a>, <a href="file:///d:/os/src/shell/pipeline.rs"><code>src/shell/pipeline.rs</code></a></li>
@@ -3233,7 +3432,7 @@ ps<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<s
 
 
 <div id="doc-boot-stage8b-video" class="doc-section">
-    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #27</div>
+    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #28</div>
     <h1>Hardware Video Driver &amp; GOP Framebuffer Documentation</h1>
 <ul>
 <li><strong>Source Module</strong>: <a href="file:///d:/os/src/video/"><code>src/video/</code></a></li>
@@ -3317,7 +3516,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -3452,7 +3651,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #30</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -3625,7 +3824,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage9-sync" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #30</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
     <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
 <h2>Overview</h2>
 <p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
@@ -3772,7 +3971,7 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 <div id="doc-boot-stage9-elf" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #32</div>
     <h1>Userspace ELF64 Binary Loader &amp; Execution</h1>
 <h2>Overview</h2>
 <p>Hydra OS features an autonomous <strong>Userspace ELF64 Binary Loader</strong> capable of parsing, relocating, mapping, and executing standalone compiled x86_64 binaries directly from the OpenZFS storage medium (<code>hydrapool/bin</code>) in unprivileged <strong>Ring 3 (CPL = 3)</strong>.</p>
@@ -4112,7 +4311,7 @@ hydra:/bin&gt;<span class="w"> </span>ps
 
 
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #32</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #33</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

@@ -288,7 +288,8 @@ fn main() -> Status {
 
     // 7. ZFS Microkernel File Server Initialization
     console::set_color(Color::Yellow, Color::Black);
-    println!("\n[*] Step 6: Initializing ZFS Microkernel File Server...");
+    println!("\n[*] Step 6: Initializing Storage Subsystem & ZFS File Server...");
+    crate::arch::ata::init();
     fs::init_server();
     fs::ZfsClient::sync_boot_binaries();
     console::set_color(Color::LightGreen, Color::Black);
@@ -296,8 +297,9 @@ fn main() -> Status {
         "[+] ZFS File Server Online (Endpoint #{:#x}):",
         fs::zfs::ENDPOINT_ZFS_SERVER
     );
-    println!("    - Storage Pool: 'hydrapool' (8 MiB, Fletcher-4 Checksums, CoW enabled)");
-    println!("    - Datasets: hydrapool/root (/), hydrapool/bin (/bin)");
+    println!("    - Storage Pool: 'hydrapool' (32 MiB, Fletcher-4 Checksums, CoW enabled)");
+    println!("    - Persistence : {}", if crate::arch::ata::is_drive_present() { "Active (Primary Master ATA Hard Disk)" } else { "In-Memory RAM Fallback" });
+    println!("    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)");
 
     // 8. Preemptive Multitasking & Scheduler Initialization
     console::set_color(Color::Yellow, Color::Black);

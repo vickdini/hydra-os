@@ -1,3 +1,4 @@
+pub mod ata;
 pub mod boot_services;
 pub mod cpu;
 pub mod gdt;

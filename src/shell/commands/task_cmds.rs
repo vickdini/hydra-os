@@ -417,14 +417,29 @@ impl Command for SyncCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect microkernel synchronization primitives, mutexes, and endpoint wait queues"
+        "Flush cached filesystem buffers to disk and inspect microkernel wait queues"
     }
 
     fn usage(&self) -> &'static str {
-        "sync"
+        "sync [--all]"
     }
 
-    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+        match crate::fs::client::ZfsClient::sync() {
+            Ok(_) => {
+                set_color(Color::LightGreen, Color::Black);
+                println!("[+] OpenZFS Storage: Synchronized all metadata, dnodes, and flushed ATA write caches to persistent media.");
+            }
+            Err(e) => {
+                set_color(Color::LightRed, Color::Black);
+                println!("[!] Failed to sync storage pool: {}", e);
+            }
+        }
+
+        if !args.iter().any(|&a| a == "--all" || a == "-a") {
+            return;
+        }
+
         set_color(Color::LightGreen, Color::Black);
         println!("\n============================================================");
         println!(" [+] HYDRA MICROKERNEL: SYNCHRONIZATION & WAIT QUEUES       ");

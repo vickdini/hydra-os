@@ -53,7 +53,7 @@ pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsC
 pub use time::TimeCommand;
 pub use translate::{MapCommand, TranslateCommand, UnmapCommand};
 pub use video::VideoCommand;
-pub use zfs_cmds::{ZfsCommand, ZpoolCommand};
+pub use zfs_cmds::{DisksCommand, ZfsCommand, ZpoolCommand};
 
 /// Static registry of all built-in commands and integrated programs.
 /// To integrate a new command or program, instantiate it in this slice!
@@ -115,6 +115,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &CapRevokeCommand,
     &IpcCommand,
     &TimeCommand,
+    &DisksCommand,
     &ZpoolCommand,
     &ZfsCommand,
     &EfifsCommand,

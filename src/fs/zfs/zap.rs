@@ -3,6 +3,7 @@ use super::types::DnodeType;
 pub const MAX_ZAP_ENTRIES: usize = 32;
 
 /// A directory entry in the ZFS Attribute Processor (ZAP).
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ZapEntry {
     pub name: [u8; 32],
@@ -43,6 +44,7 @@ impl ZapEntry {
 }
 
 /// Micro-ZAP structure for directory and property lookups
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ZapDirectory {
     pub entries: [ZapEntry; MAX_ZAP_ENTRIES],

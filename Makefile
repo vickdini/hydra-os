@@ -2,6 +2,7 @@ TARGET := x86_64-unknown-uefi
 EFI_BIN := target/$(TARGET)/release/hydra.efi
 DIST_DIR := dist/x86_64
 IMG := $(DIST_DIR)/hydra.img
+STORAGE_IMG := $(DIST_DIR)/storage.img
 ISO := $(DIST_DIR)/kernel.iso
 
 .PHONY: all build clean
@@ -13,6 +14,10 @@ $(EFI_BIN):
 
 build: $(EFI_BIN)
 	mkdir -p $(DIST_DIR)
+	@if [ ! -f $(STORAGE_IMG) ]; then \
+		echo "Creating persistent 32MB ATA storage image..."; \
+		dd if=/dev/zero of=$(STORAGE_IMG) bs=1M count=32; \
+	fi
 	cp $(EFI_BIN) $(DIST_DIR)/bootx64.efi
 	# Create FAT EFI disk image (16MB)
 	dd if=/dev/zero of=$(IMG) bs=1M count=16

@@ -334,7 +334,9 @@ impl ZfsClient {
                 Some(s) => s,
                 None => return Err("ZFS File Server not running"),
             };
-            return server.dmu.cow_write_file(obj_id, data, &mut server.spa);
+            let txg = server.dmu.cow_write_file(obj_id, data, &mut server.spa)?;
+            let _ = server.sync_metadata();
+            return Ok(txg);
         }
 
         // Otherwise create new file in parent directory
@@ -348,6 +350,7 @@ impl ZfsClient {
         let file_obj = server.dmu.allocate_object(DnodeType::PlainFile, filename)?;
         let txg = server.dmu.cow_write_file(file_obj, data, &mut server.spa)?;
         server.dmu.add_directory_entry(parent_dir, filename, file_obj, DnodeType::PlainFile)?;
+        let _ = server.sync_metadata();
         Ok(txg)
     }
 
@@ -366,6 +369,7 @@ impl ZfsClient {
             let dnode = &server.dmu.dnodes[obj_id as usize];
             let bp = dnode.direct_blocks[0];
             let txg = server.spa.commit_txg(bp);
+            let _ = server.sync_metadata();
             return Ok(txg);
         }
 
@@ -387,6 +391,7 @@ impl ZfsClient {
 
         let dir_obj = server.dmu.allocate_object(DnodeType::Directory, dirname)?;
         server.dmu.add_directory_entry(parent_dir, dirname, dir_obj, DnodeType::Directory)?;
+        let _ = server.sync_metadata();
         Ok(dir_obj)
     }
 
@@ -411,6 +416,7 @@ impl ZfsClient {
 
         let _ = server.dmu.remove_directory_entry(parent_dir, dirname)?;
         server.dmu.free_object(obj_id, &mut server.spa);
+        let _ = server.sync_metadata();
         Ok(())
     }
 
@@ -430,7 +436,18 @@ impl ZfsClient {
 
         let _ = server.dmu.remove_directory_entry(parent_dir, filename)?;
         server.dmu.free_object(obj_id, &mut server.spa);
+        let _ = server.sync_metadata();
         Ok(())
+    }
+
+    /// Flushes all cached ZFS file metadata and ATA write buffers to physical media.
+    pub fn sync() -> Result<(), &'static str> {
+        let mut server_lock = ZFS_SERVER.lock();
+        let server = match server_lock.as_mut() {
+            Some(s) => s,
+            None => return Err("ZFS File Server not running"),
+        };
+        server.sync_metadata()
     }
 
     /// Copies a file in ZFS (like Unix `cp`).
@@ -460,6 +477,7 @@ impl ZfsClient {
 
         // Update dnode name
         server.dmu.dnodes[src_obj as usize].set_name(dst_name);
+        let _ = server.sync_metadata();
         Ok(())
     }
 

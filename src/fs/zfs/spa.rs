@@ -3,15 +3,24 @@ use uefi::mem::memory_map::MemoryType;
 
 use super::types::{BlockPointer, Fletcher4, Uberblock, ZFS_BLOCK_SIZE};
 
-/// Total storage capacity of the default Hydra ZFS storage pool (8 MiB).
-pub const POOL_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
-pub const POOL_TOTAL_BLOCKS: usize = POOL_CAPACITY_BYTES / ZFS_BLOCK_SIZE; // 2048 blocks
+/// Total storage capacity of the default Hydra ZFS storage pool (32 MiB).
+pub const POOL_CAPACITY_BYTES: usize = 32 * 1024 * 1024;
+pub const POOL_TOTAL_BLOCKS: usize = POOL_CAPACITY_BYTES / ZFS_BLOCK_SIZE; // 8192 blocks
+pub const SECTORS_PER_BLOCK: usize = ZFS_BLOCK_SIZE / crate::arch::ata::ATA_SECTOR_SIZE; // 8 sectors per 4 KiB block
+
+/// Number of system metadata blocks reserved at the start of the pool (Blocks 0..28).
+/// - Block 0: VdevLabel & Active Uberblock
+/// - Blocks 1..4: Dnode Object Table (64 * 256 bytes = 16 KiB)
+/// - Blocks 5..28: Directory ZAP Structures (64 * 1544 bytes = 96 KiB)
+pub const RESERVED_METADATA_BLOCKS: usize = 32;
 
 /// Virtual Device (vdev) storage backing the ZFS pool.
-/// Dynamically allocated from UEFI loader data pages at boot time.
+/// Operates on physical/virtual ATA hard disks via programmed I/O with automatic
+/// write-through caching to an allocated RAM buffer.
 pub struct VdevStorage {
     base_ptr: *mut u8,
     _capacity_bytes: usize,
+    has_ata: bool,
 }
 
 unsafe impl Send for VdevStorage {}
@@ -31,18 +40,51 @@ impl VdevStorage {
             }
         }
 
+        let has_ata = crate::arch::ata::is_drive_present();
+
         Self {
             base_ptr: ptr,
             _capacity_bytes: POOL_CAPACITY_BYTES,
+            has_ata,
         }
     }
 
+    /// Returns true if this vdev is backed by a physical or virtual ATA hard drive.
+    pub fn is_hardware_backed(&self) -> bool {
+        self.has_ata
+    }
+
+    /// Reads a 4 KiB block from the storage device.
     pub fn read_block(&self, block_index: usize, out_buf: &mut [u8]) -> Result<(), &'static str> {
-        if self.base_ptr.is_null() {
-            return Err("Vdev storage uninitialized");
-        }
         if block_index >= POOL_TOTAL_BLOCKS {
             return Err("Block index out of bounds");
+        }
+
+        // 1. Try reading from physical/virtual ATA hard disk if active
+        if self.has_ata {
+            let mut ata_guard = crate::arch::ata::PRIMARY_ATA.lock();
+            if let Some(ref mut dev) = *ata_guard {
+                let start_lba = (block_index as u64) * (SECTORS_PER_BLOCK as u64);
+                let mut temp_block = [0u8; ZFS_BLOCK_SIZE];
+                if dev.read_sectors(start_lba, SECTORS_PER_BLOCK as u8, &mut temp_block).is_ok() {
+                    let copy_len = out_buf.len().min(ZFS_BLOCK_SIZE);
+                    out_buf[..copy_len].copy_from_slice(&temp_block[..copy_len]);
+
+                    // Update L1 cache in memory
+                    if !self.base_ptr.is_null() {
+                        unsafe {
+                            let dst = self.base_ptr.add(block_index * ZFS_BLOCK_SIZE);
+                            core::ptr::copy_nonoverlapping(temp_block.as_ptr(), dst, ZFS_BLOCK_SIZE);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Fallback to in-memory backing buffer
+        if self.base_ptr.is_null() {
+            return Err("Vdev storage uninitialized");
         }
         let offset = block_index * ZFS_BLOCK_SIZE;
         let copy_len = if out_buf.len() < ZFS_BLOCK_SIZE { out_buf.len() } else { ZFS_BLOCK_SIZE };
@@ -53,20 +95,45 @@ impl VdevStorage {
         Ok(())
     }
 
+    /// Writes a 4 KiB block to the storage device with write-through disk persistence.
     pub fn write_block(&mut self, block_index: usize, in_buf: &[u8]) -> Result<(), &'static str> {
-        if self.base_ptr.is_null() {
-            return Err("Vdev storage uninitialized");
-        }
         if block_index >= POOL_TOTAL_BLOCKS {
             return Err("Block index out of bounds");
         }
-        let offset = block_index * ZFS_BLOCK_SIZE;
+
+        // 1. Update in-memory cache
         let copy_len = if in_buf.len() < ZFS_BLOCK_SIZE { in_buf.len() } else { ZFS_BLOCK_SIZE };
-        unsafe {
-            let dst = self.base_ptr.add(offset);
-            core::ptr::copy_nonoverlapping(in_buf.as_ptr(), dst, copy_len);
-            if copy_len < ZFS_BLOCK_SIZE {
-                core::ptr::write_bytes(dst.add(copy_len), 0, ZFS_BLOCK_SIZE - copy_len);
+        if !self.base_ptr.is_null() {
+            let offset = block_index * ZFS_BLOCK_SIZE;
+            unsafe {
+                let dst = self.base_ptr.add(offset);
+                core::ptr::copy_nonoverlapping(in_buf.as_ptr(), dst, copy_len);
+                if copy_len < ZFS_BLOCK_SIZE {
+                    core::ptr::write_bytes(dst.add(copy_len), 0, ZFS_BLOCK_SIZE - copy_len);
+                }
+            }
+        }
+
+        // 2. Persist to physical/virtual ATA hard disk sectors
+        if self.has_ata {
+            let mut ata_guard = crate::arch::ata::PRIMARY_ATA.lock();
+            if let Some(ref mut dev) = *ata_guard {
+                let start_lba = (block_index as u64) * (SECTORS_PER_BLOCK as u64);
+                let mut full_block = [0u8; ZFS_BLOCK_SIZE];
+                full_block[..copy_len].copy_from_slice(&in_buf[..copy_len]);
+                dev.write_sectors(start_lba, SECTORS_PER_BLOCK as u8, &full_block)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Flushes hardware disk write caches.
+    pub fn flush(&mut self) -> Result<(), &'static str> {
+        if self.has_ata {
+            let mut ata_guard = crate::arch::ata::PRIMARY_ATA.lock();
+            if let Some(ref mut dev) = *ata_guard {
+                dev.flush()?;
             }
         }
         Ok(())
@@ -102,11 +169,23 @@ impl Spa {
             allocated_blocks: 0,
         };
 
-        // Reserve block 0 for Vdev Label and Uberblock array
-        spa.mark_block(0, true);
-        spa.allocated_blocks = 1;
+        // Reserve blocks 0..RESERVED_METADATA_BLOCKS for Vdev Label, dnodes, and ZAP tables
+        for b in 0..RESERVED_METADATA_BLOCKS {
+            spa.mark_block(b, true);
+        }
+        spa.allocated_blocks = RESERVED_METADATA_BLOCKS;
 
         spa
+    }
+
+    /// Returns true if this storage pool is backed by persistent physical/virtual ATA hardware.
+    pub fn is_hardware_backed(&self) -> bool {
+        self.vdev.is_hardware_backed()
+    }
+
+    /// Flushes all persistent writes to physical storage media.
+    pub fn flush(&mut self) -> Result<(), &'static str> {
+        self.vdev.flush()
     }
 
     fn mark_block(&mut self, block: usize, used: bool) {
@@ -127,7 +206,7 @@ impl Spa {
 
     /// Frees a previously allocated block in the SPA block bitmap.
     pub fn free_block(&mut self, block: usize) {
-        if block > 0 && block < POOL_TOTAL_BLOCKS && self.is_block_used(block) {
+        if block >= RESERVED_METADATA_BLOCKS && block < POOL_TOTAL_BLOCKS && self.is_block_used(block) {
             self.mark_block(block, false);
             self.allocated_blocks = self.allocated_blocks.saturating_sub(1);
         }
@@ -138,8 +217,8 @@ impl Spa {
     pub fn cow_allocate_block(&mut self, data: &[u8]) -> Result<BlockPointer, &'static str> {
         let mut target_block = None;
 
-        // Linear scan for first free block
-        for b in 1..POOL_TOTAL_BLOCKS {
+        // Linear scan for first free block after reserved metadata area
+        for b in RESERVED_METADATA_BLOCKS..POOL_TOTAL_BLOCKS {
             if !self.is_block_used(b) {
                 target_block = Some(b);
                 break;

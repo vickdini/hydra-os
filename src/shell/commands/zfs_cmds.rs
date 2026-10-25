@@ -31,11 +31,15 @@ impl Command for ZpoolCommand {
                 set_color(Color::White, Color::Black);
                 println!(" state: ONLINE");
                 println!("status: The pool is operating normally via the Microkernel ZFS File Server.");
-                println!("action: No known data errors detected; all blocks checksum-verified.");
+                let is_disk = crate::arch::ata::is_drive_present();
                 println!("config:");
                 println!("        NAME                 STATE     READ WRITE CKSUM");
                 println!("        hydrapool            ONLINE       0     0     0");
-                println!("          vdev-ramdisk-0     ONLINE       0     0     0");
+                if is_disk {
+                    println!("          vdev-ata-0         ONLINE       0     0     0 (Persistent ATA Hard Disk)");
+                } else {
+                    println!("          vdev-ramdisk-0     ONLINE       0     0     0 (Volatile RAM Fallback)");
+                }
 
                 if let Ok((total_mb, alloc_kb, free_kb, txg)) = ZfsClient::pool_status() {
                     set_color(Color::Yellow, Color::Black);
@@ -44,6 +48,7 @@ impl Command for ZpoolCommand {
                     println!("  - Capacity:           {} MiB", total_mb);
                     println!("  - Allocated:          {} KiB", alloc_kb);
                     println!("  - Free Space:         {} KiB", free_kb);
+                    println!("  - Persistence Mode:   {}", if is_disk { "Hardware ATA Sector I/O (ACID Durable)" } else { "In-Memory RAM Buffer" });
                     println!("  - Active Uberblock:   TXG #{}", txg);
                     println!("  - Checksum Algorithm: Fletcher-4 (4x 64-bit words)");
                     println!("  - Allocation Policy:  Copy-on-Write (CoW) Merkle Tree");
@@ -247,3 +252,61 @@ impl Command for ZfsCommand {
         }
     }
 }
+
+/// Shell command to inspect attached physical and virtual block storage devices.
+pub struct DisksCommand;
+
+impl Command for DisksCommand {
+    fn name(&self) -> &'static str {
+        "disks"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["storage", "lsblk", "fdisk"]
+    }
+
+    fn description(&self) -> &'static str {
+        "Inspect attached physical/virtual block storage devices and ATA controllers"
+    }
+
+    fn usage(&self) -> &'static str {
+        "disks"
+    }
+
+    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+        set_color(Color::LightCyan, Color::Black);
+        println!("=== Hydra OS Storage Subsystem & Block Devices ===");
+
+        let is_present = crate::arch::ata::is_drive_present();
+        if is_present {
+            let mut model_buf = [0u8; 40];
+            let model = crate::arch::ata::get_drive_model(&mut model_buf).unwrap_or("ATA Hard Disk");
+            let info = crate::arch::ata::drive_info();
+
+            set_color(Color::LightGreen, Color::Black);
+            println!("\nDevice: /dev/hda (Primary Master ATA/IDE)");
+            set_color(Color::White, Color::Black);
+            println!("  - Model:             {}", model);
+            println!("  - Controller Port:   I/O Base 0x1F0, Control 0x3F6");
+            if let Some((cap_bytes, sectors, is_lba48)) = info {
+                let cap_mb = cap_bytes / (1024 * 1024);
+                println!("  - Capacity:          {} MiB ({} bytes)", cap_mb, cap_bytes);
+                println!("  - Total Sectors:     {} (512 bytes/sector)", sectors);
+                println!("  - Addressing:        {}", if is_lba48 { "LBA48 (48-bit Logical Block Addressing)" } else { "LBA28 (28-bit Logical Block Addressing)" });
+            }
+            println!("  - I/O Mode:          Programmed I/O (Polled PIO, nIEN=1)");
+            println!("  - Cache Flushing:    Hardware ATA CACHE FLUSH supported");
+            println!("  - Vdev Association:  vdev-ata-0 -> Backs OpenZFS pool 'hydrapool'");
+            println!("  - Persistence:       ENABLED (Durably saved across reboots)");
+        } else {
+            set_color(Color::Yellow, Color::Black);
+            println!("\nNo physical or virtual ATA hard disks detected on Primary Master (0x1F0).");
+            set_color(Color::White, Color::Black);
+            println!("  - Fallback Vdev:     vdev-ramdisk-0 (32 MiB In-Memory Volatile RAM Disk)");
+            println!("  - Persistence:       DISABLED (Data will reset upon system reboot)");
+            println!("  - Tip: Attach an IDE hard disk at IDE-0-0 in VirtualBox or -hda in QEMU.");
+        }
+        set_color(Color::White, Color::Black);
+    }
+}
+

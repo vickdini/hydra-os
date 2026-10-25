@@ -3,6 +3,9 @@
 /// Standard ZFS Uberblock magic: 0x00bab10c (OO-BA-BLOC)
 pub const ZFS_UBERBLOCK_MAGIC: u64 = 0x0000_0000_00ba_b10c;
 
+/// Persistent Vdev Label Magic: "HYDRAZFS" (0x4859_4452_415a_4653)
+pub const VDEV_LABEL_MAGIC: u64 = 0x4859_4452_415a_4653;
+
 /// Storage Pool Allocator Version
 pub const SPA_VERSION_5000: u64 = 5000;
 
@@ -10,6 +13,7 @@ pub const SPA_VERSION_5000: u64 = 5000;
 pub const ZFS_BLOCK_SIZE: usize = 4096;
 
 /// Fletcher-4 Checksum (4 x 64-bit accumulators)
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Fletcher4 {
     pub a: u64,
@@ -56,6 +60,7 @@ impl Fletcher4 {
 
 /// ZFS Block Pointer (`blkptr_t`)
 /// Represents a location on a vdev along with integrity checksum, size, and birth TXG.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BlockPointer {
     pub vdev_id: u32,
@@ -83,6 +88,7 @@ impl BlockPointer {
 
 /// ZFS Uberblock (`uberblock_t`)
 /// The root of a ZFS pool's Merkle tree. Updated on every transaction group (TXG) commit.
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Uberblock {
     pub magic: u64,
@@ -112,6 +118,39 @@ impl Uberblock {
     }
 }
 
+/// On-disk Persistent Vdev Label stored in Block 0.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VdevLabel {
+    pub magic: u64,
+    pub pool_name: [u8; 16],
+    pub uberblock: Uberblock,
+    pub root_dir_obj: u64,
+    pub bin_dir_obj: u64,
+    pub next_obj_id: u64,
+    pub allocated_blocks: u64,
+    pub checksum: Fletcher4,
+}
+
+impl VdevLabel {
+    pub const fn empty() -> Self {
+        Self {
+            magic: 0,
+            pool_name: [0u8; 16],
+            uberblock: Uberblock::new(1, BlockPointer::empty(), [0u8; 16]),
+            root_dir_obj: 0,
+            bin_dir_obj: 0,
+            next_obj_id: 0,
+            allocated_blocks: 0,
+            checksum: Fletcher4 { a: 0, b: 0, c: 0, d: 0 },
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.magic == VDEV_LABEL_MAGIC && self.uberblock.is_valid()
+    }
+}
+
 /// Dnode object types in DMU
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -125,6 +164,7 @@ pub enum DnodeType {
 
 /// Physical Dnode structure (`dnode_phys_t`)
 /// Describes an object (file, directory, or dataset) and points to its data blocks.
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DnodePhys {
     pub obj_type: DnodeType,

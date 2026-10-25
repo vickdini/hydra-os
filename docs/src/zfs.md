@@ -51,14 +51,23 @@ Hydra implements **ZFS (Zettabyte File System)** as the default filesystem, stru
 
 Hydra's ZFS implementation faithfully models the fundamental layers of OpenZFS:
 
-### 1. Storage Pool Allocator (SPA)
-- **Storage Pool**: Named `hydrapool` by default.
-- **VDEV (Virtual Device)**: Manages physical block storage or memory-backed frames.
-- **Copy-on-Write (CoW)**: Data blocks are never updated in-place. Writing allocates new blocks, preserves previous data for snapshots, and links to a new Merkle root.
-- **Active Uberblock**: The root of the storage pool (`magic: 0x00bab10c`, `version: 5000`). Every write transaction commits an incremented Transaction Group (`TXG`).
+### 1. Storage Pool Allocator (SPA) & Persistent Hardware Vdevs
+- **Storage Pool**: Named `hydrapool` (expanded capacity: 32 MiB, 8,192 x 4096-byte blocks).
+- **Persistent Vdev Architecture**:
+  - `vdev-ata-0`: Bare-metal hardware ATA PIO block device backing (`/dev/hda`). Sector I/O operations execute directly against physical/virtual hard disks with L1 memory caching and hardware write cache flushing (`CACHE FLUSH`).
+  - `vdev-ramdisk-0`: Automatic fallback volatile 32 MiB memory buffer when no ATA controller or disk is detected.
+- **Copy-on-Write (CoW)**: Data blocks are never updated in-place. Writing allocates new blocks starting at Block 32, preserves previous data for snapshots, and links to a new Merkle root.
+- **Active Uberblock & Vdev Label**:
+  - **Block 0**: Houses the `VdevLabel` (`magic: 0x4859_4452_415a_4653` / `"HYDRAZFS"`), pool GUID, state, and the active `Uberblock`.
+  - **Blocks 1..4**: Serialized dnodes (`DnodePhys` array).
+  - **Block 5**: Serialized dataset structures.
+  - **Blocks 6..30**: Serialized Micro-ZAP directories.
+  - **Blocks 32..8191**: Dynamic CoW user data and payload blocks.
+- **Cold Boot Restoration**:
+  Upon kernel initialization, `ZfsServer::new()` reads Block 0 from the ATA hard disk. If a valid `VdevLabel` with matching Fletcher-4 checksum is verified, the server completely restores the persistent storage pool, all directories, datasets, and files.
 
 ### 2. Fletcher-4 End-to-End Checksums
-Every block pointer (`blkptr_t`) carries a 256-bit Fletcher-4 checksum (4 parallel 64-bit accumulators):
+Every block pointer (`blkptr_t`) and `VdevLabel` carries a 256-bit Fletcher-4 checksum (4 parallel 64-bit accumulators):
 $$\text{Fletcher-4: } a = \sum w_i, \quad b = \sum a_i, \quad c = \sum b_i, \quad d = \sum c_i$$
 Upon read operations, the ZFS File Server recalculates the checksum and detects any silent data corruption before returning data to the caller.
 
@@ -100,43 +109,47 @@ The File Server verifies client capabilities on every request:
 
 ---
 
-## 5. Interactive Shell Commands
+## 5. Interactive Shell Commands & Verification
 
-Hydra provides native user commands to interact with the ZFS File Server:
+Hydra provides native commands to inspect persistent storage, manage pools, and sync modified blocks:
 
-```
-hydra> zpool status
+```text
+hydra:/bin> disks
+=== Hydra OS Storage Subsystem & Block Devices ===
+
+Device: /dev/hda (Primary Master ATA/IDE)
+  - Model:             QEMU HARDDISK
+  - Controller Port:   I/O Base 0x1F0, Control 0x3F6
+  - Capacity:          32 MiB (33554432 bytes)
+  - Total Sectors:     65536 (512 bytes/sector)
+  - Addressing:        LBA48 (48-bit Logical Block Addressing)
+  - I/O Mode:          Programmed I/O (Polled PIO, nIEN=1)
+  - Cache Flushing:    Hardware ATA CACHE FLUSH supported
+  - Vdev Association:  vdev-ata-0 -> Backs OpenZFS pool 'hydrapool'
+  - Persistence:       ENABLED (Durably saved across reboots)
+
+hydra:/bin> zpool status
   pool: hydrapool
  state: ONLINE
 status: The pool is operating normally via the Microkernel ZFS File Server.
-action: No known data errors detected; all blocks checksum-verified.
 config:
         NAME                 STATE     READ WRITE CKSUM
         hydrapool            ONLINE       0     0     0
-          vdev-ramdisk-0     ONLINE       0     0     0
+          vdev-ata-0         ONLINE       0     0     0 (Persistent ATA Hard Disk)
 
 Pool Properties & Metrics:
-  - Capacity:           8 MiB
-  - Allocated:          128 KiB
-  - Free Space:         8064 KiB
-  - Active Uberblock:   TXG #2
+  - Capacity:           32 MiB
+  - Allocated:          160 KiB
+  - Free Space:         32608 KiB
+  - Persistence Mode:   Hardware ATA Sector I/O (ACID Durable)
+  - Active Uberblock:   TXG #9
   - Checksum Algorithm: Fletcher-4 (4x 64-bit words)
   - Allocation Policy:  Copy-on-Write (CoW) Merkle Tree
 
-hydra> zfs list
-NAME                     USED    AVAIL MOUNTPOINT
-------------------------------------------------------------------
-hydrapool/root           128K    8064K /
-hydrapool/bin            128K    8064K /bin
+hydra:/bin> zfs cat persistent.txt
+hydraos-storage-success
 
-hydra> zfs cat readme.txt
-Hydra OS Default Filesystem: OpenZFS Architecture
-Integrated as an independent Microkernel File Server.
-All operations are verified via Fletcher-4 checksums!
-
-hydra> zfs write demo.txt "Hello from ZFS on Hydra Microkernel!"
-[+] CoW write committed to ZFS File Server!
-    - File: 'demo.txt' (36 bytes)
-    - Merkle Root Updated to TXG #3
-    - Fletcher-4 Checksum computed & stored
+hydra:/bin> sync
+[+] OpenZFS Storage: Synchronized all metadata, dnodes, and flushed ATA write caches to persistent media.
 ```
+
