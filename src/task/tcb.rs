@@ -183,6 +183,7 @@ pub struct Task {
     pub ticks_run: u64,
     pub timeslice_remaining: u32,
     pub cspace: Box<CapabilityTable>,
+    pub fds: crate::fs::FdTable,
 }
 
 impl Task {
@@ -203,6 +204,7 @@ impl Task {
             ticks_run: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),
+            fds: crate::fs::FdTable::new_default(),
         }
     }
 

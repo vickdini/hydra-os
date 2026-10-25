@@ -140,3 +140,22 @@ pub fn get_task_snapshots() -> Vec<TaskSnapshot> {
     let sched = SCHEDULER.lock();
     sched.snapshots()
 }
+
+static FALLBACK_FDS: spin::Mutex<crate::fs::FdTable> = spin::Mutex::new(crate::fs::FdTable::empty());
+
+/// Executes a closure with mutable access to the active task's file descriptor table.
+/// Falls back to a global default table if multitasking is not yet initialized.
+pub fn with_current_fds_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut crate::fs::FdTable) -> R,
+{
+    let mut sched = SCHEDULER.lock();
+    if sched.is_initialized() {
+        sched.current_task_fds_mut(f).expect("Task FdTable missing")
+    } else {
+        drop(sched);
+        let mut fallback = FALLBACK_FDS.lock();
+        fallback.init_default();
+        f(&mut fallback)
+    }
+}

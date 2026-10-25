@@ -4,6 +4,7 @@ pub mod editor;
 pub mod fs;
 pub mod history;
 pub mod pager;
+pub mod pipeline;
 pub mod state;
 
 use core::str;
@@ -58,6 +59,21 @@ pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
             state.last_status = 1;
             return;
         }
+    }
+
+    // Check for shell pipeline (|) or file output redirection (> or >>)
+    if pipeline::try_execute_pipeline(trimmed, state) {
+        return;
+    }
+
+    execute_single_command(trimmed, state);
+}
+
+/// Executes a single unpiped, unredirected shell command.
+pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
+    let trimmed = cmd_line.trim();
+    if trimmed.is_empty() {
+        return;
     }
 
     let mut args_buf = [""; MAX_ARGS];

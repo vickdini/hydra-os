@@ -122,6 +122,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+            fds: crate::fs::FdTable::new_default(),
         };
 
         self.tasks.push(task);
@@ -185,6 +186,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+            fds: crate::fs::FdTable::new_default(),
         };
 
         self.tasks.push(task);
@@ -338,6 +340,18 @@ impl Scheduler {
             self.tasks[self.current_index].id
         } else {
             TaskId(0)
+        }
+    }
+
+    /// Executes a closure with a mutable reference to the currently executing task's FD table.
+    pub fn current_task_fds_mut<F, R>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut crate::fs::FdTable) -> R,
+    {
+        if self.initialized && self.current_index < self.tasks.len() {
+            Some(f(&mut self.tasks[self.current_index].fds))
+        } else {
+            None
         }
     }
 

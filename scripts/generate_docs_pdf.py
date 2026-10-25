@@ -207,6 +207,13 @@ DOCS_ORDER = [
         "subtitle": "Microkernel ZFS File Server (Endpoint 0x20), CoW Merkle tree, Fletcher-4 checksums, and datasets.",
     },
     {
+        "stage": "Stage 8: File Server & Storage",
+        "title": "Unix File Descriptor Table & Shell Pipelines",
+        "file": "docs/src/vfs.md",
+        "anchor": "doc-boot-stage8-vfs",
+        "subtitle": "POSIX file descriptors (0..15), anonymous pipes (PipeBuffer), I/O redirection, and shell pipeline chains.",
+    },
+    {
         "stage": "Stage 8b: Hardware Video & Framebuffer",
         "title": "Hardware Video Driver & Framebuffer Console",
         "file": "docs/src/video.md",

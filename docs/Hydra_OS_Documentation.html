@@ -440,6 +440,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-ep" class="toc-link"><span class="toc-title">Rendezvous Channels & Endpoints</span><span class="toc-sub">Circular FIFO ring buffers, rendezvous mailboxes, and thread-safe SharedEndpoint.</span></a></li>
 <li class="toc-stage-header">Stage 8: File Server & Storage</li>
 <li class="toc-item"><a href="#doc-boot-stage8-zfs" class="toc-link"><span class="toc-title">ZFS Microkernel File Server Architecture</span><span class="toc-sub">Microkernel ZFS File Server (Endpoint 0x20), CoW Merkle tree, Fletcher-4 checksums, and datasets.</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage8-vfs" class="toc-link"><span class="toc-title">Unix File Descriptor Table & Shell Pipelines</span><span class="toc-sub">POSIX file descriptors (0..15), anonymous pipes (PipeBuffer), I/O redirection, and shell pipeline chains.</span></a></li>
 <li class="toc-stage-header">Stage 8b: Hardware Video & Framebuffer</li>
 <li class="toc-item"><a href="#doc-boot-stage8b-video" class="toc-link"><span class="toc-title">Hardware Video Driver & Framebuffer Console</span><span class="toc-sub">UEFI GOP linear framebuffer discovery, 8x16 bitmap font, and autonomous pixel console.</span></a></li>
 <li class="toc-stage-header">Stage 9: Multitasking & Scheduler</li>
@@ -2787,8 +2788,175 @@ Upon read operations, the ZFS File Server recalculates the checksum and detects 
 
 
 
+<div id="doc-boot-stage8-vfs" class="doc-section">
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #25</div>
+    <h1>Unix File Descriptor Table &amp; Shell Pipelines</h1>
+<ul>
+<li><strong>Source Files</strong>: <a href="file:///d:/os/src/fs/fd.rs"><code>src/fs/fd.rs</code></a>, <a href="file:///d:/os/src/fs/pipe.rs"><code>src/fs/pipe.rs</code></a>, <a href="file:///d:/os/src/shell/pipeline.rs"><code>src/shell/pipeline.rs</code></a></li>
+<li><strong>Subsystem</strong>: Virtual File System (VFS), POSIX File Descriptors, IPC Pipes, Shell Streams</li>
+<li><strong>Privilege Levels</strong>: Ring 0 (Kernel Subsystem) &amp; Ring 3 (Userland Syscalls)</li>
+</ul>
+<hr />
+<h2>1. Architectural Overview</h2>
+<p>Hydra OS implements a complete Unix-like File Descriptor model that decouples input/output operations from underlying hardware devices or filesystem implementations. Every process in Hydra maintains its own <strong>File Descriptor Table (<code>FdTable</code>)</strong>, allowing standard streams to be seamlessly redirected across processes, anonymous pipes, and ZFS files.</p>
+<div class="codehilite"><pre><span></span><code><span class="nb">+-------------------------------------------------------------------------+</span>
+<span class="c">|                              PROCESS (TCB)                              |</span>
+<span class="c">|                                                                         |</span>
+<span class="c">|   </span><span class="nb">+-----------------------------------------------------------------+</span><span class="c">   |</span>
+<span class="c">|   |                   FILE DESCRIPTOR TABLE (0</span><span class="nt">..</span><span class="c">15)                 |   |</span>
+<span class="c">|   |                                                                 |   |</span>
+<span class="c">|   |   fd 0: Stdin  </span><span class="nb">---------</span><span class="nv">&gt;</span><span class="c"> </span><span class="k">[</span><span class="c"> ConsoleIn / PipeRead </span><span class="k">]</span><span class="c">              |   |</span>
+<span class="c">|   |   fd 1: Stdout </span><span class="nb">---------</span><span class="nv">&gt;</span><span class="c"> </span><span class="k">[</span><span class="c"> ConsoleOut / PipeWrite / File </span><span class="k">]</span><span class="c">     |   |</span>
+<span class="c">|   |   fd 2: Stderr </span><span class="nb">---------</span><span class="nv">&gt;</span><span class="c"> </span><span class="k">[</span><span class="c"> ConsoleErr / PipeWrite / File </span><span class="k">]</span><span class="c">     |   |</span>
+<span class="c">|   |   fd 3</span><span class="nt">..</span><span class="c">15: Open Files</span><span class="nt">,</span><span class="c"> Pipes</span><span class="nt">,</span><span class="c"> or Network Sockets               |   |</span>
+<span class="c">|   </span><span class="nb">+-----------------------------------------------------------------+</span><span class="c">   |</span>
+<span class="nb">+-------------------------------------------------------------------------+</span>
+<span class="c">                    |                                 |</span>
+<span class="c">         Pipes (Streaming IPC)               ZFS Storage (CoW)</span>
+<span class="c">                    v                                 v</span>
+<span class="c">        </span><span class="nb">+-----------------------+</span><span class="c">         </span><span class="nb">+-----------------------+</span>
+<span class="c">        |   4 KiB Ring Buffer   |         |    ZFS File Server    |</span>
+<span class="c">        |      PipeBuffer       |         |   (CoW Transaction)   |</span>
+<span class="c">        </span><span class="nb">+-----------------------+</span><span class="c">         </span><span class="nb">+-----------------------+</span>
+</code></pre></div>
+
+<hr />
+<h2>2. Standard Streams &amp; Descriptors</h2>
+<p>Every newly spawned task automatically inherits a standard Unix descriptor table:</p>
+<table>
+<thead>
+<tr>
+<th>FD Index</th>
+<th>POSIX Name</th>
+<th>Default Target</th>
+<th>Capability &amp; Access</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td><code>STDIN_FILENO</code></td>
+<td><code>FileDescriptor::ConsoleIn</code></td>
+<td>PS/2 Keyboard Input Buffer (Non-blocking)</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td><code>STDOUT_FILENO</code></td>
+<td><code>FileDescriptor::ConsoleOut</code></td>
+<td>Physical Framebuffer / Terminal Screen</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td><code>STDERR_FILENO</code></td>
+<td><code>FileDescriptor::ConsoleErr</code></td>
+<td>Physical Framebuffer / Error Channel</td>
+</tr>
+<tr>
+<td><code>3..15</code></td>
+<td>Available FDs</td>
+<td><code>None</code></td>
+<td>Allocated dynamically via <code>open()</code> or <code>pipe()</code></td>
+</tr>
+</tbody>
+</table>
+<h3>File Descriptor Types (<code>FileDescriptor</code>)</h3>
+<ol>
+<li><strong><code>ConsoleIn</code></strong>: Reads characters from the hardware PS/2 keyboard ring buffer.</li>
+<li><strong><code>ConsoleOut</code> / <code>ConsoleErr</code></strong>: Writes formatted ASCII/UTF-8 directly to the screen console.</li>
+<li><strong><code>PipeRead(Arc&lt;Mutex&lt;PipeBuffer&gt;&gt;)</code></strong>: Reads streamed bytes from an anonymous pipe ring buffer.</li>
+<li><strong><code>PipeWrite(Arc&lt;Mutex&lt;PipeBuffer&gt;&gt;)</code></strong>: Writes streamed bytes into an anonymous pipe ring buffer.</li>
+<li><strong><code>File</code></strong>: Represents a stateful cursor into a file stored on the ZFS storage pool.</li>
+</ol>
+<hr />
+<h2>3. Anonymous Pipe Subsystem</h2>
+<p>The <strong><code>PipeBuffer</code></strong> primitive (<a href="file:///d:/os/src/fs/pipe.rs"><code>src/fs/pipe.rs</code></a>) provides high-throughput, lock-free/spinlock-protected unidirectional byte streaming between processes:</p>
+<ul>
+<li><strong>Buffer Size</strong>: 4096 bytes circular ring buffer.</li>
+<li><strong>Reference Counting</strong>: Tracks active reader and writer file descriptors.</li>
+<li><strong>EOF Semantics</strong>: When all writers close their end (<code>writers == 0</code>), subsequent reads on an empty buffer return <code>0</code> bytes (standard POSIX EOF).</li>
+<li><strong>Broken Pipe (EPIPE)</strong>: Attempting to write to a pipe with <code>readers == 0</code> immediately fails with <code>-EPIPE</code> (or broken pipe error).</li>
+</ul>
+<hr />
+<h2>4. Unix System Calls</h2>
+<p>Hydra OS exposes the full complement of POSIX I/O system calls to Ring 3 processes:</p>
+<table>
+<thead>
+<tr>
+<th>Syscall</th>
+<th>Number</th>
+<th>Arguments</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SYS_WRITE</code></td>
+<td><code>3</code></td>
+<td><code>arg0: fd</code>, <code>arg1: ptr</code>, <code>arg2: count</code></td>
+<td>Writes bytes to the specified file descriptor</td>
+</tr>
+<tr>
+<td><code>SYS_OPEN</code></td>
+<td><code>9</code></td>
+<td><code>arg0: path_ptr</code>, <code>arg1: len</code>, <code>arg2: flags</code></td>
+<td>Opens or creates a file in ZFS (<code>O_RDONLY</code>, <code>O_WRONLY</code>, <code>O_RDWR</code>, <code>O_APPEND</code>)</td>
+</tr>
+<tr>
+<td><code>SYS_CLOSE</code></td>
+<td><code>10</code></td>
+<td><code>arg0: fd</code></td>
+<td>Closes the file descriptor and decrements pipe refcounts</td>
+</tr>
+<tr>
+<td><code>SYS_READ</code></td>
+<td><code>11</code></td>
+<td><code>arg0: fd</code>, <code>arg1: buf_ptr</code>, <code>arg2: count</code></td>
+<td>Reads bytes from a descriptor (Console, Pipe, or File)</td>
+</tr>
+<tr>
+<td><code>SYS_PIPE</code></td>
+<td><code>12</code></td>
+<td><code>arg0: *mut [u64; 2]</code></td>
+<td>Allocates a new pipe and returns <code>[read_fd, write_fd]</code></td>
+</tr>
+<tr>
+<td><code>SYS_DUP2</code></td>
+<td><code>13</code></td>
+<td><code>arg0: oldfd</code>, <code>arg1: newfd</code></td>
+<td>Duplicates <code>oldfd</code> onto <code>newfd</code>, redirecting streams</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>5. Shell Pipelines &amp; Redirection</h2>
+<p>The Hydra Interactive Shell (<a href="file:///d:/os/src/shell/pipeline.rs"><code>src/shell/pipeline.rs</code></a>) supports arbitrary pipeline chaining and file redirection:</p>
+<h3>1. Pipelines (<code>|</code>)</h3>
+<p>Chains the standard output (<code>fd 1</code>) of command $N$ to the standard input (<code>fd 0</code>) of command $N+1$:</p>
+<div class="codehilite"><pre><span></span><code>cat<span class="w"> </span>/test.txt<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>Pipeline
+ps<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>idle
+<span class="nb">help</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>fs
+</code></pre></div>
+
+<h3>2. Output Redirection (<code>&gt;</code> and <code>&gt;&gt;</code>)</h3>
+<p>Redirects command standard output to a file in ZFS:
+- <code>&gt;</code> (Overwrite / Truncate):
+  <code>bash
+  echo Hello Hydra &gt; /test.txt</code>
+- <code>&gt;&gt;</code> (Append):
+  <code>bash
+  echo Pipeline Verified &gt;&gt; /test.txt</code></p>
+<h3>3. Combined Pipeline &amp; Redirection</h3>
+<p>Pipelines can seamlessly terminate in a file redirection target:</p>
+<div class="codehilite"><pre><span></span><code>ps<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>idle<span class="w"> </span>&gt;<span class="w"> </span>/idle_process.txt
+</code></pre></div>
+
+<p>Output is buffered in memory during pipeline execution and committed atomically to the ZFS filesystem via Copy-on-Write (CoW).</p>
+</div>
+
+
+
 <div id="doc-boot-stage8b-video" class="doc-section">
-    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #25</div>
+    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #26</div>
     <h1>Hardware Video Driver &amp; GOP Framebuffer Documentation</h1>
 <ul>
 <li><strong>Source Module</strong>: <a href="file:///d:/os/src/video/"><code>src/video/</code></a></li>
@@ -2872,7 +3040,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #26</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #27</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -3007,7 +3175,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #27</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -3180,7 +3348,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage9-sync" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
     <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
 <h2>Overview</h2>
 <p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
@@ -3327,7 +3495,7 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #29</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #30</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

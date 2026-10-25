@@ -129,9 +129,28 @@ impl Command for CatCommand {
     }
 
     fn execute(&self, args: &[&str], state: &mut ShellState) {
-        if args.is_empty() {
-            set_color(Color::LightRed, Color::Black);
-            println!("Usage: cat <filename>");
+        if args.is_empty() || args[0] == "-" {
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(0) {
+                        desc.read(&mut chunk).unwrap_or(0)
+                    } else {
+                        0
+                    }
+                });
+                if n == 0 {
+                    break;
+                }
+                set_color(Color::White, Color::Black);
+                if let Ok(text) = core::str::from_utf8(&chunk[..n]) {
+                    print!("{}", text);
+                } else {
+                    for &b in &chunk[..n] {
+                        print!("{}", b as char);
+                    }
+                }
+            }
             return;
         }
 

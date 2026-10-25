@@ -312,10 +312,29 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Directly writes raw text to the physical console screen / framebuffer without FD indirection.
+pub fn print_raw(s: &str) {
+    let mut console = CONSOLE.lock();
+    let _ = console.write_str(s);
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    let mut console = CONSOLE.lock();
-    let _ = console.write_fmt(args);
+    struct Fd1Writer;
+    impl fmt::Write for Fd1Writer {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            crate::task::with_current_fds_mut(|fds| {
+                if let Some(desc) = fds.get_mut(1) {
+                    let _ = desc.write(s.as_bytes());
+                } else {
+                    print_raw(s);
+                }
+            });
+            Ok(())
+        }
+    }
+    let mut writer = Fd1Writer;
+    let _ = writer.write_fmt(args);
 }
 
 static HARDWARE_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);

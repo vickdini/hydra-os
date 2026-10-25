@@ -236,8 +236,27 @@ impl Command for WcCommand {
         }
 
         if file_count == 0 {
-            set_color(Color::LightRed, Color::Black);
-            println!("wc: missing file operand");
+            let mut input = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(0) {
+                        desc.read(&mut chunk).unwrap_or(0)
+                    } else {
+                        0
+                    }
+                });
+                if n == 0 {
+                    break;
+                }
+                input.extend_from_slice(&chunk[..n]);
+            }
+            let text = core::str::from_utf8(&input).unwrap_or("");
+            let lines = text.lines().count();
+            let words = text.split_whitespace().count();
+            let bytes_cnt = input.len();
+            set_color(Color::White, Color::Black);
+            print_wc_counts(opt_l, opt_w, opt_c, lines, words, bytes_cnt, "");
             return;
         }
 
@@ -307,11 +326,11 @@ impl Command for GrepCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "grep [-i] [-n] [-v] [-c] <pattern> <file...>"
+        "grep [-i] [-n] [-v] [-c] <pattern> [file...]"
     }
 
     fn execute(&self, args: &[&str], state: &mut ShellState) {
-        if args.len() < 2 {
+        if args.is_empty() {
             set_color(Color::LightRed, Color::Black);
             println!("Usage: {}", self.usage());
             return;
@@ -341,13 +360,65 @@ impl Command for GrepCommand {
             }
         }
 
-        if pos_count < 2 {
+        if pos_count < 1 {
             set_color(Color::LightRed, Color::Black);
-            println!("grep: missing pattern or file operand");
+            println!("grep: missing pattern operand");
             return;
         }
 
         let pattern = positional[0];
+
+        if pos_count == 1 {
+            let mut input = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(0) {
+                        desc.read(&mut chunk).unwrap_or(0)
+                    } else {
+                        0
+                    }
+                });
+                if n == 0 {
+                    break;
+                }
+                input.extend_from_slice(&chunk[..n]);
+            }
+
+            let text = core::str::from_utf8(&input).unwrap_or("");
+            let mut match_count = 0;
+            for (line_idx, line) in text.lines().enumerate() {
+                if crate::console::check_interrupt() {
+                    println!("^C");
+                    state.last_status = 130;
+                    return;
+                }
+                let is_match = if ignore_case {
+                    line_contains_case_insensitive(line, pattern)
+                } else {
+                    line.contains(pattern)
+                };
+                let selected = if invert { !is_match } else { is_match };
+                if selected {
+                    match_count += 1;
+                    if !count_only {
+                        if line_numbers {
+                            set_color(Color::LightGreen, Color::Black);
+                            print!("{}:", line_idx + 1);
+                        }
+                        set_color(Color::White, Color::Black);
+                        println!("{}", line);
+                    }
+                }
+            }
+            if count_only {
+                set_color(Color::White, Color::Black);
+                println!("{}", match_count);
+            }
+            state.last_status = if match_count > 0 { 0 } else { 1 };
+            return;
+        }
+
         let file_args = &positional[1..pos_count];
 
         for &file in file_args {

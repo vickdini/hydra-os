@@ -16,6 +16,11 @@ pub const SYS_GETPID: u64 = 5;
 pub const SYS_UPTIME: u64 = 6;
 pub const SYS_IPC_SEND: u64 = 7;
 pub const SYS_IPC_RECV: u64 = 8;
+pub const SYS_OPEN: u64 = 9;
+pub const SYS_CLOSE: u64 = 10;
+pub const SYS_READ: u64 = 11;
+pub const SYS_PIPE: u64 = 12;
+pub const SYS_DUP2: u64 = 13;
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
@@ -28,6 +33,11 @@ pub struct SyscallStats {
     pub getpid_calls: u64,
     pub uptime_calls: u64,
     pub ipc_calls: u64,
+    pub open_calls: u64,
+    pub close_calls: u64,
+    pub read_calls: u64,
+    pub pipe_calls: u64,
+    pub dup2_calls: u64,
     pub unknown_calls: u64,
 }
 
@@ -40,6 +50,11 @@ pub static SYSCALL_STATS: Mutex<SyscallStats> = Mutex::new(SyscallStats {
     getpid_calls: 0,
     uptime_calls: 0,
     ipc_calls: 0,
+    open_calls: 0,
+    close_calls: 0,
+    read_calls: 0,
+    pipe_calls: 0,
+    dup2_calls: 0,
     unknown_calls: 0,
 });
 
@@ -164,21 +179,156 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame) {
         SYS_WRITE => {
             stats.write_calls += 1;
             drop(stats);
-            // arg0: buffer pointer, arg1: length
-            let ptr = arg0 as *const u8;
-            let len = (arg1 as usize).min(4096);
+            // Backward-compatible:
+            // If arg0 <= 15: arg0 = fd, arg1 = ptr, arg2 = len
+            // If arg0 > 15:  arg0 = ptr, arg1 = len, fd = 1
+            let (fd, ptr, len) = if arg0 <= 15 {
+                (arg0 as usize, arg1 as *const u8, _arg2 as usize)
+            } else {
+                (1usize, arg0 as *const u8, arg1 as usize)
+            };
             if !ptr.is_null() && len > 0 {
-                // Safely validate and print slice
                 let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                if let Ok(text) = core::str::from_utf8(slice) {
-                    crate::print!("{}", text);
-                    len as i64
+                crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(fd) {
+                        match desc.write(slice) {
+                            Ok(n) => n as i64,
+                            Err(_) => -5, // -EIO
+                        }
+                    } else {
+                        -9 // -EBADF
+                    }
+                })
+            } else if len == 0 {
+                0
+            } else {
+                -14 // -EFAULT
+            }
+        }
+        SYS_OPEN => {
+            stats.open_calls += 1;
+            drop(stats);
+            // arg0: path pointer (*const u8), arg1: path len (usize), arg2: flags (u64)
+            // flags: 0 = O_RDONLY, 1 = O_WRONLY (truncate/create), 2 = O_RDWR, 3 = O_APPEND
+            let ptr = arg0 as *const u8;
+            let len = (arg1 as usize).min(256);
+            let flags = _arg2;
+            if !ptr.is_null() && len > 0 {
+                let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                if let Ok(path_str) = core::str::from_utf8(slice) {
+                    let readable = flags == 0 || flags == 2;
+                    let writable = flags == 1 || flags == 2 || flags == 3;
+                    let append = flags == 3;
+
+                    // If opening for write/append, ensure file exists (touch)
+                    if writable {
+                        let _ = crate::fs::ZfsClient::touch_file(path_str);
+                    }
+
+                    let desc = crate::fs::FileDescriptor::File {
+                        path: alloc::string::String::from(path_str),
+                        cursor: 0,
+                        readable,
+                        writable,
+                        append,
+                    };
+
+                    crate::task::with_current_fds_mut(|fds| {
+                        match fds.alloc_fd(desc) {
+                            Ok(fd) => fd as i64,
+                            Err(_) => -24, // -EMFILE
+                        }
+                    })
                 } else {
                     -22 // -EINVAL
                 }
             } else {
                 -14 // -EFAULT
             }
+        }
+        SYS_CLOSE => {
+            stats.close_calls += 1;
+            drop(stats);
+            // arg0: fd
+            let fd = arg0 as usize;
+            crate::task::with_current_fds_mut(|fds| {
+                match fds.close(fd) {
+                    Ok(_) => 0,
+                    Err(_) => -9, // -EBADF
+                }
+            })
+        }
+        SYS_READ => {
+            stats.read_calls += 1;
+            drop(stats);
+            // arg0: fd, arg1: buf ptr (*mut u8), arg2: count (usize)
+            let fd = arg0 as usize;
+            let ptr = arg1 as *mut u8;
+            let count = (_arg2 as usize).min(65536);
+            if !ptr.is_null() && count > 0 {
+                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
+                crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(fd) {
+                        match desc.read(slice) {
+                            Ok(n) => n as i64,
+                            Err(_) => -5, // -EIO
+                        }
+                    } else {
+                        -9 // -EBADF
+                    }
+                })
+            } else if count == 0 {
+                0
+            } else {
+                -14 // -EFAULT
+            }
+        }
+        SYS_PIPE => {
+            stats.pipe_calls += 1;
+            drop(stats);
+            // arg0: pointer to [u64; 2] to receive [read_fd, write_fd]
+            let pipe_fds_ptr = arg0 as *mut [u64; 2];
+            if !pipe_fds_ptr.is_null() {
+                let pipe = crate::fs::PipeBuffer::new();
+                let read_desc = crate::fs::FileDescriptor::PipeRead(pipe.clone());
+                let write_desc = crate::fs::FileDescriptor::PipeWrite(pipe);
+
+                crate::task::with_current_fds_mut(|fds| {
+                    match fds.alloc_fd(read_desc) {
+                        Ok(rfd) => {
+                            match fds.alloc_fd(write_desc) {
+                                Ok(wfd) => {
+                                    unsafe {
+                                        (*pipe_fds_ptr)[0] = rfd as u64;
+                                        (*pipe_fds_ptr)[1] = wfd as u64;
+                                    }
+                                    0
+                                }
+                                Err(_) => {
+                                    let _ = fds.close(rfd);
+                                    -24 // -EMFILE
+                                }
+                            }
+                        }
+                        Err(_) => -24, // -EMFILE
+                    }
+                })
+            } else {
+                -14 // -EFAULT
+            }
+        }
+        SYS_DUP2 => {
+            stats.dup2_calls += 1;
+            drop(stats);
+            // arg0: oldfd, arg1: newfd
+            let oldfd = arg0 as usize;
+            let newfd = arg1 as usize;
+            crate::task::with_current_fds_mut(|fds| {
+                match fds.dup2(oldfd, newfd) {
+                    Ok(fd) => fd as i64,
+                    Err(_) => -9, // -EBADF
+                }
+            })
         }
         SYS_EXIT => {
             stats.exit_calls += 1;
