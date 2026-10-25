@@ -228,6 +228,13 @@ DOCS_ORDER = [
         "subtitle": "Round-robin timeslicing at 100 Hz, iretq context switching, idle task, and task commands (ps, spawn, kill).",
     },
     {
+        "stage": "Stage 9: Multitasking & Scheduler",
+        "title": "Synchronization Primitives & Wait Queues",
+        "file": "docs/src/sync.md",
+        "anchor": "doc-boot-stage9-sync",
+        "subtitle": "TaskState::Blocked wait queues, sleep Mutex, Semaphore, CondVar, and blocking rendezvous IPC.",
+    },
+    {
         "stage": "Stage 10: Interactive Shell",
         "title": "Interactive Microkernel Shell & Command REPL",
         "file": "docs/src/shell.md",

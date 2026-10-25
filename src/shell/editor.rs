@@ -1,6 +1,6 @@
 use uefi::proto::console::text::{Color, Key, ScanCode};
 
-use crate::console::{get_key, set_color};
+use crate::console::{get_key_or_refresh, set_color};
 use crate::fs::client::{normalize_path, ZfsClient};
 use crate::fs::zfs::types::DnodeType;
 use crate::shell::commands::all_commands;
@@ -129,6 +129,7 @@ fn navigate_history_down(
 /// - Tab auto-completion for commands and ZFS filesystem paths (Zsh-style)
 pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option<usize> {
     crate::print!("{}", prompt);
+    let mut last_gen = crate::console::console_output_generation();
 
     let mut len = 0;
     let mut cursor_pos = 0;
@@ -138,7 +139,38 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
     let mut draft_len = 0;
 
     loop {
-        let key = get_key();
+        let key = match get_key_or_refresh(last_gen) {
+            Ok(k) => k,
+            Err(()) => {
+                // Background task output occurred; wait briefly for continuous output bursts to settle
+                crate::console::stall(core::time::Duration::from_millis(20));
+
+                // If background output did not end with a newline, advance to the next line
+                let (col, _) = crate::console::cursor_position();
+                if col > 0 {
+                    crate::println!();
+                }
+
+                // Automatically re-render the prompt on the fresh line
+                let mut pbuf = [0u8; 96];
+                let cur_prompt = state.format_prompt(&mut pbuf);
+                set_color(state.prompt_color, Color::Black);
+                crate::print!("{}", cur_prompt);
+                set_color(Color::White, Color::Black);
+
+                // Redraw any partial line the user had already typed
+                if len > 0 {
+                    if let Ok(text) = core::str::from_utf8(&buf[..len]) {
+                        crate::print!("{}", text);
+                        if cursor_pos < len {
+                            move_cursor_left(len - cursor_pos);
+                        }
+                    }
+                }
+                last_gen = crate::console::console_output_generation();
+                continue;
+            }
+        };
         match key {
             Key::Printable(ch) => {
                 let code = u16::from(ch);
@@ -524,6 +556,7 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
             }
             _ => {}
         }
+        last_gen = crate::console::console_output_generation();
     }
 }
 

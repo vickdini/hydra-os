@@ -206,6 +206,16 @@ pub fn is_standalone_video() -> bool {
     *USE_STANDALONE_VIDEO.lock()
 }
 
+static CONSOLE_OUTPUT_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn console_output_generation() -> u64 {
+    CONSOLE_OUTPUT_GENERATION.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn inc_console_output_generation() {
+    CONSOLE_OUTPUT_GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
 impl Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let attr = self.current_attr;
@@ -217,6 +227,7 @@ impl Write for Console {
                 let _ = stdout.write_str(s);
             });
         }
+        inc_console_output_generation();
         Ok(())
     }
 }
@@ -370,6 +381,27 @@ pub fn get_key() -> Key {
                 return key;
             }
             // Yield to firmware / VM timer with a 10ms stall to avoid pegging CPU
+            stall(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Waits for a key press, or returns Err(()) if new console output was generated while waiting.
+pub fn get_key_or_refresh(last_gen: u64) -> Result<Key, ()> {
+    loop {
+        if let Some(key) = read_key() {
+            return Ok(key);
+        }
+        if console_output_generation() != last_gen {
+            return Err(());
+        }
+        if is_hardware_mode() {
+            if x86_64::instructions::interrupts::are_enabled() {
+                x86_64::instructions::hlt();
+            } else {
+                core::hint::spin_loop();
+            }
+        } else {
             stall(Duration::from_millis(10));
         }
     }

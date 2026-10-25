@@ -47,7 +47,7 @@ pub use misc::{ClearCommand, ColorCommand, EchoCommand, PanicCommand, ScrollLock
 pub use power::{HaltCommand, RebootCommand, ShutdownCommand};
 pub use script::ShCommand;
 pub use status::StatusCommand;
-pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyscallsCommand};
+pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
 pub use time::TimeCommand;
 pub use translate::{MapCommand, TranslateCommand, UnmapCommand};
 pub use video::VideoCommand;
@@ -124,6 +124,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &SpawnCommand,
     &KillCommand,
     &SyscallsCommand,
+    &SyncCommand,
     // Power Management
     &RebootCommand,
     &ShutdownCommand,

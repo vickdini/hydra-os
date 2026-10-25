@@ -113,10 +113,10 @@ pub fn sys_uptime() -> u64 {
     unsafe { syscall0(SYS_UPTIME) as u64 }
 }
 
-/// Sends an IPC message to a microkernel endpoint.
+/// Sends an IPC message to a microkernel endpoint (non-blocking).
 pub fn sys_ipc_send(endpoint_id: u32, msg: &crate::ipc::Message) -> Result<(), i64> {
     let res = unsafe {
-        syscall2(SYS_IPC_SEND, endpoint_id as u64, msg as *const _ as usize as u64)
+        syscall3(SYS_IPC_SEND, endpoint_id as u64, msg as *const _ as usize as u64, 0)
     };
     if res >= 0 {
         Ok(())
@@ -125,10 +125,34 @@ pub fn sys_ipc_send(endpoint_id: u32, msg: &crate::ipc::Message) -> Result<(), i
     }
 }
 
-/// Receives an IPC message from a microkernel endpoint.
+/// Receives an IPC message from a microkernel endpoint (non-blocking).
 pub fn sys_ipc_recv(endpoint_id: u32, msg: &mut crate::ipc::Message) -> Result<(), i64> {
     let res = unsafe {
-        syscall2(SYS_IPC_RECV, endpoint_id as u64, msg as *mut _ as usize as u64)
+        syscall3(SYS_IPC_RECV, endpoint_id as u64, msg as *mut _ as usize as u64, 0)
+    };
+    if res >= 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Sends an IPC message to a microkernel endpoint, blocking if the queue is full.
+pub fn sys_ipc_send_blocking(endpoint_id: u32, msg: &crate::ipc::Message) -> Result<(), i64> {
+    let res = unsafe {
+        syscall3(SYS_IPC_SEND, endpoint_id as u64, msg as *const _ as usize as u64, 1)
+    };
+    if res >= 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Receives an IPC message from a microkernel endpoint, blocking until a message arrives.
+pub fn sys_ipc_recv_blocking(endpoint_id: u32, msg: &mut crate::ipc::Message) -> Result<(), i64> {
+    let res = unsafe {
+        syscall3(SYS_IPC_RECV, endpoint_id as u64, msg as *mut _ as usize as u64, 1)
     };
     if res >= 0 {
         Ok(())

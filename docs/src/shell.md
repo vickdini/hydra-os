@@ -276,9 +276,19 @@ In [`src/shell/commands/mod.rs`](file:///d:/os/src/shell/commands/mod.rs):
 
 ## 4. Architecture & Key Features
 
-### Thread-Safe Interactive Input
-Interactive input is handled by `console::read_line`:
-- Characters are received from UEFI stdin with a 10 ms sleep interval via `uefi::boot::stall` to ensure low VM CPU utilization.
+### Automatic 3-Second Bare-Metal Transition Countdown
+Upon shell startup, Hydra automatically initiates a 3-second countdown before transitioning to bare-metal hardware ownership (`exitboot`):
+- **Hands-Free Boot**: Users no longer need to manually type `exitboot` to unlock Ring 3 user mode, autonomous framebuffer rendering, and preemptive multitasking.
+- **Countdown Display**: An interactive timer counts down (`3... 2... 1... NOW`), after which `ExitBootServices` is called, hardware ownership is established, and the bare-metal prompt `hydra:/bin>` appears.
+- **User Control**:
+  - Pressing <kbd>Enter</kbd> during the countdown immediately bypasses the remaining delay and transitions to bare metal instantly.
+  - Pressing any other key (e.g. <kbd>Space</kbd> or <kbd>Esc</kbd>) cancels the countdown, keeping the shell in UEFI Boot Services mode.
+
+### Thread-Safe Interactive Input & Automatic Prompt Refresh
+Interactive input is handled by `src/shell/editor.rs` (`read_line`):
+- **Automatic Prompt Appearance**: When a command finishes execution, the shell REPL loop immediately formats and renders the `hydra:/>` prompt on screen without requiring the user to press <kbd>Enter</kbd>.
+- **Foreground vs. Background Task Synchronization**: Commands like `spawn user`, `spawn rogue`, `spawn mutex`, and `spawn producer` execute in the foreground by default using `task::wait_task(id)`, returning CPU control and rendering the prompt precisely when task execution finishes. Passing `--bg`, `-b`, or `&` launches the task asynchronously in the background.
+- **Asynchronous Prompt Auto-Refresh**: If a concurrent background task (e.g. `consumer` receiving IPC messages) writes output to the console while the shell is waiting for input, `get_key_or_refresh()` monitors the global console generation counter (`CONSOLE_OUTPUT_GENERATION`). Once background output completes, the shell automatically moves to a new line and re-renders the prompt (and preserves any partially typed input) without requiring user intervention.
 - Real-time backspace support erases characters from screen and buffer seamlessly via cursor positioning.
 - Enter (`\r` or `\n`) submits the command line.
 

@@ -48,6 +48,26 @@ pub fn yield_now() {
     }
 }
 
+/// Transitions the calling task to `TaskState::Blocked` and yields the CPU immediately.
+/// Returns the TaskId of the blocked task.
+pub fn block_current() -> TaskId {
+    if !is_active() {
+        return TaskId(0);
+    }
+    let id = {
+        let mut sched = SCHEDULER.lock();
+        sched.block_current()
+    };
+    yield_now();
+    id
+}
+
+/// Unblocks a previously blocked task, moving it back to `TaskState::Ready`.
+pub fn unblock_task(id: TaskId) -> bool {
+    let mut sched = SCHEDULER.lock();
+    sched.unblock_task(id)
+}
+
 /// Puts the current task to sleep for a specified number of PIT timer ticks.
 pub fn sleep_ticks(ticks: u64) {
     if !is_active() || !x86_64::instructions::interrupts::are_enabled() {
@@ -93,6 +113,26 @@ pub fn exit() -> ! {
 pub fn kill(id: TaskId) -> bool {
     let mut sched = SCHEDULER.lock();
     sched.kill_task(id)
+}
+
+/// Returns true if a task with the given ID is still active (not Dead).
+pub fn is_task_alive(id: TaskId) -> bool {
+    let sched = SCHEDULER.lock();
+    sched.is_task_alive(id)
+}
+
+/// Waits synchronously for a task with the given ID to complete (transition to Dead).
+/// Yields execution to the scheduler while waiting. Returns true if completed, false if interrupted.
+pub fn wait_task(id: TaskId) -> bool {
+    while is_task_alive(id) {
+        if crate::console::check_interrupt() {
+            crate::println!("^C");
+            let _ = kill(id);
+            return false;
+        }
+        sleep_ms(10);
+    }
+    true
 }
 
 /// Returns a diagnostic snapshot list of all registered tasks.

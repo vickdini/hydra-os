@@ -445,6 +445,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-stage-header">Stage 9: Multitasking & Scheduler</li>
 <li class="toc-item"><a href="#doc-boot-stage9-tcb" class="toc-link"><span class="toc-title">Task Control Block (TCB) & Thread State</span><span class="toc-sub">TCB architecture, register frame (TaskRegisters), lifecycle state machine, and heap stacks.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-scheduler" class="toc-link"><span class="toc-title">Preemptive Multitasking & Context Switching</span><span class="toc-sub">Round-robin timeslicing at 100 Hz, iretq context switching, idle task, and task commands (ps, spawn, kill).</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage9-sync" class="toc-link"><span class="toc-title">Synchronization Primitives & Wait Queues</span><span class="toc-sub">TaskState::Blocked wait queues, sleep Mutex, Semaphore, CondVar, and blocking rendezvous IPC.</span></a></li>
 <li class="toc-stage-header">Stage 10: Interactive Shell</li>
 <li class="toc-item"><a href="#doc-boot-stage10-shell" class="toc-link"><span class="toc-title">Interactive Microkernel Shell & Command REPL</span><span class="toc-sub">Command REPL, real-time memory/CPU inspection, CSpace manipulation, ZFS commands, and IPC testing.</span></a></li>
     </ul>
@@ -3178,8 +3179,155 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 
+<div id="doc-boot-stage9-sync" class="doc-section">
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
+    <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
+<h2>Overview</h2>
+<p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
+<p>The synchronization subsystem is implemented in <a href="file:///d:/os/src/sync/"><code>src/sync/</code></a> and integrated with the preemptive scheduler in <a href="file:///d:/os/src/task/scheduler.rs"><code>src/task/scheduler.rs</code></a> and the IPC subsystem in <a href="file:///d:/os/src/ipc/endpoint.rs"><code>src/ipc/endpoint.rs</code></a>.</p>
+<hr />
+<h2>Core Primitives</h2>
+<h3>1. Wait Queue (<code>WaitQueue</code>)</h3>
+<p>The <a href="file:///d:/os/src/sync/wait_queue.rs"><code>WaitQueue</code></a> maintains a FIFO queue of suspended tasks (<code>TaskId</code>) awaiting an event:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">WaitQueue</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">waiters</span><span class="p">:</span><span class="w"> </span><span class="nc">VecDeque</span><span class="o">&lt;</span><span class="n">TaskId</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><strong><code>wait(&amp;mut self)</code></strong>: Captures the current <code>TaskId</code>, enqueues it, marks the task as <code>TaskState::Blocked</code>, and invokes <code>yield_now()</code> to relinquish the CPU immediately.</li>
+<li><strong><code>wake_one(&amp;mut self) -&gt; Option&lt;TaskId&gt;</code></strong>: Dequeues the oldest waiting task and transitions it to <code>TaskState::Ready</code>.</li>
+<li><strong><code>wake_all(&amp;mut self) -&gt; usize</code></strong>: Dequeues and unblocks all waiting tasks.</li>
+</ul>
+<hr />
+<h3>2. Sleeping Mutex (<code>Mutex&lt;T&gt;</code>)</h3>
+<p>The <a href="file:///d:/os/src/sync/mutex.rs"><code>Mutex&lt;T&gt;</code></a> provides mutual exclusion with automatic thread suspension:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Mutex</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">locked</span><span class="p">:</span><span class="w"> </span><span class="nc">AtomicBool</span><span class="p">,</span>
+<span class="w">    </span><span class="n">owner</span><span class="p">:</span><span class="w"> </span><span class="nc">AtomicU64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">waiters</span><span class="p">:</span><span class="w"> </span><span class="nc">SpinLock</span><span class="o">&lt;</span><span class="n">WaitQueue</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">data</span><span class="p">:</span><span class="w"> </span><span class="nc">UnsafeCell</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><strong>Fast Path</strong>: Uncontended acquisition succeeds via atomic CAS (<code>compare_exchange(false, true)</code>), requiring zero context switches or allocations.</li>
+<li><strong>Contention Path</strong>: If already locked, the calling task registers in <code>waiters</code>, transitions to <code>TaskState::Blocked</code>, and yields the CPU.</li>
+<li><strong>Release</strong>: When the <code>MutexGuard</code> is dropped, ownership is cleared, and <code>waiters.wake_one()</code> is called to reschedule the next waiter.</li>
+</ul>
+<div class="codehilite"><pre><span></span><code><span class="n">sequenceDiagram</span>
+<span class="w">    </span><span class="n">autonumber</span>
+<span class="w">    </span><span class="n">actor</span><span class="w"> </span><span class="n">ThreadA</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Thread</span><span class="w"> </span><span class="n">A</span>
+<span class="w">    </span><span class="n">actor</span><span class="w"> </span><span class="n">ThreadB</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Thread</span><span class="w"> </span><span class="n">B</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Lock</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Sched</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Scheduler</span>
+
+<span class="w">    </span><span class="n">ThreadA</span><span class="o">-&gt;&gt;</span><span class="n">Lock</span><span class="o">:</span><span class="w"> </span><span class="n">lock</span><span class="p">()</span><span class="w"> </span><span class="p">(</span><span class="n">CAS</span><span class="w"> </span><span class="kr">false</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kr">true</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Lock</span><span class="o">:</span><span class="w"> </span><span class="n">Fast</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="n">acquired</span><span class="o">!</span><span class="w"> </span><span class="n">Owner</span><span class="o">=</span><span class="n">Thread</span><span class="w"> </span><span class="n">A</span>
+<span class="w">    </span><span class="n">ThreadB</span><span class="o">-&gt;&gt;</span><span class="n">Lock</span><span class="o">:</span><span class="w"> </span><span class="n">lock</span><span class="p">()</span><span class="w"> </span><span class="p">(</span><span class="n">contended</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Lock</span><span class="o">:</span><span class="w"> </span><span class="n">Enqueues</span><span class="w"> </span><span class="n">Thread</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="n">into</span><span class="w"> </span><span class="n">WaitQueue</span>
+<span class="w">    </span><span class="n">Lock</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="o">:</span><span class="w"> </span><span class="n">block_current</span><span class="p">()</span><span class="w"> </span><span class="p">(</span><span class="n">TaskState</span><span class="o">::</span><span class="n">Blocked</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Sched</span><span class="o">:</span><span class="w"> </span><span class="n">Thread</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="n">descheduled</span>
+<span class="w">    </span><span class="n">ThreadA</span><span class="o">-&gt;&gt;</span><span class="n">Lock</span><span class="o">:</span><span class="w"> </span><span class="n">unlock</span><span class="p">()</span><span class="w"> </span><span class="p">(</span><span class="n">MutexGuard</span><span class="w"> </span><span class="n">drop</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Lock</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="o">:</span><span class="w"> </span><span class="n">unblock_task</span><span class="p">(</span><span class="n">Thread</span><span class="w"> </span><span class="n">B</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Sched</span><span class="o">:</span><span class="w"> </span><span class="n">Thread</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="n">moved</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">TaskState</span><span class="o">::</span><span class="n">Ready</span>
+<span class="w">    </span><span class="n">Sched</span><span class="o">-&gt;&gt;</span><span class="n">ThreadB</span><span class="o">:</span><span class="w"> </span><span class="n">Resumes</span><span class="w"> </span><span class="n">execution</span><span class="p">,</span><span class="w"> </span><span class="n">acquires</span><span class="w"> </span><span class="n">lock</span>
+</code></pre></div>
+
+<hr />
+<h3>3. Counting Semaphore (<code>Semaphore</code>)</h3>
+<p>The <a href="file:///d:/os/src/sync/semaphore.rs"><code>Semaphore</code></a> manages shared permits:
+- <strong><code>acquire()</code></strong>: Atomically decrements <code>permits</code>. If no permits remain, the caller is enqueued in the semaphore's <code>WaitQueue</code> and suspended.
+- <strong><code>release()</code></strong>: Increments <code>permits</code> and awakens one waiting task from the queue.</p>
+<hr />
+<h3>4. Condition Variable (<code>CondVar</code>)</h3>
+<p>The <a href="file:///d:/os/src/sync/condvar.rs"><code>CondVar</code></a> enables threads to suspend execution until a condition predicate is satisfied:
+- <strong><code>wait(guard: MutexGuard&lt;T&gt;)</code></strong>: Atomically releases the held mutex, enqueues the thread in the condition variable's wait queue, and blocks. When awakened, it re-acquires the mutex before returning.
+- <strong><code>notify_one()</code></strong>: Wakes a single waiting thread.
+- <strong><code>notify_all()</code></strong>: Wakes all waiting threads.</p>
+<hr />
+<h3>5. Synchronized Bounded Channel (<code>Channel&lt;T&gt;</code>)</h3>
+<p>The <a href="file:///d:/os/src/sync/channel.rs"><code>Channel&lt;T&gt;</code></a> implements thread-safe message passing:
+- <strong><code>send(&amp;self, item: T)</code></strong>: Blocks if the channel buffer is at capacity until a receiver consumes data.
+- <strong><code>recv(&amp;self) -&gt; T</code></strong>: Blocks if the channel is empty until a sender transmits an item.</p>
+<hr />
+<h2>Blocking Inter-Process Communication (IPC)</h2>
+<p>In <a href="file:///d:/os/src/ipc/endpoint.rs"><code>src/ipc/endpoint.rs</code></a>, microkernel endpoints feature integrated send and receive wait queues:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Endpoint</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">buffer</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Message</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="n">QUEUE_CAPACITY</span><span class="p">],</span>
+<span class="w">    </span><span class="n">head</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tail</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="n">count</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="n">send_waiters</span><span class="p">:</span><span class="w"> </span><span class="nc">WaitQueue</span><span class="p">,</span>
+<span class="w">    </span><span class="n">recv_waiters</span><span class="p">:</span><span class="w"> </span><span class="nc">WaitQueue</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><strong><code>send_blocking(msg)</code></strong>: Transmits a message, suspending the sender if the queue is full. Awakens any blocked receivers.</li>
+<li><strong><code>receive_blocking() -&gt; Message</code></strong>: Extracts a message, suspending the receiver if the queue is empty. Awakens any blocked senders.</li>
+<li><strong>System Endpoints (<code>SYSTEM_ENDPOINTS[0..15]</code>)</strong>: Global shared rendezvous ports accessible both by kernel threads and user processes via <code>SYS_IPC_SEND</code> and <code>SYS_IPC_RECV</code> system calls.</li>
+</ul>
+<hr />
+<h2>Interactive Shell Verification</h2>
+<p>The subsystem is fully verified in the shell:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt; sync
+
+============================================================
+[+] HYDRA MICROKERNEL: SYNCHRONIZATION &amp; WAIT QUEUES
+============================================================
+  Sleep-Lock Mutex Status (DEMO_MUTEX):
+    - State           : UNLOCKED
+    - Owner PID       : 0
+    - Blocked Waiters : 0
+
+  Active System IPC Endpoints (0..15):
+    EP_ID PENDING_MSGS WAIT_RECEIVERS WAIT_SENDERS
+    --------------------------------------------------
+    0     0            0              0
+    1     0            0              0
+    2     0            0              0
+
+  Scheduler Task State Summary:
+    - Running: 1 | Ready: 1 | Blocked: 0 | Sleeping: 0
+============================================================
+
+hydra:/bin&gt; spawn consumer
+[+] Spawned consumer task #4 waiting on Endpoint #1.
+    Type 'ps' to observe consumer transitioning into Blocked state.
+    Run 'spawn producer' to deliver messages and unblock it.
+hydra:/bin&gt;  [Consumer] Calling receive_blocking() on Endpoint #1 (will Block if empty)...
+ps
+PID   NAME        MODE    STATE     PRIORITY    TICKS        STACK (RSP)
+------------------------------------------------------------------------------
+0     shell       Kernel  Running   Normal        749 0x0000000001fe5e4e0
+1     idle        Kernel  Ready     Idle            0 0x00000000017a3190
+2     worker_a    Kernel  Dead      Normal          2 0x00000000017a8938
+3     worker_b    Kernel  Dead      Normal          3 0x00000000017ae148
+4     consumer    Kernel  Blocked   Normal          1 0x00000000017b3828
+------------------------------------------------------------------------------
+
+hydra:/bin&gt; spawn producer
+[+] Spawned Producer task #5 feeding Endpoint #1.
+hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
+[Producer] Message #1 sent.
+[Consumer] Received message from Endpoint #1: label=0x1001, arg0=1
+[Producer] Depositing message #2 to Endpoint #1...
+[Producer] Message #2 sent.
+[Consumer] Received message from Endpoint #1: label=0x1002, arg0=2
+[Producer] Depositing message #3 to Endpoint #1...
+[Producer] Message #3 sent.
+[Producer] Completed sending batch.
+[Consumer] Received message from Endpoint #1: label=0x1003, arg0=3
+[Consumer] Completed receiving batch.
+</code></pre></div>
+</div>
+
+
+
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #28</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #29</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>
@@ -3763,9 +3911,18 @@ hydra:/bin&gt;
    ];</code></p>
 <hr />
 <h2>4. Architecture &amp; Key Features</h2>
-<h3>Thread-Safe Interactive Input</h3>
-<p>Interactive input is handled by <code>console::read_line</code>:
-- Characters are received from UEFI stdin with a 10 ms sleep interval via <code>uefi::boot::stall</code> to ensure low VM CPU utilization.
+<h3>Automatic 3-Second Bare-Metal Transition Countdown</h3>
+<p>Upon shell startup, Hydra automatically initiates a 3-second countdown before transitioning to bare-metal hardware ownership (<code>exitboot</code>):
+- <strong>Hands-Free Boot</strong>: Users no longer need to manually type <code>exitboot</code> to unlock Ring 3 user mode, autonomous framebuffer rendering, and preemptive multitasking.
+- <strong>Countdown Display</strong>: An interactive timer counts down (<code>3... 2... 1... NOW</code>), after which <code>ExitBootServices</code> is called, hardware ownership is established, and the bare-metal prompt <code>hydra:/bin&gt;</code> appears.
+- <strong>User Control</strong>:
+  - Pressing <kbd>Enter</kbd> during the countdown immediately bypasses the remaining delay and transitions to bare metal instantly.
+  - Pressing any other key (e.g. <kbd>Space</kbd> or <kbd>Esc</kbd>) cancels the countdown, keeping the shell in UEFI Boot Services mode.</p>
+<h3>Thread-Safe Interactive Input &amp; Automatic Prompt Refresh</h3>
+<p>Interactive input is handled by <code>src/shell/editor.rs</code> (<code>read_line</code>):
+- <strong>Automatic Prompt Appearance</strong>: When a command finishes execution, the shell REPL loop immediately formats and renders the <code>hydra:/&gt;</code> prompt on screen without requiring the user to press <kbd>Enter</kbd>.
+- <strong>Foreground vs. Background Task Synchronization</strong>: Commands like <code>spawn user</code>, <code>spawn rogue</code>, <code>spawn mutex</code>, and <code>spawn producer</code> execute in the foreground by default using <code>task::wait_task(id)</code>, returning CPU control and rendering the prompt precisely when task execution finishes. Passing <code>--bg</code>, <code>-b</code>, or <code>&amp;</code> launches the task asynchronously in the background.
+- <strong>Asynchronous Prompt Auto-Refresh</strong>: If a concurrent background task (e.g. <code>consumer</code> receiving IPC messages) writes output to the console while the shell is waiting for input, <code>get_key_or_refresh()</code> monitors the global console generation counter (<code>CONSOLE_OUTPUT_GENERATION</code>). Once background output completes, the shell automatically moves to a new line and re-renders the prompt (and preserves any partially typed input) without requiring user intervention.
 - Real-time backspace support erases characters from screen and buffer seamlessly via cursor positioning.
 - Enter (<code>\r</code> or <code>\n</code>) submits the command line.</p>
 <h3>Multi-Tier Power Management (<code>shutdown</code> &amp; <code>reboot</code>)</h3>

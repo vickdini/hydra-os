@@ -285,6 +285,29 @@ impl Scheduler {
         }
     }
 
+    /// Marks the currently running task as Blocked and zeroes its remaining timeslice.
+    pub fn block_current(&mut self) -> TaskId {
+        if self.initialized && self.current_index < self.tasks.len() {
+            let task = &mut self.tasks[self.current_index];
+            task.state = TaskState::Blocked;
+            task.timeslice_remaining = 0;
+            task.id
+        } else {
+            TaskId(0)
+        }
+    }
+
+    /// Wakes a blocked task by its ID, transitioning its state back to Ready.
+    pub fn unblock_task(&mut self, id: TaskId) -> bool {
+        for task in self.tasks.iter_mut() {
+            if task.id == id && task.state == TaskState::Blocked {
+                task.state = TaskState::Ready;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Marks the currently running task as Dead and zeroes its timeslice.
     pub fn terminate_current(&mut self) {
         if self.initialized && self.current_index < self.tasks.len() {
@@ -316,6 +339,16 @@ impl Scheduler {
         } else {
             TaskId(0)
         }
+    }
+
+    /// Returns true if a task with the given ID exists and is active (not Dead).
+    pub fn is_task_alive(&self, id: TaskId) -> bool {
+        for task in &self.tasks {
+            if task.id == id && task.state != TaskState::Dead {
+                return true;
+            }
+        }
+        false
     }
 
     /// Returns the total count of registered tasks (active and dead).

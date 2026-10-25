@@ -24,7 +24,6 @@ fn demo_user_process() {
     
     for i in 1..=4 {
         crate::syscall::sys_print("  [Ring 3 User Mode] Iteration ");
-        // Print iteration number as ascii
         let digit = [b'0' + (i as u8), b'\n'];
         if let Ok(s) = core::str::from_utf8(&digit) {
             crate::syscall::sys_print(s);
@@ -37,16 +36,57 @@ fn demo_user_process() {
 }
 
 /// Rogue user-mode process that attempts to execute a privileged instruction ('cli') in Ring 3.
-///
-/// Demonstrates hardware CPU privilege protection: the CPU immediately intercepts this with #GP.
 fn demo_rogue_process() {
     crate::syscall::sys_print("\n  [Ring 3 Rogue Task] Running in unprivileged user mode.\n");
     crate::syscall::sys_print("  [Ring 3 Rogue Task] Attempting privileged 'cli' instruction (Ring 0 only)...\n");
     unsafe {
         core::arch::asm!("cli");
     }
-    // Should never reach here because hardware raises General Protection Fault (#GP)
     crate::syscall::sys_exit();
+}
+
+/// Global demo mutex for lock contention and sleeping wait-queue testing.
+static DEMO_MUTEX: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
+
+fn demo_mutex_worker_a() {
+    println!("  [Task A] Attempting to acquire DEMO_MUTEX...");
+    let mut guard = DEMO_MUTEX.lock();
+    *guard += 100;
+    println!("  [Task A] Lock acquired! Value={}. Holding lock for 250 ms...", *guard);
+    task::sleep_ms(250);
+    println!("  [Task A] Releasing DEMO_MUTEX.");
+}
+
+fn demo_mutex_worker_b() {
+    task::sleep_ms(40); // Allow Task A to acquire the lock first
+    println!("  [Task B] Attempting to acquire DEMO_MUTEX (contended -> transitioning to Blocked)...");
+    let mut guard = DEMO_MUTEX.lock();
+    *guard += 50;
+    println!("  [Task B] Lock acquired after being unblocked! Value={}", *guard);
+}
+
+fn demo_producer() {
+    if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(1) {
+        for i in 1..=3 {
+            task::sleep_ms(200);
+            let msg = crate::ipc::Message::with_args(0x1000 + i, [i as u64, 42, 1337, 0]);
+            println!("  [Producer] Depositing message #{} to Endpoint #1...", i);
+            ep.send_blocking(msg);
+            println!("  [Producer] Message #{} sent.", i);
+        }
+        println!("  [Producer] Completed sending batch.");
+    }
+}
+
+fn demo_consumer() {
+    if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(1) {
+        println!("  [Consumer] Calling receive_blocking() on Endpoint #1 (will Block if empty)...");
+        for _ in 1..=3 {
+            let msg = ep.receive_blocking();
+            println!("  [Consumer] Received message from Endpoint #1: label={:#x}, arg0={}", msg.label, msg.args[0]);
+        }
+        println!("  [Consumer] Completed receiving batch.");
+    }
 }
 
 /// Lists all registered tasks, thread states, privilege levels, and CPU tick statistics.
@@ -62,7 +102,7 @@ impl Command for PsCommand {
     }
 
     fn description(&self) -> &'static str {
-        "List all active and sleeping kernel/user tasks in the preemptive scheduler"
+        "List all active, sleeping, and blocked tasks in the preemptive scheduler"
     }
 
     fn usage(&self) -> &'static str {
@@ -127,11 +167,11 @@ impl Command for SpawnCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Spawn a new task (e.g. 'spawn worker', 'spawn user', 'spawn rogue')"
+        "Spawn a new task (e.g. 'spawn worker', 'spawn user', 'spawn mutex', 'spawn consumer', 'spawn producer')"
     }
 
     fn usage(&self) -> &'static str {
-        "spawn [worker | user | rogue]"
+        "spawn [--bg] [worker | user | rogue | mutex | consumer | producer]"
     }
 
     fn execute(&self, args: &[&str], _state: &mut ShellState) {
@@ -141,7 +181,16 @@ impl Command for SpawnCommand {
             return;
         }
 
-        let target = args.first().copied().unwrap_or("worker");
+        let mut bg_mode = false;
+        let mut target = "worker";
+
+        for &arg in args {
+            if arg == "--bg" || arg == "-b" || arg == "&" {
+                bg_mode = true;
+            } else if !arg.starts_with('-') {
+                target = arg;
+            }
+        }
 
         match target {
             "worker" | "counter" | "demo" => {
@@ -154,6 +203,11 @@ impl Command for SpawnCommand {
                 println!("    Type 'ps' to observe the task executing concurrently.");
             }
             "user" | "ring3" => {
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    set_color(Color::Yellow, Color::Black);
+                    println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
+                    return;
+                }
                 let id = task::spawn_user("user_demo", demo_user_process, TaskPriority::Normal);
                 set_color(Color::LightGreen, Color::Black);
                 println!(
@@ -161,9 +215,18 @@ impl Command for SpawnCommand {
                     id.0
                 );
                 println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B)");
-                println!("    Type 'ps' to observe its execution or 'syscalls' for metrics.");
+                if bg_mode {
+                    println!("    Running in background. Type 'ps' to observe execution.");
+                } else {
+                    task::wait_task(id);
+                }
             }
             "rogue" => {
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    set_color(Color::Yellow, Color::Black);
+                    println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
+                    return;
+                }
                 let id = task::spawn_user("rogue_task", demo_rogue_process, TaskPriority::Normal);
                 set_color(Color::Yellow, Color::Black);
                 println!(
@@ -171,12 +234,55 @@ impl Command for SpawnCommand {
                     id.0
                 );
                 println!("    This task will attempt an illegal 'cli' instruction in user mode.");
-                println!("    Observe the CPU General Protection Fault (#GP) handling.");
+                if bg_mode {
+                    println!("    Running in background. Observe fault via 'syscalls'.");
+                } else {
+                    task::wait_task(id);
+                }
+            }
+            "mutex" | "lock" => {
+                let id1 = task::spawn("worker_a", demo_mutex_worker_a, TaskPriority::Normal);
+                let id2 = task::spawn("worker_b", demo_mutex_worker_b, TaskPriority::Normal);
+                set_color(Color::LightGreen, Color::Black);
+                println!(
+                    "[+] Spawned contending tasks #{}: 'worker_a' and #{}: 'worker_b'.",
+                    id1.0, id2.0
+                );
+                println!("    Worker B will block on DEMO_MUTEX while Worker A holds it.");
+                if bg_mode {
+                    println!("    Running in background. Type 'ps' to observe 'worker_b' in Blocked state.");
+                } else {
+                    task::wait_task(id1);
+                    task::wait_task(id2);
+                }
+            }
+            "consumer" => {
+                let id = task::spawn("consumer", demo_consumer, TaskPriority::Normal);
+                set_color(Color::LightGreen, Color::Black);
+                println!(
+                    "[+] Spawned Consumer task #{} waiting on Endpoint #1.",
+                    id.0
+                );
+                println!("    Type 'ps' to observe consumer transitioning into Blocked state.");
+                println!("    Run 'spawn producer' to deliver messages and unblock it.");
+            }
+            "producer" => {
+                let id = task::spawn("producer", demo_producer, TaskPriority::Normal);
+                set_color(Color::LightGreen, Color::Black);
+                println!(
+                    "[+] Spawned Producer task #{} feeding Endpoint #1.",
+                    id.0
+                );
+                if bg_mode {
+                    println!("    Running in background.");
+                } else {
+                    task::wait_task(id);
+                }
             }
             unknown => {
                 set_color(Color::LightRed, Color::Black);
                 println!(
-                    "Unknown task template '{}'. Available templates: worker, user, rogue",
+                    "Unknown task template '{}'. Available: worker, user, rogue, mutex, consumer, producer",
                     unknown
                 );
             }
@@ -294,6 +400,78 @@ impl Command for SyscallsCommand {
         println!("    - [8] SYS_IPC_RECV : {} calls", stats.ipc_calls);
         println!("    ---------------------------------------------");
         println!("    * Total Hardware System Calls Handled: {}", stats.total_calls);
+        println!("============================================================\n");
+    }
+}
+
+/// Inspects microkernel synchronization primitives, sleep-locks, and wait-queues.
+pub struct SyncCommand;
+
+impl Command for SyncCommand {
+    fn name(&self) -> &'static str {
+        "sync"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["locks", "waiters"]
+    }
+
+    fn description(&self) -> &'static str {
+        "Inspect microkernel synchronization primitives, mutexes, and endpoint wait queues"
+    }
+
+    fn usage(&self) -> &'static str {
+        "sync"
+    }
+
+    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+        set_color(Color::LightGreen, Color::Black);
+        println!("\n============================================================");
+        println!(" [+] HYDRA MICROKERNEL: SYNCHRONIZATION & WAIT QUEUES       ");
+        println!("============================================================");
+
+        println!("  Sleep-Lock Mutex Status (DEMO_MUTEX):");
+        println!("    - State           : {}", if DEMO_MUTEX.is_locked() { "LOCKED" } else { "UNLOCKED" });
+        println!("    - Owner PID       : {}", DEMO_MUTEX.owner_pid());
+        println!("    - Blocked Waiters : {}", DEMO_MUTEX.waiting_count());
+
+        println!("\n  Active System IPC Endpoints (0..15):");
+        println!("    {:<5} {:<12} {:<15} {:<15}", "EP_ID", "PENDING_MSGS", "WAIT_RECEIVERS", "WAIT_SENDERS");
+        println!("    {:-<50}", "");
+
+        for i in 0..8 {
+            if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(i) {
+                let pending = ep.pending_count();
+                let recv_w = ep.waiting_receivers();
+                let send_w = ep.waiting_senders();
+                if pending > 0 || recv_w > 0 || send_w > 0 || i <= 2 {
+                    println!("    {:<5} {:<12} {:<15} {:<15}", i, pending, recv_w, send_w);
+                }
+            }
+        }
+
+        if task::is_active() {
+            let snapshots = task::get_task_snapshots();
+            let mut blocked_count = 0;
+            let mut ready_count = 0;
+            let mut sleeping_count = 0;
+            let mut running_count = 0;
+
+            for s in &snapshots {
+                match s.state {
+                    TaskState::Blocked => blocked_count += 1,
+                    TaskState::Ready => ready_count += 1,
+                    TaskState::Sleeping { .. } => sleeping_count += 1,
+                    TaskState::Running => running_count += 1,
+                    _ => {}
+                }
+            }
+
+            println!("\n  Scheduler Task State Summary:");
+            println!("    - Running: {} | Ready: {} | Blocked: {} | Sleeping: {}",
+                running_count, ready_count, blocked_count, sleeping_count);
+        }
+
         println!("============================================================\n");
     }
 }

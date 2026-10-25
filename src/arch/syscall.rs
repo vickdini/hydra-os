@@ -198,15 +198,24 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame) {
         SYS_IPC_SEND => {
             stats.ipc_calls += 1;
             drop(stats);
-            // arg0: endpoint_id, arg1: pointer to Message
+            // arg0: endpoint_id, arg1: pointer to Message, arg2: flags (0 = non-blocking, 1 = blocking)
             let ep_id = arg0 as u32;
             let msg_ptr = arg1 as *const crate::ipc::Message;
+            let blocking = (_arg2 & 1) != 0;
             if !msg_ptr.is_null() {
-                let msg = unsafe { *msg_ptr };
-                let mut ep = crate::ipc::endpoint::Endpoint::new(ep_id);
-                match ep.send(msg) {
-                    Ok(_) => 0,
-                    Err(_) => -11, // -EAGAIN
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(ep_id) {
+                    let msg = unsafe { *msg_ptr };
+                    if blocking {
+                        ep.send_blocking(msg);
+                        0
+                    } else {
+                        match ep.send(msg) {
+                            Ok(_) => 0,
+                            Err(_) => -11, // -EAGAIN
+                        }
+                    }
+                } else {
+                    -22 // -EINVAL (unknown endpoint)
                 }
             } else {
                 -14 // -EFAULT
@@ -215,16 +224,26 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame) {
         SYS_IPC_RECV => {
             stats.ipc_calls += 1;
             drop(stats);
-            // arg0: endpoint_id, arg1: pointer to output Message
+            // arg0: endpoint_id, arg1: pointer to output Message, arg2: flags (0 = non-blocking, 1 = blocking)
             let ep_id = arg0 as u32;
             let msg_ptr = arg1 as *mut crate::ipc::Message;
+            let blocking = (_arg2 & 1) != 0;
             if !msg_ptr.is_null() {
-                let mut ep = crate::ipc::endpoint::Endpoint::new(ep_id);
-                if let Some(msg) = ep.receive() {
-                    unsafe { *msg_ptr = msg; }
-                    0
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(ep_id) {
+                    if blocking {
+                        let msg = ep.receive_blocking();
+                        unsafe { *msg_ptr = msg; }
+                        0
+                    } else {
+                        if let Some(msg) = ep.receive() {
+                            unsafe { *msg_ptr = msg; }
+                            0
+                        } else {
+                            -11 // -EAGAIN
+                        }
+                    }
                 } else {
-                    -11 // -EAGAIN
+                    -22 // -EINVAL (unknown endpoint)
                 }
             } else {
                 -14 // -EFAULT

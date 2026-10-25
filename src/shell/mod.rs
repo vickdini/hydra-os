@@ -94,11 +94,63 @@ pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
     }
 }
 
+fn auto_exitboot_countdown(state: &mut ShellState) {
+    if crate::arch::boot_services::is_hardware_takeover_complete() {
+        return;
+    }
+
+    set_color(Color::LightCyan, Color::Black);
+    crate::print!("[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): ");
+
+    let mut cancelled = false;
+    let mut proceed_early = false;
+
+    for remaining in (1..=3).rev() {
+        set_color(Color::Yellow, Color::Black);
+        crate::print!("{}... ", remaining);
+
+        for _ in 0..20 {
+            if let Some(key) = crate::console::read_key() {
+                match key {
+                    uefi::proto::console::text::Key::Printable(ch)
+                        if u16::from(ch) == 13 || u16::from(ch) == 10 || char::from(ch) == '\r' || char::from(ch) == '\n' =>
+                    {
+                        proceed_early = true;
+                        break;
+                    }
+                    _ => {
+                        cancelled = true;
+                        break;
+                    }
+                }
+            }
+            crate::console::stall(core::time::Duration::from_millis(50));
+        }
+
+        if cancelled || proceed_early {
+            break;
+        }
+    }
+
+    if cancelled {
+        set_color(Color::LightRed, Color::Black);
+        crate::println!("CANCELLED");
+        set_color(Color::White, Color::Black);
+        crate::println!("    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.\n");
+    } else {
+        set_color(Color::LightGreen, Color::Black);
+        crate::println!("NOW");
+        execute_command("exitboot", state);
+        crate::println!();
+    }
+}
+
 pub fn run() -> ! {
     let mut state = ShellState::new();
     let mut line_buf = [0u8; LINE_BUF_LEN];
 
     print_welcome_banner();
+    auto_exitboot_countdown(&mut state);
 
     loop {
         set_color(state.prompt_color, Color::Black);
