@@ -100,6 +100,30 @@ impl Framebuffer {
         }
     }
 
+    /// Inverts the RGB color channels in a rectangular region (lossless reversible XOR).
+    pub fn invert_rect(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let x_end = (x + w).min(self.width);
+        let y_end = (y + h).min(self.height);
+
+        for py in y..y_end {
+            let row_offset = (py * self.stride + x) * 4;
+            let count = (x_end - x) * 4;
+            if row_offset + count <= self.size {
+                unsafe {
+                    let ptr = self.base_ptr.add(row_offset);
+                    for i in 0..count {
+                        if i % 4 != 3 {
+                            *ptr.add(i) = !*ptr.add(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Clears the entire display to a single RGB color.
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         self.fill_rect(0, 0, self.width, self.height, r, g, b);

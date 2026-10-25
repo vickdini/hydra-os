@@ -67,3 +67,17 @@ hydra> video test
 hydra> video clear
 [+] Framebuffer display cleared.
 ```
+
+---
+
+## 5. Hardware Console Cursor Engine
+
+The autonomous video console features a zero-allocation, lossless text insertion cursor:
+- **Zero-Allocation Lossless XOR Inversion**: Implemented in [`Framebuffer::invert_rect`](file:///d:/os/src/video/framebuffer.rs#L104-L125). Inverts the RGB bytes (`!*ptr`) of target pixels without touching the alpha channel. This provides reversible display and erasure without allocating secondary scratch buffers.
+- **Dynamic Cursor Shapes**: Supports three configurable cursor styles ([`CursorShape`](file:///d:/os/src/video/console.rs#L11-L19)):
+  - `Underline`: 3-pixel horizontal bar at the baseline of the font cell (scanlines 13..16).
+  - `Block`: Full 8x16 inverted character cell, maintaining readability through color inversion.
+  - `Bar`: 2-pixel vertical line at the left boundary of the character cell.
+- **Hardware-Synchronized Blinking**: In the console polling loops ([`get_key_or_refresh`](file:///d:/os/src/console.rs#L407-L426)), a 10ms timer step drives a ~1 Hz (500ms toggle interval) blinking rate while the shell waits for keyboard input.
+- **Artifact Prevention**: Any operation that modifies the framebuffer (`write_char`, `new_line`, `clear`, `scroll_up`, or direct buffer writes) automatically invokes `hide_cursor()` prior to rasterization, preventing cursor ghosting artifacts.
+

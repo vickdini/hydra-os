@@ -327,3 +327,22 @@ hydra> ipc 0x2001 100 200 300
     - Label: 0x2001
     - Args:  [100, 200, 300, 0]
 ```
+
+### Visual Text Insertion Cursor & `cursor` Command
+The shell provides real-time cursor tracking and blinking in both UEFI firmware mode and bare-metal video mode:
+- **Exact Insertion Feedback**: As characters are typed, deleted, or traversed with <kbd>&larr;</kbd> / <kbd>&rarr;</kbd> / <kbd>Home</kbd> / <kbd>End</kbd>, the visual cursor instantly indicates the next character's insertion point.
+- **Dynamic Cursor Shapes**: Supports `underline` (default 3px baseline), `block` (8x16 inverted cell), and `bar` (2px vertical).
+- **Interactive Configuration**: The `cursor` command allows inspecting and toggling cursor parameters:
+```text
+hydra:/bin> cursor
+[*] Terminal Cursor Status:
+    Enabled:  yes
+    Shape:    underline
+    Position: col 0, row 9
+    Blink:    ~1 Hz (500ms interval)
+Usage: cursor [on|off|underline|block|bar]
+
+hydra:/bin> cursor block
+[+] Terminal cursor shape set to Block (8x16 inverted box).
+```
+

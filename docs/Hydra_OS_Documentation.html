@@ -3515,6 +3515,17 @@ hydra&gt; video test
 hydra&gt; video clear
 [+] Framebuffer display cleared.
 </code></pre></div>
+
+<hr />
+<h2>5. Hardware Console Cursor Engine</h2>
+<p>The autonomous video console features a zero-allocation, lossless text insertion cursor:
+- <strong>Zero-Allocation Lossless XOR Inversion</strong>: Implemented in <a href="file:///d:/os/src/video/framebuffer.rs#L104-L125"><code>Framebuffer::invert_rect</code></a>. Inverts the RGB bytes (<code>!*ptr</code>) of target pixels without touching the alpha channel. This provides reversible display and erasure without allocating secondary scratch buffers.
+- <strong>Dynamic Cursor Shapes</strong>: Supports three configurable cursor styles (<a href="file:///d:/os/src/video/console.rs#L11-L19"><code>CursorShape</code></a>):
+  - <code>Underline</code>: 3-pixel horizontal bar at the baseline of the font cell (scanlines 13..16).
+  - <code>Block</code>: Full 8x16 inverted character cell, maintaining readability through color inversion.
+  - <code>Bar</code>: 2-pixel vertical line at the left boundary of the character cell.
+- <strong>Hardware-Synchronized Blinking</strong>: In the console polling loops (<a href="file:///d:/os/src/console.rs#L407-L426"><code>get_key_or_refresh</code></a>), a 10ms timer step drives a ~1 Hz (500ms toggle interval) blinking rate while the shell waits for keyboard input.
+- <strong>Artifact Prevention</strong>: Any operation that modifies the framebuffer (<code>write_char</code>, <code>new_line</code>, <code>clear</code>, <code>scroll_up</code>, or direct buffer writes) automatically invokes <code>hide_cursor()</code> prior to rasterization, preventing cursor ghosting artifacts.</p>
 </div>
 
 
@@ -5170,6 +5181,23 @@ hydra:/bin&gt;
 [+] Rendezvous complete! Received message from Endpoint #1:
     - Label: 0x2001
     - Args:  [100, 200, 300, 0]
+</code></pre></div>
+
+<h3>Visual Text Insertion Cursor &amp; <code>cursor</code> Command</h3>
+<p>The shell provides real-time cursor tracking and blinking in both UEFI firmware mode and bare-metal video mode:
+- <strong>Exact Insertion Feedback</strong>: As characters are typed, deleted, or traversed with <kbd>&larr;</kbd> / <kbd>&rarr;</kbd> / <kbd>Home</kbd> / <kbd>End</kbd>, the visual cursor instantly indicates the next character's insertion point.
+- <strong>Dynamic Cursor Shapes</strong>: Supports <code>underline</code> (default 3px baseline), <code>block</code> (8x16 inverted cell), and <code>bar</code> (2px vertical).
+- <strong>Interactive Configuration</strong>: The <code>cursor</code> command allows inspecting and toggling cursor parameters:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt; cursor
+[*] Terminal Cursor Status:
+    Enabled:  yes
+    Shape:    underline
+    Position: col 0, row 9
+    Blink:    ~1 Hz (500ms interval)
+Usage: cursor [on|off|underline|block|bar]
+
+hydra:/bin&gt; cursor block
+[+] Terminal cursor shape set to Block (8x16 inverted box).
 </code></pre></div>
 </div>
 

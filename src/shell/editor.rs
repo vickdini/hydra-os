@@ -207,6 +207,7 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
                 } else if code == 4 {
                     // Ctrl+D: EOF on empty line, or forward delete if non-empty
                     if len == 0 {
+                        crate::console::hide_cursor();
                         return None;
                     } else if cursor_pos < len {
                         let old_len = len;
@@ -248,6 +249,7 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
                     handle_tab_completion(cur_prompt, buf, &mut len, &mut cursor_pos, state);
                 } else if code == 10 || code == 13 || c == '\r' || c == '\n' {
                     // Enter / Return / Ctrl+M / Ctrl+J
+                    crate::console::hide_cursor();
                     if scroll_offset > 0 {
                         let mut pbuf = [0u8; 96];
                         let cur_prompt = state.format_prompt(&mut pbuf);

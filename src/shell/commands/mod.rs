@@ -47,7 +47,7 @@ pub use history_cmd::HistoryCommand;
 pub use info::InfoCommand;
 pub use ipc::IpcCommand;
 pub use mem::{AllocCommand, HeapCommand, MemCommand};
-pub use misc::{ClearCommand, ColorCommand, EchoCommand, PanicCommand, ScrollLockCommand, TrapCommand};
+pub use misc::{ClearCommand, ColorCommand, CursorCommand, EchoCommand, PanicCommand, ScrollLockCommand, TrapCommand};
 pub use power::{HaltCommand, RebootCommand, ShutdownCommand};
 pub use script::ShCommand;
 pub use status::StatusCommand;
@@ -70,6 +70,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &ClearCommand,
     &ColorCommand,
     &EchoCommand,
+    &CursorCommand,
     &ScrollLockCommand,
     // Script Runner (Bash/POSIX)
     &ShCommand,

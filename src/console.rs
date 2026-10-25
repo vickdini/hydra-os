@@ -299,6 +299,73 @@ pub fn set_cursor_position(col: usize, row: usize) {
     }
 }
 
+pub use crate::video::console::CursorShape;
+
+/// Displays the cursor at the current screen coordinate.
+pub fn show_cursor() {
+    if is_standalone_video() {
+        crate::video::console::show_cursor();
+    } else {
+        uefi::system::with_stdout(|stdout| {
+            let _ = stdout.enable_cursor(true);
+        });
+    }
+}
+
+/// Hides the cursor from the screen.
+pub fn hide_cursor() {
+    if is_standalone_video() {
+        crate::video::console::hide_cursor();
+    } else {
+        uefi::system::with_stdout(|stdout| {
+            let _ = stdout.enable_cursor(false);
+        });
+    }
+}
+
+/// Toggles the cursor state for blinking.
+pub fn toggle_cursor() {
+    if is_standalone_video() {
+        crate::video::console::toggle_cursor();
+    }
+}
+
+/// Enables or disables the visual cursor.
+pub fn set_cursor_enabled(enabled: bool) {
+    if is_standalone_video() {
+        crate::video::console::set_cursor_enabled(enabled);
+    } else {
+        uefi::system::with_stdout(|stdout| {
+            let _ = stdout.enable_cursor(enabled);
+        });
+    }
+}
+
+/// Returns whether the visual cursor is enabled.
+pub fn is_cursor_enabled() -> bool {
+    if is_standalone_video() {
+        crate::video::console::is_cursor_enabled()
+    } else {
+        true
+    }
+}
+
+/// Sets the visual cursor rendering shape.
+pub fn set_cursor_shape(shape: CursorShape) {
+    if is_standalone_video() {
+        crate::video::console::set_cursor_shape(shape);
+    }
+}
+
+/// Returns the current cursor rendering shape.
+pub fn cursor_shape() -> CursorShape {
+    if is_standalone_video() {
+        crate::video::console::cursor_shape()
+    } else {
+        CursorShape::Underline
+    }
+}
+
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -392,36 +459,40 @@ pub fn stall(duration: Duration) {
 
 /// Waits until a key is pressed (from PS/2 keyboard in hardware mode, or UEFI stdin).
 pub fn get_key() -> Key {
-    if is_hardware_mode() {
-        crate::arch::keyboard::get_key()
-    } else {
-        loop {
-            if let Some(key) = read_key() {
-                return key;
-            }
-            // Yield to firmware / VM timer with a 10ms stall to avoid pegging CPU
-            stall(Duration::from_millis(10));
+    show_cursor();
+    let mut blink_counter = 0u32;
+    loop {
+        if let Some(key) = read_key() {
+            hide_cursor();
+            return key;
+        }
+        stall(Duration::from_millis(10));
+        blink_counter += 1;
+        if blink_counter >= 50 {
+            blink_counter = 0;
+            toggle_cursor();
         }
     }
 }
 
 /// Waits for a key press, or returns Err(()) if new console output was generated while waiting.
 pub fn get_key_or_refresh(last_gen: u64) -> Result<Key, ()> {
+    show_cursor();
+    let mut blink_counter = 0u32;
     loop {
         if let Some(key) = read_key() {
+            hide_cursor();
             return Ok(key);
         }
         if console_output_generation() != last_gen {
+            hide_cursor();
             return Err(());
         }
-        if is_hardware_mode() {
-            if x86_64::instructions::interrupts::are_enabled() {
-                x86_64::instructions::hlt();
-            } else {
-                core::hint::spin_loop();
-            }
-        } else {
-            stall(Duration::from_millis(10));
+        stall(Duration::from_millis(10));
+        blink_counter += 1;
+        if blink_counter >= 50 {
+            blink_counter = 0;
+            toggle_cursor();
         }
     }
 }

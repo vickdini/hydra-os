@@ -194,3 +194,73 @@ impl Command for ScrollLockCommand {
     }
 }
 
+pub struct CursorCommand;
+
+impl Command for CursorCommand {
+    fn name(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn description(&self) -> &'static str {
+        "Configure shell cursor visibility and style (on, off, underline, block, bar)"
+    }
+
+    fn usage(&self) -> &'static str {
+        "cursor [on|off|underline|block|bar]"
+    }
+
+    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+        use crate::console::CursorShape;
+
+        match args.first() {
+            Some(&"on") | Some(&"enable") => {
+                crate::console::set_cursor_enabled(true);
+                set_color(Color::LightGreen, Color::Black);
+                println!("[+] Terminal cursor enabled.");
+            }
+            Some(&"off") | Some(&"disable") => {
+                crate::console::set_cursor_enabled(false);
+                set_color(Color::Yellow, Color::Black);
+                println!("[-] Terminal cursor disabled.");
+            }
+            Some(&"underline") => {
+                crate::console::set_cursor_shape(CursorShape::Underline);
+                set_color(Color::LightCyan, Color::Black);
+                println!("[+] Terminal cursor shape set to Underline (3-pixel baseline).");
+            }
+            Some(&"block") => {
+                crate::console::set_cursor_shape(CursorShape::Block);
+                set_color(Color::LightCyan, Color::Black);
+                println!("[+] Terminal cursor shape set to Block (8x16 inverted box).");
+            }
+            Some(&"bar") => {
+                crate::console::set_cursor_shape(CursorShape::Bar);
+                set_color(Color::LightCyan, Color::Black);
+                println!("[+] Terminal cursor shape set to Bar (2-pixel vertical line).");
+            }
+            Some(other) => {
+                println!("[-] Unknown cursor option: '{}'", other);
+                println!("Usage: {}", self.usage());
+            }
+            None => {
+                let enabled = crate::console::is_cursor_enabled();
+                let shape = match crate::console::cursor_shape() {
+                    CursorShape::Underline => "underline",
+                    CursorShape::Block => "block",
+                    CursorShape::Bar => "bar",
+                };
+                let (col, row) = crate::console::cursor_position();
+
+                set_color(Color::LightCyan, Color::Black);
+                println!("[*] Terminal Cursor Status:");
+                println!("    Enabled:  {}", if enabled { "yes" } else { "no" });
+                println!("    Shape:    {}", shape);
+                println!("    Position: col {}, row {}", col, row);
+                println!("    Blink:    ~1 Hz (500ms interval)");
+                println!("Usage: {}", self.usage());
+            }
+        }
+    }
+}
+
+
