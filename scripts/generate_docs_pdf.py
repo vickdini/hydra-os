@@ -130,6 +130,13 @@ DOCS_ORDER = [
         "subtitle": "Control register inspection (CR0 protection, CR2 fault address, CR3 PML4 root, CR4).",
     },
     {
+        "stage": "Stage 3: CPU Architecture",
+        "title": "Hardware System Calls & Ring 3 User Mode",
+        "file": "docs/src/arch/syscall.md",
+        "anchor": "doc-boot-stage3-syscall",
+        "subtitle": "Fast syscall/sysretq MSRs, asm_syscall_entry trampoline, TSS RSP0, and fault isolation.",
+    },
+    {
         "stage": "Stage 4: Memory Subsystem",
         "title": "Memory Subsystem Coordinator",
         "file": "docs/src/memory/mod.md",

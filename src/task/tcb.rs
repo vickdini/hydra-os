@@ -154,14 +154,32 @@ impl TaskRegisters {
     }
 }
 
+/// Execution privilege level of a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivilegeMode {
+    Kernel, // Ring 0
+    User,   // Ring 3
+}
+
+impl PrivilegeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PrivilegeMode::Kernel => "Kernel",
+            PrivilegeMode::User => "User",
+        }
+    }
+}
+
 /// Task Control Block (TCB) representing a thread of execution in Hydra Microkernel.
 pub struct Task {
     pub id: TaskId,
     pub name: &'static str,
     pub state: TaskState,
     pub priority: TaskPriority,
+    pub mode: PrivilegeMode,
     pub regs: TaskRegisters,
-    pub stack: Option<Box<[u8]>>,
+    pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
+    pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
     pub ticks_run: u64,
     pub timeslice_remaining: u32,
     pub cspace: Box<CapabilityTable>,
@@ -178,11 +196,24 @@ impl Task {
             name,
             state: TaskState::Running,
             priority: TaskPriority::Normal,
+            mode: PrivilegeMode::Kernel,
             regs,
-            stack: None, // Uses existing firmware/boot stack
+            stack: None,      // Uses existing firmware/boot stack
+            user_stack: None,
             ticks_run: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),
+        }
+    }
+
+    /// Returns the top address of the task's kernel stack (used for TSS RSP0 and hardware SYSCALL).
+    pub fn kernel_stack_top(&self) -> u64 {
+        if let Some(ref stack) = self.stack {
+            let bottom = stack.as_ptr() as u64;
+            (bottom + stack.len() as u64) & !0xF
+        } else {
+            // Main thread uses existing firmware stack pointer
+            self.regs.rsp
         }
     }
 }

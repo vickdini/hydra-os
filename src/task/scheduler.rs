@@ -4,7 +4,7 @@ use x86_64::registers::control::Cr3;
 
 use crate::arch::idt::ExceptionContext;
 use crate::capability::table::CapabilityTable;
-use super::tcb::{Task, TaskId, TaskPriority, TaskRegisters, TaskState};
+use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
 
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
 pub const DEFAULT_STACK_SIZE: usize = 16384;  // 16 KiB per kernel thread stack
@@ -16,6 +16,7 @@ pub struct TaskSnapshot {
     pub name: &'static str,
     pub state: TaskState,
     pub priority: TaskPriority,
+    pub mode: PrivilegeMode,
     pub ticks_run: u64,
     pub rsp: u64,
     pub rip: u64,
@@ -114,8 +115,73 @@ impl Scheduler {
             name,
             state: TaskState::Ready,
             priority,
+            mode: PrivilegeMode::Kernel,
             regs,
             stack: Some(stack),
+            user_stack: None,
+            ticks_run: 0,
+            timeslice_remaining: self.default_timeslice,
+            cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+        };
+
+        self.tasks.push(task);
+        id
+    }
+
+    /// Spawns an unprivileged Ring 3 User Mode task.
+    ///
+    /// Allocates both a kernel stack (for TSS RSP0 and hardware SYSCALL)
+    /// and a user stack (for userland RSP). Configures user code (0x23) and
+    /// user data (0x1B) segment selectors with RPL=3.
+    pub fn spawn_user(
+        &mut self,
+        name: &'static str,
+        entry_fn: fn(),
+        priority: TaskPriority,
+    ) -> TaskId {
+        let current_cr3 = Cr3::read().0.start_address().as_u64();
+        let id = TaskId(self.next_id);
+        self.next_id += 1;
+
+        // 1. Allocate dedicated 16 KiB Kernel Stack
+        let kernel_stack = alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice();
+
+        // 2. Allocate dedicated 16 KiB User Stack
+        let user_stack = alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice();
+        let user_stack_bottom = user_stack.as_ptr() as u64;
+        let user_stack_top = (user_stack_bottom + user_stack.len() as u64) & !0xF;
+        let initial_user_rsp = user_stack_top.saturating_sub(48);
+
+        // 3. Mark user stack memory as USER_ACCESSIBLE
+        let _ = crate::memory::paging::make_user_accessible(
+            x86_64::VirtAddr::new(user_stack_bottom),
+            user_stack.len(),
+        );
+
+        // 4. Mark user entry code page as USER_ACCESSIBLE
+        let fn_ptr = entry_fn as *const () as usize as u64;
+        let _ = crate::memory::paging::make_user_accessible(
+            x86_64::VirtAddr::new(fn_ptr),
+            4096,
+        );
+
+        let mut regs = TaskRegisters::empty();
+        regs.rip = fn_ptr;
+        regs.rsp = initial_user_rsp;
+        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
+        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.rflags = 0x202; // IF=1: Interrupts enabled
+        regs.cr3 = current_cr3;
+
+        let task = Task {
+            id,
+            name,
+            state: TaskState::Ready,
+            priority,
+            mode: PrivilegeMode::User,
+            regs,
+            stack: Some(kernel_stack),
+            user_stack: Some(user_stack),
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
@@ -190,6 +256,11 @@ impl Scheduler {
         next_task.state = TaskState::Running;
         next_task.timeslice_remaining = self.default_timeslice;
 
+        // 4b. Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task
+        let kernel_top = next_task.kernel_stack_top();
+        crate::arch::gdt::set_privilege_stack(x86_64::VirtAddr::new(kernel_top));
+        crate::arch::syscall::set_kernel_rsp(kernel_top);
+
         // 5. Restore registers into the ExceptionContext frame for iretq execution
         next_task.regs.restore_to_context(ctx);
 
@@ -261,6 +332,7 @@ impl Scheduler {
                 name: task.name,
                 state: task.state,
                 priority: task.priority,
+                mode: task.mode,
                 ticks_run: task.ticks_run,
                 rsp: task.regs.rsp,
                 rip: task.regs.rip,

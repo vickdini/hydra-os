@@ -397,7 +397,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
         <strong>Target Architecture:</strong> x86_64-unknown-uefi (Native 64-bit Long Mode)<br>
         <strong>Security Model:</strong> Capability-Based Access Control (seL4-style)<br>
         <strong>IPC Subsystem:</strong> Synchronous &amp; Asynchronous Message Rendezvous<br>
-        <strong>Generated:</strong> October 24, 2026
+        <strong>Generated:</strong> October 25, 2026
     </div>
 </div>
 
@@ -424,6 +424,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage3-keyboard" class="toc-link"><span class="toc-title">8042 PS/2 Keyboard Controller & Input Buffer</span><span class="toc-sub">Scancode Set 1 decoder, interrupt-driven circular ring buffer, modifier tracking, and sleep waits.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage3-takeover" class="toc-link"><span class="toc-title">Hardware Takeover & ExitBootServices</span><span class="toc-sub">Terminating firmware control, reloading GDT/TSS, autonomous CR3 PML4, and 8042 PS/2 keyboard.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage3-cpu" class="toc-link"><span class="toc-title">CPU Control Registers & Diagnostics</span><span class="toc-sub">Control register inspection (CR0 protection, CR2 fault address, CR3 PML4 root, CR4).</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage3-syscall" class="toc-link"><span class="toc-title">Hardware System Calls & Ring 3 User Mode</span><span class="toc-sub">Fast syscall/sysretq MSRs, asm_syscall_entry trampoline, TSS RSP0, and fault isolation.</span></a></li>
 <li class="toc-stage-header">Stage 4: Memory Subsystem</li>
 <li class="toc-item"><a href="#doc-boot-stage4-mod" class="toc-link"><span class="toc-title">Memory Subsystem Coordinator</span><span class="toc-sub">Coordinator binding physical frame management and virtual memory translation.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage4-frame" class="toc-link"><span class="toc-title">Physical Memory Discovery & Frame Allocator</span><span class="toc-sub">UEFI memory map parser, 1 MiB low memory reservation, and 4 KiB frame allocator.</span></a></li>
@@ -1501,8 +1502,294 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 
 
 
+<div id="doc-boot-stage3-syscall" class="doc-section">
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #14</div>
+    <h1>Ring 3 User Mode &amp; Hardware System Calls (<code>syscall</code> / <code>sysretq</code>)</h1>
+<h2>Overview</h2>
+<p><strong>Phase 3</strong> introduces hardware-enforced CPU privilege rings and the fast system call interface to Hydra OS. In long mode x86_64, the kernel transitions from pure kernel-mode threads (Ring 0) to unprivileged user processes executing at Current Privilege Level 3 (<strong>Ring 3</strong>). </p>
+<p>The boundary between userland and the microkernel is guarded by:
+1. <strong>Model-Specific Registers (MSRs)</strong>: <code>IA32_EFER.SCE</code>, <code>IA32_STAR</code>, <code>IA32_LSTAR</code>, and <code>IA32_FMASK</code> configuring the hardware <code>syscall</code> and <code>sysretq</code> instructions.
+2. <strong>Task State Segment (TSS) Privilege Stack (<code>RSP0</code>)</strong>: Ensuring hardware interrupts and exceptions originating from Ring 3 safely pivot to a trusted per-task kernel stack.
+3. <strong>4-Level Paging Protection (<code>USER_ACCESSIBLE</code>)</strong>: Granular page table permissions separating supervisor-only memory from user-accessible memory.
+4. <strong>Hardware Fault Isolation</strong>: Intercepting user-mode General Protection Faults (#GP) and Page Faults (#PF) to terminate offending processes without compromising kernel stability.</p>
+<p>The core implementation is split across:
+- <strong>Syscall MSRs &amp; Assembly Dispatcher</strong>: <a href="file:///d:/os/src/arch/syscall.rs"><code>src/arch/syscall.rs</code></a>
+- <strong>Userland Syscall Library</strong>: <a href="file:///d:/os/src/syscall/user.rs"><code>src/syscall/user.rs</code></a>
+- <strong>GDT &amp; TSS RSP0 Configuration</strong>: <a href="file:///d:/os/src/arch/gdt.rs"><code>src/arch/gdt.rs</code></a>
+- <strong>Page Table User Accessibility</strong>: <a href="file:///d:/os/src/memory/paging.rs"><code>src/memory/paging.rs</code></a>
+- <strong>Process Spawning &amp; Preemption</strong>: <a href="file:///d:/os/src/task/scheduler.rs"><code>src/task/scheduler.rs</code></a>
+- <strong>Shell Diagnostics</strong>: <a href="file:///d:/os/src/shell/commands/task_cmds.rs"><code>src/shell/commands/task_cmds.rs</code></a></p>
+<hr />
+<h2>Hardware System Call Architecture</h2>
+<div class="codehilite"><pre><span></span><code><span class="n">sequenceDiagram</span>
+<span class="w">    </span><span class="n">autonumber</span>
+<span class="w">    </span><span class="n">actor</span><span class="w"> </span><span class="n">User</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Ring</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="nf">Process</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">CPU</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">x86_64</span><span class="w"> </span><span class="n">CPU</span><span class="w"> </span><span class="n">Hardware</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Stub</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">asm_syscall_entry</span><span class="w"> </span><span class="p">(</span><span class="n">Ring</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Disp</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">hydra_syscall_dispatcher</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">Sched</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="n">Hydra</span><span class="w"> </span><span class="n">Scheduler</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">Kernel</span>
+
+<span class="w">    </span><span class="n">User</span><span class="o">-&gt;&gt;</span><span class="n">CPU</span><span class="o">:</span><span class="w"> </span><span class="n">syscall</span><span class="w"> </span><span class="p">(</span><span class="n">RAX</span><span class="o">=</span><span class="n">num</span><span class="p">,</span><span class="w"> </span><span class="n">RDI</span><span class="o">=</span><span class="n">arg0</span><span class="p">,</span><span class="w"> </span><span class="n">RSI</span><span class="o">=</span><span class="n">arg1</span><span class="p">,</span><span class="w"> </span><span class="n">RDX</span><span class="o">=</span><span class="n">arg2</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">CPU</span><span class="o">:</span><span class="w"> </span><span class="n">Saves</span><span class="w"> </span><span class="n">RIP</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">RCX</span><span class="p">,</span><span class="w"> </span><span class="n">RFLAGS</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">R11</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Loads</span><span class="w"> </span><span class="n">CS</span><span class="o">=</span><span class="mh">0x08</span><span class="p">,</span><span class="w"> </span><span class="n">SS</span><span class="o">=</span><span class="mh">0x10</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">RFLAGS</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">FMASK</span><span class="w"> </span><span class="p">(</span><span class="nf">IF</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Jumps</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">LSTAR</span>
+<span class="w">    </span><span class="n">CPU</span><span class="o">-&gt;&gt;</span><span class="n">Stub</span><span class="o">:</span><span class="w"> </span><span class="n">Enters</span><span class="w"> </span><span class="n">asm_syscall_entry</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Stub</span><span class="o">:</span><span class="w"> </span><span class="n">Swaps</span><span class="w"> </span><span class="n">RSP</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">CURRENT_KERNEL_RSP</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Constructs</span><span class="w"> </span><span class="n">SyscallFrame</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="n">stack</span>
+<span class="w">    </span><span class="n">Stub</span><span class="o">-&gt;&gt;</span><span class="n">Disp</span><span class="o">:</span><span class="w"> </span><span class="n">hydra_syscall_dispatcher</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mut</span><span class="w"> </span><span class="n">SyscallFrame</span><span class="p">)</span>
+<span class="w">    </span><span class="n">Disp</span><span class="o">-&gt;&gt;</span><span class="n">Sched</span><span class="o">:</span><span class="w"> </span><span class="n">Dispatches</span><span class="w"> </span><span class="n">SYS_WRITE</span><span class="p">,</span><span class="w"> </span><span class="n">SYS_SLEEP</span><span class="p">,</span><span class="w"> </span><span class="n">SYS_EXIT</span><span class="p">,</span><span class="w"> </span><span class="n">etc</span><span class="p">.</span>
+<span class="w">    </span><span class="n">Sched</span><span class="o">--&gt;&gt;</span><span class="n">Disp</span><span class="o">:</span><span class="w"> </span><span class="n">Result</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">Status</span><span class="w"> </span><span class="n">Code</span>
+<span class="w">    </span><span class="n">Disp</span><span class="o">--&gt;&gt;</span><span class="n">Stub</span><span class="o">:</span><span class="w"> </span><span class="n">Updates</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">rax</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="kr">return</span><span class="w"> </span><span class="n">value</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">Stub</span><span class="o">:</span><span class="w"> </span><span class="n">Restores</span><span class="w"> </span><span class="n">GPRs</span><span class="p">,</span><span class="w"> </span><span class="n">restores</span><span class="w"> </span><span class="n">User</span><span class="w"> </span><span class="n">RSP</span>
+<span class="w">    </span><span class="n">Stub</span><span class="o">-&gt;&gt;</span><span class="n">CPU</span><span class="o">:</span><span class="w"> </span><span class="n">sysretq</span>
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">CPU</span><span class="o">:</span><span class="w"> </span><span class="n">Loads</span><span class="w"> </span><span class="n">CS</span><span class="o">=</span><span class="mh">0x23</span><span class="p">,</span><span class="w"> </span><span class="n">SS</span><span class="o">=</span><span class="mh">0x1B</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Restores</span><span class="w"> </span><span class="n">RIP</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">RCX</span><span class="p">,</span><span class="w"> </span><span class="n">RFLAGS</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">R11</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Switches</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">Ring</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">    </span><span class="n">CPU</span><span class="o">--&gt;&gt;</span><span class="n">User</span><span class="o">:</span><span class="w"> </span><span class="n">Resumes</span><span class="w"> </span><span class="n">execution</span><span class="w"> </span><span class="kr">in</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="n">mode</span>
+</code></pre></div>
+
+<hr />
+<h2>Model-Specific Registers (MSR) Configuration</h2>
+<p>During hardware takeover in <a href="file:///d:/os/src/arch/boot_services.rs"><code>src/arch/boot_services.rs</code></a>, the kernel programs the four architectural system call MSRs via <a href="file:///d:/os/src/arch/syscall.rs"><code>crate::arch::syscall::init()</code></a>:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">MSR Address</th>
+<th style="text-align: left;">Register Name</th>
+<th style="text-align: left;">Configured Value</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>0xC0000080</code></td>
+<td style="text-align: left;"><code>IA32_EFER</code></td>
+<td style="text-align: left;">Bit 0 (<code>SCE = 1</code>)</td>
+<td style="text-align: left;"><strong>System Call Extensions</strong>: Enables the <code>syscall</code> and <code>sysretq</code> instructions in 64-bit mode.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>0xC0000081</code></td>
+<td style="text-align: left;"><code>IA32_STAR</code></td>
+<td style="text-align: left;"><code>0x0013_0008_0000_0000</code></td>
+<td style="text-align: left;"><strong>Segment Selectors</strong>: Bits [47:32] set Kernel CS to <code>0x08</code> (Kernel SS auto <code>0x10</code>). Bits [63:48] set User base to <code>0x13</code>, causing <code>sysretq</code> to load User SS = <code>0x1B</code> (0x13+8) and User CS = <code>0x23</code> (0x13+16).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>0xC0000082</code></td>
+<td style="text-align: left;"><code>IA32_LSTAR</code></td>
+<td style="text-align: left;">Virtual address of <code>asm_syscall_entry</code></td>
+<td style="text-align: left;"><strong>Target Instruction Pointer</strong>: Canonical entry point where the CPU jumps upon executing <code>syscall</code>.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>0xC0000084</code></td>
+<td style="text-align: left;"><code>IA32_FMASK</code></td>
+<td style="text-align: left;"><code>0x0004_4700</code></td>
+<td style="text-align: left;"><strong>Flags Mask</strong>: Clears Interrupt Flag (IF: <code>0x200</code>), Trap Flag (TF: <code>0x100</code>), Direction Flag (DF: <code>0x400</code>), Nested Task (NT: <code>0x4000</code>), and Alignment Check (AC: <code>0x40000</code>) on syscall entry.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Assembly Syscall Trampoline (<code>asm_syscall_entry</code>)</h2>
+<p>Because the x86_64 <code>syscall</code> instruction does <strong>not</strong> switch the stack pointer (<code>RSP</code>), the CPU enters kernel mode with <code>RSP</code> still pointing into untrusted user space. The assembly trampoline immediately pivots to the task's kernel stack before saving registers:</p>
+<div class="codehilite"><pre><span></span><code><span class="na">.global</span><span class="w"> </span><span class="no">asm_syscall_entry</span>
+<span class="nl">asm_syscall_entry:</span>
+<span class="w">    </span><span class="c1">// 1. Preserve user RSP in scratch and switch to current task kernel stack</span>
+<span class="w">    </span><span class="nf">mov</span><span class="w"> </span><span class="p">[</span><span class="no">rip</span><span class="w"> </span><span class="err">+</span><span class="w"> </span><span class="no">USER_RSP_SCRATCH</span><span class="p">],</span><span class="w"> </span><span class="no">rsp</span>
+<span class="w">    </span><span class="nf">mov</span><span class="w"> </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">rip</span><span class="w"> </span><span class="err">+</span><span class="w"> </span><span class="no">CURRENT_KERNEL_RSP</span><span class="p">]</span>
+
+<span class="w">    </span><span class="c1">// 2. Build SyscallFrame on kernel stack</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">qword</span><span class="w"> </span><span class="no">ptr</span><span class="w"> </span><span class="p">[</span><span class="no">rip</span><span class="w"> </span><span class="err">+</span><span class="w"> </span><span class="no">USER_RSP_SCRATCH</span><span class="p">]</span><span class="w"> </span><span class="c1">// User RSP</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r11</span><span class="w">                                </span><span class="c1">// User RFLAGS</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rcx</span><span class="w">                                </span><span class="c1">// User RIP</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rbx</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rbp</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r12</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r13</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r14</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r15</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rax</span><span class="w">                                </span><span class="c1">// Syscall number</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rdi</span><span class="w">                                </span><span class="c1">// Arg 0</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rsi</span><span class="w">                                </span><span class="c1">// Arg 1</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">rdx</span><span class="w">                                </span><span class="c1">// Arg 2</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r10</span><span class="w">                                </span><span class="c1">// Arg 3</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r8</span><span class="w">                                 </span><span class="c1">// Arg 4</span>
+<span class="w">    </span><span class="nf">push</span><span class="w"> </span><span class="no">r9</span><span class="w">                                 </span><span class="c1">// Arg 5</span>
+
+<span class="w">    </span><span class="c1">// 3. Call Rust dispatcher (passes &amp;mut SyscallFrame in RCX and RDI)</span>
+<span class="w">    </span><span class="nf">mov</span><span class="w"> </span><span class="no">rcx</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span>
+<span class="w">    </span><span class="nf">mov</span><span class="w"> </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span>
+<span class="w">    </span><span class="nf">sub</span><span class="w"> </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="mi">48</span>
+<span class="w">    </span><span class="nf">call</span><span class="w"> </span><span class="no">hydra_syscall_dispatcher</span>
+<span class="w">    </span><span class="nf">add</span><span class="w"> </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="mi">48</span>
+
+<span class="w">    </span><span class="c1">// 4. Restore registers and user stack</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r9</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r8</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r10</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rdx</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rsi</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rdi</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rax</span><span class="w">                                 </span><span class="c1">// Syscall return value in RAX</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r15</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r14</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r13</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r12</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rbp</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rbx</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rcx</span><span class="w">                                 </span><span class="c1">// Restore User RIP</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">r11</span><span class="w">                                 </span><span class="c1">// Restore User RFLAGS</span>
+<span class="w">    </span><span class="nf">pop</span><span class="w"> </span><span class="no">rsp</span><span class="w">                                 </span><span class="c1">// Restore User RSP directly</span>
+
+<span class="w">    </span><span class="c1">// 5. Return to unprivileged Ring 3</span>
+<span class="w">    </span><span class="nf">sysretq</span>
+</code></pre></div>
+
+<hr />
+<h2>Task State Segment (TSS) &amp; Interrupt Stack Switching</h2>
+<p>When a hardware interrupt (such as IRQ 0 PIT timer or IRQ 1 keyboard) or a CPU exception (#GP, #PF) fires while running in Ring 3:
+1. The CPU hardware reads <code>RSP0</code> from the active TSS (<code>privilege_stack_table[0]</code>).
+2. The hardware switches <code>RSP</code> to <code>RSP0</code>.
+3. The hardware pushes <code>SS</code> (0x1B), <code>RSP</code> (user stack), <code>RFLAGS</code>, <code>CS</code> (0x23), <code>RIP</code>, and error code onto the task's kernel stack.
+4. The interrupt routine runs safely in Ring 0.
+5. Upon returning, <code>iretq</code> automatically pops the user context and drops back to Ring 3.</p>
+<p>Whenever the scheduler performs a context switch in <a href="file:///d:/os/src/task/scheduler.rs"><code>src/task/scheduler.rs</code></a>, it synchronizes both hardware stack pointers:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1">// Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">kernel_top</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next_task</span><span class="p">.</span><span class="n">kernel_stack_top</span><span class="p">();</span>
+<span class="k">crate</span><span class="p">::</span><span class="n">arch</span><span class="p">::</span><span class="n">gdt</span><span class="p">::</span><span class="n">set_privilege_stack</span><span class="p">(</span><span class="n">x86_64</span><span class="p">::</span><span class="n">VirtAddr</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">kernel_top</span><span class="p">));</span>
+<span class="k">crate</span><span class="p">::</span><span class="n">arch</span><span class="p">::</span><span class="n">syscall</span><span class="p">::</span><span class="n">set_kernel_rsp</span><span class="p">(</span><span class="n">kernel_top</span><span class="p">);</span>
+</code></pre></div>
+
+<hr />
+<h2>Registered System Calls</h2>
+<p>Hydra OS provides a microkernel system call table:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Syscall #</th>
+<th style="text-align: left;">Name</th>
+<th style="text-align: left;">Signature</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>1</code></td>
+<td style="text-align: left;"><code>SYS_YIELD</code></td>
+<td style="text-align: left;"><code>sys_yield()</code></td>
+<td style="text-align: left;">Cooperatively relinquishes the current timeslice to the next ready task.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>2</code></td>
+<td style="text-align: left;"><code>SYS_SLEEP</code></td>
+<td style="text-align: left;"><code>sys_sleep(ms: u64)</code></td>
+<td style="text-align: left;">Suspends the process for a duration in milliseconds.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>3</code></td>
+<td style="text-align: left;"><code>SYS_WRITE</code></td>
+<td style="text-align: left;"><code>sys_write(buf: *const u8, len: u64)</code></td>
+<td style="text-align: left;">Writes a UTF-8 character buffer directly to the linear framebuffer console.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>4</code></td>
+<td style="text-align: left;"><code>SYS_EXIT</code></td>
+<td style="text-align: left;"><code>sys_exit() -&gt; !</code></td>
+<td style="text-align: left;">Permanently terminates the calling process and yields CPU ownership.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>5</code></td>
+<td style="text-align: left;"><code>SYS_GETPID</code></td>
+<td style="text-align: left;"><code>sys_getpid() -&gt; u64</code></td>
+<td style="text-align: left;">Queries the process identifier (PID) of the calling task.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>6</code></td>
+<td style="text-align: left;"><code>SYS_UPTIME</code></td>
+<td style="text-align: left;"><code>sys_uptime() -&gt; u64</code></td>
+<td style="text-align: left;">Queries elapsed PIT timer ticks (100 Hz = 10 ms per tick).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>7</code></td>
+<td style="text-align: left;"><code>SYS_IPC_SEND</code></td>
+<td style="text-align: left;"><code>sys_ipc_send(ep: u32, msg: *const Message)</code></td>
+<td style="text-align: left;">Sends an IPC message to a microkernel endpoint.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>8</code></td>
+<td style="text-align: left;"><code>SYS_IPC_RECV</code></td>
+<td style="text-align: left;"><code>sys_ipc_recv(ep: u32, msg: *mut Message)</code></td>
+<td style="text-align: left;">Receives an IPC message from a microkernel endpoint.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Memory Protection &amp; Fault Isolation</h2>
+<h3>CR0.WP Page Table Manipulation (<code>make_user_accessible</code>)</h3>
+<p>Under UEFI firmware, page tables are marked read-only with CR0.WP (Write Protect) enabled. When allocating user stacks on the heap, the kernel clears CR0.WP temporarily to mark intermediate page table entries (PML4, PDPT, PD, PT) with <code>PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1">// Temporarily clear CR0.WP (bit 16)</span>
+<span class="n">core</span><span class="p">::</span><span class="n">arch</span><span class="p">::</span><span class="fm">asm!</span><span class="p">(</span>
+<span class="w">    </span><span class="s">"mov {tmp}, cr0"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"btr {tmp}, 16"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"mov cr0, {tmp}"</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">out</span><span class="p">(</span><span class="n">reg</span><span class="p">)</span><span class="w"> </span><span class="n">_</span><span class="p">,</span>
+<span class="w">    </span><span class="n">options</span><span class="p">(</span><span class="n">nostack</span><span class="p">,</span><span class="w"> </span><span class="n">preserves_flags</span><span class="p">),</span>
+<span class="p">);</span>
+<span class="c1">// Mark hierarchy levels USER_ACCESSIBLE</span>
+<span class="o">..</span><span class="p">.</span>
+<span class="c1">// Re-enable CR0.WP</span>
+<span class="n">core</span><span class="p">::</span><span class="n">arch</span><span class="p">::</span><span class="fm">asm!</span><span class="p">(</span>
+<span class="w">    </span><span class="s">"mov {tmp}, cr0"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"bts {tmp}, 16"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"mov cr0, {tmp}"</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">out</span><span class="p">(</span><span class="n">reg</span><span class="p">)</span><span class="w"> </span><span class="n">_</span><span class="p">,</span>
+<span class="w">    </span><span class="n">options</span><span class="p">(</span><span class="n">nostack</span><span class="p">,</span><span class="w"> </span><span class="n">preserves_flags</span><span class="p">),</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>Process Isolation on Hardware Faults</h3>
+<p>If a user process performs an illegal operation (e.g. executing <code>cli</code>, <code>hlt</code>, <code>in</code>, <code>out</code>, or accessing invalid memory):
+- <strong>General Protection Fault (#GP, Vector 13)</strong>: Intercepted in <a href="file:///d:/os/src/arch/idt.rs"><code>src/arch/idt.rs</code></a>. If <code>(ctx.cs &amp; 3) == 3</code>, the kernel reports the fault address, kills only the offending task (<code>sched.terminate_current()</code>), and immediately switches to another ready task.
+- <strong>Page Fault (#PF, Vector 14)</strong>: If <code>(ctx.error_code &amp; 4) != 0</code> (user-mode fault), the kernel reports a Segmentation Fault, kills the task, and maintains system integrity.
+- <strong>The interactive shell and other tasks remain completely unaffected.</strong></p>
+<hr />
+<h2>Interactive Shell Verification</h2>
+<p>Three shell commands expose and verify Phase 3 functionality:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt; syscalls
+
+============================================================
+[+] HYDRA MICROKERNEL: HARDWARE SYSTEM CALL SUBSYSTEM
+============================================================
+Hardware MSR Registers:
+  - IA32_EFER.SCE (0xC0000080) : 0x0000000000000d01 (SCE=1)
+  - IA32_STAR     (0xC0000081) : 0x0013000800000000
+    * Kernel CS:SS Base : 0x0008 / 0x0010
+    * User CS:SS Base   : 0x0013 (CS=0x0023, SS=0x001b)
+  - IA32_LSTAR    (0xC0000082) : 0x0000000001dd79364 (asm_syscall_entry)
+  - IA32_FMASK    (0xC0000084) : 0x0000000000044700 (Flags masked on entry)
+
+Registered System Calls &amp; Invocation Counts:
+  - [1] SYS_YIELD    : 0 calls
+  - [2] SYS_SLEEP    : 4 calls
+  - [3] SYS_WRITE    : 10 calls
+  - [4] SYS_EXIT     : 1 calls
+  - [5] SYS_GETPID   : 1 calls
+  - [6] SYS_UPTIME   : 1 calls
+  - [7] SYS_IPC_SEND : 0 calls
+  - [8] SYS_IPC_RECV : 0 calls
+  ---------------------------------------------
+  * Total Hardware System Calls Handled: 17
+============================================================
+
+hydra:/bin&gt; ps
+PID   NAME        MODE    STATE     PRIORITY    TICKS        STACK (RSP)
+------------------------------------------------------------------------------
+0     shell       Kernel  Running   Normal       6298 0x0000000001fe5e80
+1     idle        Kernel  Ready     Idle            0 0x00000000017a3190
+2     user_demo   User    Dead      Normal          8 0x00000000017a8870
+3     rogue_task  User    Dead      Normal          2 0x00000000017b6188
+------------------------------------------------------------------------------
+Total tasks: 4 | Timeslice: 50 ms | Worker counter: 0
+</code></pre></div>
+</div>
+
+
+
 <div id="doc-boot-stage4-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #14</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #15</div>
     <h1>Memory Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/mod.rs"><code>src/memory/mod.rs</code></a></li>
@@ -1524,7 +1811,7 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 
 
 <div id="doc-boot-stage4-frame" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #15</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #16</div>
     <h1>Physical Memory &amp; Frame Allocator Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/frame_allocator.rs"><code>src/memory/frame_allocator.rs</code></a></li>
@@ -1638,7 +1925,7 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 
 
 <div id="doc-boot-stage4-heap" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #16</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #17</div>
     <h1>Dynamic Kernel Heap Allocator Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/heap.rs"><code>src/memory/heap.rs</code></a></li>
@@ -1739,7 +2026,7 @@ hydra&gt; heap test
 
 
 <div id="doc-boot-stage5-paging" class="doc-section">
-    <div class="section-stage-badge">Stage 5: Virtual Memory &bull; Boot Sequence Order #17</div>
+    <div class="section-stage-badge">Stage 5: Virtual Memory &bull; Boot Sequence Order #18</div>
     <h1>Virtual Memory &amp; Paging Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/paging.rs"><code>src/memory/paging.rs</code></a></li>
@@ -1880,7 +2167,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage6-cap-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #18</div>
+    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #19</div>
     <h1>Capability Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/capability/mod.rs"><code>src/capability/mod.rs</code></a></li>
@@ -1991,7 +2278,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage6-cap-table" class="doc-section">
-    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #19</div>
+    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #20</div>
     <h1>Capability Table Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/capability/table.rs"><code>src/capability/table.rs</code></a></li>
@@ -2080,7 +2367,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #20</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #21</div>
     <h1>IPC Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/mod.rs"><code>src/ipc/mod.rs</code></a></li>
@@ -2108,7 +2395,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-msg" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #21</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #22</div>
     <h1>IPC Message Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/message.rs"><code>src/ipc/message.rs</code></a></li>
@@ -2212,7 +2499,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-ep" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #22</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #23</div>
     <h1>IPC Endpoint Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/endpoint.rs"><code>src/ipc/endpoint.rs</code></a></li>
@@ -2322,7 +2609,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage8-zfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #23</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #24</div>
     <h1>ZFS Microkernel File Server Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/fs/zfs/"><code>src/fs/zfs/</code></a> &amp; <a href="file:///d:/os/src/fs/client.rs"><code>src/fs/client.rs</code></a></li>
@@ -2500,7 +2787,7 @@ Upon read operations, the ZFS File Server recalculates the checksum and detects 
 
 
 <div id="doc-boot-stage8b-video" class="doc-section">
-    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #24</div>
+    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #25</div>
     <h1>Hardware Video Driver &amp; GOP Framebuffer Documentation</h1>
 <ul>
 <li><strong>Source Module</strong>: <a href="file:///d:/os/src/video/"><code>src/video/</code></a></li>
@@ -2584,7 +2871,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #25</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #26</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -2719,7 +3006,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #26</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #27</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -2892,7 +3179,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #27</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #28</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

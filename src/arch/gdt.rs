@@ -18,17 +18,7 @@ pub struct Selectors {
     pub tss_selector: SegmentSelector,
 }
 
-static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
-    let mut tss = TaskStateSegment::new();
-    let stack_start = VirtAddr::from_ptr(&raw const DOUBLE_FAULT_STACK);
-    let stack_end = stack_start + STACK_SIZE as u64;
-    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_end;
-
-    let priv_stack_start = VirtAddr::from_ptr(&raw const PRIVILEGE_STACK);
-    let priv_stack_end = priv_stack_start + STACK_SIZE as u64;
-    tss.privilege_stack_table[0] = priv_stack_end;
-    tss
-});
+static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
 static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     let mut gdt = GlobalDescriptorTable::new();
@@ -36,7 +26,7 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     let kernel_data_selector = gdt.append(Descriptor::kernel_data_segment());
     let user_data_selector = gdt.append(Descriptor::user_data_segment());
     let user_code_selector = gdt.append(Descriptor::user_code_segment());
-    let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));
+    let tss_selector = gdt.append(Descriptor::tss_segment(unsafe { &*core::ptr::addr_of!(TSS) }));
 
     (
         gdt,
@@ -51,14 +41,27 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
 });
 
 pub fn init() {
-    // Initialize TSS and GDT descriptor structures in memory
-    let _ = &*TSS;
-    let _ = &*GDT;
+    unsafe {
+        let stack_start = VirtAddr::from_ptr(&raw const DOUBLE_FAULT_STACK);
+        let stack_end = stack_start + STACK_SIZE as u64;
+        TSS.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_end;
 
-    // Note: While native UEFI Boot Services are active, the firmware's IDT
-    // and timer interrupts depend on the firmware GDT selectors.
-    // The GDT and TSS structures are fully initialized in memory and ready
-    // for task switching and Ring 3 userland processes.
+        let priv_stack_start = VirtAddr::from_ptr(&raw const PRIVILEGE_STACK);
+        let priv_stack_end = priv_stack_start + STACK_SIZE as u64;
+        TSS.privilege_stack_table[0] = priv_stack_end;
+    }
+
+    let _ = &*GDT;
+}
+
+/// Dynamically updates the Ring 0 Privilege Stack (RSP0) in the TSS for the active task.
+///
+/// When an interrupt or exception occurs while the CPU is executing in Ring 3 (user mode),
+/// the hardware automatically loads RSP from privilege_stack_table[0].
+pub fn set_privilege_stack(stack_top: VirtAddr) {
+    unsafe {
+        TSS.privilege_stack_table[0] = stack_top;
+    }
 }
 
 

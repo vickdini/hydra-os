@@ -79,6 +79,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     // 8b. Initialize 8042 PS/2 Keyboard Controller for IRQ 1 interrupts
     crate::arch::keyboard::init();
 
+    // 8c. Initialize fast x86_64 hardware system call MSRs (EFER, STAR, LSTAR, FMASK)
+    crate::arch::syscall::init();
+
     // 9. Enable CPU hardware interrupts (sti)
     x86_64::instructions::interrupts::enable();
 
@@ -100,6 +103,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         selectors.kernel_data_selector.0,
         selectors.tss_selector.0
     );
+    println!("  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)");
     println!("  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)");
     println!("  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)");
     println!("  - Virtual Memory     : Autonomous PML4 Root at PhysAddr {:#x}", cr3_frame);

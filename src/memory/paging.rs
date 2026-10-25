@@ -285,6 +285,80 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Ensures that the specified virtual address range is marked USER_ACCESSIBLE
+    /// across all hierarchical page table levels (PML4, PDPT, PD, and PT / huge page).
+    pub unsafe fn make_user_accessible(
+        &mut self,
+        virt_start: VirtAddr,
+        size: usize,
+    ) -> Result<(), &'static str> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        // Temporarily clear CR0.WP (bit 16) so the kernel can modify page table structures
+        core::arch::asm!(
+            "mov {tmp}, cr0",
+            "btr {tmp}, 16",
+            "mov cr0, {tmp}",
+            tmp = out(reg) _,
+            options(nostack, preserves_flags),
+        );
+
+        let start_page = Page::<Size4KiB>::containing_address(virt_start);
+        let end_page = Page::<Size4KiB>::containing_address(virt_start + (size as u64).saturating_sub(1));
+
+        for page in Page::range_inclusive(start_page, end_page) {
+            let p4 = self.table_at_mut(self.pml4_phys);
+            let p4_entry = &mut p4[page.p4_index()];
+            if !p4_entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            p4_entry.set_flags(p4_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+
+            let p3 = self.table_at_mut(p4_entry.addr());
+            let p3_entry = &mut p3[page.p3_index()];
+            if !p3_entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            p3_entry.set_flags(p3_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+            if p3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                x86_64::instructions::tlb::flush(page.start_address());
+                continue;
+            }
+
+            let p2 = self.table_at_mut(p3_entry.addr());
+            let p2_entry = &mut p2[page.p2_index()];
+            if !p2_entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            p2_entry.set_flags(p2_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+            if p2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                x86_64::instructions::tlb::flush(page.start_address());
+                continue;
+            }
+
+            let p1 = self.table_at_mut(p2_entry.addr());
+            let p1_entry = &mut p1[page.p1_index()];
+            if !p1_entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            p1_entry.set_flags(p1_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+            x86_64::instructions::tlb::flush(page.start_address());
+        }
+
+        // Re-enable CR0.WP (bit 16) to restore supervisor write protection
+        core::arch::asm!(
+            "mov {tmp}, cr0",
+            "bts {tmp}, 16",
+            "mov cr0, {tmp}",
+            tmp = out(reg) _,
+            options(nostack, preserves_flags),
+        );
+
+        Ok(())
+    }
+
     /// Identity-maps a physical frame 1:1 (`virt_addr = phys_addr`).
     ///
     /// Required for memory-mapped I/O (MMIO), such as the Local APIC,
@@ -365,5 +439,15 @@ impl AddressSpace {
         Ok(Self {
             pml4_phys: new_pml4_phys,
         })
+    }
+}
+
+/// Marks a memory region as user-accessible in the active/kernel PML4 page tables.
+pub fn make_user_accessible(virt_start: VirtAddr, size: usize) -> Result<(), &'static str> {
+    if let Some(ref mut space) = *KERNEL_SPACE.lock() {
+        unsafe { space.make_user_accessible(virt_start, size) }
+    } else {
+        let mut active = AddressSpace::active();
+        unsafe { active.make_user_accessible(virt_start, size) }
     }
 }

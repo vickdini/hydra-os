@@ -11,6 +11,7 @@ pub mod fs;
 pub mod ipc;
 pub mod memory;
 pub mod shell;
+pub mod syscall;
 pub mod task;
 pub mod video;
 

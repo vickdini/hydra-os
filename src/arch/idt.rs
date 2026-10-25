@@ -286,6 +286,20 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
         14 => {
             // #PF - Page Fault Exception
             let fault_addr = Cr2::read_raw();
+            let is_user = (ctx.error_code & (1 << 2)) != 0 || (ctx.cs & 3) == 3;
+
+            if is_user && crate::task::is_active() {
+                set_color(Color::LightRed, Color::Black);
+                let pid = crate::task::SCHEDULER.lock().current_task_id();
+                println!("\n[!] USER FAULT: Segmentation Fault (#PF) in Task PID {}", pid.0);
+                println!("    Faulting Address (CR2): {:#x}", fault_addr);
+                println!("    Instruction Pointer   : {:#x}, Error Code: {:#x}", ctx.rip, ctx.error_code);
+                let mut sched = crate::task::SCHEDULER.lock();
+                sched.terminate_current();
+                sched.schedule(ctx);
+                return;
+            }
+
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: PAGE FAULT (#PF)");
@@ -297,7 +311,6 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
             // Decode error code bits
             let is_present = (ctx.error_code & (1 << 0)) != 0;
             let is_write = (ctx.error_code & (1 << 1)) != 0;
-            let is_user = (ctx.error_code & (1 << 2)) != 0;
             let is_inst_fetch = (ctx.error_code & (1 << 4)) != 0;
 
             println!("  Root Cause Details:");
@@ -311,6 +324,19 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
         }
         13 => {
             // #GP - General Protection Fault
+            let is_user = (ctx.cs & 3) == 3;
+
+            if is_user && crate::task::is_active() {
+                set_color(Color::LightRed, Color::Black);
+                let pid = crate::task::SCHEDULER.lock().current_task_id();
+                println!("\n[!] USER FAULT: General Protection Fault (#GP) in Task PID {}", pid.0);
+                println!("    Privilege Violation at RIP: {:#x}, Selector/Error: {:#x}", ctx.rip, ctx.error_code);
+                let mut sched = crate::task::SCHEDULER.lock();
+                sched.terminate_current();
+                sched.schedule(ctx);
+                return;
+            }
+
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: GENERAL PROTECTION FAULT (#GP)");
@@ -335,6 +361,18 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
         }
         6 => {
             // #UD - Invalid Opcode
+            let is_user = (ctx.cs & 3) == 3;
+            if is_user && crate::task::is_active() {
+                set_color(Color::LightRed, Color::Black);
+                let pid = crate::task::SCHEDULER.lock().current_task_id();
+                println!("\n[!] USER FAULT: Invalid Opcode (#UD) in Task PID {}", pid.0);
+                println!("    Faulting RIP: {:#x}", ctx.rip);
+                let mut sched = crate::task::SCHEDULER.lock();
+                sched.terminate_current();
+                sched.schedule(ctx);
+                return;
+            }
+
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: INVALID OPCODE (#UD)");
@@ -346,6 +384,18 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
         }
         0 => {
             // #DE - Divide Error
+            let is_user = (ctx.cs & 3) == 3;
+            if is_user && crate::task::is_active() {
+                set_color(Color::LightRed, Color::Black);
+                let pid = crate::task::SCHEDULER.lock().current_task_id();
+                println!("\n[!] USER FAULT: Divide-by-Zero (#DE) in Task PID {}", pid.0);
+                println!("    Faulting RIP: {:#x}", ctx.rip);
+                let mut sched = crate::task::SCHEDULER.lock();
+                sched.terminate_current();
+                sched.schedule(ctx);
+                return;
+            }
+
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: DIVIDE-BY-ZERO (#DE)");

@@ -3,7 +3,7 @@ pub mod tcb;
 
 use alloc::vec::Vec;
 pub use scheduler::{TaskSnapshot, SCHEDULER};
-pub use tcb::{Task, TaskId, TaskPriority, TaskRegisters, TaskState};
+pub use tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
 
 /// Initializes the multitasking subsystem and registers the current main thread.
 pub fn init(current_cr3: u64) {
@@ -26,10 +26,16 @@ pub fn is_active() -> bool {
     SCHEDULER.lock().is_initialized()
 }
 
-/// Spawns a new background kernel task.
+/// Spawns a new background kernel task (Ring 0).
 pub fn spawn(name: &'static str, entry_fn: fn(), priority: TaskPriority) -> TaskId {
     let mut sched = SCHEDULER.lock();
     sched.spawn(name, entry_fn, priority)
+}
+
+/// Spawns a new unprivileged user process (Ring 3).
+pub fn spawn_user(name: &'static str, entry_fn: fn(), priority: TaskPriority) -> TaskId {
+    let mut sched = SCHEDULER.lock();
+    sched.spawn_user(name, entry_fn, priority)
 }
 
 /// Cooperatively yields the current task's timeslice to the next ready task.
