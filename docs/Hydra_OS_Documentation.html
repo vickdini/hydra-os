@@ -407,6 +407,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
     <ul class="toc-list">
         <li class="toc-stage-header">System Overview</li>
 <li class="toc-item"><a href="#doc-overview-index" class="toc-link"><span class="toc-title">Architecture Overview & Codebase Index</span><span class="toc-sub">Microkernel architecture overview, directory map, and concept analogies.</span></a></li>
+<li class="toc-item"><a href="#doc-standards" class="toc-link"><span class="toc-title">Source Code Documentation Standard</span><span class="toc-sub">Rustdoc specification, section headers (Safety, Panics, Errors), intra-doc links, and code comment conventions.</span></a></li>
 <li class="toc-stage-header">Build & Toolchain</li>
 <li class="toc-item"><a href="#doc-build-toolchain" class="toc-link"><span class="toc-title">Build Automation & Toolchain Configuration</span><span class="toc-sub">NASM assembly compiler script, DWARF debug symbols, and UEFI build settings.</span></a></li>
 <li class="toc-stage-header">Stage 0: Firmware Handoff</li>
@@ -462,10 +463,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h2>🗺️ Documentation Directory Map</h2>
 <div class="codehilite"><pre><span></span><code><span class="n">docs</span><span class="o">/</span>
 <span class="err">├──</span><span class="w"> </span><span class="n">README</span><span class="o">.</span><span class="n">md</span><span class="w">                      </span><span class="c1"># This Index</span>
+<span class="err">├──</span><span class="w"> </span><span class="n">DOCUMENTATION_STANDARD</span><span class="o">.</span><span class="n">md</span><span class="w">      </span><span class="c1"># Rustdoc-compatible source code documentation standard</span>
 <span class="err">├──</span><span class="w"> </span><span class="n">build</span><span class="o">.</span><span class="n">md</span><span class="w">                       </span><span class="c1"># Build automation script (build.rs)</span>
 <span class="err">└──</span><span class="w"> </span><span class="n">src</span><span class="o">/</span>
 <span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">main</span><span class="o">.</span><span class="n">md</span><span class="w">                    </span><span class="c1"># Kernel entry point &amp; bootstrap orchestrator (src/main.rs)</span>
 <span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">console</span><span class="o">.</span><span class="n">md</span><span class="w">                 </span><span class="c1"># Thread-safe console &amp; formatting macros (src/console.rs)</span>
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">vfs</span><span class="o">.</span><span class="n">md</span><span class="w">                     </span><span class="c1"># Unix File Descriptors, Pipes, Syscalls &amp; Pipelines (src/fs/)</span>
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">zfs</span><span class="o">.</span><span class="n">md</span><span class="w">                     </span><span class="c1"># Microkernel ZFS File Server &amp; SPA CoW (src/fs/zfs/)</span>
 <span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">arch</span><span class="o">/</span>
 <span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">mod</span><span class="o">.</span><span class="n">md</span><span class="w">                 </span><span class="c1"># Architecture-specific module root (src/arch/mod.rs)</span>
 <span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">boot_services</span><span class="o">.</span><span class="n">md</span><span class="w">       </span><span class="c1"># Hardware takeover &amp; ExitBootServices (src/arch/boot_services.rs)</span>
@@ -680,8 +684,280 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 
+<div id="doc-standards" class="doc-section">
+    <div class="section-stage-badge">System Overview &bull; Boot Sequence Order #02</div>
+    <h1>Hydra OS — Source Code Documentation Standard</h1>
+<ul>
+<li><strong>Document Version</strong>: 1.0.0</li>
+<li><strong>Scope</strong>: All Rust source files (<code>src/**/*.rs</code>) across the entire Hydra OS codebase.</li>
+<li><strong>Engine Compatibility</strong>: <code>rustdoc</code> (Rust 2021 Edition), Markdown (CommonMark), GitHub Flavored Markdown (GFM).</li>
+<li><strong>Primary Goal</strong>: Ensure every module, type, function, and unsafe block is maximally understandable, self-explanatory, and accessible to both systems engineers and learners.</li>
+</ul>
+<hr />
+<h2>1. Core Philosophy: "Code Tells How, Docs Tell Why"</h2>
+<ol>
+<li><strong>Self-Explanatory Architecture</strong>: Source code expresses the raw algorithmic logic; documentation articulates the <strong>architectural intent</strong>, <strong>hardware constraints</strong>, <strong>invariants</strong>, and <strong>safety prerequisites</strong>.</li>
+<li><strong>Accessible Rigor</strong>: Use clear, accessible English accompanied by intuitive systems analogies (e.g., capability tokens as security keycards, frame allocator as parking lot attendant), while maintaining absolute technical precision regarding bit masks, memory layouts, and register states.</li>
+<li><strong>Rustdoc First</strong>: All public items must compile cleanly into formatted HTML via <code>cargo doc</code> without broken links, unescaped HTML, or missing sections.</li>
+<li><strong>No Trivial Comments</strong>: Comments like <code>// sets the value</code> or <code>/// returns the id</code> are forbidden. Every doc comment must provide genuine insight beyond what the type signature already conveys.</li>
+</ol>
+<hr />
+<h2>2. Doc Comment Types &amp; Scope</h2>
+<table>
+<thead>
+<tr>
+<th>Syntax</th>
+<th>Target</th>
+<th>Required Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>//!</code></td>
+<td><strong>Module / Crate Root</strong></td>
+<td>Top of every file: subsystem role, architectural dependencies, dataflow.</td>
+</tr>
+<tr>
+<td><code>///</code></td>
+<td><strong>Types, Functions, Constants</strong></td>
+<td>All <code>struct</code>, <code>enum</code>, <code>trait</code>, <code>fn</code>, <code>const</code>, <code>static</code>, and type aliases.</td>
+</tr>
+<tr>
+<td><code>//</code></td>
+<td><strong>Implementation Logic</strong></td>
+<td>Complex internal algorithms, hardware errata workarounds, assembly rationale.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>3. Module-Level Documentation Standard (<code>//!</code>)</h2>
+<p>Every single <code>.rs</code> file <strong>must begin</strong> with an outer module-level documentation block (<code>//!</code>) structured as follows:</p>
+<div class="codehilite"><pre><span></span><code><span class="sd">//! # Subsystem Name: High-Level Title</span>
+<span class="sd">//!</span>
+<span class="sd">//! Concise summary of the module's core responsibility in 1–2 sentences.</span>
+<span class="sd">//!</span>
+<span class="sd">//! ## Architectural Role &amp; Design Rationale</span>
+<span class="sd">//! Explanation of why this module exists, how it fits into the microkernel design,</span>
+<span class="sd">//! and the problems it solves. Include real-world analogies where helpful.</span>
+<span class="sd">//!</span>
+<span class="sd">//! ## Key Types &amp; Interfaces</span>
+<span class="sd">//! - [`TypeName`](TypeName): Summary of primary structure.</span>
+<span class="sd">//! - [`function_name()`]: Core public entry point.</span>
+<span class="sd">//!</span>
+<span class="sd">//! ## Hardware &amp; Dependency Context</span>
+<span class="sd">//! - CPU Privilege Level: Ring 0 (Kernel) / Ring 3 (Userland)</span>
+<span class="sd">//! - Hardware Interaction: I/O Ports, MSRs, MMIO, or Page Tables</span>
+<span class="sd">//! - Concurrency: Lock-free atomics / `spin::Mutex` / Interrupt-safe</span>
+<span class="sd">//!</span>
+<span class="sd">//! ## Dataflow &amp; Architectural Diagram (Optional but Strongly Encouraged)</span>
+<span class="sd">//! ```text</span>
+<span class="sd">//! +-------------+         +-------------+         +-------------+</span>
+<span class="sd">//! | Input Stream | ------&gt; | Pipe Buffer | ------&gt; | File Output |</span>
+<span class="sd">//! +-------------+         +-------------+         +-------------+</span>
+<span class="sd">//! ```</span>
+</code></pre></div>
+
+<hr />
+<h2>4. Function &amp; Method Documentation Standard</h2>
+<p>Every function (both <code>pub</code> and non-trivial <code>pub(crate)</code>/private functions) must adhere to the <strong>Standard Section Pattern</strong>:</p>
+<div class="codehilite"><pre><span></span><code><span class="sd">/// Single-sentence summary written in the third-person imperative mood.</span>
+<span class="sd">///</span>
+<span class="sd">/// Multi-paragraph detailed explanation of the function's internal mechanism,</span>
+<span class="sd">/// edge-case handling, and architectural side effects (e.g., changes to task state,</span>
+<span class="sd">/// hardware interrupt flags, or memory page mappings).</span>
+<span class="sd">///</span>
+<span class="sd">/// # Arguments</span>
+<span class="sd">///</span>
+<span class="sd">/// * `param1` - Purpose, units (bytes, ticks, ms), valid range, and constraints.</span>
+<span class="sd">/// * `param2` - Expected invariant or state requirement.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Returns</span>
+<span class="sd">///</span>
+<span class="sd">/// Description of the return value. For `Option&lt;T&gt;` or `Result&lt;T, E&gt;`, explain</span>
+<span class="sd">/// what `Some` / `None` or `Ok` / `Err` specifically signify in this context.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Errors</span>
+<span class="sd">///</span>
+<span class="sd">/// Explicitly list all error conditions, negative errno values, and recovery steps:</span>
+<span class="sd">/// - `-EBADF`: The provided file descriptor index was out of bounds or unopened.</span>
+<span class="sd">/// - `-EMFILE`: The per-process file descriptor table is completely saturated.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Panics</span>
+<span class="sd">///</span>
+<span class="sd">/// Explicitly state conditions that cause a panic, or guarantee:</span>
+<span class="sd">/// - *Guaranteed to never panic under normal execution.*</span>
+<span class="sd">///</span>
+<span class="sd">/// # Safety</span>
+<span class="sd">///</span>
+<span class="sd">/// **MANDATORY FOR ALL `unsafe fn`!** State caller invariants:</span>
+<span class="sd">/// 1. Pointer validity: Alignment, dereference bounds, and lifetime requirements.</span>
+<span class="sd">/// 2. Interrupt context: Must interrupts be disabled (`CLI`) before invocation?</span>
+<span class="sd">/// 3. Hardware state: Required CPU mode (e.g., 64-bit Long Mode, CR0.WP active).</span>
+<span class="sd">///</span>
+<span class="sd">/// # Examples</span>
+<span class="sd">///</span>
+<span class="sd">/// ```rust,no_run</span>
+<span class="sd">/// let (read_fd, write_fd) = sys_pipe().expect("Failed to create pipe");</span>
+<span class="sd">/// sys_write(write_fd, b"Hydra OS").unwrap();</span>
+<span class="sd">/// ```</span>
+</code></pre></div>
+
+<hr />
+<h2>5. Struct, Enum, and Field Documentation Standard</h2>
+<h3>Structs</h3>
+<p>Every struct must explain its <strong>lifecycle</strong>, <strong>ownership</strong>, and <strong>threading guarantees</strong>:</p>
+<div class="codehilite"><pre><span></span><code><span class="sd">/// Circular ring buffer implementing an anonymous unidirectional streaming pipe.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Concurrency &amp; Thread Safety</span>
+<span class="sd">/// This structure is protected by a [`spin::Mutex`] and is safe to share</span>
+<span class="sd">/// across threads via an [`Arc&lt;Mutex&lt;PipeBuffer&gt;&gt;`]. Read and write operations</span>
+<span class="sd">/// acquire the lock briefly to copy bytes into or out of the internal array.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Lifetime &amp; Cleanup</span>
+<span class="sd">/// When all reader file descriptors drop (`readers == 0`), subsequent write calls</span>
+<span class="sd">/// return a Broken Pipe error (`-EPIPE`). When all writers drop (`writers == 0`),</span>
+<span class="sd">/// subsequent reads return `0` bytes (EOF) once the internal buffer is drained.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">PipeBuffer</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// Internal 4096-byte ring storage for unread stream payload.</span>
+<span class="w">    </span><span class="n">buffer</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="kt">u8</span><span class="p">;</span><span class="w"> </span><span class="n">PIPE_BUFFER_SIZE</span><span class="p">],</span>
+<span class="w">    </span><span class="sd">/// Ring index where next incoming byte will be written (head pointer).</span>
+<span class="w">    </span><span class="n">head</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">/// Ring index where next available byte will be read (tail pointer).</span>
+<span class="w">    </span><span class="n">tail</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">/// Total count of valid, unconsumed bytes currently residing in the ring.</span>
+<span class="w">    </span><span class="n">count</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">/// Number of active reader file descriptors holding a reference to this pipe.</span>
+<span class="w">    </span><span class="n">readers</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">/// Number of active writer file descriptors holding a reference to this pipe.</span>
+<span class="w">    </span><span class="n">writers</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Enums</h3>
+<p>Every enum and each individual variant must be documented:</p>
+<div class="codehilite"><pre><span></span><code><span class="sd">/// Execution privilege level of an architectural thread/task.</span>
+<span class="cp">#[derive(Debug, Clone, Copy, PartialEq, Eq)]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">PrivilegeMode</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// Ring 0: Full hardware privilege with supervisor segment selectors (CS=0x08, SS=0x10).</span>
+<span class="w">    </span><span class="n">Kernel</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">/// Ring 3: Unprivileged userland execution with user segment selectors (CS=0x23, SS=0x1B).</span>
+<span class="w">    </span><span class="sd">/// All hardware I/O and privileged instructions cause a General Protection Fault (#GP).</span>
+<span class="w">    </span><span class="n">User</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2>6. Rustdoc Formatting Rules &amp; Intra-Doc Links</h2>
+<ol>
+<li><strong>Intra-Doc Links</strong>: Always link to types using Rustdoc bracket syntax rather than raw markdown URLs:
+   - <code>[</code>Task<code>](crate::task::Task)</code>
+   - <code>[</code>PipeBuffer<code>](crate::fs::pipe::PipeBuffer)</code>
+   - <code>[</code>SCHEDULER<code>](crate::task::scheduler::SCHEDULER)</code></li>
+<li><strong>Code Blocks</strong>: Always provide a language specifier on triple-backtick blocks:
+   - <code>rust,no_run</code> for Rust examples
+   - <code>text</code> for ASCII diagrams
+   - <code>bash</code> for shell commands</li>
+<li><strong>Section Headings</strong>: Use Markdown Level 1 (<code># Section</code>) inside doc comments for standard sections (<code># Arguments</code>, <code># Returns</code>, <code># Errors</code>, <code># Safety</code>).</li>
+</ol>
+<hr />
+<h2>7. Concrete Examples: Good vs. Bad Documentation</h2>
+<h3>Example 1: Function Documentation</h3>
+<h4>❌ Bad Documentation (Lazy / Inadequate)</h4>
+<div class="codehilite"><pre><span></span><code><span class="c1">// duplicates a descriptor</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">dup2</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">oldfd</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">newfd</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4>✅ Good Documentation (Standard-Compliant)</h4>
+<div class="codehilite"><pre><span></span><code><span class="sd">/// Duplicates an open file descriptor onto another index, closing the target if active.</span>
+<span class="sd">///</span>
+<span class="sd">/// Conforms to POSIX `dup2` semantics. If `oldfd == newfd` and `oldfd` is a valid open</span>
+<span class="sd">/// descriptor, the function returns `Ok(newfd)` without closing. Otherwise, if `newfd`</span>
+<span class="sd">/// is already open, it is closed before the clone of `oldfd` is installed.</span>
+<span class="sd">///</span>
+<span class="sd">/// If `oldfd` references an anonymous pipe, the associated pipe buffer's reader or writer</span>
+<span class="sd">/// reference count is incremented accordingly.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Arguments</span>
+<span class="sd">///</span>
+<span class="sd">/// * `oldfd` - The source file descriptor index (must be in `0..MAX_FDS` and open).</span>
+<span class="sd">/// * `newfd` - The target file descriptor index to overwrite (must be in `0..MAX_FDS`).</span>
+<span class="sd">///</span>
+<span class="sd">/// # Returns</span>
+<span class="sd">///</span>
+<span class="sd">/// * `Ok(newfd)` - The new file descriptor index on successful duplication.</span>
+<span class="sd">/// * `Err("Bad file descriptor (EBADF)")` - If either index is out of bounds or `oldfd` is closed.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Errors</span>
+<span class="sd">///</span>
+<span class="sd">/// Returns an error if `oldfd &gt;= 16`, `newfd &gt;= 16`, or `fds[oldfd]` is `None`.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">dup2</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">oldfd</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">newfd</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h3>Example 2: Unsafe Hardware Architecture Function</h3>
+<h4>❌ Bad Documentation</h4>
+<div class="codehilite"><pre><span></span><code><span class="c1">// switches cr3 page table</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">switch_cr3</span><span class="p">(</span><span class="n">phys_addr</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4>✅ Good Documentation (Standard-Compliant)</h4>
+<div class="codehilite"><pre><span></span><code><span class="sd">/// Loads a new physical base address into the CPU Control Register 3 (`CR3`).</span>
+<span class="sd">///</span>
+<span class="sd">/// Flushes the architectural Translation Lookaside Buffer (TLB) for all non-global</span>
+<span class="sd">/// page mappings and immediately switches the active 4-level paging root to the</span>
+<span class="sd">/// specified PML4 table.</span>
+<span class="sd">///</span>
+<span class="sd">/// # Arguments</span>
+<span class="sd">///</span>
+<span class="sd">/// * `phys_addr` - Physical address of the root PML4 table. Must be strictly 4 KiB aligned</span>
+<span class="sd">///   (bits 0..11 must be zero).</span>
+<span class="sd">///</span>
+<span class="sd">/// # Safety</span>
+<span class="sd">///</span>
+<span class="sd">/// This function is inherently unsafe because writing an invalid address to `CR3`</span>
+<span class="sd">/// causes an immediate Triple Fault and hardware CPU reboot. The caller must guarantee:</span>
+<span class="sd">/// 1. `phys_addr` points to a valid, identity-mapped or kernel-accessible PML4 frame.</span>
+<span class="sd">/// 2. The new page table identity-maps the executing code and stack frames.</span>
+<span class="sd">/// 3. The address satisfies 4096-byte alignment (`phys_addr &amp; 0xFFF == 0`).</span>
+<span class="sd">///</span>
+<span class="sd">/// # Hardware Registers</span>
+<span class="sd">///</span>
+<span class="sd">/// - Modifies: `CR3` (PDBR — Page Directory Base Register).</span>
+<span class="sd">/// - Side Effects: Complete invalidation of CPU TLB entries (except those marked Global in PTE).</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">switch_cr3</span><span class="p">(</span><span class="n">phys_addr</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2>8. Verification &amp; Tooling Workflow</h2>
+<p>Documentation completeness is verified automatically as part of the continuous build:</p>
+<ol>
+<li><strong>Local Documentation Generation</strong>:
+   <code>bash
+   cargo doc --no-deps --target x86_64-unknown-uefi</code></li>
+<li><strong>Enforcing Warnings as Errors</strong>:
+   Add to crate root (<code>src/main.rs</code>):
+   <code>rust
+   #![warn(missing_docs)]
+   #![warn(rustdoc::broken_intra_doc_links)]</code></li>
+<li><strong>PDF Generation Synchronization</strong>:
+   Whenever a new module is documented, ensure it is added to <code>DOCS_ORDER</code> in <a href="file:///d:/os/scripts/generate_docs_pdf.py"><code>scripts/generate_docs_pdf.py</code></a> so it renders into the publication PDF:
+   <code>bash
+   python scripts/generate_docs_pdf.py</code></li>
+</ol>
+</div>
+
+
+
 <div id="doc-build-toolchain" class="doc-section">
-    <div class="section-stage-badge">Build & Toolchain &bull; Boot Sequence Order #02</div>
+    <div class="section-stage-badge">Build & Toolchain &bull; Boot Sequence Order #03</div>
     <h1>Build Script Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/build.rs"><code>build.rs</code></a></li>
@@ -710,7 +986,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage0" class="doc-section">
-    <div class="section-stage-badge">Stage 0: Firmware Handoff &bull; Boot Sequence Order #03</div>
+    <div class="section-stage-badge">Stage 0: Firmware Handoff &bull; Boot Sequence Order #04</div>
     <h1>Legacy Assembly Bootstrapper Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/arch/x86_64/boot"><code>src/arch/x86_64/boot/</code></a></li>
@@ -756,7 +1032,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage1" class="doc-section">
-    <div class="section-stage-badge">Stage 1: Kernel Entry Point &bull; Boot Sequence Order #04</div>
+    <div class="section-stage-badge">Stage 1: Kernel Entry Point &bull; Boot Sequence Order #05</div>
     <h1>Kernel Entry Point &amp; Bootstrapping Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/main.rs"><code>src/main.rs</code></a></li>
@@ -893,7 +1169,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage2" class="doc-section">
-    <div class="section-stage-badge">Stage 2: Early Diagnostics &bull; Boot Sequence Order #05</div>
+    <div class="section-stage-badge">Stage 2: Early Diagnostics &bull; Boot Sequence Order #06</div>
     <h1>Console &amp; Diagnostic Output Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/console.rs"><code>src/console.rs</code></a></li>
@@ -957,7 +1233,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #06</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #07</div>
     <h1>Architecture Module Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/arch/mod.rs"><code>src/arch/mod.rs</code></a></li>
@@ -978,7 +1254,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-gdt" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #07</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #08</div>
     <h1>Global Descriptor Table (GDT) &amp; TSS Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/arch/gdt.rs"><code>src/arch/gdt.rs</code></a></li>
@@ -1055,7 +1331,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-idt" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #08</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #09</div>
     <h1>Interrupt Descriptor Table (IDT) &amp; Hardware Exceptions</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/arch/idt.rs"><code>src/arch/idt.rs</code></a></li>
@@ -1199,7 +1475,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-pic" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #09</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #10</div>
     <h1>8259 Programmable Interrupt Controller (PIC)</h1>
 <h2>1. Architectural Role</h2>
 <p>The <strong>8259 Programmable Interrupt Controller (PIC)</strong> is the legacy interrupt routing hardware in standard PC/AT architectures. It aggregates up to 15 hardware IRQs (Interrupt Request lines) across two cascading controllers and forwards them to the CPU via the <code>INTR</code> line.</p>
@@ -1264,7 +1540,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-pit" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #10</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #11</div>
     <h1>8254 Programmable Interval Timer (PIT)</h1>
 <h2>1. Architectural Role</h2>
 <p>The <strong>Intel 8254 Programmable Interval Timer (PIT)</strong> provides Hydra with a hardware clock source for measuring wall-clock time, coordinating preemptive multitasking ticks, and executing low-power sleeps.</p>
@@ -1290,7 +1566,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-keyboard" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #11</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #12</div>
     <h1>8042 PS/2 Keyboard Driver &amp; Input Subsystem</h1>
 <h2>1. Architectural Role</h2>
 <p>The <strong>8042 Keyboard Controller</strong> provides Hydra with independent, firmware-free human interface input. Operating on standard I/O ports <code>0x60</code> (Data) and <code>0x64</code> (Status/Command), it decodes raw hardware scancodes into high-level keyboard events.</p>
@@ -1352,7 +1628,7 @@ An HTML version suitable for browser inspection or custom printing is also creat
 
 
 <div id="doc-boot-stage3-takeover" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #12</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #13</div>
     <h1>Hardware Takeover &amp; ExitBootServices</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/arch/boot_services.rs"><code>src/arch/boot_services.rs</code></a></li>
@@ -1464,7 +1740,7 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 
 
 <div id="doc-boot-stage3-cpu" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #13</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #14</div>
     <h1>CPU Control &amp; Register Diagnostics Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/arch/cpu.rs"><code>src/arch/cpu.rs</code></a></li>
@@ -1505,7 +1781,7 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 
 
 <div id="doc-boot-stage3-syscall" class="doc-section">
-    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #14</div>
+    <div class="section-stage-badge">Stage 3: CPU Architecture &bull; Boot Sequence Order #15</div>
     <h1>Ring 3 User Mode &amp; Hardware System Calls (<code>syscall</code> / <code>sysretq</code>)</h1>
 <h2>Overview</h2>
 <p><strong>Phase 3</strong> introduces hardware-enforced CPU privilege rings and the fast system call interface to Hydra OS. In long mode x86_64, the kernel transitions from pure kernel-mode threads (Ring 0) to unprivileged user processes executing at Current Privilege Level 3 (<strong>Ring 3</strong>). </p>
@@ -1791,7 +2067,7 @@ Total tasks: 4 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage4-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #15</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #16</div>
     <h1>Memory Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/mod.rs"><code>src/memory/mod.rs</code></a></li>
@@ -1813,7 +2089,7 @@ Total tasks: 4 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage4-frame" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #16</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #17</div>
     <h1>Physical Memory &amp; Frame Allocator Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/frame_allocator.rs"><code>src/memory/frame_allocator.rs</code></a></li>
@@ -1927,7 +2203,7 @@ Total tasks: 4 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage4-heap" class="doc-section">
-    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #17</div>
+    <div class="section-stage-badge">Stage 4: Memory Subsystem &bull; Boot Sequence Order #18</div>
     <h1>Dynamic Kernel Heap Allocator Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/heap.rs"><code>src/memory/heap.rs</code></a></li>
@@ -2028,7 +2304,7 @@ hydra&gt; heap test
 
 
 <div id="doc-boot-stage5-paging" class="doc-section">
-    <div class="section-stage-badge">Stage 5: Virtual Memory &bull; Boot Sequence Order #18</div>
+    <div class="section-stage-badge">Stage 5: Virtual Memory &bull; Boot Sequence Order #19</div>
     <h1>Virtual Memory &amp; Paging Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/memory/paging.rs"><code>src/memory/paging.rs</code></a></li>
@@ -2169,7 +2445,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage6-cap-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #19</div>
+    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #20</div>
     <h1>Capability Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/capability/mod.rs"><code>src/capability/mod.rs</code></a></li>
@@ -2280,7 +2556,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage6-cap-table" class="doc-section">
-    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #20</div>
+    <div class="section-stage-badge">Stage 6: Security & Capabilities &bull; Boot Sequence Order #21</div>
     <h1>Capability Table Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/capability/table.rs"><code>src/capability/table.rs</code></a></li>
@@ -2369,7 +2645,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-mod" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #21</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #22</div>
     <h1>IPC Subsystem Overview</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/mod.rs"><code>src/ipc/mod.rs</code></a></li>
@@ -2397,7 +2673,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-msg" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #22</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #23</div>
     <h1>IPC Message Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/message.rs"><code>src/ipc/message.rs</code></a></li>
@@ -2501,7 +2777,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage7-ipc-ep" class="doc-section">
-    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #23</div>
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #24</div>
     <h1>IPC Endpoint Module Documentation</h1>
 <ul>
 <li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/endpoint.rs"><code>src/ipc/endpoint.rs</code></a></li>
@@ -2611,7 +2887,7 @@ hydra&gt; unmap 0x7000000000
 
 
 <div id="doc-boot-stage8-zfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #24</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #25</div>
     <h1>ZFS Microkernel File Server Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/fs/zfs/"><code>src/fs/zfs/</code></a> &amp; <a href="file:///d:/os/src/fs/client.rs"><code>src/fs/client.rs</code></a></li>
@@ -2789,7 +3065,7 @@ Upon read operations, the ZFS File Server recalculates the checksum and detects 
 
 
 <div id="doc-boot-stage8-vfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #25</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #26</div>
     <h1>Unix File Descriptor Table &amp; Shell Pipelines</h1>
 <ul>
 <li><strong>Source Files</strong>: <a href="file:///d:/os/src/fs/fd.rs"><code>src/fs/fd.rs</code></a>, <a href="file:///d:/os/src/fs/pipe.rs"><code>src/fs/pipe.rs</code></a>, <a href="file:///d:/os/src/shell/pipeline.rs"><code>src/shell/pipeline.rs</code></a></li>
@@ -2956,7 +3232,7 @@ ps<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<s
 
 
 <div id="doc-boot-stage8b-video" class="doc-section">
-    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #26</div>
+    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #27</div>
     <h1>Hardware Video Driver &amp; GOP Framebuffer Documentation</h1>
 <ul>
 <li><strong>Source Module</strong>: <a href="file:///d:/os/src/video/"><code>src/video/</code></a></li>
@@ -3040,7 +3316,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #27</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -3175,7 +3451,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #28</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -3348,7 +3624,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage9-sync" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #30</div>
     <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
 <h2>Overview</h2>
 <p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
@@ -3495,7 +3771,7 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #30</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #31</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

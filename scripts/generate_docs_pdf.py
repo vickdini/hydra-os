@@ -46,6 +46,13 @@ DOCS_ORDER = [
         "subtitle": "Microkernel architecture overview, directory map, and concept analogies.",
     },
     {
+        "stage": "System Overview",
+        "title": "Source Code Documentation Standard",
+        "file": "docs/src/doc_standard.md",
+        "anchor": "doc-standards",
+        "subtitle": "Rustdoc specification, section headers (Safety, Panics, Errors), intra-doc links, and code comment conventions.",
+    },
+    {
         "stage": "Build & Toolchain",
         "title": "Build Automation & Toolchain Configuration",
         "file": "docs/build.md",

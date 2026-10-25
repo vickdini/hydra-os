@@ -57,7 +57,7 @@ pub fn init() {
 /// Dynamically updates the Ring 0 Privilege Stack (RSP0) in the TSS for the active task.
 ///
 /// When an interrupt or exception occurs while the CPU is executing in Ring 3 (user mode),
-/// the hardware automatically loads RSP from privilege_stack_table[0].
+/// the hardware automatically loads RSP from `privilege_stack_table[0]`.
 pub fn set_privilege_stack(stack_top: VirtAddr) {
     unsafe {
         TSS.privilege_stack_table[0] = stack_top;

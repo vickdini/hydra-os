@@ -9,10 +9,13 @@ Welcome to the technical documentation for **Hydra OS**. Every source code file 
 ```
 docs/
 ├── README.md                      # This Index
+├── DOCUMENTATION_STANDARD.md      # Rustdoc-compatible source code documentation standard
 ├── build.md                       # Build automation script (build.rs)
 └── src/
     ├── main.md                    # Kernel entry point & bootstrap orchestrator (src/main.rs)
     ├── console.md                 # Thread-safe console & formatting macros (src/console.rs)
+    ├── vfs.md                     # Unix File Descriptors, Pipes, Syscalls & Pipelines (src/fs/)
+    ├── zfs.md                     # Microkernel ZFS File Server & SPA CoW (src/fs/zfs/)
     ├── arch/
     │   ├── mod.md                 # Architecture-specific module root (src/arch/mod.rs)
     │   ├── boot_services.md       # Hardware takeover & ExitBootServices (src/arch/boot_services.rs)
