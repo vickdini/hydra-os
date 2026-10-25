@@ -445,6 +445,10 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage8-vfs" class="toc-link"><span class="toc-title">Unix File Descriptor Table & Shell Pipelines</span><span class="toc-sub">POSIX file descriptors (0..15), anonymous pipes (PipeBuffer), I/O redirection, and shell pipeline chains.</span></a></li>
 <li class="toc-stage-header">Stage 8b: Hardware Video & Framebuffer</li>
 <li class="toc-item"><a href="#doc-boot-stage8b-video" class="toc-link"><span class="toc-title">Hardware Video Driver & Framebuffer Console</span><span class="toc-sub">UEFI GOP linear framebuffer discovery, 8x16 bitmap font, and autonomous pixel console.</span></a></li>
+<li class="toc-stage-header">Stage 8c: Graphical Desktop & Wayland</li>
+<li class="toc-item"><a href="#doc-boot-stage8c-plasma" class="toc-link"><span class="toc-title">Wayland Compositor & KDE Plasma Desktop Shell</span><span class="toc-sub">Double-buffered 32-bit compositor, PS/2 mouse driver, Breeze theme engine, Konsole, and KSysGuard.</span></a></li>
+<li class="toc-stage-header">Stage 8d: Network Subsystem</li>
+<li class="toc-item"><a href="#doc-boot-stage8d-net" class="toc-link"><span class="toc-title">Intel E1000 Gigabit NIC Driver & Network Stack</span><span class="toc-sub">Intel 82540EM DMA controller, Ethernet II, ARP cache, IPv4, ICMP ping, DHCP client, and HTTP/1.0 downloader.</span></a></li>
 <li class="toc-stage-header">Stage 9: Multitasking & Scheduler</li>
 <li class="toc-item"><a href="#doc-boot-stage9-tcb" class="toc-link"><span class="toc-title">Task Control Block (TCB) & Thread State</span><span class="toc-sub">TCB architecture, register frame (TaskRegisters), lifecycle state machine, and heap stacks.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-scheduler" class="toc-link"><span class="toc-title">Preemptive Multitasking & Context Switching</span><span class="toc-sub">Round-robin timeslicing at 100 Hz, iretq context switching, idle task, and task commands (ps, spawn, kill).</span></a></li>
@@ -3515,8 +3519,236 @@ hydra&gt; video clear
 
 
 
+<div id="doc-boot-stage8c-plasma" class="doc-section">
+    <div class="section-stage-badge">Stage 8c: Graphical Desktop & Wayland &bull; Boot Sequence Order #29</div>
+    <h1>Wayland Compositor &amp; KDE Plasma Desktop Shell</h1>
+<h2>1. Architectural Role &amp; Design Rationale</h2>
+<p>Hydra OS introduces a native microkernel graphical desktop environment modeled after <strong>KDE Plasma</strong> running on a <strong>Wayland Compositor</strong>. Rather than relying on legacy monolithic X11 servers or bloated graphics stacks, Hydra implements a modern, memory-safe, double-buffered graphics pipeline executing in Ring 0 / Ring 3.</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                       KDE Plasma Desktop Shell                           |
+|       - Breeze Window Theme Engine (Titlebars, Close, Max, Min)          |
+|       - 40px Taskbar Panel (Kickoff Launcher, Window Tabs, System Tray)  |
+|       - Interactive Applications (Konsole Terminal, KSysGuard Monitor)   |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|                  Microkernel Wayland Compositor Core                     |
+|       - Surface Registry (WlSurface: Position, Size, Z-Stacking)         |
+|       - Input Routing &amp; Focus Management (wl_seat)                       |
+|       - Window Drag-and-Drop &amp; Maximize State Machine                    |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|               Double-Buffered Framebuffer Compositor                     |
+|       - 32-bit ARGB Canvas (Vec&lt;u32&gt;) in Fast System RAM                 |
+|       - Fast Alpha-Blending (Color::blend) &amp; Vertical Gradients          |
+|       - 12x19 Anti-Aliased Arrow Mouse Cursor Sprite                     |
++--------------------------------------------------------------------------+
+                  │                                     │
+                  ▼                                     ▼
+     Physical UEFI GOP Framebuffer              PS/2 Mouse Auxiliary Driver
+      (Linear Video RAM Blit)                    (Ports 0x60/0x64, 3-byte packets)
+</code></pre></div>
+
+<hr />
+<h2>2. Hardware Input: PS/2 Auxiliary Mouse Driver</h2>
+<p>Pointer interaction is handled autonomously by <a href="file:///d:/os/src/arch/mouse.rs"><code>src/arch/mouse.rs</code></a> via standard 8042 controller I/O ports:
+- <strong>Port 0x60</strong>: Data Register.
+- <strong>Port 0x64</strong>: Status / Command Register.</p>
+<h3>Multiplexed Controller Routing</h3>
+<p>By checking bit 5 (<code>STATUS_AUX_OUTPUT</code>) of status port <code>0x64</code>, the driver distinguishes mouse packet bytes from keyboard scancodes without hardware collisions.</p>
+<h3>3-Byte Packet Protocol</h3>
+<p>Standard PS/2 mouse motion is streamed in 3-byte packets:
+- <strong>Byte 0</strong>: Flags (Left Button, Right Button, Middle Button, Bit 3 verification, X/Y sign extensions, overflow bits).
+- <strong>Byte 1</strong>: Delta X (9-bit signed relative horizontal movement).
+- <strong>Byte 2</strong>: Delta Y (9-bit signed relative vertical movement, inverted for screen space).</p>
+<p>The coordinates are clamped within the active display bounds <code>(0..width - 1, 0..height - 1)</code>.</p>
+<hr />
+<h2>3. Double-Buffered Compositor Engine</h2>
+<p>To eliminate screen flickering and tearing when moving windows, rendering widgets, or tracking the mouse pointer:
+1. <strong>Off-Screen Canvas</strong>: Maintained in heap memory (<code>Vec&lt;u32&gt;</code> of size <code>width * height</code>).
+2. <strong>Color Primitives</strong>: 32-bit ARGB packing with linear alpha blending:
+   $$\text{Color::blend}(bg, fg, \alpha) = \frac{(fg \times \alpha) + (bg \times (255 - \alpha))}{255}$$
+3. <strong>Cursor Sprite</strong>: High-definition 12x19 pixel arrow sprite with a dark outline (<code>#121212</code>) and opaque white interior (<code>#FFFFFF</code>).
+4. <strong>Hardware Flip</strong>: Transfers the assembled raster buffer to the physical UEFI GOP linear framebuffer in a single pass, converting to BGRA if the hardware requires it.</p>
+<hr />
+<h2>4. KDE Plasma Breeze Desktop Elements</h2>
+<p>The desktop shell reproduces the signature aesthetics of KDE Plasma:
+- <strong>Breeze Dark Wallpaper</strong>: Geometric gradient (<code>#1b1e20</code> -&gt; <code>#232629</code> -&gt; <code>#2a2e32</code>) with abstract angular polygon accents.
+- <strong>Breeze Window Frames</strong>:
+  - Translucent slate title bar (<code>#31363b</code> when active, <code>#232629</code> when inactive).
+  - Breeze control buttons on the top right: Minimize (<code>-</code>), Maximize (<code>#</code>), and Close (<code>X</code>, highlighted in <code>#da4453</code> red).
+  - Real-time window dragging by holding and dragging anywhere on the title bar.
+  - Z-ordering: clicking any window brings it to the top of the stack.
+- <strong>Bottom Panel &amp; System Tray (Height 40px)</strong>:
+  - <strong>Kickoff Application Launcher</strong>: Left-aligned Plasma button with blue glow indicator (<code>#1d99f3</code>).
+  - <strong>Task Manager Tabs</strong>: Live window entries with bottom highlight underlines.
+  - <strong>System Tray</strong>: Live ZFS storage health indicator (<code>ZFS: ONLINE</code>) and digital clock.
+- <strong>Integrated Applications</strong>:
+  - <strong>Konsole (Terminal)</strong>: Interactive command shell (<code>hydra:desktop&gt;</code>) supporting commands like <code>zpool</code>, <code>uname</code>, <code>mem</code>, <code>clear</code>, and <code>help</code>.
+  - <strong>KSysGuard (System Monitor)</strong>: Live performance dashboard with an animated CPU load gauge, kernel heap memory utilization meter, and persistent ZFS storage status.</p>
+<hr />
+<h2>5. Shell Integration &amp; Controls</h2>
+<p>The desktop environment is launched from the Hydra microkernel shell:</p>
+<div class="codehilite"><pre><span></span><code>hydra:/bin&gt;<span class="w"> </span>plasma
+</code></pre></div>
+
+<p>Aliases: <code>startplasma</code>, <code>wayland</code>, <code>gui</code>, <code>desktop</code>.</p>
+<h3>Keyboard &amp; Mouse Controls</h3>
+<ul>
+<li><strong>Mouse Left Click &amp; Drag</strong>: Move windows, select active applications, and click control buttons.</li>
+<li><strong>Keyboard Input</strong>: Directed to the active focused window (e.g. Konsole terminal).</li>
+<li><strong>Escape Key (<code>Esc</code>)</strong>: Gracefully terminates the Wayland session and restores the microkernel text console.</li>
+</ul>
+</div>
+
+
+
+<div id="doc-boot-stage8d-net" class="doc-section">
+    <div class="section-stage-badge">Stage 8d: Network Subsystem &bull; Boot Sequence Order #30</div>
+    <h1>Intel E1000 Gigabit Ethernet Driver &amp; Microkernel Network Stack</h1>
+<h2>1. Architectural Role &amp; Design Rationale</h2>
+<p>Hydra OS implements a zero-dependency, <code>no_std</code> native network protocol stack running directly in Ring 0 / Ring 3 microkernel space. Rather than relying on monolithic Linux network subsystems or third-party crates with external POSIX requirements, Hydra OS provides a purpose-built networking architecture designed for microkernel efficiency, zero-copy packet processing, and direct integration with persistent OpenZFS storage.</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                  Application &amp; Shell Utilities Layer                     |
+|     - `ifconfig` / `ip` (Interface diagnostics &amp; TX/RX telemetry)        |
+|     - `dhcp` (Automated DHCP dynamic lease acquisition)                  |
+|     - `ping &lt;ip&gt;` (ICMP Echo Request/Reply latency tester)               |
+|     - `wget &lt;ip&gt; &lt;port&gt; &lt;path&gt; &lt;zfs_path&gt;` (HTTP/1.0 File Downloader)    |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|                   Transport Layer Protocols (RFC 768 / 793)             |
+|     - UDP (User Datagram Protocol: Checksum, ports, datagram mux)        |
+|     - TCP (Transmission Control Protocol: 3-Way Handshake, SEQ/ACK, PSH) |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|                   Internetwork Layer Protocols (RFC 791 / 792 / 826)     |
+|     - IPv4 (Internet Protocol v4: 20-byte header, RFC 1071 Checksum)     |
+|     - ICMP (Internet Control Message Protocol: Echo Request / Reply)     |
+|     - ARP (Address Resolution Protocol: Dynamic 16-entry MAC cache)      |
+|     - DHCP Client (RFC 2131: Discover -&gt; Offer -&gt; Request -&gt; Ack)       |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|                    Link Layer: Ethernet II Framing                       |
+|     - Destination MAC (6B), Source MAC (6B), EtherType (2B)              |
+|     - EtherType 0x0800 (IPv4), EtherType 0x0806 (ARP)                    |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
++--------------------------------------------------------------------------+
+|            Intel 82540EM (E1000) Gigabit NIC Controller Driver            |
+|     - PCI Bus Enumeration (Vendor: 0x8086, Device: 0x100E)               |
+|     - 32-Entry Circular Ring Transmit (TX) &amp; Receive (RX) Descriptors    |
+|     - Memory Mapped I/O (MMIO) Registers (CTRL, RCTL, TCTL, RAL/RAH)     |
+|     - Direct Memory Access (DMA) Packet Buffers (2048 bytes per slot)    |
++--------------------------------------------------------------------------+
+                                     │
+                                     ▼
+       Physical / Virtualized Hardware (VirtualBox 82540EM / QEMU E1000)
+</code></pre></div>
+
+<hr />
+<h2>2. PCI Subsystem &amp; Intel 82540EM Hardware Controller</h2>
+<p>Hardware interaction begins with the x86 PCI Configuration Mechanism #1 (<a href="file:///d:/os/src/arch/pci.rs"><code>src/arch/pci.rs</code></a>):
+- <strong>Config Address Port (<code>0xCF8</code>)</strong>: Formats 32-bit queries containing the Bus (0–255), Device (0–31), Function (0–7), and Register offset (aligned to 4 bytes).
+- <strong>Config Data Port (<code>0xCFC</code>)</strong>: Reads and writes 32-bit register values.
+- <strong>Bus Mastering</strong>: Bit 2 of the PCI Command Register (<code>0x04</code>) is explicitly enabled to allow the NIC's DMA engine to access host system memory.</p>
+<h3>Intel 82540EM Architecture (<a href="file:///d:/os/src/net/e1000.rs"><code>src/net/e1000.rs</code></a>)</h3>
+<p>The Intel 82540EM Gigabit Ethernet controller is initialized via standard MMIO registers:
+1. <strong>Device Reset</strong>: The <code>CTRL_RST</code> bit is asserted, followed by hardware link setup (<code>CTRL_SLU</code>).
+2. <strong>MAC Address Extraction</strong>: The hardware burned-in MAC address is read from registers <code>RAL0</code> (Receive Address Low) and <code>RAH0</code> (Receive Address High).
+3. <strong>Receive Engine (<code>RCTL</code>)</strong>:
+   - Programmed with 32 circular RX descriptors (<code>RxDesc</code>).
+   - Configured with <code>RCTL_EN</code> (Receiver Enable), <code>RCTL_BAM</code> (Broadcast Accept Mode), and <code>RCTL_BSIZE_2048</code> (2048-byte DMA packet buffer per descriptor).
+4. <strong>Transmit Engine (<code>TCTL</code>)</strong>:
+   - Programmed with 32 circular TX descriptors (<code>TxDesc</code>).
+   - Configured with <code>TCTL_EN</code> (Transmitter Enable), <code>TCTL_PSP</code> (Pad Short Packets), and standard IPG (Inter-Packet Gap) timings via <code>TIPG</code>.</p>
+<hr />
+<h2>3. Network Stack Implementation</h2>
+<h3>Ethernet II Framing (<a href="file:///d:/os/src/net/ethernet.rs"><code>src/net/ethernet.rs</code></a>)</h3>
+<p>Packs 14-byte Ethernet headers containing 6-byte Destination MAC, 6-byte Source MAC, and 16-bit EtherType:
+- <code>0x0806</code>: Address Resolution Protocol (ARP).
+- <code>0x0800</code>: Internet Protocol version 4 (IPv4).</p>
+<h3>Address Resolution Protocol &amp; Cache (<a href="file:///d:/os/src/net/arp.rs"><code>src/net/arp.rs</code></a>)</h3>
+<p>Maintains an internal dynamic <code>ArpCache</code> of up to 16 mappings between 4-byte IPv4 addresses and 6-byte Ethernet hardware addresses.
+- <strong>ARP Request</strong>: Broadcasts <code>FF:FF:FF:FF:FF:FF</code> asking <code>"Who has IP X.X.X.X? Tell Hydra OS"</code>.
+- <strong>ARP Reply</strong>: Dynamically updates the cache with target MAC addresses upon receipt.</p>
+<h3>IPv4 Engine &amp; Checksum Verification (<a href="file:///d:/os/src/net/ipv4.rs"><code>src/net/ipv4.rs</code></a>)</h3>
+<p>Encapsulates 20-byte IPv4 headers with Type of Service (<code>0x00</code>), Total Length, Identification counter, Flags/Fragment Offset (<code>0x4000</code> Don't Fragment), TTL (<code>64</code>), Protocol (<code>1</code> ICMP, <code>6</code> TCP, <code>17</code> UDP), Source IP, and Destination IP.
+- Implements RFC 1071 standard One's Complement 16-bit Internet Checksum computation.</p>
+<h3>DHCP Dynamic Lease Acquisition (<a href="file:///d:/os/src/net/dhcp.rs"><code>src/net/dhcp.rs</code></a>)</h3>
+<p>Automates network configuration via RFC 2131:
+1. <strong>DHCP Discover</strong>: Broadcast packet sent from port 68 to port 67 (<code>255.255.255.255</code>).
+2. <strong>DHCP Offer</strong>: Parses offered IP address, server identifier, subnet mask (Option 1), router gateway (Option 3), and DNS servers (Option 6).
+3. <strong>DHCP Request</strong>: Broadcasts formal request for the offered lease.
+4. <strong>DHCP Ack</strong>: Acknowledges lease and applies network parameters directly to the global <code>Interface</code> state.</p>
+<h3>Domain Name System (DNS) Client (<a href="file:///d:/os/src/net/dns.rs"><code>src/net/dns.rs</code></a>)</h3>
+<p>Implements standard RFC 1035 UDP-based name resolution over port 53:
+- <strong>URL &amp; Hostname Sanitization</strong>: Strips <code>http://</code>, <code>https://</code>, trailing paths (<code>/...</code>), and port numbers (<code>:80</code>).
+- <strong>Standard Query Formatting</strong>: Emits 12-byte header with recursion desired (<code>0x0100</code>), single question, and length-prefixed domain labels (e.g. <code>\x06google\x03com\x00</code>).
+- <strong>Response Parsing</strong>: Validates transaction IDs and response flags, handles DNS name pointer compression (<code>0xC0</code>), parses Answer records, and extracts 4-byte <code>A</code> (IPv4) addresses.</p>
+<h3>Transport Layer &amp; HTTP Downloader (<a href="file:///d:/os/src/net/tcp.rs"><code>src/net/tcp.rs</code></a> &amp; <a href="file:///d:/os/src/net/http.rs"><code>src/net/http.rs</code></a>)</h3>
+<ul>
+<li><strong>TCP Handshake</strong>: Performs SYN -&gt; SYN-ACK -&gt; ACK connection establishment with sequence and acknowledgment tracking.</li>
+<li><strong>HTTP/1.0 GET</strong>: Transmits <code>GET &lt;path&gt; HTTP/1.0\r\nHost: &lt;host&gt;\r\nConnection: close\r\n\r\n</code>, receives streaming segments, strips HTTP response headers (<code>200 OK</code>), and returns binary file content.</li>
+</ul>
+<hr />
+<h2>4. OpenZFS Storage Integration</h2>
+<p>Hydra OS connects its network stack directly to persistent OpenZFS storage pools:
+- The <code>wget</code> command downloads remote binaries, configuration files, and assets over TCP/HTTP using either IP addresses or domain names.
+- Streamed payloads are committed into persistent OpenZFS storage via <a href="file:///d:/os/src/fs/zfs.rs"><code>ZfsClient::write_file_by_path</code></a>.</p>
+<hr />
+<h2>5. Shell Command Reference</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Command</th>
+<th style="text-align: left;">Arguments</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>ifconfig</code> / <code>ip</code></td>
+<td style="text-align: left;">None</td>
+<td style="text-align: left;">Displays MAC address, link state, IP address, subnet mask, gateway, DNS, and TX/RX packet telemetry.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>dhcp</code></td>
+<td style="text-align: left;">None</td>
+<td style="text-align: left;">Manually triggers the RFC 2131 DHCP state machine to refresh network parameters (auto-acquired at boot).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>dns</code> / <code>nslookup</code></td>
+<td style="text-align: left;"><code>&lt;domain_or_url&gt;</code></td>
+<td style="text-align: left;">Queries the configured DNS server to resolve a domain name into an IPv4 address.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>ping</code></td>
+<td style="text-align: left;"><code>&lt;ip_or_url&gt;</code></td>
+<td style="text-align: left;">Resolves domain names/URLs via DNS and transmits 4 ICMP Echo Request packets to verify connectivity.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>wget</code></td>
+<td style="text-align: left;"><code>&lt;server_or_url&gt; &lt;port&gt; &lt;path&gt; &lt;dest&gt;</code></td>
+<td style="text-align: left;">Fetches a remote file over HTTP and commits the payload directly into OpenZFS.</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+
+
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #29</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -3651,7 +3883,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #30</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #32</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -3824,7 +4056,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage9-sync" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #33</div>
     <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
 <h2>Overview</h2>
 <p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
@@ -3971,7 +4203,7 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 <div id="doc-boot-stage9-elf" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #32</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #34</div>
     <h1>Userspace ELF64 Binary Loader &amp; Execution</h1>
 <h2>Overview</h2>
 <p>Hydra OS features an autonomous <strong>Userspace ELF64 Binary Loader</strong> capable of parsing, relocating, mapping, and executing standalone compiled x86_64 binaries directly from the OpenZFS storage medium (<code>hydrapool/bin</code>) in unprivileged <strong>Ring 3 (CPL = 3)</strong>.</p>
@@ -4311,7 +4543,7 @@ hydra:/bin&gt;<span class="w"> </span>ps
 
 
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #33</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #35</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>

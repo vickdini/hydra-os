@@ -20,6 +20,8 @@ pub mod time;
 pub mod translate;
 pub mod task_cmds;
 pub mod video;
+pub mod plasma_cmd;
+pub mod net_cmds;
 pub mod zfs_cmds;
 
 use crate::shell::command::Command;
@@ -53,6 +55,8 @@ pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsC
 pub use time::TimeCommand;
 pub use translate::{MapCommand, TranslateCommand, UnmapCommand};
 pub use video::VideoCommand;
+pub use plasma_cmd::PlasmaCommand;
+pub use net_cmds::{DhcpCommand, DnsCommand, IfconfigCommand, PingCommand, WgetCommand};
 pub use zfs_cmds::{DisksCommand, ZfsCommand, ZpoolCommand};
 
 /// Static registry of all built-in commands and integrated programs.
@@ -110,12 +114,18 @@ pub static COMMANDS: &[&dyn Command] = &[
     &MapCommand,
     &UnmapCommand,
     &VideoCommand,
+    &PlasmaCommand,
     &CapsCommand,
     &CapInsertCommand,
     &CapRevokeCommand,
     &IpcCommand,
     &TimeCommand,
     &DisksCommand,
+    &IfconfigCommand,
+    &DhcpCommand,
+    &DnsCommand,
+    &PingCommand,
+    &WgetCommand,
     &ZpoolCommand,
     &ZfsCommand,
     &EfifsCommand,

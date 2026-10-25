@@ -236,6 +236,20 @@ DOCS_ORDER = [
         "subtitle": "UEFI GOP linear framebuffer discovery, 8x16 bitmap font, and autonomous pixel console.",
     },
     {
+        "stage": "Stage 8c: Graphical Desktop & Wayland",
+        "title": "Wayland Compositor & KDE Plasma Desktop Shell",
+        "file": "docs/src/video/wayland_plasma.md",
+        "anchor": "doc-boot-stage8c-plasma",
+        "subtitle": "Double-buffered 32-bit compositor, PS/2 mouse driver, Breeze theme engine, Konsole, and KSysGuard.",
+    },
+    {
+        "stage": "Stage 8d: Network Subsystem",
+        "title": "Intel E1000 Gigabit NIC Driver & Network Stack",
+        "file": "docs/src/net/mod.md",
+        "anchor": "doc-boot-stage8d-net",
+        "subtitle": "Intel 82540EM DMA controller, Ethernet II, ARP cache, IPv4, ICMP ping, DHCP client, and HTTP/1.0 downloader.",
+    },
+    {
         "stage": "Stage 9: Multitasking & Scheduler",
         "title": "Task Control Block (TCB) & Thread State",
         "file": "docs/src/task/tcb.md",

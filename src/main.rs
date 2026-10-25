@@ -15,6 +15,7 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod video;
+pub mod net;
 
 
 use core::panic::PanicInfo;
@@ -290,6 +291,8 @@ fn main() -> Status {
     console::set_color(Color::Yellow, Color::Black);
     println!("\n[*] Step 6: Initializing Storage Subsystem & ZFS File Server...");
     crate::arch::ata::init();
+    crate::arch::mouse::init();
+    net::init();
     fs::init_server();
     fs::ZfsClient::sync_boot_binaries();
     console::set_color(Color::LightGreen, Color::Black);

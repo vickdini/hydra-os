@@ -110,6 +110,40 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     println!("  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)");
     println!("============================================================\n");
 
+    // 10. Automatically initialize and configure network adapter via DHCP
+    if crate::net::e1000::is_present() {
+        set_color(Color::Yellow, Color::Black);
+        crate::print!("[*] Network: Autonegotiating carrier link and DHCP lease... ");
+        for _ in 0..100 {
+            if crate::net::e1000::is_link_up() {
+                break;
+            }
+            crate::arch::pit::sleep_ms(10);
+        }
+
+        if crate::net::e1000::is_link_up() {
+            match crate::net::dhcp_acquire() {
+                Ok(lease) => {
+                    set_color(Color::LightGreen, Color::Black);
+                    println!(
+                        "ONLINE ({}.{}.{}.{}, Gateway {}.{}.{}.{}, DNS {}.{}.{}.{})",
+                        lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
+                        lease.router[0], lease.router[1], lease.router[2], lease.router[3],
+                        lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]
+                    );
+                }
+                Err(e) => {
+                    set_color(Color::LightRed, Color::Black);
+                    println!("Deferred ({})", e);
+                }
+            }
+        } else {
+            set_color(Color::Yellow, Color::Black);
+            println!("Link Down (No carrier)");
+        }
+        println!();
+    }
+
     Ok(HardwareTakeoverStats {
         memory_map_entries: entries_count,
         gdt_code_selector: selectors.kernel_code_selector.0,
