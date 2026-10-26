@@ -412,7 +412,9 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
 
             // Preemptive Multitasking Round-Robin Scheduling
             if crate::task::is_active() {
-                crate::task::SCHEDULER.lock().schedule(ctx);
+                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.schedule(ctx);
+                }
             }
         }
         33 => {

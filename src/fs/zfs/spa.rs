@@ -188,7 +188,7 @@ impl Spa {
         self.vdev.flush()
     }
 
-    fn mark_block(&mut self, block: usize, used: bool) {
+    pub fn mark_block(&mut self, block: usize, used: bool) {
         let word_idx = block / 64;
         let bit_idx = block % 64;
         if used {

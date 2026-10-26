@@ -85,6 +85,27 @@ Full multi-threaded POSIX execution is enabled via in-kernel thread creation and
   - `FUTEX_WAKE` / `FUTEX_WAKE_BITSET`: Wakes up to `val` threads blocked on the target address without deadlock or lock inversion.
 * **Robust Thread Exit (`clear_child_tid`)**: When a thread terminates via `sys_exit` or `exit()`, the kernel writes `0` to the userspace address designated by `CLONE_CHILD_CLEARTID` / `set_tid_address` and automatically triggers a futex wake, unblocking `pthread_join()` callers immediately.
 
+### 6. User and Superuser (Root) Security Subsystem
+Hydra OS implements a POSIX-compliant user identity and credential management model across both microkernel tasks and Linux ABI processes:
+* **Task Credentials**: Each task control block maintains 6 credential attributes:
+  - Real UID (`uid`) and Real GID (`gid`): Identifies the account owning the process.
+  - Effective UID (`euid`) and Effective GID (`egid`): Used by the kernel for permission checks (file access, signal delivery, syscall capabilities).
+  - Saved-Set UID (`suid`) and Saved-Set GID (`sgid`): Preserves identity across set-UID / privilege drop transitions.
+* **Identity Management Syscalls**:
+  - `sys_getuid` (102), `sys_getgid` (104), `sys_geteuid` (107), `sys_getegid` (108): Query active credentials.
+  - `sys_setuid` (105), `sys_setgid` (106): Transition user identities; privileged processes (`euid == 0`) can switch to any UID/GID (updating real, effective, and saved IDs), while unprivileged processes can only switch `euid` to their real or saved ID.
+  - `sys_seteuid` (115), `sys_setegid` (116): Change effective user/group identity.
+  - `sys_setreuid` (113), `sys_setregid` (114), `sys_setresuid` (117), `sys_getresuid` (118), `sys_setresgid` (119), `sys_getresgid` (120): Precise multi-field credential swapping.
+  - `sys_capget` (125), `sys_capset` (126): Linux capability mask inspection; UID 0 receives full capabilities (`0xFFFFFFFF`), while unprivileged users receive restricted capabilities (`0x0`).
+* **OpenZFS System Account Database**:
+  - `/etc/passwd`: Defines `root` (UID 0:0, `/root`, `/bin/sh`) and `hydra` (UID 1000:1000, `/home/hydra`, `/bin/sh`).
+  - `/etc/group`: Defines `root` (GID 0), `wheel` (GID 10), and `hydra` (GID 1000).
+* **Interactive Shell Privilege Management**:
+  - Dynamic shell prompts: `hydra:/path# ` for superuser `root` (UID 0), `hydra:/path$ ` for unprivileged users (`hydra`, UID 1000).
+  - `whoami` and `id`: Display active username, UID, GID, and security group membership.
+  - `su [user]`: Seamlessly switch active shell credentials.
+  - `sudo <command>`: Execute an individual command elevated with superuser UID 0 privileges.
+
 ---
 
 ## Interactive Shell Command: `linux`
@@ -92,7 +113,7 @@ Full multi-threaded POSIX execution is enabled via in-kernel thread creation and
 The shell provides the `linux` command (aliased to `lx` and `linux64`):
 
 ```text
-hydra> linux status
+hydra:/bin# linux status
 ============================================================
            HYDRA OS - LINUX ABI COMPATIBILITY SUBSYSTEM      
 ============================================================
@@ -112,26 +133,27 @@ hydra> linux status
   Unsupported Syscalls:               0
 ============================================================
 
-hydra> linux test
-[*] Running Linux ABI compatibility self-tests...
-  [+] sys_uname: Linux 6.8.0-hydra
-  [+] /proc/version: Linux version 6.8.0-hydra (gcc-13 / rustc-1.80) #1 SMP PREEMPT Hydra Microkernel
-  [+] /dev/urandom: [54, e2, d1, 44, b0, 68, 77, 8a]
-  [+] arch_prctl(ARCH_SET_FS): MSR 0xC0000100 read/write verified
-[+] Linux ABI self-tests completed successfully.
+hydra:/bin# linux run roletest.elf
+[+] Read 2760 bytes from OpenZFS (roletest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 2 (UID 0, GID 0). Executing...
 
-hydra> linux run threadtest.elf
-[+] Read 1984 bytes from OpenZFS (threadtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 2. Executing...
-
-[LINUX THREAD TEST STARTED]
-  [MAIN] Initial Process PID (TGID): 2, TID: 2
-  [MAIN] Spawning POSIX thread via sys_clone()...
-  [MAIN] Child thread cloned with TID 3. Waiting on futex join...
-  [CHILD THREAD] Running in parallel! TID: 3, TGID: 2
-  [CHILD THREAD] Incremented shared counter to 42. Terminating thread...
-  [MAIN] Futex join completed! Shared counter = 42
-[+] LINUX MULTI-THREADING & FUTEX VERIFIED SUCCESSFULLY!
-
+=======================================================
+   HYDRA OS POSIX CREDENTIAL & SECURITY ROLE TEST
+=======================================================
+[ROLETEST] Step 1: Initial credentials: UID=0, EUID=0, GID=0, EGID=0 (Superuser Root)
+[ROLETEST] Step 1b: getresuid -> ruid=0, euid=0, suid=0
+[ROLETEST] Step 2: Dropping privileges via setuid(1000)...
+[ROLETEST] setuid(1000) result: 0
+[ROLETEST] Current credentials: UID=1000, EUID=1000 [SUCCESS: Standard User Hydra]
+[ROLETEST] Step 3: Attempting unauthorized escalation via setuid(0)...
+[ROLETEST] setuid(0) result: -1 -> EPERM [DENIED: Security Enforced!]
+[ROLETEST] Step 4: Attempting unauthorized escalation via seteuid(0)...
+[ROLETEST] seteuid(0) result: -1 -> EPERM [DENIED: Security Enforced!]
+[ROLETEST] Step 5: Testing authorized setuid(1000) as unprivileged user...
+[ROLETEST] setuid(1000) result: 0 -> SUCCESS (allowed to retain self identity)
+[ROLETEST] Step 6: capget -> effective mask=0x0 [SUCCESS: Capabilities restricted for UID 1000]
+=======================================================
+[+] ALL TESTS PASSED! User Role Security Verified.
+=======================================================
 [+] Linux process 2 finished execution.
 ```

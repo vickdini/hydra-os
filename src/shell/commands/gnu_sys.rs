@@ -111,10 +111,115 @@ impl Command for WhoamiCommand {
 
         set_color(Color::White, Color::Black);
         if is_id || args.is_empty() && self.name() == "id" {
-            println!("uid=0(root) gid=0(root) groups=0(root) cspace={} slots rights=ALL(0xFFFFFFFF)",
-                state.cap_table.len());
+            let role_desc = if state.is_root() {
+                "cspace=Root slots rights=ALL(0xFFFFFFFF)"
+            } else {
+                "cspace=User slots rights=REDUCED(0x00000003)"
+            };
+            println!("uid={}({}) gid={}({}) groups={}({}) {}",
+                state.current_uid, state.username_str(),
+                state.current_gid, state.username_str(),
+                state.current_gid, state.username_str(),
+                role_desc);
         } else {
-            println!("root");
+            println!("{}", state.username_str());
+        }
+    }
+}
+
+/// Switch active user identity.
+pub struct SuCommand;
+
+impl Command for SuCommand {
+    fn name(&self) -> &'static str {
+        "su"
+    }
+
+    fn description(&self) -> &'static str {
+        "Switch shell user and effective credentials (e.g. 'su root' or 'su hydra')"
+    }
+
+    fn usage(&self) -> &'static str {
+        "su [user]"
+    }
+
+    fn execute(&self, args: &[&str], state: &mut ShellState) {
+        let target_user = if args.is_empty() { "root" } else { args[0] };
+
+        match target_user {
+            "root" | "0" => {
+                state.set_user("root", 0, 0);
+                set_color(Color::LightGreen, Color::Black);
+                println!("[+] Switched to superuser 'root' (UID 0, GID 0)");
+            }
+            "hydra" | "1000" => {
+                state.set_user("hydra", 1000, 1000);
+                set_color(Color::LightGreen, Color::Black);
+                println!("[+] Switched to standard user 'hydra' (UID 1000, GID 1000)");
+            }
+            other => {
+                if let Some(uid) = parse_u64(other) {
+                    state.set_user("user", uid as u32, uid as u32);
+                    set_color(Color::LightGreen, Color::Black);
+                    println!("[+] Switched to UID {} (GID {})", uid, uid);
+                } else {
+                    set_color(Color::LightRed, Color::Black);
+                    println!("su: user '{}' does not exist in /etc/passwd", other);
+                    state.last_status = 1;
+                }
+            }
+        }
+    }
+}
+
+/// Execute command with superuser privileges.
+pub struct SudoCommand;
+
+impl Command for SudoCommand {
+    fn name(&self) -> &'static str {
+        "sudo"
+    }
+
+    fn description(&self) -> &'static str {
+        "Execute a shell command with superuser (UID 0 / root) privileges"
+    }
+
+    fn usage(&self) -> &'static str {
+        "sudo <command> [args...]"
+    }
+
+    fn execute(&self, args: &[&str], state: &mut ShellState) {
+        if args.is_empty() {
+            set_color(Color::LightRed, Color::Black);
+            println!("Usage: {}", self.usage());
+            return;
+        }
+
+        let old_uid = state.current_uid;
+        let old_gid = state.current_gid;
+        let mut old_user = [0u8; 32];
+        let old_user_len = state.username_len;
+        old_user[..old_user_len].copy_from_slice(&state.username[..old_user_len]);
+
+        // Temporarily escalate to root
+        state.set_user("root", 0, 0);
+
+        let cmd_name = args[0];
+        let sub_args = &args[1..];
+
+        if let Some(cmd) = crate::shell::commands::find_command(cmd_name) {
+            cmd.execute(sub_args, state);
+        } else if crate::shell::fs::search_and_execute(cmd_name, sub_args, state) {
+            state.last_status = 0;
+        } else {
+            set_color(Color::LightRed, Color::Black);
+            println!("sudo: command not found: '{}'", cmd_name);
+            state.last_status = 127;
+        }
+
+        // Restore previous identity
+        if let Ok(prev_name) = core::str::from_utf8(&old_user[..old_user_len]) {
+            state.set_user(prev_name, old_uid, old_gid);
         }
     }
 }

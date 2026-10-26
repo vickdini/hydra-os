@@ -56,9 +56,18 @@ pub fn spawn_linux_elf(
     elf_data: &[u8],
     args: &[&str],
     priority: TaskPriority,
+    uid: u32,
+    gid: u32,
 ) -> Result<TaskId, &'static str> {
-    let mut sched = SCHEDULER.lock();
-    sched.spawn_linux_elf(name, elf_data, args, priority)
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched = SCHEDULER.lock();
+        sched.spawn_linux_elf(name, elf_data, args, priority, uid, gid)
+    })
+}
+
+/// Sets credentials for a specific task.
+pub fn set_task_credentials(id: TaskId, uid: u32, gid: u32) {
+    SCHEDULER.lock().set_task_credentials(id, uid, gid);
 }
 
 /// Returns the personality (Hydra vs Linux) of the currently running task.

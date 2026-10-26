@@ -28,7 +28,7 @@ impl Command for LinuxCommand {
         &["linux64", "lx"]
     }
 
-    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+    fn execute(&self, args: &[&str], state: &mut ShellState) {
         let sub = if args.is_empty() { "status" } else { args[0] };
 
         match sub {
@@ -156,9 +156,11 @@ impl Command for LinuxCommand {
                     &buffer[..bytes_read],
                     app_args,
                     crate::task::TaskPriority::Normal,
+                    state.current_uid,
+                    state.current_gid,
                 ) {
                     Ok(tid) => {
-                        println!("[+] Linux process spawned with Task ID {}. Executing...", tid.0);
+                        println!("[+] Linux process spawned with Task ID {} (UID {}, GID {}). Executing...", tid.0, state.current_uid, state.current_gid);
                         crate::task::wait_task(tid);
                         println!("[+] Linux process {} finished execution.", tid.0);
                     }

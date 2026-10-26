@@ -72,6 +72,9 @@ impl ZfsServer {
 
         spa.active_uberblock = label.uberblock;
         spa.allocated_blocks = (label.allocated_blocks as usize).max(crate::fs::zfs::spa::RESERVED_METADATA_BLOCKS);
+        for b in 0..spa.allocated_blocks {
+            spa.mark_block(b, true);
+        }
 
         let mut dmu = alloc::boxed::Box::new(Dmu::new());
         dmu.next_obj_id = label.next_obj_id;
@@ -239,7 +242,32 @@ impl ZfsServer {
         let _ = dmu.create_dataset("hydrapool/tmp", "/tmp");
         let _ = dmu.add_directory_entry(root_dir, "tmp", tmp_dir, DnodeType::Directory);
 
-        // 4. Pre-populate default files and sample executables in ZFS /bin
+        // 4. Create /etc and /home directories
+        let etc_dir = dmu.allocate_object(DnodeType::Directory, "etc").unwrap();
+        let _ = dmu.create_dataset("hydrapool/etc", "/etc");
+        let _ = dmu.add_directory_entry(root_dir, "etc", etc_dir, DnodeType::Directory);
+
+        let home_dir = dmu.allocate_object(DnodeType::Directory, "home").unwrap();
+        let _ = dmu.create_dataset("hydrapool/home_users", "/home");
+        let _ = dmu.add_directory_entry(root_dir, "home", home_dir, DnodeType::Directory);
+
+        let hydra_home = dmu.allocate_object(DnodeType::Directory, "hydra").unwrap();
+        let _ = dmu.add_directory_entry(home_dir, "hydra", hydra_home, DnodeType::Directory);
+
+        // Pre-populate /etc/passwd and /etc/group
+        let passwd_content = b"root:x:0:0:root:/root:/bin/sh\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\nbin:x:2:2:bin:/bin:/usr/sbin/nologin\nsys:x:3:3:sys:/dev:/usr/sbin/nologin\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\nhydra:x:1000:1000:Hydra User,,,:/home/hydra:/bin/sh\n";
+        if let Ok(file_obj) = dmu.allocate_object(DnodeType::PlainFile, "passwd") {
+            let _ = dmu.cow_write_file(file_obj, passwd_content, &mut spa);
+            let _ = dmu.add_directory_entry(etc_dir, "passwd", file_obj, DnodeType::PlainFile);
+        }
+
+        let group_content = b"root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:hydra\nsudo:x:27:hydra\nnogroup:x:65534:\nhydra:x:1000:\n";
+        if let Ok(file_obj) = dmu.allocate_object(DnodeType::PlainFile, "group") {
+            let _ = dmu.cow_write_file(file_obj, group_content, &mut spa);
+            let _ = dmu.add_directory_entry(etc_dir, "group", file_obj, DnodeType::PlainFile);
+        }
+
+        // 5. Pre-populate default files and sample executables in ZFS /bin
         let sample_files: &[(&str, &[u8])] = &[
             (
                 "readme.txt",

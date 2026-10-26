@@ -120,10 +120,10 @@ impl Command for PsCommand {
 
         set_color(Color::LightCyan, Color::Black);
         println!(
-            "{:<5} {:<14} {:<8} {:<11} {:<9} {:>8} {:>18}",
-            "PID", "NAME", "MODE", "STATE", "PRIORITY", "TICKS", "STACK (RSP)"
+            "{:<5} {:<5} {:<14} {:<8} {:<11} {:<9} {:>8} {:>18}",
+            "PID", "UID", "NAME", "MODE", "STATE", "PRIORITY", "TICKS", "STACK (RSP)"
         );
-        println!("{:-<78}", "");
+        println!("{:-<84}", "");
 
         for s in &snapshots {
             match s.state {
@@ -135,8 +135,9 @@ impl Command for PsCommand {
             }
 
             println!(
-                "{:<5} {:<14} {:<8} {:<11} {:<9} {:>8} {:#018x}",
+                "{:<5} {:<5} {:<14} {:<8} {:<11} {:<9} {:>8} {:#018x}",
                 s.id.0,
+                s.uid,
                 s.name,
                 s.mode.as_str(),
                 s.state.as_str(),

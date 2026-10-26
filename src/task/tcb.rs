@@ -198,6 +198,12 @@ pub struct Task {
     pub brk: u64,
     pub clear_child_tid: u64,
     pub tgid: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+    pub suid: u32,
+    pub sgid: u32,
     pub regs: TaskRegisters,
     pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
     pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
@@ -225,6 +231,12 @@ impl Task {
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            suid: 0,
+            sgid: 0,
             regs,
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,

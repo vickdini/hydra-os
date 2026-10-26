@@ -674,12 +674,16 @@ impl ZfsClient {
             ("\\bin\\linux_app.elf", "/bin/linux_app.elf"),
             ("\\bin\\thread_test.elf", "/bin/thread_test.elf"),
             ("\\bin\\threadtest.elf", "/bin/threadtest.elf"),
+            ("\\bin\\roletest.elf", "/bin/roletest.elf"),
             ("\\hello.elf", "/bin/hello.elf"),
             ("\\counter.elf", "/bin/counter.elf"),
             ("\\linuxapp.elf", "/bin/linuxapp.elf"),
             ("\\linux_app.elf", "/bin/linux_app.elf"),
             ("\\thread_test.elf", "/bin/thread_test.elf"),
             ("\\threadtest.elf", "/bin/threadtest.elf"),
+            ("\\roletest.elf", "/bin/roletest.elf"),
+            ("\\etc\\passwd", "/etc/passwd"),
+            ("\\etc\\group", "/etc/group"),
         ];
 
         let mut imported_count = 0;
@@ -705,7 +709,10 @@ impl ZfsClient {
                             }
                         }
 
-                        if total_read >= 4 && file_buf[..4] == crate::task::elf::ELF_MAGIC {
+                        let is_elf = total_read >= 4 && file_buf[..4] == crate::task::elf::ELF_MAGIC;
+                        let is_config = total_read > 0 && (zfs_path.starts_with("/etc/"));
+
+                        if is_elf || is_config {
                             if let Ok(_txg) = Self::write_file_by_path(zfs_path, &file_buf[..total_read]) {
                                 imported_count += 1;
                                 crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);

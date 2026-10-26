@@ -17,6 +17,7 @@ pub struct TaskSnapshot {
     pub state: TaskState,
     pub priority: TaskPriority,
     pub mode: PrivilegeMode,
+    pub uid: u32,
     pub ticks_run: u64,
     pub rsp: u64,
     pub rip: u64,
@@ -121,6 +122,12 @@ impl Scheduler {
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            suid: 0,
+            sgid: 0,
             regs,
             stack: Some(stack),
             user_stack: None,
@@ -191,6 +198,12 @@ impl Scheduler {
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            suid: 0,
+            sgid: 0,
             regs,
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
@@ -257,6 +270,12 @@ impl Scheduler {
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            suid: 0,
+            sgid: 0,
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -278,6 +297,8 @@ impl Scheduler {
         elf_data: &[u8],
         args: &[&str],
         priority: TaskPriority,
+        uid: u32,
+        gid: u32,
     ) -> Result<TaskId, &'static str> {
         let current_cr3 = Cr3::read().0.start_address().as_u64();
         let image = super::elf::load_linux_elf(elf_data, args).map_err(|e| e.as_str())?;
@@ -304,6 +325,12 @@ impl Scheduler {
             brk: image.initial_brk,
             clear_child_tid: 0,
             tgid: id.0 as u64,
+            uid,
+            gid,
+            euid: uid,
+            egid: gid,
+            suid: uid,
+            sgid: gid,
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -342,6 +369,12 @@ impl Scheduler {
         let parent_name = parent.name;
         let parent_priority = parent.priority;
         let parent_fds = parent.fds.clone();
+        let parent_uid = parent.uid;
+        let parent_gid = parent.gid;
+        let parent_euid = parent.euid;
+        let parent_egid = parent.egid;
+        let parent_suid = parent.suid;
+        let parent_sgid = parent.sgid;
 
         let child_id = TaskId(self.next_id);
         self.next_id += 1;
@@ -412,6 +445,12 @@ impl Scheduler {
             brk: parent_brk,
             clear_child_tid,
             tgid: child_tgid,
+            uid: parent_uid,
+            gid: parent_gid,
+            euid: parent_euid,
+            egid: parent_egid,
+            suid: parent_suid,
+            sgid: parent_sgid,
             regs,
             stack: Some(kernel_stack),
             user_stack: None,
@@ -666,12 +705,28 @@ impl Scheduler {
                 state: task.state,
                 priority: task.priority,
                 mode: task.mode,
+                uid: task.uid,
                 ticks_run: task.ticks_run,
                 rsp: task.regs.rsp,
                 rip: task.regs.rip,
             });
         }
         list
+    }
+
+    /// Sets POSIX credentials (UID, GID, EUID, EGID, SUID, SGID) for a target task.
+    pub fn set_task_credentials(&mut self, id: TaskId, uid: u32, gid: u32) {
+        for task in &mut self.tasks {
+            if task.id == id {
+                task.uid = uid;
+                task.gid = gid;
+                task.euid = uid;
+                task.egid = gid;
+                task.suid = uid;
+                task.sgid = gid;
+                break;
+            }
+        }
     }
 }
 

@@ -559,8 +559,229 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             0
         }
 
-        SYS_GETUID | SYS_GETEUID => 1000,
-        SYS_GETGID | SYS_GETEGID => 1000,
+        SYS_GETUID => {
+            crate::task::with_current_task_mut(|t| t.uid as i64).unwrap_or(0)
+        }
+        SYS_GETGID => {
+            crate::task::with_current_task_mut(|t| t.gid as i64).unwrap_or(0)
+        }
+        SYS_GETEUID => {
+            crate::task::with_current_task_mut(|t| t.euid as i64).unwrap_or(0)
+        }
+        SYS_GETEGID => {
+            crate::task::with_current_task_mut(|t| t.egid as i64).unwrap_or(0)
+        }
+
+        SYS_SETUID => {
+            // sys_setuid(uid: uid_t)
+            let new_uid = arg0 as u32;
+            crate::task::with_current_task_mut(|t| {
+                if t.euid == 0 {
+                    // Superuser: set real, effective, and saved-set UID
+                    t.uid = new_uid;
+                    t.euid = new_uid;
+                    t.suid = new_uid;
+                    0
+                } else if new_uid == t.uid || new_uid == t.suid {
+                    // Unprivileged: can only switch effective UID to real or saved UID
+                    t.euid = new_uid;
+                    0
+                } else {
+                    -EPERM
+                }
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETGID => {
+            // sys_setgid(gid: gid_t)
+            let new_gid = arg0 as u32;
+            crate::task::with_current_task_mut(|t| {
+                if t.euid == 0 {
+                    // Superuser: set real, effective, and saved-set GID
+                    t.gid = new_gid;
+                    t.egid = new_gid;
+                    t.sgid = new_gid;
+                    0
+                } else if new_gid == t.gid || new_gid == t.sgid {
+                    // Unprivileged: can only switch effective GID to real or saved GID
+                    t.egid = new_gid;
+                    0
+                } else {
+                    -EPERM
+                }
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETEUID => {
+            // sys_seteuid(euid: uid_t)
+            let new_euid = arg0 as u32;
+            crate::task::with_current_task_mut(|t| {
+                if t.euid == 0 || new_euid == t.uid || new_euid == t.suid {
+                    t.euid = new_euid;
+                    0
+                } else {
+                    -EPERM
+                }
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETEGID => {
+            // sys_setegid(egid: gid_t)
+            let new_egid = arg0 as u32;
+            crate::task::with_current_task_mut(|t| {
+                if t.euid == 0 || new_egid == t.gid || new_egid == t.sgid {
+                    t.egid = new_egid;
+                    0
+                } else {
+                    -EPERM
+                }
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETREUID => {
+            // sys_setreuid(ruid: uid_t, euid: uid_t)
+            let ruid = arg0 as u32;
+            let euid = arg1 as u32;
+            crate::task::with_current_task_mut(|t| {
+                let is_root = t.euid == 0;
+                let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid;
+                let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
+                if !ok_r || !ok_e {
+                    return -EPERM;
+                }
+                if ruid != u32::MAX {
+                    t.uid = ruid;
+                }
+                if euid != u32::MAX {
+                    t.euid = euid;
+                }
+                if ruid != u32::MAX || (euid != u32::MAX && euid != t.uid) {
+                    t.suid = t.euid;
+                }
+                0
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETREGID => {
+            // sys_setregid(rgid: gid_t, egid: gid_t)
+            let rgid = arg0 as u32;
+            let egid = arg1 as u32;
+            crate::task::with_current_task_mut(|t| {
+                let is_root = t.euid == 0;
+                let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid;
+                let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
+                if !ok_r || !ok_e {
+                    return -EPERM;
+                }
+                if rgid != u32::MAX {
+                    t.gid = rgid;
+                }
+                if egid != u32::MAX {
+                    t.egid = egid;
+                }
+                if rgid != u32::MAX || (egid != u32::MAX && egid != t.gid) {
+                    t.sgid = t.egid;
+                }
+                0
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_SETRESUID => {
+            // sys_setresuid(ruid: uid_t, euid: uid_t, suid: uid_t)
+            let ruid = arg0 as u32;
+            let euid = arg1 as u32;
+            let suid = arg2 as u32;
+            crate::task::with_current_task_mut(|t| {
+                let is_root = t.euid == 0;
+                let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid || ruid == t.suid;
+                let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
+                let ok_s = suid == u32::MAX || is_root || suid == t.uid || suid == t.euid || suid == t.suid;
+                if !ok_r || !ok_e || !ok_s {
+                    return -EPERM;
+                }
+                if ruid != u32::MAX { t.uid = ruid; }
+                if euid != u32::MAX { t.euid = euid; }
+                if suid != u32::MAX { t.suid = suid; }
+                0
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_GETRESUID => {
+            // sys_getresuid(ruid: uid_t*, euid: uid_t*, suid: uid_t*)
+            let ruid_p = arg0 as *mut u32;
+            let euid_p = arg1 as *mut u32;
+            let suid_p = arg2 as *mut u32;
+            crate::task::with_current_task_mut(|t| {
+                unsafe {
+                    if !ruid_p.is_null() { *ruid_p = t.uid; }
+                    if !euid_p.is_null() { *euid_p = t.euid; }
+                    if !suid_p.is_null() { *suid_p = t.suid; }
+                }
+                0
+            }).unwrap_or(-EFAULT)
+        }
+
+        SYS_SETRESGID => {
+            // sys_setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t)
+            let rgid = arg0 as u32;
+            let egid = arg1 as u32;
+            let sgid = arg2 as u32;
+            crate::task::with_current_task_mut(|t| {
+                let is_root = t.euid == 0;
+                let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid || rgid == t.sgid;
+                let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
+                let ok_s = sgid == u32::MAX || is_root || sgid == t.gid || sgid == t.egid || sgid == t.sgid;
+                if !ok_r || !ok_e || !ok_s {
+                    return -EPERM;
+                }
+                if rgid != u32::MAX { t.gid = rgid; }
+                if egid != u32::MAX { t.egid = egid; }
+                if sgid != u32::MAX { t.sgid = sgid; }
+                0
+            }).unwrap_or(-EPERM)
+        }
+
+        SYS_GETRESGID => {
+            // sys_getresgid(rgid: gid_t*, egid: gid_t*, sgid: gid_t*)
+            let rgid_p = arg0 as *mut u32;
+            let egid_p = arg1 as *mut u32;
+            let sgid_p = arg2 as *mut u32;
+            crate::task::with_current_task_mut(|t| {
+                unsafe {
+                    if !rgid_p.is_null() { *rgid_p = t.gid; }
+                    if !egid_p.is_null() { *egid_p = t.egid; }
+                    if !sgid_p.is_null() { *sgid_p = t.sgid; }
+                }
+                0
+            }).unwrap_or(-EFAULT)
+        }
+
+        SYS_CAPGET => {
+            // sys_capget(hdrp: cap_user_header_t, datap: cap_user_data_t)
+            let datap = arg1 as *mut u32;
+            crate::task::with_current_task_mut(|t| {
+                let is_root = t.euid == 0;
+                let cap_mask = if is_root { 0xFFFF_FFFFu32 } else { 0u32 };
+                if !datap.is_null() {
+                    unsafe {
+                        *datap = cap_mask;
+                        *datap.add(1) = cap_mask;
+                        *datap.add(2) = 0;
+                    }
+                }
+                0
+            }).unwrap_or(0)
+        }
+
+        SYS_CAPSET => {
+            crate::task::with_current_task_mut(|t| {
+                if t.euid == 0 {
+                    0
+                } else {
+                    -EPERM
+                }
+            }).unwrap_or(-EPERM)
+        }
 
         SYS_ARCH_PRCTL => {
             // sys_arch_prctl(code: int, addr: unsigned long)

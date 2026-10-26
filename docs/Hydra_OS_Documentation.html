@@ -5285,10 +5285,30 @@ hydra:/bin&gt; cursor block
   - <code>FUTEX_WAIT</code> / <code>FUTEX_WAIT_BITSET</code>: Atomic value comparison against <code>*uaddr</code>; blocks calling thread in scheduler if values match, or returns <code>-EAGAIN</code> (<code>-11</code>) if contested.
   - <code>FUTEX_WAKE</code> / <code>FUTEX_WAKE_BITSET</code>: Wakes up to <code>val</code> threads blocked on the target address without deadlock or lock inversion.
 * <strong>Robust Thread Exit (<code>clear_child_tid</code>)</strong>: When a thread terminates via <code>sys_exit</code> or <code>exit()</code>, the kernel writes <code>0</code> to the userspace address designated by <code>CLONE_CHILD_CLEARTID</code> / <code>set_tid_address</code> and automatically triggers a futex wake, unblocking <code>pthread_join()</code> callers immediately.</p>
+<h3>6. User and Superuser (Root) Security Subsystem</h3>
+<p>Hydra OS implements a POSIX-compliant user identity and credential management model across both microkernel tasks and Linux ABI processes:
+* <strong>Task Credentials</strong>: Each task control block maintains 6 credential attributes:
+  - Real UID (<code>uid</code>) and Real GID (<code>gid</code>): Identifies the account owning the process.
+  - Effective UID (<code>euid</code>) and Effective GID (<code>egid</code>): Used by the kernel for permission checks (file access, signal delivery, syscall capabilities).
+  - Saved-Set UID (<code>suid</code>) and Saved-Set GID (<code>sgid</code>): Preserves identity across set-UID / privilege drop transitions.
+* <strong>Identity Management Syscalls</strong>:
+  - <code>sys_getuid</code> (102), <code>sys_getgid</code> (104), <code>sys_geteuid</code> (107), <code>sys_getegid</code> (108): Query active credentials.
+  - <code>sys_setuid</code> (105), <code>sys_setgid</code> (106): Transition user identities; privileged processes (<code>euid == 0</code>) can switch to any UID/GID (updating real, effective, and saved IDs), while unprivileged processes can only switch <code>euid</code> to their real or saved ID.
+  - <code>sys_seteuid</code> (115), <code>sys_setegid</code> (116): Change effective user/group identity.
+  - <code>sys_setreuid</code> (113), <code>sys_setregid</code> (114), <code>sys_setresuid</code> (117), <code>sys_getresuid</code> (118), <code>sys_setresgid</code> (119), <code>sys_getresgid</code> (120): Precise multi-field credential swapping.
+  - <code>sys_capget</code> (125), <code>sys_capset</code> (126): Linux capability mask inspection; UID 0 receives full capabilities (<code>0xFFFFFFFF</code>), while unprivileged users receive restricted capabilities (<code>0x0</code>).
+* <strong>OpenZFS System Account Database</strong>:
+  - <code>/etc/passwd</code>: Defines <code>root</code> (UID 0:0, <code>/root</code>, <code>/bin/sh</code>) and <code>hydra</code> (UID 1000:1000, <code>/home/hydra</code>, <code>/bin/sh</code>).
+  - <code>/etc/group</code>: Defines <code>root</code> (GID 0), <code>wheel</code> (GID 10), and <code>hydra</code> (GID 1000).
+* <strong>Interactive Shell Privilege Management</strong>:
+  - Dynamic shell prompts: <code>hydra:/path#</code> for superuser <code>root</code> (UID 0), <code>hydra:/path$</code> for unprivileged users (<code>hydra</code>, UID 1000).
+  - <code>whoami</code> and <code>id</code>: Display active username, UID, GID, and security group membership.
+  - <code>su [user]</code>: Seamlessly switch active shell credentials.
+  - <code>sudo &lt;command&gt;</code>: Execute an individual command elevated with superuser UID 0 privileges.</p>
 <hr />
 <h2>Interactive Shell Command: <code>linux</code></h2>
 <p>The shell provides the <code>linux</code> command (aliased to <code>lx</code> and <code>linux64</code>):</p>
-<div class="codehilite"><pre><span></span><code>hydra&gt; linux status
+<div class="codehilite"><pre><span></span><code>hydra:/bin# linux status
 ============================================================
            HYDRA OS - LINUX ABI COMPATIBILITY SUBSYSTEM      
 ============================================================
@@ -5308,27 +5328,28 @@ hydra:/bin&gt; cursor block
   Unsupported Syscalls:               0
 ============================================================
 
-hydra&gt; linux test
-[*] Running Linux ABI compatibility self-tests...
-  [+] sys_uname: Linux 6.8.0-hydra
-  [+] /proc/version: Linux version 6.8.0-hydra (gcc-13 / rustc-1.80) #1 SMP PREEMPT Hydra Microkernel
-  [+] /dev/urandom: [54, e2, d1, 44, b0, 68, 77, 8a]
-  [+] arch_prctl(ARCH_SET_FS): MSR 0xC0000100 read/write verified
-[+] Linux ABI self-tests completed successfully.
+hydra:/bin# linux run roletest.elf
+[+] Read 2760 bytes from OpenZFS (roletest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 2 (UID 0, GID 0). Executing...
 
-hydra&gt; linux run threadtest.elf
-[+] Read 1984 bytes from OpenZFS (threadtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 2. Executing...
-
-[LINUX THREAD TEST STARTED]
-  [MAIN] Initial Process PID (TGID): 2, TID: 2
-  [MAIN] Spawning POSIX thread via sys_clone()...
-  [MAIN] Child thread cloned with TID 3. Waiting on futex join...
-  [CHILD THREAD] Running in parallel! TID: 3, TGID: 2
-  [CHILD THREAD] Incremented shared counter to 42. Terminating thread...
-  [MAIN] Futex join completed! Shared counter = 42
-[+] LINUX MULTI-THREADING &amp; FUTEX VERIFIED SUCCESSFULLY!
-
+=======================================================
+   HYDRA OS POSIX CREDENTIAL &amp; SECURITY ROLE TEST
+=======================================================
+[ROLETEST] Step 1: Initial credentials: UID=0, EUID=0, GID=0, EGID=0 (Superuser Root)
+[ROLETEST] Step 1b: getresuid -&gt; ruid=0, euid=0, suid=0
+[ROLETEST] Step 2: Dropping privileges via setuid(1000)...
+[ROLETEST] setuid(1000) result: 0
+[ROLETEST] Current credentials: UID=1000, EUID=1000 [SUCCESS: Standard User Hydra]
+[ROLETEST] Step 3: Attempting unauthorized escalation via setuid(0)...
+[ROLETEST] setuid(0) result: -1 -&gt; EPERM [DENIED: Security Enforced!]
+[ROLETEST] Step 4: Attempting unauthorized escalation via seteuid(0)...
+[ROLETEST] seteuid(0) result: -1 -&gt; EPERM [DENIED: Security Enforced!]
+[ROLETEST] Step 5: Testing authorized setuid(1000) as unprivileged user...
+[ROLETEST] setuid(1000) result: 0 -&gt; SUCCESS (allowed to retain self identity)
+[ROLETEST] Step 6: capget -&gt; effective mask=0x0 [SUCCESS: Capabilities restricted for UID 1000]
+=======================================================
+[+] ALL TESTS PASSED! User Role Security Verified.
+=======================================================
 [+] Linux process 2 finished execution.
 </code></pre></div>
 </div>
