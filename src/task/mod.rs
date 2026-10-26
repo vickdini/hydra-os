@@ -3,9 +3,9 @@ pub mod scheduler;
 pub mod tcb;
 
 use alloc::vec::Vec;
-pub use elf::{load_elf, ElfBinary, ElfError, ElfProcessImage};
+pub use elf::{load_elf, load_linux_elf, ElfBinary, ElfError, ElfProcessImage};
 pub use scheduler::{TaskSnapshot, SCHEDULER};
-pub use tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
+pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRegisters, TaskState};
 
 /// Initializes the multitasking subsystem and registers the current main thread.
 pub fn init(current_cr3: u64) {
@@ -48,6 +48,31 @@ pub fn spawn_elf(
 ) -> Result<TaskId, &'static str> {
     let mut sched = SCHEDULER.lock();
     sched.spawn_elf(name, elf_data, priority)
+}
+
+/// Spawns a new unprivileged user process running a Linux ELF64 binary under the Linux ABI.
+pub fn spawn_linux_elf(
+    name: &'static str,
+    elf_data: &[u8],
+    args: &[&str],
+    priority: TaskPriority,
+) -> Result<TaskId, &'static str> {
+    let mut sched = SCHEDULER.lock();
+    sched.spawn_linux_elf(name, elf_data, args, priority)
+}
+
+/// Returns the personality (Hydra vs Linux) of the currently running task.
+pub fn current_personality() -> TaskPersonality {
+    SCHEDULER.lock().current_personality()
+}
+
+/// Executes a closure with mutable access to the active task control block.
+pub fn with_current_task_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut Task) -> R,
+{
+    let mut sched = SCHEDULER.lock();
+    sched.current_task_mut(f)
 }
 
 /// Cooperatively yields the current task's timeslice to the next ready task.

@@ -116,6 +116,10 @@ impl Scheduler {
             state: TaskState::Ready,
             priority,
             mode: PrivilegeMode::Kernel,
+            personality: super::tcb::TaskPersonality::Hydra,
+            fs_base: 0,
+            brk: 0,
+            clear_child_tid: 0,
             regs,
             stack: Some(stack),
             user_stack: None,
@@ -181,6 +185,10 @@ impl Scheduler {
             state: TaskState::Ready,
             priority,
             mode: PrivilegeMode::User,
+            personality: super::tcb::TaskPersonality::Hydra,
+            fs_base: 0,
+            brk: 0,
+            clear_child_tid: 0,
             regs,
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
@@ -242,6 +250,56 @@ impl Scheduler {
             state: TaskState::Ready,
             priority,
             mode: PrivilegeMode::User,
+            personality: super::tcb::TaskPersonality::Hydra,
+            fs_base: 0,
+            brk: 0,
+            clear_child_tid: 0,
+            regs,
+            stack: Some(image.kernel_stack),
+            user_stack: Some(image.user_stack),
+            user_image: image.allocated_image,
+            ticks_run: 0,
+            timeslice_remaining: self.default_timeslice,
+            cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+            fds: crate::fs::FdTable::new_default(),
+        };
+
+        self.tasks.push(task);
+        Ok(id)
+    }
+
+    /// Spawns an unprivileged Ring 3 task running a Linux ELF64 binary with the Linux ABI.
+    pub fn spawn_linux_elf(
+        &mut self,
+        name: &'static str,
+        elf_data: &[u8],
+        args: &[&str],
+        priority: TaskPriority,
+    ) -> Result<TaskId, &'static str> {
+        let current_cr3 = Cr3::read().0.start_address().as_u64();
+        let image = super::elf::load_linux_elf(elf_data, args).map_err(|e| e.as_str())?;
+
+        let id = TaskId(self.next_id);
+        self.next_id += 1;
+
+        let mut regs = TaskRegisters::empty();
+        regs.rip = image.entry_point;
+        regs.rsp = image.initial_user_rsp;
+        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
+        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.rflags = 0x202; // IF=1: Interrupts enabled
+        regs.cr3 = current_cr3;
+
+        let task = Task {
+            id,
+            name,
+            state: TaskState::Ready,
+            priority,
+            mode: PrivilegeMode::User,
+            personality: super::tcb::TaskPersonality::Linux,
+            fs_base: 0,
+            brk: image.initial_brk,
+            clear_child_tid: 0,
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -286,6 +344,7 @@ impl Scheduler {
         // 3. Current task's timeslice expired or it is not Running (e.g. Blocked, Sleeping, Dead)
         let current_cr3 = Cr3::read().0.start_address().as_u64();
         curr_task.regs.save_from_context(ctx, current_cr3);
+        curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
         if curr_task.state == TaskState::Running {
             curr_task.state = TaskState::Ready;
         }
@@ -325,6 +384,11 @@ impl Scheduler {
         let kernel_top = next_task.kernel_stack_top();
         crate::arch::gdt::set_privilege_stack(x86_64::VirtAddr::new(kernel_top));
         crate::arch::syscall::set_kernel_rsp(kernel_top);
+
+        // 4c. Switch FS_BASE MSR for incoming task
+        unsafe {
+            crate::arch::syscall::wrmsr(0xC000_0100, next_task.fs_base);
+        }
 
         // 5. Restore registers into the ExceptionContext frame for iretq execution
         next_task.regs.restore_to_context(ctx);
@@ -403,6 +467,27 @@ impl Scheduler {
             self.tasks[self.current_index].id
         } else {
             TaskId(0)
+        }
+    }
+
+    /// Returns the target OS personality of the currently active task.
+    pub fn current_personality(&self) -> super::tcb::TaskPersonality {
+        if self.initialized && self.current_index < self.tasks.len() {
+            self.tasks[self.current_index].personality
+        } else {
+            super::tcb::TaskPersonality::Hydra
+        }
+    }
+
+    /// Executes a closure with a mutable reference to the currently executing task.
+    pub fn current_task_mut<F, R>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut Task) -> R,
+    {
+        if self.initialized && self.current_index < self.tasks.len() {
+            Some(f(&mut self.tasks[self.current_index]))
+        } else {
+            None
         }
     }
 

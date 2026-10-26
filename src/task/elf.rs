@@ -343,12 +343,14 @@ pub struct ElfProcessImage {
     pub entry_point: u64,
     /// Initial user stack pointer (RSP) configured in user space.
     pub initial_user_rsp: u64,
-    /// Dedicated 16 KiB unprivileged user stack buffer.
+    /// Dedicated unprivileged user stack buffer.
     pub user_stack: Box<[u8]>,
-    /// Dedicated 16 KiB privileged kernel stack buffer (for TSS RSP0 and hardware SYSCALL).
+    /// Dedicated privileged kernel stack buffer (for TSS RSP0 and hardware SYSCALL).
     pub kernel_stack: Box<[u8]>,
     /// Backing memory buffer holding segment code/data for Position-Independent Executables.
     pub allocated_image: Option<Box<[u8]>>,
+    /// Initial heap break address (end of loaded segments).
+    pub initial_brk: u64,
 }
 
 /// Parses, allocates, and maps an ELF64 binary into memory for Ring 3 execution.
@@ -454,6 +456,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
             user_stack,
             kernel_stack,
             allocated_image: Some(seg_buffer),
+            initial_brk: base_virt + aligned_span as u64,
         })
     } else {
         // Strategy 2: Fixed Virtual Address Binary (ET_EXEC with absolute virtual addresses)
@@ -493,6 +496,212 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
             user_stack,
             kernel_stack,
             allocated_image: None,
+            initial_brk: (max_vaddr + 4095) & !4095,
         })
     }
+}
+
+/// Parses, allocates, and maps a Linux ELF64 binary with standard Linux stack layout (argv, envp, auxv).
+pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage, ElfError> {
+    let elf = ElfBinary::parse(elf_data)?;
+    let load_segments = elf.load_segments();
+
+    if load_segments.is_empty() {
+        return Err(ElfError::NoLoadableSegments);
+    }
+
+    let mut min_vaddr = u64::MAX;
+    let mut max_vaddr = 0u64;
+
+    for ph in &load_segments {
+        if ph.p_vaddr < min_vaddr {
+            min_vaddr = ph.p_vaddr;
+        }
+        let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+        if seg_end > max_vaddr {
+            max_vaddr = seg_end;
+        }
+        let file_end = ph.p_offset.saturating_add(ph.p_filesz);
+        if file_end > elf_data.len() as u64 {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
+    }
+
+    // Allocate 16 KiB Kernel Stack
+    let kernel_stack = alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice();
+
+    // Allocate 64 KiB User Stack for Linux process
+    let user_stack_size = 65536;
+    let user_stack = alloc::vec![0u8; user_stack_size].into_boxed_slice();
+    let user_stack_bottom = user_stack.as_ptr() as u64;
+    let user_stack_top = user_stack_bottom + user_stack.len() as u64;
+
+    crate::memory::paging::make_user_accessible(
+        VirtAddr::new(user_stack_bottom),
+        user_stack.len(),
+    )
+    .map_err(|e| ElfError::PagingError(e))?;
+
+    let (entry_point, initial_brk, allocated_image, phdr_addr) = if elf.is_pie() || min_vaddr == 0 {
+        let total_span = (max_vaddr.saturating_sub(min_vaddr)) as usize;
+        let aligned_span = (total_span + 4095) & !4095;
+        let mut seg_buffer = alloc::vec![0u8; aligned_span].into_boxed_slice();
+        let base_virt = seg_buffer.as_ptr() as u64;
+
+        for ph in &load_segments {
+            let seg_offset = (ph.p_vaddr - min_vaddr) as usize;
+            let filesz = ph.p_filesz as usize;
+            let memsz = ph.p_memsz as usize;
+
+            if filesz > 0 {
+                let file_src = &elf_data[ph.p_offset as usize..(ph.p_offset as usize + filesz)];
+                seg_buffer[seg_offset..seg_offset + filesz].copy_from_slice(file_src);
+            }
+            if memsz > filesz {
+                let bss_start = seg_offset + filesz;
+                let bss_end = seg_offset + memsz;
+                if bss_end <= seg_buffer.len() {
+                    seg_buffer[bss_start..bss_end].fill(0);
+                }
+            }
+        }
+
+        crate::memory::paging::make_user_accessible(
+            VirtAddr::new(base_virt),
+            seg_buffer.len(),
+        )
+        .map_err(|e| ElfError::PagingError(e))?;
+
+        let entry_point = base_virt + (elf.header.e_entry - min_vaddr);
+        let phdr_addr = base_virt + (elf.header.e_phoff - min_vaddr);
+        (entry_point, base_virt + aligned_span as u64, Some(seg_buffer), phdr_addr)
+    } else {
+        for ph in &load_segments {
+            let filesz = ph.p_filesz as usize;
+            let memsz = ph.p_memsz as usize;
+            let vaddr = ph.p_vaddr;
+
+            crate::memory::paging::make_user_accessible(
+                VirtAddr::new(vaddr),
+                memsz,
+            )
+            .map_err(|e| ElfError::PagingError(e))?;
+
+            if filesz > 0 {
+                let src = &elf_data[ph.p_offset as usize..(ph.p_offset as usize + filesz)];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), vaddr as *mut u8, filesz);
+                }
+            }
+
+            if memsz > filesz {
+                let bss_dest = (vaddr + ph.p_filesz) as *mut u8;
+                let bss_len = memsz - filesz;
+                unsafe {
+                    core::ptr::write_bytes(bss_dest, 0, bss_len);
+                }
+            }
+        }
+        let phdr_addr = elf.header.e_phoff;
+        (elf.header.e_entry, (max_vaddr + 4095) & !4095, None, phdr_addr)
+    };
+
+    // Construct Linux userspace stack (argv, envp, auxv)
+    let mut sp = user_stack_top;
+
+    // 1. Copy string data (argv strings, envp strings, random bytes) to top of stack
+    sp -= 16;
+    let rand_addr = sp;
+    unsafe {
+        let rand_slice = core::slice::from_raw_parts_mut(sp as *mut u8, 16);
+        for (i, b) in rand_slice.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(19);
+        }
+    }
+
+    // Default env strings
+    let env_strings = ["PATH=/bin:/usr/bin", "USER=root", "HOME=/", "TERM=linux"];
+    let mut env_addrs = alloc::vec::Vec::new();
+    for env in &env_strings {
+        let bytes = env.as_bytes();
+        sp -= bytes.len() as u64 + 1;
+        unsafe {
+            let dest = sp as *mut u8;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, bytes.len());
+            *dest.add(bytes.len()) = 0;
+        }
+        env_addrs.push(sp);
+    }
+
+    // Argv strings
+    let mut argv_addrs = alloc::vec::Vec::new();
+    for arg in args {
+        let bytes = arg.as_bytes();
+        sp -= bytes.len() as u64 + 1;
+        unsafe {
+            let dest = sp as *mut u8;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, bytes.len());
+            *dest.add(bytes.len()) = 0;
+        }
+        argv_addrs.push(sp);
+    }
+
+    // 2. Align sp to 16 bytes
+    sp &= !0xF;
+
+    // 3. Prepare words to push:
+    // [Auxv...] [envp NULL, envp...] [argv NULL, argv...] [argc]
+    use crate::compat::linux::types::*;
+    let mut words: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+    // Auxv entries
+    words.push(AT_NULL); words.push(0);
+    words.push(AT_RANDOM); words.push(rand_addr);
+    words.push(AT_SECURE); words.push(0);
+    words.push(AT_EGID); words.push(1000);
+    words.push(AT_GID); words.push(1000);
+    words.push(AT_EUID); words.push(1000);
+    words.push(AT_UID); words.push(1000);
+    words.push(AT_ENTRY); words.push(entry_point);
+    words.push(AT_FLAGS); words.push(0);
+    words.push(AT_BASE); words.push(0);
+    words.push(AT_PAGESZ); words.push(4096);
+    words.push(AT_PHNUM); words.push(elf.header.e_phnum as u64);
+    words.push(AT_PHENT); words.push(elf.header.e_phentsize as u64);
+    words.push(AT_PHDR); words.push(phdr_addr);
+
+    // Envp (NULL-terminated)
+    words.push(0);
+    for addr in env_addrs.iter().rev() {
+        words.push(*addr);
+    }
+
+    // Argv (NULL-terminated)
+    words.push(0);
+    for addr in argv_addrs.iter().rev() {
+        words.push(*addr);
+    }
+
+    // Argc
+    words.push(args.len() as u64);
+
+    // Push words downwards
+    for word in words {
+        sp -= 8;
+        unsafe {
+            *(sp as *mut u64) = word;
+        }
+    }
+
+    // Align initial RSP to 16 bytes
+    sp &= !0xF;
+
+    Ok(ElfProcessImage {
+        entry_point,
+        initial_user_rsp: sp,
+        user_stack,
+        kernel_stack,
+        allocated_image,
+        initial_brk,
+    })
 }

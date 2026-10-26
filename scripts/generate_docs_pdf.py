@@ -284,6 +284,13 @@ DOCS_ORDER = [
         "anchor": "doc-boot-stage10-shell",
         "subtitle": "Command REPL, real-time memory/CPU inspection, CSpace manipulation, ZFS commands, and IPC testing.",
     },
+    {
+        "stage": "Stage 11: Linux Compatibility (ABI Layer)",
+        "title": "Linux Binary Compatibility Subsystem",
+        "file": "docs/src/compat/linux.md",
+        "anchor": "doc-boot-stage11-linux",
+        "subtitle": "Direct x86_64 Linux system call emulation, MSR IA32_FS_BASE TLS management, Auxv stack setup, and POSIX pseudo-files.",
+    },
 ]
 
 

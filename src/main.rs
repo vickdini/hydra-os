@@ -18,6 +18,7 @@ pub mod video;
 pub mod net;
 pub mod compress;
 pub mod pkg;
+pub mod compat;
 
 
 use core::panic::PanicInfo;

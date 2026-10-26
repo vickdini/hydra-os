@@ -155,6 +155,13 @@ pub fn init() {
 /// High-level Rust system call dispatcher called by `asm_syscall_entry`.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame) {
+    // Check if active task uses Linux ABI personality
+    if crate::task::current_personality() == crate::task::TaskPersonality::Linux {
+        let res = crate::compat::linux::dispatch_linux_syscall(frame);
+        frame.rax = res as u64;
+        return;
+    }
+
     let num = frame.rax;
     let arg0 = frame.rdi;
     let arg1 = frame.rsi;

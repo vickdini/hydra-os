@@ -23,6 +23,7 @@ pub mod video;
 pub mod plasma_cmd;
 pub mod net_cmds;
 pub mod zfs_cmds;
+pub mod linux_cmd;
 
 use crate::shell::command::Command;
 
@@ -58,6 +59,7 @@ pub use video::VideoCommand;
 pub use plasma_cmd::PlasmaCommand;
 pub use net_cmds::{DhcpCommand, DnsCommand, IfconfigCommand, PingCommand, WgetCommand};
 pub use zfs_cmds::{DisksCommand, ZfsCommand, ZpoolCommand};
+pub use linux_cmd::LinuxCommand;
 
 /// Static registry of all built-in commands and integrated programs.
 /// To integrate a new command or program, instantiate it in this slice!
@@ -140,6 +142,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &SyscallsCommand,
     &SyncCommand,
     &ElfCommand,
+    &LinuxCommand,
     // Power Management
     &RebootCommand,
     &ShutdownCommand,

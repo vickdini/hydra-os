@@ -456,6 +456,8 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage9-elf" class="toc-link"><span class="toc-title">Userspace ELF64 Binary Loader & Execution</span><span class="toc-sub">Parsing standalone ELF64 binaries from ZFS, PIE relocation, Ring 3 memory mapping, and syscall execution.</span></a></li>
 <li class="toc-stage-header">Stage 10: Interactive Shell</li>
 <li class="toc-item"><a href="#doc-boot-stage10-shell" class="toc-link"><span class="toc-title">Interactive Microkernel Shell & Command REPL</span><span class="toc-sub">Command REPL, real-time memory/CPU inspection, CSpace manipulation, ZFS commands, and IPC testing.</span></a></li>
+<li class="toc-stage-header">Stage 11: Linux Compatibility (ABI Layer)</li>
+<li class="toc-item"><a href="#doc-boot-stage11-linux" class="toc-link"><span class="toc-title">Linux Binary Compatibility Subsystem</span><span class="toc-sub">Direct x86_64 Linux system call emulation, MSR IA32_FS_BASE TLS management, Auxv stack setup, and POSIX pseudo-files.</span></a></li>
     </ul>
 </div>
 
@@ -5013,9 +5015,9 @@ hydra:/bin&gt;
 <td style="text-align: left;">Manages ZFS datasets (<code>hydrapool/root</code>, <code>hydrapool/bin</code>, <code>hydrapool/tmp</code>) and CoW snapshots.</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>apt</code>, <code>pkg</code></td>
-<td style="text-align: left;"><code>apt &lt;update\|install\|download\|search\|list\|show\|sources&gt;</code></td>
-<td style="text-align: left;">Debian APT package manager: synchronizes indexes, decompresses Gzip, demuxes <code>ar</code>/<code>tar</code>, and installs packages to ZFS.</td>
+<td style="text-align: left;"><code>linux</code>, <code>lx</code></td>
+<td style="text-align: left;"><code>linux &lt;status\|info\|test\|run &lt;path&gt;&gt;</code></td>
+<td style="text-align: left;">Linux ABI binary compatibility layer: executes standard x86_64 Linux ELF binaries, manages MSR TLS, and provides Linux syscalls.</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>efifs</code></td>
@@ -5203,6 +5205,108 @@ Usage: cursor [on|off|underline|block|bar]
 
 hydra:/bin&gt; cursor block
 [+] Terminal cursor shape set to Block (8x16 inverted box).
+</code></pre></div>
+</div>
+
+
+
+<div id="doc-boot-stage11-linux" class="doc-section">
+    <div class="section-stage-badge">Stage 11: Linux Compatibility (ABI Layer) &bull; Boot Sequence Order #36</div>
+    <h1>Stage 11: Linux Binary Compatibility Subsystem (ABI Layer)</h1>
+<h2>Architectural Role &amp; Design Rationale</h2>
+<p>To support existing modern open-source graphical ecosystems—specifically standard C/C++ runtimes, <code>musl-libc</code>, and Wayland/KDE Plasma components—without requiring thousands of manual userspace ports, Hydra OS implements an in-kernel <strong>Linux Binary Compatibility Subsystem</strong> (<code>src/compat/linux</code>).</p>
+<p>Similar in spirit to FreeBSD's <em>Linuxulator</em> or Windows Subsystem for Linux 1 (<em>WSL1</em>), the subsystem does not run a guest Linux kernel inside a virtual machine. Instead, it provides a direct, high-performance ABI translation layer that allows unprivileged 64-bit Linux ELF binaries to execute natively on the bare-metal hardware.</p>
+<hr />
+<h2>Architectural Workflow</h2>
+<div class="codehilite"><pre><span></span><code>+-------------------------------------------------------------------+
+|               Linux Userland Application / Runtime                |
+|        (musl libc, BusyBox, Wayland, Qt 6, KDE Plasma 6)          |
++-------------------------------------------------------------------+
+                                 |  Linux x86_64 Syscall Convention
+                                 |  (RAX: num, RDI, RSI, RDX, R10, R8, R9)
+                                 v
++-------------------------------------------------------------------+
+|                 Hydra Hardware SYSCALL Trampoline                 |
+|                   (src/arch/syscall.rs: LSTAR)                    |
++-------------------------------------------------------------------+
+                                 |
+                 +---------------+---------------+
+                 |                               |
+    [TaskPersonality::Hydra]       [TaskPersonality::Linux]
+                 |                               |
+                 v                               v
++--------------------------------+ +--------------------------------+
+|  Hydra Microkernel Dispatcher  | |   Linux ABI Compatibility      |
+|  (SYS_YIELD, SYS_IPC, etc.)    | |   (src/compat/linux/mod.rs)    |
++--------------------------------+ +--------------------------------+
+                                                 |
+         +--------------------+------------------+------------------+
+         |                    |                  |                  |
+         v                    v                  v                  v
+    [POSIX VFS / ZFS]     [Memory / Mmap]     [MSR / TLS]     [Pseudo-FS]
+     open, read, write     brk, mmap, munmap   ARCH_SET_FS     /proc, /dev
+</code></pre></div>
+
+<hr />
+<h2>Key Capabilities &amp; Features</h2>
+<h3>1. Dual Personality Task Management</h3>
+<p>Every <code>Task</code> in Hydra microkernel holds a <code>personality: TaskPersonality</code> attribute:
+* <code>TaskPersonality::Hydra</code>: Default microkernel tasks using Hydra syscall numbers (<code>SYS_YIELD = 1</code>, <code>SYS_SLEEP = 2</code>, <code>SYS_WRITE = 3</code>, etc.).
+* <code>TaskPersonality::Linux</code>: Linux applications using standard Linux x86_64 syscall numbers (<code>SYS_READ = 0</code>, <code>SYS_WRITE = 1</code>, <code>SYS_OPEN = 2</code>, <code>SYS_CLOSE = 3</code>, <code>SYS_MMAP = 9</code>, <code>SYS_BRK = 12</code>, <code>SYS_ARCH_PRCTL = 158</code>, etc.).</p>
+<h3>2. Thread-Local Storage (TLS) via Hardware MSR</h3>
+<p>Standard Linux C runtimes (<code>glibc</code> and <code>musl</code>) depend heavily on x86_64 segment registers for thread-local variables and stack canary protection (<code>%fs:0x28</code>):
+* The <code>arch_prctl(ARCH_SET_FS, addr)</code> system call is implemented using the CPU Model-Specific Register <code>IA32_FS_BASE</code> (<code>0xC000_0100</code>).
+* During preemptive context switches in <a href="file:///d:/os/src/task/scheduler.rs"><code>Scheduler::schedule()</code></a>, the active task's <code>fs_base</code> is saved via <code>rdmsr</code> and restored for the incoming task via <code>wrmsr</code>.</p>
+<h3>3. System V AMD64 Stack &amp; Auxiliary Vectors (<code>Auxv</code>)</h3>
+<p>When launching a Linux binary via <code>spawn_linux_elf()</code>, the ELF loader constructs a standard Linux userspace stack containing:
+* <code>argc</code>: Argument count.
+* <code>argv[]</code>: Array of null-terminated string pointers pointing to stack strings.
+* <code>envp[]</code>: Array of environment variables (<code>PATH=/bin:/usr/bin</code>, <code>USER=root</code>, <code>HOME=/</code>, <code>TERM=linux</code>).
+* <code>Auxiliary Vectors (Auxv)</code>: Critical startup metadata consumed by dynamic linkers:
+  - <code>AT_PHDR</code>, <code>AT_PHENT</code>, <code>AT_PHNUM</code>: Program header memory locations.
+  - <code>AT_PAGESZ</code>: Hardware page size (4096 bytes).
+  - <code>AT_ENTRY</code>: Entry point address.
+  - <code>AT_UID</code>, <code>AT_EUID</code>, <code>AT_GID</code>, <code>AT_EGID</code>: User identity credentials.
+  - <code>AT_RANDOM</code>: Pointer to 16 cryptographic random bytes.</p>
+<h3>4. Linux Pseudo-Filesystem Emulation</h3>
+<p>Virtual Linux filesystem paths are intercepted and served directly in memory:
+* <code>/dev/null</code>, <code>/dev/zero</code>: Standard POSIX sink and zero streams.
+* <code>/dev/urandom</code>: Hardware pseudo-random generator stream.
+* <code>/proc/version</code>: Identifies kernel as <code>Linux 6.8.0-hydra (gcc/rustc) #1 SMP PREEMPT Hydra Microkernel</code>.
+* <code>/proc/meminfo</code>: Reports dynamic kernel heap allocation and free capacity.
+* <code>/proc/cpuinfo</code>: Reports processor architecture and instruction set capabilities.</p>
+<hr />
+<h2>Interactive Shell Command: <code>linux</code></h2>
+<p>The shell provides the <code>linux</code> command (aliased to <code>lx</code> and <code>linux64</code>):</p>
+<div class="codehilite"><pre><span></span><code>hydra&gt; linux status
+============================================================
+           HYDRA OS - LINUX ABI COMPATIBILITY SUBSYSTEM      
+============================================================
+  Emulation Profile:    Linux 6.8.0-hydra (x86_64)
+  Target C-Runtime:     musl-libc, glibc, Alpine userspace
+  Syscall Interface:    Fast hardware SYSCALL / SYSRET
+  TLS Subsystem:        MSR IA32_FS_BASE (arch_prctl)
+  Memory Subsystem:     Page-backed brk + anonymous mmap
+  Pseudo Filesystems:   /dev/null, /dev/urandom, /proc/version
+------------------------------------------------------------
+  Total Syscalls Dispatched:          0
+  File &amp; Terminal I/O Calls:          0
+  Memory / mmap / brk Calls:          0
+  Process &amp; Signals Calls:            0
+  arch_prctl (TLS) Calls:             0
+  Time / Clock Calls:                 0
+  Unsupported Syscalls:               0
+============================================================
+
+hydra&gt; linux test
+[*] Running Linux ABI compatibility self-tests...
+  [+] sys_uname: Linux 6.8.0-hydra
+  [+] /proc/version: Linux version 6.8.0-hydra (gcc-13 / rustc-1.80) #1 SMP PREEMPT Hydra Microkernel
+  [+] /dev/urandom: [54, e2, d1, 44, b0, 68, 77, 8a]
+  [+] arch_prctl(ARCH_SET_FS): MSR 0xC0000100 read/write verified
+[+] Linux ABI self-tests completed successfully.
+
+hydra&gt; linux run /bin/busybox ls -la
 </code></pre></div>
 </div>
 

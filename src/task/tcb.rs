@@ -170,6 +170,22 @@ impl PrivilegeMode {
     }
 }
 
+/// Target OS ABI personality for system call routing and runtime semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPersonality {
+    Hydra,
+    Linux,
+}
+
+impl TaskPersonality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskPersonality::Hydra => "Hydra",
+            TaskPersonality::Linux => "Linux",
+        }
+    }
+}
+
 /// Task Control Block (TCB) representing a thread of execution in Hydra Microkernel.
 pub struct Task {
     pub id: TaskId,
@@ -177,6 +193,10 @@ pub struct Task {
     pub state: TaskState,
     pub priority: TaskPriority,
     pub mode: PrivilegeMode,
+    pub personality: TaskPersonality,
+    pub fs_base: u64,
+    pub brk: u64,
+    pub clear_child_tid: u64,
     pub regs: TaskRegisters,
     pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
     pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
@@ -199,6 +219,10 @@ impl Task {
             state: TaskState::Running,
             priority: TaskPriority::Normal,
             mode: PrivilegeMode::Kernel,
+            personality: TaskPersonality::Hydra,
+            fs_base: 0,
+            brk: 0,
+            clear_child_tid: 0,
             regs,
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,

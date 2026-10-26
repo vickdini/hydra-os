@@ -670,8 +670,12 @@ impl ZfsClient {
         let candidate_files = [
             ("\\bin\\hello.elf", "/bin/hello.elf"),
             ("\\bin\\counter.elf", "/bin/counter.elf"),
+            ("\\bin\\linuxapp.elf", "/bin/linuxapp.elf"),
+            ("\\bin\\linux_app.elf", "/bin/linux_app.elf"),
             ("\\hello.elf", "/bin/hello.elf"),
             ("\\counter.elf", "/bin/counter.elf"),
+            ("\\linuxapp.elf", "/bin/linuxapp.elf"),
+            ("\\linux_app.elf", "/bin/linux_app.elf"),
         ];
 
         let mut imported_count = 0;
@@ -679,8 +683,9 @@ impl ZfsClient {
         let mut file_buf = alloc::vec![0u8; 65536];
 
         for &(fat_path, zfs_path) in &candidate_files {
-            // Skip if file already exists in ZFS
-            if Self::lookup(zfs_path).is_ok() {
+            // Skip only if file already exists in ZFS and can be read successfully
+            let mut test_buf = [0u8; 16];
+            if Self::read_file_by_path(zfs_path, &mut test_buf).is_ok() {
                 continue;
             }
 
