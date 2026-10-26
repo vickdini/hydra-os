@@ -441,8 +441,10 @@ impl AtaDevice {
             self.ports.delay_400ns();
         }
 
-        // Flush write cache immediately for ACID durability
-        self.flush()
+        // Sector write complete; wait for drive to finish internal transfer
+        self.ports.delay_400ns();
+        self.ports.wait_not_busy()?;
+        Ok(())
     }
 
     /// Flushes the drive's volatile write cache to persistent magnetic or flash media.

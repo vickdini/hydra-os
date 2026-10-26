@@ -397,7 +397,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
         <strong>Target Architecture:</strong> x86_64-unknown-uefi (Native 64-bit Long Mode)<br>
         <strong>Security Model:</strong> Capability-Based Access Control (seL4-style)<br>
         <strong>IPC Subsystem:</strong> Synchronous &amp; Asynchronous Message Rendezvous<br>
-        <strong>Generated:</strong> October 25, 2026
+        <strong>Generated:</strong> October 26, 2026
     </div>
 </div>
 
@@ -5011,6 +5011,11 @@ hydra:/bin&gt;
 <td style="text-align: left;"><code>zfs</code></td>
 <td style="text-align: left;"><code>zfs &lt;list\|snap\|cat\|write&gt;</code></td>
 <td style="text-align: left;">Manages ZFS datasets (<code>hydrapool/root</code>, <code>hydrapool/bin</code>, <code>hydrapool/tmp</code>) and CoW snapshots.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>apt</code>, <code>pkg</code></td>
+<td style="text-align: left;"><code>apt &lt;update\|install\|download\|search\|list\|show\|sources&gt;</code></td>
+<td style="text-align: left;">Debian APT package manager: synchronizes indexes, decompresses Gzip, demuxes <code>ar</code>/<code>tar</code>, and installs packages to ZFS.</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>efifs</code></td>

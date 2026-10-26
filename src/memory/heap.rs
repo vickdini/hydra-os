@@ -5,8 +5,8 @@ use uefi::mem::memory_map::MemoryType;
 
 use super::frame_allocator::{FRAME_ALLOCATOR, PAGE_SIZE};
 
-/// Default kernel heap size: 8 MiB
-pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
+/// Default kernel heap size: 128 MiB (accommodates Debian repository indexes, Wayland compositors, and ZFS cache)
+pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
 
 /// Global allocator for Hydra kernel (`extern crate alloc`).
 #[global_allocator]

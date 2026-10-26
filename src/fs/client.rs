@@ -1,5 +1,5 @@
 use super::zfs::server::{
-    simple_str_hash, ZFS_IPC_LOOKUP, ZFS_IPC_PING, ZFS_IPC_POOL_STATUS,
+    simple_str_hash, ZfsServer, ZFS_IPC_LOOKUP, ZFS_IPC_PING, ZFS_IPC_POOL_STATUS,
     ZFS_IPC_READ, ZFS_IPC_SNAPSHOT, ZFS_IPC_WRITE, ZFS_SERVER, ZFS_STATUS_OK,
 };
 use super::zfs::types::DnodeType;
@@ -157,6 +157,55 @@ pub fn resolve_parent_and_name<'a>(path: &'a str) -> Result<(u64, &'a str), &'st
             curr_obj = entry.object_id;
         } else {
             return Err("Parent directory not found");
+        }
+    }
+
+    let child_name = parts[count - 1];
+    Ok((curr_obj, child_name))
+}
+
+/// Resolves the parent directory object ID and child component name for a normalized path,
+/// automatically creating any intermediate parent directories if they do not exist.
+pub fn resolve_parent_and_name_or_create<'a>(server: &mut ZfsServer, path: &'a str) -> Result<(u64, &'a str), &'static str> {
+    let clean = path.trim_matches(['/', '\\']);
+    if clean.is_empty() {
+        return Err("Cannot target root directory as a child");
+    }
+
+    let mut curr_obj = server.root_dir_obj;
+
+    let mut parts: [&str; 16] = [""; 16];
+    let mut count = 0;
+    for token in clean.split(['/', '\\']) {
+        if !token.is_empty() && count < parts.len() {
+            parts[count] = token;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return Err("Invalid path");
+    }
+
+    // Traverse up to parent, creating any missing directories
+    for i in 0..(count - 1) {
+        let part = parts[i];
+        let found = {
+            let zap = &server.dmu.zap_dirs[curr_obj as usize];
+            zap.lookup(part).map(|e| (e.object_id, e.obj_type))
+        };
+        match found {
+            Some((obj_id, DnodeType::Directory)) => {
+                curr_obj = obj_id;
+            }
+            Some((_, _)) => {
+                return Err("Parent path component is not a directory");
+            }
+            None => {
+                let new_dir = server.dmu.allocate_object(DnodeType::Directory, part)?;
+                server.dmu.add_directory_entry(curr_obj, part, new_dir, DnodeType::Directory)?;
+                curr_obj = new_dir;
+            }
         }
     }
 
@@ -324,6 +373,13 @@ impl ZfsClient {
     /// Writes an entire file by path using Copy-on-Write semantics.
     /// Creates the file if it doesn't already exist.
     pub fn write_file_by_path(path: &str, data: &[u8]) -> Result<u64, &'static str> {
+        let txg = Self::write_file_by_path_batch(path, data)?;
+        Self::sync()?;
+        Ok(txg)
+    }
+
+    /// Fast batch write that updates DMU structures without flushing metadata on every write.
+    pub fn write_file_by_path_batch(path: &str, data: &[u8]) -> Result<u64, &'static str> {
         // If file already exists, overwrite via CoW
         if let Ok((obj_id, obj_type)) = resolve_path(path) {
             if obj_type != DnodeType::PlainFile {
@@ -334,23 +390,20 @@ impl ZfsClient {
                 Some(s) => s,
                 None => return Err("ZFS File Server not running"),
             };
-            let txg = server.dmu.cow_write_file(obj_id, data, &mut server.spa)?;
-            let _ = server.sync_metadata();
-            return Ok(txg);
+            return server.dmu.cow_write_file(obj_id, data, &mut server.spa);
         }
 
-        // Otherwise create new file in parent directory
-        let (parent_dir, filename) = resolve_parent_and_name(path)?;
+        // Otherwise create new file in parent directory (auto-creating parent directories if needed)
         let mut server_lock = ZFS_SERVER.lock();
         let server = match server_lock.as_mut() {
             Some(s) => s,
             None => return Err("ZFS File Server not running"),
         };
+        let (parent_dir, filename) = resolve_parent_and_name_or_create(server, path)?;
 
         let file_obj = server.dmu.allocate_object(DnodeType::PlainFile, filename)?;
         let txg = server.dmu.cow_write_file(file_obj, data, &mut server.spa)?;
         server.dmu.add_directory_entry(parent_dir, filename, file_obj, DnodeType::PlainFile)?;
-        let _ = server.sync_metadata();
         Ok(txg)
     }
 
@@ -393,6 +446,51 @@ impl ZfsClient {
         server.dmu.add_directory_entry(parent_dir, dirname, dir_obj, DnodeType::Directory)?;
         let _ = server.sync_metadata();
         Ok(dir_obj)
+    }
+
+    /// Recursively creates a directory and all parent components (like Unix `mkdir -p`).
+    pub fn create_dir_all(path: &str) -> Result<u64, &'static str> {
+        let clean = path.trim_matches(['/', '\\']);
+        if clean.is_empty() {
+            let server_lock = ZFS_SERVER.lock();
+            let server = match server_lock.as_ref() {
+                Some(s) => s,
+                None => return Err("ZFS File Server not running"),
+            };
+            return Ok(server.root_dir_obj);
+        }
+
+        let mut server_lock = ZFS_SERVER.lock();
+        let server = match server_lock.as_mut() {
+            Some(s) => s,
+            None => return Err("ZFS File Server not running"),
+        };
+
+        let mut curr_obj = server.root_dir_obj;
+        for part in clean.split(['/', '\\']) {
+            if part.is_empty() {
+                continue;
+            }
+            let found = {
+                let zap = &server.dmu.zap_dirs[curr_obj as usize];
+                zap.lookup(part).map(|e| (e.object_id, e.obj_type))
+            };
+            match found {
+                Some((obj_id, DnodeType::Directory)) => {
+                    curr_obj = obj_id;
+                }
+                Some((_, _)) => {
+                    return Err("Path component exists and is not a directory");
+                }
+                None => {
+                    let new_dir = server.dmu.allocate_object(DnodeType::Directory, part)?;
+                    server.dmu.add_directory_entry(curr_obj, part, new_dir, DnodeType::Directory)?;
+                    curr_obj = new_dir;
+                }
+            }
+        }
+        let _ = server.sync_metadata();
+        Ok(curr_obj)
     }
 
     /// Removes an empty directory at the specified path (like Unix `rmdir`).
@@ -447,7 +545,8 @@ impl ZfsClient {
             Some(s) => s,
             None => return Err("ZFS File Server not running"),
         };
-        server.sync_metadata()
+        server.sync_metadata()?;
+        server.spa.flush()
     }
 
     /// Copies a file in ZFS (like Unix `cp`).

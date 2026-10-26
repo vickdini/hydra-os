@@ -179,6 +179,7 @@ hydra:/bin>
 | `time`, `date` | `time` | Queries the hardware Real-Time Clock (RTC) via UEFI runtime services. |
 | `zpool` | `zpool <status\|list>` | Inspects and manages ZFS storage pools (`hydrapool`, vdevs, CoW Merkle tree). |
 | `zfs` | `zfs <list\|snap\|cat\|write>` | Manages ZFS datasets (`hydrapool/root`, `hydrapool/bin`, `hydrapool/tmp`) and CoW snapshots. |
+| `apt`, `pkg` | `apt <update\|install\|download\|search\|list\|show\|sources>` | Debian APT package manager: synchronizes indexes, decompresses Gzip, demuxes `ar`/`tar`, and installs packages to ZFS. |
 | `efifs` | `efifs <ls\|cat\|run>` | Low-level firmware diagnostic tool inspecting raw UEFI FAT bootloader media. |
 | `color` | `color <name>` | Customizes shell prompt and text color (`cyan`, `green`, `yellow`, `red`, `white`, `magenta`, `blue`). |
 | `scroll` | `scroll [on\|off]` | Toggles or sets Scroll Lock mode for Up/Down arrow terminal scrolling. |

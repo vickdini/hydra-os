@@ -1,0 +1,50 @@
+Package: busybox-static
+Version: 1:1.36.1-6
+Architecture: amd64
+Installed-Size: 2156
+Filename: pool/main/b/busybox/busybox-static_1.36.1-6_amd64.deb
+Size: 708
+SHA256: 4efbdd937b6b4d7a1c1fbd74915cd0cee44da9377c1c3ab1610c4514cc4445ac
+Section: utils
+Depends: 
+Description: Standalone rescue shell and core utilities
+ BusyBox combines tiny versions of many common UNIX utilities into a
+ single multi-call binary.
+
+Package: neofetch
+Version: 7.1.0-4
+Architecture: all
+Installed-Size: 340
+Filename: pool/main/n/neofetch/neofetch_7.1.0-4_all.deb
+Size: 724
+SHA256: e3c70d9501e78a569d8c07786f78e798f2e1536e40c856d908208008adcc6bcc
+Section: utils
+Depends: bash (>= 4.0)
+Description: Fast, highly customizable system info script
+ Neofetch displays information about your operating system, software, and hardware
+ in an aesthetic and visually pleasing ASCII art format.
+
+Package: plasma-desktop
+Version: 6.8.0-1
+Architecture: amd64
+Installed-Size: 14500
+Filename: pool/main/p/plasma-desktop/plasma-desktop_6.8.0-1_amd64.deb
+Size: 5894120
+SHA256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+Section: kde
+Depends: kf6-kcoreaddons, libwayland-client0, qt6-base
+Description: KDE Plasma Desktop Workspace 6.8
+ Tools and session management for the modern KDE Plasma 6.8 desktop,
+ providing Wayland compositing, panel, application launcher, and widgets.
+
+Package: wayland-utils
+Version: 1.2.0-1
+Architecture: amd64
+Installed-Size: 120
+Filename: pool/main/w/wayland-utils/wayland-utils_1.2.0-1_amd64.deb
+Size: 45000
+SHA256: 4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5
+Section: x11
+Depends: libwayland-client0 (>= 1.20)
+Description: Wayland diagnostic and inspection utilities
+ Contains wayland-info diagnostic tool for inspecting active Wayland displays.

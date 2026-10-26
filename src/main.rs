@@ -16,6 +16,8 @@ pub mod syscall;
 pub mod task;
 pub mod video;
 pub mod net;
+pub mod compress;
+pub mod pkg;
 
 
 use core::panic::PanicInfo;
