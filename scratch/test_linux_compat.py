@@ -75,22 +75,24 @@ def main():
     print("[*] QMP Greeting received:", len(initial), "bytes")
     send_qmp(sock, "qmp_capabilities")
 
-    print("[*] Waiting 10 seconds for UEFI boot and auto bare-metal hardware takeover...")
-    time.sleep(10)
+    print("[*] Waiting 16 seconds for UEFI boot and auto bare-metal hardware takeover...")
+    time.sleep(16)
 
-    # 1. Test: Run Linux binary
-    print("[*] Executing 'linux run linuxapp.elf'...")
+    # 1. Test: Run Linux Multi-Threaded binary
+    print("[*] Executing 'linux run threadtest.elf'...")
+    send_key_str(sock, "\n")
+    time.sleep(1)
     send_key_str(sock, "clear\n")
     time.sleep(1)
-    send_key_str(sock, "linux run linuxapp.elf\n")
-    time.sleep(3)
-    send_qmp(sock, "screendump", {"filename": r"D:\os\scratch\test_linux_exec.ppm"})
+    send_key_str(sock, "linux run threadtest.elf\n")
+    time.sleep(6)
+    send_qmp(sock, "screendump", {"filename": r"D:\os\scratch\test_thread_exec.ppm"})
 
     # 2. Test: Check 'linux status' to verify syscall counters
     print("[*] Executing 'linux status'...")
     send_key_str(sock, "linux status\n")
     time.sleep(2)
-    send_qmp(sock, "screendump", {"filename": r"D:\os\scratch\test_linux_status.ppm"})
+    send_qmp(sock, "screendump", {"filename": r"D:\os\scratch\test_thread_status.ppm"})
 
     print("[*] Quitting QEMU...")
     try:
@@ -101,7 +103,7 @@ def main():
     proc.wait(timeout=5)
 
     from PIL import Image
-    for name in ["test_ls_bin", "test_linux_exec", "test_linux_status"]:
+    for name in ["test_thread_exec", "test_thread_status"]:
         ppm_path = rf"D:\os\scratch\{name}.ppm"
         png_path = rf"D:\os\scratch\{name}.png"
         if os.path.exists(ppm_path):

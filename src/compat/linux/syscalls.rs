@@ -64,6 +64,7 @@ pub const SYS_GETGID: u64 = 104;
 pub const SYS_GETEUID: u64 = 107;
 pub const SYS_GETEGID: u64 = 108;
 pub const SYS_ARCH_PRCTL: u64 = 158;
+pub const SYS_GETTID: u64 = 186;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
 pub const SYS_CLOCK_GETTIME: u64 = 228;

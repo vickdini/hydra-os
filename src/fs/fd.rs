@@ -164,6 +164,7 @@ impl FileDescriptor {
 }
 
 /// Per-process File Descriptor Table (supports up to MAX_FDS open files/pipes/streams).
+#[derive(Clone)]
 pub struct FdTable {
     fds: [Option<FileDescriptor>; MAX_FDS],
 }

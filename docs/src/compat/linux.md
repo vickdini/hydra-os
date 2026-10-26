@@ -74,6 +74,17 @@ Virtual Linux filesystem paths are intercepted and served directly in memory:
 * `/proc/meminfo`: Reports dynamic kernel heap allocation and free capacity.
 * `/proc/cpuinfo`: Reports processor architecture and instruction set capabilities.
 
+### 5. Multi-Threading & Futex Subsystem (`clone`, `futex`, `set_tid_address`)
+Full multi-threaded POSIX execution is enabled via in-kernel thread creation and synchronization:
+* **`sys_clone` (Syscall 56)**: Supports flags `CLONE_VM`, `CLONE_FS`, `CLONE_FILES`, `CLONE_THREAD`, `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, and `CLONE_CHILD_CLEARTID`.
+  - Threads share address spaces (`CR3`), virtual filesystems, and file descriptor tables.
+  - Sibling threads share the same Thread Group ID (`TGID`), with `sys_getpid` returning the process TGID and `sys_gettid` returning the thread's individual task ID.
+  - Dedicated per-thread kernel stacks (`DEFAULT_STACK_SIZE = 16 KiB`) ensure re-entrant syscall execution and isolated interrupt stacks.
+* **`sys_futex` (Syscall 202)**: Implements fast userspace mutex primitives:
+  - `FUTEX_WAIT` / `FUTEX_WAIT_BITSET`: Atomic value comparison against `*uaddr`; blocks calling thread in scheduler if values match, or returns `-EAGAIN` (`-11`) if contested.
+  - `FUTEX_WAKE` / `FUTEX_WAKE_BITSET`: Wakes up to `val` threads blocked on the target address without deadlock or lock inversion.
+* **Robust Thread Exit (`clear_child_tid`)**: When a thread terminates via `sys_exit` or `exit()`, the kernel writes `0` to the userspace address designated by `CLONE_CHILD_CLEARTID` / `set_tid_address` and automatically triggers a futex wake, unblocking `pthread_join()` callers immediately.
+
 ---
 
 ## Interactive Shell Command: `linux`
@@ -92,10 +103,10 @@ hydra> linux status
   Memory Subsystem:     Page-backed brk + anonymous mmap
   Pseudo Filesystems:   /dev/null, /dev/urandom, /proc/version
 ------------------------------------------------------------
-  Total Syscalls Dispatched:          0
-  File & Terminal I/O Calls:          0
+  Total Syscalls Dispatched:          28
+  File & Terminal I/O Calls:          8
   Memory / mmap / brk Calls:          0
-  Process & Signals Calls:            0
+  Process & Signals Calls:            20
   arch_prctl (TLS) Calls:             0
   Time / Clock Calls:                 0
   Unsupported Syscalls:               0
@@ -109,5 +120,18 @@ hydra> linux test
   [+] arch_prctl(ARCH_SET_FS): MSR 0xC0000100 read/write verified
 [+] Linux ABI self-tests completed successfully.
 
-hydra> linux run /bin/busybox ls -la
+hydra> linux run threadtest.elf
+[+] Read 1984 bytes from OpenZFS (threadtest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 2. Executing...
+
+[LINUX THREAD TEST STARTED]
+  [MAIN] Initial Process PID (TGID): 2, TID: 2
+  [MAIN] Spawning POSIX thread via sys_clone()...
+  [MAIN] Child thread cloned with TID 3. Waiting on futex join...
+  [CHILD THREAD] Running in parallel! TID: 3, TGID: 2
+  [CHILD THREAD] Incremented shared counter to 42. Terminating thread...
+  [MAIN] Futex join completed! Shared counter = 42
+[+] LINUX MULTI-THREADING & FUTEX VERIFIED SUCCESSFULLY!
+
+[+] Linux process 2 finished execution.
 ```

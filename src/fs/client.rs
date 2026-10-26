@@ -672,10 +672,14 @@ impl ZfsClient {
             ("\\bin\\counter.elf", "/bin/counter.elf"),
             ("\\bin\\linuxapp.elf", "/bin/linuxapp.elf"),
             ("\\bin\\linux_app.elf", "/bin/linux_app.elf"),
+            ("\\bin\\thread_test.elf", "/bin/thread_test.elf"),
+            ("\\bin\\threadtest.elf", "/bin/threadtest.elf"),
             ("\\hello.elf", "/bin/hello.elf"),
             ("\\counter.elf", "/bin/counter.elf"),
             ("\\linuxapp.elf", "/bin/linuxapp.elf"),
             ("\\linux_app.elf", "/bin/linux_app.elf"),
+            ("\\thread_test.elf", "/bin/thread_test.elf"),
+            ("\\threadtest.elf", "/bin/threadtest.elf"),
         ];
 
         let mut imported_count = 0;

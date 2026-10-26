@@ -5,6 +5,7 @@
 //! to execute natively on Hydra Microkernel.
 
 pub mod fs;
+pub mod futex;
 pub mod syscalls;
 pub mod types;
 
@@ -48,7 +49,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     let arg2 = frame.rdx;
     let arg3 = frame.r10;
     let arg4 = frame.r8;
-    let _arg5 = frame.r9;
+    let arg5 = frame.r9;
 
     {
         let mut stats = LINUX_STATS.lock();
@@ -473,7 +474,23 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         }
 
         SYS_GETPID => {
+            crate::task::with_current_task_mut(|t| t.tgid as i64).unwrap_or(0)
+        }
+
+        SYS_GETTID => {
             crate::task::SCHEDULER.lock().current_task_id().0 as i64
+        }
+
+        SYS_CLONE => {
+            // sys_clone(flags: unsigned long, child_stack: void*, ptid: int*, ctid: int*, newtls: unsigned long)
+            {
+                let mut stats = LINUX_STATS.lock();
+                stats.process_calls += 1;
+            }
+            match crate::task::SCHEDULER.lock().spawn_clone(frame) {
+                Ok(child_id) => child_id.0 as i64,
+                Err(_) => -ENOMEM,
+            }
         }
 
         SYS_EXIT | SYS_EXIT_GROUP => {
@@ -583,8 +600,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
         SYS_FUTEX => {
             // sys_futex(uaddr: int*, op: int, val: int, timeout: const struct timespec*, uaddr2: int*, val3: int)
-            // In single-thread or cooperative userspace, FUTEX_WAIT and FUTEX_WAKE can safely return 0
-            0
+            {
+                let mut stats = LINUX_STATS.lock();
+                stats.process_calls += 1;
+            }
+            futex::dispatch_futex(arg0, arg1 as i32, arg2 as u32, arg3, arg4, arg5 as u32)
         }
 
         SYS_SET_TID_ADDRESS => {

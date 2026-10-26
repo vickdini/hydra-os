@@ -5275,6 +5275,16 @@ hydra:/bin&gt; cursor block
 * <code>/proc/version</code>: Identifies kernel as <code>Linux 6.8.0-hydra (gcc/rustc) #1 SMP PREEMPT Hydra Microkernel</code>.
 * <code>/proc/meminfo</code>: Reports dynamic kernel heap allocation and free capacity.
 * <code>/proc/cpuinfo</code>: Reports processor architecture and instruction set capabilities.</p>
+<h3>5. Multi-Threading &amp; Futex Subsystem (<code>clone</code>, <code>futex</code>, <code>set_tid_address</code>)</h3>
+<p>Full multi-threaded POSIX execution is enabled via in-kernel thread creation and synchronization:
+* <strong><code>sys_clone</code> (Syscall 56)</strong>: Supports flags <code>CLONE_VM</code>, <code>CLONE_FS</code>, <code>CLONE_FILES</code>, <code>CLONE_THREAD</code>, <code>CLONE_SETTLS</code>, <code>CLONE_PARENT_SETTID</code>, <code>CLONE_CHILD_SETTID</code>, and <code>CLONE_CHILD_CLEARTID</code>.
+  - Threads share address spaces (<code>CR3</code>), virtual filesystems, and file descriptor tables.
+  - Sibling threads share the same Thread Group ID (<code>TGID</code>), with <code>sys_getpid</code> returning the process TGID and <code>sys_gettid</code> returning the thread's individual task ID.
+  - Dedicated per-thread kernel stacks (<code>DEFAULT_STACK_SIZE = 16 KiB</code>) ensure re-entrant syscall execution and isolated interrupt stacks.
+* <strong><code>sys_futex</code> (Syscall 202)</strong>: Implements fast userspace mutex primitives:
+  - <code>FUTEX_WAIT</code> / <code>FUTEX_WAIT_BITSET</code>: Atomic value comparison against <code>*uaddr</code>; blocks calling thread in scheduler if values match, or returns <code>-EAGAIN</code> (<code>-11</code>) if contested.
+  - <code>FUTEX_WAKE</code> / <code>FUTEX_WAKE_BITSET</code>: Wakes up to <code>val</code> threads blocked on the target address without deadlock or lock inversion.
+* <strong>Robust Thread Exit (<code>clear_child_tid</code>)</strong>: When a thread terminates via <code>sys_exit</code> or <code>exit()</code>, the kernel writes <code>0</code> to the userspace address designated by <code>CLONE_CHILD_CLEARTID</code> / <code>set_tid_address</code> and automatically triggers a futex wake, unblocking <code>pthread_join()</code> callers immediately.</p>
 <hr />
 <h2>Interactive Shell Command: <code>linux</code></h2>
 <p>The shell provides the <code>linux</code> command (aliased to <code>lx</code> and <code>linux64</code>):</p>
@@ -5289,10 +5299,10 @@ hydra:/bin&gt; cursor block
   Memory Subsystem:     Page-backed brk + anonymous mmap
   Pseudo Filesystems:   /dev/null, /dev/urandom, /proc/version
 ------------------------------------------------------------
-  Total Syscalls Dispatched:          0
-  File &amp; Terminal I/O Calls:          0
+  Total Syscalls Dispatched:          28
+  File &amp; Terminal I/O Calls:          8
   Memory / mmap / brk Calls:          0
-  Process &amp; Signals Calls:            0
+  Process &amp; Signals Calls:            20
   arch_prctl (TLS) Calls:             0
   Time / Clock Calls:                 0
   Unsupported Syscalls:               0
@@ -5306,7 +5316,20 @@ hydra&gt; linux test
   [+] arch_prctl(ARCH_SET_FS): MSR 0xC0000100 read/write verified
 [+] Linux ABI self-tests completed successfully.
 
-hydra&gt; linux run /bin/busybox ls -la
+hydra&gt; linux run threadtest.elf
+[+] Read 1984 bytes from OpenZFS (threadtest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 2. Executing...
+
+[LINUX THREAD TEST STARTED]
+  [MAIN] Initial Process PID (TGID): 2, TID: 2
+  [MAIN] Spawning POSIX thread via sys_clone()...
+  [MAIN] Child thread cloned with TID 3. Waiting on futex join...
+  [CHILD THREAD] Running in parallel! TID: 3, TGID: 2
+  [CHILD THREAD] Incremented shared counter to 42. Terminating thread...
+  [MAIN] Futex join completed! Shared counter = 42
+[+] LINUX MULTI-THREADING &amp; FUTEX VERIFIED SUCCESSFULLY!
+
+[+] Linux process 2 finished execution.
 </code></pre></div>
 </div>
 

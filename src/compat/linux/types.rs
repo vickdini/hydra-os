@@ -169,3 +169,14 @@ pub const AT_SECURE: u64 = 23;
 pub const AT_RANDOM: u64 = 25;
 pub const AT_EXECFN: u64 = 31;
 pub const AT_SYSINFO_EHDR: u64 = 33;
+
+// Linux clone(2) flags
+pub const CLONE_VM: u64 = 0x0000_0100;
+pub const CLONE_FS: u64 = 0x0000_0200;
+pub const CLONE_FILES: u64 = 0x0000_0400;
+pub const CLONE_SIGHAND: u64 = 0x0000_0800;
+pub const CLONE_THREAD: u64 = 0x0001_0000;
+pub const CLONE_SETTLS: u64 = 0x0008_0000;
+pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
