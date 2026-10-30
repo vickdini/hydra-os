@@ -79,6 +79,7 @@ const NR_FACCESSAT2: u64 = 439;
 const EPERM: i64 = -1;
 const ENOENT: i64 = -2;
 const EBADF: i64 = -9;
+const EAGAIN: i64 = -11;
 const EACCES: i64 = -13;
 const EFAULT: i64 = -14;
 const EEXIST: i64 = -17;
@@ -235,6 +236,13 @@ fn fd_vnode(fd: i32) -> Option<Arc<Mutex<OpenFile>>> {
     }
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(FileDescriptor::Vnode(f)) => Some(f.clone()),
+        _ => None,
+    })
+}
+
+fn inet_of(fd: usize) -> Option<Arc<Mutex<super::inet::InetSocket>>> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(FileDescriptor::Inet(s)) => Some(s.clone()),
         _ => None,
     })
 }
@@ -915,6 +923,35 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             fds.set_cloexec(fd, arg & 1 != 0);
             0
         }),
+        F_GETFL | F_SETFL if inet_of(fd).is_some() => {
+            let s = inet_of(fd).unwrap();
+            let mut s = s.lock();
+            if cmd == F_SETFL {
+                s.nonblock = arg as u32 & O_NONBLOCK != 0;
+                0
+            } else {
+                2 | if s.nonblock { O_NONBLOCK as i64 } else { 0 } // O_RDWR
+            }
+        }
+        F_GETFL | F_SETFL if crate::task::with_current_fds_mut(|fds| fds.get(fd).map_or(false, is_tty)) => {
+            if cmd == F_SETFL {
+                super::tty::set_nonblock(arg as u32 & O_NONBLOCK != 0);
+                0
+            } else {
+                2 | if super::tty::nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
+            }
+        }
+        F_GETFL | F_SETFL if pipe_of(fd).is_some() => {
+            let (pipe, write_end) = pipe_of(fd).unwrap();
+            let mut p = pipe.lock();
+            let flag = if write_end { &mut p.write_nonblock } else { &mut p.read_nonblock };
+            if cmd == F_SETFL {
+                *flag = arg as u32 & O_NONBLOCK != 0;
+                0
+            } else {
+                (if write_end { 1 } else { 0 }) | if *flag { O_NONBLOCK as i64 } else { 0 }
+            }
+        }
         F_GETFL => match fd_vnode(fd as i32) {
             Some(f) => f.lock().flags as i64,
             None => return None,
@@ -944,7 +981,17 @@ fn is_tty(d: &FileDescriptor) -> bool {
     matches!(d, FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr)
 }
 
-/// Blocking read from a pipe: waits for data, or returns 0 once every writer is gone.
+/// The pipe behind descriptor `fd` and whether it is the write end.
+fn pipe_of(fd: usize) -> Option<(Arc<Mutex<crate::fs::PipeBuffer>>, bool)> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(FileDescriptor::PipeRead(p)) => Some((p.clone(), false)),
+        Some(FileDescriptor::PipeWrite(p)) => Some((p.clone(), true)),
+        _ => None,
+    })
+}
+
+/// Read from a pipe: waits for data (unless `O_NONBLOCK`), or returns 0 once every
+/// writer is gone.
 fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
     loop {
         {
@@ -954,6 +1001,9 @@ fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
             }
             if p.writers_count() == 0 {
                 return 0;
+            }
+            if p.read_nonblock {
+                return EAGAIN;
             }
         }
         if super::proc::signal_pending() {
@@ -984,6 +1034,9 @@ fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
                 return if done > 0 { done as i64 } else { -32 };
             }
             Some(0) => {
+                if pipe.lock().write_nonblock {
+                    return if done > 0 { done as i64 } else { EAGAIN };
+                }
                 if super::proc::signal_pending() {
                     return if done > 0 { done as i64 } else { super::proc::ERESTARTSYS };
                 }
@@ -999,7 +1052,8 @@ fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
 fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let fd = a[0] as usize;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
-    let stream = is_tty(&desc) || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_));
+    let stream = is_tty(&desc)
+        || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_));
     if !stream {
         return None;
     }
@@ -1028,13 +1082,15 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
             match &desc {
                 FileDescriptor::PipeRead(p) => pipe_read(p, buf),
                 FileDescriptor::PipeWrite(_) => EBADF,
-                _ => super::tty::read(buf, false),
+                FileDescriptor::Inet(s) => super::inet::read(s, buf),
+                _ => super::tty::read(buf, super::tty::nonblock()),
             }
         } else {
             let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
             match &desc {
                 FileDescriptor::PipeWrite(p) => pipe_write(p, data),
                 FileDescriptor::PipeRead(_) => EBADF,
+                FileDescriptor::Inet(s) => super::inet::write(s, data),
                 _ => super::tty::write(data) as i64,
             }
         };
@@ -1059,6 +1115,28 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
             match desc {
                 Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
+                Some(FileDescriptor::Inet(ref s)) => match a[1] {
+                    0x5421 => {
+                        // FIONBIO
+                        match copy_in(a[2], 4) {
+                            Ok(v) => {
+                                s.lock().nonblock = v.iter().any(|&b| b != 0);
+                                0
+                            }
+                            Err(e) => e,
+                        }
+                    }
+                    0x541B => {
+                        // FIONREAD
+                        let n = super::inet::pending_bytes(s) as i32;
+                        match copy_out(a[2], &n.to_le_bytes()) {
+                            Ok(()) => 0,
+                            Err(e) => e,
+                        }
+                    }
+                    r if r & 0xFF00 == 0x5400 => super::tty::NOT_A_TTY,
+                    _ => EINVAL,
+                },
                 Some(FileDescriptor::Vnode(_)) | Some(FileDescriptor::PipeRead(_)) | Some(FileDescriptor::PipeWrite(_))
                     if a[1] & 0xFF00 == 0x5400 =>
                 {
@@ -1227,6 +1305,29 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
         NR_FCNTL => fcntl(a[0] as i32, a[1], a[2])?,
+
+        436 => {
+            // close_range(first, last, flags): CLOSE_RANGE_CLOEXEC (4) marks instead of closing;
+            // CLOSE_RANGE_UNSHARE (2) needs nothing since every process has its own table
+            let (first, last, flags) = (a[0] as u32 as usize, a[1] as u32 as usize, a[2]);
+            if first > last || flags & !6 != 0 {
+                EINVAL
+            } else {
+                let last = last.min(crate::fs::MAX_FDS - 1);
+                crate::task::with_current_fds_mut(|fds| {
+                    for fd in first..=last {
+                        if flags & 4 != 0 {
+                            if fds.get(fd).is_some() {
+                                fds.set_cloexec(fd, true);
+                            }
+                        } else {
+                            let _ = fds.close(fd);
+                        }
+                    }
+                });
+                0
+            }
+        }
 
         // Extended attributes: the pool stores none, so lists are empty and lookups miss
         188..=190 | 197..=199 => EOPNOTSUPP, // setxattr family, removexattr family

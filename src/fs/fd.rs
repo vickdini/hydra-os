@@ -62,6 +62,8 @@ pub enum FileDescriptor {
     MemFd(Arc<Mutex<crate::compat::linux::memfd::MemFd>>),
     /// A ZFS inode opened through the Linux VFS.
     Vnode(Arc<Mutex<OpenFile>>),
+    /// An internet (TCP/UDP) socket; I/O goes through the Linux socket layer.
+    Inet(Arc<Mutex<crate::compat::linux::inet::InetSocket>>),
     /// A path-addressed file: pseudo files (`/dev`, `/proc`) and Hydra-native opens.
     File {
         path: String,
@@ -151,6 +153,7 @@ impl FileDescriptor {
                 let mut m = memfd.lock();
                 m.read(buf)
             }
+            FileDescriptor::Inet(_) => Err("Internet sockets are read through the Linux socket layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.readable() {
@@ -242,6 +245,7 @@ impl FileDescriptor {
                 let mut m = memfd.lock();
                 m.write(data)
             }
+            FileDescriptor::Inet(_) => Err("Internet sockets are written through the Linux socket layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.writable() {
@@ -300,6 +304,7 @@ impl FileDescriptor {
                 if *writable { ev |= 0x0004; }
                 ev
             }
+            FileDescriptor::Inet(s) => s.lock().poll_events(),
             // Regular files are always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) => 0x0001 | 0x0004,
             FileDescriptor::Epoll(_) => 0,

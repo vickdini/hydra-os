@@ -221,6 +221,8 @@ pub struct Task {
     /// Nesting depth of `task::preemptible` wait points this task is inside; saved and
     /// restored with the task so the timer only preempts the task that is actually waiting.
     pub preempt_depth: u32,
+    /// Linux system call in progress (`u64::MAX` when none); saved with the task.
+    pub syscall_nr: u64,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -260,6 +262,7 @@ impl Task {
             mm: None,
             exe: None,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
     }

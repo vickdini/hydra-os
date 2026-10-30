@@ -1,28 +1,34 @@
 use alloc::sync::Arc;
 use spin::Mutex;
 
-pub const PIPE_BUFFER_SIZE: usize = 4096;
+/// Pipe capacity (Linux default: 16 pages).
+pub const PIPE_BUFFER_SIZE: usize = 65536;
 
 /// Circular ring buffer implementing an anonymous unidirectional pipe.
 pub struct PipeBuffer {
-    buffer: [u8; PIPE_BUFFER_SIZE],
+    buffer: alloc::vec::Vec<u8>,
     head: usize,
     tail: usize,
     count: usize,
     readers: usize,
     writers: usize,
+    /// `O_NONBLOCK` of the read and write ends (their open file descriptions).
+    pub read_nonblock: bool,
+    pub write_nonblock: bool,
 }
 
 impl PipeBuffer {
     /// Creates a new PipeBuffer with 1 reader and 1 writer reference.
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
-            buffer: [0u8; PIPE_BUFFER_SIZE],
+            buffer: alloc::vec![0u8; PIPE_BUFFER_SIZE],
             head: 0,
             tail: 0,
             count: 0,
             readers: 1,
             writers: 1,
+            read_nonblock: false,
+            write_nonblock: false,
         }))
     }
 

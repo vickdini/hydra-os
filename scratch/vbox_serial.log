@@ -9,8 +9,8 @@
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xdc7ea23e
-    RFLAGS: 0x202, RSP: 0xdf1008a0
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xdc812473
+    RFLAGS: 0x206, RSP: 0xdf100860
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0xdee01000
@@ -30,7 +30,7 @@
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xdc7ea0c0 -> PhysAddr 0xdc7ea0c0
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xdc8120a0 -> PhysAddr 0xdc8120a0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x20341000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x20342000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -57,9 +57,9 @@
 [1m[32m[40m[+] ATA Storage: Detected Primary Master 'VBOX HARDDISK' (16384 MiB, 33554432 sectors, LBA28)
 [+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
 [+] Network Subsystem: Intel E1000 Online (MAC 08:00:27:41:47:51, Link: DOWN)
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #12, 8495 objects)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #13, 8495 objects)
 [+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 130 MiB used, TXG #12, Fletcher-4, CoW)
+    - Storage Pool: 'hydrapool' (16384 MiB, 131 MiB used, TXG #13, Fletcher-4, CoW)
     - Persistence : Active (Primary Master ATA Hard Disk)
     - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
 [1m[33m[40m
@@ -102,488 +102,30 @@
     - Framebuffer Base       : 0xe0000000
     - Segment Selectors      : CS=0x8, DS=0x10, TR=0x28
 
-hydra:/bin$ ls
-ZFS Directory listing for '/bin' (Dataset: hydrapool/root):
-NAME                     TYPE         CHECKSUM     STATUS
-------------------------------------------------------------
-readme.txt               <FILE>      Fletcher4     ONLINE
-demo.sh                  <FILE>      Fletcher4     ONLINE
-hello.elf                <FILE>      Fletcher4     ONLINE
-counter.elf              <FILE>      Fletcher4     ONLINE
-linuxapp.elf             <FILE>      Fletcher4     ONLINE
-linux_app.elf            <FILE>      Fletcher4     ONLINE
-thread_test.elf          <FILE>      Fletcher4     ONLINE
-threadtest.elf           <FILE>      Fletcher4     ONLINE
-roletest.elf             <FILE>      Fletcher4     ONLINE
-socktest.elf             <FILE>      Fletcher4     ONLINE
-epolltest.elf            <FILE>      Fletcher4     ONLINE
-shmtest.elf              <FILE>      Fletcher4     ONLINE
-wlclient.elf             <FILE>      Fletcher4     ONLINE
-wlseat.elf               <FILE>      Fletcher4     ONLINE
-dynclient.elf            <FILE>      Fletcher4     ONLINE
-vmtest.elf               <FILE>      Fletcher4     ONLINE
-plasmashell.elf          <FILE>      Fletcher4     ONLINE
-krunner.elf              <FILE>      Fletcher4     ONLINE
-proctest.elf             <FILE>      Fletcher4     ONLINE
-------------------------------------------------------------
-Total entries: 19 (ZFS pool: hydrapool, CoW enabled)
-
-hydra:/bin$ cd cd c  ls /
-ZFS Directory listing for '/' (Dataset: hydrapool/root):
-NAME                     TYPE         CHECKSUM     STATUS
-------------------------------------------------------------
-bin                      <DIR>       Fletcher4     ONLINE
-etc                      <DIR>       Fletcher4     ONLINE
-home                     <DIR>       Fletcher4     ONLINE
-root                     <DIR>       Fletcher4     ONLINE
-tmp                      <DIR>       Fletcher4     ONLINE
-lib64                    <DIR>       Fletcher4     ONLINE
-zfstest                  <DIR>       Fletcher4     ONLINE
-ubuntu                   <DIR>       Fletcher4     ONLINE
-------------------------------------------------------------
-Total entries: 8 (ZFS pool: hydrapool, CoW enabled)
-
-hydra:/bin$ cd /ubucd /ubuntu/
-hydra:/ubuntu$ ls
-ZFS Directory listing for '/ubuntu' (Dataset: hydrapool/root):
-NAME                     TYPE         CHECKSUM     STATUS
-------------------------------------------------------------
-bin                      <FILE>      Fletcher4     ONLINE
-boot                     <DIR>       Fletcher4     ONLINE
-dev                      <DIR>       Fletcher4     ONLINE
-etc                      <DIR>       Fletcher4     ONLINE
-home                     <DIR>       Fletcher4     ONLINE
-lib                      <FILE>      Fletcher4     ONLINE
-lib64                    <FILE>      Fletcher4     ONLINE
-media                    <DIR>       Fletcher4     ONLINE
-mnt                      <DIR>       Fletcher4     ONLINE
-opt                      <DIR>       Fletcher4     ONLINE
-proc                     <DIR>       Fletcher4     ONLINE
-root                     <DIR>       Fletcher4     ONLINE
-run                      <DIR>       Fletcher4     ONLINE
-sbin                     <FILE>      Fletcher4     ONLINE
-srv                      <DIR>       Fletcher4     ONLINE
-sys                      <DIR>       Fletcher4     ONLINE
-tmp                      <DIR>       Fletcher4     ONLINE
-usr                      <DIR>       Fletcher4     ONLINE
-var                      <DIR>       Fletcher4     ONLINE
-------------------------------------------------------------
-Total entries: 19 (ZFS pool: hydrapool, CoW enabled)
-
-hydra:/ubuntu$ ls bin
-ZFS Directory listing for '/ubuntu/bin' (Dataset: hydrapool/root):
-NAME                     TYPE         CHECKSUM     STATUS
-------------------------------------------------------------
-[                        <FILE>      Fletcher4     ONLINE
-apt                      <FILE>      Fletcher4     ONLINE
-apt-cache                <FILE>      Fletcher4     ONLINE
-apt-cdrom                <FILE>      Fletcher4     ONLINE
-apt-config               <FILE>      Fletcher4     ONLINE
-apt-get                  <FILE>      Fletcher4     ONLINE
-apt-mark                 <FILE>      Fletcher4     ONLINE
-arch                     <FILE>      Fletcher4     ONLINE
-awk                      <FILE>      Fletcher4     ONLINE
-b2sum                    <FILE>      Fletcher4     ONLINE
-base32                   <FILE>      Fletcher4     ONLINE
-base64                   <FILE>      Fletcher4     ONLINE
-basename                 <FILE>      Fletcher4     ONLINE
-basenc                   <FILE>      Fletcher4     ONLINE
-bash                     <FILE>      Fletcher4     ONLINE
-bashbug                  <FILE>      Fletcher4     ONLINE
-captoinfo                <FILE>      Fletcher4     ONLINE
-cat                      <FILE>      Fletcher4     ONLINE
-chage                    <FILE>      Fletcher4     ONLINE
-chattr                   <FILE>      Fletcher4     ONLINE
-chcon                    <FILE>      Fletcher4     ONLINE
-chfn                     <FILE>      Fletcher4     ONLINE
-chgrp                    <FILE>      Fletcher4     ONLINE
-chmod                    <FILE>      Fletcher4     ONLINE
-choom                    <FILE>      Fletcher4     ONLINE
-chown                    <FILE>      Fletcher4     ONLINE
-chroot                   <FILE>      Fletcher4     ONLINE
-chrt                     <FILE>      Fletcher4     ONLINE
-chsh                     <FILE>      Fletcher4     ONLINE
-cksum                    <FILE>      Fletcher4     ONLINE
-clear                    <FILE>      Fletcher4     ONLINE
-clear_console            <FILE>      Fletcher4     ONLINE
-cmp                      <FILE>      Fletcher4     ONLINE
-comm                     <FILE>      Fletcher4     ONLINE
-coreutils                <FILE>      Fletcher4     ONLINE
-cp                       <FILE>      Fletcher4     ONLINE
-csplit                   <FILE>      Fletcher4     ONLINE
-cut                      <FILE>      Fletcher4     ONLINE
-dash                     <FILE>      Fletcher4     ONLINE
-date                     <FILE>      Fletcher4     ONLINE
-dd                       <FILE>      Fletcher4     ONLINE
-deb-systemd-helper       <FILE>      Fletcher4     ONLINE
-deb-systemd-invoke       <FILE>      Fletcher4     ONLINE
-debconf                  <FILE>      Fletcher4     ONLINE
-debconf-apt-progress     <FILE>      Fletcher4     ONLINE
-debconf-communicate      <FILE>      Fletcher4     ONLINE
-debconf-copydb           <FILE>      Fletcher4     ONLINE
-debconf-escape           <FILE>      Fletcher4     ONLINE
-debconf-set-selections   <FILE>      Fletcher4     ONLINE
-debconf-show             <FILE>      Fletcher4     ONLINE
-df                       <FILE>      Fletcher4     ONLINE
-diff                     <FILE>      Fletcher4     ONLINE
-diff3                    <FILE>      Fletcher4     ONLINE
-dir                      <FILE>      Fletcher4     ONLINE
-dircolors                <FILE>      Fletcher4     ONLINE
-dirname                  <FILE>      Fletcher4     ONLINE
-dmesg                    <FILE>      Fletcher4     ONLINE
-dnsdomainname            <FILE>      Fletcher4     ONLINE
-domainname               <FILE>      Fletcher4     ONLINE
-dpkg                     <FILE>      Fletcher4     ONLINE
-dpkg-deb                 <FILE>      Fletcher4     ONLINE
-dpkg-divert              <FILE>      Fletcher4     ONLINE
-dpkg-maintscript-helper  <FILE>      Fletcher4     ONLINE
-dpkg-query               <FILE>      Fletcher4     ONLINE
-dpkg-realpath            <FILE>      Fletcher4     ONLINE
-dpkg-split               <FILE>      Fletcher4     ONLINE
-dpkg-statoverride        <FILE>      Fletcher4     ONLINE
-dpkg-trigger             <FILE>      Fletcher4     ONLINE
-du                       <FILE>      Fletcher4     ONLINE
-echo                     <FILE>      Fletcher4     ONLINE
-egrep                    <FILE>      Fletcher4     ONLINE
-env                      <FILE>      Fletcher4     ONLINE
-expand                   <FILE>      Fletcher4     ONLINE
-expiry                   <FILE>      Fletcher4     ONLINE
-expr                     <FILE>      Fletcher4     ONLINE
-factor                   <FILE>      Fletcher4     ONLINE
-fallocate                <FILE>      Fletcher4     ONLINE
-false                    <FILE>      Fletcher4     ONLINE
-fgrep                    <FILE>      Fletcher4     ONLINE
-find                     <FILE>      Fletcher4     ONLINE
-findmnt                  <FILE>      Fletcher4     ONLINE
-flock                    <FILE>      Fletcher4     ONLINE
-fmt                      <FILE>      Fletcher4     ONLINE
-fold                     <FILE>      Fletcher4     ONLINE
-free                     <FILE>      Fletcher4     ONLINE
-getconf                  <FILE>      Fletcher4     ONLINE
-getent                   <FILE>      Fletcher4     ONLINE
-getopt                   <FILE>      Fletcher4     ONLINE
-gnu[                     <FILE>      Fletcher4     ONLINE
-gnuarch                  <FILE>      Fletcher4     ONLINE
-gnub2sum                 <FILE>      Fletcher4     ONLINE
-gnubase32                <FILE>      Fletcher4     ONLINE
-gnubase64                <FILE>      Fletcher4     ONLINE
-gnubasename              <FILE>      Fletcher4     ONLINE
-gnubasenc                <FILE>      Fletcher4     ONLINE
-gnucat                   <FILE>      Fletcher4     ONLINE
-gnuchcon                 <FILE>      Fletcher4     ONLINE
-gnuchgrp                 <FILE>      Fletcher4     ONLINE
-gnuchmod                 <FILE>      Fletcher4     ONLINE
-gnuchown                 <FILE>      Fletcher4     ONLINE
-gnucksum                 <FILE>      Fletcher4     ONLINE
-gnucomm                  <FILE>      Fletcher4     ONLINE
-gnucp                    <FILE>      Fletcher4     ONLINE
-gnucsplit                <FILE>      Fletcher4     ONLINE
-gnucut                   <FILE>      Fletcher4     ONLINE
-gnudate                  <FILE>      Fletcher4     ONLINE
-gnudd                    <FILE>      Fletcher4     ONLINE
-gnudf                    <FILE>      Fletcher4     ONLINE
-gnudir                   <FILE>      Fletcher4     ONLINE
-gnudircolors             <FILE>      Fletcher4     ONLINE
-gnudirname               <FILE>      Fletcher4     ONLINE
-gnudu                    <FILE>      Fletcher4     ONLINE
-gnuecho                  <FILE>      Fletcher4     ONLINE
-gnuenv                   <FILE>      Fletcher4     ONLINE
-gnuexpand                <FILE>      Fletcher4     ONLINE
-gnuexpr                  <FILE>      Fletcher4     ONLINE
-gnufactor                <FILE>      Fletcher4     ONLINE
-gnufalse                 <FILE>      Fletcher4     ONLINE
-gnufmt                   <FILE>      Fletcher4     ONLINE
-gnufold                  <FILE>      Fletcher4     ONLINE
-gnugroups                <FILE>      Fletcher4     ONLINE
-gnuhead                  <FILE>      Fletcher4     ONLINE
-gnuhostid                <FILE>      Fletcher4     ONLINE
-gnuid                    <FILE>      Fletcher4     ONLINE
-gnuinstall               <FILE>      Fletcher4     ONLINE
-gnujoin                  <FILE>      Fletcher4     ONLINE
-gnulink                  <FILE>      Fletcher4     ONLINE
-gnuln                    <FILE>      Fletcher4     ONLINE
-gnulogname               <FILE>      Fletcher4     ONLINE
-gnuls                    <FILE>      Fletcher4     ONLINE
-gnumd5sum                <FILE>      Fletcher4     ONLINE
-gnumkdir                 <FILE>      Fletcher4     ONLINE
-gnumkfifo                <FILE>      Fletcher4     ONLINE
-gnumknod                 <FILE>      Fletcher4     ONLINE
-gnumktemp                <FILE>      Fletcher4     ONLINE
-gnumv                    <FILE>      Fletcher4     ONLINE
-gnunice                  <FILE>      Fletcher4     ONLINE
-gnunl                    <FILE>      Fletcher4     ONLINE
-gnunohup                 <FILE>      Fletcher4     ONLINE
-gnunproc                 <FILE>      Fletcher4     ONLINE
-gnunumfmt                <FILE>      Fletcher4     ONLINE
-gnuod                    <FILE>      Fletcher4     ONLINE
-gnupaste                 <FILE>      Fletcher4     ONLINE
-gnupathchk               <FILE>      Fletcher4     ONLINE
-gnupinky                 <FILE>      Fletcher4     ONLINE
-gnupr                    <FILE>      Fletcher4     ONLINE
-gnuprintenv              <FILE>      Fletcher4     ONLINE
-gnuprintf                <FILE>      Fletcher4     ONLINE
-gnuptx                   <FILE>      Fletcher4     ONLINE
-gnupwd                   <FILE>      Fletcher4     ONLINE
-gnureadlink              <FILE>      Fletcher4     ONLINE
-gnurealpath              <FILE>      Fletcher4     ONLINE
-gnurm                    <FILE>      Fletcher4     ONLINE
-gnurmdir                 <FILE>      Fletcher4     ONLINE
-gnuruncon                <FILE>      Fletcher4     ONLINE
-gnuseq                   <FILE>      Fletcher4     ONLINE
-gnusha1sum               <FILE>      Fletcher4     ONLINE
-gnusha224sum             <FILE>      Fletcher4     ONLINE
-gnusha256sum             <FILE>      Fletcher4     ONLINE
-gnusha384sum             <FILE>      Fletcher4     ONLINE
-gnusha512sum             <FILE>      Fletcher4     ONLINE
-gnushred                 <FILE>      Fletcher4     ONLINE
-gnushuf                  <FILE>      Fletcher4     ONLINE
-gnusleep                 <FILE>      Fletcher4     ONLINE
-gnusort                  <FILE>      Fletcher4     ONLINE
-gnusplit                 <FILE>      Fletcher4     ONLINE
-gnustat                  <FILE>      Fletcher4     ONLINE
-gnustdbuf                <FILE>      Fletcher4     ONLINE
-gnustty                  <FILE>      Fletcher4     ONLINE
-gnusum                   <FILE>      Fletcher4     ONLINE
-gnusync                  <FILE>      Fletcher4     ONLINE
-gnutac                   <FILE>      Fletcher4     ONLINE
-gnutail                  <FILE>      Fletcher4     ONLINE
-gnutee                   <FILE>      Fletcher4     ONLINE
-gnutest                  <FILE>      Fletcher4     ONLINE
-gpgv                     <FILE>      Fletcher4     ONLINE
-gnutimeout               <FILE>      Fletcher4     ONLINE
-gnutouch                 <FILE>      Fletcher4     ONLINE
-gnutr                    <FILE>      Fletcher4     ONLINE
-gnutrue                  <FILE>      Fletcher4     ONLINE
-gnutruncate              <FILE>      Fletcher4     ONLINE
-gnutsort                 <FILE>      Fletcher4     ONLINE
-gnutty                   <FILE>      Fletcher4     ONLINE
-gnuuname                 <FILE>      Fletcher4     ONLINE
-gnuunexpand              <FILE>      Fletcher4     ONLINE
-gnuuniq                  <FILE>      Fletcher4     ONLINE
-gnuunlink                <FILE>      Fletcher4     ONLINE
-gnuusers                 <FILE>      Fletcher4     ONLINE
-gnuvdir                  <FILE>      Fletcher4     ONLINE
-gnuwc                    <FILE>      Fletcher4     ONLINE
-gnuwho                   <FILE>      Fletcher4     ONLINE
-gnuwhoami                <FILE>      Fletcher4     ONLINE
-gnuyes                   <FILE>      Fletcher4     ONLINE
-gpasswd                  <FILE>      Fletcher4     ONLINE
-grep                     <FILE>      Fletcher4     ONLINE
-groups                   <FILE>      Fletcher4     ONLINE
-gunzip                   <FILE>      Fletcher4     ONLINE
-gzexe                    <FILE>      Fletcher4     ONLINE
-gzip                     <FILE>      Fletcher4     ONLINE
-hardlink                 <FILE>      Fletcher4     ONLINE
-hashsum                  <FILE>      Fletcher4     ONLINE
-head                     <FILE>      Fletcher4     ONLINE
-hostid                   <FILE>      Fletcher4     ONLINE
-hostname                 <FILE>      Fletcher4     ONLINE
-i386                     <FILE>      Fletcher4     ONLINE
-iconv                    <FILE>      Fletcher4     ONLINE
-id                       <FILE>      Fletcher4     ONLINE
-infocmp                  <FILE>      Fletcher4     ONLINE
-infotocap                <FILE>      Fletcher4     ONLINE
-install                  <FILE>      Fletcher4     ONLINE
-ionice                   <FILE>      Fletcher4     ONLINE
-ipcmk                    <FILE>      Fletcher4     ONLINE
-ipcrm                    <FILE>      Fletcher4     ONLINE
-ipcs                     <FILE>      Fletcher4     ONLINE
-ischroot                 <FILE>      Fletcher4     ONLINE
-join                     <FILE>      Fletcher4     ONLINE
-kill                     <FILE>      Fletcher4     ONLINE
-ld.so                    <FILE>      Fletcher4     ONLINE
-ldd                      <FILE>      Fletcher4     ONLINE
-link                     <FILE>      Fletcher4     ONLINE
-linux32                  <FILE>      Fletcher4     ONLINE
-linux64                  <FILE>      Fletcher4     ONLINE
-ln                       <FILE>      Fletcher4     ONLINE
-locale                   <FILE>      Fletcher4     ONLINE
-locale-check             <FILE>      Fletcher4     ONLINE
-localedef                <FILE>      Fletcher4     ONLINE
-logger                   <FILE>      Fletcher4     ONLINE
-login                    <FILE>      Fletcher4     ONLINE
-logname                  <FILE>      Fletcher4     ONLINE
-ls                       <FILE>      Fletcher4     ONLINE
-lsattr                   <FILE>      Fletcher4     ONLINE
-lsblk                    <FILE>      Fletcher4     ONLINE
-lscpu                    <FILE>      Fletcher4     ONLINE
-lsipc                    <FILE>      Fletcher4     ONLINE
-lslocks                  <FILE>      Fletcher4     ONLINE
-lsns                     <FILE>      Fletcher4     ONLINE
-man                      <FILE>      Fletcher4     ONLINE
-mawk                     <FILE>      Fletcher4     ONLINE
-mcookie                  <FILE>      Fletcher4     ONLINE
-md5sum                   <FILE>      Fletcher4     ONLINE
-mkdir                    <FILE>      Fletcher4     ONLINE
-mkfifo                   <FILE>      Fletcher4     ONLINE
-mknod                    <FILE>      Fletcher4     ONLINE
-mktemp                   <FILE>      Fletcher4     ONLINE
-more                     <FILE>      Fletcher4     ONLINE
-mount                    <FILE>      Fletcher4     ONLINE
-mountpoint               <FILE>      Fletcher4     ONLINE
-mv                       <FILE>      Fletcher4     ONLINE
-namei                    <FILE>      Fletcher4     ONLINE
-nawk                     <FILE>      Fletcher4     ONLINE
-nice                     <FILE>      Fletcher4     ONLINE
-nisdomainname            <FILE>      Fletcher4     ONLINE
-nl                       <FILE>      Fletcher4     ONLINE
-nohup                    <FILE>      Fletcher4     ONLINE
-nproc                    <FILE>      Fletcher4     ONLINE
-nsenter                  <FILE>      Fletcher4     ONLINE
-numfmt                   <FILE>      Fletcher4     ONLINE
-od                       <FILE>      Fletcher4     ONLINE
-pager                    <FILE>      Fletcher4     ONLINE
-partx                    <FILE>      Fletcher4     ONLINE
-passwd                   <FILE>      Fletcher4     ONLINE
-paste                    <FILE>      Fletcher4     ONLINE
-pathchk                  <FILE>      Fletcher4     ONLINE
-perl                     <FILE>      Fletcher4     ONLINE
-perl5.40.1               <FILE>      Fletcher4     ONLINE
-pgrep                    <FILE>      Fletcher4     ONLINE
-pidof                    <FILE>      Fletcher4     ONLINE
-pidwait                  <FILE>      Fletcher4     ONLINE
-pinky                    <FILE>      Fletcher4     ONLINE
-pkill                    <FILE>      Fletcher4     ONLINE
-pldd                     <FILE>      Fletcher4     ONLINE
-pmap                     <FILE>      Fletcher4     ONLINE
-pr                       <FILE>      Fletcher4     ONLINE
-printenv                 <FILE>      Fletcher4     ONLINE
-printf                   <FILE>      Fletcher4     ONLINE
-prlimit                  <FILE>      Fletcher4     ONLINE
-ps                       <FILE>      Fletcher4     ONLINE
-ptx                      <FILE>      Fletcher4     ONLINE
-pwd                      <FILE>      Fletcher4     ONLINE
-pwdx                     <FILE>      Fletcher4     ONLINE
-rbash                    <FILE>      Fletcher4     ONLINE
-readlink                 <FILE>      Fletcher4     ONLINE
-realpath                 <FILE>      Fletcher4     ONLINE
-renice                   <FILE>      Fletcher4     ONLINE
-reset                    <FILE>      Fletcher4     ONLINE
-rgrep                    <FILE>      Fletcher4     ONLINE
-rm                       <FILE>      Fletcher4     ONLINE
-rmdir                    <FILE>      Fletcher4     ONLINE
-run-parts                <FILE>      Fletcher4     ONLINE
-runcon                   <FILE>      Fletcher4     ONLINE
-savelog                  <FILE>      Fletcher4     ONLINE
-script                   <FILE>      Fletcher4     ONLINE
-scriptlive               <FILE>      Fletcher4     ONLINE
-scriptreplay             <FILE>      Fletcher4     ONLINE
-sdiff                    <FILE>      Fletcher4     ONLINE
-sed                      <FILE>      Fletcher4     ONLINE
-select-editor            <FILE>      Fletcher4     ONLINE
-sensible-browser         <FILE>      Fletcher4     ONLINE
-sensible-editor          <FILE>      Fletcher4     ONLINE
-sensible-pager           <FILE>      Fletcher4     ONLINE
-sensible-terminal        <FILE>      Fletcher4     ONLINE
-seq                      <FILE>      Fletcher4     ONLINE
-setarch                  <FILE>      Fletcher4     ONLINE
-setpriv                  <FILE>      Fletcher4     ONLINE
-setsid                   <FILE>      Fletcher4     ONLINE
-setterm                  <FILE>      Fletcher4     ONLINE
-sh                       <FILE>      Fletcher4     ONLINE
-sha1sum                  <FILE>      Fletcher4     ONLINE
-sha224sum                <FILE>      Fletcher4     ONLINE
-sha256sum                <FILE>      Fletcher4     ONLINE
-sha3-224sum              <FILE>      Fletcher4     ONLINE
-sha3-256sum              <FILE>      Fletcher4     ONLINE
-sha3-384sum              <FILE>      Fletcher4     ONLINE
-sha3-512sum              <FILE>      Fletcher4     ONLINE
-sha384sum                <FILE>      Fletcher4     ONLINE
-sha3sum                  <FILE>      Fletcher4     ONLINE
-sha512sum                <FILE>      Fletcher4     ONLINE
-shake128sum              <FILE>      Fletcher4     ONLINE
-shake256sum              <FILE>      Fletcher4     ONLINE
-shred                    <FILE>      Fletcher4     ONLINE
-shuf                     <FILE>      Fletcher4     ONLINE
-skill                    <FILE>      Fletcher4     ONLINE
-slabtop                  <FILE>      Fletcher4     ONLINE
-sleep                    <FILE>      Fletcher4     ONLINE
-snice                    <FILE>      Fletcher4     ONLINE
-sort                     <FILE>      Fletcher4     ONLINE
-split                    <FILE>      Fletcher4     ONLINE
-stat                     <FILE>      Fletcher4     ONLINE
-stdbuf                   <FILE>      Fletcher4     ONLINE
-stty                     <FILE>      Fletcher4     ONLINE
-su                       <FILE>      Fletcher4     ONLINE
-sum                      <FILE>      Fletcher4     ONLINE
-sync                     <FILE>      Fletcher4     ONLINE
-tabs                     <FILE>      Fletcher4     ONLINE
-tac                      <FILE>      Fletcher4     ONLINE
-tail                     <FILE>      Fletcher4     ONLINE
-tar                      <FILE>      Fletcher4     ONLINE
-taskset                  <FILE>      Fletcher4     ONLINE
-tee                      <FILE>      Fletcher4     ONLINE
-tempfile                 <FILE>      Fletcher4     ONLINE
-test                     <FILE>      Fletcher4     ONLINE
-tic                      <FILE>      Fletcher4     ONLINE
-timeout                  <FILE>      Fletcher4     ONLINE
-tload                    <FILE>      Fletcher4     ONLINE
-toe                      <FILE>      Fletcher4     ONLINE
-top                      <FILE>      Fletcher4     ONLINE
-touch                    <FILE>      Fletcher4     ONLINE
-tput                     <FILE>      Fletcher4     ONLINE
-tr                       <FILE>      Fletcher4     ONLINE
-true                     <FILE>      Fletcher4     ONLINE
-truncate                 <FILE>      Fletcher4     ONLINE
-tset                     <FILE>      Fletcher4     ONLINE
-tsort                    <FILE>      Fletcher4     ONLINE
-tty                      <FILE>      Fletcher4     ONLINE
-tzselect                 <FILE>      Fletcher4     ONLINE
-uclampset                <FILE>      Fletcher4     ONLINE
-umount                   <FILE>      Fletcher4     ONLINE
-uname                    <FILE>      Fletcher4     ONLINE
-uncompress               <FILE>      Fletcher4     ONLINE
-unexpand                 <FILE>      Fletcher4     ONLINE
-uniq                     <FILE>      Fletcher4     ONLINE
-unlink                   <FILE>      Fletcher4     ONLINE
-unshare                  <FILE>      Fletcher4     ONLINE
-update-alternatives      <FILE>      Fletcher4     ONLINE
-uptime                   <FILE>      Fletcher4     ONLINE
-users                    <FILE>      Fletcher4     ONLINE
-vdir                     <FILE>      Fletcher4     ONLINE
-vmstat                   <FILE>      Fletcher4     ONLINE
-w                        <FILE>      Fletcher4     ONLINE
-wall                     <FILE>      Fletcher4     ONLINE
-watch                    <FILE>      Fletcher4     ONLINE
-wc                       <FILE>      Fletcher4     ONLINE
-whereis                  <FILE>      Fletcher4     ONLINE
-which                    <FILE>      Fletcher4     ONLINE
-which.debianutils        <FILE>      Fletcher4     ONLINE
-who                      <FILE>      Fletcher4     ONLINE
-whoami                   <FILE>      Fletcher4     ONLINE
-x86_64                   <FILE>      Fletcher4     ONLINE
-xargs                    <FILE>      Fletcher4     ONLINE
-yes                      <FILE>      Fletcher4     ONLINE
-ypdomainname             <FILE>      Fletcher4     ONLINE
-zcat                     <FILE>      Fletcher4     ONLINE
-zcmp                     <FILE>      Fletcher4     ONLINE
-zdiff                    <FILE>      Fletcher4     ONLINE
-zdump                    <FILE>      Fletcher4     ONLINE
-zegrep                   <FILE>      Fletcher4     ONLINE
-zfgrep                   <FILE>      Fletcher4     ONLINE
-zforce                   <FILE>      Fletcher4     ONLINE
-zgrep                    <FILE>      Fletcher4     ONLINE
-zless                    <FILE>      Fletcher4     ONLINE
-zmore                    <FILE>      Fletcher4     ONLINE
-znew                     <FILE>      Fletcher4     ONLINE
-------------------------------------------------------------
-Total entries: 392 (ZFS pool: hydrapool, CoW enabled)
-
-hydra:/ubuntu$ ^C
-hydra:/ubuntu$ ^C
-hydra:/ubuntu$ ^C
-hydra:/ubuntu$ ^C
-hydra:/ubuntu$ sleppslep sle ep 10
-^C
-hydra:/ubuntu$ sleep 10
-^C
-hydra:/ubuntu$ sleep 10
-hydra:/ubuntu$ clear
-
-+--------------------------------------------------------------+
-|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
-|  Type 'help' for available commands, or 'info' for details.  |
-+--------------------------------------------------------------+
-
-hydra:/ubuntu$ exit
-[*] Powering down system...
+hydra:/bin$ su root
+[+] Switched to superuser 'root' (UID 0, GID 0)
+hydra:/bin# linu
+linux  linux64  
+hydra:/bin# linuslinu x chroot /ubuntu /urlinux chroot /ubuntu /u sr/bin/htop
+[!] linux chroot: /usr/bin/htop: not found in /ubuntu (errno -2)
+hydra:/bin# linux chroot /ubuntu /usr/bin/htoplinux chroot /ubuntu /usr/bin/hto linux chroot /ubuntu /usr/bin/ht linux chroot /ubuntu /usr/bin/h linux chroot /ubuntu /usr/bin/ apt-get update
+0% [Working]0% [Waiting for headers] [Waiting for headers]0% [Waiting for headers] [Waiting for headers]                                              Get:1 http://archive.ubuntu.com/ubuntu resolute InRelease [136 kB]
+0% [1 InRelease 14.2 kB/136 kB 10%] [Waiting for headers]                                                         Get:2 http://security.ubuntu.com/ubuntu resolute-security InRelease [137 kB]
+                                                         0% [Waiting for headers]                        Get:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
+0% [3 InRelease 14.2 kB/137 kB 10%]                                   0% [Waiting for headers]                        Get:4 http://archive.ubuntu.com/ubuntu resolute-backports InRelease [137 kB]
+0% [4 InRelease 82.5 kB/137 kB 60%]                                   0% [Working]0% [Working]0% [Working]0% [Working]0% [Waiting for headers]                        Get:5 http://archive.ubuntu.com/ubuntu resolute/main amd64 Packages [1480 kB]
+0% [5 Packages 31.7 kB/1480 kB 2%] [Connecting to security.ubuntu.com]0% [5 Packages 192 kB/1480 kB 13%] [Connecting to security.ubuntu.com (91.189.91.83)]                                                                                     16% [Waiting for headers]                         Get:6 http://security.ubuntu.com/ubuntu resolute-security/main amd64 Packages [607 kB]
+16% [6 Packages 63.6 kB/607 kB 10%]16% [5 Packages store 0 B] [Waiting for headers] [6 Packages 69.5 kB/607 kB 11%]                                                                                Get:7 http://archive.ubuntu.com/ubuntu resolute/main Translation-en [524 kB]
+                                                                                18% [5 Packages store 0 B] [Waiting for headers] [6 Packages 206 kB/607 kB 34%][watchdog] kernel busy for 5 s: rip=0xdc7d3e9c rsp=0x68abd0
+[watchdog] kernel busy for 10 s: rip=0xdc7d3e9c rsp=0x68abd0
+[watchdog] kernel busy for 15 s: rip=0xdc7d3e9c rsp=0x68abd0
+[watchdog] kernel busy for 20 s: rip=0xdc7d3e9c rsp=0x68abd0
+[watchdog] kernel busy for 25 s: rip=0xdc7d3e9c rsp=0x68abd0
+                                                                               Get:8 http://archive.ubuntu.com/ubuntu resolute/universe amd64 Packages [16.0 MB]
+43% [5 Packages store 0 B] [8 Packages 9061 kB/16.0 MB 57%]                                                        331 kB/s 51s44% [8 Packages 9092 kB/16.0 MB 57%] [Connecting to security.ubuntu.com]                                           331 kB/s 51s50% [8 Packages 11.2 MB/16.0 MB 70%] [Connecting to security.ubuntu.com (91.189.91.81)]                            331 kB/s 45s52% [8 Packages 11.6 MB/16.0 MB 73%] [Waiting for headers]                                                         331 kB/s 43s                                                                                                                               Ign:8 http://archive.ubuntu.com/ubuntu resolute/universe amd64 Packages
+                                                                                                                               Get:9 http://security.ubuntu.com/ubuntu resolute-security/main Translation-en [141 kB]
+20% [Connecting to archive.ubuntu.com] [9 Translation-en 17.2 kB/141 kB 12%]                                  331 kB/s 1min 18s20% [Waiting for headers] [Waiting for headers]                                                               331 kB/s 1min 18s                                                                                                                               Get:10 http://archive.ubuntu.com/ubuntu resolute/universe Translation-en [6329 kB]
+21% [10 Translation-en 14.3 kB/6329 kB 0%] [Waiting for headers]                                              331 kB/s 1min 18s[watchdog] kernel busy for 5 s: rip=0xdc7d3e9c rsp=0x4f75b0
+[watchdog] kernel busy for 10 s: rip=0xdc7d3e9c rsp=0x4f75b0
+[watchdog] kernel busy for 15 s: rip=0xdc7d3e9c rsp=0x4f75b0
+[watchdog] kernel busy for 20 s: rip=0xdc7d3e9c rsp=0x4f75b0

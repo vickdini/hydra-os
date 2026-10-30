@@ -140,6 +140,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -221,6 +222,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -298,6 +300,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -366,6 +369,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -456,6 +460,7 @@ impl Scheduler {
             mm: Some(mm),
             exe: Some(alloc::sync::Arc::from(exec_path)),
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
         crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
@@ -599,6 +604,7 @@ impl Scheduler {
             mm: parent_mm,
             exe: parent_exe,
             preempt_depth: 0,
+            syscall_nr: u64::MAX,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
 
@@ -702,6 +708,8 @@ impl Scheduler {
         // 4a. The preemption-point marker belongs to the task, not the CPU
         self.tasks[curr_idx].preempt_depth =
             super::PREEMPT_POINTS.swap(self.tasks[next_idx].preempt_depth, core::sync::atomic::Ordering::SeqCst);
+        self.tasks[curr_idx].syscall_nr =
+            super::CURRENT_SYSCALL.swap(self.tasks[next_idx].syscall_nr, core::sync::atomic::Ordering::Relaxed);
 
         // 4b'. Swap x87/SSE state through the trap frame's save area
         let trap_fpu = crate::arch::idt::CURRENT_TRAP_FPU.load(core::sync::atomic::Ordering::Acquire);
@@ -907,6 +915,32 @@ impl Scheduler {
     /// Returns the total count of registered tasks (active and dead).
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    /// Writes every live task's state and pending system call to the serial port without
+    /// allocating (used from interrupt context to diagnose hangs).
+    pub fn dump_tasks(&self) {
+        crate::console::serial_write("[tasks] id state tgid syscall rip ticks exe\n");
+        for (i, task) in self.tasks.iter().enumerate() {
+            if task.state == TaskState::Dead {
+                continue;
+            }
+            let nr = if i == self.current_index {
+                super::CURRENT_SYSCALL.load(core::sync::atomic::Ordering::Relaxed)
+            } else {
+                task.syscall_nr
+            };
+            let mut b = crate::console::FixedBuf::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut b,
+                format_args!(
+                    "[tasks] {} {} {} {} {:#x} {} {}\n",
+                    task.id.0, task.state.as_str(), task.tgid, nr as i64, task.regs.rip, task.ticks_run,
+                    if task.exe.is_some() { task.exe_path() } else { task.name }
+                ),
+            );
+            crate::console::serial_write(b.as_str());
+        }
     }
 
     /// Captures a diagnostic snapshot of all registered tasks.

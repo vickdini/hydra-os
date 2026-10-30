@@ -171,15 +171,18 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         // timer never preempts kernel code outside explicit wait points (see
         // `task::preemptible`), and the entry stub disables interrupts again on return.
         x86_64::instructions::interrupts::enable();
-        let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed);
+        let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed)
+            && crate::compat::linux::trace_matches_current();
         let (num, args) = (frame.rax, [frame.rdi, frame.rsi, frame.rdx, frame.r10]);
         if tracing {
             let pid = crate::task::SCHEDULER.lock().current_task_id().0;
-            crate::println!("[trace] {} > {}({:#x}, {:#x}, {:#x}, {:#x})", pid, num, args[0], args[1], args[2], args[3]);
+            crate::kprintln!("[trace] {} > {}({:#x}, {:#x}, {:#x}, {:#x})", pid, num, args[0], args[1], args[2], args[3]);
         }
+        crate::task::CURRENT_SYSCALL.store(num, core::sync::atomic::Ordering::Relaxed);
         let res = crate::compat::linux::dispatch_linux_syscall(frame);
+        crate::task::CURRENT_SYSCALL.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
         if tracing {
-            crate::println!("[trace]   = {}", res);
+            crate::kprintln!("[trace]   = {}", res);
         }
         frame.rax = res as u64;
         crate::compat::linux::proc::deliver_on_syscall_return(frame, fpu, num);

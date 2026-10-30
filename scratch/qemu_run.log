@@ -11,8 +11,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd4a074e
-    RFLAGS: 0x202, RSP: 0xbfe627f0
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd4b9473
+    RFLAGS: 0x202, RSP: 0xbfe627b0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0xbf801000
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd4a05d0 -> PhysAddr 0xbd4a05d0
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd4b90a0 -> PhysAddr 0xbd4b90a0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x21780000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x21781000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -60,9 +60,9 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
 [+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
 [1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #13, 8495 objects)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #88, 8562 objects)
 [+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 131 MiB used, TXG #13, Fletcher-4, CoW)
+    - Storage Pool: 'hydrapool' (16384 MiB, 656 MiB used, TXG #88, Fletcher-4, CoW)
     - Persistence : Active (Primary Master ATA Hard Disk)
     - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
 [1m[33m[40m

@@ -118,6 +118,9 @@ struct Tty {
     /// Foreground process group (receives Ctrl+C).
     fg_pgrp: u64,
     winsize: Option<(u16, u16)>,
+    /// `O_NONBLOCK` of the console's open file description (shared by every process
+    /// that inherited it, as on Linux).
+    nonblock: bool,
 }
 
 static TTY: Mutex<Tty> = Mutex::new(Tty {
@@ -127,7 +130,17 @@ static TTY: Mutex<Tty> = Mutex::new(Tty {
     session: 0,
     fg_pgrp: 0,
     winsize: None,
+    nonblock: false,
 });
+
+/// `O_NONBLOCK` state of the console file description (`fcntl(F_GETFL/F_SETFL)`).
+pub fn nonblock() -> bool {
+    TTY.lock().nonblock
+}
+
+pub fn set_nonblock(on: bool) {
+    TTY.lock().nonblock = on;
+}
 
 /// Gives the console to the Linux session led by `sid` with foreground group `pgrp`,
 /// resetting the terminal to its default (cooked) mode.
@@ -138,6 +151,7 @@ pub fn attach_session(sid: u64, pgrp: u64) {
     t.termios = Termios::default();
     t.line.clear();
     t.ready.clear();
+    t.nonblock = false;
 }
 
 /// Returns the console to the Hydra shell.
@@ -389,7 +403,7 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
                     }
                 }
                 if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
-                    crate::println!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
+                    crate::kprintln!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
                 }
                 return n as i64;
             }
@@ -472,7 +486,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
                 let mut t = TTY.lock();
                 t.termios = Termios::from_bytes(&b);
                 if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
-                    crate::println!("[tty] set lflag={:#o} req={:#x} line={} ready={}", t.termios.lflag, request, t.line.len(), t.ready.len());
+                    crate::kprintln!("[tty] set lflag={:#o} req={:#x} line={} ready={}", t.termios.lflag, request, t.line.len(), t.ready.len());
                 }
                 if request == TCSETSF {
                     t.ready.clear();

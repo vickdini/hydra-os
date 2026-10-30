@@ -233,6 +233,31 @@ impl Write for Console {
     }
 }
 
+/// Fixed-capacity text buffer for formatting without allocation (interrupt context).
+pub struct FixedBuf {
+    buf: [u8; 160],
+    len: usize,
+}
+
+impl FixedBuf {
+    pub const fn new() -> Self {
+        Self { buf: [0; 160], len: 0 }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for FixedBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
 /// Mirrors console output to the COM1 serial port (initialised by firmware) so logs survive
 /// after boot services exit. Used for debugging and automated test capture.
 pub fn serial_write(s: &str) {
@@ -405,6 +430,19 @@ macro_rules! print {
 macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
+/// Prints a kernel diagnostic to the console and serial port, never through the current
+/// task's standard output (which may be a pipe another process parses).
+#[macro_export]
+macro_rules! kprintln {
+    ($($arg:tt)*) => ($crate::console::_kprint(format_args!("{}\n", format_args!($($arg)*))));
+}
+
+#[doc(hidden)]
+pub fn _kprint(args: fmt::Arguments) {
+    let mut console = CONSOLE.lock();
+    let _ = console.write_fmt(args);
 }
 
 /// Directly writes raw text to the physical console screen / framebuffer without FD indirection.

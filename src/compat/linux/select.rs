@@ -48,6 +48,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
     let deadline = timeout_ns.map(|ns| crate::arch::pit::ticks() + (ns + 9_999_999) / 10_000_000);
     loop {
         super::tty::pump();
+        crate::net::stack::poll();
         let mut out_r = alloc::vec![0u64; words];
         let mut out_w = alloc::vec![0u64; words];
         let out_e = alloc::vec![0u64; words];

@@ -8,6 +8,7 @@ pub mod epoll;
 pub mod eventfd;
 pub mod fs;
 pub mod futex;
+pub mod inet;
 pub mod memfd;
 pub mod execve;
 pub mod mm;
@@ -80,6 +81,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
     if let Some(r) = process::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
         LINUX_STATS.lock().process_calls += 1;
+        return r;
+    }
+
+    if let Some(r) = inet::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        LINUX_STATS.lock().io_calls += 1;
         return r;
     }
 
@@ -556,7 +562,14 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 return -EFAULT;
             }
 
+            // pipe2 flags: O_NONBLOCK (0o4000), O_CLOEXEC (0o2000000)
+            let flags = if num == SYS_PIPE2 { arg1 } else { 0 };
             let pipe = crate::fs::PipeBuffer::new();
+            {
+                let mut p = pipe.lock();
+                p.read_nonblock = flags & 0o4000 != 0;
+                p.write_nonblock = flags & 0o4000 != 0;
+            }
             let read_desc = crate::fs::FileDescriptor::PipeRead(pipe.clone());
             let write_desc = crate::fs::FileDescriptor::PipeWrite(pipe);
 
@@ -564,6 +577,10 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 match fds.alloc_fd(read_desc) {
                     Ok(rfd) => match fds.alloc_fd(write_desc) {
                         Ok(wfd) => {
+                            if flags & 0o2000000 != 0 {
+                                fds.set_cloexec(rfd, true);
+                                fds.set_cloexec(wfd, true);
+                            }
                             unsafe {
                                 (*pipefd_ptr)[0] = rfd as i32;
                                 (*pipefd_ptr)[1] = wfd as i32;
@@ -1219,32 +1236,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             }).unwrap_or(-EPERM)
         }
 
-        SYS_SETEUID => {
-            // sys_seteuid(euid: uid_t)
-            let new_euid = arg0 as u32;
-            crate::task::with_current_task_mut(|t| {
-                if t.euid == 0 || new_euid == t.uid || new_euid == t.suid {
-                    t.euid = new_euid;
-                    0
-                } else {
-                    -EPERM
-                }
-            }).unwrap_or(-EPERM)
-        }
-
-        SYS_SETEGID => {
-            // sys_setegid(egid: gid_t)
-            let new_egid = arg0 as u32;
-            crate::task::with_current_task_mut(|t| {
-                if t.euid == 0 || new_egid == t.gid || new_egid == t.sgid {
-                    t.egid = new_egid;
-                    0
-                } else {
-                    -EPERM
-                }
-            }).unwrap_or(-EPERM)
-        }
-
         SYS_SETREUID => {
             // sys_setreuid(ruid: uid_t, euid: uid_t)
             let ruid = arg0 as u32;
@@ -1565,6 +1556,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
             loop {
                 tty::pump();
+                crate::net::stack::poll();
                 let mut ready_count = 0;
                 crate::task::with_current_fds_mut(|fds| {
                     for i in 0..nfds {
@@ -1816,13 +1808,22 @@ fn read_sockaddr_path(sun_path: &[u8; 108]) -> Option<String> {
 /// (`linux trace on|off`).
 pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Only trace processes whose executable path contains this text (empty = all).
+pub static TRACE_FILTER: Mutex<String> = Mutex::new(String::new());
+
+/// True if the running process passes the trace filter.
+pub fn trace_matches_current() -> bool {
+    let filter = TRACE_FILTER.lock();
+    filter.is_empty() || crate::task::with_current_task_mut(|t| t.exe_path().contains(filter.as_str())).unwrap_or(false)
+}
+
 /// Bitmap of syscall numbers already reported as unimplemented (each is logged once).
 static REPORTED_ENOSYS: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 
 /// Logs the first use of an unimplemented system call to the console and serial port.
 fn report_unimplemented(num: u64, args: [u64; 3]) {
     if num >= 512 {
-        crate::println!("[linux] unimplemented syscall {} ({:#x}, {:#x}, {:#x})", num, args[0], args[1], args[2]);
+        crate::kprintln!("[linux] unimplemented syscall {} ({:#x}, {:#x}, {:#x})", num, args[0], args[1], args[2]);
         return;
     }
     let mut seen = REPORTED_ENOSYS.lock();
@@ -1831,7 +1832,7 @@ fn report_unimplemented(num: u64, args: [u64; 3]) {
         seen[w] |= 1 << b;
         drop(seen);
         let pid = crate::task::SCHEDULER.lock().current_task_id().0;
-        crate::println!("[linux] pid {}: unimplemented syscall {} ({:#x}, {:#x}, {:#x}) -> ENOSYS", pid, num, args[0], args[1], args[2]);
+        crate::kprintln!("[linux] pid {}: unimplemented syscall {} ({:#x}, {:#x}, {:#x}) -> ENOSYS", pid, num, args[0], args[1], args[2]);
     }
 }
 

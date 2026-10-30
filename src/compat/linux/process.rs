@@ -147,6 +147,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             0
         }
         NR_RSEQ => ENOSYS,
+        115 => super::proc::sys_getgroups(a[0], a[1]),
+        116 => super::proc::sys_setgroups(a[0], a[1]),
+        // flock: a single machine with no other lock holders, so locks always succeed
+        73 => 0,
+        // sync_file_range: writeback hint; data reaches the pool with the next transaction group
+        277 => 0,
         229 => {
             // clock_getres: 10 ms timer resolution
             if a[1] != 0 {

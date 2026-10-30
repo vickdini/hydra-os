@@ -165,6 +165,10 @@ impl ZfsServer {
 
     /// Allocates an inode and links it into `dir` as `name`.
     fn make_node(&mut self, dir: u64, name: &[u8], mode: u32, uid: u32, gid: u32, rdev: u64) -> ZplResult<u64> {
+        if name == b"." || name == b".." {
+            // Always present in a directory (`mkdir .` fails with EEXIST on Linux)
+            return Err(EEXIST);
+        }
         check_name(name)?;
         self.dir_dnode(dir)?;
         if self.zap.lookup(&mut self.dmu, dir, name).map_err(io)?.is_some() {

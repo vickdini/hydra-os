@@ -11,6 +11,10 @@ pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRe
 /// Number of kernel wait points currently active (see [`preemptible`]).
 pub static PREEMPT_POINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Linux system call the running task is executing (`u64::MAX` when none), for
+/// [`scheduler::Scheduler::dump_tasks`].
+pub static CURRENT_SYSCALL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
 /// Runs `f` (an idle wait such as `hlt` or a timed sleep) as a preemption point.
 ///
 /// Kernel-mode code is otherwise never preempted by the timer: kernel spinlocks are not

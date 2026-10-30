@@ -9,8 +9,8 @@
 #define SYS_SETGID     106
 #define SYS_GETEUID    107
 #define SYS_GETEGID    108
-#define SYS_SETEUID    115
-#define SYS_SETEGID    116
+#define SYS_SETRESUID  117  /* seteuid(e) == setresuid(-1, e, -1), as in glibc */
+#define SYS_SETRESGID  119
 #define SYS_GETRESUID  118
 #define SYS_GETRESGID  120
 #define SYS_CAPGET     125
@@ -58,7 +58,8 @@ static inline long sys_setuid(unsigned int uid) {
 
 static inline long sys_seteuid(unsigned int euid) {
     long ret;
-    asm volatile("syscall" : "=a"(ret) : "a"(SYS_SETEUID), "D"((unsigned long)euid) : "rcx", "r11", "memory");
+    // seteuid(euid) is setresuid(-1, euid, -1): Linux has no seteuid system call
+    asm volatile("syscall" : "=a"(ret) : "a"(SYS_SETRESUID), "D"(-1L), "S"((unsigned long)euid), "d"(-1L) : "rcx", "r11", "memory");
     return ret;
 }
 

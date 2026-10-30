@@ -128,6 +128,8 @@ pub struct Process {
     /// continue through `wait` (WUNTRACED / WCONTINUED), each reported once.
     pub stopped: bool,
     pub stop_sig: u32,
+    /// Supplementary group IDs (`getgroups`/`setgroups`).
+    pub groups: Vec<u32>,
     stop_reported: bool,
     continued: bool,
 }
@@ -154,12 +156,12 @@ pub fn current_ids() -> (u64, u64) {
 /// group, session and signal dispositions (`fork`); otherwise it starts its own session.
 pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>) {
     let mut procs = PROCS.lock();
-    let (pgid, sid, actions, mask) = match inherit_from.and_then(|p| procs.get(&p)) {
+    let (pgid, sid, actions, mask, groups) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask)
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone())
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0),
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new()),
     };
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
@@ -178,6 +180,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             vfork_released: false,
             stopped: false,
             stop_sig: 0,
+            groups,
             stop_reported: false,
             continued: false,
         },
@@ -267,6 +270,48 @@ impl Process {
     pub fn threads_alive(&self) -> usize {
         self.threads.len()
     }
+}
+
+/// `getgroups(size, list)`: the supplementary groups (count only when `size` is 0).
+pub fn sys_getgroups(size: u64, list: u64) -> i64 {
+    let (_, pid) = current_ids();
+    let groups = PROCS.lock().get(&pid).map(|p| p.groups.clone()).unwrap_or_default();
+    if size == 0 {
+        return groups.len() as i64;
+    }
+    if (size as usize) < groups.len() {
+        return EINVAL;
+    }
+    let bytes: Vec<u8> = groups.iter().flat_map(|g| g.to_le_bytes()).collect();
+    if !bytes.is_empty() && !write_bytes(list, &bytes) {
+        return EFAULT;
+    }
+    groups.len() as i64
+}
+
+/// `setgroups(size, list)`: replaces the supplementary groups (root only).
+pub fn sys_setgroups(size: u64, list: u64) -> i64 {
+    if size > 65536 {
+        return EINVAL;
+    }
+    let euid = crate::task::with_current_task_mut(|t| t.euid).unwrap_or(0);
+    if euid != 0 {
+        return EPERM;
+    }
+    let mut groups = Vec::with_capacity(size as usize);
+    if size > 0 {
+        if !prefault_current(list, size * 4, false) {
+            return EFAULT;
+        }
+        for i in 0..size {
+            groups.push(unsafe { *((list + i * 4) as *const u32) });
+        }
+    }
+    let (_, pid) = current_ids();
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        p.groups = groups;
+    }
+    0
 }
 
 pub fn getppid() -> i64 {
@@ -427,6 +472,9 @@ pub fn is_stopped(pid: u64) -> bool {
 /// Stops the calling process (default action of a stop signal) and waits until it is
 /// continued or killed.
 fn stop_current(sig: u32) {
+    if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::kprintln!("[signal] pid {} stopped by signal {}", current_ids().1, sig);
+    }
     let (_, pid) = current_ids();
     {
         let mut procs = PROCS.lock();
@@ -838,7 +886,7 @@ fn die(sig: u32) -> ! {
     let (_, pid) = current_ids();
     let core = matches!(sig, SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV);
     if sig != SIGPIPE && sig != SIGTERM && sig != SIGINT && sig != SIGKILL {
-        crate::println!("[linux] pid {} killed by signal {}{}", pid, sig, if core { " (core dumped)" } else { "" });
+        crate::kprintln!("[linux] pid {} killed by signal {}{}", pid, sig, if core { " (core dumped)" } else { "" });
     }
     set_exit_status(pid, (sig as i32) | if core { 0x80 } else { 0 });
     crate::task::exit_group();

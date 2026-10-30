@@ -96,6 +96,7 @@ def main():
     ap.add_argument("--boot-wait", type=float, default=25)
     ap.add_argument("--gap", type=float, default=1.0, help="seconds between commands")
     ap.add_argument("--prompt", default=None, help="wait for one more occurrence of this text before typing each command after the first")
+    ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
     ap.add_argument("commands", nargs="*")
@@ -133,12 +134,24 @@ def main():
                 c = c[1:]
             if a.prompt and i > 0 and not no_wait:
                 # Wait until the program prints a new prompt after the previous command
-                deadline = time.time() + 60
+                deadline = time.time() + a.prompt_timeout
                 while time.time() < deadline and read_log(a.log)[start:].count(a.prompt) <= prompts_seen:
                     time.sleep(0.25)
             if a.prompt:
                 prompts_seen = read_log(a.log)[start:].count(a.prompt)
-            if len(c) == 2 and c[0] == "^" and c[1].isalpha():
+            if c.startswith("~"):
+                # "~30": pause 30 seconds before the next item
+                time.sleep(float(c[1:]))
+                continue
+            if c.startswith("!"):
+                # "!info registers": QEMU monitor command, output printed to stderr
+                r = qmp.cmd("human-monitor-command", {"command-line": c[1:]})
+                sys.stderr.write(str(r.get("return", r)) + "\n")
+                continue
+            if c.startswith("%"):
+                # "%f12", "%esc": a single named key (QEMU qcode)
+                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": c[1:]}]})
+            elif len(c) == 2 and c[0] == "^" and c[1].isalpha():
                 # Ctrl+letter, e.g. ^C, ^Z, ^D
                 qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": c[1].lower()}]})
             else:

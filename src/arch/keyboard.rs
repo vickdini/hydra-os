@@ -179,10 +179,18 @@ pub fn process_scancode(scancode: u8) -> Option<Key> {
     None
 }
 
+/// Set by F12; the timer interrupt prints the task list (see `Scheduler::dump_tasks`).
+pub static TASK_DUMP_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Called exclusively by the IRQ 1 (Vector 33) interrupt service routine.
 pub fn on_keyboard_irq() {
     let mut data_port: Port<u8> = Port::new(0x60);
     let scancode = unsafe { data_port.read() };
+    if scancode == 0x58 {
+        // F12: dump the task list on the serial port (handled by the timer interrupt)
+        TASK_DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     if let Some(key) = process_scancode(scancode) {
         let mut buffer = KEY_BUFFER.lock();
         buffer.push(key);

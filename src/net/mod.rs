@@ -30,6 +30,7 @@ pub mod ethernet;
 pub mod http;
 pub mod icmp;
 pub mod ipv4;
+pub mod stack;
 pub mod tcp;
 pub mod udp;
 

@@ -312,6 +312,28 @@ pub const YIELD_VECTOR: u64 = 0x81;
 /// state through it; the trap stub restores from it before `iretq`.
 pub static CURRENT_TRAP_FPU: AtomicPtr<FpuState> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Consecutive timer ticks spent in kernel code outside a wait point.
+static KERNEL_BUSY_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Reports kernel code that runs for seconds without reaching a wait point (a spinning
+/// lock or an endless loop): the interrupted instruction pointer identifies the culprit.
+fn kernel_watchdog(ctx: &ExceptionContext, at_preempt_point: bool) {
+    if at_preempt_point {
+        KERNEL_BUSY_TICKS.store(0, Ordering::Relaxed);
+        return;
+    }
+    let busy = KERNEL_BUSY_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    if busy % 500 == 0 {
+        // No allocation or console lock here: either may be what the kernel is stuck on
+        let mut b = crate::console::FixedBuf::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut b,
+            format_args!("[watchdog] kernel busy for {} s: rip={:#x} rsp={:#x}\n", busy / 100, ctx.rip, ctx.rsp),
+        );
+        crate::console::serial_write(b.as_str());
+    }
+}
+
 /// Kills the current user task after an unrecoverable fault and switches away from it.
 fn kill_current_user_task(ctx: &mut ExceptionContext) {
     kill_or_signal(ctx, 11);
@@ -359,6 +381,15 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             // Demand paging and copy-on-write for processes with their own address space.
             // Kernel accesses to user memory (syscall buffers) are resolved the same way.
             let resolved = crate::memory::vm::handle_current_fault(fault_addr, is_write, is_fetch);
+            if crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed) && is_user && crate::compat::linux::trace_matches_current() {
+                static FAULTS_LOGGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                if FAULTS_LOGGED.fetch_add(1, Ordering::Relaxed) < 400 {
+                    crate::println!(
+                        "[fault] addr={:#x} rip={:#x} err={:#x} user={} -> {:?}",
+                        fault_addr, ctx.rip, ctx.error_code, is_user, resolved
+                    );
+                }
+            }
             if let Some(Ok(())) = resolved {
                 return;
             }
@@ -502,6 +533,13 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             if at_preempt_point && crate::task::is_active() {
                 if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
                     sched.schedule(ctx);
+                }
+            }
+            kernel_watchdog(ctx, at_preempt_point);
+            if crate::arch::keyboard::TASK_DUMP_REQUESTED.load(Ordering::Relaxed) && crate::task::is_active() {
+                if let Some(sched) = crate::task::SCHEDULER.try_lock() {
+                    crate::arch::keyboard::TASK_DUMP_REQUESTED.store(false, Ordering::Relaxed);
+                    sched.dump_tasks();
                 }
             }
         }
