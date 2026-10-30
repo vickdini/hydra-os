@@ -106,29 +106,25 @@ impl Command for ZfsCommand {
                 println!("{:<24} {:>8} {:>8} {:<16}", "NAME", "USED", "AVAIL", "MOUNTPOINT");
                 println!("------------------------------------------------------------------");
 
-                let server_lock = ZFS_SERVER.lock();
-                if let Some(server) = server_lock.as_ref() {
-                    for ds in server.dmu.datasets.iter() {
-                        if ds.is_valid {
-                            set_color(Color::LightCyan, Color::Black);
-                            print!("{:<24} ", ds.name_str());
-                            set_color(Color::White, Color::Black);
-                            println!("{:>7}K {:>7}K {:<16}", "128", "8064", ds.mountpoint_str());
-                        }
+                let guard = ZFS_SERVER.lock();
+                if let Some(server) = guard.as_ref() {
+                    let used_k = server.dmu.spa.allocated_bytes() / 1024;
+                    let avail_k = server.dmu.spa.free_bytes() / 1024;
+                    for ds in server.datasets.iter().filter(|d| d.is_snapshot == 0) {
+                        set_color(Color::LightCyan, Color::Black);
+                        print!("{:<24} ", ds.name_str());
+                        set_color(Color::White, Color::Black);
+                        println!("{:>7}K {:>7}K {:<16}", used_k, avail_k, ds.mountpoint_str());
                     }
-
-                    // Display snapshots if any
                     let mut has_snaps = false;
-                    for snap in server.dmu.snapshots.iter() {
-                        if snap.is_valid {
-                            if !has_snaps {
-                                println!("\nSnapshots:");
-                                has_snaps = true;
-                            }
-                            let mut buf = [0u8; 64];
-                            set_color(Color::LightGreen, Color::Black);
-                            println!("  {} (Created at TXG #{})", snap.full_name(&mut buf), snap.txg);
+                    for snap in server.datasets.iter().filter(|d| d.is_snapshot != 0) {
+                        if !has_snaps {
+                            println!("
+Snapshots:");
+                            has_snaps = true;
                         }
+                        set_color(Color::LightGreen, Color::Black);
+                        println!("  {} (Created at TXG #{})", snap.name_str(), snap.txg);
                     }
                 }
             }
@@ -184,6 +180,9 @@ impl Command for ZfsCommand {
                 }
             }
 
+            "selftest" => crate::fs::zfs::selftest::run_selftest(),
+            "verify" => crate::fs::zfs::selftest::run_verify(),
+
             "write" => {
                 if args.len() < 3 {
                     set_color(Color::LightRed, Color::Black);
@@ -208,39 +207,18 @@ impl Command for ZfsCommand {
                 let content_bytes = &content_buf[..content_len];
                 let _cap = state.cap_table.get(1).cloned();
 
-                let mut server_lock = ZFS_SERVER.lock();
-                if let Some(server) = server_lock.as_mut() {
-                    let file_obj = match server.dmu.allocate_object(
-                        crate::fs::zfs::types::DnodeType::PlainFile,
-                        name,
-                    ) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            set_color(Color::LightRed, Color::Black);
-                            println!("[!] Failed to allocate dnode: {}", e);
-                            return;
-                        }
-                    };
-
-                    match server.dmu.cow_write_file(file_obj, content_bytes, &mut server.spa) {
-                        Ok(new_txg) => {
-                            let bin_dir = server.bin_dir_obj;
-                            let _ = server.dmu.add_directory_entry(
-                                bin_dir,
-                                name,
-                                file_obj,
-                                crate::fs::zfs::types::DnodeType::PlainFile,
-                            );
-                            set_color(Color::LightGreen, Color::Black);
-                            println!("[+] CoW write committed to ZFS File Server!");
-                            println!("    - File: '{}' ({} bytes)", name, content_bytes.len());
-                            println!("    - Merkle Root Updated to TXG #{}", new_txg);
-                            println!("    - Fletcher-4 Checksum computed & stored");
-                        }
-                        Err(e) => {
-                            set_color(Color::LightRed, Color::Black);
-                            println!("[!] CoW write failed: {}", e);
-                        }
+                let path = alloc::format!("/bin/{}", name);
+                match ZfsClient::write_file_by_path(&path, content_bytes) {
+                    Ok(new_txg) => {
+                        set_color(Color::LightGreen, Color::Black);
+                        println!("[+] CoW write committed to ZFS File Server!");
+                        println!("    - File: '{}' ({} bytes)", path, content_bytes.len());
+                        println!("    - Merkle Root Updated to TXG #{}", new_txg);
+                        println!("    - Fletcher-4 Checksum computed & stored");
+                    }
+                    Err(e) => {
+                        set_color(Color::LightRed, Color::Black);
+                        println!("[!] CoW write failed: {}", e);
                     }
                 }
             }

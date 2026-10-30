@@ -38,7 +38,81 @@ impl Command for PlasmaCommand {
         "plasma"
     }
 
-    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+    fn execute(&self, args: &[&str], state: &mut ShellState) {
+        let force_builtin = args.iter().any(|&a| a == "--builtin" || a == "-b");
+
+        // By default, launch the genuine upstream KDE Plasma 6.8 Linux ELF64 binary (/bin/plasmashell.elf)
+        // directly in Ring 3 userspace via the Linux ABI & Wayland compositor bridge.
+        if !force_builtin {
+            let target_elf = if args.iter().any(|&a| a == "--krunner" || a == "krunner") {
+                "/bin/krunner.elf"
+            } else {
+                "/bin/plasmashell.elf"
+            };
+
+            let mut elf_buf = alloc::vec![0u8; 2 * 1024 * 1024];
+            let mut bytes_read = 0;
+            if let Ok(n) = crate::fs::ZfsClient::read_file_by_path(target_elf, &mut elf_buf) {
+                bytes_read = n;
+            } else if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                let fat_path = if target_elf.contains("krunner") {
+                    "\\bin\\krunner.elf"
+                } else {
+                    "\\bin\\plasmashell.elf"
+                };
+                if let Ok(data) = crate::shell::fs::read_boot_file(fat_path) {
+                    let copy_n = data.len().min(elf_buf.len());
+                    elf_buf[..copy_n].copy_from_slice(&data[..copy_n]);
+                    bytes_read = copy_n;
+                }
+            }
+
+            if bytes_read > 0 {
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    set_color(Color::Yellow, Color::Black);
+                    println!(
+                        "[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 KDE Plasma 6.8 binary '{}'...",
+                        target_elf
+                    );
+                    let _ = crate::arch::boot_services::take_hardware_ownership();
+                }
+
+                set_color(Color::LightCyan, Color::Black);
+                println!(
+                    "[*] Launching genuine KDE Plasma 6.8 Linux ELF64 binary '{}' ({} bytes) in Ring 3...",
+                    target_elf, bytes_read
+                );
+                let proc_args = [target_elf];
+                match crate::task::spawn_linux_elf(
+                    target_elf,
+                    &elf_buf[..bytes_read],
+                    &proc_args,
+                    crate::task::TaskPriority::Normal,
+                    state.current_uid,
+                    state.current_gid,
+                ) {
+                    Ok(tid) => {
+                        set_color(Color::LightGreen, Color::Black);
+                        println!(
+                            "[+] KDE Plasma 6.8 process '{}' spawned (Task ID #{}, UID {}, GID {}).",
+                            target_elf, tid.0, state.current_uid, state.current_gid
+                        );
+                        set_color(Color::White, Color::Black);
+                        crate::task::wait_task(tid);
+                        set_color(Color::LightGreen, Color::Black);
+                        println!("[+] KDE Plasma 6.8 process '{}' (Task #{}) completed cleanly.", target_elf, tid.0);
+                        set_color(Color::White, Color::Black);
+                        return;
+                    }
+                    Err(e) => {
+                        set_color(Color::LightRed, Color::Black);
+                        println!("[!] Failed to spawn '{}': {}", target_elf, e);
+                        set_color(Color::White, Color::Black);
+                    }
+                }
+            }
+        }
+
         // Verify that hardware GOP video linear framebuffer is active
         let fb_dims = with_framebuffer(|fb| (fb.width(), fb.height()));
         let (width, height) = match fb_dims {

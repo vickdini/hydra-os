@@ -14,6 +14,7 @@ pub enum PseudoFile {
     ProcMeminfo,
     ProcCpuinfo,
     ProcSelfMaps,
+    ProcSelfAuxv,
 }
 
 pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
@@ -25,6 +26,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/meminfo" => Some(PseudoFile::ProcMeminfo),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
         "/proc/self/maps" => Some(PseudoFile::ProcSelfMaps),
+        "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
         _ => None,
     }
 }
@@ -63,6 +65,10 @@ impl PseudoFile {
             PseudoFile::ProcCpuinfo => {
                 let text = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n";
                 read_slice(text.as_bytes(), cursor, buf)
+            }
+            PseudoFile::ProcSelfAuxv => {
+                let auxv = super::process::current_auxv();
+                read_slice(&auxv, cursor, buf)
             }
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
@@ -107,4 +113,13 @@ fn read_slice(data: &[u8], cursor: usize, buf: &mut [u8]) -> usize {
     let to_copy = available.len().min(buf.len());
     buf[..to_copy].copy_from_slice(&available[..to_copy]);
     to_copy
+}
+
+/// Target of a `/proc` symbolic link (`/proc/self/exe`, `/proc/self/cwd`), if `path` is one.
+pub fn proc_link(path: &str) -> Option<alloc::string::String> {
+    match path {
+        "/proc/self/cwd" => Some(crate::task::with_current_fds_mut(|fds| fds.cwd_path.clone())),
+        "/proc/self/exe" => crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())),
+        _ => None,
+    }
 }

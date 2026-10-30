@@ -1,4 +1,5 @@
 pub mod elf;
+pub mod exec;
 pub mod scheduler;
 pub mod tcb;
 
@@ -6,6 +7,21 @@ use alloc::vec::Vec;
 pub use elf::{load_elf, load_linux_elf, ElfBinary, ElfError, ElfProcessImage};
 pub use scheduler::{TaskSnapshot, SCHEDULER};
 pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRegisters, TaskState};
+
+/// Number of kernel wait points currently active (see [`preemptible`]).
+pub static PREEMPT_POINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Runs `f` (an idle wait such as `hlt` or a timed sleep) as a preemption point.
+///
+/// Kernel-mode code is otherwise never preempted by the timer: kernel spinlocks are not
+/// interrupt-safe, and syscalls run with interrupts disabled, so switching away from a task
+/// that holds one would deadlock the CPU. `f` must not be called with any lock held.
+pub fn preemptible<R>(f: impl FnOnce() -> R) -> R {
+    PREEMPT_POINTS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let r = f();
+    PREEMPT_POINTS.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+    r
+}
 
 /// Initializes the multitasking subsystem and registers the current main thread.
 pub fn init(current_cr3: u64) {
@@ -65,6 +81,34 @@ pub fn spawn_linux_elf(
     })
 }
 
+/// Spawns a Linux program `exe` (a path inside `root_dir`) `chroot`ed into `root_dir`.
+pub fn spawn_linux_chroot(
+    root_dir: &str,
+    exe: &str,
+    args: &[&str],
+    uid: u32,
+    gid: u32,
+) -> Result<TaskId, alloc::string::String> {
+    use crate::fs::ZfsClient;
+    let root = ZfsClient::resolve(0, root_dir.as_bytes(), true)
+        .map_err(|e| alloc::format!("cannot open root directory {} (errno {})", root_dir, e))?;
+    let ino = ZfsClient::resolve_in(root, root, exe.as_bytes(), true)
+        .map_err(|e| alloc::format!("{}: not found in {} (errno {})", exe, root_dir, e))?;
+    let attr = ZfsClient::getattr(ino).map_err(|e| alloc::format!("stat failed (errno {})", e))?;
+    let mut data = alloc::vec![0u8; attr.size as usize];
+    let n = ZfsClient::read_at(ino, 0, &mut data).map_err(|e| alloc::format!("read failed (errno {})", e))?;
+    data.truncate(n);
+    if !elf::ElfBinary::parse(&data).is_ok() || !exec::is_vm_loadable(&data) {
+        return Err(alloc::format!("{} is not a position-independent x86_64 ELF executable", exe));
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched = SCHEDULER.lock();
+        sched
+            .spawn_linux_process("linux_app", &data, exe, args, TaskPriority::Normal, uid, gid, Some(root))
+            .map_err(alloc::string::String::from)
+    })
+}
+
 /// Sets credentials for a specific task.
 pub fn set_task_credentials(id: TaskId, uid: u32, gid: u32) {
     SCHEDULER.lock().set_task_credentials(id, uid, gid);
@@ -90,7 +134,7 @@ pub fn yield_now() {
         return;
     }
     unsafe {
-        core::arch::asm!("int 32");
+        core::arch::asm!("int 0x81");
     }
 }
 
@@ -153,6 +197,15 @@ pub fn exit() -> ! {
             core::hint::spin_loop();
         }
     }
+}
+
+/// Terminates every thread of the calling process (Linux `exit_group`).
+pub fn exit_group() -> ! {
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.terminate_current_group();
+    }
+    exit()
 }
 
 /// Terminates a task by its TaskId.

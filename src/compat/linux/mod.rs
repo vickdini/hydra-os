@@ -4,10 +4,18 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod epoll;
+pub mod eventfd;
 pub mod fs;
 pub mod futex;
+pub mod memfd;
+pub mod mm;
+pub mod process;
+pub mod socket;
 pub mod syscalls;
 pub mod types;
+pub mod vfs;
+pub mod wayland_bridge;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,8 +23,13 @@ use spin::Mutex;
 use x86_64::VirtAddr;
 
 use crate::arch::syscall::SyscallFrame;
+pub use epoll::*;
+pub use eventfd::*;
+pub use memfd::*;
+pub use socket::*;
 pub use syscalls::*;
 pub use types::*;
+pub use wayland_bridge::*;
 
 /// Linux ABI subsystem diagnostic counters.
 #[derive(Debug, Clone, Copy, Default)]
@@ -56,6 +69,32 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         stats.total_calls += 1;
     }
 
+    if let Some(r) = process::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        LINUX_STATS.lock().process_calls += 1;
+        return r;
+    }
+
+    if let Some(r) = vfs::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        LINUX_STATS.lock().io_calls += 1;
+        return r;
+    }
+
+    if matches!(num, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | SYS_MREMAP | SYS_MADVISE | SYS_MINCORE | SYS_MSYNC) {
+        if let Some(mm) = mm::current_mm() {
+            LINUX_STATS.lock().memory_calls += 1;
+            return match num {
+                SYS_MMAP => mm::sys_mmap(&mm, arg0, arg1, arg2, arg3, arg4 as i64, arg5),
+                SYS_MUNMAP => mm::sys_munmap(&mm, arg0, arg1),
+                SYS_MPROTECT => mm::sys_mprotect(&mm, arg0, arg1, arg2),
+                SYS_BRK => mm::sys_brk(&mm, arg0),
+                SYS_MREMAP => mm::sys_mremap(&mm, arg0, arg1, arg2, arg3, arg4),
+                SYS_MADVISE => mm::sys_madvise(&mm, arg0, arg1, arg2),
+                SYS_MINCORE => mm::sys_mincore(&mm, arg0, arg1, arg2),
+                _ => 0, // msync: no write-back of shared file mappings yet
+            };
+        }
+    }
+
     match num {
         SYS_READ => {
             // sys_read(fd: int, buf: void*, count: size_t)
@@ -68,6 +107,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             if count == 0 {
                 return 0;
             }
+
+            if !crate::memory::vm::prefault_current(ptr as u64, count as u64, true) {
+                return -EFAULT;
+            }
+            dispatch_wayland_events();
 
             let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
             crate::task::with_current_fds_mut(|fds| {
@@ -93,9 +137,12 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             if count == 0 {
                 return 0;
             }
+            if !crate::memory::vm::prefault_current(ptr as u64, count as u64, false) {
+                return -EFAULT;
+            }
 
             let slice = unsafe { core::slice::from_raw_parts(ptr, count) };
-            crate::task::with_current_fds_mut(|fds| {
+            let res = crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.write(slice) {
                         Ok(n) => n as i64,
@@ -104,7 +151,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 } else {
                     -EBADF
                 }
-            })
+            });
+            if res > 0 {
+                dispatch_wayland_events();
+            }
+            res
         }
 
         SYS_OPEN => {
@@ -260,6 +311,28 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
             let aligned_len = (length + 4095) & !4095;
 
+            // Check if fd is a shared memory descriptor (memfd)
+            if fd >= 0 {
+                let is_memfd = crate::task::with_current_fds_mut(|fds| {
+                    if let Some(crate::fs::FileDescriptor::MemFd(m)) = fds.get(fd as usize) {
+                        Some(m.clone())
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(memfd) = is_memfd {
+                    let frames = match memfd.lock().frames_for(aligned_len) {
+                        Some(f) => f,
+                        None => return -ENOMEM,
+                    };
+                    return match crate::memory::vm::map_into_kernel_space(&frames, true) {
+                        Some(vaddr) => vaddr as i64,
+                        None => -ENOMEM,
+                    };
+                }
+            }
+
             // Strategy: Anonymous memory allocation via kernel heap/frame allocator
             if (flags & MAP_ANONYMOUS) != 0 || fd == -1 {
                 let buffer = alloc::vec![0u8; aligned_len].into_boxed_slice();
@@ -355,6 +428,67 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             }
         }
 
+        SYS_READV => {
+            // sys_readv(fd: int, iov: const struct iovec*, iovcnt: int)
+            let fd = arg0 as usize;
+            let iov_ptr = arg1 as *const LinuxIovec;
+            let iovcnt = arg2 as usize;
+            if !crate::memory::vm::prefault_current(iov_ptr as u64, (iovcnt * core::mem::size_of::<LinuxIovec>()) as u64, false) {
+                return -EFAULT;
+            }
+            let mut total = 0i64;
+            for i in 0..iovcnt {
+                let iov = unsafe { *iov_ptr.add(i) };
+                if iov.iov_len == 0 {
+                    continue;
+                }
+                if !crate::memory::vm::prefault_current(iov.iov_base, iov.iov_len, true) {
+                    return if total > 0 { total } else { -EFAULT };
+                }
+                let slice = unsafe { core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, iov.iov_len as usize) };
+                let res = crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
+                    Some(desc) => desc.read(slice).map(|n| n as i64).unwrap_or(-EIO),
+                    None => -EBADF,
+                });
+                if res < 0 {
+                    return if total > 0 { total } else { res };
+                }
+                total += res;
+                if (res as u64) < iov.iov_len {
+                    break;
+                }
+            }
+            total
+        }
+
+        SYS_PREAD64 | SYS_PWRITE64 => {
+            // sys_pread64/pwrite64(fd: int, buf: void*, count: size_t, offset: loff_t)
+            let fd = arg0 as usize;
+            let count = arg2 as usize;
+            let offset = arg3 as usize;
+            let is_read = num == SYS_PREAD64;
+            if count == 0 {
+                return 0;
+            }
+            if !crate::memory::vm::prefault_current(arg1, count as u64, is_read) {
+                return -EFAULT;
+            }
+            crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
+                Some(desc) => {
+                    let res = if is_read {
+                        desc.pread(unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, count) }, offset)
+                    } else {
+                        desc.pwrite(unsafe { core::slice::from_raw_parts(arg1 as *const u8, count) }, offset)
+                    };
+                    match res {
+                        Ok(n) => n as i64,
+                        Err(_) => -ESPIPE,
+                    }
+                }
+                None => -EBADF,
+            })
+        }
+
         SYS_WRITEV => {
             // sys_writev(fd: int, iov: const struct iovec*, iovcnt: int)
             let fd = arg0 as usize;
@@ -364,9 +498,15 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 return -EFAULT;
             }
 
+            if !crate::memory::vm::prefault_current(iov_ptr as u64, (iovcnt * core::mem::size_of::<LinuxIovec>()) as u64, false) {
+                return -EFAULT;
+            }
             let mut total_written = 0i64;
             for i in 0..iovcnt {
                 let iov = unsafe { *iov_ptr.add(i) };
+                if !crate::memory::vm::prefault_current(iov.iov_base, iov.iov_len, false) {
+                    return if total_written > 0 { total_written } else { -EFAULT };
+                }
                 if iov.iov_len > 0 && iov.iov_base != 0 {
                     let slice = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
                     let res = crate::task::with_current_fds_mut(|fds| {
@@ -461,6 +601,438 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             })
         }
 
+        SYS_SOCKET => {
+            // sys_socket(domain: int, type: int, protocol: int)
+            let domain = arg0 as u32;
+            let sock_type = arg1 as u32;
+            let _protocol = arg2 as u32;
+
+            if domain != AF_UNIX && domain != AF_LOCAL {
+                return -EAFNOSUPPORT;
+            }
+
+            let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
+            let sock = UnixSocket::new(domain, sock_type, nonblock);
+            let desc = crate::fs::FileDescriptor::Socket(sock);
+
+            crate::task::with_current_fds_mut(|fds| {
+                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+            })
+        }
+
+        SYS_BIND => {
+            // sys_bind(sockfd: int, addr: const struct sockaddr*, addrlen: socklen_t)
+            let fd = arg0 as usize;
+            let addr_ptr = arg1 as *const LinuxSockaddrUn;
+            let addrlen = arg2 as usize;
+
+            if addr_ptr.is_null() || addrlen < 2 {
+                return -EFAULT;
+            }
+
+            let addr: LinuxSockaddrUn = unsafe { core::ptr::read_unaligned(addr_ptr) };
+            if addr.sun_family as u32 != AF_UNIX && addr.sun_family as u32 != AF_LOCAL {
+                return -EAFNOSUPPORT;
+            }
+
+            let path = match read_sockaddr_path(&addr.sun_path) {
+                Some(p) => p,
+                None => return -EINVAL,
+            };
+
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                    let sock_clone = sock.clone();
+                    UnixSocket::bind(&sock_clone, &path)
+                } else {
+                    Err(-EBADF)
+                }
+            });
+            match res {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+
+        SYS_LISTEN => {
+            // sys_listen(sockfd: int, backlog: int)
+            let fd = arg0 as usize;
+            let backlog = arg1 as usize;
+
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                    sock.lock().listen(backlog)
+                } else {
+                    Err(-EBADF)
+                }
+            });
+            match res {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+
+        SYS_ACCEPT | SYS_ACCEPT4 => {
+            // sys_accept(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
+            // sys_accept4(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*, flags: int)
+            let fd = arg0 as usize;
+            let addr_ptr = arg1 as *mut LinuxSockaddrUn;
+            let addrlen_ptr = arg2 as *mut u32;
+            let flags = if num == SYS_ACCEPT4 { arg3 as u32 } else { 0 };
+            let nonblock = (flags & SOCK_NONBLOCK) != 0;
+
+            let sock = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(s)) = fds.get(fd) {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
+            let sock = match sock {
+                Some(s) => s,
+                None => return -EBADF,
+            };
+
+            let client_sock = match sock.lock().accept(nonblock) {
+                Ok(c) => c,
+                Err(err) => return err,
+            };
+
+            if !addr_ptr.is_null() {
+                unsafe {
+                    let mut un = LinuxSockaddrUn::default();
+                    un.sun_family = AF_UNIX as u16;
+                    *addr_ptr = un;
+                    if !addrlen_ptr.is_null() {
+                        *addrlen_ptr = 2; // sizeof(sun_family)
+                    }
+                }
+            }
+
+            let desc = crate::fs::FileDescriptor::Socket(client_sock);
+            crate::task::with_current_fds_mut(|fds| {
+                fds.alloc_fd(desc).map(|newfd| newfd as i64).unwrap_or(-EMFILE)
+            })
+        }
+
+        SYS_CONNECT => {
+            // sys_connect(sockfd: int, addr: const struct sockaddr*, addrlen: socklen_t)
+            let fd = arg0 as usize;
+            let addr_ptr = arg1 as *const LinuxSockaddrUn;
+            let addrlen = arg2 as usize;
+
+            if addr_ptr.is_null() || addrlen < 2 {
+                return -EFAULT;
+            }
+
+            let addr: LinuxSockaddrUn = unsafe { core::ptr::read_unaligned(addr_ptr) };
+            if addr.sun_family as u32 != AF_UNIX && addr.sun_family as u32 != AF_LOCAL {
+                return -EAFNOSUPPORT;
+            }
+
+            let path = match read_sockaddr_path(&addr.sun_path) {
+                Some(p) => p,
+                None => return -EINVAL,
+            };
+
+            if path == "/run/user/1000/wayland-0" || path == "wayland-0" {
+                ensure_wayland_bridge();
+            }
+
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                    sock.lock().connect(&path)
+                } else {
+                    Err(-EBADF)
+                }
+            });
+            if res.is_ok() && (path == "/run/user/1000/wayland-0" || path == "wayland-0") {
+                dispatch_wayland_events();
+            }
+            match res {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+
+        SYS_SOCKETPAIR => {
+            // sys_socketpair(domain: int, type: int, protocol: int, sv: int[2])
+            let domain = arg0 as u32;
+            let sock_type = arg1 as u32;
+            let _protocol = arg2 as u32;
+            let sv_ptr = arg3 as *mut [i32; 2];
+
+            if sv_ptr.is_null() {
+                return -EFAULT;
+            }
+
+            if domain != AF_UNIX && domain != AF_LOCAL {
+                return -EAFNOSUPPORT;
+            }
+
+            let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
+            let (sock_a, sock_b) = UnixSocket::pair(sock_type, nonblock);
+
+            let desc_a = crate::fs::FileDescriptor::Socket(sock_a);
+            let desc_b = crate::fs::FileDescriptor::Socket(sock_b);
+
+            crate::task::with_current_fds_mut(|fds| {
+                match fds.alloc_fd(desc_a) {
+                    Ok(fd_a) => match fds.alloc_fd(desc_b) {
+                        Ok(fd_b) => {
+                            unsafe {
+                                (*sv_ptr)[0] = fd_a as i32;
+                                (*sv_ptr)[1] = fd_b as i32;
+                            }
+                            0
+                        }
+                        Err(_) => {
+                            let _ = fds.close(fd_a);
+                            -EMFILE
+                        }
+                    },
+                    Err(_) => -EMFILE,
+                }
+            })
+        }
+
+        SYS_SENDTO => {
+            // sys_sendto(sockfd: int, buf: const void*, len: size_t, flags: int, dest_addr: const struct sockaddr*, addrlen: socklen_t)
+            let fd = arg0 as usize;
+            let ptr = arg1 as *const u8;
+            let count = arg2 as usize;
+            if ptr.is_null() && count > 0 {
+                return -EFAULT;
+            }
+            if count == 0 {
+                return 0;
+            }
+            let slice = unsafe { core::slice::from_raw_parts(ptr, count) };
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(desc) = fds.get_mut(fd) {
+                    match desc.write(slice) {
+                        Ok(n) => n as i64,
+                        Err(_) => -EIO,
+                    }
+                } else {
+                    -EBADF
+                }
+            });
+            if res > 0 {
+                dispatch_wayland_events();
+            }
+            res
+        }
+
+        SYS_RECVFROM => {
+            // sys_recvfrom(sockfd: int, buf: void*, len: size_t, flags: int, src_addr: struct sockaddr*, addrlen: socklen_t*)
+            let fd = arg0 as usize;
+            let ptr = arg1 as *mut u8;
+            let count = arg2 as usize;
+            if ptr.is_null() && count > 0 {
+                return -EFAULT;
+            }
+            if count == 0 {
+                return 0;
+            }
+            dispatch_wayland_events();
+            let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
+            crate::task::with_current_fds_mut(|fds| {
+                if let Some(desc) = fds.get_mut(fd) {
+                    match desc.read(slice) {
+                        Ok(n) => n as i64,
+                        Err(_) => -EIO,
+                    }
+                } else {
+                    -EBADF
+                }
+            })
+        }
+
+        SYS_SENDMSG => {
+            // sys_sendmsg(sockfd: int, msg: const struct msghdr*, flags: int)
+            let fd = arg0 as usize;
+            let msg_ptr = arg1 as *const LinuxMsghdr;
+            if msg_ptr.is_null() {
+                return -EFAULT;
+            }
+            let msg = unsafe { *msg_ptr };
+
+            // 1. Process SCM_RIGHTS ancillary data if present
+            if !msg.msg_control.is_null() && msg.msg_controllen >= 16 {
+                let cmsg = unsafe { *(msg.msg_control as *const LinuxCmsghdr) };
+                if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
+                    let num_fds = cmsg.cmsg_len.saturating_sub(16) / 4;
+                    let fd_array = unsafe { msg.msg_control.add(16) as *const i32 };
+                    for i in 0..num_fds {
+                        let target_fd = unsafe { *fd_array.add(i) } as usize;
+                        let desc_clone = crate::task::with_current_fds_mut(|fds| {
+                            fds.get(target_fd).cloned()
+                        });
+                        if let Some(desc) = desc_clone {
+                            let _ = crate::task::with_current_fds_mut(|fds| {
+                                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                                    sock.lock().push_ancillary_fd(desc)
+                                } else {
+                                    Err("Not a socket")
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 2. Transmit payload data buffers from msg_iov
+            let mut total_sent = 0;
+            if !msg.msg_iov.is_null() && msg.msg_iovlen > 0 {
+                for i in 0..msg.msg_iovlen {
+                    let iov = unsafe { *msg.msg_iov.add(i) };
+                    if iov.iov_base != 0 && iov.iov_len > 0 {
+                        let slice = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
+                        let sent = crate::task::with_current_fds_mut(|fds| {
+                            if let Some(desc) = fds.get_mut(fd) {
+                                desc.write(slice).map(|n| n as i64).unwrap_or(-EIO)
+                            } else {
+                                -EBADF
+                            }
+                        });
+                        if sent < 0 {
+                            return sent;
+                        }
+                        total_sent += sent;
+                    }
+                }
+            }
+            if total_sent > 0 {
+                dispatch_wayland_events();
+            }
+            total_sent
+        }
+
+        SYS_RECVMSG => {
+            // sys_recvmsg(sockfd: int, msg: struct msghdr*, flags: int)
+            let fd = arg0 as usize;
+            let msg_ptr = arg1 as *mut LinuxMsghdr;
+            if msg_ptr.is_null() {
+                return -EFAULT;
+            }
+            let msg = unsafe { *msg_ptr };
+            dispatch_wayland_events();
+
+            // 1. Receive incoming ancillary data (SCM_RIGHTS) if requested
+            if !msg.msg_control.is_null() && msg.msg_controllen >= 20 {
+                let incoming_desc = crate::task::with_current_fds_mut(|fds| {
+                    if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                        sock.lock().pop_ancillary_fd()
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(desc) = incoming_desc {
+                    let new_fd = crate::task::with_current_fds_mut(|fds| {
+                        fds.alloc_fd(desc).map(|f| f as i32).unwrap_or(-1)
+                    });
+                    if new_fd >= 0 {
+                        unsafe {
+                            let cmsg_ptr = msg.msg_control as *mut LinuxCmsghdr;
+                            *cmsg_ptr = LinuxCmsghdr {
+                                cmsg_len: 20,
+                                cmsg_level: SOL_SOCKET,
+                                cmsg_type: SCM_RIGHTS,
+                            };
+                            let fd_dest = msg.msg_control.add(16) as *mut i32;
+                            *fd_dest = new_fd;
+                            (*msg_ptr).msg_controllen = 20;
+                        }
+                    }
+                } else {
+                    unsafe {
+                        (*msg_ptr).msg_controllen = 0;
+                    }
+                }
+            }
+
+            // 2. Read incoming payload data into msg_iov
+            let mut total_recv = 0;
+            if !msg.msg_iov.is_null() && msg.msg_iovlen > 0 {
+                for i in 0..msg.msg_iovlen {
+                    let iov = unsafe { *msg.msg_iov.add(i) };
+                    if iov.iov_base != 0 && iov.iov_len > 0 {
+                        let slice = unsafe { core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, iov.iov_len as usize) };
+                        let recvd = crate::task::with_current_fds_mut(|fds| {
+                            if let Some(desc) = fds.get_mut(fd) {
+                                desc.read(slice).map(|n| n as i64).unwrap_or(-EIO)
+                            } else {
+                                -EBADF
+                            }
+                        });
+                        if recvd < 0 {
+                            return recvd;
+                        }
+                        total_recv += recvd;
+                    }
+                }
+            }
+            total_recv
+        }
+
+        SYS_SHUTDOWN => {
+            // sys_shutdown(sockfd: int, how: int)
+            let fd = arg0 as usize;
+            let how = arg1 as u32;
+
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                    sock.lock().shutdown(how)
+                } else {
+                    Err(-EBADF)
+                }
+            });
+            match res {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+
+        SYS_GETSOCKNAME | SYS_GETPEERNAME => {
+            // sys_getsockname(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
+            // sys_getpeername(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
+            let fd = arg0 as usize;
+            let addr_ptr = arg1 as *mut LinuxSockaddrUn;
+            let addrlen_ptr = arg2 as *mut u32;
+
+            if addr_ptr.is_null() || addrlen_ptr.is_null() {
+                return -EFAULT;
+            }
+
+            crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
+                    let s = sock.lock();
+                    let mut un = LinuxSockaddrUn::default();
+                    un.sun_family = AF_UNIX as u16;
+                    let path_str = match &s.role {
+                        UnixSocketRole::Bound(p) => p.as_str(),
+                        UnixSocketRole::Listening { path, .. } => path.as_str(),
+                        UnixSocketRole::Connected { peer_path, .. } => peer_path.as_str(),
+                        _ => "",
+                    };
+                    let bytes = path_str.as_bytes();
+                    let copy_len = bytes.len().min(107);
+                    un.sun_path[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                    un.sun_path[copy_len] = 0;
+                    unsafe {
+                        *addr_ptr = un;
+                        *addrlen_ptr = (2 + copy_len + 1) as u32;
+                    }
+                    0
+                } else {
+                    -EBADF
+                }
+            })
+        }
+
         SYS_NANOSLEEP => {
             // sys_nanosleep(req: const struct timespec*, rem: struct timespec*)
             let req_ptr = arg0 as *const LinuxTimespec;
@@ -493,8 +1065,12 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             }
         }
 
-        SYS_EXIT | SYS_EXIT_GROUP => {
+        SYS_EXIT => {
             crate::task::exit();
+        }
+
+        SYS_EXIT_GROUP => {
+            crate::task::exit_group();
         }
 
         SYS_UNAME => {
@@ -520,6 +1096,26 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 3 => 2, // O_RDWR
                 4 => 0,
                 _ => 0,
+            }
+        }
+
+        SYS_FTRUNCATE => {
+            // sys_ftruncate(fd: int, length: off_t)
+            let fd = arg0 as usize;
+            let length = arg1 as usize;
+            let res = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::MemFd(m)) = fds.get(fd) {
+                    m.lock().truncate(length);
+                    Ok(0)
+                } else if let Some(crate::fs::FileDescriptor::File { .. }) = fds.get(fd) {
+                    Ok(0)
+                } else {
+                    Err(-EBADF)
+                }
+            });
+            match res {
+                Ok(v) => v,
+                Err(e) => e,
             }
         }
 
@@ -913,9 +1509,207 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             buflen as i64
         }
 
+        SYS_POLL | SYS_PPOLL => {
+            // sys_poll(fds: struct pollfd*, nfds: nfds_t, timeout_msecs: int)
+            // sys_ppoll(fds: struct pollfd*, nfds: nfds_t, tmo_p: const struct timespec*, sigmask: const sigset_t*)
+            let fds_ptr = arg0 as *mut LinuxPollFd;
+            let nfds = arg1 as usize;
+            let timeout_ms = if num == SYS_PPOLL {
+                let ts_ptr = arg2 as *const LinuxTimespec;
+                if ts_ptr.is_null() {
+                    -1
+                } else {
+                    let ts = unsafe { *ts_ptr };
+                    (ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000) as i32
+                }
+            } else {
+                arg2 as i32
+            };
+
+            if fds_ptr.is_null() && nfds > 0 {
+                return -EFAULT;
+            }
+            dispatch_wayland_events();
+            if nfds == 0 {
+                if timeout_ms > 0 {
+                    crate::task::sleep_ms(timeout_ms as u64);
+                }
+                return 0;
+            }
+
+            let start_tick = crate::arch::pit::ticks();
+            let timeout_ticks = if timeout_ms < 0 {
+                u64::MAX
+            } else {
+                (timeout_ms as u64 + 9) / 10
+            };
+
+            loop {
+                let mut ready_count = 0;
+                crate::task::with_current_fds_mut(|fds| {
+                    for i in 0..nfds {
+                        unsafe {
+                            let pfd = &mut *fds_ptr.add(i);
+                            pfd.revents = 0;
+                            if pfd.fd < 0 {
+                                continue;
+                            }
+                            if let Some(desc) = fds.get(pfd.fd as usize) {
+                                let ev = desc.poll_events() as i16;
+                                let matched = ev & (pfd.events | (EPOLLERR as i16) | (EPOLLHUP as i16));
+                                if matched != 0 {
+                                    pfd.revents = matched;
+                                    ready_count += 1;
+                                }
+                            } else {
+                                pfd.revents = EPOLLNVAL as i16;
+                                ready_count += 1;
+                            }
+                        }
+                    }
+                });
+
+                if ready_count > 0 || timeout_ms == 0 {
+                    return ready_count as i64;
+                }
+
+                let elapsed = crate::arch::pit::ticks().saturating_sub(start_tick);
+                if elapsed >= timeout_ticks {
+                    return 0;
+                }
+
+                crate::task::yield_now();
+            }
+        }
+
+        SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 => {
+            // sys_epoll_create(size: int)
+            // sys_epoll_create1(flags: int)
+            let ep = EpollInstance::new();
+            let desc = crate::fs::FileDescriptor::Epoll(ep);
+            crate::task::with_current_fds_mut(|fds| {
+                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+            })
+        }
+
+        SYS_EPOLL_CTL => {
+            // sys_epoll_ctl(epfd: int, op: int, fd: int, event: struct epoll_event*)
+            let epfd = arg0 as usize;
+            let op = arg1 as i32;
+            let target_fd = arg2 as i32;
+            let ev_ptr = arg3 as *const LinuxEpollEvent;
+
+            let ev = if !ev_ptr.is_null() && op != EPOLL_CTL_DEL {
+                Some(unsafe { core::ptr::read_unaligned(ev_ptr) })
+            } else {
+                None
+            };
+
+            let epoll_arc = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Epoll(ep)) = fds.get(epfd) {
+                    Some(ep.clone())
+                } else {
+                    None
+                }
+            });
+
+            let epoll_arc = match epoll_arc {
+                Some(ep) => ep,
+                None => return -EBADF,
+            };
+
+            let res = epoll_arc.lock().ctl(op, target_fd, ev);
+            match res {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+
+        SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
+            // sys_epoll_wait(epfd: int, events: struct epoll_event*, maxevents: int, timeout: int)
+            let epfd = arg0 as usize;
+            let events_ptr = arg1 as *mut LinuxEpollEvent;
+            let maxevents = arg2 as i32;
+            let timeout_ms = arg3 as i32;
+
+            if events_ptr.is_null() || maxevents <= 0 {
+                return -EINVAL;
+            }
+
+            let epoll_arc = crate::task::with_current_fds_mut(|fds| {
+                if let Some(crate::fs::FileDescriptor::Epoll(ep)) = fds.get(epfd) {
+                    Some(ep.clone())
+                } else {
+                    None
+                }
+            });
+
+            let epoll_arc = match epoll_arc {
+                Some(ep) => ep,
+                None => return -EBADF,
+            };
+
+            let start_tick = crate::arch::pit::ticks();
+            let timeout_ticks = if timeout_ms < 0 {
+                u64::MAX
+            } else {
+                (timeout_ms as u64 + 9) / 10
+            };
+
+            loop {
+                dispatch_wayland_events();
+                let ready = epoll_collect_ready(&epoll_arc, maxevents as usize);
+                if !ready.is_empty() {
+                    let count = ready.len();
+                    for (i, ev) in ready.into_iter().enumerate() {
+                        unsafe {
+                            core::ptr::write_unaligned(events_ptr.add(i), ev);
+                        }
+                    }
+                    return count as i64;
+                }
+
+                if timeout_ms == 0 {
+                    return 0;
+                }
+
+                let elapsed = crate::arch::pit::ticks().saturating_sub(start_tick);
+                if elapsed >= timeout_ticks {
+                    return 0;
+                }
+
+                crate::task::yield_now();
+            }
+        }
+
+        SYS_EVENTFD | SYS_EVENTFD2 => {
+            // sys_eventfd2(initval: unsigned int, flags: int)
+            let initval = arg0 as u32;
+            let flags = arg1 as u32;
+            let efd = EventFd::new(initval, flags);
+            let desc = crate::fs::FileDescriptor::EventFd(efd);
+            crate::task::with_current_fds_mut(|fds| {
+                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+            })
+        }
+
+        SYS_MEMFD_CREATE => {
+            // sys_memfd_create(name: const char*, flags: unsigned int)
+            let name_ptr = arg0 as *const u8;
+            let _flags = arg1 as u32;
+            let name = read_user_string(name_ptr).unwrap_or_else(|| String::from("memfd"));
+            let memfd = MemFd::new(&name);
+            let desc = crate::fs::FileDescriptor::MemFd(memfd);
+            crate::task::with_current_fds_mut(|fds| {
+                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+            })
+        }
+
         _ => {
             let mut stats = LINUX_STATS.lock();
             stats.unknown_calls += 1;
+            drop(stats);
+            report_unimplemented(num, [arg0, arg1, arg2]);
             -ENOSYS
         }
     }
@@ -979,4 +1773,38 @@ fn open_path(path: &str, flags: u64) -> i64 {
     crate::task::with_current_fds_mut(|fds| {
         fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
     })
+}
+
+fn read_sockaddr_path(sun_path: &[u8; 108]) -> Option<String> {
+    let mut len = 0;
+    while len < sun_path.len() && sun_path[len] != 0 {
+        len += 1;
+    }
+    if len == 0 {
+        return None;
+    }
+    core::str::from_utf8(&sun_path[..len]).map(String::from).ok()
+}
+
+/// When set, every Linux system call is logged with its arguments and result
+/// (`linux trace on|off`).
+pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Bitmap of syscall numbers already reported as unimplemented (each is logged once).
+static REPORTED_ENOSYS: Mutex<[u64; 8]> = Mutex::new([0; 8]);
+
+/// Logs the first use of an unimplemented system call to the console and serial port.
+fn report_unimplemented(num: u64, args: [u64; 3]) {
+    if num >= 512 {
+        crate::println!("[linux] unimplemented syscall {} ({:#x}, {:#x}, {:#x})", num, args[0], args[1], args[2]);
+        return;
+    }
+    let mut seen = REPORTED_ENOSYS.lock();
+    let (w, b) = ((num / 64) as usize, num % 64);
+    if seen[w] & (1 << b) == 0 {
+        seen[w] |= 1 << b;
+        drop(seen);
+        let pid = crate::task::SCHEDULER.lock().current_task_id().0;
+        crate::println!("[linux] pid {}: unimplemented syscall {} ({:#x}, {:#x}, {:#x}) -> ENOSYS", pid, num, args[0], args[1], args[2]);
+    }
 }

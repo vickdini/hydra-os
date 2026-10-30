@@ -91,6 +91,11 @@ pub static mut CURRENT_KERNEL_RSP: u64 = 0;
 #[no_mangle]
 static mut USER_RSP_SCRATCH: u64 = 0;
 
+/// User FPU state saved by the syscall entry stub for the syscall in progress. Valid until
+/// the current syscall yields the CPU; `clone` reads it to give the child the parent's state.
+pub static SYSCALL_FPU: core::sync::atomic::AtomicPtr<crate::arch::idt::FpuState> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
 /// Updates the active task's kernel stack pointer for syscall stack switching.
 pub fn set_kernel_rsp(rsp: u64) {
     unsafe {
@@ -154,10 +159,24 @@ pub fn init() {
 
 /// High-level Rust system call dispatcher called by `asm_syscall_entry`.
 #[no_mangle]
-pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame) {
+pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
+    SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
+
+    // Release address spaces of exited processes (no locks are held at syscall entry)
+    crate::memory::vm::reap_retired_mms();
+
     // Check if active task uses Linux ABI personality
     if crate::task::current_personality() == crate::task::TaskPersonality::Linux {
+        let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed);
+        let (num, args) = (frame.rax, [frame.rdi, frame.rsi, frame.rdx, frame.r10]);
+        if tracing {
+            let pid = crate::task::SCHEDULER.lock().current_task_id().0;
+            crate::println!("[trace] {} > {}({:#x}, {:#x}, {:#x}, {:#x})", pid, num, args[0], args[1], args[2], args[3]);
+        }
         let res = crate::compat::linux::dispatch_linux_syscall(frame);
+        if tracing {
+            crate::println!("[trace]   = {}", res);
+        }
         frame.rax = res as u64;
         return;
     }
@@ -452,15 +471,26 @@ global_asm!(
         push r8                                 // Arg 4
         push r9                                 // Arg 5
 
-        // 3. Call Rust dispatcher
-        // Pass pointer to SyscallFrame in both RCX (Win64) and RDI (SysV)
-        mov rcx, rsp
-        mov rdi, rsp
-        sub rsp, 48                             // 32-byte Win64 shadow space + 16-byte alignment
-        call hydra_syscall_dispatcher
-        add rsp, 48
+        // 3. Save user x87/SSE state (Linux preserves it across syscalls; kernel code uses SSE).
+        // RBP (already saved in the frame) keeps the frame pointer across the call.
+        mov rbp, rsp
+        sub rsp, 512
+        and rsp, -16
+        fxsave64 [rsp]
 
-        // 4. Restore registers (dispatcher updated rax with return value)
+        // 4. Call Rust dispatcher: Arg 1 = SyscallFrame, Arg 2 = FPU area (Win64 + SysV)
+        mov rcx, rbp
+        mov rdi, rbp
+        mov rdx, rsp
+        mov rsi, rsp
+        sub rsp, 32                             // 32-byte Win64 shadow space
+        call hydra_syscall_dispatcher
+        add rsp, 32
+
+        fxrstor64 [rsp]
+        mov rsp, rbp
+
+        // 5. Restore registers (dispatcher updated rax with return value)
         pop r9
         pop r8
         pop r10

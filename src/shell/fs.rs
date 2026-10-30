@@ -21,14 +21,14 @@ pub static DEFAULT_SEARCH_PATHS: &[&str] = &[
 ];
 
 /// Converts an ASCII/UTF-8 path string into a null-terminated UTF-16 CStr16.
-/// Strips leading backslash if present so it opens properly relative to root volume.
+/// Strips leading slashes and converts '/' to '\' so it opens properly relative to UEFI root volume.
 pub fn path_to_cstr16<'a>(path: &str, buf: &'a mut [u16]) -> Option<&'a CStr16> {
-    let clean = path.strip_prefix('\\').unwrap_or(path);
+    let clean = path.trim_start_matches(['\\', '/']);
     if clean.len() + 1 > buf.len() {
         return None;
     }
     for (i, b) in clean.bytes().enumerate() {
-        buf[i] = b as u16;
+        buf[i] = if b == b'/' { b'\\' as u16 } else { b as u16 };
     }
     buf[clean.len()] = 0;
     CStr16::from_u16_with_nul(&buf[..=clean.len()]).ok()
@@ -44,6 +44,85 @@ pub fn open_root_volume() -> Result<Directory, &'static str> {
         .map_err(|_| "Failed to access boot file system protocol")?;
     fs.open_volume()
         .map_err(|_| "Failed to open root volume directory")
+}
+
+/// Largest file [`read_media_file`] will load (root filesystem archives).
+const MAX_MEDIA_FILE: usize = 1024 * 1024 * 1024;
+
+/// Reads a whole file from the first UEFI file system that has it: the boot volume, then
+/// any other attached FAT volume (installation media). No 16 MiB limit.
+pub fn read_media_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    if crate::console::is_hardware_mode() {
+        return Err("Boot media reading unavailable in hardware mode");
+    }
+    let mut path_u16 = [0u16; 128];
+    let cstr = path_to_cstr16(path, &mut path_u16).ok_or("Path too long or invalid")?;
+    let handles = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<uefi::proto::media::fs::SimpleFileSystem>())
+        .map_err(|_| "No file systems available")?;
+    for handle in handles.iter() {
+        let mut fs = match uefi::boot::open_protocol_exclusive::<uefi::proto::media::fs::SimpleFileSystem>(*handle) {
+            Ok(fs) => fs,
+            Err(_) => continue,
+        };
+        let mut root = match fs.open_volume() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut file = match root.open(cstr, FileMode::Read, FileAttribute::empty()).ok().and_then(|h| h.into_regular_file()) {
+            Some(f) => f,
+            None => continue,
+        };
+        let mut info_buf = [0u8; 256];
+        let size = file.get_info::<FileInfo>(&mut info_buf).map_err(|_| "Failed to query file info")?.file_size() as usize;
+        if size > MAX_MEDIA_FILE {
+            return Err("File too large");
+        }
+        let mut buf = alloc::vec![0u8; size];
+        let mut total = 0;
+        while total < size {
+            match file.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(_) => return Err("I/O error reading media file"),
+            }
+        }
+        buf.truncate(total);
+        return Ok(buf);
+    }
+    Err("File not found on any attached volume")
+}
+
+/// Reads an entire file from the boot volume into a heap-allocated buffer.
+pub fn read_boot_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    if crate::console::is_hardware_mode() {
+        return Err("Boot media reading unavailable in hardware mode");
+    }
+    let mut root = open_root_volume()?;
+    let mut path_u16 = [0u16; 128];
+    let cstr = path_to_cstr16(path, &mut path_u16).ok_or("Path too long or invalid")?;
+
+    let file_handle = root.open(cstr, FileMode::Read, FileAttribute::empty())
+        .map_err(|_| "File not found on boot media")?;
+    let mut file = file_handle.into_regular_file().ok_or("Path is directory, not file")?;
+
+    let mut info_buf = [0u8; 256];
+    let file_info = file.get_info::<FileInfo>(&mut info_buf).map_err(|_| "Failed to query file info")?;
+    let file_size = file_info.file_size() as usize;
+    if file_size == 0 || file_size > MAX_LOAD_SIZE {
+        return Err("Invalid file size");
+    }
+
+    let mut buf = alloc::vec![0u8; file_size];
+    let mut total_read = 0;
+    while total_read < file_size {
+        match file.read(&mut buf[total_read..]) {
+            Ok(0) => break,
+            Ok(n) => total_read += n,
+            Err(_) => return Err("I/O error reading boot file"),
+        }
+    }
+    buf.truncate(total_read);
+    Ok(buf)
 }
 
 /// Executes an executable file found at the given filesystem path.
@@ -193,7 +272,11 @@ pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellSt
     for cand in &zfs_candidates {
         if let Ok((obj_id, obj_type)) = crate::fs::client::ZfsClient::lookup(cand) {
             if obj_type == crate::fs::zfs::types::DnodeType::PlainFile {
-                let mut buffer = alloc::vec![0u8; 65536];
+                let alloc_len = crate::fs::client::ZfsClient::file_stat(cand)
+                    .map(|st| (st.size as usize) + 64)
+                    .unwrap_or(65536)
+                    .max(65536);
+                let mut buffer = alloc::vec![0u8; alloc_len];
                 let cap = state.cap_table.get(1).cloned();
                 if let Ok(bytes_read) = crate::fs::client::ZfsClient::read_file(obj_id, &mut buffer, cap) {
                     if bytes_read >= 4 && buffer[..4] == crate::task::elf::ELF_MAGIC {
@@ -205,18 +288,57 @@ pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellSt
 
                         if !crate::arch::boot_services::is_hardware_takeover_complete() {
                             set_color(Color::Yellow, Color::Black);
-                            println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
-                            return true;
+                            println!("[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 ELF '{}'...", cand);
+                            let _ = crate::arch::boot_services::take_hardware_ownership();
                         }
 
                         let leaked_name: &'static str =
                             alloc::boxed::Box::leak(alloc::string::String::from(cand.as_str()).into_boxed_str());
-                        match crate::task::spawn_elf(leaked_name, &buffer[..bytes_read], crate::task::TaskPriority::Normal) {
+                        let is_linux_elf = crate::task::elf::ElfBinary::parse(&buffer[..bytes_read])
+                            .map(|e| e.interp_path().is_some())
+                            .unwrap_or(false)
+                            || cand.contains("linux")
+                            || cand.contains("plasmashell")
+                            || cand.contains("krunner")
+                            || cand.contains("wlclient")
+                            || cand.contains("wlseat")
+                            || cand.contains("dynclient")
+                            || cand.contains("thread")
+                            || cand.contains("sock")
+                            || cand.contains("epoll")
+                            || cand.contains("shm")
+                            || cand.contains("role");
+
+                        let spawn_res = if is_linux_elf {
+                            let mut full_args = alloc::vec![leaked_name];
+                            for &a in args {
+                                if a != "--bg" && a != "-b" && a != "&" {
+                                    full_args.push(a);
+                                }
+                            }
+                            crate::task::spawn_linux_elf(
+                                leaked_name,
+                                &buffer[..bytes_read],
+                                &full_args,
+                                crate::task::TaskPriority::Normal,
+                                state.current_uid,
+                                state.current_gid,
+                            )
+                        } else {
+                            crate::task::spawn_elf(leaked_name, &buffer[..bytes_read], crate::task::TaskPriority::Normal)
+                        };
+
+                        match spawn_res {
                             Ok(pid) => {
                                 set_color(Color::LightGreen, Color::Black);
-                                println!("[+] Spawned Ring 3 ELF process #{} ('{}').", pid.0, leaked_name);
+                                println!(
+                                    "[+] Spawned Ring 3 {} ELF process #{} ('{}').",
+                                    if is_linux_elf { "Linux" } else { "Native" },
+                                    pid.0,
+                                    leaked_name
+                                );
                                 println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B, RFLAGS=0x202)");
-                                let bg = args.iter().any(|&a| a == "--bg" || a == "-b" || a == "&");
+                                let bg = args.iter().any(|&a| a == "--bg" && a == "-b" || a == "&");
                                 if bg {
                                     println!("    Running in background. Type 'ps' to inspect execution.");
                                 } else {

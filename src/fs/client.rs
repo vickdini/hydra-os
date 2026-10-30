@@ -1,11 +1,21 @@
-use super::zfs::server::{
-    simple_str_hash, ZfsServer, ZFS_IPC_LOOKUP, ZFS_IPC_PING, ZFS_IPC_POOL_STATUS,
-    ZFS_IPC_READ, ZFS_IPC_SNAPSHOT, ZFS_IPC_WRITE, ZFS_SERVER, ZFS_STATUS_OK,
-};
+//! # ZFS Client Interface
+//!
+//! Path-based access to the ZFS file server for kernel code and shell commands, plus the
+//! path walker ([`resolve_at`]) that the Linux layer uses. Paths are resolved component
+//! by component through the ZPL, following symbolic links (up to 40, as Linux) and `..`.
+
+use alloc::vec::Vec;
+
+use super::zfs::server::{with_server, ZfsServer, ZFS_SERVER};
 use super::zfs::types::DnodeType;
+use super::zfs::zap::ZapEntry;
+use super::zfs::zpl::{self, Attr, ReaddirEntry, SetAttr};
 use crate::capability::Capability;
-use crate::ipc::{Endpoint, Message};
 use uefi::proto::media::file::File;
+
+/// Maximum symbolic links followed while resolving one path (Linux `MAXSYMLINKS`).
+pub const SYMLOOP_MAX: usize = 40;
+const ELOOP: i64 = -40;
 
 /// Detailed file/directory metadata returned by stat
 #[derive(Debug, Clone, Copy)]
@@ -17,6 +27,11 @@ pub struct FileStat {
     pub checksum: [u64; 4],
     pub is_allocated: bool,
     pub name: [u8; 32],
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub nlink: u32,
+    pub mtime: i64,
 }
 
 impl FileStat {
@@ -55,11 +70,9 @@ pub fn normalize_path<'a>(cwd: &str, path: &str, out: &'a mut [u8; 128]) -> &'a 
             if count > 0 {
                 count -= 1;
             }
-        } else {
-            if count < parts.len() {
-                parts[count] = token;
-                count += 1;
-            }
+        } else if count < parts.len() {
+            parts[count] = token;
+            count += 1;
         }
     }
 
@@ -69,12 +82,12 @@ pub fn normalize_path<'a>(cwd: &str, path: &str, out: &'a mut [u8; 128]) -> &'a 
     }
 
     let mut pos = 0;
-    for i in 0..count {
+    for part in parts.iter().take(count) {
         if pos < out.len() {
             out[pos] = b'/';
             pos += 1;
         }
-        let b = parts[i].as_bytes();
+        let b = part.as_bytes();
         let len = b.len().min(out.len().saturating_sub(pos));
         out[pos..pos + len].copy_from_slice(&b[..len]);
         pos += len;
@@ -83,285 +96,171 @@ pub fn normalize_path<'a>(cwd: &str, path: &str, out: &'a mut [u8; 128]) -> &'a 
     core::str::from_utf8(&out[..pos]).unwrap_or("/")
 }
 
-/// Resolves an absolute normalized path in ZFS, returning (object_id, DnodeType).
-pub fn resolve_path(path: &str) -> Result<(u64, DnodeType), &'static str> {
-    let server_lock = ZFS_SERVER.lock();
-    let server = match server_lock.as_ref() {
-        Some(s) => s,
-        None => return Err("ZFS File Server not running"),
-    };
+fn components(path: &[u8]) -> Vec<Vec<u8>> {
+    path.split(|&c| c == b'/').filter(|c| !c.is_empty() && *c != b".").map(|c| c.to_vec()).collect()
+}
 
-    let mut curr_obj = server.root_dir_obj;
-    let mut curr_type = DnodeType::Directory;
+/// Resolves `path` relative to directory `base` (absolute paths start at the root).
+/// Symbolic links are followed in every component, and in the last one if `follow_last`
+/// or the path ends in `/`.
+pub fn resolve_at(s: &mut ZfsServer, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+    let root = s.root_obj();
+    resolve_in(s, root, base, path, follow_last)
+}
 
-    let clean = path.trim_matches(['/', '\\']);
-    if clean.is_empty() {
-        return Ok((curr_obj, curr_type));
+/// Like [`resolve_at`], but with `root` as the root directory (`chroot`): absolute paths
+/// and absolute symlink targets start there, and `..` never climbs above it.
+pub fn resolve_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+    if path.is_empty() {
+        return Err(zpl::ENOENT);
     }
-
-    for part in clean.split(['/', '\\']) {
-        if part.is_empty() {
+    let follow_last = follow_last || path.ends_with(b"/");
+    let mut cur = if path[0] == b'/' { root } else { base };
+    let mut pending: Vec<Vec<u8>> = components(path);
+    pending.reverse();
+    let mut links = 0;
+    while let Some(comp) = pending.pop() {
+        if comp == b".." {
+            cur = if cur == root { root } else { s.lookup(cur, b"..")? };
             continue;
         }
-        if curr_type != DnodeType::Directory {
-            return Err("Path component is not a directory");
+        let next = s.lookup(cur, &comp)?;
+        let is_last = pending.is_empty();
+        let attr = s.getattr(next)?;
+        if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
+            links += 1;
+            if links > SYMLOOP_MAX {
+                return Err(ELOOP);
+            }
+            let target = s.readlink(next)?;
+            if target.first() == Some(&b'/') {
+                cur = root;
+            }
+            let mut more = components(&target);
+            more.reverse();
+            pending.extend(more);
+            continue;
         }
-        let zap = &server.dmu.zap_dirs[curr_obj as usize];
-        if let Some(entry) = zap.lookup(part) {
-            curr_obj = entry.object_id;
-            curr_type = entry.obj_type;
-        } else {
-            return Err("File or directory not found");
+        if !is_last && !attr.is_dir() {
+            return Err(zpl::ENOTDIR);
         }
+        cur = next;
     }
-
-    Ok((curr_obj, curr_type))
+    if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
+        return Err(zpl::ENOTDIR);
+    }
+    Ok(cur)
 }
 
-/// Resolves the parent directory object ID and child component name for a normalized path.
-pub fn resolve_parent_and_name<'a>(path: &'a str) -> Result<(u64, &'a str), &'static str> {
-    let clean = path.trim_matches(['/', '\\']);
-    if clean.is_empty() {
-        return Err("Cannot target root directory as a child");
-    }
+/// Splits `path` into its parent directory (resolved) and final name.
+pub fn resolve_parent_at(s: &mut ZfsServer, base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
+    let root = s.root_obj();
+    resolve_parent_in(s, root, base, path)
+}
 
-    let server_lock = ZFS_SERVER.lock();
-    let server = match server_lock.as_ref() {
-        Some(s) => s,
-        None => return Err("ZFS File Server not running"),
+/// Like [`resolve_parent_at`] within the root directory `root`.
+pub fn resolve_parent_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
+    let trimmed = {
+        let mut end = path.len();
+        while end > 1 && path[end - 1] == b'/' {
+            end -= 1;
+        }
+        &path[..end]
     };
-
-    let mut curr_obj = server.root_dir_obj;
-
-    let mut parts: [&str; 16] = [""; 16];
-    let mut count = 0;
-    for token in clean.split(['/', '\\']) {
-        if !token.is_empty() && count < parts.len() {
-            parts[count] = token;
-            count += 1;
-        }
+    let (dir_part, name) = match trimmed.iter().rposition(|&c| c == b'/') {
+        Some(i) => (&trimmed[..i.max(1)], &trimmed[i + 1..]),
+        None => (&b"."[..], trimmed),
+    };
+    if name.is_empty() || name == b"/" {
+        return Err(zpl::EEXIST);
     }
-
-    if count == 0 {
-        return Err("Invalid path");
-    }
-
-    // Traverse up to parent
-    for i in 0..(count - 1) {
-        let part = parts[i];
-        let zap = &server.dmu.zap_dirs[curr_obj as usize];
-        if let Some(entry) = zap.lookup(part) {
-            if entry.obj_type != DnodeType::Directory {
-                return Err("Parent path component is not a directory");
-            }
-            curr_obj = entry.object_id;
-        } else {
-            return Err("Parent directory not found");
-        }
-    }
-
-    let child_name = parts[count - 1];
-    Ok((curr_obj, child_name))
+    let dir_path: &[u8] = if dir_part.is_empty() { b"/" } else { dir_part };
+    let parent = if dir_path == b"." { base } else { resolve_in(s, root, base, dir_path, true)? };
+    Ok((parent, name.to_vec()))
 }
 
-/// Resolves the parent directory object ID and child component name for a normalized path,
-/// automatically creating any intermediate parent directories if they do not exist.
-pub fn resolve_parent_and_name_or_create<'a>(server: &mut ZfsServer, path: &'a str) -> Result<(u64, &'a str), &'static str> {
-    let clean = path.trim_matches(['/', '\\']);
-    if clean.is_empty() {
+fn errno_str(e: i64) -> &'static str {
+    match e {
+        zpl::ENOENT => "File or directory not found",
+        zpl::EEXIST => "File or directory already exists",
+        zpl::ENOTDIR => "Path component is not a directory",
+        zpl::EISDIR => "Target is a directory",
+        zpl::ENOTEMPTY => "Directory is not empty",
+        zpl::ENOSPC => "Storage pool is out of space",
+        zpl::EINVAL => "Invalid argument",
+        zpl::ENAMETOOLONG => "File name too long",
+        ELOOP => "Too many levels of symbolic links",
+        _ => "ZFS I/O error",
+    }
+}
+
+/// Resolves an absolute path, following symlinks, returning (object_id, DnodeType).
+pub fn resolve_path(path: &str) -> Result<(u64, DnodeType), &'static str> {
+    with_server(|s| {
+        let root = s.root_obj();
+        let ino = resolve_at(s, root, path.as_bytes(), true)?;
+        Ok((ino, s.getattr(ino)?.kind()))
+    })
+    .map_err(errno_str)
+}
+
+/// Resolves the parent directory object ID and child component name for a path.
+pub fn resolve_parent_and_name(path: &str) -> Result<(u64, &str), &'static str> {
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if name.is_empty() {
         return Err("Cannot target root directory as a child");
     }
-
-    let mut curr_obj = server.root_dir_obj;
-
-    let mut parts: [&str; 16] = [""; 16];
-    let mut count = 0;
-    for token in clean.split(['/', '\\']) {
-        if !token.is_empty() && count < parts.len() {
-            parts[count] = token;
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        return Err("Invalid path");
-    }
-
-    // Traverse up to parent, creating any missing directories
-    for i in 0..(count - 1) {
-        let part = parts[i];
-        let found = {
-            let zap = &server.dmu.zap_dirs[curr_obj as usize];
-            zap.lookup(part).map(|e| (e.object_id, e.obj_type))
-        };
-        match found {
-            Some((obj_id, DnodeType::Directory)) => {
-                curr_obj = obj_id;
-            }
-            Some((_, _)) => {
-                return Err("Parent path component is not a directory");
-            }
-            None => {
-                let new_dir = server.dmu.allocate_object(DnodeType::Directory, part)?;
-                server.dmu.add_directory_entry(curr_obj, part, new_dir, DnodeType::Directory)?;
-                curr_obj = new_dir;
-            }
-        }
-    }
-
-    let child_name = parts[count - 1];
-    Ok((curr_obj, child_name))
+    let parent = with_server(|s| {
+        let root = s.root_obj();
+        Ok(resolve_parent_at(s, root, path.as_bytes())?.0)
+    })
+    .map_err(errno_str)?;
+    Ok((parent, name))
 }
 
-/// Client interface for interacting with the ZFS File Server via Microkernel IPC
+/// Client interface to the ZFS file server.
 pub struct ZfsClient;
 
 impl ZfsClient {
-    /// Pings the ZFS File Server over IPC and returns current active transaction group (TXG).
+    /// Returns the current committed transaction group.
     pub fn ping() -> Result<u64, &'static str> {
-        let req = Message::new(ZFS_IPC_PING);
-        let mut reply_ep = Endpoint::new(999);
-
-        let mut server_lock = ZFS_SERVER.lock();
-        if let Some(server) = server_lock.as_mut() {
-            server.dispatch_request(req, &mut reply_ep);
-        } else {
-            return Err("ZFS File Server is not initialized");
-        }
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                return Ok(resp.args[1]);
-            }
-        }
-        Err("Failed to ping ZFS server")
+        with_server(|s| Ok(s.dmu.ub.txg)).map_err(errno_str)
     }
 
-    /// Queries the ZFS pool status (total MiB, allocated KiB, free KiB, TXG)
+    /// Pool status: (total MiB, allocated KiB, free KiB << 32 | txg).
     pub fn pool_status() -> Result<(u64, u64, u64, u64), &'static str> {
-        let req = Message::new(ZFS_IPC_POOL_STATUS);
-        let mut reply_ep = Endpoint::new(999);
-
-        let mut server_lock = ZFS_SERVER.lock();
-        if let Some(server) = server_lock.as_mut() {
-            server.dispatch_request(req, &mut reply_ep);
-        } else {
-            return Err("ZFS File Server is not initialized");
-        }
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                let total_mb = resp.args[1];
-                let alloc_kb = resp.args[2];
-                let free_kb = resp.args[3] >> 32;
-                let txg = resp.args[3] & 0xFFFF_FFFF;
-                return Ok((total_mb, alloc_kb, free_kb, txg));
-            }
-        }
-        Err("Failed to query pool status from ZFS server")
+        with_server(|s| {
+            Ok((
+                s.dmu.spa.total_capacity_bytes() / (1024 * 1024),
+                s.dmu.spa.allocated_bytes() / 1024,
+                s.dmu.spa.free_bytes() / 1024,
+                s.dmu.ub.txg,
+            ))
+        })
+        .map_err(errno_str)
     }
 
-    /// Looks up an object ID by path (e.g. "/bin/hello.efi" or "hello.efi") in the ZFS pool.
+    /// Looks up a path, returning (object id, type).
     pub fn lookup(path: &str) -> Result<(u64, DnodeType), &'static str> {
-        // First attempt standard hierarchical resolution
-        if let Ok(res) = resolve_path(path) {
-            return Ok(res);
-        }
-
-        // Fallback: check in /bin directory for legacy command lookups
-        let clean = path.trim_start_matches('/').trim_start_matches('\\');
-        let filename = clean.strip_prefix("bin/").unwrap_or_else(|| {
-            clean.strip_prefix("bin\\").unwrap_or(clean)
-        });
-
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let dir_obj = server.bin_dir_obj;
-        let hash = simple_str_hash(filename);
-
-        let req = Message::with_args(ZFS_IPC_LOOKUP, [dir_obj, hash, 0, 0]);
-        let mut reply_ep = Endpoint::new(999);
-        server.dispatch_request(req, &mut reply_ep);
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                let obj_id = resp.args[1];
-                let obj_type = match resp.args[2] {
-                    1 => DnodeType::PlainFile,
-                    2 => DnodeType::Directory,
-                    3 => DnodeType::Dataset,
-                    _ => DnodeType::None,
-                };
-                return Ok((obj_id, obj_type));
-            }
-        }
-
-        Err("File not found in ZFS File Server")
+        resolve_path(path)
     }
 
-    /// Reads data from a file object via Capability-mediated ZFS IPC.
-    pub fn read_file(obj_id: u64, out_buf: &mut [u8], cap: Option<Capability>) -> Result<usize, &'static str> {
-        let req = Message::with_args(
-            ZFS_IPC_READ,
-            [obj_id, out_buf.as_mut_ptr() as u64, out_buf.len() as u64, 0],
-        );
-        let req = if let Some(c) = cap { req.with_cap(c) } else { req };
-
-        let mut reply_ep = Endpoint::new(999);
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        server.dispatch_request(req, &mut reply_ep);
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                return Ok(resp.args[1] as usize);
-            } else if resp.args[0] == 2 {
-                return Err("Capability rights violation (READ right required)");
-            } else if resp.args[0] == 4 {
-                return Err("ZFS Fletcher-4 checksum failure: file corrupted");
-            }
-        }
-
-        Err("Read error from ZFS server")
+    /// Reads a file from the start into `out_buf`, returning the bytes read.
+    pub fn read_file(obj_id: u64, out_buf: &mut [u8], _cap: Option<Capability>) -> Result<usize, &'static str> {
+        with_server(|s| s.read(obj_id, 0, out_buf)).map_err(errno_str)
     }
 
-    /// Writes data to a file object via Capability-mediated ZFS CoW IPC.
-    pub fn write_file(obj_id: u64, data: &[u8], cap: Option<Capability>) -> Result<u64, &'static str> {
-        let req = Message::with_args(
-            ZFS_IPC_WRITE,
-            [obj_id, data.as_ptr() as u64, data.len() as u64, 0],
-        );
-        let req = if let Some(c) = cap { req.with_cap(c) } else { req };
-
-        let mut reply_ep = Endpoint::new(999);
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        server.dispatch_request(req, &mut reply_ep);
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                return Ok(resp.args[1]); // new TXG
-            } else if resp.args[0] == 2 {
-                return Err("Capability rights violation (WRITE right required)");
-            }
-        }
-
-        Err("Write error from ZFS server")
+    /// Replaces a file's contents.
+    pub fn write_file(obj_id: u64, data: &[u8], _cap: Option<Capability>) -> Result<u64, &'static str> {
+        with_server(|s| {
+            s.setattr(obj_id, SetAttr { size: Some(0), ..SetAttr::default() })?;
+            s.write(obj_id, 0, data)?;
+            Ok(s.dmu.open_txg)
+        })
+        .map_err(errno_str)
     }
 
-    /// Reads an entire file by path into `out_buf`.
+    /// Reads a file by path into `out_buf` (up to its length).
     pub fn read_file_by_path(path: &str, out_buf: &mut [u8]) -> Result<usize, &'static str> {
         let (obj_id, obj_type) = Self::lookup(path)?;
         if obj_type != DnodeType::PlainFile {
@@ -370,293 +269,272 @@ impl ZfsClient {
         Self::read_file(obj_id, out_buf, None)
     }
 
-    /// Writes an entire file by path using Copy-on-Write semantics.
-    /// Creates the file if it doesn't already exist.
+    /// Writes a whole file by path (creating it and parent directories) and commits.
     pub fn write_file_by_path(path: &str, data: &[u8]) -> Result<u64, &'static str> {
-        let txg = Self::write_file_by_path_batch(path, data)?;
+        Self::write_file_by_path_batch(path, data)?;
         Self::sync()?;
-        Ok(txg)
+        Ok(Self::ping()?)
     }
 
-    /// Fast batch write that updates DMU structures without flushing metadata on every write.
+    /// Writes a whole file by path without forcing a commit.
     pub fn write_file_by_path_batch(path: &str, data: &[u8]) -> Result<u64, &'static str> {
-        // If file already exists, overwrite via CoW
-        if let Ok((obj_id, obj_type)) = resolve_path(path) {
-            if obj_type != DnodeType::PlainFile {
-                return Err("Target path is a directory, not a file");
-            }
-            let mut server_lock = ZFS_SERVER.lock();
-            let server = match server_lock.as_mut() {
-                Some(s) => s,
-                None => return Err("ZFS File Server not running"),
+        with_server(|s| {
+            let root = s.root_obj();
+            let ino = match resolve_at(s, root, path.as_bytes(), true) {
+                Ok(ino) => {
+                    if s.getattr(ino)?.is_dir() {
+                        return Err(zpl::EISDIR);
+                    }
+                    s.setattr(ino, SetAttr { size: Some(0), ..SetAttr::default() })?;
+                    ino
+                }
+                Err(zpl::ENOENT) => {
+                    let parent_path = path.trim_end_matches('/').rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+                    mkdir_all(s, parent_path)?;
+                    let (parent, name) = resolve_parent_at(s, root, path.as_bytes())?;
+                    s.create(parent, &name, 0o644, 0, 0)?
+                }
+                Err(e) => return Err(e),
             };
-            return server.dmu.cow_write_file(obj_id, data, &mut server.spa);
-        }
-
-        // Otherwise create new file in parent directory (auto-creating parent directories if needed)
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-        let (parent_dir, filename) = resolve_parent_and_name_or_create(server, path)?;
-
-        let file_obj = server.dmu.allocate_object(DnodeType::PlainFile, filename)?;
-        let txg = server.dmu.cow_write_file(file_obj, data, &mut server.spa)?;
-        server.dmu.add_directory_entry(parent_dir, filename, file_obj, DnodeType::PlainFile)?;
-        Ok(txg)
+            s.write(ino, 0, data)?;
+            Ok(s.dmu.open_txg)
+        })
+        .map_err(errno_str)
     }
 
-    /// Creates or updates a file (like Unix `touch`).
+    /// Creates an empty file, or updates the timestamps of an existing one.
     pub fn touch_file(path: &str) -> Result<u64, &'static str> {
-        if let Ok((obj_id, obj_type)) = resolve_path(path) {
-            if obj_type != DnodeType::PlainFile {
-                return Err("Target exists and is not a file");
+        with_server(|s| {
+            let root = s.root_obj();
+            match resolve_at(s, root, path.as_bytes(), true) {
+                Ok(ino) => {
+                    let t = crate::arch::rtc::now();
+                    let t = (t.0 as i64, t.1);
+                    s.setattr(ino, SetAttr { atime: Some(t), mtime: Some(t), ..SetAttr::default() })?;
+                    Ok(ino)
+                }
+                Err(zpl::ENOENT) => {
+                    let (parent, name) = resolve_parent_at(s, root, path.as_bytes())?;
+                    s.create(parent, &name, 0o644, 0, 0)
+                }
+                Err(e) => Err(e),
             }
-            // Re-commit empty or current data to update timestamp/TXG
-            let mut server_lock = ZFS_SERVER.lock();
-            let server = match server_lock.as_mut() {
-                Some(s) => s,
-                None => return Err("ZFS File Server not running"),
-            };
-            let dnode = &server.dmu.dnodes[obj_id as usize];
-            let bp = dnode.direct_blocks[0];
-            let txg = server.spa.commit_txg(bp);
-            let _ = server.sync_metadata();
-            return Ok(txg);
-        }
-
-        Self::write_file_by_path(path, &[])
+        })
+        .map_err(errno_str)
     }
 
-    /// Creates a new directory at the specified path (like Unix `mkdir`).
+    /// Creates a directory (like `mkdir`).
     pub fn create_dir(path: &str) -> Result<u64, &'static str> {
-        if resolve_path(path).is_ok() {
-            return Err("File or directory already exists");
-        }
-
-        let (parent_dir, dirname) = resolve_parent_and_name(path)?;
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let dir_obj = server.dmu.allocate_object(DnodeType::Directory, dirname)?;
-        server.dmu.add_directory_entry(parent_dir, dirname, dir_obj, DnodeType::Directory)?;
-        let _ = server.sync_metadata();
-        Ok(dir_obj)
+        with_server(|s| {
+            let root = s.root_obj();
+            let (parent, name) = resolve_parent_at(s, root, path.as_bytes())?;
+            s.mkdir(parent, &name, 0o755, 0, 0)
+        })
+        .map_err(errno_str)
     }
 
-    /// Recursively creates a directory and all parent components (like Unix `mkdir -p`).
+    /// Creates a directory and missing parents (like `mkdir -p`).
     pub fn create_dir_all(path: &str) -> Result<u64, &'static str> {
-        let clean = path.trim_matches(['/', '\\']);
-        if clean.is_empty() {
-            let server_lock = ZFS_SERVER.lock();
-            let server = match server_lock.as_ref() {
-                Some(s) => s,
-                None => return Err("ZFS File Server not running"),
-            };
-            return Ok(server.root_dir_obj);
-        }
-
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let mut curr_obj = server.root_dir_obj;
-        for part in clean.split(['/', '\\']) {
-            if part.is_empty() {
-                continue;
-            }
-            let found = {
-                let zap = &server.dmu.zap_dirs[curr_obj as usize];
-                zap.lookup(part).map(|e| (e.object_id, e.obj_type))
-            };
-            match found {
-                Some((obj_id, DnodeType::Directory)) => {
-                    curr_obj = obj_id;
-                }
-                Some((_, _)) => {
-                    return Err("Path component exists and is not a directory");
-                }
-                None => {
-                    let new_dir = server.dmu.allocate_object(DnodeType::Directory, part)?;
-                    server.dmu.add_directory_entry(curr_obj, part, new_dir, DnodeType::Directory)?;
-                    curr_obj = new_dir;
-                }
-            }
-        }
-        let _ = server.sync_metadata();
-        Ok(curr_obj)
+        with_server(|s| mkdir_all(s, path)).map_err(errno_str)
     }
 
-    /// Removes an empty directory at the specified path (like Unix `rmdir`).
+    /// Removes an empty directory.
     pub fn remove_dir(path: &str) -> Result<(), &'static str> {
-        let (obj_id, obj_type) = resolve_path(path)?;
-        if obj_type != DnodeType::Directory {
-            return Err("Target path is not a directory");
-        }
-
-        let (parent_dir, dirname) = resolve_parent_and_name(path)?;
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let zap = &server.dmu.zap_dirs[obj_id as usize];
-        if zap.count > 0 {
-            return Err("Directory is not empty");
-        }
-
-        let _ = server.dmu.remove_directory_entry(parent_dir, dirname)?;
-        server.dmu.free_object(obj_id, &mut server.spa);
-        let _ = server.sync_metadata();
-        Ok(())
+        with_server(|s| {
+            let root = s.root_obj();
+            let (parent, name) = resolve_parent_at(s, root, path.as_bytes())?;
+            s.rmdir(parent, &name)
+        })
+        .map_err(errno_str)
     }
 
-    /// Removes a file from ZFS (like Unix `rm`).
+    /// Removes a file or symbolic link.
     pub fn remove_file(path: &str) -> Result<(), &'static str> {
-        let (obj_id, obj_type) = resolve_path(path)?;
-        if obj_type != DnodeType::PlainFile {
-            return Err("Target path is a directory (use -r to remove recursively)");
-        }
-
-        let (parent_dir, filename) = resolve_parent_and_name(path)?;
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let _ = server.dmu.remove_directory_entry(parent_dir, filename)?;
-        server.dmu.free_object(obj_id, &mut server.spa);
-        let _ = server.sync_metadata();
-        Ok(())
+        with_server(|s| {
+            let root = s.root_obj();
+            let (parent, name) = resolve_parent_at(s, root, path.as_bytes())?;
+            s.unlink(parent, &name)
+        })
+        .map_err(errno_str)
     }
 
-    /// Flushes all cached ZFS file metadata and ATA write buffers to physical media.
+    /// Commits all pending changes to disk.
     pub fn sync() -> Result<(), &'static str> {
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-        server.sync_metadata()?;
-        server.spa.flush()
+        with_server(|s| s.sync().map(|_| ())).map_err(errno_str)
     }
 
-    /// Copies a file in ZFS (like Unix `cp`).
+    /// Commits pending changes if a commit is due (called from idle points).
+    pub fn sync_if_dirty() {
+        if let Some(mut guard) = ZFS_SERVER.try_lock() {
+            if let Some(s) = guard.as_mut() {
+                if s.dmu.has_pending_changes() {
+                    let _ = s.sync();
+                }
+            }
+        }
+    }
+
+    /// Copies a file.
     pub fn copy_file(src_path: &str, dst_path: &str) -> Result<u64, &'static str> {
-        let mut buf = [0u8; 4096];
-        let bytes_read = Self::read_file_by_path(src_path, &mut buf)?;
-        Self::write_file_by_path(dst_path, &buf[..bytes_read])
+        let st = Self::file_stat(src_path)?;
+        let mut buf = alloc::vec![0u8; st.size as usize];
+        let n = Self::read_file_by_path(src_path, &mut buf)?;
+        Self::write_file_by_path(dst_path, &buf[..n])
     }
 
-    /// Moves or renames a file or directory in ZFS (like Unix `mv`).
+    /// Renames a file or directory.
     pub fn move_entry(src_path: &str, dst_path: &str) -> Result<(), &'static str> {
-        let (src_obj, src_type) = resolve_path(src_path)?;
-        let (src_parent, src_name) = resolve_parent_and_name(src_path)?;
-        let (dst_parent, dst_name) = resolve_parent_and_name(dst_path)?;
-
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        // Remove from source directory (without freeing dnode)
-        let _ = server.dmu.remove_directory_entry(src_parent, src_name)?;
-
-        // Add into destination directory
-        server.dmu.add_directory_entry(dst_parent, dst_name, src_obj, src_type)?;
-
-        // Update dnode name
-        server.dmu.dnodes[src_obj as usize].set_name(dst_name);
-        let _ = server.sync_metadata();
-        Ok(())
+        with_server(|s| {
+            let root = s.root_obj();
+            let (sdir, sname) = resolve_parent_at(s, root, src_path.as_bytes())?;
+            let (ddir, dname) = resolve_parent_at(s, root, dst_path.as_bytes())?;
+            s.rename(sdir, &sname, ddir, &dname)
+        })
+        .map_err(errno_str)
     }
 
-    /// Retrieves detailed file metadata (like Unix `stat`).
+    /// File metadata (following symlinks).
     pub fn file_stat(path: &str) -> Result<FileStat, &'static str> {
-        let (obj_id, obj_type) = resolve_path(path)?;
-        let server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_ref() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
+        with_server(|s| {
+            let root = s.root_obj();
+            let ino = resolve_at(s, root, path.as_bytes(), true)?;
+            let a = s.getattr(ino)?;
+            let dn = s.dmu.get_dnode(ino).map_err(|_| zpl::EIO)?;
+            let bp = dn.blkptr[0];
+            let mut name = [0u8; 32];
+            let base = path.trim_end_matches('/').rsplit('/').next().unwrap_or("/");
+            let n = base.len().min(31);
+            name[..n].copy_from_slice(&base.as_bytes()[..n]);
+            Ok(FileStat {
+                obj_id: ino,
+                obj_type: a.kind(),
+                size: a.size,
+                birth_txg: a.birth_txg,
+                checksum: [bp.checksum.a, bp.checksum.b, bp.checksum.c, bp.checksum.d],
+                is_allocated: !bp.is_hole(),
+                name,
+                mode: a.mode,
+                uid: a.uid,
+                gid: a.gid,
+                nlink: a.nlink,
+                mtime: a.mtime.0,
+            })
+        })
+        .map_err(errno_str)
+    }
 
-        let dnode = &server.dmu.dnodes[obj_id as usize];
-        let bp = &dnode.direct_blocks[0];
+    /// Snapshots the dataset with the given index.
+    pub fn snapshot(dataset_id: usize) -> Result<u64, &'static str> {
+        let name = alloc::format!("snap{}", crate::arch::rtc::now().0);
+        with_server(|s| s.snapshot(dataset_id, &name)).map_err(errno_str)
+    }
 
-        Ok(FileStat {
-            obj_id,
-            obj_type,
-            size: dnode.file_size,
-            birth_txg: dnode.birth_txg,
-            checksum: [bp.checksum.a, bp.checksum.b, bp.checksum.c, bp.checksum.d],
-            is_allocated: bp.is_allocated,
-            name: dnode.name,
+    /// Lists a directory (excluding `.` and `..`). Returns (entries, count, dataset name).
+    pub fn list_dir(path: &str) -> Result<(Vec<ZapEntry>, usize, &'static str), &'static str> {
+        with_server(|s| {
+            let root = s.root_obj();
+            let dir = resolve_at(s, root, path.as_bytes(), true)?;
+            let mut out = Vec::new();
+            let mut cookie = 2;
+            loop {
+                let batch = s.readdir(dir, cookie, 256)?;
+                if batch.is_empty() {
+                    break;
+                }
+                for e in batch {
+                    cookie = e.next_cookie;
+                    let kind = s.getattr(e.ino).map(|a| a.kind()).unwrap_or(DnodeType::None);
+                    out.push(ZapEntry::new(&e.name, e.ino, kind));
+                }
+            }
+            let n = out.len();
+            Ok((out, n, "hydrapool/root"))
+        })
+        .map_err(errno_str)
+    }
+
+    // --------------------------------------------------------------
+    // Inode-level access used by the VFS / Linux layer
+    // --------------------------------------------------------------
+
+    /// Resolves a path relative to `base` (0 = root).
+    pub fn resolve(base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+        with_server(|s| {
+            let base = if base == 0 { s.root_obj() } else { base };
+            resolve_at(s, base, path, follow_last)
         })
     }
 
-    /// Creates a snapshot of a dataset via ZFS IPC
-    pub fn snapshot(dataset_id: usize) -> Result<u64, &'static str> {
-        let req = Message::with_args(ZFS_IPC_SNAPSHOT, [dataset_id as u64, 0, 0, 0]);
-        let mut reply_ep = Endpoint::new(999);
-
-        let mut server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_mut() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        server.dispatch_request(req, &mut reply_ep);
-
-        if let Some(resp) = reply_ep.receive() {
-            if resp.args[0] == ZFS_STATUS_OK {
-                return Ok(resp.args[1]);
-            }
-        }
-        Err("Failed to create snapshot")
+    /// Resolves a path within root directory `root` (0 = pool root), relative to `base`
+    /// (0 = `root`).
+    pub fn resolve_in(root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+        with_server(|s| {
+            let root = if root == 0 { s.root_obj() } else { root };
+            let base = if base == 0 { root } else { base };
+            resolve_in(s, root, base, path, follow_last)
+        })
     }
 
-    /// Queries directory contents from the ZFS File Server.
-    pub fn list_dir(
-        path: &str,
-    ) -> Result<([crate::fs::zfs::zap::ZapEntry; crate::fs::zfs::zap::MAX_ZAP_ENTRIES], usize, &'static str), &'static str> {
-        let (dir_obj, dir_type) = resolve_path(path)?;
-        if dir_type != DnodeType::Directory {
-            return Err("Target path is not a directory");
-        }
-
-        let server_lock = ZFS_SERVER.lock();
-        let server = match server_lock.as_ref() {
-            Some(s) => s,
-            None => return Err("ZFS File Server not running"),
-        };
-
-        let idx = dir_obj as usize;
-        if idx < crate::fs::zfs::dmu::MAX_OBJECTS {
-            let zap = &server.dmu.zap_dirs[idx];
-            let ds_name = if dir_obj == server.bin_dir_obj {
-                "hydrapool/bin"
-            } else if dir_obj == server.root_dir_obj {
-                "hydrapool/root"
-            } else {
-                "hydrapool/data"
-            };
-            return Ok((zap.entries, zap.count, ds_name));
-        }
-
-        Err("Directory not found in ZFS")
+    /// Resolves the parent directory and final name of a path within `root`.
+    pub fn resolve_parent_in(root: u64, base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
+        with_server(|s| {
+            let root = if root == 0 { s.root_obj() } else { root };
+            let base = if base == 0 { root } else { base };
+            resolve_parent_in(s, root, base, path)
+        })
     }
 
-    /// Discovers standalone executable ELF64 binaries on the UEFI boot medium (FAT volume)
-    /// and imports them into the OpenZFS storage pool under `/bin/` before ExitBootServices.
+    /// Resolves the parent directory and final name of a path relative to `base`.
+    pub fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
+        with_server(|s| {
+            let base = if base == 0 { s.root_obj() } else { base };
+            resolve_parent_at(s, base, path)
+        })
+    }
+
+    pub fn root_ino() -> u64 {
+        with_server(|s| Ok(s.root_obj())).unwrap_or(0)
+    }
+
+    pub fn getattr(ino: u64) -> Result<Attr, i64> {
+        with_server(|s| s.getattr(ino))
+    }
+
+    pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
+        with_server(|s| s.setattr(ino, set))
+    }
+
+    pub fn read_at(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+        with_server(|s| s.read(ino, offset, buf))
+    }
+
+    pub fn write_at(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
+        with_server(|s| s.write(ino, offset, data))
+    }
+
+    pub fn readdir(ino: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i64> {
+        with_server(|s| s.readdir(ino, cookie, max))
+    }
+
+    pub fn readlink(ino: u64) -> Result<Vec<u8>, i64> {
+        with_server(|s| s.readlink(ino))
+    }
+
+    pub fn open_ref(ino: u64) {
+        let _ = with_server(|s| {
+            s.open_ref(ino);
+            Ok(())
+        });
+    }
+
+    pub fn release(ino: u64) {
+        let _ = with_server(|s| {
+            s.release(ino);
+            Ok(())
+        });
+    }
+
+    /// Imports the boot-medium test binaries into the pool (before ExitBootServices).
     pub fn sync_boot_binaries() -> usize {
         if crate::console::is_hardware_mode() {
             return 0;
@@ -675,56 +553,101 @@ impl ZfsClient {
             ("\\bin\\thread_test.elf", "/bin/thread_test.elf"),
             ("\\bin\\threadtest.elf", "/bin/threadtest.elf"),
             ("\\bin\\roletest.elf", "/bin/roletest.elf"),
-            ("\\hello.elf", "/bin/hello.elf"),
-            ("\\counter.elf", "/bin/counter.elf"),
-            ("\\linuxapp.elf", "/bin/linuxapp.elf"),
-            ("\\linux_app.elf", "/bin/linux_app.elf"),
-            ("\\thread_test.elf", "/bin/thread_test.elf"),
-            ("\\threadtest.elf", "/bin/threadtest.elf"),
-            ("\\roletest.elf", "/bin/roletest.elf"),
+            ("\\bin\\socktest.elf", "/bin/socktest.elf"),
+            ("\\bin\\epolltest.elf", "/bin/epolltest.elf"),
+            ("\\bin\\shmtest.elf", "/bin/shmtest.elf"),
+            ("\\bin\\wlclient.elf", "/bin/wlclient.elf"),
+            ("\\bin\\wlseat.elf", "/bin/wlseat.elf"),
+            ("\\bin\\dynclient.elf", "/bin/dynclient.elf"),
+            ("\\bin\\vmtest.elf", "/bin/vmtest.elf"),
+            ("\\bin\\fstest.elf", "/bin/fstest.elf"),
+            ("\\bin\\plasmashell.elf", "/bin/plasmashell.elf"),
+            ("\\bin\\krunner.elf", "/bin/krunner.elf"),
+            ("\\bin\\ld-hydra.so", "/lib64/ld-hydra.so"),
             ("\\etc\\passwd", "/etc/passwd"),
             ("\\etc\\group", "/etc/group"),
         ];
 
         let mut imported_count = 0;
         let mut path_u16 = [0u16; 128];
-        let mut file_buf = alloc::vec![0u8; 65536];
 
         for &(fat_path, zfs_path) in &candidate_files {
-            // Skip only if file already exists in ZFS and can be read successfully
-            let mut test_buf = [0u8; 16];
-            if Self::read_file_by_path(zfs_path, &mut test_buf).is_ok() {
-                continue;
+            let cstr = match crate::shell::fs::path_to_cstr16(fat_path, &mut path_u16) {
+                Some(c) => c,
+                None => continue,
+            };
+            let handle = match root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let mut file = match handle.into_regular_file() {
+                Some(f) => f,
+                None => continue,
+            };
+            let mut info_buf = [0u8; 256];
+            let file_size = file
+                .get_info::<uefi::proto::media::file::FileInfo>(&mut info_buf)
+                .map(|i| i.file_size() as usize)
+                .unwrap_or(0);
+            let mut file_buf = alloc::vec![0u8; file_size];
+            let mut total_read = 0;
+            while total_read < file_buf.len() {
+                match file.read(&mut file_buf[total_read..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => total_read += n,
+                }
             }
+            let data = &file_buf[..total_read];
 
-            if let Some(cstr) = crate::shell::fs::path_to_cstr16(fat_path, &mut path_u16) {
-                if let Ok(handle) = root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
-                    if let Some(mut file) = handle.into_regular_file() {
-                        let mut total_read = 0;
-                        while total_read < file_buf.len() {
-                            match file.read(&mut file_buf[total_read..]) {
-                                Ok(0) => break,
-                                Ok(n) => total_read += n,
-                                Err(_) => break,
-                            }
-                        }
-
-                        let is_elf = total_read >= 4 && file_buf[..4] == crate::task::elf::ELF_MAGIC;
-                        let is_config = total_read > 0 && (zfs_path.starts_with("/etc/"));
-
-                        if is_elf || is_config {
-                            if let Ok(_txg) = Self::write_file_by_path(zfs_path, &file_buf[..total_read]) {
-                                imported_count += 1;
-                                crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
-                                crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes, Fletcher-4 verified)",
-                                    fat_path, zfs_path, total_read);
-                            }
-                        }
+            // Skip files already imported with identical contents
+            if let Ok(st) = Self::file_stat(zfs_path) {
+                if st.size == data.len() as u64 {
+                    let mut existing = alloc::vec![0u8; data.len()];
+                    if Self::read_file_by_path(zfs_path, &mut existing).is_ok() && existing == data {
+                        continue;
                     }
                 }
             }
+
+            let is_elf = data.len() >= 4 && data[..4] == crate::task::elf::ELF_MAGIC;
+            let is_config = !data.is_empty() && zfs_path.starts_with("/etc/");
+            if (is_elf || is_config) && Self::write_file_by_path_batch(zfs_path, data).is_ok() {
+                if is_elf {
+                    let _ = with_server(|s| {
+                        let root = s.root_obj();
+                        let ino = resolve_at(s, root, zfs_path.as_bytes(), true)?;
+                        s.setattr(ino, SetAttr { mode: Some(0o755), ..SetAttr::default() })?;
+                        Ok(())
+                    });
+                }
+                imported_count += 1;
+                crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
+                crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes)", fat_path, zfs_path, total_read);
+            }
         }
 
+        if imported_count > 0 {
+            let _ = Self::sync();
+        }
         imported_count
     }
+}
+
+/// Creates `path` and any missing parent directories, returning the final directory.
+fn mkdir_all(s: &mut ZfsServer, path: &str) -> Result<u64, i64> {
+    let mut cur = s.root_obj();
+    for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        cur = match s.lookup(cur, part.as_bytes()) {
+            Ok(_) => {
+                let ino = resolve_at(s, cur, part.as_bytes(), true)?;
+                if !s.getattr(ino)?.is_dir() {
+                    return Err(zpl::ENOTDIR);
+                }
+                ino
+            }
+            Err(zpl::ENOENT) => s.mkdir(cur, part.as_bytes(), 0o755, 0, 0)?,
+            Err(e) => return Err(e),
+        };
+    }
+    Ok(cur)
 }

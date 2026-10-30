@@ -5,7 +5,7 @@ IMG := $(DIST_DIR)/hydra.img
 STORAGE_IMG := $(DIST_DIR)/storage.img
 ISO := $(DIST_DIR)/kernel.iso
 
-.PHONY: all build clean
+.PHONY: all build clean rootfs-media
 
 all: build
 
@@ -19,7 +19,7 @@ build: $(EFI_BIN)
 		dd if=/dev/zero of=$(STORAGE_IMG) bs=1M count=32; \
 	fi
 	cp $(EFI_BIN) $(DIST_DIR)/bootx64.efi
-	# Create FAT EFI disk image (16MB)
+	# Create FAT EFI disk image (16MB; El Torito limits the boot image size)
 	dd if=/dev/zero of=$(IMG) bs=1M count=16
 	mkfs.vfat $(IMG)
 	mmd -i $(IMG) ::/EFI ::/EFI/BOOT ::/bin ::/apps
@@ -35,6 +35,15 @@ build: $(EFI_BIN)
 	cp $(IMG) $(DIST_DIR)/iso_root/efiboot.img
 	xorriso -as mkisofs -V "HYDRA" -e efiboot.img -no-emul-boot -isohybrid-gpt-basdat -o $(ISO) $(DIST_DIR)/iso_root
 	rm -rf $(DIST_DIR)/iso_root
+
+# Installation media: a FAT32 disk holding root filesystem archives from esp/rootfs.
+# Attach it as a second disk; `linux rootfs install` finds \rootfs\ubuntu-base.tar.gz on it.
+rootfs-media:
+	mkdir -p $(DIST_DIR)
+	dd if=/dev/zero of=$(DIST_DIR)/rootfs-media.img bs=1M count=256
+	mkfs.vfat -F 32 -n HYDRAINST $(DIST_DIR)/rootfs-media.img
+	mmd -i $(DIST_DIR)/rootfs-media.img ::/rootfs
+	mcopy -i $(DIST_DIR)/rootfs-media.img esp/rootfs/* ::/rootfs/
 
 clean:
 	cargo clean

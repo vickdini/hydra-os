@@ -222,6 +222,7 @@ impl Write for Console {
         self.scrollback.push_str(s, attr);
         if is_standalone_video() {
             crate::video::console::write_str(s);
+            serial_write(s);
         } else {
             uefi::system::with_stdout(|stdout| {
                 let _ = stdout.write_str(s);
@@ -229,6 +230,33 @@ impl Write for Console {
         }
         inc_console_output_generation();
         Ok(())
+    }
+}
+
+/// Mirrors console output to the COM1 serial port (initialised by firmware) so logs survive
+/// after boot services exit. Used for debugging and automated test capture.
+pub fn serial_write(s: &str) {
+    use x86_64::instructions::port::Port;
+    const COM1: u16 = 0x3F8;
+    let mut data: Port<u8> = Port::new(COM1);
+    let mut status: Port<u8> = Port::new(COM1 + 5);
+    for b in s.bytes() {
+        if b == b'\n' {
+            serial_put(&mut data, &mut status, b'\r');
+        }
+        serial_put(&mut data, &mut status, b);
+    }
+}
+
+fn serial_put(data: &mut x86_64::instructions::port::Port<u8>, status: &mut x86_64::instructions::port::Port<u8>, b: u8) {
+    unsafe {
+        // Wait (bounded) for the transmit holding register to empty
+        for _ in 0..100_000 {
+            if status.read() & 0x20 != 0 {
+                break;
+            }
+        }
+        data.write(b);
     }
 }
 
@@ -390,6 +418,11 @@ pub fn _print(args: fmt::Arguments) {
     struct Fd1Writer;
     impl fmt::Write for Fd1Writer {
         fn write_str(&mut self, s: &str) -> fmt::Result {
+            // The descriptor table allocates; before the heap exists print directly
+            if !crate::memory::heap::is_initialized() {
+                print_raw(s);
+                return Ok(());
+            }
             crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(1) {
                     let _ = desc.write(s.as_bytes());
@@ -466,7 +499,7 @@ pub fn get_key() -> Key {
             hide_cursor();
             return key;
         }
-        stall(Duration::from_millis(10));
+        crate::task::preemptible(|| stall(Duration::from_millis(10)));
         blink_counter += 1;
         if blink_counter >= 50 {
             blink_counter = 0;
@@ -488,7 +521,7 @@ pub fn get_key_or_refresh(last_gen: u64) -> Result<Key, ()> {
             hide_cursor();
             return Err(());
         }
-        stall(Duration::from_millis(10));
+        crate::task::preemptible(|| stall(Duration::from_millis(10)));
         blink_counter += 1;
         if blink_counter >= 50 {
             blink_counter = 0;

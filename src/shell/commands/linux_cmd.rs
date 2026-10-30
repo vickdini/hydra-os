@@ -21,7 +21,7 @@ impl Command for LinuxCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "linux [status|info|test|run <path> [args...]]"
+        "linux [status|info|test|run <path> [args...]|chroot <dir> <program> [args...]|rootfs install [archive] [dir]]"
     }
 
     fn aliases(&self) -> &'static [&'static str] {
@@ -119,17 +119,11 @@ impl Command for LinuxCommand {
                     return;
                 }
 
-                if !crate::arch::boot_services::is_hardware_takeover_complete() {
-                    console::set_color(Color::Yellow, Color::Black);
-                    println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
-                    console::set_color(Color::White, Color::Black);
-                    return;
-                }
-
                 let raw_path = args[1];
                 let app_args = &args[1..];
 
-                let mut buffer = alloc::vec![0u8; 65536];
+                // 2 MiB buffer to accommodate larger Linux binaries such as genuine plasmashell.elf (941 KiB)
+                let mut buffer = alloc::vec![0u8; 2 * 1024 * 1024];
                 let mut bytes_read = 0;
                 let mut resolved_path = alloc::string::String::from(raw_path);
 
@@ -140,14 +134,48 @@ impl Command for LinuxCommand {
                     if let Ok(n) = crate::fs::ZfsClient::read_file_by_path(&bin_path, &mut buffer) {
                         bytes_read = n;
                         resolved_path = bin_path;
+                    } else if !raw_path.ends_with(".elf") {
+                        let bin_elf = alloc::format!("/bin/{}.elf", raw_path);
+                        if let Ok(n) = crate::fs::ZfsClient::read_file_by_path(&bin_elf, &mut buffer) {
+                            bytes_read = n;
+                            resolved_path = bin_elf;
+                        }
+                    }
+                }
+
+                if bytes_read == 0 && !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    // Fallback to boot media (FAT volume /bin/<file> or /<file>)
+                    let clean = raw_path.trim_start_matches('/').trim_start_matches('\\');
+                    let fat_paths = [
+                        alloc::format!("\\bin\\{}", clean),
+                        alloc::format!("\\bin\\{}.elf", clean),
+                        alloc::format!("\\{}", clean),
+                    ];
+                    for fp in &fat_paths {
+                        if let Ok(data) = crate::shell::fs::read_boot_file(fp) {
+                            let copy_n = data.len().min(buffer.len());
+                            buffer[..copy_n].copy_from_slice(&data[..copy_n]);
+                            bytes_read = copy_n;
+                            resolved_path = alloc::format!("boot:{}", fp);
+                            break;
+                        }
                     }
                 }
 
                 if bytes_read == 0 {
                     console::set_color(Color::LightRed, Color::Black);
-                    println!("[!] Failed to read file '{}' from OpenZFS storage pool.", raw_path);
+                    println!("[!] Failed to read file '{}' from OpenZFS storage pool or boot media.", raw_path);
                     console::set_color(Color::White, Color::Black);
                     return;
+                }
+
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    console::set_color(Color::Yellow, Color::Black);
+                    println!(
+                        "[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '{}'...",
+                        resolved_path
+                    );
+                    let _ = crate::arch::boot_services::take_hardware_ownership();
                 }
 
                 println!("[+] Read {} bytes from OpenZFS ({}). Spawning Linux process...", bytes_read, resolved_path);
@@ -172,9 +200,82 @@ impl Command for LinuxCommand {
                 }
             }
 
+            "trace" => {
+                let on = args.get(1).copied() != Some("off");
+                crate::compat::linux::TRACE_SYSCALLS.store(on, core::sync::atomic::Ordering::Relaxed);
+                println!("[+] Linux syscall tracing {}", if on { "enabled" } else { "disabled" });
+            }
+
+            "chroot" => {
+                if args.len() < 3 {
+                    println!("Usage: linux chroot <dir> <program> [args...]   e.g. linux chroot /ubuntu /usr/bin/bash -c 'ls /'");
+                    return;
+                }
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    let _ = crate::arch::boot_services::take_hardware_ownership();
+                }
+                let program = args[2];
+                let argv: alloc::vec::Vec<&str> = args[2..].iter().copied().collect();
+                match crate::task::spawn_linux_chroot(args[1], program, &argv, state.current_uid, state.current_gid) {
+                    Ok(tid) => {
+                        crate::task::wait_task(tid);
+                        println!("[+] Linux process {} exited.", tid.0);
+                    }
+                    Err(e) => {
+                        console::set_color(Color::LightRed, Color::Black);
+                        println!("[!] linux chroot: {}", e);
+                        console::set_color(Color::White, Color::Black);
+                    }
+                }
+            }
+
+            "rootfs" => {
+                if args.get(1).copied() != Some("install") {
+                    println!("Usage: linux rootfs install [boot-archive-path] [target-dir]");
+                    return;
+                }
+                let archive = args.get(2).copied().unwrap_or(r"\rootfs\ubuntu-base.tar.gz");
+                let dest = args.get(3).copied().unwrap_or("/ubuntu");
+                if crate::arch::boot_services::is_hardware_takeover_complete() {
+                    println!("[!] The boot volume is only readable before hardware takeover; reboot and run this first.");
+                    return;
+                }
+                let data = match crate::shell::fs::read_media_file(archive) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        console::set_color(Color::LightRed, Color::Black);
+                        println!("[!] Cannot read {} from the boot volume: {:?}", archive, e);
+                        console::set_color(Color::White, Color::Black);
+                        return;
+                    }
+                };
+                match crate::pkg::rootfs::install(&data, dest) {
+                    Ok(sum) => {
+                        console::set_color(Color::LightGreen, Color::Black);
+                        println!(
+                            "[+] Root filesystem installed in {}: {} files ({} MiB), {} dirs, {} symlinks, {} hard links, {} devices, {} skipped",
+                            dest, sum.files, sum.bytes / (1024 * 1024), sum.dirs, sum.symlinks, sum.hardlinks, sum.devices, sum.skipped
+                        );
+                        console::set_color(Color::White, Color::Black);
+                    }
+                    Err(e) => {
+                        console::set_color(Color::LightRed, Color::Black);
+                        println!("[!] rootfs install failed: {}", e);
+                        console::set_color(Color::White, Color::Black);
+                    }
+                }
+            }
+
+            "click" => {
+                let x = if args.len() > 1 { args[1].parse::<usize>().unwrap_or(640) } else { 640 };
+                let y = if args.len() > 2 { args[2].parse::<usize>().unwrap_or(400) } else { 400 };
+                crate::compat::linux::inject_simulated_click(x, y);
+                println!("[+] Injected simulated mouse click at ({}, {})", x, y);
+            }
+
             _ => {
                 console::set_color(Color::LightRed, Color::Black);
-                println!("Invalid subcommand. Usage: linux [status|info|test|run <path>]");
+                println!("Invalid subcommand. Usage: linux [status|info|test|run <path>|click <x> <y>]");
                 console::set_color(Color::White, Color::Black);
             }
         }

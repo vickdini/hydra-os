@@ -208,10 +208,18 @@ pub struct Task {
     pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
     pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
     pub user_image: Option<Box<[u8]>>,  // Backing segment buffer for ELF process image
+    pub interp_image: Option<Box<[u8]>>, // Backing segment buffer for dynamic linker (PT_INTERP)
     pub ticks_run: u64,
     pub timeslice_remaining: u32,
     pub cspace: Box<CapabilityTable>,
     pub fds: crate::fs::FdTable,
+    /// Private address space (Linux processes loaded through the VM subsystem). Threads of
+    /// one process share it. `None` for kernel tasks and legacy tasks in the kernel space.
+    pub mm: Option<alloc::sync::Arc<spin::Mutex<crate::memory::vm::Mm>>>,
+    /// Path of the executable image (`/proc/self/exe`), for Linux processes.
+    pub exe: Option<alloc::sync::Arc<str>>,
+    /// Saved x87/SSE register state while the task is not running.
+    pub fpu: Box<crate::arch::idt::FpuState>,
 }
 
 impl Task {
@@ -241,11 +249,20 @@ impl Task {
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,
             user_image: None,
+            interp_image: None,
             ticks_run: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default(),
+            mm: None,
+            exe: None,
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
+    }
+
+    /// Path of the running executable, or the task name for kernel tasks.
+    pub fn exe_path(&self) -> &str {
+        self.exe.as_deref().unwrap_or(self.name)
     }
 
     /// Returns the top address of the task's kernel stack (used for TSS RSP0 and hardware SYSCALL).

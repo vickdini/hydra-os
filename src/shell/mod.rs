@@ -76,12 +76,13 @@ pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
         return;
     }
 
+    let words = split_words(trimmed);
     let mut args_buf = [""; MAX_ARGS];
     let mut arg_count = 0;
 
-    for word in trimmed.split_whitespace() {
+    for word in words.iter() {
         if arg_count < MAX_ARGS {
-            args_buf[arg_count] = word;
+            args_buf[arg_count] = word.as_str();
             arg_count += 1;
         }
     }
@@ -108,6 +109,63 @@ pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
         println!("Unknown command: '{}'. Type 'help' for built-ins or 'path' for executable search dirs.", command_name);
         state.last_status = 127;
     }
+}
+
+/// Splits a command line into words like a POSIX shell: whitespace separates words,
+/// single quotes keep text literally, double quotes group text, and a backslash escapes
+/// the next character (outside single quotes).
+pub fn split_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
+    const SQ: char = '\'';
+    const BS: char = '\\';
+    let mut words = alloc::vec::Vec::new();
+    let mut cur = alloc::string::String::new();
+    let mut in_word = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == SQ {
+            in_word = true;
+            for q in chars.by_ref() {
+                if q == SQ {
+                    break;
+                }
+                cur.push(q);
+            }
+        } else if c == '"' {
+            in_word = true;
+            while let Some(q) = chars.next() {
+                if q == '"' {
+                    break;
+                }
+                if q == BS {
+                    if let Some(n) = chars.next() {
+                        if !(n == '"' || n == BS || n == '$' || n == '`') {
+                            cur.push(BS);
+                        }
+                        cur.push(n);
+                    }
+                } else {
+                    cur.push(q);
+                }
+            }
+        } else if c == BS {
+            in_word = true;
+            if let Some(n) = chars.next() {
+                cur.push(n);
+            }
+        } else if c.is_whitespace() {
+            if in_word {
+                words.push(core::mem::take(&mut cur));
+                in_word = false;
+            }
+        } else {
+            in_word = true;
+            cur.push(c);
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    words
 }
 
 fn auto_exitboot_countdown(state: &mut ShellState) {

@@ -50,6 +50,10 @@ pub const ESPIPE: i64 = 29;
 pub const EROFS: i64 = 30;
 pub const EPIPE: i64 = 32;
 pub const ENOSYS: i64 = 38;
+pub const EPROTONOSUPPORT: i64 = 93;
+pub const EAFNOSUPPORT: i64 = 97;
+pub const EADDRINUSE: i64 = 98;
+pub const ECONNREFUSED: i64 = 111;
 
 /// `struct utsname` layout on Linux x86_64.
 #[repr(C)]
@@ -167,6 +171,7 @@ pub const AT_HWCAP: u64 = 16;
 pub const AT_CLKTCK: u64 = 17;
 pub const AT_SECURE: u64 = 23;
 pub const AT_RANDOM: u64 = 25;
+pub const AT_HWCAP2: u64 = 26;
 pub const AT_EXECFN: u64 = 31;
 pub const AT_SYSINFO_EHDR: u64 = 33;
 
@@ -180,3 +185,30 @@ pub const CLONE_SETTLS: u64 = 0x0008_0000;
 pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
 pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
 pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+
+pub const SOL_SOCKET: i32 = 1;
+pub const SCM_RIGHTS: i32 = 1;
+
+
+/// Linux `struct msghdr` for `sendmsg` and `recvmsg`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct LinuxMsghdr {
+    pub msg_name: u64,
+    pub msg_namelen: u32,
+    pub msg_iov: *mut LinuxIovec,
+    pub msg_iovlen: usize,
+    pub msg_control: *mut u8,
+    pub msg_controllen: usize,
+    pub msg_flags: i32,
+}
+
+/// Linux `struct cmsghdr` for socket ancillary data.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct LinuxCmsghdr {
+    pub cmsg_len: usize,
+    pub cmsg_level: i32,
+    pub cmsg_type: i32,
+}
+

@@ -5,8 +5,10 @@ use uefi::mem::memory_map::MemoryType;
 
 use super::frame_allocator::{FRAME_ALLOCATOR, PAGE_SIZE};
 
-/// Default kernel heap size: 128 MiB (accommodates Debian repository indexes, Wayland compositors, and ZFS cache)
-pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
+/// Preferred kernel heap size: 512 MiB (room to unpack root filesystem archives in memory).
+pub const HEAP_SIZE: usize = 512 * 1024 * 1024;
+/// Smallest heap accepted when memory is short.
+const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 
 /// Global allocator for Hydra kernel (`extern crate alloc`).
 #[global_allocator]
@@ -36,21 +38,29 @@ pub fn init() -> Result<HeapStats, &'static str> {
         return Ok(stats());
     }
 
-    let page_count = (HEAP_SIZE + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
+    // Use at most a quarter of usable RAM, halving down to the minimum if no region fits
+    let usable = FRAME_ALLOCATOR.lock().total_usable_memory() as usize;
+    let mut size = HEAP_SIZE.min((usable / 4).max(MIN_HEAP_SIZE));
     let mut heap_start_ptr: Option<*mut u8> = None;
+    while heap_start_ptr.is_none() && size >= MIN_HEAP_SIZE {
+        let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
-    // Strategy 1: Allocate contiguous physical frames from Hydra's frame allocator
-    {
-        let mut alloc = FRAME_ALLOCATOR.lock();
-        if let Some(frame) = alloc.allocate_contiguous_frames(page_count) {
-            heap_start_ptr = Some(frame.start_address().as_u64() as *mut u8);
+        // Strategy 1: Allocate contiguous physical frames from Hydra's frame allocator
+        {
+            let mut alloc = FRAME_ALLOCATOR.lock();
+            if let Some(frame) = alloc.allocate_contiguous_frames(page_count) {
+                heap_start_ptr = Some(frame.start_address().as_u64() as *mut u8);
+            }
         }
-    }
 
-    // Strategy 2: Fall back to UEFI Boot Services loader data allocation
-    if heap_start_ptr.is_none() {
-        if let Ok(ptr) = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, page_count) {
-            heap_start_ptr = Some(ptr.as_ptr());
+        // Strategy 2: Fall back to UEFI Boot Services loader data allocation
+        if heap_start_ptr.is_none() {
+            if let Ok(ptr) = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, page_count) {
+                heap_start_ptr = Some(ptr.as_ptr());
+            }
+        }
+        if heap_start_ptr.is_none() {
+            size /= 2;
         }
     }
 
@@ -58,13 +68,13 @@ pub fn init() -> Result<HeapStats, &'static str> {
 
     unsafe {
         // Zero-initialize heap memory to ensure clean initial state
-        core::ptr::write_bytes(start_ptr, 0, HEAP_SIZE);
+        core::ptr::write_bytes(start_ptr, 0, size);
         // Initialize the linked-list allocator
-        HEAP_ALLOCATOR.lock().init(start_ptr, HEAP_SIZE);
+        HEAP_ALLOCATOR.lock().init(start_ptr, size);
     }
 
     HEAP_START_ADDR.store(start_ptr as u64, Ordering::SeqCst);
-    HEAP_TOTAL_SIZE.store(HEAP_SIZE, Ordering::SeqCst);
+    HEAP_TOTAL_SIZE.store(size, Ordering::SeqCst);
     HEAP_INITIALIZED.store(true, Ordering::SeqCst);
 
     Ok(stats())

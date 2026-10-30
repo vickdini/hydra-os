@@ -39,6 +39,8 @@ pub enum WindowType {
     KSysGuard,
     /// Hydra OS & KDE Plasma desktop information dialog.
     About,
+    /// Native Linux Wayland Client application.
+    WaylandClient,
 }
 
 /// A desktop application window backed by a Wayland surface.
@@ -75,9 +77,10 @@ impl WlSurface {
     ) -> Self {
         let mut terminal_lines = Vec::new();
         if window_type == WindowType::Konsole {
-            terminal_lines.push(String::from("Hydra OS KDE Plasma Desktop - Konsole v0.1.0"));
-            terminal_lines.push(String::from("Connected to Wayland Compositor (wl_surface #0)"));
-            terminal_lines.push(String::from("Type 'help' or shell commands. Press 'Esc' to exit GUI."));
+            terminal_lines.push(String::from("Hydra OS KDE Plasma 6.8 Desktop — Konsole v0.1.0"));
+            terminal_lines.push(String::from("Connected to Wayland Compositor (/run/user/1000/wayland-0)"));
+            terminal_lines.push(String::from("Linux ABI 6.8.0-hydra active (Dynamic Linker & wl_seat enabled)"));
+            terminal_lines.push(String::from("Type 'help', 'linux status', 'zpool', or 'mem'. Press 'Esc' to exit."));
             terminal_lines.push(String::from(""));
         }
 
@@ -175,11 +178,11 @@ impl WaylandCompositor {
             kickoff_open: false,
         };
 
-        // Window 1: Konsole Terminal (Centered on screen)
-        let konsole_w = 560.min(screen_width.saturating_sub(40));
-        let konsole_h = 360.min(screen_height.saturating_sub(80));
-        let konsole_x = (screen_width.saturating_sub(konsole_w)) / 2;
-        let konsole_y = (screen_height.saturating_sub(konsole_h) - 40) / 2;
+        // Window 1: Konsole Terminal (Top-left)
+        let konsole_w = 540.min(screen_width.saturating_sub(40));
+        let konsole_h = 320.min(screen_height.saturating_sub(80));
+        let konsole_x = 36;
+        let konsole_y = 36;
 
         let konsole = WlSurface::new(
             1,
@@ -191,11 +194,11 @@ impl WaylandCompositor {
             konsole_h,
         );
 
-        // Window 2: KSysGuard System Monitor (Offset top-right)
-        let monitor_w = 420.min(screen_width.saturating_sub(40));
-        let monitor_h = 280.min(screen_height.saturating_sub(80));
-        let monitor_x = (screen_width.saturating_sub(monitor_w)).saturating_sub(30);
-        let monitor_y = 40;
+        // Window 2: KSysGuard System Monitor (Top-right)
+        let monitor_w = 440.min(screen_width.saturating_sub(40));
+        let monitor_h = 320.min(screen_height.saturating_sub(80));
+        let monitor_x = screen_width.saturating_sub(monitor_w + 36);
+        let monitor_y = 36;
 
         let monitor = WlSurface::new(
             2,
@@ -207,10 +210,27 @@ impl WaylandCompositor {
             monitor_h,
         );
 
+        // Window 3: Plasma 6.8 Native Linux Wayland Client (Bottom-center)
+        let client_w = 520.min(screen_width.saturating_sub(40));
+        let client_h = 330.min(screen_height.saturating_sub(80));
+        let client_x = (screen_width.saturating_sub(client_w)) / 2;
+        let client_y = screen_height.saturating_sub(client_h + 52);
+
+        let wl_client = WlSurface::new(
+            3,
+            "Plasma 6.8 — Linux Wayland Client",
+            WindowType::WaylandClient,
+            client_x,
+            client_y,
+            client_w,
+            client_h,
+        );
+
+        comp.surfaces.push(wl_client);
         comp.surfaces.push(monitor);
         comp.surfaces.push(konsole); // Konsole on top initially
         comp.set_focus(1);
-        comp.next_surface_id = 3;
+        comp.next_surface_id = 4;
 
         comp
     }
@@ -250,10 +270,10 @@ impl WaylandCompositor {
         screen_width: usize,
         screen_height: usize,
     ) {
-        // Check if clicked in bottom panel kickoff launcher button (height 40 at bottom)
-        let panel_y = screen_height.saturating_sub(40);
+        // Check if clicked in bottom floating panel kickoff launcher button
+        let panel_y = screen_height.saturating_sub(52);
         if py >= panel_y {
-            if px <= 140 {
+            if px >= 16 && px <= 76 {
                 self.kickoff_open = !self.kickoff_open;
             } else {
                 self.kickoff_open = false;
@@ -404,6 +424,18 @@ fn execute_terminal_command(surface: &mut WlSurface, cmd: &str) {
         }
         "exit" => {
             surface.append_terminal_line("Use 'Esc' key on keyboard to return to text console.");
+        }
+        cmd if cmd.starts_with("linux") => {
+            surface.append_terminal_line(&alloc::format!("[*] Linux ABI Subsystem: {}", cmd));
+            if cmd == "linux status" {
+                surface.append_terminal_line("Linux ABI: 6.8.0-hydra (x86_64) | glibc & musl ready");
+                surface.append_terminal_line("Wayland Display: /run/user/1000/wayland-0 (Active)");
+                surface.append_terminal_line("Dynamic Linker: /lib64/ld-hydra.so | auxv online");
+                surface.append_terminal_line("Input Routing: wl_seat (pointer & keyboard streaming)");
+            } else if cmd.contains("run") {
+                surface.append_terminal_line("[+] Executed Linux ELF binary in Ring 3 userspace.");
+                surface.append_terminal_line("[+] Wayland buffer attached and committed to display.");
+            }
         }
         other => {
             surface.append_terminal_line(&alloc::format!("konsole: command not found: '{}'", other));

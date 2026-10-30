@@ -11,8 +11,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0x1dd19098
-    RFLAGS: 0x206, RSP: 0x1fe627e0
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0x1dccfbd8
+    RFLAGS: 0x202, RSP: 0x1fe627b0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0x1f801000
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0x1dd18fa0 -> PhysAddr 0x1dd18fa0
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0x1dccfae0 -> PhysAddr 0x1dccfae0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x9780000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x9781000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -60,8 +60,6 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
 [+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
 [1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
-[+] OpenZFS: Mounted existing persistent storage pool 'hydrapool' from ATA Hard Disk!
-    - Active TXG: #22, Allocated Blocks: 53 (Verified via Fletcher-4)
 [+] Imported '\bin\hello.elf' from boot media into ZFS '/bin/hello.elf' (2344 bytes, Fletcher-4 verified)
 [+] Imported '\bin\counter.elf' from boot media into ZFS '/bin/counter.elf' (2544 bytes, Fletcher-4 verified)
 [+] Imported '\bin\linuxapp.elf' from boot media into ZFS '/bin/linuxapp.elf' (1256 bytes, Fletcher-4 verified)
@@ -69,6 +67,15 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [+] Imported '\bin\thread_test.elf' from boot media into ZFS '/bin/thread_test.elf' (1984 bytes, Fletcher-4 verified)
 [+] Imported '\bin\threadtest.elf' from boot media into ZFS '/bin/threadtest.elf' (1984 bytes, Fletcher-4 verified)
 [+] Imported '\bin\roletest.elf' from boot media into ZFS '/bin/roletest.elf' (2760 bytes, Fletcher-4 verified)
+[+] Imported '\bin\socktest.elf' from boot media into ZFS '/bin/socktest.elf' (3744 bytes, Fletcher-4 verified)
+[+] Imported '\bin\epolltest.elf' from boot media into ZFS '/bin/epolltest.elf' (3536 bytes, Fletcher-4 verified)
+[+] Imported '\bin\shmtest.elf' from boot media into ZFS '/bin/shmtest.elf' (3744 bytes, Fletcher-4 verified)
+[+] Imported '\bin\wlclient.elf' from boot media into ZFS '/bin/wlclient.elf' (3840 bytes, Fletcher-4 verified)
+[+] Imported '\bin\wlseat.elf' from boot media into ZFS '/bin/wlseat.elf' (3832 bytes, Fletcher-4 verified)
+[+] Imported '\bin\dynclient.elf' from boot media into ZFS '/bin/dynclient.elf' (2064 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/lib64/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/lib/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/bin/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
 [+] ZFS File Server Online (Endpoint #0x20):
     - Storage Pool: 'hydrapool' (32 MiB, Fletcher-4 Checksums, CoW enabled)
     - Persistence : Active (Primary Master ATA Hard Disk)

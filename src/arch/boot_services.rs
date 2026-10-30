@@ -53,6 +53,14 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     let entries_count = memory_map.entries().count();
 
+    // 3b. Task switches and syscalls save x87/SSE state with FXSAVE only. Disable XSAVE
+    // so user code (glibc's CPU feature detection) never enables AVX registers that would
+    // not be preserved.
+    unsafe {
+        use x86_64::registers::control::{Cr4, Cr4Flags};
+        Cr4::update(|flags| flags.remove(Cr4Flags::OSXSAVE));
+    }
+
     // 4. Load Hydra's GDT and reload segments
     crate::arch::gdt::load_and_switch();
     let selectors = crate::arch::gdt::get_selectors();
@@ -75,15 +83,13 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
 
     // 8. Initialize 8254 PIT timer to 100 Hz (10ms tick interval on IRQ 0)
     crate::arch::pit::init(100);
+    crate::arch::rtc::init();
 
     // 8b. Initialize 8042 PS/2 Keyboard Controller for IRQ 1 interrupts
     crate::arch::keyboard::init();
 
     // 8c. Initialize fast x86_64 hardware system call MSRs (EFER, STAR, LSTAR, FMASK)
     crate::arch::syscall::init();
-
-    // 9. Enable CPU hardware interrupts (sti)
-    x86_64::instructions::interrupts::enable();
 
     *done = true;
 
@@ -109,6 +115,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     println!("  - Virtual Memory     : Autonomous PML4 Root at PhysAddr {:#x}", cr3_frame);
     println!("  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)");
     println!("============================================================\n");
+
+    // 9. Enable CPU hardware interrupts (sti) after banner rendering completes
+    x86_64::instructions::interrupts::enable();
 
     // 10. Automatically initialize and configure network adapter via DHCP
     if crate::net::e1000::is_present() {

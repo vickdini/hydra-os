@@ -121,6 +121,14 @@ impl Compositor {
         self.pixels.fill(color);
     }
 
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        &mut self.pixels
+    }
+
     /// Sets a single pixel to the given color without bounds checking.
     #[inline(always)]
     pub fn put_pixel(&mut self, x: usize, y: usize, color: u32) {

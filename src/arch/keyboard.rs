@@ -192,11 +192,11 @@ pub fn on_keyboard_irq() {
 /// Reads a key non-blockingly (first from the interrupt ring buffer, then fallback polling if interrupts disabled).
 pub fn read_key() -> Option<Key> {
     // 1. Check if a key was captured asynchronously by the IRQ 1 handler
-    {
+    if let Some(key) = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut buffer = KEY_BUFFER.lock();
-        if let Some(key) = buffer.pop() {
-            return Some(key);
-        }
+        buffer.pop()
+    }) {
+        return Some(key);
     }
 
     // 2. Fallback polling if hardware interrupts are disabled (e.g. early init)

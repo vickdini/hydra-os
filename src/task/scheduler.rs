@@ -7,7 +7,7 @@ use crate::capability::table::CapabilityTable;
 use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
 
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
-pub const DEFAULT_STACK_SIZE: usize = 16384;  // 16 KiB per kernel thread stack
+pub const DEFAULT_STACK_SIZE: usize = 65536;  // 64 KiB per kernel thread stack
 
 /// Diagnostic snapshot of a task for shell inspection (e.g. `ps` / `tasks` command).
 #[derive(Debug, Clone)]
@@ -62,10 +62,10 @@ impl Scheduler {
         self.spawn_internal("idle", idle_task_entry, TaskPriority::Idle, current_cr3);
     }
 
-    /// Updates the CR3 root paging address for the primary main task.
+    /// Updates the CR3 root paging address for the primary main task and background kernel tasks.
     pub fn update_main_cr3(&mut self, cr3: u64) {
-        if !self.tasks.is_empty() {
-            self.tasks[0].regs.cr3 = cr3;
+        for task in &mut self.tasks {
+            task.regs.cr3 = cr3;
         }
     }
 
@@ -132,10 +132,14 @@ impl Scheduler {
             stack: Some(stack),
             user_stack: None,
             user_image: None,
+            interp_image: None,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default(),
+            mm: None,
+            exe: None,
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
         self.tasks.push(task);
@@ -208,10 +212,14 @@ impl Scheduler {
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
             user_image: None,
+            interp_image: None,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default(),
+            mm: None,
+            exe: None,
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
         self.tasks.push(task);
@@ -280,10 +288,14 @@ impl Scheduler {
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
             user_image: image.allocated_image,
+            interp_image: image.interp_image,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default(),
+            mm: None,
+            exe: None,
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
         self.tasks.push(task);
@@ -300,6 +312,13 @@ impl Scheduler {
         uid: u32,
         gid: u32,
     ) -> Result<TaskId, &'static str> {
+        if super::exec::is_vm_loadable(elf_data) {
+            // /proc/self/exe must be absolute; `linux run` resolves bare names in /bin
+            let arg0 = args.first().copied().unwrap_or(name);
+            let exec_path = if arg0.starts_with('/') { alloc::string::String::from(arg0) } else { alloc::format!("/bin/{}", arg0) };
+            return self.spawn_linux_process(name, elf_data, &exec_path, args, priority, uid, gid, None);
+        }
+
         let current_cr3 = Cr3::read().0.start_address().as_u64();
         let image = super::elf::load_linux_elf(elf_data, args).map_err(|e| e.as_str())?;
 
@@ -335,13 +354,104 @@ impl Scheduler {
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
             user_image: image.allocated_image,
+            interp_image: image.interp_image,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default(),
+            mm: None,
+            exe: None,
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
         self.tasks.push(task);
+        Ok(id)
+    }
+
+    /// Spawns a Linux process in its own private address space (PIE and high-linked binaries).
+    ///
+    /// With `root` set, the process runs `chroot`ed into that directory inode: the dynamic
+    /// linker is looked up inside it and it becomes the process's root and working directory.
+    pub fn spawn_linux_process(
+        &mut self,
+        name: &'static str,
+        elf_data: &[u8],
+        exec_path: &str,
+        args: &[&str],
+        priority: TaskPriority,
+        uid: u32,
+        gid: u32,
+        root: Option<u64>,
+    ) -> Result<TaskId, &'static str> {
+        let read_in_root = |path: &str| -> Option<Vec<u8>> {
+            let root = root?;
+            let ino = crate::fs::ZfsClient::resolve_in(root, root, path.as_bytes(), true).ok()?;
+            let size = crate::fs::ZfsClient::getattr(ino).ok()?.size as usize;
+            let mut buf = alloc::vec![0u8; size];
+            let n = crate::fs::ZfsClient::read_at(ino, 0, &mut buf).ok()?;
+            buf.truncate(n);
+            Some(buf)
+        };
+        let interp_reader: &dyn Fn(&str) -> Option<Vec<u8>> = if root.is_some() { &read_in_root } else { &read_interpreter };
+        let image = super::exec::load_linux_exec(
+            elf_data.to_vec().into_boxed_slice(),
+            exec_path,
+            args,
+            DEFAULT_LINUX_ENV,
+            super::exec::ExecCreds { uid, gid },
+            interp_reader,
+        )
+        .map_err(|e| e.as_str())?;
+
+        let id = TaskId(self.next_id);
+        self.next_id += 1;
+
+        let mm = alloc::sync::Arc::new(Mutex::new(image.mm));
+        let mut regs = TaskRegisters::empty();
+        regs.rip = image.entry;
+        regs.rsp = image.rsp;
+        regs.cs = 0x20 | 3;
+        regs.ss = 0x18 | 3;
+        regs.rflags = 0x202;
+        regs.cr3 = mm.lock().cr3();
+
+        self.tasks.push(Task {
+            id,
+            name,
+            state: TaskState::Ready,
+            priority,
+            mode: PrivilegeMode::User,
+            personality: super::tcb::TaskPersonality::Linux,
+            fs_base: 0,
+            brk: 0,
+            clear_child_tid: 0,
+            tgid: id.0 as u64,
+            uid,
+            gid,
+            euid: uid,
+            egid: gid,
+            suid: uid,
+            sgid: gid,
+            regs,
+            stack: Some(alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice()),
+            user_stack: None,
+            user_image: None,
+            interp_image: None,
+            ticks_run: 0,
+            timeslice_remaining: self.default_timeslice,
+            cspace: alloc::boxed::Box::new(CapabilityTable::new()),
+            fds: {
+                let mut fds = crate::fs::FdTable::new_default();
+                if let Some(r) = root {
+                    fds.root_ino = r;
+                    fds.cwd_ino = r;
+                }
+                fds
+            },
+            mm: Some(mm),
+            exe: Some(alloc::sync::Arc::from(exec_path)),
+            fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
+        });
         Ok(id)
     }
 
@@ -375,6 +485,10 @@ impl Scheduler {
         let parent_egid = parent.egid;
         let parent_suid = parent.suid;
         let parent_sgid = parent.sgid;
+        // Threads share the address space. fork() without CLONE_VM needs copy-on-write
+        // duplication (milestone 2); until then the child shares the parent's memory.
+        let parent_mm = parent.mm.clone();
+        let parent_exe = parent.exe.clone();
 
         let child_id = TaskId(self.next_id);
         self.next_id += 1;
@@ -434,6 +548,14 @@ impl Scheduler {
 
         let kernel_stack = alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice();
 
+        // The child resumes with the parent's user FPU state as saved at syscall entry
+        let syscall_fpu = crate::arch::syscall::SYSCALL_FPU.load(core::sync::atomic::Ordering::Acquire);
+        let child_fpu = if syscall_fpu.is_null() {
+            crate::arch::idt::FpuState::new()
+        } else {
+            unsafe { (*syscall_fpu).clone() }
+        };
+
         let task = Task {
             id: child_id,
             name: parent_name,
@@ -455,14 +577,27 @@ impl Scheduler {
             stack: Some(kernel_stack),
             user_stack: None,
             user_image: None,
+            interp_image: None,
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: parent_fds,
+            mm: parent_mm,
+            exe: parent_exe,
+            fpu: alloc::boxed::Box::new(child_fpu),
         };
 
         self.tasks.push(task);
         Ok(child_id)
+    }
+
+    /// Gives up the rest of the current timeslice and switches to the next ready task
+    /// (voluntary yield, `sched_yield`, blocking and sleeping).
+    pub fn schedule_now(&mut self, ctx: &mut ExceptionContext) {
+        if self.initialized && self.current_index < self.tasks.len() {
+            self.tasks[self.current_index].timeslice_remaining = 0;
+        }
+        self.schedule(ctx);
     }
 
     /// Invoked on every IRQ 0 timer interrupt (100 Hz) to perform timeslice accounting and context switching.
@@ -500,6 +635,18 @@ impl Scheduler {
             curr_task.state = TaskState::Ready;
         }
 
+        // 3b. Release address spaces of tasks that died earlier (never the current task,
+        // whose page tables are still loaded). Parking never allocates.
+        for (idx, task) in self.tasks.iter_mut().enumerate() {
+            if idx != curr_idx && task.state == TaskState::Dead {
+                if let Some(mm) = task.mm.take() {
+                    if let Err(mm) = crate::memory::vm::retire_mm(mm) {
+                        task.mm = Some(mm);
+                    }
+                }
+            }
+        }
+
         // 4. Select the next Ready task in round-robin fashion
         let num_tasks = self.tasks.len();
         let mut next_idx = None;
@@ -525,11 +672,26 @@ impl Scheduler {
         }
 
         let next_idx = next_idx.unwrap_or(curr_idx);
+        if next_idx == curr_idx {
+            self.tasks[curr_idx].state = TaskState::Running;
+            self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;
+            return;
+        }
         self.current_index = next_idx;
+
+        // 4a. Swap x87/SSE state through the trap frame's save area
+        let trap_fpu = crate::arch::idt::CURRENT_TRAP_FPU.load(core::sync::atomic::Ordering::Acquire);
+        if !trap_fpu.is_null() {
+            unsafe {
+                self.tasks[curr_idx].fpu.0 = (*trap_fpu).0;
+                (*trap_fpu).0 = self.tasks[next_idx].fpu.0;
+            }
+        }
 
         let next_task = &mut self.tasks[next_idx];
         next_task.state = TaskState::Running;
         next_task.timeslice_remaining = self.default_timeslice;
+        crate::memory::vm::set_current_mm(next_task.mm.as_ref());
 
         // 4b. Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task
         let kernel_top = next_task.kernel_stack_top();
@@ -605,6 +767,21 @@ impl Scheduler {
                 for id in ids {
                     self.unblock_task(id);
                 }
+            }
+        }
+    }
+
+    /// Marks every other thread sharing the current task's thread group as Dead.
+    pub fn terminate_current_group(&mut self) {
+        if !self.initialized || self.current_index >= self.tasks.len() {
+            return;
+        }
+        let tgid = self.tasks[self.current_index].tgid;
+        let me = self.tasks[self.current_index].id;
+        for task in self.tasks.iter_mut() {
+            if task.tgid == tgid && task.id != me && task.state != TaskState::Dead {
+                task.state = TaskState::Dead;
+                task.timeslice_remaining = 0;
             }
         }
     }
@@ -730,6 +907,37 @@ impl Scheduler {
     }
 }
 
+/// Environment given to Linux processes started from the Hydra shell.
+const DEFAULT_LINUX_ENV: &[&str] = &[
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME=/root",
+    "USER=root",
+    "LOGNAME=root",
+    "SHELL=/bin/bash",
+    "TERM=linux",
+    "LANG=C.UTF-8",
+    "XDG_RUNTIME_DIR=/run/user/1000",
+    "WAYLAND_DISPLAY=wayland-0",
+];
+
+/// Reads a dynamic linker named by `PT_INTERP` from the filesystem (or boot media).
+fn read_interpreter(path: &str) -> Option<Vec<u8>> {
+    if let Ok(stat) = crate::fs::client::ZfsClient::file_stat(path) {
+        let mut buf = alloc::vec![0u8; stat.size as usize];
+        if let Ok(n) = crate::fs::client::ZfsClient::read_file_by_path(path, &mut buf) {
+            buf.truncate(n);
+            return Some(buf);
+        }
+    }
+    if !crate::arch::boot_services::is_hardware_takeover_complete() {
+        let fat_path = path.replace('/', "\\");
+        if let Ok(data) = crate::shell::fs::read_boot_file(&fat_path) {
+            return Some(data);
+        }
+    }
+    None
+}
+
 /// Trampoline wrapper function called when a spawned kernel thread starts execution.
 extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
     let func: fn() = unsafe { core::mem::transmute(entry_fn_addr) };
@@ -743,7 +951,7 @@ extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
 fn idle_task_entry() {
     loop {
         if x86_64::instructions::interrupts::are_enabled() {
-            x86_64::instructions::hlt();
+            crate::task::preemptible(x86_64::instructions::hlt);
         } else {
             core::hint::spin_loop();
         }

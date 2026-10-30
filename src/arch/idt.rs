@@ -1,4 +1,5 @@
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use spin::Mutex;
 use uefi::proto::console::text::Color;
 use x86_64::registers::control::Cr2;
@@ -169,6 +170,7 @@ extern "C" {
     fn asm_irq_45();
     fn asm_irq_46();
     fn asm_irq_47();
+    fn asm_yield();
 }
 
 /// Initializes Hydra's IDT, installs all exception handlers, and loads the IDT.
@@ -251,6 +253,9 @@ pub fn init() {
         idt.entries[32 + i].set_handler_addr(handler, kernel_cs);
     }
 
+    // Vector 0x81: voluntary reschedule (`task::yield_now`), kernel only
+    idt.entries[YIELD_VECTOR as usize].set_handler_addr(asm_yield as *const () as usize, kernel_cs);
+
     // Load IDT into CPU
     idt.load();
     drop(idt);
@@ -274,7 +279,42 @@ pub fn reload_with_kernel_cs(cs: u16) {
 
 /// Central Rust exception dispatcher called by assembly trampolines.
 #[no_mangle]
-extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
+extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
+    let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
+    dispatch_exception(ctx);
+    CURRENT_TRAP_FPU.store(prev_fpu, Ordering::Release);
+}
+
+/// 512-byte `FXSAVE64` area holding x87, MMX and SSE register state.
+#[repr(C, align(16))]
+#[derive(Clone)]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    /// Power-on state: all exceptions masked (FCW = 0x037F, MXCSR = 0x1F80).
+    pub fn new() -> Self {
+        let mut area = [0u8; 512];
+        area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
+        area[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+        Self(area)
+    }
+}
+
+/// Software interrupt vector used by `task::yield_now` for voluntary rescheduling.
+pub const YIELD_VECTOR: u64 = 0x81;
+
+/// FPU save area of the innermost trap frame being handled. The scheduler swaps task FPU
+/// state through it; the trap stub restores from it before `iretq`.
+pub static CURRENT_TRAP_FPU: AtomicPtr<FpuState> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Kills the current user task after an unrecoverable fault and switches away from it.
+fn kill_current_user_task(ctx: &mut ExceptionContext) {
+    let mut sched = crate::task::SCHEDULER.lock();
+    sched.terminate_current();
+    sched.schedule(ctx);
+}
+
+fn dispatch_exception(ctx: &mut ExceptionContext) {
     match ctx.vector {
         3 => {
             // #BP - Breakpoint Exception (Int3)
@@ -287,16 +327,35 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
             // #PF - Page Fault Exception
             let fault_addr = Cr2::read_raw();
             let is_user = (ctx.error_code & (1 << 2)) != 0 || (ctx.cs & 3) == 3;
+            let is_write = (ctx.error_code & (1 << 1)) != 0;
+            let is_fetch = (ctx.error_code & (1 << 4)) != 0;
 
-            if is_user && crate::task::is_active() {
+            // Demand paging and copy-on-write for processes with their own address space.
+            // Kernel accesses to user memory (syscall buffers) are resolved the same way.
+            let resolved = crate::memory::vm::handle_current_fault(fault_addr, is_write, is_fetch);
+            if let Some(Ok(())) = resolved {
+                return;
+            }
+            let user_space_fault = resolved.is_some();
+
+            if (is_user || user_space_fault) && crate::task::is_active() {
                 set_color(Color::LightRed, Color::Black);
                 let pid = crate::task::SCHEDULER.lock().current_task_id();
-                println!("\n[!] USER FAULT: Segmentation Fault (#PF) in Task PID {}", pid.0);
-                println!("    Faulting Address (CR2): {:#x}", fault_addr);
-                println!("    Instruction Pointer   : {:#x}, Error Code: {:#x}", ctx.rip, ctx.error_code);
-                let mut sched = crate::task::SCHEDULER.lock();
-                sched.terminate_current();
-                sched.schedule(ctx);
+                let reason = match resolved {
+                    Some(Err(crate::memory::vm::FaultError::Bus)) => "Bus Error (SIGBUS)",
+                    Some(Err(crate::memory::vm::FaultError::OutOfMemory)) => "Out of Memory",
+                    _ => "Segmentation Fault (SIGSEGV)",
+                };
+                println!("\n[!] USER FAULT: {} (#PF) in Task PID {}", reason, pid.0);
+                println!(
+                    "    Faulting Address (CR2): {:#x} ({} {}, {} mode)",
+                    fault_addr,
+                    if is_fetch { "exec" } else if is_write { "write" } else { "read" },
+                    if (ctx.error_code & 1) != 0 { "protection" } else { "not-present" },
+                    if is_user { "user" } else { "kernel" }
+                );
+                println!("    Instruction Pointer   : {:#x}, Error Code: {:#x}, RSP: {:#x}", ctx.rip, ctx.error_code, ctx.rsp);
+                kill_current_user_task(ctx);
                 return;
             }
 
@@ -410,10 +469,21 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext) {
             crate::arch::pit::on_timer_tick();
             crate::arch::pic::send_eoi(0);
 
-            // Preemptive Multitasking Round-Robin Scheduling
-            if crate::task::is_active() {
+            // Preemptive Multitasking Round-Robin Scheduling: only user mode and kernel
+            // wait points are preempted (see `task::preemptible`)
+            let at_preempt_point = (ctx.cs & 3) == 3
+                || crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::SeqCst) > 0;
+            if at_preempt_point && crate::task::is_active() {
                 if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
                     sched.schedule(ctx);
+                }
+            }
+        }
+        YIELD_VECTOR => {
+            // Voluntary yield: the caller holds no locks, so switching is always safe
+            if crate::task::is_active() {
+                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.schedule_now(ctx);
                 }
             }
         }
@@ -517,6 +587,7 @@ global_asm!(
     TRAP_NO_ERRCODE asm_irq_45, 45
     TRAP_NO_ERRCODE asm_irq_46, 46
     TRAP_NO_ERRCODE asm_irq_47, 47
+    TRAP_NO_ERRCODE asm_yield, 0x81
 
     common_trap_handler:
         // Save General-Purpose Registers (matches ExceptionContext layout)
@@ -536,12 +607,25 @@ global_asm!(
         push r14
         push r15
 
-        // Pass pointer to ExceptionContext as 1st arg (RCX for Win64/UEFI, RDI for SysV)
-        mov rcx, rsp
-        mov rdi, rsp
+        // Save the interrupted x87/SSE state below the frame. RBP (already saved in the
+        // context) keeps the context pointer across the call.
+        mov rbp, rsp
+        sub rsp, 512
+        and rsp, -16
+        fxsave64 [rsp]
+
+        // Arg 1 = ExceptionContext, Arg 2 = FPU save area (Win64: RCX/RDX, SysV: RDI/RSI)
+        mov rcx, rbp
+        mov rdi, rbp
+        mov rdx, rsp
+        mov rsi, rsp
         sub rsp, 32
         call hydra_exception_handler
         add rsp, 32
+
+        // Restore the FPU state (possibly swapped in by the scheduler)
+        fxrstor64 [rsp]
+        mov rsp, rbp
 
         // Restore General-Purpose Registers
         pop r15

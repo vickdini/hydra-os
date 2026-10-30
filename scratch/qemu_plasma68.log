@@ -1,0 +1,110 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0x1d514898
+    RFLAGS: 0x202, RSP: 0x1fe627b0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0x1f801000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 457 MiB
+    - Allocated: 0 KiB
+    - Allocated Test Frame: 0x100000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x1780000
+    - Total Size:    128 MiB (134217728 bytes)
+    - Available:     128 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0x1d5147a0 -> PhysAddr 0x1d5147a0
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x9780000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x9781000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0x80000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[1m[33m[40m
+[*] Step 6: Initializing Storage Subsystem & ZFS File Server...
+[1m[32m[40m[+] ATA Storage: Detected Primary Master 'QEMU HARDDISK' (32 MiB, 65536 sectors, LBA48)
+[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+[1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+[+] Imported '\bin\hello.elf' from boot media into ZFS '/bin/hello.elf' (2344 bytes, Fletcher-4 verified)
+[+] Imported '\bin\counter.elf' from boot media into ZFS '/bin/counter.elf' (2544 bytes, Fletcher-4 verified)
+[+] Imported '\bin\linuxapp.elf' from boot media into ZFS '/bin/linuxapp.elf' (1256 bytes, Fletcher-4 verified)
+[+] Imported '\bin\linux_app.elf' from boot media into ZFS '/bin/linux_app.elf' (1256 bytes, Fletcher-4 verified)
+[+] Imported '\bin\thread_test.elf' from boot media into ZFS '/bin/thread_test.elf' (1984 bytes, Fletcher-4 verified)
+[+] Imported '\bin\threadtest.elf' from boot media into ZFS '/bin/threadtest.elf' (1984 bytes, Fletcher-4 verified)
+[+] Imported '\bin\roletest.elf' from boot media into ZFS '/bin/roletest.elf' (2760 bytes, Fletcher-4 verified)
+[+] Imported '\bin\socktest.elf' from boot media into ZFS '/bin/socktest.elf' (3744 bytes, Fletcher-4 verified)
+[+] Imported '\bin\epolltest.elf' from boot media into ZFS '/bin/epolltest.elf' (3536 bytes, Fletcher-4 verified)
+[+] Imported '\bin\shmtest.elf' from boot media into ZFS '/bin/shmtest.elf' (3744 bytes, Fletcher-4 verified)
+[+] Imported '\bin\wlclient.elf' from boot media into ZFS '/bin/wlclient.elf' (3840 bytes, Fletcher-4 verified)
+[+] Imported '\bin\wlseat.elf' from boot media into ZFS '/bin/wlseat.elf' (3832 bytes, Fletcher-4 verified)
+[+] Imported '\bin\dynclient.elf' from boot media into ZFS '/bin/dynclient.elf' (2064 bytes, Fletcher-4 verified)
+[+] Imported '\bin\plasmashell.elf' from boot media into ZFS '/bin/plasmashell.elf' (941216 bytes, Fletcher-4 verified)
+[+] Imported '\bin\krunner.elf' from boot media into ZFS '/bin/krunner.elf' (290816 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/lib64/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/lib/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-hydra.so' from boot media into ZFS '/bin/ld-hydra.so' (1224 bytes, Fletcher-4 verified)
+[+] Imported '\bin\ld-linux-x86-64.so.2' from boot media into ZFS '/lib64/ld-linux-x86-64.so.2' (1224 bytes, Fletcher-4 verified)
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (32 MiB, Fletcher-4 Checksums, CoW enabled)
+    - Persistence : Active (Primary Master ATA Hard Disk)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[1m[36m[40m
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
+[1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
+
+[1m[32m[40mhydra:/bin$     plasma
+[1m[37m[40m[1m[36m[40m[*] Initializing KDE Plasma Wayland Desktop (1280x800)...
+[1m[32m[40m[+] Exited KDE Plasma Wayland session. Returned to Hydra shell.
+hydra:/bin$ linux run plasmashell.elf
+[1m[37m[40m[1m[33m[40m[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.
+[1m[37m[40m[1m[32m[40mhydra:/bin$ 

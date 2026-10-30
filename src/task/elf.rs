@@ -181,6 +181,8 @@ pub enum ElfError {
     AllocationFailed,
     /// Failed to update page table protection flags or map virtual pages.
     PagingError(&'static str),
+    /// Dynamic ELF interpreter specified in PT_INTERP not found in filesystem.
+    InterpreterNotFound,
 }
 
 impl ElfError {
@@ -198,6 +200,7 @@ impl ElfError {
             ElfError::SegmentOutOfBounds => "Segment file offset and size exceed buffer bounds",
             ElfError::AllocationFailed => "Memory allocation failed during segment loading",
             ElfError::PagingError(msg) => msg,
+            ElfError::InterpreterNotFound => "Dynamic ELF interpreter specified in PT_INTERP not found in filesystem",
         }
     }
 }
@@ -306,6 +309,25 @@ impl<'a> ElfBinary<'a> {
         }
         list
     }
+
+    /// Returns the path string to the dynamic linker specified by a `PT_INTERP` segment, if present.
+    pub fn interp_path(&self) -> Option<&'a str> {
+        for ph in self.program_headers() {
+            if ph.p_type == PT_INTERP {
+                let start = ph.p_offset as usize;
+                let filesz = ph.p_filesz as usize;
+                if start < self.data.len() {
+                    let end = (start + filesz).min(self.data.len());
+                    let slice = &self.data[start..end];
+                    let len = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+                    if let Ok(s) = core::str::from_utf8(&slice[..len]) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Iterator over ELF program headers.
@@ -349,6 +371,8 @@ pub struct ElfProcessImage {
     pub kernel_stack: Box<[u8]>,
     /// Backing memory buffer holding segment code/data for Position-Independent Executables.
     pub allocated_image: Option<Box<[u8]>>,
+    /// Backing memory buffer holding segment code/data for dynamic linker (PT_INTERP).
+    pub interp_image: Option<Box<[u8]>>,
     /// Initial heap break address (end of loaded segments).
     pub initial_brk: u64,
 }
@@ -456,6 +480,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
             user_stack,
             kernel_stack,
             allocated_image: Some(seg_buffer),
+            interp_image: None,
             initial_brk: base_virt + aligned_span as u64,
         })
     } else {
@@ -496,6 +521,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
             user_stack,
             kernel_stack,
             allocated_image: None,
+            interp_image: None,
             initial_brk: (max_vaddr + 4095) & !4095,
         })
     }
@@ -530,11 +556,11 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
     // Allocate 16 KiB Kernel Stack
     let kernel_stack = alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice();
 
-    // Allocate 64 KiB User Stack for Linux process
-    let user_stack_size = 65536;
+    // Allocate 256 KiB User Stack for Linux process
+    let user_stack_size = 262144;
     let user_stack = alloc::vec![0u8; user_stack_size].into_boxed_slice();
     let user_stack_bottom = user_stack.as_ptr() as u64;
-    let user_stack_top = user_stack_bottom + user_stack.len() as u64;
+    let user_stack_top = (user_stack_bottom + user_stack.len() as u64) & !0xF;
 
     crate::memory::paging::make_user_accessible(
         VirtAddr::new(user_stack_bottom),
@@ -545,11 +571,13 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
     let (entry_point, initial_brk, allocated_image, phdr_addr) = if elf.is_pie() || min_vaddr == 0 {
         let total_span = (max_vaddr.saturating_sub(min_vaddr)) as usize;
         let aligned_span = (total_span + 4095) & !4095;
-        let mut seg_buffer = alloc::vec![0u8; aligned_span].into_boxed_slice();
-        let base_virt = seg_buffer.as_ptr() as u64;
+        let mut seg_buffer = alloc::vec![0u8; aligned_span + 4096].into_boxed_slice();
+        let raw_ptr = seg_buffer.as_ptr() as usize;
+        let align_pad = (4096 - (raw_ptr & 4095)) & 4095;
+        let base_virt = (raw_ptr + align_pad) as u64;
 
         for ph in &load_segments {
-            let seg_offset = (ph.p_vaddr - min_vaddr) as usize;
+            let seg_offset = align_pad + (ph.p_vaddr - min_vaddr) as usize;
             let filesz = ph.p_filesz as usize;
             let memsz = ph.p_memsz as usize;
 
@@ -567,7 +595,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
         }
 
         crate::memory::paging::make_user_accessible(
-            VirtAddr::new(base_virt),
+            VirtAddr::new(seg_buffer.as_ptr() as u64),
             seg_buffer.len(),
         )
         .map_err(|e| ElfError::PagingError(e))?;
@@ -606,6 +634,116 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
         (elf.header.e_entry, (max_vaddr + 4095) & !4095, None, phdr_addr)
     };
 
+    // Check for dynamic linker interpreter (PT_INTERP)
+    let mut interp_image: Option<Box<[u8]>> = None;
+    let mut interp_base: u64 = 0;
+    let mut final_entry_point: u64 = entry_point;
+
+    if let Some(interp_req) = elf.interp_path() {
+        // Candidate paths in ZFS
+        let clean_name = if let Some(pos) = interp_req.rfind('/') {
+            &interp_req[pos + 1..]
+        } else {
+            interp_req
+        };
+        let p_bin = alloc::format!("/bin/{}", clean_name);
+        let p_lib = alloc::format!("/lib/{}", clean_name);
+        let p_lib64 = alloc::format!("/lib64/{}", clean_name);
+
+        let candidates = [
+            interp_req,
+            p_bin.as_str(),
+            p_lib.as_str(),
+            p_lib64.as_str(),
+            "/bin/ld-hydra.so",
+            "/lib64/ld-hydra.so",
+            "/lib/ld-hydra.so",
+        ];
+
+        let mut found_data: Option<alloc::vec::Vec<u8>> = None;
+        for path in &candidates {
+            if let Ok(stat) = crate::fs::client::ZfsClient::file_stat(path) {
+                let mut buf = alloc::vec![0u8; stat.size as usize];
+                if crate::fs::client::ZfsClient::read_file_by_path(path, &mut buf).is_ok() {
+                    found_data = Some(buf);
+                    break;
+                }
+            }
+        }
+
+        if found_data.is_none() {
+            let fat_candidates = [
+                alloc::format!("\\bin\\{}", clean_name),
+                alloc::format!("\\lib64\\{}", clean_name),
+                alloc::string::String::from("\\bin\\ld-hydra.so"),
+                alloc::string::String::from("\\bin\\ld-linux-x86-64.so.2"),
+            ];
+            for fp in &fat_candidates {
+                if let Ok(data) = crate::shell::fs::read_boot_file(fp) {
+                    found_data = Some(data);
+                    break;
+                }
+            }
+        }
+
+        if let Some(interp_bytes) = found_data {
+            let interp_elf = ElfBinary::parse(&interp_bytes)?;
+            let interp_segs = interp_elf.load_segments();
+            if interp_segs.is_empty() {
+                return Err(ElfError::NoLoadableSegments);
+            }
+
+            let mut i_min_vaddr = u64::MAX;
+            let mut i_max_vaddr = 0u64;
+            for ph in &interp_segs {
+                if ph.p_vaddr < i_min_vaddr {
+                    i_min_vaddr = ph.p_vaddr;
+                }
+                let end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if end > i_max_vaddr {
+                    i_max_vaddr = end;
+                }
+            }
+
+            let i_span = (i_max_vaddr.saturating_sub(i_min_vaddr)) as usize;
+            let i_aligned = (i_span + 4095) & !4095;
+            let mut i_buffer = alloc::vec![0u8; i_aligned + 4096].into_boxed_slice();
+            let i_raw_ptr = i_buffer.as_ptr() as usize;
+            let i_align_pad = (4096 - (i_raw_ptr & 4095)) & 4095;
+            let i_base = (i_raw_ptr + i_align_pad) as u64;
+
+            for ph in &interp_segs {
+                let off = i_align_pad + (ph.p_vaddr - i_min_vaddr) as usize;
+                let fsz = ph.p_filesz as usize;
+                let msz = ph.p_memsz as usize;
+                if fsz > 0 {
+                    let src = &interp_bytes[ph.p_offset as usize..(ph.p_offset as usize + fsz)];
+                    i_buffer[off..off + fsz].copy_from_slice(src);
+                }
+                if msz > fsz {
+                    let bss_start = off + fsz;
+                    let bss_end = off + msz;
+                    if bss_end <= i_buffer.len() {
+                        i_buffer[bss_start..bss_end].fill(0);
+                    }
+                }
+            }
+
+            crate::memory::paging::make_user_accessible(
+                VirtAddr::new(i_buffer.as_ptr() as u64),
+                i_buffer.len(),
+            )
+            .map_err(|e| ElfError::PagingError(e))?;
+
+            let i_entry = i_base + (interp_elf.header.e_entry - i_min_vaddr);
+            final_entry_point = i_entry;
+            interp_base = i_base;
+            interp_image = Some(i_buffer);
+        } else {
+            return Err(ElfError::InterpreterNotFound);
+        }
+    }
+
     // Construct Linux userspace stack (argv, envp, auxv)
     let mut sp = user_stack_top;
 
@@ -620,7 +758,18 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
     }
 
     // Default env strings
-    let env_strings = ["PATH=/bin:/usr/bin", "USER=root", "HOME=/", "TERM=linux"];
+    let env_strings = [
+        "PATH=/bin:/usr/bin",
+        "USER=root",
+        "HOME=/",
+        "TERM=linux",
+        "XDG_RUNTIME_DIR=/run/user/1000",
+        "WAYLAND_DISPLAY=wayland-0",
+        "XDG_SESSION_TYPE=wayland",
+        "QT_QPA_PLATFORM=wayland",
+        "KDE_FULL_SESSION=true",
+        "KDE_SESSION_VERSION=6",
+    ];
     let mut env_addrs = alloc::vec::Vec::new();
     for env in &env_strings {
         let bytes = env.as_bytes();
@@ -654,21 +803,21 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
     use crate::compat::linux::types::*;
     let mut words: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
 
-    // Auxv entries
-    words.push(AT_NULL); words.push(0);
-    words.push(AT_RANDOM); words.push(rand_addr);
-    words.push(AT_SECURE); words.push(0);
-    words.push(AT_EGID); words.push(1000);
-    words.push(AT_GID); words.push(1000);
-    words.push(AT_EUID); words.push(1000);
-    words.push(AT_UID); words.push(1000);
-    words.push(AT_ENTRY); words.push(entry_point);
-    words.push(AT_FLAGS); words.push(0);
-    words.push(AT_BASE); words.push(0);
-    words.push(AT_PAGESZ); words.push(4096);
-    words.push(AT_PHNUM); words.push(elf.header.e_phnum as u64);
-    words.push(AT_PHENT); words.push(elf.header.e_phentsize as u64);
-    words.push(AT_PHDR); words.push(phdr_addr);
+    // Auxv entries (pushed downwards: push a_val [offset +8] first, then a_type [offset +0])
+    words.push(0); words.push(AT_NULL);
+    words.push(rand_addr); words.push(AT_RANDOM);
+    words.push(0); words.push(AT_SECURE);
+    words.push(1000); words.push(AT_EGID);
+    words.push(1000); words.push(AT_GID);
+    words.push(1000); words.push(AT_EUID);
+    words.push(1000); words.push(AT_UID);
+    words.push(entry_point); words.push(AT_ENTRY); // Application entry point
+    words.push(0); words.push(AT_FLAGS);
+    words.push(interp_base); words.push(AT_BASE); // Dynamic linker base address
+    words.push(4096); words.push(AT_PAGESZ);
+    words.push(elf.header.e_phnum as u64); words.push(AT_PHNUM);
+    words.push(elf.header.e_phentsize as u64); words.push(AT_PHENT);
+    words.push(phdr_addr); words.push(AT_PHDR);
 
     // Envp (NULL-terminated)
     words.push(0);
@@ -685,6 +834,15 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
     // Argc
     words.push(args.len() as u64);
 
+    // Ensure that after pushing `words.len()` 8-byte words, `sp` is 16-byte aligned
+    // and points directly to `argc` at the bottom of the initial stack frame.
+    if words.len() % 2 != 0 {
+        sp -= 8;
+        unsafe {
+            *(sp as *mut u64) = 0;
+        }
+    }
+
     // Push words downwards
     for word in words {
         sp -= 8;
@@ -693,15 +851,13 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
         }
     }
 
-    // Align initial RSP to 16 bytes
-    sp &= !0xF;
-
     Ok(ElfProcessImage {
-        entry_point,
+        entry_point: final_entry_point,
         initial_user_rsp: sp,
         user_stack,
         kernel_stack,
         allocated_image,
+        interp_image,
         initial_brk,
     })
 }

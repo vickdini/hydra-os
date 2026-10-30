@@ -35,8 +35,8 @@ use crate::task::elf::{
 };
 use crate::task::{self, TaskPriority};
 
-/// Maximum size of an ELF binary read into memory for inspection and execution (64 KiB).
-const MAX_ELF_BUFFER: usize = 65536;
+/// Maximum size of an ELF binary read into memory for inspection and execution (2 MiB).
+const MAX_ELF_BUFFER: usize = 2 * 1024 * 1024;
 
 /// Inspects and executes standalone ELF64 userland binaries from ZFS.
 pub struct ElfCommand;
@@ -184,18 +184,43 @@ impl Command for ElfCommand {
         // 4. Check hardware takeover requirement
         if !crate::arch::boot_services::is_hardware_takeover_complete() {
             set_color(Color::Yellow, Color::Black);
-            println!("[!] Ring 3 user mode processes require bare-metal mode. Please run 'exitboot' first.");
-            return;
+            println!(
+                "[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 ELF '{}'...",
+                resolved_path
+            );
+            let _ = crate::arch::boot_services::take_hardware_ownership();
         }
 
         // 5. Spawn Unprivileged Ring 3 Process
+        let is_linux_elf = elf.interp_path().is_some()
+            || resolved_path.contains("linux")
+            || resolved_path.contains("plasmashell")
+            || resolved_path.contains("krunner")
+            || resolved_path.contains("wlclient")
+            || resolved_path.contains("wlseat")
+            || resolved_path.contains("dynclient");
         let leaked_name: &'static str = Box::leak(resolved_path.into_boxed_str());
-        match task::spawn_elf(leaked_name, &buffer[..bytes_read], TaskPriority::Normal) {
+        let spawn_res = if is_linux_elf {
+            let app_args = [leaked_name];
+            task::spawn_linux_elf(
+                leaked_name,
+                &buffer[..bytes_read],
+                &app_args,
+                TaskPriority::Normal,
+                _state.current_uid,
+                _state.current_gid,
+            )
+        } else {
+            task::spawn_elf(leaked_name, &buffer[..bytes_read], TaskPriority::Normal)
+        };
+        match spawn_res {
             Ok(pid) => {
                 set_color(Color::LightGreen, Color::Black);
                 println!(
-                    "[+] Spawned Ring 3 ELF process #{} ('{}').",
-                    pid.0, leaked_name
+                    "[+] Spawned Ring 3 {} ELF process #{} ('{}').",
+                    if is_linux_elf { "Linux" } else { "Native" },
+                    pid.0,
+                    leaked_name
                 );
                 println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B, RFLAGS=0x202)");
 
