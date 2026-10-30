@@ -223,6 +223,10 @@ pub struct Task {
     pub preempt_depth: u32,
     /// Linux system call in progress (`u64::MAX` when none); saved with the task.
     pub syscall_nr: u64,
+    /// Sleeping in [`crate::task::wait::wait`]: a wait-queue wakeup or signal makes it ready.
+    pub event_wait: bool,
+    /// A wakeup arrived while the task was not (yet) waiting: its next wait returns at once.
+    pub wake_pending: bool,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -263,6 +267,8 @@ impl Task {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
     }

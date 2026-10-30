@@ -3,20 +3,27 @@
 //! Connection-oriented TCP and datagram UDP on top of the packet-level Ethernet/IPv4
 //! code, for the socket layer (`AF_INET` in the Linux personality).
 //!
-//! The NIC is polled: [`poll`] drains received frames, answers ARP, routes UDP datagrams
-//! to their socket's queue and TCP segments to their connection's state machine, and
-//! runs retransmission timers. Socket operations call it while they wait.
+//! [`poll`] drains received frames, answers ARP, routes UDP datagrams to their socket's
+//! queue and TCP segments to their connection's state machine, and runs retransmission
+//! timers. Once the scheduler runs, the `netd` kernel task does this whenever the NIC
+//! interrupts (or a timer is due) and wakes the wait queue of every socket whose state
+//! changed, so blocked socket calls sleep until their data arrives. Before that (early
+//! boot, DHCP) callers poll the NIC themselves.
 //!
 //! TCP implements the client side used by package managers and similar programs: active
 //! open, in-order receive (out-of-order segments are dropped and recovered by the peer's
 //! retransmission), a sliding send window bounded by the peer's advertised window,
 //! go-back-N retransmission with exponential back-off, and orderly (FIN) and abortive
-//! (RST) close. The advertised receive window stays below what the NIC's receive ring
-//! can absorb between polls.
+//! (RST) close. The advertised receive window (64 KiB, the most possible without window
+//! scaling) fits in the NIC's receive ring.
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
+
+use crate::task::wait::{self, WaitQueue};
 
 use super::arp::{ArpPacket, ARP_TABLE};
 use super::ethernet::{EtherType, EthernetFrame};
@@ -33,8 +40,8 @@ pub const EPIPE: i64 = -32;
 pub const ENETUNREACH: i64 = -101;
 
 const MSS: usize = 1460;
-/// Advertised receive window (fits in the NIC receive ring between polls).
-const RECV_WINDOW: usize = 32 * 1024;
+/// Advertised receive window: the largest a 16-bit window field holds (no window scaling).
+const RECV_WINDOW: usize = 65535;
 /// Most unsent + unacknowledged data a connection buffers.
 const SEND_BUFFER: usize = 256 * 1024;
 const RTO_INITIAL_TICKS: u64 = 30; // 300 ms at 100 Hz
@@ -79,11 +86,14 @@ struct TcpConn {
     rto: u64,
     retries: u32,
     error: Option<i64>,
+    /// Tasks waiting for this connection to change state (data, space, close, error).
+    wq: Arc<WaitQueue>,
 }
 
 struct UdpSock {
     local_port: u16,
     queue: VecDeque<([u8; 4], u16, Vec<u8>)>,
+    wq: Arc<WaitQueue>,
 }
 
 struct Stack {
@@ -280,23 +290,28 @@ impl TcpConn {
         self.output();
     }
 
-    fn timers(&mut self) {
-        let outstanding = self.snd_una != self.snd_nxt || self.state == TcpState::SynSent;
-        if !outstanding || now().saturating_sub(self.last_send) < self.rto {
-            return;
+    /// True while a retransmission timer runs (data or SYN awaiting acknowledgement).
+    fn timer_armed(&self) -> bool {
+        self.snd_una != self.snd_nxt || self.state == TcpState::SynSent
+    }
+
+    /// Retransmits when the timer expired. Returns true if the connection failed.
+    fn timers(&mut self) -> bool {
+        if !self.timer_armed() || now().saturating_sub(self.last_send) < self.rto {
+            return false;
         }
         self.retries += 1;
         if self.retries > MAX_RETRIES {
             self.error = Some(ETIMEDOUT);
             self.state = TcpState::Closed;
-            return;
+            return true;
         }
         self.rto = (self.rto * 2).min(RTO_MAX_TICKS);
         self.last_send = now();
         if self.state == TcpState::SynSent {
             let iss = self.iss;
             self.send_segment(TcpFlags::SYN, iss, &[]);
-            return;
+            return false;
         }
         // Go back N: resend everything from the oldest unacknowledged byte
         self.snd_nxt = self.snd_una;
@@ -304,7 +319,7 @@ impl TcpConn {
             let seq = self.snd_una;
             self.send_segment(TcpFlags::FIN | TcpFlags::ACK, seq, &[]);
             self.snd_nxt = self.snd_una.wrapping_add(1);
-            return;
+            return false;
         }
         let fin = self.fin_seq.take();
         let state = self.state;
@@ -316,34 +331,105 @@ impl TcpConn {
         if fin.is_none() {
             self.state = state;
         }
+        false
     }
 }
 
-/// Processes received frames and protocol timers. Called by every waiting socket operation.
-pub fn poll() {
+/// Woken by the NIC interrupt: `netd` has frames to process.
+pub static NET_WQ: WaitQueue = WaitQueue::new();
+/// The `netd` task runs; other code no longer polls the NIC itself.
+static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Processes received frames and protocol timers, then wakes the sockets they affected.
+/// Returns true if the receive ring may hold more frames.
+pub fn poll() -> bool {
     if !e1000::is_present() {
-        return;
+        return false;
     }
     let mut frame = [0u8; 1518];
-    for _ in 0..64 {
+    let mut woken: Vec<Arc<WaitQueue>> = Vec::new();
+    let mut more = true;
+    for _ in 0..256 {
         let len = match e1000::receive_frame(&mut frame) {
             Some(l) => l,
-            None => break,
+            None => {
+                more = false;
+                break;
+            }
         };
-        handle_frame(&frame[..len]);
+        if let Some(q) = handle_frame(&frame[..len]) {
+            if !woken.iter().any(|w| Arc::ptr_eq(w, &q)) {
+                woken.push(q);
+            }
+        }
     }
-    let mut stack = STACK.lock();
-    for c in stack.tcp.values_mut() {
-        c.timers();
+    {
+        let mut stack = STACK.lock();
+        for c in stack.tcp.values_mut() {
+            if c.timers() {
+                woken.push(c.wq.clone());
+            }
+        }
+        // Forget closed connections nobody holds any more
+        stack.tcp.retain(|_, c| !(c.detached && matches!(c.state, TcpState::Closed | TcpState::TimeWait)));
     }
-    // Forget closed connections nobody holds any more
-    stack.tcp.retain(|_, c| !(c.detached && matches!(c.state, TcpState::Closed | TcpState::TimeWait)));
+    for q in woken {
+        q.wake_all();
+    }
+    more
 }
 
-fn handle_frame(raw: &[u8]) {
+/// Lets a waiting socket operation make progress: polls the NIC unless `netd` does it.
+pub fn kick() {
+    if !SERVICE_RUNNING.load(Ordering::Acquire) {
+        poll();
+    }
+}
+
+/// True once `netd` processes the NIC (socket waits then sleep until woken).
+pub fn service_running() -> bool {
+    SERVICE_RUNNING.load(Ordering::Acquire)
+}
+
+/// True if some connection has a retransmission timer running.
+fn timers_armed() -> bool {
+    STACK.lock().tcp.values().any(|c| c.timer_armed())
+}
+
+/// Starts `netd` and switches the NIC to interrupt-driven receive.
+pub fn start_service() {
+    if !e1000::is_present() || SERVICE_RUNNING.load(Ordering::Acquire) {
+        return;
+    }
+    crate::task::spawn("netd", netd_main, crate::task::TaskPriority::High);
+    SERVICE_RUNNING.store(true, Ordering::Release);
+    e1000::enable_interrupts();
+}
+
+/// The network task: processes received frames when the NIC interrupts, and runs TCP
+/// timers while any are armed (every 50 ms; the shortest retransmission timeout is 300 ms).
+fn netd_main() {
+    loop {
+        NET_WQ.register();
+        if poll() {
+            continue;
+        }
+        let deadline = if timers_armed() { Some(crate::arch::pit::ticks() + 5) } else { None };
+        wait::wait(deadline);
+    }
+}
+
+/// The wait queue of a TCP connection or UDP socket.
+pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
+    let stack = STACK.lock();
+    stack.tcp.get(&id).map(|c| c.wq.clone()).or_else(|| stack.udp.get(&id).map(|u| u.wq.clone()))
+}
+
+/// Handles one frame; returns the wait queue of the socket it affected.
+fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
     let frame = match EthernetFrame::parse(raw) {
         Some(f) => f,
-        None => return,
+        None => return None,
     };
     let my_ip = local_ip();
     match frame.ethertype {
@@ -365,10 +451,10 @@ fn handle_frame(raw: &[u8]) {
         EtherType::Ipv4 => {
             let ip = match Ipv4Packet::parse(frame.payload) {
                 Some(p) => p,
-                None => return,
+                None => return None,
             };
             if ip.dst_ip != my_ip {
-                return;
+                return None;
             }
             match ip.protocol {
                 IpProtocol::Tcp => {
@@ -378,7 +464,10 @@ fn handle_frame(raw: &[u8]) {
                             c.local_port == seg.dst_port && c.remote_port == seg.src_port && c.remote_ip == ip.src_ip
                         });
                         match conn {
-                            Some(c) => c.input(&seg),
+                            Some(c) => {
+                                c.input(&seg);
+                                return Some(c.wq.clone());
+                            }
                             None => {
                                 // No such connection: reset it (unless it is itself a reset)
                                 if seg.flags & TcpFlags::RST == 0 {
@@ -392,7 +481,7 @@ fn handle_frame(raw: &[u8]) {
                 IpProtocol::Udp => {
                     let p = ip.payload;
                     if p.len() < 8 {
-                        return;
+                        return None;
                     }
                     let src_port = u16::from_be_bytes([p[0], p[1]]);
                     let dst_port = u16::from_be_bytes([p[2], p[3]]);
@@ -402,6 +491,7 @@ fn handle_frame(raw: &[u8]) {
                         if u.queue.len() < 64 {
                             u.queue.push_back((ip.src_ip, src_port, p[8..len].to_vec()));
                         }
+                        return Some(u.wq.clone());
                     }
                 }
                 _ => {}
@@ -409,6 +499,7 @@ fn handle_frame(raw: &[u8]) {
         }
         _ => {}
     }
+    None
 }
 
 fn send_reset(dst: [u8; 4], seg: &TcpPacket) {
@@ -460,6 +551,7 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u3
         rto: RTO_INITIAL_TICKS,
         retries: 0,
         error: None,
+        wq: WaitQueue::new_shared(),
     };
     c.send_segment(TcpFlags::SYN, iss, &[]);
     stack.tcp.insert(id, c);
@@ -590,7 +682,7 @@ pub fn udp_open(port: u16) -> Result<u32, i64> {
         port
     };
     let id = stack.alloc_id();
-    stack.udp.insert(id, UdpSock { local_port: port, queue: VecDeque::new() });
+    stack.udp.insert(id, UdpSock { local_port: port, queue: VecDeque::new(), wq: WaitQueue::new_shared() });
     Ok(id)
 }
 

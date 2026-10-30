@@ -194,6 +194,8 @@ pub fn on_keyboard_irq() {
     if let Some(key) = process_scancode(scancode) {
         let mut buffer = KEY_BUFFER.lock();
         buffer.push(key);
+        drop(buffer);
+        crate::compat::linux::tty::INPUT_WQ.wake_all();
     }
 }
 

@@ -15,6 +15,8 @@ pub struct PipeBuffer {
     /// `O_NONBLOCK` of the read and write ends (their open file descriptions).
     pub read_nonblock: bool,
     pub write_nonblock: bool,
+    /// Readers and writers waiting for data, space or the other end to close.
+    pub wq: Arc<crate::task::wait::WaitQueue>,
 }
 
 impl PipeBuffer {
@@ -29,6 +31,7 @@ impl PipeBuffer {
             writers: 1,
             read_nonblock: false,
             write_nonblock: false,
+            wq: crate::task::wait::WaitQueue::new_shared(),
         }))
     }
 
@@ -68,6 +71,9 @@ impl PipeBuffer {
 
     pub fn drop_reader(&mut self) {
         self.readers = self.readers.saturating_sub(1);
+        if self.readers == 0 {
+            self.wq.wake_all();
+        }
     }
 
     pub fn add_writer(&mut self) {
@@ -76,6 +82,9 @@ impl PipeBuffer {
 
     pub fn drop_writer(&mut self) {
         self.writers = self.writers.saturating_sub(1);
+        if self.writers == 0 {
+            self.wq.wake_all();
+        }
     }
 
     /// Reads up to `out.len()` bytes from the pipe ring buffer.
@@ -94,6 +103,9 @@ impl PipeBuffer {
             self.tail = (self.tail + 1) % PIPE_BUFFER_SIZE;
         }
         self.count -= to_read;
+        if to_read > 0 {
+            self.wq.wake_all();
+        }
         to_read
     }
 
@@ -114,6 +126,9 @@ impl PipeBuffer {
             self.head = (self.head + 1) % PIPE_BUFFER_SIZE;
         }
         self.count += to_write;
+        if to_write > 0 {
+            self.wq.wake_all();
+        }
         Ok(to_write)
     }
 }

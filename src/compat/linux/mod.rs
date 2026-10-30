@@ -1554,9 +1554,23 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 (timeout_ms as u64 + 9) / 10
             };
 
+            let deadline = if timeout_ms < 0 { None } else { Some(start_tick + timeout_ticks) };
+            let mut waits = crate::task::wait::WaitSet::new();
+            crate::task::with_current_fds_mut(|fds| {
+                for i in 0..nfds {
+                    let fd = unsafe { (*fds_ptr.add(i)).fd };
+                    if fd >= 0 {
+                        if let Some(desc) = fds.get(fd as usize) {
+                            desc.add_wait_queues(&mut waits);
+                        }
+                    }
+                }
+            });
+
             loop {
+                waits.register();
                 tty::pump();
-                crate::net::stack::poll();
+                crate::net::stack::kick();
                 let mut ready_count = 0;
                 crate::task::with_current_fds_mut(|fds| {
                     for i in 0..nfds {
@@ -1593,7 +1607,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                     return proc::ERESTARTSYS;
                 }
                 dispatch_wayland_events();
-                crate::task::sleep_ticks(1);
+                waits.wait(deadline);
             }
         }
 
@@ -1671,7 +1685,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 (timeout_ms as u64 + 9) / 10
             };
 
+            let deadline = if timeout_ms < 0 { None } else { Some(start_tick + timeout_ticks) };
+            let waits = epoll_wait_set(&epoll_arc);
+
             loop {
+                waits.register();
                 dispatch_wayland_events();
                 let ready = epoll_collect_ready(&epoll_arc, maxevents as usize);
                 if !ready.is_empty() {
@@ -1696,7 +1714,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                     return proc::ERESTARTSYS;
                 }
                 dispatch_wayland_events();
-                crate::task::sleep_ticks(1);
+                waits.wait(deadline);
             }
         }
 

@@ -246,6 +246,8 @@ pub fn thread_exited(pid: u64, tid: u64) {
                 procs.remove(&pid);
             } else {
                 parent.pending |= bit(SIGCHLD);
+                // This runs under the scheduler lock (task exit): wake the parent later
+                crate::task::wait::wake_process_deferred(ppid);
             }
         }
         // Parent 0 is the Hydra shell, which reads the status itself (see `take_status`)
@@ -412,6 +414,7 @@ fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64) {
     if let Some(parent) = procs.get_mut(&ppid) {
         if parent.actions[SIGCHLD as usize].flags & SA_NOCLDSTOP == 0 {
             parent.pending |= bit(SIGCHLD);
+            crate::task::wait::wake_process_deferred(ppid);
         }
     }
 }

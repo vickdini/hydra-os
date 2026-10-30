@@ -559,7 +559,19 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         34..=47 => {
             // Hardware IRQs from legacy 8259 PIC (Cascade, Serial, Floppy, RTC, etc.)
             let irq = (ctx.vector - 32) as u8;
+            let net = crate::net::e1000::irq_line() == Some(irq) && crate::net::e1000::on_interrupt();
+            if net {
+                crate::net::stack::NET_WQ.wake_all();
+            }
             crate::arch::pic::send_eoi(irq);
+            // Run the network task now rather than at the end of the current timeslice
+            let at_preempt_point = (ctx.cs & 3) == 3
+                || crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::SeqCst) > 0;
+            if net && at_preempt_point && crate::task::is_active() {
+                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.schedule_now(ctx);
+                }
+            }
         }
         20..=31 | 48..=255 => {
             // Spurious or unhandled interrupt / trap - return cleanly

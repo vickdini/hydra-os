@@ -11,8 +11,12 @@
 //! The driver utilizes circular direct memory access (DMA) descriptor rings for transmission and reception:
 //! - **Transmit Ring (TX)**: 32 descriptors of 16 bytes each. Packets are written into identity-mapped host
 //!   memory buffers and transmitted autonomously by the hardware DMA engine upon updating the Tail pointer.
-//! - **Receive Ring (RX)**: 32 descriptors of 16 bytes each. Incoming Ethernet frames are written by the NIC
-//!   directly into pre-allocated 2048-byte host buffers with hardware CRC validation.
+//! - **Receive Ring (RX)**: 256 descriptors of 16 bytes each. Incoming Ethernet frames are written by the NIC
+//!   directly into pre-allocated 2048-byte host buffers with hardware CRC validation. The ring holds 512 KiB,
+//!   several full TCP receive windows.
+//!
+//! Receive is interrupt-driven once the scheduler runs ([`enable_interrupts`]): the handler acknowledges the
+//! interrupt and wakes the network task (`netd`), which drains the ring. Early boot code (DHCP) polls.
 //!
 //! ## Hardware Registers (MMIO via BAR0)
 //!
@@ -30,6 +34,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use crate::arch::pci::{self, PciDevice};
 
@@ -39,7 +44,10 @@ pub const E1000_DEVICE_ID: u16 = 0x100E; // 82540EM (VirtualBox / QEMU)
 // E1000 Register Offsets
 const REG_CTRL: usize = 0x0000;
 const REG_STATUS: usize = 0x0008;
+const REG_ICR: usize = 0x00C0;
+const REG_IMS: usize = 0x00D0;
 const REG_IMC: usize = 0x00D8;
+const REG_RDTR: usize = 0x2820;
 const REG_RCTL: usize = 0x0100;
 const REG_TCTL: usize = 0x0400;
 const REG_TIPG: usize = 0x0410;
@@ -80,7 +88,21 @@ const TCTL_COLD_SHIFT: u32 = 12;   // Collision Distance
 
 // Descriptors Configuration
 const NUM_TX_DESC: usize = 32;
-const NUM_RX_DESC: usize = 32;
+const NUM_RX_DESC: usize = 256;
+
+// Interrupt causes (ICR/IMS bits)
+const INT_LSC: u32 = 1 << 2; // Link status change
+const INT_RXDMT0: u32 = 1 << 4; // Receive descriptors running low
+const INT_RXO: u32 = 1 << 6; // Receiver overrun
+const INT_RXT0: u32 = 1 << 7; // Receive timer (a frame arrived)
+
+/// MMIO base of the active device, for the interrupt handler (which must not take
+/// [`E1000_NIC`]: the interrupted code may hold it).
+static MMIO_BASE: AtomicU64 = AtomicU64::new(0);
+/// Legacy IRQ line of the device once interrupts are enabled (0xFF = polled).
+static IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
+/// PCI interrupt line reported by the firmware.
+static PCI_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
 const BUFFER_SIZE: usize = 2048;
 
 /// Hardware 16-byte Transmit Descriptor consumed by the E1000 DMA engine.
@@ -358,8 +380,51 @@ pub fn init() -> Result<(), &'static str> {
         }
     }
 
+    MMIO_BASE.store(device.mmio_base, Ordering::Release);
+    PCI_IRQ_LINE.store(dev.irq_line, Ordering::Release);
     *nic_lock = Some(device);
     Ok(())
+}
+
+/// Switches receive to interrupts: unmasks the device's receive causes and its PIC line.
+/// Returns false (the stack keeps polling) if the firmware assigned no legacy IRQ.
+pub fn enable_interrupts() -> bool {
+    let base = MMIO_BASE.load(Ordering::Acquire);
+    let irq = PCI_IRQ_LINE.load(Ordering::Acquire);
+    if base == 0 || irq == 0 || irq >= 16 || irq == 2 {
+        return false;
+    }
+    IRQ_LINE.store(irq, Ordering::Release);
+    unsafe {
+        // Interrupt for every frame (no receive delay timer), then unmask the causes
+        core::ptr::write_volatile((base + REG_RDTR as u64) as *mut u32, 0);
+        core::ptr::read_volatile((base + REG_ICR as u64) as *const u32);
+        core::ptr::write_volatile((base + REG_IMS as u64) as *mut u32, INT_RXT0 | INT_RXO | INT_RXDMT0 | INT_LSC);
+    }
+    crate::arch::pic::unmask_irq(irq);
+    if irq >= 8 {
+        crate::arch::pic::unmask_irq(2);
+    }
+    true
+}
+
+/// The device's IRQ line when interrupt-driven.
+pub fn irq_line() -> Option<u8> {
+    match IRQ_LINE.load(Ordering::Acquire) {
+        0xFF => None,
+        l => Some(l),
+    }
+}
+
+/// Interrupt handler body: acknowledges the causes (reading ICR clears them and lowers
+/// the line). Returns true if the interrupt was ours.
+pub fn on_interrupt() -> bool {
+    let base = MMIO_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return false;
+    }
+    let icr = unsafe { core::ptr::read_volatile((base + REG_ICR as u64) as *const u32) };
+    icr != 0
 }
 
 /// Returns true if the Intel E1000 device is initialized and active.

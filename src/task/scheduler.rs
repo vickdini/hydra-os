@@ -141,6 +141,8 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -223,6 +225,8 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -301,6 +305,8 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -370,6 +376,8 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -461,6 +469,8 @@ impl Scheduler {
             exe: Some(alloc::sync::Arc::from(exec_path)),
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
         crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
@@ -605,6 +615,8 @@ impl Scheduler {
             exe: parent_exe,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            event_wait: false,
+            wake_pending: false,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
 
@@ -634,11 +646,13 @@ impl Scheduler {
 
         let current_ticks = crate::arch::pit::ticks();
 
-        // 1. Wake up any sleeping tasks whose timer target has expired
+        // 1. Apply wait-queue wakeups, and wake sleeping tasks whose timer target has expired
+        self.apply_wakes();
         for task in self.tasks.iter_mut() {
             if let TaskState::Sleeping { wake_tick } = task.state {
                 if current_ticks >= wake_tick {
                     task.state = TaskState::Ready;
+                    task.event_wait = false;
                 }
             }
         }
@@ -677,8 +691,19 @@ impl Scheduler {
         let num_tasks = self.tasks.len();
         let mut next_idx = None;
 
-        // First pass: Check non-idle Ready tasks
+        // First pass: high-priority service tasks (the network task) run as soon as they
+        // are ready; then non-idle Ready tasks in round-robin order
         for offset in 1..=num_tasks {
+            let idx = (curr_idx + offset) % num_tasks;
+            if self.tasks[idx].state == TaskState::Ready && self.tasks[idx].priority >= TaskPriority::High {
+                next_idx = Some(idx);
+                break;
+            }
+        }
+        for offset in 1..=num_tasks {
+            if next_idx.is_some() {
+                break;
+            }
             let idx = (curr_idx + offset) % num_tasks;
             if self.tasks[idx].state == TaskState::Ready && self.tasks[idx].priority > TaskPriority::Idle {
                 next_idx = Some(idx);
@@ -759,6 +784,68 @@ impl Scheduler {
         }
     }
 
+    /// Wakes task `id` from an event wait; a task that is not waiting yet keeps the wakeup
+    /// for its next wait. Tasks blocked for other reasons (futexes, IPC) are not disturbed.
+    pub fn wake_task(&mut self, id: u64) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id.0 == id) {
+            match task.state {
+                TaskState::Dead => {}
+                TaskState::Blocked | TaskState::Sleeping { .. } if task.event_wait => {
+                    task.state = TaskState::Ready;
+                    task.event_wait = false;
+                }
+                TaskState::Blocked | TaskState::Sleeping { .. } => {}
+                _ => task.wake_pending = true,
+            }
+        }
+    }
+
+    /// Applies wakeups recorded by [`super::wait::WaitQueue::wake_all`].
+    pub fn apply_wakes(&mut self) {
+        let mut woken = [(0u64, false); 64];
+        let mut n = 0;
+        let overflow = super::wait::drain(|id, process| {
+            woken[n] = (id, process);
+            n += 1;
+        });
+        for &(id, process) in &woken[..n] {
+            if process {
+                self.unblock_group(id);
+            } else {
+                self.wake_task(id);
+            }
+        }
+        if overflow {
+            for task in self.tasks.iter_mut() {
+                if task.event_wait && matches!(task.state, TaskState::Blocked | TaskState::Sleeping { .. }) {
+                    task.state = TaskState::Ready;
+                    task.event_wait = false;
+                }
+            }
+        }
+    }
+
+    /// Puts the current task in an event wait (until `deadline`, if any). Returns false
+    /// without sleeping when a wakeup already arrived; the caller then re-checks.
+    pub fn event_wait_current(&mut self, deadline: Option<u64>) -> bool {
+        self.apply_wakes();
+        if !self.initialized || self.current_index >= self.tasks.len() {
+            return false;
+        }
+        let task = &mut self.tasks[self.current_index];
+        if task.wake_pending {
+            task.wake_pending = false;
+            return false;
+        }
+        task.event_wait = true;
+        task.state = match deadline {
+            Some(wake_tick) => TaskState::Sleeping { wake_tick },
+            None => TaskState::Blocked,
+        };
+        task.timeslice_remaining = 0;
+        true
+    }
+
     /// Marks the currently running task as Blocked and zeroes its remaining timeslice.
     pub fn block_current(&mut self) -> TaskId {
         if self.initialized && self.current_index < self.tasks.len() {
@@ -836,11 +923,24 @@ impl Scheduler {
         }
     }
 
-    /// Wakes every blocked thread of process `tgid` (a signal arrived).
+    /// Wakes every blocked thread of process `tgid` (a signal arrived), including threads
+    /// in event waits; a thread about to wait finds the wakeup pending.
     pub fn unblock_group(&mut self, tgid: u64) {
         for task in self.tasks.iter_mut() {
-            if task.tgid == tgid && task.state == TaskState::Blocked {
-                task.state = TaskState::Ready;
+            if task.tgid != tgid {
+                continue;
+            }
+            match task.state {
+                TaskState::Blocked => {
+                    task.state = TaskState::Ready;
+                    task.event_wait = false;
+                }
+                TaskState::Sleeping { .. } if task.event_wait => {
+                    task.state = TaskState::Ready;
+                    task.event_wait = false;
+                }
+                TaskState::Running | TaskState::Ready => task.wake_pending = true,
+                _ => {}
             }
         }
     }
@@ -1022,7 +1122,16 @@ extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
 fn idle_task_entry() {
     loop {
         if x86_64::instructions::interrupts::are_enabled() {
-            crate::task::preemptible(x86_64::instructions::hlt);
+            // Halt until the next interrupt, unless one already woke a task: checking with
+            // interrupts disabled and re-enabling them atomically with `hlt` closes the gap
+            // in which a wakeup could be missed until the next timer tick
+            x86_64::instructions::interrupts::disable();
+            if crate::task::wait::wakes_pending() {
+                x86_64::instructions::interrupts::enable();
+                crate::task::yield_now();
+            } else {
+                crate::task::preemptible(x86_64::instructions::interrupts::enable_and_hlt);
+            }
         } else {
             core::hint::spin_loop();
         }

@@ -2,6 +2,7 @@ pub mod elf;
 pub mod exec;
 pub mod scheduler;
 pub mod tcb;
+pub mod wait;
 
 use alloc::vec::Vec;
 pub use elf::{load_elf, load_linux_elf, ElfBinary, ElfError, ElfProcessImage};

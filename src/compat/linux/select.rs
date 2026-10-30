@@ -1,7 +1,8 @@
 //! # `select` / `pselect6`
 //!
 //! Waits until descriptors in the read, write or exception sets become ready, using the
-//! same readiness rules as `poll` ([`crate::fs::FileDescriptor::poll_events`]).
+//! same readiness rules as `poll` ([`crate::fs::FileDescriptor::poll_events`]), sleeping on
+//! the descriptors' wait queues in between.
 
 use alloc::vec::Vec;
 
@@ -46,9 +47,20 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         _ => return EFAULT,
     };
     let deadline = timeout_ns.map(|ns| crate::arch::pit::ticks() + (ns + 9_999_999) / 10_000_000);
+    let mut waits = crate::task::wait::WaitSet::new();
+    crate::task::with_current_fds_mut(|fds| {
+        for fd in 0..nfds {
+            if is_set(&r, fd) || is_set(&w, fd) || is_set(&e, fd) {
+                if let Some(d) = fds.get(fd) {
+                    d.add_wait_queues(&mut waits);
+                }
+            }
+        }
+    });
     loop {
+        waits.register();
         super::tty::pump();
-        crate::net::stack::poll();
+        crate::net::stack::kick();
         let mut out_r = alloc::vec![0u64; words];
         let mut out_w = alloc::vec![0u64; words];
         let out_e = alloc::vec![0u64; words];
@@ -96,7 +108,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         if super::proc::signal_pending() {
             return super::proc::ERESTARTSYS;
         }
-        crate::task::sleep_ticks(1);
+        waits.wait(deadline);
     }
 }
 

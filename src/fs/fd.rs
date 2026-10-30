@@ -271,6 +271,40 @@ impl FileDescriptor {
     }
 
     /// Evaluates readiness flags for epoll and poll multiplexing.
+    /// Adds the wait queues that announce this descriptor's readiness changes to `waits`,
+    /// or marks the set polled when changes are not announced (eventfd, epoll, listening
+    /// sockets). Does not take the scheduler lock (callers may hold it).
+    pub fn add_wait_queues(&self, waits: &mut crate::task::wait::WaitSet) {
+        use crate::task::wait::QueueRef;
+        match self {
+            FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {
+                waits.add(QueueRef::Static(&crate::compat::linux::tty::INPUT_WQ));
+            }
+            FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) => {
+                waits.add(QueueRef::Shared(p.lock().wq.clone()));
+            }
+            FileDescriptor::Socket(sock) => match &sock.lock().role {
+                crate::compat::linux::socket::UnixSocketRole::Connected { rx, tx, .. } => {
+                    waits.add(QueueRef::Shared(rx.lock().wq.clone()));
+                    waits.add(QueueRef::Shared(tx.lock().wq.clone()));
+                }
+                _ => waits.polled = true,
+            },
+            FileDescriptor::Inet(s) => {
+                let s = s.lock();
+                match s.wait_queue() {
+                    Some(q) if crate::net::stack::service_running() => waits.add(QueueRef::Shared(q)),
+                    Some(_) => waits.polled = true,
+                    // No endpoint yet: readiness only changes through the owner's own calls
+                    None => {}
+                }
+            }
+            // Always ready
+            FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) | FileDescriptor::File { .. } => {}
+            FileDescriptor::EventFd(_) | FileDescriptor::Epoll(_) => waits.polled = true,
+        }
+    }
+
     pub fn poll_events(&self) -> u32 {
         match self {
             FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {

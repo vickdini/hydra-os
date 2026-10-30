@@ -153,6 +153,21 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         73 => 0,
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
+        // getrusage(who, struct rusage *): CPU time from the scheduler's tick accounting
+        // (user and system time are not told apart); other fields stay zero
+        98 => {
+            let who = a[0] as i32;
+            if !(-1..=1).contains(&who) {
+                EINVAL
+            } else {
+                let ticks = if who == -1 { 0 } else { crate::task::with_current_task_mut(|t| t.ticks_run).unwrap_or(0) };
+                let us = ticks * 1_000_000 / crate::arch::pit::frequency_hz().max(1);
+                let mut ru = [0u8; 144];
+                ru[0..8].copy_from_slice(&(us / 1_000_000).to_le_bytes());
+                ru[8..16].copy_from_slice(&(us % 1_000_000).to_le_bytes());
+                copy_out(a[1], &ru)
+            }
+        }
         229 => {
             // clock_getres: 10 ms timer resolution
             if a[1] != 0 {

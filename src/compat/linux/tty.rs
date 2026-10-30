@@ -133,6 +133,9 @@ static TTY: Mutex<Tty> = Mutex::new(Tty {
     nonblock: false,
 });
 
+/// Readers of the terminal (and `poll`/`select` on it), woken by keystrokes.
+pub static INPUT_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
+
 /// `O_NONBLOCK` state of the console file description (`fcntl(F_GETFL/F_SETFL)`).
 pub fn nonblock() -> bool {
     TTY.lock().nonblock
@@ -340,6 +343,8 @@ pub fn pump() {
     for sig in signals {
         super::proc::post_group(fg, sig);
     }
+    // Another task may be waiting for the input this pump just processed
+    INPUT_WQ.wake_all();
 }
 
 /// True if input is buffered for `read` (does not pull new keystrokes; see [`pump`]).
@@ -375,7 +380,10 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
             return super::proc::ERESTARTSYS;
         }
     }
+    let mut waits = crate::task::wait::WaitSet::new();
+    waits.add(crate::task::wait::QueueRef::Static(&INPUT_WQ));
     loop {
+        waits.register();
         pump();
         {
             let mut t = TTY.lock();
@@ -417,7 +425,7 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
         if super::proc::signal_pending() {
             return super::proc::ERESTARTSYS;
         }
-        crate::task::sleep_ticks(1);
+        waits.wait(None);
     }
 }
 

@@ -103,6 +103,20 @@ impl EpollInstance {
 }
 
 /// Collects ready events for this epoll instance using the current process FdTable.
+/// Wait set of every descriptor an epoll instance watches.
+pub fn epoll_wait_set(epoll: &Arc<Mutex<EpollInstance>>) -> crate::task::wait::WaitSet {
+    let fds_watched: Vec<i32> = epoll.lock().watches.values().map(|w| w.fd).collect();
+    let mut waits = crate::task::wait::WaitSet::new();
+    crate::task::with_current_fds_mut(|fds| {
+        for fd in fds_watched {
+            if let Some(desc) = fds.get(fd as usize) {
+                desc.add_wait_queues(&mut waits);
+            }
+        }
+    });
+    waits
+}
+
 pub fn epoll_collect_ready(
     epoll: &Arc<Mutex<EpollInstance>>,
     maxevents: usize,

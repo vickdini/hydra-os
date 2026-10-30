@@ -993,7 +993,9 @@ fn pipe_of(fd: usize) -> Option<(Arc<Mutex<crate::fs::PipeBuffer>>, bool)> {
 /// Read from a pipe: waits for data (unless `O_NONBLOCK`), or returns 0 once every
 /// writer is gone.
 fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
+    let waits = pipe_wait_set(pipe);
     loop {
+        waits.register();
         {
             let mut p = pipe.lock();
             if p.available_read() > 0 {
@@ -1009,14 +1011,23 @@ fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
         if super::proc::signal_pending() {
             return super::proc::ERESTARTSYS;
         }
-        crate::task::sleep_ticks(1);
+        waits.wait(None);
     }
+}
+
+/// Wait set of a pipe's readers and writers.
+fn pipe_wait_set(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>) -> crate::task::wait::WaitSet {
+    let mut waits = crate::task::wait::WaitSet::new();
+    waits.add(crate::task::wait::QueueRef::Shared(pipe.lock().wq.clone()));
+    waits
 }
 
 /// Blocking write to a pipe: waits for space; `EPIPE` (and `SIGPIPE`) without readers.
 fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
     let mut done = 0;
+    let waits = pipe_wait_set(pipe);
     while done < data.len() {
+        waits.register();
         let wrote = {
             let mut p = pipe.lock();
             if p.readers_count() == 0 {
@@ -1040,7 +1051,7 @@ fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
                 if super::proc::signal_pending() {
                     return if done > 0 { done as i64 } else { super::proc::ERESTARTSYS };
                 }
-                crate::task::sleep_ticks(1);
+                waits.wait(None);
             }
             Some(n) => done += n,
         }

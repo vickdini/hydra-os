@@ -150,6 +150,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
             set_color(Color::Yellow, Color::Black);
             println!("Link Down (No carrier)");
         }
+        // From here on the NIC interrupts and the `netd` task processes received frames
+        crate::net::stack::start_service();
         println!();
     }
 

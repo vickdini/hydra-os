@@ -1,8 +1,9 @@
 //! # Internet Sockets (`AF_INET`)
 //!
 //! TCP (`SOCK_STREAM`) and UDP (`SOCK_DGRAM`) sockets for Linux processes, backed by the
-//! transport engine in [`crate::net::stack`]. Blocking operations poll the network while
-//! they wait and stop for signals; non-blocking sockets return `EAGAIN`/`EINPROGRESS`.
+//! transport engine in [`crate::net::stack`]. Blocking operations sleep on the
+//! connection's wait queue until the network task reports a change, and stop for signals;
+//! non-blocking sockets return `EAGAIN`/`EINPROGRESS`.
 //!
 //! IPv6 is not available: `AF_INET6` sockets fail with `EAFNOSUPPORT`, which makes
 //! resolvers and clients fall back to IPv4.
@@ -69,6 +70,12 @@ impl Drop for InetSocket {
 
 impl InetSocket {
     /// Readiness for poll/select/epoll: POLLIN 0x1, POLLOUT 0x4, POLLERR 0x8, POLLHUP 0x10.
+    /// The wait queue that announces readiness changes (`None` before an endpoint exists:
+    /// an unconnected socket's readiness only changes through the caller's own calls).
+    pub fn wait_queue(&self) -> Option<Arc<crate::task::wait::WaitQueue>> {
+        self.tcp.or(self.udp).and_then(stack::wait_queue)
+    }
+
     pub fn poll_events(&self) -> u32 {
         if let Some(id) = self.tcp {
             let (r, w, hup, err) = stack::tcp_poll(id);
@@ -149,11 +156,17 @@ fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
     })
 }
 
-/// Waits (polling the network) until `ready()` gives a result, honouring non-blocking
-/// mode and signals.
-fn wait_for<T>(nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
+/// Waits until `ready()` gives a result for connection/endpoint `id`, honouring
+/// non-blocking mode and signals.
+fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
+    let mut waits = crate::task::wait::WaitSet::new();
+    match stack::wait_queue(id) {
+        Some(q) if stack::service_running() => waits.add(crate::task::wait::QueueRef::Shared(q)),
+        _ => waits.polled = true,
+    }
     loop {
-        stack::poll();
+        waits.register();
+        stack::kick();
         if let Some(r) = ready() {
             return r;
         }
@@ -163,7 +176,7 @@ fn wait_for<T>(nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>
         if super::proc::signal_pending() {
             return Err(super::proc::ERESTARTSYS);
         }
-        crate::task::sleep_ticks(1);
+        waits.wait(None);
     }
 }
 
@@ -210,7 +223,7 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
             }
         }
     };
-    let r = wait_for(false, || match stack::tcp_state(id) {
+    let r = wait_for(id, false, || match stack::tcp_state(id) {
         stack::TcpState::SynSent => None,
         stack::TcpState::Closed => Some(Err(stack::tcp_take_error(id).unwrap_or(stack::ECONNREFUSED))),
         _ => Some(Ok(())),
@@ -235,7 +248,7 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
         };
         let mut sent = 0;
         while sent < data.len() {
-            let r = wait_for(nonblock && sent == 0, || match stack::tcp_send(id, &data[sent..]) {
+            let r = wait_for(id, nonblock && sent == 0, || match stack::tcp_send(id, &data[sent..]) {
                 Ok(0) => None,
                 Ok(n) => Some(Ok(n)),
                 Err(e) => Some(Err(e)),
@@ -290,7 +303,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         if shut_rd {
             return Ok((0, None, false));
         }
-        let n = wait_for(nonblock, || match stack::tcp_recv(id, buf, peek) {
+        let n = wait_for(id, nonblock, || match stack::tcp_recv(id, buf, peek) {
             Ok((0, false)) => {
                 if stack::tcp_state(id) == stack::TcpState::Closed {
                     Some(Ok(0))
@@ -304,7 +317,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         return Ok((n, None, false));
     }
     let id = sock.lock().udp_id()?;
-    let (ip, port, data) = wait_for(nonblock, || stack::udp_recv(id, peek).map(Ok))?;
+    let (ip, port, data) = wait_for(id, nonblock, || stack::udp_recv(id, peek).map(Ok))?;
     let n = data.len().min(buf.len());
     buf[..n].copy_from_slice(&data[..n]);
     Ok((n, Some((ip, port)), data.len() > n))
@@ -406,7 +419,7 @@ pub fn write(sock: &Arc<Mutex<InetSocket>>, data: &[u8]) -> i64 {
 
 /// Bytes ready to read (`FIONREAD`).
 pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
-    stack::poll();
+    stack::kick();
     let s = sock.lock();
     if let Some(id) = s.tcp {
         let mut probe = alloc::vec![0u8; 65536];
