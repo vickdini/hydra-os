@@ -126,14 +126,21 @@ def main():
         qmp.type(" ")  # cancel auto takeover countdown
         time.sleep(2.0)
         start = len(read_log(a.log))
+        prompts_seen = 0
         for i, c in enumerate(a.commands):
-            if a.prompt and i > 0:
-                # Wait until the program prints its prompt again
+            no_wait = c.startswith("@")  # "@cmd": type without waiting for a prompt
+            if no_wait:
+                c = c[1:]
+            if a.prompt and i > 0 and not no_wait:
+                # Wait until the program prints a new prompt after the previous command
                 deadline = time.time() + 60
-                while time.time() < deadline and read_log(a.log)[start:].count(a.prompt) < i:
+                while time.time() < deadline and read_log(a.log)[start:].count(a.prompt) <= prompts_seen:
                     time.sleep(0.25)
-            if c == "^C":
-                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": "c"}]})
+            if a.prompt:
+                prompts_seen = read_log(a.log)[start:].count(a.prompt)
+            if len(c) == 2 and c[0] == "^" and c[1].isalpha():
+                # Ctrl+letter, e.g. ^C, ^Z, ^D
+                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": c[1].lower()}]})
             else:
                 qmp.type(c + "\n")
             time.sleep(a.gap)

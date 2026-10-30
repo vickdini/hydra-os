@@ -77,6 +77,24 @@ fn segment_prot(ph: &Elf64ProgramHeader) -> u32 {
 }
 
 /// Result of mapping one ELF object.
+/// An ELF file to load: its leading bytes (enough for the headers, `PT_INTERP` and
+/// program header table), its total length, and the object its pages are mapped from.
+pub struct ElfSource {
+    pub head: Vec<u8>,
+    pub len: u64,
+    pub obj: Arc<dyn MappedObject>,
+}
+
+impl ElfSource {
+    /// A source backed by an in-memory copy of the whole file.
+    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
+        let head = bytes[..bytes.len().min(64 * 1024)].to_vec();
+        let len = bytes.len() as u64;
+        let obj: Arc<dyn MappedObject> = BufferObject::new(bytes);
+        Self { head, len, obj }
+    }
+}
+
 struct MappedElf {
     bias: u64,
     entry: u64,
@@ -86,8 +104,8 @@ struct MappedElf {
 
 /// Maps all `PT_LOAD` segments of `obj` into `mm`. PIE objects are placed at `pie_base`
 /// when given, otherwise wherever the mmap allocator finds room.
-fn map_elf(mm: &mut Mm, obj: &Arc<BufferObject>, pie_base: Option<u64>) -> Result<MappedElf, ElfError> {
-    let elf = ElfBinary::parse(obj.bytes())?;
+fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<MappedElf, ElfError> {
+    let elf = ElfBinary::parse(&src.head)?;
     let segs = elf.load_segments();
     if segs.is_empty() {
         return Err(ElfError::NoLoadableSegments);
@@ -111,8 +129,8 @@ fn map_elf(mm: &mut Mm, obj: &Arc<BufferObject>, pie_base: Option<u64>) -> Resul
         0
     };
 
-    let object: Arc<dyn MappedObject> = obj.clone();
-    let file_len = obj.len() as u64;
+    let object = src.obj.clone();
+    let file_len = src.len;
     for ph in &segs {
         if ph.p_offset.saturating_add(ph.p_filesz) > file_len {
             return Err(ElfError::SegmentOutOfBounds);
@@ -187,27 +205,25 @@ fn cpuid_edx_leaf1() -> u64 {
 
 /// Loads `exe` (and its dynamic linker, read through `read_file`) into a new address space.
 pub fn load_linux_exec(
-    exe: Box<[u8]>,
+    exe: ElfSource,
     exec_path: &str,
     argv: &[&str],
     envp: &[&str],
     creds: ExecCreds,
-    read_file: &dyn Fn(&str) -> Option<Vec<u8>>,
+    read_file: &dyn Fn(&str) -> Option<ElfSource>,
 ) -> Result<LinuxExecImage, ElfError> {
     let mut mm = Mm::new().map_err(|e| ElfError::PagingError(e))?;
 
-    let interp_path = ElfBinary::parse(&exe)?.interp_path().map(String::from);
-    let exe_obj = BufferObject::new(exe);
-    let main = map_elf(&mut mm, &exe_obj, Some(PIE_BASE))?;
+    let interp_path = ElfBinary::parse(&exe.head)?.interp_path().map(String::from);
+    let main = map_elf(&mut mm, &exe, Some(PIE_BASE))?;
 
     mm.brk_start = page_up(main.end);
     mm.brk = mm.brk_start;
 
     let (entry, interp_base) = match interp_path {
         Some(path) => {
-            let bytes = read_file(&path).ok_or(ElfError::InterpreterNotFound)?;
-            let interp_obj = BufferObject::new(bytes.into_boxed_slice());
-            let interp = map_elf(&mut mm, &interp_obj, None)?;
+            let interp_src = read_file(&path).ok_or(ElfError::InterpreterNotFound)?;
+            let interp = map_elf(&mut mm, &interp_src, None)?;
             (interp.entry, interp.bias)
         }
         None => (main.entry, 0),
@@ -253,7 +269,7 @@ pub fn load_linux_exec(
         (AT_CLKTCK, 100),
         (AT_PHDR, main.phdr),
         (AT_PHENT, 56),
-        (AT_PHNUM, ElfBinary::parse(exe_obj.bytes())?.header().e_phnum as u64),
+        (AT_PHNUM, ElfBinary::parse(&exe.head)?.header().e_phnum as u64),
         (AT_BASE, interp_base),
         (AT_FLAGS, 0),
         (AT_ENTRY, main.entry),

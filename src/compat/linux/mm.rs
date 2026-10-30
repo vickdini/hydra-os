@@ -91,6 +91,16 @@ pub fn inode_object(ino: u64) -> Arc<InodeObject> {
     obj
 }
 
+/// An executable or shared object on the pool, mapped through the page cache: only the
+/// headers are read now, the rest is faulted in page by page.
+pub fn inode_source(ino: u64) -> Result<crate::task::exec::ElfSource, i64> {
+    let len = ZfsClient::getattr(ino)?.size;
+    let mut head = alloc::vec![0u8; len.min(64 * 1024) as usize];
+    let n = ZfsClient::read_at(ino, 0, &mut head)?;
+    head.truncate(n);
+    Ok(crate::task::exec::ElfSource { head, len, obj: inode_object(ino) })
+}
+
 /// Returns the running task's address space, if it has one.
 pub fn current_mm() -> Option<Arc<Mutex<Mm>>> {
     crate::task::with_current_task_mut(|t| t.mm.clone()).flatten()

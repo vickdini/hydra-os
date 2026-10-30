@@ -94,17 +94,14 @@ pub fn spawn_linux_chroot(
         .map_err(|e| alloc::format!("cannot open root directory {} (errno {})", root_dir, e))?;
     let ino = ZfsClient::resolve_in(root, root, exe.as_bytes(), true)
         .map_err(|e| alloc::format!("{}: not found in {} (errno {})", exe, root_dir, e))?;
-    let attr = ZfsClient::getattr(ino).map_err(|e| alloc::format!("stat failed (errno {})", e))?;
-    let mut data = alloc::vec![0u8; attr.size as usize];
-    let n = ZfsClient::read_at(ino, 0, &mut data).map_err(|e| alloc::format!("read failed (errno {})", e))?;
-    data.truncate(n);
-    if !elf::ElfBinary::parse(&data).is_ok() || !exec::is_vm_loadable(&data) {
+    let source = crate::compat::linux::mm::inode_source(ino).map_err(|e| alloc::format!("read failed (errno {})", e))?;
+    if !elf::ElfBinary::parse(&source.head).is_ok() || !exec::is_vm_loadable(&source.head) {
         return Err(alloc::format!("{} is not a position-independent x86_64 ELF executable", exe));
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
         sched
-            .spawn_linux_process("linux_app", &data, exe, args, TaskPriority::Normal, uid, gid, Some(root))
+            .spawn_linux_process("linux_app", source, exe, args, TaskPriority::Normal, uid, gid, Some(root))
             .map_err(alloc::string::String::from)
     })
 }

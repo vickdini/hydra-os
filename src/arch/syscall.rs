@@ -167,6 +167,10 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
 
     // Check if active task uses Linux ABI personality
     if crate::task::current_personality() == crate::task::TaskPersonality::Linux {
+        // Like Linux, service interrupts (keyboard, timer) while a system call runs; the
+        // timer never preempts kernel code outside explicit wait points (see
+        // `task::preemptible`), and the entry stub disables interrupts again on return.
+        x86_64::instructions::interrupts::enable();
         let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed);
         let (num, args) = (frame.rax, [frame.rdi, frame.rsi, frame.rdx, frame.r10]);
         if tracing {
@@ -486,6 +490,7 @@ global_asm!(
         mov rsi, rsp
         sub rsp, 32                             // 32-byte Win64 shadow space
         call hydra_syscall_dispatcher
+        cli                                     // no interrupts while user state is restored
         add rsp, 32
 
         fxrstor64 [rsp]

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -167,6 +168,41 @@ int main(int argc, char **argv) {
     n = read(p[0], buf, 1);
     check("signal interrupts blocking read with EINTR", n == -1 && errno == EINTR);
     waitpid(c, &st, 0);
+
+    // 12. Job control: stop, continue and kill a child, observed through waitpid
+    c = fork();
+    if (c == 0) {
+        for (;;) pause();
+    }
+    usleep(100000);
+    kill(c, SIGSTOP);
+    w = waitpid(c, &st, WUNTRACED);
+    check("SIGSTOP: waitpid(WUNTRACED) reports stopped", w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP);
+    kill(c, SIGCONT);
+    w = waitpid(c, &st, WCONTINUED);
+    check("SIGCONT: waitpid(WCONTINUED) reports continued", w == c && WIFCONTINUED(st));
+    kill(c, SIGSTOP);
+    waitpid(c, &st, WUNTRACED);
+    kill(c, SIGKILL);
+    w = waitpid(c, &st, 0);
+    check("SIGKILL ends a stopped child", w == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL);
+
+    // 13. A sleep interrupted by a stop resumes and still lasts its full duration
+    c = fork();
+    if (c == 0) {
+        struct timespec t0, t1, req = {1, 0};
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        nanosleep(&req, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        _exit(ms >= 950 ? 0 : 1);
+    }
+    usleep(200000);
+    kill(c, SIGSTOP);
+    usleep(300000);
+    kill(c, SIGCONT);
+    waitpid(c, &st, 0);
+    check("stopped nanosleep restarts for the remaining time", WIFEXITED(st) && WEXITSTATUS(st) == 0);
 
     printf("[proctest] %s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s");
     return failures;

@@ -87,14 +87,29 @@ fn current_tgid() -> u64 {
 }
 
 /// Sleeps until `deadline_ns` on the boot clock, waking early (with `EINTR`) for signals.
-fn sleep_until(deadline_ns: u64) -> i64 {
+/// Deadlines of interrupted sleeps, by thread, so a transparent restart (after a stop
+/// signal or an ignored signal) sleeps only for the remaining time.
+static SLEEP_DEADLINES: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Sleeps until `deadline_ns` (boot clock). If a signal interrupts the sleep, the remaining
+/// time is written to `rem` (when given) and the call reports `ERESTART_RESTARTBLOCK`.
+fn sleep_until(deadline_ns: u64, rem: u64) -> i64 {
     loop {
         let now = crate::arch::pit::ticks() * 10_000_000;
         if now >= deadline_ns {
             return 0;
         }
         if super::proc::signal_pending() {
-            return -4; // EINTR
+            let (tid, _) = super::proc::current_ids();
+            SLEEP_DEADLINES.lock().insert(tid, deadline_ns);
+            if rem != 0 && crate::memory::vm::prefault_current(rem, 16, true) {
+                let left = deadline_ns - now;
+                unsafe {
+                    *(rem as *mut i64) = (left / 1_000_000_000) as i64;
+                    *((rem + 8) as *mut i64) = (left % 1_000_000_000) as i64;
+                }
+            }
+            return super::proc::ERESTART_RESTARTBLOCK;
         }
         crate::task::sleep_ticks(1);
     }
@@ -162,7 +177,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         122 => crate::task::with_current_task_mut(|t| t.euid as i64).unwrap_or(0),
         123 => crate::task::with_current_task_mut(|t| t.egid as i64).unwrap_or(0),
         NR_NANOSLEEP | NR_CLOCK_NANOSLEEP => {
-            let (req, abs) = if num == NR_NANOSLEEP { (a[0], false) } else { (a[2], a[1] & 1 != 0) };
+            let (req, abs, rem) = if num == NR_NANOSLEEP { (a[0], false, a[1]) } else { (a[2], a[1] & 1 != 0, a[3]) };
+            // A transparently restarted sleep continues toward its original deadline
+            let (tid, _) = super::proc::current_ids();
+            let saved = SLEEP_DEADLINES.lock().remove(&tid);
+            if super::proc::take_restart_flag() {
+                if let Some(deadline) = saved {
+                    return Some(sleep_until(deadline, if abs { 0 } else { rem }));
+                }
+            }
             let ns = match read_timespec_ns(req) {
                 Some(ns) => ns,
                 None => return Some(EINVAL),
@@ -180,7 +203,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             } else {
                 now + ns
             };
-            sleep_until(deadline)
+            sleep_until(deadline, if abs { 0 } else { rem })
         }
         NR_GETRLIMIT => {
             if a[0] >= RLIMIT_NLIMITS {
@@ -201,13 +224,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         }
         NR_GETPPID => super::proc::getppid(),
         NR_GETPGRP => super::proc::getpgid(0),
-        NR_GETPGID => super::proc::getpgid(a[0]),
-        NR_GETSID => super::proc::getsid(a[0]),
-        NR_SETPGID => super::proc::setpgid(a[0], a[1]),
+        NR_GETPGID => super::proc::getpgid(a[0] as u32 as u64),
+        NR_GETSID => super::proc::getsid(a[0] as u32 as u64),
+        NR_SETPGID => super::proc::setpgid(a[0] as u32 as u64, a[1] as u32 as u64),
         NR_SETSID => super::proc::setsid(),
-        NR_KILL => super::proc::sys_kill(a[0] as i64, a[1]),
-        NR_TKILL => super::proc::sys_tkill(a[0], a[1]),
-        NR_TGKILL => super::proc::sys_tgkill(a[0], a[1], a[2]),
+        // pid_t arguments are 32-bit: sign-extend from the low half of the register
+        NR_KILL => super::proc::sys_kill(a[0] as i32 as i64, a[1]),
+        NR_TKILL => super::proc::sys_tkill(a[0] as u32 as u64, a[1]),
+        NR_TGKILL => super::proc::sys_tgkill(a[0] as u32 as u64, a[1] as u32 as u64, a[2]),
         NR_SCHED_GETAFFINITY => {
             // One CPU: report a mask with only CPU 0 set, sized as the kernel's cpumask (8 bytes)
             if (a[1] as usize) < 8 {

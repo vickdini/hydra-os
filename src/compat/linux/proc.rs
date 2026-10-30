@@ -54,7 +54,6 @@ pub const SIGWINCH: u32 = 28;
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 
-const SA_SIGINFO: u64 = 0x4;
 const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
@@ -65,6 +64,26 @@ const SS_DISABLE: u32 = 2;
 
 /// Internal return value of interrupted blocking system calls (never seen by user code).
 pub const ERESTARTSYS: i64 = -512;
+/// Like [`ERESTARTSYS`], but the call resumes from saved state (its restart block) and a
+/// signal handler always turns it into `EINTR`, even with `SA_RESTART` (sleeps).
+pub const ERESTART_RESTARTBLOCK: i64 = -516;
+
+/// Threads whose interrupted system call is being restarted transparently.
+static RESTARTING: Mutex<BTreeMap<u64, ()>> = Mutex::new(BTreeMap::new());
+
+/// True (once) if the calling thread's current system call is a transparent restart.
+pub fn take_restart_flag() -> bool {
+    let (tid, _) = current_ids();
+    RESTARTING.lock().remove(&tid).is_some()
+}
+
+/// Records that system call `nr` is being restarted (only sleeps keep restart state).
+fn mark_restart(nr: u64) {
+    if nr == 35 || nr == 230 {
+        let (tid, _) = current_ids();
+        RESTARTING.lock().insert(tid, ());
+    }
+}
 const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
 const EINTR: i64 = -4;
@@ -105,6 +124,12 @@ pub struct Process {
     pub zombie: bool,
     /// `vfork` parent waits until this child execs or exits.
     pub vfork_released: bool,
+    /// Job control: stopped by `stop_sig`; the parent learns about the stop and the later
+    /// continue through `wait` (WUNTRACED / WCONTINUED), each reported once.
+    pub stopped: bool,
+    pub stop_sig: u32,
+    stop_reported: bool,
+    continued: bool,
 }
 
 /// All Linux processes, including zombies not yet reaped.
@@ -151,6 +176,10 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             exit_status: None,
             zombie: false,
             vfork_released: false,
+            stopped: false,
+            stop_sig: 0,
+            stop_reported: false,
+            continued: false,
         },
     );
 }
@@ -323,7 +352,23 @@ pub fn vfork_released(child: u64) -> bool {
 // ----------------------------------------------------------------------
 
 fn default_ignored(sig: u32) -> bool {
-    matches!(sig, SIGCHLD | SIGURG | SIGWINCH | SIGCONT | SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
+    matches!(sig, SIGCHLD | SIGURG | SIGWINCH | SIGCONT)
+}
+
+fn is_stop_signal(sig: u32) -> bool {
+    matches!(sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
+}
+
+const STOP_MASK: u64 = (1 << (SIGSTOP - 1)) | (1 << (SIGTSTP - 1)) | (1 << (SIGTTIN - 1)) | (1 << (SIGTTOU - 1));
+const SA_NOCLDSTOP: u64 = 1;
+
+/// Tells the parent of `child` about a job-control state change (unless it asked not to be).
+fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64) {
+    if let Some(parent) = procs.get_mut(&ppid) {
+        if parent.actions[SIGCHLD as usize].flags & SA_NOCLDSTOP == 0 {
+            parent.pending |= bit(SIGCHLD);
+        }
+    }
 }
 
 fn wake_process(pid: u64) {
@@ -335,17 +380,87 @@ fn wake_process(pid: u64) {
 pub fn post_process(pid: u64, sig: u32) -> bool {
     {
         let mut procs = PROCS.lock();
+        let mut resumed_ppid = None;
         match procs.get_mut(&pid) {
             Some(p) if !p.zombie => {
+                if sig == SIGCONT {
+                    p.pending &= !STOP_MASK;
+                    for t in p.threads.values_mut() {
+                        t.pending &= !STOP_MASK;
+                    }
+                    if p.stopped {
+                        p.stopped = false;
+                        p.continued = true;
+                        resumed_ppid = Some(p.ppid);
+                    }
+                } else if is_stop_signal(sig) {
+                    p.pending &= !bit(SIGCONT);
+                }
                 if sig != 0 {
                     p.pending |= bit(sig);
                 }
             }
             _ => return false,
         }
+        if let Some(ppid) = resumed_ppid {
+            notify_parent_stop(&mut procs, ppid);
+        }
     }
     wake_process(pid);
     true
+}
+
+/// True if the calling thread ignores or blocks `sig`.
+pub fn ignores_or_blocks(sig: u32) -> bool {
+    let (tid, pid) = current_ids();
+    PROCS.lock().get(&pid).map_or(true, |p| {
+        let blocked = p.threads.get(&tid).map_or(0, |t| t.mask) & bit(sig) != 0;
+        blocked || p.actions[sig as usize].handler == SIG_IGN
+    })
+}
+
+/// True if process `pid` is stopped by job control.
+pub fn is_stopped(pid: u64) -> bool {
+    PROCS.lock().get(&pid).map_or(false, |p| p.stopped)
+}
+
+/// Stops the calling process (default action of a stop signal) and waits until it is
+/// continued or killed.
+fn stop_current(sig: u32) {
+    let (_, pid) = current_ids();
+    {
+        let mut procs = PROCS.lock();
+        let ppid = match procs.get_mut(&pid) {
+            Some(p) => {
+                p.stopped = true;
+                p.stop_sig = sig;
+                p.stop_reported = false;
+                p.continued = false;
+                p.ppid
+            }
+            None => return,
+        };
+        notify_parent_stop(&mut procs, ppid);
+    }
+    wait_while_stopped();
+}
+
+/// Blocks the calling thread while its process is stopped (until SIGCONT or SIGKILL).
+fn wait_while_stopped() {
+    let (tid, pid) = current_ids();
+    loop {
+        let (stopped, killed) = match PROCS.lock().get(&pid) {
+            Some(p) => {
+                let t = p.threads.get(&tid).map_or(0, |t| t.pending);
+                (p.stopped, (p.pending | t) & bit(SIGKILL) != 0)
+            }
+            None => (false, false),
+        };
+        if !stopped || killed {
+            return;
+        }
+        crate::task::sleep_ticks(1);
+    }
 }
 
 /// Posts `sig` to one thread.
@@ -661,6 +776,7 @@ enum Action {
     None,
     Handler(u32, SigAction, u64),
     Terminate(u32),
+    Stop(u32),
 }
 
 /// Takes the next deliverable signal for the calling thread and decides what to do.
@@ -694,8 +810,12 @@ fn dequeue() -> Action {
                 if default_ignored(sig) {
                     continue;
                 }
+                if is_stop_signal(sig) {
+                    return Action::Stop(sig);
+                }
                 return Action::Terminate(sig);
             }
+            _ if sig == SIGSTOP => return Action::Stop(sig),
             _ if sig == SIGKILL => return Action::Terminate(sig),
             _ => {
                 if act.flags & SA_RESETHAND != 0 {
@@ -788,23 +908,34 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
 /// call number (for restarts); the result is already in `frame.rax`.
 pub fn deliver_on_syscall_return(frame: &mut SyscallFrame, fpu: *mut FpuState, orig_nr: u64) {
     let result = frame.rax as i64;
-    match dequeue() {
+    let (_, pid) = current_ids();
+    let action = loop {
+        if is_stopped(pid) {
+            wait_while_stopped();
+        }
+        match dequeue() {
+            Action::Stop(sig) => stop_current(sig),
+            a => break a,
+        }
+    };
+    match action {
+        Action::Stop(_) => unreachable!(),
         Action::None => {
-            if result == ERESTARTSYS {
-                // Interrupted by a signal that turned out to be ignored: restart
+            if result == ERESTARTSYS || result == ERESTART_RESTARTBLOCK {
+                // Interrupted by a signal that turned out to be ignored (or a stop): restart
                 frame.rip -= 2;
                 frame.rax = orig_nr;
+                mark_restart(orig_nr);
             }
         }
         Action::Terminate(sig) => die(sig),
         Action::Handler(sig, act, old_mask) => {
-            if result == ERESTARTSYS {
-                if act.flags & SA_RESTART != 0 {
-                    frame.rip -= 2;
-                    frame.rax = orig_nr;
-                } else {
-                    frame.rax = EINTR as u64;
-                }
+            if result == ERESTARTSYS && act.flags & SA_RESTART != 0 {
+                frame.rip -= 2;
+                frame.rax = orig_nr;
+                mark_restart(orig_nr);
+            } else if result == ERESTARTSYS || result == ERESTART_RESTARTBLOCK {
+                frame.rax = EINTR as u64;
             }
             let mut regs = UserRegs {
                 r8: frame.r8,
@@ -844,10 +975,25 @@ pub fn deliver_on_syscall_return(frame: &mut SyscallFrame, fpu: *mut FpuState, o
 /// Delivers pending signals to a thread about to return to user mode from an interrupt
 /// or exception.
 pub fn deliver_on_trap_return(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
-    if (ctx.cs & 3) != 3 || fpu.is_null() || !signal_pending() {
+    if (ctx.cs & 3) != 3 || fpu.is_null() {
         return;
     }
-    match dequeue() {
+    let (_, pid) = current_ids();
+    let stopped = PROCS.try_lock().map_or(false, |p| p.get(&pid).map_or(false, |p| p.stopped));
+    if !stopped && !signal_pending() {
+        return;
+    }
+    let action = loop {
+        if is_stopped(pid) {
+            wait_while_stopped();
+        }
+        match dequeue() {
+            Action::Stop(sig) => stop_current(sig),
+            a => break a,
+        }
+    };
+    match action {
+        Action::Stop(_) => unreachable!(),
         Action::None => {}
         Action::Terminate(sig) => die(sig),
         Action::Handler(sig, act, old_mask) => {
@@ -1003,7 +1149,15 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
 // ----------------------------------------------------------------------
 
 const WNOHANG: u64 = 1;
+const WUNTRACED: u64 = 2;
+const WCONTINUED: u64 = 8;
 const WNOWAIT: u64 = 0x0100_0000;
+
+/// Status values `wait` reports for job-control state changes.
+const WAIT_CONTINUED: i32 = 0xffff;
+fn wait_status_stopped(sig: u32) -> i32 {
+    0x7f | ((sig as i32) << 8)
+}
 
 fn matches(child: &Process, me: u64, my_pgid: u64, sel: i64) -> bool {
     child.ppid == me
@@ -1017,17 +1171,27 @@ fn matches(child: &Process, me: u64, my_pgid: u64, sel: i64) -> bool {
 
 /// Finds (and unless `keep`, reaps) a zombie child matching `sel`.
 /// Returns Ok(Some((pid, status))), Ok(None) if children exist but none exited, Err(ECHILD).
-fn reap(sel: i64, keep: bool) -> Result<Option<(u64, i32)>, i64> {
+fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
+    let keep = options & WNOWAIT != 0;
     let (_, me) = current_ids();
     let mut procs = PROCS.lock();
     let my_pgid = procs.get(&me).map_or(me, |p| p.pgid);
     let mut any = false;
+    // (pid, status, kind): 0 = exited (reap), 1 = stopped, 2 = continued
     let mut found = None;
     for c in procs.values() {
         if matches(c, me, my_pgid, sel) {
             any = true;
             if c.zombie {
-                found = Some((c.pid, c.exit_status.unwrap_or(0)));
+                found = Some((c.pid, c.exit_status.unwrap_or(0), 0));
+                break;
+            }
+            if options & WUNTRACED != 0 && c.stopped && !c.stop_reported {
+                found = Some((c.pid, wait_status_stopped(c.stop_sig), 1));
+                break;
+            }
+            if options & WCONTINUED != 0 && c.continued {
+                found = Some((c.pid, WAIT_CONTINUED, 2));
                 break;
             }
         }
@@ -1035,12 +1199,18 @@ fn reap(sel: i64, keep: bool) -> Result<Option<(u64, i32)>, i64> {
     if !any {
         return Err(ECHILD);
     }
-    if let Some((pid, _)) = found {
+    if let Some((pid, _, kind)) = found {
         if !keep {
-            procs.remove(&pid);
+            match kind {
+                0 => {
+                    procs.remove(&pid);
+                }
+                1 => procs.get_mut(&pid).unwrap().stop_reported = true,
+                _ => procs.get_mut(&pid).unwrap().continued = false,
+            }
         }
     }
-    Ok(found)
+    Ok(found.map(|(pid, status, _)| (pid, status)))
 }
 
 /// Encodes an exit status the way `wait` reports it.
@@ -1050,7 +1220,7 @@ pub fn wait_status_exit(code: i32) -> i32 {
 
 fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
     loop {
-        match reap(sel, options & WNOWAIT != 0)? {
+        match reap(sel, options)? {
             Some(r) => return Ok(Some(r)),
             None if options & WNOHANG != 0 => return Ok(None),
             None => {}
@@ -1082,15 +1252,24 @@ pub fn sys_waitid(idtype: u64, id: u64, infop: u64, options: u64) -> i64 {
         2 => -(id as i64),     // P_PGID
         _ => return EINVAL,
     };
-    if options & 4 == 0 {
-        return EINVAL; // only WEXITED is supported
+    if options & (4 | WUNTRACED | WCONTINUED) == 0 {
+        return EINVAL; // need at least one of WEXITED, WSTOPPED, WCONTINUED
     }
     match wait_loop(sel, options) {
         Ok(Some((pid, status))) => {
             if infop != 0 {
                 let mut info = [0u8; 128];
                 info[0..4].copy_from_slice(&(SIGCHLD as i32).to_le_bytes());
-                let (code, value) = if status & 0x7f == 0 { (1, (status >> 8) & 0xff) } else { (2, status & 0x7f) };
+                // CLD_EXITED 1, CLD_KILLED 2, CLD_STOPPED 5, CLD_CONTINUED 6
+                let (code, value) = if status == WAIT_CONTINUED {
+                    (6, SIGCONT as i32)
+                } else if status & 0xff == 0x7f {
+                    (5, (status >> 8) & 0xff)
+                } else if status & 0x7f == 0 {
+                    (1, (status >> 8) & 0xff)
+                } else {
+                    (2, status & 0x7f)
+                };
                 info[8..12].copy_from_slice(&(code as i32).to_le_bytes());
                 info[16..20].copy_from_slice(&(pid as i32).to_le_bytes());
                 info[24..28].copy_from_slice(&value.to_le_bytes());

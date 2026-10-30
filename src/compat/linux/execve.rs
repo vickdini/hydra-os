@@ -56,15 +56,6 @@ fn read_string_array(ptr: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, i64> {
     Ok(out)
 }
 
-/// Reads a whole file by inode.
-fn read_file(ino: u64) -> Result<Vec<u8>, i64> {
-    let size = ZfsClient::getattr(ino)?.size as usize;
-    let mut data = alloc::vec![0u8; size];
-    let n = ZfsClient::read_at(ino, 0, &mut data)?;
-    data.truncate(n);
-    Ok(data)
-}
-
 /// Parses a `#!interpreter [arg]` line.
 fn parse_shebang(data: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     if !data.starts_with(b"#!") {
@@ -150,12 +141,13 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         if attr.mode & S_IFMT != S_IFREG || !may_access(&attr, c.euid, c.egid, 1) || attr.mode & 0o111 == 0 {
             return EACCES;
         }
-        let data = match read_file(ino) {
-            Ok(d) => d,
+        let source = match super::mm::inode_source(ino) {
+            Ok(s) => s,
             Err(e) => return e,
         };
+        let data = &source.head;
 
-        if let Some((interp, arg)) = parse_shebang(&data) {
+        if let Some((interp, arg)) = parse_shebang(data) {
             depth += 1;
             if depth > 4 {
                 return ELOOP;
@@ -175,24 +167,24 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             continue;
         }
 
-        if crate::task::elf::ElfBinary::parse(&data).is_err() {
+        if crate::task::elf::ElfBinary::parse(data).is_err() {
             return ENOEXEC;
         }
-        if !crate::task::exec::is_vm_loadable(&data) {
+        if !crate::task::exec::is_vm_loadable(data) {
             return ENOEXEC;
         }
 
         let root = proc_root();
-        let read_in_root = |p: &str| -> Option<Vec<u8>> {
+        let read_in_root = |p: &str| -> Option<crate::task::exec::ElfSource> {
             let ino = ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?;
-            read_file(ino).ok()
+            super::mm::inode_source(ino).ok()
         };
         let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();
         let envp_s: Vec<String> = envp.iter().map(|e| lossy(e)).collect();
         let argv_r: Vec<&str> = argv_s.iter().map(|s| s.as_str()).collect();
         let envp_r: Vec<&str> = envp_s.iter().map(|s| s.as_str()).collect();
         match crate::task::exec::load_linux_exec(
-            data.into_boxed_slice(),
+            source,
             &abs_path,
             &argv_r,
             &envp_r,

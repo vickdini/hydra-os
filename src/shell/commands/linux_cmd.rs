@@ -189,8 +189,7 @@ impl Command for LinuxCommand {
                 ) {
                     Ok(tid) => {
                         println!("[+] Linux process spawned with Task ID {} (UID {}, GID {}). Executing...", tid.0, state.current_uid, state.current_gid);
-                        crate::task::wait_task(tid);
-                        println!("[+] Linux process {} finished execution.", tid.0);
+                        run_in_foreground(tid);
                     }
                     Err(e) => {
                         console::set_color(Color::LightRed, Color::Black);
@@ -217,20 +216,7 @@ impl Command for LinuxCommand {
                 let program = args[2];
                 let argv: alloc::vec::Vec<&str> = args[2..].iter().copied().collect();
                 match crate::task::spawn_linux_chroot(args[1], program, &argv, state.current_uid, state.current_gid) {
-                    Ok(tid) => {
-                        // The process leads its own session and owns the console until it exits
-                        crate::compat::linux::tty::attach_session(tid.0, tid.0);
-                        while crate::task::is_task_alive(tid) {
-                            crate::task::preemptible(|| crate::task::sleep_ms(20));
-                        }
-                        crate::compat::linux::tty::detach_session();
-                        let status = crate::compat::linux::proc::take_status(tid.0);
-                        match status {
-                            Some(s) if s & 0x7f != 0 => println!("[+] Linux process {} killed by signal {}.", tid.0, s & 0x7f),
-                            Some(s) => println!("[+] Linux process {} exited with status {}.", tid.0, (s >> 8) & 0xff),
-                            None => println!("[+] Linux process {} exited.", tid.0),
-                        }
-                    }
+                    Ok(tid) => run_in_foreground(tid),
                     Err(e) => {
                         console::set_color(Color::LightRed, Color::Black);
                         println!("[!] linux chroot: {}", e);
@@ -289,5 +275,21 @@ impl Command for LinuxCommand {
                 console::set_color(Color::White, Color::Black);
             }
         }
+    }
+}
+
+/// Runs a Linux process started from the Hydra shell in the foreground: it leads its own
+/// session and owns the console (keyboard, Ctrl+C) until it exits; then its exit status is
+/// reported and the console returns to the shell.
+fn run_in_foreground(tid: crate::task::TaskId) {
+    crate::compat::linux::tty::attach_session(tid.0, tid.0);
+    while crate::task::is_task_alive(tid) {
+        crate::task::preemptible(|| crate::task::sleep_ms(20));
+    }
+    crate::compat::linux::tty::detach_session();
+    match crate::compat::linux::proc::take_status(tid.0) {
+        Some(s) if s & 0x7f != 0 => println!("[+] Linux process {} killed by signal {}.", tid.0, s & 0x7f),
+        Some(s) => println!("[+] Linux process {} exited with status {}.", tid.0, (s >> 8) & 0xff),
+        None => println!("[+] Linux process {} exited.", tid.0),
     }
 }

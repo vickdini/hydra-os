@@ -139,6 +139,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default(),
             mm: None,
             exe: None,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -219,6 +220,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default(),
             mm: None,
             exe: None,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -295,6 +297,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default(),
             mm: None,
             exe: None,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -316,7 +319,8 @@ impl Scheduler {
             // /proc/self/exe must be absolute; `linux run` resolves bare names in /bin
             let arg0 = args.first().copied().unwrap_or(name);
             let exec_path = if arg0.starts_with('/') { alloc::string::String::from(arg0) } else { alloc::format!("/bin/{}", arg0) };
-            return self.spawn_linux_process(name, elf_data, &exec_path, args, priority, uid, gid, None);
+            let source = super::exec::ElfSource::from_bytes(elf_data.to_vec().into_boxed_slice());
+            return self.spawn_linux_process(name, source, &exec_path, args, priority, uid, gid, None);
         }
 
         let current_cr3 = Cr3::read().0.start_address().as_u64();
@@ -361,6 +365,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default(),
             mm: None,
             exe: None,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -376,7 +381,7 @@ impl Scheduler {
     pub fn spawn_linux_process(
         &mut self,
         name: &'static str,
-        elf_data: &[u8],
+        exe: super::exec::ElfSource,
         exec_path: &str,
         args: &[&str],
         priority: TaskPriority,
@@ -384,18 +389,17 @@ impl Scheduler {
         gid: u32,
         root: Option<u64>,
     ) -> Result<TaskId, &'static str> {
-        let read_in_root = |path: &str| -> Option<Vec<u8>> {
+        let read_in_root = |path: &str| -> Option<super::exec::ElfSource> {
             let root = root?;
             let ino = crate::fs::ZfsClient::resolve_in(root, root, path.as_bytes(), true).ok()?;
-            let size = crate::fs::ZfsClient::getattr(ino).ok()?.size as usize;
-            let mut buf = alloc::vec![0u8; size];
-            let n = crate::fs::ZfsClient::read_at(ino, 0, &mut buf).ok()?;
-            buf.truncate(n);
-            Some(buf)
+            crate::compat::linux::mm::inode_source(ino).ok()
         };
-        let interp_reader: &dyn Fn(&str) -> Option<Vec<u8>> = if root.is_some() { &read_in_root } else { &read_interpreter };
+        let read_legacy = |path: &str| -> Option<super::exec::ElfSource> {
+            read_interpreter(path).map(|b| super::exec::ElfSource::from_bytes(b.into_boxed_slice()))
+        };
+        let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
         let image = super::exec::load_linux_exec(
-            elf_data.to_vec().into_boxed_slice(),
+            exe,
             exec_path,
             args,
             DEFAULT_LINUX_ENV,
@@ -451,6 +455,7 @@ impl Scheduler {
             },
             mm: Some(mm),
             exe: Some(alloc::sync::Arc::from(exec_path)),
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
         crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
@@ -593,6 +598,7 @@ impl Scheduler {
             fds: parent_fds,
             mm: parent_mm,
             exe: parent_exe,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
 
@@ -693,7 +699,11 @@ impl Scheduler {
         }
         self.current_index = next_idx;
 
-        // 4a. Swap x87/SSE state through the trap frame's save area
+        // 4a. The preemption-point marker belongs to the task, not the CPU
+        self.tasks[curr_idx].preempt_depth =
+            super::PREEMPT_POINTS.swap(self.tasks[next_idx].preempt_depth, core::sync::atomic::Ordering::SeqCst);
+
+        // 4b'. Swap x87/SSE state through the trap frame's save area
         let trap_fpu = crate::arch::idt::CURRENT_TRAP_FPU.load(core::sync::atomic::Ordering::Acquire);
         if !trap_fpu.is_null() {
             unsafe {

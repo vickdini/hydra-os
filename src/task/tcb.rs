@@ -218,6 +218,9 @@ pub struct Task {
     pub mm: Option<alloc::sync::Arc<spin::Mutex<crate::memory::vm::Mm>>>,
     /// Path of the executable image (`/proc/self/exe`), for Linux processes.
     pub exe: Option<alloc::sync::Arc<str>>,
+    /// Nesting depth of `task::preemptible` wait points this task is inside; saved and
+    /// restored with the task so the timer only preempts the task that is actually waiting.
+    pub preempt_depth: u32,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -256,6 +259,7 @@ impl Task {
             fds: crate::fs::FdTable::new_default(),
             mm: None,
             exe: None,
+            preempt_depth: 0,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
     }

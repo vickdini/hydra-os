@@ -345,6 +345,22 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
     if buf.is_empty() {
         return 0;
     }
+    // A background process reading the terminal is stopped with SIGTTIN (EIO if it
+    // ignores or blocks that signal), as on Linux
+    let (_, pid) = super::proc::current_ids();
+    if let Some((sid, pgid)) = super::proc::session_of(pid) {
+        let (tty_sid, fg) = {
+            let t = TTY.lock();
+            (t.session, t.fg_pgrp)
+        };
+        if tty_sid == sid && fg != 0 && pgid != fg {
+            if super::proc::ignores_or_blocks(super::proc::SIGTTIN) {
+                return -5;
+            }
+            super::proc::post_group(pgid, super::proc::SIGTTIN);
+            return super::proc::ERESTARTSYS;
+        }
+    }
     loop {
         pump();
         {
@@ -371,6 +387,9 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
                         }
                         None => break,
                     }
+                }
+                if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::println!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
                 }
                 return n as i64;
             }
@@ -452,6 +471,9 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
             Some(b) => {
                 let mut t = TTY.lock();
                 t.termios = Termios::from_bytes(&b);
+                if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::println!("[tty] set lflag={:#o} req={:#x} line={} ready={}", t.termios.lflag, request, t.line.len(), t.ready.len());
+                }
                 if request == TCSETSF {
                     t.ready.clear();
                     t.line.clear();
