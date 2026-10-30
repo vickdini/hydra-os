@@ -9,10 +9,14 @@ pub mod eventfd;
 pub mod fs;
 pub mod futex;
 pub mod memfd;
+pub mod execve;
 pub mod mm;
+pub mod proc;
 pub mod process;
+pub mod select;
 pub mod socket;
 pub mod syscalls;
+pub mod tty;
 pub mod types;
 pub mod vfs;
 pub mod wayland_bridge;
@@ -67,6 +71,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     {
         let mut stats = LINUX_STATS.lock();
         stats.total_calls += 1;
+    }
+
+    if let Some(r) = dispatch_process_calls(frame, num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        LINUX_STATS.lock().process_calls += 1;
+        return r;
     }
 
     if let Some(r) = process::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
@@ -1059,7 +1068,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 let mut stats = LINUX_STATS.lock();
                 stats.process_calls += 1;
             }
-            match crate::task::SCHEDULER.lock().spawn_clone(frame) {
+            match crate::task::SCHEDULER.lock().spawn_clone(frame, [arg0, arg1, arg2, arg3, arg4]) {
                 Ok(child_id) => child_id.0 as i64,
                 Err(_) => -ENOMEM,
             }
@@ -1144,9 +1153,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             // sys_gettimeofday(tv: struct timeval*, tz: struct timezone*)
             let tv_ptr = arg0 as *mut LinuxTimeval;
             if !tv_ptr.is_null() {
-                let ticks = crate::arch::pit::ticks();
-                let secs = (ticks / 100) as i64;
-                let usecs = ((ticks % 100) * 10_000) as i64;
+                if !crate::memory::vm::prefault_current(arg0, 16, true) {
+                    return -EFAULT;
+                }
+                let (s, ns) = crate::arch::rtc::now();
+                let (secs, usecs) = (s as i64, (ns / 1000) as i64);
                 unsafe {
                     (*tv_ptr).tv_sec = secs;
                     (*tv_ptr).tv_usec = usecs;
@@ -1436,12 +1447,20 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         SYS_CLOCK_GETTIME => {
             // sys_clock_gettime(clk_id: clockid_t, tp: struct timespec*)
             let tp_ptr = arg1 as *mut LinuxTimespec;
-            if tp_ptr.is_null() {
+            if tp_ptr.is_null() || !crate::memory::vm::prefault_current(arg1, 16, true) {
                 return -EFAULT;
             }
-            let ticks = crate::arch::pit::ticks();
-            let secs = (ticks / 100) as i64;
-            let nsecs = ((ticks % 100) * 10_000_000) as i64;
+            // CLOCK_REALTIME(_COARSE/_ALARM) is wall-clock time; the others count from boot
+            let (secs, nsecs) = match arg0 {
+                0 | 5 | 8 | 11 => {
+                    let (s, ns) = crate::arch::rtc::now();
+                    (s as i64, ns as i64)
+                }
+                _ => {
+                    let ticks = crate::arch::pit::ticks();
+                    ((ticks / 100) as i64, ((ticks % 100) * 10_000_000) as i64)
+                }
+            };
             unsafe {
                 (*tp_ptr).tv_sec = secs;
                 (*tp_ptr).tv_nsec = nsecs;
@@ -1545,6 +1564,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             };
 
             loop {
+                tty::pump();
                 let mut ready_count = 0;
                 crate::task::with_current_fds_mut(|fds| {
                     for i in 0..nfds {
@@ -1577,8 +1597,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if elapsed >= timeout_ticks {
                     return 0;
                 }
-
-                crate::task::yield_now();
+                if proc::signal_pending() {
+                    return proc::ERESTARTSYS;
+                }
+                dispatch_wayland_events();
+                crate::task::sleep_ticks(1);
             }
         }
 
@@ -1677,8 +1700,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if elapsed >= timeout_ticks {
                     return 0;
                 }
-
-                crate::task::yield_now();
+                if proc::signal_pending() {
+                    return proc::ERESTARTSYS;
+                }
+                dispatch_wayland_events();
+                crate::task::sleep_ticks(1);
             }
         }
 
@@ -1807,4 +1833,54 @@ fn report_unimplemented(num: u64, args: [u64; 3]) {
         let pid = crate::task::SCHEDULER.lock().current_task_id().0;
         crate::println!("[linux] pid {}: unimplemented syscall {} ({:#x}, {:#x}, {:#x}) -> ENOSYS", pid, num, args[0], args[1], args[2]);
     }
+}
+
+/// Process lifecycle and signal system calls that need the syscall frame.
+fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Option<i64> {
+    const CLONE_VM: u64 = 0x100;
+    const CLONE_VFORK: u64 = 0x4000;
+    let fpu = crate::arch::syscall::SYSCALL_FPU.load(core::sync::atomic::Ordering::Acquire);
+    Some(match num {
+        15 => proc::sys_rt_sigreturn(frame),
+        13 => proc::sys_rt_sigaction(a[0], a[1], a[2], a[3]),
+        14 => proc::sys_rt_sigprocmask(a[0], a[1], a[2], a[3]),
+        127 => proc::sys_rt_sigpending(a[0], a[1]),
+        130 => proc::sys_rt_sigsuspend(a[0], a[1]),
+        131 => proc::sys_sigaltstack(a[0], a[1]),
+        61 => proc::sys_wait4(a[0] as i32 as i64, a[1], a[2], a[3]),
+        247 => proc::sys_waitid(a[0], a[1], a[2], a[3]),
+        59 => execve::sys_execve(frame, fpu, -100, a[0], a[1], a[2], 0),
+        322 => execve::sys_execve(frame, fpu, a[0] as i32 as i64, a[1], a[2], a[3], a[4]),
+        56 | 57 | 58 => {
+            let args = match num {
+                56 => [a[0], a[1], a[2], a[3], a[4]],
+                57 => [17, 0, 0, 0, 0],                           // fork: SIGCHLD
+                _ => [CLONE_VM | CLONE_VFORK | 17, 0, 0, 0, 0],   // vfork
+            };
+            let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
+                Ok(id) => id.0,
+                Err(_) => return Some(-ENOMEM),
+            };
+            if args[0] & CLONE_VFORK != 0 {
+                // The parent sleeps until the child execs or exits (it borrows our memory)
+                while !proc::vfork_released(child) {
+                    crate::task::sleep_ticks(1);
+                }
+            }
+            child as i64
+        }
+        60 => {
+            let (_, pid) = proc::current_ids();
+            if proc::PROCS.lock().get(&pid).map_or(false, |p| p.threads_alive() <= 1) {
+                proc::set_exit_status(pid, proc::wait_status_exit(a[0] as i32));
+            }
+            crate::task::exit();
+        }
+        231 => {
+            let (_, pid) = proc::current_ids();
+            proc::set_exit_status(pid, proc::wait_status_exit(a[0] as i32));
+            crate::task::exit_group();
+        }
+        _ => return None,
+    })
 }

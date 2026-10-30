@@ -13,8 +13,8 @@ pub fn try_execute_pipeline(cmd_line: &str, state: &mut ShellState) -> bool {
     let trimmed = cmd_line.trim();
 
     // Check if the command line contains '|', '>', or '>>'
-    let has_pipe = trimmed.contains('|');
-    let has_redirect = trimmed.contains('>');
+    let has_pipe = has_unquoted(trimmed, '|');
+    let has_redirect = has_unquoted(trimmed, '>');
 
     if !has_pipe && !has_redirect {
         return false;
@@ -31,7 +31,7 @@ pub fn try_execute_pipeline(cmd_line: &str, state: &mut ShellState) -> bool {
 
 /// Executes a pipeline of commands: `cmd1 | cmd2 | ... | cmdN`.
 fn execute_pipe_chain(cmd_line: &str, state: &mut ShellState) {
-    let raw_stages: Vec<&str> = cmd_line.split('|').map(|s| s.trim()).collect();
+    let raw_stages: Vec<&str> = split_unquoted(cmd_line, '|').into_iter().map(|s| s.trim()).collect();
     if raw_stages.is_empty() {
         return;
     }
@@ -202,4 +202,36 @@ fn parse_redirect_target(s: &str) -> (&str, &str, bool) {
     } else {
         (s.trim(), "", false)
     }
+}
+
+/// True if `ch` appears in `line` outside single or double quotes.
+fn has_unquoted(line: &str, ch: char) -> bool {
+    split_unquoted(line, ch).len() > 1
+}
+
+/// Splits `line` at occurrences of `sep` that are outside quotes.
+fn split_unquoted(line: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\\' => escaped = true,
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == sep => {
+                parts.push(&line[start..i]);
+                start = i + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    parts.push(&line[start..]);
+    parts
 }

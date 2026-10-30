@@ -199,8 +199,9 @@ pub fn read_key() -> Option<Key> {
         return Some(key);
     }
 
-    // 2. Fallback polling if hardware interrupts are disabled (e.g. early init)
-    if !x86_64::instructions::interrupts::are_enabled() {
+    // 2. Fallback polling before the IRQ 1 handler is set up (early init). Once it is,
+    // polling would race with it and read the same scancode twice.
+    if !crate::arch::pit::is_active() && !x86_64::instructions::interrupts::are_enabled() {
         let _guard = KEYBOARD_LOCK.lock();
         let mut status_port: Port<u8> = Port::new(0x64);
         let status = unsafe { status_port.read() };

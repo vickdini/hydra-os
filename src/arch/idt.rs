@@ -282,6 +282,11 @@ pub fn reload_with_kernel_cs(cs: u16) {
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
     dispatch_exception(ctx);
+    // Returning to user mode: run any pending signal handlers first
+    if (ctx.cs & 3) == 3 && crate::task::is_active() {
+        crate::compat::linux::tty::pump();
+        crate::compat::linux::proc::deliver_on_trap_return(ctx, fpu);
+    }
     CURRENT_TRAP_FPU.store(prev_fpu, Ordering::Release);
 }
 
@@ -309,6 +314,27 @@ pub static CURRENT_TRAP_FPU: AtomicPtr<FpuState> = AtomicPtr::new(core::ptr::nul
 
 /// Kills the current user task after an unrecoverable fault and switches away from it.
 fn kill_current_user_task(ctx: &mut ExceptionContext) {
+    kill_or_signal(ctx, 11);
+}
+
+/// Handles an unrecoverable fault of the current task. Linux processes faulting in user
+/// mode receive the matching signal (their handler may recover); otherwise the task ends.
+fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
+    let linux = crate::task::current_personality() == crate::task::TaskPersonality::Linux;
+    if linux && (ctx.cs & 3) == 3 {
+        let fpu = CURRENT_TRAP_FPU.load(Ordering::Acquire);
+        crate::compat::linux::proc::force_fault_signal(ctx, fpu, sig);
+        return;
+    }
+    if linux {
+        let (_, pid) = crate::compat::linux::proc::current_ids();
+        crate::compat::linux::proc::set_exit_status(pid, sig as i32);
+        let mut sched = crate::task::SCHEDULER.lock();
+        sched.terminate_current_group();
+        sched.terminate_current();
+        sched.schedule(ctx);
+        return;
+    }
     let mut sched = crate::task::SCHEDULER.lock();
     sched.terminate_current();
     sched.schedule(ctx);
@@ -339,6 +365,12 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             let user_space_fault = resolved.is_some();
 
             if (is_user || user_space_fault) && crate::task::is_active() {
+                let linux_user = is_user && crate::task::current_personality() == crate::task::TaskPersonality::Linux;
+                if linux_user {
+                    let sig = if resolved == Some(Err(crate::memory::vm::FaultError::Bus)) { 7 } else { 11 };
+                    kill_or_signal(ctx, sig);
+                    return;
+                }
                 set_color(Color::LightRed, Color::Black);
                 let pid = crate::task::SCHEDULER.lock().current_task_id();
                 let reason = match resolved {
@@ -390,9 +422,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 let pid = crate::task::SCHEDULER.lock().current_task_id();
                 println!("\n[!] USER FAULT: General Protection Fault (#GP) in Task PID {}", pid.0);
                 println!("    Privilege Violation at RIP: {:#x}, Selector/Error: {:#x}", ctx.rip, ctx.error_code);
-                let mut sched = crate::task::SCHEDULER.lock();
-                sched.terminate_current();
-                sched.schedule(ctx);
+                kill_or_signal(ctx, 11);
                 return;
             }
 
@@ -426,9 +456,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 let pid = crate::task::SCHEDULER.lock().current_task_id();
                 println!("\n[!] USER FAULT: Invalid Opcode (#UD) in Task PID {}", pid.0);
                 println!("    Faulting RIP: {:#x}", ctx.rip);
-                let mut sched = crate::task::SCHEDULER.lock();
-                sched.terminate_current();
-                sched.schedule(ctx);
+                kill_or_signal(ctx, 4);
                 return;
             }
 
@@ -449,9 +477,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 let pid = crate::task::SCHEDULER.lock().current_task_id();
                 println!("\n[!] USER FAULT: Divide-by-Zero (#DE) in Task PID {}", pid.0);
                 println!("    Faulting RIP: {:#x}", ctx.rip);
-                let mut sched = crate::task::SCHEDULER.lock();
-                sched.terminate_current();
-                sched.schedule(ctx);
+                kill_or_signal(ctx, 8);
                 return;
             }
 

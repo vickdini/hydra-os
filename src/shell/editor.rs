@@ -45,7 +45,7 @@ fn navigate_history_up(
     len: &mut usize,
     cursor_pos: &mut usize,
     history_offset: &mut Option<usize>,
-    draft_buf: &mut [u8; 128],
+    draft_buf: &mut [u8; 1024],
     draft_len: &mut usize,
     state: &ShellState,
 ) {
@@ -81,7 +81,7 @@ fn navigate_history_down(
     len: &mut usize,
     cursor_pos: &mut usize,
     history_offset: &mut Option<usize>,
-    draft_buf: &[u8; 128],
+    draft_buf: &[u8; 1024],
     draft_len: usize,
     state: &ShellState,
 ) {
@@ -135,7 +135,7 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
     let mut cursor_pos = 0;
     let mut history_offset: Option<usize> = None;
     let mut scroll_offset: usize = 0;
-    let mut draft_buf = [0u8; 128];
+    let mut draft_buf = [0u8; 1024];
     let mut draft_len = 0;
 
     loop {

@@ -1,5 +1,5 @@
 pub const MAX_HISTORY: usize = 32;
-pub const MAX_CMD_LEN: usize = 128;
+pub const MAX_CMD_LEN: usize = 1024;
 
 /// Fixed-size command history ring buffer for Hydra shell.
 pub struct History {

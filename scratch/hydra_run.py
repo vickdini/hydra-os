@@ -94,6 +94,8 @@ def main():
     ap.add_argument("--until", default=None)
     ap.add_argument("--log", default=os.path.join(ROOT, "scratch", "qemu_run.log"))
     ap.add_argument("--boot-wait", type=float, default=25)
+    ap.add_argument("--gap", type=float, default=1.0, help="seconds between commands")
+    ap.add_argument("--prompt", default=None, help="wait for one more occurrence of this text before typing each command after the first")
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
     ap.add_argument("commands", nargs="*")
@@ -124,9 +126,17 @@ def main():
         qmp.type(" ")  # cancel auto takeover countdown
         time.sleep(2.0)
         start = len(read_log(a.log))
-        for c in a.commands:
-            qmp.type(c + "\n")
-            time.sleep(1.0)
+        for i, c in enumerate(a.commands):
+            if a.prompt and i > 0:
+                # Wait until the program prints its prompt again
+                deadline = time.time() + 60
+                while time.time() < deadline and read_log(a.log)[start:].count(a.prompt) < i:
+                    time.sleep(0.25)
+            if c == "^C":
+                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": "c"}]})
+            else:
+                qmp.type(c + "\n")
+            time.sleep(a.gap)
         deadline = time.time() + a.wait
         while time.time() < deadline:
             log = read_log(a.log)

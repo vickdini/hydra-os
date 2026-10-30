@@ -269,8 +269,11 @@ impl FileDescriptor {
     /// Evaluates readiness flags for epoll and poll multiplexing.
     pub fn poll_events(&self) -> u32 {
         match self {
-            FileDescriptor::ConsoleIn => 0x0001,
-            FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => 0x0004,
+            FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {
+                // Callers pump the keyboard first; this may run under the scheduler lock
+                let readable = !crate::compat::linux::tty::attached() || crate::compat::linux::tty::has_input();
+                0x0004 | if readable { 0x0001 } else { 0 }
+            }
             FileDescriptor::PipeRead(pipe) => {
                 let p = pipe.lock();
                 let mut ev = 0;
@@ -457,6 +460,35 @@ impl FdTable {
         self.fds[newfd] = Some(desc);
         self.cloexec[newfd] = false;
         Ok(newfd)
+    }
+
+    /// Copies the table for a new process or thread (`fork`/`clone`): descriptors share
+    /// their open file descriptions, and pipe ends gain a reference each.
+    pub fn fork_copy(&self) -> Self {
+        for desc in self.fds.iter().flatten() {
+            match desc {
+                FileDescriptor::PipeRead(pipe) => pipe.lock().add_reader(),
+                FileDescriptor::PipeWrite(pipe) => pipe.lock().add_writer(),
+                _ => {}
+            }
+        }
+        self.clone()
+    }
+
+    /// Closes every descriptor (process exit).
+    pub fn close_all(&mut self) {
+        for fd in 0..self.fds.len() {
+            let _ = self.close(fd);
+        }
+    }
+
+    /// Closes descriptors marked close-on-exec (`execve`).
+    pub fn close_on_exec(&mut self) {
+        for fd in 0..self.fds.len() {
+            if self.cloexec(fd) {
+                let _ = self.close(fd);
+            }
+        }
     }
 
     /// Duplicates `oldfd` onto the lowest free descriptor at or above `min`.

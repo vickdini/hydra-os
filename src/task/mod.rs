@@ -159,8 +159,11 @@ pub fn unblock_task(id: TaskId) -> bool {
 }
 
 /// Puts the current task to sleep for a specified number of PIT timer ticks.
+///
+/// Works inside system calls (which run with interrupts disabled): the task sleeps in the
+/// scheduler and the CPU keeps running other tasks, whose timer interrupts wake it.
 pub fn sleep_ticks(ticks: u64) {
-    if !is_active() || !x86_64::instructions::interrupts::are_enabled() {
+    if !is_active() || !crate::arch::pit::is_active() {
         crate::arch::pit::sleep_ticks(ticks);
         return;
     }
@@ -174,7 +177,7 @@ pub fn sleep_ticks(ticks: u64) {
 
 /// Puts the current task to sleep for a duration in milliseconds.
 pub fn sleep_ms(ms: u64) {
-    if !is_active() || !x86_64::instructions::interrupts::are_enabled() {
+    if !is_active() || !crate::arch::pit::is_active() {
         crate::arch::pit::sleep_ms(ms);
         return;
     }

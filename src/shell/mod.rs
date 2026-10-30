@@ -14,7 +14,7 @@ use crate::console::set_color;
 pub use command::Command;
 pub use state::ShellState;
 
-const LINE_BUF_LEN: usize = 128;
+const LINE_BUF_LEN: usize = 1024;
 const MAX_ARGS: usize = 16;
 
 pub fn print_welcome_banner() {
@@ -46,7 +46,7 @@ pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
         if let Some(prev) = target_cmd {
             set_color(Color::LightCyan, Color::Black);
             println!("{}", prev);
-            let mut copy_buf = [0u8; 128];
+            let mut copy_buf = [0u8; 1024];
             let len = prev.len().min(copy_buf.len());
             copy_buf[..len].copy_from_slice(&prev.as_bytes()[..len]);
             if let Ok(prev_str) = core::str::from_utf8(&copy_buf[..len]) {

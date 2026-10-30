@@ -178,6 +178,7 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             crate::println!("[trace]   = {}", res);
         }
         frame.rax = res as u64;
+        crate::compat::linux::proc::deliver_on_syscall_return(frame, fpu, num);
         return;
     }
 

@@ -218,8 +218,18 @@ impl Command for LinuxCommand {
                 let argv: alloc::vec::Vec<&str> = args[2..].iter().copied().collect();
                 match crate::task::spawn_linux_chroot(args[1], program, &argv, state.current_uid, state.current_gid) {
                     Ok(tid) => {
-                        crate::task::wait_task(tid);
-                        println!("[+] Linux process {} exited.", tid.0);
+                        // The process leads its own session and owns the console until it exits
+                        crate::compat::linux::tty::attach_session(tid.0, tid.0);
+                        while crate::task::is_task_alive(tid) {
+                            crate::task::preemptible(|| crate::task::sleep_ms(20));
+                        }
+                        crate::compat::linux::tty::detach_session();
+                        let status = crate::compat::linux::proc::take_status(tid.0);
+                        match status {
+                            Some(s) if s & 0x7f != 0 => println!("[+] Linux process {} killed by signal {}.", tid.0, s & 0x7f),
+                            Some(s) => println!("[+] Linux process {} exited with status {}.", tid.0, (s >> 8) & 0xff),
+                            None => println!("[+] Linux process {} exited.", tid.0),
+                        }
                     }
                     Err(e) => {
                         console::set_color(Color::LightRed, Color::Black);

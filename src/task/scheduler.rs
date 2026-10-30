@@ -365,6 +365,7 @@ impl Scheduler {
         };
 
         self.tasks.push(task);
+        crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
         Ok(id)
     }
 
@@ -452,19 +453,24 @@ impl Scheduler {
             exe: Some(alloc::sync::Arc::from(exec_path)),
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
+        crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
         Ok(id)
     }
 
-    /// Clones the calling task into a new thread or child process for the Linux ABI (`sys_clone`).
+    /// Clones the calling task into a new thread or child process for the Linux ABI
+    /// (`clone`, `fork`, `vfork`). Without `CLONE_VM` the child gets a copy-on-write copy of
+    /// the address space; without `CLONE_THREAD` it becomes a new process.
+    ///
+    /// `args` are the `clone` arguments (flags, stack, parent_tid, child_tid, tls); the rest
+    /// of the child's registers come from `frame`.
     pub fn spawn_clone(
         &mut self,
         frame: &crate::arch::syscall::SyscallFrame,
+        args: [u64; 5],
     ) -> Result<TaskId, &'static str> {
-        let flags = frame.rdi;
-        let child_stack = frame.rsi;
-        let ptid = frame.rdx;
-        let ctid = frame.r10;
-        let newtls = frame.r8;
+        use crate::compat::linux::types::{CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_PARENT_SETTID, CLONE_SETTLS, CLONE_THREAD};
+        const CLONE_VM: u64 = 0x100;
+        let [flags, child_stack, ptid, ctid, newtls] = args;
 
         if !self.initialized || self.current_index >= self.tasks.len() {
             return Err("Scheduler not initialized");
@@ -478,17 +484,24 @@ impl Scheduler {
         let parent_brk = parent.brk;
         let parent_name = parent.name;
         let parent_priority = parent.priority;
-        let parent_fds = parent.fds.clone();
+        let parent_fds = parent.fds.fork_copy();
+        let parent_tid = parent.id.0;
         let parent_uid = parent.uid;
         let parent_gid = parent.gid;
         let parent_euid = parent.euid;
         let parent_egid = parent.egid;
         let parent_suid = parent.suid;
         let parent_sgid = parent.sgid;
-        // Threads share the address space. fork() without CLONE_VM needs copy-on-write
-        // duplication (milestone 2); until then the child shares the parent's memory.
-        let parent_mm = parent.mm.clone();
         let parent_exe = parent.exe.clone();
+        let parent_mm = if flags & CLONE_VM != 0 {
+            parent.mm.clone()
+        } else {
+            match parent.mm.as_ref() {
+                Some(mm) => Some(alloc::sync::Arc::new(Mutex::new(mm.lock().fork()?))),
+                None => parent.mm.clone(),
+            }
+        };
+        let parent_cr3 = parent_mm.as_ref().map_or(parent_cr3, |m| m.lock().cr3());
 
         let child_id = TaskId(self.next_id);
         self.next_id += 1;
@@ -516,33 +529,29 @@ impl Scheduler {
         regs.ss = 0x18 | 3;
         regs.cr3 = parent_cr3;
 
-        let child_fs_base = if (flags & crate::compat::linux::types::CLONE_SETTLS) != 0 {
+        // The parent's live FS base is in the MSR, not yet saved in its task
+        let _ = parent_fs_base;
+        let child_fs_base = if flags & CLONE_SETTLS != 0 {
             newtls
         } else {
-            parent_fs_base
+            unsafe { crate::arch::syscall::rdmsr(0xC000_0100) }
         };
 
-        let child_tgid = if (flags & crate::compat::linux::types::CLONE_THREAD) != 0 {
-            parent_tgid
-        } else {
-            child_id.0 as u64
-        };
+        let child_tgid = if flags & CLONE_THREAD != 0 { parent_tgid } else { child_id.0 as u64 };
 
-        let clear_child_tid = if (flags & crate::compat::linux::types::CLONE_CHILD_CLEARTID) != 0 {
-            ctid
-        } else {
-            0
-        };
+        let clear_child_tid = if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 };
 
-        if (flags & crate::compat::linux::types::CLONE_PARENT_SETTID) != 0 && ptid != 0 {
-            unsafe {
-                *(ptid as *mut i32) = child_id.0 as i32;
-            }
+        let tid_bytes = (child_id.0 as i32).to_le_bytes();
+        if flags & CLONE_PARENT_SETTID != 0 && ptid != 0 && crate::memory::vm::prefault_current(ptid, 4, true) {
+            unsafe { *(ptid as *mut i32) = child_id.0 as i32 };
         }
-
-        if (flags & crate::compat::linux::types::CLONE_CHILD_SETTID) != 0 && ctid != 0 {
-            unsafe {
-                *(ctid as *mut i32) = child_id.0 as i32;
+        if flags & CLONE_CHILD_SETTID != 0 && ctid != 0 {
+            if flags & CLONE_VM != 0 {
+                if crate::memory::vm::prefault_current(ctid, 4, true) {
+                    unsafe { *(ctid as *mut i32) = child_id.0 as i32 };
+                }
+            } else if let Some(mm) = parent_mm.as_ref() {
+                let _ = mm.lock().write_bytes(ctid, &tid_bytes);
             }
         }
 
@@ -588,6 +597,11 @@ impl Scheduler {
         };
 
         self.tasks.push(task);
+        if child_tgid == parent_tgid {
+            crate::compat::linux::proc::register_thread(child_tgid, child_id.0, parent_tid);
+        } else {
+            crate::compat::linux::proc::register_process(child_tgid, parent_tgid, child_id.0, Some(parent_tgid));
+        }
         Ok(child_id)
     }
 
@@ -750,24 +764,43 @@ impl Scheduler {
         false
     }
 
+    /// Marks task `idx` as Dead and releases what it holds: wakes `CLONE_CHILD_CLEARTID`
+    /// waiters, closes its descriptors (so pipe readers see end-of-file), and tells the
+    /// Linux process table, which turns the process into a zombie after its last thread.
+    fn retire_task(&mut self, idx: usize) {
+        if self.tasks[idx].state == TaskState::Dead {
+            return;
+        }
+        self.tasks[idx].state = TaskState::Dead;
+        self.tasks[idx].timeslice_remaining = 0;
+
+        // The clear-tid word lives in the task's own address space: only write it when
+        // that address space is the one currently loaded
+        let clear_child_tid = self.tasks[idx].clear_child_tid;
+        let active_cr3 = Cr3::read().0.start_address().as_u64();
+        if clear_child_tid != 0 && self.tasks[idx].regs.cr3 == active_cr3 {
+            if crate::memory::vm::prefault_current(clear_child_tid, 4, true) {
+                unsafe { *(clear_child_tid as *mut i32) = 0 };
+            }
+            let mut fq = crate::compat::linux::futex::GLOBAL_FUTEX.lock();
+            let ids = fq.wake_task_ids(clear_child_tid, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
+            drop(fq);
+            for id in ids {
+                self.unblock_task(id);
+            }
+        }
+
+        let mut fds = core::mem::replace(&mut self.tasks[idx].fds, crate::fs::FdTable::empty());
+        fds.close_all();
+        if self.tasks[idx].personality == super::tcb::TaskPersonality::Linux {
+            crate::compat::linux::proc::thread_exited(self.tasks[idx].tgid, self.tasks[idx].id.0);
+        }
+    }
+
     /// Marks the currently running task as Dead and zeroes its timeslice.
     pub fn terminate_current(&mut self) {
         if self.initialized && self.current_index < self.tasks.len() {
-            let clear_child_tid = self.tasks[self.current_index].clear_child_tid;
-            self.tasks[self.current_index].state = TaskState::Dead;
-            self.tasks[self.current_index].timeslice_remaining = 0;
-            if clear_child_tid != 0 {
-                let ptr = clear_child_tid as *mut i32;
-                unsafe {
-                    *ptr = 0;
-                }
-                let mut fq = crate::compat::linux::futex::GLOBAL_FUTEX.lock();
-                let ids = fq.wake_task_ids(clear_child_tid, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
-                drop(fq);
-                for id in ids {
-                    self.unblock_task(id);
-                }
-            }
+            self.retire_task(self.current_index);
         }
     }
 
@@ -778,10 +811,18 @@ impl Scheduler {
         }
         let tgid = self.tasks[self.current_index].tgid;
         let me = self.tasks[self.current_index].id;
+        for idx in 0..self.tasks.len() {
+            if self.tasks[idx].tgid == tgid && self.tasks[idx].id != me {
+                self.retire_task(idx);
+            }
+        }
+    }
+
+    /// Wakes every blocked thread of process `tgid` (a signal arrived).
+    pub fn unblock_group(&mut self, tgid: u64) {
         for task in self.tasks.iter_mut() {
-            if task.tgid == tgid && task.id != me && task.state != TaskState::Dead {
-                task.state = TaskState::Dead;
-                task.timeslice_remaining = 0;
+            if task.tgid == tgid && task.state == TaskState::Blocked {
+                task.state = TaskState::Ready;
             }
         }
     }
@@ -794,21 +835,7 @@ impl Scheduler {
         }
         for i in 0..self.tasks.len() {
             if self.tasks[i].id == id && self.tasks[i].state != TaskState::Dead {
-                let clear_child_tid = self.tasks[i].clear_child_tid;
-                self.tasks[i].state = TaskState::Dead;
-                self.tasks[i].timeslice_remaining = 0;
-                if clear_child_tid != 0 {
-                    let ptr = clear_child_tid as *mut i32;
-                    unsafe {
-                        *ptr = 0;
-                    }
-                    let mut fq = crate::compat::linux::futex::GLOBAL_FUTEX.lock();
-                    let ids = fq.wake_task_ids(clear_child_tid, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
-                    drop(fq);
-                    for wid in ids {
-                        self.unblock_task(wid);
-                    }
-                }
+                self.retire_task(i);
                 return true;
             }
         }

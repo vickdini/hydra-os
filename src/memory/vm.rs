@@ -209,6 +209,46 @@ impl Mm {
         self.pml4.as_u64()
     }
 
+    /// Duplicates this address space for `fork`. Private pages become shared copy-on-write
+    /// (read-only in both, copied on the first write by either); shared mappings stay
+    /// shared and writable.
+    pub fn fork(&mut self) -> Result<Mm, &'static str> {
+        let mut child = Mm::new()?;
+        child.vmas = self.vmas.clone();
+        child.brk_start = self.brk_start;
+        child.brk = self.brk;
+        child.auxv = self.auxv.clone();
+        let areas: Vec<(u64, u64, bool)> = self.vmas.values().map(|v| (v.start, v.end, v.shared)).collect();
+        for (start, end, shared) in areas {
+            let mut addr = start;
+            while addr < end {
+                let (frame_addr, flags) = match self.pte(addr, false) {
+                    Some(e) if pte_holds_frame(e) => {
+                        let flags = if shared { e.flags() } else { e.flags() - PageTableFlags::WRITABLE };
+                        let frame_addr = e.addr();
+                        e.set_addr(frame_addr, flags);
+                        (frame_addr, flags)
+                    }
+                    Some(_) => {
+                        addr += PAGE_SIZE;
+                        continue;
+                    }
+                    None => {
+                        addr = (addr + 0x20_0000) & !0x1F_FFFF;
+                        continue;
+                    }
+                };
+                frame_ref_inc(PhysFrame::containing_address(frame_addr));
+                let entry = child.pte(addr, true).ok_or("Out of memory while forking address space")?;
+                entry.set_addr(frame_addr, flags);
+                addr += PAGE_SIZE;
+            }
+        }
+        // Parent PTEs lost their write bit: drop stale TLB entries
+        x86_64::instructions::tlb::flush_all();
+        Ok(child)
+    }
+
     /// Returns the area containing `addr`, if any.
     pub fn find_vma(&self, addr: u64) -> Option<&Vma> {
         self.vmas

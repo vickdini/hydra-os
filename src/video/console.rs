@@ -33,6 +33,12 @@ pub struct VideoConsole {
     cursor_drawn_col: usize,
     cursor_drawn_row: usize,
     cursor_drawn_shape: CursorShape,
+    esc_state: EscState,
+    esc_params: [u16; 8],
+    esc_nparams: usize,
+    esc_has_param: bool,
+    default_fg: (u8, u8, u8),
+    default_bg: (u8, u8, u8),
 }
 
 impl VideoConsole {
@@ -55,6 +61,12 @@ impl VideoConsole {
             cursor_drawn_col: 0,
             cursor_drawn_row: 0,
             cursor_drawn_shape: CursorShape::Underline,
+            esc_state: EscState::Ground,
+            esc_params: [0; 8],
+            esc_nparams: 0,
+            esc_has_param: false,
+            default_fg: (220, 220, 220),
+            default_bg: (0, 0, 0),
         }
     }
 
@@ -71,6 +83,8 @@ impl VideoConsole {
     }
 
     pub fn set_color(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+        self.default_fg = fg;
+        self.default_bg = bg;
         self.fg = fg;
         self.bg = bg;
     }
@@ -203,6 +217,9 @@ impl VideoConsole {
     }
 
     pub fn write_char(&mut self, c: char) {
+        if self.ansi_feed(c) {
+            return;
+        }
         if self.cursor_drawn {
             self.hide_cursor();
         }
@@ -399,3 +416,182 @@ pub fn cursor_shape() -> CursorShape {
     }
 }
 
+/// ANSI escape sequence parser state (ECMA-48 subset used by terminal programs).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscState {
+    Ground,
+    Escape,
+    /// `ESC (`, `ESC )` and similar: swallow one more character.
+    EscapeArg,
+    Csi,
+}
+
+/// Standard 8-colour ANSI palette (normal, bright).
+const ANSI_COLORS: [(u8, u8, u8); 16] = [
+    (0, 0, 0),
+    (205, 49, 49),
+    (13, 188, 121),
+    (229, 229, 16),
+    (36, 114, 200),
+    (188, 63, 188),
+    (17, 168, 205),
+    (220, 220, 220),
+    (102, 102, 102),
+    (241, 76, 76),
+    (35, 209, 139),
+    (245, 245, 67),
+    (59, 142, 234),
+    (214, 112, 214),
+    (41, 184, 219),
+    (255, 255, 255),
+];
+
+impl VideoConsole {
+    /// Consumes `c` if it is part of an escape sequence. Returns true when handled.
+    fn ansi_feed(&mut self, c: char) -> bool {
+        match self.esc_state {
+            EscState::Ground => {
+                if c == '\x1b' {
+                    self.esc_state = EscState::Escape;
+                    return true;
+                }
+                c == '\x07' // BEL: no sound, just swallow it
+            }
+            EscState::Escape => {
+                self.esc_state = match c {
+                    '[' => {
+                        self.esc_params = [0; 8];
+                        self.esc_nparams = 0;
+                        self.esc_has_param = false;
+                        EscState::Csi
+                    }
+                    '(' | ')' | '#' | '%' => EscState::EscapeArg,
+                    _ => EscState::Ground,
+                };
+                true
+            }
+            EscState::EscapeArg => {
+                self.esc_state = EscState::Ground;
+                true
+            }
+            EscState::Csi => {
+                match c {
+                    '0'..='9' => {
+                        let i = self.esc_nparams.min(7);
+                        self.esc_params[i] = self.esc_params[i].saturating_mul(10).saturating_add(c as u16 - '0' as u16);
+                        self.esc_has_param = true;
+                    }
+                    ';' => {
+                        self.esc_nparams = (self.esc_nparams + 1).min(7);
+                    }
+                    '?' | '>' | '=' | ' ' => {}
+                    '\x40'..='\x7e' => {
+                        let n = if self.esc_has_param || self.esc_nparams > 0 { self.esc_nparams + 1 } else { 0 };
+                        self.esc_state = EscState::Ground;
+                        self.csi_dispatch(c, n);
+                    }
+                    _ => self.esc_state = EscState::Ground,
+                }
+                true
+            }
+        }
+    }
+
+    fn csi_param(&self, i: usize, default: usize) -> usize {
+        let v = self.esc_params[i] as usize;
+        if v == 0 {
+            default
+        } else {
+            v
+        }
+    }
+
+    /// Paints columns `from..to` of row `row` with the background colour.
+    fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
+        if from >= to {
+            return;
+        }
+        self.framebuffer.fill_rect(
+            from * FONT_WIDTH,
+            row * FONT_HEIGHT,
+            (to - from) * FONT_WIDTH,
+            FONT_HEIGHT,
+            self.bg.0,
+            self.bg.1,
+            self.bg.2,
+        );
+    }
+
+    fn csi_dispatch(&mut self, cmd: char, nparams: usize) {
+        if self.cursor_drawn {
+            self.hide_cursor();
+        }
+        let (cols, rows) = (self.max_cols, self.max_rows);
+        match cmd {
+            'A' => self.cursor_row = self.cursor_row.saturating_sub(self.csi_param(0, 1)),
+            'B' => self.cursor_row = (self.cursor_row + self.csi_param(0, 1)).min(rows - 1),
+            'C' => self.cursor_col = (self.cursor_col + self.csi_param(0, 1)).min(cols - 1),
+            'D' => self.cursor_col = self.cursor_col.saturating_sub(self.csi_param(0, 1)),
+            'G' => self.cursor_col = (self.csi_param(0, 1) - 1).min(cols - 1),
+            'd' => self.cursor_row = (self.csi_param(0, 1) - 1).min(rows - 1),
+            'H' | 'f' => {
+                self.cursor_row = (self.csi_param(0, 1) - 1).min(rows - 1);
+                self.cursor_col = (self.csi_param(1, 1) - 1).min(cols - 1);
+            }
+            'K' => {
+                let row = self.cursor_row;
+                match self.esc_params[0] {
+                    0 => self.erase_cells(row, self.cursor_col, cols),
+                    1 => self.erase_cells(row, 0, self.cursor_col + 1),
+                    _ => self.erase_cells(row, 0, cols),
+                }
+            }
+            'J' => match self.esc_params[0] {
+                0 => {
+                    let row = self.cursor_row;
+                    self.erase_cells(row, self.cursor_col, cols);
+                    for r in row + 1..rows {
+                        self.erase_cells(r, 0, cols);
+                    }
+                }
+                1 => {
+                    for r in 0..self.cursor_row {
+                        self.erase_cells(r, 0, cols);
+                    }
+                    let row = self.cursor_row;
+                    self.erase_cells(row, 0, self.cursor_col + 1);
+                }
+                _ => {
+                    for r in 0..rows {
+                        self.erase_cells(r, 0, cols);
+                    }
+                }
+            },
+            'X' => {
+                let row = self.cursor_row;
+                let n = self.csi_param(0, 1);
+                self.erase_cells(row, self.cursor_col, (self.cursor_col + n).min(cols));
+            }
+            'm' => {
+                for i in 0..nparams.max(1) {
+                    match self.esc_params[i] {
+                        0 => {
+                            self.fg = self.default_fg;
+                            self.bg = self.default_bg;
+                        }
+                        1 => {}
+                        7 => core::mem::swap(&mut self.fg, &mut self.bg),
+                        30..=37 => self.fg = ANSI_COLORS[(self.esc_params[i] - 30) as usize],
+                        39 => self.fg = self.default_fg,
+                        40..=47 => self.bg = ANSI_COLORS[(self.esc_params[i] - 40) as usize],
+                        49 => self.bg = self.default_bg,
+                        90..=97 => self.fg = ANSI_COLORS[(self.esc_params[i] - 90 + 8) as usize],
+                        100..=107 => self.bg = ANSI_COLORS[(self.esc_params[i] - 100 + 8) as usize],
+                        _ => {}
+                    }
+                }
+            }
+            _ => {} // modes, scrolling regions, reports: not needed for a text console
+        }
+    }
+}

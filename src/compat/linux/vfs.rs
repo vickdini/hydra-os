@@ -123,7 +123,7 @@ const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 // ----------------------------------------------------------------------
 
 /// Copies a NUL-terminated string (at most `PATH_MAX`) from user memory.
-fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
+pub(crate) fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
     if ptr == 0 {
         return Err(EFAULT);
     }
@@ -148,7 +148,7 @@ fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
     }
 }
 
-fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
+pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
     let p = user_cstr(ptr)?;
     if p.is_empty() {
         return Err(ENOENT);
@@ -178,14 +178,14 @@ fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
 // Process context
 // ----------------------------------------------------------------------
 
-struct Creds {
-    uid: u32,
-    gid: u32,
-    euid: u32,
-    egid: u32,
+pub(crate) struct Creds {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
 }
 
-fn creds() -> Creds {
+pub(crate) fn creds() -> Creds {
     crate::task::with_current_task_mut(|t| Creds { uid: t.uid, gid: t.gid, euid: t.euid, egid: t.egid }).unwrap_or(Creds {
         uid: 0,
         gid: 0,
@@ -199,11 +199,11 @@ fn umask() -> u32 {
 }
 
 /// The process root directory (0 = pool root).
-fn proc_root() -> u64 {
+pub(crate) fn proc_root() -> u64 {
     crate::task::with_current_fds_mut(|fds| fds.root_ino)
 }
 
-fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
     ZfsClient::resolve_in(proc_root(), base, path, follow)
 }
 
@@ -213,7 +213,7 @@ fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
 
 /// The directory a path is resolved against: (inode, absolute path). Inode 0 means the
 /// process root.
-fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
+pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
     if path.first() == Some(&b'/') {
         return Ok((0, String::from("/")));
     }
@@ -244,7 +244,7 @@ fn fd_exists(fd: i32) -> bool {
 }
 
 /// Lexically joins and normalises `path` onto absolute directory `base`.
-fn join_path(base: &str, path: &[u8]) -> String {
+pub(crate) fn join_path(base: &str, path: &[u8]) -> String {
     let mut parts: Vec<&[u8]> = Vec::new();
     let path_abs = path.first() == Some(&b'/');
     if !path_abs {
@@ -284,7 +284,7 @@ fn chardev_path(rdev: u64) -> Option<&'static str> {
     }
 }
 
-fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
+pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
     if uid == 0 {
         // root may read/write anything and execute anything with an x bit (or a directory)
         return want & 1 == 0 || attr.mode & 0o111 != 0 || attr.is_dir();
@@ -434,6 +434,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
 
+    if matches!(abs.as_str(), "/dev/tty" | "/dev/console" | "/dev/tty0" | "/dev/tty1") {
+        return install(FileDescriptor::ConsoleOut, flags);
+    }
     if is_pseudo(&abs) {
         return install(
             FileDescriptor::File {
@@ -937,10 +940,134 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
     })
 }
 
+fn is_tty(d: &FileDescriptor) -> bool {
+    matches!(d, FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr)
+}
+
+/// Blocking read from a pipe: waits for data, or returns 0 once every writer is gone.
+fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
+    loop {
+        {
+            let mut p = pipe.lock();
+            if p.available_read() > 0 {
+                return p.read(buf) as i64;
+            }
+            if p.writers_count() == 0 {
+                return 0;
+            }
+        }
+        if super::proc::signal_pending() {
+            return super::proc::ERESTARTSYS;
+        }
+        crate::task::sleep_ticks(1);
+    }
+}
+
+/// Blocking write to a pipe: waits for space; `EPIPE` (and `SIGPIPE`) without readers.
+fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
+    let mut done = 0;
+    while done < data.len() {
+        let wrote = {
+            let mut p = pipe.lock();
+            if p.readers_count() == 0 {
+                None
+            } else if p.available_write() > 0 {
+                Some(p.write(&data[done..]).unwrap_or(0))
+            } else {
+                Some(0)
+            }
+        };
+        match wrote {
+            None => {
+                let (tid, pid) = super::proc::current_ids();
+                super::proc::post_thread(pid, tid, super::proc::SIGPIPE);
+                return if done > 0 { done as i64 } else { -32 };
+            }
+            Some(0) => {
+                if super::proc::signal_pending() {
+                    return if done > 0 { done as i64 } else { super::proc::ERESTARTSYS };
+                }
+                crate::task::sleep_ticks(1);
+            }
+            Some(n) => done += n,
+        }
+    }
+    done as i64
+}
+
+/// Terminal and pipe I/O, which may block. `None` for other descriptor kinds.
+fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
+    let fd = a[0] as usize;
+    let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
+    let stream = is_tty(&desc) || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_));
+    if !stream {
+        return None;
+    }
+    // (buffer, length) pairs: one for read/write, the iovec array for readv/writev
+    let iov: Vec<(u64, u64)> = match num {
+        0 | 1 => alloc::vec![(a[1], a[2])],
+        _ => {
+            let raw = match copy_in(a[1], a[2] as usize * 16) {
+                Ok(r) => r,
+                Err(e) => return Some(e),
+            };
+            raw.chunks_exact(16)
+                .map(|c| (u64::from_le_bytes(c[0..8].try_into().unwrap()), u64::from_le_bytes(c[8..16].try_into().unwrap())))
+                .filter(|&(_, l)| l > 0)
+                .collect()
+        }
+    };
+    let reading = num == 0 || num == 19;
+    let mut total = 0i64;
+    for (ptr, len) in iov {
+        if !prefault_current(ptr, len, reading) {
+            return Some(if total > 0 { total } else { EFAULT });
+        }
+        let r = if reading {
+            let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
+            match &desc {
+                FileDescriptor::PipeRead(p) => pipe_read(p, buf),
+                FileDescriptor::PipeWrite(_) => EBADF,
+                _ => super::tty::read(buf, false),
+            }
+        } else {
+            let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+            match &desc {
+                FileDescriptor::PipeWrite(p) => pipe_write(p, data),
+                FileDescriptor::PipeRead(_) => EBADF,
+                _ => super::tty::write(data) as i64,
+            }
+        };
+        if r < 0 {
+            return Some(if total > 0 { total } else { r });
+        }
+        total += r;
+        if reading && (r as u64) < len {
+            break; // short read: don't wait for the next buffer
+        }
+    }
+    Some(total)
+}
+
 /// Handles the file-system system calls. Returns `None` when the call (or the kind of
 /// descriptor it targets) belongs to another handler.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     let r = match num {
+        0 | 1 | 19 | 20 => return stream_io(num, a),
+        16 => {
+            // ioctl: terminal requests on the console; ENOTTY for terminal requests elsewhere
+            let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
+            match desc {
+                Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
+                Some(FileDescriptor::Vnode(_)) | Some(FileDescriptor::PipeRead(_)) | Some(FileDescriptor::PipeWrite(_))
+                    if a[1] & 0xFF00 == 0x5400 =>
+                {
+                    super::tty::NOT_A_TTY
+                }
+                None => EBADF,
+                _ => return None,
+            }
+        }
         NR_OPEN => open_at(AT_FDCWD, a[0], a[1] as u32, a[2] as u32),
         NR_CREAT => open_at(AT_FDCWD, a[0], O_CREAT | O_WRONLY | O_TRUNC, a[1] as u32),
         NR_OPENAT => open_at(a[0] as i64, a[1], a[2] as u32, a[3] as u32),

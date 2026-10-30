@@ -545,7 +545,7 @@ impl ZfsClient {
             Err(_) => return 0,
         };
 
-        let candidate_files = [
+        let fixed_files = [
             ("\\bin\\hello.elf", "/bin/hello.elf"),
             ("\\bin\\counter.elf", "/bin/counter.elf"),
             ("\\bin\\linuxapp.elf", "/bin/linuxapp.elf"),
@@ -568,10 +568,30 @@ impl ZfsClient {
             ("\\etc\\group", "/etc/group"),
         ];
 
+        // Every executable in the boot volume's in directory is imported too
+        let mut candidate_files: Vec<(alloc::string::String, alloc::string::String)> = fixed_files
+            .iter()
+            .map(|&(f, z)| (alloc::string::String::from(f), alloc::string::String::from(z)))
+            .collect();
+        if let Some(cstr) = crate::shell::fs::path_to_cstr16(r"\bin", &mut [0u16; 16]) {
+            if let Ok(handle) = root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
+                if let Some(mut dir) = handle.into_directory() {
+                    let mut entry_buf = [0u8; 512];
+                    while let Ok(Some(info)) = dir.read_entry(&mut entry_buf) {
+                        let name = alloc::format!("{}", info.file_name());
+                        if name.ends_with(".elf") && !candidate_files.iter().any(|(_, z)| z.ends_with(&alloc::format!("/{}", name))) {
+                            candidate_files.push((alloc::format!(r"\bin\{}", name), alloc::format!("/bin/{}", name)));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut imported_count = 0;
         let mut path_u16 = [0u16; 128];
 
-        for &(fat_path, zfs_path) in &candidate_files {
+        for (fat_path, zfs_path) in candidate_files.iter() {
+            let (fat_path, zfs_path) = (fat_path.as_str(), zfs_path.as_str());
             let cstr = match crate::shell::fs::path_to_cstr16(fat_path, &mut path_u16) {
                 Some(c) => c,
                 None => continue,
