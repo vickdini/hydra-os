@@ -8,6 +8,9 @@
 //!
 //! The console belongs to Linux processes only while a session holds it (see
 //! [`attach_session`]); otherwise the Hydra shell reads the keyboard directly.
+//!
+//! The line discipline itself ([`Tty`], [`feed_input`], [`take_input`], [`tty_ioctl`])
+//! is shared with pseudo-terminals ([`super::pty`]).
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -107,31 +110,43 @@ impl Termios {
     }
 }
 
-struct Tty {
+/// Terminal state: termios settings, line editing and the input queue for `read`.
+pub(crate) struct Tty {
     termios: Termios,
     /// Line being edited in canonical mode.
     line: Vec<u8>,
     /// Input ready for `read`; `None` marks an end-of-file (Ctrl+D) boundary.
     ready: VecDeque<Option<u8>>,
     /// Session holding the terminal (0 = the Hydra shell owns the console).
-    session: u64,
+    pub(crate) session: u64,
     /// Foreground process group (receives Ctrl+C).
-    fg_pgrp: u64,
-    winsize: Option<(u16, u16)>,
+    pub(crate) fg_pgrp: u64,
+    pub(crate) winsize: Option<(u16, u16)>,
     /// `O_NONBLOCK` of the console's open file description (shared by every process
     /// that inherited it, as on Linux).
     nonblock: bool,
 }
 
-static TTY: Mutex<Tty> = Mutex::new(Tty {
-    termios: Termios::default(),
-    line: Vec::new(),
-    ready: VecDeque::new(),
-    session: 0,
-    fg_pgrp: 0,
-    winsize: None,
-    nonblock: false,
-});
+impl Tty {
+    pub(crate) const fn new() -> Self {
+        Self {
+            termios: Termios::default(),
+            line: Vec::new(),
+            ready: VecDeque::new(),
+            session: 0,
+            fg_pgrp: 0,
+            winsize: None,
+            nonblock: false,
+        }
+    }
+
+    /// True if `read` would return data (or end-of-file) now.
+    pub(crate) fn has_input(&self) -> bool {
+        !self.ready.is_empty()
+    }
+}
+
+static TTY: Mutex<Tty> = Mutex::new(Tty::new());
 
 /// Readers of the terminal (and `poll`/`select` on it), woken by keystrokes.
 pub static INPUT_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
@@ -184,21 +199,26 @@ fn out(bytes: &[u8]) {
     }
 }
 
-/// Writes program output with output processing (`ONLCR`: newline -> CR LF).
-pub fn write(data: &[u8]) -> usize {
-    let oflag = TTY.lock().termios.oflag;
-    if oflag & OPOST != 0 && oflag & ONLCR != 0 && data.contains(&b'\n') {
-        let mut v = Vec::with_capacity(data.len() + 8);
+/// Applies output processing (`ONLCR`: newline -> CR LF) to program output.
+pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
+    let oflag = t.termios.oflag;
+    if oflag & OPOST != 0 && oflag & ONLCR != 0 {
         for &b in data {
             if b == b'\n' {
-                v.push(b'\r');
+                out.push(b'\r');
             }
-            v.push(b);
+            out.push(b);
         }
-        out(&v);
     } else {
-        out(data);
+        out.extend_from_slice(data);
     }
+}
+
+/// Writes program output to the console.
+pub fn write(data: &[u8]) -> usize {
+    let mut v = Vec::with_capacity(data.len() + 8);
+    process_output(&TTY.lock(), data, &mut v);
+    out(&v);
     data.len()
 }
 
@@ -227,6 +247,16 @@ fn key_bytes(key: Key) -> Vec<u8> {
             0x17 => alloc::vec![0x1b], // Escape
             _ => Vec::new(),
         },
+    }
+}
+
+/// Feeds input bytes through the line discipline: echo goes to `echo`, and `ISIG`
+/// characters add the signal to raise (in the foreground group) to `signals`.
+pub(crate) fn feed_input(t: &mut Tty, bytes: &[u8], echo: &mut Vec<u8>, signals: &mut Vec<u32>) {
+    for &b in bytes {
+        if let Some(sig) = input_byte(t, b, echo) {
+            signals.push(sig);
+        }
     }
 }
 
@@ -329,11 +359,7 @@ pub fn pump() {
     let fg = {
         let mut t = TTY.lock();
         for k in keys {
-            for b in key_bytes(k) {
-                if let Some(sig) = input_byte(&mut t, b, &mut echo) {
-                    signals.push(sig);
-                }
-            }
+            feed_input(&mut t, &key_bytes(k), &mut echo, &mut signals);
         }
         t.fg_pgrp
     };
@@ -385,39 +411,8 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
     loop {
         waits.register();
         pump();
-        {
-            let mut t = TTY.lock();
-            let canon = t.termios.lflag & ICANON != 0;
-            if !t.ready.is_empty() {
-                let mut n = 0;
-                while n < buf.len() {
-                    match t.ready.front() {
-                        Some(Some(b)) => {
-                            buf[n] = *b;
-                            n += 1;
-                            t.ready.pop_front();
-                            if canon && buf[n - 1] == b'\n' {
-                                break;
-                            }
-                        }
-                        Some(None) => {
-                            // End-of-file marker: ends this read (0 bytes if nothing before it)
-                            if n == 0 {
-                                t.ready.pop_front();
-                            }
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-                if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
-                    crate::kprintln!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
-                }
-                return n as i64;
-            }
-            if !canon && t.termios.cc[VMIN] == 0 {
-                return 0;
-            }
+        if let Some(n) = take_input(&mut TTY.lock(), buf) {
+            return n;
         }
         if nonblock {
             return EAGAIN;
@@ -427,6 +422,43 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
         }
         waits.wait(None);
     }
+}
+
+/// Takes input for `read`: a line in canonical mode, otherwise what is there. `None`
+/// means the reader must wait.
+pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
+    let canon = t.termios.lflag & ICANON != 0;
+    if !t.ready.is_empty() {
+        let mut n = 0;
+        while n < buf.len() {
+            match t.ready.front() {
+                Some(Some(b)) => {
+                    buf[n] = *b;
+                    n += 1;
+                    t.ready.pop_front();
+                    if canon && buf[n - 1] == b'\n' {
+                        break;
+                    }
+                }
+                Some(None) => {
+                    // End-of-file marker: ends this read (0 bytes if nothing before it)
+                    if n == 0 {
+                        t.ready.pop_front();
+                    }
+                    break;
+                }
+                None => break,
+            }
+        }
+        if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::kprintln!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
+        }
+        return Some(n as i64);
+    }
+    if !canon && t.termios.cc[VMIN] == 0 {
+        return Some(0);
+    }
+    None
 }
 
 fn copy_out(ptr: u64, data: &[u8]) -> bool {
@@ -446,8 +478,27 @@ fn copy_in(ptr: u64, len: usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
-/// Terminal `ioctl`s.
+/// Console terminal `ioctl`s.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
+    if request == 0x541B {
+        pump(); // FIONREAD counts keystrokes not yet pumped
+    }
+    let default_size = || {
+        let (cols, rows) = crate::video::console::dimensions();
+        (rows as u16, cols as u16)
+    };
+    tty_ioctl(&TTY, request, arg, &default_size).0
+}
+
+/// Terminal `ioctl`s on `tty`. `default_size` gives (rows, cols) until `TIOCSWINSZ`.
+/// Returns the result and whether the window size changed (the caller sends `SIGWINCH`).
+pub(crate) fn tty_ioctl(tty: &Mutex<Tty>, request: u64, arg: u64, default_size: &dyn Fn() -> (u16, u16)) -> (i64, bool) {
+    let mut resized = false;
+    let r = tty_ioctl_inner(tty, request, arg, default_size, &mut resized);
+    (r, resized)
+}
+
+fn tty_ioctl_inner(tty: &Mutex<Tty>, request: u64, arg: u64, default_size: &dyn Fn() -> (u16, u16), resized: &mut bool) -> i64 {
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;
     const TCSETSW: u64 = 0x5403;
@@ -477,7 +528,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
 
     match request {
         TCGETS | TCGETS2 => {
-            let b = TTY.lock().termios.to_bytes();
+            let b = tty.lock().termios.to_bytes();
             let mut full = [0u8; 44];
             full[..36].copy_from_slice(&b);
             full[36..40].copy_from_slice(&38400u32.to_le_bytes());
@@ -491,7 +542,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
         }
         TCSETS | TCSETSW | TCSETSF => match copy_in(arg, 36) {
             Some(b) => {
-                let mut t = TTY.lock();
+                let mut t = tty.lock();
                 t.termios = Termios::from_bytes(&b);
                 if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
                     crate::kprintln!("[tty] set lflag={:#o} req={:#x} line={} ready={}", t.termios.lflag, request, t.line.len(), t.ready.len());
@@ -511,7 +562,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
         },
         TCXONC => 0,
         TCFLSH => {
-            let mut t = TTY.lock();
+            let mut t = tty.lock();
             if arg == 0 || arg == 2 {
                 t.ready.clear();
                 t.line.clear();
@@ -519,10 +570,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
             0
         }
         TIOCGWINSZ => {
-            let (cols, rows) = match TTY.lock().winsize {
-                Some((r, c)) => (c as usize, r as usize),
-                None => crate::video::console::dimensions(),
-            };
+            let (rows, cols) = tty.lock().winsize.unwrap_or_else(default_size);
             let mut b = [0u8; 8];
             b[0..2].copy_from_slice(&(rows as u16).to_le_bytes());
             b[2..4].copy_from_slice(&(cols as u16).to_le_bytes());
@@ -534,13 +582,16 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
         }
         TIOCSWINSZ => match copy_in(arg, 8) {
             Some(b) => {
-                TTY.lock().winsize = Some((u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])));
+                let size = Some((u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])));
+                let mut t = tty.lock();
+                *resized = t.winsize != size;
+                t.winsize = size;
                 0
             }
             None => EFAULT,
         },
         TIOCGPGRP => {
-            let pg = TTY.lock().fg_pgrp as i32;
+            let pg = tty.lock().fg_pgrp as i32;
             if copy_out(arg, &pg.to_le_bytes()) {
                 0
             } else {
@@ -549,13 +600,13 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
         }
         TIOCSPGRP => match copy_in(arg, 4) {
             Some(b) => {
-                TTY.lock().fg_pgrp = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
+                tty.lock().fg_pgrp = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
                 0
             }
             None => EFAULT,
         },
         TIOCGSID => {
-            let sid = TTY.lock().session as i32;
+            let sid = tty.lock().session as i32;
             if copy_out(arg, &sid.to_le_bytes()) {
                 0
             } else {
@@ -564,8 +615,7 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
         }
         TIOCSCTTY | TIOCNOTTY => 0,
         FIONREAD => {
-            pump();
-            let n = TTY.lock().ready.iter().take_while(|b| b.is_some()).count() as i32;
+            let n = tty.lock().ready.iter().take_while(|b| b.is_some()).count() as i32;
             if copy_out(arg, &n.to_le_bytes()) {
                 0
             } else {

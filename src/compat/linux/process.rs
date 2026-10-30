@@ -153,6 +153,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         73 => 0,
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
+        282 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], 0),
+        289 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], a[3]),
+        // pause: sleep until a signal is delivered (a posted signal wakes the event wait)
+        34 => loop {
+            if super::proc::signal_pending() {
+                break -4; // EINTR (never restarted)
+            }
+            crate::task::wait::wait(None);
+        },
         // getrusage(who, struct rusage *): CPU time from the scheduler's tick accounting
         // (user and system time are not told apart); other fields stay zero
         98 => {

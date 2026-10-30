@@ -781,6 +781,67 @@ pub fn sys_rt_sigsuspend(mask_ptr: u64, size: u64) -> i64 {
 static SUSPEND_RESTORE: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
 /// True if the calling thread has an unblocked pending signal (blocking syscalls poll this).
+/// True if process `pid` (or one of its threads) has a signal from `mask` pending
+/// (`signalfd` readiness). Never blocks.
+pub fn pending_for(pid: u64, mask: u64) -> bool {
+    let procs = match PROCS.try_lock() {
+        Some(p) => p,
+        None => return false,
+    };
+    procs.get(&pid).map_or(false, |p| {
+        let threads = p.threads.values().fold(0, |acc, t| acc | t.pending);
+        (p.pending | threads) & mask != 0
+    })
+}
+
+/// `si_code`, child pid and `si_status` for a `SIGCHLD` received by `parent`, derived
+/// from its children's state (the process table does not queue per-signal details):
+/// an unreaped zombie gives CLD_EXITED/KILLED/DUMPED, else a stopped or continued child.
+pub fn sigchld_details(parent: u64) -> (i32, u64, i32) {
+    const CLD_EXITED: i32 = 1;
+    const CLD_KILLED: i32 = 2;
+    const CLD_DUMPED: i32 = 3;
+    const CLD_STOPPED: i32 = 5;
+    const CLD_CONTINUED: i32 = 6;
+    let procs = PROCS.lock();
+    let children = || procs.values().filter(move |c| c.ppid == parent);
+    if let Some(c) = children().find(|c| c.zombie) {
+        let st = c.exit_status.unwrap_or(0);
+        return match st & 0x7f {
+            0 => (CLD_EXITED, c.pid, (st >> 8) & 0xff),
+            sig if st & 0x80 != 0 => (CLD_DUMPED, c.pid, sig),
+            sig => (CLD_KILLED, c.pid, sig),
+        };
+    }
+    if let Some(c) = children().find(|c| c.stopped) {
+        return (CLD_STOPPED, c.pid, c.stop_sig as i32);
+    }
+    if let Some(c) = children().find(|c| c.continued) {
+        return (CLD_CONTINUED, c.pid, SIGCONT as i32);
+    }
+    (0, 0, 0)
+}
+
+/// Takes the lowest pending signal in `mask` for the calling thread (its own pending set
+/// first, then the process's) without delivering it (`signalfd` reads).
+pub fn take_signal(mask: u64) -> Option<u32> {
+    let (tid, pid) = current_ids();
+    let mut procs = PROCS.lock();
+    let p = procs.get_mut(&pid)?;
+    let t = p.threads.entry(tid).or_default();
+    if t.pending & mask != 0 {
+        let sig = (t.pending & mask).trailing_zeros() + 1;
+        t.pending &= !bit(sig);
+        return Some(sig);
+    }
+    if p.pending & mask != 0 {
+        let sig = (p.pending & mask).trailing_zeros() + 1;
+        p.pending &= !bit(sig);
+        return Some(sig);
+    }
+    None
+}
+
 pub fn signal_pending() -> bool {
     let (tid, pid) = current_ids();
     let procs = match PROCS.try_lock() {

@@ -136,7 +136,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
-            fds: crate::fs::FdTable::new_default(),
+            fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
             preempt_depth: 0,
@@ -220,7 +220,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
-            fds: crate::fs::FdTable::new_default(),
+            fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
             preempt_depth: 0,
@@ -300,7 +300,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
-            fds: crate::fs::FdTable::new_default(),
+            fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
             preempt_depth: 0,
@@ -371,7 +371,7 @@ impl Scheduler {
             ticks_run: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
-            fds: crate::fs::FdTable::new_default(),
+            fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
             preempt_depth: 0,
@@ -463,7 +463,7 @@ impl Scheduler {
                     fds.root_ino = r;
                     fds.cwd_ino = r;
                 }
-                fds
+                fds.into_shared()
             },
             mm: Some(mm),
             exe: Some(alloc::sync::Arc::from(exec_path)),
@@ -488,7 +488,7 @@ impl Scheduler {
         frame: &crate::arch::syscall::SyscallFrame,
         args: [u64; 5],
     ) -> Result<TaskId, &'static str> {
-        use crate::compat::linux::types::{CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_PARENT_SETTID, CLONE_SETTLS, CLONE_THREAD};
+        use crate::compat::linux::types::{CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_PARENT_SETTID, CLONE_SETTLS, CLONE_THREAD};
         const CLONE_VM: u64 = 0x100;
         let [flags, child_stack, ptid, ctid, newtls] = args;
 
@@ -504,7 +504,12 @@ impl Scheduler {
         let parent_brk = parent.brk;
         let parent_name = parent.name;
         let parent_priority = parent.priority;
-        let parent_fds = parent.fds.fork_copy();
+        // Threads share the descriptor table; a new process gets a copy
+        let parent_fds = if flags & CLONE_FILES != 0 {
+            parent.fds.clone()
+        } else {
+            parent.fds.lock().fork_copy().into_shared()
+        };
         let parent_tid = parent.id.0;
         let parent_uid = parent.uid;
         let parent_gid = parent.gid;
@@ -895,8 +900,11 @@ impl Scheduler {
             }
         }
 
-        let mut fds = core::mem::replace(&mut self.tasks[idx].fds, crate::fs::FdTable::empty());
-        fds.close_all();
+        // The last thread using the descriptor table closes its descriptors
+        let fds = core::mem::replace(&mut self.tasks[idx].fds, crate::fs::FdTable::empty().into_shared());
+        if let Ok(fds) = alloc::sync::Arc::try_unwrap(fds) {
+            fds.into_inner().close_all();
+        }
         if self.tasks[idx].personality == super::tcb::TaskPersonality::Linux {
             crate::compat::linux::proc::thread_exited(self.tasks[idx].tgid, self.tasks[idx].id.0);
         }
@@ -996,7 +1004,7 @@ impl Scheduler {
         F: FnOnce(&mut crate::fs::FdTable) -> R,
     {
         if self.initialized && self.current_index < self.tasks.len() {
-            Some(f(&mut self.tasks[self.current_index].fds))
+            Some(f(&mut self.tasks[self.current_index].fds.lock()))
         } else {
             None
         }

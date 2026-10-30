@@ -212,7 +212,8 @@ pub struct Task {
     pub ticks_run: u64,
     pub timeslice_remaining: u32,
     pub cspace: Box<CapabilityTable>,
-    pub fds: crate::fs::FdTable,
+    /// Descriptor table, shared with the other threads of the process (`CLONE_FILES`).
+    pub fds: crate::fs::SharedFdTable,
     /// Private address space (Linux processes loaded through the VM subsystem). Threads of
     /// one process share it. `None` for kernel tasks and legacy tasks in the kernel space.
     pub mm: Option<alloc::sync::Arc<spin::Mutex<crate::memory::vm::Mm>>>,
@@ -262,7 +263,7 @@ impl Task {
             ticks_run: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),
-            fds: crate::fs::FdTable::new_default(),
+            fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
             preempt_depth: 0,

@@ -211,7 +211,12 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             t.exe = Some(exe);
             t.fs_base = 0;
             t.clear_child_tid = 0;
-            t.fds.close_on_exec();
+            // The new image gets a descriptor table of its own (as Linux's unshare_files)
+            if alloc::sync::Arc::strong_count(&t.fds) > 1 {
+                let copy = t.fds.lock().fork_copy();
+                t.fds = copy.into_shared();
+            }
+            t.fds.lock().close_on_exec();
             core::mem::replace(&mut t.mm, Some(new_mm.clone()))
         })
         .flatten()

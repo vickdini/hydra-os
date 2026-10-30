@@ -64,6 +64,10 @@ pub enum FileDescriptor {
     Vnode(Arc<Mutex<OpenFile>>),
     /// An internet (TCP/UDP) socket; I/O goes through the Linux socket layer.
     Inet(Arc<Mutex<crate::compat::linux::inet::InetSocket>>),
+    /// An end of a pseudo-terminal (`/dev/ptmx` master or `/dev/pts/N` slave).
+    Pty(Arc<crate::compat::linux::pty::PtyFile>),
+    /// Signals received as data (`signalfd`).
+    SignalFd(Arc<crate::compat::linux::signalfd::SignalFd>),
     /// A path-addressed file: pseudo files (`/dev`, `/proc`) and Hydra-native opens.
     File {
         path: String,
@@ -154,6 +158,8 @@ impl FileDescriptor {
                 m.read(buf)
             }
             FileDescriptor::Inet(_) => Err("Internet sockets are read through the Linux socket layer"),
+            FileDescriptor::Pty(_) => Err("Pseudo-terminals are read through the Linux terminal layer"),
+            FileDescriptor::SignalFd(_) => Err("signalfd is read through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.readable() {
@@ -246,6 +252,10 @@ impl FileDescriptor {
                 m.write(data)
             }
             FileDescriptor::Inet(_) => Err("Internet sockets are written through the Linux socket layer"),
+            // Kernel output to a process whose stdout is a pseudo-terminal (never waits:
+            // callers may hold the scheduler lock)
+            FileDescriptor::Pty(p) => Ok(p.write_nowait(data)),
+            FileDescriptor::SignalFd(_) => Err("signalfd is not writable"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.writable() {
@@ -290,6 +300,9 @@ impl FileDescriptor {
                 }
                 _ => waits.polled = true,
             },
+            FileDescriptor::Pty(p) => waits.add(QueueRef::Shared(p.pty.wq.clone())),
+            // Posting a signal wakes every wait of the process
+            FileDescriptor::SignalFd(_) => {}
             FileDescriptor::Inet(s) => {
                 let s = s.lock();
                 match s.wait_queue() {
@@ -339,12 +352,17 @@ impl FileDescriptor {
                 ev
             }
             FileDescriptor::Inet(s) => s.lock().poll_events(),
+            FileDescriptor::Pty(p) => p.poll_events(),
+            FileDescriptor::SignalFd(s) => s.poll_events(),
             // Regular files are always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) => 0x0001 | 0x0004,
             FileDescriptor::Epoll(_) => 0,
         }
     }
 }
+
+/// A descriptor table shared by the threads of a process (`CLONE_FILES`).
+pub type SharedFdTable = Arc<Mutex<FdTable>>;
 
 /// Per-process File Descriptor Table plus the process's working directory.
 #[derive(Clone)]
@@ -519,6 +537,11 @@ impl FdTable {
         for fd in 0..self.fds.len() {
             let _ = self.close(fd);
         }
+    }
+
+    /// Wraps the table for sharing between threads.
+    pub fn into_shared(self) -> SharedFdTable {
+        Arc::new(Mutex::new(self))
     }
 
     /// Closes descriptors marked close-on-exec (`execve`).
