@@ -215,6 +215,14 @@ impl BlockCache {
     }
 }
 
+/// What a device holds before import ([`Spa::probe`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DiskContents {
+    Blank,
+    Pool,
+    Other,
+}
+
 /// Storage Pool Allocator.
 pub struct Spa {
     pub vdev: Vdev,
@@ -294,6 +302,22 @@ impl Spa {
 
     /// Opens an existing pool, returning it with its newest valid uberblock, or hands the
     /// device back if it holds no valid pool.
+    /// What block 0 of a device holds: nothing (all zeros), a pool label, or something
+    /// else. Read errors are retried; `None` means the device could not be read.
+    pub fn probe(vdev: &Vdev) -> Option<DiskContents> {
+        let mut block = [0u8; ZFS_BLOCK_SIZE];
+        for _ in 0..3 {
+            if vdev.read(0, &mut block).is_ok() {
+                if block.iter().all(|&b| b == 0) {
+                    return Some(DiskContents::Blank);
+                }
+                let label: VdevLabel = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const VdevLabel) };
+                return Some(if label.magic == super::types::VDEV_LABEL_MAGIC { DiskContents::Pool } else { DiskContents::Other });
+            }
+        }
+        None
+    }
+
     pub fn open(vdev: Vdev) -> Result<(Self, Uberblock), Vdev> {
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         if vdev.read(0, &mut block).is_err() {
@@ -430,8 +454,8 @@ impl Spa {
     /// Finishes a transaction group: persists dirty bitmap blocks, writes the uberblock,
     /// then releases blocks freed during the group.
     pub fn commit(&mut self, ub: &mut Uberblock) -> Result<(), &'static str> {
+        // Blocks stay dirty until written, so a failed commit is redone by the next one
         let dirty: Vec<u64> = self.dirty_bitmap_blocks.keys().copied().collect();
-        self.dirty_bitmap_blocks.clear();
         for idx in dirty {
             let mut block = [0u8; ZFS_BLOCK_SIZE];
             let first_word = idx as usize * ZFS_BLOCK_SIZE / 8;
@@ -441,6 +465,7 @@ impl Spa {
                 }
             }
             self.vdev.write(self.label.bitmap_start + idx, &block)?;
+            self.dirty_bitmap_blocks.remove(&idx);
         }
         self.vdev.flush()?;
 

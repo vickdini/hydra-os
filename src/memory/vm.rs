@@ -752,6 +752,22 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
     }
 }
 
+/// Physical address of `addr` in the running process if it lies in a shared mapping
+/// (`MAP_SHARED`: memory other processes may map too); `None` for private memory or an
+/// unmapped page. Used to key futexes shared between processes.
+pub fn shared_phys_current(addr: u64) -> Option<u64> {
+    let ptr = CURRENT_MM.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    let mm = unsafe { &*ptr };
+    let mut guard = mm.lock();
+    if !guard.find_vma(addr)?.shared {
+        return None;
+    }
+    guard.translate(addr).map(|p| p.as_u64())
+}
+
 /// Validates and faults in a user buffer of the running process before kernel I/O into it.
 /// Returns false if the range is not mapped with the required access.
 pub fn prefault_current(addr: u64, len: u64, write: bool) -> bool {

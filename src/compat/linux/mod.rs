@@ -7,20 +7,25 @@
 pub mod epoll;
 pub mod eventfd;
 pub mod fs;
+pub mod itimer;
+pub mod inotify;
 pub mod futex;
 pub mod inet;
 pub mod memfd;
 pub mod execve;
 pub mod mm;
 pub mod proc;
+pub mod pidfd;
 pub mod pty;
 pub mod process;
 pub mod select;
 pub mod signalfd;
 pub mod socket;
 pub mod syscalls;
+pub mod timerfd;
 pub mod tty;
 pub mod types;
+pub mod unix;
 pub mod vfs;
 pub mod wayland_bridge;
 
@@ -86,6 +91,9 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         return r;
     }
 
+    if let Some(r) = unix::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        return r;
+    }
     if let Some(r) = inet::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
         LINUX_STATS.lock().io_calls += 1;
         return r;
@@ -1616,10 +1624,15 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 => {
             // sys_epoll_create(size: int)
             // sys_epoll_create1(flags: int)
+            let cloexec = num == SYS_EPOLL_CREATE1 && arg0 as u32 & EPOLL_CLOEXEC != 0;
             let ep = EpollInstance::new();
             let desc = crate::fs::FileDescriptor::Epoll(ep);
-            crate::task::with_current_fds_mut(|fds| {
-                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+            crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(desc) {
+                Ok(fd) => {
+                    fds.set_cloexec(fd, cloexec);
+                    fd as i64
+                }
+                Err(_) => -EMFILE,
             })
         }
 
@@ -1718,17 +1731,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 dispatch_wayland_events();
                 waits.wait(deadline);
             }
-        }
-
-        SYS_EVENTFD | SYS_EVENTFD2 => {
-            // sys_eventfd2(initval: unsigned int, flags: int)
-            let initval = arg0 as u32;
-            let flags = arg1 as u32;
-            let efd = EventFd::new(initval, flags);
-            let desc = crate::fs::FileDescriptor::EventFd(efd);
-            crate::task::with_current_fds_mut(|fds| {
-                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
-            })
         }
 
         SYS_MEMFD_CREATE => {
@@ -1857,6 +1859,69 @@ fn report_unimplemented(num: u64, args: [u64; 3]) {
 }
 
 /// Process lifecycle and signal system calls that need the syscall frame.
+const CLONE_PIDFD: u64 = 0x1000;
+const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// Creates a thread or process for `clone`/`clone3` (`args` as `clone` takes them:
+/// flags with the exit signal, stack, parent_tid, child_tid, tls) and stores a pidfd for
+/// the child at `pidfd_ptr` when asked to.
+fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>) -> i64 {
+    const CLONE_VFORK: u64 = 0x4000;
+    args[0] &= !CLONE_PIDFD;
+    let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
+        Ok(id) => id.0,
+        Err(_) => return -ENOMEM,
+    };
+    if let Some(ptr) = pidfd_ptr {
+        let fd = pidfd::install(child, false) as i32;
+        if !crate::memory::vm::prefault_current(ptr, 4, true) {
+            return -EFAULT;
+        }
+        unsafe { core::ptr::write_unaligned(ptr as *mut i32, fd) };
+    }
+    if args[0] & CLONE_VFORK != 0 {
+        // The parent sleeps until the child execs or exits (it borrows our memory)
+        while !proc::vfork_released(child) {
+            crate::task::sleep_ticks(1);
+        }
+    }
+    child as i64
+}
+
+/// `clone3(struct clone_args *, size)`.
+fn sys_clone3(frame: &mut SyscallFrame, args_ptr: u64, size: u64) -> i64 {
+    // CLONE_ARGS_SIZE_VER0 is 64 bytes; later fields (set_tid, cgroup) must be unused
+    if size < 64 || size > 4096 || !crate::memory::vm::prefault_current(args_ptr, size, false) {
+        return if size < 64 || size > 4096 { -EINVAL } else { -EFAULT };
+    }
+    let field = |i: u64| -> u64 {
+        if (i + 1) * 8 <= size {
+            unsafe { core::ptr::read_unaligned((args_ptr + i * 8) as *const u64) }
+        } else {
+            0
+        }
+    };
+    let (flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls) =
+        (field(0), field(1), field(2), field(3), field(4), field(5), field(6), field(7));
+    let (set_tid_size, cgroup) = (field(9), field(10));
+    if exit_signal > 64 || set_tid_size != 0 || (flags & CLONE_INTO_CGROUP != 0 && cgroup != 0) {
+        return -EINVAL;
+    }
+    if (stack == 0) != (stack_size == 0) {
+        return -EINVAL;
+    }
+    // The child starts with the top of the given stack
+    let sp = if stack != 0 { stack + stack_size } else { 0 };
+    let clone_flags = (flags & !(CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP) & 0xFFFF_FF00) | exit_signal;
+    let pidfd_ptr = if flags & CLONE_PIDFD != 0 { Some(pidfd) } else { None };
+    let child = do_clone(frame, [clone_flags, sp, parent_tid, child_tid, tls], pidfd_ptr);
+    if child > 0 && flags & CLONE_CLEAR_SIGHAND != 0 {
+        proc::reset_handlers(child as u64);
+    }
+    child
+}
+
 fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Option<i64> {
     const CLONE_VM: u64 = 0x100;
     const CLONE_VFORK: u64 = 0x4000;
@@ -1878,18 +1943,14 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
                 57 => [17, 0, 0, 0, 0],                           // fork: SIGCHLD
                 _ => [CLONE_VM | CLONE_VFORK | 17, 0, 0, 0, 0],   // vfork
             };
-            let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
-                Ok(id) => id.0,
-                Err(_) => return Some(-ENOMEM),
-            };
-            if args[0] & CLONE_VFORK != 0 {
-                // The parent sleeps until the child execs or exits (it borrows our memory)
-                while !proc::vfork_released(child) {
-                    crate::task::sleep_ticks(1);
-                }
+            // clone(CLONE_PIDFD) stores the pidfd where parent_tid points
+            let pidfd_ptr = if num == 56 && args[0] & CLONE_PIDFD != 0 { Some(a[2]) } else { None };
+            if pidfd_ptr.is_some() && args[0] & CLONE_PARENT_SETTID != 0 {
+                return Some(-EINVAL);
             }
-            child as i64
+            do_clone(frame, args, pidfd_ptr)
         }
+        435 => sys_clone3(frame, a[0], a[1]),
         60 => {
             let (_, pid) = proc::current_ids();
             if proc::PROCS.lock().get(&pid).map_or(false, |p| p.threads_alive() <= 1) {

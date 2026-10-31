@@ -127,10 +127,14 @@ pub fn epoll_collect_ready(
         ep.watches.values().copied().collect()
     };
 
+    let mut fired_oneshot = Vec::new();
     crate::task::with_current_fds_mut(|fds| {
         for watch in watches {
             if ready.len() >= maxevents {
                 break;
+            }
+            if watch.events == EPOLLONESHOT {
+                continue; // a one-shot watch that already fired: disabled until EPOLL_CTL_MOD
             }
             if let Some(desc) = fds.get(watch.fd as usize) {
                 let current_ev = desc.poll_events();
@@ -140,6 +144,9 @@ pub fn epoll_collect_ready(
                         events: matched,
                         data: watch.data,
                     });
+                    if watch.events & EPOLLONESHOT != 0 {
+                        fired_oneshot.push(watch.fd);
+                    }
                 }
             } else {
                 // FD closed while being monitored -> report EPOLLHUP | EPOLLERR
@@ -150,6 +157,14 @@ pub fn epoll_collect_ready(
             }
         }
     });
+    if !fired_oneshot.is_empty() {
+        let mut ep = epoll.lock();
+        for fd in fired_oneshot {
+            if let Some(w) = ep.watches.get_mut(&fd) {
+                w.events = EPOLLONESHOT;
+            }
+        }
+    }
 
     ready
 }

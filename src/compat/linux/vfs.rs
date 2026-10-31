@@ -209,6 +209,43 @@ pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> 
     ZfsClient::resolve_in(proc_root(), base, path, follow)
 }
 
+/// Lookup key of a Unix socket path: the process root and the absolute path, so the
+/// same name means the same socket to every process sharing that root.
+pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
+    let (_, base_path) = base_dir(AT_FDCWD, path)?;
+    let abs = join_path(&base_path, path);
+    let mut key = alloc::format!("{}:", proc_root()).into_bytes();
+    key.extend_from_slice(abs.as_bytes());
+    Ok(key)
+}
+
+/// Creates the socket node `bind` makes for a path name (mode 0777 minus the umask).
+pub(crate) fn make_socket_node(path: &[u8]) -> Result<(), i64> {
+    const S_IFSOCK: u32 = 0o140000;
+    let (base, _) = base_dir(AT_FDCWD, path)?;
+    let (dir, name) = resolve_parent(base, path)?;
+    let c = creds();
+    let pattr = ZfsClient::getattr(dir)?;
+    if !may_access(&pattr, c.euid, c.egid, 2 | 1) {
+        return Err(EACCES);
+    }
+    let mode = S_IFSOCK | (0o777 & !umask());
+    zfs(|s| s.mknod(dir, &name, mode, 0, c.euid, c.egid).map(|_| ()))
+}
+
+/// Resolves a user path to (inode, is a directory) for the caller.
+pub(crate) fn lookup_path(path_ptr: u64, follow: bool) -> Result<(u64, bool), i64> {
+    let path = user_path(path_ptr)?;
+    let (base, _) = base_dir(AT_FDCWD, &path)?;
+    let ino = resolve(base, &path, follow)?;
+    Ok((ino, ZfsClient::getattr(ino)?.is_dir()))
+}
+
+/// True if `path` names an existing file.
+pub(crate) fn path_exists(path: &[u8]) -> bool {
+    base_dir(AT_FDCWD, path).and_then(|(base, _)| resolve(base, path, true)).is_ok()
+}
+
 fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
     ZfsClient::resolve_parent_in(proc_root(), base, path)
 }
@@ -470,6 +507,15 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         }
         Some(FileDescriptor::File { path, .. }) if is_pseudo(&path) => Some(Ok(pseudo_stat(&path))),
         Some(FileDescriptor::Pty(p)) => Some(Ok(p.stat())),
+        Some(FileDescriptor::Unix(s)) => {
+            let mut st = super::types::LinuxStat::default();
+            st.st_dev = 0x8;
+            st.st_ino = s.ino();
+            st.st_mode = 0o140777;
+            st.st_nlink = 1;
+            st.st_blksize = 4096;
+            Some(Ok(st))
+        }
         Some(FileDescriptor::ConsoleIn) | Some(FileDescriptor::ConsoleOut) | Some(FileDescriptor::ConsoleErr) => {
             Some(Ok(console_stat()))
         }
@@ -744,6 +790,10 @@ fn fd_link(abs: &str) -> Option<String> {
         }
         FileDescriptor::Socket(s) => alloc::format!("socket:[{}]", Arc::as_ptr(&s) as usize as u64 & 0xFFFF_FFFF),
         FileDescriptor::Inet(s) => alloc::format!("socket:[{}]", Arc::as_ptr(&s) as usize as u64 & 0xFFFF_FFFF),
+        FileDescriptor::Unix(s) => alloc::format!("socket:[{}]", s.ino()),
+        FileDescriptor::TimerFd(_) => String::from("anon_inode:[timerfd]"),
+        FileDescriptor::Inotify(_) => String::from("anon_inode:inotify"),
+        FileDescriptor::PidFd(_) => String::from("anon_inode:[pidfd]"),
         FileDescriptor::Epoll(_) => String::from("anon_inode:[eventpoll]"),
         FileDescriptor::EventFd(_) => String::from("anon_inode:[eventfd]"),
         FileDescriptor::SignalFd(_) => String::from("anon_inode:[signalfd]"),
@@ -1055,6 +1105,46 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 2 | if super::tty::nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
             }
         }
+        F_GETFL | F_SETFL if event_obj_of(fd).is_some() => {
+            let desc = event_obj_of(fd).unwrap();
+            let on = arg as u32 & O_NONBLOCK != 0;
+            let nb = match &desc {
+                FileDescriptor::EventFd(e) => {
+                    let mut e = e.lock();
+                    if cmd == F_SETFL {
+                        e.nonblocking = on;
+                    }
+                    e.nonblocking
+                }
+                FileDescriptor::TimerFd(t) => {
+                    if cmd == F_SETFL {
+                        t.set_nonblock(on);
+                    }
+                    t.get_nonblock()
+                }
+                FileDescriptor::Inotify(i) => {
+                    if cmd == F_SETFL {
+                        i.set_nonblock(on);
+                    }
+                    i.get_nonblock()
+                }
+                _ => false,
+            };
+            if cmd == F_SETFL {
+                0
+            } else {
+                2 | if nb { O_NONBLOCK as i64 } else { 0 } // O_RDWR
+            }
+        }
+        F_GETFL | F_SETFL if unix_of(fd).is_some() => {
+            let s = unix_of(fd).unwrap();
+            if cmd == F_SETFL {
+                s.set_nonblock(arg as u32 & O_NONBLOCK != 0);
+                0
+            } else {
+                2 | if s.get_nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
+            }
+        }
         F_GETFL | F_SETFL if signalfd_of(fd).is_some() => {
             let s = signalfd_of(fd).unwrap();
             if cmd == F_SETFL {
@@ -1111,6 +1201,22 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
 
 fn is_tty(d: &FileDescriptor) -> bool {
     matches!(d, FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr)
+}
+
+/// The eventfd, timerfd or inotify object behind descriptor `fd`.
+fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_))) => Some(d.clone()),
+        _ => None,
+    })
+}
+
+/// The Unix socket behind descriptor `fd`.
+fn unix_of(fd: usize) -> Option<Arc<super::unix::UnixSocket>> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(FileDescriptor::Unix(s)) => Some(s.clone()),
+        _ => None,
+    })
 }
 
 /// The signalfd behind descriptor `fd`.
@@ -1212,7 +1318,8 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let fd = a[0] as usize;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
     let stream = is_tty(&desc)
-        || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_) | FileDescriptor::Pty(_) | FileDescriptor::SignalFd(_));
+        || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_) | FileDescriptor::Pty(_) | FileDescriptor::SignalFd(_) | FileDescriptor::Unix(_)
+            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_));
     if !stream {
         return None;
     }
@@ -1244,6 +1351,10 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::Inet(s) => super::inet::read(s, buf),
                 FileDescriptor::Pty(p) => p.read(buf),
                 FileDescriptor::SignalFd(s) => s.read(buf),
+                FileDescriptor::Unix(s) => s.read(buf),
+                FileDescriptor::EventFd(e) => super::eventfd::read(e, buf),
+                FileDescriptor::TimerFd(t) => t.read(buf),
+                FileDescriptor::Inotify(i) => i.read(buf),
                 _ => super::tty::read(buf, super::tty::nonblock()),
             }
         } else {
@@ -1254,6 +1365,9 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::Inet(s) => super::inet::write(s, data),
                 FileDescriptor::Pty(p) => p.write(data),
                 FileDescriptor::SignalFd(_) => EINVAL,
+                FileDescriptor::Unix(s) => s.write(data),
+                FileDescriptor::EventFd(e) => super::eventfd::write(e, data),
+                FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => EINVAL,
                 _ => super::tty::write(data) as i64,
             }
         };
@@ -1278,6 +1392,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
             match desc {
                 Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
+                Some(FileDescriptor::Unix(ref s)) => super::unix::ioctl(s, a[1], a[2]),
+                Some(FileDescriptor::Inotify(ref i)) if a[1] == 0x541B => {
+                    // FIONREAD: bytes of queued events
+                    match copy_out(a[2], &(i.pending_bytes() as i32).to_le_bytes()) {
+                        Ok(()) => 0,
+                        Err(e) => e,
+                    }
+                }
                 Some(FileDescriptor::Pty(ref p)) => match a[1] {
                     0x5421 => match copy_in(a[2], 4) {
                         // FIONBIO

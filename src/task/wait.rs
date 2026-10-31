@@ -148,15 +148,28 @@ impl core::ops::Deref for QueueRef {
 pub struct WaitSet {
     queues: Vec<QueueRef>,
     pub polled: bool,
+    /// Objects that become ready at a time (timers): the wait ends at the earliest.
+    deadlines: Vec<Arc<dyn Deadline>>,
+}
+
+/// Something that becomes ready at a known timer tick (a `timerfd`).
+pub trait Deadline: Send + Sync {
+    /// The tick at which it next becomes ready, if armed.
+    fn next_tick(&self) -> Option<u64>;
 }
 
 impl WaitSet {
     pub fn new() -> Self {
-        Self { queues: Vec::new(), polled: false }
+        Self { queues: Vec::new(), polled: false, deadlines: Vec::new() }
     }
 
     pub fn add(&mut self, q: QueueRef) {
         self.queues.push(q);
+    }
+
+    /// Also ends waits when `d` becomes ready (checked each time the set sleeps).
+    pub fn add_deadline(&mut self, d: Arc<dyn Deadline>) {
+        self.deadlines.push(d);
     }
 
     /// Registers the current task on every queue (repeat before each condition check).
@@ -172,6 +185,7 @@ impl WaitSet {
 
     /// Sleeps until a queue is woken, a signal arrives, or tick `deadline` passes.
     pub fn wait(&self, deadline: Option<u64>) {
+        let deadline = self.deadlines.iter().filter_map(|d| d.next_tick()).fold(deadline, |acc, t| Some(acc.map_or(t, |a| a.min(t))));
         let deadline = if self.polled {
             let next = crate::arch::pit::ticks() + 1;
             Some(deadline.map_or(next, |d| d.min(next)))

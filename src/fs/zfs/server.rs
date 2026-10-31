@@ -70,28 +70,54 @@ pub struct ZfsServer {
 }
 
 impl ZfsServer {
-    /// Mounts the pool on the primary disk, creating a new one if the disk has none.
+    /// Mounts the pool on the primary disk, creating a new one only on a blank disk.
+    ///
+    /// A disk that holds a pool which cannot be imported (or anything else) is never
+    /// formatted: the kernel stops with an error instead, leaving the data for repair.
     pub fn new() -> Self {
-        let vdev = match Spa::open(Vdev::open()) {
-            Ok((spa, ub)) => {
-                let mut server = Self::with_dmu(Dmu::new(spa, ub));
-                server.load_datasets();
-                crate::console::set_color(
-                    uefi::proto::console::text::Color::LightGreen,
-                    uefi::proto::console::text::Color::Black,
-                );
-                crate::println!(
-                    "[+] OpenZFS: Imported pool '{}' ({} MiB, TXG #{}, {} objects)",
-                    server.dmu.spa.pool_name_str(),
-                    server.dmu.spa.total_capacity_bytes() / (1024 * 1024),
-                    server.dmu.ub.txg,
-                    server.dmu.ub.next_obj - 1
-                );
-                return server;
+        let vdev = Vdev::open();
+        let contents = super::spa::Spa::probe(&vdev);
+        let mut vdev = vdev;
+        if contents == Some(super::spa::DiskContents::Pool) {
+            // Retry the import: a transient read error must not look like a missing pool
+            for _ in 0..3 {
+                match Spa::open(vdev) {
+                    Ok(pool) => return Self::imported(pool),
+                    Err(v) => vdev = v,
+                }
             }
+            panic!("OpenZFS: the disk holds pool data that cannot be imported; refusing to format it");
+        }
+        if vdev.is_hardware_backed() && contents != Some(super::spa::DiskContents::Blank) {
+            panic!("OpenZFS: the disk is not blank ({:?}); refusing to create a pool on it", contents);
+        }
+        let vdev = match Spa::open(vdev) {
+            Ok(pool) => return Self::imported(pool),
             Err(vdev) => vdev,
         };
+        Self::create_on(vdev)
+    }
 
+    /// Finishes importing an opened pool.
+    fn imported((spa, ub): (Spa, super::types::Uberblock)) -> Self {
+        let mut server = Self::with_dmu(Dmu::new(spa, ub));
+        server.load_datasets();
+        crate::console::set_color(
+            uefi::proto::console::text::Color::LightGreen,
+            uefi::proto::console::text::Color::Black,
+        );
+        crate::println!(
+            "[+] OpenZFS: Imported pool '{}' ({} MiB, TXG #{}, {} objects)",
+            server.dmu.spa.pool_name_str(),
+            server.dmu.spa.total_capacity_bytes() / (1024 * 1024),
+            server.dmu.ub.txg,
+            server.dmu.ub.next_obj - 1
+        );
+        server
+    }
+
+    /// Creates a new pool on a blank device.
+    fn create_on(vdev: Vdev) -> Self {
         let spa = Spa::create(vdev, "hydrapool").expect("ZFS: unable to create pool");
         let mut server = Self::with_dmu(Dmu::new(spa, Dmu::initial_uberblock()));
         if let Err(e) = server.populate_new_pool() {

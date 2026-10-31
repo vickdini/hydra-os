@@ -41,6 +41,7 @@ pub const SIGFPE: u32 = 8;
 pub const SIGKILL: u32 = 9;
 pub const SIGSEGV: u32 = 11;
 pub const SIGPIPE: u32 = 13;
+pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
 pub const SIGCHLD: u32 = 17;
 pub const SIGCONT: u32 = 18;
@@ -49,6 +50,8 @@ pub const SIGTSTP: u32 = 20;
 pub const SIGTTIN: u32 = 21;
 pub const SIGTTOU: u32 = 22;
 pub const SIGURG: u32 = 23;
+pub const SIGVTALRM: u32 = 26;
+pub const SIGPROF: u32 = 27;
 pub const SIGWINCH: u32 = 28;
 
 const SIG_DFL: u64 = 0;
@@ -216,6 +219,7 @@ pub fn thread_exited(pid: u64, tid: u64) {
             if p.threads.is_empty() && !p.zombie {
                 p.zombie = true;
                 p.vfork_released = true;
+                super::pidfd::EXIT_WQ.wake_all();
                 if p.exit_status.is_none() {
                     p.exit_status = Some(0);
                 }
@@ -368,8 +372,34 @@ pub fn setsid() -> i64 {
 }
 
 /// Session and process group of `pid`.
+/// True if process `pid` is in the process table (alive or a zombie).
+pub fn process_exists(pid: u64) -> bool {
+    PROCS.lock().contains_key(&pid)
+}
+
+/// True if process `pid` has exited (a zombie, or already reaped). Never blocks: reports
+/// false while the table is busy (callers re-check after the next wakeup).
+pub fn has_exited(pid: u64) -> bool {
+    match PROCS.try_lock() {
+        Some(p) => p.get(&pid).map_or(true, |p| p.zombie),
+        None => false,
+    }
+}
+
 pub fn session_of(pid: u64) -> Option<(u64, u64)> {
     PROCS.lock().get(&pid).map(|p| (p.sid, p.pgid))
+}
+
+/// `clone3(CLONE_CLEAR_SIGHAND)`: handled signals of `pid` return to their default
+/// action (ignored ones stay ignored).
+pub fn reset_handlers(pid: u64) {
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        for a in p.actions.iter_mut() {
+            if a.handler != SIG_IGN {
+                *a = SigAction::default();
+            }
+        }
+    }
 }
 
 /// Resets signal dispositions across `execve` (handled signals return to default).
@@ -1362,6 +1392,11 @@ pub fn sys_waitid(idtype: u64, id: u64, infop: u64, options: u64) -> i64 {
         0 => -1,               // P_ALL
         1 => id as i64,        // P_PID
         2 => -(id as i64),     // P_PGID
+        3 => match super::pidfd::pid_of(id) {
+            // P_PIDFD
+            Ok(pid) => pid as i64,
+            Err(e) => return e,
+        },
         _ => return EINVAL,
     };
     if options & (4 | WUNTRACED | WCONTINUED) == 0 {

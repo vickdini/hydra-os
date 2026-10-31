@@ -153,6 +153,25 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         73 => 0,
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
+        // alarm / getitimer / setitimer
+        37 => super::itimer::sys_alarm(a[0]),
+        36 => super::itimer::sys_getitimer(a[0], a[1]),
+        38 => super::itimer::sys_setitimer(a[0], a[1], a[2]),
+        // pidfd_open / pidfd_send_signal
+        434 => super::pidfd::sys_pidfd_open(a[0], a[1]),
+        424 => super::pidfd::sys_pidfd_send_signal(a[0], a[1], a[2], a[3]),
+        // eventfd / eventfd2
+        284 => super::eventfd::sys_eventfd2(a[0], 0),
+        290 => super::eventfd::sys_eventfd2(a[0], a[1]),
+        // timerfd_create / settime / gettime
+        283 => super::timerfd::sys_create(a[0], a[1]),
+        286 => super::timerfd::sys_settime(a[0], a[1], a[2], a[3]),
+        287 => super::timerfd::sys_gettime(a[0], a[1]),
+        // inotify_init / inotify_init1 / add_watch / rm_watch
+        253 => super::inotify::sys_init1(0),
+        294 => super::inotify::sys_init1(a[0]),
+        254 => super::inotify::sys_add_watch(a[0], a[1], a[2]),
+        255 => super::inotify::sys_rm_watch(a[0], a[1]),
         282 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], 0),
         289 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], a[3]),
         // pause: sleep until a signal is delivered (a posted signal wakes the event wait)

@@ -216,6 +216,7 @@ impl Command for LinuxCommand {
                     let _ = crate::arch::boot_services::take_hardware_ownership();
                 }
                 prepare_network_files(args[1]);
+                prepare_runtime_dir(args[1], state.current_uid, state.current_gid);
                 let program = args[2];
                 let argv: alloc::vec::Vec<&str> = args[2..].iter().copied().collect();
                 match crate::task::spawn_linux_chroot(args[1], program, &argv, state.current_uid, state.current_gid) {
@@ -300,6 +301,19 @@ fn run_in_foreground(tid: crate::task::TaskId) {
 /// Fills in a Linux root's empty `/etc/resolv.conf` and `/etc/hosts` (as WSL does), so the
 /// C library resolves names through the DNS server from the DHCP lease. Files that already
 /// have content, or are symbolic links, are left alone.
+/// Creates `/run/user/<uid>` in the target root (mode 0700, owned by the user), the
+/// per-user runtime directory (`XDG_RUNTIME_DIR`) that logind provides on a real system
+/// and D-Bus, Wayland and KDE expect.
+fn prepare_runtime_dir(root: &str, uid: u32, gid: u32) {
+    let path = alloc::format!("{}/run/user/{}", root.trim_end_matches('/'), uid);
+    if let Ok(ino) = crate::fs::ZfsClient::create_dir_all(&path) {
+        let _ = crate::fs::ZfsClient::setattr(
+            ino,
+            crate::fs::zfs::zpl::SetAttr { mode: Some(0o700), uid: Some(uid), gid: Some(gid), ..Default::default() },
+        );
+    }
+}
+
 fn prepare_network_files(root: &str) {
     let dns = crate::net::GLOBAL_INTERFACE.lock().dns_server();
     let resolv = if dns != [0, 0, 0, 0] {

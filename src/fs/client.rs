@@ -527,6 +527,16 @@ impl ZfsClient {
         });
     }
 
+    /// Reports the last close of a file opened for writing (`IN_CLOSE_WRITE`).
+    pub fn notify_close_write(ino: u64) {
+        if crate::compat::linux::inotify::active() {
+            let _ = with_server(|s| {
+                s.notify_file(ino, crate::compat::linux::inotify::IN_CLOSE_WRITE);
+                Ok(())
+            });
+        }
+    }
+
     pub fn release(ino: u64) {
         let _ = with_server(|s| {
             s.release(ino);

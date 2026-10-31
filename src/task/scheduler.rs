@@ -410,11 +410,13 @@ impl Scheduler {
             read_interpreter(path).map(|b| super::exec::ElfSource::from_bytes(b.into_boxed_slice()))
         };
         let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
+        let env = linux_env(uid);
+        let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
         let image = super::exec::load_linux_exec(
             exe,
             exec_path,
             args,
-            DEFAULT_LINUX_ENV,
+            &env,
             super::exec::ExecCreds { uid, gid },
             interp_reader,
         )
@@ -789,6 +791,11 @@ impl Scheduler {
         }
     }
 
+    /// CPU time of process `tgid` (all its live threads) in timer ticks.
+    pub fn process_ticks(&self, tgid: u64) -> u64 {
+        self.tasks.iter().filter(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| t.ticks_run).sum()
+    }
+
     /// Wakes task `id` from an event wait; a task that is not waiting yet keeps the wakeup
     /// for its next wait. Tasks blocked for other reasons (futexes, IPC) are not disturbed.
     pub fn wake_task(&mut self, id: u64) {
@@ -892,11 +899,12 @@ impl Scheduler {
             if crate::memory::vm::prefault_current(clear_child_tid, 4, true) {
                 unsafe { *(clear_child_tid as *mut i32) = 0 };
             }
+            let key = crate::compat::linux::futex::key_for_task(&self.tasks[idx], clear_child_tid);
             let mut fq = crate::compat::linux::futex::GLOBAL_FUTEX.lock();
-            let ids = fq.wake_task_ids(clear_child_tid, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
+            let ids = fq.wake_task_ids(key, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
             drop(fq);
             for id in ids {
-                self.unblock_task(id);
+                self.wake_task(id.0);
             }
         }
 
@@ -1086,18 +1094,24 @@ impl Scheduler {
     }
 }
 
-/// Environment given to Linux processes started from the Hydra shell.
-const DEFAULT_LINUX_ENV: &[&str] = &[
-    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "HOME=/root",
-    "USER=root",
-    "LOGNAME=root",
-    "SHELL=/bin/bash",
-    "TERM=linux",
-    "LANG=C.UTF-8",
-    "XDG_RUNTIME_DIR=/run/user/1000",
-    "WAYLAND_DISPLAY=wayland-0",
-];
+/// Environment given to Linux processes started from the Hydra shell as `uid`: the
+/// user's identity and home, and the runtime directory a login would provide (see
+/// `linux chroot`, which creates `/run/user/<uid>`).
+fn linux_env(uid: u32) -> Vec<alloc::string::String> {
+    use alloc::format;
+    let (user, home) = if uid == 0 { ("root", alloc::string::String::from("/root")) } else { ("hydra", format!("/home/hydra")) };
+    alloc::vec![
+        format!("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+        format!("HOME={}", home),
+        format!("USER={}", user),
+        format!("LOGNAME={}", user),
+        format!("SHELL=/bin/bash"),
+        format!("TERM=linux"),
+        format!("LANG=C.UTF-8"),
+        format!("XDG_RUNTIME_DIR=/run/user/{}", uid),
+        format!("WAYLAND_DISPLAY=wayland-0"),
+    ]
+}
 
 /// Reads a dynamic linker named by `PT_INTERP` from the filesystem (or boot media).
 fn read_interpreter(path: &str) -> Option<Vec<u8>> {

@@ -123,9 +123,26 @@ impl AtaPorts {
         unsafe { self.status_command.read() }
     }
 
+    /// Software reset of the channel (SRST): returns a drive stuck busy after a failed or
+    /// timed-out command to a state where it accepts commands again.
+    fn soft_reset(&mut self) {
+        unsafe {
+            self.control_alt_status.write(0x04 | 0x02); // SRST, interrupts off
+        }
+        self.delay_400ns();
+        unsafe {
+            self.control_alt_status.write(0x02);
+        }
+        for _ in 0..10 {
+            self.delay_400ns();
+        }
+        let _ = self.wait_not_busy();
+    }
+
     /// Polls until the BSY bit is cleared or a timeout occurs.
     fn wait_not_busy(&mut self) -> Result<u8, &'static str> {
-        for _ in 0..ATA_POLL_TIMEOUT {
+        let mut wait = PollDeadline::new();
+        while !wait.expired() {
             let status = self.read_alt_status();
             if (status & ATA_STATUS_BSY) == 0 {
                 return Ok(status);
@@ -137,7 +154,8 @@ impl AtaPorts {
 
     /// Polls until the drive indicates DRQ (data request ready) and is not busy.
     fn wait_data_ready(&mut self) -> Result<(), &'static str> {
-        for _ in 0..ATA_POLL_TIMEOUT {
+        let mut wait = PollDeadline::new();
+        while !wait.expired() {
             let status = self.read_alt_status();
             if (status & ATA_STATUS_ERR) != 0 {
                 return Err("ATA device reported error status (ERR bit asserted)");
@@ -151,6 +169,33 @@ impl AtaPorts {
             core::hint::spin_loop();
         }
         Err("ATA device timeout waiting for DRQ data ready")
+    }
+}
+
+/// Timeout for status polling: at least `ATA_POLL_TIMEOUT` polls, and while the timer
+/// runs, at least 30 seconds. A virtual disk can stall for seconds while the host flushes
+/// its image file; a fixed poll count alone gave up on writes that were still in progress.
+struct PollDeadline {
+    polls: u64,
+    start: u64,
+    deadline: u64,
+}
+
+impl PollDeadline {
+    fn new() -> Self {
+        let hz = crate::arch::pit::frequency_hz().max(1);
+        let start = crate::arch::pit::ticks();
+        Self { polls: 0, start, deadline: start + 30 * hz }
+    }
+
+    fn expired(&mut self) -> bool {
+        self.polls += 1;
+        if self.polls <= ATA_POLL_TIMEOUT as u64 {
+            return false;
+        }
+        // Past the poll budget: keep waiting only while the timer shows time passing
+        let now = crate::arch::pit::ticks();
+        now == self.start || now >= self.deadline
     }
 }
 
@@ -298,6 +343,14 @@ impl AtaDevice {
     /// Returns `Err` if the target LBA exceeds disk boundaries, the buffer is undersized,
     /// or a hardware communication error/timeout occurs.
     pub fn read_sectors(&mut self, lba: u64, count: u8, buf: &mut [u8]) -> Result<(), &'static str> {
+        // A failed command leaves the drive in an unknown state: reset it, then retry once
+        self.read_sectors_once(lba, count, buf).or_else(|_| {
+            self.ports.soft_reset();
+            self.read_sectors_once(lba, count, buf)
+        })
+    }
+
+    fn read_sectors_once(&mut self, lba: u64, count: u8, buf: &mut [u8]) -> Result<(), &'static str> {
         let required_len = (count as usize).saturating_mul(ATA_SECTOR_SIZE);
         if buf.len() < required_len {
             return Err("Destination buffer too small for requested sector count");
@@ -375,6 +428,14 @@ impl AtaDevice {
     /// # Errors
     /// Returns `Err` if the target LBA exceeds disk boundaries or a write timeout occurs.
     pub fn write_sectors(&mut self, lba: u64, count: u8, buf: &[u8]) -> Result<(), &'static str> {
+        // Rewriting the same sectors is safe: reset after a failure and retry once
+        self.write_sectors_once(lba, count, buf).or_else(|_| {
+            self.ports.soft_reset();
+            self.write_sectors_once(lba, count, buf)
+        })
+    }
+
+    fn write_sectors_once(&mut self, lba: u64, count: u8, buf: &[u8]) -> Result<(), &'static str> {
         let required_len = (count as usize).saturating_mul(ATA_SECTOR_SIZE);
         if buf.len() < required_len {
             return Err("Source buffer too small for requested sector count");
@@ -449,6 +510,13 @@ impl AtaDevice {
 
     /// Flushes the drive's volatile write cache to persistent magnetic or flash media.
     pub fn flush(&mut self) -> Result<(), &'static str> {
+        self.flush_once().or_else(|_| {
+            self.ports.soft_reset();
+            self.flush_once()
+        })
+    }
+
+    fn flush_once(&mut self) -> Result<(), &'static str> {
         self.ports.wait_not_busy()?;
         let cmd = if self.lba48_supported {
             ATA_CMD_CACHE_FLUSH_EXT

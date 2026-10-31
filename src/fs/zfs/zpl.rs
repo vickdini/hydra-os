@@ -99,6 +99,47 @@ fn check_name(name: &[u8]) -> ZplResult<()> {
 }
 
 impl ZfsServer {
+    /// Reports a change of `ino` to inotify: to the inode's own watches and, under its
+    /// name, to its directory's watches.
+    pub fn notify_file(&mut self, ino: u64, mask: u32) {
+        if !crate::compat::linux::inotify::active() {
+            return;
+        }
+        let dn = match self.dnode(ino) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mask = mask | if dn.mode & S_IFMT == S_IFDIR { crate::compat::linux::inotify::IN_ISDIR } else { 0 };
+        crate::compat::linux::inotify::event(ino, mask, 0, b"");
+        let parent = dn.parent;
+        if parent == 0 || parent == ino || !crate::compat::linux::inotify::watched(parent) {
+            return;
+        }
+        if let Some(name) = self.name_in(parent, ino) {
+            crate::compat::linux::inotify::event(parent, mask, 0, &name);
+        }
+    }
+
+    /// The name under which directory `dir` holds `ino` (a scan; only for notification).
+    fn name_in(&mut self, dir: u64, ino: u64) -> Option<Vec<u8>> {
+        let mut pos = 0;
+        loop {
+            let batch = self.zap.readdir(&mut self.dmu, dir, pos, 64).ok()?;
+            let last = batch.last()?.next_pos;
+            if let Some(e) = batch.into_iter().find(|e| e.ino == ino) {
+                return Some(e.name);
+            }
+            pos = last;
+        }
+    }
+
+    /// Reports an entry change in directory `dir`.
+    fn notify_entry(&self, dir: u64, mask: u32, cookie: u32, name: &[u8], is_dir: bool) {
+        if crate::compat::linux::inotify::active() {
+            crate::compat::linux::inotify::event(dir, mask | if is_dir { crate::compat::linux::inotify::IN_ISDIR } else { 0 }, cookie, name);
+        }
+    }
+
     fn dnode(&mut self, ino: u64) -> ZplResult<DnodePhys> {
         let dn = self.dmu.get_dnode(ino).map_err(|_| ENOENT)?;
         if dn.mode == 0 {
@@ -191,6 +232,7 @@ impl ZfsServer {
         self.dmu.put_dnode(ino, dn);
         self.zap.insert(&mut self.dmu, dir, name, ino, dtype_from_mode(mode)).map_err(io)?;
         self.touch(dir, true, true)?;
+        self.notify_entry(dir, crate::compat::linux::inotify::IN_CREATE, 0, name, mode & S_IFMT == S_IFDIR);
         self.maybe_sync();
         Ok(ino)
     }
@@ -271,7 +313,12 @@ impl ZfsServer {
         dn.ctime = t.0;
         dn.ctime_ns = t.1;
         self.dmu.put_dnode(ino, dn);
-        self.touch(dir, true, true)
+        self.touch(dir, true, true)?;
+        self.notify_entry(dir, crate::compat::linux::inotify::IN_CREATE, 0, name, false);
+        if crate::compat::linux::inotify::active() {
+            crate::compat::linux::inotify::event(ino, crate::compat::linux::inotify::IN_ATTRIB, 0, b"");
+        }
+        Ok(())
     }
 
     /// Drops one link to `ino`, freeing it when no links and no open handles remain.
@@ -304,7 +351,12 @@ impl ZfsServer {
         }
         self.zap.remove(&mut self.dmu, dir, name).map_err(io)?;
         self.touch(dir, true, true)?;
+        self.notify_entry(dir, crate::compat::linux::inotify::IN_DELETE, 0, name, false);
+        let last = self.dnode(ino).map_or(true, |d| d.nlink <= 1);
         self.drop_link(ino)?;
+        if crate::compat::linux::inotify::active() {
+            crate::compat::linux::inotify::event(ino, if last { crate::compat::linux::inotify::IN_DELETE_SELF } else { crate::compat::linux::inotify::IN_ATTRIB }, 0, b"");
+        }
         self.maybe_sync();
         Ok(())
     }
@@ -327,6 +379,10 @@ impl ZfsServer {
         parent.nlink = parent.nlink.saturating_sub(1);
         self.dmu.put_dnode(dir, parent);
         self.touch(dir, true, true)?;
+        self.notify_entry(dir, crate::compat::linux::inotify::IN_DELETE, 0, name, true);
+        if crate::compat::linux::inotify::active() {
+            crate::compat::linux::inotify::event(ino, crate::compat::linux::inotify::IN_DELETE_SELF | crate::compat::linux::inotify::IN_ISDIR, 0, b"");
+        }
         self.drop_link(ino)
     }
 
@@ -401,6 +457,12 @@ impl ZfsServer {
         self.dmu.put_dnode(ino, moved);
         self.touch(sdir, true, true)?;
         self.touch(ddir, true, true)?;
+        if crate::compat::linux::inotify::active() {
+            let cookie = crate::compat::linux::inotify::cookie();
+            self.notify_entry(sdir, crate::compat::linux::inotify::IN_MOVED_FROM, cookie, sname, src_is_dir);
+            self.notify_entry(ddir, crate::compat::linux::inotify::IN_MOVED_TO, cookie, dname, src_is_dir);
+            crate::compat::linux::inotify::event(ino, crate::compat::linux::inotify::IN_MOVE_SELF, 0, b"");
+        }
         self.maybe_sync();
         Ok(())
     }
@@ -425,6 +487,7 @@ impl ZfsServer {
         }
         let n = self.dmu.write(ino, offset, data).map_err(io)?;
         self.touch(ino, true, true)?;
+        self.notify_file(ino, crate::compat::linux::inotify::IN_MODIFY);
         self.maybe_sync();
         Ok(n)
     }
@@ -463,6 +526,8 @@ impl ZfsServer {
         dn.ctime = t.0;
         dn.ctime_ns = t.1;
         self.dmu.put_dnode(ino, dn);
+        // Truncation is a modification; ownership, mode and time changes are attributes
+        self.notify_file(ino, if set.size.is_some() { crate::compat::linux::inotify::IN_MODIFY } else { crate::compat::linux::inotify::IN_ATTRIB });
         self.getattr(ino)
     }
 

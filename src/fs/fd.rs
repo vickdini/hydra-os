@@ -44,6 +44,9 @@ impl OpenFile {
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
+        if self.writable() {
+            ZfsClient::notify_close_write(self.ino);
+        }
         ZfsClient::release(self.ino);
     }
 }
@@ -68,6 +71,14 @@ pub enum FileDescriptor {
     Pty(Arc<crate::compat::linux::pty::PtyFile>),
     /// Signals received as data (`signalfd`).
     SignalFd(Arc<crate::compat::linux::signalfd::SignalFd>),
+    /// A Unix domain socket (`AF_UNIX`).
+    Unix(Arc<crate::compat::linux::unix::UnixSocket>),
+    /// A timer read as a descriptor (`timerfd`).
+    TimerFd(Arc<crate::compat::linux::timerfd::TimerFd>),
+    /// File-system change notifications (`inotify`).
+    Inotify(Arc<crate::compat::linux::inotify::Inotify>),
+    /// A process (`pidfd_open`, `CLONE_PIDFD`).
+    PidFd(Arc<crate::compat::linux::pidfd::PidFd>),
     /// A path-addressed file: pseudo files (`/dev`, `/proc`) and Hydra-native opens.
     File {
         path: String,
@@ -160,6 +171,9 @@ impl FileDescriptor {
             FileDescriptor::Inet(_) => Err("Internet sockets are read through the Linux socket layer"),
             FileDescriptor::Pty(_) => Err("Pseudo-terminals are read through the Linux terminal layer"),
             FileDescriptor::SignalFd(_) => Err("signalfd is read through the Linux layer"),
+            FileDescriptor::Unix(_) => Err("Unix sockets are read through the Linux socket layer"),
+            FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => Err("read through the Linux layer"),
+            FileDescriptor::PidFd(_) => Err("pidfds are not readable"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.readable() {
@@ -256,6 +270,9 @@ impl FileDescriptor {
             // callers may hold the scheduler lock)
             FileDescriptor::Pty(p) => Ok(p.write_nowait(data)),
             FileDescriptor::SignalFd(_) => Err("signalfd is not writable"),
+            // Kernel output to a process whose stdout is a socket: best effort, never waits
+            FileDescriptor::Unix(_) => Ok(data.len()),
+            FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) | FileDescriptor::PidFd(_) => Err("not writable"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.writable() {
@@ -303,6 +320,14 @@ impl FileDescriptor {
             FileDescriptor::Pty(p) => waits.add(QueueRef::Shared(p.pty.wq.clone())),
             // Posting a signal wakes every wait of the process
             FileDescriptor::SignalFd(_) => {}
+            FileDescriptor::Unix(s) => s.add_wait_queues(waits),
+            FileDescriptor::TimerFd(t) => {
+                waits.add(QueueRef::Shared(t.wq.clone()));
+                waits.add_deadline(t.clone());
+            }
+            FileDescriptor::Inotify(i) => waits.add(QueueRef::Shared(i.wq.clone())),
+            FileDescriptor::PidFd(_) => waits.add(QueueRef::Static(&crate::compat::linux::pidfd::EXIT_WQ)),
+            FileDescriptor::EventFd(e) => waits.add(QueueRef::Shared(e.lock().wq.clone())),
             FileDescriptor::Inet(s) => {
                 let s = s.lock();
                 match s.wait_queue() {
@@ -314,7 +339,8 @@ impl FileDescriptor {
             }
             // Always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) | FileDescriptor::File { .. } => {}
-            FileDescriptor::EventFd(_) | FileDescriptor::Epoll(_) => waits.polled = true,
+            // A nested epoll instance's readiness changes are not announced
+            FileDescriptor::Epoll(_) => waits.polled = true,
         }
     }
 
@@ -354,6 +380,10 @@ impl FileDescriptor {
             FileDescriptor::Inet(s) => s.lock().poll_events(),
             FileDescriptor::Pty(p) => p.poll_events(),
             FileDescriptor::SignalFd(s) => s.poll_events(),
+            FileDescriptor::Unix(s) => s.poll_events(),
+            FileDescriptor::TimerFd(t) => t.poll_events(),
+            FileDescriptor::Inotify(i) => i.poll_events(),
+            FileDescriptor::PidFd(p) => p.poll_events(),
             // Regular files are always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) => 0x0001 | 0x0004,
             FileDescriptor::Epoll(_) => 0,
