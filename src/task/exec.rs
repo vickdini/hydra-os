@@ -65,10 +65,14 @@ pub struct LinuxExecImage {
 /// Credentials reported to the new process through the auxiliary vector.
 #[derive(Clone, Copy)]
 pub struct ExecCreds {
-    /// User ID reported in `AT_UID` and `AT_EUID`.
+    /// Real user ID (`AT_UID`).
     pub uid: u32,
-    /// Group ID reported in `AT_GID` and `AT_EGID`.
+    /// Real group ID (`AT_GID`).
     pub gid: u32,
+    /// Effective user ID (`AT_EUID`): the file owner for a set-user-ID program.
+    pub euid: u32,
+    /// Effective group ID (`AT_EGID`).
+    pub egid: u32,
 }
 
 /// Returns true if the binary can be loaded into a private address space: position
@@ -333,10 +337,11 @@ pub fn load_linux_exec(
         (AT_FLAGS, 0),
         (AT_ENTRY, main.entry),
         (AT_UID, creds.uid as u64),
-        (AT_EUID, creds.uid as u64),
+        (AT_EUID, creds.euid as u64),
         (AT_GID, creds.gid as u64),
-        (AT_EGID, creds.gid as u64),
-        (AT_SECURE, 0),
+        (AT_EGID, creds.egid as u64),
+        // Secure mode (the C library ignores LD_PRELOAD and the like) for set-ID programs
+        (AT_SECURE, (creds.uid != creds.euid || creds.gid != creds.egid) as u64),
         (AT_RANDOM, addr_of(random_off)),
         (AT_HWCAP2, 0),
         (AT_EXECFN, addr_of(execfn_off)),

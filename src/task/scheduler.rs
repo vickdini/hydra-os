@@ -473,7 +473,7 @@ impl Scheduler {
             exec_path,
             args,
             &env,
-            super::exec::ExecCreds { uid, gid },
+            super::exec::ExecCreds { uid, gid, euid: uid, egid: gid },
             interp_reader,
         )
         .map_err(|e| e.as_str())?;

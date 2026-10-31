@@ -1,6 +1,6 @@
 su root
 [1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
-[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends plasma-workspace plasma-desktop kwin-style-breeze breeze
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends pipewire pipewire-pulse wireplumber
 [1m[37m[40m
 ============================================================
  [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
@@ -17,21 +17,96 @@ su root
 
 [*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
 
-E: dpkg was interrupted, you must manually run 'dpkg --configure -a' to correct the problem. 
-[+] Linux process 4 exited with status 100.
-hydra:/bin# [tasks] id state tgid syscall rip ticks exe
-[tasks] 0 Running 0 -1 0xbd4538e1 59462 shell
-[tasks] 1 Ready 1 -1 0xbd3a63f0 0 idle
-[tasks] 2 Blocked 2 -1 0xbd3b4af3 2 netd
-[tasks] 3 Sleeping 3 -1 0xbd3b3c97 120 txgd
+Reading package lists... 0%Reading package lists... 100%Reading package lists... Done
+Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 57%Building dependency tree... 80%Building dependency tree... Done
+Reading state information... 0% Reading state information... 0%Reading state information... Done
+Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
+The following additional packages will be installed:
+  liblua5.4-0 libpipewire-0.3-modules libroc0.4 libsnapd-glib-2-1 libspeexdsp1 libuv1t64 libwireplumber-0.5-0 pipewire-bin
+Suggested packages:
+  libpipewire-0.3-modules-extra snapd libspa-0.2-bluetooth pulseaudio-utils libspa-0.2-libcamera wireplumber-doc
+Recommended packages:
+  rtkit
+The following NEW packages will be installed:
+  liblua5.4-0 libpipewire-0.3-modules libroc0.4 libsnapd-glib-2-1 libspeexdsp1 libuv1t64 libwireplumber-0.5-0 pipewire pipewire-bin pipewire-pulse wireplumber
+0 upgraded, 11 newly installed, 0 to remove and 21 not upgraded.
+Need to get 2798 kB of archives.
+After this operation, 11.6 MB of additional disk space will be used.
+0% [Working]            Get:1 http://archive.ubuntu.com/ubuntu resolute/main amd64 libuv1t64 amd64 1.51.0-2ubuntu1 [103 kB]
+0% [1 libuv1t64 14.2 kB/103 kB 14%]                                   5% [Waiting for headers]                        Get:2 http://archive.ubuntu.com/ubuntu resolute/main amd64 liblua5.4-0 amd64 5.4.8-1build1 [163 kB]
+6% [2 liblua5.4-0 27.1 kB/163 kB 17%]                                     11% [Waiting for headers]                         Get:3 http://archive.ubuntu.com/ubuntu resolute/main amd64 libspeexdsp1 amd64 1.2.1-3build1 [45.5 kB]
+12% [3 libspeexdsp1 16.8 kB/45.5 kB 37%]                                        Get:4 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libroc0.4 amd64 0.4.0+dfsg-5ubuntu3.1 [285 kB]
+                                        15% [4 libroc0.4 15.0 kB/285 kB 5%]                                   Get:5 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsnapd-glib-2-1 amd64 1.72-0ubuntu3 [120 kB]
+26% [5 libsnapd-glib-2-1 74.8 kB/120 kB 62%]                                            Get:6 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpipewire-0.3-modules amd64 1.6.2-1ubuntu1.2 [882 kB]
+30% [6 libpipewire-0.3-modules 19.6 kB/882 kB 2%]                                                 Get:7 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libwireplumber-0.5-0 amd64 0.5.13-1ubuntu1.1 [322 kB]
+                                                 58% [7 libwireplumber-0.5-0 44.7 kB/322 kB 14%]                                               Get:8 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 pipewire-bin amd64 1.6.2-1ubuntu1.2 [654 kB]
+                                               69% [8 pipewire-bin 46.7 kB/654 kB 7%]                                      Get:9 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 pipewire amd64 1.6.2-1ubuntu1.2 [109 kB]
+                                      89% [9 pipewire 40.4 kB/109 kB 37%]                                   Get:10 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 pipewire-pulse amd64 1.6.2-1ubuntu1.2 [9534 B]
+                                   Get:11 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 wireplumber amd64 0.5.13-1ubuntu1.1 [107 kB]
+97% [11 wireplumber 51.3 kB/107 kB 48%]                                       100% [Working]              Fetched 2798 kB in 1s (2104 kB/s)
+Selecting previously unselected package libuv1t64:amd64.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 82562 files and directories currently installed.)
+Preparing to unpack .../00-libuv1t64_1.51.0-2ubuntu1_amd64.deb ...
+Unpacking libuv1t64:amd64 (1.51.0-2ubuntu1) ...
+Selecting previously unselected package liblua5.4-0:amd64.
+Preparing to unpack .../01-liblua5.4-0_5.4.8-1build1_amd64.deb ...
+Unpacking liblua5.4-0:amd64 (5.4.8-1build1) ...
+Selecting previously unselected package libspeexdsp1:amd64.
+Preparing to unpack .../02-libspeexdsp1_1.2.1-3build1_amd64.deb ...
+Unpacking libspeexdsp1:amd64 (1.2.1-3build1) ...
+Selecting previously unselected package libroc0.4:amd64.
+Preparing to unpack .../03-libroc0.4_0.4.0+dfsg-5ubuntu3.1_amd64.deb ...
+Unpacking libroc0.4:amd64 (0.4.0+dfsg-5ubuntu3.1) ...
+Selecting previously unselected package libsnapd-glib-2-1:amd64.
+Preparing to unpack .../04-libsnapd-glib-2-1_1.72-0ubuntu3_amd64.deb ...
+Unpacking libsnapd-glib-2-1:amd64 (1.72-0ubuntu3) ...
+Selecting previously unselected package libpipewire-0.3-modules:amd64.
+Preparing to unpack .../05-libpipewire-0.3-modules_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking libpipewire-0.3-modules:amd64 (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package libwireplumber-0.5-0:amd64.
+Preparing to unpack .../06-libwireplumber-0.5-0_0.5.13-1ubuntu1.1_amd64.deb ...
+Unpacking libwireplumber-0.5-0:amd64 (0.5.13-1ubuntu1.1) ...
+Selecting previously unselected package pipewire-bin.
+Preparing to unpack .../07-pipewire-bin_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking pipewire-bin (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package pipewire:amd64.
+Preparing to unpack .../08-pipewire_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking pipewire:amd64 (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package pipewire-pulse.
+Preparing to unpack .../09-pipewire-pulse_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking pipewire-pulse (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package wireplumber.
+Preparing to unpack .../10-wireplumber_0.5.13-1ubuntu1.1_amd64.deb ...
+Unpacking wireplumber (0.5.13-1ubuntu1.1) ...
+Setting up libuv1t64:amd64 (1.51.0-2ubuntu1) ...
+Setting up libsnapd-glib-2-1:amd64 (1.72-0ubuntu3) ...
+Setting up libspeexdsp1:amd64 (1.2.1-3build1) ...
+Setting up liblua5.4-0:amd64 (5.4.8-1build1) ...
+Setting up libroc0.4:amd64 (0.4.0+dfsg-5ubuntu3.1) ...
+Setting up libwireplumber-0.5-0:amd64 (0.5.13-1ubuntu1.1) ...
+Setting up libpipewire-0.3-modules:amd64 (1.6.2-1ubuntu1.2) ...
+Setting up pipewire-bin (1.6.2-1ubuntu1.2) ...
+Setting up pipewire:amd64 (1.6.2-1ubuntu1.2) ...
+Creating group 'pipewire' with GID 991.
+Creating user 'pipewire' (system user for pipewire) with UID 991 and GID 991.
+[linux] pid 274: unimplemented syscall 326 (0x8, 0x0, 0x9) -> ENOSYS
+[linux] pid 274: unimplemented syscall 40 (0x9, 0x8, 0x0) -> ENOSYS
+Created symlink '/etc/systemd/user/default.target.wants/filter-chain.service' ? '/usr/lib/systemd/user/filter-chain.service'.
+Created symlink '/etc/systemd/user/sockets.target.wants/pipewire.socket' ? '/usr/lib/systemd/user/pipewire.socket'.
+Created symlink '/etc/systemd/user/default.target.wants/pipewire.service' ? '/usr/lib/systemd/user/pipewire.service'.
+Setting up wireplumber (0.5.13-1ubuntu1.1) ...
+Created symlink '/etc/systemd/user/pipewire-session-manager.service' ? '/usr/lib/systemd/user/wireplumber.service'.
+Created symlink '/etc/systemd/user/pipewire.service.wants/wireplumber.service' ? '/usr/lib/systemd/user/wireplumber.service'.
+Setting up pipewire-pulse (1.6.2-1ubuntu1.2) ...
+Created symlink '/etc/systemd/user/default.target.wants/pipewire-pulse.service' ? '/usr/lib/systemd/user/pipewire-pulse.service'.
+Created symlink '/etc/systemd/user/sockets.target.wants/pipewire-pulse.socket' ? '/usr/lib/systemd/user/pipewire-pulse.socket'.
+Processing triggers for libglib2.0-0t64:amd64 (2.88.0-1ubuntu0.1) ...
+Processing triggers for libc-bin (2.43-2ubuntu2.3) ...
 [tasks] id state tgid syscall rip ticks exe
-[tasks] 0 Running 0 -1 0xbd4538e1 71563 shell
-[tasks] 1 Ready 1 -1 0xbd3a63f0 0 idle
-[tasks] 2 Blocked 2 -1 0xbd3b4af3 3 netd
-[tasks] 3 Sleeping 3 -1 0xbd3b3c97 144 txgd
-[tasks] id state tgid syscall rip ticks exe
-[tasks] 0 Running 0 -1 0xbd4538e1 83663 shell
-[tasks] 1 Ready 1 -1 0xbd3a63f0 0 idle
-[tasks] 2 Blocked 2 -1 0xbd3b4af3 3 netd
-[tasks] 3 Sleeping 3 -1 0xbd3b3c97 169 txgd
-
+[tasks] 0 Sleeping 0 -1 0xbd365647 552 shell
+[tasks] 1 Ready 1 -1 0xbd3859b9 18 idle
+[tasks] 2 Blocked 2 -1 0xbd365647 102 netd
+[tasks] 3 Sleeping 3 -1 0xbd391f63 18 txgd
+[tasks] 4 Running 4 -1 0x7fffbe6ffc32 2461 /usr/bin/apt-get
+[+] Linux process 4 exited with status 0.
+hydra:/bin# 

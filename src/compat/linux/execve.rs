@@ -168,6 +168,10 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     let c = creds();
     let mut abs_path;
     let mut follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    // Set-user-ID / set-group-ID of the program finally run (never of a script)
+    let mut set_uid: Option<u32>;
+    let mut set_gid: Option<u32>;
+    let mut via_script = false;
     let mut dirfd = dirfd;
     let mut depth = 0;
     let image = loop {
@@ -209,8 +213,11 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             Err(e) => return e,
         };
         let data = &source.head;
+        set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
+        set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
 
         if let Some((interp, arg)) = parse_shebang(data) {
+            via_script = true;
             depth += 1;
             if depth > 4 {
                 return ELOOP;
@@ -251,7 +258,12 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             &abs_path,
             &argv_r,
             &envp_r,
-            crate::task::exec::ExecCreds { uid: c.euid, gid: c.egid },
+            crate::task::exec::ExecCreds {
+                uid: c.uid,
+                gid: c.gid,
+                euid: if via_script { c.euid } else { set_uid.unwrap_or(c.euid) },
+                egid: if via_script { c.egid } else { set_gid.unwrap_or(c.egid) },
+            },
             &read_in_root,
         ) {
             Ok(img) => break img,
@@ -273,6 +285,18 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             t.regs.cr3 = cr3;
             t.exe = Some(exe);
             t.fs_base = 0;
+            // A set-ID program runs with the file's owner (group) as its effective and
+            // saved id; capabilities follow the new effective user
+            if !via_script {
+                if let Some(u) = set_uid {
+                    t.euid = u;
+                    t.suid = u;
+                }
+                if let Some(g) = set_gid {
+                    t.egid = g;
+                    t.sgid = g;
+                }
+            }
             let (uid, euid) = (t.uid, t.euid);
             t.caps.on_exec(uid, euid);
             t.clear_child_tid = 0;

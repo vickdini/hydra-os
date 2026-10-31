@@ -356,6 +356,26 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
             t.changed = true;
         }
     }
+    // The audio/video server, started by systemd user units on a real system: autostart
+    // entries start it with the session (TryExec skips them when PipeWire is missing)
+    for (name, exec, phase) in [("pipewire", "pipewire", 0), ("wireplumber", "wireplumber", 1), ("pipewire-pulse", "pipewire-pulse", 1)] {
+        t.file(
+            s,
+            &alloc::format!("/etc/xdg/autostart/hydra-{}.desktop", name),
+            &alloc::format!(
+                "[Desktop Entry]
+# Written by Hydra: no systemd user manager starts this
+Type=Application
+Name={}
+Exec={}
+TryExec={}
+NoDisplay=true
+X-KDE-autostart-phase={}
+",
+                name, exec, exec, phase
+            ),
+        )?;
+    }
     // The session logs in without a password: Plasma must not lock it on idle
     if lookup_path(s, t.root, "/etc/xdg/kscreenlockerrc").is_none() {
         t.file(s, "/etc/xdg/kscreenlockerrc", "# Written by Hydra: the session has no password to unlock with

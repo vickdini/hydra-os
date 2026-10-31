@@ -35,9 +35,87 @@ pub const HEAP_SIZE: usize = 512 * 1024 * 1024;
 /// Smallest heap accepted when memory is short.
 const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 
+/// The linked-list heap behind [`KERNEL_HEAP`]: large blocks, and the memory the
+/// small-object lists are carved from.
+pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
+
 /// Global allocator for Hydra kernel (`extern crate alloc`).
 #[global_allocator]
-pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
+static KERNEL_HEAP: SizeClassHeap = SizeClassHeap::new();
+
+/// Block sizes served from free lists (powers of two, each block aligned to its size).
+const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
+/// Bytes requested from the linked-list heap when a class runs out.
+const REFILL_BYTES: usize = 16 * 1024;
+
+/// A free block of a size class (the link lives in the free block itself).
+struct FreeBlock {
+    next: *mut FreeBlock,
+}
+
+struct FreeList(*mut FreeBlock);
+
+unsafe impl Send for FreeList {}
+
+/// Small allocations come from per-size free lists in O(1); freed small blocks go back to
+/// their list (they are never returned to the linked-list heap). The linked-list heap's
+/// first-fit search is linear in the number of holes, which small blocks would otherwise
+/// multiply.
+pub struct SizeClassHeap {
+    classes: [spin::Mutex<FreeList>; 8],
+}
+
+impl SizeClassHeap {
+    const fn new() -> Self {
+        Self { classes: [const { spin::Mutex::new(FreeList(core::ptr::null_mut())) }; 8] }
+    }
+
+    fn class_of(layout: &core::alloc::Layout) -> Option<usize> {
+        let need = layout.size().max(layout.align());
+        CLASS_SIZES.iter().position(|&c| c >= need)
+    }
+}
+
+unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let class = match Self::class_of(&layout) {
+            Some(c) => c,
+            None => return HEAP_ALLOCATOR.alloc(layout),
+        };
+        let mut list = self.classes[class].lock();
+        if list.0.is_null() {
+            // Carve a run of blocks out of the linked-list heap
+            let size = CLASS_SIZES[class];
+            let chunk = match core::alloc::Layout::from_size_align(REFILL_BYTES, size) {
+                Ok(l) => HEAP_ALLOCATOR.alloc(l),
+                Err(_) => core::ptr::null_mut(),
+            };
+            if chunk.is_null() {
+                return core::ptr::null_mut();
+            }
+            for i in (0..REFILL_BYTES / size).rev() {
+                let block = chunk.add(i * size) as *mut FreeBlock;
+                (*block).next = list.0;
+                list.0 = block;
+            }
+        }
+        let block = list.0;
+        list.0 = (*block).next;
+        block as *mut u8
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        match Self::class_of(&layout) {
+            Some(class) => {
+                let mut list = self.classes[class].lock();
+                let block = ptr as *mut FreeBlock;
+                (*block).next = list.0;
+                list.0 = block;
+            }
+            None => HEAP_ALLOCATOR.dealloc(ptr, layout),
+        }
+    }
+}
 
 /// Tracks whether the global kernel heap has been initialized.
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);

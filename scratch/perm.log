@@ -1,4 +1,4 @@
-linux chroot /ubuntu /usr/bin/ls -ldn /home /home/hydra
+linux chroot /ubuntu /usr/bin/ls -ln /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/passwd /usr/bin/su
 [1m[37m[40m
 ============================================================
  [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
@@ -15,15 +15,8 @@ linux chroot /ubuntu /usr/bin/ls -ldn /home /home/hydra
 
 [*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
 
-drwxr-xr-x 3 0    0    4096 Oct 31 13:15 /home
-drwxr-x--- 6 1000 1000 4096 Oct 31 20:52 /home/hydra
+-rwsr-xr-x 1 0 0   93640 Feb  2  2026 /usr/bin/passwd
+-rwsr-xr-x 1 0 0   55760 Aug 19 14:23 /usr/bin/su
+-rwsr-xr-- 1 0 101 35040 Mar  3  2026 /usr/lib/dbus-1.0/dbus-daemon-launch-helper
 [+] Linux process 4 exited with status 0.
-hydra:/bin$ linux chroot /ubuntu /usr/bin/mkdir -v /home/hydra/Desktop
-mkdir: /home/hydra/Desktop: File exists
-[+] Linux process 5 exited with status 1.
-hydra:/bin$ linux chroot /ubuntu /usr/bin/mkdir -v /run/user/1000/probe
-mkdir: created directory '/run/user/1000/probe'
-[+] Linux process 6 exited with status 0.
-hydra:/bin$ linux chroot /ubuntu /usr/bin/touch /home/hydra/probe
-[+] Linux process 7 exited with status 0.
 hydra:/bin$ 
