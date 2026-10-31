@@ -206,6 +206,9 @@ pub struct AtaDevice {
     model: [u8; 40],
     total_sectors: u64,
     lba48_supported: bool,
+    /// Bus-master DMA engine, when the controller has one.
+    dma: Option<BusMaster>,
+    dma_failures: u32,
 }
 
 impl AtaDevice {
@@ -305,6 +308,8 @@ impl AtaDevice {
             model,
             total_sectors,
             lba48_supported,
+            dma: BusMaster::probe(),
+            dma_failures: 0,
         })
     }
 
@@ -360,6 +365,9 @@ impl AtaDevice {
         }
         if count == 0 {
             return Ok(());
+        }
+        if let Some(r) = self.dma_or(lba, count, buf.as_mut_ptr(), false) {
+            return r;
         }
 
         self.ports.wait_not_busy()?;
@@ -446,6 +454,9 @@ impl AtaDevice {
         if count == 0 {
             return Ok(());
         }
+        if let Some(r) = self.dma_or(lba, count, buf.as_ptr() as *mut u8, true) {
+            return r;
+        }
 
         self.ports.wait_not_busy()?;
 
@@ -530,6 +541,196 @@ impl AtaDevice {
         self.ports.wait_not_busy()?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bus-master DMA (PCI IDE controller, e.g. PIIX)
+// ---------------------------------------------------------------------------
+
+const ATA_CMD_READ_DMA: u8 = 0xC8;
+const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
+const ATA_CMD_WRITE_DMA: u8 = 0xCA;
+const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
+
+// Bus-master register offsets and bits (primary channel)
+const BM_COMMAND: u16 = 0;
+const BM_STATUS: u16 = 2;
+const BM_PRDT: u16 = 4;
+const BM_CMD_START: u8 = 0x01;
+const BM_CMD_TO_MEMORY: u8 = 0x08; // device -> memory (a disk read)
+const BM_STATUS_ACTIVE: u8 = 0x01;
+const BM_STATUS_ERROR: u8 = 0x02;
+const BM_STATUS_IRQ: u8 = 0x04;
+
+/// Pages in the DMA bounce buffer: one transfer of up to 255 sectors fits.
+const DMA_PAGES: usize = 32;
+
+/// Bus-master DMA engine of the primary IDE channel.
+///
+/// Transfers go through a physically contiguous bounce buffer below 4 GiB (PRD entries
+/// carry 32-bit addresses), described by one PRD entry per page so that no entry crosses
+/// a 64 KiB boundary. One command moves a whole run of sectors: under virtualization this
+/// replaces hundreds of thousands of emulated port accesses per megabyte with a single
+/// transfer, and on hardware it frees the CPU during the transfer.
+struct BusMaster {
+    base: u16,
+    /// Physical (identity-mapped) address of the PRD table page.
+    prdt: u64,
+    /// Physical (identity-mapped) address of the bounce buffer.
+    buf: u64,
+}
+
+impl BusMaster {
+    /// Finds the IDE controller's bus-master registers and allocates the DMA memory.
+    fn probe() -> Option<Self> {
+        let dev = crate::arch::pci::find_class(0x01, 0x01)?;
+        // Programming interface bit 7: the controller supports bus mastering
+        let prog_if = crate::arch::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
+        if prog_if & 0x80 == 0 {
+            return None;
+        }
+        let bar4 = crate::arch::pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x20);
+        if bar4 & 1 == 0 || bar4 & !3 == 0 {
+            return None; // not an I/O BAR
+        }
+        crate::arch::pci::enable_bus_mastering(&dev);
+        let frames = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().allocate_contiguous_frames(DMA_PAGES + 1)?;
+        let base_phys = frames.start_address().as_u64();
+        if base_phys + ((DMA_PAGES as u64 + 1) * 4096) > 0x1_0000_0000 {
+            return None; // PRDs address only the first 4 GiB
+        }
+        crate::console::serial_write("[ata] bus-master DMA enabled\n");
+        Some(Self { base: (bar4 & 0xFFFC) as u16, prdt: base_phys, buf: base_phys + 4096 })
+    }
+
+    fn outb(&self, reg: u16, v: u8) {
+        unsafe { Port::<u8>::new(self.base + reg).write(v) };
+    }
+
+    fn inb(&self, reg: u16) -> u8 {
+        unsafe { Port::<u8>::new(self.base + reg).read() }
+    }
+
+    /// Describes `bytes` of the bounce buffer in the PRD table.
+    fn build_prdt(&self, bytes: usize) {
+        let table = self.prdt as *mut u32;
+        let pages = (bytes + 4095) / 4096;
+        for i in 0..pages {
+            let len = (bytes - i * 4096).min(4096) as u32;
+            let last = if i + 1 == pages { 0x8000_0000u32 } else { 0 };
+            unsafe {
+                core::ptr::write_volatile(table.add(i * 2), (self.buf + (i * 4096) as u64) as u32);
+                core::ptr::write_volatile(table.add(i * 2 + 1), len | last);
+            }
+        }
+    }
+}
+
+impl AtaDevice {
+    /// Moves `count` sectors at `lba` by DMA (`write`: from `data` to the disk).
+    fn dma_transfer(&mut self, lba: u64, count: u8, data: *mut u8, write: bool) -> Result<(), &'static str> {
+        let bm = match self.dma.as_ref() {
+            Some(b) => b,
+            None => return Err("no DMA"),
+        };
+        let bytes = count as usize * ATA_SECTOR_SIZE;
+        if write {
+            unsafe { core::ptr::copy_nonoverlapping(data as *const u8, bm.buf as *mut u8, bytes) };
+        }
+        bm.build_prdt(bytes);
+        bm.outb(BM_COMMAND, 0);
+        bm.outb(BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ); // write-1-to-clear
+        unsafe { Port::<u32>::new(bm.base + BM_PRDT).write(bm.prdt as u32) };
+        let direction = if write { 0 } else { BM_CMD_TO_MEMORY };
+        bm.outb(BM_COMMAND, direction);
+
+        self.ports.wait_not_busy()?;
+        let lba48 = !(lba < 0x1000_0000 && !self.lba48_supported);
+        unsafe {
+            if !lba48 {
+                self.ports.drive_head.write(0xE0 | (((lba >> 24) & 0x0F) as u8));
+            } else {
+                self.ports.drive_head.write(0x40);
+            }
+        }
+        self.ports.delay_400ns();
+        unsafe {
+            if lba48 {
+                self.ports.sector_count.write(0);
+                self.ports.lba_low.write((lba >> 24) as u8);
+                self.ports.lba_mid.write((lba >> 32) as u8);
+                self.ports.lba_high.write((lba >> 40) as u8);
+            } else {
+                self.ports.error_features.write(0);
+            }
+            self.ports.sector_count.write(count);
+            self.ports.lba_low.write(lba as u8);
+            self.ports.lba_mid.write((lba >> 8) as u8);
+            self.ports.lba_high.write((lba >> 16) as u8);
+            let cmd = match (write, lba48) {
+                (false, false) => ATA_CMD_READ_DMA,
+                (false, true) => ATA_CMD_READ_DMA_EXT,
+                (true, false) => ATA_CMD_WRITE_DMA,
+                (true, true) => ATA_CMD_WRITE_DMA_EXT,
+            };
+            self.ports.status_command.write(cmd);
+        }
+        bm.outb(BM_COMMAND, direction | BM_CMD_START);
+
+        // Completion: the engine stops (or reports an error) and the drive is no longer busy
+        let mut wait = PollDeadline::new();
+        let result = loop {
+            let st = bm.inb(BM_STATUS);
+            if st & BM_STATUS_ERROR != 0 {
+                break Err("ATA DMA transfer error");
+            }
+            if st & BM_STATUS_ACTIVE == 0 || st & BM_STATUS_IRQ != 0 {
+                break Ok(());
+            }
+            if wait.expired() {
+                break Err("ATA DMA transfer timed out");
+            }
+            core::hint::spin_loop();
+        };
+        bm.outb(BM_COMMAND, 0);
+        let status = self.ports.wait_not_busy()?;
+        bm.outb(BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
+        result?;
+        if status & (ATA_STATUS_ERR | ATA_STATUS_DF) != 0 {
+            return Err("ATA device reported an error after DMA");
+        }
+        if !write {
+            unsafe { core::ptr::copy_nonoverlapping(bm.buf as *const u8, data, bytes) };
+        }
+        Ok(())
+    }
+
+    /// Uses DMA when the controller supports it; on a DMA failure the drive is reset and
+    /// the transfer is repeated with port I/O (and DMA is turned off after repeated
+    /// failures).
+    fn dma_or(&mut self, lba: u64, count: u8, data: *mut u8, write: bool) -> Option<Result<(), &'static str>> {
+        if self.dma.is_none() || count == 0 {
+            return None;
+        }
+        match self.dma_transfer(lba, count, data, write) {
+            Ok(()) => Some(Ok(())),
+            Err(e) => {
+                self.ports.soft_reset();
+                self.dma_failures += 1;
+                if self.dma_failures >= 3 {
+                    crate::console::serial_write("[ata] DMA failing repeatedly; using port I/O\n");
+                    self.dma = None;
+                }
+                let _ = e;
+                None
+            }
+        }
+    }
+}
+
+/// Whether disk transfers use bus-master DMA.
+pub fn dma_enabled() -> bool {
+    PRIMARY_ATA.lock().as_ref().map_or(false, |d| d.dma.is_some())
 }
 
 /// Initializes the primary ATA hard disk drive subsystem.

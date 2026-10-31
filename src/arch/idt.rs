@@ -328,7 +328,14 @@ fn kernel_watchdog(ctx: &ExceptionContext, at_preempt_point: bool) {
         let mut b = crate::console::FixedBuf::new();
         let _ = core::fmt::Write::write_fmt(
             &mut b,
-            format_args!("[watchdog] kernel busy for {} s: rip={:#x} rsp={:#x}\n", busy / 100, ctx.rip, ctx.rsp),
+            // `anchor` locates the image: rip - anchor + map address of hydra_syscall_dispatcher
+            format_args!(
+                "[watchdog] kernel busy for {} s: rip={:#x} rsp={:#x} anchor={:#x}\n",
+                busy / 100,
+                ctx.rip,
+                ctx.rsp,
+                crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize
+            ),
         );
         crate::console::serial_write(b.as_str());
     }

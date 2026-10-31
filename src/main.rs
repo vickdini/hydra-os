@@ -15,6 +15,7 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod video;
+pub mod wayland;
 pub mod net;
 pub mod compress;
 pub mod pkg;

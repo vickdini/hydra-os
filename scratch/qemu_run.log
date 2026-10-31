@@ -11,8 +11,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd47f9f3
-    RFLAGS: 0x206, RSP: 0xbfe62820
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd413b83
+    RFLAGS: 0x202, RSP: 0xbfe627f0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0xbf801000
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd47f620 -> PhysAddr 0xbd47f620
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd4137b0 -> PhysAddr 0xbd4137b0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x21780000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x21781000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -56,13 +56,14 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
 [1m[33m[40m
 [*] Step 6: Initializing Storage Subsystem & ZFS File Server...
+[ata] bus-master DMA enabled
 [1m[32m[40m[+] ATA Storage: Detected Primary Master 'QEMU HARDDISK' (16384 MiB, 33554432 sectors, LBA48)
 [+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
 [+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
 [1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #2776, 10769 objects)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #9278, 15569 objects)
 [+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 810 MiB used, TXG #2776, Fletcher-4, CoW)
+    - Storage Pool: 'hydrapool' (16384 MiB, 1513 MiB used, TXG #9278, Fletcher-4, CoW)
     - Persistence : Active (Primary Master ATA Hard Disk)
     - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
 [1m[33m[40m
@@ -84,10 +85,9 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
 [1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
 
-[1m[32m[40mhydra:/bin$ su root
-[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
-[1m[36m[40mhydra:/bin# linux chroot /ubuntu /bin/bash
-[1m[37m[40m
+[1m[32m[40mhydra:/bin$ linux run proctest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/proctest.elf'...
+
 ============================================================
  [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
 ============================================================
@@ -103,21 +103,32 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 
 [*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
 
-[?2004hroot@hydra:/# dbus-daemon --session --address=unix:path=$XDG_RUNTIME_DIR/bus --fork; export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
-[?2004l[?2004hroot@hydra:/# (dbus-test-tool echo --name=org.hydra.Echo >/dev/null 2>&1 &); sleep 3; qdbus6; echo qdbus-rc=$?
-[?2004l:1.0
- org.hydra.Echo
-:1.1
-org.freedesktop.DBus
-qdbus-rc=0
-[?2004hroot@hydra:/# qdbus6 org.hydra.Echo /org/hydra org.hydra.Test.Hello; echo qdbus2-rc=$?
-[?2004lqdbus2-rc=0
-[?2004hroot@hydra:/# gdbus call --session --dest org.hydra.Echo --object-path /x --method a.b.C; echo gdbus-rc=$?
-[?2004l()
-gdbus-rc=0
-[?2004hroot@hydra:/# seq 1 3 | xargs -P3 -I{} sh -c 'echo spawn {}'; timeout 1 sleep 5; echo timeout-rc=$?
-[?2004lspawn 1
-spawn 2
-spawn 3
-timeout-rc=124
-[?2004hroot@hydra:/# 
+[+] Read 860568 bytes from OpenZFS (/bin/proctest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 3 (UID 1000, GID 1000). Executing...
+[proctest] pid=3 ppid=0
+[proctest] SIGUSR1 handler runs (kill to self)              PASS
+[proctest] FPU state survives handler                       PASS
+[proctest] blocked signal is pending, not delivered         PASS
+[proctest] unblocking delivers it                           PASS
+[proctest] SIGSEGV handler + siglongjmp recovery            PASS
+[proctest] write to PROT_READ page raises SIGSEGV           PASS
+[proctest] fork + waitpid exit status 42                    PASS
+[proctest] child writes are copy-on-write                   PASS
+[proctest] SIGCHLD delivered to parent                      PASS
+[proctest] child killed by SIGTERM reported                 PASS
+[proctest] 10000 bytes through a pipe, then EOF             PASS
+[proctest] write without readers -> EPIPE                   PASS
+[proctest] fork + execve(/proc/self/exe) exit status 7      PASS
+[proctest] posix_spawn exit status 9                        PASS
+[proctest] wait with no children -> ECHILD                  PASS
+[proctest] signal interrupts blocking read with EINTR       PASS
+[proctest] SIGSTOP: waitpid(WUNTRACED) reports stopped      PASS
+[proctest] SIGCONT: waitpid(WCONTINUED) reports continued   PASS
+[proctest] SIGKILL ends a stopped child                     PASS
+[proctest] stopped nanosleep restarts for the remaining time PASS
+[proctest] ALL PASSED (0 failures)
+[+] Linux process 3 exited with status 0.
+hydra:/bin$ [tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Running 0 -1 0xbd3bdba1 3596 shell
+[tasks] 1 Ready 1 -1 0xbd3e05d9 165 idle
+[tasks] 2 Blocked 2 -1 0xbd3eba73 1 netd

@@ -1,0 +1,129 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd457c93
+    RFLAGS: 0x202, RSP: 0xbfe621b0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0xbf801000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 4040 MiB
+    - Allocated: 2560 KiB
+    - Allocated Test Frame: 0x380000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x1780000
+    - Total Size:    512 MiB (536870912 bytes)
+    - Available:     512 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd4578c0 -> PhysAddr 0xbd4578c0
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x21780000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x21781000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0xc0000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[1m[33m[40m
+[*] Step 6: Initializing Storage Subsystem & ZFS File Server...
+[ata] bus-master DMA enabled
+[1m[32m[40m[+] ATA Storage: Detected Primary Master 'QEMU HARDDISK' (16384 MiB, 33554432 sectors, LBA48)
+[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+[1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #2858, 10769 objects)
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 1049 MiB used, TXG #2858, Fletcher-4, CoW)
+    - Persistence : Active (Primary Master ATA Hard Disk)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[1m[36m[40m
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
+[1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
+
+[1m[32m[40mhydra:/bin$ su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /bin/bash
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[?2004hroot@hydra:/# apt-get install -y --no-install-recommends qt6-wayland kcalc wayland-utils fonts-dejavu-core xkb-data >/tmp/kc.log 2>&1; echo kc=$?; tail -3 /tmp/ kc.log; du -sh /usr/lib/x86_64-linux-gnu | tail -1; sync; sleep 5; echo KCALC-$((1+1))-DONE
+[?2004l[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7eae rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7eae rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7eae rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x1efba90 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7eae rsp=0x1efba90 anchor=0xbd401c80
+[linux] pid 1791: unimplemented syscall 221 (0x4, 0x0, 0x5258) -> ENOSYS
+[watchdog] kernel busy for 5 s: rip=0xbd3b7eae rsp=0x9ec9a10 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x9ec9a10 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x9ec9a10 anchor=0xbd401c80
+[watchdog] kernel busy for 5 s: rip=0xbd3b7ea4 rsp=0x9ec9a10 anchor=0xbd401c80
+kc=0
+[linux] pid 1804: unimplemented syscall 40 (0x1, 0x3, 0x0) -> ENOSYS
+Setting up kcalc (4:25.12.3-0ubuntu1) ...
+Processing triggers for libc-bin (2.43-2ubuntu2.3) ...
+Processing triggers for shared-mime-info (2.4-5build3) ...
+375M	/usr/lib/x86_64-linux-gnu
+KCALC-2-DONE
+[?2004hroot@hydra:/# 

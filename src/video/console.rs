@@ -304,6 +304,50 @@ pub fn is_active() -> bool {
     VIDEO_CONSOLE.lock().is_some()
 }
 
+/// Off-screen copy the console draws into while a compositor owns the screen, and the
+/// real framebuffer address to return to.
+static SHADOW: Mutex<Option<(alloc::vec::Vec<u8>, usize)>> = Mutex::new(None);
+
+/// Gives the screen to a compositor: the console keeps drawing, into a shadow copy of
+/// the framebuffer. Returns the real framebuffer (address, width, height, stride in
+/// pixels, BGR order) for the compositor to draw on.
+pub fn release_display() -> Option<(*mut u8, usize, usize, usize, bool)> {
+    let mut guard = VIDEO_CONSOLE.lock();
+    let console = guard.as_mut()?;
+    let mut shadow = SHADOW.lock();
+    let fb = console.framebuffer_mut();
+    let info = (fb.base_ptr(), fb.width(), fb.height(), fb.stride(), fb.is_bgr());
+    if shadow.is_none() {
+        let mut copy = alloc::vec![0u8; fb.size()];
+        unsafe { core::ptr::copy_nonoverlapping(fb.base_ptr(), copy.as_mut_ptr(), fb.size()) };
+        let real = fb.base_ptr() as usize;
+        fb.set_base(copy.as_mut_ptr());
+        *shadow = Some((copy, real));
+        return Some((real as *mut u8, info.1, info.2, info.3, info.4));
+    }
+    let real = shadow.as_ref().unwrap().1 as *mut u8;
+    Some((real, info.1, info.2, info.3, info.4))
+}
+
+/// Returns the screen to the console, showing what it drew in the meantime.
+pub fn reclaim_display() {
+    let mut guard = VIDEO_CONSOLE.lock();
+    let console = match guard.as_mut() {
+        Some(c) => c,
+        None => return,
+    };
+    if let Some((copy, real)) = SHADOW.lock().take() {
+        let fb = console.framebuffer_mut();
+        unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), real as *mut u8, fb.size().min(copy.len())) };
+        fb.set_base(real as *mut u8);
+    }
+}
+
+/// True while a compositor owns the screen.
+pub fn display_released() -> bool {
+    SHADOW.lock().is_some()
+}
+
 /// Writes a string to the autonomous video console if active.
 pub fn write_str(s: &str) {
     let mut guard = VIDEO_CONSOLE.lock();

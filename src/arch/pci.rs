@@ -143,6 +143,40 @@ pub fn enable_bus_mastering(dev: &PciDevice) {
     pci_write_u16(dev.bus, dev.device, dev.function, PCI_REG_COMMAND, updated);
 }
 
+/// Finds the first device of a class/subclass (e.g. 0x01/0x01, an IDE controller).
+pub fn find_class(class: u8, subclass: u8) -> Option<PciDevice> {
+    for bus in 0..=31 {
+        for device in 0..32 {
+            if matches!(pci_read_u16(bus, device, 0, PCI_REG_VENDOR_ID), 0xFFFF | 0x0000) {
+                continue;
+            }
+            let functions = if pci_read_u8(bus, device, 0, PCI_REG_HEADER_TYPE) & 0x80 != 0 { 8 } else { 1 };
+            for function in 0..functions {
+                let v = pci_read_u16(bus, device, function, PCI_REG_VENDOR_ID);
+                if v == 0xFFFF || v == 0x0000 {
+                    continue;
+                }
+                if pci_read_u8(bus, device, function, PCI_REG_CLASS) == class
+                    && pci_read_u8(bus, device, function, PCI_REG_SUBCLASS) == subclass
+                {
+                    return Some(PciDevice {
+                        bus,
+                        device,
+                        function,
+                        vendor_id: v,
+                        device_id: pci_read_u16(bus, device, function, PCI_REG_DEVICE_ID),
+                        class_id: class,
+                        subclass_id: subclass,
+                        bar0: pci_read_u32(bus, device, function, PCI_REG_BAR0),
+                        irq_line: pci_read_u8(bus, device, function, PCI_REG_INTERRUPT_LINE),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Scans the PCI bus topology for a device matching the target vendor and device IDs.
 pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     for bus in 0..=31 {

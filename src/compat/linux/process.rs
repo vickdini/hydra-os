@@ -153,6 +153,8 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         73 => 0,
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
+        // fadvise64: access-pattern hints (no read-ahead policy to tune)
+        221 => 0,
         // alarm / getitimer / setitimer
         37 => super::itimer::sys_alarm(a[0]),
         36 => super::itimer::sys_getitimer(a[0], a[1]),

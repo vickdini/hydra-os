@@ -43,6 +43,12 @@ impl Framebuffer {
         self.is_bgr
     }
 
+    /// Points drawing at other memory of the same size (the console's shadow buffer while
+    /// the compositor owns the screen).
+    pub fn set_base(&mut self, ptr: *mut u8) {
+        self.base_ptr = ptr;
+    }
+
     pub fn base_ptr(&self) -> *mut u8 {
         self.base_ptr
     }

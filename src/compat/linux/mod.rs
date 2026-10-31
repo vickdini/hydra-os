@@ -1549,7 +1549,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             if fds_ptr.is_null() && nfds > 0 {
                 return -EFAULT;
             }
-            dispatch_wayland_events();
             if nfds == 0 {
                 if timeout_ms > 0 {
                     crate::task::sleep_ms(timeout_ms as u64);
@@ -1616,7 +1615,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if proc::signal_pending() {
                     return proc::ERESTARTSYS;
                 }
-                dispatch_wayland_events();
                 waits.wait(deadline);
             }
         }
@@ -1705,7 +1703,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
             loop {
                 waits.register();
-                dispatch_wayland_events();
                 let ready = epoll_collect_ready(&epoll_arc, maxevents as usize);
                 if !ready.is_empty() {
                     let count = ready.len();
@@ -1728,7 +1725,6 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if proc::signal_pending() {
                     return proc::ERESTARTSYS;
                 }
-                dispatch_wayland_events();
                 waits.wait(deadline);
             }
         }

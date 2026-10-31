@@ -4,5 +4,6 @@
 # Local disk images (too large for GitHub; regenerate with `make rootfs-media` / qemu.bat)
 dist/x86_64/rootfs-media.img
 dist/x86_64/hydrapool.qcow2
+dist/x86_64/hydrapool.backup.qcow2
 dist/x86_64/hydrapool.vdi
 dist/x86_64/rootfs-media.vdi

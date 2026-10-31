@@ -314,8 +314,13 @@ impl UnixSocket {
             return EMSGSIZE;
         }
         let cred = Ucred::current();
+        // Only a call that may sleep registers on the queue (a non-blocking call made by a
+        // task that is itself registered there, such as an in-kernel server, must not
+        // unregister it when its wait set is dropped)
         let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(pair.wq.clone()));
+        if !nonblock {
+            waits.add(QueueRef::Shared(pair.wq.clone()));
+        }
         let mut sent = 0;
         loop {
             waits.register();
@@ -371,7 +376,9 @@ impl UnixSocket {
         let nonblock = self.get_nonblock() || flags & MSG_DONTWAIT != 0;
         let peek = flags & MSG_PEEK != 0;
         let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(pair.wq.clone()));
+        if !nonblock {
+            waits.add(QueueRef::Shared(pair.wq.clone()));
+        }
         loop {
             waits.register();
             {
@@ -408,6 +415,68 @@ impl UnixSocket {
 
     pub fn write(&self, data: &[u8]) -> i64 {
         self.send(data, Vec::new(), 0)
+    }
+}
+
+// ----------------------------------------------------------------------
+// Kernel-side use (in-kernel servers such as the Wayland compositor)
+// ----------------------------------------------------------------------
+
+/// Creates a listening stream socket bound at `path` inside the process root `root_ino`
+/// (so clients chrooted there find it), owned by `uid`/`gid` with mode 0700 like a
+/// per-user runtime socket. An existing node at the path is replaced.
+pub fn kernel_listen(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<Arc<UnixSocket>, i64> {
+    const S_IFSOCK: u32 = 0o140000;
+    let key = alloc::format!("{}:{}", root_ino, path).into_bytes();
+    let sock = UnixSocket::new(SOCK_STREAM, true);
+    crate::fs::zfs::with_server(|s| {
+        let (dir, name) = crate::fs::client::resolve_parent_in(s, root_ino, root_ino, path.as_bytes())?;
+        let _ = s.unlink(dir, &name);
+        s.mknod(dir, &name, S_IFSOCK | 0o700, 0, uid, gid).map(|_| ())
+    })?;
+    {
+        let mut names = NAMES.lock();
+        if names.get(&key).map_or(false, |w| w.strong_count() > 0) {
+            return Err(EADDRINUSE);
+        }
+        names.insert(key.clone(), Arc::downgrade(&sock));
+    }
+    *sock.local.lock() = Some(Addr::Path { shown: path.as_bytes().to_vec(), key });
+    *sock.state.lock() = State::Listening { backlog: 64, pending: VecDeque::new(), cred: Ucred { pid: 0, uid, gid } };
+    Ok(sock)
+}
+
+impl UnixSocket {
+    /// Takes a pending connection without waiting.
+    pub fn kernel_accept(&self) -> Option<Arc<UnixSocket>> {
+        match &mut *self.state.lock() {
+            State::Listening { pending, .. } => pending.pop_front(),
+            _ => None,
+        }
+    }
+
+    /// Non-blocking receive with descriptors: `Ok(None)` when nothing is waiting,
+    /// `Ok(Some((0, _)))` at end-of-file.
+    pub fn kernel_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, Vec<FileDescriptor>)>, i64> {
+        match self.recv(buf, MSG_DONTWAIT) {
+            Ok((n, fds, _, _)) => Ok(Some((n, fds))),
+            Err(EAGAIN) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Non-blocking send with descriptors; returns bytes queued (possibly fewer than
+    /// `data.len()`, or `EAGAIN` while the peer's buffer is full).
+    pub fn kernel_send(&self, data: &[u8], fds: Vec<FileDescriptor>) -> i64 {
+        self.send(data, fds, MSG_DONTWAIT | MSG_NOSIGNAL)
+    }
+
+    /// Credentials of the connected peer (`SO_PEERCRED`): (pid, uid, gid).
+    pub fn peer_cred(&self) -> Option<(u32, u32, u32)> {
+        match &*self.state.lock() {
+            State::Connected { peer_cred, .. } => Some((peer_cred.pid, peer_cred.uid, peer_cred.gid)),
+            _ => None,
+        }
     }
 }
 

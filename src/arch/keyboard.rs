@@ -179,6 +179,10 @@ pub fn process_scancode(scancode: u8) -> Option<Key> {
     None
 }
 
+/// Ctrl and Alt held on the console (for the Ctrl+Alt+F2 display switch).
+static CONSOLE_CTRL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static CONSOLE_ALT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Set by F12; the timer interrupt prints the task list (see `Scheduler::dump_tasks`).
 pub static TASK_DUMP_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -190,6 +194,25 @@ pub fn on_keyboard_irq() {
         // F12: dump the task list on the serial port (handled by the timer interrupt)
         TASK_DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
         return;
+    }
+    if crate::wayland::RAW_KEYBOARD.load(core::sync::atomic::Ordering::Acquire) {
+        // The Wayland compositor shows: it receives the keyboard as raw scancodes
+        crate::wayland::push_scancode(scancode);
+        return;
+    }
+    // Ctrl+Alt+F2 on the console switches to the compositor's screen
+    use core::sync::atomic::Ordering::Relaxed;
+    match scancode {
+        0x1D => CONSOLE_CTRL.store(true, Relaxed),
+        0x9D => CONSOLE_CTRL.store(false, Relaxed),
+        0x38 => CONSOLE_ALT.store(true, Relaxed),
+        0xB8 => CONSOLE_ALT.store(false, Relaxed),
+        0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::wayland::is_running() => {
+            crate::wayland::SWITCH_TO_COMPOSITOR.store(true, core::sync::atomic::Ordering::Release);
+            crate::wayland::INPUT_WQ.wake_all();
+            return;
+        }
+        _ => {}
     }
     if let Some(key) = process_scancode(scancode) {
         let mut buffer = KEY_BUFFER.lock();

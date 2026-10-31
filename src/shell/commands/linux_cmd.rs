@@ -207,6 +207,27 @@ impl Command for LinuxCommand {
                 println!("[+] Linux syscall tracing {}", if on { "enabled" } else { "disabled" });
             }
 
+            "wayland" => {
+                // linux wayland [root]: start the compositor for clients in a Linux root
+                let root = args.get(1).copied().unwrap_or("/ubuntu");
+                if !crate::arch::boot_services::is_hardware_takeover_complete() {
+                    let _ = crate::arch::boot_services::take_hardware_ownership();
+                }
+                let root_ino = match crate::fs::ZfsClient::resolve(0, root.as_bytes(), true) {
+                    Ok(i) => i,
+                    Err(_) => {
+                        println!("[!] linux wayland: no such directory: {}", root);
+                        return;
+                    }
+                };
+                prepare_runtime_dir(root, state.current_uid, state.current_gid);
+                let path = alloc::format!("/run/user/{}/wayland-0", state.current_uid);
+                match crate::wayland::start(root_ino, &path, state.current_uid, state.current_gid) {
+                    Ok(()) => println!("[+] Wayland compositor started: WAYLAND_DISPLAY=wayland-0 in {} (Ctrl+Alt+F1 console, Ctrl+Alt+F2 desktop)", root),
+                    Err(e) => println!("[!] linux wayland: {}", e),
+                }
+            }
+
             "chroot" => {
                 if args.len() < 3 {
                     println!("Usage: linux chroot <dir> <program> [args...]   e.g. linux chroot /ubuntu /usr/bin/bash -c 'ls /'");
