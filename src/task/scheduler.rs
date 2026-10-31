@@ -74,6 +74,9 @@ pub struct Scheduler {
     default_timeslice: u32,
     /// True once [`Scheduler::init`] has registered the boot/main task and idle thread.
     initialized: bool,
+    /// The kernel's own page table root, which kernel tasks always run on (never a Linux
+    /// process's tables: those are freed when the process exits).
+    kernel_cr3: u64,
 }
 
 impl Scheduler {
@@ -85,6 +88,7 @@ impl Scheduler {
             next_id: 1,
             default_timeslice: DEFAULT_TIMESLICE_TICKS,
             initialized: false,
+            kernel_cr3: 0,
         }
     }
 
@@ -94,6 +98,7 @@ impl Scheduler {
             return;
         }
 
+        self.kernel_cr3 = current_cr3;
         // Register the active main thread as Task 0
         let main_task = Task::new_main(TaskId(0), "shell", current_cr3);
         self.tasks.push(main_task);
@@ -106,6 +111,7 @@ impl Scheduler {
 
     /// Updates the CR3 root paging address for the primary main task and background kernel tasks.
     pub fn update_main_cr3(&mut self, cr3: u64) {
+        self.kernel_cr3 = cr3;
         for task in &mut self.tasks {
             task.regs.cr3 = cr3;
         }
@@ -123,8 +129,10 @@ impl Scheduler {
         entry_fn: fn(),
         priority: TaskPriority,
     ) -> TaskId {
-        let current_cr3 = Cr3::read().0.start_address().as_u64();
-        self.spawn_internal(name, entry_fn, priority, current_cr3)
+        // Kernel tasks may be started from a Linux system call (itimerd from alarm()):
+        // they still get the kernel's tables, not the caller's
+        let cr3 = if self.kernel_cr3 != 0 { self.kernel_cr3 } else { Cr3::read().0.start_address().as_u64() };
+        self.spawn_internal(name, entry_fn, priority, cr3)
     }
 
     /// Allocates a kernel stack and appends a new Ring 0 task using page table root `cr3`.
@@ -172,6 +180,7 @@ impl Scheduler {
             egid: 0,
             suid: 0,
             sgid: 0,
+            caps: crate::task::tcb::Caps::for_euid(0),
             regs,
             stack: Some(stack),
             user_stack: None,
@@ -256,6 +265,7 @@ impl Scheduler {
             egid: 0,
             suid: 0,
             sgid: 0,
+            caps: crate::task::tcb::Caps::for_euid(0),
             regs,
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
@@ -336,6 +346,7 @@ impl Scheduler {
             egid: 0,
             suid: 0,
             sgid: 0,
+            caps: crate::task::tcb::Caps::for_euid(0),
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -407,6 +418,7 @@ impl Scheduler {
             egid: gid,
             suid: uid,
             sgid: gid,
+            caps: crate::task::tcb::Caps::for_euid(uid),
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -495,6 +507,7 @@ impl Scheduler {
             egid: gid,
             suid: uid,
             sgid: gid,
+            caps: crate::task::tcb::Caps::for_euid(uid),
             regs,
             stack: Some(alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice()),
             user_stack: None,
@@ -563,6 +576,7 @@ impl Scheduler {
         let parent_egid = parent.egid;
         let parent_suid = parent.suid;
         let parent_sgid = parent.sgid;
+        let parent_caps = parent.caps;
         let parent_exe = parent.exe.clone();
         let parent_mm = if flags & CLONE_VM != 0 {
             parent.mm.clone()
@@ -653,6 +667,7 @@ impl Scheduler {
             egid: parent_egid,
             suid: parent_suid,
             sgid: parent_sgid,
+            caps: parent_caps,
             regs,
             stack: Some(kernel_stack),
             user_stack: None,
@@ -720,7 +735,9 @@ impl Scheduler {
 
         // 3. Current task's timeslice expired or it is not Running (e.g. Blocked, Sleeping, Dead)
         let current_cr3 = Cr3::read().0.start_address().as_u64();
-        curr_task.regs.save_from_context(ctx, current_cr3);
+        // A task without an address space of its own keeps the kernel's tables
+        let saved_cr3 = if curr_task.mm.is_none() && self.kernel_cr3 != 0 { self.kernel_cr3 } else { current_cr3 };
+        curr_task.regs.save_from_context(ctx, saved_cr3);
         curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
         if curr_task.state == TaskState::Running {
             curr_task.state = TaskState::Ready;
@@ -1132,6 +1149,7 @@ impl Scheduler {
                 task.egid = gid;
                 task.suid = uid;
                 task.sgid = gid;
+                task.caps = crate::task::tcb::Caps::for_euid(uid);
                 break;
             }
         }

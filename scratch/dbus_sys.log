@@ -1,0 +1,35 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/rm -f /etc/group.lock /etc/gshadow.lock /etc/passwd.lock /etc/shadow.lock /etc/subuid.lock /etc/subgid.lock /etc/.pwd.lock
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Linux process 3 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/sbin/useradd -m -u 1000 -s /bin/bash -G video hydra
+[+] Linux process 4 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/bin/id hydra
+uid=1000(hydra) gid=1000(hydra) groups=1000(hydra),44(video)
+[+] Linux process 10 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/bin/mkdir -p /run/dbus
+[+] Linux process 11 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/bin/dbus-daemon --system
+[+] Linux process 12 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/bin/dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.Peer.Ping
+Error org.freedesktop.DBus.Error.AccessDenied: Rejected send message, 1 matched rules; type="method_call", sender=":1.0" (uid=0 pid=14 comm="") interface="org.freedesktop.DBus.Peer" member="Ping" error name="(unset)" requested_reply="0" destination="org.freedesktop.DBus" (bus)
+[+] Linux process 14 exited with status 1.
+hydra:/bin# sync
+[+] OpenZFS Storage: Synchronized all metadata, dnodes, and flushed ATA write caches to persistent media.
+hydra:/bin# 

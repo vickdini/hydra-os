@@ -4,7 +4,12 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod chardev;
+pub mod devices;
+pub mod drm;
 pub mod epoll;
+pub mod evdev;
+pub mod netlink;
 pub mod eventfd;
 pub mod fs;
 pub mod itimer;
@@ -99,6 +104,9 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         return r;
     }
 
+    if let Some(r) = chardev::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+        return r;
+    }
     if let Some(r) = unix::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
         return r;
     }
@@ -1218,19 +1226,21 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             // sys_setuid(uid: uid_t)
             let new_uid = arg0 as u32;
             crate::task::with_current_task_mut(|t| {
-                if t.euid == 0 {
-                    // Superuser: set real, effective, and saved-set UID
+                let old = (t.uid, t.euid, t.suid);
+                if t.caps.has(crate::task::tcb::Caps::SETUID) {
+                    // Privileged: set real, effective, and saved-set UID
                     t.uid = new_uid;
                     t.euid = new_uid;
                     t.suid = new_uid;
-                    0
                 } else if new_uid == t.uid || new_uid == t.suid {
                     // Unprivileged: can only switch effective UID to real or saved UID
                     t.euid = new_uid;
-                    0
                 } else {
-                    -EPERM
+                    return -EPERM;
                 }
+                let new = (t.uid, t.euid, t.suid);
+                t.caps.on_uid_change(old, new);
+                0
             }).unwrap_or(-EPERM)
         }
 
@@ -1238,8 +1248,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             // sys_setgid(gid: gid_t)
             let new_gid = arg0 as u32;
             crate::task::with_current_task_mut(|t| {
-                if t.euid == 0 {
-                    // Superuser: set real, effective, and saved-set GID
+                if t.caps.has(crate::task::tcb::Caps::SETGID) {
+                    // Privileged: set real, effective, and saved-set GID
                     t.gid = new_gid;
                     t.egid = new_gid;
                     t.sgid = new_gid;
@@ -1259,7 +1269,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let ruid = arg0 as u32;
             let euid = arg1 as u32;
             crate::task::with_current_task_mut(|t| {
-                let is_root = t.euid == 0;
+                let is_root = t.caps.has(crate::task::tcb::Caps::SETUID);
+                let old = (t.uid, t.euid, t.suid);
                 let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid;
                 let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
                 if !ok_r || !ok_e {
@@ -1274,6 +1285,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if ruid != u32::MAX || (euid != u32::MAX && euid != t.uid) {
                     t.suid = t.euid;
                 }
+                let new = (t.uid, t.euid, t.suid);
+                t.caps.on_uid_change(old, new);
                 0
             }).unwrap_or(-EPERM)
         }
@@ -1283,7 +1296,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let rgid = arg0 as u32;
             let egid = arg1 as u32;
             crate::task::with_current_task_mut(|t| {
-                let is_root = t.euid == 0;
+                let is_root = t.caps.has(crate::task::tcb::Caps::SETGID);
                 let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid;
                 let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
                 if !ok_r || !ok_e {
@@ -1308,7 +1321,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let euid = arg1 as u32;
             let suid = arg2 as u32;
             crate::task::with_current_task_mut(|t| {
-                let is_root = t.euid == 0;
+                let is_root = t.caps.has(crate::task::tcb::Caps::SETUID);
+                let old = (t.uid, t.euid, t.suid);
                 let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid || ruid == t.suid;
                 let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
                 let ok_s = suid == u32::MAX || is_root || suid == t.uid || suid == t.euid || suid == t.suid;
@@ -1318,6 +1332,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 if ruid != u32::MAX { t.uid = ruid; }
                 if euid != u32::MAX { t.euid = euid; }
                 if suid != u32::MAX { t.suid = suid; }
+                let new = (t.uid, t.euid, t.suid);
+                t.caps.on_uid_change(old, new);
                 0
             }).unwrap_or(-EPERM)
         }
@@ -1343,7 +1359,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let egid = arg1 as u32;
             let sgid = arg2 as u32;
             crate::task::with_current_task_mut(|t| {
-                let is_root = t.euid == 0;
+                let is_root = t.caps.has(crate::task::tcb::Caps::SETGID);
                 let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid || rgid == t.sgid;
                 let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
                 let ok_s = sgid == u32::MAX || is_root || sgid == t.gid || sgid == t.egid || sgid == t.sgid;
@@ -1578,7 +1594,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                     let fd = unsafe { (*fds_ptr.add(i)).fd };
                     if fd >= 0 {
                         if let Some(desc) = fds.get(fd as usize) {
-                            desc.add_wait_queues(&mut waits);
+                            fds.add_wait_queues_for(desc, &mut waits);
                         }
                     }
                 }
@@ -1598,7 +1614,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                                 continue;
                             }
                             if let Some(desc) = fds.get(pfd.fd as usize) {
-                                let ev = desc.poll_events() as i16;
+                                let ev = fds.readiness(desc) as i16;
                                 let matched = ev & (pfd.events | (EPOLLERR as i16) | (EPOLLHUP as i16));
                                 if matched != 0 {
                                     pfd.revents = matched;

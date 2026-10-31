@@ -1,0 +1,101 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/local/bin/udevtest
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[udevtest] udev_new ok
+[udevtest] scan drm card[0-9] -> 0
+[udevtest]   /sys/devices/pci0000:00/0000:00:02.0/drm/card0
+[udevtest]     sysname=card0 subsystem=drm devnode=/dev/dri/card0 initialized=1 seat=(null)
+[udevtest]     CURRENT_TAGS=:seat:master-of-seat:uaccess:
+[udevtest]     DEVNAME=/dev/dri/card0
+[udevtest]     DEVPATH=/devices/pci0000:00/0000:00:02.0/drm/card0
+[udevtest]     DEVTYPE=drm_minor
+[udevtest]     ID_FOR_SEAT=drm-pci-0000_00_02_0
+[udevtest]     ID_PATH=pci-0000:00:02.0
+[udevtest]     ID_PATH_TAG=pci-0000_00_02_0
+[udevtest]     MAJOR=226
+[udevtest]     MINOR=0
+[udevtest]     SUBSYSTEM=drm
+[udevtest]     TAGS=:seat:master-of-seat:uaccess:
+[udevtest]     USEC_INITIALIZED=1000000
+[udevtest]     pci parent boot_vga=1
+[udevtest] scan input  -> 0
+[udevtest]   /sys/devices/platform/i8042/serio0/input/input0
+[udevtest]     sysname=input0 subsystem=input devnode=(null) initialized=0 seat=(null)
+[udevtest]     DEVPATH=/devices/platform/i8042/serio0/input/input0
+[udevtest]     EV=120013
+[udevtest]     KEY=e000ffff01ffffff fffffffffffffffe
+[udevtest]     LED=7
+[udevtest]     MODALIAS=input:b0011v0001p0001eAB41-e0,1,4,11,14,k1,2,3,4,5,6,7,8,9,A,B,C,D,E,F,10,11,12,13,14,15,16,17,18,19,1A,1B,1C,1D,1E,1F,20,21,22,23,24,25,26,27,28,29,2A,2B,2C,2D,2E,2F,30,31,32,33,34,35,36,37,38,39,3A,3B,3C,3D,3E,3F,40,41,42,43,44,45,46,47,48,49,4A,4B,4C,4D,4E,4F,50,51,52,53,54,55,56,57,58,60,61,62,63,64,65,66,67,68,69,6A,6B,6C,6D,6E,6F,7D,7E,7F,ram4,l0,1,2,sfw
+[udevtest]     MSC=10
+[udevtest]     NAME="AT Translated Set 2 keyboard"
+[udevtest]     PHYS="isa0060/serio0/input0"
+[udevtest]     PRODUCT=11/1/1/ab41
+[udevtest]     PROP=0
+[udevtest]     SUBSYSTEM=input
+[udevtest]   /sys/devices/platform/i8042/serio0/input/input0/event0
+[udevtest]     sysname=event0 subsystem=input devnode=/dev/input/event0 initialized=1 seat=(null)
+[udevtest]     CURRENT_TAGS=:seat:uaccess:
+[udevtest]     DEVNAME=/dev/input/event0
+[udevtest]     DEVPATH=/devices/platform/i8042/serio0/input/input0/event0
+[udevtest]     ID_BUS=i8042
+[udevtest]     ID_INPUT=1
+[udevtest]     ID_INPUT_KEY=1
+[udevtest]     ID_INPUT_KEYBOARD=1
+[udevtest]     ID_PATH=platform-i8042-serio-0
+[udevtest]     ID_PATH_TAG=platform-i8042-serio-0
+[udevtest]     ID_SERIAL=noserial
+[udevtest]     MAJOR=13
+[udevtest]     MINOR=64
+[udevtest]     SUBSYSTEM=input
+[udevtest]     TAGS=:seat:uaccess:
+[udevtest]     USEC_INITIALIZED=1000000
+[udevtest]     XKBLAYOUT=us
+[udevtest]     XKBMODEL=pc105
+[udevtest]   /sys/devices/platform/i8042/serio1/input/input1
+[udevtest]     sysname=input1 subsystem=input devnode=(null) initialized=0 seat=(null)
+[udevtest]     DEVPATH=/devices/platform/i8042/serio1/input/input1
+[udevtest]     EV=7
+[udevtest]     KEY=70000 0 0 0 0
+[udevtest]     MODALIAS=input:b0011v0002p0001e0000-e0,1,2,k110,111,112,r0,1,amlsfw
+[udevtest]     NAME="ImPS/2 Generic Wheel Mouse"
+[udevtest]     PHYS="isa0060/serio1/input0"
+[udevtest]     PRODUCT=11/2/1/0
+[udevtest]     PROP=0
+[udevtest]     REL=3
+[udevtest]     SUBSYSTEM=input
+[udevtest]   /sys/devices/platform/i8042/serio1/input/input1/event1
+[udevtest]     sysname=event1 subsystem=input devnode=/dev/input/event1 initialized=1 seat=(null)
+[udevtest]     CURRENT_TAGS=:seat:uaccess:
+[udevtest]     DEVNAME=/dev/input/event1
+[udevtest]     DEVPATH=/devices/platform/i8042/serio1/input/input1/event1
+[udevtest]     ID_BUS=i8042
+[udevtest]     ID_INPUT=1
+[udevtest]     ID_INPUT_MOUSE=1
+[udevtest]     ID_PATH=platform-i8042-serio-1
+[udevtest]     ID_PATH_TAG=platform-i8042-serio-1
+[udevtest]     ID_SERIAL=noserial
+[udevtest]     MAJOR=13
+[udevtest]     MINOR=65
+[udevtest]     SUBSYSTEM=input
+[udevtest]     TAGS=:seat:uaccess:
+[udevtest]     USEC_INITIALIZED=1000000
+[udevtest] monitor ok, enable_receiving -> 0
+[udevtest] done
+[+] Linux process 3 exited with status 0.
+hydra:/bin# 

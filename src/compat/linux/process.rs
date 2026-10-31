@@ -7,6 +7,7 @@
 const ESRCH: i64 = -3;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
+const EPERM: i64 = -1;
 const ENOSYS: i64 = -38;
 
 const NR_GETRLIMIT: u64 = 97;
@@ -297,6 +298,115 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
         NR_SCHED_SETAFFINITY => 0,
+        99 => {
+            // sysinfo
+            let fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
+            let (total, free) = (fa.total_usable_memory(), fa.free_memory());
+            drop(fa);
+            let mut b = [0u8; 112];
+            b[0..8].copy_from_slice(&(crate::arch::pit::ticks() / 100).to_le_bytes());
+            b[32..40].copy_from_slice(&total.to_le_bytes());
+            b[40..48].copy_from_slice(&free.to_le_bytes());
+            let procs = super::proc::process_count() as u16;
+            b[80..82].copy_from_slice(&procs.to_le_bytes());
+            b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
+            copy_out(a[0], &b)
+        }
+        142 => 0, // sched_setparam: priorities of normal tasks are ignored
+        143 => copy_out(a[1], &0u32.to_le_bytes()),
+        144 => {
+            // sched_setscheduler: real-time policies need CAP_SYS_NICE
+            match a[1] & !0x4000_0000 {
+                0 | 3 | 5 => 0,
+                1 | 2 => {
+                    if crate::task::with_current_task_mut(|t| t.caps.has(1 << 23)).unwrap_or(false) {
+                        0
+                    } else {
+                        EPERM
+                    }
+                }
+                _ => EINVAL,
+            }
+        }
+        145 => 0, // sched_getscheduler: SCHED_OTHER
+        146 => match a[0] {
+            1 | 2 => 99,
+            0 | 3 | 5 => 0,
+            _ => EINVAL,
+        },
+        147 => match a[0] {
+            1 | 2 => 1,
+            0 | 3 | 5 => 0,
+            _ => EINVAL,
+        },
+        303 => -95, // name_to_handle_at: EOPNOTSUPP (callers fall back to fdinfo)
+        125 => {
+            // capget: root holds every capability, other users none
+            let version = match super::vfs::copy_in(a[0], 4) {
+                Ok(v) => u32::from_le_bytes(v[..4].try_into().unwrap()),
+                Err(e) => return Some(e),
+            };
+            let words = match version {
+                0x1998_0330 => 1,
+                0x2007_1026 | 0x2008_0522 => 2,
+                _ => {
+                    // Unknown version: report the preferred one
+                    let _ = copy_out(a[0], &0x2008_0522u32.to_le_bytes());
+                    return Some(if a[1] == 0 { 0 } else { EINVAL });
+                }
+            };
+            if a[1] == 0 {
+                return Some(0);
+            }
+            let caps = crate::task::with_current_task_mut(|t| t.caps).unwrap_or(crate::task::tcb::Caps::for_euid(0));
+            let mut data = alloc::vec![0u8; 12 * words];
+            for w in 0..words {
+                // effective, permitted (inheritable stays empty)
+                let (e, p) = ((caps.effective >> (32 * w)) as u32, (caps.permitted >> (32 * w)) as u32);
+                data[w * 12..w * 12 + 4].copy_from_slice(&e.to_le_bytes());
+                data[w * 12 + 4..w * 12 + 8].copy_from_slice(&p.to_le_bytes());
+            }
+            copy_out(a[1], &data)
+        }
+        126 => {
+            // capset (own process): permitted may only shrink, effective must stay within it
+            let head = match super::vfs::copy_in(a[0], 8) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let words = match u32::from_le_bytes(head[..4].try_into().unwrap()) {
+                0x1998_0330 => 1,
+                0x2007_1026 | 0x2008_0522 => 2,
+                _ => return Some(EINVAL),
+            };
+            let pid = i32::from_le_bytes(head[4..8].try_into().unwrap());
+            if pid != 0 && pid as u64 != super::proc::current_ids().1 {
+                return Some(EPERM);
+            }
+            let data = match super::vfs::copy_in(a[1], 12 * words) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let (mut eff, mut perm) = (0u64, 0u64);
+            for w in 0..words {
+                eff |= (u32::from_le_bytes(data[w * 12..w * 12 + 4].try_into().unwrap()) as u64) << (32 * w);
+                perm |= (u32::from_le_bytes(data[w * 12 + 4..w * 12 + 8].try_into().unwrap()) as u64) << (32 * w);
+            }
+            crate::task::with_current_task_mut(|t| {
+                if words == 1 {
+                    // A v1 caller cannot see the upper capabilities: keep them as they are
+                    eff |= t.caps.effective & !0xFFFF_FFFF;
+                    perm |= t.caps.permitted & !0xFFFF_FFFF;
+                }
+                if perm & !t.caps.permitted != 0 || eff & !perm != 0 {
+                    return EPERM;
+                }
+                t.caps.permitted = perm;
+                t.caps.effective = eff;
+                0
+            })
+            .unwrap_or(EPERM)
+        }
         NR_PRCTL => match a[0] {
             PR_GET_AUXV => {
                 let auxv = current_auxv();
@@ -310,6 +420,17 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 auxv.len() as i64
             }
             PR_SET_NAME | PR_SET_PDEATHSIG | PR_SET_DUMPABLE | PR_SET_CHILD_SUBREAPER | PR_SET_NO_NEW_PRIVS => 0,
+            8 => {
+                // PR_SET_KEEPCAPS
+                if a[1] > 1 {
+                    return Some(EINVAL);
+                }
+                crate::task::with_current_task_mut(|t| t.caps.keep = a[1] == 1);
+                0
+            }
+            7 => crate::task::with_current_task_mut(|t| t.caps.keep as i64).unwrap_or(0), // PR_GET_KEEPCAPS
+            47 => 0, // PR_CAP_AMBIENT
+            24 => 0,     // PR_CAPBSET_DROP
             PR_GET_NAME => {
                 let mut name = [0u8; 16];
                 name[..9].copy_from_slice(b"linux_app");

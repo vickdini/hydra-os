@@ -194,7 +194,7 @@ pub fn epoll_wait_set(epoll: &Arc<Mutex<EpollInstance>>) -> crate::task::wait::W
     crate::task::with_current_fds_mut(|fds| {
         for fd in fds_watched {
             if let Some(desc) = fds.get(fd as usize) {
-                desc.add_wait_queues(&mut waits);
+                fds.add_wait_queues_for(desc, &mut waits);
             }
         }
     });
@@ -234,7 +234,7 @@ pub fn epoll_collect_ready(
                 continue; // a one-shot watch that already fired: disabled until EPOLL_CTL_MOD
             }
             if let Some(desc) = fds.get(watch.fd as usize) {
-                let current_ev = desc.poll_events();
+                let current_ev = fds.readiness(desc);
                 let matched = current_ev & (watch.events | EPOLLERR | EPOLLHUP);
                 if matched != 0 {
                     ready.push(LinuxEpollEvent {

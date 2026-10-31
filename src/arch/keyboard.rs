@@ -221,6 +221,20 @@ pub fn on_keyboard_irq() {
         TASK_DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
         return;
     }
+    if scancode == 0x46 {
+        // Scroll Lock: toggle Linux syscall tracing (works while a session owns the keyboard)
+        let t = &crate::compat::linux::TRACE_SYSCALLS;
+        t.store(!t.load(core::sync::atomic::Ordering::Relaxed), core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    if scancode == 0xC6 {
+        return;
+    }
+    if crate::compat::linux::evdev::routing() {
+        // A DRM session shows: the keyboard is an evdev device
+        crate::compat::linux::evdev::push_scancode(scancode);
+        return;
+    }
     if crate::wayland::RAW_KEYBOARD.load(core::sync::atomic::Ordering::Acquire) {
         // The Wayland compositor shows: it receives the keyboard as raw scancodes
         crate::wayland::push_scancode(scancode);

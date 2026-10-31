@@ -1542,7 +1542,7 @@ fn flush(c: &mut Client) {
 }
 
 /// Linux key code for a set-1 scancode after an `0xE0` prefix (0 = ignored).
-fn e0_keycode(make: u8) -> u32 {
+pub(crate) fn e0_keycode(make: u8) -> u32 {
     match make {
         0x1C => 96,  // KP Enter
         0x1D => 97,  // Right Ctrl

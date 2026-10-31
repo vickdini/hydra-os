@@ -159,7 +159,7 @@ pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
 }
 
 /// Copies `data` to user memory at `ptr`.
-fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
+pub(crate) fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     if ptr == 0 || !prefault_current(ptr, data.len() as u64, true) {
         return Err(EFAULT);
     }
@@ -167,7 +167,7 @@ fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
-fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
+pub(crate) fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     if ptr == 0 || !prefault_current(ptr, len as u64, false) {
         return Err(EFAULT);
     }
@@ -438,7 +438,9 @@ fn write_statx(ptr: u64, st: &super::types::LinuxStat) -> i64 {
     let mut b = [0u8; 256];
     let put32 = |b: &mut [u8; 256], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
     let put64 = |b: &mut [u8; 256], off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    put32(&mut b, 0, 0x7FF); // STATX_BASIC_STATS
+    put32(&mut b, 0, 0x17FF); // STATX_BASIC_STATS | STATX_MNT_ID
+    // One mount per device number (the pool, devpts, the console, devices)
+    put64(&mut b, 144, 20 + (st.st_dev & 0xFFFF));
     put32(&mut b, 4, st.st_blksize as u32);
     put32(&mut b, 16, st.st_nlink as u32);
     put32(&mut b, 20, st.st_uid);
@@ -507,6 +509,7 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         }
         Some(FileDescriptor::File { path, .. }) if is_pseudo(&path) => Some(Ok(pseudo_stat(&path))),
         Some(FileDescriptor::Pty(p)) => Some(Ok(p.stat())),
+        Some(FileDescriptor::Device(d)) => Some(Ok(d.stat())),
         Some(FileDescriptor::Unix(s)) => {
             let mut st = super::types::LinuxStat::default();
             st.st_dev = 0x8;
@@ -617,6 +620,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         }
     }
     if ftype == S_IFCHR {
+        if let Some(dev) = super::chardev::open(attr.rdev, flags) {
+            return install(FileDescriptor::Device(dev?), flags);
+        }
         if let Some(path) = pty_chardev_path(attr.rdev) {
             if let Some(desc) = open_pty_path(&path, flags)? {
                 return install(desc, flags);
@@ -798,6 +804,7 @@ fn fd_link(abs: &str) -> Option<String> {
         FileDescriptor::EventFd(_) => String::from("anon_inode:[eventfd]"),
         FileDescriptor::SignalFd(_) => String::from("anon_inode:[signalfd]"),
         FileDescriptor::MemFd(_) => String::from("/memfd: (deleted)"),
+        FileDescriptor::Device(d) => d.path(),
     })
 }
 
@@ -970,14 +977,30 @@ fn utimens(dirfd: i64, path_ptr: u64, times_ptr: u64, flags: u64) -> i64 {
 /// `f_type` of the devpts file system (glibc checks it before using `/dev/ptmx`).
 const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
 
-fn statfs_out(ptr: u64, devpts: bool) -> i64 {
+/// The file system type `statfs` reports for an absolute path: the pseudo file systems
+/// Linux mounts at `/proc`, `/sys` and `/dev/pts` (programs such as libudev check their
+/// magic numbers), the pool for everything else.
+fn fs_magic(abs: &str) -> i64 {
+    let under = |dir: &str| abs == dir || abs.starts_with(&alloc::format!("{}/", dir));
+    if under("/dev/pts") || abs == "/dev/ptmx" {
+        DEVPTS_SUPER_MAGIC
+    } else if under("/proc") {
+        0x9fa0 // PROC_SUPER_MAGIC
+    } else if under("/sys") {
+        0x6265_6572 // SYSFS_MAGIC
+    } else {
+        ZFS_SUPER_MAGIC
+    }
+}
+
+fn statfs_out(ptr: u64, magic: i64) -> i64 {
     let (total, free, objs) = match zfs(|s| Ok(s.statfs())) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let mut b = [0u8; 120];
-    let vals: [i64; 7] = if devpts {
-        [DEVPTS_SUPER_MAGIC, 1024, 0, 0, 0, 0, 0]
+    let vals: [i64; 7] = if magic != ZFS_SUPER_MAGIC {
+        [magic, if magic == DEVPTS_SUPER_MAGIC { 1024 } else { 4096 }, 0, 0, 0, 0, 0]
     } else {
         [ZFS_SUPER_MAGIC, 4096, total as i64, free as i64, free as i64, (objs + 1_000_000) as i64, 1_000_000]
     };
@@ -1136,6 +1159,15 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 2 | if nb { O_NONBLOCK as i64 } else { 0 } // O_RDWR
             }
         }
+        F_GETFL | F_SETFL if device_of(fd).is_some() => {
+            let d = device_of(fd).unwrap();
+            if cmd == F_SETFL {
+                d.set_nonblock(arg as u32 & O_NONBLOCK != 0);
+                0
+            } else {
+                2 | if d.nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
+            }
+        }
         F_GETFL | F_SETFL if unix_of(fd).is_some() => {
             let s = unix_of(fd).unwrap();
             if cmd == F_SETFL {
@@ -1207,6 +1239,14 @@ fn is_tty(d: &FileDescriptor) -> bool {
 fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_))) => Some(d.clone()),
+        _ => None,
+    })
+}
+
+/// The character device behind descriptor `fd`.
+fn device_of(fd: usize) -> Option<Arc<dyn super::chardev::CharDevice>> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(FileDescriptor::Device(d)) => Some(d.clone()),
         _ => None,
     })
 }
@@ -1319,7 +1359,7 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
     let stream = is_tty(&desc)
         || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_) | FileDescriptor::Pty(_) | FileDescriptor::SignalFd(_) | FileDescriptor::Unix(_)
-            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_));
+            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) | FileDescriptor::Device(_));
     if !stream {
         return None;
     }
@@ -1355,6 +1395,7 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::EventFd(e) => super::eventfd::read(e, buf),
                 FileDescriptor::TimerFd(t) => t.read(buf),
                 FileDescriptor::Inotify(i) => i.read(buf),
+                FileDescriptor::Device(d) => d.read(buf),
                 _ => super::tty::read(buf, super::tty::nonblock()),
             }
         } else {
@@ -1368,6 +1409,7 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::Unix(s) => s.write(data),
                 FileDescriptor::EventFd(e) => super::eventfd::write(e, data),
                 FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => EINVAL,
+                FileDescriptor::Device(d) => d.write(data),
                 _ => super::tty::write(data) as i64,
             }
         };
@@ -1393,6 +1435,17 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             match desc {
                 Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
                 Some(FileDescriptor::Unix(ref s)) => super::unix::ioctl(s, a[1], a[2]),
+                Some(FileDescriptor::Device(ref d)) => match a[1] {
+                    0x5421 => match copy_in(a[2], 4) {
+                        // FIONBIO
+                        Ok(v) => {
+                            d.set_nonblock(v.iter().any(|&b| b != 0));
+                            0
+                        }
+                        Err(e) => e,
+                    },
+                    _ => d.ioctl(a[1], a[2]),
+                },
                 Some(FileDescriptor::Inotify(ref i)) if a[1] == 0x541B => {
                     // FIONREAD: bytes of queued events
                     match copy_out(a[2], &(i.pending_bytes() as i32).to_le_bytes()) {
@@ -1550,10 +1603,20 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             0
         }
         NR_STATFS => match user_path(a[0]).and_then(|p| base_dir(AT_FDCWD, &p).map(|(_, base)| join_path(&base, &p))) {
-            Ok(abs) => statfs_out(a[1], abs == "/dev/pts" || abs.starts_with("/dev/pts/") || abs == "/dev/ptmx"),
+            Ok(abs) => statfs_out(a[1], fs_magic(&abs)),
             Err(e) => e,
         },
-        NR_FSTATFS => statfs_out(a[1], pty_of(a[0] as usize).is_some()),
+        NR_FSTATFS => {
+            let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
+            let magic = match desc {
+                Some(FileDescriptor::Pty(_)) => DEVPTS_SUPER_MAGIC,
+                Some(FileDescriptor::Vnode(f)) => fs_magic(&f.lock().path),
+                Some(FileDescriptor::File { path, .. }) => fs_magic(&path),
+                Some(_) => ZFS_SUPER_MAGIC,
+                None => return Some(EBADF),
+            };
+            statfs_out(a[1], magic)
+        }
 
         NR_GETCWD => {
             let path = crate::task::with_current_fds_mut(|fds| fds.cwd_path.clone());

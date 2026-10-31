@@ -22,7 +22,7 @@ impl Command for LinuxCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "linux [status|info|test|run <path> [args...]|chroot <dir> <program> [args...]|rootfs install [archive] [dir]]"
+        "linux [status|info|test|run <path> [args...]|chroot <dir> <program> [args...]|plasma [dir]|rootfs install [archive] [dir]]"
     }
 
     fn aliases(&self) -> &'static [&'static str] {
@@ -234,21 +234,30 @@ impl Command for LinuxCommand {
                     println!("Usage: linux chroot <dir> <program> [args...]   e.g. linux chroot /ubuntu /usr/bin/bash -c 'ls /'");
                     return;
                 }
-                if !crate::arch::boot_services::is_hardware_takeover_complete() {
-                    let _ = crate::arch::boot_services::take_hardware_ownership();
+                run_chroot(args[1], &args[2..], state.current_uid, state.current_gid);
+            }
+
+            "plasma" => {
+                // linux plasma [root]: the graphical KDE session on the DRM display, started
+                // as root (the login manager needs it) for the desktop user, uid 1000
+                let root = args.get(1).copied().unwrap_or("/ubuntu");
+                let has = |p: &str| crate::fs::ZfsClient::resolve(0, alloc::format!("{}{}", root.trim_end_matches('/'), p).as_bytes(), true).is_ok();
+                if !has("/usr/libexec/hydra-session") && !has("/usr/bin/kwin_wayland") {
+                    println!("[!] linux plasma: no KDE in {} (apt-get install kwin-wayland konsole)", root);
+                    return;
                 }
-                prepare_network_files(args[1]);
-                prepare_runtime_dir(args[1], state.current_uid, state.current_gid);
-                let program = args[2];
-                let argv: alloc::vec::Vec<&str> = args[2..].iter().copied().collect();
-                match crate::task::spawn_linux_chroot(args[1], program, &argv, state.current_uid, state.current_gid) {
-                    Ok(tid) => run_in_foreground(tid),
-                    Err(e) => {
-                        console::set_color(Color::LightRed, Color::Black);
-                        println!("[!] linux chroot: {}", e);
-                        console::set_color(Color::White, Color::Black);
-                    }
+                let mut argv: alloc::vec::Vec<&str> = alloc::vec![
+                    "/bin/sh", "/usr/libexec/hydra-session", "env", "KWIN_COMPOSE=Q", "XCURSOR_THEME=breeze_cursors", "dbus-run-session",
+                ];
+                if has("/usr/bin/startplasma-wayland") {
+                    println!("[*] Starting KDE Plasma...");
+                    argv.push("startplasma-wayland");
+                } else {
+                    // plasma-workspace is not installed yet: the compositor with a terminal
+                    println!("[*] Plasma (plasma-workspace) is not installed in {}; starting KWin with Konsole...", root);
+                    argv.extend_from_slice(&["kwin_wayland", "--drm", "konsole"]);
                 }
+                run_chroot(root, &argv, 0, 0);
             }
 
             "rootfs" => {
@@ -307,6 +316,27 @@ impl Command for LinuxCommand {
 /// Runs a Linux process started from the Hydra shell in the foreground: it leads its own
 /// session and owns the console (keyboard, Ctrl+C) until it exits; then its exit status is
 /// reported and the console returns to the shell.
+/// Runs `argv` inside the Linux root `root` as `uid`/`gid` and waits for it, after
+/// preparing what the root expects at boot (network files, runtime directory, devices).
+fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
+    if !crate::arch::boot_services::is_hardware_takeover_complete() {
+        let _ = crate::arch::boot_services::take_hardware_ownership();
+    }
+    prepare_network_files(root);
+    prepare_runtime_dir(root, uid, gid);
+    if let Err(e) = crate::compat::linux::devices::populate(root) {
+        println!("[!] linux chroot: device files: {}", e);
+    }
+    match crate::task::spawn_linux_chroot(root, argv[0], argv, uid, gid) {
+        Ok(tid) => run_in_foreground(tid),
+        Err(e) => {
+            console::set_color(Color::LightRed, Color::Black);
+            println!("[!] linux chroot: {}", e);
+            console::set_color(Color::White, Color::Black);
+        }
+    }
+}
+
 fn run_in_foreground(tid: crate::task::TaskId) {
     crate::compat::linux::tty::attach_session(tid.0, tid.0);
     while crate::task::is_task_alive(tid) {

@@ -610,6 +610,11 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             crate::arch::keyboard::on_keyboard_irq();
             crate::arch::pic::send_eoi(1);
         }
+        44 => {
+            // Vector 44 = IRQ 12: PS/2 mouse byte
+            crate::arch::mouse::on_mouse_irq();
+            crate::arch::pic::send_eoi(12);
+        }
         34..=47 => {
             // Hardware IRQs from legacy 8259 PIC (Cascade, Serial, Floppy, RTC, etc.)
             let irq = (ctx.vector - 32) as u8;

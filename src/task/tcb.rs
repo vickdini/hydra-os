@@ -289,6 +289,8 @@ pub struct Task {
     pub suid: u32,
     /// Saved set-group-ID.
     pub sgid: u32,
+    /// Linux capability sets (what privileged operations are allowed).
+    pub caps: Caps,
     /// Saved CPU general-purpose and control register state.
     pub regs: TaskRegisters,
     /// Dedicated kernel stack buffer (used for Ring 0 execution and TSS `RSP0`).
@@ -348,6 +350,7 @@ impl Task {
             egid: 0,
             suid: 0,
             sgid: 0,
+            caps: Caps::for_euid(0),
             regs,
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,
@@ -381,5 +384,61 @@ impl Task {
             // Main thread uses existing firmware stack pointer
             self.regs.rsp
         }
+    }
+}
+
+/// Linux capability sets of a task. Root's power comes from these rather than from its
+/// user id: a process that keeps them (`PR_SET_KEEPCAPS`) may change ids after leaving
+/// uid 0, and `capset` can drop them while staying root.
+#[derive(Clone, Copy, Debug)]
+pub struct Caps {
+    /// Effective set: the capabilities checked by privileged operations.
+    pub effective: u64,
+    /// Permitted set: what the effective set may hold.
+    pub permitted: u64,
+    /// Keep the permitted set when no user id stays 0 (`PR_SET_KEEPCAPS`).
+    pub keep: bool,
+}
+
+impl Caps {
+    /// Every capability up to `CAP_LAST_CAP` (40).
+    pub const FULL: u64 = (1 << 41) - 1;
+    /// `CAP_SETGID`.
+    pub const SETGID: u64 = 1 << 6;
+    /// `CAP_SETUID`.
+    pub const SETUID: u64 = 1 << 7;
+
+    /// The sets a process starts with: all for root, none otherwise.
+    pub const fn for_euid(euid: u32) -> Self {
+        let all = if euid == 0 { Self::FULL } else { 0 };
+        Self { effective: all, permitted: all, keep: false }
+    }
+
+    /// True if capability `cap` (a `Caps::*` bit) is effective.
+    pub fn has(&self, cap: u64) -> bool {
+        self.effective & cap != 0
+    }
+
+    /// Applies the capability rules for a change of user ids from `old` to `new`
+    /// (each `(real, effective, saved)`).
+    pub fn on_uid_change(&mut self, old: (u32, u32, u32), new: (u32, u32, u32)) {
+        let had_root = old.0 == 0 || old.1 == 0 || old.2 == 0;
+        let has_root = new.0 == 0 || new.1 == 0 || new.2 == 0;
+        if had_root && !has_root && !self.keep {
+            self.permitted = 0;
+            self.effective = 0;
+        }
+        if old.1 == 0 && new.1 != 0 {
+            self.effective = 0;
+        } else if old.1 != 0 && new.1 == 0 {
+            self.effective = self.permitted;
+        }
+    }
+
+    /// The sets after `execve` (no file capabilities): full for root, none otherwise.
+    pub fn on_exec(&mut self, uid: u32, euid: u32) {
+        self.permitted = if uid == 0 || euid == 0 { Self::FULL } else { 0 };
+        self.effective = if euid == 0 { self.permitted } else { 0 };
+        self.keep = false;
     }
 }

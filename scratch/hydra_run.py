@@ -99,6 +99,7 @@ def main():
     ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
+    ap.add_argument("--no-cancel", action="store_true", help="let the boot countdowns run out (bare metal, then the desktop autostart)")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
 
@@ -114,6 +115,8 @@ def main():
         "-qmp", "stdio",
         "-no-reboot",
     ]
+    # e.g. HYDRA_QEMU_EXTRA="-d cpu_reset -D D:/os/scratch/qemu_dbg.log"
+    args += os.environ.get("HYDRA_QEMU_EXTRA", "").split()
     if a.extra_disk:
         args += ["-drive", f"file={a.extra_disk},format=raw,if=ide,index=1,media=disk"]
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -124,7 +127,8 @@ def main():
         while time.time() < deadline and "Transitioning to bare-metal" not in read_log(a.log):
             time.sleep(0.5)
         time.sleep(1.0)
-        qmp.type(" ")  # cancel auto takeover countdown
+        if not a.no_cancel:
+            qmp.type(" ")  # cancel auto takeover countdown (and with it the desktop autostart)
         time.sleep(2.0)
         start = len(read_log(a.log))
         prompts_seen = 0
@@ -170,6 +174,8 @@ def main():
         sys.stdout.write(log[start:])
         sys.stdout.write("\n")
     finally:
+        if proc.poll() is not None:
+            print(f"[hydra_run] QEMU exited on its own with status {proc.returncode}")
         try:
             qmp.cmd("quit")
         except Exception:

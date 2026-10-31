@@ -1,0 +1,58 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/apt-get install -y --no-install-recommends breeze-cursor-theme
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+Reading package lists... 0%Reading package lists... 0%Reading package lists... 22%Reading package lists... Done
+Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 71%Building dependency tree... Done
+Reading state information... 0% Reading state information... 0%Reading state information... 0%Reading state information... Done
+Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
+The following NEW packages will be installed:
+  breeze-cursor-theme
+0 upgraded, 1 newly installed, 0 to remove and 31 not upgraded.
+Need to get 1362 kB of archives.
+After this operation, 31.3 MB of additional disk space will be used.
+0% [Working]            Get:1 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 breeze-cursor-theme all 4:6.6.5-0ubuntu0.1 [1362 kB]
+5% [1 breeze-cursor-theme 79.6 kB/1362 kB 6%]                                             100% [Working]              Fetched 1362 kB in 1s (1216 kB/s)
+debconf: unable to initialize frontend: Dialog
+debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 1.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 1.)
+debconf: falling back to frontend: Teletype
+Selecting previously unselected package breeze-cursor-theme.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 17101 files and directories currently installed.)
+Preparing to unpack .../breeze-cursor-theme_4%3a6.6.5-0ubuntu0.1_all.deb ...
+Unpacking breeze-cursor-theme (4:6.6.5-0ubuntu0.1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd38cde4 rsp=0x1d5ed30 anchor=0xbd436140
+[watchdog] kernel busy for 10 s: rip=0xbd38cdee rsp=0x1d5ed30 anchor=0xbd436140
+[watchdog] kernel busy for 15 s: rip=0xbd38cdee rsp=0x1d5ed30 anchor=0xbd436140
+[watchdog] kernel busy for 20 s: rip=0xbd38cde4 rsp=0x1d5ed30 anchor=0xbd436140
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1 0xbd3c72f7 444 shell
+[tasks] 1 Ready 1 -1 0xbd3bc1c9 36 idle
+[tasks] 2 Blocked 2 -1 0xbd3c7fa3 37 netd
+[tasks] 3 Sleeping 3 270 0xbd3c7fa3 1211 /usr/bin/apt-get
+[tasks] 28 Running 28 74 0xbd3c7fa3 584 /usr/bin/dpkg
+[watchdog] kernel busy for 25 s: rip=0xbd38cde4 rsp=0x1d5ed30 anchor=0xbd436140
+Setting up breeze-cursor-theme (4:6.6.5-0ubuntu0.1) ...
+[+] Linux process 3 exited with status 0.
+hydra:/bin# [tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Running 0 -1 0xbd3ca481 831 shell
+[tasks] 1 Ready 1 -1 0xbd3bc1c9 51 idle
+[tasks] 2 Blocked 2 -1 0xbd3c7fa3 37 netd
+

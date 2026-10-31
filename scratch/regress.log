@@ -1,0 +1,205 @@
+linux run /bin/proctest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/proctest.elf'...
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Read 860568 bytes from OpenZFS (/bin/proctest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 3 (UID 1000, GID 1000). Executing...
+[proctest] pid=3 ppid=0
+[proctest] SIGUSR1 handler runs (kill to self)              PASS
+[proctest] FPU state survives handler                       PASS
+[proctest] blocked signal is pending, not delivered         PASS
+[proctest] unblocking delivers it                           PASS
+[proctest] SIGSEGV handler + siglongjmp recovery            PASS
+[proctest] write to PROT_READ page raises SIGSEGV           PASS
+[proctest] fork + waitpid exit status 42                    PASS
+[proctest] child writes are copy-on-write                   PASS
+[proctest] SIGCHLD delivered to parent                      PASS
+[proctest] child killed by SIGTERM reported                 PASS
+[proctest] 10000 bytes through a pipe, then EOF             PASS
+[proctest] write without readers -> EPIPE                   PASS
+[proctest] fork + execve(/proc/self/exe) exit status 7      PASS
+[proctest] posix_spawn exit status 9                        PASS
+[proctest] wait with no children -> ECHILD                  PASS
+[proctest] signal interrupts blocking read with EINTR       PASS
+[proctest] SIGSTOP: waitpid(WUNTRACED) reports stopped      PASS
+[proctest] SIGCONT: waitpid(WCONTINUED) reports continued   PASS
+[proctest] SIGKILL ends a stopped child                     PASS
+[proctest] stopped nanosleep restarts for the remaining time PASS
+[proctest] ALL PASSED (0 failures)
+[+] Linux process 3 exited with status 0.
+hydra:/bin$ linux run /bin/ptytest.elf
+[+] Read 996952 bytes from OpenZFS (/bin/ptytest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 12 (UID 1000, GID 1000). Executing...
+[ptytest] fd opened by a thread is usable by main thread     PASS
+[ptytest] pipe created by a thread works in main thread      PASS
+[ptytest] fd closed by a thread is closed for main thread    PASS
+[ptytest] fork child closing an fd leaves the parent's open  PASS
+[ptytest] posix_openpt opens /dev/ptmx                       PASS
+[ptytest] grantpt + unlockpt                                 PASS
+[ptytest] ptsname is /dev/pts/N                              PASS
+[ptytest] stat(ptsname) is a character device                PASS
+[ptytest] open slave                                         PASS
+[ptytest] isatty(slave) and isatty(master)                   PASS
+[ptytest] ttyname(slave) == ptsname                          PASS
+[ptytest] master write -> slave reads a line                 PASS
+[ptytest] master reads the echo (with CR LF)                 PASS
+[ptytest] erase character edits the line                     PASS
+[ptytest] slave write -> master reads with ONLCR             PASS
+[ptytest] tcsetattr raw mode                                 PASS
+[ptytest] poll(slave) readable in raw mode                   PASS
+[ptytest] raw read returns single byte                       PASS
+[ptytest] no echo in raw mode                                PASS
+[ptytest] TIOCSWINSZ on master, TIOCGWINSZ on slave          PASS
+[ptytest] O_NONBLOCK master read -> EAGAIN                   PASS
+[ptytest] slave read after master close -> EOF               PASS
+[ptytest] slave write after master close -> EIO              PASS
+[ptytest] openpty                                            PASS
+[ptytest] ^C on master sends SIGINT to the slave's foreground PASS
+[ptytest] forkpty child sees a terminal on stdio             PASS
+[ptytest] ALL PASSED (0 failures)
+[+] Linux process 12 exited with status 0.
+hydra:/bin$ linux run /bin/unixtest.elf
+[+] Read 860400 bytes from OpenZFS (/bin/unixtest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 20 (UID 1000, GID 1000). Executing...
+[unixtest] socketpair(SOCK_STREAM)                              PASS
+[unixtest] stream write/read                                    PASS
+[unixtest] stream reads merge writes                            PASS
+[unixtest] MSG_PEEK                                             PASS
+[unixtest] MSG_DONTWAIT on empty -> EAGAIN                      PASS
+[unixtest] poll: not readable when empty                        PASS
+[unixtest] poll: readable after write                           PASS
+[unixtest] sendmsg SCM_RIGHTS                                   PASS
+[unixtest] recvmsg delivers the descriptor with its byte        PASS
+[unixtest] passed descriptor refers to the same pipe            PASS
+[unixtest] following data arrives separately                    PASS
+[unixtest] SO_PEERCRED on a pair is ourselves                   PASS
+[unixtest] SO_PASSCRED adds SCM_CREDENTIALS                     PASS
+[unixtest] read after peer close -> EOF                         PASS
+[unixtest] send after peer close -> EPIPE (MSG_NOSIGNAL)        PASS
+[unixtest] socketpair(SOCK_SEQPACKET)                           PASS
+[unixtest] seqpacket keeps message boundaries                   PASS
+[unixtest] seqpacket short read sets MSG_TRUNC                  PASS
+[unixtest] bind + listen (path)                                 PASS
+[unixtest] second bind -> EADDRINUSE (path)                     PASS
+[unixtest] accept (path)                                        PASS
+[unixtest] SO_PEERCRED is the client (path)                     PASS
+[unixtest] client/server exchange (path)                        PASS
+[unixtest] getsockname returns the bound name (path)            PASS
+[unixtest] non-blocking accept -> EAGAIN (path)                 PASS
+[unixtest] bound path is a socket node                          PASS
+[unixtest] connect after the listener closed -> ECONNREFUSED    PASS
+[unixtest] connect to a missing path -> ENOENT                  PASS
+[unixtest] bind + listen (abstract)                             PASS
+[unixtest] second bind -> EADDRINUSE (abstract)                 PASS
+[unixtest] accept (abstract)                                    PASS
+[unixtest] SO_PEERCRED is the client (abstract)                 PASS
+[unixtest] client/server exchange (abstract)                    PASS
+[unixtest] getsockname returns the bound name (abstract)        PASS
+[unixtest] non-blocking accept -> EAGAIN (abstract)             PASS
+[unixtest] ALL PASSED (0 failures)
+[+] Linux process 20 exited with status 0.
+hydra:/bin$ linux run /bin/m3test.elf
+[+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 23 (UID 1000, GID 1000). Executing...
+[m3test] eventfd2 with EFD_CLOEXEC                              PASS
+[m3test] eventfd read returns the sum and resets                PASS
+[m3test] blocking eventfd read waits for a writer               PASS
+[m3test] EFD_SEMAPHORE counts down by one                       PASS
+[m3test] empty non-blocking eventfd -> EAGAIN                   PASS
+[m3test] poll wakes when another thread writes the eventfd      PASS
+[m3test] timerfd_create                                         PASS
+[m3test] timerfd_settime one-shot 300 ms                        PASS
+[m3test] timerfd_gettime shows it armed                         PASS
+[m3test] read blocks until expiry (one expiration)              PASS
+[m3test] periodic timer counts missed expirations               PASS
+[m3test] epoll_wait wakes on timer expiry                       PASS
+[m3test] disarmed non-blocking read -> EAGAIN                   PASS
+[m3test] inotify_init1                                          PASS
+[m3test] inotify_add_watch on a directory                       PASS
+[m3test] watching the same inode again returns the same wd      PASS
+[m3test] no events yet -> EAGAIN                                PASS
+[m3test] IN_CREATE with the entry name                          PASS
+[m3test] IN_MODIFY for a write to a file in the directory       PASS
+[m3test] IN_CLOSE_WRITE on close                                PASS
+[m3test] FIONREAD counts queued bytes                           PASS
+[m3test] IN_ATTRIB on chmod                                     PASS
+[m3test] rename gives MOVED_FROM/MOVED_TO with one cookie       PASS
+[m3test] IN_DELETE in the directory                             PASS
+[m3test] IN_DELETE_SELF then IN_IGNORED on the file's watch     PASS
+[m3test] mkdir gives IN_CREATE|IN_ISDIR                         PASS
+[m3test] inotify_rm_watch                                       PASS
+[m3test] rm_watch queues IN_IGNORED                             PASS
+[m3test] EPOLLONESHOT reports once until re-armed               PASS
+[m3test] ALL PASSED (0 failures)
+[+] Linux process 23 exited with status 0.
+hydra:/bin$ linux run /bin/gapstest.elf
+[+] Read 856472 bytes from OpenZFS (/bin/gapstest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 26 (UID 1000, GID 1000). Executing...
+[gapstest] alarm(1) returns 0 when none was pending                 PASS
+[gapstest] SIGALRM arrives after about one second                   PASS
+[gapstest] alarm returns the seconds left on the previous alarm     PASS
+[gapstest] setitimer(ITIMER_REAL) periodic 100 ms                   PASS
+[gapstest] getitimer reports the interval                           PASS
+[gapstest] periodic timer delivered repeated SIGALRMs               PASS
+[gapstest] disarmed timer reads back as zero                        PASS
+[gapstest] ITIMER_PROF fires after CPU time is used                 PASS
+[linux] pid 27 killed by signal 14
+[gapstest] an unhandled SIGALRM terminates the process              PASS
+[gapstest] pidfd_open on a child                                    PASS
+[gapstest] pidfd not readable while the child runs                  PASS
+[gapstest] pidfd becomes readable when the child exits              PASS
+[gapstest] waitid(P_PIDFD) reaps the child                          PASS
+[gapstest] pidfd_send_signal(SIGTERM)                               PASS
+[gapstest] the signalled child was terminated                       PASS
+[gapstest] pidfd_open of a missing process -> ESRCH                 PASS
+[gapstest] clone3 creates a process                                 PASS
+[gapstest] clone3 CLONE_PIDFD returns a pidfd                       PASS
+[gapstest] child of clone3 exits with its status                    PASS
+[gapstest] FUTEX_WAKE in a parent wakes the child in shared memory  PASS
+[gapstest] process-shared semaphore between parent and child        PASS
+[gapstest] a private wake does not reach another process            PASS
+[gapstest] ALL PASSED (0 failures)
+[+] Linux process 26 exited with status 0.
+hydra:/bin$ linux run /bin/vmtest.elf
+[+] Read 968248 bytes from OpenZFS (/bin/vmtest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 34 (UID 1000, GID 1000). Executing...
+[vmtest] Hydra VM test starting (argc=1, argv[0]=/bin/vmtest.elf)
+[vmtest] malloc small (brk) + large (mmap)            PASS
+[vmtest] realloc 8 MiB -> 32 MiB keeps contents (mremap) PASS
+[vmtest] anonymous mmap is zero-filled                PASS
+[vmtest] anonymous mmap read-back                     PASS
+[vmtest] MAP_FIXED lands at requested address         PASS
+[vmtest] MAP_FIXED page replaced (zero), neighbours kept PASS
+[vmtest] MAP_FIXED_NOREPLACE fails on overlap         PASS
+[vmtest] mprotect read-only                           PASS
+[vmtest] mprotect read-write again                    PASS
+[vmtest] write after re-enabling PROT_WRITE           PASS
+[vmtest] munmap middle page                           PASS
+[vmtest] hole is free after munmap                    PASS
+[vmtest] mremap grow (may move)                       PASS
+[vmtest] mremap grown tail is writable                PASS
+[vmtest] memfd_create                                 PASS
+[vmtest] ftruncate memfd to 3 pages                   PASS
+[vmtest] two MAP_SHARED mappings alias                PASS
+[vmtest] pread sees mapped writes                     PASS
+[vmtest] MAP_PRIVATE write is copy-on-write           PASS
+[vmtest] SSE state preserved across syscalls/yields   PASS
+[vmtest] 4 threads share memory (counter == 4000)     PASS
+[vmtest] per-thread SSE state isolated                PASS
+[vmtest] ALL PASSED (0 failures)
+[+] Linux process 34 exited with status 0.
+hydra:/bin$ 

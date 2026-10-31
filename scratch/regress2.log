@@ -1,0 +1,46 @@
+linux run /bin/gapstest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/gapstest.elf'...
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Read 856472 bytes from OpenZFS (/bin/gapstest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 3 (UID 1000, GID 1000). Executing...
+[gapstest] alarm(1) returns 0 when none was pending                 PASS
+[gapstest] SIGALRM arrives after about one second                   PASS
+[gapstest] alarm returns the seconds left on the previous alarm     PASS
+[gapstest] setitimer(ITIMER_REAL) periodic 100 ms                   PASS
+[gapstest] getitimer reports the interval                           PASS
+[gapstest] periodic timer delivered repeated SIGALRMs               PASS
+[gapstest] disarmed timer reads back as zero                        PASS
+[gapstest] ITIMER_PROF fires after CPU time is used                 PASS
+[linux] pid 5 killed by signal 14
+[gapstest] an unhandled SIGALRM terminates the process              PASS
+[gapstest] pidfd_open on a child                                    PASS
+[gapstest] pidfd not readable while the child runs                  PASS
+[gapstest] pidfd becomes readable when the child exits              PASS
+[gapstest] waitid(P_PIDFD) reaps the child                          PASS
+[gapstest] pidfd_send_signal(SIGTERM)                               PASS
+[gapstest] the signalled child was terminated                       PASS
+[gapstest] pidfd_open of a missing process -> ESRCH                 PASS
+[gapstest] clone3 creates a process                                 PASS
+[gapstest] clone3 CLONE_PIDFD returns a pidfd                       PASS
+[gapstest] child of clone3 exits with its status                    PASS
+[gapstest] FUTEX_WAKE in a parent wakes the child in shared memory  PASS
+[gapstest] process-shared semaphore between parent and child        PASS
+[gapstest] a private wake does not reach another process            PASS
+[gapstest] ALL PASSED (0 failures)
+[+] Linux process 3 exited with status 0.
+hydra:/bin$ 

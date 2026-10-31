@@ -152,6 +152,8 @@ pub enum FileDescriptor {
     Inotify(Arc<crate::compat::linux::inotify::Inotify>),
     /// Process reference file descriptor (`pidfd_open` / `CLONE_PIDFD`).
     PidFd(Arc<crate::compat::linux::pidfd::PidFd>),
+    /// Character device driven by a kernel driver (DRM, evdev) or a netlink socket.
+    Device(Arc<dyn crate::compat::linux::chardev::CharDevice>),
     /// Path-addressed file handle used for synthetic pseudo-files (`/dev`, `/proc`) and native opens.
     File {
         /// Normalized absolute path of the target file.
@@ -267,6 +269,7 @@ impl FileDescriptor {
             FileDescriptor::Unix(_) => Err("Unix sockets are read through the Linux socket layer"),
             FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => Err("read through the Linux layer"),
             FileDescriptor::PidFd(_) => Err("pidfds are not readable"),
+            FileDescriptor::Device(_) => Err("devices are read through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.readable() {
@@ -406,6 +409,7 @@ impl FileDescriptor {
             // Kernel output to a process whose stdout is a socket: best effort, never waits
             FileDescriptor::Unix(_) => Ok(data.len()),
             FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) | FileDescriptor::PidFd(_) => Err("not writable"),
+            FileDescriptor::Device(_) => Err("devices are written through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
                 if !f.writable() {
@@ -465,6 +469,7 @@ impl FileDescriptor {
             }
             FileDescriptor::Inotify(i) => waits.add(QueueRef::Shared(i.wq.clone())),
             FileDescriptor::PidFd(_) => waits.add(QueueRef::Static(&crate::compat::linux::pidfd::EXIT_WQ)),
+            FileDescriptor::Device(d) => d.add_wait_queues(waits),
             FileDescriptor::EventFd(e) => waits.add(QueueRef::Shared(e.lock().wq.clone())),
             FileDescriptor::Inet(s) => {
                 let s = s.lock();
@@ -528,6 +533,7 @@ impl FileDescriptor {
             FileDescriptor::TimerFd(t) => t.poll_events(),
             FileDescriptor::Inotify(i) => i.poll_events(),
             FileDescriptor::PidFd(p) => p.poll_events(),
+            FileDescriptor::Device(d) => d.poll_events(),
             // Regular files are always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) => 0x0001 | 0x0004,
             FileDescriptor::Epoll(_) => 0,
@@ -663,6 +669,47 @@ impl FdTable {
     /// * `Err("Process file descriptor table is full (EMFILE)")` - All `MAX_FDS` slots are occupied.
     pub fn alloc_fd(&mut self, desc: FileDescriptor) -> Result<usize, &'static str> {
         self.alloc_fd_from(desc, 0)
+    }
+
+    /// Readiness of `desc` for `poll`/`select`/`epoll`. An `epoll` descriptor is readable when
+    /// one of the descriptors it watches (in this table) is ready, as on Linux.
+    pub fn readiness(&self, desc: &FileDescriptor) -> u32 {
+        self.readiness_at(desc, 0)
+    }
+
+    fn readiness_at(&self, desc: &FileDescriptor, depth: u32) -> u32 {
+        match desc {
+            FileDescriptor::Epoll(ep) if depth < 4 => {
+                use crate::compat::linux::epoll::{EPOLLERR, EPOLLHUP, EPOLLONESHOT};
+                let watches: Vec<(i32, u32)> =
+                    ep.lock().watches.values().filter(|w| w.events != EPOLLONESHOT).map(|w| (w.fd, w.events)).collect();
+                let ready = watches.iter().any(|&(fd, events)| {
+                    self.get(fd as usize).map_or(false, |d| self.readiness_at(d, depth + 1) & (events | EPOLLERR | EPOLLHUP) != 0)
+                });
+                if ready { 0x0001 } else { 0 }
+            }
+            _ => desc.poll_events(),
+        }
+    }
+
+    /// Adds the wait queues that announce readiness changes of `desc`; for an `epoll`
+    /// descriptor, those of the descriptors it watches.
+    pub fn add_wait_queues_for(&self, desc: &FileDescriptor, waits: &mut crate::task::wait::WaitSet) {
+        self.add_wait_queues_at(desc, waits, 0)
+    }
+
+    fn add_wait_queues_at(&self, desc: &FileDescriptor, waits: &mut crate::task::wait::WaitSet, depth: u32) {
+        match desc {
+            FileDescriptor::Epoll(ep) if depth < 4 => {
+                let fds: Vec<i32> = ep.lock().watches.values().map(|w| w.fd).collect();
+                for fd in fds {
+                    if let Some(d) = self.get(fd as usize) {
+                        self.add_wait_queues_at(d, waits, depth + 1);
+                    }
+                }
+            }
+            _ => desc.add_wait_queues(waits),
+        }
     }
 
     /// Retrieves an immutable reference to the `FileDescriptor` at index `fd`.

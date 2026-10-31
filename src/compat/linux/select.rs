@@ -52,7 +52,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         for fd in 0..nfds {
             if is_set(&r, fd) || is_set(&w, fd) || is_set(&e, fd) {
                 if let Some(d) = fds.get(fd) {
-                    d.add_wait_queues(&mut waits);
+                    fds.add_wait_queues_for(d, &mut waits);
                 }
             }
         }
@@ -73,7 +73,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
                     continue;
                 }
                 let ev = match fds.get(fd) {
-                    Some(d) => d.poll_events(),
+                    Some(d) => fds.readiness(d),
                     None => {
                         bad = true;
                         return;

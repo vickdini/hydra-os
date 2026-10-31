@@ -1,0 +1,58 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/local/bin/drmtest
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[drmtest] open /dev/dri/card0                                  PASS
+[drmtest] fstat: char device 226:0                             PASS
+[drmtest] sysfs /sys/dev/char/226:0/device/drm                 PASS
+[drmtest] DRM_IOCTL_VERSION name hydradrm                      PASS
+[drmtest] GET_CAP DUMB_BUFFER = 1                              PASS
+[drmtest] SET_CLIENT_CAP ATOMIC refused                        PASS
+[drmtest] SET_CLIENT_CAP UNIVERSAL_PLANES                      PASS
+[drmtest] GETRESOURCES counts                                  PASS
+[drmtest] GETRESOURCES ids                                     PASS
+[drmtest] GETCONNECTOR connected, 1 mode                       PASS
+[drmtest] GETCONNECTOR mode                                    PASS
+[drmtest] mode 1280x800 1280x800@60, 3 props
+[drmtest] GETPROPERTY DPMS                                     PASS
+[drmtest] CREATE_DUMB                                          PASS
+[drmtest] MAP_DUMB                                             PASS
+[drmtest] mmap dumb buffer                                     PASS
+[drmtest] second mapping shares pages                          PASS
+[drmtest] ADDFB2 XRGB8888                                      PASS
+[drmtest] SETCRTC (gradient on screen)                         PASS
+[drmtest] GETCRTC reports the framebuffer                      PASS
+[drmtest] MODE_CURSOR2 set + move                              PASS
+[drmtest] PAGE_FLIP with event                                 PASS
+[drmtest] poll: flip event ready                               PASS
+[drmtest] read FLIP_COMPLETE event                             PASS
+[drmtest] open /dev/input/event0                               PASS
+[drmtest] EVIOCGNAME keyboard                                  PASS
+[drmtest] EVIOCGBIT EV_KEY                                     PASS
+[drmtest] EVIOCGBIT has KEY_A                                  PASS
+[drmtest] nonblocking read: EAGAIN                             PASS
+[drmtest] event1: REL_X and REL_Y                              PASS
+[drmtest] EVIOCGID bus i8042                                   PASS
+[drmtest] netlink uevent socket binds                          PASS
+[drmtest] netlink recv: EAGAIN                                 PASS
+[drmtest] udev db c13:64                                       PASS
+[drmtest] showing the gradient for 3 s (move the mouse to see the cursor)
+[drmtest] cursor ended at 100,100
+[drmtest] ALL PASSED (0 failures)
+[+] Linux process 3 exited with status 0.
+hydra:/bin# 

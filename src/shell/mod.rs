@@ -314,6 +314,40 @@ fn auto_exitboot_countdown(state: &mut ShellState) {
     }
 }
 
+/// After the bare-metal transition, waits 3 seconds for a key press and otherwise starts
+/// the KDE desktop (`linux plasma`). Any key cancels and leaves the Hydra shell.
+fn auto_plasma_countdown(state: &mut ShellState) {
+    if !crate::arch::boot_services::is_hardware_takeover_complete() {
+        return; // the user stayed under UEFI Boot Services
+    }
+    set_color(Color::LightCyan, Color::Black);
+    crate::print!("[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): ");
+    let mut cancelled = false;
+    'countdown: for remaining in (1..=3).rev() {
+        set_color(Color::Yellow, Color::Black);
+        crate::print!("{}... ", remaining);
+        for _ in 0..20 {
+            if crate::console::read_key().is_some() {
+                cancelled = true;
+                break 'countdown;
+            }
+            crate::console::stall(core::time::Duration::from_millis(50));
+        }
+    }
+    if cancelled {
+        set_color(Color::LightRed, Color::Black);
+        crate::println!("CANCELLED");
+        set_color(Color::White, Color::Black);
+        crate::println!("    Type 'linux plasma' to start the desktop later.
+");
+    } else {
+        set_color(Color::LightGreen, Color::Black);
+        crate::println!("NOW");
+        set_color(Color::White, Color::Black);
+        execute_command("linux plasma", state);
+    }
+}
+
 /// Starts the main diverging interactive shell read-eval-print loop (REPL).
 ///
 /// Initializes a fresh `ShellState`, prints the welcome banner, runs the automatic
@@ -333,6 +367,7 @@ pub fn run() -> ! {
 
     print_welcome_banner();
     auto_exitboot_countdown(&mut state);
+    auto_plasma_countdown(&mut state);
 
     loop {
         set_color(state.prompt_color, Color::Black);

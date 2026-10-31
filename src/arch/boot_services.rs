@@ -144,6 +144,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
 
     // 8b. Initialize 8042 PS/2 Keyboard Controller for IRQ 1 interrupts
     crate::arch::keyboard::init();
+    crate::arch::mouse::enable_irq();
 
     // 8c. Initialize fast x86_64 hardware system call MSRs (EFER, STAR, LSTAR, FMASK)
     crate::arch::syscall::init();

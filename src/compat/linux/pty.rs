@@ -464,6 +464,11 @@ impl PtyFile {
                     None => EFAULT,
                 }
             }
+            0x541B if self.master => {
+                // FIONREAD on the master: output the slave wrote that is waiting to be read
+                let n = self.pty.state.lock().to_master.len();
+                put_u32(arg, n.min(i32::MAX as usize) as u32)
+            }
             TIOCSCTTY => {
                 let (_, pid) = super::proc::current_ids();
                 if let Some((sid, pgid)) = super::proc::session_of(pid) {

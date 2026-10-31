@@ -97,6 +97,12 @@ struct Ps2Mouse {
     packet_idx: usize,
     state: MouseState,
     initialized: bool,
+    /// Bytes arrive through IRQ 12 (after hardware takeover) instead of polling.
+    irq_mode: bool,
+    /// Latest event decoded by the interrupt handler, not yet polled.
+    pending: Option<MouseEvent>,
+    /// Screen size the position is clamped to (from the last poll).
+    screen: (usize, usize),
 }
 
 impl Ps2Mouse {
@@ -108,6 +114,9 @@ impl Ps2Mouse {
             packet_idx: 0,
             state: MouseState::new(400, 300),
             initialized: false,
+            irq_mode: false,
+            pending: None,
+            screen: (1024, 768),
         }
     }
 
@@ -196,8 +205,13 @@ impl Ps2Mouse {
         Ok(())
     }
 
-    /// Polls for incoming mouse packet bytes and updates coordinates.
+    /// Polls for incoming mouse packet bytes and updates coordinates. Once IRQ 12 is
+    /// enabled the interrupt handler consumes the bytes and this reports what it decoded.
     fn poll(&mut self, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
+        self.screen = (screen_width, screen_height);
+        if self.irq_mode {
+            return self.pending.take();
+        }
         if !self.initialized {
             let _ = self.init();
         }
@@ -214,6 +228,11 @@ impl Ps2Mouse {
         }
 
         let byte = unsafe { self.data_port.read() };
+        self.feed(byte, screen_width, screen_height)
+    }
+
+    /// Adds one byte of a 3-byte packet; returns the event once a packet is complete.
+    fn feed(&mut self, byte: u8, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
 
         // Byte 0 must have bit 3 set (always 1 in standard PS/2 packet)
         if self.packet_idx == 0 && (byte & 0x08) == 0 {
@@ -320,4 +339,47 @@ pub fn set_position(x: usize, y: usize) {
 /// Returns the current snapshot of pointer coordinates and button states.
 pub fn current_state() -> MouseState {
     MOUSE_DRIVER.lock().state
+}
+
+/// Switches the mouse to interrupt-driven input (IRQ 12), once Hydra owns the PIC and IDT.
+pub fn enable_irq() {
+    {
+        let mut mouse = MOUSE_DRIVER.lock();
+        if !mouse.initialized {
+            return;
+        }
+        mouse.irq_mode = true;
+        mouse.packet_idx = 0;
+    }
+    crate::arch::pic::unmask_irq(2);
+    crate::arch::pic::unmask_irq(12);
+}
+
+/// IRQ 12: one byte from the auxiliary port.
+pub fn on_mouse_irq() {
+    let mut data_port: Port<u8> = Port::new(PS2_DATA_PORT);
+    let byte = unsafe { data_port.read() };
+    let mut mouse = match MOUSE_DRIVER.try_lock() {
+        Some(m) => m,
+        None => return,
+    };
+    let (w, h) = mouse.screen;
+    if let Some(ev) = mouse.feed(byte, w, h) {
+        // Merge with an event not yet polled so presses are not lost
+        let merged = match mouse.pending.take() {
+            Some(prev) => MouseEvent {
+                left_pressed: prev.left_pressed || ev.left_pressed,
+                right_pressed: prev.right_pressed || ev.right_pressed,
+                delta_x: prev.delta_x + ev.delta_x,
+                delta_y: prev.delta_y + ev.delta_y,
+                ..ev
+            },
+            None => ev,
+        };
+        mouse.pending = Some(merged);
+        drop(mouse);
+        let buttons = ev.state.left_button as u8 | (ev.state.right_button as u8) << 1 | (ev.state.middle_button as u8) << 2;
+        crate::compat::linux::evdev::push_mouse(ev.delta_x, ev.delta_y, buttons);
+        crate::wayland::INPUT_WQ.wake_all();
+    }
 }

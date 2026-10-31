@@ -5,14 +5,23 @@ IMG := $(DIST_DIR)/hydra.img
 STORAGE_IMG := $(DIST_DIR)/storage.img
 ISO := $(DIST_DIR)/kernel.iso
 
-.PHONY: all build clean rootfs-media
+.PHONY: all build clean rootfs-media userland
 
 all: build
+
+# Linux userland pieces installed into the Ubuntu root by `linux chroot` (needs libdbus-1-dev)
+LOGIND := esp/bin/hydra-logind.elf
+userland: $(LOGIND)
+
+$(LOGIND): userland/hydra-logind/hydra-logind.c
+	mkdir -p esp/bin
+	gcc -O2 -Wall -o $@ $< -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -ldbus-1
+	strip $@
 
 $(EFI_BIN):
 	cargo build --release --target $(TARGET)
 
-build: $(EFI_BIN)
+build: $(EFI_BIN) $(LOGIND)
 	mkdir -p $(DIST_DIR)
 	@if [ ! -f $(STORAGE_IMG) ]; then \
 		echo "Creating persistent 32MB ATA storage image..."; \

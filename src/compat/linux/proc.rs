@@ -373,8 +373,8 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
     if size > 65536 {
         return EINVAL;
     }
-    let euid = crate::task::with_current_task_mut(|t| t.euid).unwrap_or(0);
-    if euid != 0 {
+    let privileged = crate::task::with_current_task_mut(|t| t.caps.has(crate::task::tcb::Caps::SETGID)).unwrap_or(false);
+    if !privileged {
         return EPERM;
     }
     let mut groups = Vec::with_capacity(size as usize);
@@ -391,6 +391,11 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
         p.groups = groups;
     }
     0
+}
+
+/// Number of Linux processes (live and zombie), for `sysinfo`.
+pub fn process_count() -> usize {
+    PROCS.lock().len()
 }
 
 /// `getppid()`: returns the parent process ID of the calling process.

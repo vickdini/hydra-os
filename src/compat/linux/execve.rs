@@ -273,6 +273,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             t.regs.cr3 = cr3;
             t.exe = Some(exe);
             t.fs_base = 0;
+            let (uid, euid) = (t.uid, t.euid);
+            t.caps.on_exec(uid, euid);
             t.clear_child_tid = 0;
             // The new image gets a descriptor table of its own (as Linux's unshare_files)
             if alloc::sync::Arc::strong_count(&t.fds) > 1 {

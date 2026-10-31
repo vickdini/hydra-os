@@ -138,6 +138,7 @@ fn fd_object(fd: usize) -> Result<Arc<dyn MappedObject>, i64> {
             let ino = ZfsClient::resolve(0, path.as_bytes(), true).map_err(|_| -ENODEV)?;
             Ok(inode_object(ino))
         }
+        crate::fs::FileDescriptor::Device(d) => d.mmap_object(),
         _ => Err(-ENODEV),
     }
 }

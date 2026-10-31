@@ -1,0 +1,1161 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/apt-get install -y --no-install-recommends kwin-wayland konsole
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x21780000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+Reading package lists... 0%Reading package lists... 100%Reading package lists... Done
+Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 65%Building dependency tree... 90%Building dependency tree... Done
+Reading state information... 0% Reading state information... 0%Reading state information... Done
+Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
+The following additional packages will be installed:
+  bubblewrap dirmngr glycin-loaders glycin-thumbnailers gnupg gpg gpg-agent gpgconf gpgsm kded6 kio6 konsole-kpart kwallet6 kwayland6-data libaom3 libassuan9
+  libasyncns0 libavcodec62 libavformat62 libavutil60 libbluray3 libcairo-gobject2 libcairo2 libcap2 libcap2-bin libchromaprint1 libcjson1 libcodec2-1.2
+  libdatrie1 libdav1d7 libdecor-0-0 libdisplay-info3 libdvdnav4 libdvdread8t64 libei1 libepoxy0 libfftw3-single3 libflac14 libfontenc1 libfribidi0
+  libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-common libgl1 libglycin-2-0 libgme0 libgpgme45 libgpgmepp7 libgsm1 libheif-plugin-aomdec libheif1 libhwy1t64
+  libimobiledevice-1.0-6 libimobiledevice-glue-1.0-0 libjxl0.11 libkdecorations3-6 libkdecorations3private2 libkf6attica6 libkf6bookmarks-data
+  libkf6bookmarks6 libkf6bookmarkswidgets6 libkf6completion-data libkf6completion6 libkf6configqml6 libkf6dbusaddons-data libkf6dbusaddons6 libkf6doctools6
+  libkf6i18nqml6 libkf6idletime6 libkf6jobwidgets-data libkf6jobwidgets6 libkf6kiocore6 libkf6kiofilewidgets6 libkf6kiogui6 libkf6kiowidgets6
+  libkf6newstuff-data libkf6newstuffcore6 libkf6newstuffwidgets6 libkf6notifyconfig-data libkf6notifyconfig6 libkf6package-data libkf6package6
+  libkf6parts-data libkf6parts6 libkf6pty-data libkf6pty6 libkf6screendpms8 libkf6service-bin libkf6service-data libkf6service6 libkf6solid-data libkf6solid6
+  libkf6sonnet-data libkf6sonnetcore6 libkf6sonnetui6 libkf6svg6 libkf6syndication6 libkf6textwidgets-data libkf6textwidgets6 libkf6wallet-data libkf6wallet6
+  libkf6walletbackend6 libkf6windowsystem-data libkf6windowsystem6 libkglobalacceld0 libksba8 libkscreen-data libkscreenlocker6 libkwaylandclient6 libkwin6
+  liblayershellqtinterface6 liblcms2-2 libmbedcrypto16 libmp3lame0 libmpg123-0t64 libnorm1t64 libnpth0t64 libnuma1 liboeffis1 libopenjp2-7 libopenmpt0t64
+  libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libpgm-5.3-0t64 libpipewire-0.3-0t64 libpixman-1-0 libplasma7 libplasmaactivities-data
+  libplasmaactivities7 libplasmaquick7 libplist-2.0-4 libpulse0 libqaccessibilityclient-qt6-0 libqca-qt6-2 libqt6core5compat6 libqt6multimedia6
+  libqt6quickwidgets6 libqt6texttospeech6 librabbitmq4 librav1e0.8 libreadline8t64 librist4 librsvg2-2 libsecret-1-0 libsecret-common libsharpyuv0 libshine3
+  libsnappy1v5 libsndfile1 libsodium23 libsoxr0 libspa-0.2-modules libspeex1 libsqlite3-0 libsrt1.5-gnutls libssh-4 libsvtav1enc2 libswresample6 libswscale9
+  libthai-data libthai0 libtheoradec2 libtheoraenc2 libtirpc-common libtirpc3t64 libtwolame0 libudfread3 libusbmuxd-2.0-7 libva-drm2 libva-x11-2 libva2
+  libvdpau1 libvorbisenc2 libvpl2 libvpx12 libwebp7 libwebpmux3 libwebrtc-audio-processing-1-3 libx264-165 libx265-215 libxaw7 libxcb-composite0 libxcb-dpms0
+  libxcb-record0 libxcb-res0 libxcvt0 libxfixes3 libxfont2 libxi6 libxkbfile1 libxmu6 libxpm4 libxrandr2 libxrender1 libxslt1.1 libxss1 libxt6t64 libxvidcore4
+  libzmq5 libzvbi-common libzvbi0t64 ocl-icd-libopencl1 pinentry-curses psmisc readline-common x11-xkb-utils xserver-common xwayland
+Suggested packages:
+  dbus-user-session libpam-systemd pinentry-gnome3 tor libheif-plugin-x265 | libheif-plugin-kvazaar gpg-wks-server parcimonie xloadimage scdaemon tpm2daemon
+  systemsettings lrzsz libcuda1 libnvcuvid1 libnvidia-encode1 libbluray-bdj libdvdcss2 libfftw3-bin libfftw3-dev libheif-plugin-libde265 libheif-plugin-x265
+  libheif-plugin-ffmpegdec libheif-plugin-jpegdec libheif-plugin-jpegenc libheif-plugin-j2kdec libheif-plugin-j2kenc libheif-plugin-kvazaar
+  libheif-plugin-rav1e libheif-plugin-svtenc libusbmuxd-tools libpam-fprintd libpam-kwallet5 libpam-pkcs11 libpam-sss liblcms2-utils opus-tools pipewire
+  pulseaudio librsvg2-bin speex opencl-icd pinentry-doc readline-doc
+Recommended packages:
+  libheif-plugin-aomenc | libheif-plugin-rav1e | libheif-plugin-svtenc gnupg-l10n gnupg-utils gpg-wks-client switcheroo-control kwin-style-aurorae libaacs0
+  libpam-cap default-libdecor-0-plugin-1 | libdecor-0-plugin-1 libheif-plugin-aomenc usbmuxd keditbookmarks libkf6config-bin libkf6dbusaddons-bin
+  qml6-module-org-kde-newstuff kpackagetool6 media-player-info sonnet6-plugins kde-config-screenlocker layer-shell-qt libpipewire-0.3-common kactivitymanagerd
+  plasma-activities-bin ca-certificates libqca-qt6-plugins librsvg2-common xfonts-base xauth
+The following NEW packages will be installed:
+  bubblewrap dirmngr glycin-loaders glycin-thumbnailers gnupg gpg gpg-agent gpgconf gpgsm kded6 kio6 konsole konsole-kpart kwallet6 kwayland6-data
+  kwin-wayland libaom3 libassuan9 libasyncns0 libavcodec62 libavformat62 libavutil60 libbluray3 libcairo-gobject2 libcairo2 libcap2 libcap2-bin
+  libchromaprint1 libcjson1 libcodec2-1.2 libdatrie1 libdav1d7 libdecor-0-0 libdisplay-info3 libdvdnav4 libdvdread8t64 libei1 libepoxy0 libfftw3-single3
+  libflac14 libfontenc1 libfribidi0 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-common libgl1 libglycin-2-0 libgme0 libgpgme45 libgpgmepp7 libgsm1
+  libheif-plugin-aomdec libheif1 libhwy1t64 libimobiledevice-1.0-6 libimobiledevice-glue-1.0-0 libjxl0.11 libkdecorations3-6 libkdecorations3private2
+  libkf6attica6 libkf6bookmarks-data libkf6bookmarks6 libkf6bookmarkswidgets6 libkf6completion-data libkf6completion6 libkf6configqml6 libkf6dbusaddons-data
+  libkf6dbusaddons6 libkf6doctools6 libkf6i18nqml6 libkf6idletime6 libkf6jobwidgets-data libkf6jobwidgets6 libkf6kiocore6 libkf6kiofilewidgets6 libkf6kiogui6
+  libkf6kiowidgets6 libkf6newstuff-data libkf6newstuffcore6 libkf6newstuffwidgets6 libkf6notifyconfig-data libkf6notifyconfig6 libkf6package-data
+  libkf6package6 libkf6parts-data libkf6parts6 libkf6pty-data libkf6pty6 libkf6screendpms8 libkf6service-bin libkf6service-data libkf6service6
+  libkf6solid-data libkf6solid6 libkf6sonnet-data libkf6sonnetcore6 libkf6sonnetui6 libkf6svg6 libkf6syndication6 libkf6textwidgets-data libkf6textwidgets6
+  libkf6wallet-data libkf6wallet6 libkf6walletbackend6 libkf6windowsystem-data libkf6windowsystem6 libkglobalacceld0 libksba8 libkscreen-data
+  libkscreenlocker6 libkwaylandclient6 libkwin6 liblayershellqtinterface6 liblcms2-2 libmbedcrypto16 libmp3lame0 libmpg123-0t64 libnorm1t64 libnpth0t64
+  libnuma1 liboeffis1 libopenjp2-7 libopenmpt0t64 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libpgm-5.3-0t64 libpipewire-0.3-0t64
+  libpixman-1-0 libplasma7 libplasmaactivities-data libplasmaactivities7 libplasmaquick7 libplist-2.0-4 libpulse0 libqaccessibilityclient-qt6-0 libqca-qt6-2
+  libqt6core5compat6 libqt6multimedia6 libqt6quickwidgets6 libqt6texttospeech6 librabbitmq4 librav1e0.8 libreadline8t64 librist4 librsvg2-2 libsecret-1-0
+  libsecret-common libsharpyuv0 libshine3 libsnappy1v5 libsndfile1 libsodium23 libsoxr0 libspa-0.2-modules libspeex1 libsqlite3-0 libsrt1.5-gnutls libssh-4
+  libsvtav1enc2 libswresample6 libswscale9 libthai-data libthai0 libtheoradec2 libtheoraenc2 libtirpc-common libtirpc3t64 libtwolame0 libudfread3
+  libusbmuxd-2.0-7 libva-drm2 libva-x11-2 libva2 libvdpau1 libvorbisenc2 libvpl2 libvpx12 libwebp7 libwebpmux3 libwebrtc-audio-processing-1-3 libx264-165
+  libx265-215 libxaw7 libxcb-composite0 libxcb-dpms0 libxcb-record0 libxcb-res0 libxcvt0 libxfixes3 libxfont2 libxi6 libxkbfile1 libxmu6 libxpm4 libxrandr2
+  libxrender1 libxslt1.1 libxss1 libxt6t64 libxvidcore4 libzmq5 libzvbi-common libzvbi0t64 ocl-icd-libopencl1 pinentry-curses psmisc readline-common
+  x11-xkb-utils xserver-common xwayland
+0 upgraded, 211 newly installed, 0 to remove and 31 not upgraded.
+Need to get 76.1 MB of archives.
+After this operation, 253 MB of additional disk space will be used.
+0% [Working]            Get:1 http://archive.ubuntu.com/ubuntu resolute/main amd64 psmisc amd64 23.7-2ubuntu2 [179 kB]
+0% [1 psmisc 14.2 kB/179 kB 8%]                               0% [Waiting for headers]                        Get:2 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6dbusaddons-data all 6.24.0-0ubuntu1 [21.9 kB]
+                        Get:3 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6dbusaddons6 amd64 6.24.0-0ubuntu1 [50.8 kB]
+0% [3 libkf6dbusaddons6 42.9 kB/50.8 kB 84%]                                            Get:4 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6service-data all 6.24.0-0ubuntu1 [39.5 kB]
+                                            Get:5 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6service6 amd64 6.24.0-0ubuntu1 [171 kB]
+                                            1% [5 libkf6service6 16.8 kB/171 kB 10%]                                        Get:6 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6service-bin amd64 6.24.0-0ubuntu1 [27.7 kB]
+                                        Get:7 http://archive.ubuntu.com/ubuntu resolute/universe amd64 kded6 amd64 6.24.0-0ubuntu1 [64.5 kB]
+                                        1% [7 kded6 11.8 kB/64.5 kB 18%]                                Get:8 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6wallet-data all 6.24.0-0ubuntu1 [236 kB]
+1% [8 libkf6wallet-data 11.9 kB/236 kB 5%]                                          Get:9 http://archive.ubuntu.com/ubuntu resolute/main amd64 libassuan9 amd64 3.0.2-2build1 [41.3 kB]
+                                          2% [9 libassuan9 35.3 kB/41.3 kB 85%]                                     Get:10 http://archive.ubuntu.com/ubuntu resolute/main amd64 readline-common all 8.3-4 [61.5 kB]
+2% [10 readline-common 58.5 kB/61.5 kB 95%]                                           Get:11 http://archive.ubuntu.com/ubuntu resolute/main amd64 libreadline8t64 amd64 8.3-4 [164 kB]
+                                           2% [11 libreadline8t64 61.5 kB/164 kB 37%]                                          Get:12 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gpgconf amd64 2.4.8-4ubuntu3.1 [106 kB]
+                                          2% [12 gpgconf 26.5 kB/106 kB 25%]                                  Get:13 http://archive.ubuntu.com/ubuntu resolute/main amd64 libksba8 amd64 1.6.7-2build1 [125 kB]
+2% [13 libksba8 49.5 kB/125 kB 40%]                                   Get:14 http://archive.ubuntu.com/ubuntu resolute/main amd64 libnpth0t64 amd64 1.8-3build1 [9302 B]
+                                   Get:15 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 dirmngr amd64 2.4.8-4ubuntu3.1 [327 kB]
+                                   3% [15 dirmngr 44.2 kB/327 kB 14%]                                  Get:16 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libsqlite3-0 amd64 3.46.1-9ubuntu0.3 [720 kB]
+3% [16 libsqlite3-0 41.0 kB/720 kB 6%]                                      Get:17 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gpg amd64 2.4.8-4ubuntu3.1 [637 kB]
+                                      4% [17 gpg 33.9 kB/637 kB 5%]                             Get:18 http://archive.ubuntu.com/ubuntu resolute/main amd64 pinentry-curses amd64 1.3.2-3ubuntu1 [41.1 kB]
+                             Get:19 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gpg-agent amd64 2.4.8-4ubuntu3.1 [236 kB]
+5% [19 gpg-agent 3401 B/236 kB 1%]                                  Get:20 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gpgsm amd64 2.4.8-4ubuntu3.1 [239 kB]
+                                  5% [20 gpgsm 27.3 kB/239 kB 11%]                                Get:21 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gnupg all 2.4.8-4ubuntu3.1 [311 kB]
+6% [21 gnupg 47.4 kB/311 kB 15%]                                Get:22 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgpgme45 amd64 2.0.1-2build1 [140 kB]
+6% [22 libgpgme45 60.4 kB/140 kB 43%]                                     Get:23 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgpgmepp7 amd64 2.0.0-2 [131 kB]
+6% [23 libgpgmepp7 50.3 kB/131 kB 38%]                                      Get:24 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6walletbackend6 amd64 6.24.0-0ubuntu1 [58.4 kB]
+7% [24 libkf6walletbackend6 48.5 kB/58.4 kB 83%]                                                Get:25 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6wallet6 amd64 6.24.0-0ubuntu1 [54.5 kB]
+                                                7% [Waiting for headers]                        Get:26 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6windowsystem-data all 6.24.0-0ubuntu1 [12.6 kB]
+                        Get:27 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxcb-res0 amd64 1.17.0-2ubuntu1 [6780 B]
+                        Get:28 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxfixes3 amd64 1:6.0.0-2build2 [11.1 kB]
+                        Get:29 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6windowsystem6 amd64 6.24.0-0ubuntu1 [202 kB]
+7% [29 libkf6windowsystem6 33.3 kB/202 kB 16%]                                              Get:30 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqt6core5compat6 amd64 6.10.2-1 [150 kB]
+                                              7% [30 libqt6core5compat6 25.0 kB/150 kB 17%]                                             Get:31 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqca-qt6-2 amd64 2.3.10-2 [386 kB]
+                                             8% [31 libqca-qt6-2 4205 B/386 kB 1%]                                     Get:32 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsecret-common all 0.21.7-2build1 [5608 B]
+                                     Get:33 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsecret-1-0 amd64 0.21.7-2build1 [119 kB]
+8% [33 libsecret-1-0 1313 B/119 kB 1%]                                      Get:34 http://archive.ubuntu.com/ubuntu resolute/universe amd64 kwallet6 amd64 6.24.0-0ubuntu1 [282 kB]
+                                      8% [34 kwallet6 12.1 kB/282 kB 4%]                                  Get:35 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxslt1.1 amd64 1.1.45-0.1 [165 kB]
+9% [35 libxslt1.1 53.9 kB/165 kB 33%]                                     Get:36 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6doctools6 amd64 6.24.0-0ubuntu1 [17.0 kB]
+                                     Get:37 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6kiocore6 amd64 6.24.0-0ubuntu1 [532 kB]
+9% [37 libkf6kiocore6 571 B/532 kB 0%]                                      Get:38 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6bookmarks-data all 6.24.0-0ubuntu1 [48.5 kB]
+                                      Get:39 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6bookmarks6 amd64 6.24.0-0ubuntu1 [46.6 kB]
+10% [39 libkf6bookmarks6 2641 B/46.6 kB 6%]                                           Get:40 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6bookmarkswidgets6 amd64 6.24.0-0ubuntu1 [37.2 kB]
+10% [40 libkf6bookmarkswidgets6 20.6 kB/37.2 kB 55%]                                                    Get:41 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6completion-data all 6.24.0-0ubuntu1 [18.2 kB]
+                                                    Get:42 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6completion6 amd64 6.24.0-0ubuntu1 [95.8 kB]
+                                                    10% [42 libkf6completion6 29.4 kB/95.8 kB 31%]                                              Get:43 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6solid-data all 6.24.0-0ubuntu1 [123 kB]
+                                              11% [43 libkf6solid-data 62.9 kB/123 kB 51%]                                            Get:44 http://archive.ubuntu.com/ubuntu resolute/main amd64 libplist-2.0-4 amd64 2.7.0+git20250820-1build1 [51.1 kB]
+                                            11% [44 libplist-2.0-4 4804 B/51.1 kB 9%]                                         Get:45 http://archive.ubuntu.com/ubuntu resolute/main amd64 libimobiledevice-glue-1.0-0 amd64 1.3.2-2build1 [33.8 kB]
+11% [45 libimobiledevice-glue-1.0-0 18.2 kB/33.8 kB 54%]                                                        Get:46 http://archive.ubuntu.com/ubuntu resolute/main amd64 libusbmuxd-2.0-7 amd64 2.1.1-1 [17.9 kB]
+                                                        Get:47 http://archive.ubuntu.com/ubuntu resolute/main amd64 libimobiledevice-1.0-6 amd64 1.4.0-1build1 [138 kB]
+                                                        11% [47 libimobiledevice-1.0-6 31.4 kB/138 kB 23%]                                                  Get:48 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6solid6 amd64 6.24.0-0ubuntu1 [289 kB]
+                                                  12% [48 libkf6solid6 22.5 kB/289 kB 8%]                                       Get:49 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6kiogui6 amd64 6.24.0-0ubuntu1 [182 kB]
+12% [49 libkf6kiogui6 57.5 kB/182 kB 32%]                                         Get:50 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6jobwidgets-data all 6.24.0-0ubuntu1 [42.5 kB]
+12% [50 libkf6jobwidgets-data 5077 B/42.5 kB 12%]                                                 Get:51 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6jobwidgets6 amd64 6.24.0-0ubuntu1 [99.0 kB]
+                                                 12% [51 libkf6jobwidgets6 27.1 kB/99.0 kB 27%]                                              Get:52 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6kiowidgets6 amd64 6.24.0-0ubuntu1 [421 kB]
+                                              13% [52 libkf6kiowidgets6 57.4 kB/421 kB 14%]                                             Get:53 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6kiofilewidgets6 amd64 6.24.0-0ubuntu1 [392 kB]
+13% [53 libkf6kiofilewidgets6 24.7 kB/392 kB 6%]                                                Get:54 http://archive.ubuntu.com/ubuntu resolute/universe amd64 kio6 amd64 6.24.0-0ubuntu1 [2344 kB]
+                                                14% [54 kio6 21.3 kB/2344 kB 1%]                                Get:55 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6configqml6 amd64 6.24.0-0ubuntu1 [22.0 kB]
+16% [55 libkf6configqml6 9678 B/22.0 kB 44%]                                            Get:56 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6i18nqml6 amd64 6.24.0-0ubuntu1 [41.3 kB]
+                                            Get:57 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxss1 amd64 1:1.2.3-1build4 [7084 B]
+                                            Get:58 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6idletime6 amd64 6.24.0-0ubuntu1 [63.5 kB]
+                                            16% [58 libkf6idletime6 3253 B/63.5 kB 5%]                                          Get:59 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6package-data all 6.24.0-0ubuntu1 [70.1 kB]
+17% [59 libkf6package-data 5017 B/70.1 kB 7%]                                             Get:60 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6package6 amd64 6.24.0-0ubuntu1 [70.6 kB]
+                                             17% [60 libkf6package6 161 B/70.6 kB 0%]                                        Get:61 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkscreen-data all 4:6.6.4-0ubuntu1 [13.7 kB]
+                                        Get:62 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxcb-dpms0 amd64 1.17.0-2ubuntu1 [5410 B]
+                                        Get:63 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6screendpms8 amd64 4:6.6.4-0ubuntu1 [28.4 kB]
+                                        17% [Waiting for headers]                         Get:64 http://archive.ubuntu.com/ubuntu resolute/universe amd64 liblayershellqtinterface6 amd64 6.6.4-0ubuntu1 [30.6 kB]
+                         Get:65 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6svg6 amd64 6.24.0-0ubuntu1 [116 kB]
+17% [65 libkf6svg6 33.6 kB/116 kB 29%]                                      Get:66 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libplasmaactivities-data all 6.6.4-0ubuntu1 [5684 B]
+                                      Get:67 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libplasmaactivities7 amd64 6.6.4-0ubuntu1 [78.4 kB]
+18% [67 libplasmaactivities7 41.2 kB/78.4 kB 52%]                                                 Get:68 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 libplasma7 amd64 6.6.6-0ubuntu0.1 [140 kB]
+                                                 18% [68 libplasma7 27.2 kB/140 kB 19%]                                      Get:69 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 libplasmaquick7 amd64 6.6.6-0ubuntu0.1 [211 kB]
+18% [69 libplasmaquick7 16.4 kB/211 kB 8%]                                          18% [Waiting for headers]                         Get:70 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxi6 amd64 2:1.8.2-2 [33.1 kB]
+                         Get:71 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 libkscreenlocker6 amd64 6.6.5-0ubuntu0.1 [154 kB]
+19% [71 libkscreenlocker6 0 B/154 kB 0%]                                        Get:72 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcap2 amd64 1:2.75-10ubuntu2 [29.3 kB]
+                                        19% [72 libcap2 7393 B/29.3 kB 25%]                                   Get:73 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcap2-bin amd64 1:2.75-10ubuntu2 [33.5 kB]
+                                   Get:74 http://archive.ubuntu.com/ubuntu resolute/main amd64 libfribidi0 amd64 1.0.16-5 [26.6 kB]
+19% [74 libfribidi0 8825 B/26.6 kB 33%]                                       Get:75 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtirpc-common all 1.3.7-0.1 [7114 B]
+                                       Get:76 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtirpc3t64 amd64 1.3.7-0.1 [80.9 kB]
+19% [76 libtirpc3t64 39.3 kB/80.9 kB 49%]                                         Get:77 http://archive.ubuntu.com/ubuntu resolute/main amd64 libnuma1 amd64 2.0.19-1build1 [23.7 kB]
+                                         20% [77 libnuma1 22.9 kB/23.7 kB 97%]                                     Get:78 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 bubblewrap amd64 0.11.1-1ubuntu0.3 [51.0 kB]
+                                     Get:79 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpixman-1-0 amd64 0.46.4-1 [287 kB]
+20% [79 libpixman-1-0 12.5 kB/287 kB 4%]                                        Get:80 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxrender1 amd64 1:0.9.12-1build1 [19.2 kB]
+                                        Get:81 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcairo2 amd64 1.18.4-3 [579 kB]
+                                        20% [81 libcairo2 29.4 kB/579 kB 5%]                                    Get:82 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsharpyuv0 amd64 1.5.0-0.1build1 [17.6 kB]
+                                    Get:83 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libaom3 amd64 3.13.1-2ubuntu0.1 [1969 kB]
+                                    21% [83 libaom3 15.6 kB/1969 kB 1%]                                   Get:84 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libheif-plugin-aomdec amd64 1.21.2-3ubuntu0.6 [15.5 kB]
+                                   Get:85 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libheif1 amd64 1.21.2-3ubuntu0.6 [550 kB]
+23% [85 libheif1 39.1 kB/550 kB 7%]                                   Get:86 http://archive.ubuntu.com/ubuntu resolute/main amd64 libhwy1t64 amd64 1.3.0-2 [768 kB]
+24% [86 libhwy1t64 7061 B/768 kB 1%]                                    Get:87 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 liblcms2-2 amd64 2.17-1ubuntu0.2 [169 kB]
+25% [87 liblcms2-2 16.5 kB/169 kB 10%]                                      Get:88 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libjxl0.11 amd64 0.11.1-6ubuntu4.2 [1269 kB]
+25% [88 libjxl0.11 41.4 kB/1269 kB 3%]26% [88 libjxl0.11 430 kB/1269 kB 34%]                                      Get:89 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcairo-gobject2 amd64 1.18.4-3 [127 kB]
+27% [89 libcairo-gobject2 3095 B/127 kB 2%]                                           Get:90 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libglycin-2-0 amd64 2.1.5+ds-0ubuntu0.2 [1487 kB]
+                                           27% [90 libglycin-2-0 5113 B/1487 kB 0%]                                        Get:91 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 glycin-thumbnailers amd64 2.1.5+ds-0ubuntu0.2 [223 kB]
+29% [91 glycin-thumbnailers 8535 B/223 kB 4%]                                             Get:92 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgdk-pixbuf2.0-common all 2.44.5+dfsg-4ubuntu1 [5754 B]
+                                             Get:93 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgdk-pixbuf-2.0-0 amd64 2.44.5+dfsg-4ubuntu1 [101 kB]
+29% [93 libgdk-pixbuf-2.0-0 38.8 kB/101 kB 38%]                                               Get:94 http://archive.ubuntu.com/ubuntu resolute/main amd64 libthai-data all 0.1.30-1 [155 kB]
+                                               29% [94 libthai-data 2304 B/155 kB 1%]                                      Get:95 http://archive.ubuntu.com/ubuntu resolute/main amd64 libdatrie1 amd64 0.2.14-1 [19.8 kB]
+                                      Get:96 http://archive.ubuntu.com/ubuntu resolute/main amd64 libthai0 amd64 0.1.30-1 [19.2 kB]
+                                      Get:97 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpango-1.0-0 amd64 1.57.0-1 [241 kB]
+30% [97 libpango-1.0-0 2082 B/241 kB 1%]                                        30% [Connecting to archive.ubuntu.com]                                      Get:98 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpangoft2-1.0-0 amd64 1.57.0-1 [53.3 kB]
+30% [98 libpangoft2-1.0-0 14.2 kB/53.3 kB 27%]                                              30% [Waiting for headers]                         Get:99 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpangocairo-1.0-0 amd64 1.57.0-1 [29.0 kB]
+30% [99 libpangocairo-1.0-0 5518 B/29.0 kB 19%]                                               30% [Waiting for headers]                         Get:100 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 librsvg2-2 amd64 2.61.3+dfsg-3ubuntu0.1 [1850 kB]
+30% [100 librsvg2-2 2610 B/1850 kB 0%]32% [Waiting for headers]                                                                                                                         3464 kB/s 15s                                                                                                                                                               Get:101 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 glycin-loaders amd64 2.1.5+ds-0ubuntu0.2 [2984 kB]
+32% [101 glycin-loaders 64.5 kB/2984 kB 2%]                                                                                                       3464 kB/s 15s36% [Connecting to archive.ubuntu.com]                                                                                                            3464 kB/s 14s                                                                                                                                                               Get:102 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6newstuff-data all 6.24.0-0ubuntu1 [170 kB]
+36% [102 libkf6newstuff-data 4064 B/170 kB 2%]                                                                                                    3464 kB/s 14s36% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:103 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6attica6 amd64 6.24.0-0ubuntu1 [185 kB]
+36% [103 libkf6attica6 0 B/185 kB 0%]                                                                                                             3464 kB/s 14s36% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:104 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6syndication6 amd64 6.24.0-0ubuntu1 [201 kB]
+36% [104 libkf6syndication6 5516 B/201 kB 3%]                                                                                                     3464 kB/s 14s36% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:105 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6newstuffcore6 amd64 6.24.0-0ubuntu1 [302 kB]
+36% [105 libkf6newstuffcore6 20.0 kB/302 kB 7%]                                                                                                   3464 kB/s 14s37% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:106 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqt6quickwidgets6 amd64 6.10.2+dfsg-3 [49.1 kB]
+37% [106 libqt6quickwidgets6 8422 B/49.1 kB 17%]                                                                                                  3464 kB/s 14s37% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:107 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6newstuffwidgets6 amd64 6.24.0-0ubuntu1 [24.8 kB]
+37% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:108 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6parts-data all 6.24.0-0ubuntu1 [44.2 kB]
+37% [108 libkf6parts-data 8422 B/44.2 kB 19%]                                                                                                     3464 kB/s 14s37% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:109 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6parts6 amd64 6.24.0-0ubuntu1 [90.2 kB]
+37% [109 libkf6parts6 5655 B/90.2 kB 6%]                                                                                                          3464 kB/s 14s37% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:110 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6pty-data all 6.24.0-0ubuntu1 [28.1 kB]
+37% [110 libkf6pty-data 0 B/28.1 kB 0%]                                                                                                           3464 kB/s 14s38% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:111 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6pty6 amd64 6.24.0-0ubuntu1 [23.2 kB]
+38% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:112 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6textwidgets-data all 6.24.0-0ubuntu1 [205 kB]
+38% [112 libkf6textwidgets-data 17.1 kB/205 kB 8%]                                                                                                3464 kB/s 14s38% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:113 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6sonnet-data all 6.24.0-0ubuntu1 [116 kB]
+38% [113 libkf6sonnet-data 8420 B/116 kB 7%]                                                                                                      3464 kB/s 14s38% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:114 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6sonnetcore6 amd64 6.24.0-0ubuntu1 [167 kB]
+38% [114 libkf6sonnetcore6 0 B/167 kB 0%]                                                                                                         3464 kB/s 14s39% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:115 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6sonnetui6 amd64 6.24.0-0ubuntu1 [57.5 kB]
+39% [115 libkf6sonnetui6 8422 B/57.5 kB 15%]                                                                                                      3464 kB/s 14s39% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:116 http://archive.ubuntu.com/ubuntu resolute/main amd64 libfftw3-single3 amd64 3.3.10-2fakesync1build3 [865 kB]
+39% [116 libfftw3-single3 30.2 kB/865 kB 3%]                                                                                                      3464 kB/s 14s40% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:117 http://archive.ubuntu.com/ubuntu resolute/main amd64 libflac14 amd64 1.5.0+ds-5 [168 kB]
+40% [117 libflac14 89.6 kB/168 kB 53%]                                                                                                            3464 kB/s 14s40% [Waiting for headers]                                                                                                                         3464 kB/s 14s                                                                                                                                                               Get:118 http://archive.ubuntu.com/ubuntu resolute/main amd64 libmpg123-0t64 amd64 1.33.3-2 [176 kB]
+40% [118 libmpg123-0t64 130 kB/176 kB 74%]                                                                                                        3464 kB/s 14s40% [Waiting for headers]                                                                                                                         3464 kB/s 13s                                                                                                                                                               Get:119 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libmp3lame0 amd64 3.101~svn6525+dfsg-2ubuntu0.1 [121 kB]
+40% [119 libmp3lame0 65.0 kB/121 kB 54%]                                                                                                          3464 kB/s 13s40% [Waiting for headers]                                                                                                                         3464 kB/s 13s                                                                                                                                                               Get:120 http://archive.ubuntu.com/ubuntu resolute/main amd64 libopus0 amd64 1.6.1-1 [3564 kB]
+41% [120 libopus0 65.0 kB/3564 kB 2%]                                                                                                             3464 kB/s 13s44% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:121 http://archive.ubuntu.com/ubuntu resolute/main amd64 libvorbisenc2 amd64 1.3.7-3build2 [79.6 kB]
+44% [121 libvorbisenc2 65.0 kB/79.6 kB 82%]                                                                                                       3464 kB/s 12s44% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:122 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsndfile1 amd64 1.2.2-4 [219 kB]
+45% [122 libsndfile1 64.5 kB/219 kB 30%]                                                                                                          3464 kB/s 12s45% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:123 http://archive.ubuntu.com/ubuntu resolute/main amd64 libwebrtc-audio-processing-1-3 amd64 1.3-3build2 [411 kB]
+45% [123 libwebrtc-audio-processing-1-3 65.0 kB/411 kB 16%]                                                                                       3464 kB/s 12s45% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:124 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libspa-0.2-modules amd64 1.6.2-1ubuntu1.2 [1152 kB]
+45% [124 libspa-0.2-modules 64.5 kB/1152 kB 6%]                                                                                                   3464 kB/s 12s47% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:125 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpipewire-0.3-0t64 amd64 1.6.2-1ubuntu1.2 [300 kB]
+47% [125 libpipewire-0.3-0t64 64.5 kB/300 kB 22%]                                                                                                 3464 kB/s 12s47% [125 libpipewire-0.3-0t64 129 kB/300 kB 43%]                                                                                                  3464 kB/s 12s47% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:126 http://archive.ubuntu.com/ubuntu resolute/main amd64 libva2 amd64 2.23.0-1ubuntu1 [76.5 kB]
+47% [126 libva2 65.0 kB/76.5 kB 85%]                                                                                                              3464 kB/s 12s47% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:127 http://archive.ubuntu.com/ubuntu resolute/main amd64 libva-drm2 amd64 2.23.0-1ubuntu1 [7112 B]
+47% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:128 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libva-x11-2 amd64 2.23.0-1ubuntu1 [12.2 kB]
+47% [Waiting for headers]                                                                                                                         3464 kB/s 12s                                                                                                                                                               Get:129 http://archive.ubuntu.com/ubuntu resolute/main amd64 libvdpau1 amd64 1.5-4 [27.8 kB]
+48% [Waiting for headers]                                                                                                                         1951 kB/s 21s                                                                                                                                                               Get:130 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libvpl2 amd64 1:2.16.0-1 [134 kB]
+48% [130 libvpl2 65.0 kB/134 kB 49%]                                                                                                              1951 kB/s 21s48% [Waiting for headers]                                                                                                                         1951 kB/s 21s                                                                                                                                                               Get:131 http://archive.ubuntu.com/ubuntu resolute/main amd64 ocl-icd-libopencl1 amd64 2.3.4-1 [40.9 kB]
+48% [Waiting for headers]                                                                                                                         1951 kB/s 21s                                                                                                                                                               Get:132 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libavutil60 amd64 7:8.0.1-3ubuntu2 [449 kB]
+48% [132 libavutil60 64.5 kB/449 kB 14%]                                                                                                          1951 kB/s 21s48% [Waiting for headers]                                                                                                                         1951 kB/s 21s                                                                                                                                                               Get:133 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libcodec2-1.2 amd64 1.2.0-4 [9015 kB]
+49% [133 libcodec2-1.2 64.5 kB/9015 kB 1%]                                                                                                        1951 kB/s 21s53% [133 libcodec2-1.2 4017 kB/9015 kB 45%]                                                                                                       1951 kB/s 19s57% [133 libcodec2-1.2 8035 kB/9015 kB 89%]                                                                                                       1951 kB/s 17s58% [Waiting for headers]                                                                                                                         1951 kB/s 16s                                                                                                                                                               Get:134 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libdav1d7 amd64 1.5.3-1 [626 kB]
+58% [134 libdav1d7 64.5 kB/626 kB 10%]                                                                                                            1951 kB/s 16s59% [Waiting for headers]                                                                                                                         1951 kB/s 16s                                                                                                                                                               Get:135 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libgsm1 amd64 1.0.23-2 [28.9 kB]
+59% [Waiting for headers]                                                                                                                         1951 kB/s 16s                                                                                                                                                               Get:136 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libopenjp2-7 amd64 2.5.4-1ubuntu0.1 [187 kB]
+59% [136 libopenjp2-7 65.0 kB/187 kB 35%]                                                                                                         1951 kB/s 16s59% [Waiting for headers]                                                                                                                         1951 kB/s 16s                                                                                                                                                               Get:137 http://archive.ubuntu.com/ubuntu resolute/universe amd64 librav1e0.8 amd64 0.8.1-7 [1062 kB]
+59% [137 librav1e0.8 64.5 kB/1062 kB 6%]                                                                                                          1951 kB/s 16s60% [Waiting for headers]                                                                                                                         1951 kB/s 15s                                                                                                                                                               Get:138 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libshine3 amd64 3.1.1-3build1 [23.5 kB]
+61% [Waiting for headers]                                                                                                                         1951 kB/s 15s                                                                                                                                                               Get:139 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsnappy1v5 amd64 1.2.2-2 [30.8 kB]
+61% [Waiting for headers]                                                                                                                         1951 kB/s 15s                                                                                                                                                               Get:140 http://archive.ubuntu.com/ubuntu resolute/main amd64 libspeex1 amd64 1.2.1-3build1 [63.3 kB]
+61% [Waiting for headers]                                                                                                                         1951 kB/s 15s                                                                                                                                                               Get:141 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libsvtav1enc2 amd64 2.3.0+dfsg-1build1 [2742 kB]
+61% [141 libsvtav1enc2 64.5 kB/2742 kB 2%]                                                                                                        1951 kB/s 15s64% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:142 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libsoxr0 amd64 0.1.3-4.1 [82.7 kB]
+64% [142 libsoxr0 64.5 kB/82.7 kB 78%]                                                                                                            1951 kB/s 14s64% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:143 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libswresample6 amd64 7:8.0.1-3ubuntu2 [77.0 kB]
+64% [143 libswresample6 64.5 kB/77.0 kB 84%]                                                                                                      1951 kB/s 14s64% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:144 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtheoradec2 amd64 1.2.0+dfsg-6 [55.6 kB]
+64% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:145 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtheoraenc2 amd64 1.2.0+dfsg-6 [106 kB]
+64% [145 libtheoraenc2 64.5 kB/106 kB 61%]                                                                                                        1951 kB/s 14s65% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:146 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtwolame0 amd64 0.4.0-2build4 [52.6 kB]
+65% [Waiting for headers]                                                                                                                         1951 kB/s 14s                                                                                                                                                               Get:147 http://archive.ubuntu.com/ubuntu resolute/main amd64 libvpx12 amd64 1.16.0-3 [1244 kB]
+65% [147 libvpx12 64.5 kB/1244 kB 5%]                                                                                                             1951 kB/s 14s66% [Waiting for headers]                                                                                                                         1951 kB/s 13s                                                                                                                                                               Get:148 http://archive.ubuntu.com/ubuntu resolute/main amd64 libwebp7 amd64 1.5.0-0.1build1 [264 kB]
+66% [148 libwebp7 64.5 kB/264 kB 24%]                                                                                                             1951 kB/s 13s66% [Waiting for headers]                                                                                                                         1951 kB/s 13s                                                                                                                                                               Get:149 http://archive.ubuntu.com/ubuntu resolute/main amd64 libwebpmux3 amd64 1.5.0-0.1build1 [26.4 kB]
+67% [Waiting for headers]                                                                                                                         1951 kB/s 13s                                                                                                                                                               Get:150 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libx264-165 amd64 2:0.165.3222+gitb35605ac-3build1 [609 kB]
+67% [150 libx264-165 64.5 kB/609 kB 11%]                                                                                                          1951 kB/s 13s67% [150 libx264-165 129 kB/609 kB 21%]                                                                                                           1951 kB/s 13s67% [Waiting for headers]                                                                                                                         1951 kB/s 13s                                                                                                                                                               Get:151 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libx265-215 amd64 4.1-4 [1331 kB]
+67% [151 libx265-215 64.5 kB/1331 kB 5%]                                                                                                          1951 kB/s 13s69% [Waiting for headers]                                                                                                                         1951 kB/s 12s                                                                                                                                                               Get:152 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libxvidcore4 amd64 2:1.3.7-3 [220 kB]
+69% [152 libxvidcore4 64.5 kB/220 kB 29%]                                                                                                         1951 kB/s 12s69% [Waiting for headers]                                                                                                                         1951 kB/s 12s                                                                                                                                                               Get:153 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libzvbi-common all 0.2.44-1ubuntu2 [43.0 kB]
+69% [Waiting for headers]                                                                                                                         1951 kB/s 12s                                                                                                                                                               Get:154 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libzvbi0t64 amd64 0.2.44-1ubuntu2 [264 kB]
+69% [154 libzvbi0t64 64.5 kB/264 kB 24%]                                                                                                          1951 kB/s 12s70% [Waiting for headers]                                                                                                                         1951 kB/s 12s                                                                                                                                                               Get:155 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libavcodec62 amd64 7:8.0.1-3ubuntu2 [9711 kB]
+70% [155 libavcodec62 83.4 kB/9711 kB 1%]                                                                                                         1951 kB/s 12s74% [155 libavcodec62 4295 kB/9711 kB 44%]                                                                                                         3633 kB/s 5s79% [155 libavcodec62 8637 kB/9711 kB 89%]                                                                                                         3633 kB/s 4s80% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:156 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libudfread3 amd64 1.2.0-2 [17.3 kB]
+80% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:157 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libbluray3 amd64 1:1.4.1-1 [133 kB]
+80% [157 libbluray3 64.5 kB/133 kB 49%]                                                                                                            3633 kB/s 3s80% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:158 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libchromaprint1 amd64 1.6.0-2build1 [33.4 kB]
+80% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:159 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libdvdread8t64 amd64 7.0.1-1 [63.3 kB]
+81% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:160 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libdvdnav4 amd64 7.0.0-2 [40.3 kB]
+81% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:161 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libgme0 amd64 0.6.4-1 [146 kB]
+81% [161 libgme0 64.5 kB/146 kB 44%]                                                                                                               3633 kB/s 3s81% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:162 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libopenmpt0t64 amd64 0.8.4-1 [744 kB]
+81% [162 libopenmpt0t64 64.5 kB/744 kB 9%]                                                                                                         3633 kB/s 3s82% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:163 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 librabbitmq4 amd64 0.15.0-1ubuntu0.26.04.2 [37.7 kB]
+82% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:164 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libcjson1 amd64 1.7.19-2 [22.8 kB]
+82% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:165 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libmbedcrypto16 amd64 3.6.5-0.1ubuntu2 [259 kB]
+82% [165 libmbedcrypto16 64.5 kB/259 kB 25%]                                                                                                       3633 kB/s 3s82% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:166 http://archive.ubuntu.com/ubuntu resolute/universe amd64 librist4 amd64 0.2.11+dfsg-1build1 [76.0 kB]
+83% [166 librist4 64.8 kB/76.0 kB 85%]                                                                                                             3633 kB/s 3s83% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:167 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libsrt1.5-gnutls amd64 1.5.4-3 [334 kB]
+83% [167 libsrt1.5-gnutls 64.5 kB/334 kB 19%]                                                                                                      3633 kB/s 3s83% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:168 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libssh-4 amd64 0.11.3-1ubuntu2.1 [208 kB]
+83% [168 libssh-4 64.5 kB/208 kB 31%]                                                                                                              3633 kB/s 3s83% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:169 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libnorm1t64 amd64 1.5.9+dfsg-4 [158 kB]
+83% [169 libnorm1t64 64.5 kB/158 kB 41%]                                                                                                           3633 kB/s 3s84% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:170 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libpgm-5.3-0t64 amd64 5.3.128~dfsg-2.1build2 [168 kB]
+84% [170 libpgm-5.3-0t64 64.5 kB/168 kB 38%]                                                                                                       3633 kB/s 3s84% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:171 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsodium23 amd64 1.0.18-2 [165 kB]
+84% [171 libsodium23 64.5 kB/165 kB 39%]                                                                                                           3633 kB/s 3s84% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:172 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libzmq5 amd64 4.3.5-1build3 [262 kB]
+84% [172 libzmq5 64.5 kB/262 kB 25%]                                                                                                               3633 kB/s 3s85% [Waiting for headers]                                                                                                                          3633 kB/s 3s                                                                                                                                                               Get:173 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libavformat62 amd64 7:8.0.1-3ubuntu2 [1291 kB]
+85% [173 libavformat62 64.5 kB/1291 kB 5%]                                                                                                         3633 kB/s 3s86% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:174 http://archive.ubuntu.com/ubuntu resolute/main amd64 libasyncns0 amd64 0.8-7 [12.4 kB]
+86% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:175 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpulse0 amd64 1:17.0+dfsg1-2ubuntu4 [293 kB]
+86% [175 libpulse0 84.8 kB/293 kB 29%]                                                                                                             3633 kB/s 2s87% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:176 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libswscale9 amd64 7:8.0.1-3ubuntu2 [411 kB]
+87% [176 libswscale9 64.5 kB/411 kB 16%]                                                                                                           3633 kB/s 2s87% [176 libswscale9 259 kB/411 kB 63%]                                                                                                            3633 kB/s 2s87% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:177 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxrandr2 amd64 2:1.5.4-1build1 [19.6 kB]
+87% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:178 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqt6multimedia6 amd64 6.10.2-2 [831 kB]
+87% [178 libqt6multimedia6 64.5 kB/831 kB 8%]                                                                                                      3633 kB/s 2s88% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:179 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqt6texttospeech6 amd64 6.10.2-1 [45.7 kB]
+88% [179 libqt6texttospeech6 9874 B/45.7 kB 22%]                                                                                                   3633 kB/s 2s88% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:180 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6textwidgets6 amd64 6.24.0-0ubuntu1 [90.9 kB]
+88% [180 libkf6textwidgets6 64.5 kB/90.9 kB 71%]                                                                                                   3633 kB/s 2s88% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:181 http://archive.ubuntu.com/ubuntu resolute/universe amd64 konsole-kpart amd64 4:25.12.3-0ubuntu1 [819 kB]
+89% [181 konsole-kpart 9872 B/819 kB 1%]                                                                                                           3633 kB/s 2s89% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:182 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6notifyconfig-data all 6.24.0-0ubuntu1 [31.3 kB]
+90% [Waiting for headers]                                                                                                                          3633 kB/s 2s                                                                                                                                                               Get:183 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkf6notifyconfig6 amd64 6.24.0-0ubuntu1 [32.5 kB]
+90% [Waiting for headers]                                                                                                                          3633 kB/s 1s                                                                                                                                                               Get:184 http://archive.ubuntu.com/ubuntu resolute/universe amd64 konsole amd64 4:25.12.3-0ubuntu1 [1488 kB]
+90% [184 konsole 64.5 kB/1488 kB 4%]                                                                                                               3633 kB/s 1s91% [Waiting for headers]                                                                                                                          3633 kB/s 1s                                                                                                                                                               Get:185 http://archive.ubuntu.com/ubuntu resolute/universe amd64 kwayland6-data all 4:6.6.4-0ubuntu1 [5724 B]
+91% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:186 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxt6t64 amd64 1:1.2.1-1.3build1 [173 kB]
+92% [186 libxt6t64 64.5 kB/173 kB 37%]                                                                                                             2257 kB/s 2s92% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:187 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxmu6 amd64 2:1.1.3-4 [48.9 kB]
+92% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:188 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libxpm4 amd64 1:3.5.17-1ubuntu0.26.04.2 [37.2 kB]
+92% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:189 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxaw7 amd64 2:1.0.16-1build1 [190 kB]
+92% [189 libxaw7 64.5 kB/190 kB 34%]                                                                                                               2257 kB/s 2s92% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:190 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxkbfile1 amd64 1:1.1.0-1build5 [70.1 kB]
+92% [190 libxkbfile1 64.5 kB/70.1 kB 92%]                                                                                                          2257 kB/s 2s92% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:191 http://archive.ubuntu.com/ubuntu resolute/main amd64 x11-xkb-utils amd64 7.7+9build1 [170 kB]
+93% [191 x11-xkb-utils 64.5 kB/170 kB 38%]                                                                                                         2257 kB/s 2s93% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:192 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 xserver-common all 2:21.1.22-1ubuntu1.3 [30.0 kB]
+93% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:193 http://archive.ubuntu.com/ubuntu resolute/main amd64 libdecor-0-0 amd64 0.2.5-1 [16.5 kB]
+93% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:194 http://archive.ubuntu.com/ubuntu resolute/main amd64 libei1 amd64 1.5.0-3 [42.8 kB]
+93% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:195 http://archive.ubuntu.com/ubuntu resolute/main amd64 libepoxy0 amd64 1.5.10-2build1 [226 kB]
+93% [195 libepoxy0 64.5 kB/226 kB 28%]                                                                                                             2257 kB/s 2s93% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:196 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgl1 amd64 1.7.0-3 [98.3 kB]
+94% [196 libgl1 64.5 kB/98.3 kB 66%]                                                                                                               2257 kB/s 2s94% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:197 http://archive.ubuntu.com/ubuntu resolute/main amd64 liboeffis1 amd64 1.5.0-3 [12.8 kB]
+94% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:198 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxcvt0 amd64 0.1.3-1build1 [5852 B]
+94% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:199 http://archive.ubuntu.com/ubuntu resolute/main amd64 libfontenc1 amd64 1:1.1.8-1build2 [14.1 kB]
+94% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:200 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libxfont2 amd64 1:2.0.6-2ubuntu0.2 [96.5 kB]
+94% [200 libxfont2 65.0 kB/96.5 kB 67%]                                                                                                            2257 kB/s 2s94% [Waiting for headers]                                                                                                                          2257 kB/s 2s                                                                                                                                                               Get:201 http://archive.ubuntu.com/ubuntu resolute/main amd64 xwayland amd64 2:24.1.10-1 [1007 kB]
+94% [201 xwayland 64.5 kB/1007 kB 6%]                                                                                                              2257 kB/s 1s95% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:202 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkdecorations3private2 amd64 4:6.6.4-0ubuntu1 [11.9 kB]
+95% [Connecting to archive.ubuntu.com]                                                                                                             2257 kB/s 1s                                                                                                                                                               Get:203 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkdecorations3-6 amd64 4:6.6.4-0ubuntu1 [80.0 kB]
+95% [203 libkdecorations3-6 14.2 kB/80.0 kB 18%]                                                                                                   2257 kB/s 1s96% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:204 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxcb-record0 amd64 1.17.0-2ubuntu1 [7480 B]
+96% [204 libxcb-record0 5519 B/7480 B 74%]                                                                                                         2257 kB/s 1s96% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:205 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 libkglobalacceld0 amd64 6.6.5-0ubuntu0.1 [106 kB]
+96% [205 libkglobalacceld0 2612 B/106 kB 2%]                                                                                                       2257 kB/s 1s96% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:206 http://archive.ubuntu.com/ubuntu resolute/main amd64 libdisplay-info3 amd64 0.3.0-1 [87.8 kB]
+96% [206 libdisplay-info3 8421 B/87.8 kB 10%]                                                                                                      2257 kB/s 1s96% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:207 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libkwaylandclient6 amd64 4:6.6.4-0ubuntu1 [215 kB]
+96% [207 libkwaylandclient6 8420 B/215 kB 4%]                                                                                                      2257 kB/s 1s96% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:208 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxcb-composite0 amd64 1.17.0-2ubuntu1 [5368 B]
+97% [Waiting for headers]                                                                                                                          2257 kB/s 1s                                                                                                                                                               Get:209 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 libkwin6 amd64 4:6.6.6-0ubuntu0.1 [2454 kB]
+97% [209 libkwin6 47.6 kB/2454 kB 2%]                                                                                                              2257 kB/s 1s99% [Waiting for headers]                                                                                                                          2257 kB/s 0s                                                                                                                                                               Get:210 http://archive.ubuntu.com/ubuntu resolute/universe amd64 libqaccessibilityclient-qt6-0 amd64 0.6.0-4ubuntu1 [95.4 kB]
+99% [210 libqaccessibilityclient-qt6-0 64.8 kB/95.4 kB 68%]                                                                                        2257 kB/s 0s99% [Waiting for headers]                                                                                                                          2257 kB/s 0s                                                                                                                                                               Get:211 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 kwin-wayland amd64 4:6.6.6-0ubuntu0.1 [464 kB]
+99% [211 kwin-wayland 64.8 kB/464 kB 14%]                                                                                                          2257 kB/s 0s100% [Working]                                                                                                                                     2257 kB/s 0s                                                                                                                                                               Fetched 76.1 MB in 29s (2609 kB/s)
+debconf: unable to initialize frontend: Dialog
+debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 211.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 211.)
+debconf: falling back to frontend: Teletype
+Extracting templates from packages: 14%Extracting templates from packages: 28%Extracting templates from packages: 42%Extracting templates from packages: 56%Extracting templates from packages: 71%Extracting templates from packages: 85%Extracting templates from packages: 99%Extracting templates from packages: 100%
+Selecting previously unselected package psmisc.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 13181 files and directories currently installed.)
+Preparing to unpack .../00-psmisc_23.7-2ubuntu2_amd64.deb ...
+Unpacking psmisc (23.7-2ubuntu2) ...
+Selecting previously unselected package libkf6dbusaddons-data.
+Preparing to unpack .../01-libkf6dbusaddons-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6dbusaddons-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6dbusaddons6:amd64.
+Preparing to unpack .../02-libkf6dbusaddons6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6dbusaddons6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6service-data.
+Preparing to unpack .../03-libkf6service-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6service-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6service6:amd64.
+Preparing to unpack .../04-libkf6service6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6service6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6service-bin.
+Preparing to unpack .../05-libkf6service-bin_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6service-bin (6.24.0-0ubuntu1) ...
+Selecting previously unselected package kded6.
+Preparing to unpack .../06-kded6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking kded6 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6wallet-data.
+Preparing to unpack .../07-libkf6wallet-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6wallet-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libassuan9:amd64.
+Preparing to unpack .../08-libassuan9_3.0.2-2build1_amd64.deb ...
+Unpacking libassuan9:amd64 (3.0.2-2build1) ...
+Selecting previously unselected package readline-common.
+Preparing to unpack .../09-readline-common_8.3-4_all.deb ...
+Unpacking readline-common (8.3-4) ...
+Selecting previously unselected package libreadline8t64:amd64.
+Preparing to unpack .../10-libreadline8t64_8.3-4_amd64.deb ...
+Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8 to /lib/x86_64-linux-gnu/libhistory.so.8.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8.2 to /lib/x86_64-linux-gnu/libhistory.so.8.2.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8 to /lib/x86_64-linux-gnu/libreadline.so.8.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8.2 to /lib/x86_64-linux-gnu/libreadline.so.8.2.usr-is-merged by libreadline8t64'
+Unpacking libreadline8t64:amd64 (8.3-4) ...
+Selecting previously unselected package gpgconf.
+Preparing to unpack .../11-gpgconf_2.4.8-4ubuntu3.1_amd64.deb ...
+Unpacking gpgconf (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package libksba8:amd64.
+Preparing to unpack .../12-libksba8_1.6.7-2build1_amd64.deb ...
+Unpacking libksba8:amd64 (1.6.7-2build1) ...
+Selecting previously unselected package libnpth0t64:amd64.
+Preparing to unpack .../13-libnpth0t64_1.8-3build1_amd64.deb ...
+Unpacking libnpth0t64:amd64 (1.8-3build1) ...
+Selecting previously unselected package dirmngr.
+Preparing to unpack .../14-dirmngr_2.4.8-4ubuntu3.1_amd64.deb ...
+Unpacking dirmngr (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package libsqlite3-0:amd64.
+Preparing to unpack .../15-libsqlite3-0_3.46.1-9ubuntu0.3_amd64.deb ...
+Unpacking libsqlite3-0:amd64 (3.46.1-9ubuntu0.3) ...
+Selecting previously unselected package gpg.
+Preparing to unpack .../16-gpg_2.4.8-4ubuntu3.1_amd64.deb ...
+Unpacking gpg (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package pinentry-curses.
+Preparing to unpack .../17-pinentry-curses_1.3.2-3ubuntu1_amd64.deb ...
+Unpacking pinentry-curses (1.3.2-3ubuntu1) ...
+Selecting previously unselected package gpg-agent.
+Preparing to unpack .../18-gpg-agent_2.4.8-4ubuntu3.1_amd64.deb ...
+Unpacking gpg-agent (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package gpgsm.
+Preparing to unpack .../19-gpgsm_2.4.8-4ubuntu3.1_amd64.deb ...
+Unpacking gpgsm (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package gnupg.
+Preparing to unpack .../20-gnupg_2.4.8-4ubuntu3.1_all.deb ...
+Unpacking gnupg (2.4.8-4ubuntu3.1) ...
+Selecting previously unselected package libgpgme45:amd64.
+Preparing to unpack .../21-libgpgme45_2.0.1-2build1_amd64.deb ...
+Unpacking libgpgme45:amd64 (2.0.1-2build1) ...
+Selecting previously unselected package libgpgmepp7:amd64.
+Preparing to unpack .../22-libgpgmepp7_2.0.0-2_amd64.deb ...
+Unpacking libgpgmepp7:amd64 (2.0.0-2) ...
+Selecting previously unselected package libkf6walletbackend6:amd64.
+Preparing to unpack .../23-libkf6walletbackend6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6walletbackend6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6wallet6:amd64.
+Preparing to unpack .../24-libkf6wallet6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6wallet6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6windowsystem-data.
+Preparing to unpack .../25-libkf6windowsystem-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6windowsystem-data (6.24.0-0ubuntu1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd3b753e rsp=0x1f59100 anchor=0xbd428cd0
+Selecting previously unselected package libxcb-res0:amd64.
+Preparing to unpack .../26-libxcb-res0_1.17.0-2ubuntu1_amd64.deb ...
+Unpacking libxcb-res0:amd64 (1.17.0-2ubuntu1) ...
+Selecting previously unselected package libxfixes3:amd64.
+Preparing to unpack .../27-libxfixes3_1%3a6.0.0-2build2_amd64.deb ...
+Unpacking libxfixes3:amd64 (1:6.0.0-2build2) ...
+Selecting previously unselected package libkf6windowsystem6:amd64.
+Preparing to unpack .../28-libkf6windowsystem6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6windowsystem6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libqt6core5compat6:amd64.
+Preparing to unpack .../29-libqt6core5compat6_6.10.2-1_amd64.deb ...
+Unpacking libqt6core5compat6:amd64 (6.10.2-1) ...
+Selecting previously unselected package libqca-qt6-2:amd64.
+Preparing to unpack .../30-libqca-qt6-2_2.3.10-2_amd64.deb ...
+Unpacking libqca-qt6-2:amd64 (2.3.10-2) ...
+Selecting previously unselected package libsecret-common.
+Preparing to unpack .../31-libsecret-common_0.21.7-2build1_all.deb ...
+Unpacking libsecret-common (0.21.7-2build1) ...
+Selecting previously unselected package libsecret-1-0:amd64.
+Preparing to unpack .../32-libsecret-1-0_0.21.7-2build1_amd64.deb ...
+Unpacking libsecret-1-0:amd64 (0.21.7-2build1) ...
+Selecting previously unselected package kwallet6.
+Preparing to unpack .../33-kwallet6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking kwallet6 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libxslt1.1:amd64.
+Preparing to unpack .../34-libxslt1.1_1.1.45-0.1_amd64.deb ...
+Unpacking libxslt1.1:amd64 (1.1.45-0.1) ...
+Selecting previously unselected package libkf6doctools6:amd64.
+Preparing to unpack .../35-libkf6doctools6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6doctools6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6kiocore6:amd64.
+Preparing to unpack .../36-libkf6kiocore6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6kiocore6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6bookmarks-data.
+Preparing to unpack .../37-libkf6bookmarks-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6bookmarks-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6bookmarks6:amd64.
+Preparing to unpack .../38-libkf6bookmarks6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6bookmarks6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6bookmarkswidgets6:amd64.
+Preparing to unpack .../39-libkf6bookmarkswidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6bookmarkswidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6completion-data.
+Preparing to unpack .../40-libkf6completion-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6completion-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6completion6:amd64.
+Preparing to unpack .../41-libkf6completion6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6completion6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6solid-data.
+Preparing to unpack .../42-libkf6solid-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6solid-data (6.24.0-0ubuntu1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd3b753e rsp=0x1f59100 anchor=0xbd428cd0
+Selecting previously unselected package libplist-2.0-4:amd64.
+Preparing to unpack .../43-libplist-2.0-4_2.7.0+git20250820-1build1_amd64.deb ...
+Unpacking libplist-2.0-4:amd64 (2.7.0+git20250820-1build1) ...
+Selecting previously unselected package libimobiledevice-glue-1.0-0.
+Preparing to unpack .../44-libimobiledevice-glue-1.0-0_1.3.2-2build1_amd64.deb ...
+Unpacking libimobiledevice-glue-1.0-0 (1.3.2-2build1) ...
+Selecting previously unselected package libusbmuxd-2.0-7:amd64.
+Preparing to unpack .../45-libusbmuxd-2.0-7_2.1.1-1_amd64.deb ...
+Unpacking libusbmuxd-2.0-7:amd64 (2.1.1-1) ...
+Selecting previously unselected package libimobiledevice-1.0-6:amd64.
+Preparing to unpack .../46-libimobiledevice-1.0-6_1.4.0-1build1_amd64.deb ...
+Unpacking libimobiledevice-1.0-6:amd64 (1.4.0-1build1) ...
+Selecting previously unselected package libkf6solid6:amd64.
+Preparing to unpack .../47-libkf6solid6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6solid6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6kiogui6:amd64.
+Preparing to unpack .../48-libkf6kiogui6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6kiogui6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6jobwidgets-data.
+Preparing to unpack .../49-libkf6jobwidgets-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6jobwidgets-data (6.24.0-0ubuntu1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd3b753e rsp=0x1f59100 anchor=0xbd428cd0
+Selecting previously unselected package libkf6jobwidgets6:amd64.
+Preparing to unpack .../50-libkf6jobwidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6jobwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6kiowidgets6:amd64.
+Preparing to unpack .../51-libkf6kiowidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6kiowidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6kiofilewidgets6:amd64.
+Preparing to unpack .../52-libkf6kiofilewidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6kiofilewidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package kio6.
+Preparing to unpack .../53-kio6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking kio6 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6configqml6:amd64.
+Preparing to unpack .../54-libkf6configqml6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6configqml6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6i18nqml6:amd64.
+Preparing to unpack .../55-libkf6i18nqml6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6i18nqml6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libxss1:amd64.
+Preparing to unpack .../56-libxss1_1%3a1.2.3-1build4_amd64.deb ...
+Unpacking libxss1:amd64 (1:1.2.3-1build4) ...
+Selecting previously unselected package libkf6idletime6:amd64.
+Preparing to unpack .../57-libkf6idletime6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6idletime6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6package-data.
+Preparing to unpack .../58-libkf6package-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6package-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6package6:amd64.
+Preparing to unpack .../59-libkf6package6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6package6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkscreen-data.
+Preparing to unpack .../60-libkscreen-data_4%3a6.6.4-0ubuntu1_all.deb ...
+Unpacking libkscreen-data (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package libxcb-dpms0:amd64.
+Preparing to unpack .../61-libxcb-dpms0_1.17.0-2ubuntu1_amd64.deb ...
+Unpacking libxcb-dpms0:amd64 (1.17.0-2ubuntu1) ...
+Selecting previously unselected package libkf6screendpms8:amd64.
+Preparing to unpack .../62-libkf6screendpms8_4%3a6.6.4-0ubuntu1_amd64.deb ...
+Unpacking libkf6screendpms8:amd64 (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package liblayershellqtinterface6:amd64.
+Preparing to unpack .../63-liblayershellqtinterface6_6.6.4-0ubuntu1_amd64.deb ...
+Unpacking liblayershellqtinterface6:amd64 (6.6.4-0ubuntu1) ...
+Selecting previously unselected package libkf6svg6:amd64.
+Preparing to unpack .../64-libkf6svg6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6svg6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libplasmaactivities-data.
+Preparing to unpack .../65-libplasmaactivities-data_6.6.4-0ubuntu1_all.deb ...
+Unpacking libplasmaactivities-data (6.6.4-0ubuntu1) ...
+Selecting previously unselected package libplasmaactivities7:amd64.
+Preparing to unpack .../66-libplasmaactivities7_6.6.4-0ubuntu1_amd64.deb ...
+Unpacking libplasmaactivities7:amd64 (6.6.4-0ubuntu1) ...
+Selecting previously unselected package libplasma7:amd64.
+Preparing to unpack .../67-libplasma7_6.6.6-0ubuntu0.1_amd64.deb ...
+Unpacking libplasma7:amd64 (6.6.6-0ubuntu0.1) ...
+Selecting previously unselected package libplasmaquick7:amd64.
+Preparing to unpack .../68-libplasmaquick7_6.6.6-0ubuntu0.1_amd64.deb ...
+Unpacking libplasmaquick7:amd64 (6.6.6-0ubuntu0.1) ...
+Selecting previously unselected package libxi6:amd64.
+Preparing to unpack .../69-libxi6_2%3a1.8.2-2_amd64.deb ...
+Unpacking libxi6:amd64 (2:1.8.2-2) ...
+Setting up psmisc (23.7-2ubuntu2) ...
+Selecting previously unselected package libkscreenlocker6:amd64.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 15357 files and directories currently installed.)
+Preparing to unpack .../000-libkscreenlocker6_6.6.5-0ubuntu0.1_amd64.deb ...
+Unpacking libkscreenlocker6:amd64 (6.6.5-0ubuntu0.1) ...
+Selecting previously unselected package libcap2:amd64.
+Preparing to unpack .../001-libcap2_1%3a2.75-10ubuntu2_amd64.deb ...
+Unpacking libcap2:amd64 (1:2.75-10ubuntu2) ...
+Selecting previously unselected package libcap2-bin.
+Preparing to unpack .../002-libcap2-bin_1%3a2.75-10ubuntu2_amd64.deb ...
+Unpacking libcap2-bin (1:2.75-10ubuntu2) ...
+Selecting previously unselected package libfribidi0:amd64.
+Preparing to unpack .../003-libfribidi0_1.0.16-5_amd64.deb ...
+Unpacking libfribidi0:amd64 (1.0.16-5) ...
+Selecting previously unselected package libtirpc-common.
+Preparing to unpack .../004-libtirpc-common_1.3.7-0.1_all.deb ...
+Unpacking libtirpc-common (1.3.7-0.1) ...
+Selecting previously unselected package libtirpc3t64:amd64.
+Preparing to unpack .../005-libtirpc3t64_1.3.7-0.1_amd64.deb ...
+Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3 to /lib/x86_64-linux-gnu/libtirpc.so.3.usr-is-merged by libtirpc3t64'
+Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3.0.0 to /lib/x86_64-linux-gnu/libtirpc.so.3.0.0.usr-is-merged by libtirpc3t64'
+Unpacking libtirpc3t64:amd64 (1.3.7-0.1) ...
+Selecting previously unselected package libnuma1:amd64.
+Preparing to unpack .../006-libnuma1_2.0.19-1build1_amd64.deb ...
+Unpacking libnuma1:amd64 (2.0.19-1build1) ...
+Selecting previously unselected package bubblewrap.
+Preparing to unpack .../007-bubblewrap_0.11.1-1ubuntu0.3_amd64.deb ...
+Unpacking bubblewrap (0.11.1-1ubuntu0.3) ...
+Selecting previously unselected package libpixman-1-0:amd64.
+Preparing to unpack .../008-libpixman-1-0_0.46.4-1_amd64.deb ...
+Unpacking libpixman-1-0:amd64 (0.46.4-1) ...
+Selecting previously unselected package libxrender1:amd64.
+Preparing to unpack .../009-libxrender1_1%3a0.9.12-1build1_amd64.deb ...
+Unpacking libxrender1:amd64 (1:0.9.12-1build1) ...
+Selecting previously unselected package libcairo2:amd64.
+Preparing to unpack .../010-libcairo2_1.18.4-3_amd64.deb ...
+Unpacking libcairo2:amd64 (1.18.4-3) ...
+Selecting previously unselected package libsharpyuv0:amd64.
+Preparing to unpack .../011-libsharpyuv0_1.5.0-0.1build1_amd64.deb ...
+Unpacking libsharpyuv0:amd64 (1.5.0-0.1build1) ...
+Selecting previously unselected package libaom3:amd64.
+Preparing to unpack .../012-libaom3_3.13.1-2ubuntu0.1_amd64.deb ...
+Unpacking libaom3:amd64 (3.13.1-2ubuntu0.1) ...
+Selecting previously unselected package libheif-plugin-aomdec:amd64.
+Preparing to unpack .../013-libheif-plugin-aomdec_1.21.2-3ubuntu0.6_amd64.deb ...
+Unpacking libheif-plugin-aomdec:amd64 (1.21.2-3ubuntu0.6) ...
+Selecting previously unselected package libheif1:amd64.
+Preparing to unpack .../014-libheif1_1.21.2-3ubuntu0.6_amd64.deb ...
+Unpacking libheif1:amd64 (1.21.2-3ubuntu0.6) ...
+Selecting previously unselected package libhwy1t64:amd64.
+Preparing to unpack .../015-libhwy1t64_1.3.0-2_amd64.deb ...
+Unpacking libhwy1t64:amd64 (1.3.0-2) ...
+Selecting previously unselected package liblcms2-2:amd64.
+Preparing to unpack .../016-liblcms2-2_2.17-1ubuntu0.2_amd64.deb ...
+Unpacking liblcms2-2:amd64 (2.17-1ubuntu0.2) ...
+Selecting previously unselected package libjxl0.11:amd64.
+Preparing to unpack .../017-libjxl0.11_0.11.1-6ubuntu4.2_amd64.deb ...
+Unpacking libjxl0.11:amd64 (0.11.1-6ubuntu4.2) ...
+Selecting previously unselected package libcairo-gobject2:amd64.
+Preparing to unpack .../018-libcairo-gobject2_1.18.4-3_amd64.deb ...
+Unpacking libcairo-gobject2:amd64 (1.18.4-3) ...
+Selecting previously unselected package libglycin-2-0:amd64.
+Preparing to unpack .../019-libglycin-2-0_2.1.5+ds-0ubuntu0.2_amd64.deb ...
+Unpacking libglycin-2-0:amd64 (2.1.5+ds-0ubuntu0.2) ...
+Selecting previously unselected package glycin-thumbnailers.
+Preparing to unpack .../020-glycin-thumbnailers_2.1.5+ds-0ubuntu0.2_amd64.deb ...
+Unpacking glycin-thumbnailers (2.1.5+ds-0ubuntu0.2) ...
+Selecting previously unselected package libgdk-pixbuf2.0-common.
+Preparing to unpack .../021-libgdk-pixbuf2.0-common_2.44.5+dfsg-4ubuntu1_all.deb ...
+Unpacking libgdk-pixbuf2.0-common (2.44.5+dfsg-4ubuntu1) ...
+Selecting previously unselected package libgdk-pixbuf-2.0-0:amd64.
+Preparing to unpack .../022-libgdk-pixbuf-2.0-0_2.44.5+dfsg-4ubuntu1_amd64.deb ...
+Unpacking libgdk-pixbuf-2.0-0:amd64 (2.44.5+dfsg-4ubuntu1) ...
+Selecting previously unselected package libthai-data.
+Preparing to unpack .../023-libthai-data_0.1.30-1_all.deb ...
+Unpacking libthai-data (0.1.30-1) ...
+Selecting previously unselected package libdatrie1:amd64.
+Preparing to unpack .../024-libdatrie1_0.2.14-1_amd64.deb ...
+Unpacking libdatrie1:amd64 (0.2.14-1) ...
+Selecting previously unselected package libthai0:amd64.
+Preparing to unpack .../025-libthai0_0.1.30-1_amd64.deb ...
+Unpacking libthai0:amd64 (0.1.30-1) ...
+Selecting previously unselected package libpango-1.0-0:amd64.
+Preparing to unpack .../026-libpango-1.0-0_1.57.0-1_amd64.deb ...
+Unpacking libpango-1.0-0:amd64 (1.57.0-1) ...
+Selecting previously unselected package libpangoft2-1.0-0:amd64.
+Preparing to unpack .../027-libpangoft2-1.0-0_1.57.0-1_amd64.deb ...
+Unpacking libpangoft2-1.0-0:amd64 (1.57.0-1) ...
+Selecting previously unselected package libpangocairo-1.0-0:amd64.
+Preparing to unpack .../028-libpangocairo-1.0-0_1.57.0-1_amd64.deb ...
+Unpacking libpangocairo-1.0-0:amd64 (1.57.0-1) ...
+Selecting previously unselected package librsvg2-2:amd64.
+Preparing to unpack .../029-librsvg2-2_2.61.3+dfsg-3ubuntu0.1_amd64.deb ...
+Unpacking librsvg2-2:amd64 (2.61.3+dfsg-3ubuntu0.1) ...
+Selecting previously unselected package glycin-loaders.
+Preparing to unpack .../030-glycin-loaders_2.1.5+ds-0ubuntu0.2_amd64.deb ...
+Unpacking glycin-loaders (2.1.5+ds-0ubuntu0.2) ...
+Selecting previously unselected package libkf6newstuff-data.
+Preparing to unpack .../031-libkf6newstuff-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6newstuff-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6attica6:amd64.
+Preparing to unpack .../032-libkf6attica6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6attica6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6syndication6:amd64.
+Preparing to unpack .../033-libkf6syndication6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6syndication6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6newstuffcore6:amd64.
+Preparing to unpack .../034-libkf6newstuffcore6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6newstuffcore6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libqt6quickwidgets6:amd64.
+Preparing to unpack .../035-libqt6quickwidgets6_6.10.2+dfsg-3_amd64.deb ...
+Unpacking libqt6quickwidgets6:amd64 (6.10.2+dfsg-3) ...
+Selecting previously unselected package libkf6newstuffwidgets6:amd64.
+Preparing to unpack .../036-libkf6newstuffwidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6newstuffwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6parts-data.
+Preparing to unpack .../037-libkf6parts-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6parts-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6parts6:amd64.
+Preparing to unpack .../038-libkf6parts6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6parts6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6pty-data.
+Preparing to unpack .../039-libkf6pty-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6pty-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6pty6:amd64.
+Preparing to unpack .../040-libkf6pty6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6pty6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6textwidgets-data.
+Preparing to unpack .../041-libkf6textwidgets-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6textwidgets-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6sonnet-data.
+Preparing to unpack .../042-libkf6sonnet-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6sonnet-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6sonnetcore6:amd64.
+Preparing to unpack .../043-libkf6sonnetcore6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6sonnetcore6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6sonnetui6:amd64.
+Preparing to unpack .../044-libkf6sonnetui6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6sonnetui6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libfftw3-single3:amd64.
+Preparing to unpack .../045-libfftw3-single3_3.3.10-2fakesync1build3_amd64.deb ...
+Unpacking libfftw3-single3:amd64 (3.3.10-2fakesync1build3) ...
+Selecting previously unselected package libflac14:amd64.
+Preparing to unpack .../046-libflac14_1.5.0+ds-5_amd64.deb ...
+Unpacking libflac14:amd64 (1.5.0+ds-5) ...
+Selecting previously unselected package libmpg123-0t64:amd64.
+Preparing to unpack .../047-libmpg123-0t64_1.33.3-2_amd64.deb ...
+Unpacking libmpg123-0t64:amd64 (1.33.3-2) ...
+Selecting previously unselected package libmp3lame0:amd64.
+Preparing to unpack .../048-libmp3lame0_3.101~svn6525+dfsg-2ubuntu0.1_amd64.deb ...
+Unpacking libmp3lame0:amd64 (3.101~svn6525+dfsg-2ubuntu0.1) ...
+Selecting previously unselected package libopus0:amd64.
+Preparing to unpack .../049-libopus0_1.6.1-1_amd64.deb ...
+Unpacking libopus0:amd64 (1.6.1-1) ...
+Selecting previously unselected package libvorbisenc2:amd64.
+Preparing to unpack .../050-libvorbisenc2_1.3.7-3build2_amd64.deb ...
+Unpacking libvorbisenc2:amd64 (1.3.7-3build2) ...
+Selecting previously unselected package libsndfile1:amd64.
+Preparing to unpack .../051-libsndfile1_1.2.2-4_amd64.deb ...
+Unpacking libsndfile1:amd64 (1.2.2-4) ...
+Selecting previously unselected package libwebrtc-audio-processing-1-3:amd64.
+Preparing to unpack .../052-libwebrtc-audio-processing-1-3_1.3-3build2_amd64.deb ...
+Unpacking libwebrtc-audio-processing-1-3:amd64 (1.3-3build2) ...
+Selecting previously unselected package libspa-0.2-modules:amd64.
+Preparing to unpack .../053-libspa-0.2-modules_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking libspa-0.2-modules:amd64 (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package libpipewire-0.3-0t64:amd64.
+Preparing to unpack .../054-libpipewire-0.3-0t64_1.6.2-1ubuntu1.2_amd64.deb ...
+Unpacking libpipewire-0.3-0t64:amd64 (1.6.2-1ubuntu1.2) ...
+Selecting previously unselected package libva2:amd64.
+Preparing to unpack .../055-libva2_2.23.0-1ubuntu1_amd64.deb ...
+Unpacking libva2:amd64 (2.23.0-1ubuntu1) ...
+Selecting previously unselected package libva-drm2:amd64.
+Preparing to unpack .../056-libva-drm2_2.23.0-1ubuntu1_amd64.deb ...
+Unpacking libva-drm2:amd64 (2.23.0-1ubuntu1) ...
+Selecting previously unselected package libva-x11-2:amd64.
+Preparing to unpack .../057-libva-x11-2_2.23.0-1ubuntu1_amd64.deb ...
+Unpacking libva-x11-2:amd64 (2.23.0-1ubuntu1) ...
+Selecting previously unselected package libvdpau1:amd64.
+Preparing to unpack .../058-libvdpau1_1.5-4_amd64.deb ...
+Unpacking libvdpau1:amd64 (1.5-4) ...
+Selecting previously unselected package libvpl2.
+Preparing to unpack .../059-libvpl2_1%3a2.16.0-1_amd64.deb ...
+Unpacking libvpl2 (1:2.16.0-1) ...
+Selecting previously unselected package ocl-icd-libopencl1:amd64.
+Preparing to unpack .../060-ocl-icd-libopencl1_2.3.4-1_amd64.deb ...
+Unpacking ocl-icd-libopencl1:amd64 (2.3.4-1) ...
+Selecting previously unselected package libavutil60:amd64.
+Preparing to unpack .../061-libavutil60_7%3a8.0.1-3ubuntu2_amd64.deb ...
+Unpacking libavutil60:amd64 (7:8.0.1-3ubuntu2) ...
+Selecting previously unselected package libcodec2-1.2:amd64.
+Preparing to unpack .../062-libcodec2-1.2_1.2.0-4_amd64.deb ...
+Unpacking libcodec2-1.2:amd64 (1.2.0-4) ...
+Selecting previously unselected package libdav1d7:amd64.
+Preparing to unpack .../063-libdav1d7_1.5.3-1_amd64.deb ...
+Unpacking libdav1d7:amd64 (1.5.3-1) ...
+Selecting previously unselected package libgsm1:amd64.
+Preparing to unpack .../064-libgsm1_1.0.23-2_amd64.deb ...
+Unpacking libgsm1:amd64 (1.0.23-2) ...
+Selecting previously unselected package libopenjp2-7:amd64.
+Preparing to unpack .../065-libopenjp2-7_2.5.4-1ubuntu0.1_amd64.deb ...
+Unpacking libopenjp2-7:amd64 (2.5.4-1ubuntu0.1) ...
+Selecting previously unselected package librav1e0.8:amd64.
+Preparing to unpack .../066-librav1e0.8_0.8.1-7_amd64.deb ...
+Unpacking librav1e0.8:amd64 (0.8.1-7) ...
+Selecting previously unselected package libshine3:amd64.
+Preparing to unpack .../067-libshine3_3.1.1-3build1_amd64.deb ...
+Unpacking libshine3:amd64 (3.1.1-3build1) ...
+Selecting previously unselected package libsnappy1v5:amd64.
+Preparing to unpack .../068-libsnappy1v5_1.2.2-2_amd64.deb ...
+Unpacking libsnappy1v5:amd64 (1.2.2-2) ...
+Selecting previously unselected package libspeex1:amd64.
+Preparing to unpack .../069-libspeex1_1.2.1-3build1_amd64.deb ...
+Unpacking libspeex1:amd64 (1.2.1-3build1) ...
+Selecting previously unselected package libsvtav1enc2:amd64.
+Preparing to unpack .../070-libsvtav1enc2_2.3.0+dfsg-1build1_amd64.deb ...
+Unpacking libsvtav1enc2:amd64 (2.3.0+dfsg-1build1) ...
+Selecting previously unselected package libsoxr0:amd64.
+Preparing to unpack .../071-libsoxr0_0.1.3-4.1_amd64.deb ...
+Unpacking libsoxr0:amd64 (0.1.3-4.1) ...
+Selecting previously unselected package libswresample6:amd64.
+Preparing to unpack .../072-libswresample6_7%3a8.0.1-3ubuntu2_amd64.deb ...
+Unpacking libswresample6:amd64 (7:8.0.1-3ubuntu2) ...
+Selecting previously unselected package libtheoradec2:amd64.
+Preparing to unpack .../073-libtheoradec2_1.2.0+dfsg-6_amd64.deb ...
+Unpacking libtheoradec2:amd64 (1.2.0+dfsg-6) ...
+Selecting previously unselected package libtheoraenc2:amd64.
+Preparing to unpack .../074-libtheoraenc2_1.2.0+dfsg-6_amd64.deb ...
+Unpacking libtheoraenc2:amd64 (1.2.0+dfsg-6) ...
+Selecting previously unselected package libtwolame0:amd64.
+Preparing to unpack .../075-libtwolame0_0.4.0-2build4_amd64.deb ...
+Unpacking libtwolame0:amd64 (0.4.0-2build4) ...
+Selecting previously unselected package libvpx12:amd64.
+Preparing to unpack .../076-libvpx12_1.16.0-3_amd64.deb ...
+Unpacking libvpx12:amd64 (1.16.0-3) ...
+Selecting previously unselected package libwebp7:amd64.
+Preparing to unpack .../077-libwebp7_1.5.0-0.1build1_amd64.deb ...
+Unpacking libwebp7:amd64 (1.5.0-0.1build1) ...
+Selecting previously unselected package libwebpmux3:amd64.
+Preparing to unpack .../078-libwebpmux3_1.5.0-0.1build1_amd64.deb ...
+Unpacking libwebpmux3:amd64 (1.5.0-0.1build1) ...
+Selecting previously unselected package libx264-165:amd64.
+Preparing to unpack .../079-libx264-165_2%3a0.165.3222+gitb35605ac-3build1_amd64.deb ...
+Unpacking libx264-165:amd64 (2:0.165.3222+gitb35605ac-3build1) ...
+Selecting previously unselected package libx265-215:amd64.
+Preparing to unpack .../080-libx265-215_4.1-4_amd64.deb ...
+Unpacking libx265-215:amd64 (4.1-4) ...
+Selecting previously unselected package libxvidcore4:amd64.
+Preparing to unpack .../081-libxvidcore4_2%3a1.3.7-3_amd64.deb ...
+Unpacking libxvidcore4:amd64 (2:1.3.7-3) ...
+Selecting previously unselected package libzvbi-common.
+Preparing to unpack .../082-libzvbi-common_0.2.44-1ubuntu2_all.deb ...
+Unpacking libzvbi-common (0.2.44-1ubuntu2) ...
+Selecting previously unselected package libzvbi0t64:amd64.
+Preparing to unpack .../083-libzvbi0t64_0.2.44-1ubuntu2_amd64.deb ...
+Unpacking libzvbi0t64:amd64 (0.2.44-1ubuntu2) ...
+Selecting previously unselected package libavcodec62:amd64.
+Preparing to unpack .../084-libavcodec62_7%3a8.0.1-3ubuntu2_amd64.deb ...
+Unpacking libavcodec62:amd64 (7:8.0.1-3ubuntu2) ...
+Selecting previously unselected package libudfread3:amd64.
+Preparing to unpack .../085-libudfread3_1.2.0-2_amd64.deb ...
+Unpacking libudfread3:amd64 (1.2.0-2) ...
+Selecting previously unselected package libbluray3:amd64.
+Preparing to unpack .../086-libbluray3_1%3a1.4.1-1_amd64.deb ...
+Unpacking libbluray3:amd64 (1:1.4.1-1) ...
+Selecting previously unselected package libchromaprint1:amd64.
+Preparing to unpack .../087-libchromaprint1_1.6.0-2build1_amd64.deb ...
+Unpacking libchromaprint1:amd64 (1.6.0-2build1) ...
+Selecting previously unselected package libdvdread8t64:amd64.
+Preparing to unpack .../088-libdvdread8t64_7.0.1-1_amd64.deb ...
+Unpacking libdvdread8t64:amd64 (7.0.1-1) ...
+Selecting previously unselected package libdvdnav4:amd64.
+Preparing to unpack .../089-libdvdnav4_7.0.0-2_amd64.deb ...
+Unpacking libdvdnav4:amd64 (7.0.0-2) ...
+Selecting previously unselected package libgme0:amd64.
+Preparing to unpack .../090-libgme0_0.6.4-1_amd64.deb ...
+Unpacking libgme0:amd64 (0.6.4-1) ...
+Selecting previously unselected package libopenmpt0t64:amd64.
+Preparing to unpack .../091-libopenmpt0t64_0.8.4-1_amd64.deb ...
+Unpacking libopenmpt0t64:amd64 (0.8.4-1) ...
+Selecting previously unselected package librabbitmq4:amd64.
+Preparing to unpack .../092-librabbitmq4_0.15.0-1ubuntu0.26.04.2_amd64.deb ...
+Unpacking librabbitmq4:amd64 (0.15.0-1ubuntu0.26.04.2) ...
+Selecting previously unselected package libcjson1:amd64.
+Preparing to unpack .../093-libcjson1_1.7.19-2_amd64.deb ...
+Unpacking libcjson1:amd64 (1.7.19-2) ...
+Selecting previously unselected package libmbedcrypto16:amd64.
+Preparing to unpack .../094-libmbedcrypto16_3.6.5-0.1ubuntu2_amd64.deb ...
+Unpacking libmbedcrypto16:amd64 (3.6.5-0.1ubuntu2) ...
+Selecting previously unselected package librist4:amd64.
+Preparing to unpack .../095-librist4_0.2.11+dfsg-1build1_amd64.deb ...
+Unpacking librist4:amd64 (0.2.11+dfsg-1build1) ...
+Selecting previously unselected package libsrt1.5-gnutls:amd64.
+Preparing to unpack .../096-libsrt1.5-gnutls_1.5.4-3_amd64.deb ...
+Unpacking libsrt1.5-gnutls:amd64 (1.5.4-3) ...
+Selecting previously unselected package libssh-4:amd64.
+Preparing to unpack .../097-libssh-4_0.11.3-1ubuntu2.1_amd64.deb ...
+Unpacking libssh-4:amd64 (0.11.3-1ubuntu2.1) ...
+Selecting previously unselected package libnorm1t64:amd64.
+Preparing to unpack .../098-libnorm1t64_1.5.9+dfsg-4_amd64.deb ...
+Unpacking libnorm1t64:amd64 (1.5.9+dfsg-4) ...
+Selecting previously unselected package libpgm-5.3-0t64:amd64.
+Preparing to unpack .../099-libpgm-5.3-0t64_5.3.128~dfsg-2.1build2_amd64.deb ...
+Unpacking libpgm-5.3-0t64:amd64 (5.3.128~dfsg-2.1build2) ...
+Selecting previously unselected package libsodium23:amd64.
+Preparing to unpack .../100-libsodium23_1.0.18-2_amd64.deb ...
+Unpacking libsodium23:amd64 (1.0.18-2) ...
+Selecting previously unselected package libzmq5:amd64.
+Preparing to unpack .../101-libzmq5_4.3.5-1build3_amd64.deb ...
+Unpacking libzmq5:amd64 (4.3.5-1build3) ...
+Selecting previously unselected package libavformat62:amd64.
+Preparing to unpack .../102-libavformat62_7%3a8.0.1-3ubuntu2_amd64.deb ...
+Unpacking libavformat62:amd64 (7:8.0.1-3ubuntu2) ...
+Selecting previously unselected package libasyncns0:amd64.
+Preparing to unpack .../103-libasyncns0_0.8-7_amd64.deb ...
+Unpacking libasyncns0:amd64 (0.8-7) ...
+Selecting previously unselected package libpulse0:amd64.
+Preparing to unpack .../104-libpulse0_1%3a17.0+dfsg1-2ubuntu4_amd64.deb ...
+Unpacking libpulse0:amd64 (1:17.0+dfsg1-2ubuntu4) ...
+Selecting previously unselected package libswscale9:amd64.
+Preparing to unpack .../105-libswscale9_7%3a8.0.1-3ubuntu2_amd64.deb ...
+Unpacking libswscale9:amd64 (7:8.0.1-3ubuntu2) ...
+Selecting previously unselected package libxrandr2:amd64.
+Preparing to unpack .../106-libxrandr2_2%3a1.5.4-1build1_amd64.deb ...
+Unpacking libxrandr2:amd64 (2:1.5.4-1build1) ...
+Selecting previously unselected package libqt6multimedia6:amd64.
+Preparing to unpack .../107-libqt6multimedia6_6.10.2-2_amd64.deb ...
+Unpacking libqt6multimedia6:amd64 (6.10.2-2) ...
+Selecting previously unselected package libqt6texttospeech6:amd64.
+Preparing to unpack .../108-libqt6texttospeech6_6.10.2-1_amd64.deb ...
+Unpacking libqt6texttospeech6:amd64 (6.10.2-1) ...
+Selecting previously unselected package libkf6textwidgets6:amd64.
+Preparing to unpack .../109-libkf6textwidgets6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6textwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package konsole-kpart.
+Preparing to unpack .../110-konsole-kpart_4%3a25.12.3-0ubuntu1_amd64.deb ...
+Unpacking konsole-kpart (4:25.12.3-0ubuntu1) ...
+Selecting previously unselected package libkf6notifyconfig-data.
+Preparing to unpack .../111-libkf6notifyconfig-data_6.24.0-0ubuntu1_all.deb ...
+Unpacking libkf6notifyconfig-data (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libkf6notifyconfig6:amd64.
+Preparing to unpack .../112-libkf6notifyconfig6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking libkf6notifyconfig6:amd64 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package konsole.
+Preparing to unpack .../113-konsole_4%3a25.12.3-0ubuntu1_amd64.deb ...
+Unpacking konsole (4:25.12.3-0ubuntu1) ...
+Selecting previously unselected package kwayland6-data.
+Preparing to unpack .../114-kwayland6-data_4%3a6.6.4-0ubuntu1_all.deb ...
+Unpacking kwayland6-data (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package libxt6t64:amd64.
+Preparing to unpack .../115-libxt6t64_1%3a1.2.1-1.3build1_amd64.deb ...
+Unpacking libxt6t64:amd64 (1:1.2.1-1.3build1) ...
+Selecting previously unselected package libxmu6:amd64.
+Preparing to unpack .../116-libxmu6_2%3a1.1.3-4_amd64.deb ...
+Unpacking libxmu6:amd64 (2:1.1.3-4) ...
+Selecting previously unselected package libxpm4:amd64.
+Preparing to unpack .../117-libxpm4_1%3a3.5.17-1ubuntu0.26.04.2_amd64.deb ...
+Unpacking libxpm4:amd64 (1:3.5.17-1ubuntu0.26.04.2) ...
+Selecting previously unselected package libxaw7:amd64.
+Preparing to unpack .../118-libxaw7_2%3a1.0.16-1build1_amd64.deb ...
+Unpacking libxaw7:amd64 (2:1.0.16-1build1) ...
+Selecting previously unselected package libxkbfile1:amd64.
+Preparing to unpack .../119-libxkbfile1_1%3a1.1.0-1build5_amd64.deb ...
+Unpacking libxkbfile1:amd64 (1:1.1.0-1build5) ...
+Selecting previously unselected package x11-xkb-utils.
+Preparing to unpack .../120-x11-xkb-utils_7.7+9build1_amd64.deb ...
+Unpacking x11-xkb-utils (7.7+9build1) ...
+Selecting previously unselected package xserver-common.
+Preparing to unpack .../121-xserver-common_2%3a21.1.22-1ubuntu1.3_all.deb ...
+Unpacking xserver-common (2:21.1.22-1ubuntu1.3) ...
+Selecting previously unselected package libdecor-0-0:amd64.
+Preparing to unpack .../122-libdecor-0-0_0.2.5-1_amd64.deb ...
+Unpacking libdecor-0-0:amd64 (0.2.5-1) ...
+Selecting previously unselected package libei1:amd64.
+Preparing to unpack .../123-libei1_1.5.0-3_amd64.deb ...
+Unpacking libei1:amd64 (1.5.0-3) ...
+Selecting previously unselected package libepoxy0:amd64.
+Preparing to unpack .../124-libepoxy0_1.5.10-2build1_amd64.deb ...
+Unpacking libepoxy0:amd64 (1.5.10-2build1) ...
+Selecting previously unselected package libgl1:amd64.
+Preparing to unpack .../125-libgl1_1.7.0-3_amd64.deb ...
+Unpacking libgl1:amd64 (1.7.0-3) ...
+Selecting previously unselected package liboeffis1:amd64.
+Preparing to unpack .../126-liboeffis1_1.5.0-3_amd64.deb ...
+Unpacking liboeffis1:amd64 (1.5.0-3) ...
+Selecting previously unselected package libxcvt0:amd64.
+Preparing to unpack .../127-libxcvt0_0.1.3-1build1_amd64.deb ...
+Unpacking libxcvt0:amd64 (0.1.3-1build1) ...
+Selecting previously unselected package libfontenc1:amd64.
+Preparing to unpack .../128-libfontenc1_1%3a1.1.8-1build2_amd64.deb ...
+Unpacking libfontenc1:amd64 (1:1.1.8-1build2) ...
+Selecting previously unselected package libxfont2:amd64.
+Preparing to unpack .../129-libxfont2_1%3a2.0.6-2ubuntu0.2_amd64.deb ...
+Unpacking libxfont2:amd64 (1:2.0.6-2ubuntu0.2) ...
+Selecting previously unselected package xwayland.
+Preparing to unpack .../130-xwayland_2%3a24.1.10-1_amd64.deb ...
+Unpacking xwayland (2:24.1.10-1) ...
+Selecting previously unselected package libkdecorations3private2:amd64.
+Preparing to unpack .../131-libkdecorations3private2_4%3a6.6.4-0ubuntu1_amd64.deb ...
+Unpacking libkdecorations3private2:amd64 (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package libkdecorations3-6:amd64.
+Preparing to unpack .../132-libkdecorations3-6_4%3a6.6.4-0ubuntu1_amd64.deb ...
+Unpacking libkdecorations3-6:amd64 (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package libxcb-record0:amd64.
+Preparing to unpack .../133-libxcb-record0_1.17.0-2ubuntu1_amd64.deb ...
+Unpacking libxcb-record0:amd64 (1.17.0-2ubuntu1) ...
+Selecting previously unselected package libkglobalacceld0:amd64.
+Preparing to unpack .../134-libkglobalacceld0_6.6.5-0ubuntu0.1_amd64.deb ...
+Unpacking libkglobalacceld0:amd64 (6.6.5-0ubuntu0.1) ...
+Selecting previously unselected package libdisplay-info3:amd64.
+Preparing to unpack .../135-libdisplay-info3_0.3.0-1_amd64.deb ...
+Unpacking libdisplay-info3:amd64 (0.3.0-1) ...
+Selecting previously unselected package libkwaylandclient6:amd64.
+Preparing to unpack .../136-libkwaylandclient6_4%3a6.6.4-0ubuntu1_amd64.deb ...
+Unpacking libkwaylandclient6:amd64 (4:6.6.4-0ubuntu1) ...
+Selecting previously unselected package libxcb-composite0:amd64.
+Preparing to unpack .../137-libxcb-composite0_1.17.0-2ubuntu1_amd64.deb ...
+Unpacking libxcb-composite0:amd64 (1.17.0-2ubuntu1) ...
+Selecting previously unselected package libkwin6.
+Preparing to unpack .../138-libkwin6_4%3a6.6.6-0ubuntu0.1_amd64.deb ...
+Unpacking libkwin6 (4:6.6.6-0ubuntu0.1) ...
+Selecting previously unselected package libqaccessibilityclient-qt6-0:amd64.
+Preparing to unpack .../139-libqaccessibilityclient-qt6-0_0.6.0-4ubuntu1_amd64.deb ...
+Unpacking libqaccessibilityclient-qt6-0:amd64 (0.6.0-4ubuntu1) ...
+Selecting previously unselected package kwin-wayland.
+Preparing to unpack .../140-kwin-wayland_4%3a6.6.6-0ubuntu0.1_amd64.deb ...
+Unpacking kwin-wayland (4:6.6.6-0ubuntu0.1) ...
+Setting up libgme0:amd64 (0.6.4-1) ...
+Setting up libchromaprint1:amd64 (1.6.0-2build1) ...
+Setting up libksba8:amd64 (1.6.7-2build1) ...
+Setting up libhwy1t64:amd64 (1.3.0-2) ...
+Setting up liblayershellqtinterface6:amd64 (6.6.4-0ubuntu1) ...
+Setting up liblcms2-2:amd64 (2.17-1ubuntu0.2) ...
+Setting up libpixman-1-0:amd64 (0.46.4-1) ...
+Setting up libdvdread8t64:amd64 (7.0.1-1) ...
+Setting up libnorm1t64:amd64 (1.5.9+dfsg-4) ...
+Setting up libsharpyuv0:amd64 (1.5.0-0.1build1) ...
+Setting up libaom3:amd64 (3.13.1-2ubuntu0.1) ...
+Setting up libxcb-res0:amd64 (1.17.0-2ubuntu1) ...
+Setting up librabbitmq4:amd64 (0.15.0-1ubuntu0.26.04.2) ...
+Setting up libnpth0t64:amd64 (1.8-3build1) ...
+Setting up libkf6solid-data (6.24.0-0ubuntu1) ...
+Setting up libfftw3-single3:amd64 (3.3.10-2fakesync1build3) ...
+Setting up libsodium23:amd64 (1.0.18-2) ...
+Setting up libudfread3:amd64 (1.2.0-2) ...
+Setting up libspeex1:amd64 (1.2.1-3build1) ...
+Setting up libshine3:amd64 (3.1.1-3build1) ...
+Setting up libvpl2 (1:2.16.0-1) ...
+Setting up libxpm4:amd64 (1:3.5.17-1ubuntu0.26.04.2) ...
+Setting up libxi6:amd64 (2:1.8.2-2) ...
+Setting up libtwolame0:amd64 (0.4.0-2build4) ...
+Setting up libxrender1:amd64 (1:0.9.12-1build1) ...
+Setting up libdatrie1:amd64 (0.2.14-1) ...
+Setting up libgsm1:amd64 (1.0.23-2) ...
+Setting up libsoxr0:amd64 (0.1.3-4.1) ...
+Setting up libx264-165:amd64 (2:0.165.3222+gitb35605ac-3build1) ...
+Setting up libdisplay-info3:amd64 (0.3.0-1) ...
+Setting up libtirpc-common (1.3.7-0.1) ...
+Setting up libcodec2-1.2:amd64 (1.2.0-4) ...
+Setting up kwayland6-data (4:6.6.4-0ubuntu1) ...
+Setting up libkf6pty-data (6.24.0-0ubuntu1) ...
+Setting up libkf6windowsystem-data (6.24.0-0ubuntu1) ...
+Setting up libsqlite3-0:amd64 (3.46.1-9ubuntu0.3) ...
+Setting up libgdk-pixbuf2.0-common (2.44.5+dfsg-4ubuntu1) ...
+Setting up libkf6parts-data (6.24.0-0ubuntu1) ...
+Setting up libkf6wallet-data (6.24.0-0ubuntu1) ...
+Setting up libmpg123-0t64:amd64 (1.33.3-2) ...
+Setting up libkwaylandclient6:amd64 (4:6.6.4-0ubuntu1) ...
+Setting up libcjson1:amd64 (1.7.19-2) ...
+Setting up libxvidcore4:amd64 (2:1.3.7-3) ...
+Setting up libkf6sonnet-data (6.24.0-0ubuntu1) ...
+Setting up libwebrtc-audio-processing-1-3:amd64 (1.3-3build2) ...
+Setting up libqt6quickwidgets6:amd64 (6.10.2+dfsg-3) ...
+Setting up libcairo2:amd64 (1.18.4-3) ...
+Setting up libkf6notifyconfig-data (6.24.0-0ubuntu1) ...
+Setting up libcap2:amd64 (1:2.75-10ubuntu2) ...
+Setting up libtheoraenc2:amd64 (1.2.0+dfsg-6) ...
+Setting up libkscreen-data (4:6.6.4-0ubuntu1) ...
+Setting up libkf6attica6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libsnappy1v5:amd64 (1.2.2-2) ...
+Setting up libkf6completion-data (6.24.0-0ubuntu1) ...
+Setting up librav1e0.8:amd64 (0.8.1-7) ...
+Setting up libcap2-bin (1:2.75-10ubuntu2) ...
+Setting up libtheoradec2:amd64 (1.2.0+dfsg-6) ...
+Setting up libvpx12:amd64 (1.16.0-3) ...
+Setting up libpgm-5.3-0t64:amd64 (5.3.128~dfsg-2.1build2) ...
+Setting up libkf6bookmarks-data (6.24.0-0ubuntu1) ...
+Setting up libfontenc1:amd64 (1:1.1.8-1build2) ...
+Setting up libkf6newstuff-data (6.24.0-0ubuntu1) ...
+Setting up libei1:amd64 (1.5.0-3) ...
+Setting up libgl1:amd64 (1.7.0-3) ...
+Setting up libkf6configqml6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libva2:amd64 (2.23.0-1ubuntu1) ...
+Setting up libkf6svg6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libsvtav1enc2:amd64 (2.3.0+dfsg-1build1) ...
+Setting up libepoxy0:amd64 (1.5.10-2build1) ...
+Setting up libxfixes3:amd64 (1:6.0.0-2build2) ...
+Setting up libkf6wallet6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libfribidi0:amd64 (1.0.16-5) ...
+Setting up libopus0:amd64 (1.6.1-1) ...
+Setting up libxt6t64:amd64 (1:1.2.1-1.3build1) ...
+Setting up libkf6textwidgets-data (6.24.0-0ubuntu1) ...
+Setting up libqaccessibilityclient-qt6-0:amd64 (0.6.0-4ubuntu1) ...
+Setting up libxrandr2:amd64 (2:1.5.4-1build1) ...
+Setting up libflac14:amd64 (1.5.0+ds-5) ...
+Setting up libkf6windowsystem6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libxcb-dpms0:amd64 (1.17.0-2ubuntu1) ...
+Setting up libssh-4:amd64 (0.11.3-1ubuntu2.1) ...
+Setting up libwebp7:amd64 (1.5.0-0.1build1) ...
+Setting up libnuma1:amd64 (2.0.19-1build1) ...
+Setting up libsrt1.5-gnutls:amd64 (1.5.4-3) ...
+Setting up libplist-2.0-4:amd64 (2.7.0+git20250820-1build1) ...
+Setting up libxcb-composite0:amd64 (1.17.0-2ubuntu1) ...
+Setting up libdav1d7:amd64 (1.5.3-1) ...
+Setting up libva-drm2:amd64 (2.23.0-1ubuntu1) ...
+Setting up ocl-icd-libopencl1:amd64 (2.3.4-1) ...
+Setting up libasyncns0:amd64 (0.8-7) ...
+Setting up libvdpau1:amd64 (1.5-4) ...
+Setting up libassuan9:amd64 (3.0.2-2build1) ...
+Setting up libxslt1.1:amd64 (1.1.45-0.1) ...
+Setting up libkf6jobwidgets-data (6.24.0-0ubuntu1) ...
+Setting up libxcvt0:amd64 (0.1.3-1build1) ...
+Setting up libdecor-0-0:amd64 (0.2.5-1) ...
+Setting up libopenjp2-7:amd64 (2.5.4-1ubuntu0.1) ...
+Setting up libkf6sonnetcore6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libthai-data (0.1.30-1) ...
+Setting up libbluray3:amd64 (1:1.4.1-1) ...
+Setting up libkf6completion6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libcairo-gobject2:amd64 (1.18.4-3) ...
+Setting up libqt6core5compat6:amd64 (6.10.2-1) ...
+Setting up libxss1:amd64 (1:1.2.3-1build4) ...
+Setting up libkf6i18nqml6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6dbusaddons-data (6.24.0-0ubuntu1) ...
+Setting up libmbedcrypto16:amd64 (3.6.5-0.1ubuntu2) ...
+Setting up libxkbfile1:amd64 (1:1.1.0-1build5) ...
+Setting up libkf6package-data (6.24.0-0ubuntu1) ...
+Setting up libx265-215:amd64 (4.1-4) ...
+Setting up libva-x11-2:amd64 (2.23.0-1ubuntu1) ...
+Setting up libwebpmux3:amd64 (1.5.0-0.1build1) ...
+Setting up libkdecorations3private2:amd64 (4:6.6.4-0ubuntu1) ...
+Setting up libkf6service-data (6.24.0-0ubuntu1) ...
+Setting up libjxl0.11:amd64 (0.11.1-6ubuntu4.2) ...
+[linux] pid 1987: unimplemented syscall 326 (0x3, 0x0, 0x4) -> ENOSYS
+Setting up libxfont2:amd64 (1:2.0.6-2ubuntu0.2) ...
+Setting up readline-common (8.3-4) ...
+Setting up libkf6bookmarks6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libopenmpt0t64:amd64 (0.8.4-1) ...
+Setting up libkf6syndication6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libzvbi-common (0.2.44-1ubuntu2) ...
+Setting up libsecret-common (0.21.7-2build1) ...
+Setting up libkf6bookmarkswidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libmp3lame0:amd64 (3.101~svn6525+dfsg-2ubuntu0.1) ...
+Setting up libvorbisenc2:amd64 (1.3.7-3build2) ...
+Setting up libplasmaactivities-data (6.6.4-0ubuntu1) ...
+Setting up liboeffis1:amd64 (1.5.0-3) ...
+Setting up libdvdnav4:amd64 (7.0.0-2) ...
+Setting up libkf6dbusaddons6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libxcb-record0:amd64 (1.17.0-2ubuntu1) ...
+Setting up pinentry-curses (1.3.2-3ubuntu1) ...
+Setting up bubblewrap (0.11.1-1ubuntu0.3) ...
+Setting up libkf6pty6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6sonnetui6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libxmu6:amd64 (2:1.1.3-4) ...
+Setting up libzmq5:amd64 (4.3.5-1build3) ...
+Setting up libkf6service6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libzvbi0t64:amd64 (0.2.44-1ubuntu2) ...
+Setting up libtirpc3t64:amd64 (1.3.7-0.1) ...
+Setting up libavutil60:amd64 (7:8.0.1-3ubuntu2) ...
+Setting up libkdecorations3-6:amd64 (4:6.6.4-0ubuntu1) ...
+Setting up libkf6package6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libplasmaactivities7:amd64 (6.6.4-0ubuntu1) ...
+Setting up libkf6doctools6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libxaw7:amd64 (2:1.0.16-1build1) ...
+Setting up libplasma7:amd64 (6.6.6-0ubuntu0.1) ...
+Setting up libkf6jobwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up librist4:amd64 (0.2.11+dfsg-1build1) ...
+Setting up libthai0:amd64 (0.1.30-1) ...
+Setting up libimobiledevice-glue-1.0-0 (1.3.2-2build1) ...
+Setting up libsecret-1-0:amd64 (0.21.7-2build1) ...
+Setting up libkf6idletime6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libswscale9:amd64 (7:8.0.1-3ubuntu2) ...
+Setting up libkf6screendpms8:amd64 (4:6.6.4-0ubuntu1) ...
+Setting up libqca-qt6-2:amd64 (2.3.10-2) ...
+Setting up libswresample6:amd64 (7:8.0.1-3ubuntu2) ...
+Setting up libkf6newstuffcore6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libreadline8t64:amd64 (8.3-4) ...
+Setting up gpgconf (2.4.8-4ubuntu3.1) ...
+Setting up libsndfile1:amd64 (1.2.2-4) ...
+Setting up libkf6service-bin (6.24.0-0ubuntu1) ...
+Setting up libkf6kiocore6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6newstuffwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up gpg (2.4.8-4ubuntu3.1) ...
+Setting up gpg-agent (2.4.8-4ubuntu3.1) ...
+Setting up libusbmuxd-2.0-7:amd64 (2.1.1-1) ...
+Setting up libpulse0:amd64 (1:17.0+dfsg1-2ubuntu4) ...
+Setting up x11-xkb-utils (7.7+9build1) ...
+Setting up kded6 (6.24.0-0ubuntu1) ...
+Setting up gpgsm (2.4.8-4ubuntu3.1) ...
+Setting up libpango-1.0-0:amd64 (1.57.0-1) ...
+Setting up dirmngr (2.4.8-4ubuntu3.1) ...
+Setting up libspa-0.2-modules:amd64 (1.6.2-1ubuntu1.2) ...
+Setting up gnupg (2.4.8-4ubuntu3.1) ...
+Setting up xserver-common (2:21.1.22-1ubuntu1.3) ...
+Setting up xwayland (2:24.1.10-1) ...
+Setting up libpangoft2-1.0-0:amd64 (1.57.0-1) ...
+Setting up libgpgme45:amd64 (2.0.1-2build1) ...
+Setting up libpipewire-0.3-0t64:amd64 (1.6.2-1ubuntu1.2) ...
+Setting up libpangocairo-1.0-0:amd64 (1.57.0-1) ...
+Setting up libimobiledevice-1.0-6:amd64 (1.4.0-1build1) ...
+Setting up libgpgmepp7:amd64 (2.0.0-2) ...
+Setting up libkf6walletbackend6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6solid6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6kiogui6:amd64 (6.24.0-0ubuntu1) ...
+Setting up kwallet6 (6.24.0-0ubuntu1) ...
+Setting up libkf6kiowidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6kiofilewidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up kio6 (6.24.0-0ubuntu1) ...
+Setting up libkf6notifyconfig6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkf6parts6:amd64 (6.24.0-0ubuntu1) ...
+Setting up libkglobalacceld0:amd64 (6.6.5-0ubuntu0.1) ...
+Setting up libplasmaquick7:amd64 (6.6.6-0ubuntu0.1) ...
+Setting up libkscreenlocker6:amd64 (6.6.5-0ubuntu0.1) ...
+Setting up libkwin6 (4:6.6.6-0ubuntu0.1) ...
+Setting up kwin-wayland (4:6.6.6-0ubuntu0.1) ...
+Failed to set capabilities on file 'setcap': Operation not supported
+Failed to set capabilities for kwin_wayland
+Setting up libheif-plugin-aomdec:amd64 (1.21.2-3ubuntu0.6) ...
+Setting up libheif1:amd64 (1.21.2-3ubuntu0.6) ...
+Setting up glycin-loaders (2.1.5+ds-0ubuntu0.2) ...
+Setting up libglycin-2-0:amd64 (2.1.5+ds-0ubuntu0.2) ...
+Setting up glycin-thumbnailers (2.1.5+ds-0ubuntu0.2) ...
+Setting up libgdk-pixbuf-2.0-0:amd64 (2.44.5+dfsg-4ubuntu1) ...
+Setting up librsvg2-2:amd64 (2.61.3+dfsg-3ubuntu0.1) ...
+Setting up libavcodec62:amd64 (7:8.0.1-3ubuntu2) ...
+Setting up libavformat62:amd64 (7:8.0.1-3ubuntu2) ...
+Setting up libqt6multimedia6:amd64 (6.10.2-2) ...
+Setting up libqt6texttospeech6:amd64 (6.10.2-1) ...
+Setting up libkf6textwidgets6:amd64 (6.24.0-0ubuntu1) ...
+Setting up konsole-kpart (4:25.12.3-0ubuntu1) ...
+Setting up konsole (4:25.12.3-0ubuntu1) ...
+update-alternatives: using /usr/bin/konsole to provide /usr/bin/x-terminal-emulator (x-terminal-emulator) in auto mode
+Processing triggers for libc-bin (2.43-2ubuntu2.3) ...
+[+] Linux process 3 exited with status 0.
+hydra:/bin# 

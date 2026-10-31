@@ -1,0 +1,41 @@
+#!/bin/sh
+# hydra-session [--uid N] PROGRAM [ARGS...]
+#
+# Starts what systemd starts at boot for a graphical login on Hydra -- the D-Bus system
+# bus and the login manager (hydra-logind) -- then runs PROGRAM as user N (default 1000)
+# in session 1 on seat0, e.g.
+#     hydra-session dbus-run-session kwin_wayland --drm konsole
+uid=1000
+if [ "$1" = "--uid" ]; then uid=$2; shift 2; fi
+
+ping() {
+    dbus-send --system --dest="$1" --type=method_call --print-reply "$2" "$3" >/dev/null 2>&1
+}
+
+if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
+    rm -f /run/dbus/system_bus_socket /run/dbus/pid
+    mkdir -p /run/dbus
+    dbus-daemon --system || exit 1
+fi
+if ! ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping; then
+    /usr/libexec/hydra-logind --uid "$uid" $HYDRA_LOGIND_OPTS &
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping && break
+        sleep 1
+    done
+fi
+
+entry=$(getent passwd "$uid")
+user=$(echo "$entry" | cut -d: -f1)
+home=$(echo "$entry" | cut -d: -f6)
+gid=$(echo "$entry" | cut -d: -f4)
+mkdir -p "/run/user/$uid"
+chown "$uid:${gid:-$uid}" "/run/user/$uid"
+chmod 700 "/run/user/$uid"
+export XDG_RUNTIME_DIR="/run/user/$uid" HOME="${home:-/}" USER="$user" LOGNAME="$user"
+export XDG_SESSION_ID=1 XDG_SEAT=seat0 XDG_VTNR=2 XDG_SESSION_TYPE=wayland XDG_SESSION_CLASS=user
+cd "$HOME" 2>/dev/null
+if [ "$uid" = "$(id -u)" ]; then
+    exec "$@"
+fi
+exec setpriv --reuid="$uid" --regid="${gid:-$uid}" --init-groups -- "$@"
