@@ -1,0 +1,54 @@
+2... 1... NOW
+[*] Plasma (plasma-workspace) is not installed in /ubuntu; starting KWin with Konsole...
+hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+hydra-logind: session controller is :1.3
+Accepting client connections on sockets: QList("wayland-0")
+pci id for fd 18: 1234:1111, driver (null)
+pci id for fd 19: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 19: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+kwin_wayland_drm: drmSetClientCap for Atomic Mode Setting failed. Using legacy mode on GPU "/dev/dri/card0"
+kwin_wayland_drm: drmModeListLessees() failed: Invalid argument
+kwin_wayland_drm: Could not find edid for connector DrmConnector(id=42, gpu="/dev/dri/card0", name="Virtual-1", connection="Connected", countMode=1)
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+kwin_decorations: Could not locate decoration plugin "org.kde.breeze"
+kwin_decorations: Could not locate decoration plugin "org.kde.kwin.aurorae"
+kwin_core: Failed to load cursor theme "default"
+kwin_core: Failed to load cursor theme "default"
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1 0xbd441b63 677 shell
+[tasks] 1 Running 1 -1 0xbd3731d9 12345 idle
+[tasks] 2 Blocked 2 -1 0xbd4519a7 1 netd
+[tasks] 3 Sleeping 3 -1 0xbd3b5f23 35 txgd
+[tasks] 4 Blocked 4 61 0xbd441b63 75 /usr/bin/dbus-run-session
+[tasks] 9 Blocked 9 232 0xbd441b63 73 /usr/bin/dbus-daemon
+[tasks] 11 Blocked 11 7 0xbd441b63 27 /usr/libexec/hydra-logind
+[tasks] 27 Blocked 27 232 0xbd441b63 130 /usr/bin/dbus-daemon
+[tasks] 28 Sleeping 28 271 0xbd441b63 2398 /usr/bin/kwin_wayland
+[tasks] 29 Blocked 28 271 0xbd441b63 197 /usr/bin/kwin_wayland
+[tasks] 30 Blocked 28 271 0xbd441b63 5 /usr/bin/kwin_wayland
+[tasks] 33 Blocked 33 271 0xbd441b63 1073 /usr/bin/konsole
+[tasks] 34 Blocked 33 7 0xbd441b63 27 /usr/bin/konsole
+[tasks] 35 Blocked 33 7 0xbd441b63 22 /usr/bin/konsole
+[tasks] 36 Blocked 33 271 0xbd441b63 33 /usr/bin/konsole
+[tasks] 37 Blocked 37 270 0xbd441b63 50 /bin/bash
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1 0xbd441b63 921 shell
+[tasks] 1 Running 1 -1 0xbd3731d9 18444 idle
+[tasks] 2 Blocked 2 -1 0xbd4519a7 1 netd
+[tasks] 3 Sleeping 3 -1 0xbd3b5f23 47 txgd
+[tasks] 4 Blocked 4 61 0xbd441b63 75 /usr/bin/dbus-run-session
+[tasks] 9 Blocked 9 232 0xbd441b63 73 /usr/bin/dbus-daemon
+[tasks] 11 Blocked 11 7 0xbd441b63 27 /usr/libexec/hydra-logind
+[tasks] 27 Blocked 27 232 0xbd441b63 130 /usr/bin/dbus-daemon
+[tasks] 28 Sleeping 28 271 0xbd441b63 2398 /usr/bin/kwin_wayland
+[tasks] 29 Blocked 28 271 0xbd441b63 197 /usr/bin/kwin_wayland
+[tasks] 30 Blocked 28 271 0xbd441b63 6 /usr/bin/kwin_wayland
+[tasks] 33 Blocked 33 271 0xbd441b63 1073 /usr/bin/konsole
+[tasks] 34 Blocked 33 7 0xbd441b63 27 /usr/bin/konsole
+[tasks] 35 Blocked 33 7 0xbd441b63 22 /usr/bin/konsole
+[tasks] 36 Blocked 33 271 0xbd441b63 33 /usr/bin/konsole
+[tasks] 37 Blocked 37 270 0xbd441b63 50 /bin/bash
+

@@ -212,6 +212,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         crate::net::stack::start_service();
         println!();
     }
+    // Pending file system changes reach the disk every few seconds from here on
+    crate::fs::client::start_txg_sync();
 
     Ok(HardwareTakeoverStats {
         memory_map_entries: entries_count,

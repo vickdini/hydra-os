@@ -677,9 +677,9 @@ impl ZfsClient {
         with_server(|s| s.sync().map(|_| ())).map_err(errno_str)
     }
 
-    ///Opportunistically commits pending changes if the [`ZFS_SERVER`] lock is uncontended and the DMU has dirty state.
+    /// Opportunistically commits pending changes if the [`ZFS_SERVER`] lock is uncontended and the DMU has dirty state.
     ///
-    /// Invoked from kernel idle/yield points so interactive file changes reach disk promptly.
+    /// Called every few seconds by the `txgd` task ([`start_txg_sync`]).
     pub fn sync_if_dirty() {
         if let Some(mut guard) = ZFS_SERVER.try_lock() {
             if let Some(s) = guard.as_mut() {
@@ -1138,4 +1138,26 @@ fn mkdir_all(s: &mut ZfsServer, path: &str) -> Result<u64, i64> {
         };
     }
     Ok(cur)
+}
+
+/// Seconds between automatic commits of pending changes (OpenZFS's `zfs_txg_timeout`).
+const TXG_TIMEOUT_SECS: u64 = 5;
+
+static TXG_SYNC_RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Starts the `txgd` kernel task, which commits pending changes every few seconds so a
+/// power-off loses at most that much work (otherwise only full transaction groups,
+/// `fsync` and `sync` reach the disk).
+pub fn start_txg_sync() {
+    if TXG_SYNC_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    crate::task::spawn("txgd", txgd_main, crate::task::TaskPriority::Normal);
+}
+
+fn txgd_main() {
+    loop {
+        crate::task::sleep_ms(TXG_TIMEOUT_SECS * 1000);
+        ZfsClient::sync_if_dirty();
+    }
 }

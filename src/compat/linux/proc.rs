@@ -558,6 +558,7 @@ pub fn post_process(pid: u64, sig: u32) -> bool {
                         p.stopped = false;
                         p.continued = true;
                         resumed_ppid = Some(p.ppid);
+                        super::pidfd::EXIT_WQ.wake_all(); // WCONTINUED waiters
                     }
                 } else if is_stop_signal(sig) {
                     p.pending &= !bit(SIGCONT);
@@ -605,6 +606,7 @@ fn stop_current(sig: u32) {
                 p.stop_sig = sig;
                 p.stop_reported = false;
                 p.continued = false;
+                super::pidfd::EXIT_WQ.wake_all(); // WUNTRACED waiters
                 p.ppid
             }
             None => return,
@@ -1491,9 +1493,13 @@ pub fn wait_status_exit(code: i32) -> i32 {
     (code & 0xff) << 8
 }
 
-/// Polls [`reap`] in a loop until a matching child changes state, `WNOHANG` applies, or a signal interrupts the wait.
+/// Waits until a matching child changes state (exit, stop, continue: all wake
+/// [`super::pidfd::EXIT_WQ`]), `WNOHANG` applies, or a signal interrupts the wait.
 fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
+    let mut waits = crate::task::wait::WaitSet::new();
+    waits.add(crate::task::wait::QueueRef::Static(&super::pidfd::EXIT_WQ));
     loop {
+        waits.register();
         match reap(sel, options)? {
             Some(r) => return Ok(Some(r)),
             None if options & WNOHANG != 0 => return Ok(None),
@@ -1502,7 +1508,7 @@ fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
         if signal_pending() {
             return Err(ERESTARTSYS);
         }
-        crate::task::sleep_ticks(1);
+        waits.wait(None);
     }
 }
 

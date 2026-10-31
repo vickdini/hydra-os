@@ -339,8 +339,17 @@ fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
 
 fn run_in_foreground(tid: crate::task::TaskId) {
     crate::compat::linux::tty::attach_session(tid.0, tid.0);
-    while crate::task::is_task_alive(tid) {
-        crate::task::preemptible(|| crate::task::sleep_ms(20));
+    // Sleep until a process exits (the deadline covers the gap between the process
+    // becoming a zombie and its task being gone)
+    let mut waits = crate::task::wait::WaitSet::new();
+    waits.add(crate::task::wait::QueueRef::Static(&crate::compat::linux::pidfd::EXIT_WQ));
+    loop {
+        waits.register();
+        if !crate::task::is_task_alive(tid) {
+            break;
+        }
+        let deadline = crate::arch::pit::ticks() + 25;
+        crate::task::preemptible(|| waits.wait(Some(deadline)));
     }
     crate::compat::linux::tty::detach_session();
     match crate::compat::linux::proc::take_status(tid.0) {

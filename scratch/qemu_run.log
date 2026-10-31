@@ -11,8 +11,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd41ce23
-    RFLAGS: 0x202, RSP: 0xbfe627a0
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd43dc73
+    RFLAGS: 0x202, RSP: 0xbfe627f0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0xbf801000
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd41ca50 -> PhysAddr 0xbd41ca50
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd43d8a0 -> PhysAddr 0xbd43d8a0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x21780000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x21781000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -61,9 +61,9 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
 [+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
 [1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #14824, 19687 objects)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #14837, 19695 objects)
 [+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 2013 MiB used, TXG #14824, Fletcher-4, CoW)
+    - Storage Pool: 'hydrapool' (16384 MiB, 2013 MiB used, TXG #14837, Fletcher-4, CoW)
     - Persistence : Active (Primary Master ATA Hard Disk)
     - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
 [1m[33m[40m
@@ -125,3 +125,37 @@ kwin_decorations: Could not locate decoration plugin "org.kde.breeze"
 kwin_decorations: Could not locate decoration plugin "org.kde.kwin.aurorae"
 kwin_core: Failed to load cursor theme "default"
 kwin_core: Failed to load cursor theme "default"
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1 0xbd441b63 677 shell
+[tasks] 1 Running 1 -1 0xbd3731d9 12345 idle
+[tasks] 2 Blocked 2 -1 0xbd4519a7 1 netd
+[tasks] 3 Sleeping 3 -1 0xbd3b5f23 35 txgd
+[tasks] 4 Blocked 4 61 0xbd441b63 75 /usr/bin/dbus-run-session
+[tasks] 9 Blocked 9 232 0xbd441b63 73 /usr/bin/dbus-daemon
+[tasks] 11 Blocked 11 7 0xbd441b63 27 /usr/libexec/hydra-logind
+[tasks] 27 Blocked 27 232 0xbd441b63 130 /usr/bin/dbus-daemon
+[tasks] 28 Sleeping 28 271 0xbd441b63 2398 /usr/bin/kwin_wayland
+[tasks] 29 Blocked 28 271 0xbd441b63 197 /usr/bin/kwin_wayland
+[tasks] 30 Blocked 28 271 0xbd441b63 5 /usr/bin/kwin_wayland
+[tasks] 33 Blocked 33 271 0xbd441b63 1073 /usr/bin/konsole
+[tasks] 34 Blocked 33 7 0xbd441b63 27 /usr/bin/konsole
+[tasks] 35 Blocked 33 7 0xbd441b63 22 /usr/bin/konsole
+[tasks] 36 Blocked 33 271 0xbd441b63 33 /usr/bin/konsole
+[tasks] 37 Blocked 37 270 0xbd441b63 50 /bin/bash
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1 0xbd441b63 921 shell
+[tasks] 1 Running 1 -1 0xbd3731d9 18444 idle
+[tasks] 2 Blocked 2 -1 0xbd4519a7 1 netd
+[tasks] 3 Sleeping 3 -1 0xbd3b5f23 47 txgd
+[tasks] 4 Blocked 4 61 0xbd441b63 75 /usr/bin/dbus-run-session
+[tasks] 9 Blocked 9 232 0xbd441b63 73 /usr/bin/dbus-daemon
+[tasks] 11 Blocked 11 7 0xbd441b63 27 /usr/libexec/hydra-logind
+[tasks] 27 Blocked 27 232 0xbd441b63 130 /usr/bin/dbus-daemon
+[tasks] 28 Sleeping 28 271 0xbd441b63 2398 /usr/bin/kwin_wayland
+[tasks] 29 Blocked 28 271 0xbd441b63 197 /usr/bin/kwin_wayland
+[tasks] 30 Blocked 28 271 0xbd441b63 6 /usr/bin/kwin_wayland
+[tasks] 33 Blocked 33 271 0xbd441b63 1073 /usr/bin/konsole
+[tasks] 34 Blocked 33 7 0xbd441b63 27 /usr/bin/konsole
+[tasks] 35 Blocked 33 7 0xbd441b63 22 /usr/bin/konsole
+[tasks] 36 Blocked 33 271 0xbd441b63 33 /usr/bin/konsole
+[tasks] 37 Blocked 37 270 0xbd441b63 50 /bin/bash

@@ -17,7 +17,7 @@ const EMFILE: i64 = -24;
 const PIDFD_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC_FLAG: bool = true;
 
-/// Woken whenever a process exits (pidfd readiness).
+/// Woken whenever a process exits, stops or continues (pidfd readiness, `wait4`).
 pub static EXIT_WQ: WaitQueue = WaitQueue::new();
 
 /// Represents a Linux process file descriptor (`pidfd`).
