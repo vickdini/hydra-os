@@ -1,26 +1,28 @@
-//! # Network Subsystem Core & Interface Management
+//! # Network Subsystem: Core Interface Management & Protocol Dispatch
 //!
-//! Provides the primary interface abstraction, packet dispatching, ARP resolution, and DHCP automation.
+//! Provides the primary network interface abstraction, packet dispatching, ARP resolution, and DHCP automation.
 //!
 //! ## Architectural Role & Design Rationale
 //!
 //! The network subsystem acts as the unified bridge between physical link-layer network adapters
-//! (e.g. [`e1000::E1000Device`]) and higher-layer transport and application protocols (ARP, IPv4, ICMP, UDP, TCP, HTTP).
+//! (e.g., `e1000::E1000Device`) and higher-layer transport and application protocols (ARP, IPv4, ICMP, UDP, TCP, DNS, HTTP).
 //!
-//! The [`Interface`] struct manages assigned network parameters (IP, Subnet Mask, Gateway Router, DNS),
+//! The `Interface` struct manages assigned network parameters (IP, Subnet Mask, Gateway Router, DNS),
 //! coordinates hardware packet polling, and transparently resolves destination MAC addresses via ARP.
 //!
-//! ## Submodules
+//! ## Key Types & Interfaces
 //!
-//! - [`e1000`]: Intel 82540EM Gigabit Ethernet NIC hardware driver.
-//! - [`ethernet`]: IEEE 802.3 / Ethernet II frame framing.
-//! - [`arp`]: Address Resolution Protocol & dynamic ARP cache.
-//! - [`ipv4`]: Internet Protocol Version 4 datagrams and checksums.
-//! - [`icmp`]: Internet Control Message Protocol (`ping`).
-//! - [`udp`]: User Datagram Protocol.
-//! - [`dhcp`]: Dynamic Host Configuration Protocol client.
-//! - [`tcp`]: Transmission Control Protocol stream engine.
-//! - [`http`]: HTTP/1.0 client for remote package downloads.
+//! - `Interface`: Encapsulates the local network interface state (MAC, IPv4 address, subnet mask, gateway, DNS) and provides link-layer and IPv4 transmission/polling methods.
+//! - `GLOBAL_INTERFACE`: Thread-safe global singleton protecting the primary system network interface.
+//! - `init`: Probes PCI for the Intel E1000 NIC and automatically acquires a DHCP lease when link carrier is present.
+//! - `dhcp_acquire`: Executes the 4-way RFC 2131 DHCP handshake to configure `GLOBAL_INTERFACE`.
+//! - `ping`: Transmits an ICMP Echo Request and measures round-trip time (RTT) in milliseconds.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Hardware Dependencies: Relies on `e1000` for DMA frame transmission/reception and `crate::arch::pit` for millisecond timeout polling.
+//! - Concurrency: Protected via [`spin::Mutex`] in `GLOBAL_INTERFACE`.
 
 pub mod arp;
 pub mod dhcp;
@@ -41,15 +43,27 @@ use crate::net::icmp::{IcmpPacket, IcmpType};
 use crate::net::ipv4::{IpProtocol, Ipv4Packet};
 
 /// Manages the local network interface configuration and packet routing.
+///
+/// Stores the hardware 48-bit MAC address alongside the assigned IPv4 address, subnet mask,
+/// default gateway, and DNS server. Synchronized globally via `GLOBAL_INTERFACE`.
 pub struct Interface {
+    /// Hardware 48-bit Ethernet MAC address.
     mac: [u8; 6],
+    /// Assigned local IPv4 address.
     ip: [u8; 4],
+    /// Local IPv4 subnet mask.
     subnet_mask: [u8; 4],
+    /// Default gateway router IPv4 address.
     gateway: [u8; 4],
+    /// Configured recursive DNS server IPv4 address.
     dns_server: [u8; 4],
 }
 
 impl Interface {
+    /// Creates a new unconfigured network `Interface` with zeroed addresses and a `/24` default mask.
+    ///
+    /// # Returns
+    /// A newly initialized `Interface` instance suitable for `const` static initialization.
     pub const fn new() -> Self {
         Self {
             mac: [0; 6],
@@ -60,43 +74,72 @@ impl Interface {
         }
     }
 
+    /// Returns the 6-byte hardware MAC address of this interface.
     pub fn mac(&self) -> [u8; 6] {
         self.mac
     }
 
+    /// Returns the currently assigned 4-byte IPv4 address of this interface.
     pub fn ip(&self) -> [u8; 4] {
         self.ip
     }
 
+    /// Returns the 4-byte IPv4 subnet mask of this interface.
     pub fn subnet_mask(&self) -> [u8; 4] {
         self.subnet_mask
     }
 
+    /// Returns the 4-byte IPv4 address of the default gateway router.
     pub fn gateway(&self) -> [u8; 4] {
         self.gateway
     }
 
+    /// Returns the 4-byte IPv4 address of the configured DNS server.
     pub fn dns_server(&self) -> [u8; 4] {
         self.dns_server
     }
 
+    /// Assigns the local 4-byte IPv4 address for this interface.
+    ///
+    /// # Arguments
+    /// - `ip`: The 4-byte IPv4 address to assign.
     pub fn set_ip(&mut self, ip: [u8; 4]) {
         self.ip = ip;
     }
 
+    /// Assigns the 4-byte IPv4 subnet mask for this interface.
+    ///
+    /// # Arguments
+    /// - `mask`: The 4-byte subnet mask (e.g., `[255, 255, 255, 0]`).
     pub fn set_subnet_mask(&mut self, mask: [u8; 4]) {
         self.subnet_mask = mask;
     }
 
+    /// Assigns the default gateway router IPv4 address for this interface.
+    ///
+    /// # Arguments
+    /// - `gw`: The 4-byte gateway IPv4 address.
     pub fn set_gateway(&mut self, gw: [u8; 4]) {
         self.gateway = gw;
     }
 
+    /// Assigns the recursive DNS server IPv4 address for this interface.
+    ///
+    /// # Arguments
+    /// - `dns`: The 4-byte DNS server IPv4 address.
     pub fn set_dns_server(&mut self, dns: [u8; 4]) {
         self.dns_server = dns;
     }
 
-    /// Determines if a target IP resides within the local subnet.
+    /// Determines whether a target IPv4 address resides within the local subnet.
+    ///
+    /// Compares the bitwise AND of `self.ip` and `target_ip` against `self.subnet_mask`.
+    ///
+    /// # Arguments
+    /// - `target_ip`: Destination 4-byte IPv4 address to test.
+    ///
+    /// # Returns
+    /// `true` if `target_ip` is on the local link subnet, or `false` if it requires gateway routing.
     pub fn is_in_subnet(&self, target_ip: [u8; 4]) -> bool {
         for i in 0..4 {
             if (self.ip[i] & self.subnet_mask[i]) != (target_ip[i] & self.subnet_mask[i]) {
@@ -106,7 +149,19 @@ impl Interface {
         true
     }
 
-    /// Resolves the destination MAC address for an IP, routing via default gateway if remote.
+    /// Resolves the destination hardware MAC address for a target IPv4 address, routing via the default gateway if remote.
+    ///
+    /// First queries [`ARP_TABLE`]; on a cache miss, broadcasts an ARP Request and polls the NIC
+    /// for up to ~1500 ms waiting for a matching ARP Reply.
+    ///
+    /// # Arguments
+    /// - `target_ip`: Destination 4-byte IPv4 address to resolve.
+    ///
+    /// # Returns
+    /// `Ok([u8; 6])` containing the resolved next-hop hardware MAC address.
+    ///
+    /// # Errors
+    /// Returns `Err` if frame serialization/transmission fails or if the ARP request times out.
     pub fn resolve_mac(&mut self, target_ip: [u8; 4]) -> Result<[u8; 6], &'static str> {
         let next_hop_ip = if self.is_in_subnet(target_ip) {
             target_ip
@@ -158,7 +213,21 @@ impl Interface {
         Err("ARP request timed out: unable to resolve target MAC address")
     }
 
-    /// Encapsulates an IPv4 payload into an Ethernet frame and transmits it over the link.
+    /// Encapsulates an IPv4 payload into an Ethernet frame and transmits it over the physical link.
+    ///
+    /// Resolves the next-hop MAC address via [`Interface::resolve_mac`], constructs the IPv4 header
+    /// and Ethernet II header, and hands the frame to the E1000 driver.
+    ///
+    /// # Arguments
+    /// - `dst_ip`: Destination 4-byte IPv4 address.
+    /// - `protocol`: Encapsulated transport-layer protocol ([`IpProtocol`]).
+    /// - `payload`: Transport-layer byte slice to encapsulate.
+    ///
+    /// # Returns
+    /// `Ok(())` when the frame has been queued and transmitted by the NIC.
+    ///
+    /// # Errors
+    /// Returns `Err` if MAC resolution fails, buffers are exceeded, or NIC transmission fails.
     pub fn send_ipv4(
         &mut self,
         dst_ip: [u8; 4],
@@ -183,6 +252,16 @@ impl Interface {
     }
 
     /// Polls the network hardware for an incoming IPv4 datagram addressed to this host.
+    ///
+    /// Automatically intercepts incoming ARP packets to update [`ARP_TABLE`] and reply to ARP requests
+    /// targeting this host's IPv4 address.
+    ///
+    /// # Arguments
+    /// - `rx_buf`: Mutable scratch buffer (recommended >= 1518 bytes) to store the received Ethernet frame.
+    ///
+    /// # Returns
+    /// `Some((src_ip, payload))` containing the sender's IPv4 address and a slice into `rx_buf`
+    /// covering the IPv4 payload, or `None` if no matching IPv4 frame was available.
     pub fn poll_ipv4<'a>(&mut self, rx_buf: &'a mut [u8]) -> Option<([u8; 4], &'a [u8])> {
         let len = e1000::receive_frame(rx_buf)?;
         let frame = EthernetFrame::parse(&rx_buf[..len])?;
@@ -233,9 +312,13 @@ impl Interface {
     }
 }
 
+/// Global spinlock-protected network interface singleton.
 pub static GLOBAL_INTERFACE: Mutex<Interface> = Mutex::new(Interface::new());
 
 /// Initializes the microkernel network subsystem and discovers attached Ethernet hardware.
+///
+/// Probes the PCI bus for an Intel E1000 NIC, records its hardware MAC address into `GLOBAL_INTERFACE`,
+/// and if carrier link is active, attempts an automatic DHCP lease acquisition via `dhcp_acquire`.
 pub fn init() {
     match e1000::init() {
         Ok(()) => {
@@ -295,6 +378,16 @@ pub fn init() {
 }
 
 /// Triggers an automated DHCP 4-way handshake to acquire an IPv4 configuration lease.
+///
+/// Broadcasts a DHCP Discover message, awaits a DHCP Offer, sends a DHCP Request, and awaits a
+/// DHCP Ack before applying the leased IPv4 address, subnet mask, default gateway, and DNS server
+/// to `GLOBAL_INTERFACE`.
+///
+/// # Returns
+/// `Ok(DhcpLease)` containing the leased network configuration parameters.
+///
+/// # Errors
+/// Returns `Err` if no Ethernet card is active, packet serialization fails, or the handshake times out.
 pub fn dhcp_acquire() -> Result<dhcp::DhcpLease, &'static str> {
     let mut iface = GLOBAL_INTERFACE.lock();
     let mac = iface.mac;
@@ -425,7 +518,17 @@ pub fn dhcp_acquire() -> Result<dhcp::DhcpLease, &'static str> {
     Err("DHCP Request timed out (no DHCP Ack received)")
 }
 
-/// Sends an ICMP Echo Request and waits for an Echo Reply, measuring RTT latency.
+/// Sends an ICMP Echo Request and waits for an Echo Reply, measuring round-trip latency in milliseconds.
+///
+/// # Arguments
+/// - `target_ip`: Destination 4-byte IPv4 address to ping.
+/// - `seq`: ICMP sequence number to tag the request with.
+///
+/// # Returns
+/// `Ok(rtt_ms)` containing the round-trip time in milliseconds.
+///
+/// # Errors
+/// Returns `Err` if the local interface has no assigned IP address, ARP/transmission fails, or the reply times out.
 pub fn ping(target_ip: [u8; 4], seq: u16) -> Result<u64, &'static str> {
     let mut iface = GLOBAL_INTERFACE.lock();
     let local_ip = iface.ip;

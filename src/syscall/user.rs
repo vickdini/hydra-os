@@ -1,3 +1,15 @@
+//! # System Call Subsystem: Userland Assembly Invocation Wrappers
+//!
+//! Provides inline assembly helpers (`syscall0`..`syscall3`) and typed wrappers (`sys_write`,
+//! `sys_sleep`, `sys_open`, `sys_ipc_send`, etc.) for userland applications executing in Ring 3.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! To invoke kernel services, unprivileged Ring 3 applications execute the x86_64 `syscall` instruction.
+//! The kernel expects the system call number in `RAX`, and arguments in `RDI`, `RSI`, `RDX`, and `R10`,
+//! with the return code placed in `RAX`. This module encapsulates the register conventions into
+//! ergonomic Rust functions, checking pointer bounds and converting return values to standard `Result` types.
+
 use crate::arch::syscall::*;
 
 /// Invokes an x86_64 system call with 0 arguments.

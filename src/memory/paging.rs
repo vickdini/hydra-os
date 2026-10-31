@@ -1,3 +1,32 @@
+//! # Memory Subsystem: x86_64 4-Level Page Table Management
+//!
+//! Provides low-level manipulation of x86_64 4-level hierarchical page tables (`PML4`, `PDPT`,
+//! `PD`, `PT`), virtual-to-physical address translation, TLB invalidation, and construction of
+//! autonomous kernel and user address spaces.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! During UEFI boot, the processor executes inside firmware-owned identity-mapped page tables.
+//! `AddressSpace` allows the kernel to take ownership of paging by cloning active firmware
+//! mappings into conventional RAM (`init_kernel_space`), creating isolated per-process `PML4`
+//! roots that share kernel mappings (`AddressSpace::create_user_space`), and mapping or
+//! updating protection flags on individual 4 KiB pages with automatic intermediate table allocation.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `AddressSpace`: Handle to a 4-level page table hierarchy rooted at a physical `PML4` frame.
+//! - `KERNEL_SPACE`: Global spinlock-protected handle to Hydra's autonomous kernel `AddressSpace`.
+//! - `init_kernel_space`: Allocates and populates the kernel's dedicated `PML4` table.
+//! - `make_user_accessible`: Grants Ring 3 (`USER_ACCESSIBLE`) permissions across a virtual range.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **CPU Registers**: Reads and writes `CR3` (page table root) and temporarily toggles `CR0.WP`
+//!   (Write Protect, bit 16) when modifying read-only boot page table structures.
+//! - **TLB Management**: Executes `invlpg` (`tlb::flush`) upon mapping, unmapping, or flag changes.
+//! - **Physical Memory**: Assumes physical page table frames are identity-mapped and accessible at
+//!   their physical addresses.
+
 use spin::Mutex;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::page_table::PageTableEntry;
@@ -11,6 +40,18 @@ pub static KERNEL_SPACE: Mutex<Option<AddressSpace>> = Mutex::new(None);
 
 /// Initializes Hydra's autonomous kernel address space by allocating a dedicated PML4
 /// in conventional memory and copying active boot mappings.
+///
+/// # Arguments
+///
+/// * `allocator` - Physical frame allocator used to allocate the new `PML4` root frame.
+///
+/// # Returns
+///
+/// The physical address (`PhysAddr`) of the newly created kernel `PML4` table.
+///
+/// # Errors
+///
+/// Returns `Err` if the frame allocator is out of physical memory.
 pub fn init_kernel_space(allocator: &mut PhysicalMemoryManager) -> Result<PhysAddr, &'static str> {
     let space = AddressSpace::create_kernel_space(allocator)?;
     let pml4 = space.pml4_physical_address();
@@ -20,11 +61,16 @@ pub fn init_kernel_space(allocator: &mut PhysicalMemoryManager) -> Result<PhysAd
 
 /// Represents an x86_64 4-level (PML4) virtual address space.
 pub struct AddressSpace {
+    /// Physical address of the 4 KiB-aligned root Page Map Level 4 (`PML4`) table.
     pml4_phys: PhysAddr,
 }
 
 impl AddressSpace {
     /// Obtains the currently active address space from the CPU CR3 register.
+    ///
+    /// # Returns
+    ///
+    /// An `AddressSpace` wrapping the physical `PML4` address currently loaded in `CR3`.
     pub fn active() -> Self {
         let (cr3_frame, _) = Cr3::read();
         Self {
@@ -33,6 +79,10 @@ impl AddressSpace {
     }
 
     /// Creates an AddressSpace handle pointing to a specific PML4 physical address.
+    ///
+    /// # Arguments
+    ///
+    /// * `pml4_phys` - Physical address of a valid 4 KiB `PML4` frame.
     pub const fn from_pml4(pml4_phys: PhysAddr) -> Self {
         Self { pml4_phys }
     }
@@ -45,6 +95,7 @@ impl AddressSpace {
     /// Switches the CPU CR3 register to make this address space active.
     ///
     /// # Safety
+    ///
     /// The caller must ensure that the address space contains valid mappings
     /// for the currently executing kernel code and stack.
     pub unsafe fn switch(&self) {
@@ -54,6 +105,11 @@ impl AddressSpace {
 
     /// In UEFI x86_64 identity-mapped environments or direct-mapped kernels,
     /// read a page table at a given physical address.
+    ///
+    /// # Safety
+    ///
+    /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
+    /// that is identity-mapped in the active address space.
     pub unsafe fn table_at<'a>(&self, phys: PhysAddr) -> &'a PageTable {
         let ptr = phys.as_u64() as *const PageTable;
         &*ptr
@@ -61,6 +117,11 @@ impl AddressSpace {
 
     /// In UEFI x86_64 identity-mapped environments or direct-mapped kernels,
     /// get a mutable reference to a page table at a given physical address.
+    ///
+    /// # Safety
+    ///
+    /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
+    /// that is identity-mapped and writable in the active address space, with exclusive access.
     pub unsafe fn table_at_mut<'a>(&self, phys: PhysAddr) -> &'a mut PageTable {
         let ptr = phys.as_u64() as *mut PageTable;
         &mut *ptr
@@ -68,6 +129,10 @@ impl AddressSpace {
 
     /// Traverses the page table entry to find the next level page table,
     /// allocating a new 4 KiB frame from `allocator` and initializing it if not present.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `entry` belongs to a valid page table in identity-mapped memory.
     unsafe fn get_or_create_next_table<'a>(
         &self,
         entry: &mut PageTableEntry,
@@ -95,6 +160,10 @@ impl AddressSpace {
     }
 
     /// Walk the 4-level page table to translate a virtual address to physical address if mapped.
+    ///
+    /// # Safety
+    ///
+    /// All page table frames referenced by this `AddressSpace` must be valid and identity-mapped.
     pub unsafe fn translate_addr(&self, addr: VirtAddr) -> Option<PhysAddr> {
         let p4 = self.table_at(self.pml4_phys);
         let p4_entry = &p4[addr.p4_index()];
@@ -135,6 +204,10 @@ impl AddressSpace {
     }
 
     /// Queries the mapped physical frame and protection flags for a given 4 KiB virtual page.
+    ///
+    /// # Safety
+    ///
+    /// All page table frames referenced by this `AddressSpace` must be valid and identity-mapped.
     pub unsafe fn translate_page(
         &self,
         page: Page<Size4KiB>,
@@ -179,6 +252,11 @@ impl AddressSpace {
     ///
     /// Allocates intermediate page tables (PDPT, PD, PT) as needed from `allocator`.
     /// Flushes the CPU Translation Lookaside Buffer (TLB) for `page`.
+    ///
+    /// # Safety
+    ///
+    /// Mapping an arbitrary virtual page to a physical frame can alias memory or corrupt
+    /// active execution state if `page` overlaps live code, stack, or page tables.
     pub unsafe fn map_page(
         &mut self,
         page: Page<Size4KiB>,
@@ -209,6 +287,10 @@ impl AddressSpace {
     /// Unmaps a 4 KiB virtual page and returns the previously mapped physical frame.
     ///
     /// Flushes the CPU Translation Lookaside Buffer (TLB) for `page`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no active references or execution depend on `page` remaining mapped.
     pub unsafe fn unmap_page(
         &mut self,
         page: Page<Size4KiB>,
@@ -250,6 +332,11 @@ impl AddressSpace {
     }
 
     /// Updates protection flags (e.g. read-write, user-accessible, no-execute) for an existing mapped page.
+    ///
+    /// # Safety
+    ///
+    /// Changing page permissions on active code or data pages can fault or expose kernel memory if
+    /// `flags` are misconfigured.
     pub unsafe fn update_flags(
         &mut self,
         page: Page<Size4KiB>,
@@ -287,6 +374,11 @@ impl AddressSpace {
 
     /// Ensures that the specified virtual address range is marked USER_ACCESSIBLE
     /// across all hierarchical page table levels (PML4, PDPT, PD, and PT / huge page).
+    ///
+    /// # Safety
+    ///
+    /// Marking a virtual range `USER_ACCESSIBLE` exposes those pages (and potentially sharing
+    /// huge pages) to unprivileged Ring 3 code.
     pub unsafe fn make_user_accessible(
         &mut self,
         virt_start: VirtAddr,
@@ -363,6 +455,11 @@ impl AddressSpace {
     ///
     /// Required for memory-mapped I/O (MMIO), such as the Local APIC,
     /// ACPI tables, and the GOP linear framebuffer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `frame` does not collide with an already mapped virtual page
+    /// in an unsafe manner.
     pub unsafe fn identity_map(
         &mut self,
         frame: PhysFrame<Size4KiB>,
@@ -375,6 +472,11 @@ impl AddressSpace {
     }
 
     /// Maps a contiguous range of physical frames to a contiguous virtual page range.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the virtual page range and physical frame range are valid
+    /// and do not alias active memory unsafely.
     pub unsafe fn map_range(
         &mut self,
         start_page: Page<Size4KiB>,

@@ -1,14 +1,31 @@
-//! # Interval Timers (`alarm`, `setitimer`, `getitimer`)
+//! # Linux Compatibility: Interval Timers (`alarm`, `setitimer`, `getitimer`)
 //!
-//! Per-process timers that raise a signal: `ITIMER_REAL` (wall time, `SIGALRM`; also what
-//! `alarm` sets), `ITIMER_VIRTUAL` (`SIGVTALRM`) and `ITIMER_PROF` (`SIGPROF`), the last
-//! two counting the process's CPU time (Hydra does not separate user from system time,
-//! so both count all of it).
+//! Implements per-process POSIX interval timers that periodically or once raise a signal
+//! upon expiration (`ITIMER_REAL` -> `SIGALRM`, `ITIMER_VIRTUAL` -> `SIGVTALRM`,
+//! `ITIMER_PROF` -> `SIGPROF`).
 //!
-//! Signals cannot be posted from the timer interrupt (posting takes locks the interrupted
-//! code may hold), so the `itimerd` kernel task, started on first use, sleeps until the
-//! earliest expiry and posts them. Resolution is the scheduler tick (10 ms). Timers
-//! survive `execve` and are not inherited across `fork`, as on Linux.
+//! ## Architectural Role & Design Rationale
+//! Delivering a Linux signal requires acquiring process table and scheduler locks, which
+//! cannot safely be done directly inside the hardware timer interrupt handler (IRQ 0)
+//! because the interrupted context may already hold those locks. Instead, a dedicated
+//! high-priority kernel daemon (`itimerd`), spawned lazily on first timer use, sleeps on
+//! [`CHANGED`] until the earliest armed timer's deadline and posts the corresponding signal
+//! from normal task context.
+//!
+//! `ITIMER_REAL` counts wall/boot ticks (10 ms resolution), while `ITIMER_VIRTUAL` and
+//! `ITIMER_PROF` count the process's accumulated CPU ticks from the scheduler. Interval
+//! timers survive `execve(2)` and are not inherited across `fork(2)`, matching Linux semantics.
+//!
+//! ## Key Types & Interfaces
+//! - [`sys_alarm()`]: Implements `alarm(2)` in whole seconds on `ITIMER_REAL`.
+//! - [`sys_getitimer()`]: Implements `getitimer(2)` returning current remaining and interval timevals.
+//! - [`sys_setitimer()`]: Implements `setitimer(2)` arming or disarming any of the three process timers.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel syscall handlers and `itimerd` background daemon)
+//! - Hardware Interaction: Reads PIT tick counter ([`crate::arch::pit::ticks`])
+//! - Concurrency: Global [`TIMERS`] map guarded by [`spin::Mutex`] and coordinated with
+//!   `itimerd` via the [`CHANGED`] wait queue.
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -16,42 +33,53 @@ use spin::Mutex;
 
 use crate::task::wait::WaitQueue;
 
+/// Negative errno for invalid `which` timer index or out-of-range `timeval` field.
 const EINVAL: i64 = -22;
+/// Negative errno for invalid userland `struct itimerval` pointer.
 const EFAULT: i64 = -14;
 
+/// Timer index for real-time (wall-clock) countdown delivering `SIGALRM`.
 const ITIMER_REAL: u64 = 0;
+/// Maximum valid timer index (`ITIMER_PROF = 2`, delivering `SIGPROF`).
 const ITIMER_PROF: u64 = 2;
 
+/// Number of microseconds per scheduler PIT tick (10 ms = 10,000 us).
 const US_PER_TICK: u64 = 10_000;
 
-/// One timer: next expiry (in its clock's ticks) and reload interval (0 = one-shot).
+/// State of a single armed interval timer: next expiry (in its clock's ticks) and reload interval (`0` = one-shot).
 #[derive(Clone, Copy, Default)]
 struct Timer {
+    /// Absolute tick value (on the timer's respective clock) at which the timer next expires.
     next: u64,
+    /// Periodic reload interval in ticks (`0` for a single-shot timer).
     interval: u64,
 }
 
+/// Holds the three POSIX interval timers (`ITIMER_REAL`, `ITIMER_VIRTUAL`, `ITIMER_PROF`) for a single process.
 #[derive(Default)]
 struct ProcTimers {
-    /// Indexed by `ITIMER_*`.
+    /// Array of timers indexed by `ITIMER_*` (`0..3`).
     t: [Option<Timer>; 3],
 }
 
+/// Global map from process ID (`tgid`) to its active [`ProcTimers`].
 static TIMERS: Mutex<BTreeMap<u64, ProcTimers>> = Mutex::new(BTreeMap::new());
-/// Wakes `itimerd` when a timer is set (its next deadline may be earlier).
+/// Wait queue waking `itimerd` whenever a process arms or updates a timer with a potentially earlier deadline.
 static CHANGED: WaitQueue = WaitQueue::new();
+/// Atomic flag ensuring the `itimerd` background kernel task is spawned at most once.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Returns the current boot tick count from the PIT.
 fn now() -> u64 {
     crate::arch::pit::ticks()
 }
 
-/// CPU time of process `pid` in ticks.
+/// Returns the total CPU time consumed by process `pid` in scheduler ticks.
 fn cpu_ticks(pid: u64) -> u64 {
     crate::task::SCHEDULER.lock().process_ticks(pid)
 }
 
-/// The clock a timer counts on, in ticks.
+/// Returns the current value of the clock backing timer `which` for process `pid`, in ticks.
 fn clock(which: usize, pid: u64) -> u64 {
     if which == ITIMER_REAL as usize {
         now()
@@ -60,6 +88,7 @@ fn clock(which: usize, pid: u64) -> u64 {
     }
 }
 
+/// Maps timer index `which` (`0..3`) to the Linux signal number it raises on expiry.
 fn signal_for(which: usize) -> u32 {
     match which {
         0 => super::proc::SIGALRM,
@@ -68,6 +97,7 @@ fn signal_for(which: usize) -> u32 {
     }
 }
 
+/// Main loop of the `itimerd` kernel daemon that checks armed interval timers and posts signals.
 fn itimerd_main() {
     loop {
         CHANGED.register();
@@ -123,13 +153,14 @@ fn itimerd_main() {
     }
 }
 
+/// Lazily spawns the `itimerd` kernel thread on the first call to arm a timer.
 fn ensure_started() {
     if !STARTED.swap(true, Ordering::AcqRel) {
         crate::task::spawn("itimerd", itimerd_main, crate::task::TaskPriority::High);
     }
 }
 
-/// (remaining, interval) of a timer in ticks.
+/// Returns `(remaining_ticks, interval_ticks)` for timer `which` of process `pid`.
 fn get(pid: u64, which: usize) -> (u64, u64) {
     let t = TIMERS.lock().get(&pid).and_then(|p| p.t[which]);
     match t {
@@ -138,7 +169,7 @@ fn get(pid: u64, which: usize) -> (u64, u64) {
     }
 }
 
-/// Arms (`value` > 0) or disarms a timer; values in ticks.
+/// Arms (`value > 0`) or disarms (`value == 0`) timer `which` for process `pid` with values in ticks.
 fn set(pid: u64, which: usize, value: u64, interval: u64) {
     let base = clock(which, pid);
     let mut all = TIMERS.lock();
@@ -151,6 +182,7 @@ fn set(pid: u64, which: usize, value: u64, interval: u64) {
     CHANGED.wake_all();
 }
 
+/// Validates a `(tv_sec, tv_usec)` pair and converts it into scheduler ticks (rounding up).
 fn ticks_from_timeval(sec: i64, usec: i64) -> Result<u64, i64> {
     if sec < 0 || !(0..1_000_000).contains(&usec) {
         return Err(EINVAL);
@@ -159,7 +191,7 @@ fn ticks_from_timeval(sec: i64, usec: i64) -> Result<u64, i64> {
     Ok((us + US_PER_TICK - 1) / US_PER_TICK)
 }
 
-/// Writes `struct itimerval` {interval, value} (ticks to timevals).
+/// Writes a 32-byte `struct itimerval { it_interval, it_value }` to user address `ptr`.
 fn put_itimerval(ptr: u64, interval: u64, value: u64) -> i64 {
     if !crate::memory::vm::prefault_current(ptr, 32, true) {
         return EFAULT;
@@ -175,7 +207,16 @@ fn put_itimerval(ptr: u64, interval: u64, value: u64) -> i64 {
     0
 }
 
-/// `alarm(seconds)`: returns the seconds left on the previous alarm (rounded up).
+/// System call handler for `alarm(seconds)` (`SYSCALL 37`).
+///
+/// Schedules a one-shot `SIGALRM` delivery in `seconds` seconds (or cancels any pending alarm
+/// when `seconds == 0`), returning the number of seconds remaining on any previously armed alarm.
+///
+/// # Arguments
+/// * `seconds` - Countdown duration in seconds (`0` disarms the alarm).
+///
+/// # Returns
+/// Whole seconds remaining until the previous `ITIMER_REAL` timer would have expired (rounded up).
 pub fn sys_alarm(seconds: u64) -> i64 {
     let (_, pid) = super::proc::current_ids();
     let (left, _) = get(pid, 0);
@@ -183,7 +224,14 @@ pub fn sys_alarm(seconds: u64) -> i64 {
     ((left + 99) / 100) as i64
 }
 
-/// `getitimer(which, curr_value)`.
+/// System call handler for `getitimer(which, curr_value)` (`SYSCALL 36`).
+///
+/// # Arguments
+/// * `which` - Timer selector: `ITIMER_REAL` (`0`), `ITIMER_VIRTUAL` (`1`), or `ITIMER_PROF` (`2`).
+/// * `ptr` - User virtual address of the destination `struct itimerval`.
+///
+/// # Returns
+/// `0` on success, `-EINVAL` if `which > 2`, or `-EFAULT` if `ptr` is unmapped.
 pub fn sys_getitimer(which: u64, ptr: u64) -> i64 {
     if which > ITIMER_PROF {
         return EINVAL;
@@ -193,7 +241,18 @@ pub fn sys_getitimer(which: u64, ptr: u64) -> i64 {
     put_itimerval(ptr, interval, value)
 }
 
-/// `setitimer(which, new_value, old_value)`.
+/// System call handler for `setitimer(which, new_value, old_value)` (`SYSCALL 38`).
+///
+/// Arms or disarms the specified interval timer for the calling process and optionally
+/// writes the previous timer setting to `old_ptr`.
+///
+/// # Arguments
+/// * `which` - Timer selector: `ITIMER_REAL` (`0`), `ITIMER_VIRTUAL` (`1`), or `ITIMER_PROF` (`2`).
+/// * `new_ptr` - User virtual address of the new `struct itimerval` (`0` disarms the timer).
+/// * `old_ptr` - Optional user virtual address to receive the previous `struct itimerval` (`0` if unused).
+///
+/// # Returns
+/// `0` on success, `-EINVAL` if `which > 2` or a `timeval` field is invalid, or `-EFAULT` on bad pointer.
 pub fn sys_setitimer(which: u64, new_ptr: u64, old_ptr: u64) -> i64 {
     if which > ITIMER_PROF {
         return EINVAL;

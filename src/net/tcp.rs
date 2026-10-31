@@ -13,33 +13,59 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`TcpFlags`]: Bitmask constants for SYN, ACK, FIN, RST, and PSH.
+//! - [`TcpFlags`]: Bitmask constants for SYN, ACK, FIN, RST, PSH, and URG.
 //! - [`TcpPacket`]: Structured representation of a TCP segment.
 //! - [`compute_tcp_checksum()`]: Calculates the 16-bit checksum including the IPv4 pseudo-header.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Zero-allocation (`no_std`) TCP segment parser, serializer, and pseudo-header checksum calculator.
 
+/// Namespace for 8-bit TCP control flag bitmasks (RFC 793).
 pub struct TcpFlags;
 
 impl TcpFlags {
+    /// No more data from sender (`bit 0`).
     pub const FIN: u8 = 1 << 0;
+    /// Synchronize sequence numbers (`bit 1`).
     pub const SYN: u8 = 1 << 1;
+    /// Reset the connection (`bit 2`).
     pub const RST: u8 = 1 << 2;
+    /// Push function (`bit 3`).
     pub const PSH: u8 = 1 << 3;
+    /// Acknowledgment field significant (`bit 4`).
     pub const ACK: u8 = 1 << 4;
+    /// Urgent pointer field significant (`bit 5`).
     pub const URG: u8 = 1 << 5;
 }
 
+/// Structured zero-copy representation of a TCP segment.
 pub struct TcpPacket<'a> {
+    /// Source 16-bit TCP port number.
     pub src_port: u16,
+    /// Destination 16-bit TCP port number.
     pub dst_port: u16,
+    /// 32-bit sequence number of the first data octet in this segment (or ISN if `SYN` is set).
     pub seq_num: u32,
+    /// 32-bit acknowledgment number (next sequence number expected by the sender).
     pub ack_num: u32,
+    /// Bitmask of [`TcpFlags`] control bits.
     pub flags: u8,
+    /// 16-bit receive window size advertised by the sender.
     pub window_size: u16,
+    /// Borrowed slice containing the segment's application data payload.
     pub payload: &'a [u8],
 }
 
 impl<'a> TcpPacket<'a> {
     /// Parses a TCP segment from an IPv4 payload slice.
+    ///
+    /// # Arguments
+    /// - `buf`: Raw IPv4 payload slice.
+    ///
+    /// # Returns
+    /// `Some(TcpPacket)` if `buf` is at least 20 bytes and contains a valid data offset, or `None` otherwise.
     pub fn parse(buf: &'a [u8]) -> Option<Self> {
         if buf.len() < 20 {
             return None;
@@ -77,7 +103,25 @@ impl<'a> TcpPacket<'a> {
         })
     }
 
-    /// Serializes a TCP segment including the 20-byte standard header and pseudo-header checksum.
+    /// Serializes a TCP segment including the 20-byte standard header and IPv4 pseudo-header checksum.
+    ///
+    /// # Arguments
+    /// - `src_ip`: Source 4-byte IPv4 address (for the pseudo-header checksum).
+    /// - `dst_ip`: Destination 4-byte IPv4 address (for the pseudo-header checksum).
+    /// - `src_port`: Source 16-bit TCP port.
+    /// - `dst_port`: Destination 16-bit TCP port.
+    /// - `seq_num`: 32-bit sequence number.
+    /// - `ack_num`: 32-bit acknowledgment number.
+    /// - `flags`: Bitmask of [`TcpFlags`].
+    /// - `window_size`: 16-bit advertised receive window size.
+    /// - `payload`: Segment data payload slice.
+    /// - `out_buf`: Destination buffer (must be at least `20 + payload.len()` bytes).
+    ///
+    /// # Returns
+    /// `Ok(total_len)` containing the total serialized TCP segment length in bytes.
+    ///
+    /// # Errors
+    /// Returns `Err` if `out_buf` is smaller than `20 + payload.len()`.
     pub fn serialize(
         src_ip: [u8; 4],
         dst_ip: [u8; 4],
@@ -131,6 +175,14 @@ impl<'a> TcpPacket<'a> {
 }
 
 /// Computes the 16-bit TCP checksum across the 12-byte IPv4 pseudo-header and TCP segment.
+///
+/// # Arguments
+/// - `src_ip`: Source 4-byte IPv4 address.
+/// - `dst_ip`: Destination 4-byte IPv4 address.
+/// - `tcp_data`: Serialized TCP header and payload (with the checksum field set to `0`).
+///
+/// # Returns
+/// 16-bit one's complement TCP checksum.
 pub fn compute_tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_data: &[u8]) -> u16 {
     let mut pseudo = [0u8; 12];
     pseudo[0..4].copy_from_slice(&src_ip);

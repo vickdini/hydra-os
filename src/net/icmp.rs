@@ -12,22 +12,42 @@
 //!
 //! - [`IcmpType`]: Enum distinguishing Echo Request, Echo Reply, and other ICMP control messages.
 //! - [`IcmpPacket`]: Structured representation of an ICMP packet with header and checksum.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Uses [`super::ipv4::compute_checksum`] for RFC 792 16-bit one's complement checksums.
 
 use super::ipv4::compute_checksum;
 
+/// ICMP control message type identifiers (RFC 792).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcmpType {
+    /// Echo Reply (`0`).
     EchoReply,
+    /// Echo Request (`8`).
     EchoRequest,
+    /// Destination Unreachable (`3`).
     DestinationUnreachable,
+    /// Unrecognized or unhandled ICMP message type.
     Unknown(u8),
 }
 
 impl IcmpType {
+    /// Raw ICMP type code for Echo Reply (`0`).
     pub const ECHO_REPLY: u8 = 0;
+    /// Raw ICMP type code for Destination Unreachable (`3`).
     pub const DEST_UNREACHABLE: u8 = 3;
+    /// Raw ICMP type code for Echo Request (`8`).
     pub const ECHO_REQUEST: u8 = 8;
 
+    /// Converts a raw 8-bit ICMP type field into an [`IcmpType`].
+    ///
+    /// # Arguments
+    /// - `val`: Raw 8-bit type code from the ICMP header.
+    ///
+    /// # Returns
+    /// The corresponding [`IcmpType`] variant.
     pub fn from_u8(val: u8) -> Self {
         match val {
             Self::ECHO_REPLY => IcmpType::EchoReply,
@@ -37,6 +57,7 @@ impl IcmpType {
         }
     }
 
+    /// Returns the raw 8-bit numeric code for this [`IcmpType`].
     pub fn as_u8(&self) -> u8 {
         match *self {
             IcmpType::EchoReply => Self::ECHO_REPLY,
@@ -47,16 +68,28 @@ impl IcmpType {
     }
 }
 
+/// Structured zero-copy representation of an ICMP packet.
 pub struct IcmpPacket<'a> {
+    /// ICMP message type (`EchoRequest`, `EchoReply`, etc.).
     pub msg_type: IcmpType,
+    /// ICMP subtype code.
     pub code: u8,
+    /// 16-bit Echo Request/Reply identifier.
     pub identifier: u16,
+    /// 16-bit Echo Request/Reply sequence number.
     pub sequence: u16,
+    /// Borrowed slice containing the ICMP data payload.
     pub payload: &'a [u8],
 }
 
 impl<'a> IcmpPacket<'a> {
     /// Parses an ICMP packet from an IPv4 payload slice.
+    ///
+    /// # Arguments
+    /// - `buf`: Raw IPv4 payload slice.
+    ///
+    /// # Returns
+    /// `Some(IcmpPacket)` if `buf` is at least 8 bytes long, or `None` otherwise.
     pub fn parse(buf: &'a [u8]) -> Option<Self> {
         if buf.len() < 8 {
             return None;
@@ -77,7 +110,19 @@ impl<'a> IcmpPacket<'a> {
         })
     }
 
-    /// Serializes an ICMP Echo Request into the provided buffer with computed checksum.
+    /// Serializes an ICMP Echo Request into the provided buffer with a computed RFC 1071 checksum.
+    ///
+    /// # Arguments
+    /// - `identifier`: 16-bit echo identifier.
+    /// - `sequence`: 16-bit echo sequence number.
+    /// - `payload`: Echo data bytes to include after the 8-byte header.
+    /// - `out_buf`: Destination byte slice (must be at least `8 + payload.len()` bytes).
+    ///
+    /// # Returns
+    /// `Ok(total_len)` containing the total number of bytes written into `out_buf`.
+    ///
+    /// # Errors
+    /// Returns `Err` if `out_buf` is smaller than `8 + payload.len()`.
     pub fn serialize_echo_request(
         identifier: u16,
         sequence: u16,

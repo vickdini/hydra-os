@@ -1,3 +1,25 @@
+//! # Synchronization Subsystem: Counting Semaphore
+//!
+//! Implements [`Semaphore`], a counting semaphore primitive that bounds concurrent access to a
+//! resource pool and blocks tasks when no permits are available.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! A counting semaphore maintains an atomic permit counter (`AtomicIsize`). Tasks calling
+//! [`Semaphore::acquire`] decrement the permit count atomically if positive; when the count
+//! reaches zero, the caller registers itself in the internal [`WaitQueue`] and blocks until a
+//! corresponding [`Semaphore::release`] increments the counter and wakes a waiter.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`Semaphore`]: Counting semaphore supporting [`Semaphore::acquire`], [`Semaphore::try_acquire`],
+//!   and [`Semaphore::release`].
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Atomics**: Uses `AtomicIsize` with `compare_exchange_weak` (`AcqRel`/`Acquire`) and `fetch_add` (`Release`).
+//! - **Scheduler**: Suspends blocked callers via [`crate::task::block_current`].
+
 use core::sync::atomic::{AtomicIsize, Ordering};
 use spin::Mutex as SpinLock;
 
@@ -6,7 +28,9 @@ use crate::task::{self, TaskId};
 
 /// Counting Semaphore with task blocking.
 pub struct Semaphore {
+    /// Number of currently available permits.
     permits: AtomicIsize,
+    /// Spinlock-protected FIFO queue of tasks blocked waiting for a permit.
     waiters: SpinLock<WaitQueue>,
 }
 

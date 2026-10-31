@@ -1,12 +1,30 @@
-//! # Internet Sockets (`AF_INET`)
+//! # Linux Compatibility: IPv4 Internet Sockets (`AF_INET`)
 //!
-//! TCP (`SOCK_STREAM`) and UDP (`SOCK_DGRAM`) sockets for Linux processes, backed by the
-//! transport engine in [`crate::net::stack`]. Blocking operations sleep on the
-//! connection's wait queue until the network task reports a change, and stop for signals;
-//! non-blocking sockets return `EAGAIN`/`EINPROGRESS`.
+//! Provides TCP (`SOCK_STREAM`) and UDP (`SOCK_DGRAM`) sockets for Linux processes,
+//! backed by the in-kernel TCP/IP transport engine in [`crate::net::stack`].
 //!
-//! IPv6 is not available: `AF_INET6` sockets fail with `EAFNOSUPPORT`, which makes
-//! resolvers and clients fall back to IPv4.
+//! ## Architectural Role & Design Rationale
+//! Networking applications (`curl`, `apt`, DNS resolvers, SSH clients) interact with the
+//! network through standard BSD/POSIX socket system calls (`socket`, `connect`, `bind`,
+//! `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`). Blocking operations
+//! register on the underlying connection's [`WaitQueue`](crate::task::wait::WaitQueue) and
+//! sleep until the network driver task signals packet arrival or state transitions, waking
+//! early with `ERESTARTSYS` if a signal arrives.
+//!
+//! IPv6 is intentionally rejected at socket creation (`AF_INET6` returns `-EAFNOSUPPORT`),
+//! causing dual-stack resolvers (`getaddrinfo`) to immediately fall back to IPv4.
+//!
+//! ## Key Types & Interfaces
+//! - [`InetSocket`]: Per-descriptor `AF_INET` socket state wrapping a TCP or UDP handle in [`crate::net::stack`].
+//! - [`dispatch()`]: Intercepts socket system calls targeting `AF_INET` descriptors.
+//! - [`read()`] / [`write()`]: Stream and datagram I/O paths when accessed via standard VFS `read`/`write`.
+//! - [`pending_bytes()`]: Implements `FIONREAD` byte-available queries.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Indirectly kicks the network interface ([`crate::net::stack::kick`])
+//!   to poll VirtIO-Net / NIC rings.
+//! - Concurrency: Each [`InetSocket`] is wrapped in `Arc<Mutex<InetSocket>>` inside the file table.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -16,44 +34,77 @@ use crate::fs::FileDescriptor;
 use crate::memory::vm::prefault_current;
 use crate::net::stack;
 
+/// Address family constant for IPv4 Internet sockets.
 const AF_INET: u32 = 2;
+/// Address family constant for IPv6 sockets (unsupported; rejected with `EAFNOSUPPORT`).
 const AF_INET6: u32 = 10;
+/// Socket type constant for sequenced, reliable, two-way byte streams (TCP).
 const SOCK_STREAM: u32 = 1;
+/// Socket type constant for connectionless datagrams (UDP).
 const SOCK_DGRAM: u32 = 2;
+/// Socket type flag: enable non-blocking mode (`O_NONBLOCK`) on the new socket descriptor.
 const SOCK_NONBLOCK: u32 = 0o4000;
+/// Socket type flag: atomically mark the new socket descriptor close-on-exec (`FD_CLOEXEC`).
 const SOCK_CLOEXEC: u32 = 0o2000000;
 
+/// Message flag: peek at incoming data without removing it from the receive queue.
 const MSG_PEEK: u64 = 0x2;
+/// Message flag: perform a single send/receive operation without blocking.
 const MSG_DONTWAIT: u64 = 0x40;
+/// Message flag returned in `msg_flags` when a UDP datagram was larger than the supplied buffer.
 const MSG_TRUNC: u64 = 0x20;
 
+/// Negative errno for non-blocking operation that cannot complete immediately.
 const EAGAIN: i64 = -11;
+/// Negative errno for invalid userland buffer or address pointer.
 const EFAULT: i64 = -14;
+/// Negative errno for invalid argument or malformed `sockaddr_in`.
 const EINVAL: i64 = -22;
+/// Negative errno for per-process file descriptor table full.
 const EMFILE: i64 = -24;
+/// Negative errno for socket operation attempted on a non-socket descriptor.
 const ENOTSOCK: i64 = -88;
+/// Negative errno for UDP send on an unconnected socket without a destination address.
 const EDESTADDRREQ: i64 = -89;
+/// Negative errno for unsupported socket type or protocol within `AF_INET`.
 const EPROTONOSUPPORT: i64 = -93;
+/// Negative errno for unsupported socket operation (e.g., `listen`/`accept` on client-only stack).
 const EOPNOTSUPP: i64 = -95;
+/// Negative errno for unsupported address family (such as `AF_INET6`).
 const EAFNOSUPPORT: i64 = -97;
+/// Negative errno for `connect` called on an already-connected TCP socket.
 const EISCONN: i64 = -106;
+/// Negative errno for I/O or `getpeername` on an unconnected socket.
 const ENOTCONN: i64 = -107;
+/// Negative errno for non-blocking `connect` while a previous connection attempt is still pending.
 const EALREADY: i64 = -114;
+/// Negative errno for non-blocking `connect` initiated asynchronously.
 const EINPROGRESS: i64 = -115;
+/// Negative errno for write on a broken TCP connection (`SIGPIPE` is also posted unless `MSG_NOSIGNAL`).
 const EPIPE: i64 = -32;
 
-/// An `AF_INET` socket.
+/// Represents an open Linux `AF_INET` (IPv4 TCP or UDP) socket.
+///
+/// # Concurrency & Thread Safety
+/// Guarded by `Arc<Mutex<InetSocket>>` in the file descriptor table. Blocking calls release
+/// this mutex before sleeping on the underlying transport wait queue in [`crate::net::stack`].
+///
+/// # Lifetime & Cleanup
+/// When dropped, closes any associated TCP connection or UDP port binding in [`crate::net::stack`].
 pub struct InetSocket {
+    /// `true` for TCP (`SOCK_STREAM`), `false` for UDP (`SOCK_DGRAM`).
     stream: bool,
+    /// Whether `O_NONBLOCK` is enabled on this socket description.
     pub nonblock: bool,
-    /// TCP connection handle once `connect` was called.
+    /// Underlying TCP connection handle in [`crate::net::stack`] once `connect` has been called.
     tcp: Option<u32>,
-    /// UDP endpoint handle (created on bind, connect or first send).
+    /// Underlying UDP endpoint handle in [`crate::net::stack`] (created on `bind`, `connect`, or first send).
     udp: Option<u32>,
-    /// Port requested with `bind` before the endpoint exists.
+    /// Local port number requested via `bind(2)` before the transport endpoint is opened.
     bound_port: u16,
-    /// Default destination of a connected UDP socket.
+    /// Default remote `(ip, port)` destination for a connected UDP socket.
     peer: Option<([u8; 4], u16)>,
+    /// Whether the read half of the socket has been shut down via `shutdown(SHUT_RD / SHUT_RDWR)`.
     shut_rd: bool,
 }
 
@@ -69,13 +120,14 @@ impl Drop for InetSocket {
 }
 
 impl InetSocket {
-    /// Readiness for poll/select/epoll: POLLIN 0x1, POLLOUT 0x4, POLLERR 0x8, POLLHUP 0x10.
-    /// The wait queue that announces readiness changes (`None` before an endpoint exists:
-    /// an unconnected socket's readiness only changes through the caller's own calls).
+    /// Returns the transport [`WaitQueue`](crate::task::wait::WaitQueue) that announces readiness
+    /// changes for this socket (`None` before an underlying TCP/UDP endpoint exists).
     pub fn wait_queue(&self) -> Option<Arc<crate::task::wait::WaitQueue>> {
         self.tcp.or(self.udp).and_then(stack::wait_queue)
     }
 
+    /// Evaluates current `poll` / `select` / `epoll` readiness bitmask (`POLLIN = 0x1`,
+    /// `POLLOUT = 0x4`, `POLLERR = 0x8`, `POLLHUP = 0x10`).
     pub fn poll_events(&self) -> u32 {
         if let Some(id) = self.tcp {
             let (r, w, hup, err) = stack::tcp_poll(id);
@@ -88,6 +140,7 @@ impl InetSocket {
         0x4 | readable as u32
     }
 
+    /// Lazily allocates or returns the existing UDP endpoint handle in [`crate::net::stack`].
     fn udp_id(&mut self) -> Result<u32, i64> {
         if let Some(id) = self.udp {
             return Ok(id);
@@ -98,6 +151,7 @@ impl InetSocket {
     }
 }
 
+/// Copies `len` bytes from userland address `ptr` into a kernel [`Vec<u8>`].
 fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     if ptr == 0 || !prefault_current(ptr, len as u64, false) {
         return Err(EFAULT);
@@ -107,6 +161,7 @@ fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     Ok(v)
 }
 
+/// Copies `data` from the kernel into userland address `ptr`.
 fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     if ptr == 0 || !prefault_current(ptr, data.len() as u64, true) {
         return Err(EFAULT);
@@ -115,7 +170,7 @@ fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
-/// Parses a `sockaddr_in`; `Ok(None)` for `AF_UNSPEC` (disconnect).
+/// Parses a userland `struct sockaddr_in` at `(ptr, len)`, returning `Ok(None)` for `AF_UNSPEC` (disconnect).
 fn read_sockaddr(ptr: u64, len: u64) -> Result<Option<([u8; 4], u16)>, i64> {
     if len < 2 {
         return Err(EINVAL);
@@ -135,7 +190,7 @@ fn read_sockaddr(ptr: u64, len: u64) -> Result<Option<([u8; 4], u16)>, i64> {
     Ok(Some(([raw[4], raw[5], raw[6], raw[7]], port)))
 }
 
-/// Writes a `sockaddr_in` and its length (`addrlen` is in/out).
+/// Writes a 16-byte `struct sockaddr_in` and its length into userland (`len_ptr` is in/out).
 fn write_sockaddr(ptr: u64, len_ptr: u64, ip: [u8; 4], port: u16) -> Result<(), i64> {
     if ptr == 0 || len_ptr == 0 {
         return Ok(());
@@ -149,6 +204,7 @@ fn write_sockaddr(ptr: u64, len_ptr: u64, ip: [u8; 4], port: u16) -> Result<(), 
     copy_out(len_ptr, &16u32.to_le_bytes())
 }
 
+/// Looks up file descriptor `fd` in the current task and returns its [`InetSocket`] if it is an `AF_INET` socket.
 fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(FileDescriptor::Inet(s)) => Some(s.clone()),
@@ -156,8 +212,8 @@ fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
     })
 }
 
-/// Waits until `ready()` gives a result for connection/endpoint `id`, honouring
-/// non-blocking mode and signals.
+/// Waits until `ready()` returns `Some(...)` for transport endpoint `id`, honoring
+/// non-blocking mode and pending signals.
 fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
     let mut waits = crate::task::wait::WaitSet::new();
     match stack::wait_queue(id) {
@@ -180,6 +236,7 @@ fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result
     }
 }
 
+/// Initiates or completes a TCP/UDP `connect(2)` operation on `sock`.
 fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
     let dest = match read_sockaddr(addr, len) {
         Ok(d) => d,
@@ -236,6 +293,7 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
     }
 }
 
+/// Transmits `data` over a TCP stream or UDP datagram socket.
 fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u8; 4], u16)>) -> i64 {
     let (stream, nonblock, tcp) = {
         let s = sock.lock();
@@ -291,7 +349,7 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
     }
 }
 
-/// Receives into `buf`; returns (bytes, source) — source only for datagrams.
+/// Receives data into `buf`, returning `(bytes_copied, optional_udp_source, was_truncated)`.
 fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(usize, Option<([u8; 4], u16)>, bool), i64> {
     let (stream, nonblock, tcp, shut_rd) = {
         let s = sock.lock();
@@ -323,7 +381,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
     Ok((n, Some((ip, port)), data.len() > n))
 }
 
-/// Reads `msghdr` iovecs: (base, len) pairs.
+/// Reads an array of `struct iovec` `(iov_base, iov_len)` pairs from user memory.
 fn read_iovecs(iov: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
     if count > 1024 {
         return Err(EINVAL);
@@ -335,6 +393,7 @@ fn read_iovecs(iov: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
         .collect())
 }
 
+/// Implements `sendmsg(2)` on an [`InetSocket`] by gathering all `msg_iov` buffers.
 fn sendmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -365,6 +424,7 @@ fn sendmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     send(sock, &data, flags, dest)
 }
 
+/// Implements `recvmsg(2)` on an [`InetSocket`] by scattering received data across `msg_iov`.
 fn recvmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -405,7 +465,14 @@ fn recvmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     n as i64
 }
 
-/// Socket I/O through `read`/`write` (and their vectored forms) on an `AF_INET` socket.
+/// Reads bytes from an `AF_INET` socket through `read(2)` or `readv(2)`.
+///
+/// # Arguments
+/// * `sock` - Shared reference to the [`InetSocket`].
+/// * `buf` - Destination buffer slice.
+///
+/// # Returns
+/// Number of bytes read on success, `0` on EOF, or a negative errno on failure.
 pub fn read(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8]) -> i64 {
     match recv(sock, buf, 0) {
         Ok((n, _, _)) => n as i64,
@@ -413,11 +480,22 @@ pub fn read(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8]) -> i64 {
     }
 }
 
+/// Writes bytes to an `AF_INET` socket through `write(2)` or `writev(2)`.
+///
+/// # Arguments
+/// * `sock` - Shared reference to the [`InetSocket`].
+/// * `data` - Source byte slice to transmit.
+///
+/// # Returns
+/// Number of bytes sent on success, or a negative errno on failure.
 pub fn write(sock: &Arc<Mutex<InetSocket>>, data: &[u8]) -> i64 {
     send(sock, data, 0, None)
 }
 
-/// Bytes ready to read (`FIONREAD`).
+/// Returns the number of unread bytes currently queued on `sock` (for `ioctl(FIONREAD)`).
+///
+/// # Arguments
+/// * `sock` - Shared reference to the [`InetSocket`].
 pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
     stack::kick();
     let s = sock.lock();
@@ -428,7 +506,18 @@ pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
     s.udp.and_then(|id| stack::udp_recv(id, true)).map_or(0, |(_, _, d)| d.len())
 }
 
-/// Handles socket system calls on `AF_INET` sockets; `None` for other socket families.
+/// Dispatches Linux socket system calls that operate on `AF_INET` (or `AF_INET6`) sockets.
+///
+/// Returns `None` if `num` is not a socket syscall or if the target file descriptor is not
+/// an `AF_INET` socket (allowing the `AF_UNIX` dispatcher to handle it).
+///
+/// # Arguments
+/// * `num` - Linux `x86_64` system call number.
+/// * `a` - The six 64-bit system call register arguments.
+///
+/// # Returns
+/// * `Some(result)` if the call was handled by the `AF_INET` subsystem.
+/// * `None` if the call should be delegated to another subsystem.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     if num == 41 {
         // socket(domain, type, protocol)
@@ -624,4 +713,3 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         _ => ENOTSOCK,
     })
 }
-

@@ -1,9 +1,28 @@
+//! # Shell Command: CPU Control Register Inspector (`cpu`)
+//!
+//! Reads and displays the current x86_64 architectural control registers (`CR0`, `CR2`, `CR3`,
+//! and `CR4`) via [`crate::arch::cpu::read_state()`].
+//!
+//! ## Architectural Role & Design Rationale
+//! Verifying paging configuration, write-protection enforcement (`CR0.WP`), active 4-level
+//! page table roots (`CR3`), and last page-fault linear addresses (`CR2`) is essential during
+//! kernel debugging. [`CpuCommand`] exposes these hardware registers in a human-readable format.
+//!
+//! ## Key Types & Interfaces
+//! - [`CpuCommand`]: Implements the `cpu` built-in command.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (executes privileged `mov crX` instructions via [`crate::arch::cpu`])
+//! - Hardware Interaction: Reads `CR0`, `CR2`, `CR3`, and `CR4` registers
+//! - Concurrency: Stateless read-only snapshot of the executing processor's control registers
+
 use uefi::proto::console::text::Color;
 use crate::arch;
 use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Built-in `cpu` command that displays x86_64 control registers (`CR0`, `CR2`, `CR3`, `CR4`).
 pub struct CpuCommand;
 
 impl Command for CpuCommand {

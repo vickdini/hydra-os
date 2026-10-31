@@ -20,12 +20,15 @@ const O_CLOEXEC_FLAG: bool = true;
 /// Woken whenever a process exits (pidfd readiness).
 pub static EXIT_WQ: WaitQueue = WaitQueue::new();
 
+/// Represents a Linux process file descriptor (`pidfd`).
 pub struct PidFd {
+    /// Monitored process identifier.
     pub pid: u64,
     nonblock: AtomicBool,
 }
 
 impl PidFd {
+    /// Polls readiness events on this process descriptor (reports `POLLIN` when target has exited).
     pub fn poll_events(&self) -> u32 {
         if super::proc::has_exited(self.pid) {
             0x0001 // POLLIN: the process exited
@@ -34,10 +37,12 @@ impl PidFd {
         }
     }
 
+    /// Sets or clears non-blocking behavior on this descriptor.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
+    /// Queries whether non-blocking mode is currently enabled on this descriptor.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }

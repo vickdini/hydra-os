@@ -22,6 +22,7 @@ const SFD_NONBLOCK: u64 = 0o4000;
 const SFD_CLOEXEC: u64 = 0o2000000;
 const SIGINFO_SIZE: usize = 128;
 
+/// Represents an active Linux signal file descriptor (`signalfd`).
 pub struct SignalFd {
     mask: AtomicU64,
     nonblock: AtomicBool,
@@ -30,6 +31,7 @@ pub struct SignalFd {
 }
 
 impl SignalFd {
+    /// Polls readiness of queued pending signals matching the descriptor's signal mask.
     pub fn poll_events(&self) -> u32 {
         if super::proc::pending_for(self.owner, self.mask.load(Ordering::Relaxed)) {
             0x0001
@@ -38,14 +40,17 @@ impl SignalFd {
         }
     }
 
+    /// Sets or clears non-blocking I/O mode on this signal descriptor.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
+    /// Queries whether non-blocking mode is currently enabled on this descriptor.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
+    /// Reads structured `signalfd_siginfo` records for pending delivered signals.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
         if buf.len() < SIGINFO_SIZE {
             return EINVAL;

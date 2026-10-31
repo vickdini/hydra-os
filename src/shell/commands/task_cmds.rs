@@ -1,3 +1,7 @@
+//! # Shell Commands: Multitasking & Process Management (`ps`, `spawn`, `kill`, `top`)
+//!
+//! Provides interactive process management commands for inspecting tasks, spawning threads, and terminating tasks.
+
 use core::sync::atomic::{AtomicU64, Ordering};
 use uefi::proto::console::text::Color;
 

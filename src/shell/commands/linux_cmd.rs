@@ -9,6 +9,7 @@ use crate::console;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command inspecting Linux compatibility layer telemetry and spawning Linux binaries.
 pub struct LinuxCommand;
 
 impl Command for LinuxCommand {

@@ -1,8 +1,13 @@
+//! # Shell Command: System Information & Version (`info`, `about`)
+//!
+//! Displays kernel version, architecture target, and project metadata.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command displaying operating system version and build details.
 pub struct InfoCommand;
 
 impl Command for InfoCommand {

@@ -1,48 +1,101 @@
-//! # UStar / POSIX TAR Archive Extractor
+//! # Package & Archive Subsystem: UStar / POSIX TAR Archive Extractor
 //!
-//! Implements a streaming reader and unpacker for UStar/POSIX `.tar` archives.
-//! Extracts files and directories directly into Hydra OS's persistent OpenZFS filesystem.
+//! Implements a streaming reader and unpacker for UStar/POSIX `.tar` archives,
+//! extracting directories, regular files, and symbolic link references directly
+//! into Hydra OS's persistent OpenZFS storage pool.
+//!
+//! ## Architectural Role & Design Rationale
+//! Used by the package manager (`dpkg` / `apt` shell commands) to unpack the `data.tar`
+//! payload of `.deb` packages into the root filesystem. All file writes are batched into
+//! the open ZFS transaction group via [`ZfsClient::write_file_by_path_batch()`] and flushed
+//! in a single atomic commit at the end of extraction.
+//!
+//! ## Key Types & Interfaces
+//! - [`TarArchive`]: Streaming parser over an in-memory `.tar` slice.
+//! - `TarExtractSummary`: Extraction telemetry (files, directories, symlinks, total bytes).
+//! - [`TarType`]: Decoded 1-byte TAR header type flag (`'0'`, `'1'`, `'2'`, `'5'`, `'L'`).
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Persists unpacked files via [`crate::fs::client::ZfsClient`].
+//! - Concurrency: Synchronizes with the global ZFS server per batch write and final sync.
 
 use core::str;
 use alloc::string::String;
 use crate::fs::client::ZfsClient;
 
-/// Size of each block in a TAR archive (512 bytes).
+/// Size of each header and data block in a standard TAR archive (`512` bytes).
 pub const TAR_BLOCK_SIZE: usize = 512;
 
-/// Type flags recognized in TAR header records.
+/// Entry type flags recognized in 512-byte POSIX/UStar TAR header records (offset 156).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TarType {
+    /// Regular file (`'0'` or NUL `0`).
     RegularFile,
+    /// Hard link to another entry in the archive (`'1'`).
     HardLink,
+    /// Symbolic link (`'2'`).
     SymLink,
+    /// Directory (`'5'`).
     Directory,
+    /// GNU tar long filename extension header (`'L'`); payload holds the path for the next record.
     GnuLongName,
+    /// Any other vendor-specific or POSIX extended type flag byte.
     Other(u8),
 }
 
-/// Statistics reported after unpacking a TAR archive into ZFS.
+/// Statistics reported after unpacking a [`TarArchive`] into OpenZFS.
+///
+/// # Concurrency & Thread Safety
+/// Plain value struct (`Copy`, `Clone`, `Default`) returned by [`TarArchive::extract_to_zfs()`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TarExtractSummary {
+    /// Number of regular files written to ZFS.
     pub files_extracted: usize,
+    /// Number of directories created in ZFS.
     pub dirs_created: usize,
+    /// Number of symbolic links recorded in ZFS.
     pub symlinks_recorded: usize,
+    /// Total payload bytes written across all extracted regular files.
     pub total_bytes: usize,
 }
 
-/// Streaming parser for TAR archives.
+/// Streaming parser and ZFS extractor for uncompressed UStar/POSIX `.tar` archives.
+///
+/// # Concurrency & Thread Safety
+/// Holds an immutable borrow `&'a [u8]` of the archive buffer.
 pub struct TarArchive<'a> {
+    /// Underlying byte slice containing sequential 512-byte TAR blocks.
     data: &'a [u8],
 }
 
 impl<'a> TarArchive<'a> {
-    /// Initializes a new TAR archive reader over a memory slice.
+    /// Initializes a new [`TarArchive`] reader over an uncompressed TAR byte slice.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Memory slice containing a `.tar` archive.
+    ///
+    /// # Returns
+    ///
+    /// A [`TarArchive`] wrapper ready for extraction.
     pub fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
-    /// Unpacks all directories and regular files from this TAR archive directly
-    /// into Hydra OS's persistent OpenZFS storage.
+    /// Unpacks all directories, regular files, and symlinks from the archive into OpenZFS.
+    ///
+    /// Handles both POSIX `ustar` 155-byte path prefixes and GNU `L` long-filename headers,
+    /// batches all writes into the open transaction group, and calls [`ZfsClient::sync()`]
+    /// once at completion.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(TarExtractSummary)` - Counts of extracted files, directories, symlinks, and bytes.
+    ///
+    /// # Errors
+    ///
+    /// * `Err("Truncated TAR archive data")` - A header declares a file size that extends past `self.data.len()`.
     pub fn extract_to_zfs(&self) -> Result<TarExtractSummary, &'static str> {
         let mut summary = TarExtractSummary::default();
         let mut offset = 0;
@@ -160,7 +213,7 @@ impl<'a> TarArchive<'a> {
     }
 }
 
-/// Helper function to parse an octal byte slice into a usize.
+/// Parses an ASCII octal byte field from a TAR header into a `usize`.
 fn parse_octal(bytes: &[u8]) -> usize {
     let mut val: usize = 0;
     for &b in bytes {
@@ -175,7 +228,7 @@ fn parse_octal(bytes: &[u8]) -> usize {
     val
 }
 
-/// Extracts a null-terminated UTF-8 string from a byte slice.
+/// Extracts a NUL-terminated UTF-8 string slice from a fixed-size TAR header field.
 fn extract_null_terminated_str(bytes: &[u8]) -> &str {
     let mut len = 0;
     while len < bytes.len() && bytes[len] != 0 {

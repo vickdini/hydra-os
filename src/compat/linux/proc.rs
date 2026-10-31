@@ -1,24 +1,37 @@
-//! # Linux Processes and Signals
+//! # Linux Compatibility: Processes, Thread Groups, and POSIX Signals
 //!
-//! The process table (parent/child links, process groups, sessions, exit status and
-//! zombies), POSIX signals (dispositions, masks, pending sets, delivery, `rt_sigreturn`),
-//! and the `wait4`/`waitid`/`kill` family.
+//! Manages the Linux process table (parent/child relationships, process groups, sessions,
+//! exit status, and zombies), POSIX signal state (dispositions, masks, pending bitmasks,
+//! signal frame delivery, and `rt_sigreturn`), and the `wait4`/`waitid`/`kill` system call family.
 //!
-//! ## Model
+//! ## Architectural Role & Design Rationale
+//! A Linux process is a thread group (`tgid`). Signal dispositions (`struct sigaction`) and
+//! process-directed pending signals belong to the [`Process`], whereas each thread maintains
+//! its own blocked signal mask, thread-directed pending set, and alternate signal stack.
+//! Signals are delivered when a thread returns to user mode, either from a system call
+//! ([`deliver_on_syscall_return`]) or from an interrupt or exception ([`deliver_on_trap_return`]).
+//! The signal frame constructed on the user stack matches Linux's x86_64 `rt_sigframe` layout
+//! byte-for-byte, allowing standard C library (`glibc`/`musl`) `sa_restorer` trampolines and
+//! `ucontext_t` accessors to operate without modification.
 //!
-//! A process is a thread group (`tgid`). Signal dispositions and process-directed
-//! pending signals belong to the process; each thread has its own mask, pending set and
-//! alternate stack. Signals are delivered when a thread returns to user mode, either from
-//! a system call ([`deliver_on_syscall_return`]) or from an interrupt or exception
-//! ([`deliver_on_trap_return`]). The signal frame on the user stack has exactly the layout
-//! of Linux's x86_64 `rt_sigframe`, so the C library's `sa_restorer` trampoline and
-//! `ucontext_t` accessors work unchanged.
-//!
-//! Blocking system calls poll for completion and return [`ERESTARTSYS`] when a signal
-//! arrives; delivery turns that into a transparent restart (`SA_RESTART` or an ignored
+//! Blocking system calls poll for completion and return [`ERESTARTSYS`] when a signal arrives;
+//! delivery converts that into either a transparent syscall restart (`SA_RESTART` or an ignored
 //! signal) or `-EINTR`.
 //!
-//! Lock order: the scheduler lock may be held while taking [`PROCS`], never the reverse.
+//! Lock ordering invariant: the scheduler lock may be held while acquiring [`PROCS`], never the reverse.
+//!
+//! ## Key Types & Interfaces
+//! - [`Process`] & [`PROCS`]: Thread-group state and the global process table.
+//! - [`SigAction`]: Kernel representation of x86_64 `struct sigaction`.
+//! - [`UserRegs`]: Complete user-mode general-purpose register snapshot saved/restored across signals.
+//! - [`deliver_on_syscall_return`] & [`deliver_on_trap_return`]: User-return signal delivery hooks.
+//! - [`sys_rt_sigreturn`] & [`return_to_user`]: Signal frame restoration and `iretq` user-mode transition.
+//! - [`sys_wait4`], [`sys_waitid`], [`sys_kill`], [`sys_tgkill`], [`sys_tkill`]: Process lifecycle and signaling syscalls.
+//!
+//! ## Hardware & Dependency Context
+//! - **Architecture**: x86_64 (`FXSAVE64`/`FXRSTOR64` 512-byte FPU frame, 128-byte ABI red zone, `iretq` ring-3 return).
+//! - **Dependencies**: Coordinates with [`crate::task`] for thread scheduling and wakeups,
+//!   [`crate::memory::vm::prefault_current`] for safe user stack access, and [`super::pidfd`] for exit notifications.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -28,41 +41,73 @@ use crate::arch::idt::{ExceptionContext, FpuState};
 use crate::arch::syscall::SyscallFrame;
 use crate::memory::vm::prefault_current;
 
+/// Total number of supported POSIX and real-time signals (`1..=64`).
 pub const NSIG: usize = 64;
 
+/// Hangup detected on controlling terminal or death of controlling process (`SIGHUP`).
 pub const SIGHUP: u32 = 1;
+/// Interactive attention / interrupt signal from keyboard (`SIGINT`).
 pub const SIGINT: u32 = 2;
+/// Quit from keyboard with core dump (`SIGQUIT`).
 pub const SIGQUIT: u32 = 3;
+/// Illegal instruction fault (`SIGILL`).
 pub const SIGILL: u32 = 4;
+/// Trace/breakpoint trap (`SIGTRAP`).
 pub const SIGTRAP: u32 = 5;
+/// Abnormal termination / abort signal (`SIGABRT`).
 pub const SIGABRT: u32 = 6;
+/// Bus error / misaligned memory access (`SIGBUS`).
 pub const SIGBUS: u32 = 7;
+/// Floating-point / arithmetic exception (`SIGFPE`).
 pub const SIGFPE: u32 = 8;
+/// Unblockable, uncatchable immediate process termination signal (`SIGKILL`).
 pub const SIGKILL: u32 = 9;
+/// Invalid memory reference / segmentation fault (`SIGSEGV`).
 pub const SIGSEGV: u32 = 11;
+/// Write on a pipe or socket with no readers (`SIGPIPE`).
 pub const SIGPIPE: u32 = 13;
+/// Timer clock alarm (`SIGALRM`).
 pub const SIGALRM: u32 = 14;
+/// Software termination request signal (`SIGTERM`).
 pub const SIGTERM: u32 = 15;
+/// Child process stopped, continued, or terminated (`SIGCHLD`).
 pub const SIGCHLD: u32 = 17;
+/// Continue executing if stopped (`SIGCONT`).
 pub const SIGCONT: u32 = 18;
+/// Unblockable, uncatchable stop execution signal (`SIGSTOP`).
 pub const SIGSTOP: u32 = 19;
+/// Stop typed at terminal (`SIGTSTP`).
 pub const SIGTSTP: u32 = 20;
+/// Background process attempting terminal read (`SIGTTIN`).
 pub const SIGTTIN: u32 = 21;
+/// Background process attempting terminal write (`SIGTTOU`).
 pub const SIGTTOU: u32 = 22;
+/// Urgent condition on socket (`SIGURG`).
 pub const SIGURG: u32 = 23;
+/// Virtual timer alarm expired (`SIGVTALRM`).
 pub const SIGVTALRM: u32 = 26;
+/// Profiling timer clock expired (`SIGPROF`).
 pub const SIGPROF: u32 = 27;
+/// Terminal window size change (`SIGWINCH`).
 pub const SIGWINCH: u32 = 28;
 
+/// Default signal disposition constant (`SIG_DFL`).
 const SIG_DFL: u64 = 0;
+/// Ignore signal disposition constant (`SIG_IGN`).
 const SIG_IGN: u64 = 1;
 
+/// `sigaction` flag: deliver signal on the alternate signal stack configured by `sigaltstack`.
 const SA_ONSTACK: u64 = 0x0800_0000;
+/// `sigaction` flag: automatically restart interrupted system calls instead of failing with `EINTR`.
 const SA_RESTART: u64 = 0x1000_0000;
+/// `sigaction` flag: do not automatically block the signal while its handler is executing.
 const SA_NODEFER: u64 = 0x4000_0000;
+/// `sigaction` flag: reset disposition to `SIG_DFL` upon entry to the signal handler.
 const SA_RESETHAND: u64 = 0x8000_0000;
 
+/// `sigaltstack` flag indicating the thread is currently executing on the alternate stack.
 const SS_ONSTACK: u32 = 1;
+/// `sigaltstack` flag to disable the alternate signal stack.
 const SS_DISABLE: u32 = 2;
 
 /// Internal return value of interrupted blocking system calls (never seen by user code).
@@ -74,7 +119,7 @@ pub const ERESTART_RESTARTBLOCK: i64 = -516;
 /// Threads whose interrupted system call is being restarted transparently.
 static RESTARTING: Mutex<BTreeMap<u64, ()>> = Mutex::new(BTreeMap::new());
 
-/// True (once) if the calling thread's current system call is a transparent restart.
+/// Returns `true` (once) if the calling thread's current system call is a transparent restart.
 pub fn take_restart_flag() -> bool {
     let (tid, _) = current_ids();
     RESTARTING.lock().remove(&tid).is_some()
@@ -87,39 +132,62 @@ fn mark_restart(nr: u64) {
         RESTARTING.lock().insert(tid, ());
     }
 }
+/// Negative `EPERM` error constant (`-1`).
 const EPERM: i64 = -1;
+/// Negative `ESRCH` error constant (`-3`).
 const ESRCH: i64 = -3;
+/// Negative `EINTR` error constant (`-4`).
 const EINTR: i64 = -4;
+/// Negative `ECHILD` error constant (`-10`).
 const ECHILD: i64 = -10;
+/// Negative `EFAULT` error constant (`-14`).
 const EFAULT: i64 = -14;
+/// Negative `EINVAL` error constant (`-22`).
 const EINVAL: i64 = -22;
 
 /// Kernel `struct sigaction` for x86_64.
 #[derive(Clone, Copy, Default)]
 pub struct SigAction {
+    /// User-space virtual address of the signal handler function (or `SIG_DFL`/`SIG_IGN`).
     pub handler: u64,
+    /// Action flags (`SA_RESTART`, `SA_ONSTACK`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`).
     pub flags: u64,
+    /// User-space address of the `sa_restorer` trampoline that invokes `rt_sigreturn`.
     pub restorer: u64,
+    /// Bitmask of additional signals to block while the handler is executing.
     pub mask: u64,
 }
 
+/// Per-thread signal mask, pending signal bitmask, and alternate signal stack state.
 #[derive(Clone, Copy, Default)]
 struct ThreadSig {
+    /// Bitmask of signals currently blocked by this thread.
     mask: u64,
+    /// Bitmask of pending signals directed specifically at this thread (`tkill`/`tgkill`).
     pending: u64,
+    /// Base user virtual address of the alternate signal stack (`ss_sp`).
     alt_sp: u64,
+    /// Size in bytes of the alternate signal stack (`ss_size`).
     alt_size: u64,
+    /// Alternate stack flags (`SS_DISABLE`, `SS_ONSTACK`).
     alt_flags: u32,
 }
 
 /// One process (thread group).
 pub struct Process {
+    /// Process ID / thread group ID (`tgid`).
     pub pid: u64,
+    /// Parent process ID (`ppid`).
     pub ppid: u64,
+    /// Process group ID (`pgid`).
     pub pgid: u64,
+    /// Session ID (`sid`).
     pub sid: u64,
+    /// Signal dispositions indexed by 1-based signal number (`1..=NSIG`).
     pub actions: [SigAction; NSIG + 1],
+    /// Bitmask of pending signals directed at the process as a whole.
     pub pending: u64,
+    /// Per-thread signal state keyed by thread ID (`tid`).
     threads: BTreeMap<u64, ThreadSig>,
     /// Exit status in `wait` encoding, set by `exit_group` or a fatal signal.
     pub exit_status: Option<i32>,
@@ -130,23 +198,28 @@ pub struct Process {
     /// Job control: stopped by `stop_sig`; the parent learns about the stop and the later
     /// continue through `wait` (WUNTRACED / WCONTINUED), each reported once.
     pub stopped: bool,
+    /// Signal number that caused this process to stop.
     pub stop_sig: u32,
     /// Supplementary group IDs (`getgroups`/`setgroups`).
     pub groups: Vec<u32>,
+    /// Whether the current job-control stop state has already been reported to `wait`.
     stop_reported: bool,
+    /// Whether a `SIGCONT` continuation is awaiting reporting via `wait` (`WCONTINUED`).
     continued: bool,
 }
 
 /// All Linux processes, including zombies not yet reaped.
 pub static PROCS: Mutex<BTreeMap<u64, Process>> = Mutex::new(BTreeMap::new());
 
+/// Converts a 1-based signal number (`1..=64`) into its corresponding 64-bit mask bit.
 fn bit(sig: u32) -> u64 {
     1u64 << (sig - 1)
 }
 
+/// Bitmask of signals that cannot be blocked or ignored (`SIGKILL` and `SIGSTOP`).
 const UNBLOCKABLE: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1));
 
-/// The calling thread's (tid, pid).
+/// Returns the calling thread's `(tid, pid)` pair.
 pub fn current_ids() -> (u64, u64) {
     crate::task::with_current_task_mut(|t| (t.id.0, t.tgid)).unwrap_or((0, 0))
 }
@@ -272,7 +345,7 @@ pub fn take_status(pid: u64) -> Option<i32> {
 }
 
 impl Process {
-    /// Threads of this process still running.
+    /// Returns the number of threads of this process still running.
     pub fn threads_alive(&self) -> usize {
         self.threads.len()
     }
@@ -320,23 +393,27 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
     0
 }
 
+/// `getppid()`: returns the parent process ID of the calling process.
 pub fn getppid() -> i64 {
     let (_, pid) = current_ids();
     PROCS.lock().get(&pid).map_or(1, |p| p.ppid as i64)
 }
 
+/// `getpgid(target)`: returns the process group ID of `target` (or the caller when `target == 0`).
 pub fn getpgid(target: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
     PROCS.lock().get(&target).map_or(ESRCH, |p| p.pgid as i64)
 }
 
+/// `getsid(target)`: returns the session ID of `target` (or the caller when `target == 0`).
 pub fn getsid(target: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
     PROCS.lock().get(&target).map_or(ESRCH, |p| p.sid as i64)
 }
 
+/// `setpgid(target, pgid)`: sets the process group ID of `target` to `pgid`.
 pub fn setpgid(target: u64, pgid: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
@@ -354,6 +431,7 @@ pub fn setpgid(target: u64, pgid: u64) -> i64 {
     0
 }
 
+/// `setsid()`: creates a new session if the calling process is not a process group leader.
 pub fn setsid() -> i64 {
     let (_, pid) = current_ids();
     let mut procs = PROCS.lock();
@@ -371,14 +449,13 @@ pub fn setsid() -> i64 {
     }
 }
 
-/// Session and process group of `pid`.
-/// True if process `pid` is in the process table (alive or a zombie).
+/// Returns `true` if process `pid` is in the process table (alive or a zombie).
 pub fn process_exists(pid: u64) -> bool {
     PROCS.lock().contains_key(&pid)
 }
 
-/// True if process `pid` has exited (a zombie, or already reaped). Never blocks: reports
-/// false while the table is busy (callers re-check after the next wakeup).
+/// Returns `true` if process `pid` has exited (a zombie, or already reaped). Never blocks: reports
+/// `false` while the table is busy (callers re-check after the next wakeup).
 pub fn has_exited(pid: u64) -> bool {
     match PROCS.try_lock() {
         Some(p) => p.get(&pid).map_or(true, |p| p.zombie),
@@ -386,6 +463,7 @@ pub fn has_exited(pid: u64) -> bool {
     }
 }
 
+/// Returns the `(sid, pgid)` session and process group of `pid`.
 pub fn session_of(pid: u64) -> Option<(u64, u64)> {
     PROCS.lock().get(&pid).map(|p| (p.sid, p.pgid))
 }
@@ -419,7 +497,7 @@ pub fn exec_reset(pid: u64) {
     }
 }
 
-/// Lets a `vfork` parent continue (the child has exec'ed or exited).
+/// Returns `true` when a `vfork` parent may continue (the child has `exec`'ed or exited).
 pub fn vfork_released(child: u64) -> bool {
     PROCS.lock().get(&child).map_or(true, |p| p.vfork_released)
 }
@@ -428,15 +506,19 @@ pub fn vfork_released(child: u64) -> bool {
 // Sending signals
 // ----------------------------------------------------------------------
 
+/// Returns `true` if `sig`'s default disposition (`SIG_DFL`) is to be ignored.
 fn default_ignored(sig: u32) -> bool {
     matches!(sig, SIGCHLD | SIGURG | SIGWINCH | SIGCONT)
 }
 
+/// Returns `true` if `sig` is a job-control stop signal (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`).
 fn is_stop_signal(sig: u32) -> bool {
     matches!(sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
 }
 
+/// Bitmask of all job-control stop signals.
 const STOP_MASK: u64 = (1 << (SIGSTOP - 1)) | (1 << (SIGTSTP - 1)) | (1 << (SIGTTIN - 1)) | (1 << (SIGTTOU - 1));
+/// `sigaction` flag for `SIGCHLD`: do not generate `SIGCHLD` when children stop or continue.
 const SA_NOCLDSTOP: u64 = 1;
 
 /// Tells the parent of `child` about a job-control state change (unless it asked not to be).
@@ -449,12 +531,13 @@ fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64) {
     }
 }
 
+/// Unblocks all sleeping threads belonging to process `pid`.
 fn wake_process(pid: u64) {
     let mut sched = crate::task::SCHEDULER.lock();
     sched.unblock_group(pid);
 }
 
-/// Posts `sig` to process `pid` (process-directed). Returns false if no such process.
+/// Posts `sig` to process `pid` (process-directed). Returns `false` if no such process.
 pub fn post_process(pid: u64, sig: u32) -> bool {
     {
         let mut procs = PROCS.lock();
@@ -488,7 +571,7 @@ pub fn post_process(pid: u64, sig: u32) -> bool {
     true
 }
 
-/// True if the calling thread ignores or blocks `sig`.
+/// Returns `true` if the calling thread ignores or blocks `sig`.
 pub fn ignores_or_blocks(sig: u32) -> bool {
     let (tid, pid) = current_ids();
     PROCS.lock().get(&pid).map_or(true, |p| {
@@ -497,7 +580,7 @@ pub fn ignores_or_blocks(sig: u32) -> bool {
     })
 }
 
-/// True if process `pid` is stopped by job control.
+/// Returns `true` if process `pid` is stopped by job control.
 pub fn is_stopped(pid: u64) -> bool {
     PROCS.lock().get(&pid).map_or(false, |p| p.stopped)
 }
@@ -526,7 +609,7 @@ fn stop_current(sig: u32) {
     wait_while_stopped();
 }
 
-/// Blocks the calling thread while its process is stopped (until SIGCONT or SIGKILL).
+/// Blocks the calling thread while its process is stopped (until `SIGCONT` or `SIGKILL`).
 fn wait_while_stopped() {
     let (tid, pid) = current_ids();
     loop {
@@ -544,7 +627,7 @@ fn wait_while_stopped() {
     }
 }
 
-/// Posts `sig` to one thread.
+/// Posts `sig` to one specific thread `tid` within process `pid`.
 pub fn post_thread(pid: u64, tid: u64, sig: u32) -> bool {
     {
         let mut procs = PROCS.lock();
@@ -570,6 +653,7 @@ pub fn post_group(pgid: u64, sig: u32) -> usize {
     members.len()
 }
 
+/// `kill(pid, sig)`: sends signal `sig` to a process or process group selected by `pid`.
 pub fn sys_kill(pid: i64, sig: u64) -> i64 {
     if sig as usize > NSIG {
         return EINVAL;
@@ -595,6 +679,7 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
     }
 }
 
+/// `tgkill(pid, tid, sig)`: sends signal `sig` to thread `tid` in thread group `pid`.
 pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
     if sig as usize > NSIG {
         return EINVAL;
@@ -606,6 +691,7 @@ pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
     }
 }
 
+/// `tkill(tid, sig)`: sends signal `sig` to thread `tid`.
 pub fn sys_tkill(tid: u64, sig: u64) -> i64 {
     let pid = PROCS.lock().values().find(|p| p.threads.contains_key(&tid)).map(|p| p.pid);
     match pid {
@@ -618,6 +704,7 @@ pub fn sys_tkill(tid: u64, sig: u64) -> i64 {
 // Dispositions and masks
 // ----------------------------------------------------------------------
 
+/// Safely prefaults and reads `N` consecutive 64-bit values from user address `ptr`.
 fn read_u64s<const N: usize>(ptr: u64) -> Option<[u64; N]> {
     if !prefault_current(ptr, (N * 8) as u64, false) {
         return None;
@@ -629,6 +716,7 @@ fn read_u64s<const N: usize>(ptr: u64) -> Option<[u64; N]> {
     Some(out)
 }
 
+/// Safely prefaults and writes `data` into user memory at `ptr`.
 fn write_bytes(ptr: u64, data: &[u8]) -> bool {
     if !prefault_current(ptr, data.len() as u64, true) {
         return false;
@@ -637,6 +725,7 @@ fn write_bytes(ptr: u64, data: &[u8]) -> bool {
     true
 }
 
+/// `rt_sigaction(sig, act, oact, size)`: inspects and/or updates the disposition for signal `sig`.
 pub fn sys_rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
     if size != 8 || sig == 0 || sig as usize > NSIG {
         return EINVAL;
@@ -685,6 +774,7 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
     0
 }
 
+/// `rt_sigprocmask(how, set, oset, size)`: inspects and/or updates the calling thread's blocked signal mask.
 pub fn sys_rt_sigprocmask(how: u64, set: u64, oset: u64, size: u64) -> i64 {
     if size != 8 {
         return EINVAL;
@@ -721,6 +811,7 @@ pub fn sys_rt_sigprocmask(how: u64, set: u64, oset: u64, size: u64) -> i64 {
     0
 }
 
+/// `sigaltstack(ss, old)`: configures and/or queries the calling thread's alternate signal stack.
 pub fn sys_sigaltstack(ss: u64, old: u64) -> i64 {
     let (tid, pid) = current_ids();
     let mut procs = PROCS.lock();
@@ -761,6 +852,7 @@ pub fn sys_sigaltstack(ss: u64, old: u64) -> i64 {
     0
 }
 
+/// `rt_sigpending(set, size)`: writes the bitmask of signals pending for the calling thread/process to `set`.
 pub fn sys_rt_sigpending(set: u64, size: u64) -> i64 {
     if size != 8 {
         return EINVAL;
@@ -810,8 +902,7 @@ pub fn sys_rt_sigsuspend(mask_ptr: u64, size: u64) -> i64 {
 /// Masks to restore after a signal interrupted `rt_sigsuspend`, by thread.
 static SUSPEND_RESTORE: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
-/// True if the calling thread has an unblocked pending signal (blocking syscalls poll this).
-/// True if process `pid` (or one of its threads) has a signal from `mask` pending
+/// Returns `true` if process `pid` (or one of its threads) has a signal from `mask` pending
 /// (`signalfd` readiness). Never blocks.
 pub fn pending_for(pid: u64, mask: u64) -> bool {
     let procs = match PROCS.try_lock() {
@@ -824,9 +915,9 @@ pub fn pending_for(pid: u64, mask: u64) -> bool {
     })
 }
 
-/// `si_code`, child pid and `si_status` for a `SIGCHLD` received by `parent`, derived
+/// Returns `(si_code, child_pid, si_status)` for a `SIGCHLD` received by `parent`, derived
 /// from its children's state (the process table does not queue per-signal details):
-/// an unreaped zombie gives CLD_EXITED/KILLED/DUMPED, else a stopped or continued child.
+/// an unreaped zombie gives `CLD_EXITED`/`CLD_KILLED`/`CLD_DUMPED`, else a stopped or continued child.
 pub fn sigchld_details(parent: u64) -> (i32, u64, i32) {
     const CLD_EXITED: i32 = 1;
     const CLD_KILLED: i32 = 2;
@@ -872,6 +963,7 @@ pub fn take_signal(mask: u64) -> Option<u32> {
     None
 }
 
+/// Returns `true` if the calling thread has an unblocked pending signal (blocking syscalls poll this).
 pub fn signal_pending() -> bool {
     let (tid, pid) = current_ids();
     let procs = match PROCS.try_lock() {
@@ -894,30 +986,53 @@ pub fn signal_pending() -> bool {
 /// Complete user register state of an interrupted context.
 #[derive(Clone, Copy, Default)]
 pub struct UserRegs {
+    /// General-purpose register `r8`.
     pub r8: u64,
+    /// General-purpose register `r9`.
     pub r9: u64,
+    /// General-purpose register `r10`.
     pub r10: u64,
+    /// General-purpose register `r11`.
     pub r11: u64,
+    /// General-purpose register `r12`.
     pub r12: u64,
+    /// General-purpose register `r13`.
     pub r13: u64,
+    /// General-purpose register `r14`.
     pub r14: u64,
+    /// General-purpose register `r15`.
     pub r15: u64,
+    /// General-purpose register `rdi` (first argument).
     pub rdi: u64,
+    /// General-purpose register `rsi` (second argument).
     pub rsi: u64,
+    /// Base pointer register `rbp`.
     pub rbp: u64,
+    /// General-purpose register `rbx`.
     pub rbx: u64,
+    /// General-purpose register `rdx` (third argument).
     pub rdx: u64,
+    /// Accumulator / return value register `rax`.
     pub rax: u64,
+    /// General-purpose register `rcx`.
     pub rcx: u64,
+    /// User stack pointer register `rsp`.
     pub rsp: u64,
+    /// Instruction pointer register `rip`.
     pub rip: u64,
+    /// CPU status flags register `rflags`.
     pub rflags: u64,
 }
 
+/// Internal decision produced when dequeuing a pending signal for delivery.
 enum Action {
+    /// No deliverable unblocked signal remains.
     None,
+    /// Invoke user handler `(sig, sigaction, saved_mask)`.
     Handler(u32, SigAction, u64),
+    /// Terminate the process due to `sig`.
     Terminate(u32),
+    /// Stop the process due to job-control signal `sig`.
     Stop(u32),
 }
 
@@ -987,7 +1102,7 @@ fn die(sig: u32) -> ! {
 }
 
 /// Writes an `rt_sigframe` for `sig` onto the user stack and redirects `regs` to the
-/// handler. Returns false if the stack is unusable.
+/// handler. Returns `false` if the stack is unusable.
 fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, old_mask: u64) -> bool {
     let (tid, pid) = current_ids();
     let alt = PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).copied()).unwrap_or_default();
@@ -1255,6 +1370,11 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
 /// Returns to user mode with every register (including `rcx`/`r11`) taken from `regs`
 /// and the FPU state from `fpu`, via `iretq`. Used where `sysret` cannot restore the
 /// full context.
+///
+/// # Safety
+/// - `regs.rip` and `regs.rsp` must point to valid user-space addresses mapped in the active page table.
+/// - `regs.rflags` must have `IF` (`0x200`) set and privileged flags masked properly for Ring 3 execution.
+/// - `fpu` must contain a valid 64-byte-aligned 512-byte `FXRSTOR64` image with reserved `MXCSR` bits cleared.
 pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
     let regs = *regs;
     core::arch::asm!(
@@ -1290,17 +1410,23 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
 // wait4 / waitid
 // ----------------------------------------------------------------------
 
+/// `wait4` / `waitid` option flag: return immediately if no child has changed state (`WNOHANG`).
 const WNOHANG: u64 = 1;
+/// `wait4` / `waitid` option flag: also report stopped children (`WUNTRACED` / `WSTOPPED`).
 const WUNTRACED: u64 = 2;
+/// `wait4` / `waitid` option flag: also report continued children (`WCONTINUED`).
 const WCONTINUED: u64 = 8;
+/// `waitid` option flag: leave the child in a waitable state without reaping it (`WNOWAIT`).
 const WNOWAIT: u64 = 0x0100_0000;
 
 /// Status values `wait` reports for job-control state changes.
 const WAIT_CONTINUED: i32 = 0xffff;
+/// Encodes a stop signal `sig` into the 16-bit status word reported by `wait4`.
 fn wait_status_stopped(sig: u32) -> i32 {
     0x7f | ((sig as i32) << 8)
 }
 
+/// Returns `true` if `child` is a direct child of `me` matching the `wait` selector `sel`.
 fn matches(child: &Process, me: u64, my_pgid: u64, sel: i64) -> bool {
     child.ppid == me
         && match sel {
@@ -1312,7 +1438,7 @@ fn matches(child: &Process, me: u64, my_pgid: u64, sel: i64) -> bool {
 }
 
 /// Finds (and unless `keep`, reaps) a zombie child matching `sel`.
-/// Returns Ok(Some((pid, status))), Ok(None) if children exist but none exited, Err(ECHILD).
+/// Returns `Ok(Some((pid, status)))`, `Ok(None)` if children exist but none exited, or `Err(ECHILD)`.
 fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
     let keep = options & WNOWAIT != 0;
     let (_, me) = current_ids();
@@ -1360,6 +1486,7 @@ pub fn wait_status_exit(code: i32) -> i32 {
     (code & 0xff) << 8
 }
 
+/// Polls [`reap`] in a loop until a matching child changes state, `WNOHANG` applies, or a signal interrupts the wait.
 fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
     loop {
         match reap(sel, options)? {
@@ -1374,6 +1501,7 @@ fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
     }
 }
 
+/// `wait4(pid, status_ptr, options, rusage)`: waits for a child process to change state.
 pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage: u64) -> i64 {
     match wait_loop(pid, options) {
         Ok(Some((pid, status))) => {
@@ -1387,6 +1515,7 @@ pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage: u64) -> i64 {
     }
 }
 
+/// `waitid(idtype, id, infop, options)`: waits for a child process state change and populates a `siginfo_t`.
 pub fn sys_waitid(idtype: u64, id: u64, infop: u64, options: u64) -> i64 {
     let sel = match idtype {
         0 => -1,               // P_ALL

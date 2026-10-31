@@ -1,3 +1,29 @@
+//! # Shell Subsystem: Filesystem Binary Loader & Path Resolver
+//!
+//! Bridges the interactive shell with both the microkernel ZFS File Server (for Ring 3 ELF64
+//! and ZFS-hosted binaries) and the UEFI Simple File System protocol (for FAT boot media
+//! files and PE32+ `.efi` executables).
+//!
+//! ## Architectural Role & Design Rationale
+//! During system bring-up and interactive operation, users execute programs stored either in
+//! the copy-on-write ZFS pool (`hydrapool/bin`) or on the attached UEFI FAT boot partition.
+//! This module implements two-tier `$PATH` resolution: it queries the ZFS File Server over
+//! capability-checked IPC first, automatically transitioning to bare-metal hardware mode if a
+//! Ring 3 native or Linux ABI ELF64 binary is launched, and falls back to UEFI `LoadImage` /
+//! `StartImage` when operating under UEFI Boot Services.
+//!
+//! ## Key Types & Interfaces
+//! - `DEFAULT_SEARCH_PATHS`: Ordered list of UEFI boot volume directories searched for `.efi` binaries.
+//! - `search_and_execute`: Resolves a command name across ZFS `/bin` and UEFI search paths and spawns it.
+//! - `execute_file`: Loads and starts a UEFI PE32+ binary from the boot volume.
+//! - `read_boot_file` / `read_media_file`: Reads whole files from the boot volume or installation media into heap memory.
+//! - `list_directory` / `print_file`: Inspects directories and text files on the UEFI FAT volume.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (spawns Ring 3 ELF tasks with `CS=0x23`, `SS=0x1B`)
+//! - Hardware Interaction: UEFI `SimpleFileSystem` / `LoadedImage` protocols (pre-`ExitBootServices`) and ZFS IPC client
+//! - Concurrency: Synchronous execution on the calling shell thread; supports background task spawning via `--bg` or `&`
+
 use core::str;
 use uefi::boot::{allocate_pages, free_pages, AllocateType, LoadImageSource};
 use uefi::mem::memory_map::MemoryType;
@@ -9,10 +35,10 @@ use uefi::CStr16;
 use crate::console::set_color;
 use crate::shell::state::ShellState;
 
-/// Maximum size of an executable or file loaded into memory (16 MiB).
+/// Maximum size of an executable or boot file loaded into memory (16 MiB).
 const MAX_LOAD_SIZE: usize = 16 * 1024 * 1024;
 
-/// Default search directories checked in order when executing a command.
+/// Default UEFI FAT search directories checked in order when resolving an external command.
 pub static DEFAULT_SEARCH_PATHS: &[&str] = &[
     "\\bin",
     "\\apps",
@@ -20,8 +46,24 @@ pub static DEFAULT_SEARCH_PATHS: &[&str] = &[
     "\\",
 ];
 
-/// Converts an ASCII/UTF-8 path string into a null-terminated UTF-16 CStr16.
-/// Strips leading slashes and converts '/' to '\' so it opens properly relative to UEFI root volume.
+/// Converts an ASCII/UTF-8 path string into a NUL-terminated UTF-16 [`CStr16`].
+///
+/// Strips leading slashes (`/` or `\`) and normalizes forward slashes (`/`) to UEFI
+/// backslashes (`\`) so the path opens relative to the root of a UEFI volume.
+///
+/// # Arguments
+///
+/// * `path` - Input UTF-8 path string.
+/// * `buf` - Caller-provided `u16` scratch buffer to hold the encoded UTF-16 code units.
+///
+/// # Returns
+///
+/// * `Some(&CStr16)` - Valid NUL-terminated UTF-16 string slice backed by `buf`.
+/// * `None` - If `buf` is too small to hold the converted path plus NUL terminator.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn path_to_cstr16<'a>(path: &str, buf: &'a mut [u16]) -> Option<&'a CStr16> {
     let clean = path.trim_start_matches(['\\', '/']);
     if clean.len() + 1 > buf.len() {
@@ -34,7 +76,17 @@ pub fn path_to_cstr16<'a>(path: &str, buf: &'a mut [u16]) -> Option<&'a CStr16> 
     CStr16::from_u16_with_nul(&buf[..=clean.len()]).ok()
 }
 
-/// Attempts to open the boot volume root directory.
+/// Opens the root directory of the UEFI boot volume from which the kernel image was loaded.
+///
+/// # Returns
+///
+/// * `Ok(Directory)` - Handle to the open root directory of the boot volume.
+/// * `Err(&'static str)` - If UEFI Boot Services have been terminated or the protocol cannot be opened.
+///
+/// # Errors
+///
+/// Returns an error if the kernel has already transitioned to bare-metal hardware mode or if
+/// the UEFI `SimpleFileSystem` protocol fails.
 pub fn open_root_volume() -> Result<Directory, &'static str> {
     if crate::console::is_hardware_mode() {
         return Err("UEFI Boot Services terminated (operating in bare-metal hardware mode)");
@@ -46,11 +98,27 @@ pub fn open_root_volume() -> Result<Directory, &'static str> {
         .map_err(|_| "Failed to open root volume directory")
 }
 
-/// Largest file [`read_media_file`] will load (root filesystem archives).
+/// Largest file `read_media_file` will load into memory (1 GiB, used for root filesystem archives).
 const MAX_MEDIA_FILE: usize = 1024 * 1024 * 1024;
 
-/// Reads a whole file from the first UEFI file system that has it: the boot volume, then
-/// any other attached FAT volume (installation media). No 16 MiB limit.
+/// Reads an entire file from the first attached UEFI FAT volume that contains it.
+///
+/// Searches all handles implementing `SimpleFileSystem` (both the boot volume and any
+/// attached installation media) and supports payloads up to [`MAX_MEDIA_FILE`] (1 GiB).
+///
+/// # Arguments
+///
+/// * `path` - Relative or root-anchored path to the target file on the FAT volume.
+///
+/// # Returns
+///
+/// * `Ok(Vec<u8>)` - Heap-allocated vector containing the complete file contents.
+/// * `Err(&'static str)` - Static error description if in hardware mode, not found, or an I/O error occurs.
+///
+/// # Errors
+///
+/// Returns an error if Boot Services are inactive, the path exceeds buffer limits, the file
+/// exceeds 1 GiB, or no attached volume contains `path`.
 pub fn read_media_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     if crate::console::is_hardware_mode() {
         return Err("Boot media reading unavailable in hardware mode");
@@ -92,7 +160,21 @@ pub fn read_media_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> 
     Err("File not found on any attached volume")
 }
 
-/// Reads an entire file from the boot volume into a heap-allocated buffer.
+/// Reads an entire file (up to 16 MiB) from the UEFI boot volume into a heap-allocated buffer.
+///
+/// # Arguments
+///
+/// * `path` - File path on the boot volume.
+///
+/// # Returns
+///
+/// * `Ok(Vec<u8>)` - Heap-allocated buffer containing the file bytes.
+/// * `Err(&'static str)` - Error message if the file is missing, empty, larger than 16 MiB, or unreadable.
+///
+/// # Errors
+///
+/// Returns an error if UEFI Boot Services are terminated, `path` is a directory or missing,
+/// or the file size is outside `1..=MAX_LOAD_SIZE`.
 pub fn read_boot_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     if crate::console::is_hardware_mode() {
         return Err("Boot media reading unavailable in hardware mode");
@@ -125,7 +207,26 @@ pub fn read_boot_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     Ok(buf)
 }
 
-/// Executes an executable file found at the given filesystem path.
+/// Loads and executes a UEFI PE32+ executable file from the boot volume.
+///
+/// Validates the `MZ` signature, allocates `LOADER_DATA` pages via UEFI Boot Services,
+/// passes `args` as UTF-16 load options via the `LoadedImage` protocol, and invokes
+/// `uefi::boot::start_image`.
+///
+/// # Arguments
+///
+/// * `path` - Path to the `.efi` binary on the UEFI boot volume.
+/// * `args` - Command-line arguments passed as load options to the child UEFI image.
+///
+/// # Returns
+///
+/// * `Ok(())` - When the child UEFI image finishes executing and returns control.
+/// * `Err(&'static str)` - If the file cannot be read, lacks an `MZ` header, or fails `load_image`.
+///
+/// # Errors
+///
+/// Returns an error if Boot Services are terminated, the file does not exist or exceeds 16 MiB,
+/// lacks a valid PE32+ `MZ` header, or `uefi::boot::load_image` fails.
 pub fn execute_file(path: &str, args: &[&str]) -> Result<(), &'static str> {
     if crate::console::is_hardware_mode() {
         return Err("UEFI application execution unavailable in bare-metal hardware mode (Boot Services terminated)");
@@ -246,9 +347,23 @@ pub fn execute_file(path: &str, args: &[&str]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Searches the $PATH directories for an executable matching `command_name`.
-/// Queries the default ZFS File Server first via IPC, then falls back to the UEFI boot media.
-/// Returns true if a program was found and execution was attempted.
+/// Searches the ZFS File Server and UEFI `$PATH` directories for an executable matching `command_name` and runs it.
+///
+/// Queries the microkernel ZFS File Server (`/bin`) first via capability-checked IPC. If an
+/// ELF64 binary is found, automatically transitions to bare-metal hardware mode (if not already
+/// active) and spawns a Ring 3 native or Linux ABI process. If not found in ZFS and UEFI Boot
+/// Services are still active, searches `DEFAULT_SEARCH_PATHS` on the UEFI boot volume.
+///
+/// # Arguments
+///
+/// * `command_name` - Name or path of the external program to locate.
+/// * `args` - Slice of arguments passed to the spawned program.
+/// * `state` - Mutable reference to the active [`ShellState`].
+///
+/// # Returns
+///
+/// `true` if a matching program was found and execution was attempted, or `false` if no
+/// matching binary exists in ZFS or the UEFI search paths.
 pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellState) -> bool {
     // 1. Primary check: Query the Microkernel ZFS File Server via IPC
     let mut zfs_candidates: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
@@ -483,7 +598,15 @@ pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellSt
     false
 }
 
-/// Checks if a regular file exists at the given path on the boot volume.
+/// Checks whether a regular file exists at the given path on the UEFI boot volume.
+///
+/// # Arguments
+///
+/// * `path` - File path on the boot volume.
+///
+/// # Returns
+///
+/// `true` if UEFI Boot Services are active and `path` resolves to a regular file; `false` otherwise.
 pub fn file_exists(path: &str) -> bool {
     if crate::console::is_hardware_mode() {
         return false;
@@ -504,7 +627,11 @@ pub fn file_exists(path: &str) -> bool {
     }
 }
 
-/// Lists the contents of a directory on the boot volume.
+/// Lists the contents of a directory on the UEFI FAT boot volume to the console.
+///
+/// # Arguments
+///
+/// * `dir_path` - Directory path relative to the UEFI boot volume root (`""`, `"/"`, or `"\\"` for root).
 pub fn list_directory(dir_path: &str) {
     let mut root = match open_root_volume() {
         Ok(r) => r,
@@ -575,7 +702,14 @@ pub fn list_directory(dir_path: &str) {
     println!("Total entries: {}", count);
 }
 
-/// Reads and prints the text content of a file on the boot volume.
+/// Reads and prints the text content of a file on the UEFI FAT boot volume to the console.
+///
+/// Non-UTF-8 byte sequences are sanitized by printing printable ASCII characters and replacing
+/// control/binary bytes with `.`.
+///
+/// # Arguments
+///
+/// * `path` - File path on the UEFI boot volume.
 pub fn print_file(path: &str) {
     let mut root = match open_root_volume() {
         Ok(r) => r,

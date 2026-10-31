@@ -1,3 +1,26 @@
+//! # Synchronization Subsystem: Sleep Mutex
+//!
+//! Implements [`Mutex<T>`], a blocking mutual exclusion primitive that suspends contended tasks
+//! via a [`WaitQueue`] rather than spinning on the CPU.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Spinlocks are appropriate for short, non-blocking critical sections, but holding a spinlock
+//! across lengthy operations wastes CPU time. [`Mutex<T>`] attempts an uncontended atomic
+//! `compare_exchange` fast path and falls back to enqueuing the caller's `TaskId` in a
+//! [`WaitQueue`] and invoking [`crate::task::block_current`]. When the `MutexGuard` drops,
+//! it releases the lock and wakes the oldest waiting task in FIFO order.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`Mutex<T>`]: Blocking mutual exclusion primitive with owner tracking and wait-queue integration.
+//! - [`MutexGuard<'a, T>`]: RAII guard providing `Deref`/`DerefMut` access and automatic unlock on `Drop`.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Atomics**: Uses `AtomicBool` (`Acquire`/`Release`) for lock state and `AtomicU64` for owner PID diagnostics.
+//! - **Scheduler**: Relies on [`crate::task::SCHEDULER`] and [`crate::task::block_current`].
+
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,9 +34,13 @@ use crate::task::{self, TaskId};
 /// Unlike spinlocks which burn CPU cycles while waiting, `Mutex<T>` transitions
 /// contended threads into `TaskState::Blocked`, yielding execution until awakened.
 pub struct Mutex<T> {
+    /// Atomic flag indicating whether the mutex is currently held (`true` = locked).
     locked: AtomicBool,
+    /// Task ID of the thread currently holding the mutex (`0` when unlocked).
     owner: AtomicU64,
+    /// Spinlock-protected FIFO queue of tasks blocked waiting to acquire this mutex.
     waiters: SpinLock<WaitQueue>,
+    /// Interior-mutable storage for the protected value `T`.
     data: UnsafeCell<T>,
 }
 
@@ -108,6 +135,7 @@ impl<T> Mutex<T> {
 
 /// RAII lock guard for `Mutex<T>`. Unlocks the mutex on drop.
 pub struct MutexGuard<'a, T> {
+    /// Reference to the underlying [`Mutex`] unlocked when this guard is dropped.
     pub(crate) mutex: &'a Mutex<T>,
 }
 

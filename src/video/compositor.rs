@@ -108,10 +108,12 @@ impl Compositor {
         }
     }
 
+    /// Returns the horizontal canvas width in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Returns the vertical canvas height in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
@@ -121,10 +123,12 @@ impl Compositor {
         self.pixels.fill(color);
     }
 
+    /// Returns an immutable slice of the 32-bit ARGB pixel buffer.
     pub fn pixels(&self) -> &[u32] {
         &self.pixels
     }
 
+    /// Returns a mutable slice of the 32-bit ARGB pixel buffer.
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         &mut self.pixels
     }

@@ -14,10 +14,10 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`MouseState`]: Tracks absolute pointer coordinates `(x, y)` and button press states.
-//! - [`MouseEvent`]: Represents a discrete pointing motion or button transition event.
-//! - [`init()`]: Initializes the 8042 auxiliary port and enables streaming packet reporting.
-//! - [`poll_mouse()`]: Dispatches pending hardware packets and updates the pointer state.
+//! - `MouseState`: Tracks absolute pointer coordinates `(x, y)` and button press states.
+//! - `MouseEvent`: Represents a discrete pointing motion or button transition event.
+//! - `init`: Initializes the 8042 auxiliary port and enables streaming packet reporting.
+//! - `poll_mouse`: Dispatches pending hardware packets and updates the pointer state.
 //!
 //! ## Hardware Context
 //!
@@ -78,10 +78,15 @@ impl MouseState {
 /// Represents a mouse update event emitted by the hardware driver.
 #[derive(Debug, Clone, Copy)]
 pub struct MouseEvent {
+    /// Absolute cursor position and current button press states.
     pub state: MouseState,
+    /// Relative horizontal motion delta since the previous packet.
     pub delta_x: i32,
+    /// Relative vertical motion delta since the previous packet.
     pub delta_y: i32,
+    /// Whether the left mouse button transitioned from unpressed to pressed.
     pub left_pressed: bool,
+    /// Whether the right mouse button transitioned from unpressed to pressed.
     pub right_pressed: bool,
 }
 

@@ -29,6 +29,7 @@ pub const DIRTY_SYNC_THRESHOLD: usize = 4096;
 /// Clean dnodes kept cached before the cache is trimmed.
 const DNODE_CACHE_LIMIT: usize = 65_536;
 
+/// Result type for DMU object layer operations returning static error strings on failure.
 pub type DmuResult<T> = Result<T, &'static str>;
 
 type Indirect = [BlockPointer; BP_PER_BLOCK];
@@ -56,8 +57,11 @@ fn read_indirect(frame: PhysFrame<Size4KiB>) -> Box<Indirect> {
 
 /// The object layer of the pool.
 pub struct Dmu {
+    /// Storage Pool Allocator managing physical vdev block allocation.
     pub spa: Spa,
+    /// Active uberblock anchoring the Merkle tree root.
     pub ub: Uberblock,
+    /// Number of the currently active open transaction group.
     pub open_txg: u64,
     dnodes: BTreeMap<u64, DnodePhys>,
     dirty_dnodes: BTreeSet<u64>,
@@ -316,6 +320,7 @@ impl Dmu {
         self.dirty_data.len()
     }
 
+    /// Returns true if uncommitted dirty blocks, dnodes, or truncations are pending commit.
     pub fn has_pending_changes(&self) -> bool {
         !self.dirty_data.is_empty() || !self.dirty_dnodes.is_empty() || !self.truncated.is_empty() || !self.freed_trees.is_empty()
     }

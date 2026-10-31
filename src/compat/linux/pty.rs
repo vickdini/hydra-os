@@ -31,7 +31,9 @@ const EINVAL: i64 = -22;
 
 /// Device numbers: `/dev/ptmx` is 5:2, slaves are major 136 and up.
 pub const PTMX_MAJOR: u64 = 5;
+/// Minor device number for `/dev/ptmx`.
 pub const PTMX_MINOR: u64 = 2;
+/// Major device number for pseudo-terminal slave endpoints (`/dev/pts/*`).
 pub const PTS_MAJOR: u64 = 136;
 /// `st_dev` of the devpts file system.
 pub const PTS_DEV: u64 = 0x18;
@@ -61,6 +63,7 @@ struct PtyState {
 
 /// One pseudo-terminal pair.
 pub struct Pty {
+    /// Monotonic pseudo-terminal slave index (e.g. 0 for `/dev/pts/0`).
     pub index: u32,
     tty: Mutex<Tty>,
     state: Mutex<PtyState>,
@@ -70,8 +73,11 @@ pub struct Pty {
 
 /// An open end: the open file description shared by `dup` and `fork`.
 pub struct PtyFile {
+    /// Reference to the underlying PTY pair state.
     pub pty: Arc<Pty>,
+    /// True if this descriptor represents the master end (`/dev/ptmx`).
     pub master: bool,
+    /// Atomic flag indicating whether non-blocking I/O is enabled.
     pub nonblock: AtomicBool,
 }
 
@@ -245,6 +251,7 @@ impl Pty {
         st.st_nlink = 1;
     }
 
+    /// Returns the canonical path string of the associated slave device node.
     pub fn slave_path(&self) -> String {
         alloc::format!("/dev/pts/{}", self.index)
     }
@@ -295,6 +302,7 @@ impl PtyFile {
         }
     }
 
+    /// Reads incoming bytes from the pseudo-terminal end into `buf`.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
         if buf.is_empty() {
             return 0;
@@ -335,6 +343,7 @@ impl PtyFile {
         }
     }
 
+    /// Writes bytes to the pseudo-terminal end.
     pub fn write(&self, data: &[u8]) -> i64 {
         if self.master {
             self.pty.input(data);
@@ -410,10 +419,12 @@ impl PtyFile {
         }
     }
 
+    /// Sets or clears non-blocking mode on this PTY descriptor.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
+    /// Queries whether non-blocking mode is currently enabled on this PTY descriptor.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock()
     }

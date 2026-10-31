@@ -46,15 +46,23 @@ pub use wayland_bridge::*;
 /// Linux ABI subsystem diagnostic counters.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxSyscallStats {
+    /// Total number of Linux system calls intercepted.
     pub total_calls: u64,
+    /// Number of file and I/O system calls dispatched (`read`, `write`, `openat`, etc.).
     pub io_calls: u64,
+    /// Number of virtual memory management calls dispatched (`mmap`, `brk`, `mprotect`).
     pub memory_calls: u64,
+    /// Number of process lifecycle calls dispatched (`clone`, `exit`, `wait4`).
     pub process_calls: u64,
+    /// Number of architecture-specific control calls dispatched (`arch_prctl`).
     pub arch_prctl_calls: u64,
+    /// Number of time/clock system calls dispatched (`clock_gettime`, `nanosleep`).
     pub time_calls: u64,
+    /// Number of unhandled or unimplemented Linux system call numbers.
     pub unknown_calls: u64,
 }
 
+/// Global diagnostic counter singleton tracking Linux ABI system call activity.
 pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats {
     total_calls: 0,
     io_calls: 0,

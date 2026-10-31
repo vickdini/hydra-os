@@ -1,3 +1,30 @@
+//! # Architecture Layer: Interrupt Descriptor Table (IDT) & Hardware Exceptions
+//!
+//! Provides the 64-bit Interrupt Descriptor Table (IDT), low-level assembly exception
+//! trampolines, IST double fault isolation, and hardware interrupt dispatchers.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! In x86_64 long mode, hardware interrupts, processor traps, and software interrupts are routed
+//! through an array of 256 16-byte gate descriptors loaded into the CPU via the `LIDT` instruction.
+//! To ensure safe recovery and diagnostics, all architectural exception vectors (0..31) are routed
+//! through dedicated assembly stubs (`asm_trap_*`) that construct a uniform `ExceptionContext`
+//! stack frame and save the x87/SSE FPU state before invoking the Rust `hydra_exception_handler`.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `IdtEntry`: Low-level 16-byte gate descriptor conforming to the x86_64 architecture.
+//! - `InterruptDescriptorTable`: 256-entry array loaded into the CPU `IDTR`.
+//! - `ExceptionContext`: Complete architectural register context pushed on interrupt entry.
+//! - `IDT`: Global spinlock-protected IDT instance.
+//! - `init`: Populates the IDT with exception trampolines and loads it into the CPU.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 interrupt handlers.
+//! - Hardware Interaction: CPU `IDTR` register, assembly `lidt` instruction, and IST stack switching.
+//! - Concurrency: Handlers execute with interrupts disabled or managed via reentrancy safeguards.
+
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use spin::Mutex;
@@ -68,6 +95,7 @@ impl IdtEntry {
 /// The 256-entry x86_64 Interrupt Descriptor Table.
 #[repr(C, align(16))]
 pub struct InterruptDescriptorTable {
+    /// Array of 256 architectural 64-bit interrupt gate descriptors.
     pub entries: [IdtEntry; 256],
 }
 
@@ -103,34 +131,53 @@ impl InterruptDescriptorTable {
 #[derive(Debug, Clone, Copy)]
 pub struct ExceptionContext {
     // Callee & Caller Saved GPRs
+    /// Callee-saved general-purpose register R15.
     pub r15: u64,
+    /// Callee-saved general-purpose register R14.
     pub r14: u64,
+    /// Callee-saved general-purpose register R13.
     pub r13: u64,
+    /// Callee-saved general-purpose register R12.
     pub r12: u64,
+    /// Callee-saved base/frame pointer register RBP.
     pub rbp: u64,
+    /// Callee-saved general-purpose register RBX.
     pub rbx: u64,
+    /// Caller-saved scratch register R11.
     pub r11: u64,
+    /// Caller-saved 4th syscall argument register R10.
     pub r10: u64,
+    /// Caller-saved 6th argument register R9.
     pub r9: u64,
+    /// Caller-saved 5th argument register R8.
     pub r8: u64,
+    /// Caller-saved 1st argument register RDI.
     pub rdi: u64,
+    /// Caller-saved 2nd argument register RSI.
     pub rsi: u64,
+    /// Caller-saved 3rd argument register RDX.
     pub rdx: u64,
+    /// Caller-saved scratch register RCX.
     pub rcx: u64,
+    /// Caller-saved accumulator / syscall return value register RAX.
     pub rax: u64,
-    // Exception Vector Index
+    /// Architectural interrupt or exception vector index (0..255).
     pub vector: u64,
-    // Hardware Error Code or Dummy 0
+    /// Hardware-pushed error code (or zero for exceptions that push no error code).
     pub error_code: u64,
-    // Hardware IRETQ Stack Frame
+    /// User or kernel instruction pointer at the moment of interruption (saved by hardware).
     pub rip: u64,
+    /// Code segment selector at the moment of interruption (saved by hardware).
     pub cs: u64,
+    /// CPU RFLAGS status register at the moment of interruption (saved by hardware).
     pub rflags: u64,
+    /// Stack pointer at the moment of interruption (saved by hardware).
     pub rsp: u64,
+    /// Stack segment selector at the moment of interruption (saved by hardware).
     pub ss: u64,
 }
 
-// Global static IDT instance
+/// Global system-wide Interrupt Descriptor Table instance protected by a spinlock.
 pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
 
 // Declare external assembly trampoline symbols

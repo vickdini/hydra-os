@@ -1,9 +1,33 @@
+//! # Synchronization Subsystem: FIFO Task Wait-Queue
+//!
+//! Provides [`WaitQueue`], the foundational FIFO queue of blocked `TaskId`s used by higher-level
+//! synchronization primitives (`super::Mutex`, `super::CondVar`, `super::Semaphore`, `super::Channel`).
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Whenever a kernel thread blocks on a contended lock, condition variable, semaphore, or channel,
+//! its `TaskId` is appended to a [`WaitQueue`] (avoiding duplicate entries). When the resource
+//! becomes available, [`WaitQueue::wake_one`] or [`WaitQueue::wake_all`] pops waiting task IDs in
+//! FIFO order and transitions them back to `TaskState::Ready` via [`crate::task::unblock_task`].
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`WaitQueue`]: FIFO wait-queue supporting [`WaitQueue::enqueue`], [`WaitQueue::wait`],
+//!   [`WaitQueue::wake_one`], and [`WaitQueue::wake_all`].
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Allocation**: Backed by `alloc::collections::VecDeque<TaskId>`.
+//! - **Scheduler**: Interacts directly with [`crate::task::SCHEDULER`], [`crate::task::block_current`],
+//!   and [`crate::task::unblock_task`].
+
 use alloc::collections::VecDeque;
 use crate::task::{self, TaskId};
 
 /// Thread-safe FIFO wait-queue for tracking blocked tasks.
 #[derive(Debug, Clone, Default)]
 pub struct WaitQueue {
+    /// Double-ended FIFO queue of task IDs currently waiting on this queue.
     waiters: VecDeque<TaskId>,
 }
 

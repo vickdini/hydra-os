@@ -24,14 +24,34 @@
 //! +---------------------+---------------------+
 //! ```
 
+//! ## Key Types & Interfaces
+//!
+//! - [`clean_host()`]: Strips URL scheme prefixes, paths, and port numbers to isolate the domain name.
+//! - [`build_dns_query()`]: Serializes an RFC 1035 recursive `A`-record query packet.
+//! - [`parse_dns_response()`]: Parses an RFC 1035 DNS answer section and extracts the first IPv4 `A` record.
+//! - [`resolve()`]: End-to-end synchronous DNS resolver over [`GLOBAL_INTERFACE`].
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Uses [`GLOBAL_INTERFACE`] and [`UdpPacket`] for UDP transport on port 53, and `crate::arch::pit` for polling timeouts.
+
 use crate::net::ipv4::IpProtocol;
 use crate::net::udp::UdpPacket;
 use crate::net::GLOBAL_INTERFACE;
 
+/// Standard UDP destination port for DNS servers (`53`).
 pub const DNS_PORT: u16 = 53;
+/// Ephemeral local UDP source port used by the kernel DNS resolver (`53535`).
 pub const DNS_CLIENT_PORT: u16 = 53535;
 
 /// Strips protocols (`http://`, `https://`), paths (`/...`), and port numbers (`:80`) from input URLs.
+///
+/// # Arguments
+/// - `input`: Raw hostname or URL string slice.
+///
+/// # Returns
+/// The bare domain/host portion of `input`.
 pub fn clean_host(input: &str) -> &str {
     let s = input.trim();
     let s = if let Some(stripped) = s.strip_prefix("https://") {
@@ -55,7 +75,18 @@ pub fn clean_host(input: &str) -> &str {
     }
 }
 
-/// Constructs an RFC 1035 standard DNS query for an `A` record.
+/// Constructs an RFC 1035 standard DNS query for an IPv4 `A` record.
+///
+/// # Arguments
+/// - `domain`: Dot-separated domain name (e.g., `"example.com"`).
+/// - `tx_id`: 16-bit DNS transaction identifier.
+/// - `out_buf`: Destination byte slice (must be at least 512 bytes).
+///
+/// # Returns
+/// `Ok(bytes_written)` containing the total size of the serialized DNS query packet.
+///
+/// # Errors
+/// Returns `Err` if `out_buf.len() < 512` or if any domain label exceeds 63 bytes.
 pub fn build_dns_query(
     domain: &str,
     tx_id: u16,
@@ -111,6 +142,17 @@ pub fn build_dns_query(
 }
 
 /// Parses an RFC 1035 DNS response and returns the resolved 4-byte IPv4 address.
+///
+/// # Arguments
+/// - `buf`: Raw UDP payload containing the DNS response.
+/// - `expected_tx_id`: Expected 16-bit DNS transaction ID.
+///
+/// # Returns
+/// `Ok([u8; 4])` containing the first resolved IPv4 `A` record.
+///
+/// # Errors
+/// Returns `Err` if the header is truncated, transaction ID mismatches, server returns an RCODE error,
+/// or no IPv4 `A` record is present in the answer section.
 pub fn parse_dns_response(buf: &[u8], expected_tx_id: u16) -> Result<[u8; 4], &'static str> {
     if buf.len() < 12 {
         return Err("DNS response payload shorter than 12-byte header");
@@ -207,6 +249,18 @@ pub fn parse_dns_response(buf: &[u8], expected_tx_id: u16) -> Result<[u8; 4], &'
 }
 
 /// Resolves a domain name into an IPv4 address using the configured DNS server.
+///
+/// Automatically sanitizes `domain` via [`clean_host`] and triggers DHCP acquisition if
+/// the interface is unconfigured. Falls back to `10.0.2.3` if no DNS server was leased.
+///
+/// # Arguments
+/// - `domain`: Domain name or URL string to resolve.
+///
+/// # Returns
+/// `Ok([u8; 4])` containing the resolved IPv4 address.
+///
+/// # Errors
+/// Returns `Err` if the domain is empty, the network interface is offline, or the DNS query times out.
 pub fn resolve(domain: &str) -> Result<[u8; 4], &'static str> {
     let clean = clean_host(domain);
     if clean.is_empty() {

@@ -1,3 +1,28 @@
+//! # Task Subsystem: Preemptive Round-Robin Scheduler
+//!
+//! Implements the kernel's priority-aware preemptive round-robin task scheduler, context
+//! switcher, thread/process cloner (`clone`/`fork`), and task lifecycle manager.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Driven by the 100 Hz Programmable Interval Timer (IRQ 0) and cooperative yield interrupts
+//! (`int 0x81`), `Scheduler` multiplexes CPU execution across kernel threads and Ring 3 user
+//! processes. High-priority service tasks (`TaskPriority::High` and above) are scheduled ahead
+//! of normal round-robin tasks, while `TaskPriority::Idle` runs only when no other task is ready.
+//! On each context switch, the scheduler saves and restores general-purpose registers, `FS_BASE`,
+//! x87/SSE FPU state, TSS `RSP0`, and the `CR3` page table root.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `Scheduler`: Core scheduler state machine managing the task table and active context switches.
+//! - [`SCHEDULER`]: Global spinlock-protected `Scheduler` singleton.
+//! - `TaskSnapshot`: Diagnostic summary of a task's state, priority, registers, and CPU ticks.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Interrupt Frame**: Saves/restores `ExceptionContext` pushed by hardware interrupt stubs.
+//! - **CPU Registers & MSRs**: Updates `CR3`, `IA32_FS_BASE` (`0xC000_0100`), TSS `RSP0`, and `SYSCALL` kernel RSP.
+
 use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
@@ -6,20 +31,31 @@ use crate::arch::idt::ExceptionContext;
 use crate::capability::table::CapabilityTable;
 use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskState};
 
+/// Default timeslice granted to a scheduled task in PIT timer ticks (50 ms at 100 Hz).
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
+/// Default kernel stack size allocated per thread in bytes (64 KiB).
 pub const DEFAULT_STACK_SIZE: usize = 65536;  // 64 KiB per kernel thread stack
 
 /// Diagnostic snapshot of a task for shell inspection (e.g. `ps` / `tasks` command).
 #[derive(Debug, Clone)]
 pub struct TaskSnapshot {
+    /// Unique task identifier (PID/TID).
     pub id: TaskId,
+    /// Human-readable task name.
     pub name: &'static str,
+    /// Current scheduling state of the task.
     pub state: TaskState,
+    /// Scheduling priority class.
     pub priority: TaskPriority,
+    /// CPU privilege mode (`Kernel` Ring 0 or `User` Ring 3).
     pub mode: PrivilegeMode,
+    /// Real user ID (`uid`) owning the task.
     pub uid: u32,
+    /// Total PIT timer ticks accumulated by this task.
     pub ticks_run: u64,
+    /// Last saved stack pointer (`RSP`).
     pub rsp: u64,
+    /// Last saved instruction pointer (`RIP`).
     pub rip: u64,
 }
 
@@ -28,14 +64,20 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
 /// Preemptive Round-Robin Multitasking Scheduler.
 pub struct Scheduler {
+    /// Table of all registered tasks (active, sleeping, blocked, and dead).
     tasks: Vec<Task>,
+    /// Index into `tasks` of the currently executing task.
     current_index: usize,
+    /// Monotonically increasing counter for assigning new `TaskId`s.
     next_id: u64,
+    /// Default timeslice in timer ticks assigned when a task is scheduled.
     default_timeslice: u32,
+    /// True once [`Scheduler::init`] has registered the boot/main task and idle thread.
     initialized: bool,
 }
 
 impl Scheduler {
+    /// Creates an uninitialized `Scheduler` with an empty task list.
     pub const fn new() -> Self {
         Self {
             tasks: Vec::new(),
@@ -69,6 +111,7 @@ impl Scheduler {
         }
     }
 
+    /// Returns true if the scheduler has been initialized via [`Self::init`].
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
@@ -84,6 +127,7 @@ impl Scheduler {
         self.spawn_internal(name, entry_fn, priority, current_cr3)
     }
 
+    /// Allocates a kernel stack and appends a new Ring 0 task using page table root `cr3`.
     fn spawn_internal(
         &mut self,
         name: &'static str,
@@ -249,7 +293,7 @@ impl Scheduler {
     ///
     /// # Returns
     ///
-    /// Returns the assigned [`TaskId`] on success, or a static error description
+    /// Returns the assigned `TaskId` on success, or a static error description
     /// if the binary is malformed or memory allocation failed.
     ///
     /// # Errors

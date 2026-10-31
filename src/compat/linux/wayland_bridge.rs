@@ -1,10 +1,34 @@
-//! # Linux ABI Wayland Compositor Bridge
+//! # Linux Compatibility: In-Kernel Wayland Compositor Bridge
 //!
 //! Implements an in-kernel Wayland display server bridge listening on `/run/user/1000/wayland-0`.
-//! Translates client Wayland protocol wire messages (wl_display, wl_registry, wl_compositor,
-//! wl_shm, wl_shm_pool, wl_buffer, wl_surface, xdg_wm_base, xdg_surface, xdg_toplevel),
-//! receives shared memory pixel buffers passed via `SCM_RIGHTS` ancillary file descriptors,
-//! and composites/blits them directly into the UEFI GOP linear framebuffer and desktop compositor.
+//! Translates client Wayland protocol wire messages (`wl_display`, `wl_registry`, `wl_compositor`,
+//! `wl_shm`, `wl_shm_pool`, `wl_buffer`, `wl_surface`, `xdg_wm_base`, `xdg_surface`, `xdg_toplevel`,
+//! `wl_seat`, `wl_pointer`, `wl_keyboard`), receives shared memory pixel buffers passed via
+//! `SCM_RIGHTS` ancillary file descriptors, and composites/blits them directly into the UEFI GOP
+//! linear framebuffer with KDE Plasma Breeze window decorations.
+//!
+//! ## Architectural Role & Design Rationale
+//! Running unmodified Wayland client toolkits (such as Qt6, GTK, and KDE Plasma applications)
+//! requires a compliant Wayland compositor speaking the binary wire protocol over `/run/user/1000/wayland-0`.
+//! Embedding a lightweight protocol bridge directly inside the kernel's compatibility layer avoids
+//! the overhead of a separate user-space compositor round-trip during early graphical bring-up,
+//! reading client [`MemFd`] backing stores directly and blitting them to the UEFI GOP framebuffer
+//! while forwarding PS/2 mouse and console keyboard events as `wl_pointer` and `wl_keyboard` wire events.
+//!
+//! ## Key Types & Interfaces
+//! - [`WaylandBridge`] & [`WAYLAND_BRIDGE`]: Global compositor state managing all connected client sessions.
+//! - [`WaylandClientSession`]: Per-client protocol object table, staging wire buffer, and input focus state.
+//! - [`WaylandShmPool`] & [`WaylandBuffer`]: Shared memory pool (`MemFd`) and pixel buffer descriptors.
+//! - [`WaylandSurfaceState`]: Client window surface state (attached buffer, title, frame callbacks).
+//! - [`dispatch_wayland_events`]: Polls the listening socket, parses wire requests, dispatches input events, and blits committed surfaces.
+//! - [`blit_wayland_surface`]: Renders a committed client surface with a KDE Plasma Breeze window frame onto the UEFI GOP framebuffer.
+//!
+//! ## Hardware & Dependency Context
+//! - **Hardware**: Reads pointer state from the x86 PS/2 mouse driver ([`crate::arch::mouse`]),
+//!   timestamps from the 8254 PIT ([`crate::arch::pit`]), keyboard input from [`crate::console`],
+//!   and renders pixels to the UEFI GOP linear framebuffer ([`crate::video`]).
+//! - **Dependencies**: Uses [`crate::compat::linux::socket`] for Unix domain IPC and `SCM_RIGHTS`
+//!   descriptor extraction, and [`crate::compat::linux::memfd::MemFd`] for shared memory backing.
 
 extern crate alloc;
 
@@ -20,116 +44,191 @@ use crate::compat::linux::socket::{ensure_wayland_socket, UnixSocket, UnixSocket
 use crate::video::with_framebuffer;
 
 // Wayland Core Protocol Object IDs & Opcodes
+/// Singleton object ID for the root `wl_display` object on every Wayland connection.
 pub const WL_DISPLAY_ID: u32 = 1;
 
+/// `wl_display.sync` request opcode (asynchronous roundtrip barrier).
 pub const WL_DISPLAY_SYNC: u16 = 0;
+/// `wl_display.get_registry` request opcode (requests the global object registry).
 pub const WL_DISPLAY_GET_REGISTRY: u16 = 1;
 
+/// `wl_registry.bind` request opcode (binds a global interface name to a client object ID).
 pub const WL_REGISTRY_BIND: u16 = 0;
 
+/// `wl_compositor.create_surface` request opcode (allocates a new `wl_surface`).
 pub const WL_COMPOSITOR_CREATE_SURFACE: u16 = 0;
+/// `wl_compositor.create_region` request opcode (allocates a new `wl_region`).
 pub const WL_COMPOSITOR_CREATE_REGION: u16 = 1;
 
+/// `wl_shm.create_pool` request opcode (creates a shared memory pool from an `SCM_RIGHTS` fd).
 pub const WL_SHM_CREATE_POOL: u16 = 0;
 
+/// `wl_shm_pool.create_buffer` request opcode (slices a pixel buffer out of the shared memory pool).
 pub const WL_SHM_POOL_CREATE_BUFFER: u16 = 0;
+/// `wl_shm_pool.destroy` request opcode (destroys the shared memory pool handle).
 pub const WL_SHM_POOL_DESTROY: u16 = 1;
+/// `wl_shm_pool.resize` request opcode (expands the shared memory pool size).
 pub const WL_SHM_POOL_RESIZE: u16 = 2;
 
+/// `xdg_wm_base.destroy` request opcode.
 pub const XDG_WM_BASE_DESTROY: u16 = 0;
+/// `xdg_wm_base.create_positioner` request opcode.
 pub const XDG_WM_BASE_CREATE_POSITIONER: u16 = 1;
+/// `xdg_wm_base.get_xdg_surface` request opcode (wraps a `wl_surface` in an `xdg_surface`).
 pub const XDG_WM_BASE_GET_XDG_SURFACE: u16 = 2;
+/// `xdg_wm_base.pong` request opcode (responds to a compositor liveness ping).
 pub const XDG_WM_BASE_PONG: u16 = 3;
 
+/// `xdg_surface.destroy` request opcode.
 pub const XDG_SURFACE_DESTROY: u16 = 0;
+/// `xdg_surface.get_toplevel` request opcode (assigns the top-level window role).
 pub const XDG_SURFACE_GET_TOPLEVEL: u16 = 1;
+/// `xdg_surface.get_popup` request opcode (assigns the popup role).
 pub const XDG_SURFACE_GET_POPUP: u16 = 2;
+/// `xdg_surface.set_window_geometry` request opcode.
 pub const XDG_SURFACE_SET_WINDOW_GEOMETRY: u16 = 3;
+/// `xdg_surface.ack_configure` request opcode (acknowledges a compositor configure event).
 pub const XDG_SURFACE_ACK_CONFIGURE: u16 = 4;
 
+/// `xdg_toplevel.destroy` request opcode.
 pub const XDG_TOPLEVEL_DESTROY: u16 = 0;
+/// `xdg_toplevel.set_parent` request opcode.
 pub const XDG_TOPLEVEL_SET_PARENT: u16 = 1;
+/// `xdg_toplevel.set_title` request opcode (sets the window titlebar string).
 pub const XDG_TOPLEVEL_SET_TITLE: u16 = 2;
+/// `xdg_toplevel.set_app_id` request opcode (sets the desktop application identifier).
 pub const XDG_TOPLEVEL_SET_APP_ID: u16 = 3;
 
+/// `wl_surface.destroy` request opcode.
 pub const WL_SURFACE_DESTROY: u16 = 0;
+/// `wl_surface.attach` request opcode (stages a `wl_buffer` for the next commit).
 pub const WL_SURFACE_ATTACH: u16 = 1;
+/// `wl_surface.damage` request opcode (marks a surface rectangle as modified).
 pub const WL_SURFACE_DAMAGE: u16 = 2;
+/// `wl_surface.frame` request opcode (registers a `wl_callback` for the next vblank/frame completion).
 pub const WL_SURFACE_FRAME: u16 = 3;
+/// `wl_surface.set_opaque_region` request opcode.
 pub const WL_SURFACE_SET_OPAQUE_REGION: u16 = 4;
+/// `wl_surface.set_input_region` request opcode.
 pub const WL_SURFACE_SET_INPUT_REGION: u16 = 5;
+/// `wl_surface.commit` request opcode (atomically applies pending buffer, damage, and frame state).
 pub const WL_SURFACE_COMMIT: u16 = 6;
 
 // wl_seat Opcodes & Capabilities
+/// `wl_seat.get_pointer` request opcode (binds a `wl_pointer` input object).
 pub const WL_SEAT_GET_POINTER: u16 = 0;
+/// `wl_seat.get_keyboard` request opcode (binds a `wl_keyboard` input object).
 pub const WL_SEAT_GET_KEYBOARD: u16 = 1;
+/// `wl_seat.get_touch` request opcode (binds a `wl_touch` input object).
 pub const WL_SEAT_GET_TOUCH: u16 = 2;
+/// `wl_seat.release` request opcode (releases the seat object).
 pub const WL_SEAT_RELEASE: u16 = 3;
 
+/// `wl_seat.capabilities` bitflag indicating a pointer/mouse device is present.
 pub const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
+/// `wl_seat.capabilities` bitflag indicating a keyboard device is present.
 pub const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
+/// `wl_seat.capabilities` bitflag indicating a touch device is present.
 pub const WL_SEAT_CAPABILITY_TOUCH: u32 = 4;
 
 // wl_pointer Opcodes & Events
+/// `wl_pointer.set_cursor` request opcode.
 pub const WL_POINTER_SET_CURSOR: u16 = 0;
+/// `wl_pointer.release` request opcode.
 pub const WL_POINTER_RELEASE: u16 = 1;
 
+/// `wl_pointer.enter` event opcode (pointer entered a client surface).
 pub const WL_POINTER_EVENT_ENTER: u16 = 0;
+/// `wl_pointer.leave` event opcode (pointer left a client surface).
 pub const WL_POINTER_EVENT_LEAVE: u16 = 1;
+/// `wl_pointer.motion` event opcode (pointer moved within the focused surface).
 pub const WL_POINTER_EVENT_MOTION: u16 = 2;
+/// `wl_pointer.button` event opcode (mouse button pressed or released).
 pub const WL_POINTER_EVENT_BUTTON: u16 = 3;
+/// `wl_pointer.axis` event opcode (scroll wheel motion).
 pub const WL_POINTER_EVENT_AXIS: u16 = 4;
+/// `wl_pointer.frame` event opcode (marks the end of a logical pointer event group).
 pub const WL_POINTER_EVENT_FRAME: u16 = 5;
 
+/// Linux `evdev` button code for the left mouse button (`BTN_LEFT`).
 pub const BTN_LEFT: u32 = 0x110;
+/// Linux `evdev` button code for the right mouse button (`BTN_RIGHT`).
 pub const BTN_RIGHT: u32 = 0x111;
+/// Linux `evdev` button code for the middle mouse button (`BTN_MIDDLE`).
 pub const BTN_MIDDLE: u32 = 0x112;
 
 // wl_keyboard Opcodes & Events
+/// `wl_keyboard.release` request opcode.
 pub const WL_KEYBOARD_RELEASE: u16 = 0;
 
+/// `wl_keyboard.keymap` event opcode (advertises keymap format and file descriptor).
 pub const WL_KEYBOARD_EVENT_KEYMAP: u16 = 0;
+/// `wl_keyboard.enter` event opcode (keyboard focus entered a surface).
 pub const WL_KEYBOARD_EVENT_ENTER: u16 = 1;
+/// `wl_keyboard.leave` event opcode (keyboard focus left a surface).
 pub const WL_KEYBOARD_EVENT_LEAVE: u16 = 2;
+/// `wl_keyboard.key` event opcode (key press or release event).
 pub const WL_KEYBOARD_EVENT_KEY: u16 = 3;
+/// `wl_keyboard.modifiers` event opcode (modifier key state update).
 pub const WL_KEYBOARD_EVENT_MODIFIERS: u16 = 4;
+/// `wl_keyboard.repeat_info` event opcode (key auto-repeat rate and delay).
 pub const WL_KEYBOARD_EVENT_REPEAT_INFO: u16 = 5;
 
 // Supported Pixel Formats
+/// Wayland shared-memory pixel format: 32-bit ARGB with premultiplied alpha (`0xAARRGGBB`).
 pub const WL_SHM_FORMAT_ARGB8888: u32 = 0;
+/// Wayland shared-memory pixel format: 32-bit XRGB with ignored upper 8 bits (`0xXXRRGGBB`).
 pub const WL_SHM_FORMAT_XRGB8888: u32 = 1;
 
 /// Represents a shared memory pool created by a Wayland client via `wl_shm.create_pool`.
 pub struct WaylandShmPool {
+    /// Client-assigned Wayland object ID for this `wl_shm_pool`.
     pub id: u32,
+    /// Underlying RAM-backed [`MemFd`] passed over `SCM_RIGHTS`.
     pub memfd: Arc<Mutex<MemFd>>,
+    /// Mapped size of the shared memory pool in bytes.
     pub size: usize,
 }
 
 /// Represents an individual pixel buffer created by `wl_shm_pool.create_buffer`.
 #[derive(Debug, Clone, Copy)]
 pub struct WaylandBuffer {
+    /// Client-assigned Wayland object ID for this `wl_buffer`.
     pub id: u32,
+    /// Object ID of the parent [`WaylandShmPool`].
     pub pool_id: u32,
+    /// Byte offset of the first pixel within the parent pool's [`MemFd`].
     pub offset: usize,
+    /// Buffer width in pixels.
     pub width: usize,
+    /// Buffer height in pixels.
     pub height: usize,
+    /// Number of bytes per scanline row.
     pub stride: usize,
+    /// Pixel format code (e.g., [`WL_SHM_FORMAT_ARGB8888`] or [`WL_SHM_FORMAT_XRGB8888`]).
     pub format: u32,
 }
 
-/// Internal state of a client application surface.
+/// Internal state of a client application surface (`wl_surface`).
 pub struct WaylandSurfaceState {
+    /// Client-assigned Wayland object ID for this `wl_surface`.
     pub id: u32,
+    /// Object ID of the currently attached [`WaylandBuffer`], if any.
     pub attached_buffer_id: Option<u32>,
+    /// Window title string set via `xdg_toplevel.set_title`.
     pub title: String,
+    /// Application identifier set via `xdg_toplevel.set_app_id`.
     pub app_id: String,
+    /// Pending `wl_callback` object IDs awaiting frame completion events on commit.
     pub frame_callbacks: Vec<u32>,
+    /// Whether the surface has completed initial `xdg_surface` configuration.
     pub configured: bool,
+    /// Total number of `wl_surface.commit` requests processed on this surface.
     pub commit_count: u64,
 }
 
 impl WaylandSurfaceState {
+    /// Creates a new unconfigured [`WaylandSurfaceState`] with the given Wayland object `id`.
     pub fn new(id: u32) -> Self {
         Self {
             id,
@@ -145,27 +244,46 @@ impl WaylandSurfaceState {
 
 /// Active connection session with an individual Wayland client process.
 pub struct WaylandClientSession {
+    /// Connected server-side Unix domain socket for this client.
     pub socket: Arc<Mutex<UnixSocket>>,
+    /// Staging buffer accumulating incoming wire bytes until full Wayland messages are parsed.
     pub in_buffer: Vec<u8>,
+    /// Bound `wl_registry` object ID for this client, if requested.
     pub registry_id: Option<u32>,
+    /// Bound `wl_compositor` object ID for this client, if bound.
     pub compositor_id: Option<u32>,
+    /// Bound `wl_shm` object ID for this client, if bound.
     pub shm_id: Option<u32>,
+    /// Bound `xdg_wm_base` object ID for this client, if bound.
     pub wm_base_id: Option<u32>,
+    /// Active shared memory pools keyed by `wl_shm_pool` object ID.
     pub pools: BTreeMap<u32, WaylandShmPool>,
+    /// Active pixel buffers keyed by `wl_buffer` object ID.
     pub buffers: BTreeMap<u32, WaylandBuffer>,
+    /// Active surfaces keyed by `wl_surface` object ID.
     pub surfaces: BTreeMap<u32, WaylandSurfaceState>,
+    /// Mapping from `xdg_surface` object ID to its underlying `wl_surface` object ID.
     pub xdg_surfaces: BTreeMap<u32, u32>, // xdg_surface_id -> surface_id
+    /// Mapping from `xdg_toplevel` object ID to its parent `xdg_surface` object ID.
     pub toplevels: BTreeMap<u32, u32>,    // toplevel_id -> xdg_surface_id
+    /// Bound `wl_seat` object ID for this client, if bound.
     pub seat_id: Option<u32>,
+    /// Bound `wl_pointer` object ID for this client, if requested.
     pub pointer_id: Option<u32>,
+    /// Bound `wl_keyboard` object ID for this client, if requested.
     pub keyboard_id: Option<u32>,
+    /// Whether the mouse pointer is currently inside this client's surface bounds.
     pub pointer_inside: bool,
+    /// Last reported screen X coordinate of the mouse pointer.
     pub last_mouse_x: usize,
+    /// Last reported screen Y coordinate of the mouse pointer.
     pub last_mouse_y: usize,
+    /// Last reported pressed state of the left mouse button.
     pub last_mouse_pressed: bool,
 }
 
 impl WaylandClientSession {
+    /// Creates a new [`WaylandClientSession`] wrapping an accepted client `socket`.
     pub fn new(socket: Arc<Mutex<UnixSocket>>) -> Self {
         Self {
             socket,
@@ -190,13 +308,16 @@ impl WaylandClientSession {
     }
 }
 
-/// Global In-Kernel Wayland Compositor Bridge.
+/// Global In-Kernel Wayland Compositor Bridge state holding all active client sessions.
 pub struct WaylandBridge {
+    /// List of active client connections being serviced by the compositor.
     pub sessions: Vec<WaylandClientSession>,
+    /// Monotonically increasing Wayland event serial counter.
     pub next_serial: u32,
 }
 
 impl WaylandBridge {
+    /// Creates an empty [`WaylandBridge`] with `next_serial` initialized to `1`.
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
@@ -205,15 +326,17 @@ impl WaylandBridge {
     }
 }
 
+/// Global singleton instance of the in-kernel Wayland compositor bridge.
 pub static WAYLAND_BRIDGE: Mutex<Option<WaylandBridge>> = Mutex::new(None);
+/// Queue of `(x, y)` screen coordinates for simulated mouse clicks injected by kernel self-tests.
 pub static SIMULATED_CLICKS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
-/// Injects a simulated mouse click event for interactive testing and automation.
+/// Injects a simulated mouse click event at screen coordinates `(x, y)` for interactive testing and automation.
 pub fn inject_simulated_click(x: usize, y: usize) {
     SIMULATED_CLICKS.lock().push((x, y));
 }
 
-/// Ensures that the in-kernel Wayland display server bridge and socket are active.
+/// Ensures that the in-kernel Wayland display server bridge and `/run/user/1000/wayland-0` socket are initialized.
 pub fn ensure_wayland_bridge() {
     let _ = ensure_wayland_socket();
     let mut bridge = WAYLAND_BRIDGE.lock();
@@ -223,7 +346,7 @@ pub fn ensure_wayland_bridge() {
 }
 
 /// Dispatches all pending Wayland client requests, extracts shared memory buffers,
-/// performs display blitting on commit, and writes responses to the socket.
+/// performs display blitting on commit, and writes protocol event responses to client sockets.
 pub fn dispatch_wayland_events() {
     ensure_wayland_bridge();
 
@@ -446,6 +569,7 @@ pub fn dispatch_wayland_events() {
 // Message Serialization & Parsing Helpers
 // -----------------------------------------------------------------------------
 
+/// Appends an 8-byte Wayland wire protocol message header (`object_id`, `opcode`, and total length) to `buf`.
 fn write_msg_header(buf: &mut Vec<u8>, object_id: u32, opcode: u16, payload_len: usize) {
     let total_len = (8 + payload_len) as u32;
     let op_len = ((total_len as u32) << 16) | (opcode as u32);
@@ -453,14 +577,17 @@ fn write_msg_header(buf: &mut Vec<u8>, object_id: u32, opcode: u16, payload_len:
     buf.extend_from_slice(&op_len.to_ne_bytes());
 }
 
+/// Appends a native-endian `u32` value to a Wayland wire buffer.
 fn write_u32(buf: &mut Vec<u8>, val: u32) {
     buf.extend_from_slice(&val.to_ne_bytes());
 }
 
+/// Appends a native-endian `i32` value to a Wayland wire buffer.
 fn write_i32(buf: &mut Vec<u8>, val: i32) {
     buf.extend_from_slice(&val.to_ne_bytes());
 }
 
+/// Appends a length-prefixed, NUL-terminated, 32-bit padded UTF-8 string to a Wayland wire buffer.
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len() + 1; // null-terminated
@@ -473,6 +600,7 @@ fn write_string(buf: &mut Vec<u8>, s: &str) {
     }
 }
 
+/// Reads a native-endian `u32` from `payload` at `*offset`, advancing `*offset` by 4 bytes.
 fn read_u32(payload: &[u8], offset: &mut usize) -> Option<u32> {
     if *offset + 4 <= payload.len() {
         let val = u32::from_ne_bytes(payload[*offset..*offset + 4].try_into().ok()?);
@@ -483,6 +611,7 @@ fn read_u32(payload: &[u8], offset: &mut usize) -> Option<u32> {
     }
 }
 
+/// Reads a native-endian `i32` from `payload` at `*offset`, advancing `*offset` by 4 bytes.
 fn read_i32(payload: &[u8], offset: &mut usize) -> Option<i32> {
     if *offset + 4 <= payload.len() {
         let val = i32::from_ne_bytes(payload[*offset..*offset + 4].try_into().ok()?);
@@ -493,6 +622,7 @@ fn read_i32(payload: &[u8], offset: &mut usize) -> Option<i32> {
     }
 }
 
+/// Reads a length-prefixed, NUL-terminated, 32-bit padded string from `payload` at `*offset`.
 fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
     let len = read_u32(payload, offset)? as usize;
     if *offset + len <= payload.len() {
@@ -506,6 +636,7 @@ fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
     }
 }
 
+/// Serializes a `wl_registry.global` advertisement event into `out`.
 fn send_global(out: &mut Vec<u8>, reg_id: u32, name: u32, iface: &str, ver: u32) {
     let mut payload = Vec::new();
     write_u32(&mut payload, name);
@@ -519,6 +650,7 @@ fn send_global(out: &mut Vec<u8>, reg_id: u32, name: u32, iface: &str, ver: u32)
 // Wayland Protocol Request Dispatcher
 // -----------------------------------------------------------------------------
 
+/// Handles a single decoded client request message and appends any resulting compositor events to `out_events`.
 fn handle_client_message(
     session: &mut WaylandClientSession,
     object_id: u32,
@@ -862,6 +994,11 @@ fn handle_client_message(
 
 /// Renders a Wayland client surface directly onto the active UEFI GOP linear framebuffer,
 /// complete with a dark KDE Plasma Breeze window frame, Plasma Blue accent header, and control buttons.
+///
+/// # Arguments
+/// - `surface`: Metadata for the committed client surface (such as window title).
+/// - `buffer`: Pixel dimensions, stride, and pool offset of the attached `wl_buffer`.
+/// - `pool`: Shared memory pool containing the backing [`MemFd`] pixel data.
 pub fn blit_wayland_surface(
     surface: &WaylandSurfaceState,
     buffer: &WaylandBuffer,

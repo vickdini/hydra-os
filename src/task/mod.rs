@@ -1,7 +1,36 @@
+//! # Task Subsystem: Preemptive Multitasking and Process Management
+//!
+//! Coordinates kernel threads, unprivileged Ring 3 user processes, ELF64 binary loading,
+//! Linux `execve` process image construction, and scheduler-integrated event wait queues.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! The `task` module exposes the top-level API for spawning, scheduling, blocking, sleeping,
+//! and terminating execution threads in Hydra OS. It supports both native Hydra tasks and
+//! Linux ABI processes (`TaskPersonality::Linux`), providing preemption points for idle/wait
+//! loops (`preemptible`) while keeping kernel critical sections non-preemptible.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `Task`, `TaskId`, `TaskState`, `TaskPriority`: Core Task Control Block (TCB) types.
+//! - `SCHEDULER` & `TaskSnapshot`: Global preemptive round-robin scheduler and diagnostic state.
+//! - `spawn`, `spawn_user`, `spawn_elf`, `spawn_linux_elf`, `spawn_linux_chroot`: Process and thread creation APIs.
+//! - `yield_now`, `block_current`, `unblock_task`, `sleep_ms`, `exit`: Lifecycle and scheduling control.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Interrupts**: Triggered by IRQ 0 PIT timer ticks (100 Hz) and software yield interrupt `int 0x81`.
+//! - **CPU Privilege Levels**: Manages Ring 0 (Kernel) and Ring 3 (User) stacks, `CR3` page tables, and `FS_BASE` TLS MSRs.
+
+/// ELF64 binary parser and user-space segment mapper.
 pub mod elf;
+/// Demand-paged Linux `execve` process image builder.
 pub mod exec;
+/// Preemptive round-robin task scheduler.
 pub mod scheduler;
+/// Task Control Block (TCB), register state, and task metadata definitions.
 pub mod tcb;
+/// Lock-free interrupt-safe event wait queues (`poll`, `select`, pipes, sockets).
 pub mod wait;
 
 use alloc::vec::Vec;
@@ -9,7 +38,7 @@ pub use elf::{load_elf, load_linux_elf, ElfBinary, ElfError, ElfProcessImage};
 pub use scheduler::{TaskSnapshot, SCHEDULER};
 pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRegisters, TaskState};
 
-/// Number of kernel wait points currently active (see [`preemptible`]).
+/// Number of kernel wait points currently active (see `preemptible`).
 pub static PREEMPT_POINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Linux system call the running task is executing (`u64::MAX` when none), for
@@ -245,6 +274,7 @@ pub fn get_task_snapshots() -> Vec<TaskSnapshot> {
     sched.snapshots()
 }
 
+/// Fallback file descriptor table used before the multitasking scheduler is initialized.
 static FALLBACK_FDS: spin::Mutex<crate::fs::FdTable> = spin::Mutex::new(crate::fs::FdTable::empty());
 
 /// Executes a closure with mutable access to the active task's file descriptor table.

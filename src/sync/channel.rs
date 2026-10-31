@@ -1,3 +1,25 @@
+//! # Synchronization Subsystem: Bounded Blocking Channel
+//!
+//! Implements a bounded, thread-safe multi-producer multi-consumer (MPMC) FIFO message channel
+//! with both blocking ([`Channel::send`], [`Channel::recv`]) and non-blocking
+//! ([`Channel::try_send`], [`Channel::try_recv`]) operations.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Kernel threads and service tasks communicate structured messages through bounded channels
+//! to apply backpressure when a consumer falls behind. When the internal ring buffer (`VecDeque`)
+//! reaches capacity, senders enqueue themselves on `send_waiters` and block; when the buffer is
+//! empty, receivers enqueue themselves on `recv_waiters` and block.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`Channel<T>`]: Bounded generic message queue supporting blocking and try-based operations.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Allocation**: Uses `alloc::collections::VecDeque` pre-sized to the requested capacity.
+//! - **Scheduling**: Wakes blocked peers via [`WaitQueue::wake_one`] and yields via [`crate::task::block_current`].
+
 use alloc::collections::VecDeque;
 use spin::Mutex as SpinLock;
 
@@ -6,9 +28,13 @@ use crate::task::{self, TaskId};
 
 /// Bounded synchronized channel with blocking send and receive operations.
 pub struct Channel<T> {
+    /// Spinlock-protected ring buffer holding queued items.
     buffer: SpinLock<VecDeque<T>>,
+    /// Maximum number of items the buffer can hold before senders block.
     capacity: usize,
+    /// Wait-queue of sender tasks blocked waiting for free buffer space.
     send_waiters: SpinLock<WaitQueue>,
+    /// Wait-queue of receiver tasks blocked waiting for items to arrive.
     recv_waiters: SpinLock<WaitQueue>,
 }
 

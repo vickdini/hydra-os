@@ -1,3 +1,7 @@
+//! # Shell Command: Shell Script Execution (`sh`, `source`)
+//!
+//! Provides the `sh` command executing shell script files line-by-line from the filesystem.
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;

@@ -16,10 +16,10 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`PciDevice`]: Discovered device descriptor containing bus location, vendor/device IDs, and BARs.
-//! - [`pci_read_u32()`] / [`pci_write_u32()`]: Low-level PCI configuration space accessors.
-//! - [`find_device()`]: Scans the PCI hierarchy for a specific `(vendor_id, device_id)` pair.
-//! - [`enable_bus_mastering()`]: Grants the PCI device permission to perform autonomous memory DMA.
+//! - `PciDevice`: Discovered device descriptor containing bus location, vendor/device IDs, and BARs.
+//! - `pci_read_u32` / `pci_write_u32`: Low-level PCI configuration space accessors.
+//! - `find_device`: Scans the PCI hierarchy for a specific `(vendor_id, device_id)` pair.
+//! - `enable_bus_mastering`: Grants the PCI device permission to perform autonomous memory DMA.
 //!
 //! ## Privilege Level & Hardware Context
 //!
@@ -31,35 +31,56 @@ use x86_64::instructions::port::Port;
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
 
-// PCI Configuration Register Offsets
+/// PCI Configuration Space: Vendor ID register offset (16-bit).
 pub const PCI_REG_VENDOR_ID: u8 = 0x00;
+/// PCI Configuration Space: Device ID register offset (16-bit).
 pub const PCI_REG_DEVICE_ID: u8 = 0x02;
+/// PCI Configuration Space: Command register offset (16-bit).
 pub const PCI_REG_COMMAND: u8 = 0x04;
+/// PCI Configuration Space: Status register offset (16-bit).
 pub const PCI_REG_STATUS: u8 = 0x06;
+/// PCI Configuration Space: Revision ID register offset (8-bit).
 pub const PCI_REG_REVISION: u8 = 0x08;
+/// PCI Configuration Space: Base Class Code register offset (8-bit).
 pub const PCI_REG_CLASS: u8 = 0x0B;
+/// PCI Configuration Space: Subclass Code register offset (8-bit).
 pub const PCI_REG_SUBCLASS: u8 = 0x0A;
+/// PCI Configuration Space: Header Type register offset (8-bit).
 pub const PCI_REG_HEADER_TYPE: u8 = 0x0E;
+/// PCI Configuration Space: Base Address Register 0 offset (32-bit).
 pub const PCI_REG_BAR0: u8 = 0x10;
+/// PCI Configuration Space: Base Address Register 1 offset (32-bit).
 pub const PCI_REG_BAR1: u8 = 0x14;
+/// PCI Configuration Space: Interrupt Line register offset (8-bit).
 pub const PCI_REG_INTERRUPT_LINE: u8 = 0x3C;
 
-// PCI Command Bits
+/// PCI Command Register bit 0: Response in I/O Space.
 pub const PCI_CMD_IO_SPACE: u16 = 0x0001;
+/// PCI Command Register bit 1: Response in Memory Space.
 pub const PCI_CMD_MEMORY_SPACE: u16 = 0x0002;
+/// PCI Command Register bit 2: Enable Bus Mastering (DMA).
 pub const PCI_CMD_BUS_MASTER: u16 = 0x0004;
 
 /// Encapsulates a discovered PCI peripheral on the hardware bus.
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
+    /// Target PCI bus number (0..255).
     pub bus: u8,
+    /// Target PCI device/slot number (0..31).
     pub device: u8,
+    /// Target PCI function index (0..7).
     pub function: u8,
+    /// 16-bit Vendor Identifier assigned by the PCI-SIG.
     pub vendor_id: u16,
+    /// 16-bit Device Identifier assigned by the device vendor.
     pub device_id: u16,
+    /// PCI base class code identifying the device category (e.g. 0x02 for Network).
     pub class_id: u8,
+    /// PCI subclass code further refining device functionality.
     pub subclass_id: u8,
+    /// Raw Base Address Register 0 (specifies memory or I/O window).
     pub bar0: u32,
+    /// Programmable interrupt line (IRQ vector) assigned to the device.
     pub irq_line: u8,
 }
 

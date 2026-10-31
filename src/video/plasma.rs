@@ -19,12 +19,17 @@ use super::compositor::{Color, Compositor};
 use super::wayland::{WaylandCompositor, WindowType, CONTROL_BTN_WIDTH, TITLEBAR_HEIGHT};
 use super::font::FONT_HEIGHT;
 
-// Official Upstream KDE Plasma 6.8 Raw Assets
+/// Raw 1280x800 32-bit ARGB desktop wallpaper bitmap image.
 pub static SCARLETTREE_WALLPAPER: &[u8] = include_bytes!("assets/scarlettree_1280x800.raw");
+/// Raw 32x32 32-bit ARGB KDE Plasma Kickoff start menu icon.
 pub static ICON_START_KDE: &[u8] = include_bytes!("assets/start-here-kde_32x32.raw");
+/// Raw 32x32 32-bit ARGB Konsole terminal application icon.
 pub static ICON_TERMINAL: &[u8] = include_bytes!("assets/utilities-terminal_32x32.raw");
+/// Raw 32x32 32-bit ARGB KSysGuard system monitor application icon.
 pub static ICON_SYS_MONITOR: &[u8] = include_bytes!("assets/utilities-system-monitor_32x32.raw");
+/// Raw 32x32 32-bit ARGB Dolphin file manager application icon.
 pub static ICON_FILE_MANAGER: &[u8] = include_bytes!("assets/system-file-manager_32x32.raw");
+/// Raw 32x32 32-bit ARGB System Settings application icon.
 pub static ICON_SETTINGS: &[u8] = include_bytes!("assets/preferences-system_32x32.raw");
 
 // KDE Plasma Breeze Palette Constants

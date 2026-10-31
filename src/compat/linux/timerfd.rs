@@ -34,10 +34,12 @@ struct Timer {
     interval: u64,
 }
 
+/// Represents a Linux timer file descriptor (`timerfd`).
 pub struct TimerFd {
     clock: u64,
     timer: Mutex<Timer>,
     nonblock: AtomicBool,
+    /// Wait queue awakened on timer expiration events.
     pub wq: Arc<WaitQueue>,
 }
 
@@ -77,6 +79,7 @@ impl TimerFd {
         }
     }
 
+    /// Polls readiness of this timer descriptor (returns `POLLIN` when expired).
     pub fn poll_events(&self) -> u32 {
         let t = self.timer.lock();
         match t.next {
@@ -85,14 +88,17 @@ impl TimerFd {
         }
     }
 
+    /// Sets or clears non-blocking I/O mode on this timer descriptor.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
+    /// Queries whether non-blocking mode is currently enabled on this descriptor.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
+    /// Reads the 8-byte unsigned integer count of expirations that occurred.
     pub fn read(self: &Arc<Self>, buf: &mut [u8]) -> i64 {
         if buf.len() < 8 {
             return EINVAL;

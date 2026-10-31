@@ -1,3 +1,8 @@
+//! # Shell Commands: Virtual Address Translation & Dynamic Paging (`translate`, `map`, `unmap`)
+//!
+//! Provides diagnostic commands to inspect 4-level PML4 page walks, dynamically map
+//! virtual pages to physical frames, and unmap pages with TLB invalidation.
+
 use uefi::proto::console::text::Color;
 use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
@@ -7,6 +12,7 @@ use crate::memory;
 use crate::shell::command::{parse_hex, Command};
 use crate::shell::state::ShellState;
 
+/// Shell command walking the 4-level PML4 paging table to translate virtual addresses.
 pub struct TranslateCommand;
 
 impl Command for TranslateCommand {
@@ -103,6 +109,7 @@ impl Command for TranslateCommand {
     }
 }
 
+/// Shell command dynamically mapping a virtual page to a physical frame.
 pub struct MapCommand;
 
 impl Command for MapCommand {
@@ -204,6 +211,7 @@ impl Command for MapCommand {
     }
 }
 
+/// Shell command unmapping a virtual page and invalidating the CPU TLB entry.
 pub struct UnmapCommand;
 
 impl Command for UnmapCommand {

@@ -1,3 +1,27 @@
+//! # Architecture Layer: 8259 Programmable Interrupt Controller (PIC)
+//!
+//! Provides bare-metal configuration, IRQ remapping, and End-of-Interrupt (EOI) signaling
+//! for the dual 8259 Priority Interrupt Controller architecture.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! By default, the IBM PC/AT hardware maps Master PIC IRQs (0..7) to CPU vectors `0x08..0x0F`,
+//! which conflicts directly with x86 protected-mode exceptions (e.g., `#DF`, `#GP`).
+//! This module remaps the dual 8259 PIC controllers to IDT vectors 32..47 (`0x20..0x2F`)
+//! through Initialization Command Words (ICW1..ICW4) and configures IRQ masks.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `PIC1_OFFSET` & `PIC2_OFFSET`: Vector base offsets (32 and 40) for Master and Slave PICs.
+//! - `init`: Executes the 4-step ICW cascade initialization sequence.
+//! - `send_eoi`: Issues an End of Interrupt command to the appropriate PIC controller.
+//! - `unmask_irq` & `mask_irq`: Manipulates interrupt mask registers (IMR) dynamically.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 kernel execution.
+//! - I/O Ports: Master Command `0x20`, Data `0x21`; Slave Command `0xA0`, Data `0xA1`.
+
 use x86_64::instructions::port::Port;
 
 const PIC1_COMMAND: u16 = 0x20;
@@ -9,8 +33,10 @@ const ICW1_INIT: u8 = 0x11;
 const ICW4_8086: u8 = 0x01;
 const PIC_EOI: u8 = 0x20;
 
-pub const PIC1_OFFSET: u8 = 0x20; // Vectors 32..39
-pub const PIC2_OFFSET: u8 = 0x28; // Vectors 40..47
+/// Base IDT interrupt vector assigned to the Master 8259 PIC (IRQ 0..7 -> vectors 32..39).
+pub const PIC1_OFFSET: u8 = 0x20;
+/// Base IDT interrupt vector assigned to the Slave 8259 PIC (IRQ 8..15 -> vectors 40..47).
+pub const PIC2_OFFSET: u8 = 0x28;
 
 #[inline(always)]
 fn io_wait() {

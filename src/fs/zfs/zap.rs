@@ -1,5 +1,12 @@
-//! # Directories (ZAP)
+//! # ZFS Attribute Processor (ZAP) & Directories
 //!
+//! ## Subsystem Role & Architecture
+//! This module provides the directory management implementation for Hydra's OpenZFS
+//! filesystem layer. In OpenZFS, directories are specialized dnode objects whose data
+//! payload is formatted as variable-length directory entries structured within 4 KiB
+//! logical blocks.
+//!
+//! ## Architecture & Layout
 //! A directory is an object whose data is a sequence of 4 KiB blocks of variable-length
 //! entry records. Records never cross a block boundary:
 //!
@@ -14,7 +21,16 @@
 //! when it is the first). An entry's byte offset in the object never changes while it
 //! exists, which makes it a stable `readdir` cookie.
 //!
-//! Lookups use an in-memory index (name -> entry), built on first access and cached.
+//! Lookups use an in-memory index (`name -> entry`), built on first access and cached.
+//!
+//! ## Key Types & Interfaces
+//! - [`DirEntry`]: Low-level directory record returned by [`Zap::readdir`].
+//! - [`ZapEntry`]: Directory listing representation for user-space and shell commands.
+//! - [`Zap`]: Main engine managing directory indexing, lookup, insertion, and deletion.
+//!
+//! ## Concurrency & Hardware Semantics
+//! Directory operations mutate DMU object blocks. Consistency is guarded at higher layers
+//! (ZPL / filesystem server mutexes) when committing transactional updates.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -74,8 +90,11 @@ fn block_slack(block: &[u8; ZFS_BLOCK_SIZE]) -> u16 {
 
 /// A directory entry as returned by [`Zap::readdir`].
 pub struct DirEntry {
+    /// File name bytes.
     pub name: Vec<u8>,
+    /// Inode / object ID number.
     pub ino: u64,
+    /// Dirent type indicator (e.g. `DT_DIR`, `DT_REG`).
     pub dtype: u8,
     /// Byte offset of this entry in the directory object.
     pub pos: u64,
@@ -86,13 +105,23 @@ pub struct DirEntry {
 /// A directory listing entry for shell commands (`ZfsClient::list_dir`).
 #[derive(Debug, Clone)]
 pub struct ZapEntry {
+    /// Name of the directory entry.
     pub name: alloc::string::String,
+    /// Inode / target object ID.
     pub object_id: u64,
+    /// Dnode type representation (e.g. file, directory, symlink).
     pub obj_type: super::types::DnodeType,
+    /// Whether this directory entry represents a valid record.
     pub is_valid: bool,
 }
 
 impl ZapEntry {
+    /// Creates a new directory entry record.
+    ///
+    /// # Arguments
+    /// * `name` - Raw byte slice of the file name.
+    /// * `object_id` - Target object identifier.
+    /// * `obj_type` - Dnode type of the target.
     pub fn new(name: &[u8], object_id: u64, obj_type: super::types::DnodeType) -> Self {
         Self {
             name: alloc::string::String::from_utf8_lossy(name).into_owned(),
@@ -102,6 +131,7 @@ impl ZapEntry {
         }
     }
 
+    /// Returns a string slice of the entry name.
     pub fn name_str(&self) -> &str {
         &self.name
     }
@@ -118,6 +148,7 @@ pub struct Zap {
 }
 
 impl Zap {
+    /// Creates a new, empty directory index cache engine.
     pub const fn new() -> Self {
         Self { cache: BTreeMap::new() }
     }

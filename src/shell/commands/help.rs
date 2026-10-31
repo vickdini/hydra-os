@@ -1,9 +1,14 @@
+//! # Shell Command: System Help & Command Discovery (`help`, `?`)
+//!
+//! Provides the `help` command listing built-in microkernel commands and usage summaries.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::commands::all_commands;
 use crate::shell::state::ShellState;
 
+/// Shell command displaying the help catalog and command summaries.
 pub struct HelpCommand;
 
 impl Command for HelpCommand {

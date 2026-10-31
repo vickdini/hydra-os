@@ -1,3 +1,21 @@
+//! # Video Subsystem: UEFI Graphics Output Protocol (GOP) Framebuffer Driver
+//!
+//! Discovers the hardware display controller via UEFI GOP, extracts the physical linear framebuffer,
+//! identity-maps Video RAM in Hydra's autonomous PML4 page table, and initializes the graphical console.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! UEFI firmware exposes display hardware through the Graphics Output Protocol (GOP). Because UEFI boot
+//! services are terminated upon calling `ExitBootServices`, the kernel queries GOP during early boot,
+//! obtains the physical base pointer and pixel geometry, maps the entire frame buffer into conventional
+//! kernel virtual memory, and stores mode parameters in [`VideoModeInfo`].
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`VideoModeInfo`]: Encapsulates resolution, stride, pixel format, and text matrix dimensions.
+//! - [`init_gop()`]: Protocol discovery and framebuffer mapping entry point.
+//! - [`get_video_info()`]: Retrieves the cached display parameters.
+
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
@@ -6,15 +24,24 @@ use crate::memory;
 use super::console::{VideoConsole, VIDEO_CONSOLE};
 use super::framebuffer::Framebuffer;
 
+/// Display hardware mode parameters and linear framebuffer dimensions.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoModeInfo {
+    /// Virtual base address pointer to the linear pixel framebuffer memory.
     pub base_ptr: *mut u8,
+    /// Total size of the video framebuffer in bytes.
     pub size: usize,
+    /// Horizontal resolution in pixels (e.g. 1024).
     pub width: usize,
+    /// Vertical resolution in pixels (e.g. 768).
     pub height: usize,
+    /// Number of 32-bit pixel strides per scanline (may include padding).
     pub stride: usize,
+    /// True if pixel format is Little-Endian BGR888; false if standard RGB888.
     pub is_bgr: bool,
+    /// Text console width in character columns (using 8-pixel font).
     pub text_cols: usize,
+    /// Text console height in character rows (using 16-pixel font).
     pub text_rows: usize,
 }
 

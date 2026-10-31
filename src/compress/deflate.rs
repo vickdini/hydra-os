@@ -1,21 +1,53 @@
-//! # RFC 1951 DEFLATE Decompressor
+//! # Compression Subsystem: RFC 1951 DEFLATE Decompressor
 //!
-//! A pure-Rust, `no_std` zero-dependency implementation of the DEFLATE decompression algorithm.
-//! Supports Stored (Type 0), Fixed Huffman (Type 1), and Dynamic Huffman (Type 2) compressed blocks.
+//! Implements a pure-Rust, `no_std`, zero-dependency decompressor for the RFC 1951
+//! DEFLATE bitstream format, supporting Stored (Type 0), Fixed Huffman (Type 1), and
+//! Dynamic Huffman (Type 2) blocks.
+//!
+//! ## Architectural Role & Design Rationale
+//! Gzip archives (`.tar.gz`) and compressed kernel payloads wrap raw DEFLATE bitstreams.
+//! Providing an in-kernel canonical Huffman tree decoder and LZ77 sliding-window back-reference
+//! engine allows Hydra OS to unpack archives directly in Ring 0 without external C libraries.
+//!
+//! ## Key Types & Interfaces
+//! - [`BitReader`]: LSB-first bit-level stream reader over a compressed byte slice.
+//! - [`inflate()`] & `inflate_with_capacity`: Primary public entry points for decompressing DEFLATE data.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: None (purely CPU-bound bit manipulation and heap allocation via `alloc`).
+//! - Concurrency: Stateless functions and stack-local [`BitReader`]; fully thread-safe.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-/// Bitwise stream reader for DEFLATE bit-streams (LSB-first).
+/// Bitwise stream reader for RFC 1951 DEFLATE bit-streams (least-significant-bit first).
+///
+/// # Concurrency & Thread Safety
+/// Holds an immutable borrow `'a` of the source slice and local cursor state. Not shared
+/// across threads; instantiated per decompression call.
 pub struct BitReader<'a> {
+    /// Underlying compressed byte slice.
     data: &'a [u8],
+    /// Index of the next unconsumed byte in `data`.
     pos: usize,
+    /// Shift register caching up to 32 unread bits (LSB-first).
     bit_buf: u32,
+    /// Number of valid bits currently held in `bit_buf`.
     bits_in_buf: u8,
 }
 
 impl<'a> BitReader<'a> {
+    /// Creates a new [`BitReader`] positioned at the start of `data`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Slice containing the raw DEFLATE bitstream.
+    ///
+    /// # Returns
+    ///
+    /// An initialized [`BitReader`] with an empty bit shift buffer.
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             data,
@@ -25,7 +57,21 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Reads up to 24 bits from the stream.
+    /// Reads and consumes `n` bits (up to 24) from the bitstream, least-significant-bit first.
+    ///
+    /// Refills the internal 32-bit shift register from the underlying byte slice as needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Number of bits to extract (`0..=24`).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u32)` - The extracted `n`-bit value in the lower bits of the return value.
+    ///
+    /// # Errors
+    ///
+    /// * `Err("Unexpected end of compressed bitstream")` - If the input slice runs out of bytes before `n` bits are available.
     pub fn read_bits(&mut self, n: u8) -> Result<u32, &'static str> {
         while self.bits_in_buf < n {
             if self.pos >= self.data.len() {
@@ -42,7 +88,9 @@ impl<'a> BitReader<'a> {
         Ok(result)
     }
 
-    /// Discards remaining bits until the next byte boundary.
+    /// Discards any remaining partial-byte bits in the shift buffer to align to the next byte boundary.
+    ///
+    /// Used when transitioning from bit-packed headers into uncompressed Type 0 (`BTYPE=00`) blocks.
     pub fn align_to_byte(&mut self) {
         let discard = self.bits_in_buf % 8;
         if discard > 0 {
@@ -51,7 +99,22 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Reads an exact byte slice directly (must be byte-aligned).
+    /// Reads an exact sub-slice of `count` bytes directly from the stream after aligning to a byte boundary.
+    ///
+    /// Rewinds any whole bytes that were prefetched into `bit_buf` back into the byte cursor `pos`
+    /// before slicing `data`.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - Number of raw bytes to read.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&'a [u8])` - Borrowed slice of length `count` from the underlying buffer.
+    ///
+    /// # Errors
+    ///
+    /// * `Err("Unexpected end of stream during uncompressed block read")` - If fewer than `count` bytes remain.
     pub fn read_bytes(&mut self, count: usize) -> Result<&'a [u8], &'static str> {
         self.align_to_byte();
         // Drain any bytes cached in bit_buf first
@@ -70,20 +133,40 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// A node in the Huffman decoding tree.
+/// A node in the binary Huffman decoding tree.
 #[derive(Clone, Copy)]
 enum HuffmanNode {
-    Branch { left: u16, right: u16 },
+    /// Internal branch pointing to child node indices for bit `0` (`left`) and bit `1` (`right`).
+    Branch {
+        /// Child node index for a `0` bit (`0` indicates unallocated).
+        left: u16,
+        /// Child node index for a `1` bit (`0` indicates unallocated).
+        right: u16,
+    },
+    /// Terminal leaf holding a decoded alphabet symbol.
     Leaf(u16),
 }
 
-/// A Canonical Huffman Tree.
+/// Canonical prefix-code Huffman tree built from symbol bit-lengths per RFC 1951 Section 3.2.2.
 struct HuffmanTree {
+    /// Flat arena of tree nodes, with the root always located at index `0`.
     nodes: Vec<HuffmanNode>,
 }
 
 impl HuffmanTree {
-    /// Builds a canonical Huffman tree from an array of code lengths (RFC 1951 section 3.2.2).
+    /// Constructs a canonical Huffman decoding tree from an array of per-symbol code bit-lengths.
+    ///
+    /// # Arguments
+    ///
+    /// * `lengths` - Slice where `lengths[symbol]` gives the code bit length (`0` if the symbol is unused).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(HuffmanTree)` - Ready-to-use decoding tree.
+    ///
+    /// # Errors
+    ///
+    /// * `Err("Invalid Huffman prefix tree structure")` - If code lengths violate the Kraft inequality and collide with a leaf.
     pub fn from_code_lengths(lengths: &[u8]) -> Result<Self, &'static str> {
         let mut max_len = 0;
         for &len in lengths {
@@ -156,7 +239,20 @@ impl HuffmanTree {
         Ok(Self { nodes })
     }
 
-    /// Decodes the next symbol from the bitstream.
+    /// Reads bits one by one from `reader` and walks the tree from the root until a leaf symbol is reached.
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - Active bitstream reader.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u16)` - The decoded alphabet symbol.
+    ///
+    /// # Errors
+    ///
+    /// * `Err("Attempted to decode from empty Huffman tree")` - If the tree has no nodes.
+    /// * `Err("Invalid Huffman bit sequence")` - If the stream traverses an unpopulated branch.
     pub fn decode(&self, reader: &mut BitReader) -> Result<u16, &'static str> {
         if self.nodes.is_empty() {
             return Err("Attempted to decode from empty Huffman tree");
@@ -178,36 +274,71 @@ impl HuffmanTree {
     }
 }
 
-// RFC 1951 Table 3.2.5: Literal/Length extra bits & base lengths
+/// RFC 1951 Section 3.2.5: Base copy lengths for literal/length symbols `257..=285`.
 const LENGTH_BASE: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
     163, 195, 227, 258,
 ];
+/// RFC 1951 Section 3.2.5: Number of extra bits following literal/length symbols `257..=285`.
 const LENGTH_EXTRA_BITS: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
 
-// RFC 1951 Table 3.2.5: Distance extra bits & base distances
+/// RFC 1951 Section 3.2.5: Base backward distances for distance symbols `0..=29`.
 const DISTANCE_BASE: [u16; 30] = [
     1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
+/// RFC 1951 Section 3.2.5: Number of extra bits following distance symbols `0..=29`.
 const DISTANCE_EXTRA_BITS: [u8; 30] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
     13,
 ];
 
-// RFC 1951 Section 3.2.7: Order of code length alphabet
+/// RFC 1951 Section 3.2.7: Permutation order of code-length alphabet symbols in Dynamic Huffman headers.
 const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
-/// Decompresses raw DEFLATE bytes into a dynamically allocated byte buffer.
+/// Decompresses raw RFC 1951 DEFLATE bytes into a dynamically allocated byte vector.
+///
+/// Pre-allocates an initial output capacity of `3 * compressed_data.len()` and delegates
+/// to `inflate_with_capacity`.
+///
+/// # Arguments
+///
+/// * `compressed_data` - Slice containing raw DEFLATE blocks (without Gzip/zlib headers).
+///
+/// # Returns
+///
+/// * `Ok(Vec<u8>)` - Decompressed byte buffer.
+///
+/// # Errors
+///
+/// Returns a static error string if the bitstream is truncated or contains invalid block types,
+/// malformed Huffman trees, or out-of-bounds LZ77 back-references.
 pub fn inflate(compressed_data: &[u8]) -> Result<Vec<u8>, &'static str> {
     inflate_with_capacity(compressed_data, compressed_data.len().saturating_mul(3))
 }
 
-/// Decompresses raw DEFLATE bytes with an initial capacity hint for the output vector.
+/// Decompresses raw RFC 1951 DEFLATE bytes using a caller-supplied initial output buffer capacity.
+///
+/// Iterates through DEFLATE blocks until a block with `BFINAL == 1` is processed.
+///
+/// # Arguments
+///
+/// * `compressed_data` - Slice containing raw DEFLATE blocks.
+/// * `initial_capacity` - Number of bytes to pre-allocate in the output `Vec<u8>` (e.g., from Gzip `ISIZE`).
+///
+/// # Returns
+///
+/// * `Ok(Vec<u8>)` - Decompressed byte buffer.
+///
+/// # Errors
+///
+/// * `Err("Stored block LEN and NLEN mismatch")` - Stored block one's complement length check failed.
+/// * `Err("Reserved or invalid DEFLATE block type (3)")` - Encountered `BTYPE == 3`.
+/// * Any bitstream or Huffman decoding error from [`BitReader`] or [`decode_block()`].
 pub fn inflate_with_capacity(compressed_data: &[u8], initial_capacity: usize) -> Result<Vec<u8>, &'static str> {
     let mut reader = BitReader::new(compressed_data);
     let mut out = Vec::with_capacity(initial_capacity);
@@ -309,7 +440,27 @@ pub fn inflate_with_capacity(compressed_data: &[u8], initial_capacity: usize) ->
     Ok(out)
 }
 
-/// Decodes compressed symbols using the provided Literal/Length and Distance Huffman trees.
+/// Decodes a single Huffman-compressed block (Fixed or Dynamic) until end-of-block symbol `256`.
+///
+/// Emits literal bytes (`0..=255`) directly into `out` and expands length/distance pairs
+/// (`257..=285`) by copying sliding-window bytes from earlier in `out`.
+///
+/// # Arguments
+///
+/// * `reader` - Bitstream reader positioned at the start of the compressed block body.
+/// * `lit_tree` - Literal/length Huffman tree.
+/// * `dist_tree` - Backward distance Huffman tree.
+/// * `out` - Output buffer accumulating decompressed bytes.
+///
+/// # Returns
+///
+/// * `Ok(())` - When the end-of-block symbol (`256`) is decoded.
+///
+/// # Errors
+///
+/// * `Err("Distance code out of range")` - Decoded distance symbol `>= 30`.
+/// * `Err("Backward distance references data before start of buffer")` - LZ77 distance exceeds `out.len()`.
+/// * `Err("Invalid literal/length symbol decoded")` - Decoded symbol `> 285`.
 fn decode_block(
     reader: &mut BitReader,
     lit_tree: &HuffmanTree,

@@ -1,9 +1,14 @@
+//! # Shell Command: Video Framebuffer Mode & Diagnostics (`video`, `gop`, `fb`)
+//!
+//! Provides the `video` command reporting linear framebuffer dimensions, stride, and video RAM address.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 use crate::video;
 
+/// Shell command inspecting GOP framebuffer hardware mode parameters.
 pub struct VideoCommand;
 
 impl Command for VideoCommand {

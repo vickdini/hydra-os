@@ -1,3 +1,23 @@
+//! # Video Subsystem: Linear Framebuffer Pixel Controller
+//!
+//! Provides the raw pixel-drawing canvas, resolution queries, pixel plotting, rectangle fills,
+//! character blitting, and scanline scrolling primitives for hardware video RAM.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! The [`Framebuffer`] struct wraps a linear 32-bit pixel memory pointer obtained from UEFI GOP.
+//! It handles hardware pixel format differences (RGB888 vs. BGR888), clips coordinate bounds
+//! to prevent buffer overruns, and implements optimized memory copies for line drawing, screen clearing,
+//! and vertical console scrolling.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`Framebuffer`]: Central pixel buffer abstraction managing base pointer and dimensions.
+//! - [`Framebuffer::put_pixel()`]: Plots an individual RGB pixel with coordinate clamping.
+//! - [`Framebuffer::fill_rect()`]: Fills a rectangular region with solid color.
+//! - [`Framebuffer::draw_char()`]: Renders an 8x16 bitmap character onto the canvas.
+//! - [`Framebuffer::scroll_up()`]: Shifts display lines upward by a fixed pixel stride.
+
 use super::font::{get_char_glyph, FONT_HEIGHT, FONT_WIDTH};
 use super::gop::VideoModeInfo;
 
@@ -27,18 +47,22 @@ impl Framebuffer {
         }
     }
 
+    /// Returns the horizontal screen width in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Returns the vertical screen height in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
 
+    /// Returns the scanline stride (pixels per line) of the hardware display.
     pub fn stride(&self) -> usize {
         self.stride
     }
 
+    /// Returns true if the hardware framebuffer uses little-endian BGR pixel ordering.
     pub fn is_bgr(&self) -> bool {
         self.is_bgr
     }
@@ -49,10 +73,12 @@ impl Framebuffer {
         self.base_ptr = ptr;
     }
 
+    /// Returns the raw pointer to the underlying pixel buffer.
     pub fn base_ptr(&self) -> *mut u8 {
         self.base_ptr
     }
 
+    /// Returns the total size of the framebuffer in bytes.
     pub fn size(&self) -> usize {
         self.size
     }

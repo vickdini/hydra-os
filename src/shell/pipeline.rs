@@ -1,3 +1,24 @@
+//! # Shell Subsystem: Command Pipelines & File Redirection
+//!
+//! Implements POSIX-style unidirectional command pipelines (`cmd1 | cmd2 | ...`) and
+//! file output redirection (`>` overwrite and `>>` append) backed by kernel `PipeBuffer`
+//! descriptors and the ZFS File Server.
+//!
+//! ## Architectural Role & Design Rationale
+//! Composable text streams are fundamental to UNIX shell ergonomics. Because built-in shell
+//! commands execute synchronously in the kernel shell task, `try_execute_pipeline` connects
+//! consecutive pipeline stages by binding file descriptors `0` (`stdin`) and `1` (`stdout`) of
+//! the current task's descriptor table to in-memory `PipeBuffer` instances between stage
+//! invocations, and flushes redirected final output to ZFS via [`crate::fs::ZfsClient`].
+//!
+//! ## Key Types & Interfaces
+//! - `try_execute_pipeline`: Detects unquoted `|`, `>`, or `>>` operators and executes the pipeline or redirection chain.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: None directly; routes I/O through [`crate::fs::PipeBuffer`] and [`crate::fs::ZfsClient`]
+//! - Concurrency: Temporarily mutates the active task's file descriptor table via [`crate::task::with_current_fds_mut`]
+
 use alloc::vec::Vec;
 use uefi::proto::console::text::Color;
 
@@ -6,9 +27,21 @@ use crate::fs::client::normalize_path;
 use crate::fs::{FileDescriptor, PipeBuffer};
 use crate::shell::state::ShellState;
 
-/// Executes a pipeline or redirected command line string.
+/// Inspects a command line for unquoted pipeline (`|`) or redirection (`>`, `>>`) operators and executes it.
 ///
-/// Returns `true` if handled as a pipeline or redirection, or `false` if it is a simple command.
+/// # Arguments
+///
+/// * `cmd_line` - Raw command line string to inspect and potentially execute.
+/// * `state` - Mutable reference to the active [`ShellState`].
+///
+/// # Returns
+///
+/// * `true` - If the command line contained a pipeline or redirection and was handled.
+/// * `false` - If the command line is a simple command with no unquoted `|` or `>` operators.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn try_execute_pipeline(cmd_line: &str, state: &mut ShellState) -> bool {
     let trimmed = cmd_line.trim();
 

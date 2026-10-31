@@ -1,7 +1,23 @@
-/// Compact 8x16 bitmap font engine for bare-metal framebuffer consoles.
-/// Covers all printable ASCII characters from 32 (' ') to 126 ('~').
+//! # Video Subsystem: 8x16 Bitmap Font Engine
+//!
+//! Provides an embedded 8x16 VGA bitmap font table covering printable ASCII characters (32..126)
+//! and glyph lookup primitives for framebuffer text rendering.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Bare-metal graphical consoles require pre-compiled font glyphs to draw readable characters
+//! onto pixel arrays without complex TrueType or OpenType rasterizers. This module contains a fixed
+//! 95-glyph 8x16 bitmap array, where each character consists of 16 scanlines with 8 1-bit pixels per row.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `FONT_WIDTH`: Standard glyph width in pixels (8 pixels).
+//! - `FONT_HEIGHT`: Standard glyph height in pixels (16 pixels).
+//! - `get_char_glyph`: Maps a character to its 16-byte bitmap slice, falling back to a box glyph.
 
+/// Width of each bitmap character in pixels (8 pixels).
 pub const FONT_WIDTH: usize = 8;
+/// Height of each bitmap character in pixels (16 pixels).
 pub const FONT_HEIGHT: usize = 16;
 
 /// Returns the 16-byte bitmap slice for a given ASCII character.

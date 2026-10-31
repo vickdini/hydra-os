@@ -16,17 +16,19 @@
 //! executes synchronously with zero interrupt latency and complete fault isolation, providing
 //! reliable sector read, write, and cache flush operations to back the OpenZFS storage pool.
 //!
-//! ## Hardware & Interface Context
+//! ## Key Types & Interfaces
 //!
-//! - Hardware Controller: Standard Intel PIIX3/PIIX4 IDE Controller or compatible SATA in IDE mode.
-//! - I/O Ports: 16-bit data port (`0x1F0`), 8-bit registers (`0x1F1..0x1F7`), and device control (`0x3F6`).
-//! - Addressing Modes: Logical Block Addressing (LBA28 up to 128 GiB, LBA48 up to 128 PiB).
-//! - Sector Size: Fixed 512 bytes per physical sector.
+//! - `AtaDevice`: Represents an identified physical or virtual ATA/IDE disk drive supporting PIO and Bus-Master DMA.
+//! - `DriveRole`: Distinguishes Master (`0xA0`/`0xE0`) and Slave (`0xB0`/`0xF0`) drives on an ATA channel.
+//! - `PRIMARY_ATA`: Global mutex-protected singleton holding the primary master ATA disk instance.
+//! - `init`: Probes the primary master ATA channel and registers the block device.
 //!
-//! ## System Call & Privilege Context
+//! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Executes exclusively in Ring 0 (Microkernel core).
-//! - Filesystem Integration: Directly backs [`crate::fs::zfs::spa::VdevStorage`] in the OpenZFS SPA.
+//! - **CPU Privilege Level**: Executes exclusively in Ring 0 (Microkernel core).
+//! - **Hardware Interaction**: Standard Intel PIIX3/PIIX4 IDE Controller or compatible SATA in IDE mode; 16-bit data port (`0x1F0`), 8-bit command/status registers (`0x1F1..0x1F7`), device control (`0x3F6`), and PCI Bus-Master DMA BAR4 registers.
+//! - **Concurrency**: Synchronized globally via `PRIMARY_ATA` (`spin::Mutex`) with polled completion deadlines.
+//! - **Filesystem Integration**: Directly backs [`crate::fs::zfs::spa::Vdev`] in the OpenZFS SPA.
 
 use spin::Mutex;
 use x86_64::instructions::port::Port;
@@ -34,27 +36,43 @@ use x86_64::instructions::port::Port;
 /// Standard sector size in bytes for ATA/IDE hard drives.
 pub const ATA_SECTOR_SIZE: usize = 512;
 
-/// Standard ATA I/O port base addresses.
+/// Primary ATA channel command block base I/O port (`0x1F0`).
 pub const ATA_PRIMARY_IO_BASE: u16 = 0x1F0;
+/// Primary ATA channel control/alternate-status port (`0x3F6`).
 pub const ATA_PRIMARY_CTRL_BASE: u16 = 0x3F6;
+/// Secondary ATA channel command block base I/O port (`0x170`).
 pub const ATA_SECONDARY_IO_BASE: u16 = 0x170;
+/// Secondary ATA channel control/alternate-status port (`0x376`).
 pub const ATA_SECONDARY_CTRL_BASE: u16 = 0x376;
 
 // ATA Commands
+/// ATA PIO 28-bit LBA Read Sectors command (`0x20`).
 pub const ATA_CMD_READ_SECTORS: u8 = 0x20;
+/// ATA PIO 48-bit LBA Read Sectors Ext command (`0x24`).
 pub const ATA_CMD_READ_SECTORS_EXT: u8 = 0x24;
+/// ATA PIO 28-bit LBA Write Sectors command (`0x30`).
 pub const ATA_CMD_WRITE_SECTORS: u8 = 0x30;
+/// ATA PIO 48-bit LBA Write Sectors Ext command (`0x34`).
 pub const ATA_CMD_WRITE_SECTORS_EXT: u8 = 0x34;
+/// ATA 28-bit Flush Volatile Write Cache command (`0xE7`).
 pub const ATA_CMD_CACHE_FLUSH: u8 = 0xE7;
+/// ATA 48-bit Flush Volatile Write Cache Ext command (`0xEA`).
 pub const ATA_CMD_CACHE_FLUSH_EXT: u8 = 0xEA;
+/// ATA Identify Device command (`0xEC`).
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 // ATA Status Register Bits
+/// ATA Status bit 0: Error (`ERR`) occurred during the previous command.
 pub const ATA_STATUS_ERR: u8 = 0x01;  // Error
+/// ATA Status bit 3: Data Request (`DRQ`) — drive is ready to transfer a word/sector of data.
 pub const ATA_STATUS_DRQ: u8 = 0x08;  // Data Request Ready
+/// ATA Status bit 4: Overlapped Mode Service Request (`SRV`).
 pub const ATA_STATUS_SRV: u8 = 0x10;  // Overlapped Mode Service Request
+/// ATA Status bit 5: Drive Fault (`DF`) — internal hardware fault detected.
 pub const ATA_STATUS_DF: u8 = 0x20;   // Drive Fault / Device Fault
+/// ATA Status bit 6: Drive Ready (`DRDY`) — drive is spun up and ready to accept commands.
 pub const ATA_STATUS_DRDY: u8 = 0x40; // Device Ready
+/// ATA Status bit 7: Busy (`BSY`) — drive controller is busy; no other status bits are valid.
 pub const ATA_STATUS_BSY: u8 = 0x80;  // Busy executing command
 
 /// Maximum polling iterations before timing out on ATA hardware response.
@@ -74,18 +92,28 @@ pub enum DriveRole {
 
 /// Hardware register interface for an ATA PIO channel.
 struct AtaPorts {
+    /// 16-bit PIO data read/write register (`base + 0`).
     data: Port<u16>,
+    /// Error register on read / Features register on write (`base + 1`).
     error_features: Port<u8>,
+    /// Number of sectors to transfer (`base + 2`).
     sector_count: Port<u8>,
+    /// LBA bits `0..=7` (and `24..=31` in LBA48 high byte write) (`base + 3`).
     lba_low: Port<u8>,
+    /// LBA bits `8..=15` (and `32..=39` in LBA48 high byte write) (`base + 4`).
     lba_mid: Port<u8>,
+    /// LBA bits `16..=23` (and `40..=47` in LBA48 high byte write) (`base + 5`).
     lba_high: Port<u8>,
+    /// Drive select (`Master`/`Slave`), LBA mode bit, and LBA28 bits `24..=27` (`base + 6`).
     drive_head: Port<u8>,
+    /// Primary Status register on read / Command register on write (`base + 7`).
     status_command: Port<u8>,
+    /// Alternate Status register on read / Device Control (`nIEN`, `SRST`) on write (`ctrl_base`).
     control_alt_status: Port<u8>,
 }
 
 impl AtaPorts {
+    /// Constructs an [`AtaPorts`] register set for the given command block and control port bases.
     fn new(io_base: u16, ctrl_base: u16) -> Self {
         Self {
             data: Port::new(io_base),
@@ -176,18 +204,24 @@ impl AtaPorts {
 /// runs, at least 30 seconds. A virtual disk can stall for seconds while the host flushes
 /// its image file; a fixed poll count alone gave up on writes that were still in progress.
 struct PollDeadline {
+    /// Number of status register poll iterations performed so far.
     polls: u64,
+    /// PIT tick count recorded when the poll operation started.
     start: u64,
+    /// PIT tick count at which the 30-second wall-clock timeout expires.
     deadline: u64,
 }
 
 impl PollDeadline {
+    /// Starts a new polling deadline anchored to the current PIT tick counter.
     fn new() -> Self {
         let hz = crate::arch::pit::frequency_hz().max(1);
         let start = crate::arch::pit::ticks();
         Self { polls: 0, start, deadline: start + 30 * hz }
     }
 
+    /// Increments the poll counter and returns `true` if both the minimum poll budget and
+    /// the 30-second timer deadline have expired.
     fn expired(&mut self) -> bool {
         self.polls += 1;
         if self.polls <= ATA_POLL_TIMEOUT as u64 {
@@ -200,14 +234,24 @@ impl PollDeadline {
 }
 
 /// Represents an active physical or virtual ATA/IDE hard disk drive.
+///
+/// # Concurrency & Thread Safety
+/// Wrapped inside `PRIMARY_ATA` (`spin::Mutex<Option<AtaDevice>>`) so all PIO and DMA
+/// commands execute sequentially without overlapping port accesses.
 pub struct AtaDevice {
+    /// I/O port register set for the drive's ATA channel.
     ports: AtaPorts,
+    /// Master or Slave role on the channel.
     _role: DriveRole,
+    /// 40-byte ASCII model string extracted from `IDENTIFY` words `27..=46`.
     model: [u8; 40],
+    /// Total addressable 512-byte sectors reported by the drive.
     total_sectors: u64,
+    /// Whether 48-bit LBA addressing (`EXT` commands) is supported.
     lba48_supported: bool,
     /// Bus-master DMA engine, when the controller has one.
     dma: Option<BusMaster>,
+    /// Consecutive DMA transfer error count before falling back permanently to PIO.
     dma_failures: u32,
 }
 
@@ -547,19 +591,31 @@ impl AtaDevice {
 // Bus-master DMA (PCI IDE controller, e.g. PIIX)
 // ---------------------------------------------------------------------------
 
+/// ATA 28-bit Read DMA command (`0xC8`).
 const ATA_CMD_READ_DMA: u8 = 0xC8;
+/// ATA 48-bit Read DMA Ext command (`0x25`).
 const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
+/// ATA 28-bit Write DMA command (`0xCA`).
 const ATA_CMD_WRITE_DMA: u8 = 0xCA;
+/// ATA 48-bit Write DMA Ext command (`0x35`).
 const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 
 // Bus-master register offsets and bits (primary channel)
+/// Primary channel Bus-Master Command register offset (`0x00`).
 const BM_COMMAND: u16 = 0;
+/// Primary channel Bus-Master Status register offset (`0x02`).
 const BM_STATUS: u16 = 2;
+/// Primary channel Bus-Master Physical Region Descriptor Table (PRDT) address register offset (`0x04`).
 const BM_PRDT: u16 = 4;
+/// Bus-Master Command bit 0: Start/Stop DMA engine (`1` = Start, `0` = Stop).
 const BM_CMD_START: u8 = 0x01;
+/// Bus-Master Command bit 3: Transfer direction (`1` = Device to Memory / disk read, `0` = Memory to Device / disk write).
 const BM_CMD_TO_MEMORY: u8 = 0x08; // device -> memory (a disk read)
+/// Bus-Master Status bit 0: Bus-Master DMA active flag.
 const BM_STATUS_ACTIVE: u8 = 0x01;
+/// Bus-Master Status bit 1: DMA transfer error flag (write-1-to-clear).
 const BM_STATUS_ERROR: u8 = 0x02;
+/// Bus-Master Status bit 2: IDE interrupt asserted flag (write-1-to-clear).
 const BM_STATUS_IRQ: u8 = 0x04;
 
 /// Pages in the DMA bounce buffer: one transfer of up to 255 sectors fits.
@@ -573,6 +629,7 @@ const DMA_PAGES: usize = 32;
 /// replaces hundreds of thousands of emulated port accesses per megabyte with a single
 /// transfer, and on hardware it frees the CPU during the transfer.
 struct BusMaster {
+    /// Base I/O port address of the primary channel Bus-Master registers (from PCI `BAR4`).
     base: u16,
     /// Physical (identity-mapped) address of the PRD table page.
     prdt: u64,
@@ -603,10 +660,12 @@ impl BusMaster {
         Some(Self { base: (bar4 & 0xFFFC) as u16, prdt: base_phys, buf: base_phys + 4096 })
     }
 
+    /// Writes an 8-bit value to the specified Bus-Master register offset.
     fn outb(&self, reg: u16, v: u8) {
         unsafe { Port::<u8>::new(self.base + reg).write(v) };
     }
 
+    /// Reads an 8-bit value from the specified Bus-Master register offset.
     fn inb(&self, reg: u16) -> u8 {
         unsafe { Port::<u8>::new(self.base + reg).read() }
     }

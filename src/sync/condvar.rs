@@ -1,3 +1,24 @@
+//! # Synchronization Subsystem: Condition Variable
+//!
+//! Provides [`CondVar`], a condition variable primitive that allows threads to atomically release
+//! a `MutexGuard` and suspend execution until notified by another thread.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Condition variables allow threads to wait for arbitrary predicates protected by a [`Mutex`]
+//! without polling. [`CondVar::wait`] registers the calling task in its internal [`WaitQueue`]
+//! *before* dropping the `MutexGuard`, preventing lost wakeups if [`CondVar::notify_one`] or
+//! [`CondVar::notify_all`] is called immediately after the mutex is unlocked.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`CondVar`]: Condition variable supporting [`CondVar::wait`], [`CondVar::notify_one`], and [`CondVar::notify_all`].
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Synchronization**: Pairs with `super::mutex::Mutex` and `super::wait_queue::WaitQueue`.
+//! - **Scheduler**: Blocks the calling thread via [`crate::task::block_current`].
+
 use spin::Mutex as SpinLock;
 
 use super::mutex::{Mutex, MutexGuard};
@@ -9,6 +30,7 @@ use crate::task::{self, TaskId};
 /// Enables threads to suspend execution until a particular condition is met,
 /// atomically releasing an associated `MutexGuard` before sleeping.
 pub struct CondVar {
+    /// Spinlock-protected FIFO queue of tasks waiting for notification.
     waiters: SpinLock<WaitQueue>,
 }
 

@@ -1,3 +1,29 @@
+//! # Architecture Layer: 8042 PS/2 Keyboard Controller & Input Decoder
+//!
+//! Provides bare-metal driver support for standard PS/2 keyboards, Scancode Set 1 decoding,
+//! interrupt ring buffering, and hotkey combinations.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! To support interactive shell operations and graphical terminals following UEFI `ExitBootServices`,
+//! Hydra OS requires an autonomous keyboard driver. The 8042 PS/2 controller generates IRQ 1 (IDT vector 33)
+//! whenever a key press or release scancode is ready on I/O port `0x60`. The driver processes Scancode Set 1,
+//! maintains Shift/Ctrl/Alt modifier states, and pushes decoded `Key` events onto an internal ring buffer.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `init`: Flushes the 8042 output buffer and enables keyboard scanning with IRQ 1 generation.
+//! - `read_key`: Non-blocking poll for the next decoded `Key`.
+//! - `get_key`: Blocking read that halts the CPU (`HLT`) until a key arrives.
+//! - `on_keyboard_irq`: Interrupt Service Routine invoked on IRQ 1.
+//! - `process_scancode`: Decodes raw Scancode Set 1 bytes into ASCII and special key symbols.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 interrupt service routine and driver routines.
+//! - I/O Ports: Data port `0x60`, Status/Command port `0x64`.
+//! - Concurrency: Thread-safe via spinlocks and atomic flags.
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use uefi::proto::console::text::{Key, ScanCode};

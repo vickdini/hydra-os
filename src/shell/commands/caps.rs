@@ -1,9 +1,32 @@
+//! # Shell Commands: Capability Space (`CSpace`) Management
+//!
+//! Provides interactive commands (`caps`, `cap_insert`, `cap_revoke`) for inspecting and
+//! manipulating the shell session's object capability table ([`crate::capability::table::CapabilityTable`]).
+//!
+//! ## Architectural Role & Design Rationale
+//! In Hydra's capability-based security model, access to kernel objects (address spaces, IPC
+//! endpoints, physical memory frames, threads, and devices) is governed by unforgeable tokens
+//! stored in a task's `CSpace`. These commands allow developers and administrators to inspect
+//! active capability slots, mint test `Endpoint` capabilities, and verify capability revocation
+//! semantics interactively.
+//!
+//! ## Key Types & Interfaces
+//! - [`CapsCommand`]: Lists all occupied capability slots, object types, and bitmask rights (`caps` / `cspace`).
+//! - [`CapInsertCommand`]: Mints and inserts an `Endpoint` capability into the session's `CSpace` (`cap_insert`).
+//! - [`CapRevokeCommand`]: Revokes and clears a capability slot by index (`cap_revoke`).
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: None (operates on `ShellState::cap_table`)
+//! - Concurrency: Mutates session-local `ShellState`
+
 use uefi::proto::console::text::Color;
 use crate::capability::{CapType, Capability, Rights};
 use crate::console::set_color;
 use crate::shell::command::{parse_u32, parse_usize, Command};
 use crate::shell::state::ShellState;
 
+/// Built-in `caps` (`cspace`) command that lists active capability slots, object types, and permissions.
 pub struct CapsCommand;
 
 impl Command for CapsCommand {
@@ -74,6 +97,7 @@ impl Command for CapsCommand {
     }
 }
 
+/// Built-in `cap_insert` command that inserts a new `Endpoint` capability into the session's `CSpace`.
 pub struct CapInsertCommand;
 
 impl Command for CapInsertCommand {
@@ -117,6 +141,7 @@ impl Command for CapInsertCommand {
     }
 }
 
+/// Built-in `cap_revoke` command that revokes an existing capability from the specified `CSpace` slot.
 pub struct CapRevokeCommand;
 
 impl Command for CapRevokeCommand {

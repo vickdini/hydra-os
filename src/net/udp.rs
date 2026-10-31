@@ -11,17 +11,34 @@
 //! ## Key Types & Interfaces
 //!
 //! - [`UdpPacket`]: Structured representation of a UDP datagram header and payload.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Zero-allocation (`no_std`) UDP datagram parser and serializer.
 
+/// Structured zero-copy representation of a UDP datagram (RFC 768).
 pub struct UdpPacket<'a> {
+    /// Source 16-bit UDP port number.
     pub src_port: u16,
+    /// Destination 16-bit UDP port number.
     pub dst_port: u16,
+    /// Total length of the UDP header (8 bytes) plus payload in bytes.
     pub length: u16,
+    /// 16-bit UDP checksum (`0` indicates unused in IPv4).
     pub checksum: u16,
+    /// Borrowed slice containing the UDP datagram payload.
     pub payload: &'a [u8],
 }
 
 impl<'a> UdpPacket<'a> {
     /// Parses a UDP datagram from an IPv4 payload slice.
+    ///
+    /// # Arguments
+    /// - `buf`: Raw IPv4 payload slice.
+    ///
+    /// # Returns
+    /// `Some(UdpPacket)` if `buf` is at least 8 bytes long, or `None` otherwise.
     pub fn parse(buf: &'a [u8]) -> Option<Self> {
         if buf.len() < 8 {
             return None;
@@ -45,6 +62,18 @@ impl<'a> UdpPacket<'a> {
     }
 
     /// Serializes a UDP datagram into the destination buffer.
+    ///
+    /// # Arguments
+    /// - `src_port`: Source 16-bit UDP port.
+    /// - `dst_port`: Destination 16-bit UDP port.
+    /// - `payload`: Datagram payload slice.
+    /// - `out_buf`: Destination buffer (must be at least `8 + payload.len()` bytes).
+    ///
+    /// # Returns
+    /// `Ok(total_len)` containing the total serialized UDP datagram length in bytes.
+    ///
+    /// # Errors
+    /// Returns `Err` if `out_buf` is smaller than `8 + payload.len()`.
     pub fn serialize(
         src_port: u16,
         dst_port: u16,

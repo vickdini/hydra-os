@@ -1,9 +1,14 @@
+//! # Shell Command: Microkernel IPC Rendezvous Testing (`ipc`)
+//!
+//! Provides the `ipc` shell command for testing message transmission and receipt across endpoints.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::ipc::Message;
 use crate::shell::command::{parse_hex, parse_u64, Command};
 use crate::shell::state::ShellState;
 
+/// Shell command exercising IPC message passing and queue inspection.
 pub struct IpcCommand;
 
 impl Command for IpcCommand {

@@ -1,3 +1,27 @@
+//! # Shell Commands: GNU Coreutils System, Identity & Timing Utilities
+//!
+//! Implements standard UNIX system inspection, privilege management, and shell scripting
+//! utilities (`uname`, `whoami`, `su`, `sudo`, `sleep`, `seq`, `yes`, `true`, `false`, and
+//! `uptime`).
+//!
+//! ## Architectural Role & Design Rationale
+//! Interactive administration and shell scripts depend on standard identity switching (`su`,
+//! `sudo`, `whoami`), kernel metadata queries (`uname`, `uptime`), and loop/delay primitives
+//! (`sleep`, `seq`, `yes`, `true`, `false`). These built-in commands synchronize user/group
+//! credential changes with both `ShellState` and the active kernel task control block.
+//!
+//! ## Key Types & Interfaces
+//! - [`UnameCommand`]: Prints kernel name, hostname, release, version, and machine architecture.
+//! - [`WhoamiCommand`]: Displays effective UID/GID and capability space (`CSpace`) security profile.
+//! - [`SuCommand`] / [`SudoCommand`]: Switches or temporarily elevates the session's active UID/GID.
+//! - [`SleepCommand`] / [`UptimeCommand`]: Delays execution with `Ctrl+C` polling and reports 8254 PIT uptime ticks.
+//! - [`SeqCommand`] / [`YesCommand`] / [`TrueCommand`] / [`FalseCommand`]: Standard scripting primitives.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Queries [`crate::arch::pit`] and interrupt flags in `uptime`; stalls via [`crate::console::stall`]
+//! - Concurrency: Polls [`crate::console::check_interrupt()`] during loops and delays
+
 use core::time::Duration;
 use uefi::proto::console::text::Color;
 
@@ -5,7 +29,7 @@ use crate::console::set_color;
 use crate::shell::command::{parse_u64, Command};
 use crate::shell::state::ShellState;
 
-/// Print system information.
+/// Built-in `uname` command that prints operating system and hardware architecture metadata.
 pub struct UnameCommand;
 
 impl Command for UnameCommand {

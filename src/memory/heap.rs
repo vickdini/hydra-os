@@ -1,3 +1,28 @@
+//! # Memory Subsystem: Kernel Dynamic Heap Allocator
+//!
+//! Configures and manages the global Rust `alloc` dynamic memory allocator (`#[global_allocator]`)
+//! for the Hydra kernel, enabling standard collection types (`Box`, `Vec`, `String`, `BTreeMap`, `Arc`).
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Kernel subsystems such as the VFS, scheduler, capability table, and Linux compatibility layer
+//! require dynamic memory allocation. `init` reserves a contiguous physical memory arena—preferring
+//! up to `HEAP_SIZE` (512 MiB) carved directly from `FRAME_ALLOCATOR` and scaling down gracefully
+//! to `MIN_HEAP_SIZE` (128 MiB) or falling back to UEFI `allocate_pages` when necessary—and backs
+//! `HEAP_ALLOCATOR` (`linked_list_allocator::LockedHeap`) with that zero-initialized region.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `HEAP_ALLOCATOR`: The `#[global_allocator]` spinlock-protected linked-list heap.
+//! - `HeapStats`: Real-time diagnostic snapshot of heap capacity, usage, and free bytes.
+//! - `init`: Allocates the backing arena and initializes `HEAP_ALLOCATOR`.
+//! - `stats` & `self_test`: Runtime inspection and integrity verification of heap operations.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Backing Memory**: Identity-mapped physical frames from `FRAME_ALLOCATOR` or UEFI `LOADER_DATA`.
+//! - **Synchronization**: Internal `spin::Mutex` inside `LockedHeap` plus atomic state flags.
+
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use linked_list_allocator::LockedHeap;
 use uefi::boot::{allocate_pages, AllocateType};
@@ -14,17 +39,25 @@ const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 #[global_allocator]
 pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 
+/// Tracks whether the global kernel heap has been initialized.
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
+/// Starting virtual/physical address of the initialized kernel heap arena.
 static HEAP_START_ADDR: AtomicU64 = AtomicU64::new(0);
+/// Total size in bytes of the initialized kernel heap arena.
 static HEAP_TOTAL_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 /// Diagnostic information about the kernel heap.
 #[derive(Debug, Clone, Copy)]
 pub struct HeapStats {
+    /// Base memory address of the heap arena.
     pub start_address: u64,
+    /// Total capacity of the heap in bytes.
     pub total_bytes: usize,
+    /// Number of bytes currently allocated from the heap.
     pub used_bytes: usize,
+    /// Number of bytes currently available for allocation.
     pub free_bytes: usize,
+    /// Whether the heap has been initialized and is ready for use.
     pub is_initialized: bool,
 }
 
@@ -33,6 +66,15 @@ pub struct HeapStats {
 /// It first attempts to allocate a contiguous physical chunk from the
 /// Hydra Physical Memory Manager (conventional memory). If that is not
 /// yet available, it falls back to UEFI boot services page allocation.
+///
+/// # Returns
+///
+/// `Ok(HeapStats)` describing the newly initialized heap, or an error string if allocation failed.
+///
+/// # Errors
+///
+/// Returns `Err` if neither the physical frame allocator nor UEFI boot services can supply at least
+/// `MIN_HEAP_SIZE` bytes of contiguous memory.
 pub fn init() -> Result<HeapStats, &'static str> {
     if HEAP_INITIALIZED.load(Ordering::SeqCst) {
         return Ok(stats());

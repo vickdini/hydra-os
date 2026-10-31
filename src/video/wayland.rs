@@ -15,8 +15,8 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`WlSurface`]: Represents an individual window surface with title, bounds, and content state.
-//! - [`WindowType`]: Supported desktop application types (Konsole Terminal, KSysGuard Monitor, About).
+//! - `WlSurface`: Represents an individual window surface with title, bounds, and content state.
+//! - `WindowType`: Supported desktop application types (Konsole Terminal, KSysGuard Monitor, About).
 //! - [`WaylandCompositor`]: Central registry managing surface lifecycle, z-ordering, and drag state.
 
 extern crate alloc;
@@ -45,22 +45,37 @@ pub enum WindowType {
 
 /// A desktop application window backed by a Wayland surface.
 pub struct WlSurface {
+    /// Unique surface identifier.
     pub id: u32,
+    /// Window title displayed in the title bar.
     pub title: String,
+    /// Desktop window application type.
     pub window_type: WindowType,
+    /// Current horizontal screen coordinate in pixels.
     pub x: usize,
+    /// Current vertical screen coordinate in pixels.
     pub y: usize,
+    /// Current window width in pixels.
     pub width: usize,
+    /// Current window height in pixels.
     pub height: usize,
+    /// True if the window holds input focus.
     pub focused: bool,
+    /// True if the window is currently minimized to the task panel.
     pub minimized: bool,
+    /// True if the window is maximized to fill the desktop canvas.
     pub maximized: bool,
+    /// Restored coordinates `(x, y, width, height)` when un-maximizing.
     pub saved_rect: (usize, usize, usize, usize),
+    /// True if the user is actively dragging the title bar.
     pub dragging: bool,
+    /// Horizontal cursor offset within the title bar during drag.
     pub drag_offset_x: usize,
+    /// Vertical cursor offset within the title bar during drag.
     pub drag_offset_y: usize,
-    // Konsole-specific terminal state
+    /// Active keyboard input line for embedded Konsole terminals.
     pub terminal_input: String,
+    /// Scrollback text lines for embedded Konsole terminals.
     pub terminal_lines: Vec<String>,
 }
 
@@ -162,9 +177,13 @@ impl WlSurface {
 
 /// Central registry managing all active Wayland surfaces, z-stacking, and input focus.
 pub struct WaylandCompositor {
+    /// Active desktop surfaces ordered from bottom to top (z-order).
     pub surfaces: Vec<WlSurface>,
+    /// Monotonically increasing surface identifier counter.
     pub next_surface_id: u32,
+    /// Identifier of the surface currently being dragged by pointer, if any.
     pub active_dragging_id: Option<u32>,
+    /// State of the KDE Plasma Kickoff start menu (open/closed).
     pub kickoff_open: bool,
 }
 

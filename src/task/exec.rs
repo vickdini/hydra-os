@@ -1,14 +1,35 @@
 //! # Task Subsystem: Linux Process Image Loader (`execve`)
 //!
-//! Builds a complete Linux process image inside a fresh private address space ([`Mm`]):
+//! Builds a complete Linux process image inside a fresh private address space (`Mm`):
 //! maps the executable's `PT_LOAD` segments as copy-on-write file mappings, maps the
 //! `PT_INTERP` dynamic linker (Ubuntu's own `ld-linux-x86-64.so.2`), sets up the program
 //! break and an 8 MiB demand-paged stack, and writes the System V initial stack
 //! (`argc`, `argv`, `envp`, auxiliary vector) exactly as Linux's `binfmt_elf` does.
 //!
+//! ## Architectural Role & Design Rationale
+//!
+//! Unlike the legacy loader in `super::elf`, which copies segments eagerly into the shared
+//! kernel address space, this module constructs a demand-paged virtual memory layout inside
+//! an isolated `Mm`. Loadable segments are backed directly by `MappedObject`s (such as
+//! page-cached ZFS inodes or `BufferObject`s) so pages are faulted in on demand and shared
+//! across processes.
+//!
 //! Executables linked at fixed addresses below `USER_SPACE_START` (inside the kernel's
 //! identity map) cannot live in a private address space and are rejected by
-//! [`is_vm_loadable`]; the legacy loader in [`super::elf`] still runs those.
+//! `is_vm_loadable`; the legacy loader in `super::elf` still runs those.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `LinuxExecImage`: Loaded user address space (`Mm`), entry point (`RIP`), and stack pointer (`RSP`).
+//! - `ExecCreds`: Process UID/GID credentials written into the initial auxiliary vector (`AT_UID`, `AT_GID`, etc.).
+//! - `ElfSource`: Header prefix, total file size, and `MappedObject` backing an ELF binary.
+//! - `is_vm_loadable`: Checks whether an ELF binary can be mapped into a private user address space.
+//! - `load_linux_exec`: Maps main binary and `PT_INTERP` linker, allocates stack, and populates `argv`/`envp`/`auxv`.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **CPU Instructions**: Uses `rdtsc` to seed `AT_RANDOM` and `cpuid` (leaf 1) to populate `AT_HWCAP`.
+//! - **Virtual Memory**: Relies on [`crate::memory::vm::Mm`] for `mmap`, `write_bytes`, and `brk` setup.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -22,22 +43,31 @@ use crate::memory::vm::{
     STACK_TOP, USER_SPACE_START,
 };
 
+/// Program header type describing the location of the program header table itself.
 const PT_PHDR: u32 = 6;
+/// Segment flag: executable.
 const PF_X: u32 = 1;
+/// Segment flag: writable.
 const PF_W: u32 = 2;
+/// Segment flag: readable.
 const PF_R: u32 = 4;
 
 /// A loaded Linux process, ready to be scheduled.
 pub struct LinuxExecImage {
+    /// Populated private virtual address space for the new process.
     pub mm: Mm,
+    /// Initial instruction pointer (`RIP`)—either the dynamic linker or main executable entry.
     pub entry: u64,
+    /// Initial user stack pointer (`RSP`) pointing to `argc` at the base of the System V stack frame.
     pub rsp: u64,
 }
 
 /// Credentials reported to the new process through the auxiliary vector.
 #[derive(Clone, Copy)]
 pub struct ExecCreds {
+    /// User ID reported in `AT_UID` and `AT_EUID`.
     pub uid: u32,
+    /// Group ID reported in `AT_GID` and `AT_EGID`.
     pub gid: u32,
 }
 
@@ -54,14 +84,17 @@ pub fn is_vm_loadable(bytes: &[u8]) -> bool {
     elf.load_segments().iter().all(|ph| ph.p_vaddr >= USER_SPACE_START)
 }
 
+/// Rounds `v` down to the nearest 4 KiB page boundary.
 fn page_down(v: u64) -> u64 {
     v & !(PAGE_SIZE - 1)
 }
 
+/// Rounds `v` up to the nearest 4 KiB page boundary.
 fn page_up(v: u64) -> u64 {
     (v + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
+/// Translates ELF segment flags (`PF_R`, `PF_W`, `PF_X`) into VM protection flags (`PROT_*`).
 fn segment_prot(ph: &Elf64ProgramHeader) -> u32 {
     let mut prot = 0;
     if ph.p_flags & PF_R != 0 {
@@ -76,12 +109,14 @@ fn segment_prot(ph: &Elf64ProgramHeader) -> u32 {
     prot
 }
 
-/// Result of mapping one ELF object.
 /// An ELF file to load: its leading bytes (enough for the headers, `PT_INTERP` and
 /// program header table), its total length, and the object its pages are mapped from.
 pub struct ElfSource {
+    /// Leading bytes of the ELF file (at least the header and program header table).
     pub head: Vec<u8>,
+    /// Total length of the ELF file in bytes.
     pub len: u64,
+    /// Backing object supplying 4 KiB pages for demand-paged segment mappings.
     pub obj: Arc<dyn MappedObject>,
 }
 
@@ -95,10 +130,15 @@ impl ElfSource {
     }
 }
 
+/// Result of mapping one ELF object into a user address space.
 struct MappedElf {
+    /// Load bias added to the ELF object's virtual addresses (`0` for `ET_EXEC`).
     bias: u64,
+    /// Relocated virtual entry point address (`bias + e_entry`).
     entry: u64,
+    /// Relocated virtual address of the in-memory program header table (`AT_PHDR`).
     phdr: u64,
+    /// Highest page-aligned virtual address covered by the mapped segments.
     end: u64,
 }
 
@@ -195,15 +235,34 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<Mapped
     })
 }
 
+/// Reads the CPU timestamp counter (`RDTSC`) to seed `AT_RANDOM` bytes on the initial stack.
 fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
+/// Queries CPUID leaf 1 (`EDX`) hardware capability flags for `AT_HWCAP`.
 fn cpuid_edx_leaf1() -> u64 {
     core::arch::x86_64::__cpuid(1).edx as u64
 }
 
 /// Loads `exe` (and its dynamic linker, read through `read_file`) into a new address space.
+///
+/// # Arguments
+///
+/// * `exe` - Primary ELF executable source descriptor.
+/// * `exec_path` - Path string recorded for `AT_EXECFN`.
+/// * `argv` - Command-line argument strings.
+/// * `envp` - Environment variable strings (`KEY=VALUE`).
+/// * `creds` - User and group IDs reported in the auxiliary vector.
+/// * `read_file` - Callback used to load the dynamic linker specified by `PT_INTERP`.
+///
+/// # Returns
+///
+/// A `LinuxExecImage` containing the populated `Mm`, entry point, and initial stack pointer.
+///
+/// # Errors
+///
+/// Returns [`ElfError`] if parsing fails, the dynamic interpreter cannot be found, or VM mapping fails.
 pub fn load_linux_exec(
     exe: ElfSource,
     exec_path: &str,

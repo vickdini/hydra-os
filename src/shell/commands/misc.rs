@@ -1,9 +1,15 @@
+//! # Shell Commands: Miscellaneous Console & Diagnostic Utilities
+//!
+//! Provides utilities for color configuration, echo output, screen clearing, crash simulation,
+//! exception trapping, scroll lock toggling, and cursor styling.
+
 use uefi::proto::console::text::Color;
 use crate::console::{clear_screen, set_color};
 use crate::shell::command::Command;
 use crate::shell::print_welcome_banner;
 use crate::shell::state::ShellState;
 
+/// Shell command configuring console foreground text color.
 pub struct ColorCommand;
 
 impl Command for ColorCommand {
@@ -48,6 +54,7 @@ impl Command for ColorCommand {
     }
 }
 
+/// Shell command echoing arguments back to console output.
 pub struct EchoCommand;
 
 impl Command for EchoCommand {
@@ -74,6 +81,7 @@ impl Command for EchoCommand {
     }
 }
 
+/// Shell command clearing the terminal screen and resetting cursor position.
 pub struct ClearCommand;
 
 impl Command for ClearCommand {
@@ -100,6 +108,7 @@ impl Command for ClearCommand {
     }
 }
 
+/// Shell command triggering a deliberate kernel panic for handler testing.
 pub struct PanicCommand;
 
 impl Command for PanicCommand {
@@ -120,6 +129,7 @@ impl Command for PanicCommand {
     }
 }
 
+/// Shell command triggering an architectural CPU exception trap (`#BP`, `#DE`, `#UD`).
 pub struct TrapCommand;
 
 impl Command for TrapCommand {
@@ -149,6 +159,7 @@ impl Command for TrapCommand {
     }
 }
 
+/// Shell command pausing and inspecting terminal scrollback history.
 pub struct ScrollLockCommand;
 
 impl Command for ScrollLockCommand {
@@ -194,6 +205,7 @@ impl Command for ScrollLockCommand {
     }
 }
 
+/// Shell command configuring terminal text cursor shape (`block`, `underline`, `bar`).
 pub struct CursorCommand;
 
 impl Command for CursorCommand {

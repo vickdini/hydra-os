@@ -1,3 +1,34 @@
+//! # Architecture Layer: UEFI Boot Services Exit & Hardware Takeover
+//!
+//! Orchestrates the one-way transition from UEFI firmware boot services to autonomous
+//! Hydra OS microkernel hardware control.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! When Hydra OS is launched by the UEFI firmware loader, the CPU executes with firmware-owned
+//! descriptor tables (GDT/IDT), firmware page tables (`CR3`), and firmware-managed timer/console
+//! protocols. To become a true standalone operating system, Hydra OS must call `ExitBootServices`
+//! to reclaim all boot-service memory and install its own architectural tables and device drivers.
+//!
+//! `take_hardware_ownership` performs this transition atomically:
+//! 1. Switches console output to the autonomous GOP framebuffer (`VideoConsole`) and `COM1` serial port.
+//! 2. Terminates UEFI Boot Services via `uefi::boot::exit_boot_services`.
+//! 3. Loads Hydra's 64-bit GDT, TSS (with IST 1 for Double Faults), IDT, and 4-level PML4 page table (`CR3`).
+//! 4. Remaps the dual-8259 PIC, starts the 100 Hz 8254 PIT timer, initializes the CMOS RTC, 8042 PS/2 keyboard, and `SYSCALL` MSRs.
+//! 5. Enables CPU interrupts (`sti`) and brings up the Intel E1000 network stack via DHCP if present.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `HardwareTakeoverStats`: Diagnostic snapshot of descriptor selectors, `CR3`, and memory map size captured during takeover.
+//! - `take_hardware_ownership`: Executes the irreversible UEFI exit and bare-metal initialization sequence.
+//! - `is_hardware_takeover_complete`: Queries whether the kernel has already exited UEFI Boot Services.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **CPU Privilege Level**: Ring 0 (Kernel supervisor mode).
+//! - **Hardware Interaction**: `CR3`, `CR4`, `GDTR`, `IDTR`, `TR`, `EFER`/`STAR`/`LSTAR`/`FMASK` MSRs, 8259 PIC, 8254 PIT, CMOS RTC, 8042 PS/2, and E1000 NIC.
+//! - **Concurrency**: Guarded by the static `TAKEOVER_DONE` [`spin::Mutex`] to guarantee single execution.
+
 use spin::Mutex;
 use uefi::mem::memory_map::MemoryMap;
 use uefi::proto::console::text::Color;
@@ -6,32 +37,58 @@ use x86_64::registers::control::Cr3;
 use crate::console::{clear_screen, enable_standalone_video, set_color, set_hardware_mode};
 use crate::println;
 
-/// Statistics captured during hardware takeover.
+/// Statistics and architectural register values captured during bare-metal hardware takeover.
+///
+/// # Concurrency & Thread Safety
+/// Immutable `Copy` value returned once upon completion of `take_hardware_ownership`.
 #[derive(Debug, Clone, Copy)]
 pub struct HardwareTakeoverStats {
+    /// Total number of UEFI memory map descriptors returned by `ExitBootServices`.
     pub memory_map_entries: usize,
+    /// Loaded 64-bit kernel code segment selector (`CS`, typically `0x08`).
     pub gdt_code_selector: u16,
+    /// Loaded kernel data/stack segment selector (`DS`/`SS`, typically `0x10`).
     pub gdt_data_selector: u16,
+    /// Loaded Task State Segment selector (`TR`, typically `0x28`).
     pub tss_selector: u16,
+    /// Physical address of the active 4-level PML4 root page table in `CR3`.
     pub active_cr3_pml4: u64,
+    /// Virtual base address of the linear GOP video framebuffer.
     pub framebuffer_virt: u64,
 }
 
+/// Ensures `take_hardware_ownership` can only be executed once per boot.
 static TAKEOVER_DONE: Mutex<bool> = Mutex::new(false);
 
-/// Checks if hardware ownership has already been taken.
+/// Checks if hardware ownership has already been taken from UEFI firmware.
+///
+/// # Returns
+///
+/// `true` if `ExitBootServices` and bare-metal initialization have completed, `false` otherwise.
 pub fn is_hardware_takeover_complete() -> bool {
     *TAKEOVER_DONE.lock()
 }
 
-/// Takes full hardware ownership from UEFI firmware:
-/// 1. Activates autonomous linear framebuffer console (VideoConsole).
+/// Takes full hardware ownership from UEFI firmware and initializes all bare-metal kernel subsystems.
+///
+/// Performs the following ordered sequence:
+/// 1. Activates autonomous linear framebuffer console (`VideoConsole`).
 /// 2. Enables standalone hardware mode for console I/O and PS/2 keyboard.
 /// 3. Calls `uefi::boot::exit_boot_services` to terminate UEFI firmware control.
-/// 4. Loads Hydra's 64-bit GDT into GDTR and reloads CS (0x08), DS/ES/FS/GS/SS (0x10).
-/// 5. Loads Hydra's TSS into TR (0x28) and enables IST 1 on IDT Double Fault.
-/// 6. Switches CPU CR3 to Hydra's autonomous 4-level PML4 paging table.
-/// 7. Updates IDT entries with Hydra's kernel code selector.
+/// 4. Loads Hydra's 64-bit GDT into `GDTR` and reloads `CS` (`0x08`), `DS`/`ES`/`FS`/`GS`/`SS` (`0x10`).
+/// 5. Loads Hydra's TSS into `TR` (`0x28`) and enables IST 1 on IDT Double Fault.
+/// 6. Switches CPU `CR3` to Hydra's autonomous 4-level PML4 paging table.
+/// 7. Updates IDT entries with Hydra's kernel code selector, initializes PIC/PIT/RTC/PS2/SYSCALL, and enables interrupts.
+///
+/// # Returns
+///
+/// * `Ok(HardwareTakeoverStats)` - Summary of active selectors, `CR3`, and memory map entries.
+/// * `Err(&'static str)` - If takeover was already performed or the GOP framebuffer is unavailable.
+///
+/// # Errors
+///
+/// - Returns `Err("Hardware takeover (ExitBootServices) has already been executed.")` on duplicate invocation.
+/// - Returns `Err("Hardware GOP framebuffer driver not available.")` if video initialization failed.
 pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> {
     let mut done = TAKEOVER_DONE.lock();
     if *done {

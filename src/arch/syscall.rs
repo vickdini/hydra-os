@@ -1,46 +1,105 @@
+//! # Architecture Layer: Fast x86_64 Hardware System Calls (`SYSCALL`/`SYSRET`)
+//!
+//! Configures CPU Model-Specific Registers (MSRs) for fast long-mode system call transitions
+//! and provides the central system call entry point and dual-personality dispatcher.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Rather than using legacy software interrupt gates (`int 0x80`), 64-bit x86 CPUs provide the
+//! `SYSCALL` instruction for low-latency transitions from Ring 3 to Ring 0. The hardware loads
+//! the target RIP from `IA32_LSTAR`, loads CS/SS from `IA32_STAR`, and masks interrupt flags via
+//! `IA32_FMASK`.
+//!
+//! Upon entry, `asm_syscall_entry` switches to the task's kernel stack (TSS RSP0), saves the
+//! user registers into a `SyscallFrame`, saves the FPU context, and dispatches to
+//! `hydra_syscall_dispatcher`. Depending on [`crate::task::TaskPersonality`], calls are routed
+//! to either native Hydra microkernel services (IPC, endpoints, pipes) or the Linux ABI emulation layer.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `SyscallFrame`: Complete register context constructed by assembly entry.
+//! - `SyscallStats`: Monotonic counters tracking system call activity.
+//! - `init`: Configures `EFER`, `STAR`, `LSTAR`, and `FMASK` MSRs.
+//! - `hydra_syscall_dispatcher`: Central Rust dispatcher routing system calls.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - CPU Privilege Level: Transitions from Ring 3 (User) to Ring 0 (Kernel).
+//! - MSRs: `IA32_EFER` (0xC0000080), `IA32_STAR` (0xC0000081), `IA32_LSTAR` (0xC0000082), `IA32_FMASK` (0xC0000084).
+
 use core::arch::global_asm;
 use spin::Mutex;
 
-// x86_64 Model-Specific Registers for fast system calls
+/// Extended Feature Enable Register MSR (bit 0 enables SCE — System Call Extensions).
 pub const IA32_EFER: u32 = 0xC000_0080;
+/// Legacy / Long Mode System Call Target Address and Segment Selectors MSR.
 pub const IA32_STAR: u32 = 0xC000_0081;
+/// Long Mode System Call Target Instruction Pointer (RIP) MSR.
 pub const IA32_LSTAR: u32 = 0xC000_0082;
+/// System Call RFLAGS Mask Register (clears IF, TF, etc. on syscall entry).
 pub const IA32_FMASK: u32 = 0xC000_0084;
 
-// Standard Hydra Microkernel System Call Numbers
+/// Native Hydra system call: voluntarily yield CPU timeslice (`sys_yield`).
 pub const SYS_YIELD: u64 = 1;
+/// Native Hydra system call: sleep for milliseconds (`sys_sleep`).
 pub const SYS_SLEEP: u64 = 2;
+/// Native Hydra system call: write bytes to a file descriptor (`sys_write`).
 pub const SYS_WRITE: u64 = 3;
+/// Native Hydra system call: terminate the calling task (`sys_exit`).
 pub const SYS_EXIT: u64 = 4;
+/// Native Hydra system call: retrieve current task ID (`sys_getpid`).
 pub const SYS_GETPID: u64 = 5;
+/// Native Hydra system call: retrieve monotonic uptime ticks (`sys_uptime`).
 pub const SYS_UPTIME: u64 = 6;
+/// Native Hydra system call: send IPC message to an endpoint (`sys_ipc_send`).
 pub const SYS_IPC_SEND: u64 = 7;
+/// Native Hydra system call: receive IPC message from an endpoint (`sys_ipc_recv`).
 pub const SYS_IPC_RECV: u64 = 8;
+/// Native Hydra system call: open a file descriptor (`sys_open`).
 pub const SYS_OPEN: u64 = 9;
+/// Native Hydra system call: close a file descriptor (`sys_close`).
 pub const SYS_CLOSE: u64 = 10;
+/// Native Hydra system call: read bytes from a file descriptor (`sys_read`).
 pub const SYS_READ: u64 = 11;
+/// Native Hydra system call: create an anonymous unidirectional pipe (`sys_pipe`).
 pub const SYS_PIPE: u64 = 12;
+/// Native Hydra system call: duplicate a file descriptor (`sys_dup2`).
 pub const SYS_DUP2: u64 = 13;
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SyscallStats {
+    /// Total number of system calls dispatched.
     pub total_calls: u64,
+    /// Number of `SYS_YIELD` invocations.
     pub yield_calls: u64,
+    /// Number of `SYS_SLEEP` invocations.
     pub sleep_calls: u64,
+    /// Number of `SYS_WRITE` invocations.
     pub write_calls: u64,
+    /// Number of `SYS_EXIT` invocations.
     pub exit_calls: u64,
+    /// Number of `SYS_GETPID` invocations.
     pub getpid_calls: u64,
+    /// Number of `SYS_UPTIME` invocations.
     pub uptime_calls: u64,
+    /// Number of `SYS_IPC_SEND` and `SYS_IPC_RECV` invocations.
     pub ipc_calls: u64,
+    /// Number of `SYS_OPEN` invocations.
     pub open_calls: u64,
+    /// Number of `SYS_CLOSE` invocations.
     pub close_calls: u64,
+    /// Number of `SYS_READ` invocations.
     pub read_calls: u64,
+    /// Number of `SYS_PIPE` invocations.
     pub pipe_calls: u64,
+    /// Number of `SYS_DUP2` invocations.
     pub dup2_calls: u64,
+    /// Number of unknown or unsupported syscall numbers invoked.
     pub unknown_calls: u64,
 }
 
+/// Global system call invocation statistics instance protected by a spinlock.
 pub static SYSCALL_STATS: Mutex<SyscallStats> = Mutex::new(SyscallStats {
     total_calls: 0,
     yield_calls: 0,
@@ -63,22 +122,38 @@ pub static SYSCALL_STATS: Mutex<SyscallStats> = Mutex::new(SyscallStats {
 /// Matches the stack layout constructed by `asm_syscall_entry`.
 #[repr(C)]
 pub struct SyscallFrame {
+    /// 6th syscall argument register R9.
     pub r9: u64,
+    /// 5th syscall argument register R8.
     pub r8: u64,
+    /// 4th syscall argument register R10.
     pub r10: u64,
+    /// 3rd syscall argument register RDX.
     pub rdx: u64,
+    /// 2nd syscall argument register RSI.
     pub rsi: u64,
+    /// 1st syscall argument register RDI.
     pub rdi: u64,
-    pub rax: u64, // Syscall number on entry, return value on exit
+    /// Syscall number on entry; return value placed here on exit.
+    pub rax: u64,
+    /// Callee-saved general-purpose register R15.
     pub r15: u64,
+    /// Callee-saved general-purpose register R14.
     pub r14: u64,
+    /// Callee-saved general-purpose register R13.
     pub r13: u64,
+    /// Callee-saved general-purpose register R12.
     pub r12: u64,
+    /// Callee-saved frame/base pointer register RBP.
     pub rbp: u64,
+    /// Callee-saved general-purpose register RBX.
     pub rbx: u64,
-    pub rip: u64,    // User instruction pointer (saved from RCX)
-    pub rflags: u64, // User flags (saved from R11)
-    pub rsp: u64,    // User stack pointer
+    /// User instruction pointer (saved from RCX by hardware `SYSCALL`).
+    pub rip: u64,
+    /// User CPU flags (saved from R11 by hardware `SYSCALL`).
+    pub rflags: u64,
+    /// User stack pointer restored on `sysretq`.
+    pub rsp: u64,
 }
 
 /// The kernel stack pointer of the currently active task.

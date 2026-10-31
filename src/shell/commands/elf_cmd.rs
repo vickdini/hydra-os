@@ -10,15 +10,15 @@
 //! virtual addresses, `.bss` allocation sizes, and permission flags) or trigger unprivileged
 //! execution in Ring 3 without embedding the target binary into the kernel firmware image.
 //!
-//! ## Key Interfaces
+//! ## Key Types & Interfaces
 //!
 //! - [`ElfCommand`]: Command implementation registered in the shell command table.
 //!
 //! ## Hardware & Dependency Context
 //!
 //! - CPU Privilege Level: Transitions from Ring 0 (Kernel) to Ring 3 (Userland) upon execution.
-//! - Filesystem: Reads binaries via [`crate::fs::client::ZfsClient`] from ZFS (`hydrapool/bin`).
-//! - Scheduler: Enqueues tasks in [`crate::task::SCHEDULER`] with User mode privileges.
+//! - Hardware Interaction: Reads binaries via [`crate::fs::client::ZfsClient`] and schedules Ring 3 tasks via [`crate::task`].
+//! - Concurrency: Supports synchronous foreground wait (`wait_task`) or asynchronous background execution (`--bg`).
 
 use alloc::boxed::Box;
 use alloc::format;

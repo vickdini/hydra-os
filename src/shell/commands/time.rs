@@ -1,8 +1,13 @@
+//! # Shell Command: Real-Time Clock & Uptime Display (`time`, `date`)
+//!
+//! Provides the `time` shell command querying the CMOS RTC and system uptime tick counter.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command querying the CMOS RTC time and system uptime.
 pub struct TimeCommand;
 
 impl Command for TimeCommand {

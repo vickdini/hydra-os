@@ -1,3 +1,26 @@
+//! # Shell Commands: GNU Coreutils Text Processing & Pagination Utilities
+//!
+//! Implements POSIX/GNU text filtering, counting, path component extraction, and interactive
+//! pagination commands (`head`, `tail`, `wc`, `grep`, `basename`, `dirname`, and `more`/`less`).
+//!
+//! ## Architectural Role & Design Rationale
+//! Text processing commands form the backbone of shell pipelines (`|`). Commands such as `wc`
+//! and `grep` automatically read from file descriptor `0` (`stdin`) when no file arguments are
+//! supplied, allowing expressions like `ls -l | grep elf | wc -l` to execute seamlessly using
+//! kernel [`crate::fs::PipeBuffer`] streams.
+//!
+//! ## Key Types & Interfaces
+//! - [`HeadCommand`] / [`TailCommand`]: Prints the leading or trailing lines of one or more ZFS files.
+//! - [`WcCommand`]: Counts lines (`-l`), words (`-w`), and bytes (`-c`) from files or `stdin`.
+//! - [`GrepCommand`]: Filters lines matching a substring pattern with `-i`, `-n`, `-v`, and `-c` options.
+//! - [`BasenameCommand`] / [`DirnameCommand`]: Extracts filename or directory components from a path string.
+//! - [`MoreCommand`]: Paginates ZFS files interactively via [`crate::shell::pager::paginate_text`].
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Reads files via [`crate::fs::client::ZfsClient`] and `stdin` via task file descriptors
+//! - Concurrency: Polls [`crate::console::check_interrupt()`] to support `Ctrl+C` termination
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
@@ -5,7 +28,7 @@ use crate::fs::client::{normalize_path, ZfsClient};
 use crate::shell::command::{parse_usize, Command};
 use crate::shell::state::ShellState;
 
-/// Output the first part of files (default 10 lines).
+/// Built-in `head` command that outputs the first lines of one or more files (default 10 lines).
 pub struct HeadCommand;
 
 impl Command for HeadCommand {
@@ -300,6 +323,7 @@ impl Command for WcCommand {
     }
 }
 
+/// Formats and prints the requested line, word, and byte counts for a single [`WcCommand`] entry.
 fn print_wc_counts(opt_l: bool, opt_w: bool, opt_c: bool, l: usize, w: usize, c: usize, name: &str) {
     if opt_l {
         print!("{:>7} ", l);
@@ -480,6 +504,7 @@ impl Command for GrepCommand {
     }
 }
 
+/// Checks whether `line` contains `pattern` using ASCII case-insensitive byte comparison.
 fn line_contains_case_insensitive(line: &str, pattern: &str) -> bool {
     let line_b = line.as_bytes();
     let pat_b = pattern.as_bytes();

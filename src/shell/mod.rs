@@ -1,10 +1,43 @@
+//! # Shell Subsystem: Interactive Microkernel Command Interpreter
+//!
+//! Provides the primary interactive read-eval-print loop (REPL), command line lexical
+//! analyzer, pipeline router, and boot-service transition sequence for Hydra OS.
+//!
+//! ## Architectural Role & Design Rationale
+//! The Hydra interactive shell serves as the administrative and user-facing command console
+//! during both early UEFI boot services and post-takeover bare-metal execution. Rather than
+//! relying on an external userland shell binary to bootstrap the system, this built-in
+//! command interpreter allows immediate inspection of kernel subsystems, capability tables,
+//! ZFS datasets, and Ring 3 ELF process execution.
+//!
+//! ## Key Types & Interfaces
+//! - `Command`: Trait implemented by all built-in shell commands.
+//! - `ShellState`: Persistent session context holding capabilities, working directory, and history.
+//! - `run`: Main diverging REPL entry point that drives interactive console input and dispatch.
+//! - `execute_command`: High-level dispatcher supporting history expansion (`!!`), pipelines, and redirections.
+//! - `execute_single_command`: Direct command and `$PATH` binary resolver.
+//! - `split_words`: POSIX-like lexical tokenizer handling single quotes, double quotes, and backslash escapes.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel supervisor context; spawns Ring 3 userland tasks on demand)
+//! - Hardware Interaction: Console text output and keyboard polling via [`crate::console`]
+//! - Concurrency: Single-threaded interactive REPL loop on the bootstrap processor (BSP)
+
+/// Command trait definition and integer argument parsing helpers.
 pub mod command;
+/// Built-in shell command implementations and command registry.
 pub mod commands;
+/// Interactive line editor with history navigation and tab auto-completion.
 pub mod editor;
+/// Filesystem binary search, UEFI image loading, and Ring 3 ELF process spawning.
 pub mod fs;
+/// Fixed-capacity circular buffer for session command history.
 pub mod history;
+/// Interactive terminal text pager for multi-page command output.
 pub mod pager;
+/// Unidirectional pipe chaining (`|`) and file output redirection (`>`, `>>`).
 pub mod pipeline;
+/// Session state management including working directory, credentials, and capabilities.
 pub mod state;
 
 use core::str;
@@ -14,9 +47,19 @@ use crate::console::set_color;
 pub use command::Command;
 pub use state::ShellState;
 
+/// Maximum byte capacity of the interactive input line buffer.
 const LINE_BUF_LEN: usize = 1024;
+/// Maximum number of whitespace-separated arguments parsed per command invocation.
 const MAX_ARGS: usize = 16;
 
+/// Prints the formatted ASCII welcome banner for the Hydra Microkernel Interactive Shell.
+///
+/// Renders a cyan-bordered header box to the active console output device to indicate
+/// that the interactive shell initialization is ready.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn print_welcome_banner() {
     set_color(Color::LightCyan, Color::Black);
     println!("\n+--------------------------------------------------------------+");
@@ -25,6 +68,21 @@ pub fn print_welcome_banner() {
     println!("+--------------------------------------------------------------+\n");
 }
 
+/// Parses and executes an interactive shell command line, including history expansion and pipelines.
+///
+/// Trims leading and trailing whitespace, expands the `!!` history substitution shortcut if
+/// requested, delegates pipeline (`|`) and redirection (`>`, `>>`) chains to
+/// [`pipeline::try_execute_pipeline`], and falls back to `execute_single_command` for
+/// simple command invocations.
+///
+/// # Arguments
+///
+/// * `cmd_line` - Raw UTF-8 command line string entered by the user or script runner.
+/// * `state` - Mutable reference to the active `ShellState` session context.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
     let trimmed = cmd_line.trim();
     if trimmed.is_empty() {
@@ -70,6 +128,20 @@ pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
 }
 
 /// Executes a single unpiped, unredirected shell command.
+///
+/// Tokenizes the command line via `split_words`, resolves the primary command name
+/// against built-in commands in [`commands::find_command`], searches external binaries
+/// via [`fs::search_and_execute`], or invokes the `sh` interpreter for `.sh` scripts.
+/// Updates `state.last_status` to `127` if the command cannot be resolved.
+///
+/// # Arguments
+///
+/// * `cmd_line` - Single command string without unquoted pipe or redirection operators.
+/// * `state` - Mutable reference to the active `ShellState` session context.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
     let trimmed = cmd_line.trim();
     if trimmed.is_empty() {
@@ -111,9 +183,24 @@ pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
     }
 }
 
-/// Splits a command line into words like a POSIX shell: whitespace separates words,
-/// single quotes keep text literally, double quotes group text, and a backslash escapes
-/// the next character (outside single quotes).
+/// Splits a command line into words using POSIX-compatible quoting and escaping rules.
+///
+/// Whitespace separates words outside of quotes. Single quotes (`'...'`) preserve all
+/// enclosed characters literally. Double quotes (`"..."`) group characters while allowing
+/// backslash escapes for `"`, `\`, `\$`, and `` ` ``. Unquoted backslashes escape the
+/// immediately following character.
+///
+/// # Arguments
+///
+/// * `line` - Raw input command line slice to tokenize.
+///
+/// # Returns
+///
+/// A heap-allocated `Vec<String>` containing the unquoted, unescaped argument tokens.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn split_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
     const SQ: char = '\'';
     const BS: char = '\\';
@@ -168,6 +255,14 @@ pub fn split_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
     words
 }
 
+/// Runs an interactive 3-second countdown before automatically invoking `exitboot`.
+///
+/// Allows the user to press Enter to transition immediately to bare-metal hardware mode,
+/// or press any other key to cancel the transition and remain under UEFI Boot Services.
+///
+/// # Arguments
+///
+/// * `state` - Mutable reference to the active `ShellState` passed to the `exitboot` command.
 fn auto_exitboot_countdown(state: &mut ShellState) {
     if crate::arch::boot_services::is_hardware_takeover_complete() {
         return;
@@ -219,6 +314,19 @@ fn auto_exitboot_countdown(state: &mut ShellState) {
     }
 }
 
+/// Starts the main diverging interactive shell read-eval-print loop (REPL).
+///
+/// Initializes a fresh `ShellState`, prints the welcome banner, runs the automatic
+/// bare-metal transition countdown, and repeatedly reads and executes user commands
+/// until EOF (`Ctrl+D` on an empty line) triggers system shutdown.
+///
+/// # Returns
+///
+/// Never returns (`!`). Enters an infinite stall loop if system shutdown returns.
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn run() -> ! {
     let mut state = ShellState::new();
     let mut line_buf = [0u8; LINE_BUF_LEN];

@@ -23,8 +23,8 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`Elf64Header`]: 64-bit ELF file header definition.
-//! - [`Elf64ProgramHeader`]: Describes loadable program segments (`PT_LOAD`).
+//! - `Elf64Header`: 64-bit ELF file header definition.
+//! - `Elf64ProgramHeader`: Describes loadable program segments (`PT_LOAD`).
 //! - [`ElfBinary`]: Zero-copy parser validating ELF64 structure and segment layout.
 //! - [`ElfProcessImage`]: Allocated process resources (stacks, segment buffers, entry point).
 //! - [`load_elf()`]: Primary entry point to parse, validate, allocate, and map an ELF binary.
@@ -60,12 +60,17 @@ use crate::task::scheduler::DEFAULT_STACK_SIZE;
 /// Magic bytes identifying a valid ELF binary (`\x7fELF`).
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
-/// ELF File Identification index constants.
+/// ELF identification index: Magic byte 0 (`0x7F`).
 pub const EI_MAG0: usize = 0;
+/// ELF identification index: File class byte (`ELFCLASS64`).
 pub const EI_CLASS: usize = 4;
+/// ELF identification index: Data encoding byte (`ELFDATA2LSB`).
 pub const EI_DATA: usize = 5;
+/// ELF identification index: File version byte (`EV_CURRENT`).
 pub const EI_VERSION: usize = 6;
+/// ELF identification index: Operating system / ABI identification byte.
 pub const EI_OSABI: usize = 7;
+/// ELF identification index: ABI version byte.
 pub const EI_ABIVERSION: usize = 8;
 
 /// ELF architecture class: 64-bit object.
@@ -77,27 +82,38 @@ pub const ELFDATA2LSB: u8 = 1;
 /// ELF version: Current version (1).
 pub const EV_CURRENT: u8 = 1;
 
-/// ELF Object file types.
+/// ELF object file type: Relocatable file.
 pub const ET_REL: u16 = 1;
+/// ELF object file type: Position-dependent executable file.
 pub const ET_EXEC: u16 = 2;
+/// ELF object file type: Shared object or Position-Independent Executable (PIE).
 pub const ET_DYN: u16 = 3;
 
 /// Target machine architecture: AMD x86-64.
 pub const EM_X86_64: u16 = 0x3E;
 
-/// Program Header segment types.
+/// Program Header segment type: Unused entry.
 pub const PT_NULL: u32 = 0;
+/// Program Header segment type: Loadable program segment.
 pub const PT_LOAD: u32 = 1;
+/// Program Header segment type: Dynamic linking information.
 pub const PT_DYNAMIC: u32 = 2;
+/// Program Header segment type: Program interpreter path name (`ld.so`).
 pub const PT_INTERP: u32 = 3;
+/// Program Header segment type: Auxiliary note information.
 pub const PT_NOTE: u32 = 4;
+/// Program Header segment type: Reserved segment type.
 pub const PT_SHLIB: u32 = 5;
+/// Program Header segment type: Location and size of the program header table itself.
 pub const PT_PHDR: u32 = 6;
+/// Program Header segment type: Thread-Local Storage (TLS) template.
 pub const PT_TLS: u32 = 7;
 
-/// Program Header segment permission flags.
+/// Program Header segment permission flag: Executable (`PF_X`).
 pub const PF_X: u32 = 1; // Executable
+/// Program Header segment permission flag: Writable (`PF_W`).
 pub const PF_W: u32 = 2; // Writable
+/// Program Header segment permission flag: Readable (`PF_R`).
 pub const PF_R: u32 = 4; // Readable
 
 /// Standard 64-bit ELF File Header (64 bytes).
@@ -207,7 +223,9 @@ impl ElfError {
 
 /// Zero-copy parsed representation of a 64-bit ELF executable.
 pub struct ElfBinary<'a> {
+    /// Raw byte slice of the entire ELF file image.
     data: &'a [u8],
+    /// Parsed 64-bit ELF file header.
     header: Elf64Header,
 }
 
@@ -332,9 +350,13 @@ impl<'a> ElfBinary<'a> {
 
 /// Iterator over ELF program headers.
 pub struct ProgramHeadersIter<'a> {
+    /// Underlying ELF binary byte slice.
     data: &'a [u8],
+    /// Byte offset of the next program header entry to read.
     offset: usize,
+    /// Size in bytes of each program header entry (`e_phentsize`).
     entry_size: usize,
+    /// Number of program header entries remaining to iterate.
     remaining: usize,
 }
 
@@ -527,7 +549,22 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
     }
 }
 
-/// Parses, allocates, and maps a Linux ELF64 binary with standard Linux stack layout (argv, envp, auxv).
+/// Parses, allocates, and maps a Linux ELF64 binary with standard Linux stack layout (`argv`, `envp`, `auxv`).
+///
+/// # Arguments
+///
+/// * `elf_data` - Complete raw byte slice of the Linux ELF64 executable.
+/// * `args` - Command-line argument strings (`argv`) to place on the initial user stack.
+///
+/// # Returns
+///
+/// An [`ElfProcessImage`] initialized with the System V AMD64 initial stack frame and optional
+/// dynamic linker (`PT_INTERP`), or an [`ElfError`] if loading fails.
+///
+/// # Errors
+///
+/// Returns [`ElfError`] if header validation fails, segments are out of bounds, the interpreter
+/// cannot be located, or page table permission updates fail.
 pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage, ElfError> {
     let elf = ElfBinary::parse(elf_data)?;
     let load_segments = elf.load_segments();

@@ -75,6 +75,7 @@ pub fn start(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<(), &'stat
     Ok(())
 }
 
+/// Returns true if the Wayland compositor service daemon is currently running.
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Acquire)
 }

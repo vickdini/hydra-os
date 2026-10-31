@@ -1,3 +1,30 @@
+//! # Task Subsystem: Task Control Block (TCB) and Execution Context
+//!
+//! Defines the [`Task`] control block, saved x86_64 CPU register context ([`TaskRegisters`]),
+//! scheduling state (`TaskState`), priority levels (`TaskPriority`), privilege rings
+//! ([`PrivilegeMode`]), and OS ABI personalities ([`TaskPersonality`]).
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Every thread of execution in Hydra OS—whether a Ring 0 kernel thread, a native Hydra
+//! Ring 3 process, or a Linux ABI thread—is represented by a [`Task`] instance stored in
+//! `super::scheduler::Scheduler`. Separating the TCB data structures from scheduling policy
+//! keeps context-switch state, POSIX credentials, file descriptor tables, capability spaces,
+//! and virtual memory handles self-contained in one canonical record.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `TaskId`: Unique 64-bit identifier (`PID` / `TID`) for a kernel or user task.
+//! - [`Task`]: Complete Task Control Block holding registers, stacks, credentials, `FdTable`, and `Mm`.
+//! - [`TaskRegisters`]: Saved general-purpose, instruction/stack pointer, segment, and `CR3` registers.
+//! - `TaskState`, `TaskPriority`, [`PrivilegeMode`], [`TaskPersonality`]: Task classification enums.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **x86_64 Context Switch**: [`TaskRegisters`] mirrors the register frame captured and restored
+//!   across [`crate::arch::idt::ExceptionContext`] during `iretq` transitions.
+//! - **FPU/SIMD**: Each [`Task`] owns a heap-allocated [`crate::arch::idt::FpuState`] save area.
+
 use alloc::boxed::Box;
 use crate::arch::idt::ExceptionContext;
 use crate::capability::table::CapabilityTable;
@@ -9,14 +36,23 @@ pub struct TaskId(pub u64);
 /// Lifecycle state of a thread/task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
+    /// Runnable and waiting in the scheduler queue for a CPU timeslice.
     Ready,
+    /// Currently executing on the CPU.
     Running,
+    /// Suspended waiting on a synchronization primitive, futex, or I/O event.
     Blocked,
-    Sleeping { wake_tick: u64 },
+    /// Suspended until the system PIT timer reaches `wake_tick`.
+    Sleeping {
+        /// Target PIT tick count at which the task transitions back to [`TaskState::Ready`].
+        wake_tick: u64,
+    },
+    /// Terminated and awaiting resource reaping.
     Dead,
 }
 
 impl TaskState {
+    /// Returns a static string name for this task state.
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskState::Ready => "Ready",
@@ -31,14 +67,20 @@ impl TaskState {
 /// Scheduling priority level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskPriority {
+    /// Lowest priority; scheduled only when no other task is ready (used by the CPU halt loop).
     Idle = 0,
+    /// Background priority for low-urgency work.
     Low = 1,
+    /// Default priority for interactive shells and standard user processes.
     Normal = 2,
+    /// Elevated priority for latency-sensitive kernel services (e.g. network stack).
     High = 3,
+    /// Highest scheduling priority.
     Realtime = 4,
 }
 
 impl TaskPriority {
+    /// Returns a static string name for this priority level.
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskPriority::Idle => "Idle",
@@ -53,26 +95,47 @@ impl TaskPriority {
 /// Architectural CPU registers and execution context for x86_64 long mode.
 #[derive(Debug, Clone, Copy)]
 pub struct TaskRegisters {
+    /// General-purpose register `R15` (callee-saved).
     pub r15: u64,
+    /// General-purpose register `R14` (callee-saved).
     pub r14: u64,
+    /// General-purpose register `R13` (callee-saved).
     pub r13: u64,
+    /// General-purpose register `R12` (callee-saved).
     pub r12: u64,
+    /// Frame base pointer register `RBP` (callee-saved).
     pub rbp: u64,
+    /// General-purpose register `RBX` (callee-saved).
     pub rbx: u64,
+    /// General-purpose register `R11` (caller-saved; holds `RFLAGS` across `SYSCALL`).
     pub r11: u64,
+    /// General-purpose register `R10` (caller-saved; 4th syscall argument in Linux ABI).
     pub r10: u64,
+    /// General-purpose register `R9` (caller-saved; 6th function/syscall argument).
     pub r9: u64,
+    /// General-purpose register `R8` (caller-saved; 5th function/syscall argument).
     pub r8: u64,
+    /// Destination index register `RDI` (1st argument in System V AMD64 ABI).
     pub rdi: u64,
+    /// Source index register `RSI` (2nd argument in System V AMD64 ABI).
     pub rsi: u64,
+    /// Data register `RDX` (3rd argument in System V AMD64 ABI).
     pub rdx: u64,
+    /// Counter register `RCX` (1st argument in UEFI/Win64 ABI; holds return `RIP` across `SYSCALL`).
     pub rcx: u64,
+    /// Accumulator register `RAX` (syscall number and return value).
     pub rax: u64,
+    /// Instruction pointer `RIP`.
     pub rip: u64,
+    /// Code segment selector `CS` (`0x08` for Ring 0, `0x23` for Ring 3).
     pub cs: u64,
+    /// Processor status and control flags `RFLAGS`.
     pub rflags: u64,
+    /// Stack pointer `RSP`.
     pub rsp: u64,
+    /// Stack segment selector `SS` (`0x10` for Ring 0, `0x1B` for Ring 3).
     pub ss: u64,
+    /// Control Register 3 (`CR3`) physical address of the task's root `PML4` page table.
     pub cr3: u64,
 }
 
@@ -157,11 +220,14 @@ impl TaskRegisters {
 /// Execution privilege level of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegeMode {
+    /// Privileged supervisor execution in CPU Ring 0.
     Kernel, // Ring 0
+    /// Unprivileged application execution in CPU Ring 3.
     User,   // Ring 3
 }
 
 impl PrivilegeMode {
+    /// Returns a static string name for this privilege mode.
     pub fn as_str(&self) -> &'static str {
         match self {
             PrivilegeMode::Kernel => "Kernel",
@@ -173,11 +239,14 @@ impl PrivilegeMode {
 /// Target OS ABI personality for system call routing and runtime semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskPersonality {
+    /// Native Hydra microkernel ABI.
     Hydra,
+    /// Linux x86_64 ABI compatibility layer.
     Linux,
 }
 
 impl TaskPersonality {
+    /// Returns a static string name for this OS personality.
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskPersonality::Hydra => "Hydra",
@@ -188,29 +257,53 @@ impl TaskPersonality {
 
 /// Task Control Block (TCB) representing a thread of execution in Hydra Microkernel.
 pub struct Task {
+    /// Unique identifier (`TID`) of this task.
     pub id: TaskId,
+    /// Static human-readable label for the task.
     pub name: &'static str,
+    /// Current scheduling lifecycle state.
     pub state: TaskState,
+    /// Scheduling priority level.
     pub priority: TaskPriority,
+    /// Hardware CPU privilege ring (`Kernel` or `User`).
     pub mode: PrivilegeMode,
+    /// System call ABI personality (`Hydra` or `Linux`).
     pub personality: TaskPersonality,
+    /// Thread-local storage base address loaded into `IA32_FS_BASE` (`0xC000_0100`).
     pub fs_base: u64,
+    /// Legacy program break address (for tasks without a private [`crate::memory::vm::Mm`]).
     pub brk: u64,
+    /// User-space address cleared and futex-woken upon thread exit (`CLONE_CHILD_CLEARTID`).
     pub clear_child_tid: u64,
+    /// Thread group ID (`PID` in POSIX terms; shared by threads created with `CLONE_THREAD`).
     pub tgid: u64,
+    /// Real user ID.
     pub uid: u32,
+    /// Real group ID.
     pub gid: u32,
+    /// Effective user ID.
     pub euid: u32,
+    /// Effective group ID.
     pub egid: u32,
+    /// Saved set-user-ID.
     pub suid: u32,
+    /// Saved set-group-ID.
     pub sgid: u32,
+    /// Saved CPU general-purpose and control register state.
     pub regs: TaskRegisters,
+    /// Dedicated kernel stack buffer (used for Ring 0 execution and TSS `RSP0`).
     pub stack: Option<Box<[u8]>>,       // Kernel stack (used for Ring 0 execution and TSS RSP0)
+    /// Dedicated user stack buffer (for legacy Ring 3 tasks without a demand-paged [`crate::memory::vm::Mm`]).
     pub user_stack: Option<Box<[u8]>>,  // User stack (used for Ring 3 unprivileged execution)
+    /// Backing segment buffer for legacy PIE ELF process images.
     pub user_image: Option<Box<[u8]>>,  // Backing segment buffer for ELF process image
+    /// Backing segment buffer for legacy dynamic linker (`PT_INTERP`) images.
     pub interp_image: Option<Box<[u8]>>, // Backing segment buffer for dynamic linker (PT_INTERP)
+    /// Cumulative number of PIT timer ticks this task has executed.
     pub ticks_run: u64,
+    /// Remaining PIT timer ticks in the current scheduling quantum.
     pub timeslice_remaining: u32,
+    /// Per-task capability table governing object access rights.
     pub cspace: Box<CapabilityTable>,
     /// Descriptor table, shared with the other threads of the process (`CLONE_FILES`).
     pub fds: crate::fs::SharedFdTable,

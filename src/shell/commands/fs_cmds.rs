@@ -1,3 +1,25 @@
+//! # Shell Commands: Core ZFS File Operations (`ls`, `cat`, `write`)
+//!
+//! Implements the primary interactive commands for listing directories (`ls`), streaming file
+//! or standard-input contents (`cat`), and writing Copy-on-Write files (`write`) through the
+//! microkernel's OpenZFS File Server.
+//!
+//! ## Architectural Role & Design Rationale
+//! Every file operation in Hydra's root filesystem is verified by Fletcher-4 checksums and
+//! committed via transactional Copy-on-Write (TXG) updates in ZFS. These commands provide
+//! direct visibility into ZFS dataset membership, Fletcher-4 integrity status, and transaction
+//! group numbers while supporting standard UNIX pipeline streaming (`cat -`).
+//!
+//! ## Key Types & Interfaces
+//! - [`LsCommand`]: Lists ZFS directory entries with optional `-l` (size/metadata) and `-a` (hidden files) flags.
+//! - [`CatCommand`]: Prints ZFS file contents or streams from file descriptor `0` (`stdin`) when invoked in a pipeline.
+//! - [`WriteCommand`]: Creates or overwrites a ZFS file via a new Copy-on-Write transaction group (`TXG`).
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Communicates with the ZFS File Server via [`crate::fs::client::ZfsClient`]
+//! - Concurrency: Checks [`crate::console::check_interrupt()`] during multi-line output to support `Ctrl+C` cancellation
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
@@ -6,6 +28,7 @@ use crate::fs::zfs::types::DnodeType;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Built-in `ls` (`dir`) command that lists files and directories in the active ZFS dataset.
 pub struct LsCommand;
 
 impl Command for LsCommand {
@@ -109,6 +132,7 @@ impl Command for LsCommand {
     }
 }
 
+/// Built-in `cat` (`type`) command that displays ZFS file contents or streams from `stdin`.
 pub struct CatCommand;
 
 impl Command for CatCommand {
@@ -183,6 +207,7 @@ impl Command for CatCommand {
     }
 }
 
+/// Built-in `write` (`append`) command that creates or updates a file in ZFS via Copy-on-Write.
 pub struct WriteCommand;
 
 impl Command for WriteCommand {

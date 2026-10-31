@@ -16,19 +16,36 @@
 //!
 //! - [`EtherType`]: Enum representing supported link-layer protocols.
 //! - [`EthernetFrame`]: Structured representation of an Ethernet II frame header and payload.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Zero-allocation (`no_std`) slice parser and serializer for IEEE 802.3 frames.
 
 /// Supported IEEE 802.3 EtherType values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EtherType {
+    /// Internet Protocol Version 4 (`0x0800`).
     Ipv4,
+    /// Address Resolution Protocol (`0x0806`).
     Arp,
+    /// Unrecognized or unsupported 16-bit EtherType value.
     Unknown(u16),
 }
 
 impl EtherType {
+    /// Raw 16-bit EtherType constant for IPv4 (`0x0800`).
     pub const IPV4: u16 = 0x0800;
+    /// Raw 16-bit EtherType constant for ARP (`0x0806`).
     pub const ARP: u16 = 0x0806;
 
+    /// Converts a raw 16-bit big-endian value into an [`EtherType`].
+    ///
+    /// # Arguments
+    /// - `val`: 16-bit EtherType identifier.
+    ///
+    /// # Returns
+    /// Matching [`EtherType`] variant (`Ipv4`, `Arp`, or `Unknown(val)`).
     pub fn from_u16(val: u16) -> Self {
         match val {
             Self::IPV4 => EtherType::Ipv4,
@@ -37,6 +54,7 @@ impl EtherType {
         }
     }
 
+    /// Returns the raw 16-bit numeric representation of this [`EtherType`].
     pub fn as_u16(&self) -> u16 {
         match *self {
             EtherType::Ipv4 => Self::IPV4,
@@ -46,11 +64,15 @@ impl EtherType {
     }
 }
 
-/// Structured representation of an Ethernet II frame.
+/// Structured zero-copy representation of an Ethernet II frame.
 pub struct EthernetFrame<'a> {
+    /// Destination 6-byte hardware MAC address.
     pub dst_mac: [u8; 6],
+    /// Source 6-byte hardware MAC address.
     pub src_mac: [u8; 6],
+    /// Encapsulated protocol identifier.
     pub ethertype: EtherType,
+    /// Borrowed slice containing the encapsulated link-layer payload.
     pub payload: &'a [u8],
 }
 

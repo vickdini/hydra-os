@@ -1,8 +1,20 @@
 //! # Hydra ZFS File Server
 //!
-//! Owns the pool (SPA + DMU), directory layer and dataset table, and implements the
-//! POSIX operations in [`super::zpl`]. Kernel code reaches it through the global
-//! [`ZFS_SERVER`] lock, normally via [`crate::fs::ZfsClient`] or the VFS.
+//! ## Subsystem Role & Architecture
+//! This module provides the user-facing microkernel file server coordinating Hydra's
+//! OpenZFS storage stack. It integrates the storage pool allocator (SPA), data management
+//! unit (DMU), ZFS attribute processor (ZAP), and POSIX layer (ZPL).
+//!
+//! ## Key Types & Interfaces
+//! - [`DatasetRecord`]: In-memory and on-disk representation of a ZFS dataset or snapshot.
+//! - [`ZfsServer`]: Main server state managing pool mounts, transaction groups, and caches.
+//! - [`ZFS_SERVER`]: Global mutex protecting the active file server instance.
+//! - `init_server`, [`with_server`]: Entry points to initialize and access the server safely.
+//!
+//! ## Concurrency & Hardware Semantics
+//! Kernel and user-space threads access the server through the [`ZFS_SERVER`] spinlock.
+//! Dirty block counts are tracked to trigger automatic syncs when threshold capacity is
+//! reached. Unlinked inodes with open references are retained until the final handle closes.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -20,15 +32,29 @@ pub const ENDPOINT_ZFS_SERVER: u32 = 0x20;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DatasetRecord {
+    /// Dataset or snapshot name as a null-terminated byte array.
     pub name: [u8; 64],
+    /// Filesystem mount point path as a null-terminated byte array.
     pub mountpoint: [u8; 64],
+    /// Root directory object identifier for the dataset.
     pub root_obj: u64,
+    /// Transaction group number associated with this dataset or snapshot.
     pub txg: u64,
+    /// Flag indicating if this record represents a snapshot (1) or dataset (0).
     pub is_snapshot: u8,
+    /// Alignment padding bytes to ensure fixed 152-byte record sizing.
     pub _pad: [u8; 7],
 }
 
 impl DatasetRecord {
+    /// Creates a new dataset or snapshot descriptor.
+    ///
+    /// # Arguments
+    /// * `name` - Dataset or snapshot identifier string.
+    /// * `mountpoint` - Mount point path string.
+    /// * `root_obj` - Root directory object ID.
+    /// * `txg` - Associated transaction group number.
+    /// * `is_snapshot` - True if creating a snapshot descriptor.
     pub fn new(name: &str, mountpoint: &str, root_obj: u64, txg: u64, is_snapshot: bool) -> Self {
         let mut r = Self {
             name: [0; 64],
@@ -50,10 +76,12 @@ impl DatasetRecord {
         core::str::from_utf8(&bytes[..len]).unwrap_or("")
     }
 
+    /// Returns the dataset or snapshot name as a UTF-8 string slice.
     pub fn name_str(&self) -> &str {
         Self::str_of(&self.name)
     }
 
+    /// Returns the mount point path as a UTF-8 string slice.
     pub fn mountpoint_str(&self) -> &str {
         Self::str_of(&self.mountpoint)
     }
@@ -61,8 +89,11 @@ impl DatasetRecord {
 
 /// The ZFS file server state.
 pub struct ZfsServer {
+    /// Data Management Unit controlling object sets, dnodes, and block transactions.
     pub dmu: Dmu,
+    /// ZFS Attribute Processor managing directory namespaces and indexes.
     pub zap: Zap,
+    /// List of registered dataset and snapshot records.
     pub datasets: Vec<DatasetRecord>,
     /// Open handles per inode; unlinked inodes stay allocated until their last close.
     pub(super) open_counts: BTreeMap<u64, u32>,
@@ -252,6 +283,7 @@ impl ZfsServer {
         }
     }
 
+    /// Returns the root directory object ID of the active dataset.
     pub fn root_obj(&self) -> u64 {
         self.dmu.ub.root_obj
     }

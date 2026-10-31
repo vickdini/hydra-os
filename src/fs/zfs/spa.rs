@@ -1,14 +1,26 @@
 //! # Storage Pool Allocator (SPA)
 //!
-//! Owns the virtual device (ATA disk or RAM fallback), a bounded block cache kept in
-//! physical frames, the space bitmap, and the uberblock ring.
+//! ## Subsystem Role & Architecture
+//! The Storage Pool Allocator (SPA) is the bottom layer of Hydra's OpenZFS implementation.
+//! It abstracts physical storage into a virtual device ([`Vdev`]), manages block allocation
+//! via a persistent space bitmap, maintains an in-memory physical frame cache ([`BlockCache`]),
+//! and controls the uberblock ring for atomic commit semantics.
 //!
-//! ## Crash Consistency
-//!
+//! ## Crash Consistency & Transaction Groups
 //! Blocks freed in transaction group N are still referenced by uberblock N-1, so they are
 //! only returned to the allocator after uberblock N is on disk, and only reach the on-disk
 //! bitmap in the commit of txg N+1. A crash can therefore leak blocks allocated by an
 //! unfinished commit, but never hands out a block the last valid uberblock still uses.
+//!
+//! ## Key Types & Interfaces
+//! - [`Vdev`]: Abstraction over ATA drive or contiguous RAM disk backend.
+//! - [`BlockCache`]: LRU physical frame cache avoiding redundant device read cycles.
+//! - [`Spa`]: Storage Pool Allocator controlling allocation cursors, bitmaps, and labels.
+//! - [`DiskContents`]: Detection state for disk inspection prior to pool import.
+//!
+//! ## Concurrency & Hardware Semantics
+//! All disk I/O synchronizes against underlying ATA controller locks or atomic frame
+//! refcounts. Allocations and frees are staged in transaction groups and committed atomically.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -17,6 +29,7 @@ use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use super::types::{Fletcher4, Uberblock, VdevLabel, BlockPointer, UBERBLOCK_RING, ZFS_BLOCK_SIZE};
 use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec, FRAME_ALLOCATOR};
 
+/// Logical block size in bytes for SPA allocations (4 KiB).
 pub const BLOCK: u64 = ZFS_BLOCK_SIZE as u64;
 const SECTORS_PER_BLOCK: u64 = BLOCK / crate::arch::ata::ATA_SECTOR_SIZE as u64;
 /// Largest number of blocks moved in one ATA command (255 sectors / 8 per block).
@@ -39,6 +52,7 @@ enum Backend {
 /// The block device under the pool.
 pub struct Vdev {
     backend: Backend,
+    /// Total addressable 4 KiB logical blocks on this virtual device.
     pub total_blocks: u64,
 }
 
@@ -71,6 +85,7 @@ impl Vdev {
         }
     }
 
+    /// Returns true if this virtual device is backed by physical hardware (ATA disk) rather than RAM.
     pub fn is_hardware_backed(&self) -> bool {
         matches!(self.backend, Backend::Ata)
     }
@@ -123,6 +138,10 @@ impl Vdev {
         }
     }
 
+    /// Flushes hardware write caches to non-volatile storage.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying ATA controller command fails.
     pub fn flush(&mut self) -> Result<(), &'static str> {
         if let Backend::Ata = self.backend {
             if let Some(dev) = crate::arch::ata::PRIMARY_ATA.lock().as_mut() {
@@ -143,7 +162,9 @@ pub struct BlockCache {
     map: BTreeMap<u64, CacheEntry>,
     clock: u64,
     capacity: usize,
+    /// Number of successful block cache lookups.
     pub hits: u64,
+    /// Number of cache lookup misses requiring disk reads.
     pub misses: u64,
 }
 
@@ -203,6 +224,7 @@ impl BlockCache {
         }
     }
 
+    /// Returns the number of blocks currently held in the block cache.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -218,21 +240,29 @@ impl BlockCache {
 /// What a device holds before import ([`Spa::probe`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DiskContents {
+    /// Disk appears completely zeroed or unpartitioned.
     Blank,
+    /// Disk contains a valid OpenZFS pool label.
     Pool,
+    /// Disk contains foreign signatures or unsupported filesystem formats.
     Other,
 }
 
 /// Storage Pool Allocator.
 pub struct Spa {
+    /// Virtual block device providing raw storage.
     pub vdev: Vdev,
+    /// On-disk pool configuration label.
     pub label: VdevLabel,
+    /// In-memory cache of clean and dirty block frames.
     pub cache: BlockCache,
     bitmap: Vec<u64>,
     dirty_bitmap_blocks: BTreeMap<u64, ()>,
     pending_free: Vec<u64>,
     alloc_cursor: u64,
+    /// Total count of blocks currently allocated in the space bitmap.
     pub allocated_blocks: u64,
+    /// Human-readable pool name as a fixed-length null-padded byte array.
     pub pool_name: [u8; 32],
 }
 
@@ -300,10 +330,8 @@ impl Spa {
         Ok(spa)
     }
 
-    /// Opens an existing pool, returning it with its newest valid uberblock, or hands the
-    /// device back if it holds no valid pool.
-    /// What block 0 of a device holds: nothing (all zeros), a pool label, or something
-    /// else. Read errors are retried; `None` means the device could not be read.
+    /// Probes block 0 of a device to determine its contents: nothing (all zeros), a pool
+    /// label, or foreign data. Read errors are retried; returns `None` if device read fails.
     pub fn probe(vdev: &Vdev) -> Option<DiskContents> {
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         for _ in 0..3 {
@@ -318,6 +346,14 @@ impl Spa {
         None
     }
 
+    /// Opens an existing pool, returning it with its newest valid uberblock, or hands the
+    /// device back if it holds no valid pool.
+    ///
+    /// # Arguments
+    /// * `vdev` - Virtual block device to inspect and mount.
+    ///
+    /// # Returns
+    /// Tuple of `(Spa, Uberblock)` on success, or `Err(vdev)` on failure.
     pub fn open(vdev: Vdev) -> Result<(Self, Uberblock), Vdev> {
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         if vdev.read(0, &mut block).is_err() {
@@ -490,23 +526,28 @@ impl Spa {
         Ok(())
     }
 
+    /// Returns the pool name as a UTF-8 string slice.
     pub fn pool_name_str(&self) -> &str {
         let len = self.pool_name.iter().position(|&b| b == 0).unwrap_or(self.pool_name.len());
         core::str::from_utf8(&self.pool_name[..len]).unwrap_or("hydrapool")
     }
 
+    /// Returns the total capacity of the pool in bytes.
     pub fn total_capacity_bytes(&self) -> u64 {
         self.label.total_blocks * BLOCK
     }
 
+    /// Returns the total number of bytes currently allocated in the pool.
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated_blocks * BLOCK
     }
 
+    /// Returns the remaining free space in the pool in bytes.
     pub fn free_bytes(&self) -> u64 {
         self.total_capacity_bytes().saturating_sub(self.allocated_bytes())
     }
 
+    /// Returns true if the pool's virtual device is backed by physical hardware.
     pub fn is_hardware_backed(&self) -> bool {
         self.vdev.is_hardware_backed()
     }

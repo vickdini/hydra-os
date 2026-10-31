@@ -1,3 +1,22 @@
+//! # Video Subsystem: Autonomous Framebuffer Text Console
+//!
+//! Provides a hardware-accelerated text console with ANSI escape sequence decoding,
+//! configurable cursor styles, vertical scrolling, and color attribute management.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! When UEFI Boot Services are exited, firmware text output (`SimpleTextOutput`) ceases functioning.
+//! The [`VideoConsole`] takes over console output directly onto the GOP linear [`Framebuffer`].
+//! It supports full standard terminal semantics: line wrapping, newline handling (`\n`), carriage returns (`\r`),
+//! tab stops, backspace erasure, hardware color palettes, and ANSI/VT100 cursor control sequences.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`VIDEO_CONSOLE`]: Global spinlock-protected singleton instance.
+//! - [`VideoConsole`]: Core terminal emulator maintaining cursor state and colors.
+//! - `CursorShape`: Visual representation of the terminal cursor (`Underline`, `Block`, `Bar`).
+//! - [`clear_screen()`], [`write_str()`], [`set_colors()`]: Helper functions for global console printing.
+
 use core::fmt::{self, Write};
 use spin::Mutex;
 
@@ -70,18 +89,22 @@ impl VideoConsole {
         }
     }
 
+    /// Returns the total number of character columns supported across the screen.
     pub fn cols(&self) -> usize {
         self.max_cols
     }
 
+    /// Returns the total number of character rows supported across the screen.
     pub fn rows(&self) -> usize {
         self.max_rows
     }
 
+    /// Returns the active `(col, row)` text cursor coordinates.
     pub fn cursor_pos(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
     }
 
+    /// Updates foreground and background RGB colors for subsequently rendered text.
     pub fn set_color(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         self.default_fg = fg;
         self.default_bg = bg;
@@ -183,6 +206,7 @@ impl VideoConsole {
         self.cursor_shape
     }
 
+    /// Moves the cursor to the specified column and row coordinate.
     pub fn set_cursor_pos(&mut self, col: usize, row: usize) {
         let was_drawn = self.cursor_drawn;
         if was_drawn {
@@ -195,6 +219,7 @@ impl VideoConsole {
         }
     }
 
+    /// Clears the entire text console with the background color and homes the cursor.
     pub fn clear(&mut self) {
         if self.cursor_drawn {
             self.hide_cursor();
@@ -204,6 +229,7 @@ impl VideoConsole {
         self.cursor_row = 0;
     }
 
+    /// Advances the cursor to the beginning of the next line, scrolling if at the bottom.
     pub fn new_line(&mut self) {
         if self.cursor_drawn {
             self.hide_cursor();
@@ -216,6 +242,7 @@ impl VideoConsole {
         }
     }
 
+    /// Renders a single character or processes a control byte (`\n`, `\r`, `\t`, backspace).
     pub fn write_char(&mut self, c: char) {
         if self.ansi_feed(c) {
             return;
@@ -274,12 +301,14 @@ impl VideoConsole {
         }
     }
 
+    /// Writes a UTF-8 string slice to the graphical console.
     pub fn write_str(&mut self, s: &str) {
         for c in s.chars() {
             self.write_char(c);
         }
     }
 
+    /// Obtains a mutable reference to the underlying linear [`Framebuffer`].
     pub fn framebuffer_mut(&mut self) -> &mut Framebuffer {
         if self.cursor_drawn {
             self.hide_cursor();
@@ -287,6 +316,7 @@ impl VideoConsole {
         &mut self.framebuffer
     }
 
+    /// Obtains an immutable reference to the underlying linear [`Framebuffer`].
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.framebuffer
     }

@@ -1,4 +1,30 @@
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+//! # Architecture Layer: 8254 Programmable Interval Timer (PIT)
+//!
+//! Provides hardware periodic timer interrupt generation, tick accounting, uptime metrics,
+//! and low-power CPU sleep primitives for Hydra OS.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! The 8254 PIT oscillates at an architectural base frequency of 1.193182 MHz. By programming
+//! Channel 0 in Mode 3 (square-wave generator) with an appropriate 16-bit divisor, the timer
+//! fires IRQ 0 (IDT vector 32) at 100 Hz (every 10 ms). This periodic interrupt drives the
+//! preemptive scheduler's round-robin timeslice accounting and enables non-spinning thread sleeping.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `init`: Programs PIT Channel 0 divisor registers for the specified frequency in Hz.
+//! - `ticks`: Returns the atomic monotonic counter of elapsed timer interrupts.
+//! - `uptime_ms` / `uptime_seconds`: Converts raw ticks into human-readable wall clock uptime.
+//! - `sleep_ms` / `sleep_ticks`: Halts the CPU via `HLT` until the required time elapses.
+//! - `on_timer_tick`: Increments the tick counter from the IRQ 0 ISR.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 kernel execution.
+//! - I/O Ports: Channel 0 Data `0x40`, Mode/Command Register `0x43`.
+//! - Concurrency: Lock-free atomic synchronization (`AtomicU64`, `AtomicBool`).
+
+use core::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use x86_64::instructions::port::Port;
 
 const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;

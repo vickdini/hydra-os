@@ -1,3 +1,23 @@
+//! # Shell Command: UEFI Boot Partition Diagnostics (`efifs`)
+//!
+//! Provides low-level inspection (`efifs ls`, `efifs cat`) and PE32+ image execution
+//! (`efifs run`) on the underlying UEFI firmware FAT boot volume while UEFI Boot Services
+//! remain active.
+//!
+//! ## Architectural Role & Design Rationale
+//! Because standard shell filesystem commands (`ls`, `cat`, `cp`, `rm`) operate against the
+//! microkernel's OpenZFS storage pool (`hydrapool`), [`EfifsCommand`] gives engineers a dedicated
+//! tool to inspect and execute files residing directly on the EFI System Partition (ESP) prior
+//! to calling `exitboot`.
+//!
+//! ## Key Types & Interfaces
+//! - [`EfifsCommand`]: Implements the `efifs` command and its `ls`, `cat`, and `run` subcommands.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (UEFI Boot Services context only; disabled after `exitboot`)
+//! - Hardware Interaction: Invokes UEFI `SimpleFileSystem` and `LoadedImage` protocols via [`crate::shell::fs`]
+//! - Concurrency: Single-threaded synchronous UEFI protocol calls
+
 use uefi::proto::console::text::Color;
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
 
@@ -6,6 +26,7 @@ use crate::shell::command::Command;
 use crate::shell::fs::{open_root_volume, path_to_cstr16, print_file, execute_file};
 use crate::shell::state::ShellState;
 
+/// Built-in `efifs` command for inspecting and running files on the UEFI FAT boot partition.
 pub struct EfifsCommand;
 
 impl Command for EfifsCommand {

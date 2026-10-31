@@ -1,24 +1,84 @@
+//! # Hydra OS: Microkernel Entry Point & Bootstrap Orchestrator
+//!
+//! Native 64-bit UEFI operating system kernel entry point, subsystem bootstrap sequence,
+//! and bare-metal panic handler.
+//!
+//! ## Architectural Role & Design Rationale
+//!
+//! Unlike legacy BIOS kernels that start in 16-bit real mode and require multi-stage assembly
+//! trampolines to enter 64-bit long mode, Hydra OS executes directly as a native PE32+ UEFI
+//! application (`BOOTX64.EFI`). This root module orchestrates the sequential bring-up of all
+//! microkernel subsystems—from CPU segmentation and exception handling to physical/virtual memory,
+//! capability tables, IPC endpoints, the OpenZFS file server, and preemptive multitasking—before
+//! handing control to the interactive microkernel shell.
+//!
+//! ## Key Types & Interfaces
+//!
+//! - [`arch`]: Hardware abstraction layer (GDT, IDT, PIC, PIT, RTC, PS/2, PCI, ATA, SYSCALL).
+//! - [`memory`]: Physical frame allocator, 8 MiB kernel heap, 4-level PML4 paging, and per-process VM.
+//! - [`capability`] & [`ipc`]: Object-capability security model (CSpace) and message-passing endpoints.
+//! - [`fs`] & [`net`]: OpenZFS copy-on-write file server, POSIX file descriptors, and Intel E1000 TCP/IP stack.
+//! - [`task`] & [`compat`]: Preemptive round-robin scheduler, ELF64 loader, and Linux ABI compatibility layer.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - CPU Privilege Level: Ring 0 (Supervisor Mode) at boot; spawns Ring 3 userland tasks.
+//! - Hardware Interaction: UEFI System Table at boot, transitioning to autonomous hardware control.
+//! - Concurrency: Single-core bootstrap transitioning into 100 Hz preemptive multitasking.
+//!
+//! ## Dataflow & Architectural Diagram
+//!
+//! ```text
+//! +---------------+     +---------------+     +------------------+     +-----------------+
+//! | UEFI Firmware | --> | GDT / IDT /   | --> | Frame Allocator, | --> | CSpace & IPC    |
+//! | (BOOTX64.EFI) |     | CPU State     |     | Heap & PML4 VMM  |     | Rendezvous      |
+//! +---------------+     +---------------+     +------------------+     +-----------------+
+//!                                                                               |
+//! +---------------+     +---------------+     +------------------+              v
+//! | Interactive   | <-- | Preemptive    | <-- | ZFS File Server  | <------------+
+//! | Shell & Linux |     | Scheduler     |     | & E1000 Network  |
+//! +---------------+     +---------------+     +------------------+
+//! ```
+
 #![no_std]
 #![no_main]
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 extern crate alloc;
 
+/// Hardware architecture abstraction layer for `x86_64` CPUs and legacy PC peripherals.
 pub mod arch;
+/// Object-capability security model, access rights bitmasks, and per-task CSpace tables.
 pub mod capability;
+/// Thread-safe formatted text output over UEFI SimpleTextOutput and the GOP framebuffer console.
 #[macro_use]
 pub mod console;
+/// Virtual File System (VFS) descriptors, anonymous pipes, and the OpenZFS microkernel file server.
 pub mod fs;
+/// Inter-Process Communication (IPC) message structures and bounded wait-queue endpoints.
 pub mod ipc;
+/// Physical frame allocation, dynamic kernel heap, 4-level PML4 paging, and process virtual memory.
 pub mod memory;
+/// Interactive microkernel command-line shell, line editor, pipeline executor, and built-in utilities.
 pub mod shell;
+/// Sleep-capable kernel synchronization primitives (wait queues, mutexes, semaphores, condvars, channels).
 pub mod sync;
+/// System call ABI definitions, statistics, and userland wrapper routines.
 pub mod syscall;
+/// Preemptive round-robin task scheduler, Task Control Blocks (TCB), and ELF64 binary loader.
 pub mod task;
+/// UEFI Graphics Output Protocol (GOP) framebuffer driver, bitmap font renderer, and Plasma desktop.
 pub mod video;
+/// Native Wayland display server protocol engine, shared memory pools, and compositor state.
 pub mod wayland;
+/// Intel 82540EM (e1000) Gigabit Ethernet driver and full TCP/UDP/IPv4/DNS/DHCP/HTTP network stack.
 pub mod net;
+/// Lossless DEFLATE (RFC 1951) and GZIP (RFC 1952) decompression routines for package extraction.
 pub mod compress;
+/// Archive parsers (`ar`, `tar`, `.deb`) and Debian/Ubuntu root filesystem provisioning.
 pub mod pkg;
+/// Operating system personality and binary compatibility layers (Linux `x86_64` ABI emulation).
 pub mod compat;
 
 
@@ -30,6 +90,14 @@ use x86_64::VirtAddr;
 use capability::{table::CapabilityTable, CapType, Capability, Rights};
 use ipc::{Endpoint, Message};
 
+/// Bare-metal kernel panic handler invoked on unrecoverable runtime faults or assertions.
+///
+/// Formats the panic location and payload to the active console in bright red, masks all
+/// maskable CPU hardware interrupts (`CLI`), and enters an infinite low-power halt loop (`HLT`).
+///
+/// # Arguments
+///
+/// * `_info` - Diagnostic metadata describing the source file, line number, and panic message.
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     console::set_color(Color::LightRed, Color::Black);
@@ -40,6 +108,19 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
+/// Native UEFI application entry point (`efi_main`) and kernel bootstrap orchestrator.
+///
+/// Executes the staged initialization sequence for the Hydra Microkernel:
+/// 1. Initializes the Global Descriptor Table (GDT), Task State Segment (TSS), and Interrupt Descriptor Table (IDT).
+/// 2. Discovers physical RAM from the UEFI memory map and initializes the physical frame allocator and 8 MiB heap.
+/// 3. Constructs Hydra's autonomous 4-level PML4 page table and initializes the UEFI GOP linear framebuffer.
+/// 4. Verifies the capability table (CSpace) and IPC endpoint subsystem.
+/// 5. Initializes the RTC, ATA disk driver, PS/2 mouse, E1000 NIC, and OpenZFS storage pool (`hydrapool`).
+/// 6. Starts the preemptive round-robin task scheduler and launches the interactive microkernel shell.
+///
+/// # Returns
+///
+/// Returns [`Status::SUCCESS`] if the shell ever terminates normally (in practice, the kernel runs until poweroff).
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();

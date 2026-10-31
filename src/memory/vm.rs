@@ -4,10 +4,23 @@
 //!
 //! ## Architectural Role & Design Rationale
 //!
-//! Each Linux process owns an [`Mm`]: a private PML4 plus an ordered set of virtual memory
-//! areas ([`Vma`]). Pages are populated lazily by the page-fault handler, private pages are
-//! shared copy-on-write, and file or shared-memory pages come from a [`MappedObject`]
+//! Each Linux process owns an `Mm`: a private PML4 plus an ordered set of virtual memory
+//! areas (`Vma`). Pages are populated lazily by the page-fault handler, private pages are
+//! shared copy-on-write, and file or shared-memory pages come from a `MappedObject`
 //! (an ELF image, a page-cache file, a memfd).
+//!
+//! ## Key Types & Interfaces
+//!
+//! - `Mm`: Per-process virtual memory descriptor managing a private `PML4` and `BTreeMap` of `Vma`s.
+//! - `Vma` & `Backing`: Contiguous user virtual memory area and its backing store (`Anon` or `Object`).
+//! - `MappedObject` & `BufferObject`: Trait and in-memory implementation for file/shared page sources.
+//! - `FaultError` & `handle_current_fault`: Demand-paging and copy-on-write page fault resolution.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - **Paging & NX**: Manipulates 4-level x86_64 page tables, checking `IA32_EFER.NXE` (`0xC000_0080`)
+//!   before setting `PageTableFlags::NO_EXECUTE`, and uses software bit 9 (`PTE_HELD`) for `PROT_NONE` pages.
+//! - **Physical Frames**: Relies on `super::frame_allocator` reference counting for copy-on-write sharing.
 //!
 //! ## Address Space Layout
 //!
@@ -23,7 +36,7 @@
 //!
 //! ## Locking
 //!
-//! The page-fault handler reaches the running process's `Mm` through [`CURRENT_MM`]
+//! The page-fault handler reaches the running process's `Mm` through `CURRENT_MM`
 //! without taking the scheduler lock, so kernel code may touch user memory while holding
 //! the scheduler or file-descriptor locks. Kernel code must never touch user memory while
 //! holding an `Mm` lock or the frame allocator lock.
@@ -40,6 +53,7 @@ use x86_64::PhysAddr;
 
 use super::frame_allocator::{alloc_user_frame, frame_ref_dec, frame_ref_inc, frame_refcount, FRAME_ALLOCATOR};
 
+/// Size of a standard 4 KiB virtual page in bytes.
 pub const PAGE_SIZE: u64 = 4096;
 
 /// Lowest user virtual address (start of PML4 entry 1).
@@ -55,14 +69,20 @@ pub const STACK_SIZE: u64 = 8 * 1024 * 1024;
 /// Top of the top-down mmap area, leaving a 1 GiB gap below the stack.
 pub const MMAP_TOP: u64 = STACK_TOP - STACK_SIZE - 0x4000_0000;
 
+/// Page may be read (`PROT_READ`).
 pub const PROT_READ: u32 = 0x1;
+/// Page may be written (`PROT_WRITE`).
 pub const PROT_WRITE: u32 = 0x2;
+/// Page may be executed (`PROT_EXEC`).
 pub const PROT_EXEC: u32 = 0x4;
 
-// Linux errno values returned by memory operations
+/// Out of memory (`ENOMEM`).
 const ENOMEM: i64 = 12;
+/// Bad address (`EFAULT`).
 const EFAULT: i64 = 14;
+/// File or mapping already exists (`EEXIST`).
 const EEXIST: i64 = 17;
+/// Invalid argument (`EINVAL`).
 const EINVAL: i64 = 22;
 
 /// Software PTE bit marking a page that holds a frame but is currently inaccessible
@@ -78,26 +98,38 @@ pub trait MappedObject: Send + Sync {
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>>;
 }
 
-/// What a [`Vma`]'s pages are populated from.
+/// What a `Vma`'s pages are populated from.
 #[derive(Clone)]
 pub enum Backing {
     /// Zero-filled anonymous memory.
     Anon,
     /// Pages of a mapped object; `pgoff` is the object page that maps at `Vma::start`.
-    Object { obj: Arc<dyn MappedObject>, pgoff: u64 },
+    Object {
+        /// Shared reference to the underlying backing object.
+        obj: Arc<dyn MappedObject>,
+        /// Page offset within `obj` corresponding to `Vma::start`.
+        pgoff: u64,
+    },
 }
 
 /// A contiguous range of user virtual memory with uniform protection and backing.
 #[derive(Clone)]
 pub struct Vma {
+    /// Page-aligned inclusive start virtual address of the area.
     pub start: u64,
+    /// Page-aligned exclusive end virtual address of the area.
     pub end: u64,
+    /// Protection flags (`PROT_READ`, `PROT_WRITE`, `PROT_EXEC`).
     pub prot: u32,
+    /// True for shared mappings (`MAP_SHARED`), false for private copy-on-write mappings (`MAP_PRIVATE`).
     pub shared: bool,
+    /// Backing store from which pages in this area are populated.
     pub backing: Backing,
 }
 
 impl Vma {
+    /// Splits this VMA at page-aligned address `at`, truncating `self` to `[start, at)`
+    /// and returning the upper half `[at, end)`.
     fn split_off(&mut self, at: u64) -> Vma {
         let mut upper = self.clone();
         upper.start = at;
@@ -122,9 +154,13 @@ pub enum FaultError {
 
 /// A user address space: page tables plus the areas mapped in them.
 pub struct Mm {
+    /// Physical address of this address space's root `PML4` page table.
     pml4: PhysAddr,
+    /// Non-overlapping virtual memory areas keyed by their starting virtual address.
     vmas: BTreeMap<u64, Vma>,
+    /// Initial program break address at the end of the loaded executable image.
     pub brk_start: u64,
+    /// Current program break (`brk`) address.
     pub brk: u64,
     /// The process's auxiliary vector as passed at exec (`prctl(PR_GET_AUXV)`, `/proc/self/auxv`).
     pub auxv: Vec<u8>,
@@ -144,16 +180,19 @@ fn nx_enabled() -> bool {
     efer & (1 << 11) != 0
 }
 
+/// Returns a mutable reference to the identity-mapped page table at physical address `phys`.
 #[inline]
 fn table_at<'a>(phys: PhysAddr) -> &'a mut PageTable {
     unsafe { &mut *(phys.as_u64() as *mut PageTable) }
 }
 
+/// Rounds `addr` down to the nearest 4 KiB page boundary.
 #[inline]
 fn page_down(addr: u64) -> u64 {
     addr & !(PAGE_SIZE - 1)
 }
 
+/// Rounds `addr` up to the nearest 4 KiB page boundary.
 #[inline]
 fn page_up(addr: u64) -> u64 {
     (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -164,6 +203,7 @@ pub fn is_user_range(start: u64, len: u64) -> bool {
     start >= USER_SPACE_START && start.checked_add(len).map_or(false, |end| end <= USER_SPACE_END)
 }
 
+/// Computes the hardware [`PageTableFlags`] for a user page with VMA protection `prot`.
 fn pte_flags_for(prot: u32, writable: bool) -> PageTableFlags {
     let mut flags = PageTableFlags::USER_ACCESSIBLE;
     if prot & (PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
@@ -180,10 +220,12 @@ fn pte_flags_for(prot: u32, writable: bool) -> PageTableFlags {
     flags
 }
 
+/// Returns true if `entry` owns a physical frame (either `PRESENT` or `PTE_HELD`).
 fn pte_holds_frame(entry: &PageTableEntry) -> bool {
     entry.flags().intersects(PageTableFlags::PRESENT | PTE_HELD)
 }
 
+/// Invalidates the TLB entry for virtual address `addr`.
 fn flush(addr: u64) {
     x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(addr));
 }
@@ -263,6 +305,7 @@ impl Mm {
         self.vmas.values()
     }
 
+    /// Returns true if any existing VMA overlaps the half-open interval `[start, end)`.
     fn overlaps(&self, start: u64, end: u64) -> bool {
         if let Some((_, v)) = self.vmas.range(..end).next_back() {
             return v.end > start;
@@ -708,6 +751,7 @@ impl Mm {
         Ok(())
     }
 
+    /// Recursively releases page tables and decrements frame reference counts starting at `level`.
     fn free_tables(table_phys: PhysAddr, level: u8) {
         let table = table_at(table_phys);
         for entry in table.iter_mut() {
@@ -852,11 +896,14 @@ pub fn map_into_kernel_space(frames: &[PhysFrame<Size4KiB>], writable: bool) -> 
 /// A mapped object backed by an in-memory byte buffer (an ELF image read into memory).
 /// Pages are materialised into frames on first use and kept for the object's lifetime.
 pub struct BufferObject {
+    /// Raw byte slice holding the complete backing image in memory.
     data: Box<[u8]>,
+    /// Materialised 4 KiB physical frames indexed by page offset (`pgoff`).
     pages: Mutex<BTreeMap<u64, PhysFrame<Size4KiB>>>,
 }
 
 impl BufferObject {
+    /// Creates a new shared `BufferObject` wrapping `data`.
     pub fn new(data: Box<[u8]>) -> Arc<Self> {
         Arc::new(Self {
             data,
@@ -864,10 +911,12 @@ impl BufferObject {
         })
     }
 
+    /// Returns the total size of the underlying byte buffer in bytes.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Returns a read-only slice of the underlying byte buffer.
     pub fn bytes(&self) -> &[u8] {
         &self.data
     }

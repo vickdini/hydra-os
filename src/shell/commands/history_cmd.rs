@@ -1,3 +1,7 @@
+//! # Shell Command: Command History Navigation (`history`)
+//!
+//! Provides the `history` command displaying interactive shell command history entries.
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;

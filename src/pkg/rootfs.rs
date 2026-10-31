@@ -1,10 +1,24 @@
-//! # Root Filesystem Installer
+//! # Package & Archive Subsystem: Linux Root Filesystem Installer
 //!
-//! Unpacks a Linux root filesystem archive (`.tar` or `.tar.gz`, e.g. Ubuntu's
-//! `ubuntu-base-*.tar.gz`) into a directory of the ZFS pool, preserving everything a
-//! distribution relies on: permissions, owners, modification times, symbolic links,
-//! hard links, device nodes and FIFOs. Supports ustar headers, GNU long names (`L`/`K`)
-//! and pax extended headers (`path`, `linkpath`).
+//! Unpacks a complete Linux root filesystem archive (`.tar` or `.tar.gz`, such as Ubuntu's
+//! `ubuntu-base-*.tar.gz`) into a target directory of the OpenZFS pool while preserving
+//! permissions, ownership, modification times, symbolic links, hard links, device nodes, and FIFOs.
+//!
+//! ## Architectural Role & Design Rationale
+//! Running unmodified Linux distributions under Hydra OS's Linux compatibility layer requires
+//! faithfully materializing `/bin`, `/lib`, `/etc`, and `/dev` metadata—including setuid bits,
+//! long symbolic links, deferred hard links, and character/block device major/minor numbers.
+//! This installer supports POSIX `ustar` prefixes, GNU long name/link extensions (`L`/`K`),
+//! GNU base-256 numeric fields, and POSIX `pax` extended headers (`x`).
+//!
+//! ## Key Types & Interfaces
+//! - [`InstallSummary`]: Statistics structure tallying extracted files, directories, links, devices, and bytes.
+//! - [`install()`]: Top-level installer entry point that decompresses (if `.gz`), extracts, and commits to ZFS.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Commits extracted objects to the OpenZFS pool via [`crate::fs::zfs::server::with_server`].
+//! - Concurrency: Acquires the global ZFS server lock per entry and flushes the transaction group at completion.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,20 +28,35 @@ use crate::fs::zfs::server::{with_server, ZfsServer};
 use crate::fs::zfs::types::{S_IFBLK, S_IFCHR, S_IFIFO};
 use crate::fs::zfs::zpl::{self, SetAttr};
 
+/// Standard 512-byte TAR block size.
 const BLOCK: usize = 512;
 
-/// Counts reported after an installation.
+/// Summary counts reported after unpacking a root filesystem archive via [`install()`].
+///
+/// # Concurrency & Thread Safety
+/// Plain value struct (`Copy`, `Clone`) returned to the caller upon completion.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InstallSummary {
+    /// Total number of regular files created and written.
     pub files: usize,
+    /// Total number of directories created or updated.
     pub dirs: usize,
+    /// Total number of symbolic links created.
     pub symlinks: usize,
+    /// Total number of hard links linked.
     pub hardlinks: usize,
+    /// Total number of character devices, block devices, and FIFOs created via `mknod`.
     pub devices: usize,
+    /// Total uncompressed payload bytes written across all regular files.
     pub bytes: u64,
+    /// Count of entries skipped due to unsupported type flags or directory conflicts.
     pub skipped: usize,
 }
 
+/// Decodes an octal ASCII or GNU base-256 binary numeric header field into a `u64`.
+///
+/// If the high bit (`0x80`) of the first byte is set, interprets the remaining bytes as
+/// big-endian base-256 (GNU tar extension for large files/timestamps).
 fn octal(field: &[u8]) -> u64 {
     // GNU base-256 encoding for large values
     if field.first().map_or(false, |&b| b & 0x80 != 0) {
@@ -52,12 +81,13 @@ fn octal(field: &[u8]) -> u64 {
     v
 }
 
+/// Returns the sub-slice of `field` up to the first NUL (`0`) byte.
 fn cstr(field: &[u8]) -> &[u8] {
     let n = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     &field[..n]
 }
 
-/// Parses pax records (`"<len> key=value\n"`), returning (path, linkpath) overrides.
+/// Parses POSIX `pax` extended header records (`"<len> key=value\n"`), returning `(path, linkpath)` overrides.
 fn parse_pax(data: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     let (mut path, mut link) = (None, None);
     let mut rest = data;
@@ -83,7 +113,8 @@ fn parse_pax(data: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     (path, link)
 }
 
-/// Creates (or replaces) one archive entry under `root`.
+/// Creates or replaces a single archive entry under the root directory object `root`.
+#[allow(clippy::too_many_arguments)]
 fn install_entry(
     s: &mut ZfsServer,
     root: u64,
@@ -184,8 +215,25 @@ fn install_entry(
     Ok(())
 }
 
-/// Unpacks a tar (optionally gzip-compressed) archive into directory `dest`, creating
-/// `dest` if needed. Prints progress every 500 entries.
+/// Unpacks a `.tar` or `.tar.gz` root filesystem archive into `dest`, creating `dest` if needed.
+///
+/// Automatically detects Gzip magic (`0x1F, 0x8B`), decompresses the archive in memory,
+/// processes all TAR records (including deferred forward hard links and directory `mtime`
+/// restoration), and performs a final [`crate::fs::ZfsClient::sync()`].
+///
+/// # Arguments
+///
+/// * `archive` - Raw bytes of the `.tar` or `.tar.gz` archive.
+/// * `dest` - Absolute ZFS destination path (e.g., `"/"` or `"/ubuntu"`).
+///
+/// # Returns
+///
+/// * `Ok(InstallSummary)` - Breakdown of extracted files, directories, links, devices, and bytes.
+///
+/// # Errors
+///
+/// * `Err(String)` - If Gzip decompression fails, the TAR archive is truncated, `dest` cannot be
+///   created, or the final ZFS transaction commit fails.
 pub fn install(archive: &[u8], dest: &str) -> Result<InstallSummary, String> {
     let tar: Vec<u8>;
     let data: &[u8] = if archive.starts_with(&[0x1F, 0x8B]) {

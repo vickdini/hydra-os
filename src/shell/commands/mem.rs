@@ -1,9 +1,15 @@
+//! # Shell Commands: Physical & Heap Memory Diagnostics (`mem`, `alloc`, `heap`)
+//!
+//! Provides commands to inspect frame allocator statistics, test on-demand frame allocation,
+//! and display dynamic kernel heap utilization.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::memory;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command inspecting physical and virtual memory metrics.
 pub struct MemCommand;
 
 impl Command for MemCommand {
@@ -58,6 +64,7 @@ impl Command for MemCommand {
     }
 }
 
+/// Shell command allocating a physical 4 KiB frame on demand.
 pub struct AllocCommand;
 
 impl Command for AllocCommand {
@@ -93,6 +100,7 @@ impl Command for AllocCommand {
     }
 }
 
+/// Shell command reporting dynamic kernel heap allocation metrics.
 pub struct HeapCommand;
 
 impl Command for HeapCommand {

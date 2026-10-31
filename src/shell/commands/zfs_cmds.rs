@@ -1,3 +1,7 @@
+//! # Shell Commands: OpenZFS Storage Pool & Dataset Management (`zpool`, `zfs`)
+//!
+//! Provides CLI tools to inspect storage pools, manage datasets, and create point-in-time snapshots.
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
@@ -6,6 +10,7 @@ use crate::fs::zfs::server::ZFS_SERVER;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command managing OpenZFS storage pools (`status`, `list`).
 pub struct ZpoolCommand;
 
 impl Command for ZpoolCommand {
@@ -78,6 +83,7 @@ impl Command for ZpoolCommand {
     }
 }
 
+/// Shell command managing OpenZFS datasets and snapshots (`list`, `create`, `destroy`, `snapshot`).
 pub struct ZfsCommand;
 
 impl Command for ZfsCommand {

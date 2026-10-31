@@ -1,9 +1,15 @@
+//! # Shell Command: System Subsystems Operational Health (`status`)
+//!
+//! Provides the `status` shell command checking subsystem health across memory, scheduler,
+//! storage, and network layers.
+
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::memory;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command inspecting global microkernel subsystem operational readiness.
 pub struct StatusCommand;
 
 impl Command for StatusCommand {

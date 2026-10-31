@@ -30,8 +30,11 @@ use crate::memory::vm::prefault_current;
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 
 const AF_UNIX: u32 = 1;
+/// Sequenced, reliable, two-way connection-based byte streams (`SOCK_STREAM`).
 pub const SOCK_STREAM: u32 = 1;
+/// Connectionless, unreliable datagrams of fixed maximum length (`SOCK_DGRAM`).
 pub const SOCK_DGRAM: u32 = 2;
+/// Sequenced, reliable, two-way connection-based data transmission for datagrams (`SOCK_SEQPACKET`).
 pub const SOCK_SEQPACKET: u32 = 5;
 const SOCK_NONBLOCK: u32 = 0o4000;
 const SOCK_CLOEXEC: u32 = 0o2000000;
@@ -161,6 +164,7 @@ enum State {
     Connected { pair: Arc<Pair>, side: usize, peer_cred: Ucred, peer_addr: Option<Addr> },
 }
 
+/// Represents an open UNIX domain domain socket (`AF_UNIX`).
 pub struct UnixSocket {
     ty: u32,
     state: Mutex<State>,
@@ -219,14 +223,17 @@ impl UnixSocket {
         })
     }
 
+    /// Sets or clears non-blocking I/O mode on this socket.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
+    /// Queries whether non-blocking mode is currently enabled on this socket.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
+    /// Returns the synthetic pseudo-inode number assigned to this socket.
     pub fn ino(&self) -> u64 {
         self.ino
     }
@@ -246,6 +253,7 @@ impl UnixSocket {
         }
     }
 
+    /// Polls readiness events on this UNIX socket (`POLLIN`, `POLLOUT`, `POLLHUP`, `POLLRDHUP`).
     pub fn poll_events(&self) -> u32 {
         const POLLIN: u32 = 0x1;
         const POLLOUT: u32 = 0x4;
@@ -413,6 +421,7 @@ impl UnixSocket {
         }
     }
 
+    /// Writes data payload bytes over this connected UNIX domain socket.
     pub fn write(&self, data: &[u8]) -> i64 {
         self.send(data, Vec::new(), 0)
     }

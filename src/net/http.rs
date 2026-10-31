@@ -9,27 +9,41 @@
 //! dispatches standard HTTP `GET` requests, parses response headers (`200 OK`), strips MIME metadata,
 //! and streams the downloaded payload bytes directly into memory or ZFS files.
 //!
-//! ## Key Functions
+//! ## Key Types & Interfaces
 //!
-//! - [`http_get()`]: Performs an HTTP GET request to the target server IP and port, returning the payload body.
+//! - [`http_get_host()`]: Performs an HTTP/1.0 `GET` request with an explicit `Host:` header.
+//! - [`http_get()`]: Convenience wrapper performing an HTTP/1.0 `GET` request using the numerical IPv4 address as `Host:`.
+//!
+//! ## Hardware & Dependency Context
+//!
+//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Dependencies: Uses [`Interface`] and [`TcpPacket`] for polled TCP connection state management and `crate::arch::pit` for handshake/receive timeouts.
 
 extern crate alloc;
 
 use alloc::format;
 use crate::net::{tcp::TcpFlags, tcp::TcpPacket, Interface};
 
-/// Performs an HTTP GET request to `server_ip:port` for the specified `path`.
+/// Performs an HTTP/1.0 `GET` request to `server_ip:server_port` for `path` with an explicit `Host:` header.
+///
+/// Establishes a polled 3-way TCP handshake, sends the formatted `GET` request, accumulates response
+/// segments while acknowledging data, verifies an HTTP `200 OK` status, and shifts the response body
+/// to the start of `out_buf`.
 ///
 /// # Arguments
-/// - `iface`: Network interface handle.
-/// - `server_ip`: Target server IPv4 address.
-/// - `server_port`: Target TCP port (e.g. 80 or 8080).
-/// - `path`: HTTP resource path (e.g. `/` or `/pkg/hello.elf`).
+/// - `iface`: Mutable reference to the local network [`Interface`].
+/// - `server_ip`: Target server 4-byte IPv4 address.
+/// - `server_port`: Target TCP port (e.g., `80` or `8080`).
+/// - `host`: Value for the HTTP `Host:` request header.
+/// - `path`: HTTP resource path (e.g., `"/"` or `"/pkg/hello.elf"`).
 /// - `out_buf`: Destination byte buffer to receive the HTTP response payload body.
 ///
 /// # Returns
-/// `Ok(bytes_downloaded)` with payload length, or an error string on timeout/failure.
-/// Performs an HTTP GET request to `server_ip:port` for the specified `path` with a custom `Host:` header.
+/// `Ok(bytes_downloaded)` containing the length of the HTTP response body written to `out_buf`.
+///
+/// # Errors
+/// Returns `Err` if the interface has no IP, the TCP handshake times out, no data is received,
+/// or the server responds with a non-`200` HTTP status code.
 pub fn http_get_host(
     iface: &mut Interface,
     server_ip: [u8; 4],
@@ -215,7 +229,20 @@ pub fn http_get_host(
     }
 }
 
-/// Convenience wrapper performing an HTTP GET request using the numerical IP as the `Host:` header.
+/// Convenience wrapper performing an HTTP/1.0 `GET` request using the numerical IPv4 address as the `Host:` header.
+///
+/// # Arguments
+/// - `iface`: Mutable reference to the local network [`Interface`].
+/// - `server_ip`: Target server 4-byte IPv4 address.
+/// - `server_port`: Target TCP port (e.g., `80` or `8080`).
+/// - `path`: HTTP resource path (e.g., `"/"` or `"/pkg/hello.elf"`).
+/// - `out_buf`: Destination byte buffer to receive the HTTP response payload body.
+///
+/// # Returns
+/// `Ok(bytes_downloaded)` containing the length of the HTTP response body written to `out_buf`.
+///
+/// # Errors
+/// Propagates any connection, timeout, or HTTP status error from [`http_get_host`].
 pub fn http_get(
     iface: &mut Interface,
     server_ip: [u8; 4],

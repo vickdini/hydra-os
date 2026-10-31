@@ -1,3 +1,24 @@
+//! # Shell Subsystem: Interactive Line Editor & Tab Auto-Completion
+//!
+//! Implements an Emacs/Readline-inspired interactive command-line editor with cursor
+//! navigation, command history cycling, scrollback viewport control, and Zsh-style
+//! tab completion for built-in commands and ZFS filesystem paths.
+//!
+//! ## Architectural Role & Design Rationale
+//! Terminal usability in a bare-metal microkernel environment requires rich line-editing
+//! primitives handled directly in the console input loop. This module manages in-place line
+//! redraws, asynchronous background output detection (automatically repainting the prompt
+//! if background kernel or userland tasks write to the console), and context-aware tab
+//! completion against both the static command table and the live ZFS directory hierarchy.
+//!
+//! ## Key Types & Interfaces
+//! - `read_line`: Primary interactive line-reading loop supporting Emacs control chords, arrow keys, scrollback, and Tab completion.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Keyboard input polling and cursor positioning via [`crate::console`]
+//! - Concurrency: Detects concurrent console output via [`crate::console::console_output_generation`] and repaints the active input line
+
 use uefi::proto::console::text::{Color, Key, ScanCode};
 
 use crate::console::{get_key_or_refresh, set_color};
@@ -6,7 +27,11 @@ use crate::fs::zfs::types::DnodeType;
 use crate::shell::commands::all_commands;
 use crate::shell::state::ShellState;
 
-/// Moves cursor left by `count` positions on the console.
+/// Moves the console cursor left by `count` character columns on the current row.
+///
+/// # Arguments
+///
+/// * `count` - Number of columns to move left.
 fn move_cursor_left(count: usize) {
     if count == 0 {
         return;
@@ -17,7 +42,11 @@ fn move_cursor_left(count: usize) {
     }
 }
 
-/// Moves cursor right by `count` positions on the console.
+/// Moves the console cursor right by `count` character columns on the current row.
+///
+/// # Arguments
+///
+/// * `count` - Number of columns to move right.
 fn move_cursor_right(count: usize) {
     if count == 0 {
         return;
@@ -26,7 +55,17 @@ fn move_cursor_right(count: usize) {
     crate::console::set_cursor_position(col + count, row);
 }
 
-/// Redraws the line from the start of the input area (prompt_col).
+/// Redraws the edited command line in place starting from the column immediately after the prompt.
+///
+/// Overwrites any trailing characters from the previous longer line with spaces and repositions
+/// the hardware/framebuffer cursor to `new_cursor_pos`.
+///
+/// # Arguments
+///
+/// * `old_len` - Previous byte/character length of the input line before the edit.
+/// * `new_text` - Updated UTF-8 string to render at the prompt.
+/// * `cursor_pos_before` - Cursor offset within the line prior to redrawing.
+/// * `new_cursor_pos` - Target cursor offset within `new_text` after redrawing.
 fn redraw_line(old_len: usize, new_text: &str, cursor_pos_before: usize, new_cursor_pos: usize) {
     let (cur_col, cur_row) = crate::console::cursor_position();
     let prompt_col = cur_col.saturating_sub(cursor_pos_before);
@@ -40,6 +79,11 @@ fn redraw_line(old_len: usize, new_text: &str, cursor_pos_before: usize, new_cur
     crate::console::set_cursor_position(prompt_col + new_cursor_pos, cur_row);
 }
 
+/// Navigates backward (older) through the session command history and updates the edit buffer.
+///
+/// Saves the current uncommitted input line into `draft_buf` on the first upward navigation
+/// step so that subsequently navigating down restores the user's original draft.
+#[allow(clippy::too_many_arguments)]
 fn navigate_history_up(
     buf: &mut [u8],
     len: &mut usize,
@@ -76,6 +120,8 @@ fn navigate_history_up(
     }
 }
 
+/// Navigates forward (newer) through the session command history or restores the saved draft line.
+#[allow(clippy::too_many_arguments)]
 fn navigate_history_down(
     buf: &mut [u8],
     len: &mut usize,
@@ -110,23 +156,34 @@ fn navigate_history_down(
     }
 }
 
-/// Interactive line editor supporting:
-/// - Key combinations:
-///   - Ctrl+C: Cancel current line / interrupt
-///   - Ctrl+D: EOF (exit shell if line empty; delete char at cursor if non-empty)
-///   - Ctrl+L: Clear screen and repaint prompt and buffer
-///   - Ctrl+A / Ctrl+E: Jump to start / end of line
-///   - Ctrl+U: Kill text from cursor to start of line
-///   - Ctrl+K: Kill text from cursor to end of line
-///   - Ctrl+W: Kill previous word
-///   - Ctrl+P / Ctrl+N: History previous / next command
-///   - Ctrl+B / Ctrl+F: Move cursor left / right
-///   - Ctrl+H: Backspace
-/// - Up / Down arrow history navigation and cycling
-/// - Left / Right arrow cursor movement
-/// - Home / End line boundary jumps
-/// - In-line Backspace and Delete editing
-/// - Tab auto-completion for commands and ZFS filesystem paths (Zsh-style)
+/// Reads an interactive command line from the console with Readline-style editing and auto-completion.
+///
+/// Supports the following key combinations and editing actions:
+/// - `Ctrl+C`: Cancels the current line, prints `^C`, and repaints a fresh prompt.
+/// - `Ctrl+D`: Signals EOF (`None`) if the line is empty, or deletes the character under the cursor.
+/// - `Ctrl+L`: Clears the screen and repaints the prompt and current edit buffer.
+/// - `Ctrl+A` / `Home` & `Ctrl+E` / `End`: Jumps to the start or end of the input line.
+/// - `Ctrl+U` & `Ctrl+K`: Kills text from the cursor to the start or end of the line.
+/// - `Ctrl+W`: Deletes the word immediately preceding the cursor.
+/// - `Ctrl+P` / `Up` & `Ctrl+N` / `Down`: Navigates backward and forward through [`ShellState::history`].
+/// - `Ctrl+B` / `Left` & `Ctrl+F` / `Right`: Moves the cursor left or right by one character.
+/// - `Ctrl+S` / `F12`, `PgUp`, `PgDn`, `Esc`: Toggles and navigates the console scrollback buffer.
+/// - `Tab`: Invokes Zsh-style auto-completion for built-in commands and ZFS paths.
+///
+/// # Arguments
+///
+/// * `prompt` - Formatted shell prompt string to display before the input area.
+/// * `buf` - Mutable byte slice that receives the UTF-8 characters typed by the user.
+/// * `state` - Mutable reference to the active [`ShellState`] (used for history and path completion).
+///
+/// # Returns
+///
+/// * `Some(len)` - Number of valid UTF-8 bytes written into `buf` when the user presses Enter.
+/// * `None` - When the user presses `Ctrl+D` on an empty line (EOF / logout request).
+///
+/// # Panics
+///
+/// - *Guaranteed to never panic under normal execution.*
 pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option<usize> {
     crate::print!("{}", prompt);
     let mut last_gen = crate::console::console_output_generation();

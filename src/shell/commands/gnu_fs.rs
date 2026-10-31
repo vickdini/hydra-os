@@ -1,3 +1,27 @@
+//! # Shell Commands: GNU Coreutils Filesystem Utilities
+//!
+//! Implements POSIX and GNU Coreutils-compatible filesystem navigation, manipulation, and
+//! space-reporting commands (`pwd`, `cd`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`, `stat`,
+//! `df`, and `du`) backed by the microkernel's OpenZFS engine.
+//!
+//! ## Architectural Role & Design Rationale
+//! Providing familiar UNIX filesystem utilities directly in the built-in shell enables scripts
+//! and interactive sessions to manage ZFS directory hierarchies, inspect dnode metadata and
+//! 256-bit Fletcher-4 checksums (`stat`), and monitor pool allocation (`df`, `du`) without
+//! requiring external binaries for basic administration.
+//!
+//! ## Key Types & Interfaces
+//! - [`PwdCommand`] / [`CdCommand`]: Queries and updates `ShellState::cwd`.
+//! - [`MkdirCommand`] / [`RmdirCommand`] / [`RmCommand`]: Creates and removes directories and files (including `mkdir -p` and `rm -rf`).
+//! - [`CpCommand`] / [`MvCommand`] / [`TouchCommand`]: Copies, moves/renames, and updates files in ZFS.
+//! - [`StatCommand`]: Displays dnode object ID, birth TXG, and Fletcher-4 checksum words.
+//! - [`DfCommand`] / [`DuCommand`]: Reports ZFS pool capacity and per-directory disk usage.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - Hardware Interaction: Dispatches filesystem operations through [`crate::fs::client::ZfsClient`]
+//! - Concurrency: Operates synchronously on `ShellState` and the ZFS dataset state
+
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
@@ -6,7 +30,7 @@ use crate::fs::zfs::types::DnodeType;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
-/// Prints the current working directory.
+/// Built-in `pwd` command that prints the current working directory.
 pub struct PwdCommand;
 
 impl Command for PwdCommand {
@@ -312,6 +336,16 @@ impl Command for RmCommand {
     }
 }
 
+/// Recursively deletes all child files and subdirectories within `dir_path` before removing `dir_path` itself.
+///
+/// # Arguments
+///
+/// * `dir_path` - Normalized ZFS directory path to remove recursively.
+///
+/// # Returns
+///
+/// * `Ok(())` - If the directory and its contents were removed.
+/// * `Err(&'static str)` - If the final directory removal failed.
 fn recursively_remove_dir(dir_path: &str) -> Result<(), &'static str> {
     if let Ok((entries, _, _)) = ZfsClient::list_dir(dir_path) {
         for entry in entries.iter() {

@@ -1,10 +1,27 @@
-//! # `execve` / `execveat`
+//! # Linux Compatibility: Program Execution (`execve` / `execveat`)
 //!
-//! Replaces the calling process's program. The new image (executable, dynamic linker,
-//! stack with `argv`/`envp`/auxv) is built in a fresh address space while the old one is
-//! still intact, so every failure before the commit point returns an error to the caller
-//! like Linux does. After the commit the process keeps its PID, credentials, working and
-//! root directories, signal mask and non-close-on-exec descriptors.
+//! Replaces the calling process's program image with a new ELF binary or `#!` interpreter
+//! script while preserving process identity, credentials, and open non-`CLOEXEC` descriptors.
+//!
+//! ## Architectural Role & Design Rationale
+//! The new image (executable, dynamic linker `PT_INTERP`, and initial user stack populated
+//! with `argv`, `envp`, and the ELF auxiliary vector) is constructed inside a fresh virtual
+//! address space ([`Mm`](crate::memory::vm::Mm)) while the caller's existing address space is
+//! still active. Consequently, any failure prior to the commit point (missing file, bad ELF
+//! header, out of memory, `E2BIG`) cleanly returns an error code to the calling process just
+//! like Linux. Once committed, peer threads in the thread group are terminated, `O_CLOEXEC`
+//! files are closed, `CR3` is switched to the new page table, and the [`SyscallFrame`] is
+//! rewritten to enter the new program's entry point in Ring 3.
+//!
+//! ## Key Types & Interfaces
+//! - [`sys_execve()`]: Unified system call handler for both `execve(2)` and `execveat(2)`.
+//!
+//! ## Hardware & Dependency Context
+//! - CPU Privilege Level: Ring 0 (Kernel syscall context preparing Ring 3 transition)
+//! - Hardware Interaction: Reloads `CR3` (Page Directory Base Register), clears `IA32_FS_BASE`
+//!   MSR (`0xC000_0100`), and resets x87/SSE [`FpuState`].
+//! - Concurrency: Acquires [`SCHEDULER`](crate::task::SCHEDULER) lock during the commit phase
+//!   to atomically terminate sibling threads and swap the task's `Mm`.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -17,21 +34,40 @@ use crate::arch::syscall::SyscallFrame;
 use crate::fs::zfs::types::{S_IFMT, S_IFREG};
 use crate::fs::ZfsClient;
 
+/// Negative errno for file or interpreter not found.
 const ENOENT: i64 = -2;
+/// Negative errno for argument and environment list exceeding [`ARG_MAX`].
 const E2BIG: i64 = -7;
+/// Negative errno for invalid ELF format or unsupported binary architecture.
 const ENOEXEC: i64 = -8;
+/// Negative errno for insufficient memory when building the new address space.
 const ENOMEM: i64 = -12;
+/// Negative errno for permission denied or non-regular file target.
 const EACCES: i64 = -13;
+/// Negative errno for invalid userland pointer in path, `argv`, or `envp`.
 const EFAULT: i64 = -14;
+/// Negative errno for too many nested `#!` interpreter scripts or symbolic links.
 const ELOOP: i64 = -40;
 
+/// `execveat` flag: execute the file descriptor `dirfd` itself when `pathname` is empty.
 const AT_EMPTY_PATH: u64 = 0x1000;
+/// `execveat` flag: do not dereference the terminal symbolic link component.
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 
-/// Most bytes of argument and environment strings accepted (Linux's `ARG_MAX` default).
+/// Maximum combined byte length of argument and environment strings accepted (Linux's `ARG_MAX` default: 2 MiB).
 const ARG_MAX: usize = 2 * 1024 * 1024;
 
-/// Reads a NULL-terminated array of string pointers from user memory.
+/// Reads a `NULL`-terminated array of `NUL`-terminated C string pointers (`argv` or `envp`)
+/// from the calling process's user memory.
+///
+/// # Arguments
+/// * `ptr` - User virtual address of the `const char *const *` array (0 is treated as empty).
+/// * `total` - Running byte counter across `argv` and `envp`; checked against [`ARG_MAX`].
+///
+/// # Returns
+/// * `Ok(Vec<Vec<u8>>)` containing each copied byte string (excluding trailing `NUL`).
+/// * `Err(EFAULT)` if any pointer slot or string resides in unmapped user memory.
+/// * `Err(E2BIG)` if `*total` exceeds [`ARG_MAX`].
 fn read_string_array(ptr: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, i64> {
     let mut out = Vec::new();
     if ptr == 0 {
@@ -56,7 +92,14 @@ fn read_string_array(ptr: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, i64> {
     Ok(out)
 }
 
-/// Parses a `#!interpreter [arg]` line.
+/// Parses a `#!interpreter [optional-arg]` shebang line from the beginning of an executable file.
+///
+/// # Arguments
+/// * `data` - Initial bytes of the executable file.
+///
+/// # Returns
+/// * `Some((interpreter_path, optional_single_arg))` if `data` begins with `#!` followed by a non-empty path.
+/// * `None` if `data` does not start with `#!` or the interpreter path is empty.
 fn parse_shebang(data: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     if !data.starts_with(b"#!") {
         return None;
@@ -83,10 +126,30 @@ fn parse_shebang(data: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     }
 }
 
+/// Converts a raw byte slice into a UTF-8 [`String`], replacing invalid sequences with U+FFFD.
 fn lossy(v: &[u8]) -> String {
     String::from_utf8_lossy(v).into_owned()
 }
 
+/// Executes a new program image in the current process (`execve(2)` and `execveat(2)`).
+///
+/// Resolves `path_ptr` relative to `dirfd`, expands up to 4 levels of `#!` shebang scripts,
+/// maps the target ELF binary and optional dynamic linker into a new [`Mm`](crate::memory::vm::Mm),
+/// and—once past the point of no return—switches `CR3`, resets signal handlers and `CLOEXEC`
+/// descriptors, and updates `frame` so `SYSRET` jumps directly to the new entry point.
+///
+/// # Arguments
+/// * `frame` - Mutable reference to the saved [`SyscallFrame`] on the kernel stack.
+/// * `fpu` - Pointer to the saved [`FpuState`] to reinitialize on commit (may be null).
+/// * `dirfd` - Directory file descriptor for relative paths (`-100` / `AT_FDCWD` for `execve`).
+/// * `path_ptr` - User virtual address of the `NUL`-terminated path string.
+/// * `argv_ptr` - User virtual address of the `NULL`-terminated argument string array.
+/// * `envp_ptr` - User virtual address of the `NULL`-terminated environment string array.
+/// * `flags` - `execveat` flags (`AT_EMPTY_PATH`, `AT_SYMLINK_NOFOLLOW`).
+///
+/// # Returns
+/// * `0` on success (with `frame.rip` and `frame.rsp` updated to the new image's entry and stack).
+/// * Negative errno (`-ENOENT`, `-EACCES`, `-ENOEXEC`, `-ENOMEM`, `-E2BIG`, `-EFAULT`, `-ELOOP`) on failure.
 pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path_ptr: u64, argv_ptr: u64, envp_ptr: u64, flags: u64) -> i64 {
     let mut path = match user_cstr(path_ptr) {
         Ok(p) => p,

@@ -20,17 +20,27 @@ const EACCES: i64 = 13;
 const EINVAL: i64 = 22;
 const ENODEV: i64 = 19;
 
+/// Linux `mmap` flag: share changes across processes mapping the same memory.
 pub const MAP_SHARED: u64 = 0x01;
+/// Linux `mmap` flag: create a private copy-on-write mapping.
 pub const MAP_PRIVATE: u64 = 0x02;
+/// Linux `mmap` flag: validate mapping flags strictly.
 pub const MAP_SHARED_VALIDATE: u64 = 0x03;
+/// Linux `mmap` flag: place the mapping at exactly the requested address.
 pub const MAP_FIXED: u64 = 0x10;
+/// Linux `mmap` flag: mapping is not backed by any file (zero-initialized RAM).
 pub const MAP_ANONYMOUS: u64 = 0x20;
+/// Linux `mmap` flag: place at address but fail if already occupied.
 pub const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
 
+/// Linux `mremap` flag: allow the kernel to relocate the mapping if needed.
 pub const MREMAP_MAYMOVE: u64 = 1;
+/// Linux `mremap` flag: relocate to fixed address specified in `new_addr`.
 pub const MREMAP_FIXED: u64 = 2;
 
+/// Linux `madvise` flag: hints that the specified address range will not be needed soon.
 pub const MADV_DONTNEED: u64 = 4;
+/// Linux `madvise` flag: hints that memory in range can be freed lazily.
 pub const MADV_FREE: u64 = 8;
 
 /// Page-cache objects for mapped ZFS inodes, shared by every mapping of the same file.
@@ -132,6 +142,7 @@ fn fd_object(fd: usize) -> Result<Arc<dyn MappedObject>, i64> {
     }
 }
 
+/// Linux `mmap` (syscall 9): maps files or anonymous memory into user address space.
 pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
     if len == 0 || offset & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;
@@ -157,6 +168,7 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
     }
 }
 
+/// Linux `munmap` (syscall 11): unmaps memory in the specified address range.
 pub fn sys_munmap(mm: &Mutex<Mm>, addr: u64, len: u64) -> i64 {
     if addr & (PAGE_SIZE - 1) != 0 || len == 0 || !crate::memory::vm::is_user_range(addr, len) {
         return -EINVAL;
@@ -166,6 +178,7 @@ pub fn sys_munmap(mm: &Mutex<Mm>, addr: u64, len: u64) -> i64 {
     0
 }
 
+/// Linux `mprotect` (syscall 10): modifies access permissions for mapped memory pages.
 pub fn sys_mprotect(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64) -> i64 {
     match mm.lock().mprotect(addr, len, prot as u32) {
         Ok(()) => 0,
@@ -173,10 +186,12 @@ pub fn sys_mprotect(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64) -> i64 {
     }
 }
 
+/// Linux `brk` (syscall 12): changes the process data segment break address.
 pub fn sys_brk(mm: &Mutex<Mm>, new_brk: u64) -> i64 {
     mm.lock().set_brk(new_brk) as i64
 }
 
+/// Linux `mremap` (syscall 25): expands or shrinks an existing virtual memory mapping.
 pub fn sys_mremap(mm: &Mutex<Mm>, old: u64, old_len: u64, new_len: u64, flags: u64, new_addr: u64) -> i64 {
     if flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
         return -EINVAL;
@@ -195,6 +210,7 @@ pub fn sys_mremap(mm: &Mutex<Mm>, old: u64, old_len: u64, new_len: u64, flags: u
     }
 }
 
+/// Linux `madvise` (syscall 28): provides kernel advice regarding memory usage patterns.
 pub fn sys_madvise(mm: &Mutex<Mm>, addr: u64, len: u64, advice: u64) -> i64 {
     if addr & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;

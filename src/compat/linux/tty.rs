@@ -156,6 +156,7 @@ pub fn nonblock() -> bool {
     TTY.lock().nonblock
 }
 
+/// Sets the non-blocking state (`O_NONBLOCK`) of the console terminal.
 pub fn set_nonblock(on: bool) {
     TTY.lock().nonblock = on;
 }

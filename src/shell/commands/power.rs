@@ -1,3 +1,7 @@
+//! # Shell Commands: System Power Management (`shutdown`, `reboot`, `halt`)
+//!
+//! Provides commands to shut down the machine, perform hardware resets, or enter low-power halt state.
+
 use uefi::proto::console::text::Color;
 use uefi::runtime::ResetType;
 use uefi::Status;
@@ -5,6 +9,7 @@ use crate::console::set_color;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
+/// Shell command powering off the hardware system via UEFI runtime services or ACPI.
 pub struct ShutdownCommand;
 
 impl Command for ShutdownCommand {
@@ -60,6 +65,7 @@ impl Command for ShutdownCommand {
     }
 }
 
+/// Shell command resetting and rebooting the hardware system.
 pub struct RebootCommand;
 
 impl Command for RebootCommand {
@@ -99,6 +105,7 @@ impl Command for RebootCommand {
     }
 }
 
+/// Shell command halting the CPU into an infinite low-power loop (`HLT`).
 pub struct HaltCommand;
 
 impl Command for HaltCommand {
