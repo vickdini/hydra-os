@@ -88,6 +88,7 @@ def read_log(path):
 
 
 def main():
+    sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--mem", default="4G")
     ap.add_argument("--wait", type=float, default=60)
@@ -109,7 +110,7 @@ def main():
         QEMU,
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}",
         "-cdrom", os.path.join(ROOT, "dist", "x86_64", "kernel.iso"),
-        "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
+        "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk,cache=unsafe",
         "-boot", "d", "-m", a.mem, "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",

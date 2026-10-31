@@ -25,7 +25,9 @@
 //! ## Address Space Layout
 //!
 //! ```text
-//! 0x0000_0000_0000 .. 0x0080_0000_0000   PML4[0]: kernel identity map (shared, supervisor)
+//! 0x0000_0000_0000 .. 0x0080_0000_0000   PML4[0]: kernel identity map (shared, supervisor),
+//!     0x0001_0000 .. 0x4000_0000           except its first GiB: private user space for
+//!                                          executables linked at fixed addresses (0x400000)
 //! 0x0080_0000_0000 .. 0x8000_0000_0000   PML4[1..256]: private user space
 //!     0x5555_5555_4000                   PIE executable load base
 //!     brk heap                           grows up after the executable
@@ -56,8 +58,14 @@ use super::frame_allocator::{alloc_user_frame, frame_ref_dec, frame_ref_inc, fra
 /// Size of a standard 4 KiB virtual page in bytes.
 pub const PAGE_SIZE: u64 = 4096;
 
-/// Lowest user virtual address (start of PML4 entry 1).
+/// Lowest user virtual address of the main user area (start of PML4 entry 1).
 pub const USER_SPACE_START: u64 = 0x0000_0080_0000_0000;
+/// Lowest address of the low user window (Linux's default `mmap_min_addr`).
+pub const LOW_USER_START: u64 = 0x1_0000;
+/// End of the low user window: the first GiB, where non-PIE executables are linked. Each
+/// address space has its own page tables here, so the kernel never uses physical memory
+/// below this address (see `frame_allocator::init_memory_from_uefi`).
+pub const LOW_USER_END: u64 = 0x4000_0000;
 /// One past the highest user virtual address (end of the canonical lower half).
 pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 /// Load base for position-independent executables (matches Linux `ELF_ET_DYN_BASE`).
@@ -200,7 +208,16 @@ fn page_up(addr: u64) -> u64 {
 
 /// Returns true if `[start, start + len)` lies entirely inside user space.
 pub fn is_user_range(start: u64, len: u64) -> bool {
-    start >= USER_SPACE_START && start.checked_add(len).map_or(false, |end| end <= USER_SPACE_END)
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    (start >= USER_SPACE_START && end <= USER_SPACE_END) || (start >= LOW_USER_START && end <= LOW_USER_END)
+}
+
+/// True if `addr` is a user address (low window or main user area).
+fn is_user_addr(addr: u64) -> bool {
+    (USER_SPACE_START..USER_SPACE_END).contains(&addr) || (LOW_USER_START..LOW_USER_END).contains(&addr)
 }
 
 /// Computes the hardware [`PageTableFlags`] for a user page with VMA protection `prot`.
@@ -770,8 +787,19 @@ impl Mm {
 
 impl Drop for Mm {
     fn drop(&mut self) {
-        // Only the private user half is owned; PML4[0] and the kernel half are shared.
+        // Owned: the user half, and in PML4[0] the private PDPT with the low window (its
+        // other entries are the kernel's shared identity map). The kernel half is shared.
         let pml4 = table_at(self.pml4);
+        if pml4[0].flags().contains(PageTableFlags::PRESENT) {
+            let pdpt_phys = pml4[0].addr();
+            let pdpt = table_at(pdpt_phys);
+            if pdpt[0].flags().contains(PageTableFlags::PRESENT) {
+                Self::free_tables(pdpt[0].addr(), 2);
+                pdpt[0].set_unused();
+            }
+            pml4[0].set_unused();
+            frame_ref_dec(PhysFrame::containing_address(pdpt_phys));
+        }
         for i in 1..256 {
             if pml4[i].flags().contains(PageTableFlags::PRESENT) {
                 Self::free_tables(pml4[i].addr(), 3);
@@ -786,7 +814,7 @@ impl Drop for Mm {
 /// Returns `None` if the current task has no address space.
 pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result<(), FaultError>> {
     let ptr = CURRENT_MM.load(Ordering::Acquire);
-    if ptr.is_null() || !(USER_SPACE_START..USER_SPACE_END).contains(&addr) {
+    if ptr.is_null() || !is_user_addr(addr) {
         return None;
     }
     let mm = unsafe { &*ptr };

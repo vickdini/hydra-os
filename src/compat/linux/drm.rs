@@ -187,6 +187,8 @@ struct Kms {
     screen: Option<(*mut u8, usize, bool)>,
     blobs: BTreeMap<u32, Vec<u8>>,
     next_blob: u32,
+    /// The session is switched away (Ctrl+Alt+F1): the console shows, nothing is drawn.
+    hidden: bool,
 }
 
 unsafe impl Send for Kms {}
@@ -213,6 +215,7 @@ fn with_kms<R>(f: impl FnOnce(&mut Kms) -> R) -> R {
             screen: None,
             blobs: BTreeMap::new(),
             next_blob: 1000,
+            hidden: false,
         }
     });
     f(kms)
@@ -221,6 +224,48 @@ fn with_kms<R>(f: impl FnOnce(&mut Kms) -> R) -> R {
 /// True while a DRM client shows a picture (the console and other compositors are hidden).
 pub fn showing() -> bool {
     with_kms(|k| k.screen.is_some())
+}
+
+/// 0 = nothing to do, 1 = switch to the console, 2 = back to the session.
+static VT_REQUEST: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+static VT_WQ: WaitQueue = WaitQueue::new();
+static SESSION_HIDDEN: AtomicBool = AtomicBool::new(false);
+static VTD_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// True while a DRM session runs but the console is shown (Ctrl+Alt+F2 returns to it).
+pub fn session_hidden() -> bool {
+    SESSION_HIDDEN.load(Ordering::Acquire)
+}
+
+/// Keyboard interrupt: asks the `vtd` task to switch between the session (`to_session`)
+/// and the console. The copying happens in task context, not in the interrupt.
+pub fn request_vt_switch(to_session: bool) {
+    VT_REQUEST.store(if to_session { 2 } else { 1 }, Ordering::Release);
+    VT_WQ.wake_all();
+}
+
+/// Starts the `vtd` kernel task that carries out display switches.
+fn start_vtd() {
+    if !VTD_RUNNING.swap(true, Ordering::AcqRel) {
+        crate::task::spawn("vtd", vtd_main, crate::task::TaskPriority::High);
+    }
+}
+
+fn vtd_main() {
+    loop {
+        VT_WQ.register();
+        match VT_REQUEST.swap(0, Ordering::AcqRel) {
+            1 => with_kms(|k| {
+                k.hide();
+                SESSION_HIDDEN.store(k.hidden, Ordering::Release);
+            }),
+            2 => with_kms(|k| {
+                k.show();
+                SESSION_HIDDEN.store(k.hidden, Ordering::Release);
+            }),
+            _ => crate::task::wait::wait(None),
+        }
+    }
 }
 
 impl Kms {
@@ -253,7 +298,9 @@ impl Kms {
         let (fb, _w, _h, stride, bgr) = crate::video::console::release_display().ok_or(ENXIO)?;
         self.screen = Some((fb, stride, bgr));
         self.drawn_cursor = None;
+        self.hidden = false;
         super::evdev::set_routing(true);
+        start_vtd();
         Ok(())
     }
 
@@ -261,7 +308,34 @@ impl Kms {
     fn give_screen(&mut self) {
         if self.screen.take().is_some() {
             super::evdev::set_routing(false);
-            crate::video::console::reclaim_display();
+            if !self.hidden {
+                crate::video::console::reclaim_display();
+            }
+        }
+        self.hidden = false;
+    }
+
+    /// Ctrl+Alt+F1: the console shows; the session keeps running unseen and gets no input.
+    fn hide(&mut self) {
+        if self.screen.is_none() || self.hidden {
+            return;
+        }
+        self.hidden = true;
+        super::evdev::set_routing(false);
+        super::evdev::release_held_keys();
+        crate::video::console::reclaim_display();
+    }
+
+    /// Ctrl+Alt+F2: back to the session, repainted from its current framebuffer.
+    fn show(&mut self) {
+        if self.screen.is_none() || !self.hidden {
+            return;
+        }
+        if let Some((fb, _w, _h, stride, bgr)) = crate::video::console::release_display() {
+            self.screen = Some((fb, stride, bgr));
+            self.hidden = false;
+            super::evdev::set_routing(true);
+            self.present();
         }
     }
 
@@ -347,7 +421,7 @@ impl Kms {
 
     /// Repaints the whole screen from the scanout framebuffer.
     fn present(&mut self) {
-        if self.screen.is_none() || self.dpms != 0 {
+        if self.screen.is_none() || self.dpms != 0 || self.hidden {
             return;
         }
         self.copy_rect(0, 0, self.width, self.height);
@@ -357,7 +431,7 @@ impl Kms {
 
     /// Moves or changes the cursor, repairing only the area it covered.
     fn update_cursor(&mut self) {
-        if self.screen.is_none() || self.dpms != 0 {
+        if self.screen.is_none() || self.dpms != 0 || self.hidden {
             return;
         }
         if let Some((x, y, w, h)) = self.drawn_cursor.take() {
@@ -415,6 +489,7 @@ impl Drop for DrmFile {
                 k.master = None;
                 k.cursor_bo = None;
                 k.give_screen();
+                SESSION_HIDDEN.store(false, Ordering::Release);
             }
         });
     }
@@ -596,7 +671,15 @@ impl DrmFile {
                     _ => Err(EINVAL),
                 }
             }
-            0x11 => Ok(0), // AUTH_MAGIC
+            0x11 => {
+                // AUTH_MAGIC needs master rights (libdrm's drmIsMaster tests exactly this);
+                // every client is already authenticated, so any magic is accepted
+                if self.is_master() {
+                    Ok(0)
+                } else {
+                    Err(EACCES)
+                }
+            }
             0x1e => {
                 // SET_MASTER
                 with_kms(|k| match k.master {

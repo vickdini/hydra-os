@@ -8,6 +8,7 @@ const ESRCH: i64 = -3;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EPERM: i64 = -1;
+const EACCES: i64 = -13;
 const ENOSYS: i64 = -38;
 
 const NR_GETRLIMIT: u64 = 97;
@@ -311,6 +312,16 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             b[80..82].copy_from_slice(&procs.to_le_bytes());
             b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
             copy_out(a[0], &b)
+        }
+        140 => 20, // getpriority: nice 0 (the kernel returns 20 - nice)
+        141 => {
+            // setpriority: raising nice is allowed, lowering it needs CAP_SYS_NICE
+            let nice = a[2] as i64 as i32;
+            if nice < 0 && !crate::task::with_current_task_mut(|t| t.caps.has(1 << 23)).unwrap_or(false) {
+                EACCES
+            } else {
+                0
+            }
         }
         142 => 0, // sched_setparam: priorities of normal tasks are ignored
         143 => copy_out(a[1], &0u32.to_le_bytes()),

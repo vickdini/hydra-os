@@ -366,6 +366,11 @@ fn run_in_foreground(tid: crate::task::TaskId) {
 /// per-user runtime directory (`XDG_RUNTIME_DIR`) that logind provides on a real system
 /// and D-Bus, Wayland and KDE expect.
 fn prepare_runtime_dir(root: &str, uid: u32, gid: u32) {
+    // /run/user itself must stay searchable by every user
+    let parent = alloc::format!("{}/run/user", root.trim_end_matches('/'));
+    if let Ok(ino) = crate::fs::ZfsClient::create_dir_all(&parent) {
+        let _ = crate::fs::ZfsClient::setattr(ino, crate::fs::zfs::zpl::SetAttr { mode: Some(0o755), ..Default::default() });
+    }
     let path = alloc::format!("{}/run/user/{}", root.trim_end_matches('/'), uid);
     if let Ok(ino) = crate::fs::ZfsClient::create_dir_all(&path) {
         let _ = crate::fs::ZfsClient::setattr(

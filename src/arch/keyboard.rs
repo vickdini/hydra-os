@@ -231,7 +231,21 @@ pub fn on_keyboard_irq() {
         return;
     }
     if crate::compat::linux::evdev::routing() {
-        // A DRM session shows: the keyboard is an evdev device
+        // A DRM session shows: the keyboard is an evdev device. Ctrl+Alt+F1 switches to
+        // the text console (as the VT switch on Linux); the session keeps running.
+        use core::sync::atomic::Ordering::Relaxed;
+        match scancode {
+            0x1D => CONSOLE_CTRL.store(true, Relaxed),
+            0x9D => CONSOLE_CTRL.store(false, Relaxed),
+            0x38 => CONSOLE_ALT.store(true, Relaxed),
+            0xB8 => CONSOLE_ALT.store(false, Relaxed),
+            0x3B if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) => {
+                crate::compat::linux::drm::request_vt_switch(false);
+                return;
+            }
+            0xBB if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) => return,
+            _ => {}
+        }
         crate::compat::linux::evdev::push_scancode(scancode);
         return;
     }
@@ -247,6 +261,10 @@ pub fn on_keyboard_irq() {
         0x9D => CONSOLE_CTRL.store(false, Relaxed),
         0x38 => CONSOLE_ALT.store(true, Relaxed),
         0xB8 => CONSOLE_ALT.store(false, Relaxed),
+        0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::compat::linux::drm::session_hidden() => {
+            crate::compat::linux::drm::request_vt_switch(true);
+            return;
+        }
         0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::wayland::is_running() => {
             crate::wayland::SWITCH_TO_COMPOSITOR.store(true, core::sync::atomic::Ordering::Release);
             crate::wayland::INPUT_WQ.wake_all();

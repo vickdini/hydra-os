@@ -393,6 +393,12 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
     0
 }
 
+/// True if `gid` is one of the calling process's supplementary groups (`setgroups`).
+pub fn in_supplementary_groups(gid: u32) -> bool {
+    let (_, pid) = current_ids();
+    PROCS.lock().get(&pid).map_or(false, |p| p.groups.contains(&gid))
+}
+
 /// Number of Linux processes (live and zombie), for `sysinfo`.
 pub fn process_count() -> usize {
     PROCS.lock().len()

@@ -1,0 +1,29 @@
+linux chroot /ubuntu /usr/bin/ls -ldn /home /home/hydra
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+drwxr-xr-x 3 0    0    4096 Oct 31 13:15 /home
+drwxr-x--- 6 1000 1000 4096 Oct 31 20:52 /home/hydra
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ linux chroot /ubuntu /usr/bin/mkdir -v /home/hydra/Desktop
+mkdir: /home/hydra/Desktop: File exists
+[+] Linux process 5 exited with status 1.
+hydra:/bin$ linux chroot /ubuntu /usr/bin/mkdir -v /run/user/1000/probe
+mkdir: created directory '/run/user/1000/probe'
+[+] Linux process 6 exited with status 0.
+hydra:/bin$ linux chroot /ubuntu /usr/bin/touch /home/hydra/probe
+[+] Linux process 7 exited with status 0.
+hydra:/bin$ 

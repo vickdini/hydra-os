@@ -532,11 +532,24 @@ impl AddressSpace {
         let new_pml4 = unsafe { active_space.table_at_mut(new_pml4_phys) };
         new_pml4.zero();
 
-        // Share the kernel half (entries 256..512) and active low identity mappings (entry 0)
+        // Share the kernel half (entries 256..512). Entry 0 gets a private PDPT that shares
+        // the identity map above the first GiB and leaves the first GiB to the process
+        // (executables linked at fixed low addresses)
         for i in 256..512 {
             new_pml4[i] = active_pml4[i].clone();
         }
-        new_pml4[0] = active_pml4[0].clone();
+        let pdpt_frame = allocator
+            .allocate_zeroed_frame()
+            .ok_or("Out of memory: cannot allocate the low PDPT of a user address space")?;
+        let active_pdpt = unsafe { active_space.table_at(active_pml4[0].addr()) };
+        let new_pdpt = unsafe { active_space.table_at_mut(pdpt_frame.start_address()) };
+        for i in 1..512 {
+            new_pdpt[i] = active_pdpt[i].clone();
+        }
+        new_pml4[0].set_addr(
+            pdpt_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        );
 
         Ok(Self {
             pml4_phys: new_pml4_phys,

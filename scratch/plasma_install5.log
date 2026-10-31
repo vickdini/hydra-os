@@ -1,0 +1,20 @@
+[hydra_run] QEMU exited on its own with status 1
+Traceback (most recent call last):
+  File "D:\os\scratch\hydra_run.py", line 190, in <module>
+    main()
+    ~~~~^^
+  File "D:\os\scratch\hydra_run.py", line 163, in main
+    qmp.type(c + "\n")
+    ~~~~~~~~^^^^^^^^^^
+  File "D:\os\scratch\hydra_run.py", line 79, in type
+    self.key(ch)
+    ~~~~~~~~^^^^
+  File "D:\os\scratch\hydra_run.py", line 74, in key
+    self.cmd("send-key", {"keys": [{"type": "qcode", "data": k} for k in keys]})
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\os\scratch\hydra_run.py", line 60, in cmd
+    self.proc.stdin.flush()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+OSError: [Errno 22] Invalid argument
+Exception ignored in: <_io.BufferedWriter name=3>
+OSError: [Errno 22] Invalid argument

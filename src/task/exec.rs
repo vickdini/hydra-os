@@ -14,9 +14,9 @@
 //! page-cached ZFS inodes or `BufferObject`s) so pages are faulted in on demand and shared
 //! across processes.
 //!
-//! Executables linked at fixed addresses below `USER_SPACE_START` (inside the kernel's
-//! identity map) cannot live in a private address space and are rejected by
-//! `is_vm_loadable`; the legacy loader in `super::elf` still runs those.
+//! Executables linked at fixed addresses must lie in a user area: the low window (the
+//! first GiB, where `ET_EXEC` binaries are usually linked) or the main user area; others
+//! are rejected by `is_vm_loadable` and the legacy loader in `super::elf` runs them.
 //!
 //! ## Key Types & Interfaces
 //!
@@ -40,7 +40,7 @@ use super::elf::{ElfBinary, ElfError, Elf64ProgramHeader};
 use crate::compat::linux::types::*;
 use crate::memory::vm::{
     Backing, BufferObject, Mm, MappedObject, PAGE_SIZE, PIE_BASE, PROT_EXEC, PROT_READ, PROT_WRITE, STACK_SIZE,
-    STACK_TOP, USER_SPACE_START,
+    STACK_TOP,
 };
 
 /// Program header type describing the location of the program header table itself.
@@ -81,7 +81,7 @@ pub fn is_vm_loadable(bytes: &[u8]) -> bool {
     if elf.is_pie() {
         return true;
     }
-    elf.load_segments().iter().all(|ph| ph.p_vaddr >= USER_SPACE_START)
+    elf.load_segments().iter().all(|ph| crate::memory::vm::is_user_range(ph.p_vaddr, ph.p_memsz.max(1)))
 }
 
 /// Rounds `v` down to the nearest 4 KiB page boundary.

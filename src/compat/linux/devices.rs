@@ -348,6 +348,30 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     // udev is "running": libudev's monitor stays enabled when this exists
     t.file(s, "/run/udev/control", "")?;
 
+    // ---- What systemd-tmpfiles creates at boot: sockets of X11 (Xwayland) and ICE ----
+    for d in ["/tmp/.X11-unix", "/tmp/.ICE-unix"] {
+        let ino = t.dir(s, d)?;
+        if s.getattr(ino)?.mode & 0o7777 != 0o1777 {
+            s.setattr(ino, crate::fs::zfs::zpl::SetAttr { mode: Some(0o1777), ..Default::default() })?;
+            t.changed = true;
+        }
+    }
+    // The session logs in without a password: Plasma must not lock it on idle
+    if lookup_path(s, t.root, "/etc/xdg/kscreenlockerrc").is_none() {
+        t.file(s, "/etc/xdg/kscreenlockerrc", "# Written by Hydra: the session has no password to unlock with
+[Daemon]
+Autolock=false
+LockOnResume=false
+")?;
+    }
+    // Plasma starts through systemd user units by default; there is no systemd here
+    if lookup_path(s, t.root, "/etc/xdg/startkderc").is_none() {
+        t.file(s, "/etc/xdg/startkderc", "# Written by Hydra: no systemd user manager, start Plasma directly
+[General]
+systemdBoot=false
+")?;
+    }
+
     // ---- The login manager and the script that starts a graphical session ----
     t.file(s, "/usr/share/dbus-1/system.d/org.freedesktop.login1.conf", include_str!("../../../userland/hydra-logind/org.freedesktop.login1.conf"))?;
     t.file_bytes(s, "/usr/libexec/hydra-session", include_bytes!("../../../userland/hydra-logind/hydra-session"), 0o755)?;

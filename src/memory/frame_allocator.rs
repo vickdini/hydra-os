@@ -320,18 +320,14 @@ pub fn init_memory_from_uefi() {
         for desc in memory_map.entries() {
             // Conventional memory is free memory available for operating system allocation
             if desc.ty == uefi::boot::MemoryType::CONVENTIONAL {
-                // Reserve the first 1 MiB (0x100000) to protect IVT/BDA and avoid null pointer frame (0x0)
-                if desc.phys_start < 0x100000 {
-                    let end = desc.phys_start + desc.page_count * PAGE_SIZE;
-                    if end > 0x100000 {
-                        let skipped_pages = (0x100000 - desc.phys_start) / PAGE_SIZE;
-                        let remaining_pages = desc.page_count.saturating_sub(skipped_pages);
-                        if remaining_pages > 0 {
-                            allocator.add_region(PhysAddr::new(0x100000), remaining_pages);
-                        }
-                    }
-                } else {
-                    allocator.add_region(PhysAddr::new(desc.phys_start), desc.page_count);
+                // Memory below the low user window's end is never handed out: each process
+                // maps its own pages at those addresses (non-PIE executables live there), so
+                // the kernel could not reach such frames through the identity map
+                let floor = crate::memory::vm::LOW_USER_END;
+                let end = desc.phys_start + desc.page_count * PAGE_SIZE;
+                if end > floor {
+                    let start = desc.phys_start.max(floor);
+                    allocator.add_region(PhysAddr::new(start), (end - start) / PAGE_SIZE);
                 }
             }
         }

@@ -365,7 +365,7 @@ pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
     }
     let bits = if attr.uid == uid {
         (attr.mode >> 6) & 7
-    } else if attr.gid == gid {
+    } else if attr.gid == gid || super::proc::in_supplementary_groups(attr.gid) {
         (attr.mode >> 3) & 7
     } else {
         attr.mode & 7
@@ -840,7 +840,10 @@ fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
 
 /// Runs `f` on the parent directory and final name of `dirfd`/`path`, after checking that
 /// the caller may modify the parent.
-fn with_parent(dirfd: i64, path_ptr: u64, f: impl FnOnce(u64, &[u8], &Creds) -> Result<i64, i64>) -> i64 {
+/// Runs a directory-entry operation on the parent of `path` after the checks Linux makes:
+/// creating (`create`) an existing name fails with `EEXIST` and removing a missing one with
+/// `ENOENT`, both before write permission on the directory is considered.
+fn with_parent(dirfd: i64, path_ptr: u64, create: bool, f: impl FnOnce(u64, &[u8], &Creds) -> Result<i64, i64>) -> i64 {
     let r: Result<i64, i64> = (|| {
         let path = user_path(path_ptr)?;
         let (base, _) = base_dir(dirfd, &path)?;
@@ -849,6 +852,13 @@ fn with_parent(dirfd: i64, path_ptr: u64, f: impl FnOnce(u64, &[u8], &Creds) -> 
         let pattr = ZfsClient::getattr(parent)?;
         if !pattr.is_dir() {
             return Err(ENOTDIR);
+        }
+        if name != b"." && name != b".." {
+            match zfs(|s| s.lookup(parent, &name)) {
+                Ok(_) if create => return Err(EEXIST),
+                Err(ENOENT) if !create => return Err(ENOENT),
+                _ => {}
+            }
         }
         if !may_access(&pattr, c.euid, c.egid, 2 | 1) {
             return Err(EACCES);
@@ -901,7 +911,7 @@ fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
             let (ob, _) = base_dir(olddir, &op)?;
             resolve(ob, &op, flags & AT_SYMLINK_FOLLOW != 0)?
         };
-        Ok(with_parent(newdir, newp, |dir, name, _| zfs(|s| s.link(ino, dir, name).map(|_| 0))))
+        Ok(with_parent(newdir, newp, true, |dir, name, _| zfs(|s| s.link(ino, dir, name).map(|_| 0))))
     })();
     r.unwrap_or_else(|e| e)
 }
@@ -1532,12 +1542,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_MKDIR | NR_MKDIRAT => {
             let (dirfd, p, mode) = if num == NR_MKDIR { (AT_FDCWD, a[0], a[1]) } else { (a[0] as i64, a[1], a[2]) };
             let mask = umask();
-            with_parent(dirfd, p, |dir, name, c| zfs(|s| s.mkdir(dir, name, mode as u32 & 0o7777 & !mask, c.euid, c.egid).map(|_| 0)))
+            with_parent(dirfd, p, true, |dir, name, c| zfs(|s| s.mkdir(dir, name, mode as u32 & 0o7777 & !mask, c.euid, c.egid).map(|_| 0)))
         }
         NR_MKNOD | NR_MKNODAT => {
             let (dirfd, p, mode, dev) = if num == NR_MKNOD { (AT_FDCWD, a[0], a[1], a[2]) } else { (a[0] as i64, a[1], a[2], a[3]) };
             let mask = umask();
-            with_parent(dirfd, p, |dir, name, c| {
+            with_parent(dirfd, p, true, |dir, name, c| {
                 let mode = (mode as u32 & S_IFMT) | (mode as u32 & 0o7777 & !mask);
                 let devnode = matches!(dtype_from_mode(mode), 2 | 6); // DT_CHR, DT_BLK
                 if devnode && c.euid != 0 {
@@ -1549,18 +1559,18 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_SYMLINK | NR_SYMLINKAT => {
             let (target_ptr, dirfd, p) = if num == NR_SYMLINK { (a[0], AT_FDCWD, a[1]) } else { (a[0], a[1] as i64, a[2]) };
             match user_path(target_ptr) {
-                Ok(target) => with_parent(dirfd, p, |dir, name, c| zfs(|s| s.symlink(dir, name, &target, c.euid, c.egid).map(|_| 0))),
+                Ok(target) => with_parent(dirfd, p, true, |dir, name, c| zfs(|s| s.symlink(dir, name, &target, c.euid, c.egid).map(|_| 0))),
                 Err(e) => e,
             }
         }
         NR_LINK => link_at(AT_FDCWD, a[0], AT_FDCWD, a[1], 0),
         NR_LINKAT => link_at(a[0] as i64, a[1], a[2] as i64, a[3], a[4]),
 
-        NR_UNLINK => with_parent(AT_FDCWD, a[0], |dir, name, _| zfs(|s| s.unlink(dir, name).map(|_| 0))),
-        NR_RMDIR => with_parent(AT_FDCWD, a[0], |dir, name, _| zfs(|s| s.rmdir(dir, name).map(|_| 0))),
+        NR_UNLINK => with_parent(AT_FDCWD, a[0], false, |dir, name, _| zfs(|s| s.unlink(dir, name).map(|_| 0))),
+        NR_RMDIR => with_parent(AT_FDCWD, a[0], false, |dir, name, _| zfs(|s| s.rmdir(dir, name).map(|_| 0))),
         NR_UNLINKAT => {
             let rmdir = a[2] & AT_REMOVEDIR != 0;
-            with_parent(a[0] as i64, a[1], |dir, name, _| {
+            with_parent(a[0] as i64, a[1], false, |dir, name, _| {
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))
             })
         }
@@ -1571,6 +1581,13 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
 
         NR_CHMOD => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { mode: Some(a[1] as u32), ..SetAttr::default() }, owner_or_root),
         NR_FCHMODAT => setattr_at(a[0] as i64, a[1], true, false, SetAttr { mode: Some(a[2] as u32), ..SetAttr::default() }, owner_or_root),
+        452 => {
+            // fchmodat2(dirfd, path, mode, flags): fchmodat with AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH
+            if a[3] & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+                return Some(EINVAL);
+            }
+            setattr_at(a[0] as i64, a[1], a[3] & AT_SYMLINK_NOFOLLOW == 0, a[3] & AT_EMPTY_PATH != 0, SetAttr { mode: Some(a[2] as u32), ..SetAttr::default() }, owner_or_root)
+        }
         NR_FCHMOD => {
             fd_vnode(a[0] as i32)?;
             setattr_at(a[0] as i64, 0, true, true, SetAttr { mode: Some(a[1] as u32), ..SetAttr::default() }, owner_or_root)
@@ -1585,6 +1602,32 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 
         NR_TRUNCATE => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { size: Some(a[1]), ..SetAttr::default() }, |at, c| may_access(at, c.euid, c.egid, 2)),
+        285 => {
+            // fallocate(fd, mode, offset, len): the pool allocates on write, so reserving
+            // space only grows the file (unless FALLOC_FL_KEEP_SIZE); holes are not punched
+            let f = fd_vnode(a[0] as i32)?;
+            let (ino, writable) = {
+                let f = f.lock();
+                (f.ino, f.flags & O_ACCMODE != O_RDONLY)
+            };
+            let (mode, offset, len) = (a[1], a[2] as i64, a[3] as i64);
+            if !writable {
+                EBADF
+            } else if offset < 0 || len <= 0 {
+                EINVAL
+            } else if mode & !1 != 0 {
+                EOPNOTSUPP
+            } else if mode & 1 != 0 {
+                0
+            } else {
+                let end = (offset + len) as u64;
+                match ZfsClient::getattr(ino) {
+                    Ok(at) if at.size >= end => 0,
+                    Ok(_) => ZfsClient::setattr(ino, SetAttr { size: Some(end), ..SetAttr::default() }).map(|_| 0).unwrap_or_else(|e| e),
+                    Err(e) => e,
+                }
+            }
+        }
         NR_FTRUNCATE => {
             let f = fd_vnode(a[0] as i32)?;
             let (ino, writable) = {

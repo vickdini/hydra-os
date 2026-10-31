@@ -42,6 +42,8 @@ const SYN_DROPPED: u16 = 3;
 const MSC_SCAN: u16 = 4;
 const REL_X: u16 = 0;
 const REL_Y: u16 = 1;
+const REL_WHEEL: u16 = 8;
+const REL_WHEEL_HI_RES: u16 = 11;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
@@ -67,8 +69,9 @@ pub fn routing() -> bool {
 #[derive(Clone, Copy)]
 enum Raw {
     Scancode(u8),
-    /// Relative motion (x right, y down) and button bits (left, right, middle).
-    Mouse(i16, i16, u8),
+    /// Relative motion (x right, y down), wheel clicks (positive = away from the user)
+    /// and button bits (left, right, middle).
+    Mouse(i16, i16, i8, u8),
 }
 
 /// Raw input from the interrupt handlers: a fixed ring, locked only with interrupts off.
@@ -102,9 +105,10 @@ pub fn push_scancode(code: u8) {
     push_raw(Raw::Scancode(code));
 }
 
-/// Mouse interrupt: one decoded packet (`dy` positive = down).
-pub fn push_mouse(dx: i32, dy: i32, buttons: u8) {
-    push_raw(Raw::Mouse(dx as i16, dy as i16, buttons));
+/// Mouse interrupt: one decoded packet (`dy` positive = down, `wheel` positive = away
+/// from the user).
+pub fn push_mouse(dx: i32, dy: i32, wheel: i32, buttons: u8) {
+    push_raw(Raw::Mouse(dx as i16, dy as i16, wheel as i8, buttons));
 }
 
 fn ring_pending() -> bool {
@@ -132,6 +136,34 @@ fn event(t: u64, ty: u16, code: u16, value: i32) -> [u8; 24] {
     e[18..20].copy_from_slice(&code.to_le_bytes());
     e[20..24].copy_from_slice(&value.to_le_bytes());
     e
+}
+
+/// Reports every key and button still held as released (the session is losing the
+/// keyboard, so it would otherwise never see Ctrl and Alt go up).
+pub fn release_held_keys() {
+    pump();
+    let t = crate::arch::pit::ticks();
+    let mut per_dev: [Vec<[u8; 24]>; 2] = [Vec::new(), Vec::new()];
+    {
+        let mut st = STATE.lock();
+        for code in 0..st.keys.len() * 8 {
+            if st.keys[code / 8] & (1 << (code % 8)) != 0 {
+                per_dev[0].push(event(t, EV_KEY, code as u16, 0));
+            }
+        }
+        st.keys = [0; 96];
+        for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+            if st.buttons & (1 << i) != 0 {
+                per_dev[1].push(event(t, EV_KEY, *code, 0));
+            }
+        }
+        st.buttons = 0;
+        st.e0 = false;
+    }
+    for q in per_dev.iter_mut().filter(|q| !q.is_empty()) {
+        q.push(event(t, EV_SYN, SYN_REPORT, 0));
+    }
+    deliver(&per_dev);
 }
 
 /// Moves raw input into the queues of every open file.
@@ -182,7 +214,7 @@ fn pump() {
                     q.push(event(t, EV_KEY, code as u16, value));
                     q.push(event(t, EV_SYN, SYN_REPORT, 0));
                 }
-                Raw::Mouse(dx, dy, buttons) => {
+                Raw::Mouse(dx, dy, wheel, buttons) => {
                     let q = &mut per_dev[1];
                     for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
                         let bit = 1u8 << i;
@@ -197,6 +229,10 @@ fn pump() {
                     if dy != 0 {
                         q.push(event(t, EV_REL, REL_Y, dy as i32));
                     }
+                    if wheel != 0 {
+                        q.push(event(t, EV_REL, REL_WHEEL, wheel as i32));
+                        q.push(event(t, EV_REL, REL_WHEEL_HI_RES, wheel as i32 * 120));
+                    }
                     if !q.is_empty() && q.last().map_or(false, |e| e[16..18] != [0, 0]) {
                         q.push(event(t, EV_SYN, SYN_REPORT, 0));
                     }
@@ -204,6 +240,11 @@ fn pump() {
             }
         }
     }
+    deliver(&per_dev);
+}
+
+/// Appends events to the queues of the open files of each device.
+fn deliver(per_dev: &[Vec<[u8; 24]>; 2]) {
     let mut clients = CLIENTS.lock();
     for (dev, events) in per_dev.iter().enumerate() {
         clients[dev].retain(|w| w.strong_count() > 0);
@@ -288,8 +329,9 @@ pub fn capabilities(dev: usize, ty: u16) -> Vec<u8> {
         }
         (1, EV_KEY) => [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().for_each(|&k| set_bit(&mut m, k as usize)),
         (1, EV_REL) => {
-            set_bit(&mut m, REL_X as usize);
-            set_bit(&mut m, REL_Y as usize);
+            for code in [REL_X, REL_Y, REL_WHEEL, REL_WHEEL_HI_RES] {
+                set_bit(&mut m, code as usize);
+            }
         }
         (0, EV_MSC) => set_bit(&mut m, MSC_SCAN as usize),
         (0, EV_LED) => (0..3).for_each(|l| set_bit(&mut m, l)),

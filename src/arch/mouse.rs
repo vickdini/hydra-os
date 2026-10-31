@@ -88,13 +88,17 @@ pub struct MouseEvent {
     pub left_pressed: bool,
     /// Whether the right mouse button transitioned from unpressed to pressed.
     pub right_pressed: bool,
+    /// Wheel clicks since the previous packet (positive = away from the user).
+    pub wheel: i32,
 }
 
 struct Ps2Mouse {
     data_port: Port<u8>,
     cmd_port: Port<u8>,
-    packet_buf: [u8; 3],
+    packet_buf: [u8; 4],
     packet_idx: usize,
+    /// Bytes per packet: 3, or 4 once the IntelliMouse wheel protocol is enabled.
+    packet_len: usize,
     state: MouseState,
     initialized: bool,
     /// Bytes arrive through IRQ 12 (after hardware takeover) instead of polling.
@@ -110,8 +114,9 @@ impl Ps2Mouse {
         Self {
             data_port: Port::new(PS2_DATA_PORT),
             cmd_port: Port::new(PS2_STATUS_CMD_PORT),
-            packet_buf: [0; 3],
+            packet_buf: [0; 4],
             packet_idx: 0,
+            packet_len: 3,
             state: MouseState::new(400, 300),
             initialized: false,
             irq_mode: false,
@@ -198,11 +203,34 @@ impl Ps2Mouse {
         // 5. Tell mouse to use default settings (Command 0xF6)
         let _ = self.write_mouse_cmd(MOUSE_CMD_SET_DEFAULTS);
 
-        // 6. Enable Data Reporting (Command 0xF4)
+        // 6. IntelliMouse wheel: sample rates 200, 100, 80 in a row switch a wheel mouse to
+        //    4-byte packets, after which it reports device id 3
+        if self.enable_wheel() {
+            self.packet_len = 4;
+        }
+
+        // 7. Enable Data Reporting (Command 0xF4)
         self.write_mouse_cmd(MOUSE_CMD_ENABLE_REPORTING)?;
 
         self.initialized = true;
         Ok(())
+    }
+
+    /// Tries the IntelliMouse handshake; true if the mouse now sends wheel packets.
+    fn enable_wheel(&mut self) -> bool {
+        for rate in [200u8, 100, 80] {
+            if self.write_mouse_cmd(0xF3).is_err() || self.write_mouse_cmd(rate).is_err() {
+                return false;
+            }
+        }
+        // Get Device ID (0xF2): ACK, then the id byte
+        if self.write_mouse_cmd(0xF2).is_err() || self.wait_read().is_err() {
+            return false;
+        }
+        let id = unsafe { self.data_port.read() };
+        // Back to the usual 100 samples/s
+        let _ = self.write_mouse_cmd(0xF3).and_then(|_| self.write_mouse_cmd(100));
+        id == 3
     }
 
     /// Polls for incoming mouse packet bytes and updates coordinates. Once IRQ 12 is
@@ -243,12 +271,14 @@ impl Ps2Mouse {
         self.packet_buf[self.packet_idx] = byte;
         self.packet_idx += 1;
 
-        if self.packet_idx < 3 {
+        if self.packet_idx < self.packet_len {
             return None;
         }
 
-        // Full 3-byte packet received!
+        // Full packet received
         self.packet_idx = 0;
+        // 4th byte: signed wheel movement (negative = away from the user)
+        let wheel = if self.packet_len == 4 { -(self.packet_buf[3] as i8 as i32) } else { 0 };
         let b0 = self.packet_buf[0];
         let b1 = self.packet_buf[1];
         let b2 = self.packet_buf[2];
@@ -291,6 +321,7 @@ impl Ps2Mouse {
             delta_y: screen_dy,
             left_pressed,
             right_pressed,
+            wheel,
         })
     }
 }
@@ -372,6 +403,7 @@ pub fn on_mouse_irq() {
                 right_pressed: prev.right_pressed || ev.right_pressed,
                 delta_x: prev.delta_x + ev.delta_x,
                 delta_y: prev.delta_y + ev.delta_y,
+                wheel: prev.wheel + ev.wheel,
                 ..ev
             },
             None => ev,
@@ -379,7 +411,7 @@ pub fn on_mouse_irq() {
         mouse.pending = Some(merged);
         drop(mouse);
         let buttons = ev.state.left_button as u8 | (ev.state.right_button as u8) << 1 | (ev.state.middle_button as u8) << 2;
-        crate::compat::linux::evdev::push_mouse(ev.delta_x, ev.delta_y, buttons);
+        crate::compat::linux::evdev::push_mouse(ev.delta_x, ev.delta_y, ev.wheel, buttons);
         crate::wayland::INPUT_WQ.wake_all();
     }
 }

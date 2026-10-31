@@ -1,0 +1,746 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd425b63
+    RFLAGS: 0x202, RSP: 0xbfe627f0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0xbf801000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 3032 MiB
+    - Allocated: 2560 KiB
+    - Allocated Test Frame: 0x40280000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x40281000
+    - Total Size:    512 MiB (536870912 bytes)
+    - Available:     512 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd425790 -> PhysAddr 0xbd425790
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0xc0000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[1m[33m[40m
+[*] Step 6: Initializing Storage Subsystem & ZFS File Server...
+[ata] bus-master DMA enabled
+[1m[32m[40m[+] ATA Storage: Detected Primary Master 'QEMU HARDDISK' (16384 MiB, 33554432 sectors, LBA48)
+[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+[1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #17313, 22532 objects)
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 2327 MiB used, TXG #17313, Fletcher-4, CoW)
+    - Persistence : Active (Primary Master ATA Hard Disk)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[1m[36m[40m
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
+[1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
+
+[1m[32m[40mhydra:/bin$ su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg --configure -a
+[1m[37m[40m
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+Setting up libpython3.14-stdlib:amd64 (3.14.4-1ubuntu0.2) ...
+Setting up systemd (259.9-0ubuntu0.1) ...
+Creating group 'systemd-journal' with GID 999.
+Creating group 'systemd-network' with GID 998.
+Creating user 'systemd-network' (systemd Network Management) with UID 998 and GID 998.
+[linux] pid 12: unimplemented syscall 326 (0x8, 0x0, 0x9) -> ENOSYS
+[linux] pid 12: unimplemented syscall 40 (0x9, 0x8, 0x0) -> ENOSYS
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:11: Failed to replace specifiers in '/tmp/systemd-private-%b-*': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:12: Failed to replace specifiers in '/tmp/systemd-private-%b-*/tmp': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:13: Failed to replace specifiers in '/var/tmp/systemd-private-%b-*': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:14: Failed to replace specifiers in '/var/tmp/systemd-private-%b-*/tmp': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:22: Failed to replace specifiers in '/var/lib/systemd/coredump/.#core*.%b*': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:11: Failed to replace specifiers in '/tmp/systemd-private-%b-*': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:12: Failed to replace specifiers in '/tmp/systemd-private-%b-*/tmp': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:13: Failed to replace specifiers in '/var/tmp/systemd-private-%b-*': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:14: Failed to replace specifiers in '/var/tmp/systemd-private-%b-*/tmp': No such file or directory[0m
+[0;1;31m/usr/lib/tmpfiles.d/systemd-tmp.conf:22: Failed to replace specifiers in '/var/lib/systemd/coredump/.#core*.%b*': No such file or directory[0m
+[0;1;31mreadlinkat(/etc/profile.d/80-systemd-osc-context.sh) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/etc/profile.d/70-systemd-shell-extra.sh) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/run/shm) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/etc/mtab) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/etc/vconsole.conf) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/var/lock) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/var/log/README) failed: No such file or directory[0m
+[0;1;31mreadlinkat(/var/run) failed: No such file or directory[0m
+[0;1;31mACL operation on "/var/log/journal" failed: No such file or directory[0m
+Setting up sudo (1.9.17p2-1ubuntu3.2) ...
+update-alternatives: using /usr/bin/sudo.ws to provide /usr/bin/sudo (sudo) in auto mode
+update-alternatives: warning: skip creation of /usr/share/man/man8/sudo.8.gz because associated file /usr/share/man/man8/sudo.ws.8.gz (of link group sudo) does not exist
+update-alternatives: warning: skip creation of /usr/share/man/man8/sudoedit.8.gz because associated file /usr/share/man/man8/sudo.ws.8.gz (of link group sudo) does not exist
+update-alternatives: warning: skip creation of /usr/share/man/man5/sudoers.5.gz because associated file /usr/share/man/man5/sudoers.ws.5.gz (of link group sudo) does not exist
+update-alternatives: warning: skip creation of /usr/share/man/man8/visudo.8.gz because associated file /usr/share/man/man8/visudo.ws.8.gz (of link group sudo) does not exist
+Setting up python3.14 (3.14.4-1ubuntu0.2) ...
+Setting up libpython3-stdlib:amd64 (3.14.3-0ubuntu2) ...
+Setting up python3 (3.14.3-0ubuntu2) ...
+[linux] pid 36: unimplemented syscall 275 (0x0, 0x0, 0x1) -> ENOSYS
+Processing triggers for shared-mime-info (2.4-5build3) ...
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x4096d2a0 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x4096d2a0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x4096d2a0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x4096d2a0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x4096d2a0 anchor=0xbd446bc0
+Processing triggers for procps (2:4.0.4-9ubuntu1) ...
+Processing triggers for libc-bin (2.43-2ubuntu2.3) ...
+Processing triggers for dbus (1.16.2-2ubuntu4) ...
+Failed to open connection to "system" message bus: Failed to connect to socket /run/dbus/system_bus_socket: Connection refused
+[+] Linux process 4 exited with status 0.
+hydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends plasma-workspace plasma-desktop kwin-style-breeze breeze
+Reading package lists... 0%Reading package lists... 0%Reading package lists... 21%Reading package lists... Done
+Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 64%Building dependency tree... 87%Building dependency tree... 95%Building dependency tree... Done
+Reading state information... 0% Reading state information... 0%Reading state information... Done
+Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
+The following additional packages will be installed:
+  accountsservice breeze-wallpaper bsdutils cpp cpp-15 cpp-15-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus-user-session dconf-gsettings-backend dconf-service
+  dmidecode frameworkintegration6 gcc-15-base gdb geoclue-2.0 glib-networking glib-networking-common glib-networking-services gsettings-desktop-schemas
+  hicolor-icon-theme hwdata iso-codes kactivitymanagerd kde-cli-tools kde-cli-tools-data kde-style-breeze kde-style-breeze-data kf6-breeze-icon-theme
+  kglobalacceld kirigami-addons-data knighttime kwin-common kwin-data layer-shell-qt libaccountsservice0 libappstream5 libappstreamqt3 libass9 libatasmart4
+  libavahi-glib1 libavfilter11 libbabeltrace1 libbatterycontrol6 libblockdev-crypto3 libblockdev-fs3 libblockdev-loop3 libblockdev-mdraid3 libblockdev-nvme3
+  libblockdev-part3 libblockdev-smart3 libblockdev-swap3 libblockdev-utils3 libblockdev3 libbs2b0 libbytesize-common libbytesize1 libcryptsetup12 libdconf1
+  libdebuginfod-common libdebuginfod1t64 libdevmapper1.02.1 libdmtx0t64 libdw1t64 libeditorconfig0 libeis1 libexiv2-28 libexiv2-data libfdisk1
+  libfftw3-double3 libflite1 libfyaml0 libgeoclue-2-0 libhunspell-1.7-0 libibus-1.0-5 libinih1 libinireader0 libipt2 libisl23 libjs-underscore libjson-c5
+  libjson-glib-1.0-0 libjson-glib-1.0-common libkexiv2qt6-0 libkf6auth-data libkf6authcore6 libkf6baloo6 libkf6balooengine6 libkf6calendarevents6
+  libkf6config-bin libkf6declarative-data libkf6filemetadata-data libkf6filemetadata3 libkf6holidays-data libkf6holidays6 libkf6i18nlocaledata6
+  libkf6itemmodels6 libkf6kcmutils-data libkf6kcmutils6 libkf6kcmutilscore6 libkf6kcmutilsquick6 libkf6networkmanagerqt6 libkf6prison6 libkf6prisonscanner6
+  libkf6qqc2desktopstyle-data libkf6runner6 libkf6statusnotifieritem-data libkf6statusnotifieritem6 libkf6style6 libkf6su-bin libkf6su-data libkf6su6
+  libkf6syntaxhighlighting-data libkf6syntaxhighlighting6 libkf6texteditor-bin libkf6texteditor-data libkf6texteditor6 libkf6unitconversion-data
+  libkf6unitconversion6 libkf6userfeedback-data libkf6userfeedbackcore6 libkfontinst6 libkfontinstui6 libkirigami-data libkirigami6 libkirigamicontrols6
+  libkirigamidelegates6 libkirigamidialogs6 libkirigamilayouts6 libkirigamilayoutsprivate6 libkirigamiplatform6 libkirigamipolyfill6 libkirigamiprimitives6
+  libkirigamiprivate6 libkirigamitemplates6 libklipper6 libklookandfeel6 libkmod2 libkmpris6 libknighttime0 libkpipewire-data libkpipewire6
+  libkpipewiredmabuf6 libkpipewirerecord6 libkquickcontrolsprivate0 libksysguard-data libksysguardformatter2 libksysguardsensorfaces2 libksysguardsensors2
+  libksysguardsystemstats2 libkworkspace6-6 liblilv-0-0 liblmdb0 libmm-glib0 libmysofa1 libnotificationmanager1 libnotify4 libnspr4 libnss3 libnvme1t64
+  libpackagekitqt6-2 libpam-systemd libparted2t64 libplacebo360 libplasma-geolocation-interface6 libplasma5support-data libplasma5support6
+  libplasmaactivitiesstats1 libpolkit-agent-1-0 libpolkit-gobject-1-0 libpolkit-qt6-1-1 libprocesscore10 libpython3.14 libqalculate-data libqalculate23
+  libqrencode4 libqt6labsplatform6 libqt6openglwidgets6 libqt6positioning6 libqt6positioning6-plugins libqt6positioningquick6 libqt6quickcontrols2-6
+  libqt6quickshapes6 libqt6quicktemplates2-6 libqt6serialport6 libqt6shadertools6 libqt6sql6 libqt6sql6-sqlite libqt6test6 libqt6uitools6
+  libqt6virtualkeyboard6 libquickcharts1 libquickchartscontrols1 librubberband3 libsamplerate0 libscim8v5 libsdl2-2.0-0 libsdl2-classic libserd-0-0
+  libsord-0-0 libsoup-3.0-0 libsoup-3.0-common libsource-highlight-common libsource-highlight4t64 libsratom-0-0 libstemmer0d libtaskmanager6
+  libtext-charwidth-perl libtext-wrapi18n-perl libudev1 libudisks2-0 libunibreak6 libvidstab1.1 libvolume-key1 libweather-ion7 libxcb-damage0 libxcomposite1
+  libxcursor1 libxft2 libxinerama1 libxkbregistry0 libxmlb2 libxmuu1 libxtst6 libxv1 libxxf86dga1 libzimg2 libzix-0-0 libzxing3 milou ocean-sound-theme
+  oxygen-sounds parted pci.ids plasma-desktop-data plasma-desktoptheme plasma-integration plasma-workspace-data pnp.ids polkit-kde-agent-1 polkitd
+  qml6-module-org-kde-activities qml6-module-org-kde-baloo qml6-module-org-kde-breeze qml6-module-org-kde-config qml6-module-org-kde-coreaddons
+  qml6-module-org-kde-desktop qml6-module-org-kde-draganddrop qml6-module-org-kde-graphicaleffects qml6-module-org-kde-guiaddons
+  qml6-module-org-kde-iconthemes qml6-module-org-kde-kcmutils qml6-module-org-kde-kholidays qml6-module-org-kde-kirigami
+  qml6-module-org-kde-kirigamiaddons-components qml6-module-org-kde-kirigamiaddons-delegates qml6-module-org-kde-kirigamiaddons-tableview
+  qml6-module-org-kde-kirigamiaddons-treeview qml6-module-org-kde-kitemmodels qml6-module-org-kde-kquickcontrols qml6-module-org-kde-kquickcontrolsaddons
+  qml6-module-org-kde-ksvg qml6-module-org-kde-ksysguard qml6-module-org-kde-kwindowsystem qml6-module-org-kde-newstuff qml6-module-org-kde-notifications
+  qml6-module-org-kde-pipewire qml6-module-org-kde-plasma-plasma5support qml6-module-org-kde-prison qml6-module-org-kde-quickcharts qml6-module-org-kde-sonnet
+  qml6-module-org-kde-userfeedback qml6-module-qt-labs-folderlistmodel qml6-module-qt-labs-platform qml6-module-qt-labs-qmlmodels
+  qml6-module-qt5compat-graphicaleffects qml6-module-qtcore qml6-module-qtmultimedia qml6-module-qtpositioning qml6-module-qtqml qml6-module-qtqml-models
+  qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs qml6-module-qtquick-effects
+  qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-tooling qml6-module-qtquick-virtualkeyboard
+  qml6-module-qtquick-window qt6-base-dev-tools qt6-svg-plugins sgml-base systemd-sysv ucf udev udisks2 usb.ids user-session-migration x11-utils
+  x11-xserver-utils xdg-user-dirs xml-core
+Suggested packages:
+  gnome-control-center cpp-doc gcc-15-locales cpp-15-doc gdb-doc gdbserver isoquery kwin-addons mdadm exiv2 libfftw3-bin libfftw3-dev libjs-jquery nvme-cli
+  packagekit libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-rc0t64 libparted-dev libparted-i18n xdg-utils serdi sordi parted-doc kde-config-flatpak
+  cmake sgml-base-doc btrfs-progs f2fs-tools nilfs-tools reiserfsprogs udftools udisks2-btrfs udisks2-lvm2 xfsprogs mesa-utils nickle cairo-5c xorg-docs-core
+  debhelper
+Recommended packages:
+  kde-style-breeze-qt5 libc-dbg avahi-daemon iio-sensor-proxy modemmanager wpasupplicant systemsettings libkf6kcmutils-bin dmsetup hunspell-en-us
+  | hunspell-dictionary | myspell-dictionary javascript-common libkf6filemetadata-bin libkf6texteditor-katepart libkf6userfeedback-doc bluedevil
+  breeze-gtk-theme fonts-hack fonts-noto-cjk fonts-noto-hinted fonts-noto-mono fonts-noto-unhinted ibus-data kde-config-gtk-style kde-config-screenlocker
+  kde-config-sddm kde-style-oxygen-qt6 kgamma khelpcenter kinfocenter kio-extras kmenuedit kscreen ksshaskpass kwrited libpam-kwallet5
+  plasma-browser-integration plasma-discover plasma-disks plasma-firewall plasma-nm plasma-pa plasma-systemmonitor plasma-thunderbolt plasma-vault powerdevil
+  xdg-desktop-portal-gtk xdg-desktop-portal-kde fonts-noto-color-emoji fonts-noto-core fonts-noto-ui-core appmenu-gtk3-module kio-fuse ksystemstats
+  plasma-session-wayland qml6-module-org-kde-kirigamiaddons-formcard libnss-systemd systemd-hwe-hwdb dosfstools eject ntfs-3g exfatprogs luit
+The following NEW packages will be installed:
+  accountsservice breeze breeze-wallpaper cpp cpp-15 cpp-15-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus-user-session dconf-gsettings-backend dconf-service
+  dmidecode frameworkintegration6 gcc-15-base gdb geoclue-2.0 glib-networking glib-networking-common glib-networking-services gsettings-desktop-schemas
+  hicolor-icon-theme hwdata iso-codes kactivitymanagerd kde-cli-tools kde-cli-tools-data kde-style-breeze kde-style-breeze-data kf6-breeze-icon-theme
+  kglobalacceld kirigami-addons-data knighttime kwin-common kwin-data kwin-style-breeze layer-shell-qt libaccountsservice0 libappstream5 libappstreamqt3
+  libass9 libatasmart4 libavahi-glib1 libavfilter11 libbabeltrace1 libbatterycontrol6 libblockdev-crypto3 libblockdev-fs3 libblockdev-loop3
+  libblockdev-mdraid3 libblockdev-nvme3 libblockdev-part3 libblockdev-smart3 libblockdev-swap3 libblockdev-utils3 libblockdev3 libbs2b0 libbytesize-common
+  libbytesize1 libcryptsetup12 libdconf1 libdebuginfod-common libdebuginfod1t64 libdevmapper1.02.1 libdmtx0t64 libdw1t64 libeditorconfig0 libeis1 libexiv2-28
+  libexiv2-data libfdisk1 libfftw3-double3 libflite1 libfyaml0 libgeoclue-2-0 libhunspell-1.7-0 libibus-1.0-5 libinih1 libinireader0 libipt2 libisl23
+  libjs-underscore libjson-c5 libjson-glib-1.0-0 libjson-glib-1.0-common libkexiv2qt6-0 libkf6auth-data libkf6authcore6 libkf6baloo6 libkf6balooengine6
+  libkf6calendarevents6 libkf6config-bin libkf6declarative-data libkf6filemetadata-data libkf6filemetadata3 libkf6holidays-data libkf6holidays6
+  libkf6i18nlocaledata6 libkf6itemmodels6 libkf6kcmutils-data libkf6kcmutils6 libkf6kcmutilscore6 libkf6kcmutilsquick6 libkf6networkmanagerqt6 libkf6prison6
+  libkf6prisonscanner6 libkf6qqc2desktopstyle-data libkf6runner6 libkf6statusnotifieritem-data libkf6statusnotifieritem6 libkf6style6 libkf6su-bin
+  libkf6su-data libkf6su6 libkf6syntaxhighlighting-data libkf6syntaxhighlighting6 libkf6texteditor-bin libkf6texteditor-data libkf6texteditor6
+  libkf6unitconversion-data libkf6unitconversion6 libkf6userfeedback-data libkf6userfeedbackcore6 libkfontinst6 libkfontinstui6 libkirigami-data libkirigami6
+  libkirigamicontrols6 libkirigamidelegates6 libkirigamidialogs6 libkirigamilayouts6 libkirigamilayoutsprivate6 libkirigamiplatform6 libkirigamipolyfill6
+  libkirigamiprimitives6 libkirigamiprivate6 libkirigamitemplates6 libklipper6 libklookandfeel6 libkmod2 libkmpris6 libknighttime0 libkpipewire-data
+  libkpipewire6 libkpipewiredmabuf6 libkpipewirerecord6 libkquickcontrolsprivate0 libksysguard-data libksysguardformatter2 libksysguardsensorfaces2
+  libksysguardsensors2 libksysguardsystemstats2 libkworkspace6-6 liblilv-0-0 liblmdb0 libmm-glib0 libmysofa1 libnotificationmanager1 libnotify4 libnspr4
+  libnss3 libnvme1t64 libpackagekitqt6-2 libpam-systemd libparted2t64 libplacebo360 libplasma-geolocation-interface6 libplasma5support-data libplasma5support6
+  libplasmaactivitiesstats1 libpolkit-agent-1-0 libpolkit-gobject-1-0 libpolkit-qt6-1-1 libprocesscore10 libpython3.14 libqalculate-data libqalculate23
+  libqrencode4 libqt6labsplatform6 libqt6openglwidgets6 libqt6positioning6 libqt6positioning6-plugins libqt6positioningquick6 libqt6quickcontrols2-6
+  libqt6quickshapes6 libqt6quicktemplates2-6 libqt6serialport6 libqt6shadertools6 libqt6sql6 libqt6sql6-sqlite libqt6test6 libqt6uitools6
+  libqt6virtualkeyboard6 libquickcharts1 libquickchartscontrols1 librubberband3 libsamplerate0 libscim8v5 libsdl2-2.0-0 libsdl2-classic libserd-0-0
+  libsord-0-0 libsoup-3.0-0 libsoup-3.0-common libsource-highlight-common libsource-highlight4t64 libsratom-0-0 libstemmer0d libtaskmanager6
+  libtext-charwidth-perl libtext-wrapi18n-perl libudisks2-0 libunibreak6 libvidstab1.1 libvolume-key1 libweather-ion7 libxcb-damage0 libxcomposite1
+  libxcursor1 libxft2 libxinerama1 libxkbregistry0 libxmlb2 libxmuu1 libxtst6 libxv1 libxxf86dga1 libzimg2 libzix-0-0 libzxing3 milou ocean-sound-theme
+  oxygen-sounds parted pci.ids plasma-desktop plasma-desktop-data plasma-desktoptheme plasma-integration plasma-workspace plasma-workspace-data pnp.ids
+  polkit-kde-agent-1 polkitd qml6-module-org-kde-activities qml6-module-org-kde-baloo qml6-module-org-kde-breeze qml6-module-org-kde-config
+  qml6-module-org-kde-coreaddons qml6-module-org-kde-desktop qml6-module-org-kde-draganddrop qml6-module-org-kde-graphicaleffects
+  qml6-module-org-kde-guiaddons qml6-module-org-kde-iconthemes qml6-module-org-kde-kcmutils qml6-module-org-kde-kholidays qml6-module-org-kde-kirigami
+  qml6-module-org-kde-kirigamiaddons-components qml6-module-org-kde-kirigamiaddons-delegates qml6-module-org-kde-kirigamiaddons-tableview
+  qml6-module-org-kde-kirigamiaddons-treeview qml6-module-org-kde-kitemmodels qml6-module-org-kde-kquickcontrols qml6-module-org-kde-kquickcontrolsaddons
+  qml6-module-org-kde-ksvg qml6-module-org-kde-ksysguard qml6-module-org-kde-kwindowsystem qml6-module-org-kde-newstuff qml6-module-org-kde-notifications
+  qml6-module-org-kde-pipewire qml6-module-org-kde-plasma-plasma5support qml6-module-org-kde-prison qml6-module-org-kde-quickcharts qml6-module-org-kde-sonnet
+  qml6-module-org-kde-userfeedback qml6-module-qt-labs-folderlistmodel qml6-module-qt-labs-platform qml6-module-qt-labs-qmlmodels
+  qml6-module-qt5compat-graphicaleffects qml6-module-qtcore qml6-module-qtmultimedia qml6-module-qtpositioning qml6-module-qtqml qml6-module-qtqml-models
+  qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs qml6-module-qtquick-effects
+  qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-tooling qml6-module-qtquick-virtualkeyboard
+  qml6-module-qtquick-window qt6-base-dev-tools qt6-svg-plugins sgml-base systemd-sysv ucf udev udisks2 usb.ids user-session-migration x11-utils
+  x11-xserver-utils xdg-user-dirs xml-core
+The following packages will be upgraded:
+  bsdutils libudev1
+2 upgraded, 306 newly installed, 0 to remove and 21 not upgraded.
+Need to get 0 B/190 MB of archives.
+After this operation, 583 MB of additional disk space will be used.
+Extracting templates from packages: 9%Extracting templates from packages: 19%Extracting templates from packages: 29%Extracting templates from packages: 38%Extracting templates from packages: 48%Extracting templates from packages: 58%Extracting templates from packages: 68%Extracting templates from packages: 77%Extracting templates from packages: 87%Extracting templates from packages: 97%Extracting templates from packages: 100%
+Preconfiguring packages ...
+Selecting previously unselected package systemd-sysv.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 20257 files and directories currently installed.)
+Preparing to unpack .../0-systemd-sysv_259.9-0ubuntu0.1_amd64.deb ...
+Unpacking systemd-sysv (259.9-0ubuntu0.1) ...
+Selecting previously unselected package libtext-charwidth-perl:amd64.
+Preparing to unpack .../1-libtext-charwidth-perl_0.04-11build4_amd64.deb ...
+Unpacking libtext-charwidth-perl:amd64 (0.04-11build4) ...
+Selecting previously unselected package libtext-wrapi18n-perl.
+Preparing to unpack .../2-libtext-wrapi18n-perl_0.06-10_all.deb ...
+Unpacking libtext-wrapi18n-perl (0.06-10) ...
+Selecting previously unselected package ucf.
+Preparing to unpack .../3-ucf_3.0052ubuntu1_all.deb ...
+Moving old data out of the way
+Unpacking ucf (3.0052ubuntu1) ...
+Selecting previously unselected package libdebuginfod-common.
+Preparing to unpack .../4-libdebuginfod-common_0.194-4_all.deb ...
+Unpacking libdebuginfod-common (0.194-4) ...
+Preparing to unpack .../5-libudev1_259.9-0ubuntu0.1_amd64.deb ...
+Unpacking libudev1:amd64 (259.9-0ubuntu0.1) over (259.5-0ubuntu3.4) ...
+Setting up libudev1:amd64 (259.9-0ubuntu0.1) ...
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 20321 files and directories currently installed.)
+Preparing to unpack .../000-bsdutils_1%3a2.41.3-3ubuntu2.2_amd64.deb ...
+Unpacking bsdutils (1:2.41.3-3ubuntu2.2) over (1:2.41.3-3ubuntu2) ...
+Selecting previously unselected package libpam-systemd:amd64.
+Preparing to unpack .../001-libpam-systemd_259.9-0ubuntu0.1_amd64.deb ...
+Unpacking libpam-systemd:amd64 (259.9-0ubuntu0.1) ...
+Selecting previously unselected package dbus-user-session.
+Preparing to unpack .../002-dbus-user-session_1.16.2-2ubuntu4_amd64.deb ...
+Unpacking dbus-user-session (1.16.2-2ubuntu4) ...
+Selecting previously unselected package iso-codes.
+Preparing to unpack .../003-iso-codes_4.20.1-1_all.deb ...
+Unpacking iso-codes (4.20.1-1) ...
+Selecting previously unselected package libdevmapper1.02.1:amd64.
+Preparing to unpack .../004-libdevmapper1.02.1_2%3a1.02.205-2ubuntu3_amd64.deb ...
+Unpacking libdevmapper1.02.1:amd64 (2:1.02.205-2ubuntu3) ...
+Selecting previously unselected package libjson-c5:amd64.
+Preparing to unpack .../005-libjson-c5_0.18+ds-3_amd64.deb ...
+Unpacking libjson-c5:amd64 (0.18+ds-3) ...
+Selecting previously unselected package libcryptsetup12:amd64.
+Preparing to unpack .../006-libcryptsetup12_2%3a2.8.4-1ubuntu4_amd64.deb ...
+Unpacking libcryptsetup12:amd64 (2:2.8.4-1ubuntu4) ...
+Selecting previously unselected package libkmod2:amd64.
+Preparing to unpack .../007-libkmod2_34.2-2ubuntu2_amd64.deb ...
+Unpacking libkmod2:amd64 (34.2-2ubuntu2) ...
+Selecting previously unselected package udev.
+Preparing to unpack .../008-udev_259.9-0ubuntu0.1_amd64.deb ...
+Unpacking udev (259.9-0ubuntu0.1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+Selecting previously unselected package xdg-user-dirs.
+Preparing to unpack .../009-xdg-user-dirs_0.19-1_amd64.deb ...
+Unpacking xdg-user-dirs (0.19-1) ...
+Selecting previously unselected package dmidecode.
+Preparing to unpack .../010-dmidecode_3.6-2ubuntu1_amd64.deb ...
+Unpacking dmidecode (3.6-2ubuntu1) ...
+Selecting previously unselected package liblmdb0:amd64.
+Preparing to unpack .../011-liblmdb0_0.9.31-1build2_amd64.deb ...
+Unpacking liblmdb0:amd64 (0.9.31-1build2) ...
+Selecting previously unselected package libparted2t64:amd64.
+Preparing to unpack .../012-libparted2t64_3.6-6_amd64.deb ...
+Unpacking libparted2t64:amd64 (3.6-6) ...
+Selecting previously unselected package libxmuu1:amd64.
+Preparing to unpack .../013-libxmuu1_2%3a1.1.3-4_amd64.deb ...
+Unpacking libxmuu1:amd64 (2:1.1.3-4) ...
+Selecting previously unselected package parted.
+Preparing to unpack .../014-parted_3.6-6_amd64.deb ...
+Unpacking parted (3.6-6) ...
+Selecting previously unselected package pci.ids.
+Preparing to unpack .../015-pci.ids_0.0~2026.02.12-1_all.deb ...
+Unpacking pci.ids (0.0~2026.02.12-1) ...
+Selecting previously unselected package usb.ids.
+Preparing to unpack .../016-usb.ids_2025.12.13-1_all.deb ...
+Unpacking usb.ids (2025.12.13-1) ...
+Selecting previously unselected package libaccountsservice0:amd64.
+Preparing to unpack .../017-libaccountsservice0_23.13.9-8ubuntu5.2_amd64.deb ...
+Unpacking libaccountsservice0:amd64 (23.13.9-8ubuntu5.2) ...
+Selecting previously unselected package libpolkit-gobject-1-0:amd64.
+Preparing to unpack .../018-libpolkit-gobject-1-0_127-2ubuntu1.1_amd64.deb ...
+Unpacking libpolkit-gobject-1-0:amd64 (127-2ubuntu1.1) ...
+Selecting previously unselected package accountsservice.
+Preparing to unpack .../019-accountsservice_23.13.9-8ubuntu5.2_amd64.deb ...
+Unpacking accountsservice (23.13.9-8ubuntu5.2) ...
+Selecting previously unselected package breeze-wallpaper.
+Preparing to unpack .../020-breeze-wallpaper_4%3a6.6.5-0ubuntu0.1_all.deb ...
+Unpacking breeze-wallpaper (4:6.6.5-0ubuntu0.1) ...
+Selecting previously unselected package gcc-15-base:amd64.
+Preparing to unpack .../021-gcc-15-base_15.2.0-16ubuntu1_amd64.deb ...
+Unpacking gcc-15-base:amd64 (15.2.0-16ubuntu1) ...
+Selecting previously unselected package libisl23:amd64.
+Preparing to unpack .../022-libisl23_0.27-1build1_amd64.deb ...
+Unpacking libisl23:amd64 (0.27-1build1) ...
+Selecting previously unselected package cpp-15-x86-64-linux-gnu.
+Preparing to unpack .../023-cpp-15-x86-64-linux-gnu_15.2.0-16ubuntu1_amd64.deb ...
+Unpacking cpp-15-x86-64-linux-gnu (15.2.0-16ubuntu1) ...
+Selecting previously unselected package cpp-15.
+Preparing to unpack .../024-cpp-15_15.2.0-16ubuntu1_amd64.deb ...
+Unpacking cpp-15 (15.2.0-16ubuntu1) ...
+Selecting previously unselected package cpp-x86-64-linux-gnu.
+Preparing to unpack .../025-cpp-x86-64-linux-gnu_4%3a15.2.0-5ubuntu1_amd64.deb ...
+Unpacking cpp-x86-64-linux-gnu (4:15.2.0-5ubuntu1) ...
+Selecting previously unselected package cpp.
+Preparing to unpack .../026-cpp_4%3a15.2.0-5ubuntu1_amd64.deb ...
+Unpacking cpp (4:15.2.0-5ubuntu1) ...
+Selecting previously unselected package libdconf1:amd64.
+Preparing to unpack .../027-libdconf1_0.49.0-4_amd64.deb ...
+Unpacking libdconf1:amd64 (0.49.0-4) ...
+Selecting previously unselected package dconf-service.
+Preparing to unpack .../028-dconf-service_0.49.0-4_amd64.deb ...
+Unpacking dconf-service (0.49.0-4) ...
+Selecting previously unselected package dconf-gsettings-backend:amd64.
+Preparing to unpack .../029-dconf-gsettings-backend_0.49.0-4_amd64.deb ...
+Unpacking dconf-gsettings-backend:amd64 (0.49.0-4) ...
+Selecting previously unselected package libfyaml0:amd64.
+Preparing to unpack .../030-libfyaml0_0.9.4-1_amd64.deb ...
+Unpacking libfyaml0:amd64 (0.9.4-1) ...
+Selecting previously unselected package libstemmer0d:amd64.
+Preparing to unpack .../031-libstemmer0d_3.0.1-1_amd64.deb ...
+Unpacking libstemmer0d:amd64 (3.0.1-1) ...
+Selecting previously unselected package libxmlb2:amd64.
+Preparing to unpack .../032-libxmlb2_0.3.24-2_amd64.deb ...
+Unpacking libxmlb2:amd64 (0.3.24-2) ...
+Selecting previously unselected package libappstream5:amd64.
+Preparing to unpack .../033-libappstream5_1.1.2-1_amd64.deb ...
+Unpacking libappstream5:amd64 (1.1.2-1) ...
+Selecting previously unselected package libappstreamqt3:amd64.
+Preparing to unpack .../034-libappstreamqt3_1.1.2-1_amd64.deb ...
+Unpacking libappstreamqt3:amd64 (1.1.2-1) ...
+Selecting previously unselected package libpackagekitqt6-2:amd64.
+Preparing to unpack .../035-libpackagekitqt6-2_1.1.4-1_amd64.deb ...
+Unpacking libpackagekitqt6-2:amd64 (1.1.4-1) ...
+Selecting previously unselected package frameworkintegration6.
+Preparing to unpack .../036-frameworkintegration6_6.24.0-0ubuntu1_amd64.deb ...
+Unpacking frameworkintegration6 (6.24.0-0ubuntu1) ...
+Selecting previously unselected package libdw1t64:amd64.
+Preparing to unpack .../037-libdw1t64_0.194-4_amd64.deb ...
+Unpacking libdw1t64:amd64 (0.194-4) ...
+Selecting previously unselected package libbabeltrace1:amd64.
+Preparing to unpack .../038-libbabeltrace1_1.5.11-5build1_amd64.deb ...
+Unpacking libbabeltrace1:amd64 (1.5.11-5build1) ...
+Selecting previously unselected package libdebuginfod1t64:amd64.
+Preparing to unpack .../039-libdebuginfod1t64_0.194-4_amd64.deb ...
+Unpacking libdebuginfod1t64:amd64 (0.194-4) ...
+Selecting previously unselected package libipt2.
+Preparing to unpack .../040-libipt2_2.1.2-3_amd64.deb ...
+Unpacking libipt2 (2.1.2-3) ...
+Selecting previously unselected package libpython3.14:amd64.
+Preparing to unpack .../041-libpython3.14_3.14.4-1ubuntu0.2_amd64.deb ...
+Unpacking libpython3.14:amd64 (3.14.4-1ubuntu0.2) ...
+Selecting previously unselected package libsource-highlight-common.
+Preparing to unpack .../042-libsource-highlight-common_3.1.9-4.3build2_all.deb ...
+Unpacking libsource-highlight-common (3.1.9-4.3build2) ...
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd35bffd rsp=0x415aefe0 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc7e rsp=0x403f14a8 anchor=0xbd446bc0
+Selecting previously unselected package libsource-highlight4t64:amd64.
+Preparing to unpack .../043-libsource-highlight4t64_3.1.9-4.3build2_amd64.deb ...
+Unpacking libsource-highlight4t64:amd64 (3.1.9-4.3build2) ...
+Selecting previously unselected package gdb.
+Preparing to unpack .../044-gdb_17.1-2ubuntu1_amd64.deb ...
+Unpacking gdb (17.1-2ubuntu1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+Selecting previously unselected package libavahi-glib1:amd64.
+Preparing to unpack .../045-libavahi-glib1_0.8-18ubuntu1.1_amd64.deb ...
+Unpacking libavahi-glib1:amd64 (0.8-18ubuntu1.1) ...
+Selecting previously unselected package libjson-glib-1.0-common.
+Preparing to unpack .../046-libjson-glib-1.0-common_1.10.8+ds-2_all.deb ...
+Unpacking libjson-glib-1.0-common (1.10.8+ds-2) ...
+Selecting previously unselected package libjson-glib-1.0-0:amd64.
+Preparing to unpack .../047-libjson-glib-1.0-0_1.10.8+ds-2_amd64.deb ...
+Unpacking libjson-glib-1.0-0:amd64 (1.10.8+ds-2) ...
+Selecting previously unselected package libmm-glib0:amd64.
+Preparing to unpack .../048-libmm-glib0_1.25.95-1ubuntu1_amd64.deb ...
+Unpacking libmm-glib0:amd64 (1.25.95-1ubuntu1) ...
+Selecting previously unselected package libnotify4:amd64.
+Preparing to unpack .../049-libnotify4_0.8.8-1_amd64.deb ...
+Unpacking libnotify4:amd64 (0.8.8-1) ...
+Selecting previously unselected package glib-networking-common.
+Preparing to unpack .../050-glib-networking-common_2.80.1-1build2_all.deb ...
+Unpacking glib-networking-common (2.80.1-1build2) ...
+Selecting previously unselected package glib-networking-services.
+Preparing to unpack .../051-glib-networking-services_2.80.1-1build2_amd64.deb ...
+Unpacking glib-networking-services (2.80.1-1build2) ...
+Selecting previously unselected package user-session-migration.
+Preparing to unpack .../052-user-session-migration_0.5.1_amd64.deb ...
+Unpacking user-session-migration (0.5.1) ...
+Selecting previously unselected package gsettings-desktop-schemas.
+Preparing to unpack .../053-gsettings-desktop-schemas_50.0-1ubuntu2_all.deb ...
+Unpacking gsettings-desktop-schemas (50.0-1ubuntu2) ...
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+Selecting previously unselected package glib-networking:amd64.
+Preparing to unpack .../054-glib-networking_2.80.1-1build2_amd64.deb ...
+Unpacking glib-networking:amd64 (2.80.1-1build2) ...
+Selecting previously unselected package libsoup-3.0-common.
+Preparing to unpack .../055-libsoup-3.0-common_3.6.6-1ubuntu0.1_all.deb ...
+Unpacking libsoup-3.0-common (3.6.6-1ubuntu0.1) ...
+Selecting previously unselected package libsoup-3.0-0:amd64.
+Preparing to unpack .../056-libsoup-3.0-0_3.6.6-1ubuntu0.1_amd64.deb ...
+Unpacking libsoup-3.0-0:amd64 (3.6.6-1ubuntu0.1) ...
+Selecting previously unselected package geoclue-2.0.
+Preparing to unpack .../057-geoclue-2.0_2.7.2-2ubuntu3_amd64.deb ...
+Unpacking geoclue-2.0 (2.7.2-2ubuntu3) ...
+Selecting previously unselected package hicolor-icon-theme.
+Preparing to unpack .../058-hicolor-icon-theme_0.18-2build1_all.deb ...
+Unpacking hicolor-icon-theme (0.18-2build1) ...
+Selecting previously unselected package pnp.ids.
+Preparing to unpack .../059-pnp.ids_0.394-1build1_all.deb ...
+Unpacking pnp.ids (0.394-1build1) ...
+Selecting previously unselected package hwdata.
+Preparing to unpack .../060-hwdata_0.394-1build1_all.deb ...
+Unpacking hwdata (0.394-1build1) ...
+Selecting previously unselected package libqt6sql6:amd64.
+Preparing to unpack .../061-libqt6sql6_6.10.2+dfsg-7_amd64.deb ...
+Unpacking libqt6sql6:amd64 (6.10.2+dfsg-7) ...
+Selecting previously unselected package libqt6sql6-sqlite:amd64.
+Preparing to unpack .../062-libqt6sql6-sqlite_6.10.2+dfsg-7_amd64.deb ...
+Unpacking libqt6sql6-sqlite:amd64 (6.10.2+dfsg-7) ...
+Selecting previously unselected package kactivitymanagerd.
+Preparing to unpack .../063-kactivitymanagerd_6.6.6-0ubuntu0.1_amd64.deb ...
+Unpacking kactivitymanagerd (6.6.6-0ubuntu0.1) ...
+Selecting previously unselected package kde-style-breeze-data.
+Preparing to unpack .../064-kde-style-breeze-data_4%3a6.6.5-0ubuntu0.1_all.deb ...
+Unpacking kde-style-breeze-data (4:6.6.5-0ubuntu0.1) ...
+Selecting previously unselected package kf6-breeze-icon-theme.
+Preparing to unpack .../065-kf6-breeze-icon-theme_6.24.0-0ubuntu1_all.deb ...
+Unpacking kf6-breeze-icon-theme (6.24.0-0ubuntu1) ...
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0678 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b06e0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0670 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0698 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415b0630 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a1ee rsp=0x415b0690 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0500 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0500 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b04b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0480 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0658 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b03e8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b03b0 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b0678 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b06d8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0478 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b03a0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0850 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0480 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0850 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0828 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0510 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0320 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b03e8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0690 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd4748c8 rsp=0x415b0268 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415b0360 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a420 rsp=0x415b0658 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0678 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b0478 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a1ee rsp=0x415b03b0 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd46a1ee rsp=0x415b0630 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b04c8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b06b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0860 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0698 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a42d rsp=0x415b03f8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b07b0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0610 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0678 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0810 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b0678 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b03e8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0658 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b06d8 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b0658 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b04b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b07f8 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415b04c0 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a420 rsp=0x415b0438 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0480 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0850 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415b0960 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a1ee rsp=0x415b0360 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0860 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b04b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0960 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0368 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b03f8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b07f0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0480 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0690 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b0658 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b0728 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a420 rsp=0x415b06d8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a42d rsp=0x415b0848 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a420 rsp=0x415b06d8 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415b0850 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a420 rsp=0x415af7b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0860 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a420 rsp=0x415b04b8 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd46a1ee rsp=0x415b0220 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd45dee0 rsp=0x415b0100 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd46a1ee rsp=0x415aff50 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd460ffe rsp=0x415af070 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 60 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 65 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 70 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 75 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 80 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 85 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 90 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 95 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 100 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 60 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd44c6c5 rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 60 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 65 s: rip=0xbd46a420 rsp=0x415aff98 anchor=0xbd446bc0
+[watchdog] kernel busy for 70 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 75 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 80 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 85 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 90 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 95 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 100 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 105 s: rip=0xbd44c66d rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 110 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 115 s: rip=0xbd44c6c5 rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 120 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 125 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 130 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 135 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 140 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 145 s: rip=0xbd35bffd rsp=0x415aefe0 anchor=0xbd446bc0
+[watchdog] kernel busy for 150 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 155 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 160 s: rip=0xbd44c66d rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 165 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 170 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 175 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 180 s: rip=0xbd35bffd rsp=0x415aefe0 anchor=0xbd446bc0
+[watchdog] kernel busy for 185 s: rip=0xbd35bffd rsp=0x415aefe0 anchor=0xbd446bc0
+[watchdog] kernel busy for 190 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 195 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 200 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 205 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 210 s: rip=0xbd44c66d rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 215 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 220 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 225 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 230 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44c6c5 rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd46a420 rsp=0x415aff98 anchor=0xbd446bc0
+[watchdog] kernel busy for 20 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 25 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 30 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 35 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 40 s: rip=0xbd44c66d rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 45 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 50 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 55 s: rip=0xbd460ffe rsp=0x415af070 anchor=0xbd446bc0
+[watchdog] kernel busy for 60 s: rip=0xbd44c6c5 rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 65 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 70 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 75 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 80 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 85 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 90 s: rip=0xbd44bc16 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 95 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 100 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 105 s: rip=0xbd46a420 rsp=0x415afee8 anchor=0xbd446bc0
+[watchdog] kernel busy for 110 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 115 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 120 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 125 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 130 s: rip=0xbd46a420 rsp=0x415aff98 anchor=0xbd446bc0
+[watchdog] kernel busy for 135 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 140 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 145 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 150 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 155 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 160 s: rip=0xbd44c6c5 rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 165 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 170 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 175 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 180 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 185 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 190 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 195 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 200 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 205 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 210 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 215 s: rip=0xbd44c6c5 rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 220 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 225 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 230 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 235 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 240 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 245 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 250 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 255 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 260 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 265 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 270 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 275 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 280 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 285 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 290 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 295 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 300 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 305 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 310 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 315 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 320 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 325 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 330 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 335 s: rip=0xbd44c66d rsp=0x415af100 anchor=0xbd446bc0
+[watchdog] kernel busy for 340 s: rip=0xbd35bffd rsp=0x415aefe0 anchor=0xbd446bc0
+[watchdog] kernel busy for 345 s: rip=0xbd44c66d rsp=0x415afed0 anchor=0xbd446bc0
+[watchdog] kernel busy for 5 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 10 s: rip=0xbd44bc74 rsp=0x415af230 anchor=0xbd446bc0
+[watchdog] kernel busy for 15 s: rip=0xbd44bc7e rsp=0x415af230 anchor=0xbd446bc0
+Selecting previously unselected package kglobalacceld.
+Preparing to unpack .../066-kglobalacceld_6.6.5-0ubuntu0.1_amd64.deb ...
+Unpacking kglobalacceld (6.6.5-0ubuntu0.1) ...
+Selecting previously unselected package kirigami-addons-data.
+Preparing to unpack .../067-kirigami-addons-data_1.11.0-2ubuntu2_all.deb ...
+Unpacking kirigami-addons-data (1.11.0-2ubuntu2) ...
