@@ -215,6 +215,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
+            cmdline: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -303,6 +304,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
+            cmdline: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -387,6 +389,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
+            cmdline: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -462,6 +465,7 @@ impl Scheduler {
             fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
+            cmdline: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -561,6 +565,7 @@ impl Scheduler {
             },
             mm: Some(mm),
             exe: Some(alloc::sync::Arc::from(exec_path)),
+            cmdline: Some(Task::join_cmdline(args.iter().map(|a| a.as_bytes()))),
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -616,6 +621,7 @@ impl Scheduler {
         let parent_sgid = parent.sgid;
         let parent_caps = parent.caps;
         let parent_exe = parent.exe.clone();
+        let parent_cmdline = parent.cmdline.clone();
         let parent_mm = if flags & CLONE_VM != 0 {
             parent.mm.clone()
         } else {
@@ -717,6 +723,7 @@ impl Scheduler {
             fds: parent_fds,
             mm: parent_mm,
             exe: parent_exe,
+            cmdline: parent_cmdline,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -942,6 +949,11 @@ impl Scheduler {
     /// Executable path of process `tgid` (`/proc/<pid>/exe`), if it has a live thread.
     pub fn exe_of(&self, tgid: u64) -> Option<alloc::string::String> {
         self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| alloc::string::String::from(t.exe_path()))
+    }
+
+    /// Runs `f` on a live thread of process `tgid`, or returns `None` if there is none.
+    pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
+        self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(f)
     }
 
     /// CPU time of process `tgid` (all its live threads) in timer ticks.

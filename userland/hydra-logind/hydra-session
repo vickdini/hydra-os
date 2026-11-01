@@ -12,6 +12,14 @@ ping() {
     dbus-send --system --dest="$1" --type=method_call --print-reply "$2" "$3" >/dev/null 2>&1
 }
 
+# There is no systemd user manager. Its session bus activation file only runs /bin/false,
+# so each probe for it by Plasma logs a failed activation instead of getting the plain
+# "not provided" reply of a system without systemd: divert it (dpkg upgrades keep the move)
+f=/usr/share/dbus-1/services/org.freedesktop.systemd1.service
+if [ -e "$f" ] && [ "$(id -u)" = 0 ]; then
+    dpkg-divert --quiet --local --rename --divert "$f.hydra-disabled" --add "$f"
+fi
+
 if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
     rm -f /run/dbus/system_bus_socket /run/dbus/pid
     mkdir -p /run/dbus

@@ -593,6 +593,14 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     if matches!(abs.as_str(), "/dev/tty" | "/dev/console" | "/dev/tty0" | "/dev/tty1") {
         return install(FileDescriptor::ConsoleOut, flags);
     }
+    // Per-process /proc files are captured now: generating them takes the scheduler and
+    // descriptor table locks, which reads run under
+    if let Some(super::fs::PseudoFile::ProcPidFile(rest)) = super::fs::match_pseudo_path(&abs) {
+        let text = super::fs::proc_pid_file_text(&rest).ok_or(ENOENT)?;
+        let snapshot = super::memfd::MemFd::new(&abs);
+        snapshot.lock().write_at(0, &text);
+        return install(FileDescriptor::MemFd(snapshot), flags);
+    }
     if is_pseudo(&abs) {
         return install(
             FileDescriptor::File {

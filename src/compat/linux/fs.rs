@@ -45,6 +45,9 @@ pub enum PseudoFile {
     ProcMountinfo,
     /// `/proc/mounts` (`/proc/self/mounts`): the mount table in `fstab` format.
     ProcMounts,
+    /// `/proc/<pid>/cmdline`, `comm` and `fdinfo/<fd>` (the path after `/proc/`). Their
+    /// text is captured when opened ([`proc_pid_file_text`]); reads through the path see EOF.
+    ProcPidFile(alloc::string::String),
 }
 
 /// The mounts a Linux system has, as Hydra presents them: the pool at `/` (device 8:1,
@@ -88,7 +91,73 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
             Some(PseudoFile::ProcMountinfo)
         }
+        p if p.starts_with("/proc/") && is_proc_pid_file(&p[6..]) => Some(PseudoFile::ProcPidFile(alloc::string::String::from(&p[6..]))),
         _ => None,
+    }
+}
+
+/// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
+/// `<pid>/fdinfo/<fd>`, with `<pid>` also `self` or `thread-self`. Takes no locks: path
+/// lookups run under the scheduler lock.
+fn is_proc_pid_file(rest: &str) -> bool {
+    let Some((who, file)) = rest.split_once('/') else { return false };
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (who == "self" || who == "thread-self" || numeric(who))
+        && (file == "cmdline" || file == "comm" || file.strip_prefix("fdinfo/").is_some_and(numeric))
+}
+
+/// Text of `/proc/<pid>/cmdline`, `comm` or `fdinfo/<fd>` (`rest` is the path after
+/// `/proc/`), or `None` if the process or descriptor does not exist.
+///
+/// D-Bus needs these to identify its peers: it reads the `Pid:` line of a pidfd's `fdinfo`
+/// (without it the peer's pid is unknown, logged as `pid=18446744073709551615`) and names
+/// the peer by its `cmdline`.
+///
+/// Takes the scheduler lock and the process's descriptor table lock, so it must be called
+/// with neither held (when the file is opened, not when it is read).
+pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
+    let (who, file) = rest.split_once('/')?;
+    let pid = match who {
+        "self" | "thread-self" => super::proc::current_ids().1,
+        n => n.parse().ok()?,
+    };
+    // The descriptor table has its own lock, taken after the scheduler's is released
+    let (exe, cmdline, fds) = crate::task::SCHEDULER
+        .lock()
+        .with_process(pid, |t| (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), t.fds.clone()))?;
+    match file {
+        "cmdline" => Some(cmdline.map(|c| c.to_vec()).unwrap_or_default()),
+        "comm" => {
+            // The executable's file name, truncated to TASK_COMM_LEN - 1 bytes
+            let mut comm: alloc::vec::Vec<u8> = exe.rsplit('/').next().unwrap_or("").bytes().take(15).collect();
+            comm.push(b'\n');
+            Some(comm)
+        }
+        f => {
+            let fd: usize = f.strip_prefix("fdinfo/")?.parse().ok()?;
+            let (pos, cloexec, pidfd) = {
+                let table = fds.lock();
+                let desc = table.get(fd)?;
+                let pos = match desc {
+                    crate::fs::FileDescriptor::File { cursor, .. } => *cursor as u64,
+                    _ => 0,
+                };
+                let pidfd = match desc {
+                    crate::fs::FileDescriptor::PidFd(p) => Some(p.pid),
+                    _ => None,
+                };
+                (pos, table.cloexec(fd), pidfd)
+            };
+            let flags = 0o2 | if cloexec { 0o2000000 } else { 0 };
+            let mut text = alloc::format!("pos:\t{}\nflags:\t0{:o}\nmnt_id:\t2069\n", pos, flags);
+            if let Some(p) = pidfd {
+                // -1 once the process has exited, as Linux reports it
+                let alive = crate::task::SCHEDULER.lock().with_process(p, |_| ()).is_some();
+                let shown = if alive { p as i64 } else { -1 };
+                text.push_str(&alloc::format!("Pid:\t{}\nNSpid:\t{}\n", shown, shown));
+            }
+            Some(text.into_bytes())
+        }
     }
 }
 
@@ -143,6 +212,7 @@ impl PseudoFile {
             }
             PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
             PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
+            PseudoFile::ProcPidFile(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
                 read_slice(text.as_bytes(), cursor, buf)

@@ -278,12 +278,14 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     let new_mm = Arc::new(Mutex::new(image.mm));
     let cr3 = new_mm.lock().cr3();
     let exe: Arc<str> = Arc::from(abs_path.as_str());
+    let cmdline = crate::task::Task::join_cmdline(argv.iter().map(|a| a.as_slice()));
     let old_mm = {
         let mut sched = crate::task::SCHEDULER.lock();
         sched.terminate_current_group();
         sched.current_task_mut(|t| {
             t.regs.cr3 = cr3;
             t.exe = Some(exe);
+            t.cmdline = Some(cmdline);
             t.fs_base = 0;
             // A set-ID program runs with the file's owner (group) as its effective and
             // saved id; capabilities follow the new effective user

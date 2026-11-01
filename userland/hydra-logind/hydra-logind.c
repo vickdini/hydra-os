@@ -7,6 +7,8 @@
  * Hydra has one seat (seat0) with one graphical session ("1") on VT 2, owned by the user
  * given with --uid (default 1000).
  *
+ * It also answers for systemd-localed (org.freedesktop.locale1, read-only).
+ *
  * Build: gcc -O2 -o hydra-logind hydra-logind.c -I/usr/include/dbus-1.0
  *            -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -ldbus-1
  */
@@ -445,6 +447,150 @@ static DBusHandlerResult on_message(DBusConnection *c, DBusMessage *m, void *dat
     return DBUS_HANDLER_RESULT_HANDLED;
 }
 
+/*
+ * org.freedesktop.locale1: systemd-localed's read side. startplasma takes the keyboard
+ * layout of a new user from it; without systemd its activation file only runs /bin/false.
+ * The settings come from the files localed reads on Debian and Ubuntu.
+ */
+#define LOCALE_NAME "org.freedesktop.locale1"
+#define LOCALE_PATH "/org/freedesktop/locale1"
+
+static char locale_vars[16][160];
+static int nlocale_vars;
+static char x11_layout[64], x11_model[64], x11_variant[64], x11_options[160], vc_keymap[64], vc_toggle[64];
+
+/* Calls `fn` for each KEY=value line of `file` (quotes around the value removed). */
+static void read_env_file(const char *file, void (*fn)(const char *key, const char *value)) {
+    FILE *f = fopen(file, "r");
+    char line[256];
+    if (!f)
+        return;
+    while (fgets(line, sizeof line, f)) {
+        char *key = line + strspn(line, " \t"), *eq = strchr(key, '=');
+        if (*key == '#' || !eq)
+            continue;
+        *eq = 0;
+        char *v = eq + 1;
+        v[strcspn(v, "\r\n")] = 0;
+        size_t n = strlen(v);
+        if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
+            v[n - 1] = 0;
+            v++;
+        }
+        fn(key, v);
+    }
+    fclose(f);
+}
+
+static void locale_var(const char *key, const char *value) {
+    if (strcmp(key, "LANG") && strcmp(key, "LANGUAGE") && strncmp(key, "LC_", 3))
+        return;
+    for (int i = 0; i < nlocale_vars; i++)
+        if (!strncmp(locale_vars[i], key, strlen(key)) && locale_vars[i][strlen(key)] == '=')
+            return; /* the first file that sets a variable wins */
+    if (nlocale_vars < 16)
+        snprintf(locale_vars[nlocale_vars++], sizeof locale_vars[0], "%s=%s", key, value);
+}
+
+static void keyboard_var(const char *key, const char *value) {
+    if (!strcmp(key, "XKBLAYOUT")) snprintf(x11_layout, sizeof x11_layout, "%s", value);
+    else if (!strcmp(key, "XKBMODEL")) snprintf(x11_model, sizeof x11_model, "%s", value);
+    else if (!strcmp(key, "XKBVARIANT")) snprintf(x11_variant, sizeof x11_variant, "%s", value);
+    else if (!strcmp(key, "XKBOPTIONS")) snprintf(x11_options, sizeof x11_options, "%s", value);
+    else if (!strcmp(key, "KEYMAP")) snprintf(vc_keymap, sizeof vc_keymap, "%s", value);
+    else if (!strcmp(key, "KEYMAP_TOGGLE")) snprintf(vc_toggle, sizeof vc_toggle, "%s", value);
+}
+
+/* Rereads the settings, as localed does when they change on disk. */
+static void load_locale(void) {
+    nlocale_vars = 0;
+    x11_layout[0] = x11_model[0] = x11_variant[0] = x11_options[0] = vc_keymap[0] = vc_toggle[0] = 0;
+    read_env_file("/etc/locale.conf", locale_var);
+    read_env_file("/etc/default/locale", locale_var);
+    read_env_file("/etc/default/keyboard", keyboard_var);
+    read_env_file("/etc/vconsole.conf", keyboard_var);
+}
+
+static const char *const locale_props[] = {"Locale", "VConsoleKeymap", "VConsoleKeymapToggle", "X11Layout", "X11Model", "X11Variant",
+    "X11Options", NULL};
+
+static int append_locale_property(DBusMessageIter *it, const char *name) {
+    const char *s = !strcmp(name, "VConsoleKeymap") ? vc_keymap
+                  : !strcmp(name, "VConsoleKeymapToggle") ? vc_toggle
+                  : !strcmp(name, "X11Layout") ? x11_layout
+                  : !strcmp(name, "X11Model") ? x11_model
+                  : !strcmp(name, "X11Variant") ? x11_variant
+                  : !strcmp(name, "X11Options") ? x11_options : NULL;
+    if (s) {
+        variant_basic(it, DBUS_TYPE_STRING, &s);
+        return 1;
+    }
+    if (strcmp(name, "Locale"))
+        return 0;
+    DBusMessageIter v, a;
+    dbus_message_iter_open_container(it, DBUS_TYPE_VARIANT, "as", &v);
+    dbus_message_iter_open_container(&v, DBUS_TYPE_ARRAY, "s", &a);
+    for (int i = 0; i < nlocale_vars; i++) {
+        const char *var = locale_vars[i];
+        dbus_message_iter_append_basic(&a, DBUS_TYPE_STRING, &var);
+    }
+    dbus_message_iter_close_container(&v, &a);
+    dbus_message_iter_close_container(it, &v);
+    return 1;
+}
+
+static DBusHandlerResult on_locale_message(DBusConnection *c, DBusMessage *m, void *data) {
+    (void)data;
+    if (dbus_message_get_type(m) != DBUS_MESSAGE_TYPE_METHOD_CALL)
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    const char *iface = dbus_message_get_interface(m), *member = dbus_message_get_member(m), *pi = NULL, *name = NULL;
+    if (!member)
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    if (verbose)
+        logmsg("%s %s.%s from %s", LOCALE_PATH, iface ? iface : "?", member, dbus_message_get_sender(m));
+    load_locale();
+    DBusMessage *r;
+    DBusMessageIter it, dict, entry;
+    if (iface && !strcmp(iface, DBUS_INTERFACE_INTROSPECTABLE)) {
+        r = reply_string(m, introspect_xml);
+    } else if (iface && !strcmp(iface, PROPS_IFACE) && !strcmp(member, "Get")) {
+        if (!dbus_message_get_args(m, NULL, DBUS_TYPE_STRING, &pi, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID)) {
+            r = error(m, DBUS_ERROR_INVALID_ARGS, "Get(ss)");
+        } else {
+            r = dbus_message_new_method_return(m);
+            dbus_message_iter_init_append(r, &it);
+            if ((*pi && strcmp(pi, LOCALE_NAME)) || !append_locale_property(&it, name)) {
+                dbus_message_unref(r);
+                r = error(m, DBUS_ERROR_UNKNOWN_PROPERTY, name);
+            }
+        }
+    } else if (iface && !strcmp(iface, PROPS_IFACE) && !strcmp(member, "GetAll")) {
+        if (!dbus_message_get_args(m, NULL, DBUS_TYPE_STRING, &pi, DBUS_TYPE_INVALID)) {
+            r = error(m, DBUS_ERROR_INVALID_ARGS, "GetAll(s)");
+        } else {
+            r = dbus_message_new_method_return(m);
+            dbus_message_iter_init_append(r, &it);
+            dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
+            for (int i = 0; (!*pi || !strcmp(pi, LOCALE_NAME)) && locale_props[i]; i++) {
+                dict_entry_start(&dict, &entry, locale_props[i]);
+                append_locale_property(&entry, locale_props[i]);
+                dbus_message_iter_close_container(&dict, &entry);
+            }
+            dbus_message_iter_close_container(&it, &dict);
+        }
+    } else if (iface && !strcmp(iface, PROPS_IFACE) && !strcmp(member, "Set")) {
+        r = error(m, DBUS_ERROR_PROPERTY_READ_ONLY, "read-only");
+    } else if (!strncmp(member, "Set", 3)) {
+        /* SetLocale, SetVConsoleKeyboard, SetX11Keyboard */
+        r = error(m, DBUS_ERROR_NOT_SUPPORTED, "the system locale is set by editing /etc/default/locale and /etc/default/keyboard");
+    } else {
+        r = error(m, DBUS_ERROR_UNKNOWN_METHOD, member);
+    }
+    dbus_connection_send(c, r, NULL);
+    dbus_message_unref(r);
+    return DBUS_HANDLER_RESULT_HANDLED;
+}
+
 /* Forget the controller (and close its devices) when it leaves the bus. */
 static DBusHandlerResult on_signal(DBusConnection *c, DBusMessage *m, void *data) {
     (void)c;
@@ -494,6 +640,13 @@ int main(int argc, char **argv) {
     dbus_bus_add_match(c, "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged'", NULL);
     dbus_connection_add_filter(c, on_signal, NULL, NULL);
     logmsg("seat0 session 1 for uid %u (%s) on %s", session_uid, user_name, BUS_NAME);
+    /* A missing locale service is not worth losing the login manager over */
+    if (dbus_bus_request_name(c, LOCALE_NAME, DBUS_NAME_FLAG_DO_NOT_QUEUE, NULL) == DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
+        static const DBusObjectPathVTable locale_vtable = {.message_function = on_locale_message};
+        dbus_connection_register_object_path(c, LOCALE_PATH, &locale_vtable, NULL);
+    } else {
+        logmsg("cannot own %s", LOCALE_NAME);
+    }
     while (dbus_connection_read_write_dispatch(c, -1))
         ;
     return 0;

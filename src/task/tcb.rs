@@ -314,6 +314,8 @@ pub struct Task {
     pub mm: Option<alloc::sync::Arc<spin::Mutex<crate::memory::vm::Mm>>>,
     /// Path of the executable image (`/proc/self/exe`), for Linux processes.
     pub exe: Option<alloc::sync::Arc<str>>,
+    /// Arguments of the running program, each `NUL`-terminated (`/proc/<pid>/cmdline`).
+    pub cmdline: Option<alloc::sync::Arc<[u8]>>,
     /// Nesting depth of `task::preemptible` wait points this task is inside; saved and
     /// restored with the task so the timer only preempts the task that is actually waiting.
     pub preempt_depth: u32,
@@ -369,6 +371,7 @@ impl Task {
             fds: crate::fs::FdTable::new_default().into_shared(),
             mm: None,
             exe: None,
+            cmdline: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -378,6 +381,16 @@ impl Task {
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
+    }
+
+    /// Joins program arguments into the `NUL`-terminated form of `/proc/<pid>/cmdline`.
+    pub fn join_cmdline<'a>(args: impl IntoIterator<Item = &'a [u8]>) -> alloc::sync::Arc<[u8]> {
+        let mut out = alloc::vec::Vec::new();
+        for a in args {
+            out.extend_from_slice(a);
+            out.push(0);
+        }
+        alloc::sync::Arc::from(out)
     }
 
     /// Path of the running executable, or the task name for kernel tasks.
