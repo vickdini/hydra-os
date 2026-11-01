@@ -17,6 +17,7 @@ import time
 
 QEMU = r"C:\Program Files\qemu\qemu-system-x86_64.exe"
 OVMF = r"C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+OVMF_VARS = r"C:\Program Files\qemu\share\edk2-i386-vars.fd"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SHIFTED = {
@@ -49,7 +50,12 @@ class Qmp:
                     return None
                 self.buf += chunk
             line, self.buf = self.buf.split(b"\n", 1)
-            msg = json.loads(line)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                # accelerator warnings share stdout with QMP
+                sys.stderr.write(line.decode(errors="replace") + "\n")
+                continue
             if "event" not in msg:
                 return msg
 
@@ -92,6 +98,7 @@ def main():
     sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--mem", default="4G")
+    ap.add_argument("--accel", default="whpx", choices=["whpx", "tcg"], help="whpx: Windows hardware virtualization; tcg: software emulation")
     ap.add_argument("--wait", type=float, default=60)
     ap.add_argument("--until", default=None)
     ap.add_argument("--log", default=os.path.join(ROOT, "scratch", "qemu_run.log"))
@@ -108,9 +115,22 @@ def main():
 
     if os.path.exists(a.log):
         os.remove(a.log)
+    if a.accel == "whpx":
+        # WHPX cannot emulate OVMF's flash chip, so the firmware is loaded as a ROM: the
+        # usual OVMF.fd layout (variable store, then code) built from QEMU's split files
+        fw = os.path.join(ROOT, "target", "OVMF-whpx.fd")
+        if not os.path.exists(fw):
+            os.makedirs(os.path.dirname(fw), exist_ok=True)
+            with open(fw, "wb") as out:
+                for part in (OVMF_VARS, OVMF):
+                    with open(part, "rb") as f:
+                        out.write(f.read())
+        firmware = ["-accel", "whpx,kernel-irqchip=off", "-bios", fw]
+    else:
+        firmware = ["-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}"]
     args = [
         QEMU,
-        "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}",
+        *firmware,
         "-cdrom", os.path.join(ROOT, "dist", "x86_64", "kernel.iso"),
         "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
         "-boot", "d", "-m", a.mem, "-vga", "std", "-display", "none",
