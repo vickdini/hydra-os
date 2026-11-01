@@ -1564,7 +1564,9 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                     -1
                 } else {
                     let ts = unsafe { *ts_ptr };
-                    (ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000) as i32
+                    // Round up: a sub-millisecond timeout must still wait, or GLib's main
+                    // loop spins until the next timer tick
+                    (ts.tv_sec * 1000 + (ts.tv_nsec + 999_999) / 1_000_000).min(i32::MAX as i64) as i32
                 }
             } else {
                 arg2 as i32

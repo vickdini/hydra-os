@@ -1,0 +1,28 @@
+Windows Hypervisor Platform accelerator is operational
+linux chroot /ubuntu /usr/bin/bash -c 'find /usr/bin /usr/lib/x86_64-linux-gnu -maxdepth 1 -inum 157 -o -inum 12368 -o -inum 72188 -o -inum 68060 | xargs ls -i; dpkg-query -W libglib2.0-0t64 wireplumber libwireplumber-0.5-0 libc6; echo PKGEND $((6*7))'
+[1m[37m[40m[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+72188 /usr/bin/wireplumber		   12368 /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8800.0
+  157 /usr/lib/x86_64-linux-gnu/libc.so.6  68060 /usr/lib/x86_64-linux-gnu/libwireplumber-0.5.so.0.513.0
+libc6:amd64	2.43-2ubuntu2.3
+libglib2.0-0t64:amd64	2.88.0-1ubuntu0.1
+libwireplumber-0.5-0:amd64	0.5.13-1ubuntu1.1
+wireplumber	0.5.13-1ubuntu1.1
+PKGEND 42
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 

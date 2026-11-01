@@ -677,6 +677,52 @@ impl FdTable {
         self.readiness_at(desc, 0)
     }
 
+    /// Syscall-trace description of descriptor `fd`: kind and readiness, and for an
+    /// `epoll` descriptor each watch inside it.
+    pub fn trace_describe(&self, fd: usize) -> String {
+        let desc = match self.get(fd) {
+            Some(d) => d,
+            None => return alloc::format!("{}:closed", fd),
+        };
+        let kind = match desc {
+            FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => "console",
+            FileDescriptor::PipeRead(_) => "pipe-r",
+            FileDescriptor::PipeWrite(_) => "pipe-w",
+            FileDescriptor::Socket(_) => "socket",
+            FileDescriptor::Epoll(_) => "epoll",
+            FileDescriptor::EventFd(_) => "eventfd",
+            FileDescriptor::MemFd(_) => "memfd",
+            FileDescriptor::Vnode(_) => "vnode",
+            FileDescriptor::Inet(_) => "inet",
+            FileDescriptor::Pty(_) => "pty",
+            FileDescriptor::SignalFd(_) => "signalfd",
+            FileDescriptor::Unix(_) => "unix",
+            FileDescriptor::TimerFd(_) => "timerfd",
+            FileDescriptor::Inotify(_) => "inotify",
+            FileDescriptor::PidFd(_) => "pidfd",
+            FileDescriptor::Device(_) => "device",
+            FileDescriptor::File { .. } => "file",
+        };
+        let mut s = alloc::format!("{}:{}={:#x}", fd, kind, self.readiness(desc));
+        if let FileDescriptor::Epoll(ep) = desc {
+            let watches: Vec<(i32, u32)> = ep.lock().watches.values().map(|w| (w.fd, w.events)).collect();
+            s.push_str(" [");
+            for (wfd, events) in watches {
+                s.push_str(&alloc::format!(" {}(want {:#x})", self.trace_describe_flat(wfd as usize), events));
+            }
+            s.push_str(" ]");
+        }
+        s
+    }
+
+    fn trace_describe_flat(&self, fd: usize) -> String {
+        let s = self.trace_describe(fd);
+        match s.find(" [") {
+            Some(i) => String::from(&s[..i]),
+            None => s,
+        }
+    }
+
     fn readiness_at(&self, desc: &FileDescriptor, depth: u32) -> u32 {
         match desc {
             FileDescriptor::Epoll(ep) if depth < 4 => {

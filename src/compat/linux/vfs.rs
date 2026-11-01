@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::fd::{FileDescriptor, OpenFile, O_ACCMODE, O_APPEND, O_RDONLY, O_WRONLY};
-use crate::fs::zfs::types::{dtype_from_mode, S_IFCHR, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
+use crate::fs::zfs::types::{dtype_from_mode, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
 use crate::fs::zfs::zpl::{Attr, SetAttr};
 use crate::fs::ZfsClient;
 use crate::memory::vm::prefault_current;
@@ -522,9 +522,42 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::ConsoleIn) | Some(FileDescriptor::ConsoleOut) | Some(FileDescriptor::ConsoleErr) => {
             Some(Ok(console_stat()))
         }
+        Some(FileDescriptor::MemFd(m)) => {
+            // PipeWire checks st_size (and st_dev/st_ino) before mapping a shared block
+            let mut st = anon_stat(Arc::as_ptr(&m) as *const u8, S_IFREG | 0o777);
+            st.st_size = m.lock().size() as i64;
+            st.st_blocks = (st.st_size + 511) / 512;
+            Some(Ok(st))
+        }
+        Some(FileDescriptor::PipeRead(p)) | Some(FileDescriptor::PipeWrite(p)) => {
+            Some(Ok(anon_stat(Arc::as_ptr(&p) as *const u8, S_IFIFO | 0o600)))
+        }
+        Some(FileDescriptor::Inet(s)) => Some(Ok(anon_stat(Arc::as_ptr(&s) as *const u8, S_IFSOCK | 0o777))),
+        // Anonymous-inode objects: Linux reports mode 0600 without a file type
+        Some(FileDescriptor::EventFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
+        Some(FileDescriptor::Epoll(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
+        Some(FileDescriptor::SignalFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
+        Some(FileDescriptor::TimerFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
+        Some(FileDescriptor::Inotify(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
+        Some(FileDescriptor::PidFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         None => Some(Err(EBADF)),
         _ => None,
     }
+}
+
+/// Stat for a kernel object without a filesystem inode: owned by the caller, with the
+/// object's address as a stable inode number (shared by dup'd descriptors, as on Linux).
+fn anon_stat(obj: *const u8, mode: u32) -> super::types::LinuxStat {
+    let c = creds();
+    let mut st = super::types::LinuxStat::default();
+    st.st_dev = 0xd;
+    st.st_ino = obj as u64 >> 4;
+    st.st_mode = mode;
+    st.st_nlink = 1;
+    st.st_uid = c.euid;
+    st.st_gid = c.egid;
+    st.st_blksize = 4096;
+    st
 }
 
 fn open_at(dirfd: i64, path_ptr: u64, flags: u32, mode: u32) -> i64 {

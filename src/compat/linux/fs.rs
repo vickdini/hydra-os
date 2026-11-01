@@ -13,7 +13,7 @@
 //! ## Key Types & Interfaces
 //! - [`PseudoFile`]: Enumeration of supported virtual device and `/proc` nodes.
 //! - [`match_pseudo_path()`]: Resolves a canonical path string to a [`PseudoFile`] variant.
-//! - [`proc_link()`]: Resolves dynamic `/proc/self/cwd` and `/proc/self/exe` symbolic links.
+//! - [`proc_link()`]: Resolves dynamic `/proc/self/cwd`, `/proc/self/exe`, `/proc/<pid>/root` and `/proc/<pid>/exe` symbolic links.
 //!
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
@@ -213,7 +213,25 @@ pub fn proc_link(path: &str) -> Option<alloc::string::String> {
     match path {
         "/proc/self/cwd" => Some(crate::task::with_current_fds_mut(|fds| fds.cwd_path.clone())),
         "/proc/self/exe" => crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())),
-        _ => None,
+        // A process's root directory. Every Linux process shares the caller's root, so it
+        // is "/" as the caller sees it. PipeWire opens it to tell host clients from
+        // Flatpak sandboxes (".flatpak-info" in the client's root); a failure makes it
+        // treat every client, the session manager included, as sandboxed.
+        "/proc/self/root" => Some(alloc::string::String::from("/")),
+        _ => {
+            // /proc/<pid>/root and /proc/<pid>/exe of another process (KWin reads the exe
+            // link of a Wayland client to decide which privileged protocols it may bind)
+            let (pid, entry) = path.strip_prefix("/proc/")?.split_once('/')?;
+            let pid: u64 = pid.parse().ok()?;
+            match entry {
+                "root" => {
+                    let alive = super::proc::PROCS.lock().get(&pid).map_or(false, |p| !p.zombie);
+                    alive.then(|| alloc::string::String::from("/"))
+                }
+                "exe" => crate::task::SCHEDULER.lock().exe_of(pid),
+                _ => None,
+            }
+        }
     }
 }
 

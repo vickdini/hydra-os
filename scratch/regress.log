@@ -1,3 +1,4 @@
+Windows Hypervisor Platform accelerator is operational
 linux run /bin/proctest.elf
 [1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/proctest.elf'...
 [mouse] 4 packets (wheel enabled)
@@ -6,7 +7,7 @@ linux run /bin/proctest.elf
  [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
 ============================================================
   - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
-  - Memory Map Entries : 100 descriptors captured
+  - Memory Map Entries : 99 descriptors captured
   - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
   - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
   - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
@@ -42,9 +43,29 @@ linux run /bin/proctest.elf
 [proctest] stopped nanosleep restarts for the remaining time PASS
 [proctest] ALL PASSED (0 failures)
 [+] Linux process 4 exited with status 0.
-hydra:/bin$ linux run /bin/ptytest.elf
+hydra:/bin$ 
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/ptytest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/ptytest.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
 [+] Read 996952 bytes from OpenZFS (/bin/ptytest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 13 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
 [ptytest] fd opened by a thread is usable by main thread     PASS
 [ptytest] pipe created by a thread works in main thread      PASS
 [ptytest] fd closed by a thread is closed for main thread    PASS
@@ -72,10 +93,30 @@ hydra:/bin$ linux run /bin/ptytest.elf
 [ptytest] ^C on master sends SIGINT to the slave's foreground PASS
 [ptytest] forkpty child sees a terminal on stdio             PASS
 [ptytest] ALL PASSED (0 failures)
-[+] Linux process 13 exited with status 0.
-hydra:/bin$ linux run /bin/unixtest.elf
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/unixtest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/unixtest.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
 [+] Read 860400 bytes from OpenZFS (/bin/unixtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 21 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
 [unixtest] socketpair(SOCK_STREAM)                              PASS
 [unixtest] stream write/read                                    PASS
 [unixtest] stream reads merge writes                            PASS
@@ -112,10 +153,30 @@ hydra:/bin$ linux run /bin/unixtest.elf
 [unixtest] getsockname returns the bound name (abstract)        PASS
 [unixtest] non-blocking accept -> EAGAIN (abstract)             PASS
 [unixtest] ALL PASSED (0 failures)
-[+] Linux process 21 exited with status 0.
-hydra:/bin$ linux run /bin/m3test.elf
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/m3test.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/m3test.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
 [+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 24 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
 [m3test] eventfd2 with EFD_CLOEXEC                              PASS
 [m3test] eventfd read returns the sum and resets                PASS
 [m3test] blocking eventfd read waits for a writer               PASS
@@ -146,10 +207,30 @@ hydra:/bin$ linux run /bin/m3test.elf
 [m3test] rm_watch queues IN_IGNORED                             PASS
 [m3test] EPOLLONESHOT reports once until re-armed               PASS
 [m3test] ALL PASSED (0 failures)
-[+] Linux process 24 exited with status 0.
-hydra:/bin$ linux run /bin/gapstest.elf
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/gapstest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/gapstest.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
 [+] Read 976520 bytes from OpenZFS (/bin/gapstest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 27 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
 [gapstest] pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT)      PASS
 [gapstest] PI mutex init                                            PASS
 [gapstest] two threads under a PI mutex count to 4000               PASS
@@ -163,7 +244,7 @@ hydra:/bin$ linux run /bin/gapstest.elf
 [gapstest] periodic timer delivered repeated SIGALRMs               PASS
 [gapstest] disarmed timer reads back as zero                        PASS
 [gapstest] ITIMER_PROF fires after CPU time is used                 PASS
-[linux] pid 31 killed by signal 14
+[linux] pid 9 killed by signal 14
 [gapstest] an unhandled SIGALRM terminates the process              PASS
 [gapstest] pidfd_open on a child                                    PASS
 [gapstest] pidfd not readable while the child runs                  PASS
@@ -179,10 +260,30 @@ hydra:/bin$ linux run /bin/gapstest.elf
 [gapstest] process-shared semaphore between parent and child        PASS
 [gapstest] a private wake does not reach another process            PASS
 [gapstest] ALL PASSED (0 failures)
-[+] Linux process 27 exited with status 0.
-hydra:/bin$ linux run /bin/vmtest.elf
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/vmtest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/vmtest.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
 [+] Read 968248 bytes from OpenZFS (/bin/vmtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 38 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
 [vmtest] Hydra VM test starting (argc=1, argv[0]=/bin/vmtest.elf)
 [vmtest] malloc small (brk) + large (mmap)            PASS
 [vmtest] realloc 8 MiB -> 32 MiB keeps contents (mremap) PASS
@@ -207,5 +308,5 @@ hydra:/bin$ linux run /bin/vmtest.elf
 [vmtest] 4 threads share memory (counter == 4000)     PASS
 [vmtest] per-thread SSE state isolated                PASS
 [vmtest] ALL PASSED (0 failures)
-[+] Linux process 38 exited with status 0.
+[+] Linux process 4 exited with status 0.
 hydra:/bin$ 

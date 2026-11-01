@@ -1,0 +1,255 @@
+Windows Hypervisor Platform accelerator is operational
+2... 1... NOW
+[*] Starting KDE Plasma...
+hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
+org.kde.startup: not a reply org.freedesktop.locale1 QDBusMessage(type=Error, service="", error name="org.freedesktop.DBus.Error.Spawn.ChildExited", error message="Launch helper exited with unknown return code 1", signature="s", contents=("Launch helper exited with unknown return code 1") )
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.3' (uid=1000 pid=52 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+No backend specified, automatically choosing drm
+hydra-logind: session controller is :1.4
+pci id for fd 19: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+kwin_wayland_drm: drmSetClientCap for Atomic Mode Setting failed. Using legacy mode on GPU "/dev/dri/card0"
+kwin_wayland_drm: drmModeListLessees() failed: Invalid argument
+kwin_wayland_drm: Could not find edid for connector DrmConnector(id=42, gpu="/dev/dri/card0", name="Virtual-1", connection="Connected", countMode=1)
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+kwin_screencast: Failed to connect PipeWire context
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+Xwayland glamor: GBM Wayland interfaces not available
+Failed to initialize glamor, falling back to sw
+The XKEYBOARD keymap compiler (xkbcomp) reports:
+> Warning:          Unsupported maximum keycode 708, clipping.
+>                   X11 cannot support keycodes above 255.
+> Warning:          Virtual modifier Hyper multiply defined
+>                   Using 0, ignoring 0
+> Warning:          Virtual modifier ScrollLock multiply defined
+>                   Using 0, ignoring 0
+Errors from xkbcomp are not fatal to the X server
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.4' (uid=1000 pid=60 comm="")
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+org.kde.plasma.session: process job  "kcminit_startup" finished with exit code  0
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.KSplash'
+[linux] pid 102: unimplemented syscall 29 (0x0, 0x1, 0x380) -> ENOSYS
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.10' (uid=1000 pid=102 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.2' (uid=1000 pid=48 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+kf.kio.gui: Failed to determine systemd version, falling back to extremely legacy forking mode.
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+[1;33m[W][15:06:09.690000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+[1;33m[W][15:06:09.710000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:09.710000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][15:06:09.720000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:09.720000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][15:06:09.730000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:09.730000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+[1;33m[W][15:06:09.790000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+Xlib XKB extension major= 1  minor= 0
+New PolkitAgentListener  0x5555577520d0
+Adding new listener  PolkitQt1::Agent::Listener(0x555557751e90) for  0x5555577520d0
+Listener online
+"Cannot create unix session: No session for pid 125"
+
+** (process:125): [1;35mCRITICAL[0m **: [34m15:06:11.470[0m: polkit_agent_listener_register_with_options: assertion 'POLKIT_IS_SUBJECT (subject)' failed
+"Cannot register authentication agent!"
+Authentication agent result: false
+Couldn't register listener!
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.ActivityManager' requested by ':1.12' (uid=1000 pid=126 comm="")
+X server XKB extension major= 1  minor= 0
+[linux] pid 155: unimplemented syscall 326 (0xf, 0x7fffffffcaf0, 0x10) -> ENOSYS
+org.kde.kactivities.resources: Creating the backup of the current database failed!
+[1;32mI 15:06:13.950000 [1;35m                wp [1;34m../lib/wp/wp.c:35:wp_init:[0m WirePlumber 0.5.13 initializing
+QDBusObjectPath: invalid path "/modules/oom-notifier"
+kf.dbusaddons: The kded module name "oom-notifier" is invalid!
+QDBusObjectPath: invalid path "/modules/plasma-session-shortcuts"
+kf.dbusaddons: The kded module name "plasma-session-shortcuts" is invalid!
+[1;32mI 15:06:14.400000 [1;35m        pw.context [1;34m../src/pipewire/pipewire.c:581:pw_init:[0m version 1.6.2
+[1;32mI 15:06:14.460000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:347:wp_conf_open:[0m [1;92m<WpConf:0x5555555614a0>[0m opening config file: /usr/share/wireplumber/wireplumber.conf
+[1;32mI 15:06:14.490000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:362:wp_conf_open:[0m [1;92m<WpConf:0x5555555614a0>[0m opening fragment file: /usr/share/wireplumber/wireplumber.conf.d/alsa-vm.conf
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;32mI 15:06:14.820000 [1;35m           wp-core [1;34m../lib/wp/core.c:339:wp_core_constructed:[0m [1;36m<WpCore:0x55555556e4f0>[0m using configuration file: wireplumber.conf
+[1;32mI 15:06:14.820000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:492:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'context.properties' is not defined
+[1;32mI 15:06:14.830000 [1;35m        pw.context [1;34m../src/pipewire/context.c:473:pw_context_new:[0m 0x55555556f6a0: parsed 0 context.properties items
+[1;32mI 15:06:14.840000 [1;35m        pw.context [1;34m../src/pipewire/context.c:272:setup_data_loops:[0m created data loop 'data-loop.0'
+[1;32mI 15:06:14.840000 [1;35m        pw.context [1;34m../src/pipewire/context.c:275:setup_data_loops:[0m created 1 data-loops
+[1;96mD 15:06:14.850000 [1;35m           pw.core [1;34m../src/pipewire/impl-core.c:425:pw_context_create_core:[0m 0x5555555713c0: new pipewire-hydra-157
+[1;32mI 15:06:14.850000 [1;35m        pw.context [1;34m../src/pipewire/context.c:567:pw_context_new:[0m 0x55555556f6a0: parsed 0 context.spa-libs items
+[1;32mI 15:06:14.860000 [1;35m        pw.context [1;34m../src/pipewire/context.c:571:pw_context_new:[0m 0x55555556f6a0: parsed 0 context.modules items
+[1;32mI 15:06:14.860000 [1;35m        pw.context [1;34m../src/pipewire/context.c:576:pw_context_new:[0m 0x55555556f6a0: parsed 0 context.objects items
+[1;32mI 15:06:14.870000 [1;35m        pw.context [1;34m../src/pipewire/context.c:579:pw_context_new:[0m 0x55555556f6a0: parsed 0 context.exec items
+[1;32mI 15:06:14.870000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:log.level type: value:3
+[1;32mI 15:06:14.880000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.rate type: value:48000
+[1;32mI 15:06:14.880000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.allowed-rates type: value:[ 48000 ]
+[1;32mI 15:06:14.890000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.quantum type: value:1024
+[1;32mI 15:06:14.900000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.min-quantum type: value:32
+[1;32mI 15:06:14.900000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.max-quantum type: value:2048
+[1;32mI 15:06:14.910000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.force-quantum type: value:0
+[1;32mI 15:06:14.910000 [1;35m       pw.metadata [1;34m../src/pipewire/impl-metadata.c:186:impl_set_property:[0m 0x555555571990: add id:0 key:clock.force-rate type: value:0
+[1;32mI 15:06:14.920000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:481:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'context.spa-libs' is used as-is from '/usr/share/wireplumber/wireplumber.conf'
+[1;32mI 15:06:14.930000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:481:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'context.modules' is used as-is from '/usr/share/wireplumber/wireplumber.conf'
+[1;32mI 15:06:14.940000 [1;35m           pw.conf [1;34m../src/pipewire/conf.c:1111:pw_conf_section_for_each:[0m handle config 'wpconf' section 'context.spa-libs'
+[1;32mI 15:06:14.940000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:585:wp_conf_parse_pw_context_sections:[0m [1;92m<WpConf:0x5555555614a0>[0m parsed 6 context.spa-libs items
+[1;32mI 15:06:14.950000 [1;35m           pw.conf [1;34m../src/pipewire/conf.c:1111:pw_conf_section_for_each:[0m handle config 'wpconf' section 'context.modules'
+[1;32mI 15:06:14.960000 [1;35m         pw.module [1;34m../src/pipewire/impl-module.c:157:pw_context_load_module:[0m 0x55555556f6a0: name:libpipewire-module-rt args:{
+        nice.level   = -11
+        # rt.prio      = 88
+        # rt.time.soft = -1
+        # rt.time.hard = -1
+        # uclamp.min = 0
+        # uclamp.max = 1024
+    }
+[1;32mI 15:06:14.970000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:587:check_realtime_privileges:[0m failed to set realtime policy: Operation not permitted
+[1;32mI 15:06:14.980000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:552:check_realtime_privileges:[0m Clamp rtprio 83 to -1
+[1;32mI 15:06:14.980000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:560:check_realtime_privileges:[0m Priority max (-1) must be at least 11
+[1;32mI 15:06:14.990000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:596:check_realtime_privileges:[0m can't set rt prio to 83 (try increasing rlimits)
+[1;32mI 15:06:14.990000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:313:pw_rtkit_check_xdg_portal:[0m Can't find org.freedesktop.portal.Desktop. Is xdg-desktop-portal running?
+[1;32mI 15:06:15.000000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:955:rtkit_get_bus:[0m found session bus but no portal, trying RTKit fallback
+[1;93mW 15:06:15.010000 [1;35m           default [1;34m../src/pipewire/thread.c:119:impl_create:[0m pthread_setname error: No such file or directory
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;32mI 15:06:15.520000 [1;35m          spa.loop [1;34m../spa/plugins/support/loop.c:264:loop_create_queue:[0m 0x555555580ff8 created queue 0x5555555815c0 idx:0 0x7fffbeda5840
+[1;32mI 15:06:15.520000 [1;35m           default [1;34m../lib/wp/private/parse-conf-section.c:70:load_module:[0m 0x55555556f6a0: loaded module libpipewire-module-rt
+[1;32mI 15:06:15.530000 [1;35m         pw.module [1;34m../src/pipewire/impl-module.c:157:pw_context_load_module:[0m 0x55555556f6a0: name:libpipewire-module-protocol-native args:(null)
+[1;96mD 15:06:15.530000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1825:pipewire__module_init:[0m 0x55555558a110: new
+[1;96mD 15:06:15.540000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1440:create_server:[0m 0x55555558a110: created server 0x55555558a660
+[1;32mI 15:06:15.540000 [1;35m           default [1;34m../lib/wp/private/parse-conf-section.c:70:load_module:[0m 0x55555556f6a0: loaded module libpipewire-module-protocol-native
+[1;32mI 15:06:15.550000 [1;35m         pw.module [1;34m../src/pipewire/impl-module.c:157:pw_context_load_module:[0m 0x55555556f6a0: name:libpipewire-module-metadata args:(null)
+[1;32mI 15:06:15.560000 [1;35m           default [1;34m../lib/wp/private/parse-conf-section.c:70:load_module:[0m 0x55555556f6a0: loaded module libpipewire-module-metadata
+[1;32mI 15:06:15.560000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:590:wp_conf_parse_pw_context_sections:[0m [1;92m<WpConf:0x5555555614a0>[0m parsed 3 context.modules items
+[1;36mT 15:06:15.570000 [1;35m           wp-core [1;34m../lib/wp/core.c:43:wp_loop_source_dispatch:[0m [1;36m<GSource:0x55555556ea90>[0m entering pw main loop
+[1;32mI 15:06:15.580000 [1;35m           wp-core [1;34m../lib/wp/core.c:554:wp_core_activate_execute_step:[0m [1;36m<WpCore:0x55555556e4f0>[0m connecting to pipewire...
+[1;96mD 15:06:15.580000 [1;35m           pw.core [1;34m../src/pipewire/core.c:330:core_new:[0m 0x55555558c8f0: new
+[1;96mD 15:06:15.590000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1303:impl_new_client:[0m 0x55555558a110: new client 0x55555558d2e0
+[1;96mD 15:06:15.590000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:428:pw_protocol_native_connection_new:[0m connection 0x55555558d6f0: new fd:-1
+[1;96mD 15:06:15.600000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1330:impl_new_client:[0m 0x55555558a110: connect generic
+[1;96mD 15:06:15.600000 [1;35m          pw.proxy [1;34m../src/pipewire/proxy.c:92:pw_proxy_new:[0m 0x55555558d410: new 1 type PipeWire:Interface:Client/3 core-proxy:0x55555558c8f0, marshal:0x7fffbe38c3e0
+[1;36mT 15:06:15.610000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1275:on_client_need_flush:[0m need flush
+[1;36mT 15:06:15.610000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1275:on_client_need_flush:[0m need flush
+[1;96mD 15:06:15.620000 [1;35m           pw.core [1;34m../src/pipewire/core.c:419:pw_context_connect:[0m 0x55555558c8f0: connect
+[1;32mI 15:06:15.620000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/local-socket.c:72:try_connect:[0m connecting to 'pipewire-0-manager' runtime_dir:/run/user/1000
+[1;96mD 15:06:15.630000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:461:pw_protocol_native_connection_set_fd:[0m connection 0x55555558d6f0: fd:14
+[1;96mD 15:06:15.640000 [1;35m          pw.proxy [1;34m../src/pipewire/proxy.c:92:pw_proxy_new:[0m 0x55555559f840: new 2 type PipeWire:Interface:Registry/3 core-proxy:0x55555558c8f0, marshal:0x7fffbe38c560
+[1;36mT 15:06:15.640000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1275:on_client_need_flush:[0m need flush
+[1;96mD 15:06:15.650000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1131:on_remote_data:[0m 0x55555558d2e0: connected, fd 14
+[1;36mT 15:06:15.650000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:815:pw_protocol_native_connection_flush:[0m connection 0x55555558d6f0: 14 written 1856 bytes and 0 fds
+[1;93mW 15:06:15.670000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 15:06:15.680000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:993:do_rtkit_setup:[0m RTKit does not give us MaxRealtimePriority, using 1
+[1;93mW 15:06:15.680000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 15:06:15.690000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:998:do_rtkit_setup:[0m RTKit does not give us MinNiceLevel, using 0
+[1;93mW 15:06:15.690000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 15:06:15.700000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:1003:do_rtkit_setup:[0m RTKit does not give us RTTimeUSecMax, using -1
+[1;32mI 15:06:15.700000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:607:set_nice:[0m clamped nice level -11 to 0
+[1;32mI 15:06:15.710000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:627:set_nice:[0m main thread nice level set to 0
+[1;33m[W][15:06:15.720000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x555555574410 flatpak check failed: No such file or directory[0m
+[1;36mT 15:06:15.740000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:253:refill_buffer:[0m connection 0x55555558d6f0: 14 read 7120 bytes and 0 fds
+[1;36mT 15:06:15.750000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1036:process_remote:[0m 0x55555558c8f0: got message 0 from 0 seq:0
+[1;36mT 15:06:15.750000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:637:pw_protocol_native_connection_get_footer:[0m connection 0x55555558d6f0: recv message footer, size:48
+[1;36mT 15:06:15.760000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/protocol-footer.c:103:demarshal_core_generation:[0m core 0x55555558c8f0: recv server registry generation:33
+[1;32mI 15:06:15.760000 [1;35m           wp-core [1;34m../lib/wp/core.c:235:core_info:[0m [1;36m<WpCore:0x55555556e4f0>[0m connected to server: pipewire-0, cookie: 235270372
+[1;36mT 15:06:15.770000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1036:process_remote:[0m 0x55555558c8f0: got message 8 from 0 seq:1
+[1;96mD 15:06:15.780000 [1;35m           pw.core [1;34m../src/pipewire/core.c:86:core_event_bound_id:[0m 0x55555558c8f0: proxy id 1 bound 33
+[1;96mD 15:06:15.780000 [1;35m          pw.proxy [1;34m../src/pipewire/proxy.c:143:pw_proxy_set_bound_id:[0m 0x55555558d410: id:1 bound:33
+[1;96mD 15:06:15.790000 [1;35m           pw.core [1;34m../src/pipewire/core.c:115:core_event_bound_props:[0m 0x55555558c8f0: proxy id 1 bound 33
+[1;36mT 15:06:15.790000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1036:process_remote:[0m 0x55555558c8f0: got message 0 from 1 seq:2
+[1;36mT 15:06:15.800000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1036:process_remote:[0m 0x55555558c8f0: got message 0 from 1 seq:3
+[1;96mD 15:06:15.800000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native/connection.c:278:clear_buffer:[0m 0x55555558d710 clear fds:0 n_fds:0
+[1;36mT 15:06:15.810000 [1;35mmod.protocol-nativ [1;34m../src/modules/module-protocol-native.c:1036:process_remote:[0m 0x55555558c8f0: got message 0 from 1 seq:4
+[1;32mI 15:06:15.810000 [1;35m           wp-core [1;34m../lib/wp/core.c:575:wp_core_activate_execute_step:[0m [1;36m<WpCore:0x55555556e4f0>[0m parsing & loading components for profile [main]...
+[1;32mI 15:06:15.820000 [1;35mwp-internal-comp-l [1;34m../lib/wp/private/internal-comp-loader.c:944:wp_internal_comp_loader_load:[0m Loading profile 'main'
+[1;32mI 15:06:15.830000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:481:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'wireplumber.profiles' is used as-is from '/usr/share/wireplumber/wireplumber.conf'
+[1;32mI 15:06:15.840000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:481:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'wireplumber.components' is used as-is from '/usr/share/wireplumber/wireplumber.conf'
+[1;32mI 15:06:15.850000 [1;35m           wp-conf [1;34m../lib/wp/conf.c:481:ensure_merged_section:[0m [1;92m<WpConf:0x5555555614a0>[0m section 'wireplumber.components.rules' is used as-is from '/usr/share/wireplumber/wireplumber.conf'
+[1;32mI 15:06:15.860000 [1;35mwp-internal-comp-l [1;34m../lib/wp/private/internal-comp-loader.c:730:ensure_no_media_session:[0m [1;36m<WpCore:0x55555556e4f0>[0m checking if pipewire-media-session is running...
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;33m[W][15:06:17.820000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+[1;33m[W][15:06:18.300000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:18.300000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][15:06:18.310000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:18.310000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][15:06:18.320000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][15:06:18.320000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+QThreadStorage: entry 2 destroyed before end of thread 0x555555576fb0
+QThreadStorage: entry 1 destroyed before end of thread 0x555555576fb0
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.ActivityManager'
+[1;33m[W][15:06:18.960000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;33m[W][15:06:19.320000] mod.protocol-pulse | [        server.c:  641 start_unix_server()] server 0x555555598a90: unlinking stale socket '/run/user/1000/pulse/native'[0m
+[1;33m[W][15:06:19.380000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x5555555df8c0 flatpak check failed: No such file or directory[0m
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+kf.package: Could not find required file "mainscript" for package "/usr/share/plasma/plasmoids/org.kde.plasma.icontasks/" should be QList("ui/main.qml")
+org.kde.plasma.libtaskmanager: The PlasmaWindowManagement protocol hasn't activated in time. The client possibly got denied by kwin? Check kwin output.
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.12' (uid=1000 pid=126 comm="")
+org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x55555969ae70
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x55555969ae70
+[1;33m[W][15:07:11.520000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x5555555f4780 flatpak check failed: No such file or directory[0m
+

@@ -325,6 +325,11 @@ pub struct Task {
     pub event_wait: bool,
     /// A wakeup arrived while the task was not (yet) waiting: its next wait returns at once.
     pub wake_pending: bool,
+    /// Became ready by a wakeup (not by using up its timeslice): runs ahead of busy tasks
+    /// until it is next scheduled.
+    pub woken: bool,
+    /// Lost the CPU to a woken task mid-timeslice: scheduled before other ready tasks.
+    pub preempted: bool,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -368,6 +373,8 @@ impl Task {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }

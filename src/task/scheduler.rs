@@ -219,6 +219,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -305,6 +307,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -387,6 +391,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -460,6 +466,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -557,6 +565,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
@@ -711,6 +721,8 @@ impl Scheduler {
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             event_wait: false,
+            woken: false,
+            preempted: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
@@ -756,11 +768,23 @@ impl Scheduler {
         let curr_task = &mut self.tasks[curr_idx];
         curr_task.ticks_run += 1;
 
-        // 2. Check if current task still has timeslice and is eligible to continue
+        // 2. Check if current task still has timeslice and is eligible to continue. A task
+        // woken by an event (input, a socket, a futex; not a timed sleep, which polling
+        // loops use) preempts it: interactive work waits at most one tick instead of a
+        // full timeslice per busy task ahead of it.
         if curr_task.state == TaskState::Running && curr_task.timeslice_remaining > 1 {
             curr_task.timeslice_remaining -= 1;
-            return;
+            let woken_waiting = self
+                .tasks
+                .iter()
+                .any(|t| t.woken && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
+            if !woken_waiting {
+                return;
+            }
+            // Preempted mid-slice: it resumes right after the woken work
+            self.tasks[curr_idx].preempted = true;
         }
+        let curr_task = &mut self.tasks[curr_idx];
 
         // 3. Current task's timeslice expired or it is not Running (e.g. Blocked, Sleeping, Dead)
         let current_cr3 = Cr3::read().0.start_address().as_u64();
@@ -817,14 +841,22 @@ impl Scheduler {
                 break;
             }
         }
-        for offset in 1..=num_tasks {
-            if next_idx.is_some() {
-                break;
-            }
-            let idx = (curr_idx + offset) % num_tasks;
-            if self.tasks[idx].state == TaskState::Ready && self.tasks[idx].priority > TaskPriority::Idle {
-                next_idx = Some(idx);
-                break;
+        // (event-woken tasks first, then tasks they preempted, then the rest)
+        for tier in 0..3 {
+            for offset in 1..=num_tasks {
+                if next_idx.is_some() {
+                    break;
+                }
+                let idx = (curr_idx + offset) % num_tasks;
+                let t = &self.tasks[idx];
+                let eligible = match tier {
+                    0 => t.woken,
+                    1 => t.preempted,
+                    _ => true,
+                };
+                if t.state == TaskState::Ready && t.priority > TaskPriority::Idle && eligible {
+                    next_idx = Some(idx);
+                }
             }
         }
 
@@ -840,6 +872,8 @@ impl Scheduler {
         }
 
         let next_idx = next_idx.unwrap_or(curr_idx);
+        self.tasks[next_idx].woken = false;
+        self.tasks[next_idx].preempted = false;
         if next_idx == curr_idx {
             self.tasks[curr_idx].state = TaskState::Running;
             self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;
@@ -905,6 +939,11 @@ impl Scheduler {
         }
     }
 
+    /// Executable path of process `tgid` (`/proc/<pid>/exe`), if it has a live thread.
+    pub fn exe_of(&self, tgid: u64) -> Option<alloc::string::String> {
+        self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| alloc::string::String::from(t.exe_path()))
+    }
+
     /// CPU time of process `tgid` (all its live threads) in timer ticks.
     pub fn process_ticks(&self, tgid: u64) -> u64 {
         self.tasks.iter().filter(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| t.ticks_run).sum()
@@ -919,6 +958,7 @@ impl Scheduler {
                 TaskState::Blocked | TaskState::Sleeping { .. } if task.event_wait => {
                     task.state = TaskState::Ready;
                     task.event_wait = false;
+                    task.woken = true;
                 }
                 TaskState::Blocked | TaskState::Sleeping { .. } => {}
                 _ => task.wake_pending = true,
@@ -989,6 +1029,7 @@ impl Scheduler {
         for task in self.tasks.iter_mut() {
             if task.id == id && task.state == TaskState::Blocked {
                 task.state = TaskState::Ready;
+                task.woken = true;
                 return true;
             }
         }

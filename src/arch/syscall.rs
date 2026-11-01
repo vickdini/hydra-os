@@ -248,17 +248,36 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         // `task::preemptible`), and the entry stub disables interrupts again on return.
         x86_64::instructions::interrupts::enable();
         let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed)
-            && crate::compat::linux::trace_matches_current();
+            && crate::compat::linux::trace_matches_current()
+            && frame.rax != 228; // clock_gettime: too frequent to be useful
         let (num, args) = (frame.rax, [frame.rdi, frame.rsi, frame.rdx, frame.r10]);
         if tracing {
             let pid = crate::task::SCHEDULER.lock().current_task_id().0;
-            crate::kprintln!("[trace] {} > {}({:#x}, {:#x}, {:#x}, {:#x})", pid, num, args[0], args[1], args[2], args[3]);
+            crate::kprintln!("[trace] t={} {} > {}({:#x}, {:#x}, {:#x}, {:#x})", crate::arch::pit::ticks(), pid, num, args[0], args[1], args[2], args[3]);
+            // ppoll: show the timeout itself (a busy loop shows up as zero timeouts)
+            if num == 271 && args[2] != 0 && crate::memory::vm::prefault_current(args[2], 16, false) {
+                let ts = unsafe { core::ptr::read_unaligned(args[2] as *const [i64; 2]) };
+                crate::kprintln!("[trace]   timeout {}s {}ns", ts[0], ts[1]);
+            }
+            if num == 271 && args[1] <= 16 && crate::memory::vm::prefault_current(args[0], args[1] * 8, false) {
+                for i in 0..args[1] {
+                    let pfd = unsafe { core::ptr::read_unaligned((args[0] + i * 8) as *const [i16; 4]) };
+                    let fd = (pfd[0] as u16 as u32) | ((pfd[1] as u16 as u32) << 16);
+                    let d = crate::task::with_current_fds_mut(|fds| fds.trace_describe(fd as usize));
+                    crate::kprintln!("[trace]   pollfd {} events {:#x}", d, pfd[2]);
+                }
+            }
         }
         crate::task::CURRENT_SYSCALL.store(num, core::sync::atomic::Ordering::Relaxed);
         crate::task::CURRENT_SYSCALL_ARGS[0].store(args[0], core::sync::atomic::Ordering::Relaxed);
         crate::task::CURRENT_SYSCALL_ARGS[1].store(args[1], core::sync::atomic::Ordering::Relaxed);
         let res = crate::compat::linux::dispatch_linux_syscall(frame);
         crate::task::CURRENT_SYSCALL.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+        if tracing && (num == 46 || num == 47) && crate::memory::vm::prefault_current(args[1], 56, false) {
+            // sendmsg/recvmsg: control (SCM_RIGHTS) bytes passed, after the call
+            let h = unsafe { core::ptr::read_unaligned(args[1] as *const [u64; 7]) };
+            crate::kprintln!("[trace]   controllen {} flags {:#x}", h[5], h[6] as u32);
+        }
         if tracing {
             crate::kprintln!("[trace]   = {}", res);
         }

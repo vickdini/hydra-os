@@ -1,0 +1,317 @@
+Windows Hypervisor Platform accelerator is operational
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[hydra_run] log stalled for 40.0 s: CPU state saved to scratch/hydra_stall.txt
+2... 1... NOW
+[*] Starting KDE Plasma...
+hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
+org.kde.startup: not a reply org.freedesktop.locale1 QDBusMessage(type=Error, service="", error name="org.freedesktop.DBus.Error.Spawn.ChildExited", error message="Launch helper exited with unknown return code 1", signature="s", contents=("Launch helper exited with unknown return code 1") )
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.3' (uid=1000 pid=52 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+No backend specified, automatically choosing drm
+hydra-logind: session controller is :1.4
+pci id for fd 19: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+kwin_wayland_drm: drmSetClientCap for Atomic Mode Setting failed. Using legacy mode on GPU "/dev/dri/card0"
+kwin_wayland_drm: drmModeListLessees() failed: Invalid argument
+kwin_wayland_drm: Could not find edid for connector DrmConnector(id=42, gpu="/dev/dri/card0", name="Virtual-1", connection="Connected", countMode=1)
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+kwin_screencast: Failed to connect PipeWire context
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+Xwayland glamor: GBM Wayland interfaces not available
+Failed to initialize glamor, falling back to sw
+The XKEYBOARD keymap compiler (xkbcomp) reports:
+> Warning:          Unsupported maximum keycode 708, clipping.
+>                   X11 cannot support keycodes above 255.
+> Warning:          Virtual modifier Hyper multiply defined
+>                   Using 0, ignoring 0
+> Warning:          Virtual modifier ScrollLock multiply defined
+>                   Using 0, ignoring 0
+Errors from xkbcomp are not fatal to the X server
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.4' (uid=1000 pid=60 comm="")
+org.kde.plasma.session: process job  "kcminit_startup" finished with exit code  0
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.KSplash'
+[linux] pid 102: unimplemented syscall 29 (0x0, 0x1, 0x380) -> ENOSYS
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.10' (uid=1000 pid=102 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.2' (uid=1000 pid=48 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+kf.kio.gui: Failed to determine systemd version, falling back to extremely legacy forking mode.
+Xlib XKB extension major= 1  minor= 0
+X server XKB extension major= 1  minor= 0
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+New PolkitAgentListener  0x55555781e4f0
+Adding new listener  PolkitQt1::Agent::Listener(0x55555781e290) for  0x55555781e4f0
+Listener online
+"Cannot create unix session: No session for pid 129"
+
+** (process:129): [1;35mCRITICAL[0m **: [34m14:14:44.240[0m: polkit_agent_listener_register_with_options: assertion 'POLKIT_IS_SUBJECT (subject)' failed
+"Cannot register authentication agent!"
+Authentication agent result: false
+Couldn't register listener!
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+[1;33m[W][14:14:45.240000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+[1;33m[W][14:14:45.270000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:45.270000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][14:14:45.270000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:45.270000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][14:14:45.280000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:45.280000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+[1;33m[W][14:14:45.330000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.ActivityManager' requested by ':1.14' (uid=1000 pid=126 comm="")
+QDBusObjectPath: invalid path "/modules/oom-notifier"
+kf.dbusaddons: The kded module name "oom-notifier" is invalid!
+QDBusObjectPath: invalid path "/modules/plasma-session-shortcuts"
+kf.dbusaddons: The kded module name "plasma-session-shortcuts" is invalid!
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[linux] pid 157: unimplemented syscall 326 (0x12, 0x7fffffffcaf0, 0x13) -> ENOSYS
+org.kde.kactivities.resources: Creating the backup of the current database failed!
+[1;93mW 14:14:48.780000 [1;35m           default [1;34m../src/pipewire/thread.c:119:impl_create:[0m pthread_setname error: No such file or directory
+[1;93mW 14:14:48.790000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 14:14:48.800000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:993:do_rtkit_setup:[0m RTKit does not give us MaxRealtimePriority, using 1
+[1;93mW 14:14:48.800000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 14:14:48.810000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:998:do_rtkit_setup:[0m RTKit does not give us MinNiceLevel, using 0
+[1;93mW 14:14:48.810000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 14:14:48.810000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:1003:do_rtkit_setup:[0m RTKit does not give us RTTimeUSecMax, using -1
+[1;33m[W][14:14:48.840000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x555555574410 flatpak check failed: No such file or directory[0m
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;33m[W][14:14:50.410000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+[1;33m[W][14:14:50.870000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:50.870000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][14:14:50.880000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:50.880000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][14:14:50.880000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][14:14:50.890000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+QThreadStorage: entry 2 destroyed before end of thread 0x555555576fb0
+QThreadStorage: entry 1 destroyed before end of thread 0x555555576fb0
+[1;33m[W][14:14:53.400000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.ActivityManager'
+[1;33m[W][14:14:54.300000] mod.protocol-pulse | [        server.c:  641 start_unix_server()] server 0x555555598a90: unlinking stale socket '/run/user/1000/pulse/native'[0m
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;33m[W][14:14:54.490000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x5555555df8c0 flatpak check failed: No such file or directory[0m
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+kf.package: Could not find required file "mainscript" for package "/usr/share/plasma/plasmoids/org.kde.plasma.icontasks/" should be QList("ui/main.qml")
+org.kde.plasma.libtaskmanager: The PlasmaWindowManagement protocol hasn't activated in time. The client possibly got denied by kwin? Check kwin output.
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.14' (uid=1000 pid=126 comm="")
+[heap] 22593 KiB used, 501694 KiB free of 524288 KiB
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Ready 0 -1(0x0,0x0) 0xbd7f2a87 266 shell
+[tasks] 1 Ready 1 -1(0x0,0x0) 0xbd79de39 5 idle
+[tasks] 2 Blocked 2 -1(0x0,0x0) 0xbd81cc46 1 netd
+[tasks] 3 Ready 3 -1(0x0,0x0) 0xbd831ce7 19 txgd
+[tasks] 4 Blocked 4 61(0xffffffffffffffff,0x7fffffffe894) 0xbd7f2a87 99 /usr/bin/dbus-run-session
+[tasks] 9 Blocked 9 232(0x3,0x7fffffffe510) 0xbd7f2a87 206 /usr/bin/dbus-daemon
+[tasks] 13 Blocked 13 7(0x7fffffffead0,0x1) 0xbd7f2a87 46 /usr/libexec/hydra-logind
+[tasks] 30 Sleeping 30 232(0x3,0x7fffffffe420) 0xbd7f2a87 977 /usr/bin/dbus-daemon
+[tasks] 31 Blocked 31 271(0x555555594bf0,0x3) 0xbd7f2a87 801 /usr/bin/startplasma-wayland
+[tasks] 32 Blocked 31 271(0x7fffb00013c0,0x3) 0xbd7f2a87 50 /usr/bin/startplasma-wayland
+[tasks] 99 Blocked 97 7(0x7fffb09aeb30,0x2) 0xbd7f2a87 4 /usr/bin/kded6
+[tasks] 48 Blocked 48 271(0x55555560ffa0,0xd) 0xbd7f2a87 132 /usr/bin/plasma_session
+[tasks] 100 Blocked 97 7(0x7fffb01adb30,0x2) 0xbd7f2a87 17 /usr/bin/kded6
+[tasks] 101 Blocked 97 202(0x5555557807e0,0x189) 0xbd7f2a87 2 /usr/bin/kded6
+[tasks] 51 Blocked 48 271(0x7fffb00013c0,0x2) 0xbd7f2a87 112 /usr/bin/plasma_session
+[tasks] 52 Blocked 52 271(0x5555555943f0,0x3) 0xbd7f2a87 50 /usr/bin/kwin_wayland_wrapper
+[tasks] 53 Blocked 53 271(0x555555bdb720,0x9) 0xbd7f2a87 1801 /usr/bin/kwin_wayland
+[tasks] 54 Blocked 52 271(0x7fffb40013c0,0x2) 0xbd7f2a87 10 /usr/bin/kwin_wayland_wrapper
+[tasks] 189 Blocked 126 202(0x555558b58928,0x189) 0xbd7f2a87 53 /usr/bin/plasmashell
+[tasks] 97 Blocked 97 271(0x5555558b0300,0x6) 0xbd7f2a87 225 /usr/bin/kded6
+[tasks] 110 Blocked 102 202(0x555555774ed0,0x189) 0xbd7f2a87 1 /usr/bin/ksmserver
+[tasks] 178 Blocked 175 202(0x555555573180,0x80) 0xbd7f2a87 2 /usr/libexec/geoclue-2.0/demos/agent
+[tasks] 167 Blocked 159 271(0x7fffb0000880,0x1) 0xbd7f2a87 1 /usr/bin/wireplumber
+[tasks] 63 Blocked 53 271(0x7fffb0001620,0x3) 0xbd7f2a87 409 /usr/bin/kwin_wayland
+[tasks] 64 Blocked 53 271(0x7fff9c0014f0,0x2) 0xbd7f2a87 67 /usr/bin/kwin_wayland
+[tasks] 65 Blocked 65 -1(0x0,0x0) 0xbd75c667 1 vtd
+[tasks] 180 Blocked 175 271(0x7fffb00008c0,0x3) 0xbd7f2a87 9 /usr/libexec/geoclue-2.0/demos/agent
+[tasks] 109 Blocked 105 202(0x5555555ea780,0x80) 0xbd7f2a87 2 /usr/libexec/udisks2/udisksd
+[tasks] 113 Blocked 105 271(0x7fffa80008c0,0x2) 0xbd7f2a87 18 /usr/libexec/udisks2/udisksd
+[tasks] 169 Blocked 169 271(0x55555562f720,0x2) 0xbd7f2a87 79 /usr/bin/gmenudbusmenuproxy
+[tasks] 168 Blocked 159 202(0x5555555a14d0,0x80) 0xbd7f2a87 1 /usr/bin/wireplumber
+[tasks] 102 Blocked 102 271(0x55555773a840,0x4) 0xbd7f2a87 182 /usr/bin/ksmserver
+[tasks] 73 Blocked 73 232(0x3,0x7fffffffda00) 0xbd7f2a87 503 /usr/bin/Xwayland
+[tasks] 170 Blocked 169 271(0x7fffb4001620,0x2) 0xbd7f2a87 25 /usr/bin/gmenudbusmenuproxy
+[tasks] 77 Blocked 77 -1(0x0,0x0) 0xbd731a87 352 itimerd
+[tasks] 98 Blocked 97 271(0x7fffb4001620,0x3) 0xbd7f2a87 164 /usr/bin/kded6
+[tasks] 181 Blocked 172 232(0x7,0x7fffbdc5c9e0) 0xbd7f2a87 2 /usr/bin/pipewire-pulse
+[tasks] 155 Blocked 105 271(0x7fff9c000880,0x1) 0xbd7f2a87 1 /usr/libexec/udisks2/udisksd
+[tasks] 105 Sleeping 105 271(0x7fffa8001ff0,0x5) 0xbd7f2a87 101 /usr/libexec/udisks2/udisksd
+[tasks] 106 Blocked 102 271(0x7fffb0001620,0x2) 0xbd7f2a87 40 /usr/bin/ksmserver
+[tasks] 107 Blocked 102 7(0x7fffb5db7628,0x1) 0xbd7f2a87 31 /usr/bin/ksmserver
+[tasks] 108 Ready 105 271(0x7fffb8000880,0x2) 0xbd7f2a87 17 /usr/libexec/udisks2/udisksd
+[tasks] 117 Blocked 117 271(0x555557763fc0,0x1) 0xbd7f2a87 149 /usr/bin/kaccess
+[tasks] 118 Blocked 117 271(0x7fffb4001620,0x2) 0xbd7f2a87 47 /usr/bin/kaccess
+[tasks] 119 Blocked 117 7(0x7fffb9777a28,0x1) 0xbd7f2a87 31 /usr/bin/kaccess
+[tasks] 120 Blocked 117 202(0x555555784bb0,0x189) 0xbd7f2a87 2 /usr/bin/kaccess
+[tasks] 121 Blocked 121 271(0x5555555eb5f0,0x1) 0xbd7f2a87 81 /usr/bin/xembedsniproxy
+[tasks] 125 Blocked 121 7(0x7fffba547a28,0x1) 0xbd7f2a87 9 /usr/bin/xembedsniproxy
+[tasks] 123 Blocked 121 271(0x7fffb4001620,0x2) 0xbd7f2a87 23 /usr/bin/xembedsniproxy
+[tasks] 126 Blocked 126 202(0x5555585d74cc,0x189) 0xbd7f2a87 643 /usr/bin/plasmashell
+[tasks] 148 Blocked 126 202(0x555555819ca0,0x189) 0xbd7f2a87 1 /usr/bin/plasmashell
+[tasks] 128 Blocked 128 271(0x55555558fc70,0x2) 0xbd7f2a87 39 /usr/lib/polkit-1/polkitd
+[tasks] 174 Blocked 172 232(0xb,0x7fffbf179a60) 0xbd7f2a87 6 /usr/bin/pipewire-pulse
+[tasks] 130 Sleeping 128 271(0x7fffb8000880,0x2) 0xbd7f2a87 14 /usr/lib/polkit-1/polkitd
+[tasks] 131 Blocked 128 202(0x5555555953e0,0x80) 0xbd7f2a87 2 /usr/lib/polkit-1/polkitd
+[tasks] 132 Blocked 128 271(0x7fffb00008c0,0x2) 0xbd7f2a87 15 /usr/lib/polkit-1/polkitd
+[tasks] 164 Blocked 157 271(0x7fff9c0013c0,0x1) 0xbd7f2a87 1 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 134 Sleeping 126 271(0x7fffb0001620,0x3) 0xbd7f2a87 211 /usr/bin/plasmashell
+[tasks] 179 Blocked 175 271(0x7fffb8000880,0x1) 0xbd7f2a87 1 /usr/libexec/geoclue-2.0/demos/agent
+[tasks] 175 Blocked 175 271(0x555555585250,0x1) 0xbd7f2a87 31 /usr/libexec/geoclue-2.0/demos/agent
+[tasks] 171 Blocked 169 7(0x7fffba4eea28,0x1) 0xbd7f2a87 5 /usr/bin/gmenudbusmenuproxy
+[tasks] 138 Blocked 126 202(0x5555557bf238,0x189) 0xbd7f2a87 20 /usr/bin/plasmashell
+[tasks] 139 Blocked 126 7(0x7fffaf7fd670,0x2) 0xbd7f2a87 85 /usr/bin/plasmashell
+[tasks] 172 Blocked 172 232(0x3,0x7fffffffd2d0) 0xbd7f2a87 37 /usr/bin/pipewire-pulse
+[tasks] 149 Blocked 149 232(0x3,0x7fffffffd2e0) 0xbd7f2a87 37 /usr/bin/pipewire
+[tasks] 150 Blocked 105 202(0x5555555e8800,0x80) 0xbd7f2a87 1 /usr/libexec/udisks2/udisksd
+[tasks] 151 Blocked 105 271(0x7fffa4001280,0x2) 0xbd7f2a87 1 /usr/libexec/udisks2/udisksd
+[tasks] 152 Blocked 149 232(0xb,0x7fffbf179a60) 0xbd7f2a87 6 /usr/bin/pipewire
+[tasks] 153 Blocked 149 232(0x7,0x7fffbe7e49e0) 0xbd7f2a87 2 /usr/bin/pipewire
+[tasks] 187 Ready 126 -1(0x7fff86ead000,0xb000) 0x7fffbf7d0f8c 353 /usr/bin/plasmashell
+[tasks] 157 Blocked 157 271(0x555555682ef0,0x2) 0xbd7f2a87 97 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 158 Blocked 157 271(0x7fffb4001620,0x2) 0xbd7f2a87 52 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 159 Running 159 228(0x1,0x7fffffffe620) 0x7fffbf5f7c25 685 /usr/bin/wireplumber
+[tasks] 160 Blocked 157 7(0x7fffba517b30,0x2) 0xbd7f2a87 2 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 161 Blocked 157 7(0x7fffb9d16b30,0x2) 0xbd7f2a87 2 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 162 Blocked 157 271(0x7fffa00013c0,0x1) 0xbd7f2a87 1 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 163 Blocked 157 271(0x7fff980013c0,0x1) 0xbd7f2a87 2 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+[tasks] 166 Blocked 159 232(0xa,0x7fffbeb92960) 0xbd7f2a87 5 /usr/bin/wireplumber
+[tasks] 188 Sleeping 126 202(0x5555577e4d48,0x89) 0xbd7f2a87 28 /usr/bin/plasmashell
+[tasks] 190 Sleeping 126 202(0x7fff88006378,0x89) 0xbd7f2a87 5 /usr/bin/plasmashell
+[tasks] 191 Blocked 191 7(0x7fffffffe4c0,0x2) 0xbd7f2a87 2 /usr/bin/dbus-daemon
+[tasks] 192 Sleeping 192 271(0x55555557c570,0x1) 0xbd7f2a87 6 /usr/bin/plasma_waitforname
+[tasks] 193 Blocked 192 271(0x7fffb40013c0,0x2) 0xbd7f2a87 10 /usr/bin/plasma_waitforname
+org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x5555566b8600
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x5555566b8600
+[1;33m[W][14:15:54.700000] mod.access   | [ module-access.c:  204 context_check_access()] 0x55555559fe10: client 0x5555555f4780 flatpak check failed: No such file or directory[0m
+qrc:/qt/qml/plasma/applet/org/kde/plasma/notifications/global/PulseAudio.qml:9:1: module "org.kde.plasma.private.volume" is not installed
+org.kde.plasma.waitforname: WaitForName: Service was not registered within timeout
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.kde.KSplash' failed: Process org.kde.KSplash exited with status 1
+
