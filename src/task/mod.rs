@@ -16,6 +16,7 @@
 //! - `SCHEDULER` & `TaskSnapshot`: Global preemptive round-robin scheduler and diagnostic state.
 //! - `spawn`, `spawn_user`, `spawn_elf`, `spawn_linux_elf`, `spawn_linux_chroot`: Process and thread creation APIs.
 //! - `yield_now`, `block_current`, `unblock_task`, `sleep_ms`, `exit`: Lifecycle and scheduling control.
+//! - `supervisor`: MINIX 3-style driver reincarnation server, heartbeat monitoring, and self-healing.
 //!
 //! ## Hardware & Dependency Context
 //!
@@ -32,10 +33,16 @@ pub mod scheduler;
 pub mod tcb;
 /// Lock-free interrupt-safe event wait queues (`poll`, `select`, pipes, sockets).
 pub mod wait;
+/// MINIX 3-style process reincarnation server, driver heartbeat watchdog, and fault recovery.
+pub mod supervisor;
 
 use alloc::vec::Vec;
 pub use elf::{load_elf, load_linux_elf, ElfBinary, ElfError, ElfProcessImage};
 pub use scheduler::{TaskSnapshot, SCHEDULER};
+pub use supervisor::{
+    get_service_snapshots, kill_service_by_name, restart_service_by_name, supervisor_init,
+    supervisor_tick, ServiceDescriptor, ServiceSnapshot, ServiceState, Supervisor, SUPERVISOR,
+};
 pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRegisters, TaskState};
 
 /// Number of kernel wait points currently active (see `preemptible`).

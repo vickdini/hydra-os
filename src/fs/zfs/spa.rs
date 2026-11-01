@@ -47,6 +47,7 @@ pub fn frame_bytes(frame: PhysFrame<Size4KiB>) -> &'static mut [u8; ZFS_BLOCK_SI
 enum Backend {
     Ata,
     Ram(*mut u8),
+    BlockDeviceEndpoint(u32),
 }
 
 /// The block device under the pool.
@@ -59,6 +60,29 @@ pub struct Vdev {
 unsafe impl Send for Vdev {}
 
 impl Vdev {
+    /// Connects to a decoupled user-space block device driver running on an IPC endpoint.
+    ///
+    /// # Arguments
+    /// * `endpoint_id` - Numeric ID of the IPC endpoint registered by the block driver.
+    ///
+    /// # Errors
+    /// Returns `Err` if the endpoint is invalid or the driver fails to report capacity.
+    pub fn open_endpoint(endpoint_id: u32) -> Result<Self, &'static str> {
+        let ep = crate::ipc::endpoint::get_system_endpoint(endpoint_id).ok_or("Invalid block endpoint")?;
+        let msg = crate::ipc::Message::new(crate::ipc::protocol::MSG_BLOCK_GET_SIZE);
+        ep.send_blocking(msg);
+        let reply = ep.receive_blocking();
+        if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && (reply.args[0] as i64) >= 0 {
+            let total_blocks = reply.args[1];
+            Ok(Self {
+                backend: Backend::BlockDeviceEndpoint(endpoint_id),
+                total_blocks,
+            })
+        } else {
+            Err("Failed to query block device size over IPC")
+        }
+    }
+
     /// Opens the primary ATA disk, or a RAM disk if none is attached.
     pub fn open() -> Self {
         if crate::arch::ata::is_drive_present() {
@@ -87,7 +111,7 @@ impl Vdev {
 
     /// Returns true if this virtual device is backed by physical hardware (ATA disk) rather than RAM.
     pub fn is_hardware_backed(&self) -> bool {
-        matches!(self.backend, Backend::Ata)
+        matches!(self.backend, Backend::Ata | Backend::BlockDeviceEndpoint(_))
     }
 
     /// Reads `count` consecutive blocks starting at `block` into `buf`.
@@ -96,7 +120,7 @@ impl Vdev {
         if block + count as u64 > self.total_blocks {
             return Err("ZFS: block read past end of vdev");
         }
-        match self.backend {
+        match &self.backend {
             Backend::Ram(base) => unsafe {
                 core::ptr::copy_nonoverlapping(base.add((block * BLOCK) as usize), buf.as_mut_ptr(), buf.len());
                 Ok(())
@@ -111,6 +135,23 @@ impl Vdev {
                 }
                 Ok(())
             }
+            Backend::BlockDeviceEndpoint(ep_id) => {
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
+                    let msg = crate::ipc::Message::with_args(
+                        crate::ipc::protocol::MSG_BLOCK_READ,
+                        [block, count as u64, buf.as_mut_ptr() as u64, 0],
+                    );
+                    ep.send_blocking(msg);
+                    let reply = ep.receive_blocking();
+                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
+                        Ok(())
+                    } else {
+                        Err("ZFS: block read failed over IPC endpoint")
+                    }
+                } else {
+                    Err("ZFS: block device endpoint missing")
+                }
+            }
         }
     }
 
@@ -120,7 +161,7 @@ impl Vdev {
         if block + count as u64 > self.total_blocks {
             return Err("ZFS: block write past end of vdev");
         }
-        match self.backend {
+        match &self.backend {
             Backend::Ram(base) => unsafe {
                 core::ptr::copy_nonoverlapping(buf.as_ptr(), base.add((block * BLOCK) as usize), buf.len());
                 Ok(())
@@ -135,6 +176,23 @@ impl Vdev {
                 }
                 Ok(())
             }
+            Backend::BlockDeviceEndpoint(ep_id) => {
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
+                    let msg = crate::ipc::Message::with_args(
+                        crate::ipc::protocol::MSG_BLOCK_WRITE,
+                        [block, count as u64, buf.as_ptr() as u64, 0],
+                    );
+                    ep.send_blocking(msg);
+                    let reply = ep.receive_blocking();
+                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
+                        Ok(())
+                    } else {
+                        Err("ZFS: block write failed over IPC endpoint")
+                    }
+                } else {
+                    Err("ZFS: block device endpoint missing")
+                }
+            }
         }
     }
 
@@ -143,12 +201,29 @@ impl Vdev {
     /// # Errors
     /// Returns an error if the underlying ATA controller command fails.
     pub fn flush(&mut self) -> Result<(), &'static str> {
-        if let Backend::Ata = self.backend {
-            if let Some(dev) = crate::arch::ata::PRIMARY_ATA.lock().as_mut() {
-                dev.flush()?;
+        match &self.backend {
+            Backend::Ata => {
+                if let Some(dev) = crate::arch::ata::PRIMARY_ATA.lock().as_mut() {
+                    dev.flush()?;
+                }
+                Ok(())
             }
+            Backend::BlockDeviceEndpoint(ep_id) => {
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
+                    let msg = crate::ipc::Message::new(crate::ipc::protocol::MSG_BLOCK_FLUSH);
+                    ep.send_blocking(msg);
+                    let reply = ep.receive_blocking();
+                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
+                        Ok(())
+                    } else {
+                        Err("ZFS: block cache flush failed over IPC endpoint")
+                    }
+                } else {
+                    Err("ZFS: block device endpoint missing")
+                }
+            }
+            Backend::Ram(_) => Ok(()),
         }
-        Ok(())
     }
 }
 

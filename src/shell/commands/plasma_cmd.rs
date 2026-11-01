@@ -12,11 +12,14 @@
 //! Pressing the `Escape` key or selecting "Leave" terminates the graphical session and
 //! cleanly restores the interactive microkernel text console.
 
+use core::sync::atomic::Ordering;
 use uefi::proto::console::text::{Color, Key, ScanCode};
 use crate::console::{read_key, set_color};
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
-use crate::video::{render_plasma_desktop, with_framebuffer, Compositor, WaylandCompositor};
+use crate::video::{
+    forward_key_char, forward_mouse_event, get_video_info, DisplayServer, USE_DISPLAY_ENDPOINT,
+};
 
 /// Shell command to launch the KDE Plasma Wayland desktop environment.
 pub struct PlasmaCommand;
@@ -114,15 +117,17 @@ impl Command for PlasmaCommand {
         }
 
         // Verify that hardware GOP video linear framebuffer is active
-        let fb_dims = with_framebuffer(|fb| (fb.width(), fb.height()));
-        let (width, height) = match fb_dims {
-            Some((w, h)) => (w, h),
+        let video_info = match get_video_info() {
+            Some(i) => i,
             None => {
                 set_color(Color::LightRed, Color::Black);
                 println!("[!] Error: UEFI GOP Framebuffer not available. Cannot launch Plasma Wayland desktop.");
                 return;
             }
         };
+
+        let width = video_info.width;
+        let height = video_info.height;
 
         set_color(Color::LightCyan, Color::Black);
         println!("[*] Initializing KDE Plasma Wayland Desktop ({}x{})...", width, height);
@@ -131,30 +136,40 @@ impl Command for PlasmaCommand {
         crate::arch::mouse::init();
         crate::arch::mouse::set_position(width / 2, height / 2);
 
-        let mut canvas = Compositor::new(width, height);
-        let mut wayland_comp = WaylandCompositor::new(width, height);
-        let mut frame_counter: u64 = 0;
+        // The shell is a display client. With the Ring 3 display server running (it owns the
+        // VRAM mapping it obtained through sys_physmap), input only travels to it over
+        // ENDPOINT_DISPLAY_DEV. Without it, a local server instance draws through the kernel's
+        // own framebuffer mapping. Either way nothing here maps VRAM or issues a user-mode
+        // system call: SYSCALL from Ring 0 returns through SYSRET into Ring 3 and faults.
+        let mut local_server = if USE_DISPLAY_ENDPOINT.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(DisplayServer::new(video_info, None))
+        };
 
         // Desktop Interactive Event Loop
         loop {
             // 1. Process Hardware PS/2 Mouse Input
             if let Some(mouse_event) = crate::arch::mouse::poll_mouse(width, height) {
-                wayland_comp.handle_mouse_move(
-                    mouse_event.state.x,
-                    mouse_event.state.y,
-                    width,
-                    height,
-                );
-
-                if mouse_event.left_pressed {
-                    wayland_comp.handle_mouse_down(
+                let _ = forward_mouse_event(&mouse_event);
+                if let Some(server) = local_server.as_mut() {
+                    server.wayland_mut().handle_mouse_move(
                         mouse_event.state.x,
                         mouse_event.state.y,
                         width,
                         height,
                     );
-                } else if !mouse_event.state.left_button {
-                    wayland_comp.handle_mouse_up();
+
+                    if mouse_event.left_pressed {
+                        server.wayland_mut().handle_mouse_down(
+                            mouse_event.state.x,
+                            mouse_event.state.y,
+                            width,
+                            height,
+                        );
+                    } else if !mouse_event.state.left_button {
+                        server.wayland_mut().handle_mouse_up();
+                    }
                 }
             }
 
@@ -171,29 +186,22 @@ impl Command for PlasmaCommand {
                             // Escape character
                             break;
                         }
-                        wayland_comp.handle_key_char(c);
+                        let _ = forward_key_char(c);
+                        if let Some(server) = local_server.as_mut() {
+                            server.wayland_mut().handle_key_char(c);
+                        }
                     }
 
                     _ => {}
                 }
             }
 
-            // 3. Render Complete Plasma Breeze Desktop to Off-Screen Canvas
-            let mouse_state = crate::arch::mouse::current_state();
-            render_plasma_desktop(
-                &mut canvas,
-                &wayland_comp,
-                mouse_state.x,
-                mouse_state.y,
-                frame_counter,
-            );
-
-            // 4. Flip Double Buffer to Physical Framebuffer
-            with_framebuffer(|fb| {
-                canvas.flip(fb);
-            });
-
-            frame_counter = frame_counter.wrapping_add(1);
+            // 3. Render Complete Plasma Breeze Desktop & Flip to Framebuffer (the Ring 3 server
+            //    renders its own frames)
+            if let Some(server) = local_server.as_mut() {
+                let mouse_state = crate::arch::mouse::current_state();
+                server.render_and_flip(mouse_state.x, mouse_state.y);
+            }
 
             // Bounded pause to throttle frame rate to ~60 FPS and avoid hogging CPU
             for _ in 0..12_000 {

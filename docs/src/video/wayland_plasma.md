@@ -98,3 +98,36 @@ Aliases: `startplasma`, `wayland`, `gui`, `desktop`.
 - **Mouse Left Click & Drag**: Move windows, select active applications, and click control buttons.
 - **Keyboard Input**: Directed to the active focused window (e.g. Konsole terminal).
 - **Escape Key (`Esc`)**: Gracefully terminates the Wayland session and restores the microkernel text console.
+
+---
+
+## 6. Ring 3 Microkernel Eviction & Display Server IPC Protocol
+
+To align with modern microkernel standards, the display server and Wayland compositor can be completely evicted from Ring 0 into an unprivileged Ring 3 service daemon:
+
+```text
++--------------------------------------------------------------------------+
+|                     User-Space Ring 3 Display Server                     |
+|       - DisplayServer Daemon (ENDPOINT_DISPLAY_DEV = 0x23)               |
+|       - WaylandCompositor & KDE Plasma Desktop Shell                     |
+|       - Off-screen Compositor Canvas & Dirty-Region Tracker               |
++--------------------------------------------------------------------------+
+             ▲                                            │
+             │ IPC Input Events                           │ sys_physmap()
+             │ (MSG_FB_INPUT_EVENT)                       ▼ (User VRAM Blit)
++----------------------------------+        +------------------------------+
+|     Microkernel Core (Ring 0)    |        |    Physical Linear GOP VRAM  |
+|  - Reflected PS/2 Mouse Updates  |        |    (0x0000_6000_... User)    |
+|  - Keyboard Character Routing    |        +------------------------------+
++----------------------------------+
+```
+
+### IPC Display Protocol (`0x5000..0x500F`)
+- **`MSG_FB_GET_INFO` (`0x5001`)**: Queries GOP display resolution, scanline stride, and physical VRAM base address.
+- **`MSG_FB_FLUSH` (`0x5002`)**: Flushes off-screen surface damage to the physical display canvas.
+- **`MSG_FB_INPUT_EVENT` (`0x5003`)**: Forwards reflected mouse motion, button transitions, and typed keyboard characters to the user-space window server.
+- **`MSG_FB_REPLY` (`0x500F`)**: Status reply and geometry payload acknowledgment.
+
+### Unprivileged Direct VRAM Access (`sys_physmap`)
+The user-space display daemon invokes `sys_physmap(base_phys, size, 0)` (`SYS_PHYSMAP = 21`) during initialization. The kernel maps the linear GOP framebuffer into user virtual memory (`0x0000_6000_...`). Frame flips execute via `Compositor::flip_raw` directly in Ring 3 without triggering system calls or kernel context switches.
+

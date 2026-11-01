@@ -308,38 +308,58 @@ impl Compositor {
         }
     }
 
-    /// Flushes the complete in-memory canvas to the physical hardware Framebuffer.
-    pub fn flip(&self, fb: &mut Framebuffer) {
-        let fb_stride = fb.stride();
-        let fb_is_bgr = fb.is_bgr();
-        let fb_base = fb.base_ptr();
-        let copy_width = self.width.min(fb.width());
-        let copy_height = self.height.min(fb.height());
+    /// Flushes the complete in-memory canvas directly to raw linear video memory.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `dst_base` points to a valid, writable linear framebuffer
+    /// region in the current address space with at least `dst_stride * dst_height * 4` bytes.
+    pub unsafe fn flip_raw(
+        &self,
+        dst_base: *mut u8,
+        dst_width: usize,
+        dst_height: usize,
+        dst_stride: usize,
+        dst_is_bgr: bool,
+    ) {
+        let copy_width = self.width.min(dst_width);
+        let copy_height = self.height.min(dst_height);
 
         for py in 0..copy_height {
             let src_row = py * self.width;
-            let dst_offset = py * fb_stride * 4;
+            let dst_offset = py * dst_stride * 4;
+            let dst_ptr = dst_base.add(dst_offset) as *mut u32;
 
-            unsafe {
-                let dst_ptr = fb_base.add(dst_offset) as *mut u32;
-                if !fb_is_bgr {
-                    core::ptr::copy_nonoverlapping(
-                        self.pixels.as_ptr().add(src_row),
-                        dst_ptr,
-                        copy_width,
-                    );
-                } else {
-                    // Convert ARGB to BGRA format for hardware display
-                    for px in 0..copy_width {
-                        let argb = self.pixels[src_row + px];
-                        let r = (argb >> 16) & 0xFF;
-                        let g = (argb >> 8) & 0xFF;
-                        let b = argb & 0xFF;
-                        let bgra = (b << 16) | (g << 8) | r;
-                        *dst_ptr.add(px) = bgra;
-                    }
+            if !dst_is_bgr {
+                core::ptr::copy_nonoverlapping(
+                    self.pixels.as_ptr().add(src_row),
+                    dst_ptr,
+                    copy_width,
+                );
+            } else {
+                // Convert ARGB to BGRA format for hardware display
+                for px in 0..copy_width {
+                    let argb = self.pixels[src_row + px];
+                    let r = (argb >> 16) & 0xFF;
+                    let g = (argb >> 8) & 0xFF;
+                    let b = argb & 0xFF;
+                    let bgra = (b << 16) | (g << 8) | r;
+                    *dst_ptr.add(px) = bgra;
                 }
             }
+        }
+    }
+
+    /// Flushes the complete in-memory canvas to the physical hardware Framebuffer.
+    pub fn flip(&self, fb: &mut Framebuffer) {
+        unsafe {
+            self.flip_raw(
+                fb.base_ptr(),
+                fb.width(),
+                fb.height(),
+                fb.stride(),
+                fb.is_bgr(),
+            );
         }
     }
 }

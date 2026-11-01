@@ -29,6 +29,8 @@ pub mod zfs;
 pub use client::ZfsClient;
 pub use fd::{FdTable, FileDescriptor, SharedFdTable, MAX_FDS};
 pub use pipe::{PipeBuffer, PIPE_BUFFER_SIZE};
-pub use zfs::{init_server, ZfsServer, ZFS_SERVER};
+pub use zfs::{
+    forward_fs_ipc, init_server, set_use_fs_endpoint, ZfsServer, USE_FS_ENDPOINT, ZFS_SERVER,
+};
 
 

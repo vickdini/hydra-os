@@ -419,6 +419,8 @@ fn main() -> Status {
     println!("    - Round-Robin Timeslice : {} ms (100 Hz timer tick preemption)",
         task::scheduler::DEFAULT_TIMESLICE_TICKS * 10
     );
+    task::supervisor_init();
+    println!("    - Reincarnation Server  : Active (MINIX 3 Process Supervisor, 4 System Drivers)");
 
     console::set_color(Color::LightCyan, Color::Black);
     println!("\n============================================================");

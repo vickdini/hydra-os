@@ -397,7 +397,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
         <strong>Target Architecture:</strong> x86_64-unknown-uefi (Native 64-bit Long Mode)<br>
         <strong>Security Model:</strong> Capability-Based Access Control (seL4-style)<br>
         <strong>IPC Subsystem:</strong> Synchronous &amp; Asynchronous Message Rendezvous<br>
-        <strong>Generated:</strong> October 31, 2026
+        <strong>Generated:</strong> November 01, 2026
     </div>
 </div>
 
@@ -1967,8 +1967,8 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 <tr>
 <td style="text-align: left;"><code>3</code></td>
 <td style="text-align: left;"><code>SYS_WRITE</code></td>
-<td style="text-align: left;"><code>sys_write(buf: *const u8, len: u64)</code></td>
-<td style="text-align: left;">Writes a UTF-8 character buffer directly to the linear framebuffer console.</td>
+<td style="text-align: left;"><code>sys_write(fd: u64, buf: *const u8, len: u64)</code></td>
+<td style="text-align: left;">Writes bytes to a file descriptor (marshaled via <code>ENDPOINT_ZFS_SERVER</code> for files).</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>4</code></td>
@@ -2000,8 +2000,70 @@ hydra:/bin&gt;<span class="w"> </span>exitboot
 <td style="text-align: left;"><code>sys_ipc_recv(ep: u32, msg: *mut Message)</code></td>
 <td style="text-align: left;">Receives an IPC message from a microkernel endpoint.</td>
 </tr>
+<tr>
+<td style="text-align: left;"><code>9</code></td>
+<td style="text-align: left;"><code>SYS_OPEN</code></td>
+<td style="text-align: left;"><code>sys_open(path: *const u8, len: usize, flags: u64)</code></td>
+<td style="text-align: left;">Opens/creates a file via microkernel IPC (<code>ENDPOINT_ZFS_SERVER</code>).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>10</code></td>
+<td style="text-align: left;"><code>SYS_CLOSE</code></td>
+<td style="text-align: left;"><code>sys_close(fd: u64)</code></td>
+<td style="text-align: left;">Closes an active file descriptor via microkernel IPC.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>11</code></td>
+<td style="text-align: left;"><code>SYS_READ</code></td>
+<td style="text-align: left;"><code>sys_read(fd: u64, buf: *mut u8, count: usize)</code></td>
+<td style="text-align: left;">Reads bytes from a descriptor (marshaled via <code>ENDPOINT_ZFS_SERVER</code> for files).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>12</code></td>
+<td style="text-align: left;"><code>SYS_PIPE</code></td>
+<td style="text-align: left;"><code>sys_pipe(pipe_fds: *mut [u64; 2])</code></td>
+<td style="text-align: left;">Creates an anonymous unidirectional pipe.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>13</code></td>
+<td style="text-align: left;"><code>SYS_DUP2</code></td>
+<td style="text-align: left;"><code>sys_dup2(old_fd: u64, new_fd: u64)</code></td>
+<td style="text-align: left;">Duplicates an existing open descriptor to target index.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>20</code></td>
+<td style="text-align: left;"><code>SYS_IOPL</code></td>
+<td style="text-align: left;"><code>sys_iopl(level: u8)</code></td>
+<td style="text-align: left;">Sets CPU I/O privilege level (<code>RFLAGS.IOPL</code>) for user-space hardware drivers.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>21</code></td>
+<td style="text-align: left;"><code>SYS_PHYSMAP</code></td>
+<td style="text-align: left;"><code>sys_physmap(phys: u64, size: usize, flags: u64)</code></td>
+<td style="text-align: left;">Maps MMIO registers and VRAM into user-accessible virtual memory (<code>0x0000_6000_...</code>).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>22</code></td>
+<td style="text-align: left;"><code>SYS_DMA_ALLOC</code></td>
+<td style="text-align: left;"><code>sys_dma_alloc(size: usize)</code></td>
+<td style="text-align: left;">Allocates contiguous physical frames for zero-copy DMA buffers.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>23</code></td>
+<td style="text-align: left;"><code>SYS_IRQ_REGISTER</code></td>
+<td style="text-align: left;"><code>sys_irq_register(irq: u8, ep: u32)</code></td>
+<td style="text-align: left;">Binds hardware IRQs to an IPC endpoint for user-space interrupt reflection.</td>
+</tr>
 </tbody>
 </table>
+<hr />
+<h2>Microkernel Filesystem Syscall Delegation</h2>
+<p>Under Hydra's microkernel design, the kernel core does not execute filesystem logic directly inside <code>SYS_OPEN</code>, <code>SYS_READ</code>, <code>SYS_WRITE</code>, and <code>SYS_CLOSE</code>. Instead, when <a href="file:///d:/os/src/fs/zfs/server.rs"><code>USE_FS_ENDPOINT</code></a> is active:
+1. <code>SYS_OPEN</code>: Marshals request into <a href="file:///d:/os/src/ipc/protocol.rs"><code>MSG_FS_OPEN</code></a> (<code>0x3001</code>) and routes to <a href="file:///d:/os/src/ipc/endpoint.rs"><code>ENDPOINT_ZFS_SERVER</code></a> (<code>0x20</code>).
+2. <code>SYS_READ</code>: Marshals file reads into <a href="file:///d:/os/src/ipc/protocol.rs"><code>MSG_FS_READ</code></a> (<code>0x3002</code>).
+3. <code>SYS_WRITE</code>: Marshals file writes into <a href="file:///d:/os/src/ipc/protocol.rs"><code>MSG_FS_WRITE</code></a> (<code>0x3003</code>), while preserving console output streams (<code>fd 1</code>, <code>fd 2</code>).
+4. <code>SYS_CLOSE</code>: Marshals close into <a href="file:///d:/os/src/ipc/protocol.rs"><code>MSG_FS_CLOSE</code></a> (<code>0x3004</code>).
+5. Dual-Mode Fallback: If the user-space ZFS server daemon is not active, requests dispatch synchronously to the in-kernel ZFS server state without deadlocking early boot.</p>
 <hr />
 <h2>Memory Protection &amp; Fault Isolation</h2>
 <h3>CR0.WP Page Table Manipulation (<code>make_user_accessible</code>)</h3>
@@ -3615,6 +3677,34 @@ hydra&gt; video clear
 <li><strong>Keyboard Input</strong>: Directed to the active focused window (e.g. Konsole terminal).</li>
 <li><strong>Escape Key (<code>Esc</code>)</strong>: Gracefully terminates the Wayland session and restores the microkernel text console.</li>
 </ul>
+<hr />
+<h2>6. Ring 3 Microkernel Eviction &amp; Display Server IPC Protocol</h2>
+<p>To align with modern microkernel standards, the display server and Wayland compositor can be completely evicted from Ring 0 into an unprivileged Ring 3 service daemon:</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                     User-Space Ring 3 Display Server                     |
+|       - DisplayServer Daemon (ENDPOINT_DISPLAY_DEV = 0x23)               |
+|       - WaylandCompositor &amp; KDE Plasma Desktop Shell                     |
+|       - Off-screen Compositor Canvas &amp; Dirty-Region Tracker               |
++--------------------------------------------------------------------------+
+             ▲                                            │
+             │ IPC Input Events                           │ sys_physmap()
+             │ (MSG_FB_INPUT_EVENT)                       ▼ (User VRAM Blit)
++----------------------------------+        +------------------------------+
+|     Microkernel Core (Ring 0)    |        |    Physical Linear GOP VRAM  |
+|  - Reflected PS/2 Mouse Updates  |        |    (0x0000_6000_... User)    |
+|  - Keyboard Character Routing    |        +------------------------------+
++----------------------------------+
+</code></pre></div>
+
+<h3>IPC Display Protocol (<code>0x5000..0x500F</code>)</h3>
+<ul>
+<li><strong><code>MSG_FB_GET_INFO</code> (<code>0x5001</code>)</strong>: Queries GOP display resolution, scanline stride, and physical VRAM base address.</li>
+<li><strong><code>MSG_FB_FLUSH</code> (<code>0x5002</code>)</strong>: Flushes off-screen surface damage to the physical display canvas.</li>
+<li><strong><code>MSG_FB_INPUT_EVENT</code> (<code>0x5003</code>)</strong>: Forwards reflected mouse motion, button transitions, and typed keyboard characters to the user-space window server.</li>
+<li><strong><code>MSG_FB_REPLY</code> (<code>0x500F</code>)</strong>: Status reply and geometry payload acknowledgment.</li>
+</ul>
+<h3>Unprivileged Direct VRAM Access (<code>sys_physmap</code>)</h3>
+<p>The user-space display daemon invokes <code>sys_physmap(base_phys, size, 0)</code> (<code>SYS_PHYSMAP = 21</code>) during initialization. The kernel maps the linear GOP framebuffer into user virtual memory (<code>0x0000_6000_...</code>). Frame flips execute via <code>Compositor::flip_raw</code> directly in Ring 3 without triggering system calls or kernel context switches.</p>
 </div>
 
 
@@ -4064,6 +4154,42 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 <div class="codehilite"><pre><span></span><code>hydra:/bin&gt; kill 2
 [+] Task #2 terminated.
 </code></pre></div>
+
+<hr />
+<h2>5. MINIX 3-Style Process Reincarnation &amp; Driver Supervision</h2>
+<p>Hydra implements an autonomous driver watchdog inspired by the <strong>MINIX 3 Reincarnation Server (RS)</strong> in <a href="file:///d:/os/src/task/supervisor.rs"><code>src/task/supervisor.rs</code></a>:</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                  MINIX 3 Reincarnation Server (Supervisor)               |
+|       - Watchdog Health Checks &amp; Heartbeat Pings (MSG_SUPERVISOR_PING)   |
+|       - Dead Task Detection (!is_task_alive) &amp; Unresponsive Timeouts     |
+|       - Automatic Driver Restart &amp; IPC Endpoint Flushing                 |
++--------------------------------------------------------------------------+
+             │                                              │
+             ▼ IPC Heartbeats                               ▼ Spawn / Terminate
++-----------------------------+               +----------------------------+
+|  User-Space Driver Daemons  |               | Preemptive Task Scheduler  |
+|  - ATA Block Driver (0x21)  |               | (spawn_user, kill)         |
+|  - E1000 Net Driver (0x22)  |               +----------------------------+
+|  - Display Server   (0x23)  |
+|  - ZFS File Server  (0x20)  |
++-----------------------------+
+</code></pre></div>
+
+<h3>Heartbeat &amp; Vitality Tracking</h3>
+<ul>
+<li><strong>Heartbeat Protocol (<code>0x6001..0x6002</code>)</strong>: Dispatches <code>MSG_SUPERVISOR_PING</code> to the driver's bound IPC endpoint. Drivers reply with <code>MSG_SUPERVISOR_PONG</code> acknowledging operational health.</li>
+<li><strong>Fault Detection</strong>: If a driver crashes (<code>#GP</code>, <code>#PF</code>, or <code>#UD</code>), the kernel terminates the faulting user task without a panic. The supervisor detects <code>!is_task_alive(id)</code> on the next tick.</li>
+<li><strong>Reincarnation Action</strong>:
+  1. Terminates any lingering task state (<code>task::kill</code>).
+  2. Flushes the driver's rendezvous endpoint queue (<code>Endpoint::reset</code>).
+  3. Re-spawns a fresh driver task via <code>spawn_user</code>.
+  4. Increments <code>restart_count</code> and updates system telemetry.</li>
+</ul>
+<h3>Shell Management: <code>service</code> / <code>rs</code></h3>
+<p>Operators can monitor and test driver reincarnation interactively:
+- <code>service status</code>: Formats telemetry table showing driver name, PID, endpoint, state, and restart count.
+- <code>service restart &lt;name&gt;</code>: Manually cycles and reincarnates a service daemon.
+- <code>service kill &lt;name&gt;</code>: Simulates a sudden driver crash and triggers automated reincarnation.</p>
 </div>
 
 

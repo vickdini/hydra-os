@@ -324,6 +324,17 @@ pub fn reload_with_kernel_cs(cs: u16) {
     idt.load();
 }
 
+/// Table mapping hardware IRQ vectors (0..15) to user-space driver IPC endpoints.
+pub static USER_IRQ_ENDPOINTS: Mutex<[Option<u32>; 16]> = Mutex::new([None; 16]);
+
+/// Binds a hardware IRQ vector to an IPC endpoint so interrupts notify a user-space driver daemon.
+pub fn register_user_irq_endpoint(irq: u8, endpoint_id: u32) {
+    if (irq as usize) < 16 {
+        USER_IRQ_ENDPOINTS.lock()[irq as usize] = Some(endpoint_id);
+        crate::arch::pic::unmask_irq(irq);
+    }
+}
+
 /// Central Rust exception dispatcher called by assembly trampolines.
 #[no_mangle]
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
@@ -618,6 +629,15 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         34..=47 => {
             // Hardware IRQs from legacy 8259 PIC (Cascade, Serial, Floppy, RTC, etc.)
             let irq = (ctx.vector - 32) as u8;
+
+            // Forward to user-space driver endpoint if registered
+            if let Some(ep_id) = USER_IRQ_ENDPOINTS.lock()[irq as usize] {
+                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(ep_id) {
+                    let msg = crate::ipc::Message::with_args(0x1000 + irq as u32, [irq as u64, crate::arch::pit::ticks(), 0, 0]);
+                    let _ = ep.send(msg);
+                }
+            }
+
             let net = crate::net::e1000::irq_line() == Some(irq) && crate::net::e1000::on_interrupt();
             if net {
                 crate::net::stack::NET_WQ.wake_all();

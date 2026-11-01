@@ -1,0 +1,54 @@
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/m3test.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/m3test.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
+[m3test] eventfd2 with EFD_CLOEXEC                              PASS
+[m3test] eventfd read returns the sum and resets                PASS
+[m3test] blocking eventfd read waits for a writer               PASS
+[m3test] EFD_SEMAPHORE counts down by one                       PASS
+[m3test] empty non-blocking eventfd -> EAGAIN                   PASS
+[m3test] poll wakes when another thread writes the eventfd      PASS
+[m3test] timerfd_create                                         PASS
+[m3test] timerfd_settime one-shot 300 ms                        PASS
+[m3test] timerfd_gettime shows it armed                         PASS
+[m3test] read blocks until expiry (one expiration)              PASS
+[m3test] periodic timer counts missed expirations               PASS
+[m3test] epoll_wait wakes on timer expiry                       PASS
+[m3test] disarmed non-blocking read -> EAGAIN                   PASS
+[m3test] inotify_init1                                          PASS
+[m3test] inotify_add_watch on a directory                       PASS
+[m3test] watching the same inode again returns the same wd      PASS
+[m3test] no events yet -> EAGAIN                                PASS
+[m3test] IN_CREATE with the entry name                          PASS
+[m3test] IN_MODIFY for a write to a file in the directory       PASS
+[m3test] IN_CLOSE_WRITE on close                                PASS
+[m3test] FIONREAD counts queued bytes                           PASS
+[m3test] IN_ATTRIB on chmod                                     PASS
+[m3test] rename gives MOVED_FROM/MOVED_TO with one cookie       PASS
+[m3test] IN_DELETE in the directory                             PASS
+[m3test] IN_DELETE_SELF then IN_IGNORED on the file's watch     PASS
+[m3test] mkdir gives IN_CREATE|IN_ISDIR                         PASS
+[m3test] inotify_rm_watch                                       PASS
+[m3test] rm_watch queues IN_IGNORED                             PASS
+[m3test] EPOLLONESHOT reports once until re-armed               PASS
+[m3test] ALL PASSED (0 failures)
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 

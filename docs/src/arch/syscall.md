@@ -148,12 +148,33 @@ Hydra OS provides a microkernel system call table:
 |:---|:---|:---|:---|
 | `1` | `SYS_YIELD` | `sys_yield()` | Cooperatively relinquishes the current timeslice to the next ready task. |
 | `2` | `SYS_SLEEP` | `sys_sleep(ms: u64)` | Suspends the process for a duration in milliseconds. |
-| `3` | `SYS_WRITE` | `sys_write(buf: *const u8, len: u64)` | Writes a UTF-8 character buffer directly to the linear framebuffer console. |
+| `3` | `SYS_WRITE` | `sys_write(fd: u64, buf: *const u8, len: u64)` | Writes bytes to a file descriptor (marshaled via `ENDPOINT_ZFS_SERVER` for files). |
 | `4` | `SYS_EXIT` | `sys_exit() -> !` | Permanently terminates the calling process and yields CPU ownership. |
 | `5` | `SYS_GETPID` | `sys_getpid() -> u64` | Queries the process identifier (PID) of the calling task. |
 | `6` | `SYS_UPTIME` | `sys_uptime() -> u64` | Queries elapsed PIT timer ticks (100 Hz = 10 ms per tick). |
 | `7` | `SYS_IPC_SEND` | `sys_ipc_send(ep: u32, msg: *const Message)` | Sends an IPC message to a microkernel endpoint. |
 | `8` | `SYS_IPC_RECV` | `sys_ipc_recv(ep: u32, msg: *mut Message)` | Receives an IPC message from a microkernel endpoint. |
+| `9` | `SYS_OPEN` | `sys_open(path: *const u8, len: usize, flags: u64)` | Opens/creates a file via microkernel IPC (`ENDPOINT_ZFS_SERVER`). |
+| `10` | `SYS_CLOSE` | `sys_close(fd: u64)` | Closes an active file descriptor via microkernel IPC. |
+| `11` | `SYS_READ` | `sys_read(fd: u64, buf: *mut u8, count: usize)` | Reads bytes from a descriptor (marshaled via `ENDPOINT_ZFS_SERVER` for files). |
+| `12` | `SYS_PIPE` | `sys_pipe(pipe_fds: *mut [u64; 2])` | Creates an anonymous unidirectional pipe. |
+| `13` | `SYS_DUP2` | `sys_dup2(old_fd: u64, new_fd: u64)` | Duplicates an existing open descriptor to target index. |
+| `20` | `SYS_IOPL` | `sys_iopl(level: u8)` | Sets CPU I/O privilege level (`RFLAGS.IOPL`) for user-space hardware drivers. |
+| `21` | `SYS_PHYSMAP` | `sys_physmap(phys: u64, size: usize, flags: u64)` | Maps MMIO registers and VRAM into user-accessible virtual memory (`0x0000_6000_...`). |
+| `22` | `SYS_DMA_ALLOC`| `sys_dma_alloc(size: usize)` | Allocates contiguous physical frames for zero-copy DMA buffers. |
+| `23` | `SYS_IRQ_REGISTER`| `sys_irq_register(irq: u8, ep: u32)` | Binds hardware IRQs to an IPC endpoint for user-space interrupt reflection. |
+
+---
+
+## Microkernel Filesystem Syscall Delegation
+
+Under Hydra's microkernel design, the kernel core does not execute filesystem logic directly inside `SYS_OPEN`, `SYS_READ`, `SYS_WRITE`, and `SYS_CLOSE`. Instead, when [`USE_FS_ENDPOINT`](file:///d:/os/src/fs/zfs/server.rs) is active:
+1. `SYS_OPEN`: Marshals request into [`MSG_FS_OPEN`](file:///d:/os/src/ipc/protocol.rs) (`0x3001`) and routes to [`ENDPOINT_ZFS_SERVER`](file:///d:/os/src/ipc/endpoint.rs) (`0x20`).
+2. `SYS_READ`: Marshals file reads into [`MSG_FS_READ`](file:///d:/os/src/ipc/protocol.rs) (`0x3002`).
+3. `SYS_WRITE`: Marshals file writes into [`MSG_FS_WRITE`](file:///d:/os/src/ipc/protocol.rs) (`0x3003`), while preserving console output streams (`fd 1`, `fd 2`).
+4. `SYS_CLOSE`: Marshals close into [`MSG_FS_CLOSE`](file:///d:/os/src/ipc/protocol.rs) (`0x3004`).
+5. Dual-Mode Fallback: If the user-space ZFS server daemon is not active, requests dispatch synchronously to the in-kernel ZFS server state without deadlocking early boot.
+
 
 ---
 

@@ -20,6 +20,7 @@
 //! - `compositor`: Window surface blending, title bars, and Breeze-style desktop controls.
 //! - [`wayland`]: Wayland surface registry, focus routing, and window geometry management.
 //! - `plasma`: KDE Plasma 6.8 desktop shell rendering (panel, system tray, app launcher, widgets).
+//! - `server`: Unprivileged Ring 3 display server, event dispatcher, and Wayland compositor daemon.
 
 /// 32-bit software alpha compositor and window surface rendering.
 pub mod compositor;
@@ -35,12 +36,18 @@ pub mod gop;
 pub mod plasma;
 /// Wayland window surfaces, client buffer attachments, and input focus.
 pub mod wayland;
+/// Unprivileged Ring 3 display server, event dispatcher, and Wayland compositor daemon.
+pub mod server;
 
 pub use compositor::{Color, Compositor};
 pub use console::{clear_screen, is_active, set_colors, write_str, VideoConsole, VIDEO_CONSOLE};
 pub use framebuffer::Framebuffer;
 pub use gop::{get_video_info, init_gop, VideoModeInfo};
 pub use plasma::render_plasma_desktop;
+pub use server::{
+    forward_key_char, forward_mouse_event, run_user_display_daemon, set_use_display_endpoint,
+    DisplayServer, USE_DISPLAY_ENDPOINT,
+};
 pub use wayland::WaylandCompositor;
 
 /// Executes a closure with mutable access to the global display Framebuffer.

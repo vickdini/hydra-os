@@ -1,0 +1,194 @@
+Windows Hypervisor Platform accelerator is operational
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Hardware transition successful!
+    - Memory Map Descriptors : 99
+    - Active PML4 Root (CR3) : 0x60281000
+    - Framebuffer Base       : 0xc0000000
+    - Segment Selectors      : CS=0x8, DS=0x10, TR=0x28
+
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... 1... NOW
+[*] Starting KDE Plasma...
+hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
+org.kde.startup: not a reply org.freedesktop.locale1 QDBusMessage(type=Error, service="", error name="org.freedesktop.DBus.Error.Spawn.ChildExited", error message="Launch helper exited with unknown return code 1", signature="s", contents=("Launch helper exited with unknown return code 1") )
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.0' (uid=1000 pid=31 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.3' (uid=1000 pid=52 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+No backend specified, automatically choosing drm
+hydra-logind: session controller is :1.4
+pci id for fd 19: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+pci id for fd 20: 1234:1111, driver (null)
+pci id for fd 21: 1234:1111, driver (null)
+kwin_wayland_drm: drmSetClientCap for Atomic Mode Setting failed. Using legacy mode on GPU "/dev/dri/card0"
+kwin_wayland_drm: drmModeListLessees() failed: Invalid argument
+kwin_wayland_drm: Could not find edid for connector DrmConnector(id=42, gpu="/dev/dri/card0", name="Virtual-1", connection="Connected", countMode=1)
+Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
+kwin_screencast: Failed to connect PipeWire context
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+Xwayland glamor: GBM Wayland interfaces not available
+Failed to initialize glamor, falling back to sw
+The XKEYBOARD keymap compiler (xkbcomp) reports:
+> Warning:          Unsupported maximum keycode 708, clipping.
+>                   X11 cannot support keycodes above 255.
+> Warning:          Virtual modifier Hyper multiply defined
+>                   Using 0, ignoring 0
+> Warning:          Virtual modifier ScrollLock multiply defined
+>                   Using 0, ignoring 0
+Errors from xkbcomp are not fatal to the X server
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.4' (uid=1000 pid=60 comm="")
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+org.kde.plasma.session: process job  "kcminit_startup" finished with exit code  0
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.KSplash'
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+[linux] pid 103: unimplemented syscall 29 (0x0, 0x1, 0x380) -> ENOSYS
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.10' (uid=1000 pid=103 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.2' (uid=1000 pid=48 comm="")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
+kf.kio.gui: Failed to determine systemd version, falling back to extremely legacy forking mode.
+Baloo File Indexing has been disabled
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+[1;33m[W][19:34:43.590000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+New PolkitAgentListener  0x555559066390
+Adding new listener  PolkitQt1::Agent::Listener(0x555559066150) for  0x555559066390
+Listener online
+"Cannot create unix session: No session for pid 118"
+
+** (process:118): [1;35mCRITICAL[0m **: [34m19:34:43.930[0m: polkit_agent_listener_register_with_options: assertion 'POLKIT_IS_SUBJECT (subject)' failed
+"Cannot register authentication agent!"
+Authentication agent result: false
+Couldn't register listener!
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+[1;33m[W][19:34:44.610000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:44.610000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][19:34:44.620000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:44.620000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][19:34:44.620000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:44.630000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+[1;33m[W][19:34:44.640000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+Xlib XKB extension major= 1  minor= 0
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.ActivityManager' requested by ':1.14' (uid=1000 pid=132 comm="")
+QDBusObjectPath: invalid path "/modules/oom-notifier"
+kf.dbusaddons: The kded module name "oom-notifier" is invalid!
+QDBusObjectPath: invalid path "/modules/plasma-session-shortcuts"
+kf.dbusaddons: The kded module name "plasma-session-shortcuts" is invalid!
+[linux] pid 156: unimplemented syscall 326 (0x12, 0x7fffffffcaf0, 0x13) -> ENOSYS
+org.kde.kactivities.resources: Creating the backup of the current database failed!
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+X server XKB extension major= 1  minor= 0
+[1;33m[W][19:34:49.390000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+[1;93mW 19:34:49.510000 [1;35m           default [1;34m../src/pipewire/thread.c:119:impl_create:[0m pthread_setname error: No such file or directory
+[1;33m[W][19:34:49.770000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:49.770000] mod.rt       | [     module-rt.c:  993 do_rtkit_setup()] RTKit does not give us MaxRealtimePriority, using 1[0m
+[1;33m[W][19:34:49.780000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:49.780000] mod.rt       | [     module-rt.c:  998 do_rtkit_setup()] RTKit does not give us MinNiceLevel, using 0[0m
+[1;33m[W][19:34:49.790000] mod.rt       | [     module-rt.c:  329 translate_error()] RTKit error: org.freedesktop.DBus.Error.ServiceUnknown[0m
+[1;33m[W][19:34:49.790000] mod.rt       | [     module-rt.c: 1003 do_rtkit_setup()] RTKit does not give us RTTimeUSecMax, using -1[0m
+[1;93mW 19:34:49.950000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 19:34:49.950000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:993:do_rtkit_setup:[0m RTKit does not give us MaxRealtimePriority, using 1
+[1;93mW 19:34:49.960000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 19:34:49.960000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:998:do_rtkit_setup:[0m RTKit does not give us MinNiceLevel, using 0
+[1;93mW 19:34:49.970000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:329:translate_error:[0m RTKit error: org.freedesktop.DBus.Error.ServiceUnknown
+[1;93mW 19:34:49.970000 [1;35m            mod.rt [1;34m../src/modules/module-rt.c:1003:do_rtkit_setup:[0m RTKit does not give us RTTimeUSecMax, using -1
+[1;33m[W][19:34:51.350000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;93mW 19:34:51.700000 [1;35mm-snapd-permission [1;34m../modules/module-snapd-permission-prompting.c:458:check_apparmor_prompting_available:[0m [1;92m<WpAudioPermissionPrompting:0x55555561df60>[0m Failed to connect to snapd: No such file or directory
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.ActivityManager'
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+[1;33m[W][19:34:52.230000] mod.protocol-pulse | [        server.c:  641 start_unix_server()] server 0x555555598a90: unlinking stale socket '/run/user/1000/pulse/native'[0m
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='ca.desrt.dconf' requested by ':1.23' (uid=1000 pid=172 comm="")
+[1;93mW 19:34:52.840000 [1;35m           default [1;34m../src/pipewire/thread.c:119:impl_create:[0m pthread_setname error: No such file or directory
+QThreadStorage: entry 2 destroyed before end of thread 0x555555576fb0
+QThreadStorage: entry 1 destroyed before end of thread 0x555555576fb0
+[1;92mN 19:34:54.120000 [1;35m         wp-device [1;34m../lib/wp/device.c:710:wp_spa_device_new_from_spa_factory:[0m SPA handle 'api.libcamera.enum.manager' could not be loaded; is it installed?
+[1;92mN 19:34:54.130000 [1;35ms-monitors-libcame [1;34menumerate-device.lua:30:chunk:[0m PipeWire's libcamera SPA plugin is missing or broken. Some camera types may not be supported.
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'ca.desrt.dconf'
+qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
+org.kde.pulseaudio: No object for name "auto_null.monitor"
+libEGL warning: failed to get driver name for fd -1
+
+libEGL warning: MESA-LOADER: failed to retrieve device information
+
+libEGL warning: failed to get driver name for fd -1
+
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+kf.package: Could not find required file "mainscript" for package "/usr/share/plasma/plasmoids/org.kde.plasma.icontasks/" should be QList("ui/main.qml")
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.14' (uid=1000 pid=132 comm="")
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x555558338e50
+org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x555558338e50
+org.kde.pulseaudio: No object for name "auto_null.monitor"
+org.kde.plasma.waitforname: WaitForName: Service was not registered within timeout
+dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.kde.KSplash' failed: Process org.kde.KSplash exited with status 1
+

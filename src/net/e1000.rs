@@ -538,7 +538,18 @@ pub fn is_present() -> bool {
     E1000_NIC.lock().is_some()
 }
 
-/// Transmits a raw Ethernet frame through the global E1000 singleton.
+/// Whether network packets should route through the decoupled user-space IPC endpoint.
+pub static USE_NET_ENDPOINT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Enables or disables user-space IPC endpoint routing for the network subsystem.
+///
+/// # Arguments
+/// * `enable` - True to forward packets across `ENDPOINT_NET_DEV`, false to access hardware directly.
+pub fn set_use_net_endpoint(enable: bool) {
+    USE_NET_ENDPOINT.store(enable, core::sync::atomic::Ordering::Release);
+}
+
+/// Transmits a raw Ethernet frame through the global E1000 singleton or network IPC endpoint.
 ///
 /// # Arguments
 /// - `frame`: Raw Ethernet II frame byte slice.
@@ -549,12 +560,27 @@ pub fn is_present() -> bool {
 /// # Errors
 /// Returns `Err` if the E1000 NIC is not initialized, the frame exceeds `BUFFER_SIZE`, or DMA times out.
 pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
+    if USE_NET_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(crate::ipc::ENDPOINT_NET_DEV) {
+            let msg = crate::ipc::Message::with_args(
+                crate::ipc::protocol::MSG_NET_TRANSMIT,
+                [frame.as_ptr() as u64, frame.len() as u64, 0, 0],
+            );
+            ep.send_blocking(msg);
+            let reply = ep.receive_blocking();
+            if reply.label == crate::ipc::protocol::MSG_NET_REPLY && reply.args[0] == 0 {
+                return Ok(());
+            } else {
+                return Err("Failed to send frame over network endpoint");
+            }
+        }
+    }
     let mut guard = E1000_NIC.lock();
     let nic = guard.as_mut().ok_or("E1000 NIC not initialized")?;
     nic.send_packet(frame)
 }
 
-/// Reads a pending raw Ethernet frame from the global E1000 singleton.
+/// Reads a pending raw Ethernet frame from the global E1000 singleton or network IPC endpoint.
 ///
 /// # Arguments
 /// - `out_buf`: Destination buffer for the received frame.
@@ -562,6 +588,22 @@ pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
 /// # Returns
 /// `Some(bytes_read)` if a frame was received, or `None` if the NIC is uninitialized or the RX ring is empty.
 pub fn receive_frame(out_buf: &mut [u8]) -> Option<usize> {
+    if USE_NET_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(crate::ipc::ENDPOINT_NET_DEV) {
+            let msg = crate::ipc::Message::with_args(
+                crate::ipc::protocol::MSG_NET_RECEIVE,
+                [out_buf.as_mut_ptr() as u64, out_buf.len() as u64, 0, 0],
+            );
+            if ep.send(msg).is_ok() {
+                if let Some(reply) = ep.receive() {
+                    if reply.label == crate::ipc::protocol::MSG_NET_REPLY && reply.args[0] == 0 {
+                        return Some(reply.args[1] as usize);
+                    }
+                }
+            }
+            return None;
+        }
+    }
     let mut guard = E1000_NIC.lock();
     let nic = guard.as_mut()?;
     nic.receive_packet(out_buf)
@@ -577,4 +619,95 @@ pub fn mac_address() -> [u8; 6] {
 pub fn is_link_up() -> bool {
     let guard = E1000_NIC.lock();
     guard.as_ref().map(|d| d.is_link_up()).unwrap_or(false)
+}
+
+/// Dispatches a microkernel network IPC message against the E1000 controller, returning an IPC reply message.
+///
+/// # Arguments
+/// * `device` - Mutable reference to the E1000 network adapter state.
+/// * `msg` - Incoming IPC message payload specifying the network link-layer operation.
+///
+/// # Returns
+/// An IPC reply message containing the operation status and output parameters.
+pub fn process_net_request(device: &mut E1000Device, msg: &crate::ipc::Message) -> crate::ipc::Message {
+    use crate::ipc::protocol::*;
+    match msg.label {
+        MSG_NET_TRANSMIT => {
+            let frame_ptr = msg.args[0] as *const u8;
+            let frame_len = msg.args[1] as usize;
+            if frame_ptr.is_null() || frame_len == 0 {
+                return crate::ipc::Message::with_args(MSG_NET_REPLY, [(-22i64) as u64, 0, 0, 0]);
+            }
+            let slice = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
+            match device.send_packet(slice) {
+                Ok(_) => crate::ipc::Message::with_args(MSG_NET_REPLY, [0, frame_len as u64, 0, 0]),
+                Err(_) => crate::ipc::Message::with_args(MSG_NET_REPLY, [(-5i64) as u64, 0, 0, 0]),
+            }
+        }
+        MSG_NET_RECEIVE => {
+            let out_ptr = msg.args[0] as *mut u8;
+            let cap = msg.args[1] as usize;
+            if out_ptr.is_null() || cap == 0 {
+                return crate::ipc::Message::with_args(MSG_NET_REPLY, [(-22i64) as u64, 0, 0, 0]);
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, cap) };
+            match device.receive_packet(slice) {
+                Some(len) => crate::ipc::Message::with_args(MSG_NET_REPLY, [0, len as u64, 0, 0]),
+                None => crate::ipc::Message::with_args(MSG_NET_REPLY, [(-11i64) as u64, 0, 0, 0]),
+            }
+        }
+        MSG_NET_GET_MAC => {
+            let mac = device.mac_address();
+            let mac_lo = u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]) as u64;
+            let mac_hi = u16::from_le_bytes([mac[4], mac[5]]) as u64;
+            crate::ipc::Message::with_args(MSG_NET_REPLY, [0, mac_lo, mac_hi, 0])
+        }
+        MSG_NET_GET_STATUS => {
+            let link_up = device.is_link_up();
+            let status_mask = if link_up { 1u64 } else { 0u64 };
+            crate::ipc::Message::with_args(MSG_NET_REPLY, [0, status_mask, 0, 0])
+        }
+        MSG_SUPERVISOR_PING => {
+            crate::ipc::Message::with_args(MSG_SUPERVISOR_PONG, [msg.args[0], 1, 0, 0])
+        }
+        _ => crate::ipc::Message::with_args(MSG_NET_REPLY, [(-38i64) as u64, 0, 0, 0]),
+    }
+}
+
+/// Runs the isolated Ring 3 Intel E1000 network driver daemon on the specified IPC endpoint.
+///
+/// Registers the PCI interrupt line via `sys_irq_register`, enters a message-driven loop
+/// on `endpoint_id`, executes packet transfers, and answers network control queries over IPC.
+///
+/// # Arguments
+/// * `endpoint_id` - Numeric ID of the IPC endpoint to serve network driver requests on.
+pub fn run_user_e1000_daemon(endpoint_id: u32) -> ! {
+    if let Some(irq) = irq_line() {
+        let _ = crate::syscall::user::sys_irq_register(irq, endpoint_id);
+    }
+    let _ = enable_interrupts();
+
+    let mut msg = crate::ipc::Message::new(0);
+    loop {
+        if crate::syscall::user::sys_ipc_recv_blocking(endpoint_id, &mut msg).is_ok() {
+            // Check if this was an interrupt notification message from IDT
+            if (msg.label >= 0x1000 && msg.label <= 0x100F) || msg.label == 0x20 {
+                let _ = on_interrupt();
+                crate::net::stack::kick();
+                continue;
+            }
+            let mut guard = E1000_NIC.lock();
+            if let Some(ref mut dev) = *guard {
+                let reply = process_net_request(dev, &msg);
+                drop(guard);
+                let _ = crate::syscall::user::sys_ipc_send(endpoint_id, &reply);
+            } else {
+                let reply = crate::ipc::Message::with_args(
+                    crate::ipc::protocol::MSG_NET_REPLY,
+                    [(-19i64) as u64, 0, 0, 0],
+                );
+                let _ = crate::syscall::user::sys_ipc_send(endpoint_id, &reply);
+            }
+        }
+    }
 }

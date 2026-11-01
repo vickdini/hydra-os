@@ -854,3 +854,89 @@ pub fn get_drive_model<'a>(buf: &'a mut [u8]) -> Option<&'a str> {
     })
 }
 
+/// Dispatches a microkernel block device IPC message to the underlying ATA device.
+///
+/// # Arguments
+/// * `device` - Mutable reference to the target ATA device controller.
+/// * `msg` - Incoming IPC message payload specifying the block operation.
+///
+/// # Returns
+/// An IPC reply message containing the operation status and transferred block count.
+pub fn process_block_request(device: &mut AtaDevice, msg: &crate::ipc::Message) -> crate::ipc::Message {
+    use crate::ipc::protocol::*;
+    match msg.label {
+        MSG_BLOCK_READ => {
+            let lba_block = msg.args[0];
+            let count = msg.args[1] as usize;
+            let target_ptr = msg.args[2] as *mut u8;
+            if target_ptr.is_null() || count == 0 {
+                return crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-22i64) as u64, 0, 0, 0]);
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(target_ptr, count * crate::fs::zfs::types::ZFS_BLOCK_SIZE) };
+            let sectors_per_block = crate::fs::zfs::types::ZFS_BLOCK_SIZE / ATA_SECTOR_SIZE;
+            let lba_sector = lba_block * sectors_per_block as u64;
+            let sectors = count * sectors_per_block;
+            match device.read_sectors(lba_sector, sectors as u8, slice) {
+                Ok(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [0, count as u64, 0, 0]),
+                Err(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-5i64) as u64, 0, 0, 0]),
+            }
+        }
+        MSG_BLOCK_WRITE => {
+            let lba_block = msg.args[0];
+            let count = msg.args[1] as usize;
+            let src_ptr = msg.args[2] as *const u8;
+            if src_ptr.is_null() || count == 0 {
+                return crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-22i64) as u64, 0, 0, 0]);
+            }
+            let slice = unsafe { core::slice::from_raw_parts(src_ptr, count * crate::fs::zfs::types::ZFS_BLOCK_SIZE) };
+            let sectors_per_block = crate::fs::zfs::types::ZFS_BLOCK_SIZE / ATA_SECTOR_SIZE;
+            let lba_sector = lba_block * sectors_per_block as u64;
+            let sectors = count * sectors_per_block;
+            match device.write_sectors(lba_sector, sectors as u8, slice) {
+                Ok(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [0, count as u64, 0, 0]),
+                Err(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-5i64) as u64, 0, 0, 0]),
+            }
+        }
+        MSG_BLOCK_FLUSH => {
+            match device.flush() {
+                Ok(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [0, 0, 0, 0]),
+                Err(_) => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-5i64) as u64, 0, 0, 0]),
+            }
+        }
+        MSG_BLOCK_GET_SIZE => {
+            let sectors = device.total_sectors();
+            let blocks = sectors / (crate::fs::zfs::types::ZFS_BLOCK_SIZE / ATA_SECTOR_SIZE) as u64;
+            crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [0, blocks, 0, 0])
+        }
+        MSG_SUPERVISOR_PING => {
+            crate::ipc::Message::with_args(MSG_SUPERVISOR_PONG, [msg.args[0], 1, 0, 0])
+        }
+        _ => crate::ipc::Message::with_args(MSG_BLOCK_REPLY, [(-38i64) as u64, 0, 0, 0]),
+    }
+}
+
+/// Runs the Ring 3 ATA block driver daemon event loop on the specified IPC endpoint.
+///
+/// Acquires user-space I/O port execution authority, probes the primary master ATA channel,
+/// and continuously handles incoming block requests over the microkernel IPC rendezvous endpoint.
+///
+/// # Arguments
+/// * `endpoint_id` - Numeric ID of the IPC endpoint to serve requests on.
+pub fn run_user_block_daemon(endpoint_id: u32) -> ! {
+    let _ = crate::syscall::user::sys_iopl(3);
+    let mut dev = match AtaDevice::probe_primary_master() {
+        Some(d) => d,
+        None => loop {
+            let _ = crate::syscall::user::sys_sleep(1000);
+        },
+    };
+
+    let mut msg = crate::ipc::Message::new(0);
+    loop {
+        if crate::syscall::user::sys_ipc_recv_blocking(endpoint_id, &mut msg).is_ok() {
+            let reply = process_block_request(&mut dev, &msg);
+            let _ = crate::syscall::user::sys_ipc_send(endpoint_id, &reply);
+        }
+    }
+}
+

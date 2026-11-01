@@ -27,6 +27,13 @@
 pub mod endpoint;
 /// Inline register message definitions and capability delegation containers.
 pub mod message;
+/// Microkernel service protocol operation codes and serialization formats.
+pub mod protocol;
 
-pub use endpoint::{Endpoint, SharedEndpoint};
+pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
+pub use endpoint::{
+    ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, ENDPOINT_SUPERVISOR,
+    ENDPOINT_ZFS_SERVER,
+};
 pub use message::Message;
+pub use protocol::*;

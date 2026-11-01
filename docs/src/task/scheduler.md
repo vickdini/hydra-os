@@ -152,3 +152,43 @@ Terminates an active background task by its numeric PID (system tasks PID 0 `she
 hydra:/bin> kill 2
 [+] Task #2 terminated.
 ```
+
+---
+
+## 5. MINIX 3-Style Process Reincarnation & Driver Supervision
+
+Hydra implements an autonomous driver watchdog inspired by the **MINIX 3 Reincarnation Server (RS)** in [`src/task/supervisor.rs`](file:///d:/os/src/task/supervisor.rs):
+
+```text
++--------------------------------------------------------------------------+
+|                  MINIX 3 Reincarnation Server (Supervisor)               |
+|       - Watchdog Health Checks & Heartbeat Pings (MSG_SUPERVISOR_PING)   |
+|       - Dead Task Detection (!is_task_alive) & Unresponsive Timeouts     |
+|       - Automatic Driver Restart & IPC Endpoint Flushing                 |
++--------------------------------------------------------------------------+
+             │                                              │
+             ▼ IPC Heartbeats                               ▼ Spawn / Terminate
++-----------------------------+               +----------------------------+
+|  User-Space Driver Daemons  |               | Preemptive Task Scheduler  |
+|  - ATA Block Driver (0x21)  |               | (spawn_user, kill)         |
+|  - E1000 Net Driver (0x22)  |               +----------------------------+
+|  - Display Server   (0x23)  |
+|  - ZFS File Server  (0x20)  |
++-----------------------------+
+```
+
+### Heartbeat & Vitality Tracking
+- **Heartbeat Protocol (`0x6001..0x6002`)**: Dispatches `MSG_SUPERVISOR_PING` to the driver's bound IPC endpoint. Drivers reply with `MSG_SUPERVISOR_PONG` acknowledging operational health.
+- **Fault Detection**: If a driver crashes (`#GP`, `#PF`, or `#UD`), the kernel terminates the faulting user task without a panic. The supervisor detects `!is_task_alive(id)` on the next tick.
+- **Reincarnation Action**:
+  1. Terminates any lingering task state (`task::kill`).
+  2. Flushes the driver's rendezvous endpoint queue (`Endpoint::reset`).
+  3. Re-spawns a fresh driver task via `spawn_user`.
+  4. Increments `restart_count` and updates system telemetry.
+
+### Shell Management: `service` / `rs`
+Operators can monitor and test driver reincarnation interactively:
+- `service status`: Formats telemetry table showing driver name, PID, endpoint, state, and restart count.
+- `service restart <name>`: Manually cycles and reincarnates a service daemon.
+- `service kill <name>`: Simulates a sudden driver crash and triggers automated reincarnation.
+

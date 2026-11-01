@@ -65,6 +65,14 @@ pub const SYS_READ: u64 = 11;
 pub const SYS_PIPE: u64 = 12;
 /// Native Hydra system call: duplicate a file descriptor (`sys_dup2`).
 pub const SYS_DUP2: u64 = 13;
+/// Native Hydra system call: set CPU I/O privilege level for driver tasks (`sys_iopl`).
+pub const SYS_IOPL: u64 = 20;
+/// Native Hydra system call: map physical memory frame / MMIO into user space (`sys_physmap`).
+pub const SYS_PHYSMAP: u64 = 21;
+/// Native Hydra system call: allocate contiguous DMA memory frames (`sys_dma_alloc`).
+pub const SYS_DMA_ALLOC: u64 = 22;
+/// Native Hydra system call: register an IPC endpoint for hardware IRQ notifications (`sys_irq_register`).
+pub const SYS_IRQ_REGISTER: u64 = 23;
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,6 +103,14 @@ pub struct SyscallStats {
     pub pipe_calls: u64,
     /// Number of `SYS_DUP2` invocations.
     pub dup2_calls: u64,
+    /// Number of `SYS_IOPL` invocations.
+    pub iopl_calls: u64,
+    /// Number of `SYS_PHYSMAP` invocations.
+    pub physmap_calls: u64,
+    /// Number of `SYS_DMA_ALLOC` invocations.
+    pub dma_alloc_calls: u64,
+    /// Number of `SYS_IRQ_REGISTER` invocations.
+    pub irq_register_calls: u64,
     /// Number of unknown or unsupported syscall numbers invoked.
     pub unknown_calls: u64,
 }
@@ -114,6 +130,10 @@ pub static SYSCALL_STATS: Mutex<SyscallStats> = Mutex::new(SyscallStats {
     read_calls: 0,
     pipe_calls: 0,
     dup2_calls: 0,
+    iopl_calls: 0,
+    physmap_calls: 0,
+    dma_alloc_calls: 0,
+    irq_register_calls: 0,
     unknown_calls: 0,
 });
 
@@ -318,22 +338,35 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             } else {
                 (1usize, arg0 as *const u8, arg1 as usize)
             };
-            if !ptr.is_null() && len > 0 {
-                let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                crate::task::with_current_fds_mut(|fds| {
-                    if let Some(desc) = fds.get_mut(fd) {
-                        match desc.write(slice) {
-                            Ok(n) => n as i64,
-                            Err(_) => -5, // -EIO
-                        }
-                    } else {
-                        -9 // -EBADF
-                    }
-                })
+            if ptr.is_null() && len > 0 {
+                -14 // -EFAULT
             } else if len == 0 {
                 0
             } else {
-                -14 // -EFAULT
+                let is_file = crate::task::with_current_fds_mut(|fds| {
+                    matches!(fds.get(fd), Some(crate::fs::FileDescriptor::File { .. }))
+                });
+
+                if is_file && crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+                    let msg = crate::ipc::Message::with_args(
+                        crate::ipc::protocol::MSG_FS_WRITE,
+                        [fd as u64, ptr as u64, len as u64, 0],
+                    );
+                    let reply = crate::fs::forward_fs_ipc(msg);
+                    reply.args[0] as i64
+                } else {
+                    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    crate::task::with_current_fds_mut(|fds| {
+                        if let Some(desc) = fds.get_mut(fd) {
+                            match desc.write(slice) {
+                                Ok(n) => n as i64,
+                                Err(_) => -5, // -EIO
+                            }
+                        } else {
+                            -9 // -EBADF
+                        }
+                    })
+                }
             }
         }
         SYS_OPEN => {
@@ -344,7 +377,16 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             let ptr = arg0 as *const u8;
             let len = (arg1 as usize).min(256);
             let flags = _arg2;
-            if !ptr.is_null() && len > 0 {
+            if ptr.is_null() || len == 0 {
+                -14 // -EFAULT
+            } else if crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+                let msg = crate::ipc::Message::with_args(
+                    crate::ipc::protocol::MSG_FS_OPEN,
+                    [ptr as u64, len as u64, flags, 0],
+                );
+                let reply = crate::fs::forward_fs_ipc(msg);
+                reply.args[0] as i64
+            } else {
                 let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                 if let Ok(path_str) = core::str::from_utf8(slice) {
                     let readable = flags == 0 || flags == 2;
@@ -373,8 +415,6 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
                 } else {
                     -22 // -EINVAL
                 }
-            } else {
-                -14 // -EFAULT
             }
         }
         SYS_CLOSE => {
@@ -382,12 +422,21 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             drop(stats);
             // arg0: fd
             let fd = arg0 as usize;
-            crate::task::with_current_fds_mut(|fds| {
-                match fds.close(fd) {
-                    Ok(_) => 0,
-                    Err(_) => -9, // -EBADF
-                }
-            })
+            if crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+                let msg = crate::ipc::Message::with_args(
+                    crate::ipc::protocol::MSG_FS_CLOSE,
+                    [fd as u64, 0, 0, 0],
+                );
+                let reply = crate::fs::forward_fs_ipc(msg);
+                reply.args[0] as i64
+            } else {
+                crate::task::with_current_fds_mut(|fds| {
+                    match fds.close(fd) {
+                        Ok(_) => 0,
+                        Err(_) => -9, // -EBADF
+                    }
+                })
+            }
         }
         SYS_READ => {
             stats.read_calls += 1;
@@ -396,22 +445,35 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             let fd = arg0 as usize;
             let ptr = arg1 as *mut u8;
             let count = (_arg2 as usize).min(65536);
-            if !ptr.is_null() && count > 0 {
-                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
-                crate::task::with_current_fds_mut(|fds| {
-                    if let Some(desc) = fds.get_mut(fd) {
-                        match desc.read(slice) {
-                            Ok(n) => n as i64,
-                            Err(_) => -5, // -EIO
-                        }
-                    } else {
-                        -9 // -EBADF
-                    }
-                })
+            if ptr.is_null() && count > 0 {
+                -14 // -EFAULT
             } else if count == 0 {
                 0
             } else {
-                -14 // -EFAULT
+                let is_file = crate::task::with_current_fds_mut(|fds| {
+                    matches!(fds.get(fd), Some(crate::fs::FileDescriptor::File { .. }))
+                });
+
+                if is_file && crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
+                    let msg = crate::ipc::Message::with_args(
+                        crate::ipc::protocol::MSG_FS_READ,
+                        [fd as u64, ptr as u64, count as u64, 0],
+                    );
+                    let reply = crate::fs::forward_fs_ipc(msg);
+                    reply.args[0] as i64
+                } else {
+                    let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
+                    crate::task::with_current_fds_mut(|fds| {
+                        if let Some(desc) = fds.get_mut(fd) {
+                            match desc.read(slice) {
+                                Ok(n) => n as i64,
+                                Err(_) => -5, // -EIO
+                            }
+                        } else {
+                            -9 // -EBADF
+                        }
+                    })
+                }
             }
         }
         SYS_PIPE => {
@@ -528,6 +590,111 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
                 }
             } else {
                 -14 // -EFAULT
+            }
+        }
+        SYS_IOPL => {
+            stats.iopl_calls += 1;
+            drop(stats);
+            // arg0: requested IOPL level (0..3)
+            let level = (arg0 as u64) & 3;
+            frame.rflags = (frame.rflags & !0x3000) | (level << 12);
+            if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                sched.current_task_mut(|task| {
+                    task.regs.rflags = (task.regs.rflags & !0x3000) | (level << 12);
+                });
+            }
+            0
+        }
+        SYS_PHYSMAP => {
+            stats.physmap_calls += 1;
+            drop(stats);
+            let phys_addr = arg0;
+            let size = arg1 as usize;
+            if phys_addr == 0 || size == 0 {
+                -22 // -EINVAL
+            } else {
+                let user_virt_base = 0x0000_6000_0000_0000u64 | (phys_addr & 0x0000_00FF_FFFF_F000);
+                let pages = (size + 4095) / 4096;
+                let mut alloc = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
+                let mut mapped_ok = true;
+                let mut space_guard = crate::memory::paging::KERNEL_SPACE.lock();
+                if let Some(ref mut space) = *space_guard {
+                    use x86_64::structures::paging::{Page, PhysFrame, PageTableFlags, Size4KiB};
+                    use x86_64::{VirtAddr, PhysAddr};
+                    for i in 0..pages {
+                        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_virt_base + (i as u64 * 4096)));
+                        let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr + (i as u64 * 4096)));
+                        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                        unsafe {
+                            if space.map_page(page, frame, flags, &mut *alloc).is_err() {
+                                mapped_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    mapped_ok = false;
+                }
+                if mapped_ok {
+                    user_virt_base as i64
+                } else {
+                    -12 // -ENOMEM
+                }
+            }
+        }
+        SYS_DMA_ALLOC => {
+            stats.dma_alloc_calls += 1;
+            drop(stats);
+            let size = arg0 as usize;
+            let out_phys_ptr = arg1 as *mut u64;
+            if size == 0 {
+                -22 // -EINVAL
+            } else {
+                let pages = (size + 4095) / 4096;
+                let mut alloc = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
+                if let Some(first_frame) = alloc.allocate_contiguous_frames(pages) {
+                    let phys_base = first_frame.start_address().as_u64();
+                    let user_virt_base = 0x0000_5000_0000_0000u64 | (phys_base & 0x0000_00FF_FFFF_F000);
+                    let mut space_guard = crate::memory::paging::KERNEL_SPACE.lock();
+                    let mut mapped = true;
+                    if let Some(ref mut space) = *space_guard {
+                        use x86_64::structures::paging::{Page, PhysFrame, PageTableFlags, Size4KiB};
+                        use x86_64::{VirtAddr, PhysAddr};
+                        for i in 0..pages {
+                            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_virt_base + (i as u64 * 4096)));
+                            let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_base + (i as u64 * 4096)));
+                            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                            unsafe {
+                                if space.map_page(page, frame, flags, &mut *alloc).is_err() {
+                                    mapped = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if mapped {
+                        if !out_phys_ptr.is_null() {
+                            unsafe { *out_phys_ptr = phys_base; }
+                        }
+                        user_virt_base as i64
+                    } else {
+                        -12 // -ENOMEM
+                    }
+                } else {
+                    -12 // -ENOMEM
+                }
+            }
+        }
+        SYS_IRQ_REGISTER => {
+            stats.irq_register_calls += 1;
+            drop(stats);
+            let irq = arg0 as u8;
+            let ep_id = arg1 as u32;
+            if irq < 16 {
+                crate::arch::idt::register_user_irq_endpoint(irq, ep_id);
+                0
+            } else {
+                -22 // -EINVAL
             }
         }
         _ => {

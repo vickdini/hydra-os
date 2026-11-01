@@ -242,3 +242,68 @@ pub fn sys_ipc_recv_blocking(endpoint_id: u32, msg: &mut crate::ipc::Message) ->
         Err(res)
     }
 }
+
+/// Configures the CPU I/O Privilege Level (IOPL) in `RFLAGS` for the calling driver task.
+///
+/// An IOPL of 3 allows direct execution of `inb`, `outb`, `inw`, `outw`, `inl`, and `outl`
+/// instructions from Ring 3 without triggering general protection `#GP` faults.
+///
+/// # Arguments
+/// * `level` - Requested IOPL level (0..=3).
+pub fn sys_iopl(level: u8) -> Result<(), i64> {
+    let res = unsafe { syscall1(SYS_IOPL, level as u64) };
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Maps a physical memory or hardware MMIO peripheral region into the calling task's address space.
+///
+/// # Arguments
+/// * `phys_addr` - Physical base address to map.
+/// * `size` - Size in bytes.
+/// * `flags` - Page table protection flags.
+///
+/// # Returns
+/// Virtual base address in user space where the memory region is accessible.
+pub fn sys_physmap(phys_addr: u64, size: usize, flags: u64) -> Result<u64, i64> {
+    let res = unsafe { syscall3(SYS_PHYSMAP, phys_addr, size as u64, flags) };
+    if res >= 0 {
+        Ok(res as u64)
+    } else {
+        Err(res)
+    }
+}
+
+/// Allocates physically contiguous memory frames for zero-copy Bus-Master DMA transfers.
+///
+/// # Arguments
+/// * `size` - Desired allocation size in bytes.
+///
+/// # Returns
+/// Tuple of `(virtual_user_address, physical_base_address)`.
+pub fn sys_dma_alloc(size: usize) -> Result<(u64, u64), i64> {
+    let mut phys = 0u64;
+    let res = unsafe { syscall2(SYS_DMA_ALLOC, size as u64, &mut phys as *mut u64 as u64) };
+    if res >= 0 {
+        Ok((res as u64, phys))
+    } else {
+        Err(res)
+    }
+}
+
+/// Registers an IPC endpoint to receive event notifications whenever a physical hardware IRQ fires.
+///
+/// # Arguments
+/// * `irq` - Hardware IRQ line (0..=15).
+/// * `endpoint_id` - IPC endpoint to receive interrupt notification messages.
+pub fn sys_irq_register(irq: u8, endpoint_id: u32) -> Result<(), i64> {
+    let res = unsafe { syscall2(SYS_IRQ_REGISTER, irq as u64, endpoint_id as u64) };
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}

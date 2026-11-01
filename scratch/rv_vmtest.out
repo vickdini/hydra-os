@@ -1,0 +1,48 @@
+Windows Hypervisor Platform accelerator is operational
+linux run /bin/vmtest.elf
+[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/vmtest.elf'...
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+[+] Read 968248 bytes from OpenZFS (/bin/vmtest.elf). Spawning Linux process...
+[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
+[vmtest] Hydra VM test starting (argc=1, argv[0]=/bin/vmtest.elf)
+[vmtest] malloc small (brk) + large (mmap)            PASS
+[vmtest] realloc 8 MiB -> 32 MiB keeps contents (mremap) PASS
+[vmtest] anonymous mmap is zero-filled                PASS
+[vmtest] anonymous mmap read-back                     PASS
+[vmtest] MAP_FIXED lands at requested address         PASS
+[vmtest] MAP_FIXED page replaced (zero), neighbours kept PASS
+[vmtest] MAP_FIXED_NOREPLACE fails on overlap         PASS
+[vmtest] mprotect read-only                           PASS
+[vmtest] mprotect read-write again                    PASS
+[vmtest] write after re-enabling PROT_WRITE           PASS
+[vmtest] munmap middle page                           PASS
+[vmtest] hole is free after munmap                    PASS
+[vmtest] mremap grow (may move)                       PASS
+[vmtest] mremap grown tail is writable                PASS
+[vmtest] memfd_create                                 PASS
+[vmtest] ftruncate memfd to 3 pages                   PASS
+[vmtest] two MAP_SHARED mappings alias                PASS
+[vmtest] pread sees mapped writes                     PASS
+[vmtest] MAP_PRIVATE write is copy-on-write           PASS
+[vmtest] SSE state preserved across syscalls/yields   PASS
+[vmtest] 4 threads share memory (counter == 4000)     PASS
+[vmtest] per-thread SSE state isolated                PASS
+[vmtest] ALL PASSED (0 failures)
+[+] Linux process 4 exited with status 0.
+hydra:/bin$ 

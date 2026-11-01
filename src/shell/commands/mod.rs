@@ -70,6 +70,8 @@ pub mod net_cmds;
 pub mod zfs_cmds;
 /// Linux ABI (`SYSCALL`/`SYSRET`) Ring 3 compatibility test suite command (`linux`).
 pub mod linux_cmd;
+/// MINIX 3-style driver reincarnation server and process supervisor inspection command (`service`).
+pub mod service_cmd;
 
 use crate::shell::command::Command;
 
@@ -97,6 +99,7 @@ pub use mem::{AllocCommand, HeapCommand, MemCommand};
 pub use misc::{ClearCommand, ColorCommand, CursorCommand, EchoCommand, PanicCommand, ScrollLockCommand, TrapCommand};
 pub use power::{HaltCommand, RebootCommand, ShutdownCommand};
 pub use script::ShCommand;
+pub use service_cmd::ServiceCommand;
 pub use status::StatusCommand;
 pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
 pub use time::TimeCommand;
@@ -190,6 +193,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &SyncCommand,
     &ElfCommand,
     &LinuxCommand,
+    &ServiceCommand,
     // Power Management
     &RebootCommand,
     &ShutdownCommand,

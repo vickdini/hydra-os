@@ -123,6 +123,19 @@ impl Endpoint {
     pub fn waiting_senders(&self) -> usize {
         self.send_waiters.len()
     }
+
+    /// Flushes all pending messages from the queue and resets circular buffer pointers.
+    ///
+    /// Wakes any senders that were blocked waiting on queue capacity.
+    pub fn reset(&mut self) {
+        for slot in &mut self.buffer {
+            *slot = None;
+        }
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+        self.send_waiters.wake_all();
+    }
 }
 
 /// Thread-safe wrapper around [`Endpoint`] protected by a [`spin::Mutex`].
@@ -196,27 +209,43 @@ impl SharedEndpoint {
     pub fn waiting_senders(&self) -> usize {
         self.0.lock().waiting_senders()
     }
+
+    /// Flushes all pending messages from the endpoint queue and resets circular buffer state.
+    pub fn reset(&self) {
+        self.0.lock().reset();
+    }
 }
 
-/// System-wide shared IPC endpoints (IDs 0..15) accessible across all tasks.
-pub static SYSTEM_ENDPOINTS: [SharedEndpoint; 16] = [
-    SharedEndpoint::new(0),
-    SharedEndpoint::new(1),
-    SharedEndpoint::new(2),
-    SharedEndpoint::new(3),
-    SharedEndpoint::new(4),
-    SharedEndpoint::new(5),
-    SharedEndpoint::new(6),
-    SharedEndpoint::new(7),
-    SharedEndpoint::new(8),
-    SharedEndpoint::new(9),
-    SharedEndpoint::new(10),
-    SharedEndpoint::new(11),
-    SharedEndpoint::new(12),
-    SharedEndpoint::new(13),
-    SharedEndpoint::new(14),
-    SharedEndpoint::new(15),
+/// System-wide shared IPC endpoints (IDs 0..63) accessible across all tasks.
+pub static SYSTEM_ENDPOINTS: [SharedEndpoint; 64] = [
+    SharedEndpoint::new(0), SharedEndpoint::new(1), SharedEndpoint::new(2), SharedEndpoint::new(3),
+    SharedEndpoint::new(4), SharedEndpoint::new(5), SharedEndpoint::new(6), SharedEndpoint::new(7),
+    SharedEndpoint::new(8), SharedEndpoint::new(9), SharedEndpoint::new(10), SharedEndpoint::new(11),
+    SharedEndpoint::new(12), SharedEndpoint::new(13), SharedEndpoint::new(14), SharedEndpoint::new(15),
+    SharedEndpoint::new(16), SharedEndpoint::new(17), SharedEndpoint::new(18), SharedEndpoint::new(19),
+    SharedEndpoint::new(20), SharedEndpoint::new(21), SharedEndpoint::new(22), SharedEndpoint::new(23),
+    SharedEndpoint::new(24), SharedEndpoint::new(25), SharedEndpoint::new(26), SharedEndpoint::new(27),
+    SharedEndpoint::new(28), SharedEndpoint::new(29), SharedEndpoint::new(30), SharedEndpoint::new(31),
+    SharedEndpoint::new(32), SharedEndpoint::new(33), SharedEndpoint::new(34), SharedEndpoint::new(35),
+    SharedEndpoint::new(36), SharedEndpoint::new(37), SharedEndpoint::new(38), SharedEndpoint::new(39),
+    SharedEndpoint::new(40), SharedEndpoint::new(41), SharedEndpoint::new(42), SharedEndpoint::new(43),
+    SharedEndpoint::new(44), SharedEndpoint::new(45), SharedEndpoint::new(46), SharedEndpoint::new(47),
+    SharedEndpoint::new(48), SharedEndpoint::new(49), SharedEndpoint::new(50), SharedEndpoint::new(51),
+    SharedEndpoint::new(52), SharedEndpoint::new(53), SharedEndpoint::new(54), SharedEndpoint::new(55),
+    SharedEndpoint::new(56), SharedEndpoint::new(57), SharedEndpoint::new(58), SharedEndpoint::new(59),
+    SharedEndpoint::new(60), SharedEndpoint::new(61), SharedEndpoint::new(62), SharedEndpoint::new(63),
 ];
+
+/// Well-known Endpoint ID for the microkernel OpenZFS File Server (0x20 = 32).
+pub const ENDPOINT_ZFS_SERVER: u32 = 0x20;
+/// Well-known Endpoint ID for the Ring 3 Block Device Driver daemon (0x21 = 33).
+pub const ENDPOINT_BLOCK_DEV: u32 = 0x21;
+/// Well-known Endpoint ID for the Ring 3 Network Interface Driver daemon (0x22 = 34).
+pub const ENDPOINT_NET_DEV: u32 = 0x22;
+/// Well-known Endpoint ID for the Ring 3 Display / Compositor Server (0x23 = 35).
+pub const ENDPOINT_DISPLAY_DEV: u32 = 0x23;
+/// Well-known Endpoint ID for the MINIX 3 Reincarnation / Process Supervisor (0x24 = 36).
+pub const ENDPOINT_SUPERVISOR: u32 = 0x24;
 
 /// Retrieves a reference to a system endpoint by its numeric ID.
 pub fn get_system_endpoint(id: u32) -> Option<&'static SharedEndpoint> {
