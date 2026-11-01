@@ -10,6 +10,7 @@ from the first command onwards, and shuts QEMU down.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -100,6 +101,7 @@ def main():
     ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
+    ap.add_argument("--stall-dump", type=float, default=0, help="save CPU state when the log stops growing for this many seconds")
     ap.add_argument("--no-cancel", action="store_true", help="let the boot countdowns run out (bare metal, then the desktop autostart)")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
@@ -110,7 +112,7 @@ def main():
         QEMU,
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}",
         "-cdrom", os.path.join(ROOT, "dist", "x86_64", "kernel.iso"),
-        "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk,cache=unsafe",
+        "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
         "-boot", "d", "-m", a.mem, "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",
@@ -163,13 +165,52 @@ def main():
                 qmp.type(c + "\n")
             time.sleep(a.gap)
         deadline = time.time() + a.wait
+        last_len, last_change, dumped = -1, time.time(), False
         while time.time() < deadline:
             log = read_log(a.log)
-            if a.until and a.until in log[start:]:
+            # --stall-dump N: when the log has not grown for N seconds, save the CPU state
+            # and the kernel stack to scratch/hydra_stall.txt (once per run)
+            if len(log) != last_len:
+                last_len, last_change = len(log), time.time()
+            elif a.stall_dump and not dumped and time.time() - last_change > a.stall_dump:
+                dumped = True
+                with open(os.path.join(ROOT, "scratch", "hydra_stall.txt"), "w", encoding="utf-8") as out:
+                    regs = ""
+                    for _ in range(3):
+                        r = qmp.cmd("human-monitor-command", {"command-line": "info registers"})
+                        regs = str(r.get("return", r))
+                        out.write(regs + "\n")
+                        time.sleep(0.5)
+                    m = re.search(r"RSP=([0-9a-f]+)", regs)
+                    if m:
+                        r = qmp.cmd("human-monitor-command", {"command-line": f"x /256gx 0x{m.group(1)}"})
+                        out.write("$ stack\n" + str(r.get("return", r)) + "\n")
+                print(f"[hydra_run] log stalled for {a.stall_dump} s: CPU state saved to scratch/hydra_stall.txt")
+            # --until is a regular expression (alternatives with |; `\|` also accepted)
+            if a.until and re.search(a.until.replace(r'\|', '|'), log[start:]):
                 time.sleep(1.0)
                 break
             if proc.poll() is not None:
                 break
+            # Debug back door while waiting: commands dropped into scratch/hydra_ctl.txt
+            # ("%f12", "!info registers", "~1", text) run now; monitor output goes to
+            # scratch/hydra_ctl.out
+            ctl = os.path.join(ROOT, "scratch", "hydra_ctl.txt")
+            if os.path.exists(ctl):
+                with open(ctl, encoding="utf-8") as f:
+                    lines = [l.rstrip("\n") for l in f if l.strip()]
+                os.remove(ctl)
+                with open(os.path.join(ROOT, "scratch", "hydra_ctl.out"), "a", encoding="utf-8") as out:
+                    for c in lines:
+                        if c.startswith("!"):
+                            r = qmp.cmd("human-monitor-command", {"command-line": c[1:]})
+                            out.write(f"$ {c[1:]}\n{r.get('return', r)}\n")
+                        elif c.startswith("%"):
+                            qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": c[1:]}]})
+                        elif c.startswith("~"):
+                            time.sleep(float(c[1:]))
+                        else:
+                            qmp.type(c + "\n")
             time.sleep(0.5)
         log = read_log(a.log)
         sys.stdout.write(log[start:])

@@ -227,6 +227,22 @@ pub fn stats() -> HeapStats {
     }
 }
 
+/// Heap statistics without waiting for the heap lock (for interrupt handlers and the
+/// panic handler); `None` if the heap is busy or not initialized.
+pub fn try_stats() -> Option<HeapStats> {
+    if !is_initialized() {
+        return None;
+    }
+    let heap = HEAP_ALLOCATOR.try_lock()?;
+    Some(HeapStats {
+        start_address: HEAP_START_ADDR.load(Ordering::SeqCst),
+        total_bytes: heap.size(),
+        used_bytes: heap.used(),
+        free_bytes: heap.free(),
+        is_initialized: true,
+    })
+}
+
 /// Runs a verification suite to ensure dynamic allocation (`Box`, `Vec`, `String`, etc.)
 /// and deallocation are operating correctly without leaks.
 pub fn self_test() -> Result<(), &'static str> {
@@ -234,36 +250,43 @@ pub fn self_test() -> Result<(), &'static str> {
         return Err("Heap is not initialized");
     }
 
-    let initial_used = stats().used_bytes;
-
-    // Test 1: Box allocation & pointer dereference
-    {
-        let boxed_val = alloc::boxed::Box::new(0xCAFE_BABE_DEAD_BEEF_u64);
-        if *boxed_val != 0xCAFE_BABE_DEAD_BEEF_u64 {
-            return Err("Boxed value did not match expected value");
-        }
-    }
-
-    // Test 2: Dynamic Vector reallocation across multiple capacity growth steps
-    {
-        let mut test_vec = alloc::vec::Vec::new();
-        for i in 0..1000 {
-            test_vec.push(i * 3);
-        }
-        for (i, &val) in test_vec.iter().enumerate() {
-            if val != i * 3 {
-                return Err("Vec content corrupted during dynamic reallocation");
+    // One round warms the small-block lists (freed small blocks stay there for reuse);
+    // repeating it must then not grow the heap
+    let round = || -> Result<(), &'static str> {
+        // Test 1: Box allocation & pointer dereference
+        {
+            let boxed_val = alloc::boxed::Box::new(0xCAFE_BABE_DEAD_BEEF_u64);
+            if *boxed_val != 0xCAFE_BABE_DEAD_BEEF_u64 {
+                return Err("Boxed value did not match expected value");
             }
         }
-    }
 
-    // Test 3: String formatting & concatenation
-    {
-        let s = alloc::format!("Hydra OS dynamic string: 0x{:X}", 42);
-        if !s.starts_with("Hydra OS") {
-            return Err("String formatting failed");
+        // Test 2: Dynamic Vector reallocation across multiple capacity growth steps
+        {
+            let mut test_vec = alloc::vec::Vec::new();
+            for i in 0..1000 {
+                test_vec.push(i * 3);
+            }
+            for (i, &val) in test_vec.iter().enumerate() {
+                if val != i * 3 {
+                    return Err("Vec content corrupted during dynamic reallocation");
+                }
+            }
         }
-    }
+
+        // Test 3: String formatting & concatenation
+        {
+            let s = alloc::format!("Hydra OS dynamic string: 0x{:X}", 42);
+            if !s.starts_with("Hydra OS") {
+                return Err("String formatting failed");
+            }
+        }
+
+        Ok(())
+    };
+    round()?;
+    let initial_used = stats().used_bytes;
+    round()?;
 
     // Test 4: Verify memory deallocation (RAII drop returns used bytes to baseline)
     let final_used = stats().used_bytes;

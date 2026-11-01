@@ -53,6 +53,7 @@ pub const ENOTEMPTY: i64 = -39;
 pub type ZplResult<T> = Result<T, i64>;
 
 fn io(e: &'static str) -> i64 {
+    crate::kprintln!("[zfs] {}", e);
     if e.contains("out of space") {
         ENOSPC
     } else {

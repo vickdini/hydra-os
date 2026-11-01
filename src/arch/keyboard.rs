@@ -30,7 +30,7 @@ use uefi::proto::console::text::{Key, ScanCode};
 use uefi::Char16;
 use x86_64::instructions::port::Port;
 
-const KEY_BUFFER_CAPACITY: usize = 128;
+const KEY_BUFFER_CAPACITY: usize = 1024;
 
 struct KeyRingBuffer {
     buffer: [Option<Key>; KEY_BUFFER_CAPACITY],

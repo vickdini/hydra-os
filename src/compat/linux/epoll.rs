@@ -23,6 +23,7 @@
 //! - Hardware Interaction: None (purely logical synchronization over VFS and IPC primitives)
 //! - Concurrency: Protected by [`spin::Mutex`] wrapped in [`Arc`] for shared file table access
 
+use crate::fs::FileDescriptor;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -105,6 +106,8 @@ pub struct EpollWatch {
     pub events: u32,
     /// Opaque 64-bit user token associated with this registration.
     pub data: u64,
+    /// An edge-triggered watch on an always-ready file already reported its readiness.
+    pub reported: bool,
 }
 
 /// Represents an active in-kernel `epoll` instance backing `FileDescriptor::Epoll`.
@@ -158,6 +161,7 @@ impl EpollInstance {
                     fd,
                     events: ev.events,
                     data: ev.data,
+                    reported: false,
                 });
                 Ok(())
             }
@@ -173,6 +177,7 @@ impl EpollInstance {
                 let ev = event.ok_or(-EINVAL)?;
                 entry.events = ev.events;
                 entry.data = ev.data;
+                entry.reported = false;
                 Ok(())
             }
             _ => Err(-EINVAL),
@@ -225,6 +230,7 @@ pub fn epoll_collect_ready(
     };
 
     let mut fired_oneshot = Vec::new();
+    let mut fired_edge = Vec::new();
     crate::task::with_current_fds_mut(|fds| {
         for watch in watches {
             if ready.len() >= maxevents {
@@ -234,6 +240,15 @@ pub fn epoll_collect_ready(
                 continue; // a one-shot watch that already fired: disabled until EPOLL_CTL_MOD
             }
             if let Some(desc) = fds.get(watch.fd as usize) {
+                // Files are always ready, so an edge-triggered watch on one fires once (as on
+                // Linux); other descriptors stay level-triggered
+                let always_ready = matches!(desc, FileDescriptor::File { .. } | FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_));
+                if watch.events & EPOLLET != 0 && always_ready {
+                    if watch.reported {
+                        continue;
+                    }
+                    fired_edge.push(watch.fd);
+                }
                 let current_ev = fds.readiness(desc);
                 let matched = current_ev & (watch.events | EPOLLERR | EPOLLHUP);
                 if matched != 0 {
@@ -254,6 +269,14 @@ pub fn epoll_collect_ready(
             }
         }
     });
+    if !fired_edge.is_empty() {
+        let mut ep = epoll.lock();
+        for fd in fired_edge {
+            if let Some(w) = ep.watches.get_mut(&fd) {
+                w.reported = true;
+            }
+        }
+    }
     if !fired_oneshot.is_empty() {
         let mut ep = epoll.lock();
         for fd in fired_oneshot {

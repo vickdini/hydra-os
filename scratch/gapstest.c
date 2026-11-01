@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <linux/futex.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -194,7 +195,50 @@ static void shared_futex_tests(void) {
     munmap(word, 4096);
 }
 
+static pthread_mutex_t pi_lock;
+static long pi_counter;
+
+static void *pi_worker(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 2000; i++) {
+        pthread_mutex_lock(&pi_lock);
+        long v = pi_counter;
+        if (i % 100 == 0)
+            sched_yield(); /* let the other thread contend while the lock is held */
+        pi_counter = v + 1;
+        pthread_mutex_unlock(&pi_lock);
+    }
+    return NULL;
+}
+
+static void *pi_try(void *arg) {
+    (void)arg;
+    return (void *)(long)pthread_mutex_trylock(&pi_lock);
+}
+
+/* Priority-inheritance mutexes (FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI), as PipeWire uses */
+static void pi_mutex_tests(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    check("pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT)", pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT) == 0);
+    check("PI mutex init", pthread_mutex_init(&pi_lock, &attr) == 0);
+    pthread_t a, b;
+    pthread_create(&a, NULL, pi_worker, NULL);
+    pthread_create(&b, NULL, pi_worker, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    check("two threads under a PI mutex count to 4000", pi_counter == 4000);
+    pthread_mutex_lock(&pi_lock);
+    pthread_t c;
+    void *res = NULL;
+    pthread_create(&c, NULL, pi_try, NULL);
+    pthread_join(c, &res);
+    check("trylock of a held PI mutex from another thread -> EBUSY", (long)res == EBUSY);
+    check("PI mutex unlock by owner", pthread_mutex_unlock(&pi_lock) == 0);
+}
+
 int main(void) {
+    pi_mutex_tests();
     timer_tests();
     pidfd_tests();
     clone3_test();

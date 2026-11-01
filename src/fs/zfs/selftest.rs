@@ -209,3 +209,84 @@ pub fn run_verify() {
     }
     report(failures);
 }
+
+/// `zfs fsck <dir> [repair]`: walks the namespace below `dir` and reports directory
+/// entries whose object cannot be read (left behind when a crash loses blocks). With
+/// `repair` those entries are removed, so the names can be created again.
+pub fn run_fsck(root_path: &str, repair: bool) {
+    let r = with_server(|s| {
+        let root = path(s, root_path)?;
+        let (mut dirs, mut entries, mut dangling, mut bad_dirs) = (0u64, 0u64, 0u64, 0u64);
+        // (directory, its path, its parent and name there: unreadable ones are unlinked)
+        let mut stack: Vec<(u64, alloc::string::String, Option<(u64, Vec<u8>)>)> =
+            alloc::vec![(root, alloc::string::String::from(root_path.trim_end_matches('/')), None)];
+        while let Some((dir, dpath, link)) = stack.pop() {
+            dirs += 1;
+            if dirs % 2000 == 0 {
+                println!("[fsck] ... {} directories, {} entries, {} dangling (at {})", dirs, entries, dangling, dpath);
+            }
+            let mut cookie = 2; // after "." and ".."
+            let mut doomed: Vec<Vec<u8>> = Vec::new();
+            loop {
+                let batch = match s.readdir(dir, cookie, 256) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        bad_dirs += 1;
+                        println!("[fsck] unreadable directory {} (errno {})", dpath, -e);
+                        if repair {
+                            if let Some((parent, name)) = &link {
+                                s.zap.remove(&mut s.dmu, *parent, name).map_err(|_| -5i64)?;
+                            }
+                        }
+                        break;
+                    }
+                };
+                if batch.is_empty() {
+                    break;
+                }
+                if batch.last().map_or(true, |e| e.next_cookie <= cookie) {
+                    bad_dirs += 1;
+                    println!("[fsck] directory {} does not advance past position {}", dpath, cookie);
+                    break;
+                }
+                for e in &batch {
+                    cookie = e.next_cookie;
+                    entries += 1;
+                    let name = alloc::string::String::from_utf8_lossy(&e.name).into_owned();
+                    match s.getattr(e.ino) {
+                        Ok(a) if a.is_dir() => stack.push((e.ino, format!("{}/{}", dpath, name), Some((dir, e.name.clone())))),
+                        Ok(_) => {}
+                        Err(err) => {
+                            dangling += 1;
+                            if dangling <= 200 {
+                                println!("[fsck] dangling entry {}/{} -> object {} (errno {})", dpath, name, e.ino, -err);
+                            }
+                            doomed.push(e.name.clone());
+                        }
+                    }
+                }
+            }
+            if repair {
+                for name in doomed {
+                    s.zap.remove(&mut s.dmu, dir, &name).map_err(|_| -5i64)?;
+                }
+            }
+        }
+        if repair && (dangling > 0 || bad_dirs > 0) {
+            s.sync()?;
+        }
+        println!(
+            "[fsck] {}: {} directories, {} entries, {} dangling{}, {} unreadable directories",
+            root_path,
+            dirs,
+            entries,
+            dangling,
+            if repair { " (removed)" } else { "" },
+            bad_dirs
+        );
+        Ok(())
+    });
+    if let Err(e) = r {
+        println!("[fsck] failed: errno {}", -e);
+    }
+}

@@ -1,0 +1,24 @@
+[1m[37m[40m
+.
+..
+KSMserver__5
+KSMserver__6
+KSMserver__7
+KSMserver__8
+KSMserver__9
+dbus-1
+dconf
+iceauth_DEgGSK
+iceauth_DYQXUS
+iceauth_UZpeIW
+iceauth_lMsLjP
+iceauth_qwXKDE
+probe
+wayland-0
+wayland-0.lock
+xauth_AtxqNW
+xauth_CKlAfp
+xauth_KufTCk
+xauth_TSnsVJ
+xauth_vLjkPC
+[+] Linux process 4 exited with status 0.

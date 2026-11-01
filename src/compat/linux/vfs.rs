@@ -1602,6 +1602,26 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 
         NR_TRUNCATE => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { size: Some(a[1]), ..SetAttr::default() }, |at, c| may_access(at, c.euid, c.egid, 2)),
+        285 if matches!(crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()), Some(FileDescriptor::MemFd(_))) => {
+            // fallocate on a memfd: pages are allocated when touched; only the size grows
+            let m = match crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()) {
+                Some(FileDescriptor::MemFd(m)) => m,
+                _ => return Some(EBADF),
+            };
+            let (mode, offset, len) = (a[1], a[2] as i64, a[3] as i64);
+            if offset < 0 || len <= 0 {
+                EINVAL
+            } else if mode & !1 != 0 {
+                EOPNOTSUPP
+            } else {
+                let end = (offset + len) as usize;
+                let mut m = m.lock();
+                if mode & 1 == 0 && m.size() < end {
+                    m.truncate(end);
+                }
+                0
+            }
+        }
         285 => {
             // fallocate(fd, mode, offset, len): the pool allocates on write, so reserving
             // space only grows the file (unless FALLOC_FL_KEEP_SIZE); holes are not punched

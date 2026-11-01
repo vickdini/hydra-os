@@ -41,7 +41,29 @@ pub enum PseudoFile {
     ProcSelfMaps,
     /// `/proc/self/auxv`: exposes the raw ELF auxiliary vector of the calling process.
     ProcSelfAuxv,
+    /// `/proc/self/mountinfo` (and `/proc/<pid>/mountinfo`): the mount table, detailed.
+    ProcMountinfo,
+    /// `/proc/mounts` (`/proc/self/mounts`): the mount table in `fstab` format.
+    ProcMounts,
 }
+
+/// The mounts a Linux system has, as Hydra presents them: the pool at `/` (device 8:1,
+/// mount id 2069 = what `statx` reports for its files), and the pseudo file systems.
+const MOUNTINFO: &str = "2069 1 8:1 / / rw,relatime shared:1 - zfs hydrapool/root rw,xattr
+22 2069 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:2 - proc proc rw
+23 2069 0:23 / /sys rw,nosuid,nodev,noexec,relatime shared:3 - sysfs sysfs rw
+24 2069 0:6 / /dev rw,nosuid,relatime shared:4 - devtmpfs udev rw,mode=755
+25 24 0:25 / /dev/pts rw,nosuid,noexec,relatime shared:5 - devpts devpts rw,gid=5,mode=620,ptmxmode=000
+26 2069 0:26 / /run rw,nosuid,nodev,noexec,relatime shared:6 - tmpfs tmpfs rw,mode=755
+";
+
+const MOUNTS: &str = "hydrapool/root / zfs rw,relatime,xattr 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+udev /dev devtmpfs rw,nosuid,relatime,mode=755 0 0
+devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0
+tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,mode=755 0 0
+";
 
 /// Matches a normalized filesystem path against known `/dev` and `/proc` pseudo-files.
 ///
@@ -61,6 +83,11 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
         "/proc/self/maps" => Some(PseudoFile::ProcSelfMaps),
         "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
+        "/proc/self/mountinfo" | "/proc/thread-self/mountinfo" => Some(PseudoFile::ProcMountinfo),
+        "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts" => Some(PseudoFile::ProcMounts),
+        p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
+            Some(PseudoFile::ProcMountinfo)
+        }
         _ => None,
     }
 }
@@ -112,6 +139,8 @@ impl PseudoFile {
                 let auxv = super::process::current_auxv();
                 read_slice(&auxv, cursor, buf)
             }
+            PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
+            PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
                 read_slice(text.as_bytes(), cursor, buf)

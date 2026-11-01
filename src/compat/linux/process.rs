@@ -313,6 +313,8 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
             copy_out(a[0], &b)
         }
+        // mlock, munlock, mlockall, munlockall, mlock2: nothing is ever swapped out
+        149 | 150 | 151 | 152 | 325 => 0,
         140 => 20, // getpriority: nice 0 (the kernel returns 20 - nice)
         141 => {
             // setpriority: raising nice is allowed, lowering it needs CAP_SYS_NICE

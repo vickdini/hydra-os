@@ -319,6 +319,8 @@ pub struct Task {
     pub preempt_depth: u32,
     /// Linux system call in progress (`u64::MAX` when none); saved with the task.
     pub syscall_nr: u64,
+    /// First two arguments of that system call (shown by the task dump).
+    pub syscall_args: [u64; 2],
     /// Sleeping in [`crate::task::wait::wait`]: a wait-queue wakeup or signal makes it ready.
     pub event_wait: bool,
     /// A wakeup arrived while the task was not (yet) waiting: its next wait returns at once.
@@ -364,6 +366,7 @@ impl Task {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),

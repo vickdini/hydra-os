@@ -1,0 +1,41 @@
+su root
+[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
+[1m[36m[40mhydra:/bin# linux chroot /ubuntu /bin/sh /usr/libexec/hydra-session --uid 0 /usr/libexec/udisks2/udisksd
+[1m[37m[40m[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 100 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+
+hydra-logind: seat0 session 1 for uid 0 (root) on org.freedesktop.login1
+[heap] 4028 KiB used, 520259 KiB free of 524288 KiB
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Sleeping 0 -1(0x0,0x0) 0xbd4397a7 185 shell
+[tasks] 1 Running 1 -1(0x0,0x0) 0xbd4054f9 3416 idle
+[tasks] 2 Blocked 2 -1(0x0,0x0) 0xbd3f0f26 1 netd
+[tasks] 3 Sleeping 3 -1(0x0,0x0) 0xbd3c52f7 9 txgd
+[tasks] 4 Sleeping 4 271(0x7fffa8001ff0,0x5) 0xbd4397a7 253 /usr/libexec/udisks2/udisksd
+[tasks] 9 Blocked 9 232(0x3,0x7fffffffe510) 0xbd4397a7 60 /usr/bin/dbus-daemon
+[tasks] 13 Blocked 13 7(0x7fffffffead0,0x1) 0xbd4397a7 13 /usr/libexec/hydra-logind
+[tasks] 30 Sleeping 4 271(0x7fffb8000880,0x2) 0xbd4397a7 14 /usr/libexec/udisks2/udisksd
+[tasks] 31 Blocked 4 202(0x5555555ea790,0x80) 0xbd4397a7 2 /usr/libexec/udisks2/udisksd
+[tasks] 47 Blocked 4 271(0x7fffa4001300,0x2) 0xbd4397a7 1 /usr/libexec/udisks2/udisksd
+[tasks] 33 Blocked 4 271(0x7fffa80008c0,0x2) 0xbd4397a7 19 /usr/libexec/udisks2/udisksd
+[tasks] 48 Blocked 4 271(0x7fff9c000880,0x1) 0xbd4397a7 1 /usr/libexec/udisks2/udisksd
+[tasks] 35 Blocked 35 271(0x55555558fc70,0x2) 0xbd4397a7 47 /usr/lib/polkit-1/polkitd
+[tasks] 36 Sleeping 35 271(0x7fffb8000880,0x2) 0xbd4397a7 9 /usr/lib/polkit-1/polkitd
+[tasks] 37 Blocked 35 202(0x5555555953e0,0x80) 0xbd4397a7 2 /usr/lib/polkit-1/polkitd
+[tasks] 38 Blocked 35 271(0x7fffb00008c0,0x2) 0xbd4397a7 12 /usr/lib/polkit-1/polkitd
+[tasks] 46 Blocked 4 202(0x5555555e8810,0x80) 0xbd4397a7 1 /usr/libexec/udisks2/udisksd
+

@@ -75,6 +75,17 @@ const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 /// Negative errno for wait timeout expiration.
 const ETIMEDOUT: i64 = -110;
+const EPERM: i64 = -1;
+const EDEADLK: i64 = -35;
+
+/// `FUTEX_LOCK_PI2`: `FUTEX_LOCK_PI` with a `CLOCK_MONOTONIC` timeout by default.
+const FUTEX_LOCK_PI2: i32 = 13;
+/// PI futex word: other threads wait in the kernel (the owner must unlock through it).
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+/// PI futex word: the previous owner died holding the lock.
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+/// PI futex word: thread id of the owner.
+const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
 
 /// Unique kernel identifier for a futex word: `(address_space_id, address)`.
 ///
@@ -309,6 +320,110 @@ fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool)
     }
 }
 
+/// Compare-and-exchange on a user futex word; returns the value found.
+fn user_cmpxchg(uaddr: u64, old: u32, new: u32) -> Result<u32, i64> {
+    if uaddr & 3 != 0 || !crate::memory::vm::prefault_current(uaddr, 4, true) {
+        return Err(if uaddr & 3 != 0 { EINVAL } else { EFAULT });
+    }
+    let word = unsafe { &*(uaddr as *const core::sync::atomic::AtomicU32) };
+    Ok(match word.compare_exchange(old, new, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst) {
+        Ok(v) | Err(v) => v,
+    })
+}
+
+/// `FUTEX_LOCK_PI` / `FUTEX_TRYLOCK_PI`: takes a priority-inheritance lock whose word
+/// holds the owner's thread id. Waiters set `FUTEX_WAITERS` so the owner unlocks through
+/// the kernel, which wakes one of them. (One CPU and no real-time scheduling here, so
+/// there is no priority to inherit; the protocol is what programs depend on.)
+fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> i64 {
+    let key = key_for(uaddr, private);
+    let (tid, _) = super::proc::current_ids();
+    let tid = tid as u32 & FUTEX_TID_MASK;
+    let me = crate::task::SCHEDULER.lock().current_task_id();
+    loop {
+        {
+            let mut fq = GLOBAL_FUTEX.lock();
+            let v = match read_word(uaddr) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let owner = v & FUTEX_TID_MASK;
+            // Taking a free lock, or one whose owner died: keep the waiters bit for the others
+            let dead_owner = owner != 0 && !crate::task::is_task_alive(TaskId(owner as u64));
+            if owner == 0 || dead_owner {
+                let others = fq.waiters.iter().any(|w| w.key == key && w.task_id != me);
+                let died = if dead_owner { FUTEX_OWNER_DIED } else { v & FUTEX_OWNER_DIED };
+                let new = tid | died | if others { FUTEX_WAITERS } else { 0 };
+                match user_cmpxchg(uaddr, v, new) {
+                    Ok(found) if found == v => {
+                        fq.remove(me);
+                        return 0;
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        fq.remove(me);
+                        return e;
+                    }
+                }
+            }
+            if owner == tid {
+                fq.remove(me);
+                return EDEADLK;
+            }
+            if try_only {
+                return EAGAIN;
+            }
+            if v & FUTEX_WAITERS == 0 {
+                match user_cmpxchg(uaddr, v, v | FUTEX_WAITERS) {
+                    Ok(found) if found == v => {}
+                    Ok(_) => continue,
+                    Err(e) => return e,
+                }
+            }
+            if !fq.is_waiting(me) {
+                fq.waiters.push(FutexWaiter { key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
+            }
+        }
+        crate::task::wait::wait(deadline);
+        if deadline.map_or(false, |d| crate::arch::pit::ticks() >= d) {
+            GLOBAL_FUTEX.lock().remove(me);
+            return ETIMEDOUT;
+        }
+        if super::proc::signal_pending() {
+            GLOBAL_FUTEX.lock().remove(me);
+            return super::proc::ERESTARTSYS;
+        }
+    }
+}
+
+/// `FUTEX_UNLOCK_PI`: releases a lock the caller owns and wakes one waiter (which takes
+/// the lock in [`lock_pi`], setting the waiters bit again for any others).
+fn unlock_pi(uaddr: u64, private: bool) -> i64 {
+    let key = key_for(uaddr, private);
+    let (tid, _) = super::proc::current_ids();
+    let tid = tid as u32 & FUTEX_TID_MASK;
+    let ids = {
+        let mut fq = GLOBAL_FUTEX.lock();
+        loop {
+            let v = match read_word(uaddr) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            if v & FUTEX_TID_MASK != tid {
+                return EPERM;
+            }
+            match user_cmpxchg(uaddr, v, 0) {
+                Ok(found) if found == v => break,
+                Ok(_) => continue,
+                Err(e) => return e,
+            }
+        }
+        fq.wake_task_ids(key, 1, FUTEX_BITSET_MATCH_ANY)
+    };
+    wake_ids(&ids);
+    0
+}
+
 /// Applies an encoded `FUTEX_WAKE_OP` read-modify-write operation to `*uaddr2` and evaluates
 /// whether its comparison against the old value holds.
 fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
@@ -416,7 +531,17 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
             wake_ids(&ids);
             ids.len() as i64
         }
-        // Priority inheritance and futex descriptors: glibc falls back to plain futexes
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
+            // LOCK_PI's absolute timeout is CLOCK_REALTIME; LOCK_PI2 follows the flag
+            let rt = cmd == FUTEX_LOCK_PI || realtime;
+            match deadline_tick(timeout, false, rt) {
+                Ok(d) => lock_pi(uaddr, d, private, false),
+                Err(e) => e,
+            }
+        }
+        FUTEX_TRYLOCK_PI => lock_pi(uaddr, None, private, true),
+        FUTEX_UNLOCK_PI => unlock_pi(uaddr, private),
+        // PI requeueing and futex descriptors
         _ => ENOSYS,
     }
 }

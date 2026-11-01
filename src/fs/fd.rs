@@ -682,7 +682,7 @@ impl FdTable {
             FileDescriptor::Epoll(ep) if depth < 4 => {
                 use crate::compat::linux::epoll::{EPOLLERR, EPOLLHUP, EPOLLONESHOT};
                 let watches: Vec<(i32, u32)> =
-                    ep.lock().watches.values().filter(|w| w.events != EPOLLONESHOT).map(|w| (w.fd, w.events)).collect();
+                    ep.lock().watches.values().filter(|w| w.events != EPOLLONESHOT && !w.reported).map(|w| (w.fd, w.events)).collect();
                 let ready = watches.iter().any(|&(fd, events)| {
                     self.get(fd as usize).map_or(false, |d| self.readiness_at(d, depth + 1) & (events | EPOLLERR | EPOLLHUP) != 0)
                 });

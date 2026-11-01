@@ -34,7 +34,30 @@ use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskS
 /// Default timeslice granted to a scheduled task in PIT timer ticks (50 ms at 100 Hz).
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
 /// Default kernel stack size allocated per thread in bytes (64 KiB).
-pub const DEFAULT_STACK_SIZE: usize = 65536;  // 64 KiB per kernel thread stack
+pub const DEFAULT_STACK_SIZE: usize = 65536;
+
+/// Dead tasks moved out of the table by the scheduler, waiting to be freed outside the
+/// timer interrupt (see [`reap_dead_tasks`]).
+static PARKED_TASKS: spin::Mutex<[Option<Task>; 64]> = spin::Mutex::new([const { None }; 64]);
+
+/// Frees the kernel stacks and other memory of dead tasks parked by the scheduler. Call
+/// only where no heap, scheduler or file-system locks are held (system call entry).
+pub fn reap_dead_tasks() {
+    loop {
+        // One at a time: a task is too large to move many of them onto this stack
+        let task = match PARKED_TASKS.try_lock() {
+            Some(mut p) => match p.iter_mut().find(|s| s.is_some()) {
+                Some(slot) => slot.take(),
+                None => None,
+            },
+            None => None,
+        };
+        match task {
+            Some(t) => drop(t),
+            None => break,
+        }
+    }
+}  // 64 KiB per kernel thread stack
 
 /// Diagnostic snapshot of a task for shell inspection (e.g. `ps` / `tasks` command).
 #[derive(Debug, Clone)]
@@ -194,6 +217,7 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -279,6 +303,7 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -360,6 +385,7 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -432,6 +458,7 @@ impl Scheduler {
             exe: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -528,6 +555,7 @@ impl Scheduler {
             exe: Some(alloc::sync::Arc::from(exec_path)),
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -681,6 +709,7 @@ impl Scheduler {
             exe: parent_exe,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
+            syscall_args: [0; 2],
             event_wait: false,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(child_fpu),
@@ -723,7 +752,7 @@ impl Scheduler {
             }
         }
 
-        let curr_idx = self.current_index;
+        let mut curr_idx = self.current_index;
         let curr_task = &mut self.tasks[curr_idx];
         curr_task.ticks_run += 1;
 
@@ -744,16 +773,36 @@ impl Scheduler {
         }
 
         // 3b. Release address spaces of tasks that died earlier (never the current task,
-        // whose page tables are still loaded). Parking never allocates.
-        for (idx, task) in self.tasks.iter_mut().enumerate() {
-            if idx != curr_idx && task.state == TaskState::Dead {
-                if let Some(mm) = task.mm.take() {
-                    if let Err(mm) = crate::memory::vm::retire_mm(mm) {
-                        task.mm = Some(mm);
-                    }
+        // whose page tables are still loaded), then move the dead tasks themselves out of
+        // the table (their kernel stacks are freed by `reap_dead_tasks`). Parking never
+        // allocates or frees: this runs in the timer interrupt.
+        let mut idx = self.tasks.len();
+        while idx > 0 {
+            idx -= 1;
+            if idx == curr_idx || self.tasks[idx].state != TaskState::Dead {
+                continue;
+            }
+            if let Some(mm) = self.tasks[idx].mm.take() {
+                if let Err(mm) = crate::memory::vm::retire_mm(mm) {
+                    self.tasks[idx].mm = Some(mm);
+                    continue;
                 }
             }
+            let mut parked = match PARKED_TASKS.try_lock() {
+                Some(p) => p,
+                None => break,
+            };
+            let slot = match parked.iter_mut().find(|s| s.is_none()) {
+                Some(s) => s,
+                None => break,
+            };
+            let last = self.tasks.len() - 1;
+            *slot = Some(self.tasks.swap_remove(idx));
+            if curr_idx == last {
+                curr_idx = idx; // the current task moved into the freed position
+            }
         }
+        self.current_index = curr_idx;
 
         // 4. Select the next Ready task in round-robin fashion
         let num_tasks = self.tasks.len();
@@ -803,6 +852,10 @@ impl Scheduler {
             super::PREEMPT_POINTS.swap(self.tasks[next_idx].preempt_depth, core::sync::atomic::Ordering::SeqCst);
         self.tasks[curr_idx].syscall_nr =
             super::CURRENT_SYSCALL.swap(self.tasks[next_idx].syscall_nr, core::sync::atomic::Ordering::Relaxed);
+        for k in 0..2 {
+            self.tasks[curr_idx].syscall_args[k] =
+                super::CURRENT_SYSCALL_ARGS[k].swap(self.tasks[next_idx].syscall_args[k], core::sync::atomic::Ordering::Relaxed);
+        }
 
         // 4b'. Swap x87/SSE state through the trap frame's save area
         let trap_fpu = crate::arch::idt::CURRENT_TRAP_FPU.load(core::sync::atomic::Ordering::Acquire);
@@ -1097,22 +1150,33 @@ impl Scheduler {
     /// Writes every live task's state and pending system call to the serial port without
     /// allocating (used from interrupt context to diagnose hangs).
     pub fn dump_tasks(&self) {
+        if let Some(h) = crate::memory::heap::try_stats() {
+            crate::console::serial_write(&alloc::format!(
+                "[heap] {} KiB used, {} KiB free of {} KiB\n",
+                h.used_bytes / 1024,
+                h.free_bytes / 1024,
+                h.total_bytes / 1024
+            ));
+        }
         crate::console::serial_write("[tasks] id state tgid syscall rip ticks exe\n");
         for (i, task) in self.tasks.iter().enumerate() {
             if task.state == TaskState::Dead {
                 continue;
             }
-            let nr = if i == self.current_index {
-                super::CURRENT_SYSCALL.load(core::sync::atomic::Ordering::Relaxed)
+            let (nr, args) = if i == self.current_index {
+                (
+                    super::CURRENT_SYSCALL.load(core::sync::atomic::Ordering::Relaxed),
+                    [0, 1].map(|k| super::CURRENT_SYSCALL_ARGS[k].load(core::sync::atomic::Ordering::Relaxed)),
+                )
             } else {
-                task.syscall_nr
+                (task.syscall_nr, task.syscall_args)
             };
             let mut b = crate::console::FixedBuf::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut b,
                 format_args!(
-                    "[tasks] {} {} {} {} {:#x} {} {}\n",
-                    task.id.0, task.state.as_str(), task.tgid, nr as i64, task.regs.rip, task.ticks_run,
+                    "[tasks] {} {} {} {}({:#x},{:#x}) {:#x} {} {}\n",
+                    task.id.0, task.state.as_str(), task.tgid, nr as i64, args[0], args[1], task.regs.rip, task.ticks_run,
                     if task.exe.is_some() { task.exe_path() } else { task.name }
                 ),
             );

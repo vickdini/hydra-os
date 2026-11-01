@@ -263,7 +263,8 @@ impl Ps2Mouse {
     fn feed(&mut self, byte: u8, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
 
         // Byte 0 must have bit 3 set (always 1 in standard PS/2 packet)
-        if self.packet_idx == 0 && (byte & 0x08) == 0 {
+        // A header with both overflow bits set is a stray reply (ACK 0xFA, resend 0xFE)
+        if self.packet_idx == 0 && ((byte & 0x08) == 0 || byte & 0xC0 == 0xC0) {
             // Out of sync; discard byte and await valid packet header
             return None;
         }
@@ -379,8 +380,27 @@ pub fn enable_irq() {
         if !mouse.initialized {
             return;
         }
+        // The firmware's own PS/2 driver may have reset the mouse since `init`: redo the
+        // wheel handshake now that it is gone (interrupts off, so the keyboard handler
+        // cannot take the mouse's replies)
+        let wheel = x86_64::instructions::interrupts::without_interrupts(|| {
+            let _ = mouse.write_mouse_cmd(0xF5); // disable reporting during the handshake
+            let wheel = mouse.enable_wheel();
+            let _ = mouse.write_mouse_cmd(MOUSE_CMD_ENABLE_REPORTING);
+            // Drop replies still queued (a late ACK has bit 3 set and would be taken for
+            // the first byte of a packet)
+            for _ in 0..16 {
+                if unsafe { mouse.cmd_port.read() } & STATUS_OUTPUT_BUFFER_FULL == 0 {
+                    break;
+                }
+                let _ = unsafe { mouse.data_port.read() };
+            }
+            wheel
+        });
+        mouse.packet_len = if wheel { 4 } else { 3 };
         mouse.irq_mode = true;
         mouse.packet_idx = 0;
+        crate::kprintln!("[mouse] {} packets{}", mouse.packet_len, if wheel { " (wheel enabled)" } else { "" });
     }
     crate::arch::pic::unmask_irq(2);
     crate::arch::pic::unmask_irq(12);

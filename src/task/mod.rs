@@ -44,6 +44,9 @@ pub static PREEMPT_POINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::A
 /// Linux system call the running task is executing (`u64::MAX` when none), for
 /// [`scheduler::Scheduler::dump_tasks`].
 pub static CURRENT_SYSCALL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+/// First two arguments of [`CURRENT_SYSCALL`] (for the task dump).
+pub static CURRENT_SYSCALL_ARGS: [core::sync::atomic::AtomicU64; 2] =
+    [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
 
 /// Runs `f` (an idle wait such as `hlt` or a timed sleep) as a preemption point.
 ///

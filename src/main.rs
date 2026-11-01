@@ -100,9 +100,19 @@ use ipc::{Endpoint, Message};
 /// * `_info` - Diagnostic metadata describing the source file, line number, and panic message.
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+    // Straight to COM1 first: no locks and no allocation (the panic may be an
+    // allocation failure, or happen while the console is locked)
+    {
+        use core::fmt::Write;
+        let mut com1 = crate::arch::raw_serial::RawSerial;
+        let _ = write!(com1, "\n[!] KERNEL PANIC: {}\n", _info);
+        if let Some(h) = crate::memory::heap::try_stats() {
+            let _ = write!(com1, "[!] heap: {} KiB used, {} KiB free of {} KiB\n", h.used_bytes / 1024, h.free_bytes / 1024, h.total_bytes / 1024);
+        }
+    }
     console::set_color(Color::LightRed, Color::Black);
     println!("\n[!] KERNEL PANIC: {:?}", _info);
-    x86_64::instructions::interrupts::disable();
     loop {
         x86_64::instructions::hlt();
     }

@@ -46,6 +46,7 @@ pub mod pci;
 pub mod pic;
 /// 8254 Programmable Interval Timer (PIT) driver and system uptime accounting.
 pub mod pit;
+pub mod raw_serial;
 /// MC146818 CMOS Real-Time Clock (RTC) wall-clock epoch initialization.
 pub mod rtc;
 /// Fast `x86_64` MSR-based `syscall`/`sysretq` entry stub and kernel system call dispatcher.

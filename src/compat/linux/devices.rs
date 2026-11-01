@@ -63,6 +63,8 @@ pub fn vga_slot() -> String {
 struct Tree {
     root: u64,
     changed: bool,
+    /// Path of the operation in progress (named when one fails).
+    at: String,
 }
 
 fn split(path: &str) -> (&str, &str) {
@@ -74,6 +76,7 @@ fn split(path: &str) -> (&str, &str) {
 
 impl Tree {
     fn dir(&mut self, s: &mut ZfsServer, path: &str) -> Result<u64, i64> {
+        self.at = String::from(path);
         let mut ino = self.root;
         for comp in path.split('/').filter(|c| !c.is_empty()) {
             ino = match s.lookup(ino, comp.as_bytes()) {
@@ -107,6 +110,7 @@ impl Tree {
     }
 
     fn file_bytes(&mut self, s: &mut ZfsServer, path: &str, content: &[u8], perm: u32) -> Result<(), i64> {
+        self.at = String::from(path);
         let (parent, name) = split(path);
         let dir = self.dir(s, parent)?;
         let ino = match self.existing(s, dir, name, S_IFREG)? {
@@ -128,6 +132,7 @@ impl Tree {
     }
 
     fn link(&mut self, s: &mut ZfsServer, path: &str, target: &str) -> Result<(), i64> {
+        self.at = String::from(path);
         let (parent, name) = split(path);
         let dir = self.dir(s, parent)?;
         if let Some(i) = self.existing(s, dir, name, S_IFLNK)? {
@@ -142,6 +147,7 @@ impl Tree {
     }
 
     fn node(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32) -> Result<(), i64> {
+        self.at = String::from(path);
         let (parent, name) = split(path);
         let dir = self.dir(s, parent)?;
         if let Some(i) = self.existing(s, dir, name, S_IFCHR)? {
@@ -415,8 +421,11 @@ fn boot_binary(s: &mut ZfsServer, path: &str) -> Option<Vec<u8>> {
 /// Writes the device nodes, sysfs tree and udev records into the Linux root at `root`.
 pub fn populate(root: &str) -> Result<(), &'static str> {
     let root_ino = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true).map_err(|_| "no such root directory")?;
-    let mut tree = Tree { root: root_ino, changed: false };
-    crate::fs::zfs::with_server(|s| populate_tree(&mut tree, s)).map_err(|_| "could not write the device tree")?;
+    let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
+    if let Err(e) = crate::fs::zfs::with_server(|s| populate_tree(&mut tree, s)) {
+        crate::kprintln!("[devices] writing the device tree into {} failed at {}: errno {}", root, tree.at, -e);
+        return Err("could not write the device tree");
+    }
     if tree.changed {
         let _ = crate::fs::ZfsClient::sync();
     }

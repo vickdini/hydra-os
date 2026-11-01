@@ -141,6 +141,8 @@ int main(void) {
             if (me[k].type == EV_REL && me[k].code == REL_X) c2.x += me[k].value;
             if (me[k].type == EV_REL && me[k].code == REL_Y) c2.y += me[k].value;
             if (me[k].type == EV_KEY) printf("[drmtest] mouse key %u = %d\n", me[k].code, me[k].value);
+            if (me[k].type == EV_REL && (me[k].code == REL_WHEEL || me[k].code == REL_WHEEL_HI_RES))
+                printf("[drmtest] wheel code %u = %d\n", me[k].code, me[k].value);
         }
         r = read(kbd, me, sizeof me);
         for (int k = 0; r > 0 && k < r / (int)sizeof me[0]; k++)

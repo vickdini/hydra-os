@@ -239,6 +239,7 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
 
     // Release address spaces of exited processes (no locks are held at syscall entry)
     crate::memory::vm::reap_retired_mms();
+    crate::task::scheduler::reap_dead_tasks();
 
     // Check if active task uses Linux ABI personality
     if crate::task::current_personality() == crate::task::TaskPersonality::Linux {
@@ -254,6 +255,8 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             crate::kprintln!("[trace] {} > {}({:#x}, {:#x}, {:#x}, {:#x})", pid, num, args[0], args[1], args[2], args[3]);
         }
         crate::task::CURRENT_SYSCALL.store(num, core::sync::atomic::Ordering::Relaxed);
+        crate::task::CURRENT_SYSCALL_ARGS[0].store(args[0], core::sync::atomic::Ordering::Relaxed);
+        crate::task::CURRENT_SYSCALL_ARGS[1].store(args[1], core::sync::atomic::Ordering::Relaxed);
         let res = crate::compat::linux::dispatch_linux_syscall(frame);
         crate::task::CURRENT_SYSCALL.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
         if tracing {

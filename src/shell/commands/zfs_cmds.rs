@@ -188,6 +188,11 @@ Snapshots:");
 
             "selftest" => crate::fs::zfs::selftest::run_selftest(),
             "verify" => crate::fs::zfs::selftest::run_verify(),
+            "fsck" => {
+                // zfs fsck <dir> [repair]
+                let dir = args.get(1).copied().unwrap_or("/");
+                crate::fs::zfs::selftest::run_fsck(dir, args.get(2).copied() == Some("repair"));
+            }
 
             "write" => {
                 if args.len() < 3 {
