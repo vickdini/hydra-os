@@ -155,6 +155,7 @@ def main():
         time.sleep(2.0)
         start = len(read_log(a.log))
         prompts_seen = 0
+        typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%"]
         for i, c in enumerate(a.commands):
             no_wait = c.startswith("@")  # "@cmd": type without waiting for a prompt
             if no_wait:
@@ -206,8 +207,13 @@ def main():
                         r = qmp.cmd("human-monitor-command", {"command-line": f"x /256gx 0x{m.group(1)}"})
                         out.write("$ stack\n" + str(r.get("return", r)) + "\n")
                 print(f"[hydra_run] log stalled for {a.stall_dump} s: CPU state saved to scratch/hydra_stall.txt")
-            # --until is a regular expression (alternatives with |; `\|` also accepted)
-            if a.until and re.search(a.until.replace(r'\|', '|'), log[start:]):
+            # --until is a regular expression (alternatives with |; `\|` also accepted). The
+            # shell echoes typed commands, so their text is removed first: otherwise a
+            # pattern that also appears in a command matches its echo and ends the run early
+            seen = log[start:]
+            for c in typed:
+                seen = seen.replace(c, "")
+            if a.until and re.search(a.until.replace(r'\|', '|'), seen):
                 time.sleep(1.0)
                 break
             if proc.poll() is not None:

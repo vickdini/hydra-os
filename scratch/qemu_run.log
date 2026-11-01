@@ -85,9 +85,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
 [1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
 
-[1m[32m[40mhydra:/bin$ linux run /bin/vmtest.elf
-[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/vmtest.elf'...
-[mouse] 4 packets (wheel enabled)
+[1m[32m[40mhydra:/bin$ linux chroot /ubuntu /usr/bin/bash -c 'ls -i /usr/bin/wireplumber; dpkg-query -W wireplumber libc6; echo PKGEND'
+[1m[37m[40m[mouse] 4 packets (wheel enabled)
 
 ============================================================
  [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
@@ -104,31 +103,9 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 
 [*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
 
-[+] Read 968248 bytes from OpenZFS (/bin/vmtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
-[vmtest] Hydra VM test starting (argc=1, argv[0]=/bin/vmtest.elf)
-[vmtest] malloc small (brk) + large (mmap)            PASS
-[vmtest] realloc 8 MiB -> 32 MiB keeps contents (mremap) PASS
-[vmtest] anonymous mmap is zero-filled                PASS
-[vmtest] anonymous mmap read-back                     PASS
-[vmtest] MAP_FIXED lands at requested address         PASS
-[vmtest] MAP_FIXED page replaced (zero), neighbours kept PASS
-[vmtest] MAP_FIXED_NOREPLACE fails on overlap         PASS
-[vmtest] mprotect read-only                           PASS
-[vmtest] mprotect read-write again                    PASS
-[vmtest] write after re-enabling PROT_WRITE           PASS
-[vmtest] munmap middle page                           PASS
-[vmtest] hole is free after munmap                    PASS
-[vmtest] mremap grow (may move)                       PASS
-[vmtest] mremap grown tail is writable                PASS
-[vmtest] memfd_create                                 PASS
-[vmtest] ftruncate memfd to 3 pages                   PASS
-[vmtest] two MAP_SHARED mappings alias                PASS
-[vmtest] pread sees mapped writes                     PASS
-[vmtest] MAP_PRIVATE write is copy-on-write           PASS
-[vmtest] SSE state preserved across syscalls/yields   PASS
-[vmtest] 4 threads share memory (counter == 4000)     PASS
-[vmtest] per-thread SSE state isolated                PASS
-[vmtest] ALL PASSED (0 failures)
+72188 /usr/bin/wireplumber
+libc6:amd64	2.43-2ubuntu2.3
+wireplumber	0.5.13-1ubuntu1.1
+PKGEND
 [+] Linux process 4 exited with status 0.
 hydra:/bin$ 
