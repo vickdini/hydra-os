@@ -122,13 +122,15 @@ impl PseudoFile {
                 read_slice(content, cursor, buf)
             }
             PseudoFile::ProcMeminfo => {
-                let st = crate::memory::heap::stats();
-                let text = alloc::format!(
-                    "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\nBuffers:               0 kB\nCached:                0 kB\n",
-                    st.total_bytes / 1024,
-                    st.free_bytes / 1024,
-                    st.free_bytes / 1024
-                );
+                // Physical memory (as sysinfo reports it); no swap. System monitors read
+                // the swap and cache lines too and show garbage when they are missing.
+                let fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
+                let (total, free) = (fa.total_usable_memory() / 1024, fa.free_memory() / 1024);
+                drop(fa);
+                let mut text = alloc::format!("MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n", total, free, free);
+                for field in ["Buffers", "Cached", "SwapCached", "SwapTotal", "SwapFree", "Shmem", "SReclaimable", "SUnreclaim"] {
+                    text.push_str(&alloc::format!("{:<16}{:8} kB\n", alloc::format!("{}:", field), 0));
+                }
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcCpuinfo => {

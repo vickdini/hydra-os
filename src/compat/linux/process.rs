@@ -315,6 +315,19 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         }
         // mlock, munlock, mlockall, munlockall, mlock2: nothing is ever swapped out
         149 | 150 | 151 | 152 | 325 => 0,
+        // ioprio_set / ioprio_get: one I/O queue, priorities are accepted and read back as
+        // "none" (the default class)
+        251 | 252 => 0,
+        239 => {
+            // get_mempolicy: one NUMA node, so always MPOL_DEFAULT
+            if a[0] != 0 {
+                match copy_out(a[0], &0i32.to_le_bytes()) {
+                    0 => {}
+                    e => return Some(e),
+                }
+            }
+            0
+        }
         140 => 20, // getpriority: nice 0 (the kernel returns 20 - nice)
         141 => {
             // setpriority: raising nice is allowed, lowering it needs CAP_SYS_NICE
