@@ -168,31 +168,30 @@ impl Command for SuCommand {
     }
 
     fn execute(&self, args: &[&str], state: &mut ShellState) {
-        let target_user = if args.is_empty() { "root" } else { args[0] };
-
-        match target_user {
-            "root" | "0" => {
-                state.set_user("root", 0, 0);
-                set_color(Color::LightGreen, Color::Black);
-                println!("[+] Switched to superuser 'root' (UID 0, GID 0)");
+        let target = args.first().copied().unwrap_or("root");
+        let acct = match crate::shell::login::account(target) {
+            Some(a) => a,
+            None => {
+                set_color(Color::LightRed, Color::Black);
+                println!("su: user '{}' does not exist", target);
+                state.last_status = 1;
+                return;
             }
-            "hydra" | "1000" => {
-                state.set_user("hydra", 1000, 1000);
-                set_color(Color::LightGreen, Color::Black);
-                println!("[+] Switched to standard user 'hydra' (UID 1000, GID 1000)");
-            }
-            other => {
-                if let Some(uid) = parse_u64(other) {
-                    state.set_user("user", uid as u32, uid as u32);
-                    set_color(Color::LightGreen, Color::Black);
-                    println!("[+] Switched to UID {} (GID {})", uid, uid);
-                } else {
-                    set_color(Color::LightRed, Color::Black);
-                    println!("su: user '{}' does not exist in /etc/passwd", other);
-                    state.last_status = 1;
-                }
+        };
+        // root switches freely; anyone else gives the target account's password
+        if state.current_uid != 0 {
+            let password = crate::shell::login::read_input("Password: ", true);
+            if !crate::shell::login::verify_password(&acct.name, &password) {
+                set_color(Color::LightRed, Color::Black);
+                println!("su: Authentication failure");
+                state.last_status = 1;
+                return;
             }
         }
+        state.set_user(&acct.name, acct.uid, acct.gid);
+        set_color(Color::LightGreen, Color::Black);
+        println!("[+] Switched to '{}' (UID {}, GID {})", acct.name, acct.uid, acct.gid);
+        state.last_status = 0;
     }
 }
 
@@ -216,6 +215,36 @@ impl Command for SudoCommand {
         if args.is_empty() {
             set_color(Color::LightRed, Color::Black);
             println!("Usage: {}", self.usage());
+            return;
+        }
+
+        // An administrator proves who they are (again after 5 minutes), as with Ubuntu's sudo
+        if state.current_uid != 0 {
+            let name = alloc::string::String::from(core::str::from_utf8(&state.username[..state.username_len]).unwrap_or(""));
+            if !crate::shell::login::account(&name).map_or(false, |a| a.admin) {
+                set_color(Color::LightRed, Color::Black);
+                println!("{} is not in the sudoers file.", name);
+                state.last_status = 1;
+                return;
+            }
+            if !crate::shell::login::sudo_fresh() {
+                let password = crate::shell::login::read_input(&alloc::format!("[sudo] password for {}: ", name), true);
+                if !crate::shell::login::verify_password(&name, &password) {
+                    set_color(Color::LightRed, Color::Black);
+                    println!("sudo: 1 incorrect password attempt");
+                    state.last_status = 1;
+                    return;
+                }
+                crate::shell::login::sudo_remember();
+            }
+        }
+
+        // sudo -s / -i: a root console
+        if args[0] == "-s" || args[0] == "-i" {
+            state.set_user("root", 0, 0);
+            set_color(Color::LightGreen, Color::Black);
+            println!("[+] Switched to superuser 'root' (UID 0, GID 0)");
+            state.last_status = 0;
             return;
         }
 

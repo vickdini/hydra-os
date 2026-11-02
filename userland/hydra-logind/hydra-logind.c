@@ -21,6 +21,7 @@
  */
 #define _GNU_SOURCE
 #include <dbus/dbus.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -303,6 +304,34 @@ static int device_path(unsigned major, unsigned minor, char *out, size_t len) {
     return found;
 }
 
+/* Gives the user of the active session the seat's devices tagged "uaccess" in the udev
+ * database (the display, keyboard and mouse), as systemd-logind does with an ACL: the
+ * nodes become theirs (mode 0660 lets the owner read and write). uid 0 takes them back. */
+static void grant_seat_devices(uid_t uid) {
+    DIR *d = opendir("/run/udev/data");
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        unsigned major, minor;
+        if (sscanf(e->d_name, "c%u:%u", &major, &minor) != 2)
+            continue;
+        char path[300], line[256];
+        snprintf(path, sizeof path, "/run/udev/data/%s", e->d_name);
+        FILE *f = fopen(path, "re");
+        if (!f)
+            continue;
+        int uaccess = 0;
+        while (fgets(line, sizeof line, f))
+            if (!strcmp(line, "G:uaccess\n"))
+                uaccess = 1;
+        fclose(f);
+        if (uaccess && device_path(major, minor, path, sizeof path) == 0 && chown(path, uid, (gid_t)-1) < 0)
+            logmsg("cannot give %s to uid %u: %s", path, (unsigned)uid, strerror(errno));
+    }
+    closedir(d);
+}
+
 static int open_device(unsigned major, unsigned minor, int as_active) {
     char path[160];
     if (device_path(major, minor, path, sizeof path) < 0)
@@ -397,6 +426,7 @@ static void activate(int s) {
         properties_changed(sessions[old].path, SESSION_IFACE, old, session_active_props);
     }
     active = s;
+    grant_seat_devices(s >= 0 ? sessions[s].uid : 0);
     if (s >= 0) {
         resume_devices(s);
         properties_changed(sessions[s].path, SESSION_IFACE, s, session_active_props);
@@ -424,6 +454,7 @@ static void remove_session(int s) {
     int was_active = (s == active);
     if (was_active) {
         active = -1;
+        grant_seat_devices(0);
         properties_changed(SEAT_PATH, SEAT_IFACE, -1, seat_active_props);
     }
     se->used = 0;

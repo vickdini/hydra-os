@@ -152,7 +152,8 @@ impl Tree {
         let dir = self.dir(s, parent)?;
         if let Some(i) = self.existing(s, dir, name, S_IFCHR)? {
             let a = s.getattr(i)?;
-            if a.rdev == rdev && a.gid == gid && a.mode & 0o777 == 0o660 {
+            // A boot starts with root owning every node (the seat daemon hands some out)
+            if a.rdev == rdev && a.uid == 0 && a.gid == gid && a.mode & 0o777 == 0o660 {
                 return Ok(());
             }
             s.unlink(dir, name.as_bytes())?;

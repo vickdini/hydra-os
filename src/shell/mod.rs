@@ -33,6 +33,8 @@ pub mod editor;
 pub mod fs;
 /// Fixed-capacity circular buffer for session command history.
 pub mod history;
+/// Console login: administrators only, passwords checked by PAM's helper.
+pub mod login;
 /// Interactive terminal text pager for multi-page command output.
 pub mod pager;
 /// Unidirectional pipe chaining (`|`) and file output redirection (`>`, `>>`).
@@ -368,6 +370,7 @@ pub fn run() -> ! {
     print_welcome_banner();
     auto_exitboot_countdown(&mut state);
     auto_plasma_countdown(&mut state);
+    login::login(&mut state);
 
     loop {
         set_color(state.prompt_color, Color::Black);
@@ -376,14 +379,11 @@ pub fn run() -> ! {
         let len = match editor::read_line(prompt_str, &mut line_buf, &mut state) {
             Some(l) => l,
             None => {
+                // End of input (Ctrl+D): log out; the next user logs in again
                 set_color(Color::LightCyan, Color::Black);
-                println!("logout");
-                if let Some(cmd) = commands::find_command("shutdown") {
-                    cmd.execute(&[], &mut state);
-                }
-                loop {
-                    crate::console::stall(core::time::Duration::from_millis(500));
-                }
+                println!("logout\n");
+                login::login(&mut state);
+                continue;
             }
         };
         set_color(Color::White, Color::Black);

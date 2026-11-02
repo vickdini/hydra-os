@@ -110,6 +110,7 @@ def main():
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
     ap.add_argument("--stall-dump", type=float, default=0, help="save CPU state when the log stops growing for this many seconds")
     ap.add_argument("--no-cancel", action="store_true", help="let the boot countdowns run out (bare metal, then the desktop autostart)")
+    ap.add_argument("--login", default="hydra:hydra", help="user:password for the console login after the countdown ('' to skip)")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
 
@@ -154,6 +155,22 @@ def main():
         if not a.no_cancel:
             qmp.type(" ")  # cancel auto takeover countdown (and with it the desktop autostart)
         time.sleep(2.0)
+        def wait_for(text, since, timeout):
+            end = time.time() + timeout
+            while time.time() < end:
+                if text in read_log(a.log)[since:]:
+                    return True
+                time.sleep(0.25)
+            return False
+        user, _, password = a.login.partition(":")
+        if a.login and not a.no_cancel:
+            # The console asks an administrator to log in (the prompt is already up)
+            mark = 0
+            if wait_for("login: ", mark, 60):
+                qmp.type(user + "\n")
+                wait_for("Password: ", mark, 10)
+                qmp.type(password + "\n")
+                wait_for("Logged in as", mark, 30)
         start = len(read_log(a.log))
         prompts_seen = 0
         typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%"]
@@ -183,6 +200,19 @@ def main():
             elif len(c) == 2 and c[0] == "^" and c[1].isalpha():
                 # Ctrl+letter, e.g. ^C, ^Z, ^D
                 qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": c[1].lower()}]})
+            elif c == "su root" and a.login:
+                # Becoming root takes the administrator's password: "sudo -s", as on Ubuntu
+                mark = len(read_log(a.log))
+                qmp.type("sudo -s\n")
+                end = time.time() + 15
+                while time.time() < end:
+                    tail = read_log(a.log)[mark:]
+                    if "[sudo] password" in tail:
+                        qmp.type(password + "\n")
+                        break
+                    if "Switched to superuser" in tail or "sudoers" in tail:
+                        break
+                    time.sleep(0.25)
             else:
                 qmp.type(c + "\n")
             time.sleep(a.gap)
