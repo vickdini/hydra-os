@@ -32,6 +32,10 @@ pub struct SignalFd {
 
 impl SignalFd {
     /// Polls readiness of queued pending signals matching the descriptor's signal mask.
+    ///
+    /// # Returns
+    ///
+    /// Bitmask with `0x0001` (`POLLIN`) if matching signals are pending, or `0` otherwise.
     pub fn poll_events(&self) -> u32 {
         if super::proc::pending_for(self.owner, self.mask.load(Ordering::Relaxed)) {
             0x0001
@@ -41,16 +45,32 @@ impl SignalFd {
     }
 
     /// Sets or clears non-blocking I/O mode on this signal descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking mode; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Queries whether non-blocking mode is currently enabled on this descriptor.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
     /// Reads structured `signalfd_siginfo` records for pending delivered signals.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination byte buffer to receive `struct signalfd_siginfo` records.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes read into `buf` on success, or a negative Linux errno (`-EINVAL`, `-EAGAIN`, `-ERESTARTSYS`).
     pub fn read(&self, buf: &mut [u8]) -> i64 {
         if buf.len() < SIGINFO_SIZE {
             return EINVAL;
@@ -89,7 +109,18 @@ impl SignalFd {
     }
 }
 
-/// `signalfd4(fd, mask, sizemask, flags)` (and `signalfd` with no flags).
+/// Creates or modifies a signalfd descriptor (`signalfd4(fd, mask, sizemask, flags)` and `signalfd`).
+///
+/// # Arguments
+///
+/// * `fd` - Existing signalfd file descriptor to reconfigure, or `-1` to create a new one.
+/// * `mask_ptr` - User virtual pointer to the 8-byte signal mask.
+/// * `size` - Size of the signal mask in bytes (must be `8`).
+/// * `flags` - Bitmask of flags (`SFD_NONBLOCK`, `SFD_CLOEXEC`).
+///
+/// # Returns
+///
+/// Allocated or modified file descriptor index on success, or a negative Linux errno on error.
 pub fn sys_signalfd4(fd: i64, mask_ptr: u64, size: u64, flags: u64) -> i64 {
     if size != 8 || flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
         return EINVAL;

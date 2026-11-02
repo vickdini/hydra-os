@@ -77,6 +77,14 @@ pub struct ExecCreds {
 
 /// Returns true if the binary can be loaded into a private address space: position
 /// independent (`ET_DYN`) or linked entirely above the kernel identity map.
+///
+/// # Arguments
+///
+/// * `bytes` - Raw byte slice of the candidate executable image.
+///
+/// # Returns
+///
+/// `true` if binary can be safely mapped in user space, `false` otherwise.
 pub fn is_vm_loadable(bytes: &[u8]) -> bool {
     let elf = match ElfBinary::parse(bytes) {
         Ok(e) => e,
@@ -89,16 +97,40 @@ pub fn is_vm_loadable(bytes: &[u8]) -> bool {
 }
 
 /// Rounds `v` down to the nearest 4 KiB page boundary.
+///
+/// # Arguments
+///
+/// * `v` - Input byte address.
+///
+/// # Returns
+///
+/// Page-aligned address rounded down.
 fn page_down(v: u64) -> u64 {
     v & !(PAGE_SIZE - 1)
 }
 
 /// Rounds `v` up to the nearest 4 KiB page boundary.
+///
+/// # Arguments
+///
+/// * `v` - Input byte address.
+///
+/// # Returns
+///
+/// Page-aligned address rounded up.
 fn page_up(v: u64) -> u64 {
     (v + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
 /// Translates ELF segment flags (`PF_R`, `PF_W`, `PF_X`) into VM protection flags (`PROT_*`).
+///
+/// # Arguments
+///
+/// * `ph` - Reference to the ELF64 program header to inspect.
+///
+/// # Returns
+///
+/// Bitwise combination of [`PROT_READ`], [`PROT_WRITE`], and [`PROT_EXEC`].
 fn segment_prot(ph: &Elf64ProgramHeader) -> u32 {
     let mut prot = 0;
     if ph.p_flags & PF_R != 0 {
@@ -126,6 +158,14 @@ pub struct ElfSource {
 
 impl ElfSource {
     /// A source backed by an in-memory copy of the whole file.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Boxed slice containing complete ELF file contents.
+    ///
+    /// # Returns
+    ///
+    /// A initialized [`ElfSource`] ready for segment mapping.
     pub fn from_bytes(bytes: Box<[u8]>) -> Self {
         let head = bytes[..bytes.len().min(64 * 1024)].to_vec();
         let len = bytes.len() as u64;
@@ -148,6 +188,20 @@ struct MappedElf {
 
 /// Maps all `PT_LOAD` segments of `obj` into `mm`. PIE objects are placed at `pie_base`
 /// when given, otherwise wherever the mmap allocator finds room.
+///
+/// # Arguments
+///
+/// * `mm` - Mutable reference to the target user address space.
+/// * `src` - Source ELF image descriptor.
+/// * `pie_base` - Optional fixed base address for position-independent executables.
+///
+/// # Returns
+///
+/// [`MappedElf`] layout on success.
+///
+/// # Errors
+///
+/// Returns [`ElfError`] if parsing, segment validation, or virtual memory mapping fails.
 fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<MappedElf, ElfError> {
     let elf = ElfBinary::parse(&src.head)?;
     let segs = elf.load_segments();
@@ -240,11 +294,19 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<Mapped
 }
 
 /// Reads the CPU timestamp counter (`RDTSC`) to seed `AT_RANDOM` bytes on the initial stack.
+///
+/// # Returns
+///
+/// 64-bit cycle counter value as `u64`.
 fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 /// Queries CPUID leaf 1 (`EDX`) hardware capability flags for `AT_HWCAP`.
+///
+/// # Returns
+///
+/// 64-bit bitmask of x86_64 CPU features from EDX register.
 fn cpuid_edx_leaf1() -> u64 {
     core::arch::x86_64::__cpuid(1).edx as u64
 }

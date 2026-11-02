@@ -9,11 +9,23 @@ use crate::ipc::service::{self, CALL_TIMEOUT_TICKS};
 use crate::ipc::Message;
 
 /// Whether the display server is running.
+///
+/// # Returns
+///
+/// `true` if the display server service is registered and online, `false` otherwise.
 pub fn is_online() -> bool {
     service::is_online(ENDPOINT_DISPLAY_DEV)
 }
 
 /// Sends a request and returns the server's status word.
+///
+/// # Arguments
+/// * `label` - IPC message protocol label.
+/// * `args` - Array of 4 argument words.
+///
+/// # Returns
+///
+/// The server's status value on success, or a negative errno error code on failure.
 fn request(label: u32, args: [u64; 4]) -> Result<u64, i64> {
     let reply = service::call(ENDPOINT_DISPLAY_DEV, Message::with_args(label, args), CALL_TIMEOUT_TICKS)?;
     match reply.args[0] as i64 {
@@ -23,6 +35,13 @@ fn request(label: u32, args: [u64; 4]) -> Result<u64, i64> {
 }
 
 /// Passes a mouse update (position and buttons) to the desktop.
+///
+/// # Arguments
+/// * `event` - Mouse event structure containing coordinates and button states.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative errno error code on failure.
 pub fn mouse_event(event: &crate::arch::mouse::MouseEvent) -> Result<(), i64> {
     let pos = event.state.x as u64 | (event.state.y as u64) << 32;
     let buttons = event.left_pressed as u64
@@ -33,11 +52,22 @@ pub fn mouse_event(event: &crate::arch::mouse::MouseEvent) -> Result<(), i64> {
 }
 
 /// Passes a typed character to the focused window.
+///
+/// # Arguments
+/// * `c` - The typed character.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative errno error code on failure.
 pub fn key_char(c: char) -> Result<(), i64> {
     request(MSG_FB_INPUT_EVENT, [3, c as u64, 0, 0]).map(|_| ())
 }
 
 /// Has the desktop drawn and shown.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative errno error code on failure.
 pub fn flush() -> Result<(), i64> {
     request(MSG_FB_FLUSH, [0; 4]).map(|_| ())
 }

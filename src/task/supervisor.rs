@@ -113,6 +113,10 @@ impl ServiceDescriptor {
 
 /// ATA driver: the primary channel's ports and, if the PCI IDE controller can bus-master,
 /// its DMA registers (bus mastering is enabled here). It exits if there is no disk.
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` containing configuration flags (`"io=..."`, `"bm=..."`), or `None` if device absent.
 fn ata_args() -> Option<Vec<String>> {
     let mut args = alloc::vec![String::from("io=0x1f0"), String::from("ctrl=0x3f6")];
     if let Some(dev) = crate::arch::pci::find_class(0x01, 0x01) {
@@ -128,6 +132,10 @@ fn ata_args() -> Option<Vec<String>> {
 
 /// e1000 driver: the adapter's register window and interrupt line. Not started without
 /// an adapter.
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` containing base address and IRQ line flags, or `None` if no adapter found.
 fn e1000_args() -> Option<Vec<String>> {
     let (bar0, irq) = crate::net::e1000::find_adapter()?;
     let mut args = alloc::vec![alloc::format!("bar0={:#x}", bar0)];
@@ -138,21 +146,37 @@ fn e1000_args() -> Option<Vec<String>> {
 }
 
 /// e1000 driver: its 128 KiB register window.
+///
+/// # Returns
+///
+/// A vector of physical memory ranges `(base, length)` granted to the network driver.
 fn e1000_grants() -> Vec<(u64, u64)> {
     crate::net::e1000::find_adapter().map_or_else(Vec::new, |(bar0, _)| alloc::vec![(bar0, 128 * 1024)])
 }
 
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
+///
+/// # Returns
+///
+/// An empty argument vector wrapped in `Some`.
 fn zfs_args() -> Option<Vec<String>> {
     Some(Vec::new())
 }
 
 /// No device memory (port I/O and its own DMA buffers only).
+///
+/// # Returns
+///
+/// An empty vector of memory grants.
 fn no_grants() -> Vec<(u64, u64)> {
     Vec::new()
 }
 
 /// Display server: the framebuffer, and whether there is a disk (for its widgets).
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` containing framebuffer parameters and storage presence.
 fn display_args() -> Option<Vec<String>> {
     let info = crate::video::get_video_info()?;
     let disk = if service::is_online(crate::ipc::protocol::ENDPOINT_BLOCK_DEV) { "disk=ata" } else { "disk=none" };
@@ -162,6 +186,11 @@ fn display_args() -> Option<Vec<String>> {
     ])
 }
 
+/// Computes physical memory grants for the display server framebuffer.
+///
+/// # Returns
+///
+/// Vector of `(physical_address, length_bytes)` tuples.
 fn display_grants() -> Vec<(u64, u64)> {
     crate::video::get_video_info().map_or_else(Vec::new, |info| alloc::vec![(info.base_ptr as u64, ((info.size as u64) + 4095) & !4095)])
 }
@@ -194,11 +223,36 @@ impl Supervisor {
         Self { services: Vec::new() }
     }
 
+    /// Looks up the index of a service descriptor by name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Service name to search for.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(usize)` index within `services`.
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if name is not found.
     fn index(&self, name: &str) -> Result<usize, &'static str> {
         self.services.iter().position(|s| s.name == name).ok_or("Service not found")
     }
 
     /// Starts service `idx`'s program (a previous instance must be gone).
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - Service index in `services`.
+    ///
+    /// # Returns
+    ///
+    /// The newly spawned [`TaskId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if spawning or argument retrieval fails.
     fn launch(&mut self, idx: usize) -> Result<TaskId, &'static str> {
         let svc = &mut self.services[idx];
         let args = (svc.args)().ok_or("no device for this service")?;
@@ -215,6 +269,10 @@ impl Supervisor {
     }
 
     /// Stops service `idx`'s process, if any, and forgets its registration.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - Service index in `services`.
     fn retire(&mut self, idx: usize) {
         let svc = &mut self.services[idx];
         if let Some(old) = svc.task_id.take() {
@@ -227,6 +285,18 @@ impl Supervisor {
     }
 
     /// Replaces service `idx`'s process with a new one, unless it failed too often.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - Service index in `services`.
+    ///
+    /// # Returns
+    ///
+    /// The newly restarted [`TaskId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if maximum restarts reached or launch fails.
     fn reincarnate(&mut self, idx: usize) -> Result<TaskId, &'static str> {
         self.retire(idx);
         let svc = &mut self.services[idx];
@@ -244,6 +314,10 @@ impl Supervisor {
     }
 
     /// Telemetry of all services.
+    ///
+    /// # Returns
+    ///
+    /// Vector of [`ServiceSnapshot`] structures describing all services.
     pub fn snapshots(&self) -> Vec<ServiceSnapshot> {
         self.services
             .iter()
@@ -259,6 +333,18 @@ impl Supervisor {
     }
 
     /// Starts a stopped service by name (`service start`).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Service identifier string.
+    ///
+    /// # Returns
+    ///
+    /// The running [`TaskId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if service is unknown or launch fails.
     pub fn start_service(&mut self, name: &str) -> Result<TaskId, &'static str> {
         let idx = self.index(name)?;
         if let Some(id) = self.services[idx].task_id {
@@ -290,6 +376,15 @@ pub fn supervisor_init() {
 
 /// Waits (letting only process `id` run) until it registers as a server of `endpoint` or
 /// gives up; for kernel callers that may hold locks.
+///
+/// # Arguments
+///
+/// * `endpoint` - IPC endpoint ID to await registration on.
+/// * `id` - Expected server [`TaskId`].
+///
+/// # Returns
+///
+/// `true` if service registered and is online before deadline, `false` otherwise.
 fn await_registration(endpoint: u32, id: TaskId) -> bool {
     // Generous: the file server imports the pool before it registers
     let deadline = crate::arch::pit::ticks() + 6000;
@@ -331,6 +426,14 @@ pub fn start_all() {
 
 /// Called by a kernel client whose service has no live server: restarts it and waits for
 /// it to register. Returns whether the service is back.
+///
+/// # Arguments
+///
+/// * `endpoint` - IPC endpoint identifier of the missing service.
+///
+/// # Returns
+///
+/// `true` if service was successfully revived and is online, `false` otherwise.
 pub fn revive(endpoint: u32) -> bool {
     let restarted = {
         let mut sup = match SUPERVISOR.try_lock() {
@@ -414,11 +517,27 @@ fn watchdog_task() {
 }
 
 /// Telemetry of all services.
+///
+/// # Returns
+///
+/// A vector of [`ServiceSnapshot`] items for all registered services.
 pub fn get_service_snapshots() -> Vec<ServiceSnapshot> {
     SUPERVISOR.lock().snapshots()
 }
 
 /// Restarts a service by name (`service restart`).
+///
+/// # Arguments
+///
+/// * `name` - Service name to restart.
+///
+/// # Returns
+///
+/// The new process [`TaskId`].
+///
+/// # Errors
+///
+/// Returns static string error if service is unknown or reincarnation fails.
 pub fn restart_service_by_name(name: &str) -> Result<TaskId, &'static str> {
     let (idx, endpoint) = {
         let sup = SUPERVISOR.lock();
@@ -436,6 +555,18 @@ pub fn restart_service_by_name(name: &str) -> Result<TaskId, &'static str> {
 
 /// Kills a service's process by name, as a crash would (`service kill`); the watchdog
 /// restarts it.
+///
+/// # Arguments
+///
+/// * `name` - Service name to kill.
+///
+/// # Returns
+///
+/// The [`TaskId`] of the terminated process.
+///
+/// # Errors
+///
+/// Returns static string error if service is unknown or not currently running.
 pub fn kill_service_by_name(name: &str) -> Result<TaskId, &'static str> {
     let sup = SUPERVISOR.lock();
     let svc = &sup.services[sup.index(name)?];

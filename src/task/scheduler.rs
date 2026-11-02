@@ -86,6 +86,23 @@ pub struct TaskSnapshot {
 ///
 /// Reads files (its dynamic linker), so it must run without the scheduler lock: disk reads
 /// are calls to the disk driver process, which need the scheduler.
+///
+/// # Arguments
+///
+/// * `exe` - ELF image source descriptor.
+/// * `exec_path` - Path string for `/proc/<pid>/exe`.
+/// * `args` - Command-line arguments.
+/// * `uid` - Process user ID.
+/// * `gid` - Process group ID.
+/// * `root` - Optional chroot root directory inode.
+///
+/// # Returns
+///
+/// `Ok(LinuxExecImage)` containing the loaded memory space, entry point, and stack layout.
+///
+/// # Errors
+///
+/// Returns static error string if binary parsing or dynamic linker loading fails.
 pub fn load_linux_image(
     exe: super::exec::ElfSource,
     exec_path: &str,
@@ -146,6 +163,10 @@ static HANDOFF_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 
 /// Whether a driver is serving a call, whose caller may hold kernel locks (the file
 /// system's): work that takes such locks must wait until it is over.
+///
+/// # Returns
+///
+/// `true` if any service handoff is actively executing.
 pub fn handoff_active() -> bool {
     HANDOFF_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
 }
@@ -180,12 +201,20 @@ impl Scheduler {
     }
 
     /// Takes the descriptor tables of exited tasks, for [`crate::task::close_retired`].
+    ///
+    /// # Returns
+    ///
+    /// Vector of orphaned [`crate::fs::FdTable`] instances to close.
     pub fn take_pending_close(&mut self) -> Vec<crate::fs::FdTable> {
         core::mem::take(&mut self.pending_close)
     }
 
     /// Takes the current task's descriptor table if no other thread shares it (it is
     /// about to exit and closes it itself, before it is retired).
+    ///
+    /// # Returns
+    ///
+    /// `Some(FdTable)` if this was the last thread referencing the table, `None` otherwise.
     pub fn take_current_fds_if_last(&mut self) -> Option<crate::fs::FdTable> {
         if !self.initialized || self.current_index >= self.tasks.len() {
             return None;
@@ -199,6 +228,10 @@ impl Scheduler {
     }
 
     /// Innermost driver call in progress.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Handoff)` of the active handoff level, or `None` if normal scheduling applies.
     fn handoff_top(&self) -> Option<Handoff> {
         self.handoffs.iter().rev().find_map(|h| *h)
     }
@@ -211,6 +244,15 @@ impl Scheduler {
     /// Blocks the current task in a call to the driver task `server` and lets only that
     /// task run (the caller then yields) until [`Self::end_handoff`] or tick `deadline`.
     /// Returns `false` if calls are nested too deeply.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - Task ID of the service provider driver.
+    /// * `deadline` - Maximum PIT timer tick before caller timeout.
+    ///
+    /// # Returns
+    ///
+    /// `true` if handoff was established, `false` if handoff stack exceeded `MAX_HANDOFFS`.
     pub fn begin_handoff(&mut self, server: u64, deadline: u64) -> bool {
         let Some(slot) = self.handoffs.iter().position(|h| h.is_none()) else { return false };
         let caller = self.current_task_id().0;
@@ -221,6 +263,10 @@ impl Scheduler {
     }
 
     /// Ends the innermost driver call, served by `server`, and makes its caller runnable.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - Server Task ID matching the active handoff.
     pub fn end_handoff(&mut self, server: u64) {
         if let Some(i) = self.handoffs.iter().rposition(|h| h.is_some()) {
             if let Some(h) = self.handoffs[i] {
@@ -234,6 +280,10 @@ impl Scheduler {
     }
 
     /// Makes a task blocked in a driver call runnable again, and the next to run.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Task ID of the waiting caller to resume.
     fn resume_caller(&mut self, caller: u64) {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id.0 == caller) {
             if t.state == TaskState::Blocked {
@@ -245,6 +295,10 @@ impl Scheduler {
     }
 
     /// Initializes multitasking by wrapping the current execution thread as Task 0 ("shell").
+    ///
+    /// # Arguments
+    ///
+    /// * `current_cr3` - Physical CR3 page directory address active at boot.
     pub fn init(&mut self, current_cr3: u64) {
         if self.initialized {
             return;
@@ -262,6 +316,10 @@ impl Scheduler {
     }
 
     /// Updates the CR3 root paging address for the primary main task and background kernel tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `cr3` - Physical CR3 base register address.
     pub fn update_main_cr3(&mut self, cr3: u64) {
         self.kernel_cr3 = cr3;
         for task in &mut self.tasks {
@@ -270,11 +328,25 @@ impl Scheduler {
     }
 
     /// Returns true if the scheduler has been initialized via [`Self::init`].
+    ///
+    /// # Returns
+    ///
+    /// `true` if initialized, `false` otherwise.
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
 
     /// Spawns a new kernel thread with the given entry point and priority.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string identifier for the kernel thread.
+    /// * `entry_fn` - Function pointer to the thread entry.
+    /// * `priority` - Initial scheduling priority level.
+    ///
+    /// # Returns
+    ///
+    /// The unique [`TaskId`] assigned to the new thread.
     pub fn spawn(
         &mut self,
         name: &'static str,
@@ -288,6 +360,17 @@ impl Scheduler {
     }
 
     /// Allocates a kernel stack and appends a new Ring 0 task using page table root `cr3`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string name of the thread.
+    /// * `entry_fn` - Entry function pointer.
+    /// * `priority` - Task priority.
+    /// * `cr3` - CR3 physical address to assign to task registers.
+    ///
+    /// # Returns
+    ///
+    /// The allocated [`TaskId`].
     fn spawn_internal(
         &mut self,
         name: &'static str,
@@ -365,6 +448,16 @@ impl Scheduler {
     /// Allocates both a kernel stack (for TSS RSP0 and hardware SYSCALL)
     /// and a user stack (for userland RSP). Configures user code (0x23) and
     /// user data (0x1B) segment selectors with RPL=3.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string identifier for the user task.
+    /// * `entry_fn` - Function pointer representing user code entry.
+    /// * `priority` - Initial scheduling priority.
+    ///
+    /// # Returns
+    ///
+    /// The unique [`TaskId`] assigned to the new user process.
     pub fn spawn_user(
         &mut self,
         name: &'static str,
@@ -537,6 +630,23 @@ impl Scheduler {
     }
 
     /// Spawns an unprivileged Ring 3 task running a Linux ELF64 binary with the Linux ABI.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string identifier for the Linux task.
+    /// * `elf_data` - Raw bytes of the Linux ELF binary.
+    /// * `args` - Command line argument strings.
+    /// * `priority` - Task scheduling priority.
+    /// * `uid` - User ID.
+    /// * `gid` - Group ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(TaskId)` of the spawned task.
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if ELF loading fails.
     pub fn spawn_linux_elf(
         &mut self,
         name: &'static str,
@@ -616,6 +726,25 @@ impl Scheduler {
     ///
     /// `image` comes from [`load_linux_image`], which must run before the scheduler lock is
     /// taken.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string identifier for the Linux process.
+    /// * `image` - Loaded Linux execution image containing address space.
+    /// * `exec_path` - Path string for `/proc/<pid>/exe`.
+    /// * `args` - Command-line argument strings.
+    /// * `priority` - Task priority.
+    /// * `uid` - User ID.
+    /// * `gid` - Group ID.
+    /// * `root` - Optional chroot directory inode number.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(TaskId)` of the spawned process.
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if process setup fails.
     pub fn spawn_linux_process(
         &mut self,
         name: &'static str,
@@ -857,6 +986,10 @@ impl Scheduler {
 
     /// Gives up the rest of the current timeslice and switches to the next ready task
     /// (voluntary yield, `sched_yield`, blocking and sleeping).
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - CPU interrupt frame registers.
     pub fn schedule_now(&mut self, ctx: &mut ExceptionContext) {
         if self.initialized && self.current_index < self.tasks.len() {
             self.tasks[self.current_index].timeslice_remaining = 0;
@@ -865,6 +998,10 @@ impl Scheduler {
     }
 
     /// Invoked on every IRQ 0 timer interrupt (100 Hz) to perform timeslice accounting and context switching.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - CPU interrupt frame registers.
     pub fn schedule(&mut self, ctx: &mut ExceptionContext) {
         if !self.initialized || self.tasks.is_empty() {
             return;
@@ -1085,6 +1222,10 @@ impl Scheduler {
     }
 
     /// Marks the currently running task as sleeping until `wake_tick`.
+    ///
+    /// # Arguments
+    ///
+    /// * `wake_tick` - Target PIT timer tick when the task becomes runnable.
     pub fn sleep_current(&mut self, wake_tick: u64) {
         if self.initialized && self.current_index < self.tasks.len() {
             self.tasks[self.current_index].state = TaskState::Sleeping { wake_tick };
@@ -1093,27 +1234,65 @@ impl Scheduler {
     }
 
     /// Executable path of process `tgid` (`/proc/<pid>/exe`), if it has a live thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `tgid` - Thread Group ID (process ID).
+    ///
+    /// # Returns
+    ///
+    /// `Some(String)` path of the binary image, or `None` if process has no live threads.
     pub fn exe_of(&self, tgid: u64) -> Option<alloc::string::String> {
         self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| alloc::string::String::from(t.exe_path()))
     }
 
     /// Runs `f` on task `id`, or returns `None` if there is no such task.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Task ID to look up.
+    /// * `f` - Closure taking mutable reference to target [`Task`].
+    ///
+    /// # Returns
+    ///
+    /// `Some(R)` produced by `f`, or `None` if task ID not found.
     pub fn with_task_mut<R>(&mut self, id: TaskId, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         self.tasks.iter_mut().find(|t| t.id == id).map(f)
     }
 
     /// Runs `f` on a live thread of process `tgid`, or returns `None` if there is none.
+    ///
+    /// # Arguments
+    ///
+    /// * `tgid` - Process Thread Group ID.
+    /// * `f` - Closure operating on the first live [`Task`].
+    ///
+    /// # Returns
+    ///
+    /// `Some(R)` produced by `f`, or `None` if process has no live threads.
     pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
         self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(f)
     }
 
     /// CPU time of process `tgid` (all its live threads) in timer ticks.
+    ///
+    /// # Arguments
+    ///
+    /// * `tgid` - Process Thread Group ID.
+    ///
+    /// # Returns
+    ///
+    /// Cumulative ticks run across all threads belonging to `tgid`.
     pub fn process_ticks(&self, tgid: u64) -> u64 {
         self.tasks.iter().filter(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| t.ticks_run).sum()
     }
 
     /// Wakes task `id` from an event wait; a task that is not waiting yet, or is blocked for
     /// another reason (a futex, a driver call), keeps the wakeup for its next wait.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - 64-bit Task ID to wake.
     pub fn wake_task(&mut self, id: u64) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id.0 == id) {
             match task.state {
@@ -1158,6 +1337,14 @@ impl Scheduler {
 
     /// Puts the current task in an event wait (until `deadline`, if any). Returns false
     /// without sleeping when a wakeup already arrived; the caller then re-checks.
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - Optional maximum timer tick.
+    ///
+    /// # Returns
+    ///
+    /// `true` if task entered sleep state, `false` if wake arrived previously.
     pub fn event_wait_current(&mut self, deadline: Option<u64>) -> bool {
         self.apply_wakes();
         if !self.initialized || self.current_index >= self.tasks.len() {
@@ -1178,6 +1365,10 @@ impl Scheduler {
     }
 
     /// Marks the currently running task as Blocked and zeroes its remaining timeslice.
+    ///
+    /// # Returns
+    ///
+    /// The [`TaskId`] of the blocked task.
     pub fn block_current(&mut self) -> TaskId {
         if self.initialized && self.current_index < self.tasks.len() {
             let task = &mut self.tasks[self.current_index];
@@ -1190,6 +1381,14 @@ impl Scheduler {
     }
 
     /// Wakes a blocked task by its ID, transitioning its state back to Ready.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Task ID to unblock.
+    ///
+    /// # Returns
+    ///
+    /// `true` if task found and unblocked, `false` otherwise.
     pub fn unblock_task(&mut self, id: TaskId) -> bool {
         for task in self.tasks.iter_mut() {
             if task.id == id && task.state == TaskState::Blocked {
@@ -1204,6 +1403,10 @@ impl Scheduler {
     /// Marks task `idx` as Dead and releases what it holds: wakes `CLONE_CHILD_CLEARTID`
     /// waiters, closes its descriptors (so pipe readers see end-of-file), and tells the
     /// Linux process table, which turns the process into a zombie after its last thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - Internal index in `tasks` array.
     fn retire_task(&mut self, idx: usize) {
         if self.tasks[idx].state == TaskState::Dead {
             return;
@@ -1262,6 +1465,10 @@ impl Scheduler {
 
     /// Wakes every blocked thread of process `tgid` (a signal arrived), including threads
     /// in event waits; a thread about to wait finds the wakeup pending.
+    ///
+    /// # Arguments
+    ///
+    /// * `tgid` - Thread Group ID whose threads will be unblocked.
     pub fn unblock_group(&mut self, tgid: u64) {
         for task in self.tasks.iter_mut() {
             if task.tgid != tgid {
@@ -1284,6 +1491,14 @@ impl Scheduler {
 
     /// Terminates a task by its ID. Returns true if successfully located and terminated.
     /// System tasks (PID 0 'shell' and PID 1 'idle') are immune to termination.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Task ID to terminate.
+    ///
+    /// # Returns
+    ///
+    /// `true` if target task was found and transitioned to Dead, `false` otherwise.
     pub fn kill_task(&mut self, id: TaskId) -> bool {
         if id.0 <= 1 {
             return false;
@@ -1298,6 +1513,10 @@ impl Scheduler {
     }
 
     /// Returns the TaskId of the currently running task.
+    ///
+    /// # Returns
+    ///
+    /// Active [`TaskId`].
     pub fn current_task_id(&self) -> TaskId {
         if self.initialized && self.current_index < self.tasks.len() {
             self.tasks[self.current_index].id
@@ -1307,6 +1526,10 @@ impl Scheduler {
     }
 
     /// Returns the target OS personality of the currently active task.
+    ///
+    /// # Returns
+    ///
+    /// Current [`super::tcb::TaskPersonality`].
     pub fn current_personality(&self) -> super::tcb::TaskPersonality {
         if self.initialized && self.current_index < self.tasks.len() {
             self.tasks[self.current_index].personality
@@ -1316,6 +1539,14 @@ impl Scheduler {
     }
 
     /// Executes a closure with a mutable reference to the currently executing task.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Callable closure accepting `&mut Task`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(R)` produced by `f`, or `None` if scheduler uninitialized.
     pub fn current_task_mut<F, R>(&mut self, f: F) -> Option<R>
     where
         F: FnOnce(&mut Task) -> R,
@@ -1328,12 +1559,23 @@ impl Scheduler {
     }
 
     /// The current task's descriptor table (shared, with a lock of its own).
+    ///
+    /// # Returns
+    ///
+    /// `Some(SharedFdTable)` cloned from current task, or `None` if uninitialized.
     pub fn current_fds(&self) -> Option<crate::fs::SharedFdTable> {
         (self.initialized && self.current_index < self.tasks.len()).then(|| self.tasks[self.current_index].fds.clone())
     }
 
-
     /// Returns true if a task with the given ID exists and is active (not Dead).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Task ID to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if active, `false` if dead or non-existent.
     pub fn is_task_alive(&self, id: TaskId) -> bool {
         for task in &self.tasks {
             if task.id == id && task.state != TaskState::Dead {
@@ -1344,6 +1586,10 @@ impl Scheduler {
     }
 
     /// Returns the total count of registered tasks (active and dead).
+    ///
+    /// # Returns
+    ///
+    /// Total number of task control blocks as `usize`.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
     }
@@ -1399,6 +1645,10 @@ impl Scheduler {
     }
 
     /// Captures a diagnostic snapshot of all registered tasks.
+    ///
+    /// # Returns
+    ///
+    /// Vector of [`TaskSnapshot`] objects for each task.
     pub fn snapshots(&self) -> Vec<TaskSnapshot> {
         let mut list = Vec::with_capacity(self.tasks.len());
         for task in &self.tasks {
@@ -1418,6 +1668,12 @@ impl Scheduler {
     }
 
     /// Sets POSIX credentials (UID, GID, EUID, EGID, SUID, SGID) for a target task.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Target task ID.
+    /// * `uid` - New real/effective user ID.
+    /// * `gid` - New real/effective group ID.
     pub fn set_task_credentials(&mut self, id: TaskId, uid: u32, gid: u32) {
         for task in &mut self.tasks {
             if task.id == id {
@@ -1437,6 +1693,14 @@ impl Scheduler {
 /// Environment given to Linux processes started from the Hydra shell as `uid`: the
 /// user's identity and home, and the runtime directory a login would provide (see
 /// `linux chroot`, which creates `/run/user/<uid>`).
+///
+/// # Arguments
+///
+/// * `uid` - User ID for which environment is created.
+///
+/// # Returns
+///
+/// Vector of `"KEY=VALUE"` environment variable strings.
 fn linux_env(uid: u32) -> Vec<alloc::string::String> {
     use alloc::format;
     let (user, home) = if uid == 0 { ("root", alloc::string::String::from("/root")) } else { ("hydra", format!("/home/hydra")) };
@@ -1454,6 +1718,14 @@ fn linux_env(uid: u32) -> Vec<alloc::string::String> {
 }
 
 /// Reads a dynamic linker named by `PT_INTERP` from the filesystem (or boot media).
+///
+/// # Arguments
+///
+/// * `path` - Virtual filesystem path to dynamic interpreter.
+///
+/// # Returns
+///
+/// `Some(Vec<u8>)` containing file bytes, or `None` if read failed.
 fn read_interpreter(path: &str) -> Option<Vec<u8>> {
     if let Ok(stat) = crate::fs::client::ZfsClient::file_stat(path) {
         let mut buf = alloc::vec![0u8; stat.size as usize];
@@ -1472,6 +1744,14 @@ fn read_interpreter(path: &str) -> Option<Vec<u8>> {
 }
 
 /// Trampoline wrapper function called when a spawned kernel thread starts execution.
+///
+/// # Arguments
+///
+/// * `entry_fn_addr` - Memory address of the entry function pointer.
+///
+/// # Returns
+///
+/// This function never returns (!).
 extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
     let func: fn() = unsafe { core::mem::transmute(entry_fn_addr) };
     func();

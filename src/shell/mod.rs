@@ -318,6 +318,9 @@ fn auto_exitboot_countdown(state: &mut ShellState) {
 
 /// After the bare-metal transition, waits 3 seconds for a key press and otherwise starts
 /// the KDE desktop (`linux plasma`). Any key cancels and leaves the Hydra shell.
+///
+/// # Arguments
+/// * `state` - Mutable reference to the shell session state.
 fn auto_plasma_countdown(state: &mut ShellState) {
     if !crate::arch::boot_services::is_hardware_takeover_complete() {
         return; // the user stayed under UEFI Boot Services

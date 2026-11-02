@@ -43,11 +43,20 @@ pub struct TimerFd {
     pub wq: Arc<WaitQueue>,
 }
 
+/// Returns current monotonic time in nanoseconds derived from the system PIT tick counter.
+///
+/// # Returns
+///
+/// Monotonic time in nanoseconds.
 fn now_ns() -> u64 {
     crate::arch::pit::ticks() * NS_PER_TICK
 }
 
 /// Wall-clock time minus the tick clock (to convert `CLOCK_REALTIME` deadlines).
+///
+/// # Returns
+///
+/// Signed nanosecond offset between RTC wall clock and PIT monotonic tick counter.
 fn realtime_offset_ns() -> i128 {
     let (s, ns) = crate::arch::rtc::now();
     (s as i128) * 1_000_000_000 + ns as i128 - now_ns() as i128
@@ -61,6 +70,10 @@ impl Deadline for TimerFd {
 
 impl TimerFd {
     /// Expirations so far, advancing a periodic timer past now.
+    ///
+    /// # Returns
+    ///
+    /// Number of expirations that occurred since the last check.
     fn expirations(&self) -> u64 {
         let mut t = self.timer.lock();
         let now = now_ns();
@@ -80,6 +93,10 @@ impl TimerFd {
     }
 
     /// Polls readiness of this timer descriptor (returns `POLLIN` when expired).
+    ///
+    /// # Returns
+    ///
+    /// `0x0001` (`POLLIN`) if expired; `0` otherwise.
     pub fn poll_events(&self) -> u32 {
         let t = self.timer.lock();
         match t.next {
@@ -89,16 +106,32 @@ impl TimerFd {
     }
 
     /// Sets or clears non-blocking I/O mode on this timer descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking mode; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Queries whether non-blocking mode is currently enabled on this descriptor.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
     /// Reads the 8-byte unsigned integer count of expirations that occurred.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer (must be at least 8 bytes).
+    ///
+    /// # Returns
+    ///
+    /// `8` (bytes written) on success, or a negative Linux errno on error.
     pub fn read(self: &Arc<Self>, buf: &mut [u8]) -> i64 {
         if buf.len() < 8 {
             return EINVAL;
@@ -124,12 +157,26 @@ impl TimerFd {
     }
 
     /// (interval, remaining) in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// `(interval_ns, remaining_ns)` tuple.
     fn current(&self) -> (u64, u64) {
         let t = self.timer.lock();
         (t.interval, t.next.map_or(0, |n| n.saturating_sub(now_ns()).max(1)))
     }
 }
 
+/// Decodes and validates a 16-byte `struct timespec` from raw bytes.
+///
+/// # Arguments
+///
+/// * `b` - 16-byte slice representing `(tv_sec, tv_nsec)`.
+///
+/// # Returns
+///
+/// * `Ok(nanoseconds)` on success.
+/// * `Err(-EINVAL)` if values are out of valid range.
 fn read_timespec(b: &[u8]) -> Result<u64, i64> {
     let s = i64::from_le_bytes(b[0..8].try_into().unwrap());
     let ns = i64::from_le_bytes(b[8..16].try_into().unwrap());
@@ -139,6 +186,17 @@ fn read_timespec(b: &[u8]) -> Result<u64, i64> {
     Ok(s as u64 * 1_000_000_000 + ns as u64)
 }
 
+/// Writes an `itimerspec` struct (32 bytes) to user memory.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to write to.
+/// * `interval` - Interval duration in nanoseconds.
+/// * `value` - Expiration countdown in nanoseconds.
+///
+/// # Returns
+///
+/// `0` on success, or `-EFAULT` if user memory cannot be prefaulted.
 fn put_itimerspec(ptr: u64, interval: u64, value: u64) -> i64 {
     if !crate::memory::vm::prefault_current(ptr, 32, true) {
         return EFAULT;
@@ -150,6 +208,15 @@ fn put_itimerspec(ptr: u64, interval: u64, value: u64) -> i64 {
     0
 }
 
+/// Resolves a file descriptor index to a [`TimerFd`] reference if applicable.
+///
+/// # Arguments
+///
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+///
+/// `Some(Arc<TimerFd>)` if the descriptor refers to a timerfd, or `None`.
 fn timerfd_of(fd: u64) -> Option<Arc<TimerFd>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(crate::fs::FileDescriptor::TimerFd(t)) => Some(t.clone()),
@@ -157,7 +224,16 @@ fn timerfd_of(fd: u64) -> Option<Arc<TimerFd>> {
     })
 }
 
-/// `timerfd_create(clockid, flags)`.
+/// Creates a new timerfd descriptor (`timerfd_create(clockid, flags)`).
+///
+/// # Arguments
+///
+/// * `clock` - Clock identifier (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`).
+/// * `flags` - Creation flags (`TFD_NONBLOCK`, `TFD_CLOEXEC`).
+///
+/// # Returns
+///
+/// Newly allocated file descriptor index on success, or negative Linux errno on error.
 pub fn sys_create(clock: u64, flags: u64) -> i64 {
     // REALTIME, MONOTONIC, BOOTTIME, REALTIME_ALARM, BOOTTIME_ALARM
     if !matches!(clock, 0 | 1 | 7 | 8 | 9) || flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
@@ -178,7 +254,18 @@ pub fn sys_create(clock: u64, flags: u64) -> i64 {
     })
 }
 
-/// `timerfd_settime(fd, flags, new, old)`.
+/// Arms or disarms a timerfd (`timerfd_settime(fd, flags, new, old)`).
+///
+/// # Arguments
+///
+/// * `fd` - Target timerfd file descriptor.
+/// * `flags` - Options (`TFD_TIMER_ABSTIME`).
+/// * `new_ptr` - User pointer to incoming `struct itimerspec`.
+/// * `old_ptr` - Optional user pointer to receive prior `struct itimerspec`.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 pub fn sys_settime(fd: u64, flags: u64, new_ptr: u64, old_ptr: u64) -> i64 {
     let t = match timerfd_of(fd) {
         Some(t) => t,
@@ -217,7 +304,16 @@ pub fn sys_settime(fd: u64, flags: u64, new_ptr: u64, old_ptr: u64) -> i64 {
     0
 }
 
-/// `timerfd_gettime(fd, cur)`.
+/// Queries current timerfd status (`timerfd_gettime(fd, cur)`).
+///
+/// # Arguments
+///
+/// * `fd` - Target timerfd descriptor.
+/// * `cur_ptr` - User pointer to receive current `struct itimerspec`.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 pub fn sys_gettime(fd: u64, cur_ptr: u64) -> i64 {
     match timerfd_of(fd) {
         Some(t) => {

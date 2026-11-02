@@ -81,12 +81,22 @@ pub struct Ucred {
 }
 
 impl Ucred {
+    /// Captures the credentials (PID, UID, GID) of the currently executing task.
+    ///
+    /// # Returns
+    ///
+    /// Populated [`Ucred`] instance.
     fn current() -> Self {
         let (_, pid) = super::proc::current_ids();
         let c = super::vfs::creds();
         Self { pid: pid as u32, uid: c.euid, gid: c.egid }
     }
 
+    /// Serializes credentials into a 12-byte `struct ucred` array.
+    ///
+    /// # Returns
+    ///
+    /// 12-byte packed ucred buffer.
     fn bytes(&self) -> [u8; 12] {
         let mut b = [0u8; 12];
         b[0..4].copy_from_slice(&self.pid.to_le_bytes());
@@ -104,6 +114,11 @@ enum Addr {
 }
 
 impl Addr {
+    /// Returns the hash lookup key for this address.
+    ///
+    /// # Returns
+    ///
+    /// Byte vector representing socket lookup key.
     fn key(&self) -> Vec<u8> {
         match self {
             Addr::Path { key, .. } => key.clone(),
@@ -115,7 +130,15 @@ impl Addr {
         }
     }
 
-    /// `struct sockaddr_un` image and its length.
+    /// Generates a serialized `struct sockaddr_un` image from an optional address.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Optional socket address to format.
+    ///
+    /// # Returns
+    ///
+    /// Byte vector containing serialized `sockaddr_un`.
     fn sockaddr(addr: Option<&Addr>) -> Vec<u8> {
         let mut b = (AF_UNIX as u16).to_le_bytes().to_vec();
         match addr {
@@ -230,6 +253,16 @@ impl Drop for UnixSocket {
 }
 
 impl UnixSocket {
+    /// Constructs a new unbound UNIX domain socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - Socket type (`SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`).
+    /// * `nonblock` - Initial non-blocking status flag.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Arc<UnixSocket>`] instance.
     fn new(ty: u32, nonblock: bool) -> Arc<Self> {
         Arc::new(Self {
             ty,
@@ -244,20 +277,37 @@ impl UnixSocket {
     }
 
     /// Sets or clears non-blocking I/O mode on this socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking operations; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Queries whether non-blocking mode is currently enabled on this socket.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
     /// Returns the synthetic pseudo-inode number assigned to this socket.
+    ///
+    /// # Returns
+    ///
+    /// Unique pseudo-inode number.
     pub fn ino(&self) -> u64 {
         self.ino
     }
 
+    /// Returns the underlying connected pair and side index, if connected.
+    ///
+    /// # Returns
+    ///
+    /// `Some((pair, side_index))` if connected, or `None`.
     fn pair(&self) -> Option<(Arc<Pair>, usize)> {
         match &*self.state.lock() {
             State::Connected { pair, side, .. } => Some((pair.clone(), *side)),
@@ -266,6 +316,10 @@ impl UnixSocket {
     }
 
     /// Wait queues announcing readiness changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `waits` - Wait set to register wait queues with.
     pub fn add_wait_queues(&self, waits: &mut WaitSet) {
         waits.add(QueueRef::Shared(self.wq.clone()));
         if let Some((pair, _)) = self.pair() {
@@ -274,6 +328,10 @@ impl UnixSocket {
     }
 
     /// Polls readiness events on this UNIX socket (`POLLIN`, `POLLOUT`, `POLLHUP`, `POLLRDHUP`).
+    ///
+    /// # Returns
+    ///
+    /// Bitmask of poll flags.
     pub fn poll_events(&self) -> u32 {
         const POLLIN: u32 = 0x1;
         const POLLOUT: u32 = 0x4;
@@ -316,6 +374,10 @@ impl UnixSocket {
     }
 
     /// Bytes ready to read (`FIONREAD`).
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes queued for reception.
     pub fn pending_bytes(&self) -> usize {
         match self.pair() {
             Some((pair, side)) => {
@@ -331,6 +393,16 @@ impl UnixSocket {
     }
 
     /// Sends `data` with `fds`. Returns the bytes sent or an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Payload bytes.
+    /// * `fds` - Descriptors to transfer.
+    /// * `flags` - Transmission flags (`MSG_DONTWAIT`, `MSG_NOSIGNAL`).
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes queued on success, or a negative Linux errno on error.
     fn send(&self, data: &[u8], fds: Vec<FileDescriptor>, flags: u64) -> i64 {
         let mut fds = InFlight(fds);
         let (pair, side) = match self.pair() {
@@ -397,6 +469,16 @@ impl UnixSocket {
     }
 
     /// Receives into `buf`. Returns (bytes, descriptors, sender credentials, truncated).
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer slice.
+    /// * `flags` - Reception flags (`MSG_DONTWAIT`, `MSG_PEEK`).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok((bytes, fds, cred, truncated))` on success.
+    /// * `Err(errno)` on error.
     fn recv(&self, buf: &mut [u8], flags: u64) -> Result<(usize, Vec<FileDescriptor>, Option<Ucred>, bool), i64> {
         let (pair, side) = match self.pair() {
             Some(p) => p,
@@ -435,6 +517,14 @@ impl UnixSocket {
     }
 
     /// `read` on the socket (descriptors that arrive are closed).
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer slice.
+    ///
+    /// # Returns
+    ///
+    /// Bytes read on success, or a negative Linux errno on error.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
         match self.recv(buf, 0) {
             Ok((n, _, _, _)) => n as i64,
@@ -443,6 +533,14 @@ impl UnixSocket {
     }
 
     /// Writes data payload bytes over this connected UNIX domain socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Payload bytes to transmit.
+    ///
+    /// # Returns
+    ///
+    /// Bytes written, or a negative Linux errno on error.
     pub fn write(&self, data: &[u8]) -> i64 {
         self.send(data, Vec::new(), 0)
     }
@@ -455,6 +553,17 @@ impl UnixSocket {
 /// Creates a listening stream socket bound at `path` inside the process root `root_ino`
 /// (so clients chrooted there find it), owned by `uid`/`gid` with mode 0700 like a
 /// per-user runtime socket. An existing node at the path is replaced.
+///
+/// # Arguments
+///
+/// * `root_ino` - Inode of root dataset.
+/// * `path` - Destination filesystem path.
+/// * `uid` - Owner user ID.
+/// * `gid` - Owner group ID.
+///
+/// # Returns
+///
+/// Listening [`UnixSocket`] instance on success, or a negative Linux errno on error.
 pub fn kernel_listen(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<Arc<UnixSocket>, i64> {
     const S_IFSOCK: u32 = 0o140000;
     let sock = UnixSocket::new(SOCK_STREAM, true);
@@ -478,6 +587,10 @@ pub fn kernel_listen(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<Ar
 
 impl UnixSocket {
     /// Takes a pending connection without waiting.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Arc<UnixSocket>)` if a connection was waiting, or `None`.
     pub fn kernel_accept(&self) -> Option<Arc<UnixSocket>> {
         match &mut *self.state.lock() {
             State::Listening { pending, .. } => pending.pop_front(),
@@ -487,6 +600,14 @@ impl UnixSocket {
 
     /// Non-blocking receive with descriptors: `Ok(None)` when nothing is waiting,
     /// `Ok(Some((0, _)))` at end-of-file.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer slice.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some((bytes_read, fds)))`, `Ok(None)` if no data, or `Err(errno)`.
     pub fn kernel_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, Vec<FileDescriptor>)>, i64> {
         match self.recv(buf, MSG_DONTWAIT) {
             Ok((n, fds, _, _)) => Ok(Some((n, fds))),
@@ -497,11 +618,24 @@ impl UnixSocket {
 
     /// Non-blocking send with descriptors; returns bytes queued (possibly fewer than
     /// `data.len()`, or `EAGAIN` while the peer's buffer is full).
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Payload bytes.
+    /// * `fds` - Descriptors to transfer.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes queued on success, or a negative Linux errno on error.
     pub fn kernel_send(&self, data: &[u8], fds: Vec<FileDescriptor>) -> i64 {
         self.send(data, fds, MSG_DONTWAIT | MSG_NOSIGNAL)
     }
 
     /// Credentials of the connected peer (`SO_PEERCRED`): (pid, uid, gid).
+    ///
+    /// # Returns
+    ///
+    /// `Some((pid, uid, gid))` tuple if connected, or `None`.
     pub fn peer_cred(&self) -> Option<(u32, u32, u32)> {
         match &*self.state.lock() {
             State::Connected { peer_cred, .. } => Some((peer_cred.pid, peer_cred.uid, peer_cred.gid)),
@@ -512,6 +646,16 @@ impl UnixSocket {
 
 /// Stream read: as many bytes as fit, but never past a segment carrying descriptors once
 /// data has been taken, and never beyond the first segment that carries some.
+///
+/// # Arguments
+///
+/// * `q` - Queue holding received segments.
+/// * `buf` - Destination buffer slice.
+/// * `peek` - If true, do not consume data from the queue.
+///
+/// # Returns
+///
+/// `(bytes_copied, file_descriptors, credentials, was_truncated)` tuple.
 fn take_stream(q: &mut Queue, buf: &mut [u8], peek: bool) -> (usize, Vec<FileDescriptor>, Option<Ucred>, bool) {
     let mut n = 0;
     let mut fds = Vec::new();
@@ -545,6 +689,16 @@ fn take_stream(q: &mut Queue, buf: &mut [u8], peek: bool) -> (usize, Vec<FileDes
 }
 
 /// Record read: one whole message (the rest of it is discarded if `buf` is short).
+///
+/// # Arguments
+///
+/// * `q` - Queue holding received segments.
+/// * `buf` - Destination buffer slice.
+/// * `peek` - If true, do not consume record from queue.
+///
+/// # Returns
+///
+/// `(bytes_copied, file_descriptors, credentials, was_truncated)` tuple.
 fn take_record(q: &mut Queue, buf: &mut [u8], peek: bool) -> (usize, Vec<FileDescriptor>, Option<Ucred>, bool) {
     let seg = q.segs.front_mut().unwrap();
     let n = seg.data.len().min(buf.len());
@@ -563,6 +717,16 @@ fn take_record(q: &mut Queue, buf: &mut [u8], peek: bool) -> (usize, Vec<FileDes
 // User memory helpers
 // ----------------------------------------------------------------------
 
+/// Copies `len` bytes from user memory address `ptr` into a kernel vector.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+/// * `len` - Number of bytes to copy.
+///
+/// # Returns
+///
+/// Vector of copied bytes on success, or `-EFAULT` on memory error.
 fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     if len == 0 {
         return Ok(Vec::new());
@@ -575,6 +739,16 @@ fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     Ok(v)
 }
 
+/// Copies byte slice `data` into user memory address `ptr`.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+/// * `data` - Source bytes to copy out.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` on memory error.
 fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     if data.is_empty() {
         return Ok(());
@@ -586,6 +760,15 @@ fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+/// Reads a 32-bit unsigned integer from user virtual memory.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+///
+/// # Returns
+///
+/// `Ok(val)` on success, or `-EFAULT` on error.
 fn read_u32(ptr: u64) -> Result<u32, i64> {
     let b = copy_in(ptr, 4)?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -593,6 +776,16 @@ fn read_u32(ptr: u64) -> Result<u32, i64> {
 
 /// Writes a socket address to (`addr`, `*len_ptr`), truncating to the caller's buffer
 /// and storing the full length, as Linux does.
+///
+/// # Arguments
+///
+/// * `addr_ptr` - User virtual pointer to destination `sockaddr`.
+/// * `len_ptr` - User pointer to `socklen_t` buffer length.
+/// * `sa` - Serialized socket address bytes.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative Linux errno on error.
 fn put_sockaddr(addr_ptr: u64, len_ptr: u64, sa: &[u8]) -> Result<(), i64> {
     if addr_ptr == 0 || len_ptr == 0 {
         return Ok(());
@@ -602,7 +795,16 @@ fn put_sockaddr(addr_ptr: u64, len_ptr: u64, sa: &[u8]) -> Result<(), i64> {
     copy_out(len_ptr, &(sa.len() as u32).to_le_bytes())
 }
 
-/// Parses a `struct sockaddr_un`.
+/// Parses a `struct sockaddr_un` from user memory.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to `sockaddr_un`.
+/// * `len` - Length of structure in bytes.
+///
+/// # Returns
+///
+/// Decoded [`Addr`] enum variant, or negative Linux errno on error.
 fn read_addr(ptr: u64, len: u64) -> Result<Addr, i64> {
     if len < 2 || len > 110 {
         return Err(EINVAL);
@@ -631,11 +833,29 @@ fn read_addr(ptr: u64, len: u64) -> Result<Addr, i64> {
 // Control messages
 // ----------------------------------------------------------------------
 
+/// Rounds `n` up to the nearest multiple of 8 bytes.
+///
+/// # Arguments
+///
+/// * `n` - Value to align.
+///
+/// # Returns
+///
+/// Aligned value.
 fn align8(n: usize) -> usize {
     (n + 7) & !7
 }
 
 /// Descriptors named by the `SCM_RIGHTS` messages in a control buffer.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to control message buffer.
+/// * `len` - Length of control message buffer.
+///
+/// # Returns
+///
+/// Vector of extracted [`FileDescriptor`] handles, or negative Linux errno on error.
 fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
     let mut fds = Vec::new();
     if ptr == 0 || len < 16 {
@@ -658,7 +878,7 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
                 // The message holds a reference, like a dup: a pipe end stays open while in flight
                 match &desc {
                     FileDescriptor::PipeRead(pipe) => pipe.lock().add_reader(),
-                    FileDescriptor::PipeWrite(pipe) => pipe.lock().add_writer(),
+                    FileDescriptor::PipeWrite(pipe) => pipe.lock().drop_writer(),
                     _ => {}
                 }
                 fds.push(desc);
@@ -674,6 +894,10 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
 }
 
 /// Drops a descriptor that was in flight in a message and never installed.
+///
+/// # Arguments
+///
+/// * `desc` - In-flight descriptor to drop.
 fn release_in_flight(desc: FileDescriptor) {
     match desc {
         FileDescriptor::PipeRead(pipe) => pipe.lock().drop_reader(),
@@ -684,6 +908,18 @@ fn release_in_flight(desc: FileDescriptor) {
 
 /// Builds the received control messages into the caller's buffer: installs descriptors
 /// (closing those that do not fit) and adds credentials. Returns (bytes used, flags).
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to write control messages.
+/// * `cap` - Maximum bytes allocated for control message buffer.
+/// * `fds` - Descriptors to install.
+/// * `cred` - Optional credentials to serialize.
+/// * `cloexec` - Close-on-exec flag for installed descriptors.
+///
+/// # Returns
+///
+/// `(bytes_used, msg_flags)` tuple on success, or a negative Linux errno on error.
 fn build_control(ptr: u64, cap: usize, fds: Vec<FileDescriptor>, cred: Option<Ucred>, cloexec: bool) -> Result<(usize, u32), i64> {
     let mut out = Vec::new();
     let mut flags = 0;
@@ -735,6 +971,15 @@ fn build_control(ptr: u64, cap: usize, fds: Vec<FileDescriptor>, cred: Option<Uc
 }
 
 /// (base, len) pairs of an iovec array.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to `struct iovec` array.
+/// * `count` - Number of entries.
+///
+/// # Returns
+///
+/// Vector of `(base, len)` pairs, or negative errno on error.
 fn read_iov(ptr: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
     if count > 1024 {
         return Err(EINVAL);
@@ -746,6 +991,15 @@ fn read_iov(ptr: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
         .collect())
 }
 
+/// Gathers scatter-gather vector contents into a single contiguous byte buffer.
+///
+/// # Arguments
+///
+/// * `iov` - Slice of `(base, len)` address pairs.
+///
+/// # Returns
+///
+/// Contiguous byte vector on success, or a negative Linux errno on error.
 fn gather(iov: &[(u64, u64)]) -> Result<Vec<u8>, i64> {
     let mut data = Vec::new();
     for &(base, len) in iov {
@@ -754,6 +1008,16 @@ fn gather(iov: &[(u64, u64)]) -> Result<Vec<u8>, i64> {
     Ok(data)
 }
 
+/// Scatters a contiguous byte buffer across scatter-gather vectors in user space.
+///
+/// # Arguments
+///
+/// * `iov` - Slice of `(base, len)` address pairs.
+/// * `data` - Source byte slice to scatter.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative Linux errno on error.
 fn scatter(iov: &[(u64, u64)], data: &[u8]) -> Result<(), i64> {
     let mut off = 0;
     for &(base, len) in iov {
@@ -771,6 +1035,16 @@ fn scatter(iov: &[(u64, u64)], data: &[u8]) -> Result<(), i64> {
 // System calls
 // ----------------------------------------------------------------------
 
+/// Installs a new UNIX domain socket into the current task's descriptor table.
+///
+/// # Arguments
+///
+/// * `sock` - Socket instance to allocate descriptor for.
+/// * `cloexec` - Close-on-exec status flag.
+///
+/// # Returns
+///
+/// Allocated descriptor index, or `-EMFILE` if table full.
 fn install(sock: Arc<UnixSocket>, cloexec: bool) -> i64 {
     crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Unix(sock)) {
         Ok(fd) => {
@@ -781,6 +1055,15 @@ fn install(sock: Arc<UnixSocket>, cloexec: bool) -> i64 {
     })
 }
 
+/// Looks up a file descriptor and returns its underlying [`UnixSocket`].
+///
+/// # Arguments
+///
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+///
+/// `Some(Arc<UnixSocket>)` if valid UNIX socket, or `None`.
 fn socket_of(fd: u64) -> Option<Arc<UnixSocket>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(FileDescriptor::Unix(s)) => Some(s.clone()),
@@ -788,6 +1071,15 @@ fn socket_of(fd: u64) -> Option<Arc<UnixSocket>> {
     })
 }
 
+/// Validates and parses a socket type integer.
+///
+/// # Arguments
+///
+/// * `ty` - Socket type bitmask.
+///
+/// # Returns
+///
+/// Validated socket type or `-EPROTONOSUPPORT`.
 fn sock_type(ty: u64) -> Result<u32, i64> {
     match ty as u32 & 0xf {
         t @ (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) => Ok(t),
@@ -795,6 +1087,17 @@ fn sock_type(ty: u64) -> Result<u32, i64> {
     }
 }
 
+/// Binds a UNIX domain socket to a filesystem path or abstract name.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket reference.
+/// * `addr_ptr` - User pointer to `sockaddr_un`.
+/// * `len` - Length of address struct.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 fn bind(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     let addr = match read_addr(addr_ptr, len) {
         Ok(a) => a,
@@ -822,6 +1125,14 @@ fn bind(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     0
 }
 
+/// Marks the socket as a passive listener capable of accepting incoming connections.
+///
+/// # Arguments
+/// * `sock` - Socket instance to transition to listening mode.
+/// * `backlog` - Maximum length of the queue of pending connections.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn listen(sock: &Arc<UnixSocket>, backlog: u64) -> i64 {
     if sock.ty == SOCK_DGRAM {
         return EOPNOTSUPP;
@@ -843,6 +1154,15 @@ fn listen(sock: &Arc<UnixSocket>, backlog: u64) -> i64 {
     }
 }
 
+/// Initiates a connection on a Unix socket to the specified address.
+///
+/// # Arguments
+/// * `sock` - Socket initiating the connection.
+/// * `addr_ptr` - User pointer to `sockaddr_un`.
+/// * `len` - Length of the address structure.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn connect(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     let addr = match read_addr(addr_ptr, len) {
         Ok(a) => a,
@@ -892,6 +1212,16 @@ fn connect(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     0
 }
 
+/// Accepts an incoming connection request on a listening Unix socket.
+///
+/// # Arguments
+/// * `sock` - Listening socket instance.
+/// * `addr_ptr` - User pointer to receive the peer's address.
+/// * `len_ptr` - User pointer to in-out length of the address structure.
+/// * `flags` - Connection flags (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`).
+///
+/// # Returns
+/// Newly created file descriptor on success, or a negative Linux error code on failure.
 fn accept(sock: &Arc<UnixSocket>, addr_ptr: u64, len_ptr: u64, flags: u64) -> i64 {
     let mut waits = WaitSet::new();
     waits.add(QueueRef::Shared(sock.wq.clone()));
@@ -922,6 +1252,15 @@ fn accept(sock: &Arc<UnixSocket>, addr_ptr: u64, len_ptr: u64, flags: u64) -> i6
     }
 }
 
+/// Transmits a message, scatter/gather data, and control messages across a Unix socket.
+///
+/// # Arguments
+/// * `sock` - Socket sending the message.
+/// * `msg` - Pointer to user `msghdr` structure.
+/// * `flags` - Transmission message flags.
+///
+/// # Returns
+/// Number of bytes sent on success, or a negative Linux error code on failure.
 fn sendmsg(sock: &Arc<UnixSocket>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -941,6 +1280,15 @@ fn sendmsg(sock: &Arc<UnixSocket>, msg: u64, flags: u64) -> i64 {
     r.unwrap_or_else(|e| e)
 }
 
+/// Receives a message, scatter/gather buffers, and ancillary control data from a Unix socket.
+///
+/// # Arguments
+/// * `sock` - Socket receiving the message.
+/// * `msg` - Pointer to user `msghdr` structure.
+/// * `flags` - Reception message flags.
+///
+/// # Returns
+/// Number of bytes received on success, or a negative Linux error code on failure.
 fn recvmsg(sock: &Arc<UnixSocket>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -968,6 +1316,17 @@ fn recvmsg(sock: &Arc<UnixSocket>, msg: u64, flags: u64) -> i64 {
     r.unwrap_or_else(|e| e)
 }
 
+/// Retrieves options on a Unix domain socket.
+///
+/// # Arguments
+/// * `sock` - Socket whose option is being queried.
+/// * `level` - Protocol level (must be `SOL_SOCKET`).
+/// * `opt` - Option identifier to retrieve.
+/// * `val` - User pointer to store the option value.
+/// * `len_ptr` - User pointer to in-out length of the option buffer.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn getsockopt(sock: &Arc<UnixSocket>, level: u64, opt: u64, val: u64, len_ptr: u64) -> i64 {
     if level as u32 != SOL_SOCKET {
         return ENOPROTOOPT;
@@ -999,6 +1358,17 @@ fn getsockopt(sock: &Arc<UnixSocket>, level: u64, opt: u64, val: u64, len_ptr: u
     r.unwrap_or_else(|e| e)
 }
 
+/// Sets options on a Unix domain socket.
+///
+/// # Arguments
+/// * `sock` - Socket whose option is being set.
+/// * `level` - Protocol level (must be `SOL_SOCKET`).
+/// * `opt` - Option identifier to set.
+/// * `val` - User pointer to the option value.
+/// * `len` - Length of the option value buffer.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn setsockopt(sock: &Arc<UnixSocket>, level: u64, opt: u64, val: u64, len: u64) -> i64 {
     if level as u32 != SOL_SOCKET {
         return ENOPROTOOPT;
@@ -1016,6 +1386,14 @@ fn setsockopt(sock: &Arc<UnixSocket>, level: u64, opt: u64, val: u64, len: u64) 
     0 // buffer sizes, timeouts and the like are accepted and ignored
 }
 
+/// Shuts down all or part of a full-duplex connection on a Unix socket.
+///
+/// # Arguments
+/// * `sock` - Socket to shut down.
+/// * `how` - How to shut down: `0` (read), `1` (write), or `2` (both).
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn shutdown(sock: &Arc<UnixSocket>, how: u64) -> i64 {
     let (pair, side) = match sock.pair() {
         Some(p) => p,
@@ -1035,6 +1413,13 @@ fn shutdown(sock: &Arc<UnixSocket>, how: u64) -> i64 {
 }
 
 /// Handles `AF_UNIX` socket calls. `None` for other families and descriptors.
+///
+/// # Arguments
+/// * `num` - Syscall number.
+/// * `a` - Syscall arguments.
+///
+/// # Returns
+/// `Some(result)` if handled, or `None` if the syscall does not target an `AF_UNIX` socket.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     match num {
         41 => {
@@ -1168,7 +1553,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     })
 }
 
-/// `ioctl` on a Unix socket.
+/// Executes an `ioctl` command on a Unix domain socket.
+///
+/// # Arguments
+/// * `sock` - Socket instance on which to perform ioctl.
+/// * `request` - Device-dependent request code.
+/// * `arg` - Argument or pointer associated with the request.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 pub fn ioctl(sock: &Arc<UnixSocket>, request: u64, arg: u64) -> i64 {
     match request {
         0x5421 => match read_u32(arg) {

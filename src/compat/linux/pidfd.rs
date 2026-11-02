@@ -29,6 +29,10 @@ pub struct PidFd {
 
 impl PidFd {
     /// Polls readiness events on this process descriptor (reports `POLLIN` when target has exited).
+    ///
+    /// # Returns
+    ///
+    /// `0x0001` (`POLLIN`) if the monitored process has exited, or `0` if still running.
     pub fn poll_events(&self) -> u32 {
         if super::proc::has_exited(self.pid) {
             0x0001 // POLLIN: the process exited
@@ -38,17 +42,34 @@ impl PidFd {
     }
 
     /// Sets or clears non-blocking behavior on this descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking mode; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Queries whether non-blocking mode is currently enabled on this descriptor.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is enabled; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 }
 
 /// Installs a pidfd for `pid` (close-on-exec, as Linux always makes them).
+///
+/// # Arguments
+///
+/// * `pid` - Target process ID to monitor.
+/// * `nonblock` - Whether non-blocking polling should be enabled initially.
+///
+/// # Returns
+///
+/// Allocated file descriptor index on success, or `-EMFILE` if table is full.
 pub fn install(pid: u64, nonblock: bool) -> i64 {
     let fd = Arc::new(PidFd { pid, nonblock: AtomicBool::new(nonblock) });
     crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(crate::fs::FileDescriptor::PidFd(fd)) {
@@ -60,7 +81,17 @@ pub fn install(pid: u64, nonblock: bool) -> i64 {
     })
 }
 
-/// The process named by pidfd `fd`.
+/// Retrieves the process ID tracked by a pidfd.
+///
+/// # Arguments
+///
+/// * `fd` - File descriptor index of the pidfd.
+///
+/// # Returns
+///
+/// * `Ok(pid)` containing the monitored process ID.
+/// * `Err(EBADF)` if descriptor does not exist.
+/// * `Err(EINVAL)` if descriptor is not a pidfd.
 pub fn pid_of(fd: u64) -> Result<u64, i64> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(crate::fs::FileDescriptor::PidFd(p)) => Ok(p.pid),
@@ -69,7 +100,16 @@ pub fn pid_of(fd: u64) -> Result<u64, i64> {
     })
 }
 
-/// `pidfd_open(pid, flags)`.
+/// Linux `pidfd_open(2)` system call implementation.
+///
+/// # Arguments
+///
+/// * `pid` - Process ID to open a descriptor for.
+/// * `flags` - Creation flags (`PIDFD_NONBLOCK`).
+///
+/// # Returns
+///
+/// Allocated pidfd descriptor on success, or a negative Linux errno on error.
 pub fn sys_pidfd_open(pid: u64, flags: u64) -> i64 {
     if flags & !PIDFD_NONBLOCK != 0 || pid as i64 <= 0 {
         return EINVAL;
@@ -80,7 +120,18 @@ pub fn sys_pidfd_open(pid: u64, flags: u64) -> i64 {
     install(pid, flags & PIDFD_NONBLOCK != 0)
 }
 
-/// `pidfd_send_signal(pidfd, sig, info, flags)` (`info` is not supported and ignored).
+/// Linux `pidfd_send_signal(2)` system call implementation.
+///
+/// # Arguments
+///
+/// * `fd` - Pidfd descriptor targeting the recipient process.
+/// * `sig` - Signal number to deliver (`0` for existence check).
+/// * `_info` - Pointer to `siginfo_t` struct (currently unsupported).
+/// * `flags` - Operation flags (must be `0`).
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 pub fn sys_pidfd_send_signal(fd: u64, sig: u64, _info: u64, flags: u64) -> i64 {
     if flags != 0 || sig > 64 {
         return EINVAL;

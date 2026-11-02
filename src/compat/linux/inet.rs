@@ -122,12 +122,20 @@ impl Drop for InetSocket {
 impl InetSocket {
     /// Returns the transport [`WaitQueue`](crate::task::wait::WaitQueue) that announces readiness
     /// changes for this socket (`None` before an underlying TCP/UDP endpoint exists).
+    ///
+    /// # Returns
+    ///
+    /// `Some(Arc<WaitQueue>)` if an active transport endpoint exists, or `None`.
     pub fn wait_queue(&self) -> Option<Arc<crate::task::wait::WaitQueue>> {
         self.tcp.or(self.udp).and_then(stack::wait_queue)
     }
 
     /// Evaluates current `poll` / `select` / `epoll` readiness bitmask (`POLLIN = 0x1`,
     /// `POLLOUT = 0x4`, `POLLERR = 0x8`, `POLLHUP = 0x10`).
+    ///
+    /// # Returns
+    ///
+    /// Bitmask of poll readiness flags.
     pub fn poll_events(&self) -> u32 {
         if let Some(id) = self.tcp {
             let (r, w, hup, err) = stack::tcp_poll(id);
@@ -141,6 +149,10 @@ impl InetSocket {
     }
 
     /// Lazily allocates or returns the existing UDP endpoint handle in [`crate::net::stack`].
+    ///
+    /// # Returns
+    ///
+    /// Allocated or existing UDP endpoint index, or a negative Linux errno on error.
     fn udp_id(&mut self) -> Result<u32, i64> {
         if let Some(id) = self.udp {
             return Ok(id);
@@ -152,6 +164,15 @@ impl InetSocket {
 }
 
 /// Copies `len` bytes from userland address `ptr` into a kernel [`Vec<u8>`].
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to read from.
+/// * `len` - Number of bytes to copy.
+///
+/// # Returns
+///
+/// Vector of copied bytes on success, or `-EFAULT` if memory cannot be read.
 fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     if ptr == 0 || !prefault_current(ptr, len as u64, false) {
         return Err(EFAULT);
@@ -162,6 +183,15 @@ fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
 }
 
 /// Copies `data` from the kernel into userland address `ptr`.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to write into.
+/// * `data` - Source bytes to write.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` if memory cannot be written.
 fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     if ptr == 0 || !prefault_current(ptr, data.len() as u64, true) {
         return Err(EFAULT);
@@ -171,6 +201,15 @@ fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
 }
 
 /// Parses a userland `struct sockaddr_in` at `(ptr, len)`, returning `Ok(None)` for `AF_UNSPEC` (disconnect).
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to `sockaddr_in`.
+/// * `len` - Length of structure in bytes.
+///
+/// # Returns
+///
+/// `Ok(Some((ip, port)))` if valid, `Ok(None)` for disconnect, or negative errno on error.
 fn read_sockaddr(ptr: u64, len: u64) -> Result<Option<([u8; 4], u16)>, i64> {
     if len < 2 {
         return Err(EINVAL);
@@ -191,6 +230,17 @@ fn read_sockaddr(ptr: u64, len: u64) -> Result<Option<([u8; 4], u16)>, i64> {
 }
 
 /// Writes a 16-byte `struct sockaddr_in` and its length into userland (`len_ptr` is in/out).
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to write `sockaddr_in`.
+/// * `len_ptr` - User pointer to `socklen_t` length field.
+/// * `ip` - IPv4 address bytes.
+/// * `port` - Port number in host byte order.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` on memory error.
 fn write_sockaddr(ptr: u64, len_ptr: u64, ip: [u8; 4], port: u16) -> Result<(), i64> {
     if ptr == 0 || len_ptr == 0 {
         return Ok(());
@@ -205,6 +255,14 @@ fn write_sockaddr(ptr: u64, len_ptr: u64, ip: [u8; 4], port: u16) -> Result<(), 
 }
 
 /// Looks up file descriptor `fd` in the current task and returns its [`InetSocket`] if it is an `AF_INET` socket.
+///
+/// # Arguments
+///
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+///
+/// `Some(Arc<Mutex<InetSocket>>)` if descriptor exists and is an inet socket, or `None`.
 fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(FileDescriptor::Inet(s)) => Some(s.clone()),
@@ -214,6 +272,16 @@ fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
 
 /// Waits until `ready()` returns `Some(...)` for transport endpoint `id`, honoring
 /// non-blocking mode and pending signals.
+///
+/// # Arguments
+///
+/// * `id` - Transport endpoint index.
+/// * `nonblock` - Non-blocking flag.
+/// * `ready` - Closure polling readiness.
+///
+/// # Returns
+///
+/// Result value produced by `ready()`, or negative Linux errno on error.
 fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
     let mut waits = crate::task::wait::WaitSet::new();
     match stack::wait_queue(id) {
@@ -237,6 +305,16 @@ fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result
 }
 
 /// Initiates or completes a TCP/UDP `connect(2)` operation on `sock`.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket mutex.
+/// * `addr` - User virtual pointer to destination `sockaddr`.
+/// * `len` - Size of `sockaddr` structure.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
     let dest = match read_sockaddr(addr, len) {
         Ok(d) => d,
@@ -294,6 +372,17 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
 }
 
 /// Transmits `data` over a TCP stream or UDP datagram socket.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket mutex.
+/// * `data` - Payload bytes to send.
+/// * `flags` - Transmission flags (`MSG_DONTWAIT`, `MSG_NOSIGNAL`).
+/// * `dest` - Destination address/port for unconnected UDP sockets.
+///
+/// # Returns
+///
+/// Number of bytes sent on success, or a negative Linux errno on error.
 fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u8; 4], u16)>) -> i64 {
     let (stream, nonblock, tcp) = {
         let s = sock.lock();
@@ -350,6 +439,17 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
 }
 
 /// Receives data into `buf`, returning `(bytes_copied, optional_udp_source, was_truncated)`.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket mutex.
+/// * `buf` - Destination buffer slice.
+/// * `flags` - Reception flags (`MSG_DONTWAIT`, `MSG_PEEK`).
+///
+/// # Returns
+///
+/// * `Ok((bytes_copied, source_addr, truncated))` on success.
+/// * `Err(errno)` on network or socket error.
 fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(usize, Option<([u8; 4], u16)>, bool), i64> {
     let (stream, nonblock, tcp, shut_rd) = {
         let s = sock.lock();
@@ -382,6 +482,15 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
 }
 
 /// Reads an array of `struct iovec` `(iov_base, iov_len)` pairs from user memory.
+///
+/// # Arguments
+///
+/// * `iov` - User virtual address of `struct iovec` array.
+/// * `count` - Number of iovec elements.
+///
+/// # Returns
+///
+/// Vector of `(base, len)` pairs on success, or a negative Linux errno on error.
 fn read_iovecs(iov: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
     if count > 1024 {
         return Err(EINVAL);
@@ -394,6 +503,16 @@ fn read_iovecs(iov: u64, count: u64) -> Result<Vec<(u64, u64)>, i64> {
 }
 
 /// Implements `sendmsg(2)` on an [`InetSocket`] by gathering all `msg_iov` buffers.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket mutex.
+/// * `msg` - User pointer to `struct msghdr`.
+/// * `flags` - Message flags.
+///
+/// # Returns
+///
+/// Number of bytes sent on success, or a negative Linux errno on error.
 fn sendmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -425,6 +544,16 @@ fn sendmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
 }
 
 /// Implements `recvmsg(2)` on an [`InetSocket`] by scattering received data across `msg_iov`.
+///
+/// # Arguments
+///
+/// * `sock` - Target socket mutex.
+/// * `msg` - User pointer to `struct msghdr`.
+/// * `flags` - Message flags.
+///
+/// # Returns
+///
+/// Number of bytes received on success, or a negative Linux errno on error.
 fn recvmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     let hdr = match copy_in(msg, 56) {
         Ok(h) => h,
@@ -496,6 +625,10 @@ pub fn write(sock: &Arc<Mutex<InetSocket>>, data: &[u8]) -> i64 {
 ///
 /// # Arguments
 /// * `sock` - Shared reference to the [`InetSocket`].
+///
+/// # Returns
+///
+/// Number of bytes available for reading.
 pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
     stack::kick();
     let s = sock.lock();

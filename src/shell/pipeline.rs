@@ -63,6 +63,10 @@ pub fn try_execute_pipeline(cmd_line: &str, state: &mut ShellState) -> bool {
 }
 
 /// Executes a pipeline of commands: `cmd1 | cmd2 | ... | cmdN`.
+///
+/// # Arguments
+/// * `cmd_line` - Raw command pipeline string.
+/// * `state` - Mutable reference to the shell session state.
 fn execute_pipe_chain(cmd_line: &str, state: &mut ShellState) {
     let raw_stages: Vec<&str> = split_unquoted(cmd_line, '|').into_iter().map(|s| s.trim()).collect();
     if raw_stages.is_empty() {
@@ -164,6 +168,10 @@ fn execute_pipe_chain(cmd_line: &str, state: &mut ShellState) {
 }
 
 /// Executes a single command with file output redirection (`>` or `>>`).
+///
+/// # Arguments
+/// * `cmd_line` - Redirection command string.
+/// * `state` - Mutable reference to the shell session state.
 fn execute_single_redirect(cmd_line: &str, state: &mut ShellState) {
     let (cmd_part, file_path, append) = parse_redirect_target(cmd_line);
     if file_path.is_empty() {
@@ -203,6 +211,11 @@ fn execute_single_redirect(cmd_line: &str, state: &mut ShellState) {
 }
 
 /// Writes or appends collected bytes to a file in ZFS.
+///
+/// # Arguments
+/// * `path` - Destination file path string in ZFS.
+/// * `data` - Raw bytes to write or append.
+/// * `append` - `true` to append to existing contents, `false` to overwrite.
 fn commit_file_output(path: &str, data: &[u8], append: bool) {
     if append {
         let mut existing = alloc::vec![0u8; 65536];
@@ -223,6 +236,13 @@ fn commit_file_output(path: &str, data: &[u8], append: bool) {
 }
 
 /// Helper to parse redirection target: returns `(cmd_part, file_path, append)`.
+///
+/// # Arguments
+/// * `s` - Full command line string possibly containing `>` or `>>`.
+///
+/// # Returns
+///
+/// A tuple `(command_part, target_file_path, is_append)`.
 fn parse_redirect_target(s: &str) -> (&str, &str, bool) {
     if let Some(idx) = s.find(">>") {
         let cmd = s[..idx].trim();
@@ -238,11 +258,27 @@ fn parse_redirect_target(s: &str) -> (&str, &str, bool) {
 }
 
 /// True if `ch` appears in `line` outside single or double quotes.
+///
+/// # Arguments
+/// * `line` - Line string slice to check.
+/// * `ch` - Delimiter character to find.
+///
+/// # Returns
+///
+/// `true` if `ch` occurs outside quotes, `false` otherwise.
 fn has_unquoted(line: &str, ch: char) -> bool {
     split_unquoted(line, ch).len() > 1
 }
 
 /// Splits `line` at occurrences of `sep` that are outside quotes.
+///
+/// # Arguments
+/// * `line` - String slice to split.
+/// * `sep` - Delimiter character.
+///
+/// # Returns
+///
+/// A vector of substring slices separated by unquoted `sep`.
 fn split_unquoted(line: &str, sep: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut quote: Option<char> = None;

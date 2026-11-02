@@ -51,6 +51,10 @@ static RECV_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 /// Finds the adapter on the PCI bus and lets it bus-master; returns its register window
 /// (`BAR0`) and interrupt line, which the supervisor gives the driver.
+///
+/// # Returns
+///
+/// `Some((bar0_address, irq_line))` if found, or `None`.
 pub fn find_adapter() -> Option<(u64, u8)> {
     let dev = pci::find_device(E1000_VENDOR_ID, E1000_DEVICE_ID)?;
     pci::enable_bus_mastering(&dev);
@@ -59,6 +63,14 @@ pub fn find_adapter() -> Option<(u64, u8)> {
 }
 
 /// Sends a request to the driver; returns its reply.
+///
+/// # Arguments
+/// * `label` - IPC message protocol label.
+/// * `args` - Array of 4 argument words.
+///
+/// # Returns
+///
+/// The reply [`Message`] on success, or an error description string on failure.
 fn request(label: u32, args: [u64; 4]) -> Result<Message, &'static str> {
     match service::call(ENDPOINT_NET_DEV, Message::with_args(label, args), CALL_TIMEOUT_TICKS) {
         Ok(r) if r.label == MSG_NET_REPLY && (r.args[0] as i64) >= 0 => Ok(r),
@@ -68,6 +80,10 @@ fn request(label: u32, args: [u64; 4]) -> Result<Message, &'static str> {
 }
 
 /// Asks the driver (started at the hardware takeover) for the adapter's MAC address.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error description string on failure.
 pub fn init() -> Result<(), &'static str> {
     if !service::is_online(ENDPOINT_NET_DEV) {
         return Err("Intel E1000 (82540EM) network driver is not running");
@@ -81,17 +97,29 @@ pub fn init() -> Result<(), &'static str> {
 }
 
 /// Wakes the network task whenever the adapter interrupts. Returns whether the driver runs.
+///
+/// # Returns
+///
+/// `true` if the network driver is present and running, `false` otherwise.
 pub fn enable_interrupts() -> bool {
     service::notify_on_irq(ENDPOINT_NET_DEV, &crate::net::stack::NET_WQ);
     is_present()
 }
 
 /// Whether the adapter and its driver are up.
+///
+/// # Returns
+///
+/// `true` if initialized and available, `false` otherwise.
 pub fn is_present() -> bool {
     PRESENT.load(Ordering::Acquire)
 }
 
 /// Packets and bytes received and sent: `(packets_rx, packets_tx, bytes_rx, bytes_tx)`.
+///
+/// # Returns
+///
+/// A tuple `(packets_rx, packets_tx, bytes_rx, bytes_tx)`.
 pub fn metrics() -> (u64, u64, u64, u64) {
     (
         PACKETS_RX.load(Ordering::Relaxed),
@@ -102,6 +130,13 @@ pub fn metrics() -> (u64, u64, u64, u64) {
 }
 
 /// Transmits a raw Ethernet frame.
+///
+/// # Arguments
+/// * `frame` - Byte slice containing the raw Ethernet frame.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error description string on failure.
 ///
 /// # Errors
 /// Returns `Err` if the driver is not running, the frame is too long, or the adapter fails.
@@ -122,6 +157,9 @@ pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
 
 /// Takes the next received frame into `out_buf`, fetching a batch from the driver when
 /// none is waiting.
+///
+/// # Arguments
+/// * `out_buf` - Destination buffer to store the received packet.
 ///
 /// # Returns
 /// `Some(bytes_read)` if a frame was received, or `None` if none arrived.
@@ -151,18 +189,30 @@ pub fn receive_frame(out_buf: &mut [u8]) -> Option<usize> {
 }
 
 /// Returns the MAC address of the adapter, or all zeros if it is not up.
+///
+/// # Returns
+///
+/// The 6-byte Ethernet MAC address array.
 pub fn mac_address() -> [u8; 6] {
     *MAC.lock()
 }
 
 /// Driver diagnostics: `(receive requests, frames they returned, adapter's receive head,
 /// driver's receive position)`.
+///
+/// # Returns
+///
+/// A tuple `(receive_requests, frames_returned, hw_rx_head, driver_rx_pos)`.
 pub fn rx_diagnostics() -> (u64, u64, u64, u64) {
     let r = request(MSG_NET_GET_STATUS, [0; 4]).map_or([0; 4], |r| r.args);
     (RECV_CALLS.load(Ordering::Relaxed), RECV_FRAMES.load(Ordering::Relaxed), r[2], r[3])
 }
 
 /// Returns `true` if the adapter has a carrier link.
+///
+/// # Returns
+///
+/// `true` if physical Ethernet link carrier is detected, `false` otherwise.
 pub fn is_link_up() -> bool {
     is_present() && request(MSG_NET_GET_STATUS, [0; 4]).map_or(false, |r| r.args[1] != 0)
 }

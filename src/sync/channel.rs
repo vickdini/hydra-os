@@ -40,6 +40,14 @@ pub struct Channel<T> {
 
 impl<T> Channel<T> {
     /// Creates a bounded channel with the given buffer `capacity`.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of items the channel can buffer before blocking.
+    ///
+    /// # Returns
+    ///
+    /// An initialized [`Channel`] instance.
     pub fn new(capacity: usize) -> Self {
         Self {
             buffer: SpinLock::new(VecDeque::with_capacity(capacity.max(1))),
@@ -50,6 +58,10 @@ impl<T> Channel<T> {
     }
 
     /// Sends an item into the channel, blocking if the channel is full.
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - The value of type `T` to push into the channel.
     pub fn send(&self, item: T) {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
 
@@ -72,6 +84,14 @@ impl<T> Channel<T> {
     }
 
     /// Attempts to send an item without blocking. Returns Err(item) if full.
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - The value to send.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if stored in buffer, or `Err(item)` returning the unconsumed item if full.
     pub fn try_send(&self, item: T) -> Result<(), T> {
         let mut buf = self.buffer.lock();
         if buf.len() < self.capacity {
@@ -84,6 +104,10 @@ impl<T> Channel<T> {
     }
 
     /// Receives an item from the channel, blocking if the channel is empty.
+    ///
+    /// # Returns
+    ///
+    /// The next available item of type `T`.
     pub fn recv(&self) -> T {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
 
@@ -105,6 +129,10 @@ impl<T> Channel<T> {
     }
 
     /// Attempts to receive an item without blocking.
+    ///
+    /// # Returns
+    ///
+    /// `Some(T)` if available, or `None` if the buffer is currently empty.
     pub fn try_recv(&self) -> Option<T> {
         let mut buf = self.buffer.lock();
         if let Some(item) = buf.pop_front() {
@@ -116,26 +144,46 @@ impl<T> Channel<T> {
     }
 
     /// Returns the number of items currently buffered in the channel.
+    ///
+    /// # Returns
+    ///
+    /// Item count as `usize`.
     pub fn len(&self) -> usize {
         self.buffer.lock().len()
     }
 
     /// Returns true if the channel contains no items.
+    ///
+    /// # Returns
+    ///
+    /// `true` if empty, `false` otherwise.
     pub fn is_empty(&self) -> bool {
         self.buffer.lock().is_empty()
     }
 
     /// Returns the capacity of the channel.
+    ///
+    /// # Returns
+    ///
+    /// Maximum capacity as `usize`.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
     /// Returns the count of waiting receivers.
+    ///
+    /// # Returns
+    ///
+    /// Number of blocked receiver tasks.
     pub fn waiting_receivers(&self) -> usize {
         self.recv_waiters.lock().len()
     }
 
     /// Returns the count of waiting senders.
+    ///
+    /// # Returns
+    ///
+    /// Number of blocked sender tasks.
     pub fn waiting_senders(&self) -> usize {
         self.send_waiters.lock().len()
     }

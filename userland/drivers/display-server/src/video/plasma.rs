@@ -52,6 +52,12 @@ const COLOR_TEXT_MUTED: u32 = Color::rgb(189, 195, 199);       // #bdc3c7
 const COLOR_GREEN_ACCENT: u32 = Color::rgb(46, 204, 113);      // #2ecc71
 
 /// Draws a 32x32 RGBA/BGRA sprite with smooth alpha blending.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `x` - Destination X position.
+/// * `y` - Destination Y position.
+/// * `icon` - 32x32 pixel byte slice (4 bytes per pixel).
 pub fn draw_icon_32(canvas: &mut Compositor, x: usize, y: usize, icon: &[u8]) {
     for iy in 0..32 {
         for ix in 0..32 {
@@ -72,6 +78,12 @@ pub fn draw_icon_32(canvas: &mut Compositor, x: usize, y: usize, icon: &[u8]) {
 }
 
 /// Draws a downsampled 16x16 icon for titlebars and task tabs.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `x` - Destination X position.
+/// * `y` - Destination Y position.
+/// * `icon` - 32x32 source icon bytes downsampled by 2x.
 pub fn draw_icon_16(canvas: &mut Compositor, x: usize, y: usize, icon: &[u8]) {
     for iy in 0..16 {
         for ix in 0..16 {
@@ -134,6 +146,11 @@ pub fn render_plasma_desktop(
 }
 
 /// Renders the authentic KDE Plasma 6.8 ScarletTree wallpaper.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `width` - Screen width in pixels.
+/// * `height` - Screen height in pixels.
 fn render_wallpaper(canvas: &mut Compositor, width: usize, height: usize) {
     if width == 1280 && height == 800 && SCARLETTREE_WALLPAPER.len() >= 1280 * 800 * 4 {
         // Direct blit of authentic KDE Plasma 6.8 wallpaper
@@ -162,6 +179,11 @@ fn render_wallpaper(canvas: &mut Compositor, width: usize, height: usize) {
 }
 
 /// Renders an individual Wayland application surface and its Breeze window frame.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `surface` - Wayland surface window state.
+/// * `frame_counter` - Animation tick counter.
 fn render_window(canvas: &mut Compositor, surface: &crate::video::wayland::WlSurface, frame_counter: u64) {
     let x = surface.x;
     let y = surface.y;
@@ -237,6 +259,14 @@ fn render_window(canvas: &mut Compositor, surface: &crate::video::wayland::WlSur
 }
 
 /// Renders the native Linux Wayland Client application content within Plasma.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `x` - Left client coordinate.
+/// * `y` - Top client coordinate.
+/// * `w` - Client width.
+/// * `h` - Client height.
+/// * `_frame_counter` - Animation tick counter.
 fn render_wayland_client_content(
     canvas: &mut Compositor,
     x: usize,
@@ -287,6 +317,15 @@ fn render_wayland_client_content(
 }
 
 /// Renders the Konsole terminal application content.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `surface` - Surface containing terminal text buffer.
+/// * `x` - Left client coordinate.
+/// * `y` - Top client coordinate.
+/// * `w` - Client width.
+/// * `h` - Client height.
+/// * `frame_counter` - Animation tick counter.
 fn render_konsole_content(
     canvas: &mut Compositor,
     surface: &crate::video::wayland::WlSurface,
@@ -324,6 +363,14 @@ fn render_konsole_content(
 }
 
 /// Renders the KSysGuard System Monitor dashboard.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `x` - Left client coordinate.
+/// * `y` - Top client coordinate.
+/// * `w` - Client width.
+/// * `h` - Client height.
+/// * `frame_counter` - Animation tick counter.
 fn render_ksysguard_content(
     canvas: &mut Compositor,
     x: usize,
@@ -380,6 +427,13 @@ fn render_ksysguard_content(
 }
 
 /// Renders the signature KDE Plasma 6.8 floating bottom taskbar panel.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `compositor` - Wayland compositor managing active window tasks.
+/// * `width` - Screen width.
+/// * `height` - Screen height.
+/// * `_frame_counter` - Animation tick counter.
 fn render_panel(
     canvas: &mut Compositor,
     compositor: &WaylandCompositor,
@@ -473,6 +527,10 @@ fn render_panel(
 }
 
 /// Renders the Kickoff Application Menu popup above the launcher button.
+///
+/// # Arguments
+/// * `canvas` - Target compositor canvas.
+/// * `screen_height` - Vertical screen dimension.
 fn render_kickoff_menu(canvas: &mut Compositor, screen_height: usize) {
     let menu_w = 280;
     let menu_h = 260;

@@ -58,6 +58,10 @@ impl IcmpType {
     }
 
     /// Returns the raw 8-bit numeric code for this [`IcmpType`].
+    ///
+    /// # Returns
+    ///
+    /// The 8-bit ICMP message type value.
     pub fn as_u8(&self) -> u8 {
         match *self {
             IcmpType::EchoReply => Self::ECHO_REPLY,

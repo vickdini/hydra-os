@@ -29,17 +29,33 @@ use crate::shell::state::ShellState;
 /// synchronously by the shell dispatcher.
 pub trait Command: Sync {
     /// Returns the primary invocation keyword (e.g., `"mem"`, `"help"`, `"alloc"`).
+    ///
+    /// # Returns
+    ///
+    /// Static string slice of the command's primary keyword.
     fn name(&self) -> &'static str;
 
     /// Returns alternative invocation names (e.g., `["?"]` for `help`, `["memory"]` for `mem`).
+    ///
+    /// # Returns
+    ///
+    /// Static slice of alias keyword strings.
     fn aliases(&self) -> &'static [&'static str] {
         &[]
     }
 
     /// Returns a brief one-line description shown in the `help` manual listing.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice summarizing the command.
     fn description(&self) -> &'static str;
 
     /// Returns the command syntax and argument usage pattern.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice of command syntax.
     fn usage(&self) -> &'static str {
         ""
     }

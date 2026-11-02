@@ -103,6 +103,14 @@ const PTE_HELD: PageTableFlags = PageTableFlags::BIT_9;
 /// frame take their own reference with `frame_ref_inc`.
 pub trait MappedObject: Send + Sync {
     /// Returns the frame holding page `pgoff` of the object, or `None` past its end.
+    ///
+    /// # Arguments
+    ///
+    /// * `pgoff` - Page offset within the backing object.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` containing the backing frame; `None` if offset exceeds object length.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>>;
 }
 
@@ -138,6 +146,14 @@ pub struct Vma {
 impl Vma {
     /// Splits this VMA at page-aligned address `at`, truncating `self` to `[start, at)`
     /// and returning the upper half `[at, end)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - Virtual address split boundary.
+    ///
+    /// # Returns
+    ///
+    /// The upper half `Vma` covering `[at, end)`.
     fn split_off(&mut self, at: u64) -> Vma {
         let mut upper = self.clone();
         upper.start = at;
@@ -183,30 +199,67 @@ pub static CURRENT_MM: AtomicPtr<Mutex<Mm>> = AtomicPtr::new(core::ptr::null_mut
 static RETIRED_MMS: Mutex<[Option<Arc<Mutex<Mm>>>; 64]> = Mutex::new([const { None }; 64]);
 
 /// Returns true if `NX` (execute-disable) is enabled in `IA32_EFER`.
+///
+/// # Returns
+///
+/// `true` if CPU execute-disable bit 11 is enabled in EFER; `false` otherwise.
 fn nx_enabled() -> bool {
     let efer = unsafe { crate::arch::syscall::rdmsr(0xC000_0080) };
     efer & (1 << 11) != 0
 }
 
 /// Returns a mutable reference to the identity-mapped page table at physical address `phys`.
+///
+/// # Arguments
+///
+/// * `phys` - Physical address of the page table frame.
+///
+/// # Returns
+///
+/// Mutable reference to the `PageTable`.
 #[inline]
 fn table_at<'a>(phys: PhysAddr) -> &'a mut PageTable {
     unsafe { &mut *(phys.as_u64() as *mut PageTable) }
 }
 
 /// Rounds `addr` down to the nearest 4 KiB page boundary.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address to truncate.
+///
+/// # Returns
+///
+/// Page-aligned address truncated to 4096-byte boundary.
 #[inline]
 fn page_down(addr: u64) -> u64 {
     addr & !(PAGE_SIZE - 1)
 }
 
 /// Rounds `addr` up to the nearest 4 KiB page boundary.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address to round upward.
+///
+/// # Returns
+///
+/// Smallest 4096-byte aligned address greater than or equal to `addr`.
 #[inline]
 fn page_up(addr: u64) -> u64 {
     (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
 /// Returns true if `[start, start + len)` lies entirely inside user space.
+///
+/// # Arguments
+///
+/// * `start` - Inclusive start address of the virtual range.
+/// * `len` - Length of the range in bytes.
+///
+/// # Returns
+///
+/// `true` if the entire range is within unprivileged user space; `false` otherwise.
 pub fn is_user_range(start: u64, len: u64) -> bool {
     let end = match start.checked_add(len) {
         Some(e) => e,
@@ -216,11 +269,28 @@ pub fn is_user_range(start: u64, len: u64) -> bool {
 }
 
 /// True if `addr` is a user address (low window or main user area).
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address to test.
+///
+/// # Returns
+///
+/// `true` if `addr` resides within the valid user virtual memory windows.
 fn is_user_addr(addr: u64) -> bool {
     (USER_SPACE_START..USER_SPACE_END).contains(&addr) || (LOW_USER_START..LOW_USER_END).contains(&addr)
 }
 
 /// Computes the hardware [`PageTableFlags`] for a user page with VMA protection `prot`.
+///
+/// # Arguments
+///
+/// * `prot` - Protection bitmask (`PROT_READ`, `PROT_WRITE`, `PROT_EXEC`).
+/// * `writable` - Whether the PTE should be marked writable (false for CoW pages).
+///
+/// # Returns
+///
+/// Formatted `PageTableFlags`.
 fn pte_flags_for(prot: u32, writable: bool) -> PageTableFlags {
     let mut flags = PageTableFlags::USER_ACCESSIBLE;
     if prot & (PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
@@ -238,17 +308,33 @@ fn pte_flags_for(prot: u32, writable: bool) -> PageTableFlags {
 }
 
 /// Returns true if `entry` owns a physical frame (either `PRESENT` or `PTE_HELD`).
+///
+/// # Arguments
+///
+/// * `entry` - Page table entry to query.
+///
+/// # Returns
+///
+/// `true` if the entry currently references an active physical memory frame.
 fn pte_holds_frame(entry: &PageTableEntry) -> bool {
     entry.flags().intersects(PageTableFlags::PRESENT | PTE_HELD)
 }
 
 /// Invalidates the TLB entry for virtual address `addr`.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address whose cached translation must be flushed.
 fn flush(addr: u64) {
     x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(addr));
 }
 
 impl Mm {
     /// Creates an empty address space sharing the kernel mappings.
+    ///
+    /// # Returns
+    ///
+    /// Newly allocated `Mm` structure on success, or an error string on memory exhaustion.
     pub fn new() -> Result<Self, &'static str> {
         let space = {
             let mut alloc = FRAME_ALLOCATOR.lock();
@@ -264,6 +350,10 @@ impl Mm {
     }
 
     /// Physical address of this address space's PML4 (the value loaded into CR3).
+    ///
+    /// # Returns
+    ///
+    /// The 64-bit physical address of the root PML4 table for this address space.
     pub fn cr3(&self) -> u64 {
         self.pml4.as_u64()
     }
@@ -271,6 +361,14 @@ impl Mm {
     /// Duplicates this address space for `fork`. Private pages become shared copy-on-write
     /// (read-only in both, copied on the first write by either); shared mappings stay
     /// shared and writable.
+    ///
+    /// # Returns
+    ///
+    /// A new cloned [`Mm`] instance with duplicate VMAs and copy-on-write page table mappings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static string slice describing the failure if page table frame allocation fails.
     pub fn fork(&mut self) -> Result<Mm, &'static str> {
         let mut child = Mm::new()?;
         child.vmas = self.vmas.clone();
@@ -309,6 +407,14 @@ impl Mm {
     }
 
     /// Returns the area containing `addr`, if any.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual memory address to query.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Vma)` containing the given address, or `None` if `addr` is unmapped.
     pub fn find_vma(&self, addr: u64) -> Option<&Vma> {
         self.vmas
             .range(..=addr)
@@ -318,11 +424,24 @@ impl Mm {
     }
 
     /// Iterates over all areas in address order.
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding references to all active [`Vma`] descriptors in increasing order.
     pub fn vmas(&self) -> impl Iterator<Item = &Vma> {
         self.vmas.values()
     }
 
     /// Returns true if any existing VMA overlaps the half-open interval `[start, end)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Inclusive start virtual address.
+    /// * `end` - Exclusive end virtual address.
+    ///
+    /// # Returns
+    ///
+    /// `true` if an active area intersects `[start, end)`, `false` otherwise.
     fn overlaps(&self, start: u64, end: u64) -> bool {
         if let Some((_, v)) = self.vmas.range(..end).next_back() {
             return v.end > start;
@@ -331,6 +450,14 @@ impl Mm {
     }
 
     /// Finds a free, page-aligned range of `len` bytes, searching down from `MMAP_TOP`.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - Length of the requested range in bytes.
+    ///
+    /// # Returns
+    ///
+    /// `Some(u64)` base virtual address if an unallocated hole is found, `None` if address space is full.
     fn find_free(&self, len: u64) -> Option<u64> {
         let mut top = MMAP_TOP;
         for (_, v) in self.vmas.range(..MMAP_TOP).rev() {
@@ -347,6 +474,15 @@ impl Mm {
     }
 
     /// Walks the page tables to the leaf entry for `addr`, optionally creating tables.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual address whose page table entry is looked up.
+    /// * `create` - If `true`, missing intermediate page directory levels are allocated.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&mut PageTableEntry)` to the leaf PTE if present or created, `None` otherwise.
     fn pte(&mut self, addr: u64, create: bool) -> Option<&'static mut PageTableEntry> {
         let indices = [
             (addr >> 39) & 0x1FF,
@@ -372,6 +508,14 @@ impl Mm {
     }
 
     /// Returns the frame mapped at `addr`, if one is held.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual address to translate.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysAddr)` if `addr` is mapped to a physical frame, `None` if unmapped or non-frame.
     pub fn translate(&mut self, addr: u64) -> Option<PhysAddr> {
         let entry = self.pte(addr, false)?;
         if pte_holds_frame(entry) {
@@ -382,6 +526,11 @@ impl Mm {
     }
 
     /// Unmaps every page in `[start, end)`, dropping frame references. Areas are untouched.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Inclusive start virtual address.
+    /// * `end` - Exclusive end virtual address.
     fn zap_range(&mut self, start: u64, end: u64) {
         let mut addr = start;
         while addr < end {
@@ -404,6 +553,10 @@ impl Mm {
     }
 
     /// Splits areas so that `addr` falls on an area boundary.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual address boundary to split existing VMAs on.
     fn split_at(&mut self, addr: u64) {
         let key = match self.vmas.range(..addr).next_back() {
             Some((&k, v)) if v.end > addr => k,
@@ -414,6 +567,11 @@ impl Mm {
     }
 
     /// Removes all mappings in `[start, end)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Inclusive start virtual address.
+    /// * `end` - Exclusive end virtual address.
     pub fn unmap(&mut self, start: u64, end: u64) {
         self.split_at(start);
         self.split_at(end);
@@ -428,6 +586,26 @@ impl Mm {
     ///
     /// `fixed` replaces existing mappings at `addr`; `noreplace` fails with `EEXIST` instead.
     /// Without either, `addr` is used as a hint.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Requested virtual memory address or placement hint.
+    /// * `len` - Size of the mapping in bytes.
+    /// * `prot` - Protection flags (`PROT_READ`, `PROT_WRITE`, `PROT_EXEC`).
+    /// * `shared` - `true` if changes are visible across mappings, `false` for private COW.
+    /// * `fixed` - Overwrite any existing mappings at `addr`.
+    /// * `noreplace` - Fail if existing mappings overlap with `addr`.
+    /// * `backing` - The underlying source of bytes ([`Backing::Anon`] or [`Backing::Object`]).
+    ///
+    /// # Returns
+    ///
+    /// The starting virtual address of the allocated mapping.
+    ///
+    /// # Errors
+    ///
+    /// - `-EINVAL`: Invalid length, misaligned fixed address, or non-user address.
+    /// - `-EEXIST`: Mapping overlaps and `noreplace` was set.
+    /// - `-ENOMEM`: No free virtual address range available.
     pub fn mmap(
         &mut self,
         addr: u64,
@@ -476,6 +654,21 @@ impl Mm {
     }
 
     /// Changes protection on `[start, start + len)` (Linux `mprotect`).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Starting page-aligned virtual address.
+    /// * `len` - Length of the region in bytes.
+    /// * `prot` - New protection flags (`PROT_READ`, `PROT_WRITE`, `PROT_EXEC`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// - `-EINVAL`: `start` is not page-aligned.
+    /// - `-ENOMEM`: Part of the specified range is unmapped.
     pub fn mprotect(&mut self, start: u64, len: u64, prot: u32) -> Result<(), i64> {
         if start & (PAGE_SIZE - 1) != 0 {
             return Err(-EINVAL);
@@ -519,6 +712,14 @@ impl Mm {
     }
 
     /// Grows or shrinks the program break (Linux `brk`). Returns the resulting break.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_brk` - Desired new break address.
+    ///
+    /// # Returns
+    ///
+    /// The updated program break address (unchanged if the request fails or is invalid).
     pub fn set_brk(&mut self, new_brk: u64) -> u64 {
         if new_brk < self.brk_start || new_brk == 0 {
             return self.brk;
@@ -549,6 +750,15 @@ impl Mm {
 
     /// Returns true if `upper` directly continues `lower` with identical attributes and
     /// backing, so the two can be one area (as Linux's `vma_merge`).
+    ///
+    /// # Arguments
+    ///
+    /// * `lower` - The earlier VMA descriptor in address order.
+    /// * `upper` - The subsequent VMA descriptor immediately following `lower`.
+    ///
+    /// # Returns
+    ///
+    /// `true` if both VMAs have identical permissions and contiguous backing and can merge, `false` otherwise.
     fn can_merge(lower: &Vma, upper: &Vma) -> bool {
         if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared {
             return false;
@@ -563,6 +773,10 @@ impl Mm {
     }
 
     /// Merges the area starting at `start` with compatible neighbours on either side.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Virtual address identifying the target VMA.
     fn merge_around(&mut self, start: u64) {
         let mut start = start;
         if let Some((&prev_key, prev)) = self.vmas.range(..start).next_back() {
@@ -587,6 +801,24 @@ impl Mm {
     }
 
     /// Resizes or moves a mapping (Linux `mremap`).
+    ///
+    /// # Arguments
+    ///
+    /// * `old` - Current starting address of the mapping.
+    /// * `old_len` - Current length in bytes.
+    /// * `new_len` - Requested new length in bytes.
+    /// * `may_move` - Whether mapping can be relocated if cannot expand in place.
+    /// * `fixed_to` - Explicit fixed destination address (if `MREMAP_FIXED` specified).
+    ///
+    /// # Returns
+    ///
+    /// The starting virtual address of the resized or relocated mapping.
+    ///
+    /// # Errors
+    ///
+    /// - `-EINVAL`: Invalid alignment or zero length.
+    /// - `-EFAULT`: Source mapping not found or spans across boundaries.
+    /// - `-ENOMEM`: Cannot expand in place and `may_move` is false, or no free space.
     pub fn mremap(&mut self, old: u64, old_len: u64, new_len: u64, may_move: bool, fixed_to: Option<u64>) -> Result<u64, i64> {
         if old & (PAGE_SIZE - 1) != 0 || new_len == 0 {
             return Err(-EINVAL);
@@ -652,11 +884,32 @@ impl Mm {
 
     /// Discards the contents of `[start, end)` (Linux `MADV_DONTNEED`): later accesses see
     /// zeroes (anonymous) or the object's contents (file-backed).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Inclusive start virtual address.
+    /// * `end` - Exclusive end virtual address.
     pub fn discard(&mut self, start: u64, end: u64) {
         self.zap_range(page_down(start), page_up(end));
     }
 
     /// Resolves a page fault at `addr`. `write`/`exec` describe the faulting access.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual address that caused the fault.
+    /// * `write` - Whether the access was a write attempt.
+    /// * `exec` - Whether the access was instruction execution.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful fault resolution and mapping installation.
+    ///
+    /// # Errors
+    ///
+    /// - [`FaultError::Segv`]: Address not in a valid VMA or violates protection flags.
+    /// - [`FaultError::Bus`]: Object page retrieval failed.
+    /// - [`FaultError::OutOfMemory`]: Physical frame allocation failed.
     pub fn handle_fault(&mut self, addr: u64, write: bool, exec: bool) -> Result<(), FaultError> {
         let vma = self.find_vma(addr).cloned().ok_or(FaultError::Segv)?;
         if (write && vma.prot & PROT_WRITE == 0)
@@ -726,6 +979,19 @@ impl Mm {
 
     /// Copies `data` into this address space at `addr`, faulting pages in as needed.
     /// Works whether or not this address space is active.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual destination address in this address space.
+    /// * `data` - Source byte slice to copy.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful write of all bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FaultError`] if page allocation or access validation fails.
     pub fn write_bytes(&mut self, addr: u64, data: &[u8]) -> Result<(), FaultError> {
         let mut done = 0usize;
         while done < data.len() {
@@ -749,6 +1015,20 @@ impl Mm {
 
     /// Faults in every page of `[addr, addr + len)` so kernel code can access it directly
     /// without page faults (used before I/O into user buffers).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Starting virtual address to prefault.
+    /// * `len` - Length in bytes of the region to prefault.
+    /// * `write` - `true` if write access is required, `false` for read-only.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful fault resolution for the entire span.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FaultError`] if any page in the span fails to fault in.
     pub fn prefault(&mut self, addr: u64, len: u64, write: bool) -> Result<(), FaultError> {
         if len == 0 {
             return Ok(());
@@ -769,6 +1049,11 @@ impl Mm {
     }
 
     /// Recursively releases page tables and decrements frame reference counts starting at `level`.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_phys` - Physical address of the page table to free.
+    /// * `level` - Paging hierarchy level (1 for PT, 2 for PD, 3 for PDPT, 4 for PML4).
     fn free_tables(table_phys: PhysAddr, level: u8) {
         let table = table_at(table_phys);
         for entry in table.iter_mut() {
@@ -786,6 +1071,7 @@ impl Mm {
 }
 
 impl Drop for Mm {
+    /// Tears down the address space, decrementing reference counts on mapped frames and freeing page tables.
     fn drop(&mut self) {
         // Owned: the user half, and in PML4[0] the private PDPT with the low window (its
         // other entries are the kernel's shared identity map). The kernel half is shared.
@@ -812,6 +1098,21 @@ impl Drop for Mm {
 
 /// Resolves a page fault against the running process's address space.
 /// Returns `None` if the current task has no address space.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address that faulted.
+/// * `write` - `true` if the access was a write.
+/// * `exec` - `true` if the access was instruction execution.
+///
+/// # Returns
+///
+/// `Some(Ok(()))` on successful resolution, `Some(Err(FaultError))` on fault failure,
+/// or `None` if current task has no active address space or `addr` is not user-accessible.
+///
+/// # Panics
+///
+/// Panics if the current task's `Mm` mutex is already held when the page fault occurs.
 pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result<(), FaultError>> {
     let ptr = CURRENT_MM.load(Ordering::Acquire);
     if ptr.is_null() || !is_user_addr(addr) {
@@ -827,6 +1128,14 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
 /// Physical address of `addr` in the running process if it lies in a shared mapping
 /// (`MAP_SHARED`: memory other processes may map too); `None` for private memory or an
 /// unmapped page. Used to key futexes shared between processes.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address to translate.
+///
+/// # Returns
+///
+/// `Some(u64)` physical address if `addr` is mapped as shared, `None` otherwise.
 pub fn shared_phys_current(addr: u64) -> Option<u64> {
     let ptr = CURRENT_MM.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -842,6 +1151,16 @@ pub fn shared_phys_current(addr: u64) -> Option<u64> {
 
 /// Validates and faults in a user buffer of the running process before kernel I/O into it.
 /// Returns false if the range is not mapped with the required access.
+///
+/// # Arguments
+///
+/// * `addr` - Virtual address start of user buffer.
+/// * `len` - Length of buffer in bytes.
+/// * `write` - Whether write access is required.
+///
+/// # Returns
+///
+/// `true` if the entire range is valid and faulted in, `false` otherwise.
 pub fn prefault_current(addr: u64, len: u64, write: bool) -> bool {
     let ptr = CURRENT_MM.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -859,6 +1178,10 @@ pub fn prefault_current(addr: u64, len: u64, write: bool) -> bool {
 }
 
 /// Makes `mm` the address space the page-fault handler resolves against.
+///
+/// # Arguments
+///
+/// * `mm` - Optional reference to the new active address space [`Arc<Mutex<Mm>>`].
 pub fn set_current_mm(mm: Option<&Arc<Mutex<Mm>>>) {
     let ptr = mm.map_or(core::ptr::null_mut(), |m| Arc::as_ptr(m) as *mut Mutex<Mm>);
     CURRENT_MM.store(ptr, Ordering::Release);
@@ -867,6 +1190,14 @@ pub fn set_current_mm(mm: Option<&Arc<Mutex<Mm>>>) {
 /// Parks an exited task's address space for later release. Never allocates, so it is
 /// safe to call from the scheduler. Returns the address space back if the queue is full
 /// or busy, in which case the caller keeps it and retries later.
+///
+/// # Arguments
+///
+/// * `mm` - Address space handle to retire.
+///
+/// # Returns
+///
+/// `Ok(())` if parked successfully, or `Err(mm)` returning ownership if slots are full or locked.
 pub fn retire_mm(mm: Arc<Mutex<Mm>>) -> Result<(), Arc<Mutex<Mm>>> {
     let mut slots = match RETIRED_MMS.try_lock() {
         Some(s) => s,
@@ -899,6 +1230,15 @@ static LEGACY_WINDOW_NEXT: Mutex<u64> = Mutex::new(0x0000_1000_0000_0000);
 
 /// Maps `frames` contiguously and user-accessibly into the kernel address space and
 /// returns the start address. Used by legacy (non-`Mm`) tasks for `mmap` of shared memory.
+///
+/// # Arguments
+///
+/// * `frames` - Slice of physical 4 KiB frames to map.
+/// * `writable` - Whether the user mapping should be writable.
+///
+/// # Returns
+///
+/// `Some(u64)` virtual address of the start of the window, or `None` on allocation failure.
 pub fn map_into_kernel_space(frames: &[PhysFrame<Size4KiB>], writable: bool) -> Option<u64> {
     let start = {
         let mut next = LEGACY_WINDOW_NEXT.lock();
@@ -932,6 +1272,14 @@ pub struct BufferObject {
 
 impl BufferObject {
     /// Creates a new shared `BufferObject` wrapping `data`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Boxed slice containing raw object data.
+    ///
+    /// # Returns
+    ///
+    /// An [`Arc<BufferObject>`] wrapping the data buffer.
     pub fn new(data: Box<[u8]>) -> Arc<Self> {
         Arc::new(Self {
             data,
@@ -940,17 +1288,34 @@ impl BufferObject {
     }
 
     /// Returns the total size of the underlying byte buffer in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Size in bytes as `usize`.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns a read-only slice of the underlying byte buffer.
+    ///
+    /// # Returns
+    ///
+    /// Slice reference `&[u8]` of the data payload.
     pub fn bytes(&self) -> &[u8] {
         &self.data
     }
 }
 
 impl MappedObject for BufferObject {
+    /// Retrieves or materialises the 4 KiB physical frame corresponding to `pgoff`.
+    ///
+    /// # Arguments
+    ///
+    /// * `pgoff` - Page offset index into the backing buffer.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` containing the page data, or `None` if `pgoff` is out of bounds or allocation fails.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         let offset = (pgoff * PAGE_SIZE) as usize;
         if offset >= page_up(self.data.len() as u64) as usize {
@@ -975,6 +1340,7 @@ impl MappedObject for BufferObject {
 }
 
 impl Drop for BufferObject {
+    /// Releases physical frames held by this buffer object.
     fn drop(&mut self) {
         for (_, frame) in self.pages.lock().iter() {
             frame_ref_dec(*frame);

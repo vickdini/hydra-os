@@ -40,6 +40,10 @@ impl WaitQueue {
     }
 
     /// Enqueues a specific task ID into the wait-queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The [`TaskId`] to enqueue.
     pub fn enqueue(&mut self, id: TaskId) {
         if !self.waiters.contains(&id) {
             self.waiters.push_back(id);
@@ -50,6 +54,10 @@ impl WaitQueue {
     ///
     /// The caller yields the CPU immediately and will not be scheduled until awakened
     /// by `wake_one()` or `wake_all()`.
+    ///
+    /// # Returns
+    ///
+    /// The [`TaskId`] of the newly blocked task.
     pub fn wait(&mut self) -> TaskId {
         let current_id = task::SCHEDULER.lock().current_task_id();
         self.enqueue(current_id);
@@ -59,6 +67,10 @@ impl WaitQueue {
     /// Wakes the oldest task in the wait-queue (FIFO order).
     ///
     /// Returns the `TaskId` of the awakened task, or `None` if the queue was empty.
+    ///
+    /// # Returns
+    ///
+    /// `Some(TaskId)` of the awakened task, or `None` if the queue was empty.
     pub fn wake_one(&mut self) -> Option<TaskId> {
         while let Some(id) = self.waiters.pop_front() {
             if task::unblock_task(id) {
@@ -71,6 +83,10 @@ impl WaitQueue {
     /// Wakes all waiting tasks in the queue.
     ///
     /// Returns the count of successfully unblocked tasks.
+    ///
+    /// # Returns
+    ///
+    /// The number of tasks successfully unblocked as `usize`.
     pub fn wake_all(&mut self) -> usize {
         let mut count = 0;
         while let Some(id) = self.waiters.pop_front() {
@@ -82,11 +98,19 @@ impl WaitQueue {
     }
 
     /// Returns true if there are no waiting tasks.
+    ///
+    /// # Returns
+    ///
+    /// `true` if empty, `false` otherwise.
     pub fn is_empty(&self) -> bool {
         self.waiters.is_empty()
     }
 
     /// Returns the number of tasks currently waiting.
+    ///
+    /// # Returns
+    ///
+    /// Number of queued tasks as `usize`.
     pub fn len(&self) -> usize {
         self.waiters.len()
     }

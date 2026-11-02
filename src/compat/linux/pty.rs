@@ -41,6 +41,15 @@ pub const PTS_DEV: u64 = 0x18;
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
 /// Linux `makedev` encoding of a device number.
+///
+/// # Arguments
+///
+/// * `major` - Device major number.
+/// * `minor` - Device minor number.
+///
+/// # Returns
+///
+/// Encoded 64-bit device number.
 pub fn makedev(major: u64, minor: u64) -> u64 {
     ((major & 0xFFF) << 8) | (minor & 0xFF) | ((minor & !0xFF) << 12)
 }
@@ -101,11 +110,29 @@ impl Drop for PtyFile {
 /// Live pairs by index, for opening `/dev/pts/N`.
 static PTYS: Mutex<BTreeMap<u32, Weak<Pty>>> = Mutex::new(BTreeMap::new());
 
+/// Looks up an active pseudo-terminal pair by its slave index.
+///
+/// # Arguments
+///
+/// * `index` - Slave index number.
+///
+/// # Returns
+///
+/// `Some(Arc<Pty>)` if active, or `None`.
 fn lookup(index: u32) -> Option<Arc<Pty>> {
     PTYS.lock().get(&index).and_then(|w| w.upgrade())
 }
 
 /// Opens `/dev/ptmx`: creates a pair and returns its master end.
+///
+/// # Arguments
+///
+/// * `uid` - UID of the process creating the pair.
+/// * `nonblock` - Initial non-blocking status flag.
+///
+/// # Returns
+///
+/// Shared [`PtyFile`] reference representing the master end.
 pub fn open_master(uid: u32, nonblock: bool) -> Arc<PtyFile> {
     let mut ptys = PTYS.lock();
     ptys.retain(|_, w| w.strong_count() > 0);
@@ -131,11 +158,34 @@ pub fn open_master(uid: u32, nonblock: bool) -> Arc<PtyFile> {
 
 /// Opens slave `/dev/pts/<index>`. A session leader without a controlling terminal
 /// acquires it unless `noctty`.
+///
+/// # Arguments
+///
+/// * `index` - Slave device index.
+/// * `nonblock` - Non-blocking mode flag.
+/// * `noctty` - Do not allocate as controlling terminal flag.
+///
+/// # Returns
+///
+/// * `Ok(Arc<PtyFile>)` on successful slave open.
+/// * `Err(-ENOENT)` if slave index not active.
+/// * `Err(-EIO)` if master closed or locked.
 pub fn open_slave(index: u32, nonblock: bool, noctty: bool) -> Result<Arc<PtyFile>, i64> {
     let pty = lookup(index).ok_or(ENOENT)?;
     open_slave_of(&pty, nonblock, noctty)
 }
 
+/// Helper opening the slave end of an existing PTY pair.
+///
+/// # Arguments
+///
+/// * `pty` - Target PTY pair reference.
+/// * `nonblock` - Non-blocking mode flag.
+/// * `noctty` - Suppress controlling terminal assignment.
+///
+/// # Returns
+///
+/// Newly opened slave [`PtyFile`] or negative errno on error.
 fn open_slave_of(pty: &Arc<Pty>, nonblock: bool, noctty: bool) -> Result<Arc<PtyFile>, i64> {
     {
         let mut st = pty.state.lock();
@@ -161,11 +211,27 @@ fn open_slave_of(pty: &Arc<Pty>, nonblock: bool, noctty: bool) -> Result<Arc<Pty
 }
 
 /// The pseudo-terminal that is the controlling terminal of session `sid` (`/dev/tty`).
+///
+/// # Arguments
+///
+/// * `sid` - Target session ID.
+///
+/// # Returns
+///
+/// `Some(Arc<Pty>)` if a PTY is the controlling terminal for `sid`, or `None`.
 pub fn controlling_tty(sid: u64) -> Option<Arc<Pty>> {
     PTYS.lock().values().filter_map(|w| w.upgrade()).find(|p| p.tty.lock().session == sid)
 }
 
 /// Opens `/dev/tty` for a process whose controlling terminal is a pseudo-terminal.
+///
+/// # Arguments
+///
+/// * `nonblock` - Non-blocking mode flag.
+///
+/// # Returns
+///
+/// `Some(Arc<PtyFile>)` referencing the opened controlling terminal, or `None`.
 pub fn open_controlling(nonblock: bool) -> Option<Arc<PtyFile>> {
     let (_, pid) = super::proc::current_ids();
     let (sid, _) = super::proc::session_of(pid)?;
@@ -174,11 +240,25 @@ pub fn open_controlling(nonblock: bool) -> Option<Arc<PtyFile>> {
 }
 
 /// Indices of the live slaves (`/dev/pts` listing).
+///
+/// # Returns
+///
+/// Vector of active slave index numbers.
 pub fn indices() -> Vec<u32> {
     PTYS.lock().iter().filter(|(_, w)| w.strong_count() > 0).map(|(i, _)| *i).collect()
 }
 
 /// `stat` of `/dev/ptmx`, `/dev/pts` or `/dev/pts/N`; `None` for other paths.
+///
+/// # Arguments
+///
+/// * `abs` - Absolute path string to inspect.
+///
+/// # Returns
+///
+/// * `Some(Ok(stat))` if path is a recognized PTY virtual path.
+/// * `Some(Err(errno))` on failure (e.g. slave not found).
+/// * `None` if path does not belong to PTY subsystem.
 pub fn stat_path(abs: &str) -> Option<Result<super::types::LinuxStat, i64>> {
     let mut st = super::types::LinuxStat::default();
     st.st_blksize = 1024;
@@ -209,6 +289,18 @@ pub fn stat_path(abs: &str) -> Option<Result<super::types::LinuxStat, i64>> {
 
 /// `chmod`/`chown` of `/dev/pts/N` by `euid` (the owner may change the mode and group;
 /// only root may give the node away). `None` for other paths.
+///
+/// # Arguments
+///
+/// * `abs` - Absolute path.
+/// * `euid` - Effective UID of caller.
+/// * `mode` - Optional new mode bits.
+/// * `uid` - Optional new UID.
+/// * `gid` - Optional new GID.
+///
+/// # Returns
+///
+/// `Some(0)` on success, `Some(-EPERM)` or `Some(-ENOENT)` on error, or `None` if not `/dev/pts/*`.
 pub fn setattr_path(abs: &str, euid: u32, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> Option<i64> {
     let index = slave_index(abs)?;
     let pty = match lookup(index) {
@@ -233,11 +325,24 @@ pub fn setattr_path(abs: &str, euid: u32, mode: Option<u32>, uid: Option<u32>, g
 }
 
 /// The slave index named by `/dev/pts/<N>`.
+///
+/// # Arguments
+///
+/// * `abs` - Absolute path string.
+///
+/// # Returns
+///
+/// `Some(index)` if path matches `/dev/pts/<N>`, or `None`.
 pub fn slave_index(abs: &str) -> Option<u32> {
     abs.strip_prefix("/dev/pts/")?.parse().ok()
 }
 
 impl Pty {
+    /// Fills LinuxStat structure for this pseudo-terminal slave device.
+    ///
+    /// # Arguments
+    ///
+    /// * `st` - Target stat structure to populate.
     fn fill_stat(&self, st: &mut super::types::LinuxStat) {
         st.st_dev = PTS_DEV;
         st.st_ino = self.index as u64 + 3;
@@ -252,11 +357,19 @@ impl Pty {
     }
 
     /// Returns the canonical path string of the associated slave device node.
+    ///
+    /// # Returns
+    ///
+    /// String formatted as `/dev/pts/<index>`.
     pub fn slave_path(&self) -> String {
         alloc::format!("/dev/pts/{}", self.index)
     }
 
     /// Feeds input (master writes) through the line discipline.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw bytes written to master.
     fn input(&self, data: &[u8]) {
         let mut echo = Vec::new();
         let mut signals = Vec::new();
@@ -278,11 +391,20 @@ impl Pty {
 }
 
 impl PtyFile {
+    /// Queries the non-blocking state flag.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     fn nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
     /// stat of the open end.
+    ///
+    /// # Returns
+    ///
+    /// Populated `LinuxStat` structure.
     pub fn stat(&self) -> super::types::LinuxStat {
         let mut st = super::types::LinuxStat::default();
         if self.master {
@@ -294,6 +416,10 @@ impl PtyFile {
     }
 
     /// Path shown by `/proc/self/fd` (and so `ttyname`).
+    ///
+    /// # Returns
+    ///
+    /// Canonical file path string.
     pub fn path(&self) -> String {
         if self.master {
             String::from("/dev/ptmx")
@@ -303,6 +429,14 @@ impl PtyFile {
     }
 
     /// Reads incoming bytes from the pseudo-terminal end into `buf`.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer to fill.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes read on success, `0` on EOF, or a negative Linux errno on error.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
         if buf.is_empty() {
             return 0;
@@ -344,6 +478,14 @@ impl PtyFile {
     }
 
     /// Writes bytes to the pseudo-terminal end.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Payload bytes to write.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes written, or a negative Linux errno on error.
     pub fn write(&self, data: &[u8]) -> i64 {
         if self.master {
             self.pty.input(data);
@@ -378,6 +520,14 @@ impl PtyFile {
     }
 
     /// Writes without waiting for the master to drain output (kernel messages).
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Payload bytes.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes processed.
     pub fn write_nowait(&self, data: &[u8]) -> usize {
         if self.master {
             self.pty.input(data);
@@ -395,6 +545,10 @@ impl PtyFile {
     }
 
     /// `poll` events of this end.
+    ///
+    /// # Returns
+    ///
+    /// Bitmask of poll flags (`POLLIN`, `POLLOUT`, `POLLHUP`).
     pub fn poll_events(&self) -> u32 {
         let st = self.pty.state.lock();
         if self.master {
@@ -420,11 +574,19 @@ impl PtyFile {
     }
 
     /// Sets or clears non-blocking mode on this PTY descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking operations; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Queries whether non-blocking mode is currently enabled on this PTY descriptor.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock()
     }
@@ -432,6 +594,16 @@ impl PtyFile {
     /// `ioctl` on either end: the pty requests, then the terminal ones (which act on
     /// the slave's terminal from both ends, as on Linux). `open_peer` installs a slave
     /// descriptor for `TIOCGPTPEER`.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - ioctl request code.
+    /// * `arg` - Argument or pointer value.
+    /// * `open_peer` - Callback allocating a slave descriptor for `TIOCGPTPEER`.
+    ///
+    /// # Returns
+    ///
+    /// Result code or negative Linux errno on error.
     pub fn ioctl(&self, request: u64, arg: u64, open_peer: &dyn Fn(Arc<PtyFile>, u32) -> i64) -> i64 {
         const TIOCGPTN: u64 = 0x8004_5430;
         const TIOCSPTLCK: u64 = 0x4004_5431;
@@ -496,6 +668,16 @@ impl PtyFile {
     }
 }
 
+/// Writes a `u32` value to user space after prefaulting.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+/// * `v` - Value to write.
+///
+/// # Returns
+///
+/// `0` on success, or `-EFAULT` on memory error.
 fn put_u32(ptr: u64, v: u32) -> i64 {
     if ptr == 0 || !crate::memory::vm::prefault_current(ptr, 4, true) {
         return EFAULT;
@@ -504,6 +686,15 @@ fn put_u32(ptr: u64, v: u32) -> i64 {
     0
 }
 
+/// Reads a `u32` value from user space after prefaulting.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+///
+/// # Returns
+///
+/// `Some(u32)` on success, or `None` on fault.
 fn get_u32(ptr: u64) -> Option<u32> {
     if ptr == 0 || !crate::memory::vm::prefault_current(ptr, 4, false) {
         return None;

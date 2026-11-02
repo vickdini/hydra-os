@@ -121,6 +121,10 @@ impl ShellState {
     }
 
     /// Returns the current working directory as a UTF-8 string slice.
+    ///
+    /// # Returns
+    ///
+    /// The current working directory string slice.
     pub fn cwd_str(&self) -> &str {
         core::str::from_utf8(&self.cwd[..self.cwd_len]).unwrap_or("/bin")
     }
@@ -138,11 +142,19 @@ impl ShellState {
     }
 
     /// Returns `true` if the shell is currently running with superuser (`UID == 0`) privileges.
+    ///
+    /// # Returns
+    ///
+    /// `true` if root, `false` otherwise.
     pub fn is_root(&self) -> bool {
         self.current_uid == 0
     }
 
     /// Returns the active username as a UTF-8 string slice.
+    ///
+    /// # Returns
+    ///
+    /// The active username string slice.
     pub fn username_str(&self) -> &str {
         core::str::from_utf8(&self.username[..self.username_len]).unwrap_or("root")
     }

@@ -70,16 +70,37 @@ static CHANGED: WaitQueue = WaitQueue::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns the current boot tick count from the PIT.
+///
+/// # Returns
+///
+/// Current PIT tick count.
 fn now() -> u64 {
     crate::arch::pit::ticks()
 }
 
 /// Returns the total CPU time consumed by process `pid` in scheduler ticks.
+///
+/// # Arguments
+///
+/// * `pid` - Target process ID.
+///
+/// # Returns
+///
+/// Cumulative scheduler ticks spent running threads of `pid`.
 fn cpu_ticks(pid: u64) -> u64 {
     crate::task::SCHEDULER.lock().process_ticks(pid)
 }
 
 /// Returns the current value of the clock backing timer `which` for process `pid`, in ticks.
+///
+/// # Arguments
+///
+/// * `which` - Interval timer index (`ITIMER_REAL`, `ITIMER_VIRTUAL`, or `ITIMER_PROF`).
+/// * `pid` - Target process ID.
+///
+/// # Returns
+///
+/// Current tick counter value for the specified timer clock.
 fn clock(which: usize, pid: u64) -> u64 {
     if which == ITIMER_REAL as usize {
         now()
@@ -89,6 +110,14 @@ fn clock(which: usize, pid: u64) -> u64 {
 }
 
 /// Maps timer index `which` (`0..3`) to the Linux signal number it raises on expiry.
+///
+/// # Arguments
+///
+/// * `which` - Timer index (`0` for `SIGALRM`, `1` for `SIGVTALRM`, other for `SIGPROF`).
+///
+/// # Returns
+///
+/// Linux signal number raised upon timer expiration.
 fn signal_for(which: usize) -> u32 {
     match which {
         0 => super::proc::SIGALRM,
@@ -161,6 +190,15 @@ fn ensure_started() {
 }
 
 /// Returns `(remaining_ticks, interval_ticks)` for timer `which` of process `pid`.
+///
+/// # Arguments
+///
+/// * `pid` - Process ID owning the timer.
+/// * `which` - Timer type index (`0..3`).
+///
+/// # Returns
+///
+/// `(remaining_ticks, interval_ticks)` tuple.
 fn get(pid: u64, which: usize) -> (u64, u64) {
     let t = TIMERS.lock().get(&pid).and_then(|p| p.t[which]);
     match t {
@@ -170,6 +208,13 @@ fn get(pid: u64, which: usize) -> (u64, u64) {
 }
 
 /// Arms (`value > 0`) or disarms (`value == 0`) timer `which` for process `pid` with values in ticks.
+///
+/// # Arguments
+///
+/// * `pid` - Process ID owning the timer.
+/// * `which` - Timer type index (`0..3`).
+/// * `value` - Initial countdown ticks until expiration (`0` to disarm).
+/// * `interval` - Periodic reload ticks (`0` for one-shot).
 fn set(pid: u64, which: usize, value: u64, interval: u64) {
     let base = clock(which, pid);
     let mut all = TIMERS.lock();
@@ -183,6 +228,16 @@ fn set(pid: u64, which: usize, value: u64, interval: u64) {
 }
 
 /// Validates a `(tv_sec, tv_usec)` pair and converts it into scheduler ticks (rounding up).
+///
+/// # Arguments
+///
+/// * `sec` - Seconds component of the time value.
+/// * `usec` - Microseconds component (`0..1_000_000`).
+///
+/// # Returns
+///
+/// * `Ok(ticks)` on successful conversion.
+/// * `Err(-EINVAL)` if `sec < 0` or `usec` out of range.
 fn ticks_from_timeval(sec: i64, usec: i64) -> Result<u64, i64> {
     if sec < 0 || !(0..1_000_000).contains(&usec) {
         return Err(EINVAL);
@@ -192,6 +247,16 @@ fn ticks_from_timeval(sec: i64, usec: i64) -> Result<u64, i64> {
 }
 
 /// Writes a 32-byte `struct itimerval { it_interval, it_value }` to user address `ptr`.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to destination `struct itimerval`.
+/// * `interval` - Interval length in scheduler ticks.
+/// * `value` - Remaining countdown in scheduler ticks.
+///
+/// # Returns
+///
+/// `0` on success, or `-EFAULT` if user memory cannot be prefaulted.
 fn put_itimerval(ptr: u64, interval: u64, value: u64) -> i64 {
     if !crate::memory::vm::prefault_current(ptr, 32, true) {
         return EFAULT;

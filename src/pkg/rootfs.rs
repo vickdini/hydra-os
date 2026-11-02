@@ -57,6 +57,13 @@ pub struct InstallSummary {
 ///
 /// If the high bit (`0x80`) of the first byte is set, interprets the remaining bytes as
 /// big-endian base-256 (GNU tar extension for large files/timestamps).
+///
+/// # Arguments
+/// * `field` - Byte slice containing octal ASCII or GNU base-256 binary digits.
+///
+/// # Returns
+///
+/// The decoded `u64` numeric value.
 fn octal(field: &[u8]) -> u64 {
     // GNU base-256 encoding for large values
     if field.first().map_or(false, |&b| b & 0x80 != 0) {
@@ -82,12 +89,26 @@ fn octal(field: &[u8]) -> u64 {
 }
 
 /// Returns the sub-slice of `field` up to the first NUL (`0`) byte.
+///
+/// # Arguments
+/// * `field` - Byte slice to scan for a NUL terminator.
+///
+/// # Returns
+///
+/// A sub-slice of `field` up to the first NUL byte, or the entire slice if no NUL is present.
 fn cstr(field: &[u8]) -> &[u8] {
     let n = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     &field[..n]
 }
 
 /// Parses POSIX `pax` extended header records (`"<len> key=value\n"`), returning `(path, linkpath)` overrides.
+///
+/// # Arguments
+/// * `data` - Byte slice containing PAX extended header data.
+///
+/// # Returns
+///
+/// A tuple `(path_override, linkpath_override)` containing any extracted PAX attributes.
 fn parse_pax(data: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     let (mut path, mut link) = (None, None);
     let mut rest = data;
@@ -114,6 +135,24 @@ fn parse_pax(data: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
 }
 
 /// Creates or replaces a single archive entry under the root directory object `root`.
+///
+/// # Arguments
+/// * `s` - Active [`ZfsServer`] connection.
+/// * `root` - Root directory object ID.
+/// * `name` - Entry path byte slice.
+/// * `kind` - Tar entry typeflag character code.
+/// * `mode` - File mode and permission bits.
+/// * `uid` - Owner user ID.
+/// * `gid` - Owner group ID.
+/// * `mtime` - Modification timestamp in seconds.
+/// * `rdev` - Device major/minor ID if device node.
+/// * `link` - Target path for symlink or hardlink.
+/// * `data` - File contents payload.
+/// * `sum` - Installation statistics summary accumulator.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative errno error code on failure.
 #[allow(clippy::too_many_arguments)]
 fn install_entry(
     s: &mut ZfsServer,

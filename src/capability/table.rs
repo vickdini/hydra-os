@@ -65,6 +65,18 @@ impl CapabilityTable {
     }
 
     /// Retrieves an immutable reference to the capability residing at `slot`.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Index in the capability table (0..255).
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Capability)` if an active capability token exists at `slot`; `None` if vacant or out of bounds.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn get(&self, slot: usize) -> Option<&Capability> {
         if slot < MAX_CAPABILITIES {
             self.slots[slot].as_ref()
@@ -74,6 +86,18 @@ impl CapabilityTable {
     }
 
     /// Revokes and removes the capability at `slot`, returning the removed token if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Index in the capability table to clear.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Capability)` containing the revoked token if previously present; `None` if vacant or invalid.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn revoke(&mut self, slot: usize) -> Option<Capability> {
         if slot < MAX_CAPABILITIES {
             self.slots[slot].take()
@@ -83,6 +107,19 @@ impl CapabilityTable {
     }
 
     /// Verifies whether the capability at `slot` exists and satisfies `required_rights`.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Index of the capability token to validate.
+    /// * `required_rights` - Bitflags representing permissions required for the requested operation.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the capability exists and possesses all required rights; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn check_rights(&self, slot: usize, required_rights: Rights) -> bool {
         if let Some(cap) = self.get(slot) {
             cap.rights.contains(required_rights)
@@ -92,6 +129,14 @@ impl CapabilityTable {
     }
 
     /// Returns the total number of occupied capability slots in this table.
+    ///
+    /// # Returns
+    ///
+    /// Total count of valid capability tokens currently registered in the table.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn len(&self) -> usize {
         let mut count = 0;
         for slot in self.slots.iter() {
@@ -102,7 +147,15 @@ impl CapabilityTable {
         count
     }
 
-    /// Returns true if the capability table contains zero active capabilities.
+    /// Checks whether the capability table contains zero active capabilities.
+    ///
+    /// # Returns
+    ///
+    /// `true` if no capability slots are allocated; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

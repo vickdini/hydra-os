@@ -70,6 +70,15 @@ impl SizeClassHeap {
         Self { classes: [const { spin::Mutex::new(FreeList(core::ptr::null_mut())) }; 8] }
     }
 
+    /// Determines the best-fit size class index for a given allocation layout.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The memory layout containing size and alignment constraints.
+    ///
+    /// # Returns
+    ///
+    /// `Some(index)` into `CLASS_SIZES` if the layout fits a size class; `None` if it exceeds 2048 bytes.
     fn class_of(layout: &core::alloc::Layout) -> Option<usize> {
         let need = layout.size().max(layout.align());
         CLASS_SIZES.iter().position(|&c| c >= need)
@@ -77,6 +86,19 @@ impl SizeClassHeap {
 }
 
 unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
+    /// Allocates memory adhering to `layout` using size-class pools or the fallback heap.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - Requested size and alignment.
+    ///
+    /// # Returns
+    ///
+    /// Non-null raw pointer to allocated memory on success; null pointer on failure.
+    ///
+    /// # Safety
+    ///
+    /// Caller must satisfy global allocator invariants and deallocate with matching layout.
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let class = match Self::class_of(&layout) {
             Some(c) => c,
@@ -104,6 +126,16 @@ unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
         block as *mut u8
     }
 
+    /// Recycles previously allocated memory back to the size-class pool or linked-list heap.
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Pointer previously returned by `alloc`.
+    /// * `layout` - Exact layout used during allocation.
+    ///
+    /// # Safety
+    ///
+    /// Pointer must have been allocated by this allocator and not yet freed.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         match Self::class_of(&layout) {
             Some(class) => {
@@ -200,12 +232,30 @@ pub fn init() -> Result<HeapStats, &'static str> {
     Ok(stats())
 }
 
-/// Returns true if the kernel heap is initialized and ready for allocations.
+/// Checks whether the kernel dynamic heap is initialized and ready for allocations.
+///
+/// # Returns
+///
+/// `true` if `init_heap()` has completed successfully; `false` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn is_initialized() -> bool {
     HEAP_INITIALIZED.load(Ordering::SeqCst)
 }
 
-/// Returns real-time statistics of the kernel heap.
+/// Computes real-time utilization metrics for the dynamic kernel heap.
+///
+/// Acquires the allocator mutex to compute exact total, used, and free byte metrics.
+///
+/// # Returns
+///
+/// A populated `HeapStats` descriptor with current heap metrics.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn stats() -> HeapStats {
     if !is_initialized() {
         return HeapStats {
@@ -227,8 +277,17 @@ pub fn stats() -> HeapStats {
     }
 }
 
-/// Heap statistics without waiting for the heap lock (for interrupt handlers and the
-/// panic handler); `None` if the heap is busy or not initialized.
+/// Retrieves heap statistics without waiting for the allocator mutex.
+///
+/// Safe for invocation within interrupt service routines and the kernel panic handler.
+///
+/// # Returns
+///
+/// `Some(HeapStats)` if the heap is initialized and the lock is acquired immediately; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn try_stats() -> Option<HeapStats> {
     if !is_initialized() {
         return None;
@@ -243,8 +302,21 @@ pub fn try_stats() -> Option<HeapStats> {
     })
 }
 
-/// Runs a verification suite to ensure dynamic allocation (`Box`, `Vec`, `String`, etc.)
-/// and deallocation are operating correctly without leaks.
+/// Runs a verification test suite to ensure heap allocation and deallocation function correctly.
+///
+/// Tests `Box`, `Vec`, and `String` allocations, verifies data integrity, and checks for memory leaks.
+///
+/// # Returns
+///
+/// `Ok(())` if all allocator tests pass; `Err(&'static str)` if an assertion fails.
+///
+/// # Errors
+///
+/// Returns an error message if the heap is uninitialized or if memory corruption / leaks are detected.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn self_test() -> Result<(), &'static str> {
     if !is_initialized() {
         return Err("Heap is not initialized");

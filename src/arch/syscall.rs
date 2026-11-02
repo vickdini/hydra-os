@@ -210,6 +210,17 @@ pub static SYSCALL_FPU: core::sync::atomic::AtomicPtr<crate::arch::idt::FpuState
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Updates the active task's kernel stack pointer for syscall stack switching.
+///
+/// Written by the task scheduler when switching threads so that subsequent Ring 3
+/// `syscall` instructions switch to the correct per-thread kernel stack.
+///
+/// # Arguments
+///
+/// * `rsp` - Top of the thread's allocated kernel stack page.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn set_kernel_rsp(rsp: u64) {
     unsafe {
         CURRENT_KERNEL_RSP = rsp;
@@ -217,6 +228,23 @@ pub fn set_kernel_rsp(rsp: u64) {
 }
 
 /// Reads a 64-bit Model-Specific Register (MSR).
+///
+/// # Arguments
+///
+/// * `msr` - The 32-bit architectural MSR address (e.g., `IA32_EFER`, `IA32_LSTAR`).
+///
+/// # Returns
+///
+/// The 64-bit value assembled from `EDX:EAX`.
+///
+/// # Safety
+///
+/// Reading an invalid or reserved MSR on x86 hardware triggers a General Protection Fault (`#GP`).
+/// The caller must ensure the CPU supports the specified MSR index.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
@@ -231,6 +259,20 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 }
 
 /// Writes a 64-bit Model-Specific Register (MSR).
+///
+/// # Arguments
+///
+/// * `msr` - The 32-bit architectural MSR address to update.
+/// * `value` - The 64-bit value to store into `EDX:EAX`.
+///
+/// # Safety
+///
+/// Writing reserved bit combinations or accessing unsupported MSRs causes an unhandled
+/// General Protection Fault (`#GP`). Caller must ensure privilege level 0 and valid bitfields.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
@@ -244,6 +286,14 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Configures CPU Model-Specific Registers for fast x86_64 hardware system calls.
+///
+/// Programs `IA32_EFER` to enable System Call Extensions (SCE), initializes `IA32_STAR`
+/// with GDT selector bases for Ring 0 and Ring 3, configures `IA32_LSTAR` with the
+/// assembly entry point `asm_syscall_entry`, and masks interrupts in `IA32_FMASK`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn init() {
     unsafe {
         // 1. Enable SCE (System Call Extensions) in IA32_EFER (bit 0)
@@ -270,14 +320,43 @@ pub fn init() {
     }
 }
 
-/// Reads a [`crate::ipc::service::WireMessage`] from user memory.
+/// Reads a [`crate::ipc::service::WireMessage`] from user memory and converts it to a kernel `Message`.
+///
+/// # Arguments
+///
+/// * `ptr` - User-space virtual address pointing to a serialized `WireMessage`.
+///
+/// # Returns
+///
+/// `Ok(Message)` containing deserialized parameters, or `Err(i64)` with negative errno on bad user pointer.
+///
+/// # Errors
+///
+/// Returns `-EFAULT` if `ptr` falls outside valid user address space or triggers a page fault.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn load_wire_message(ptr: u64) -> Result<crate::ipc::Message, i64> {
     let bytes = crate::compat::linux::vfs::copy_in(ptr, core::mem::size_of::<crate::ipc::service::WireMessage>())?;
     let wire = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const crate::ipc::service::WireMessage) };
     Ok(wire.into())
 }
 
-/// Writes `msg` to user memory as a [`crate::ipc::service::WireMessage`]; returns 0 or `-EFAULT`.
+/// Writes `msg` to user memory as a [`crate::ipc::service::WireMessage`].
+///
+/// # Arguments
+///
+/// * `ptr` - User-space virtual address where the wire message should be stored.
+/// * `msg` - The kernel `Message` to serialize into user memory.
+///
+/// # Returns
+///
+/// `0` on success, or a negative errno (`-EFAULT`) on failure.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
     let wire = crate::ipc::service::WireMessage::from(msg);
     let bytes = unsafe {
@@ -287,6 +366,10 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 }
 
 /// High-level Rust system call dispatcher called by `asm_syscall_entry`.
+///
+/// # Arguments
+/// * `frame` - Mutable reference to the saved userland CPU register frame.
+/// * `fpu` - Raw pointer to the saved userland FPU/SSE state buffer.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);

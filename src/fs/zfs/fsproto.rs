@@ -151,11 +151,19 @@ pub struct Attr {
 
 impl Attr {
     /// Determines the dnode type from the mode bits.
+    ///
+    /// # Returns
+    ///
+    /// The mapped [`DnodeType`].
     pub fn kind(&self) -> DnodeType {
         DnodeType::from_mode(self.mode)
     }
 
     /// Returns true if this inode represents a directory.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this inode is a directory, `false` otherwise.
     pub fn is_dir(&self) -> bool {
         self.mode & S_IFMT == S_IFDIR
     }
@@ -210,11 +218,19 @@ impl ZapEntry {
     /// * `name` - Raw byte slice of the file name.
     /// * `object_id` - Target object identifier.
     /// * `obj_type` - Dnode type of the target.
+    ///
+    /// # Returns
+    ///
+    /// A new [`ZapEntry`] instance.
     pub fn new(name: &[u8], object_id: u64, obj_type: DnodeType) -> Self {
         Self { name: String::from_utf8_lossy(name).into_owned(), object_id, obj_type, is_valid: true }
     }
 
     /// Returns a string slice of the entry name.
+    ///
+    /// # Returns
+    ///
+    /// The entry name as a `&str`.
     pub fn name_str(&self) -> &str {
         &self.name
     }
@@ -240,25 +256,58 @@ pub struct Writer<'a> {
 
 impl<'a> Writer<'a> {
     /// Writes from the start of `buf`.
+    ///
+    /// # Arguments
+    /// * `buf` - The destination buffer to write encoded data into.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Writer`] instance.
     pub fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
     /// Bytes written so far.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written to the buffer.
     pub fn len(&self) -> usize {
         self.pos
     }
 
     /// Appends a `u64`; returns false if it does not fit.
+    ///
+    /// # Arguments
+    /// * `v` - The 64-bit integer to append.
+    ///
+    /// # Returns
+    ///
+    /// `true` if written successfully, `false` if the buffer is full.
     pub fn u64(&mut self, v: u64) -> bool {
         self.raw(&v.to_le_bytes())
     }
 
     /// Appends a length-prefixed byte string; returns false if it does not fit.
+    ///
+    /// # Arguments
+    /// * `b` - The byte slice to append.
+    ///
+    /// # Returns
+    ///
+    /// `true` if written successfully, `false` if insufficient capacity.
     pub fn bytes(&mut self, b: &[u8]) -> bool {
         self.pos + 4 + b.len() <= self.buf.len() && self.raw(&(b.len() as u32).to_le_bytes()) && self.raw(b)
     }
 
+    /// Appends raw bytes without length prefix.
+    ///
+    /// # Arguments
+    /// * `b` - Raw bytes to append.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success, `false` if insufficient space.
     fn raw(&mut self, b: &[u8]) -> bool {
         if self.pos + b.len() > self.buf.len() {
             return false;
@@ -269,6 +318,13 @@ impl<'a> Writer<'a> {
     }
 
     /// Appends an attribute record.
+    ///
+    /// # Arguments
+    /// * `a` - File attributes to encode.
+    ///
+    /// # Returns
+    ///
+    /// `true` if all attributes were written successfully, `false` otherwise.
     pub fn attr(&mut self, a: &Attr) -> bool {
         self.u64(a.ino)
             && self.u64(a.mode as u64 | (a.nlink as u64) << 32)
@@ -283,11 +339,26 @@ impl<'a> Writer<'a> {
             && self.u64(a.birth_txg)
     }
 
+    /// Appends a timestamp tuple (seconds, nanoseconds).
+    ///
+    /// # Arguments
+    /// * `t` - Timestamp tuple to encode.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success, `false` if insufficient space.
     fn time(&mut self, t: (i64, u32)) -> bool {
         self.u64(t.0 as u64) && self.u64(t.1 as u64)
     }
 
     /// Appends an attribute change record (a presence mask, then the values).
+    ///
+    /// # Arguments
+    /// * `s` - Attribute changes to encode.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success, `false` if insufficient space.
     pub fn setattr(&mut self, s: &SetAttr) -> bool {
         let mask = s.mode.is_some() as u64
             | (s.uid.is_some() as u64) << 1
@@ -305,11 +376,25 @@ impl<'a> Writer<'a> {
     }
 
     /// Appends a directory entry.
+    ///
+    /// # Arguments
+    /// * `e` - Directory entry to encode.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success, `false` if insufficient space.
     pub fn entry(&mut self, e: &ReaddirEntry) -> bool {
         self.u64(e.ino) && self.u64(e.dtype as u64) && self.u64(e.next_cookie) && self.bytes(&e.name)
     }
 
     /// Appends an inotify event.
+    ///
+    /// # Arguments
+    /// * `e` - Event record to encode.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success, `false` if insufficient space.
     pub fn event(&mut self, e: &Event) -> bool {
         self.u64(e.ino) && self.u64(e.mask as u64 | (e.cookie as u64) << 32) && self.bytes(&e.name)
     }
@@ -323,11 +408,22 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Reads from the start of `buf`.
+    ///
+    /// # Arguments
+    /// * `buf` - The buffer to read encoded protocol data from.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Reader`] instance.
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
     /// Next `u64` (0 past the end).
+    ///
+    /// # Returns
+    ///
+    /// The decoded `u64` value.
     pub fn u64(&mut self) -> u64 {
         let v = self.buf.get(self.pos..self.pos + 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
         self.pos += 8;
@@ -335,6 +431,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Next byte string (empty past the end).
+    ///
+    /// # Returns
+    ///
+    /// The decoded byte slice.
     pub fn bytes(&mut self) -> &'a [u8] {
         let len = self.buf.get(self.pos..self.pos + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
         self.pos += 4;
@@ -343,11 +443,20 @@ impl<'a> Reader<'a> {
         b
     }
 
+    /// Decodes a timestamp tuple.
+    ///
+    /// # Returns
+    ///
+    /// A `(seconds, nanoseconds)` tuple.
     fn time(&mut self) -> (i64, u32) {
         (self.u64() as i64, self.u64() as u32)
     }
 
     /// Next attribute record.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`Attr`] record.
     pub fn attr(&mut self) -> Attr {
         let ino = self.u64();
         let mode_nlink = self.u64();
@@ -370,6 +479,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Next attribute change record.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`SetAttr`] record.
     pub fn setattr(&mut self) -> SetAttr {
         let mask = self.u64();
         let (mode, uid, gid, size) = (self.u64() as u32, self.u64() as u32, self.u64() as u32, self.u64());
@@ -385,6 +498,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Next directory entry.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`ReaddirEntry`] record.
     pub fn entry(&mut self) -> ReaddirEntry {
         let ino = self.u64();
         let dtype = self.u64() as u8;
@@ -393,6 +510,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Next inotify event.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`Event`] record.
     pub fn event(&mut self) -> Event {
         let ino = self.u64();
         let mc = self.u64();

@@ -259,6 +259,14 @@ pub fn resolve_parent_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8]) -
 }
 
 /// Translates a negative ZPL/Linux errno into a human-readable static error string.
+///
+/// # Arguments
+///
+/// * `e` - Negative errno value (e.g. `zpl::ENOENT`).
+///
+/// # Returns
+///
+/// Static string slice describing the error condition.
 fn errno_str(e: i64) -> &'static str {
     match e {
         zpl::ENOENT => "File or directory not found",
@@ -860,11 +868,19 @@ impl ZfsClient {
     }
 
     /// Returns the object number of the pool's root directory (`"/"`), or `0` if unmounted.
+    ///
+    /// # Returns
+    ///
+    /// The 64-bit inode number of root directory or `0`.
     pub fn root_ino() -> u64 {
         with_server(|s| Ok(s.root_obj())).unwrap_or(0)
     }
 
     /// Queries the POSIX attributes ([`Attr`]) of inode `ino`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - Target file inode number.
     ///
     /// # Returns
     ///
@@ -875,6 +891,11 @@ impl ZfsClient {
 
     /// Updates attributes (`mode`, `uid`, `gid`, `size`, `atime`, `mtime`) on inode `ino`.
     ///
+    /// # Arguments
+    ///
+    /// * `ino` - Target file inode number.
+    /// * `set` - Attributes to modify.
+    ///
     /// # Returns
     ///
     /// * `Ok(Attr)` - Updated inode attributes, or negative Linux errno on failure.
@@ -883,6 +904,12 @@ impl ZfsClient {
     }
 
     /// Reads up to `buf.len()` bytes from inode `ino` starting at `offset`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - Target file inode number.
+    /// * `offset` - Starting file byte offset.
+    /// * `buf` - Destination byte buffer.
     ///
     /// # Returns
     ///
@@ -893,6 +920,12 @@ impl ZfsClient {
 
     /// Writes `data` to inode `ino` starting at `offset`.
     ///
+    /// # Arguments
+    ///
+    /// * `ino` - Target file inode number.
+    /// * `offset` - Starting file byte offset.
+    /// * `data` - Source byte slice.
+    ///
     /// # Returns
     ///
     /// * `Ok(usize)` - Number of bytes written, or negative Linux errno on failure.
@@ -901,6 +934,12 @@ impl ZfsClient {
     }
 
     /// Reads up to `max` directory entries from directory inode `ino` starting at `cookie`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - Directory inode number.
+    /// * `cookie` - Cursor cookie offset.
+    /// * `max` - Maximum number of entries to return.
     ///
     /// # Returns
     ///
@@ -911,6 +950,10 @@ impl ZfsClient {
 
     /// Reads the target path bytes of symbolic link inode `ino`.
     ///
+    /// # Arguments
+    ///
+    /// * `ino` - Symlink inode number.
+    ///
     /// # Returns
     ///
     /// * `Ok(Vec<u8>)` - Symlink target bytes, or negative Linux errno (`-EINVAL`, `-ENOENT`) on failure.
@@ -919,6 +962,10 @@ impl ZfsClient {
     }
 
     /// Increments the active open-handle count on `ino` so unlinked files stay allocated until closed.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - File inode number to reference.
     pub fn open_ref(ino: u64) {
         let _ = with_server(|s| {
             s.open_ref(ino);
@@ -927,6 +974,10 @@ impl ZfsClient {
     }
 
     /// Emits an `inotify` `IN_CLOSE_WRITE` event when a writable [`super::fd::OpenFile`] is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - Inode number of the closed file.
     pub fn notify_close_write(ino: u64) {
         if crate::compat::linux::inotify::active() {
             let _ = with_server(|s| {
@@ -937,6 +988,10 @@ impl ZfsClient {
     }
 
     /// Decrements the active open-handle count on `ino`, freeing the object if it was unlinked while open.
+    ///
+    /// # Arguments
+    ///
+    /// * `ino` - Inode number to release.
     pub fn release(ino: u64) {
         let _ = with_server(|s| {
             s.release(ino);
@@ -949,6 +1004,10 @@ impl ZfsClient {
     ///
     /// Must be called while UEFI Boot Services are still active (prior to `ExitBootServices`):
     /// the pool is mounted only after the hardware takeover, through the disk driver.
+    ///
+    /// # Returns
+    ///
+    /// Vector of [`BootFile`] descriptors loaded from the UEFI boot filesystem.
     pub fn read_boot_files() -> Vec<BootFile> {
         let mut files = Vec::new();
         if crate::console::is_hardware_mode() {
@@ -1041,6 +1100,10 @@ impl ZfsClient {
     /// already exist with identical contents, and commits the pool if at least one file was
     /// imported or updated.
     ///
+    /// # Arguments
+    ///
+    /// * `files` - Vector of [`BootFile`] objects to import.
+    ///
     /// # Returns
     ///
     /// The number of newly imported or updated files written into ZFS.
@@ -1094,6 +1157,19 @@ pub struct BootFile {
 }
 
 /// Recursively creates `path` and any missing parent directories under the pool root, returning the final directory inode.
+///
+/// # Arguments
+///
+/// * `s` - Active reference to the [`ZfsServer`].
+/// * `path` - Directory path to create.
+///
+/// # Returns
+///
+/// Inode number of the leaf created directory.
+///
+/// # Errors
+///
+/// Returns negative Linux errno if creation or lookup fails.
 fn mkdir_all(s: &mut ZfsServer, path: &str) -> Result<u64, i64> {
     let mut cur = s.root_obj();
     for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
@@ -1127,6 +1203,7 @@ pub fn start_txg_sync() {
     crate::task::spawn("txgd", txgd_main, crate::task::TaskPriority::Normal);
 }
 
+/// Main loop of the transaction group synchronization daemon (`txgd`).
 fn txgd_main() {
     loop {
         crate::task::sleep_ms(TXG_TIMEOUT_SECS * 1000);

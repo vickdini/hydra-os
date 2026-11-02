@@ -321,11 +321,14 @@ impl Command for LinuxCommand {
     }
 }
 
-/// Runs a Linux process started from the Hydra shell in the foreground: it leads its own
-/// session and owns the console (keyboard, Ctrl+C) until it exits; then its exit status is
-/// reported and the console returns to the shell.
 /// Runs `argv` inside the Linux root `root` as `uid`/`gid` and waits for it, after
 /// preparing what the root expects at boot (network files, runtime directory, devices).
+///
+/// # Arguments
+/// * `root` - Path to the root directory for chroot.
+/// * `argv` - Command arguments slice.
+/// * `uid` - User ID for execution.
+/// * `gid` - Group ID for execution.
 fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
     if !crate::arch::boot_services::is_hardware_takeover_complete() {
         let _ = crate::arch::boot_services::take_hardware_ownership();
@@ -345,6 +348,12 @@ fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
     }
 }
 
+/// Runs a Linux process started from the Hydra shell in the foreground: it leads its own
+/// session and owns the console (keyboard, Ctrl+C) until it exits; then its exit status is
+/// reported and the console returns to the shell.
+///
+/// # Arguments
+/// * `tid` - Task identifier of the foreground Linux process.
 fn run_in_foreground(tid: crate::task::TaskId) {
     crate::compat::linux::tty::attach_session(tid.0, tid.0);
     // Sleep until a process exits (the deadline covers the gap between the process
@@ -367,12 +376,14 @@ fn run_in_foreground(tid: crate::task::TaskId) {
     }
 }
 
-/// Fills in a Linux root's empty `/etc/resolv.conf` and `/etc/hosts` (as WSL does), so the
-/// C library resolves names through the DNS server from the DHCP lease. Files that already
-/// have content, or are symbolic links, are left alone.
 /// Creates `/run/user/<uid>` in the target root (mode 0700, owned by the user), the
 /// per-user runtime directory (`XDG_RUNTIME_DIR`) that logind provides on a real system
 /// and D-Bus, Wayland and KDE expect.
+///
+/// # Arguments
+/// * `root` - Target root directory path.
+/// * `uid` - Owner user ID.
+/// * `gid` - Owner group ID.
 fn prepare_runtime_dir(root: &str, uid: u32, gid: u32) {
     // /run/user itself must stay searchable by every user
     let parent = alloc::format!("{}/run/user", root.trim_end_matches('/'));
@@ -388,6 +399,12 @@ fn prepare_runtime_dir(root: &str, uid: u32, gid: u32) {
     }
 }
 
+/// Fills in a Linux root's empty `/etc/resolv.conf` and `/etc/hosts` (as WSL does), so the
+/// C library resolves names through the DNS server from the DHCP lease. Files that already
+/// have content, or are symbolic links, are left alone.
+///
+/// # Arguments
+/// * `root` - Target root directory path.
 fn prepare_network_files(root: &str) {
     let dns = crate::net::GLOBAL_INTERFACE.lock().dns_server();
     let resolv = if dns != [0, 0, 0, 0] {

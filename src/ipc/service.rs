@@ -78,12 +78,30 @@ pub struct WireMessage {
 }
 
 impl From<Message> for WireMessage {
+    /// Converts an in-kernel `Message` into a user-space wire representation.
+    ///
+    /// # Arguments
+    ///
+    /// * `m` - The source kernel message.
+    ///
+    /// # Returns
+    ///
+    /// The formatted `WireMessage`.
     fn from(m: Message) -> Self {
         Self { label: m.label as u64, args: m.args }
     }
 }
 
 impl From<WireMessage> for Message {
+    /// Converts a user-space `WireMessage` into an in-kernel `Message`.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The source wire message read from user memory.
+    ///
+    /// # Returns
+    ///
+    /// The deserialized kernel `Message`.
     fn from(w: WireMessage) -> Self {
         Message::with_args(w.label as u32, w.args)
     }
@@ -99,7 +117,19 @@ pub struct ContiguousFrames {
 }
 
 impl ContiguousFrames {
-    /// Allocates `pages` zeroed, physically contiguous pages.
+    /// Allocates `pages` zeroed, physically contiguous 4 KiB frames.
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - Number of contiguous 4 KiB pages to allocate.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Arc<ContiguousFrames>)` if allocation succeeds; `None` if contiguous physical memory is exhausted.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn allocate(pages: u64) -> Option<Arc<Self>> {
         let mut fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
         let first = fa.allocate_contiguous_frames(pages as usize)?;
@@ -112,22 +142,42 @@ impl ContiguousFrames {
         Some(Arc::new(Self { base, pages }))
     }
 
-    /// The memory as the kernel sees it (physical memory is identity-mapped).
+    /// Accesses the contiguous memory as a mutable byte slice from the kernel's identity mapping.
+    ///
+    /// # Returns
+    ///
+    /// Mutable byte slice spanning all allocated pages.
     ///
     /// # Safety
-    /// The caller must not hold the slice across a point where the server may write it.
+    ///
+    /// The caller must ensure that the server daemon is not actively writing to the memory
+    /// while the slice is held, to avoid data races.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub unsafe fn bytes(&self) -> &'static mut [u8] {
         core::slice::from_raw_parts_mut(self.base as *mut u8, (self.pages * 4096) as usize)
     }
 }
 
 impl MappedObject for ContiguousFrames {
+    /// Resolves the physical frame for the given page offset within this contiguous range.
+    ///
+    /// # Arguments
+    ///
+    /// * `pgoff` - 0-based page offset from the start of the contiguous allocation.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` if `pgoff < self.pages`; `None` if out of bounds.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         (pgoff < self.pages).then(|| PhysFrame::containing_address(PhysAddr::new(self.base + pgoff * 4096)))
     }
 }
 
 impl Drop for ContiguousFrames {
+    /// Decrements the reference counts of all underlying physical frames.
     fn drop(&mut self) {
         for i in 0..self.pages {
             crate::memory::frame_allocator::frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(self.base + i * 4096)));
@@ -142,6 +192,15 @@ struct DeviceRange {
 }
 
 impl MappedObject for DeviceRange {
+    /// Resolves the physical frame for a page offset within the granted device memory range.
+    ///
+    /// # Arguments
+    ///
+    /// * `pgoff` - 0-based page offset from the device memory base address.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` if `pgoff < self.pages`; `None` if out of bounds.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         (pgoff < self.pages).then(|| PhysFrame::containing_address(PhysAddr::new(self.base + pgoff * 4096)))
     }
@@ -197,7 +256,16 @@ impl Service {
     }
 }
 
-/// Lets the server of service `client` call service `endpoint` and map its window.
+/// Grants permission for a client service daemon to attach to an endpoint's shared window.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target service endpoint whose window will be shared.
+/// * `client` - Calling service endpoint permitted to attach.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn allow_client(endpoint: u32, client: u32) {
     if let Some(svc) = service(endpoint) {
         let mut clients = svc.clients.lock();
@@ -207,8 +275,24 @@ pub fn allow_client(endpoint: u32, client: u32) {
     }
 }
 
-/// `SYS_SVC_ATTACH`: maps the window of `endpoint` into the calling driver, which must be
-/// allowed to use it ([`allow_client`]) and whose server must have registered.
+/// Maps the shared memory window of `endpoint` into the calling driver's address space.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint identifier whose window should be mapped.
+///
+/// # Returns
+///
+/// Virtual user-space base address of the mapped window on success, or a negative errno.
+///
+/// # Errors
+///
+/// - `-EPERM`: The caller is not a registered service or lacks permission from `allow_client`.
+/// - `-ENODEV`: The requested service does not exist or has no registered server daemon.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn attach(endpoint: u32) -> Result<u64, i64> {
     let me = crate::task::current_service().ok_or(EPERM)?;
     let svc = service(endpoint).ok_or(ENODEV)?;
@@ -230,22 +314,70 @@ static SERVICES: [Service; 4] = [
     Service::new(ENDPOINT_DISPLAY_DEV),
 ];
 
-/// The service on `endpoint`.
+/// Resolves the static `Service` descriptor corresponding to `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target numeric endpoint ID.
+///
+/// # Returns
+///
+/// `Some(&'static Service)` if matched; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn service(endpoint: u32) -> Option<&'static Service> {
     SERVICES.iter().find(|s| s.endpoint == endpoint)
 }
 
-/// Whether a server is registered on `endpoint`.
+/// Checks whether an authoritative server daemon is currently registered on `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint to query.
+///
+/// # Returns
+///
+/// `true` if an active daemon is registered; `false` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn is_online(endpoint: u32) -> bool {
     service(endpoint).map_or(false, |s| s.server.load(Ordering::Acquire) != 0)
 }
 
-/// Task serving `endpoint` (0 if none).
+/// Retrieves the task ID of the process currently serving `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint to inspect.
+///
+/// # Returns
+///
+/// Numeric task ID of the registered server, or `0` if vacant.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn server_of(endpoint: u32) -> u64 {
     service(endpoint).map_or(0, |s| s.server.load(Ordering::Acquire))
 }
 
-/// The service window as the kernel sees it, once a server has registered.
+/// Obtains a kernel-accessible mutable slice of the service's shared data window.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target service endpoint.
+///
+/// # Returns
+///
+/// `Some(&'static mut [u8])` spanning 256 KiB if allocated; `None` if vacant.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn window(endpoint: u32) -> Option<&'static mut [u8]> {
     let svc = service(endpoint)?;
     let w = svc.window.lock().clone()?;
@@ -253,22 +385,47 @@ pub fn window(endpoint: u32) -> Option<&'static mut [u8]> {
     Some(unsafe { w.bytes() })
 }
 
-/// Sets the physical ranges (`(base, length)`) the server of `endpoint` may map.
+/// Sets the physical address ranges `(base, length)` the server of `endpoint` is permitted to map.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint to configure.
+/// * `grants` - Vector of `(physical_base, length_bytes)` tuples.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn set_grants(endpoint: u32, grants: Vec<(u64, u64)>) {
     if let Some(svc) = service(endpoint) {
         *svc.grants.lock() = grants;
     }
 }
 
-/// Wakes `wq` whenever the interrupt of `endpoint`'s driver arrives.
+/// Registers a kernel wait queue to be notified whenever an interrupt arrives for `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target service endpoint.
+/// * `wq` - Wait queue to wake upon hardware IRQ arrival.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn notify_on_irq(endpoint: u32, wq: &'static WaitQueue) {
     if let Some(svc) = service(endpoint) {
         svc.irq_notify.store(wq as *const WaitQueue as *mut WaitQueue, Ordering::Release);
     }
 }
 
-/// Forgets the server of `endpoint` (it died or is being replaced), failing a call in
-/// progress.
+/// Unregisters the server currently bound to `endpoint`, terminating active CPU handoffs.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint to detach.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn unregister(endpoint: u32) {
     if let Some(svc) = service(endpoint) {
         let server = svc.server.swap(0, Ordering::AcqRel);
@@ -281,12 +438,30 @@ pub fn unregister(endpoint: u32) {
     }
 }
 
-/// Calls the server of `endpoint` with `request` and returns its reply.
+/// Calls the server of `endpoint` with `request` and returns its reply, reviving dead daemons if needed.
 ///
-/// Data for the request must already be in the window ([`window`]). Fails with `-ENODEV`
-/// if no server is registered, `-EBUSY` if a call is already in progress (a server
-/// calling itself), and `-ETIMEDOUT` if the server does not answer within `timeout_ticks`.
-/// A server that is gone (it crashed) is restarted and the call made again, once.
+/// Performs direct CPU handoff to the server daemon. If the daemon has crashed or faults,
+/// revives the daemon on-the-spot through the supervisor and retries the call once.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target service endpoint.
+/// * `request` - Message containing protocol opcode and arguments.
+/// * `timeout_ticks` - Maximum duration to await a response in 10 ms timer ticks.
+///
+/// # Returns
+///
+/// `Ok(Message)` containing the server's reply, or negative errno on error.
+///
+/// # Errors
+///
+/// - `-ENODEV`: No server daemon is registered or revival failed.
+/// - `-EBUSY`: Another call is currently in flight or handoff failed.
+/// - `-ETIMEDOUT`: Server failed to reply within `timeout_ticks`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
     let svc = service(endpoint).ok_or(ENODEV)?;
     if !crate::task::is_active() {
@@ -301,13 +476,46 @@ pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Messa
     }
 }
 
-/// Whether the registered server of `svc` is still running.
+/// Checks whether the registered server process for `svc` is still running.
+///
+/// # Arguments
+///
+/// * `svc` - Service descriptor to query.
+///
+/// # Returns
+///
+/// `true` if the server task exists and is alive; `false` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn server_alive(svc: &Service) -> bool {
     let server = svc.server.load(Ordering::Acquire);
     server != 0 && crate::task::is_task_alive(crate::task::TaskId(server))
 }
 
-/// [`call`] without restarting a dead server (the supervisor's heartbeat).
+/// Issues a service call without reviving a failed server daemon.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint identifier.
+/// * `request` - Request message payload.
+/// * `timeout_ticks` - Deadline in timer ticks (10 ms units).
+///
+/// # Returns
+///
+/// `Ok(Message)` containing reply on success, or a negative errno.
+///
+/// # Errors
+///
+/// - `-ENODEV`: No server registered or multitasking not active.
+/// - `-EDEADLK`: Server attempted to call its own service endpoint.
+/// - `-EBUSY`: Another request is pending in the call slot.
+/// - `-ETIMEDOUT`: Server failed to reply before deadline.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
     let svc = service(endpoint).ok_or(ENODEV)?;
     let server = svc.server.load(Ordering::Acquire);
@@ -351,7 +559,24 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
 // Server side (system calls from driver processes)
 // ----------------------------------------------------------------------
 
-/// The current task's service, if it serves `endpoint`.
+/// Validates that the calling process is authorized to serve `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Target endpoint index.
+///
+/// # Returns
+///
+/// `Ok(&'static Service)` if authorized; negative errno on error.
+///
+/// # Errors
+///
+/// - `-EPERM`: Calling task does not match the designated service endpoint.
+/// - `-ENODEV`: Endpoint does not exist in the service registry.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn own_service(endpoint: u32) -> Result<&'static Service, i64> {
     if crate::task::current_service() != Some(endpoint) {
         return Err(EPERM);
@@ -359,15 +584,51 @@ fn own_service(endpoint: u32) -> Result<&'static Service, i64> {
     service(endpoint).ok_or(ENODEV)
 }
 
-/// Maps `obj` (`pages` long) shared and writable into the current process.
+/// Maps a kernel object into the virtual memory space of the currently running process.
+///
+/// # Arguments
+///
+/// * `obj` - Mappable memory object (e.g. `ContiguousFrames` or `DeviceRange`).
+/// * `pages` - Total count of 4 KiB pages to map.
+///
+/// # Returns
+///
+/// Virtual user-space address allocated for the mapping on success, or a negative errno.
+///
+/// # Errors
+///
+/// Returns `-EFAULT` if the task lacks an active virtual address space, or mmap errors.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn map_into_current(obj: Arc<dyn MappedObject>, pages: u64) -> Result<u64, i64> {
     let mm = crate::task::with_current_task_mut(|t| t.mm.clone()).flatten().ok_or(EFAULT)?;
     let addr = mm.lock().mmap(0, pages * 4096, PROT_RW, true, false, false, Backing::Object { obj, pgoff: 0 })?;
     Ok(addr)
 }
 
-/// `SYS_SVC_REGISTER`: makes the calling driver process the server of `endpoint` and maps
-/// the service window into it. Returns the window's address (its size is [`WINDOW_SIZE`]).
+/// Registers the calling process as the authoritative server daemon for `endpoint`.
+///
+/// Maps the 256 KiB shared window into the process's address space and resumes any
+/// kernel caller waiting for this service.
+///
+/// # Arguments
+///
+/// * `endpoint` - Endpoint number to register.
+///
+/// # Returns
+///
+/// User-space virtual address of the mapped 256 KiB shared window.
+///
+/// # Errors
+///
+/// - `-EPERM`: Caller is not designated for this endpoint.
+/// - `-ENOMEM`: Physical contiguous frame allocation failed.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn register(endpoint: u32) -> Result<u64, i64> {
     let svc = own_service(endpoint)?;
     let window = {
@@ -385,7 +646,24 @@ pub fn register(endpoint: u32) -> Result<u64, i64> {
     Ok(addr)
 }
 
-/// `SYS_SVC_RECV`: waits for the next request on `endpoint` (served by the caller).
+/// Blocks the calling driver daemon until a request arrives on its designated `endpoint`.
+///
+/// # Arguments
+///
+/// * `endpoint` - Endpoint served by the caller.
+///
+/// # Returns
+///
+/// `Ok(Message)` containing the received client request.
+///
+/// # Errors
+///
+/// - `-EPERM`: Caller does not own this endpoint.
+/// - `-EINTR`: Interrupted by a pending signal.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn recv(endpoint: u32) -> Result<Message, i64> {
     let svc = own_service(endpoint)?;
     loop {
@@ -407,7 +685,24 @@ pub fn recv(endpoint: u32) -> Result<Message, i64> {
     }
 }
 
-/// `SYS_SVC_REPLY`: answers the request received on `endpoint` and lets its caller run.
+/// Dispatches a reply to the active request on `endpoint` and yields the CPU back to the caller.
+///
+/// # Arguments
+///
+/// * `endpoint` - Service endpoint identifier.
+/// * `answer` - Response message to return to the waiting client.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative errno.
+///
+/// # Errors
+///
+/// - `-EINVAL`: No active undelivered request in the service slot.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn reply(endpoint: u32, answer: Message) -> Result<(), i64> {
     let svc = own_service(endpoint)?;
     {
@@ -424,7 +719,25 @@ pub fn reply(endpoint: u32, answer: Message) -> Result<(), i64> {
     Ok(())
 }
 
-/// `SYS_PHYSMAP`: maps granted device memory `[phys, phys + len)` into the calling driver.
+/// Maps physical device memory into the driver's address space if permitted by supervisor grants.
+///
+/// # Arguments
+///
+/// * `phys` - Page-aligned physical start address.
+/// * `len` - Length of the physical memory range in bytes.
+///
+/// # Returns
+///
+/// Virtual user-space base address of the mapped MMIO window on success.
+///
+/// # Errors
+///
+/// - `-EINVAL`: Unaligned address or zero length.
+/// - `-EPERM`: The requested physical range is not permitted by any supervisor grant.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn physmap(phys: u64, len: u64) -> Result<u64, i64> {
     let endpoint = crate::task::current_service().ok_or(EPERM)?;
     let svc = service(endpoint).ok_or(ENODEV)?;
@@ -440,9 +753,24 @@ pub fn physmap(phys: u64, len: u64) -> Result<u64, i64> {
     map_into_current(Arc::new(DeviceRange { base: phys, pages }), pages)
 }
 
-/// `SYS_DMA_ALLOC`: allocates `len` bytes of physically contiguous memory for device DMA
-/// and maps it into the calling driver. Returns `(address, physical address)`; the memory
-/// is freed when the driver unmaps it or exits.
+/// Allocates physically contiguous memory for device DMA and maps it into the calling driver.
+///
+/// # Arguments
+///
+/// * `len` - Requested buffer size in bytes (must be <= 16 MiB).
+///
+/// # Returns
+///
+/// Tuple `(user_addr, phys_addr)` on success.
+///
+/// # Errors
+///
+/// - `-EINVAL`: Length is zero or exceeds 16 MiB.
+/// - `-ENOMEM`: Physical contiguous allocation failed.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn dma_alloc(len: u64) -> Result<(u64, u64), i64> {
     crate::task::current_service().ok_or(EPERM)?;
     if len == 0 || len > 16 * 1024 * 1024 {
@@ -455,8 +783,15 @@ pub fn dma_alloc(len: u64) -> Result<(u64, u64), i64> {
     Ok((addr, phys))
 }
 
-/// `SYS_IOPL`: lets the calling driver use I/O ports (sets IOPL 3 in the flags it returns
-/// to user mode with).
+/// Validates whether the calling driver is authorized to access legacy x86 I/O ports.
+///
+/// # Returns
+///
+/// `Ok(())` if the current task is a registered driver daemon; `-EPERM` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn iopl_allowed() -> Result<(), i64> {
     crate::task::current_service().map(|_| ()).ok_or(EPERM)
 }
@@ -477,8 +812,15 @@ static IRQ_COUNT: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// Client wakes per line (diagnostics).
 static IRQ_NOTIFIED: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 
-/// Lines owned by drivers: `(line, owner task, interrupts since boot, client wakes,
-/// pending, masked now)`.
+/// Queries diagnostics for all hardware IRQ lines currently owned by userland drivers.
+///
+/// # Returns
+///
+/// A vector of tuples `(irq_line, owner_task, total_interrupts, client_wakes, pending_count, is_masked)`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn irq_stats() -> Vec<(u8, u64, u64, u64, u32, bool)> {
     let imr = unsafe { (x86_64::instructions::port::Port::<u8>::new(0x21).read() as u16) | (x86_64::instructions::port::Port::<u8>::new(0xA1).read() as u16) << 8 };
     (0..16)
@@ -495,7 +837,24 @@ pub fn irq_stats() -> Vec<(u8, u64, u64, u64, u32, bool)> {
 /// [`notify_on_irq`]).
 static IRQ_SERVICE: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 
-/// `SYS_IRQ_REGISTER`: routes interrupt line `irq` to the calling driver.
+/// Registers a legacy IRQ interrupt line to the calling driver daemon and unmasks it in the PIC.
+///
+/// # Arguments
+///
+/// * `irq` - Hardware IRQ line number (must not be 0, 1, 2, or 12).
+///
+/// # Returns
+///
+/// `Ok(())` on successful registration, or a negative errno.
+///
+/// # Errors
+///
+/// - `-EPERM`: Calling task is not a designated driver service.
+/// - `-EINVAL`: Invalid IRQ line or reserved kernel line (timer, keyboard, cascade, mouse).
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn irq_register(irq: u64) -> Result<(), i64> {
     crate::task::current_service().ok_or(EPERM)?;
     // The timer, the keyboard, the cascade and the mouse stay with the kernel
@@ -514,9 +873,22 @@ pub fn irq_register(irq: u64) -> Result<(), i64> {
     Ok(())
 }
 
-/// Called by the interrupt handler: if a driver owns `irq`, masks the line (its device
-/// keeps asserting it until the driver acknowledges it), counts it and wakes the driver.
-/// Returns whether a driver owns it. Never blocks or allocates.
+/// Invoked by low-level hardware ISR when an IRQ line triggers.
+///
+/// Masks the IRQ in the PIC, increments pending counters, wakes the driver's wait queue,
+/// and notifies any registered client wait queues.
+///
+/// # Arguments
+///
+/// * `irq` - Hardware IRQ line that fired.
+///
+/// # Returns
+///
+/// `true` if the line was registered to a userland driver; `false` if unhandled.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn irq_raised(irq: u8) -> bool {
     let owner = IRQ_OWNER.get(irq as usize).map_or(0, |o| o.load(Ordering::Acquire));
     if owner == 0 {
@@ -534,8 +906,23 @@ pub fn irq_raised(irq: u8) -> bool {
     true
 }
 
-/// `SYS_IRQ_ACK`: the driver has serviced its device: unmasks `irq` without waiting.
-/// Returns the number of interrupts since the last wait or acknowledgement.
+/// Acknowledges an interrupt without sleeping, resetting the pending count and unmasking the line.
+///
+/// # Arguments
+///
+/// * `irq` - Hardware IRQ line to acknowledge.
+///
+/// # Returns
+///
+/// The number of interrupts that accumulated since the last wait or acknowledgment.
+///
+/// # Errors
+///
+/// - `-EPERM`: Caller is not the registered owner of this IRQ line.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn irq_ack(irq: u64) -> Result<u32, i64> {
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
     if irq >= 16 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
@@ -546,8 +933,25 @@ pub fn irq_ack(irq: u64) -> Result<u32, i64> {
     Ok(n)
 }
 
-/// `SYS_IRQ_WAIT`: unmasks `irq` (the driver has serviced its device) and waits up to
-/// `timeout_ticks` (0: forever) for it. Returns the number of interrupts since the last wait.
+/// Unmasks an IRQ line and blocks the calling driver daemon until the next interrupt fires or deadline expires.
+///
+/// # Arguments
+///
+/// * `irq` - Hardware IRQ line to await.
+/// * `timeout_ticks` - Maximum wait duration in 10 ms ticks (0 for infinite wait).
+///
+/// # Returns
+///
+/// Number of interrupts accumulated since previous wait (0 on timeout).
+///
+/// # Errors
+///
+/// - `-EPERM`: Caller does not own this IRQ line.
+/// - `-EINTR`: Interrupted by a signal.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn irq_wait(irq: u64, timeout_ticks: u64) -> Result<u32, i64> {
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
     if irq >= 16 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
@@ -574,7 +978,15 @@ pub fn irq_wait(irq: u64, timeout_ticks: u64) -> Result<u32, i64> {
     }
 }
 
-/// Returns the interrupt lines of task `id` to the kernel (it exited).
+/// Relinquishes all IRQ lines owned by an exiting task back to the kernel.
+///
+/// # Arguments
+///
+/// * `id` - Task ID of the terminating process.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn release_irqs(id: u64) {
     for (irq, owner) in IRQ_OWNER.iter().enumerate() {
         if owner.compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {

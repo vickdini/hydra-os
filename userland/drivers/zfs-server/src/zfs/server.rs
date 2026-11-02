@@ -52,6 +52,9 @@ impl DatasetRecord {
     /// * `root_obj` - Root directory object ID.
     /// * `txg` - Associated transaction group number.
     /// * `is_snapshot` - True if creating a snapshot descriptor.
+    ///
+    /// # Returns
+    /// Initialized [`DatasetRecord`] struct.
     pub fn new(name: &str, mountpoint: &str, root_obj: u64, txg: u64, is_snapshot: bool) -> Self {
         let mut r = Self {
             name: [0; 64],
@@ -68,17 +71,30 @@ impl DatasetRecord {
         r
     }
 
+    /// Converts a NUL-terminated byte array into a string slice.
+    ///
+    /// # Arguments
+    /// * `bytes` - Byte slice containing string data.
+    ///
+    /// # Returns
+    /// Validated string slice trimmed at the first NUL byte.
     fn str_of(bytes: &[u8]) -> &str {
         let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         core::str::from_utf8(&bytes[..len]).unwrap_or("")
     }
 
     /// Returns the dataset or snapshot name as a UTF-8 string slice.
+    ///
+    /// # Returns
+    /// Dataset or snapshot name string slice.
     pub fn name_str(&self) -> &str {
         Self::str_of(&self.name)
     }
 
     /// Returns the mount point path as a UTF-8 string slice.
+    ///
+    /// # Returns
+    /// Mount point path string slice.
     pub fn mountpoint_str(&self) -> &str {
         Self::str_of(&self.mountpoint)
     }
@@ -102,6 +118,9 @@ impl ZfsServer {
     ///
     /// A disk that holds a pool which cannot be imported (or anything else) is never
     /// formatted: the kernel stops with an error instead, leaving the data for repair.
+    ///
+    /// # Returns
+    /// Initialized [`ZfsServer`] instance.
     pub fn new() -> Self {
         let vdev = Vdev::open();
         let contents = super::spa::Spa::probe(&vdev);
@@ -127,6 +146,12 @@ impl ZfsServer {
     }
 
     /// Finishes importing an opened pool.
+    ///
+    /// # Arguments
+    /// * `(spa, ub)` - Tuple of active SPA instance and validated Uberblock.
+    ///
+    /// # Returns
+    /// Initialized [`ZfsServer`] instance.
     fn imported((spa, ub): (Spa, super::types::Uberblock)) -> Self {
         let mut server = Self::with_dmu(Dmu::new(spa, ub));
         server.load_datasets();
@@ -141,6 +166,12 @@ impl ZfsServer {
     }
 
     /// Creates a new pool on a blank device.
+    ///
+    /// # Arguments
+    /// * `vdev` - Virtual device to format.
+    ///
+    /// # Returns
+    /// Initialized [`ZfsServer`] instance.
     fn create_on(vdev: Vdev) -> Self {
         let spa = Spa::create(vdev, "hydrapool").expect("ZFS: unable to create pool");
         let mut server = Self::with_dmu(Dmu::new(spa, Dmu::initial_uberblock()));
@@ -156,6 +187,13 @@ impl ZfsServer {
         server
     }
 
+    /// Constructs a server wrapping the given DMU instance.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU instance to wrap.
+    ///
+    /// # Returns
+    /// Server instance with empty caches.
     fn with_dmu(dmu: Dmu) -> Self {
         Self {
             dmu,
@@ -167,6 +205,12 @@ impl ZfsServer {
     }
 
     /// Creates the root directory, the base hierarchy and the account database.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Returns negative Linux error code on creation failure.
     fn populate_new_pool(&mut self) -> Result<(), i64> {
         let root = self.dmu.alloc_object(S_IFDIR | 0o755).map_err(|_| -5i64)?;
         let mut dn = self.dmu.get_dnode(root).map_err(|_| -5i64)?;
@@ -217,6 +261,7 @@ impl ZfsServer {
         Ok(())
     }
 
+    /// Loads dataset metadata records from the persistent datasets object.
     fn load_datasets(&mut self) {
         let obj = self.dmu.ub.datasets_obj;
         if obj == 0 {
@@ -237,6 +282,13 @@ impl ZfsServer {
             .collect();
     }
 
+    /// Writes dataset metadata records to the persistent datasets object.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Returns negative error code on write failure.
     fn store_datasets(&mut self) -> Result<(), i64> {
         let obj = self.dmu.ub.datasets_obj;
         let rec = core::mem::size_of::<DatasetRecord>();
@@ -250,6 +302,16 @@ impl ZfsServer {
     }
 
     /// Takes a point-in-time snapshot of the pool. Blocks it references are never freed.
+    ///
+    /// # Arguments
+    /// * `dataset_index` - Index into active datasets list.
+    /// * `snap_name` - Snapshot name suffix.
+    ///
+    /// # Returns
+    /// Committed transaction group number on success.
+    ///
+    /// # Errors
+    /// Returns negative error code on failure.
     pub fn snapshot(&mut self, dataset_index: usize, snap_name: &str) -> Result<u64, i64> {
         let ds = *self.datasets.iter().filter(|d| d.is_snapshot == 0).nth(dataset_index).ok_or(-22i64)?;
         let txg = self.sync()?;
@@ -262,6 +324,12 @@ impl ZfsServer {
     }
 
     /// Commits the open transaction group.
+    ///
+    /// # Returns
+    /// Committed transaction group number on success.
+    ///
+    /// # Errors
+    /// Returns negative error code on sync failure.
     pub fn sync(&mut self) -> Result<u64, i64> {
         self.dmu.sync().map_err(|e| {
             crate::println!("[!] OpenZFS: commit failed: {}", e);
@@ -277,6 +345,9 @@ impl ZfsServer {
     }
 
     /// Returns the root directory object ID of the active dataset.
+    ///
+    /// # Returns
+    /// Root directory object ID.
     pub fn root_obj(&self) -> u64 {
         self.dmu.ub.root_obj
     }
@@ -286,6 +357,15 @@ impl ZfsServer {
 pub static ZFS_SERVER: Mutex<Option<ZfsServer>> = Mutex::new(None);
 
 /// Runs `f` with the mounted file server, or fails with `-EIO` if none is mounted.
+///
+/// # Arguments
+/// * `f` - Closure receiving mutable reference to the active [`ZfsServer`].
+///
+/// # Returns
+/// Result of the closure execution.
+///
+/// # Errors
+/// Returns `-EIO` (-5) if no server is mounted or closure error.
 pub fn with_server<R>(f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
     let mut guard = ZFS_SERVER.lock();
     match guard.as_mut() {

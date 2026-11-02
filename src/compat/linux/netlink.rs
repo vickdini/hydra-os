@@ -34,7 +34,16 @@ pub struct NetlinkSocket {
     nonblock: AtomicBool,
 }
 
-/// `socket(AF_NETLINK, ...)`: `None` for other domains.
+/// Creates a netlink socket if domain is `AF_NETLINK` and protocol is `NETLINK_KOBJECT_UEVENT`.
+///
+/// # Arguments
+///
+/// * `a` - System call argument registers (`[domain, type, protocol, ...]`).
+///
+/// # Returns
+///
+/// * `Some(Ok(fd))` or `Some(Err(code))` if domain is `AF_NETLINK`.
+/// * `None` if domain is not `AF_NETLINK`.
 pub fn socket(a: [u64; 6]) -> Option<i64> {
     if a[0] != AF_NETLINK {
         return None;
@@ -57,6 +66,11 @@ pub fn socket(a: [u64; 6]) -> Option<i64> {
 }
 
 impl NetlinkSocket {
+    /// Serializes the socket address (`struct sockaddr_nl`) into a 12-byte array.
+    ///
+    /// # Returns
+    ///
+    /// A 12-byte array containing the `AF_NETLINK` family, process ID, and multicast groups mask.
     fn sockaddr(&self) -> [u8; 12] {
         let mut b = [0u8; 12];
         b[0..2].copy_from_slice(&(AF_NETLINK as u16).to_le_bytes());
@@ -65,6 +79,11 @@ impl NetlinkSocket {
         b
     }
 
+    /// Handles blocking or non-blocking receive from the uevent netlink socket.
+    ///
+    /// # Returns
+    ///
+    /// Returns `-EAGAIN` if non-blocking, or blocks until interrupted by a signal (`-ERESTARTSYS`).
     fn receive(&self) -> i64 {
         if self.nonblock() {
             return EAGAIN;
@@ -81,6 +100,17 @@ impl NetlinkSocket {
     }
 }
 
+/// Copies a serialized sockaddr buffer out to user space, respecting the user-provided maximum length.
+///
+/// # Arguments
+///
+/// * `addr` - User virtual pointer to write the sockaddr struct into.
+/// * `lenp` - User virtual pointer to the `socklen_t` in/out length.
+/// * `data` - Raw bytes of the sockaddr structure to copy out.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno (`-EFAULT`).
 fn put_addr(addr: u64, lenp: u64, data: &[u8]) -> i64 {
     if addr == 0 || lenp == 0 {
         return 0;

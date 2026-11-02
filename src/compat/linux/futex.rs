@@ -155,6 +155,12 @@ impl FutexQueue {
 
     /// Moves up to `max` waiters from `from` to `to` without waking them (`FUTEX_REQUEUE`).
     ///
+    /// # Arguments
+    ///
+    /// * `from` - Source futex key.
+    /// * `to` - Destination futex key.
+    /// * `max` - Maximum number of waiters to requeue.
+    ///
     /// # Returns
     /// Number of waiters whose key was updated to `to`.
     fn requeue(&mut self, from: FutexKey, to: FutexKey, max: usize) -> usize {
@@ -172,11 +178,23 @@ impl FutexQueue {
     }
 
     /// Returns `true` if `task` is still present in the wait queue (not yet woken).
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task ID to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if `task` is still queued; `false` otherwise.
     fn is_waiting(&self, task: TaskId) -> bool {
         self.waiters.iter().any(|w| w.task_id == task)
     }
 
     /// Removes all waiter entries belonging to `task` (used on timeout or signal interruption).
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task ID whose waiter entries should be removed.
     fn remove(&mut self, task: TaskId) {
         self.waiters.retain(|w| w.task_id != task);
     }
@@ -187,6 +205,10 @@ pub static GLOBAL_FUTEX: Mutex<FutexQueue> = Mutex::new(FutexQueue::new());
 
 /// Returns the identity of the calling task's address space (shared by threads of a process
 /// and by a `vfork` child).
+///
+/// # Returns
+///
+/// Unique address space identifier (pointer or TGID).
 fn current_space() -> u64 {
     crate::task::with_current_task_mut(|t| t.mm.as_ref().map_or(t.tgid, |m| alloc::sync::Arc::as_ptr(m) as u64)).unwrap_or(0)
 }
@@ -208,6 +230,15 @@ pub fn key_of(uaddr: u64) -> FutexKey {
 /// Computes the [`FutexKey`] for a futex operation: shared futexes in shared mappings are
 /// keyed by the physical address of the word (faulting the page in first), while private
 /// futexes are keyed by virtual address and address space.
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address of the futex word.
+/// * `private` - `true` if operation is private to address space; `false` if shared.
+///
+/// # Returns
+///
+/// Computed `FutexKey`.
 fn key_for(uaddr: u64, private: bool) -> FutexKey {
     if !private && crate::memory::vm::prefault_current(uaddr & !3, 4, false) {
         if let Some(phys) = crate::memory::vm::shared_phys_current(uaddr) {
@@ -231,6 +262,14 @@ pub fn key_for_task(task: &crate::task::Task, uaddr: u64) -> FutexKey {
 }
 
 /// Reads a 4-byte aligned `u32` word from user memory at `uaddr`, prefaulting the page if necessary.
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address.
+///
+/// # Returns
+///
+/// `Ok(val)` on success, or a negative Linux errno on error.
 fn read_word(uaddr: u64) -> Result<u32, i64> {
     if uaddr & 3 != 0 || !crate::memory::vm::prefault_current(uaddr, 4, false) {
         return Err(if uaddr & 3 != 0 { EINVAL } else { EFAULT });
@@ -239,6 +278,10 @@ fn read_word(uaddr: u64) -> Result<u32, i64> {
 }
 
 /// Wakes each task in `ids` via the global task scheduler.
+///
+/// # Arguments
+///
+/// * `ids` - Slice of task IDs to wake.
 fn wake_ids(ids: &[TaskId]) {
     if ids.is_empty() {
         return;
@@ -253,6 +296,16 @@ fn wake_ids(ids: &[TaskId]) {
 ///
 /// Relative timespecs count from the current tick; absolute timespecs are evaluated against
 /// `CLOCK_MONOTONIC` or (when `realtime` is `true`) the CMOS wall clock (`CLOCK_REALTIME`).
+///
+/// # Arguments
+///
+/// * `ts_ptr` - User virtual pointer to `struct timespec` (or `0`).
+/// * `relative` - `true` if timespec is relative duration; `false` if absolute.
+/// * `realtime` - `true` if clock is `CLOCK_REALTIME`.
+///
+/// # Returns
+///
+/// `Ok(Some(tick))` with absolute deadline tick, `Ok(None)` if no timeout, or `Err(errno)` on fault.
 fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
     if ts_ptr == 0 {
         return Ok(None);
@@ -282,6 +335,18 @@ fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u
 
 /// Implements `FUTEX_WAIT` and `FUTEX_WAIT_BITSET`: verifies `*uaddr == val` under the queue
 /// lock and sleeps until woken by a waker, interrupted by a signal, or `deadline` expires.
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address of the futex word.
+/// * `val` - Expected current value of the futex word.
+/// * `bitset` - Waiter bitset mask.
+/// * `deadline` - Optional PIT tick deadline.
+/// * `private` - `true` if private to process.
+///
+/// # Returns
+///
+/// `0` on successful wake, or a negative Linux errno on timeout/interruption.
 fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool) -> i64 {
     if bitset == 0 {
         return EINVAL;
@@ -321,6 +386,16 @@ fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool)
 }
 
 /// Compare-and-exchange on a user futex word; returns the value found.
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address.
+/// * `old` - Expected old value.
+/// * `new` - Replacement new value.
+///
+/// # Returns
+///
+/// `Ok(found_value)` or `Err(errno)`.
 fn user_cmpxchg(uaddr: u64, old: u32, new: u32) -> Result<u32, i64> {
     if uaddr & 3 != 0 || !crate::memory::vm::prefault_current(uaddr, 4, true) {
         return Err(if uaddr & 3 != 0 { EINVAL } else { EFAULT });
@@ -335,6 +410,17 @@ fn user_cmpxchg(uaddr: u64, old: u32, new: u32) -> Result<u32, i64> {
 /// holds the owner's thread id. Waiters set `FUTEX_WAITERS` so the owner unlocks through
 /// the kernel, which wakes one of them. (One CPU and no real-time scheduling here, so
 /// there is no priority to inherit; the protocol is what programs depend on.)
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address.
+/// * `deadline` - Optional tick deadline.
+/// * `private` - Private futex flag.
+/// * `try_only` - Non-blocking trylock flag.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> i64 {
     let key = key_for(uaddr, private);
     let (tid, _) = super::proc::current_ids();
@@ -398,6 +484,15 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
 
 /// `FUTEX_UNLOCK_PI`: releases a lock the caller owns and wakes one waiter (which takes
 /// the lock in [`lock_pi`], setting the waiters bit again for any others).
+///
+/// # Arguments
+///
+/// * `uaddr` - User virtual address.
+/// * `private` - Private futex flag.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno on error.
 fn unlock_pi(uaddr: u64, private: bool) -> i64 {
     let key = key_for(uaddr, private);
     let (tid, _) = super::proc::current_ids();
@@ -426,6 +521,17 @@ fn unlock_pi(uaddr: u64, private: bool) -> i64 {
 
 /// Applies an encoded `FUTEX_WAKE_OP` read-modify-write operation to `*uaddr2` and evaluates
 /// whether its comparison against the old value holds.
+///
+/// # Arguments
+///
+/// * `uaddr2` - Second user futex address.
+/// * `encoded` - Encoded `FUTEX_OP_*` value.
+///
+/// # Returns
+///
+/// * `Ok(true)` if comparison condition evaluated to true.
+/// * `Ok(false)` if condition evaluated to false.
+/// * `Err(-EFAULT)` if memory cannot be written.
 fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
     if uaddr2 & 3 != 0 || !crate::memory::vm::prefault_current(uaddr2, 4, true) {
         return Err(EFAULT);

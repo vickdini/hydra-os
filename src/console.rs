@@ -371,6 +371,19 @@ pub fn inc_console_output_generation() {
 }
 
 impl Write for Console {
+    /// Writes a formatted string slice to the active output sink (framebuffer, serial, or UEFI).
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - String slice to render.
+    ///
+    /// # Returns
+    ///
+    /// Always returns `Ok(())`.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let attr = self.current_attr;
         self.scrollback.push_str(s, attr);
@@ -419,6 +432,19 @@ impl FixedBuf {
 }
 
 impl core::fmt::Write for FixedBuf {
+    /// Appends string characters into the fixed 160-byte buffer up to available capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Source string to copy.
+    ///
+    /// # Returns
+    ///
+    /// Always returns `Ok(())`, silently truncating characters that exceed the 160-byte limit.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let n = s.len().min(self.buf.len() - self.len);
         self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
@@ -450,6 +476,16 @@ pub fn serial_write(s: &str) {
 
 /// Polls the UART Line Status Register (`COM1 + 5`) until the Transmit Holding Register Empty
 /// (`THRE`, bit 5) flag is set, then writes a single byte `b` to the data port.
+///
+/// # Arguments
+///
+/// * `data` - Mutable reference to the COM1 data register port `0x3F8`.
+/// * `status` - Mutable reference to the COM1 line status register port `0x3FD`.
+/// * `b` - Byte to transmit.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn serial_put(data: &mut x86_64::instructions::port::Port<u8>, status: &mut x86_64::instructions::port::Port<u8>, b: u8) {
     unsafe {
         // Wait (bounded) for the transmit holding register to empty
@@ -672,6 +708,14 @@ macro_rules! kprintln {
 }
 
 /// Internal implementation backing [`kprintln!`], writing directly to [`CONSOLE`].
+///
+/// # Arguments
+///
+/// * `args` - Formatted arguments structure created by `format_args!`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 #[doc(hidden)]
 pub fn _kprint(args: fmt::Arguments) {
     let mut console = CONSOLE.lock();
@@ -690,10 +734,27 @@ pub fn print_raw(s: &str) {
 
 /// Internal implementation backing [`print!`] and [`println!`], routing output through file descriptor 1
 /// of the current task when the kernel heap and task table are active.
+///
+/// # Arguments
+///
+/// * `args` - Formatted arguments structure created by `format_args!`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     struct Fd1Writer;
     impl fmt::Write for Fd1Writer {
+        /// Emits string chunks to file descriptor 1 of the current process, or falls back to `print_raw`.
+        ///
+        /// # Arguments
+        ///
+        /// * `s` - String slice to write to stdout.
+        ///
+        /// # Returns
+        ///
+        /// Always returns `Ok(())`.
         fn write_str(&mut self, s: &str) -> fmt::Result {
             // The descriptor table allocates; before the heap exists print directly
             if !crate::memory::heap::is_initialized() {
@@ -971,6 +1032,14 @@ pub fn max_scroll_offset() -> usize {
 }
 
 /// Writes a string directly to the active display viewport without recording it in the scrollback buffer.
+///
+/// # Arguments
+///
+/// * `s` - String slice to render immediately on the physical console.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn write_viewport_str(s: &str) {
     if is_standalone_video() {
         crate::video::console::write_str(s);
@@ -982,6 +1051,15 @@ fn write_viewport_str(s: &str) {
 }
 
 /// Sets the active display viewport colors without modifying the persistent [`Console::current_attr`].
+///
+/// # Arguments
+///
+/// * `fg` - Temporary foreground text color.
+/// * `bg` - Temporary background text color.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn set_viewport_color(fg: Color, bg: Color) {
     if is_standalone_video() {
         crate::video::console::set_colors(color_to_rgb(fg), color_to_rgb(bg));
@@ -994,6 +1072,15 @@ fn set_viewport_color(fg: Color, bg: Color) {
 
 /// Renders a single historical scrollback line onto the display viewport, grouping contiguous runs
 /// of identical color attributes to minimize state switches.
+///
+/// # Arguments
+///
+/// * `line` - ASCII/UTF-8 character byte slice of the line.
+/// * `attrs` - Packed attribute byte slice containing foreground/background codes per character.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn render_formatted_line(line: &[u8], attrs: &[u8]) {
     let len = line.len();
     if len == 0 {
@@ -1022,12 +1109,37 @@ fn render_formatted_line(line: &[u8], attrs: &[u8]) {
 }
 
 /// Formats the bottom status banner displayed while viewing historical lines in Scroll Lock mode.
+///
+/// # Arguments
+///
+/// * `buf` - Temporary byte slice to hold the formatted status message.
+/// * `top` - 1-based line number of the top visible line in the viewport.
+/// * `bottom` - 1-based line number of the bottom visible line in the viewport.
+/// * `total` - Total count of recorded lines in the scrollback buffer.
+/// * `offset` - Current scroll offset in lines upward from the bottom.
+///
+/// # Returns
+///
+/// Formatted banner string slice residing within `buf`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn format_scroll_status<'a>(buf: &'a mut [u8], top: usize, bottom: usize, total: usize, offset: usize) -> &'a str {
     struct BufWriter<'b> {
         buf: &'b mut [u8],
         pos: usize,
     }
     impl<'b> Write for BufWriter<'b> {
+        /// Appends bytes into the fixed status buffer slice.
+        ///
+        /// # Arguments
+        ///
+        /// * `s` - String slice to write into the buffer.
+        ///
+        /// # Returns
+        ///
+        /// Always returns `Ok(())`.
         fn write_str(&mut self, s: &str) -> fmt::Result {
             let bytes = s.as_bytes();
             let rem = self.buf.len().saturating_sub(self.pos);

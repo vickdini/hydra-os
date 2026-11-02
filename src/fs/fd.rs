@@ -103,6 +103,7 @@ impl OpenFile {
 }
 
 impl Drop for OpenFile {
+    /// Drops the open file reference, notifying ZFS if write access was enabled and releasing the inode handle.
     fn drop(&mut self) {
         if self.writable() {
             ZfsClient::notify_close_write(self.ino);
@@ -170,6 +171,20 @@ pub enum FileDescriptor {
 }
 
 /// Reads bytes from a synthetic pseudo-file or ZFS path at `offset` into `buf`.
+///
+/// # Arguments
+///
+/// * `path` - Filesystem path to read from.
+/// * `offset` - Byte offset into the file.
+/// * `buf` - Destination buffer.
+///
+/// # Returns
+///
+/// `Ok(usize)` bytes read into `buf`.
+///
+/// # Errors
+///
+/// Returns static string error if file resolution or read fails.
 fn read_path_at(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     if let Some(pseudo) = crate::compat::linux::fs::match_pseudo_path(path) {
         return Ok(pseudo.read(offset, buf));
@@ -179,6 +194,20 @@ fn read_path_at(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'st
 }
 
 /// Writes `data` to a synthetic pseudo-file or ZFS path at `offset` (or EOF when `offset` is `None`).
+///
+/// # Arguments
+///
+/// * `path` - Destination file path.
+/// * `offset` - Optional explicit byte offset, or `None` to append at EOF.
+/// * `data` - Data buffer to write.
+///
+/// # Returns
+///
+/// `Ok((bytes_written, new_offset))`.
+///
+/// # Errors
+///
+/// Returns static string error if file resolution, stat, or write fails.
 fn write_path_at(path: &str, offset: Option<usize>, data: &[u8]) -> Result<(usize, usize), &'static str> {
     if let Some(pseudo) = crate::compat::linux::fs::match_pseudo_path(path) {
         return Ok((pseudo.write(data), offset.unwrap_or(0)));
@@ -589,6 +618,10 @@ impl FdTable {
     }
 
     /// Grows `fds` and `cloexec` vectors if necessary so index `fd` is valid.
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - Desired file descriptor capacity index.
     fn ensure(&mut self, fd: usize) {
         if self.fds.len() <= fd {
             self.fds.resize(fd + 1, None);
@@ -673,12 +706,28 @@ impl FdTable {
 
     /// Readiness of `desc` for `poll`/`select`/`epoll`. An `epoll` descriptor is readable when
     /// one of the descriptors it watches (in this table) is ready, as on Linux.
+    ///
+    /// # Arguments
+    ///
+    /// * `desc` - Target [`FileDescriptor`] to query.
+    ///
+    /// # Returns
+    ///
+    /// Bitmask of poll events (such as `POLLIN`, `POLLOUT`, `POLLERR`).
     pub fn readiness(&self, desc: &FileDescriptor) -> u32 {
         self.readiness_at(desc, 0)
     }
 
     /// Syscall-trace description of descriptor `fd`: kind and readiness, and for an
     /// `epoll` descriptor each watch inside it.
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - File descriptor index to describe.
+    ///
+    /// # Returns
+    ///
+    /// Formatted diagnostic description string.
     pub fn trace_describe(&self, fd: usize) -> String {
         let desc = match self.get(fd) {
             Some(d) => d,
@@ -715,6 +764,15 @@ impl FdTable {
         s
     }
 
+    /// Formats a flattened trace description without internal nested epoll watches.
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - Descriptor index to describe.
+    ///
+    /// # Returns
+    ///
+    /// Short trace string without bracketed watch lists.
     fn trace_describe_flat(&self, fd: usize) -> String {
         let s = self.trace_describe(fd);
         match s.find(" [") {
@@ -723,6 +781,16 @@ impl FdTable {
         }
     }
 
+    /// Internal recursive helper evaluating readiness with cycle/recursion limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `desc` - File descriptor to check.
+    /// * `depth` - Current recursion depth (capped at 4).
+    ///
+    /// # Returns
+    ///
+    /// Event bitmask.
     fn readiness_at(&self, desc: &FileDescriptor, depth: u32) -> u32 {
         match desc {
             FileDescriptor::Epoll(ep) if depth < 4 => {
@@ -740,10 +808,22 @@ impl FdTable {
 
     /// Adds the wait queues that announce readiness changes of `desc`; for an `epoll`
     /// descriptor, those of the descriptors it watches.
+    ///
+    /// # Arguments
+    ///
+    /// * `desc` - Monitored file descriptor.
+    /// * `waits` - Mutable [`crate::task::wait::WaitSet`] collecting wait queues.
     pub fn add_wait_queues_for(&self, desc: &FileDescriptor, waits: &mut crate::task::wait::WaitSet) {
         self.add_wait_queues_at(desc, waits, 0)
     }
 
+    /// Recursive helper gathering wait queues down to depth 4.
+    ///
+    /// # Arguments
+    ///
+    /// * `desc` - Monitored descriptor.
+    /// * `waits` - Destination [`crate::task::wait::WaitSet`].
+    /// * `depth` - Current recursion level.
     fn add_wait_queues_at(&self, desc: &FileDescriptor, waits: &mut crate::task::wait::WaitSet, depth: u32) {
         match desc {
             FileDescriptor::Epoll(ep) if depth < 4 => {
@@ -977,6 +1057,11 @@ impl FdTable {
 }
 
 impl Default for FdTable {
+    /// Constructs a default descriptor table pre-populated with standard streams.
+    ///
+    /// # Returns
+    ///
+    /// A initialized [`FdTable`] with stdin, stdout, and stderr open.
     fn default() -> Self {
         Self::new_default()
     }

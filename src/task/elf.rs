@@ -203,6 +203,10 @@ pub enum ElfError {
 
 impl ElfError {
     /// Returns a human-readable description of the ELF loading error.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice describing the error condition.
     pub fn as_str(&self) -> &'static str {
         match self {
             ElfError::BufferTooSmall => "ELF buffer too small to hold valid header",
@@ -293,21 +297,37 @@ impl<'a> ElfBinary<'a> {
     }
 
     /// Returns a copy of the parsed ELF64 header.
+    ///
+    /// # Returns
+    ///
+    /// The [`Elf64Header`] structure describing the binary layout.
     pub fn header(&self) -> Elf64Header {
         self.header
     }
 
     /// Returns the virtual address of the program entry point.
+    ///
+    /// # Returns
+    ///
+    /// Virtual memory address of the program entry instruction as `u64`.
     pub fn entry_point(&self) -> u64 {
         self.header.e_entry
     }
 
     /// Returns true if this binary is a Position-Independent Executable (`ET_DYN`).
+    ///
+    /// # Returns
+    ///
+    /// `true` if ELF type is `ET_DYN`, `false` for `ET_EXEC`.
     pub fn is_pie(&self) -> bool {
         self.header.e_type == ET_DYN
     }
 
     /// Returns an iterator yielding all program headers in the ELF binary.
+    ///
+    /// # Returns
+    ///
+    /// A [`ProgramHeadersIter`] yielding each [`Elf64ProgramHeader`].
     pub fn program_headers(&self) -> ProgramHeadersIter<'a> {
         ProgramHeadersIter {
             data: self.data,
@@ -318,6 +338,10 @@ impl<'a> ElfBinary<'a> {
     }
 
     /// Collects and returns all loadable (`PT_LOAD`) program headers.
+    ///
+    /// # Returns
+    ///
+    /// A [`Vec<Elf64ProgramHeader>`] containing all headers where `p_type == PT_LOAD`.
     pub fn load_segments(&self) -> Vec<Elf64ProgramHeader> {
         let mut list = Vec::new();
         for ph in self.program_headers() {
@@ -329,6 +353,10 @@ impl<'a> ElfBinary<'a> {
     }
 
     /// Returns the path string to the dynamic linker specified by a `PT_INTERP` segment, if present.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&'a str)` containing the interpreter file path, or `None` if statically linked.
     pub fn interp_path(&self) -> Option<&'a str> {
         for ph in self.program_headers() {
             if ph.p_type == PT_INTERP {
@@ -363,6 +391,11 @@ pub struct ProgramHeadersIter<'a> {
 impl<'a> Iterator for ProgramHeadersIter<'a> {
     type Item = Elf64ProgramHeader;
 
+    /// Advances the iterator and returns the next program header.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Elf64ProgramHeader)` if an entry remains, `None` at end of table.
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;

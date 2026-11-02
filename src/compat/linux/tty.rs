@@ -91,6 +91,11 @@ impl Termios {
         }
     }
 
+    /// Serializes the `termios` structure into a 36-byte array matching Linux `struct termios`.
+    ///
+    /// # Returns
+    ///
+    /// 36-byte packed termios array.
     fn to_bytes(&self) -> [u8; 36] {
         let mut b = [0u8; 36];
         b[0..4].copy_from_slice(&self.iflag.to_le_bytes());
@@ -102,6 +107,15 @@ impl Termios {
         b
     }
 
+    /// Deserializes a `termios` structure from a 36-byte slice matching Linux `struct termios`.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - Source 36-byte slice.
+    ///
+    /// # Returns
+    ///
+    /// Populated [`Termios`] instance.
     fn from_bytes(b: &[u8]) -> Self {
         let u = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let mut cc = [0u8; 19];
@@ -141,6 +155,10 @@ impl Tty {
     }
 
     /// True if `read` would return data (or end-of-file) now.
+    ///
+    /// # Returns
+    ///
+    /// `true` if input is buffered; `false` otherwise.
     pub(crate) fn has_input(&self) -> bool {
         !self.ready.is_empty()
     }
@@ -152,17 +170,30 @@ static TTY: Mutex<Tty> = Mutex::new(Tty::new());
 pub static INPUT_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
 
 /// `O_NONBLOCK` state of the console file description (`fcntl(F_GETFL/F_SETFL)`).
+///
+/// # Returns
+///
+/// `true` if non-blocking mode is set; `false` otherwise.
 pub fn nonblock() -> bool {
     TTY.lock().nonblock
 }
 
 /// Sets the non-blocking state (`O_NONBLOCK`) of the console terminal.
+///
+/// # Arguments
+///
+/// * `on` - `true` to enable non-blocking operations; `false` to block.
 pub fn set_nonblock(on: bool) {
     TTY.lock().nonblock = on;
 }
 
 /// Gives the console to the Linux session led by `sid` with foreground group `pgrp`,
 /// resetting the terminal to its default (cooked) mode.
+///
+/// # Arguments
+///
+/// * `sid` - Session ID.
+/// * `pgrp` - Foreground process group ID.
 pub fn attach_session(sid: u64, pgrp: u64) {
     let mut t = TTY.lock();
     t.session = sid;
@@ -183,10 +214,19 @@ pub fn detach_session() {
 }
 
 /// True while a Linux session owns the console.
+///
+/// # Returns
+///
+/// `true` if attached to a Linux session; `false` if owned by Hydra shell.
 pub fn attached() -> bool {
     TTY.lock().session != 0
 }
 
+/// Prints raw bytes to the console output.
+///
+/// # Arguments
+///
+/// * `bytes` - Byte slice to print.
 fn out(bytes: &[u8]) {
     if let Ok(s) = core::str::from_utf8(bytes) {
         crate::console::print_raw(s);
@@ -201,6 +241,12 @@ fn out(bytes: &[u8]) {
 }
 
 /// Applies output processing (`ONLCR`: newline -> CR LF) to program output.
+///
+/// # Arguments
+///
+/// * `t` - Active Tty state.
+/// * `data` - Raw output bytes.
+/// * `out` - Destination processed byte buffer.
 pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
     let oflag = t.termios.oflag;
     if oflag & OPOST != 0 && oflag & ONLCR != 0 {
@@ -216,6 +262,14 @@ pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
 }
 
 /// Writes program output to the console.
+///
+/// # Arguments
+///
+/// * `data` - Raw bytes to write.
+///
+/// # Returns
+///
+/// Number of bytes processed and output.
 pub fn write(data: &[u8]) -> usize {
     let mut v = Vec::with_capacity(data.len() + 8);
     process_output(&TTY.lock(), data, &mut v);
@@ -223,6 +277,15 @@ pub fn write(data: &[u8]) -> usize {
     data.len()
 }
 
+/// Converts an input Key into ANSI terminal escape bytes.
+///
+/// # Arguments
+///
+/// * `key` - Hardware keyboard input key.
+///
+/// # Returns
+///
+/// Byte vector representing ANSI key sequence.
 fn key_bytes(key: Key) -> Vec<u8> {
     match key {
         Key::Printable(c) => {
@@ -253,6 +316,13 @@ fn key_bytes(key: Key) -> Vec<u8> {
 
 /// Feeds input bytes through the line discipline: echo goes to `echo`, and `ISIG`
 /// characters add the signal to raise (in the foreground group) to `signals`.
+///
+/// # Arguments
+///
+/// * `t` - Active Tty state.
+/// * `bytes` - Incoming raw input bytes.
+/// * `echo` - Output buffer for echoed characters.
+/// * `signals` - Output buffer for generated signals.
 pub(crate) fn feed_input(t: &mut Tty, bytes: &[u8], echo: &mut Vec<u8>, signals: &mut Vec<u32>) {
     for &b in bytes {
         if let Some(sig) = input_byte(t, b, echo) {
@@ -262,6 +332,16 @@ pub(crate) fn feed_input(t: &mut Tty, bytes: &[u8], echo: &mut Vec<u8>, signals:
 }
 
 /// Feeds one input byte through the line discipline. Returns a signal to raise, if any.
+///
+/// # Arguments
+///
+/// * `t` - Active Tty state.
+/// * `b` - Input byte.
+/// * `echo` - Output buffer for echo characters.
+///
+/// # Returns
+///
+/// `Some(signal)` if input byte generated a signal (e.g. `SIGINT`), or `None`.
 fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
     let tm = t.termios;
     if tm.iflag & ICRNL != 0 && b == b'\r' {
@@ -375,11 +455,19 @@ pub fn pump() {
 }
 
 /// True if input is buffered for `read` (does not pull new keystrokes; see [`pump`]).
+///
+/// # Returns
+///
+/// `true` if input is buffered; `false` otherwise.
 pub fn has_input() -> bool {
     TTY.try_lock().map_or(false, |t| !t.ready.is_empty())
 }
 
 /// Bytes available to `read` right now.
+///
+/// # Returns
+///
+/// `true` if characters are waiting to be read.
 pub fn readable() -> bool {
     pump();
     !TTY.lock().ready.is_empty()
@@ -387,6 +475,15 @@ pub fn readable() -> bool {
 
 /// `read` from the terminal: blocks until a line (canonical mode) or at least one byte
 /// (raw mode) is available.
+///
+/// # Arguments
+///
+/// * `buf` - Destination buffer to read into.
+/// * `nonblock` - Non-blocking mode flag.
+///
+/// # Returns
+///
+/// Number of bytes read, `0` on EOF, or negative Linux errno on error.
 pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
     if buf.is_empty() {
         return 0;
@@ -427,6 +524,15 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
 
 /// Takes input for `read`: a line in canonical mode, otherwise what is there. `None`
 /// means the reader must wait.
+///
+/// # Arguments
+///
+/// * `t` - Active Tty state.
+/// * `buf` - Destination buffer.
+///
+/// # Returns
+///
+/// `Some(bytes_copied)` if input was extracted, or `None` if reader must wait.
 pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
     let canon = t.termios.lflag & ICANON != 0;
     if !t.ready.is_empty() {
@@ -462,6 +568,16 @@ pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
     None
 }
 
+/// Copies byte slice to user memory after prefaulting.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to write into.
+/// * `data` - Source bytes.
+///
+/// # Returns
+///
+/// `true` on success; `false` on fault.
 fn copy_out(ptr: u64, data: &[u8]) -> bool {
     if ptr == 0 || !crate::memory::vm::prefault_current(ptr, data.len() as u64, true) {
         return false;
@@ -470,6 +586,16 @@ fn copy_out(ptr: u64, data: &[u8]) -> bool {
     true
 }
 
+/// Copies bytes from user memory into kernel vector after prefaulting.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer to read from.
+/// * `len` - Byte count.
+///
+/// # Returns
+///
+/// `Some(Vec<u8>)` on success, or `None` on fault.
 fn copy_in(ptr: u64, len: usize) -> Option<Vec<u8>> {
     if ptr == 0 || !crate::memory::vm::prefault_current(ptr, len as u64, false) {
         return None;
@@ -487,6 +613,15 @@ static NEXT_VT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 /// Virtual terminal `ioctl`s on the console. Hydra has one text console: VT numbers only
 /// tell sessions apart (the login manager decides which one owns the display), so
 /// allocating and switching VTs just records them. `None` for other requests.
+///
+/// # Arguments
+///
+/// * `request` - ioctl request code.
+/// * `arg` - User pointer or argument value.
+///
+/// # Returns
+///
+/// `Some(result)` if handled, or `None` if unhandled.
 fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
     use core::sync::atomic::Ordering::Relaxed;
     let put = |bytes: &[u8]| super::vfs::copy_out(arg, bytes).map_or_else(|e| e, |()| 0);
@@ -517,11 +652,24 @@ fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
 }
 
 /// The virtual terminal display managers last activated.
+///
+/// # Returns
+///
+/// Active VT index.
 pub fn active_vt() -> u32 {
     ACTIVE_VT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Console terminal `ioctl`s.
+///
+/// # Arguments
+///
+/// * `request` - ioctl request code.
+/// * `arg` - User pointer or argument value.
+///
+/// # Returns
+///
+/// Result code, or negative Linux errno on error.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
     if let Some(r) = vt_ioctl(request, arg) {
         return r;
@@ -538,12 +686,36 @@ pub fn ioctl(request: u64, arg: u64) -> i64 {
 
 /// Terminal `ioctl`s on `tty`. `default_size` gives (rows, cols) until `TIOCSWINSZ`.
 /// Returns the result and whether the window size changed (the caller sends `SIGWINCH`).
+///
+/// # Arguments
+///
+/// * `tty` - Target terminal mutex.
+/// * `request` - ioctl command code.
+/// * `arg` - User argument.
+/// * `default_size` - Callback providing fallback window dimensions.
+///
+/// # Returns
+///
+/// `(result_code, was_resized)` tuple.
 pub(crate) fn tty_ioctl(tty: &Mutex<Tty>, request: u64, arg: u64, default_size: &dyn Fn() -> (u16, u16)) -> (i64, bool) {
     let mut resized = false;
     let r = tty_ioctl_inner(tty, request, arg, default_size, &mut resized);
     (r, resized)
 }
 
+/// Internal handler implementing standard POSIX terminal ioctls on a terminal state.
+///
+/// # Arguments
+///
+/// * `tty` - Target terminal mutex.
+/// * `request` - ioctl request code.
+/// * `arg` - User parameter.
+/// * `default_size` - Callback returning default dimensions.
+/// * `resized` - Out parameter flag set to true if window was resized.
+///
+/// # Returns
+///
+/// ioctl return value or negative Linux errno.
 fn tty_ioctl_inner(tty: &Mutex<Tty>, request: u64, arg: u64, default_size: &dyn Fn() -> (u16, u16), resized: &mut bool) -> i64 {
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;

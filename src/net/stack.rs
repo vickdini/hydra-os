@@ -175,37 +175,74 @@ static STACK: Mutex<Stack> = Mutex::new(Stack {
 });
 
 /// Returns the current 100 Hz PIT tick counter.
+///
+/// # Returns
+///
+/// Current PIT timer tick value.
 fn now() -> u64 {
     crate::arch::pit::ticks()
 }
 
 /// Returns `true` if `a < b` in 32-bit modular TCP sequence space (RFC 1982).
+///
+/// # Arguments
+/// * `a` - First 32-bit sequence number.
+/// * `b` - Second 32-bit sequence number.
+///
+/// # Returns
+///
+/// `true` if `a` precedes `b` modulo 2^32, `false` otherwise.
 fn seq_lt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
 /// Returns `true` if `a <= b` in 32-bit modular TCP sequence space.
+///
+/// # Arguments
+/// * `a` - First 32-bit sequence number.
+/// * `b` - Second 32-bit sequence number.
+///
+/// # Returns
+///
+/// `true` if `a` precedes or equals `b` modulo 2^32, `false` otherwise.
 fn seq_le(a: u32, b: u32) -> bool {
     a == b || seq_lt(a, b)
 }
 
 /// Returns the currently assigned local IPv4 address from [`GLOBAL_INTERFACE`].
+///
+/// # Returns
+///
+/// The 4-byte local IPv4 address.
 fn local_ip() -> [u8; 4] {
     GLOBAL_INTERFACE.lock().ip()
 }
 
 /// Returns `true` once the hardware interface is present and has a non-zero IPv4 address (DHCP finished).
+///
+/// # Returns
+///
+/// `true` if interface is initialized and configured with an IP, `false` otherwise.
 pub fn is_up() -> bool {
     e1000::is_present() && local_ip() != [0, 0, 0, 0]
 }
 
 /// Encapsulates and sends an IPv4 packet via [`GLOBAL_INTERFACE`], ignoring link errors.
+///
+/// # Arguments
+/// * `dst` - Destination 4-byte IPv4 address.
+/// * `proto` - Transport protocol discriminator.
+/// * `payload` - Packet payload byte slice.
 fn send_ip(dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
     let _ = GLOBAL_INTERFACE.lock().send_ipv4(dst, proto, payload);
 }
 
 impl Stack {
     /// Allocates an unused ephemeral port in `49152..=65535`.
+    ///
+    /// # Returns
+    ///
+    /// An unallocated ephemeral port number.
     fn alloc_port(&mut self) -> u16 {
         loop {
             let p = self.next_port;
@@ -218,6 +255,10 @@ impl Stack {
     }
 
     /// Allocates a unique handle ID for a new TCP connection or UDP socket.
+    ///
+    /// # Returns
+    ///
+    /// A unique 32-bit socket identifier.
     fn alloc_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -227,11 +268,20 @@ impl Stack {
 
 impl TcpConn {
     /// Computes the current available receive window size to advertise in outgoing segments.
+    ///
+    /// # Returns
+    ///
+    /// Available receive window capacity in bytes.
     fn window(&self) -> u16 {
         RECV_WINDOW.saturating_sub(self.recv_buf.len()).min(u16::MAX as usize) as u16
     }
 
     /// Serializes and transmits a single TCP segment to `self.remote_ip`.
+    ///
+    /// # Arguments
+    /// * `flags` - TCP control flags (SYN, ACK, FIN, RST, PSH).
+    /// * `seq` - Sequence number for the segment header.
+    /// * `payload` - Segment payload byte slice.
     fn send_segment(&mut self, flags: u8, seq: u32, payload: &[u8]) {
         let mut buf = [0u8; 20 + MSS];
         let src = local_ip();
@@ -292,6 +342,9 @@ impl TcpConn {
     }
 
     /// Processes an incoming TCP segment `seg` against this connection's state machine.
+    ///
+    /// # Arguments
+    /// * `seg` - Parsed incoming TCP segment.
     fn input(&mut self, seg: &TcpPacket) {
         let flags = seg.flags;
         if flags & TcpFlags::RST != 0 {
@@ -365,6 +418,10 @@ impl TcpConn {
     }
 
     /// Returns `true` while a retransmission timer runs (data or `SYN` awaiting acknowledgment).
+    ///
+    /// # Returns
+    ///
+    /// `true` if retransmission timer is active, `false` otherwise.
     fn timer_armed(&self) -> bool {
         self.snd_una != self.snd_nxt || self.state == TcpState::SynSent
     }
@@ -466,11 +523,19 @@ pub fn kick() {
 }
 
 /// Returns `true` once the `netd` kernel task processes the NIC (socket waits then sleep until woken).
+///
+/// # Returns
+///
+/// `true` if background network daemon is running, `false` otherwise.
 pub fn service_running() -> bool {
     SERVICE_RUNNING.load(Ordering::Acquire)
 }
 
 /// Returns `true` if at least one active TCP connection has a retransmission timer running.
+///
+/// # Returns
+///
+/// `true` if any connection timer is running, `false` otherwise.
 fn timers_armed() -> bool {
     STACK.lock().tcp.values().any(|c| c.timer_armed())
 }
@@ -511,6 +576,13 @@ pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
 }
 
 /// Parses and dispatches a single Ethernet frame; returns the wait queue of the socket it affected.
+///
+/// # Arguments
+/// * `raw` - Raw Ethernet frame bytes received from the network device.
+///
+/// # Returns
+///
+/// An optional wait queue reference to wake if a socket received data.
 fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
     let frame = match EthernetFrame::parse(raw) {
         Some(f) => f,
@@ -588,6 +660,10 @@ fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
 }
 
 /// Transmits a stateless TCP `RST` segment in response to an unexpected incoming segment `seg`.
+///
+/// # Arguments
+/// * `dst` - Destination IPv4 address.
+/// * `seg` - Unexpected incoming segment triggering the reset.
 fn send_reset(dst: [u8; 4], seg: &TcpPacket) {
     let mut buf = [0u8; 20];
     let (seq, ack, flags) = if seg.flags & TcpFlags::ACK != 0 {
@@ -656,16 +732,37 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u3
 }
 
 /// Returns the current [`TcpState`] of connection `id` (or [`TcpState::Closed`] if not found).
+///
+/// # Arguments
+/// * `id` - Connection identifier.
+///
+/// # Returns
+///
+/// The connection's [`TcpState`].
 pub fn tcp_state(id: u32) -> TcpState {
     STACK.lock().tcp.get(&id).map_or(TcpState::Closed, |c| c.state)
 }
 
 /// Takes and clears the pending asynchronous error of connection `id` (`SO_ERROR`).
+///
+/// # Arguments
+/// * `id` - Connection identifier.
+///
+/// # Returns
+///
+/// The pending errno error code if any, or `None`.
 pub fn tcp_take_error(id: u32) -> Option<i64> {
     STACK.lock().tcp.get_mut(&id).and_then(|c| c.error.take())
 }
 
 /// Peeks at the pending asynchronous error of connection `id` without clearing it.
+///
+/// # Arguments
+/// * `id` - Connection identifier.
+///
+/// # Returns
+///
+/// The pending errno error code if any, or `None`.
 pub fn tcp_error(id: u32) -> Option<i64> {
     STACK.lock().tcp.get(&id).and_then(|c| c.error)
 }
@@ -738,6 +835,13 @@ pub fn tcp_recv(id: u32, buf: &mut [u8], peek: bool) -> Result<(usize, bool), i6
 }
 
 /// Queries the I/O readiness of TCP connection `id`: `(readable, writable, hang_up, error)`.
+///
+/// # Arguments
+/// * `id` - Connection identifier.
+///
+/// # Returns
+///
+/// A tuple `(readable, writable, hang_up, error)`.
 pub fn tcp_poll(id: u32) -> (bool, bool, bool, bool) {
     let stack = STACK.lock();
     match stack.tcp.get(&id) {
@@ -755,6 +859,9 @@ pub fn tcp_poll(id: u32) -> (bool, bool, bool, bool) {
 }
 
 /// Shuts down the write half of TCP connection `id` (`shutdown(SHUT_WR)`), queueing a `FIN` after buffered data.
+///
+/// # Arguments
+/// * `id` - Connection identifier.
 pub fn tcp_shutdown_write(id: u32) {
     if let Some(c) = STACK.lock().tcp.get_mut(&id) {
         c.write_closed = true;
@@ -763,6 +870,9 @@ pub fn tcp_shutdown_write(id: u32) {
 }
 
 /// Closes TCP socket `id`: detaches the handle, sends `RST` if unread data remains, or initiates a background `FIN` close.
+///
+/// # Arguments
+/// * `id` - Connection identifier.
 pub fn tcp_close(id: u32) {
     let mut stack = STACK.lock();
     if let Some(c) = stack.tcp.get_mut(&id) {
@@ -782,6 +892,13 @@ pub fn tcp_close(id: u32) {
 }
 
 /// Returns the `(local_port, remote_ip, remote_port)` tuple for TCP connection `id`.
+///
+/// # Arguments
+/// * `id` - Connection identifier.
+///
+/// # Returns
+///
+/// `Some((local_port, remote_ip, remote_port))` if connection exists, or `None`.
 pub fn tcp_endpoints(id: u32) -> Option<(u16, [u8; 4], u16)> {
     STACK.lock().tcp.get(&id).map(|c| (c.local_port, c.remote_ip, c.remote_port))
 }
@@ -816,6 +933,13 @@ pub fn udp_open(port: u16) -> Result<u32, i64> {
 }
 
 /// Returns the local 16-bit UDP port bound to socket `id` (or `0` if invalid).
+///
+/// # Arguments
+/// * `id` - UDP socket identifier.
+///
+/// # Returns
+///
+/// The bound 16-bit local UDP port number.
 pub fn udp_port(id: u32) -> u16 {
     STACK.lock().udp.get(&id).map_or(0, |u| u.local_port)
 }
@@ -863,11 +987,21 @@ pub fn udp_recv(id: u32, peek: bool) -> Option<([u8; 4], u16, Vec<u8>)> {
 }
 
 /// Returns `true` if UDP socket `id` has at least one received datagram waiting in its queue.
+///
+/// # Arguments
+/// * `id` - UDP socket identifier.
+///
+/// # Returns
+///
+/// `true` if datagrams are queued for reading, `false` otherwise.
 pub fn udp_readable(id: u32) -> bool {
     STACK.lock().udp.get(&id).map_or(false, |u| !u.queue.is_empty())
 }
 
 /// Closes UDP socket `id` and frees its queued datagrams.
+///
+/// # Arguments
+/// * `id` - UDP socket identifier to close.
 pub fn udp_close(id: u32) {
     STACK.lock().udp.remove(&id);
 }

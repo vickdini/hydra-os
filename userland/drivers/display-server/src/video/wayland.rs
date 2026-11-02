@@ -81,6 +81,18 @@ pub struct WlSurface {
 
 impl WlSurface {
     /// Creates a new Wayland application surface.
+    ///
+    /// # Arguments
+    /// * `id` - Unique surface identifier.
+    /// * `title` - Window title text.
+    /// * `window_type` - Application window kind.
+    /// * `x` - Left coordinate.
+    /// * `y` - Top coordinate.
+    /// * `width` - Window width.
+    /// * `height` - Window height.
+    ///
+    /// # Returns
+    /// Newly initialized [`WlSurface`].
     pub fn new(
         id: u32,
         title: &str,
@@ -120,6 +132,9 @@ impl WlSurface {
     }
 
     /// Appends a line of text to the terminal output buffer.
+    ///
+    /// # Arguments
+    /// * `line` - Text string line to append.
     pub fn append_terminal_line(&mut self, line: &str) {
         if self.terminal_lines.len() >= 18 {
             self.terminal_lines.remove(0);
@@ -128,6 +143,13 @@ impl WlSurface {
     }
 
     /// Returns true if the coordinate `(px, py)` falls within the window boundaries.
+    ///
+    /// # Arguments
+    /// * `px` - Point X coordinate.
+    /// * `py` - Point Y coordinate.
+    ///
+    /// # Returns
+    /// `true` if point lies inside visible window bounds, `false` otherwise.
     pub fn contains_point(&self, px: usize, py: usize) -> bool {
         if self.minimized {
             return false;
@@ -136,6 +158,13 @@ impl WlSurface {
     }
 
     /// Returns true if the coordinate `(px, py)` falls within the top title bar header.
+    ///
+    /// # Arguments
+    /// * `px` - Point X coordinate.
+    /// * `py` - Point Y coordinate.
+    ///
+    /// # Returns
+    /// `true` if point is within the titlebar, `false` otherwise.
     pub fn is_in_titlebar(&self, px: usize, py: usize) -> bool {
         if self.minimized {
             return false;
@@ -147,6 +176,10 @@ impl WlSurface {
     }
 
     /// Returns which title bar control button was clicked, if any.
+    ///
+    /// # Arguments
+    /// * `px` - Mouse X position.
+    /// * `py` - Mouse Y position.
     ///
     /// # Returns
     /// - `Some("close")`: Close button clicked.
@@ -189,6 +222,13 @@ pub struct WaylandCompositor {
 
 impl WaylandCompositor {
     /// Creates a new compositor registry populated with default desktop applications.
+    ///
+    /// # Arguments
+    /// * `screen_width` - Horizontal screen dimension.
+    /// * `screen_height` - Vertical screen dimension.
+    ///
+    /// # Returns
+    /// Newly initialized [`WaylandCompositor`] instance.
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
         let mut comp = Self {
             surfaces: Vec::new(),
@@ -255,6 +295,9 @@ impl WaylandCompositor {
     }
 
     /// Sets keyboard and active focus to the surface with the specified ID.
+    ///
+    /// # Arguments
+    /// * `id` - Surface identifier to focus.
     pub fn set_focus(&mut self, id: u32) {
         for s in &mut self.surfaces {
             s.focused = s.id == id;
@@ -262,6 +305,9 @@ impl WaylandCompositor {
     }
 
     /// Brings the specified surface to the top of the z-order stack.
+    ///
+    /// # Arguments
+    /// * `id` - Surface identifier to raise.
     pub fn raise_to_top(&mut self, id: u32) {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
             let surface = self.surfaces.remove(pos);
@@ -271,6 +317,13 @@ impl WaylandCompositor {
     }
 
     /// Returns the topmost surface under coordinate `(px, py)`, if any.
+    ///
+    /// # Arguments
+    /// * `px` - Point X coordinate.
+    /// * `py` - Point Y coordinate.
+    ///
+    /// # Returns
+    /// `Some(surface_id)` if a window contains the point, or `None`.
     pub fn surface_at_point(&self, px: usize, py: usize) -> Option<u32> {
         // Iterate backwards from topmost surface to bottom
         for s in self.surfaces.iter().rev() {
@@ -282,6 +335,12 @@ impl WaylandCompositor {
     }
 
     /// Dispatches a mouse press event to windows, title bars, and control buttons.
+    ///
+    /// # Arguments
+    /// * `px` - Mouse X position.
+    /// * `py` - Mouse Y position.
+    /// * `screen_width` - Screen width.
+    /// * `screen_height` - Screen height.
     pub fn handle_mouse_down(
         &mut self,
         px: usize,
@@ -354,6 +413,12 @@ impl WaylandCompositor {
     }
 
     /// Dispatches mouse movement updates for active window dragging.
+    ///
+    /// # Arguments
+    /// * `px` - Mouse X position.
+    /// * `py` - Mouse Y position.
+    /// * `screen_width` - Screen width.
+    /// * `screen_height` - Screen height.
     pub fn handle_mouse_move(
         &mut self,
         px: usize,
@@ -388,6 +453,9 @@ impl WaylandCompositor {
     }
 
     /// Sends typed keyboard character input to the active focused window.
+    ///
+    /// # Arguments
+    /// * `c` - Input character typed.
     pub fn handle_key_char(&mut self, c: char) {
         for surface in &mut self.surfaces {
             if surface.focused && !surface.minimized && surface.window_type == WindowType::Konsole {
@@ -414,6 +482,10 @@ impl WaylandCompositor {
 }
 
 /// Executes a shell command entered in the Konsole window and appends the result.
+///
+/// # Arguments
+/// * `surface` - Target terminal surface.
+/// * `cmd` - Command string entered.
 fn execute_terminal_command(surface: &mut WlSurface, cmd: &str) {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {

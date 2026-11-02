@@ -138,6 +138,14 @@ impl PhysicalMemoryManager {
     }
 
     /// Resolves the mutable pointer to the 16-bit reference count slot for `frame`.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - Physical 4 KiB frame whose reference count entry should be located.
+    ///
+    /// # Returns
+    ///
+    /// `Some(*mut u16)` pointing to the array slot if within bounds; `None` otherwise.
     fn refcount_slot(&self, frame: PhysFrame<Size4KiB>) -> Option<*mut u16> {
         let idx = frame.start_address().as_u64() / PAGE_SIZE;
         if self.refcounts.is_null() || idx >= self.refcount_entries {
@@ -177,6 +185,10 @@ impl PhysicalMemoryManager {
 
     /// Gives a frame from [`Self::allocate_contiguous_frames`] (which hands out frames
     /// without a reference count) a count of 1, so [`Self::ref_dec`] frees it later.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The contiguous 4 KiB frame to adopt into reference counting.
     pub fn adopt(&mut self, frame: PhysFrame<Size4KiB>) {
         if let Some(p) = self.refcount_slot(frame) {
             unsafe {
@@ -209,6 +221,10 @@ impl PhysicalMemoryManager {
     }
 
     /// Pushes an unreferenced 4 KiB frame onto the head of the intrusive free list.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - Free 4 KiB frame to recycle.
     fn push_free(&mut self, frame: PhysFrame<Size4KiB>) {
         let addr = frame.start_address().as_u64();
         unsafe {
@@ -233,16 +249,28 @@ impl PhysicalMemoryManager {
     }
 
     /// Returns the total usable physical memory registered in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Sum of all available physical frame bytes parsed from UEFI conventional memory descriptors.
     pub fn total_usable_memory(&self) -> u64 {
         self.total_usable_bytes
     }
 
     /// Returns the total physical memory currently allocated in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Total bytes consumed by currently active physical memory frames.
     pub fn allocated_memory(&self) -> u64 {
         self.allocated_frames_count * PAGE_SIZE
     }
 
     /// Returns the remaining free physical memory in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Available unallocated physical memory in bytes.
     pub fn free_memory(&self) -> u64 {
         self.total_usable_bytes.saturating_sub(self.allocated_memory())
     }
@@ -263,6 +291,10 @@ impl PhysicalMemoryManager {
     }
 
     /// Pops a frame from the intrusive free list or carves one from the current bump region.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` on success, or `None` if physical memory is exhausted.
     fn allocate_frame_raw(&mut self) -> Option<PhysFrame<Size4KiB>> {
         if self.free_list_head != 0 {
             let addr = self.free_list_head;
@@ -315,6 +347,11 @@ impl PhysicalMemoryManager {
 }
 
 unsafe impl FrameAllocator<Size4KiB> for PhysicalMemoryManager {
+    /// Delegates single frame allocation to [`PhysicalMemoryManager::allocate_frame`].
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysFrame)` containing a valid 4 KiB frame with refcount 1, or `None` if out of memory.
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.allocate_frame()
     }

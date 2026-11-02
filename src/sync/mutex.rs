@@ -59,6 +59,10 @@ impl<T> Mutex<T> {
     }
 
     /// Acquires the mutex, blocking the calling task if contended.
+    ///
+    /// # Returns
+    ///
+    /// A [`MutexGuard`] providing RAII scoped access to the protected data.
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
 
@@ -94,6 +98,10 @@ impl<T> Mutex<T> {
     }
 
     /// Attempts to acquire the mutex without blocking.
+    ///
+    /// # Returns
+    ///
+    /// `Some(MutexGuard)` if acquired immediately, or `None` if currently locked.
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
         if self
@@ -118,16 +126,28 @@ impl<T> Mutex<T> {
     }
 
     /// Returns the PID of the current owner, or 0 if unlocked.
+    ///
+    /// # Returns
+    ///
+    /// 64-bit Task ID of holding process, or 0 if free.
     pub fn owner_pid(&self) -> u64 {
         self.owner.load(Ordering::Relaxed)
     }
 
     /// Returns true if the mutex is currently locked.
+    ///
+    /// # Returns
+    ///
+    /// `true` if locked, `false` otherwise.
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Relaxed)
     }
 
     /// Returns the count of tasks currently waiting on this mutex.
+    ///
+    /// # Returns
+    ///
+    /// Number of queued tasks awaiting ownership.
     pub fn waiting_count(&self) -> usize {
         self.waiters.lock().len()
     }
@@ -142,18 +162,29 @@ pub struct MutexGuard<'a, T> {
 impl<'a, T> Deref for MutexGuard<'a, T> {
     type Target = T;
 
+    /// Dereferences the guard to a shared reference of the inner value.
+    ///
+    /// # Returns
+    ///
+    /// Read-only reference `&T` to the protected inner data.
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<'a, T> DerefMut for MutexGuard<'a, T> {
+    /// Mutably dereferences the guard to the protected value.
+    ///
+    /// # Returns
+    ///
+    /// Mutable reference `&mut T` to the inner data.
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.mutex.data.get() }
     }
 }
 
 impl<'a, T> Drop for MutexGuard<'a, T> {
+    /// Drops the guard and automatically releases the underlying mutex.
     fn drop(&mut self) {
         self.mutex.unlock();
     }

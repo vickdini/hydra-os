@@ -38,6 +38,15 @@ pub const PIC1_OFFSET: u8 = 0x20;
 /// Base IDT interrupt vector assigned to the Slave 8259 PIC (IRQ 8..15 -> vectors 40..47).
 pub const PIC2_OFFSET: u8 = 0x28;
 
+/// Issues a short I/O delay by writing zero to an unused legacy motherboard port.
+///
+/// On legacy PC architectures, writing to diagnostic port `0x80` pauses execution
+/// for roughly 1–4 microseconds, allowing older slow I/O devices (like the 8259 PIC)
+/// to latch bus commands before the next operation is sent.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 #[inline(always)]
 fn io_wait() {
     unsafe {
@@ -54,6 +63,10 @@ fn io_wait() {
 /// Configures initial interrupt masks:
 /// - Unmasks IRQ 0 (PIT Timer), IRQ 1 (PS/2 Keyboard), and IRQ 2 (Cascade line to Slave).
 /// - Masks all other peripheral IRQs to prevent unexpected spurious interrupts.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn init() {
     unsafe {
         let mut p1_cmd: Port<u8> = Port::new(PIC1_COMMAND);
@@ -97,9 +110,19 @@ pub fn init() {
     }
 }
 
-/// Sends an End of Interrupt (EOI) signal to the PIC.
-/// For IRQ 0..7, sends to Master PIC.
-/// For IRQ 8..15, sends to both Slave and Master PIC.
+/// Sends an End-of-Interrupt (EOI) signal to the PIC controllers.
+///
+/// For IRQ 0..7 (Master PIC), issues the EOI command byte (`0x20`) to the Master PIC command port (`0x20`).
+/// For IRQ 8..15 (Slave PIC), issues the EOI command to both the Slave PIC command port (`0xA0`)
+/// and the Master PIC command port (`0x20`), because the Slave is cascaded through IRQ 2.
+///
+/// # Arguments
+///
+/// * `irq` - The hardware interrupt request line (0..15) that has completed processing.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn send_eoi(irq: u8) {
     unsafe {
         if irq >= 8 {
@@ -109,7 +132,18 @@ pub fn send_eoi(irq: u8) {
     }
 }
 
-/// Unmasks a specific IRQ line on the PIC.
+/// Unmasks a specific IRQ line on the appropriate PIC controller.
+///
+/// Reads the current Interrupt Mask Register (IMR), clears the corresponding bit
+/// for the specified IRQ, and writes the updated mask back to the data port.
+///
+/// # Arguments
+///
+/// * `irq` - The hardware interrupt request line (0..15) to enable.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn unmask_irq(irq: u8) {
     unsafe {
         if irq < 8 {
@@ -124,7 +158,19 @@ pub fn unmask_irq(irq: u8) {
     }
 }
 
-/// Masks a specific IRQ line on the PIC.
+/// Masks a specific IRQ line on the appropriate PIC controller.
+///
+/// Reads the current Interrupt Mask Register (IMR), sets the corresponding bit
+/// for the specified IRQ, and writes the updated mask back to the data port,
+/// suppressing future interrupt triggers from that line.
+///
+/// # Arguments
+///
+/// * `irq` - The hardware interrupt request line (0..15) to disable.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn mask_irq(irq: u8) {
     unsafe {
         if irq < 8 {

@@ -39,7 +39,18 @@ static TIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FREQUENCY: AtomicU64 = AtomicU64::new(100);
 
 /// Initializes the 8254 Programmable Interval Timer (PIT) on Channel 0.
-/// Configures square wave generator (Mode 3) at the requested frequency in Hz.
+///
+/// Configures Channel 0 in Mode 3 (square-wave generator) at the requested frequency in Hz.
+/// Calculates the nearest 16-bit divisor of the architectural base oscillator frequency
+/// (1,193,182 Hz) and writes the low and high bytes to I/O port `0x40`.
+///
+/// # Arguments
+///
+/// * `frequency_hz` - Desired periodic interrupt frequency in Hertz (clamped between 18 Hz and 1,193,182 Hz; standard is 100 Hz).
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn init(frequency_hz: u32) {
     let freq = frequency_hz.max(18).min(PIT_BASE_FREQUENCY_HZ);
     let divisor = (PIT_BASE_FREQUENCY_HZ + freq / 2) / freq;
@@ -55,27 +66,66 @@ pub fn init(frequency_hz: u32) {
     TIMER_ACTIVE.store(true, Ordering::SeqCst);
 }
 
-/// Called exclusively by the IRQ 0 (Vector 32) interrupt service routine.
+/// Increments the monotonic tick counter.
+///
+/// Invoked exclusively by the IRQ 0 (IDT vector 32) interrupt service routine.
+/// Uses atomic relaxed ordering to ensure minimal latency in the interrupt handler.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn on_timer_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Returns whether the PIT hardware timer has been activated.
+/// Checks whether the PIT hardware timer has been activated.
+///
+/// # Returns
+///
+/// `true` if `init()` has successfully programmed Channel 0; `false` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn is_active() -> bool {
     TIMER_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Returns the configured timer frequency in Hz.
+/// Returns the configured timer frequency in Hertz.
+///
+/// # Returns
+///
+/// The frequency in Hz programmed into Channel 0 (typically 100 Hz).
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn frequency_hz() -> u64 {
     FREQUENCY.load(Ordering::Relaxed)
 }
 
-/// Returns the total number of hardware timer ticks since initialization.
+/// Returns the total number of hardware timer ticks elapsed since initialization.
+///
+/// # Returns
+///
+/// Monotonic count of 10 ms timer ticks accumulated by IRQ 0.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Returns system uptime in milliseconds based on timer ticks.
+/// Computes the system uptime in milliseconds based on elapsed timer ticks.
+///
+/// # Returns
+///
+/// System uptime expressed in milliseconds. Returns `0` if the timer frequency is unset.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn uptime_ms() -> u64 {
     let t = ticks();
     let freq = frequency_hz();
@@ -85,7 +135,15 @@ pub fn uptime_ms() -> u64 {
     (t.saturating_mul(1000)) / freq
 }
 
-/// Returns system uptime in seconds based on timer ticks.
+/// Computes the system uptime in seconds based on elapsed timer ticks.
+///
+/// # Returns
+///
+/// System uptime expressed in whole seconds. Returns `0` if the timer frequency is unset.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn uptime_seconds() -> u64 {
     let t = ticks();
     let freq = frequency_hz();
@@ -96,6 +154,17 @@ pub fn uptime_seconds() -> u64 {
 }
 
 /// Blocks execution for a specified number of timer ticks using low-power CPU halts.
+///
+/// When interrupts are enabled, halts the processor (`HLT`) until the next hardware interrupt
+/// arrives, reducing power dissipation. If interrupts are disabled, performs a hint spin loop.
+///
+/// # Arguments
+///
+/// * `count` - Number of timer ticks (10 ms increments at 100 Hz) to wait.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn sleep_ticks(count: u64) {
     if count == 0 {
         return;
@@ -111,8 +180,18 @@ pub fn sleep_ticks(count: u64) {
 }
 
 /// Blocks execution for the specified duration in milliseconds.
-/// If interrupts are enabled, halts the CPU between timer ticks.
-/// If interrupts are disabled, falls back to RDTSC cycle spinning.
+///
+/// If PIT interrupts are enabled and active, computes the required tick count and halts
+/// the processor via `sleep_ticks()`. If interrupts are disabled, falls back to RDTSC
+/// cycle spinning.
+///
+/// # Arguments
+///
+/// * `ms` - Duration in milliseconds to pause execution.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn sleep_ms(ms: u64) {
     if ms == 0 {
         return;

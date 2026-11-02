@@ -36,6 +36,13 @@ unsafe impl Sync for Framebuffer {}
 
 impl Framebuffer {
     /// Constructs a Framebuffer instance from detected video mode info.
+    ///
+    /// # Arguments
+    /// * `info` - Video mode parameters reported by GOP.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Framebuffer`] wrapping the display memory.
     pub fn new(info: VideoModeInfo) -> Self {
         Self {
             base_ptr: info.base_ptr,
@@ -48,42 +55,76 @@ impl Framebuffer {
     }
 
     /// Returns the horizontal screen width in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The display width in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
     /// Returns the vertical screen height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The display height in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
 
     /// Returns the scanline stride (pixels per line) of the hardware display.
+    ///
+    /// # Returns
+    ///
+    /// The scanline pitch in pixels.
     pub fn stride(&self) -> usize {
         self.stride
     }
 
     /// Returns true if the hardware framebuffer uses little-endian BGR pixel ordering.
+    ///
+    /// # Returns
+    ///
+    /// `true` if pixel format is BGR, `false` for RGB.
     pub fn is_bgr(&self) -> bool {
         self.is_bgr
     }
 
     /// Points drawing at other memory of the same size (the console's shadow buffer while
     /// the compositor owns the screen).
+    ///
+    /// # Arguments
+    /// * `ptr` - Pointer to new base pixel buffer.
     pub fn set_base(&mut self, ptr: *mut u8) {
         self.base_ptr = ptr;
     }
 
     /// Returns the raw pointer to the underlying pixel buffer.
+    ///
+    /// # Returns
+    ///
+    /// Raw mutable pointer to video memory.
     pub fn base_ptr(&self) -> *mut u8 {
         self.base_ptr
     }
 
     /// Returns the total size of the framebuffer in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Total buffer size in bytes.
     pub fn size(&self) -> usize {
         self.size
     }
 
     /// Sets a single pixel to the given RGB color.
+    ///
+    /// # Arguments
+    /// * `x` - Horizontal pixel coordinate.
+    /// * `y` - Vertical pixel coordinate.
+    /// * `r` - Red channel component (0..=255).
+    /// * `g` - Green channel component (0..=255).
+    /// * `b` - Blue channel component (0..=255).
     #[inline]
     pub fn put_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) {
         if x >= self.width || y >= self.height {
@@ -112,6 +153,15 @@ impl Framebuffer {
     }
 
     /// Fills a rectangular region with an RGB color.
+    ///
+    /// # Arguments
+    /// * `x` - Top-left horizontal coordinate.
+    /// * `y` - Top-left vertical coordinate.
+    /// * `w` - Rectangle width in pixels.
+    /// * `h` - Rectangle height in pixels.
+    /// * `r` - Red color component.
+    /// * `g` - Green color component.
+    /// * `b` - Blue color component.
     pub fn fill_rect(
         &mut self,
         x: usize,
@@ -133,6 +183,12 @@ impl Framebuffer {
     }
 
     /// Inverts the RGB color channels in a rectangular region (lossless reversible XOR).
+    ///
+    /// # Arguments
+    /// * `x` - Top-left horizontal coordinate.
+    /// * `y` - Top-left vertical coordinate.
+    /// * `w` - Rectangle width in pixels.
+    /// * `h` - Rectangle height in pixels.
     pub fn invert_rect(&mut self, x: usize, y: usize, w: usize, h: usize) {
         if x >= self.width || y >= self.height {
             return;
@@ -157,11 +213,23 @@ impl Framebuffer {
     }
 
     /// Clears the entire display to a single RGB color.
+    ///
+    /// # Arguments
+    /// * `r` - Red color component.
+    /// * `g` - Green color component.
+    /// * `b` - Blue color component.
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         self.fill_rect(0, 0, self.width, self.height, r, g, b);
     }
 
     /// Renders an 8x16 ASCII glyph at the specified pixel coordinates.
+    ///
+    /// # Arguments
+    /// * `x` - Left pixel coordinate.
+    /// * `y` - Top pixel coordinate.
+    /// * `c` - ASCII character to draw.
+    /// * `fg` - Foreground RGB color tuple `(r, g, b)`.
+    /// * `bg` - Background RGB color tuple `(r, g, b)`.
     pub fn draw_char(
         &mut self,
         x: usize,
@@ -186,6 +254,13 @@ impl Framebuffer {
     }
 
     /// Renders a text string at the given pixel coordinates.
+    ///
+    /// # Arguments
+    /// * `x` - Starting left pixel coordinate.
+    /// * `y` - Baseline top pixel coordinate.
+    /// * `text` - String slice to render.
+    /// * `fg` - Foreground RGB color tuple.
+    /// * `bg` - Background RGB color tuple.
     pub fn draw_string(
         &mut self,
         mut x: usize,
@@ -204,6 +279,10 @@ impl Framebuffer {
     }
 
     /// Scrolls the screen contents upwards by `pixel_rows` and clears the exposed bottom area.
+    ///
+    /// # Arguments
+    /// * `pixel_rows` - Number of vertical pixel rows to scroll.
+    /// * `bg` - Fill color for the newly exposed bottom scanlines.
     pub fn scroll_up(&mut self, pixel_rows: usize, bg: (u8, u8, u8)) {
         if pixel_rows == 0 || pixel_rows >= self.height {
             self.clear(bg.0, bg.1, bg.2);

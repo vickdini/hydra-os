@@ -80,6 +80,14 @@ pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats 
 
 /// High-level Linux system call dispatcher called by the hardware SYSCALL trampoline
 /// when the active task personality is set to Linux.
+///
+/// # Arguments
+///
+/// * `frame` - Mutable reference to the saved user CPU register frame on the kernel stack.
+///
+/// # Returns
+///
+/// The 64-bit integer result or negative errno code returned to user space.
 pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     let num = frame.rax;
     let arg0 = frame.rdi;
@@ -1779,6 +1787,15 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
 
 const ERANGE: i64 = 34;
 
+/// Reads a NUL-terminated C string from user space (up to 4096 bytes).
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to the NUL-terminated C string.
+///
+/// # Returns
+///
+/// `Some(String)` if successfully read and valid UTF-8, or `None` if null or invalid UTF-8.
 fn read_user_string(ptr: *const u8) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -1796,6 +1813,16 @@ fn read_user_string(ptr: *const u8) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Opens a path or pseudopath and allocates a file descriptor.
+///
+/// # Arguments
+///
+/// * `path` - Target file path string.
+/// * `flags` - Linux open flags bitmask (access modes, append).
+///
+/// # Returns
+///
+/// Newly allocated descriptor index on success, or a negative Linux errno on error.
 fn open_path(path: &str, flags: u64) -> i64 {
     // Check if opening pseudo-file
     if let Some(_) = fs::match_pseudo_path(path) {
@@ -1837,6 +1864,15 @@ fn open_path(path: &str, flags: u64) -> i64 {
     })
 }
 
+/// Reads a NUL-terminated filesystem path from a `sockaddr_un` structure.
+///
+/// # Arguments
+///
+/// * `sun_path` - Fixed 108-byte character buffer from `struct sockaddr_un`.
+///
+/// # Returns
+///
+/// `Some(String)` containing the decoded path string, or `None` if empty or invalid UTF-8.
 fn read_sockaddr_path(sun_path: &[u8; 108]) -> Option<String> {
     let mut len = 0;
     while len < sun_path.len() && sun_path[len] != 0 {
@@ -1856,6 +1892,10 @@ pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::
 pub static TRACE_FILTER: Mutex<String> = Mutex::new(String::new());
 
 /// True if the running process passes the trace filter.
+///
+/// # Returns
+///
+/// `true` if tracing is unconstrained or matches the current executable path; `false` otherwise.
 pub fn trace_matches_current() -> bool {
     let filter = TRACE_FILTER.lock();
     filter.is_empty() || crate::task::with_current_task_mut(|t| t.exe_path().contains(filter.as_str())).unwrap_or(false)
@@ -1865,6 +1905,11 @@ pub fn trace_matches_current() -> bool {
 static REPORTED_ENOSYS: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 
 /// Logs the first use of an unimplemented system call to the console and serial port.
+///
+/// # Arguments
+///
+/// * `num` - Unimplemented system call number.
+/// * `args` - First three system call arguments for diagnostic logging.
 fn report_unimplemented(num: u64, args: [u64; 3]) {
     if num >= 512 {
         crate::kprintln!("[linux] unimplemented syscall {} ({:#x}, {:#x}, {:#x})", num, args[0], args[1], args[2]);
@@ -1888,6 +1933,16 @@ const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 /// Creates a thread or process for `clone`/`clone3` (`args` as `clone` takes them:
 /// flags with the exit signal, stack, parent_tid, child_tid, tls) and stores a pidfd for
 /// the child at `pidfd_ptr` when asked to.
+///
+/// # Arguments
+///
+/// * `frame` - Saved register frame of parent.
+/// * `args` - Clone arguments: `[clone_flags, stack_ptr, parent_tid_ptr, child_tid_ptr, tls_ptr]`.
+/// * `pidfd_ptr` - Optional user pointer to write child's pidfd descriptor into.
+///
+/// # Returns
+///
+/// Child thread/process ID on success, or a negative Linux errno on error.
 fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>) -> i64 {
     const CLONE_VFORK: u64 = 0x4000;
     args[0] &= !CLONE_PIDFD;
@@ -1911,7 +1966,17 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     child as i64
 }
 
-/// `clone3(struct clone_args *, size)`.
+/// Implements the Linux `clone3(2)` system call.
+///
+/// # Arguments
+///
+/// * `frame` - Saved caller register frame.
+/// * `args_ptr` - User virtual pointer to `struct clone_args`.
+/// * `size` - Size of `struct clone_args` in bytes.
+///
+/// # Returns
+///
+/// Child thread/process ID on success, or a negative Linux errno on error.
 fn sys_clone3(frame: &mut SyscallFrame, args_ptr: u64, size: u64) -> i64 {
     // CLONE_ARGS_SIZE_VER0 is 64 bytes; later fields (set_tid, cgroup) must be unused
     if size < 64 || size > 4096 || !crate::memory::vm::prefault_current(args_ptr, size, false) {
@@ -1944,6 +2009,18 @@ fn sys_clone3(frame: &mut SyscallFrame, args_ptr: u64, size: u64) -> i64 {
     child
 }
 
+/// Dispatches frame-dependent process lifecycle and signal system calls.
+///
+/// # Arguments
+///
+/// * `frame` - Mutable saved register frame.
+/// * `num` - System call number.
+/// * `a` - System call argument register array `[arg0..arg5]`.
+///
+/// # Returns
+///
+/// * `Some(result)` if the system call is handled here.
+/// * `None` if the call is not handled by this dispatcher.
 fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Option<i64> {
     const CLONE_VM: u64 = 0x100;
     const CLONE_VFORK: u64 = 0x4000;

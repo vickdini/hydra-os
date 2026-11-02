@@ -58,6 +58,10 @@ impl IpProtocol {
     }
 
     /// Returns the raw 8-bit protocol number for this [`IpProtocol`].
+    ///
+    /// # Returns
+    ///
+    /// The 8-bit IP protocol number.
     pub fn as_u8(&self) -> u8 {
         match *self {
             IpProtocol::Icmp => Self::ICMP,

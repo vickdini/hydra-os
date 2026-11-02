@@ -12,6 +12,22 @@ const COM1: u16 = 0x3F8;
 pub struct RawSerial;
 
 impl core::fmt::Write for RawSerial {
+    /// Formats and emits a string slice directly to COM1 without allocating or locking.
+    ///
+    /// Intercepts newline characters (`\n`) and emits a carriage return (`\r`) first
+    /// to ensure standard terminal line discipline.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - String slice to transmit over the UART serial line.
+    ///
+    /// # Returns
+    ///
+    /// Always returns `Ok(())`.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for b in s.bytes() {
             if b == b'\n' {
@@ -23,6 +39,18 @@ impl core::fmt::Write for RawSerial {
     }
 }
 
+/// Transmits a single raw byte over COM1 by polling the Line Status Register (LSR).
+///
+/// Bounded poll up to 100,000 spin iterations for the Transmit Holding Register Empty
+/// flag (bit 5) before writing the byte to port `0x3F8`.
+///
+/// # Arguments
+///
+/// * `b` - Byte to transmit.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 fn put(b: u8) {
     let mut lsr: Port<u8> = Port::new(COM1 + 5);
     let mut data: Port<u8> = Port::new(COM1);

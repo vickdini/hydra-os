@@ -161,6 +161,11 @@ impl Default for LinuxUtsname {
 }
 
 /// Copies a UTF-8 string into a fixed 65-byte NUL-terminated `utsname` field.
+///
+/// # Arguments
+///
+/// * `dest` - Destination 65-byte fixed buffer to write into.
+/// * `src` - Source string slice to copy.
 fn copy_str(dest: &mut [u8; 65], src: &str) {
     let bytes = src.as_bytes();
     let len = bytes.len().min(64);

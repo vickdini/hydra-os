@@ -391,6 +391,13 @@ impl Command for WgetCommand {
 }
 
 /// Helper function to parse a dotted-quad IPv4 string (`"10.0.2.2"`) into `[u8; 4]`.
+///
+/// # Arguments
+/// * `s` - Dotted-quad IPv4 string slice.
+///
+/// # Returns
+///
+/// `Some([a, b, c, d])` on successful parse, or `None` if invalid format.
 fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     let mut parts = [0u8; 4];
     let mut part_idx = 0;

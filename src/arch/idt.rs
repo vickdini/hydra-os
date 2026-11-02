@@ -63,6 +63,14 @@ impl IdtEntry {
 
     /// Sets the 64-bit handler address and GDT code segment selector.
     /// Configures the gate as Present, 64-bit Interrupt Gate (type 0xE, DPL 0).
+    ///
+    /// # Arguments
+    /// * `handler_addr` - Linear virtual entry address of the handler.
+    /// * `selector` - GDT code segment selector.
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to `self` for chaining.
     pub fn set_handler_addr(&mut self, handler_addr: usize, selector: u16) -> &mut Self {
         let addr = handler_addr as u64;
         self.offset_low = (addr & 0xFFFF) as u16;
@@ -77,6 +85,13 @@ impl IdtEntry {
 
     /// Sets the Interrupt Stack Table (IST) index (1..=7).
     /// Used for stack-critical exceptions like Double Fault (`#DF`).
+    ///
+    /// # Arguments
+    /// * `ist_index` - IST stack index in the TSS (1 to 7, or 0 to disable).
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to `self` for chaining.
     pub fn set_ist(&mut self, ist_index: u8) -> &mut Self {
         self.ist = ist_index & 0x7;
         self
@@ -84,6 +99,13 @@ impl IdtEntry {
 
     /// Sets the Descriptor Privilege Level (DPL).
     /// Set DPL=3 for software interrupts callable from Ring 3 (e.g. `int3` or syscalls).
+    ///
+    /// # Arguments
+    /// * `dpl` - Privilege level ring (0 = kernel, 3 = user).
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to `self` for chaining.
     pub fn set_dpl(&mut self, dpl: u8) -> &mut Self {
         let p_bit = self.type_attr & 0x80;
         let gate_type = self.type_attr & 0x0F;
@@ -316,6 +338,9 @@ pub fn enable_double_fault_ist() {
 }
 
 /// Updates the GDT code segment selector across all IDT gates and reloads the IDTR.
+///
+/// # Arguments
+/// * `cs` - The new 16-bit kernel code segment selector.
 pub fn reload_with_kernel_cs(cs: u16) {
     let mut idt = IDT.lock();
     for entry in idt.entries.iter_mut() {
@@ -325,6 +350,10 @@ pub fn reload_with_kernel_cs(cs: u16) {
 }
 
 /// Central Rust exception dispatcher called by assembly trampolines.
+///
+/// # Arguments
+/// * `ctx` - Mutable reference to the saved CPU exception frame.
+/// * `fpu` - Pointer to the saved FXSAVE64 register area.
 #[no_mangle]
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
@@ -344,6 +373,10 @@ pub struct FpuState(pub [u8; 512]);
 
 impl FpuState {
     /// Power-on state: all exceptions masked (FCW = 0x037F, MXCSR = 0x1F80).
+    ///
+    /// # Returns
+    ///
+    /// A new initialized [`FpuState`] instance.
     pub fn new() -> Self {
         let mut area = [0u8; 512];
         area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
@@ -364,6 +397,10 @@ static KERNEL_BUSY_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 
 /// Reports kernel code that runs for seconds without reaching a wait point (a spinning
 /// lock or an endless loop): the interrupted instruction pointer identifies the culprit.
+///
+/// # Arguments
+/// * `ctx` - Interrupted CPU register context.
+/// * `at_preempt_point` - Whether execution is at an explicit preemptible wait point.
 fn kernel_watchdog(ctx: &ExceptionContext, at_preempt_point: bool) {
     if at_preempt_point {
         KERNEL_BUSY_TICKS.store(0, Ordering::Relaxed);
@@ -389,12 +426,19 @@ fn kernel_watchdog(ctx: &ExceptionContext, at_preempt_point: bool) {
 }
 
 /// Kills the current user task after an unrecoverable fault and switches away from it.
+///
+/// # Arguments
+/// * `ctx` - CPU exception register context.
 fn kill_current_user_task(ctx: &mut ExceptionContext) {
     kill_or_signal(ctx, 11);
 }
 
 /// Handles an unrecoverable fault of the current task. Linux processes faulting in user
 /// mode receive the matching signal (their handler may recover); otherwise the task ends.
+///
+/// # Arguments
+/// * `ctx` - CPU exception register context.
+/// * `sig` - POSIX signal number (e.g. SIGSEGV=11, SIGILL=4).
 fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
     let linux = crate::task::current_personality() == crate::task::TaskPersonality::Linux;
     if linux && (ctx.cs & 3) == 3 {
@@ -416,6 +460,10 @@ fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
     sched.schedule(ctx);
 }
 
+/// Routes CPU trap vectors to architecture handlers or userland task termination.
+///
+/// # Arguments
+/// * `ctx` - CPU exception register context.
 fn dispatch_exception(ctx: &mut ExceptionContext) {
     match ctx.vector {
         3 => {
@@ -646,6 +694,10 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
     }
 }
 
+/// Dumps general-purpose CPU register states to standard output.
+///
+/// # Arguments
+/// * `ctx` - The CPU exception frame to print.
 fn print_cpu_dump(ctx: &ExceptionContext) {
     println!("  Register State:");
     println!("    RAX={:#018x}  RBX={:#018x}  RCX={:#018x}", ctx.rax, ctx.rbx, ctx.rcx);
@@ -656,6 +708,11 @@ fn print_cpu_dump(ctx: &ExceptionContext) {
     println!("    R14={:#018x}  R15={:#018x}  CS:RIP={:#04x}:{:#018x}", ctx.r14, ctx.r15, ctx.cs, ctx.rip);
 }
 
+/// Disables interrupts and permanently halts the CPU.
+///
+/// # Returns
+///
+/// This function never returns (!).
 fn panic_halt() -> ! {
     x86_64::instructions::interrupts::disable();
     loop {

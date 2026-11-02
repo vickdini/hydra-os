@@ -40,6 +40,15 @@ struct KeyRingBuffer {
 }
 
 impl KeyRingBuffer {
+    /// Creates a new empty circular key ring buffer.
+    ///
+    /// # Returns
+    ///
+    /// An empty `KeyRingBuffer` instance with initialized head and tail indices.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub const fn new() -> Self {
         Self {
             buffer: [None; KEY_BUFFER_CAPACITY],
@@ -49,6 +58,18 @@ impl KeyRingBuffer {
         }
     }
 
+    /// Pushes a decoded key event into the circular ring buffer.
+    ///
+    /// If the ring buffer is at full capacity (`KEY_BUFFER_CAPACITY`), the incoming
+    /// keystroke is dropped to prevent unbounded allocation and memory overflow.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Decoded keyboard event (`Key::Printable` or `Key::Special`) to append.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn push(&mut self, key: Key) {
         if self.count < KEY_BUFFER_CAPACITY {
             self.buffer[self.tail] = Some(key);
@@ -57,6 +78,15 @@ impl KeyRingBuffer {
         }
     }
 
+    /// Pops the next available keystroke from the ring buffer.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Key)` containing the oldest unread keystroke if available, or `None` if empty.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn pop(&mut self) -> Option<Key> {
         if self.count == 0 {
             None
@@ -68,6 +98,15 @@ impl KeyRingBuffer {
         }
     }
 
+    /// Checks whether the ring buffer contains any unconsumed key events.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the ring buffer contains zero keys; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.count == 0
@@ -81,7 +120,25 @@ static KEYBOARD_LOCK: Mutex<()> = Mutex::new(());
 static KEY_BUFFER: Mutex<KeyRingBuffer> = Mutex::new(KeyRingBuffer::new());
 
 /// Processes a single raw Scancode Set 1 byte and updates modifier states.
-/// Returns Some(Key) if a printable or special key event completed.
+///
+/// Decodes make codes (key press) and break codes (key release). Handles extended
+/// multi-byte prefix sequences (`0xE0`), shift tracking (`Shift_L`, `Shift_R`),
+/// and control key modifiers (`Ctrl_L`) to generate translated ASCII characters
+/// or special navigation key events.
+///
+/// # Arguments
+///
+/// * `scancode` - The raw 8-bit scancode received from the 8042 PS/2 controller data port `0x60`.
+///
+/// # Returns
+///
+/// `Some(Key)` containing a decoded printable character (`Key::Printable`) or navigation
+/// keycode (`Key::Special`) if the scancode completes an action; `None` if the scancode
+/// represents an intermediate escape prefix, key release, or unmapped scan sequence.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn process_scancode(scancode: u8) -> Option<Key> {
     if scancode == 0xE0 {
         EXTENDED_PREFIX.store(true, Ordering::SeqCst);
@@ -212,7 +269,16 @@ static CONSOLE_ALT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// Set by F12; the timer interrupt prints the task list (see `Scheduler::dump_tasks`).
 pub static TASK_DUMP_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Called exclusively by the IRQ 1 (Vector 33) interrupt service routine.
+/// Handles hardware keyboard interrupts triggered on IRQ 1 (IDT Vector 33).
+///
+/// Reads the scancode from 8042 data port `0x60`, intercepts global hotkeys (such as F12
+/// for scheduler task dumps, Scroll Lock for syscall tracing, and Ctrl+Alt+F1/F2 for VT
+/// session switching), forwards scancodes to Linux evdev or Wayland if active, or decodes
+/// the scancode and queues the resulting `Key` into the thread-safe ring buffer.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn on_keyboard_irq() {
     let mut data_port: Port<u8> = Port::new(0x60);
     let scancode = unsafe { data_port.read() };
@@ -280,7 +346,19 @@ pub fn on_keyboard_irq() {
     }
 }
 
-/// Reads a key non-blockingly (first from the interrupt ring buffer, then fallback polling if interrupts disabled).
+/// Reads a key event non-blockingly from the keyboard ring buffer or controller port.
+///
+/// Attempts to pop a decoded keystroke from the interrupt ring buffer with interrupts
+/// disabled. If the PIT timer has not yet been initialized (early bootstrap phase) and
+/// hardware interrupts are disabled, falls back to directly polling status port `0x64`.
+///
+/// # Returns
+///
+/// `Some(Key)` if an unconsumed keystroke is available; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn read_key() -> Option<Key> {
     // 1. Check if a key was captured asynchronously by the IRQ 1 handler
     if let Some(key) = x86_64::instructions::interrupts::without_interrupts(|| {
@@ -307,8 +385,18 @@ pub fn read_key() -> Option<Key> {
     None
 }
 
-/// Blocking wait for the next key from the PS/2 keyboard.
-/// Halts the CPU efficiently using `hlt` when interrupts are enabled.
+/// Performs a blocking wait for the next keystroke from the PS/2 keyboard.
+///
+/// Efficiently halts the CPU via the `HLT` instruction while waiting for hardware
+/// interrupts when interrupts are enabled, or spins on the core hint loop if disabled.
+///
+/// # Returns
+///
+/// The next decoded `Key` event received from the keyboard.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn get_key() -> Key {
     loop {
         if let Some(key) = read_key() {
@@ -322,7 +410,15 @@ pub fn get_key() -> Key {
     }
 }
 
-/// Configures the 8042 PS/2 keyboard controller to enable scanning and IRQ 1 interrupt generation.
+/// Configures the 8042 PS/2 keyboard controller to enable scanning and IRQ 1 generation.
+///
+/// Drains stale bytes from the output buffer, enables PS/2 port 1 (keyboard),
+/// sets bit 0 of the controller configuration byte to unmask IRQ 1 interrupts,
+/// and transmits the 'Enable Scanning' command (`0xF4`) directly to the keyboard device.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn init() {
     unsafe {
         let mut status_port: Port<u8> = Port::new(0x64);

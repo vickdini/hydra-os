@@ -85,12 +85,34 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
-    /// Returns true if BAR0 specifies a memory-mapped I/O (MMIO) window.
+    /// Checks whether BAR0 specifies a memory-mapped I/O (MMIO) window.
+    ///
+    /// Inspects bit 0 of Base Address Register 0. If cleared (0), the BAR represents
+    /// memory-mapped physical registers; if set (1), it represents legacy I/O ports.
+    ///
+    /// # Returns
+    ///
+    /// `true` if BAR0 targets MMIO physical memory; `false` if it targets legacy I/O ports.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn is_mmio_bar0(&self) -> bool {
         (self.bar0 & 0x01) == 0
     }
 
-    /// Returns the physical base address of BAR0 with flags stripped.
+    /// Returns the physical base address encoded in BAR0 with metadata flags stripped.
+    ///
+    /// Masks off the lower 4 bits for MMIO windows (type, prefetch, and memory indicator bits)
+    /// or the lower 2 bits for port I/O windows.
+    ///
+    /// # Returns
+    ///
+    /// The sanitized 64-bit physical address or base port of BAR0.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn bar0_address(&self) -> u64 {
         if self.is_mmio_bar0() {
             (self.bar0 & !0x0F) as u64
@@ -100,7 +122,26 @@ impl PciDevice {
     }
 }
 
-/// Constructs a 32-bit PCI configuration address word.
+/// Constructs a 32-bit PCI configuration address word for Mechanism #1.
+///
+/// Sets bit 31 (Enable Configuration Space Mapping), the 8-bit bus number (bits 16..23),
+/// 5-bit device number (bits 11..15), 3-bit function number (bits 8..10), and the
+/// doubleword-aligned register offset (bits 2..7).
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index on the bus (0..31).
+/// * `function` - Function index within the device (0..7).
+/// * `offset` - Byte register offset within the 256-byte configuration header (0..255).
+///
+/// # Returns
+///
+/// A 32-bit address word formatted for write to I/O port `0xCF8`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 #[inline(always)]
 fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     0x8000_0000u32
@@ -110,7 +151,22 @@ fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         | ((offset as u32) & 0xFC)
 }
 
-/// Reads a 32-bit dword from PCI configuration space.
+/// Reads a 32-bit doubleword from PCI configuration space.
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index (0..31).
+/// * `function` - Function index (0..7).
+/// * `offset` - Register offset (must be 4-byte aligned).
+///
+/// # Returns
+///
+/// The 32-bit register value read from configuration data port `0xCFC`.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn pci_read_u32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let mut addr_port = Port::<u32>::new(PCI_CONFIG_ADDRESS);
     let mut data_port = Port::<u32>::new(PCI_CONFIG_DATA);
@@ -123,6 +179,21 @@ pub fn pci_read_u32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 }
 
 /// Reads a 16-bit word from PCI configuration space.
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index (0..31).
+/// * `function` - Function index (0..7).
+/// * `offset` - Register offset (must be 2-byte aligned).
+///
+/// # Returns
+///
+/// The 16-bit word at the specified offset.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn pci_read_u16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     let dword = pci_read_u32(bus, device, function, offset);
     let shift = ((offset & 2) * 8) as u32;
@@ -130,13 +201,40 @@ pub fn pci_read_u16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
 }
 
 /// Reads an 8-bit byte from PCI configuration space.
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index (0..31).
+/// * `function` - Function index (0..7).
+/// * `offset` - Byte register offset (0..255).
+///
+/// # Returns
+///
+/// The 8-bit value at the specified offset.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn pci_read_u8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     let dword = pci_read_u32(bus, device, function, offset);
     let shift = ((offset & 3) * 8) as u32;
     ((dword >> shift) & 0xFF) as u8
 }
 
-/// Writes a 32-bit dword into PCI configuration space.
+/// Writes a 32-bit doubleword into PCI configuration space.
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index (0..31).
+/// * `function` - Function index (0..7).
+/// * `offset` - 4-byte aligned register offset.
+/// * `val` - 32-bit value to store.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn pci_write_u32(bus: u8, device: u8, function: u8, offset: u8, val: u32) {
     let mut addr_port = Port::<u32>::new(PCI_CONFIG_ADDRESS);
     let mut data_port = Port::<u32>::new(PCI_CONFIG_DATA);
@@ -148,7 +246,19 @@ pub fn pci_write_u32(bus: u8, device: u8, function: u8, offset: u8, val: u32) {
     }
 }
 
-/// Writes a 16-bit word into PCI configuration space.
+/// Writes a 16-bit word into PCI configuration space via read-modify-write.
+///
+/// # Arguments
+///
+/// * `bus` - PCI bus number (0..255).
+/// * `device` - Device slot index (0..31).
+/// * `function` - Function index (0..7).
+/// * `offset` - 2-byte aligned register offset.
+/// * `val` - 16-bit word to write.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn pci_write_u16(bus: u8, device: u8, function: u8, offset: u8, val: u16) {
     let current = pci_read_u32(bus, device, function, offset);
     let shift = ((offset & 2) * 8) as u32;
@@ -158,13 +268,40 @@ pub fn pci_write_u16(bus: u8, device: u8, function: u8, offset: u8, val: u16) {
 }
 
 /// Enables PCI Bus Mastering, Memory Space, and I/O Space on the specified device.
+///
+/// Reads the Command register (offset `0x04`), sets bits 0 (I/O Space), 1 (Memory Space),
+/// and 2 (Bus Master), and writes the updated command word back.
+///
+/// # Arguments
+///
+/// * `dev` - Target PCI device descriptor whose bus mastering is to be enabled.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn enable_bus_mastering(dev: &PciDevice) {
     let cmd = pci_read_u16(dev.bus, dev.device, dev.function, PCI_REG_COMMAND);
     let updated = cmd | PCI_CMD_BUS_MASTER | PCI_CMD_MEMORY_SPACE | PCI_CMD_IO_SPACE;
     pci_write_u16(dev.bus, dev.device, dev.function, PCI_REG_COMMAND, updated);
 }
 
-/// Finds the first device of a class/subclass (e.g. 0x01/0x01, an IDE controller).
+/// Finds the first device on the PCI bus matching a specified class and subclass code.
+///
+/// Iterates over buses 0..=31, devices 0..31, and all functions, reading class/subclass
+/// registers to locate matching controllers (e.g. IDE controllers, network interfaces).
+///
+/// # Arguments
+///
+/// * `class` - Target PCI base class code (e.g. `0x01` for Mass Storage).
+/// * `subclass` - Target PCI subclass code (e.g. `0x01` for IDE).
+///
+/// # Returns
+///
+/// `Some(PciDevice)` containing device parameters and BAR0 if found; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn find_class(class: u8, subclass: u8) -> Option<PciDevice> {
     for bus in 0..=31 {
         for device in 0..32 {
@@ -199,6 +336,23 @@ pub fn find_class(class: u8, subclass: u8) -> Option<PciDevice> {
 }
 
 /// Scans the PCI bus topology for a device matching the target vendor and device IDs.
+///
+/// Iterates across buses 0..=31, devices 0..31, and all multifunction device sub-functions.
+/// Reads vendor and device ID registers, extracts class, subclass, BAR0, and interrupt line
+/// configuration if a match is found.
+///
+/// # Arguments
+///
+/// * `vendor_id` - 16-bit PCI vendor identifier (e.g. `0x8086` for Intel).
+/// * `device_id` - 16-bit PCI device identifier (e.g. `0x100E` for Intel 82540EM).
+///
+/// # Returns
+///
+/// `Some(PciDevice)` containing full topological coordinates and BAR0 if found; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     for bus in 0..=31 {
         for device in 0..32 {

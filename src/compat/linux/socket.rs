@@ -147,6 +147,10 @@ impl UnixSocket {
     /// - `socket_arc`: Shared handle to the unbound socket being bound.
     /// - `path`: Filesystem path string to register in [`GLOBAL_UNIX_SOCKETS`].
     ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful binding.
+    ///
     /// # Errors
     /// - `-EADDRINUSE`: Another socket is already registered at `path`.
     /// - `-EINVAL`: The socket is not in the [`UnixSocketRole::Unbound`] state.
@@ -170,6 +174,10 @@ impl UnixSocket {
     ///
     /// # Arguments
     /// - `backlog`: Maximum pending connection queue length (defaults to `16` if `0`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful transition to listening state.
     ///
     /// # Errors
     /// - `-EINVAL`: The socket is neither [`UnixSocketRole::Bound`] nor already [`UnixSocketRole::Listening`].
@@ -201,6 +209,10 @@ impl UnixSocket {
     ///
     /// # Arguments
     /// - `target_path`: Filesystem path of the target listening socket.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful connection establishment.
     ///
     /// # Errors
     /// - `-ECONNREFUSED`: No socket is registered at `target_path`, or the target is not listening.
@@ -347,6 +359,10 @@ impl UnixSocket {
     /// # Arguments
     /// - `desc`: Cloned [`crate::fs::FileDescriptor`] to transfer to the peer.
     ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successfully queueing the ancillary descriptor.
+    ///
     /// # Errors
     /// Returns `Err("Socket not connected")` if this socket is not in the [`UnixSocketRole::Connected`] state.
     pub fn push_ancillary_fd(&mut self, desc: crate::fs::FileDescriptor) -> Result<(), &'static str> {
@@ -421,6 +437,10 @@ impl UnixSocket {
     ///
     /// # Arguments
     /// - `how`: One of [`SHUT_RD`], [`SHUT_WR`], or [`SHUT_RDWR`].
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successfully closing the specified socket directions.
     ///
     /// # Errors
     /// - `-EINVAL`: `how` is not a valid shutdown mode.

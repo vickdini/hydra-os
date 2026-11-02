@@ -46,6 +46,18 @@ impl Rights {
     pub const ALL: Rights = Rights(0x1F);
 
     /// Checks if this rights set includes all permissions specified in `other`.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - Bitmask of required rights to check against.
+    ///
+    /// # Returns
+    ///
+    /// `true` if all bitflags in `other` are present in `self`; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn contains(&self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
     }
@@ -97,6 +109,19 @@ pub struct Capability {
 
 impl Capability {
     /// Constructs a new capability token with the specified resource type and rights.
+    ///
+    /// # Arguments
+    ///
+    /// * `cap_type` - The target resource type (memory frame, endpoint, thread, etc.).
+    /// * `rights` - Bitmask of permitted access operations on the resource.
+    ///
+    /// # Returns
+    ///
+    /// A newly constructed `Capability` token.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn new(cap_type: CapType, rights: Rights) -> Self {
         Self { cap_type, rights }
     }

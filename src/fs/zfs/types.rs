@@ -74,6 +74,14 @@ pub struct Fletcher4 {
 
 impl Fletcher4 {
     /// Computes standard ZFS Fletcher-4 checksum across 32-bit integers.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw byte buffer to checksum.
+    ///
+    /// # Returns
+    ///
+    /// A computed [`Fletcher4`] checksum.
     pub fn compute(data: &[u8]) -> Self {
         let mut a: u64 = 0;
         let mut b: u64 = 0;
@@ -144,6 +152,10 @@ impl BlockPointer {
     }
 
     /// Returns true if this block pointer represents an unallocated sparse hole.
+    ///
+    /// # Returns
+    ///
+    /// `true` if `self.block == 0`, `false` otherwise.
     pub fn is_hole(&self) -> bool {
         self.block == 0
     }
@@ -171,6 +183,14 @@ pub enum DnodeType {
 
 impl DnodeType {
     /// Converts a raw `u8` identifier into a [`DnodeType`].
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - Raw numeric object type identifier.
+    ///
+    /// # Returns
+    ///
+    /// Corresponding [`DnodeType`] variant.
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::PlainFile,
@@ -184,6 +204,14 @@ impl DnodeType {
     }
 
     /// Object kind implied by a Linux `st_mode`.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - File permission and mode bitmask.
+    ///
+    /// # Returns
+    ///
+    /// Inferred [`DnodeType`].
     pub fn from_mode(mode: u32) -> Self {
         match mode & S_IFMT {
             S_IFREG => Self::PlainFile,
@@ -303,16 +331,32 @@ impl DnodePhys {
     }
 
     /// Returns the high-level [`DnodeType`] of this object.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`DnodeType`].
     pub fn kind(&self) -> DnodeType {
         DnodeType::from_u8(self.obj_type)
     }
 
     /// Serializes this dnode into a 512-byte raw array.
+    ///
+    /// # Returns
+    ///
+    /// Fixed-size array `[u8; 512]` containing raw dnode bytes.
     pub fn to_bytes(&self) -> [u8; DNODE_SIZE] {
         unsafe { core::mem::transmute_copy(self) }
     }
 
     /// Deserializes a 512-byte raw array into a [`DnodePhys`] struct.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Slice containing at least 512 bytes.
+    ///
+    /// # Returns
+    ///
+    /// Deserialized [`DnodePhys`].
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut raw = [0u8; DNODE_SIZE];
         raw.copy_from_slice(&bytes[..DNODE_SIZE]);
@@ -349,6 +393,11 @@ pub struct VdevLabel {
 }
 
 impl VdevLabel {
+    /// Returns a slice of the label payload excluding the trailing checksum.
+    ///
+    /// # Returns
+    ///
+    /// A byte slice covering the label header fields up to the checksum.
     fn body(&self) -> &[u8] {
         let len = core::mem::size_of::<Self>() - core::mem::size_of::<Fletcher4>();
         unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, len) }
@@ -360,6 +409,10 @@ impl VdevLabel {
     }
 
     /// Validates the magic signature, version, and Fletcher-4 checksum.
+    ///
+    /// # Returns
+    ///
+    /// `true` if magic, version, and checksum match, `false` otherwise.
     pub fn is_valid(&self) -> bool {
         self.magic == VDEV_LABEL_MAGIC && self.version == POOL_VERSION && Fletcher4::compute(self.body()) == self.checksum
     }
@@ -396,6 +449,11 @@ pub struct Uberblock {
 }
 
 impl Uberblock {
+    /// Returns a slice of the uberblock payload excluding the trailing checksum.
+    ///
+    /// # Returns
+    ///
+    /// A byte slice covering the uberblock fields up to the checksum.
     fn body(&self) -> &[u8] {
         let len = core::mem::size_of::<Self>() - core::mem::size_of::<Fletcher4>();
         unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, len) }
@@ -407,6 +465,10 @@ impl Uberblock {
     }
 
     /// Verifies the magic signature, format version, and Fletcher-4 checksum.
+    ///
+    /// # Returns
+    ///
+    /// `true` if magic, version, and checksum match, `false` otherwise.
     pub fn is_valid(&self) -> bool {
         self.magic == ZFS_UBERBLOCK_MAGIC && self.version == POOL_VERSION && Fletcher4::compute(self.body()) == self.checksum
     }
@@ -430,6 +492,14 @@ pub const DT_LNK: u8 = 10;
 pub const DT_SOCK: u8 = 12;
 
 /// Directory entry type for a Linux `st_mode`.
+///
+/// # Arguments
+///
+/// * `mode` - File mode bitfield.
+///
+/// # Returns
+///
+/// Linux directory entry type byte (`DT_REG`, `DT_DIR`, etc.).
 pub fn dtype_from_mode(mode: u32) -> u8 {
     match mode & S_IFMT {
         S_IFREG => DT_REG,

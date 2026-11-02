@@ -127,6 +127,14 @@ fn parse_shebang(data: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
 }
 
 /// Converts a raw byte slice into a UTF-8 [`String`], replacing invalid sequences with U+FFFD.
+///
+/// # Arguments
+///
+/// * `v` - Byte slice to convert.
+///
+/// # Returns
+///
+/// An owned UTF-8 string with lossy replacements for invalid sequences.
 fn lossy(v: &[u8]) -> String {
     String::from_utf8_lossy(v).into_owned()
 }

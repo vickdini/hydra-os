@@ -129,6 +129,10 @@ impl<'a> Iterator for ArIterator<'a> {
     type Item = ArEntry<'a>;
 
     /// Parses the next 60-byte `ar` member header and advances the cursor past its 2-byte aligned payload.
+    ///
+    /// # Returns
+    ///
+    /// The next [`ArEntry`] if valid, or `None` if end-of-archive or corrupted.
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset + AR_HEADER_SIZE > self.data.len() {
             return None;

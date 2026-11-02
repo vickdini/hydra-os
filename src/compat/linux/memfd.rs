@@ -78,6 +78,10 @@ impl MemFd {
     }
 
     /// Returns the current logical size of the shared memory object in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Logical size of the `memfd` in bytes.
     pub fn size(&self) -> usize {
         self.size
     }
@@ -116,6 +120,14 @@ impl MemFd {
     }
 
     /// Returns the physical frame for page `index`, lazily allocating a zeroed user frame on first access.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Zero-based page index within the memory object.
+    ///
+    /// # Returns
+    ///
+    /// Physical 4KiB frame allocated for the requested page index, or `None` if out of bounds or out of memory.
     fn page(&mut self, index: usize) -> Option<PhysFrame<Size4KiB>> {
         let slot = self.pages.get_mut(index)?;
         if slot.is_none() {

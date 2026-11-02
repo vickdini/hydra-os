@@ -45,6 +45,13 @@ pub const NAME_MAX: usize = 255;
 /// Directory indexes kept cached before the cache is reset.
 const INDEX_CACHE_LIMIT: usize = 1024;
 
+/// Computes the aligned record size for an entry with `name_len` bytes.
+///
+/// # Arguments
+/// * `name_len` - Length of file name in bytes.
+///
+/// # Returns
+/// Record size in bytes aligned to 8-byte boundary.
 fn rec_size(name_len: usize) -> usize {
     (HEADER + name_len + 7) & !7
 }
@@ -56,6 +63,14 @@ struct Record {
     dtype: u8,
 }
 
+/// Parses a directory record header at offset `off` in a block.
+///
+/// # Arguments
+/// * `block` - 4 KiB directory block.
+/// * `off` - Byte offset into the block.
+///
+/// # Returns
+/// `Some(Record)` if a valid record header is parsed, or `None`.
 fn parse(block: &[u8; ZFS_BLOCK_SIZE], off: usize) -> Option<Record> {
     if off + HEADER > ZFS_BLOCK_SIZE {
         return None;
@@ -69,6 +84,15 @@ fn parse(block: &[u8; ZFS_BLOCK_SIZE], off: usize) -> Option<Record> {
     Some(Record { ino, len, name_len, dtype: block[off + 11] })
 }
 
+/// Writes a directory record header into a block at offset `off`.
+///
+/// # Arguments
+/// * `block` - Mutable reference to directory block.
+/// * `off` - Byte offset in block.
+/// * `ino` - Inode number.
+/// * `len` - Total record length.
+/// * `name_len` - File name length.
+/// * `dtype` - Directory entry type.
 fn write_header(block: &mut [u8; ZFS_BLOCK_SIZE], off: usize, ino: u64, len: usize, name_len: usize, dtype: u8) {
     block[off..off + 8].copy_from_slice(&ino.to_le_bytes());
     block[off + 8..off + 10].copy_from_slice(&(len as u16).to_le_bytes());
@@ -77,6 +101,12 @@ fn write_header(block: &mut [u8; ZFS_BLOCK_SIZE], off: usize, ino: u64, len: usi
 }
 
 /// Largest record that could be inserted into `block`.
+///
+/// # Arguments
+/// * `block` - Directory block byte array.
+///
+/// # Returns
+/// Slack space in bytes available for new records.
 fn block_slack(block: &[u8; ZFS_BLOCK_SIZE]) -> u16 {
     let mut best = 0;
     let mut off = 0;
@@ -120,12 +150,35 @@ impl Zap {
         Self { cache: BTreeMap::new() }
     }
 
+    /// Reads a single 4 KiB directory block from the DMU.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `b` - Block index within directory.
+    ///
+    /// # Returns
+    /// 4 KiB block array on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn read_dir_block(dmu: &mut Dmu, dir: u64, b: u64) -> DmuResult<[u8; ZFS_BLOCK_SIZE]> {
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         dmu.read(dir, b * BLOCK, &mut block)?;
         Ok(block)
     }
 
+    /// Retrieves or constructs the in-memory index for directory `dir`.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    ///
+    /// # Returns
+    /// Mutable reference to [`DirIndex`] on success.
+    ///
+    /// # Errors
+    /// DMU error string on read or parse failure.
     fn index(&mut self, dmu: &mut Dmu, dir: u64) -> DmuResult<&mut DirIndex> {
         if !self.cache.contains_key(&dir) {
             if self.cache.len() >= INDEX_CACHE_LIMIT {
@@ -160,21 +213,58 @@ impl Zap {
     }
 
     /// Forgets the cached index of a directory (after it is freed).
+    ///
+    /// # Arguments
+    /// * `dir` - Directory object number to evict.
     pub fn forget(&mut self, dir: u64) {
         self.cache.remove(&dir);
     }
 
     /// Looks up `name`, returning (inode, d_type).
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `name` - Entry name to search for.
+    ///
+    /// # Returns
+    /// `Some((ino, dtype))` if entry exists, or `None`.
+    ///
+    /// # Errors
+    /// DMU error string on index failure.
     pub fn lookup(&mut self, dmu: &mut Dmu, dir: u64, name: &[u8]) -> DmuResult<Option<(u64, u8)>> {
         Ok(self.index(dmu, dir)?.names.get(name).map(|&(ino, dtype, _)| (ino, dtype)))
     }
 
     /// Number of entries (excluding `.` and `..`).
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    ///
+    /// # Returns
+    /// Entry count on success.
+    ///
+    /// # Errors
+    /// DMU error string on index failure.
     pub fn count(&mut self, dmu: &mut Dmu, dir: u64) -> DmuResult<usize> {
         Ok(self.index(dmu, dir)?.names.len())
     }
 
     /// Adds an entry. The caller guarantees `name` is not already present.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `name` - File name to insert.
+    /// * `ino` - Target object/inode number.
+    /// * `dtype` - File type indicator.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on insertion failure.
     pub fn insert(&mut self, dmu: &mut Dmu, dir: u64, name: &[u8], ino: u64, dtype: u8) -> DmuResult<()> {
         if name.is_empty() || name.len() > NAME_MAX {
             return Err("ZFS: invalid file name length");
@@ -219,6 +309,17 @@ impl Zap {
     }
 
     /// Removes an entry, returning its inode number.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `name` - Entry name to delete.
+    ///
+    /// # Returns
+    /// `Some(ino)` if deleted, `None` if not found.
+    ///
+    /// # Errors
+    /// DMU error string on deletion failure.
     pub fn remove(&mut self, dmu: &mut Dmu, dir: u64, name: &[u8]) -> DmuResult<Option<u64>> {
         let (ino, pos) = match self.index(dmu, dir)?.names.get(name) {
             Some(&(ino, _, pos)) => (ino, pos),
@@ -251,6 +352,19 @@ impl Zap {
     }
 
     /// Points an existing entry at a different inode (used by rename over a target).
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `name` - Entry name to update.
+    /// * `ino` - New target inode number.
+    /// * `dtype` - New file type indicator.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on update failure.
     pub fn replace(&mut self, dmu: &mut Dmu, dir: u64, name: &[u8], ino: u64, dtype: u8) -> DmuResult<()> {
         let pos = match self.index(dmu, dir)?.names.get(name) {
             Some(&(_, _, pos)) => pos,
@@ -267,6 +381,18 @@ impl Zap {
     }
 
     /// Returns up to `max` entries starting at byte offset `from`.
+    ///
+    /// # Arguments
+    /// * `dmu` - DMU controller.
+    /// * `dir` - Directory object number.
+    /// * `from` - Starting byte offset.
+    /// * `max` - Maximum number of entries to return.
+    ///
+    /// # Returns
+    /// Vector of [`DirEntry`] records on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     pub fn readdir(&mut self, dmu: &mut Dmu, dir: u64, from: u64, max: usize) -> DmuResult<Vec<DirEntry>> {
         let size = dmu.get_dnode(dir)?.size;
         let mut out = Vec::new();

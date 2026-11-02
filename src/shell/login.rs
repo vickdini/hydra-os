@@ -36,6 +36,13 @@ pub struct Account {
 }
 
 /// Contents of a file of the installed system.
+///
+/// # Arguments
+/// * `path` - Relative file path under `SYSTEM_ROOT`.
+///
+/// # Returns
+///
+/// File contents as a [`String`], or `None` on read failure.
 fn system_file(path: &str) -> Option<String> {
     let full = alloc::format!("{}{}", SYSTEM_ROOT, path);
     let size = crate::fs::ZfsClient::file_stat(&full).ok()?.size as usize;
@@ -46,11 +53,22 @@ fn system_file(path: &str) -> Option<String> {
 }
 
 /// Whether the installed system can check passwords (it has accounts and PAM's helper).
+///
+/// # Returns
+///
+/// `true` if authentication helper and `/etc/passwd` are accessible, `false` otherwise.
 pub fn available() -> bool {
     crate::fs::ZfsClient::file_stat(&alloc::format!("{}{}", SYSTEM_ROOT, CHKPWD)).is_ok() && system_file("/etc/passwd").is_some()
 }
 
 /// Looks up account `name`.
+///
+/// # Arguments
+/// * `name` - Username string slice to find.
+///
+/// # Returns
+///
+/// `Some(Account)` if found in `/etc/passwd`, or `None`.
 pub fn account(name: &str) -> Option<Account> {
     let passwd = system_file("/etc/passwd")?;
     let fields: Vec<&str> = passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find(|f| f.len() >= 4 && f[0] == name)?;
@@ -68,6 +86,14 @@ pub fn account(name: &str) -> Option<Account> {
 }
 
 /// Checks `password` for account `name` with PAM's helper. Returns whether it matches.
+///
+/// # Arguments
+/// * `name` - Username string slice.
+/// * `password` - Plaintext password to verify.
+///
+/// # Returns
+///
+/// `true` if password matched via PAM helper, `false` otherwise.
 pub fn verify_password(name: &str, password: &str) -> bool {
     use crate::fs::{FileDescriptor, PipeBuffer};
     let argv = [CHKPWD, name, "nonull"];
@@ -110,6 +136,14 @@ pub fn verify_password(name: &str, password: &str) -> bool {
 }
 
 /// Reads a line from the keyboard, echoing it unless `secret`.
+///
+/// # Arguments
+/// * `prompt` - Interactive prompt message displayed before input.
+/// * `secret` - Whether to suppress echoing typed characters (for passwords).
+///
+/// # Returns
+///
+/// The entered text line as a [`String`].
 pub fn read_input(prompt: &str, secret: bool) -> String {
     crate::print!("{}", prompt);
     let mut line = String::new();
@@ -150,6 +184,10 @@ static SUDO_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64:
 const SUDO_TIMEOUT_TICKS: u64 = 5 * 60 * 100;
 
 /// Whether `sudo` was given a password recently.
+///
+/// # Returns
+///
+/// `true` if a successful `sudo` check occurred within the timeout period, `false` otherwise.
 pub fn sudo_fresh() -> bool {
     let t = SUDO_TICK.load(core::sync::atomic::Ordering::Relaxed);
     t != 0 && crate::arch::pit::ticks().saturating_sub(t) < SUDO_TIMEOUT_TICKS
@@ -161,6 +199,9 @@ pub fn sudo_remember() {
 }
 
 /// Asks for a login until an administrator logs in, and makes them the shell's user.
+///
+/// # Arguments
+/// * `state` - Mutable reference to the shell session state.
 pub fn login(state: &mut ShellState) {
     SUDO_TICK.store(0, core::sync::atomic::Ordering::Relaxed);
     if !available() {

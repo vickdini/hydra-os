@@ -34,6 +34,9 @@ mod memory {
         }
 
         /// This server's heap.
+        ///
+        /// # Returns
+        /// [`HeapStats`] containing total and free heap bytes.
         pub fn stats() -> HeapStats {
             let (used, free) = hydra_rt::heap_usage();
             HeapStats { total_bytes: used + free, free_bytes: free }
@@ -45,6 +48,9 @@ mod memory {
 mod arch {
     pub mod ata {
         /// Whether the supervisor reported a disk.
+        ///
+        /// # Returns
+        /// `true` if disk is present, `false` otherwise.
         pub fn is_drive_present() -> bool {
             crate::DISK_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
         }
@@ -67,10 +73,24 @@ struct Display {
 }
 
 impl Display {
+    /// Constructs a display service reply message.
+    ///
+    /// # Arguments
+    /// * `args` - Array of 4 argument words.
+    ///
+    /// # Returns
+    /// Formatted reply [`Message`].
     fn reply(args: [u64; 4]) -> Message {
         Message::new(MSG_FB_REPLY as u64, args)
     }
 
+    /// Dispatches incoming display messages (info query, flush, input events).
+    ///
+    /// # Arguments
+    /// * `msg` - Request message.
+    ///
+    /// # Returns
+    /// Reply message.
     fn handle(&mut self, msg: &Message) -> Message {
         let (w, h) = (self.fb.width(), self.fb.height());
         match msg.label as u32 {
@@ -118,6 +138,12 @@ impl Display {
 }
 
 /// Parses `fb=<phys>:<width>:<height>:<stride>:<bgr>` (numbers in decimal or `0x` hex).
+///
+/// # Arguments
+/// * `arg` - Argument string to parse.
+///
+/// # Returns
+/// `Some((phys, width, height, stride, is_bgr))` if valid, or `None`.
 fn parse_fb(arg: &str) -> Option<(u64, usize, usize, usize, bool)> {
     let num = |s: &str| match s.strip_prefix("0x") {
         Some(h) => u64::from_str_radix(h, 16).ok(),
@@ -132,6 +158,10 @@ fn parse_fb(arg: &str) -> Option<(u64, usize, usize, usize, bool)> {
     Some((phys, w, h, stride, bgr))
 }
 
+/// Display server entry point that initializes the framebuffer and handles compositor/window events.
+///
+/// # Arguments
+/// * `args` - Command-line arguments.
 fn main(args: &[&str]) {
     let Some((phys, w, h, stride, bgr)) = args.iter().find_map(|a| parse_fb(a)) else {
         println!("[display-server] no framebuffer given (fb=...)");

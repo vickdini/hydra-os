@@ -44,6 +44,14 @@ impl CondVar {
 
     /// Atomically releases `guard`, blocks the calling thread on this condition variable,
     /// and re-acquires the mutex before returning.
+    ///
+    /// # Arguments
+    ///
+    /// * `guard` - Active [`MutexGuard`] guarding the associated state.
+    ///
+    /// # Returns
+    ///
+    /// A new [`MutexGuard`] re-acquired after being signaled.
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
 
@@ -71,12 +79,20 @@ impl CondVar {
     }
 
     /// Wakes all waiting threads.
+    ///
+    /// # Returns
+    ///
+    /// The number of waiting tasks unblocked as `usize`.
     pub fn notify_all(&self) -> usize {
         let mut wq = self.waiters.lock();
         wq.wake_all()
     }
 
     /// Returns the number of threads currently waiting on this condition variable.
+    ///
+    /// # Returns
+    ///
+    /// Number of queued threads awaiting notification.
     pub fn waiting_count(&self) -> usize {
         self.waiters.lock().len()
     }

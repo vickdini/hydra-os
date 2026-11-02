@@ -126,6 +126,20 @@ impl Ps2Mouse {
     }
 
     /// Waits until the 8042 input buffer is empty and ready to accept a command/data byte.
+    ///
+    /// Polls the status register port `0x64` until bit 1 (`STATUS_INPUT_BUFFER_FULL`) clears.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the input buffer is ready for write; `Err(&'static str)` on timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the controller fails to drain its buffer within 100,000 spin cycles.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn wait_write(&mut self) -> Result<(), &'static str> {
         for _ in 0..100_000 {
             if unsafe { self.cmd_port.read() } & STATUS_INPUT_BUFFER_FULL == 0 {
@@ -137,6 +151,20 @@ impl Ps2Mouse {
     }
 
     /// Waits until the 8042 output buffer contains data to be read.
+    ///
+    /// Polls the status register port `0x64` until bit 0 (`STATUS_OUTPUT_BUFFER_FULL`) is set.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when data is ready to be read from port `0x60`; `Err(&'static str)` on timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if no data byte appears within 100,000 spin cycles.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn wait_read(&mut self) -> Result<(), &'static str> {
         for _ in 0..100_000 {
             if unsafe { self.cmd_port.read() } & STATUS_OUTPUT_BUFFER_FULL != 0 {
@@ -148,6 +176,26 @@ impl Ps2Mouse {
     }
 
     /// Sends a command byte specifically targeted at the auxiliary mouse device.
+    ///
+    /// Dispatches command `0xD4` to tell the 8042 controller that the subsequent byte
+    /// written to data port `0x60` should be routed to the auxiliary PS/2 mouse port,
+    /// and waits for the standard device acknowledge byte (`0xFA`).
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The mouse command byte (e.g. `0xF4` for enable reporting, `0xF6` for defaults).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the mouse acknowledged the command with `0xFA`; `Err(&'static str)` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if writing times out or the mouse returns a non-ACK response.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn write_mouse_cmd(&mut self, cmd: u8) -> Result<(), &'static str> {
         self.wait_write()?;
         unsafe {
@@ -169,6 +217,22 @@ impl Ps2Mouse {
     }
 
     /// Initializes the 8042 auxiliary port and enables continuous PS/2 packet streaming.
+    ///
+    /// Enables the auxiliary device clock line, configures IRQ 12 interrupt generation
+    /// in the 8042 controller configuration byte, attempts IntelliMouse wheel detection,
+    /// and issues the enable data reporting command (`0xF4`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the mouse was successfully initialized; `Err(&'static str)` on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if any phase of the 8042 auxiliary handshake fails.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn init(&mut self) -> Result<(), &'static str> {
         // 1. Enable Auxiliary Device (Command 0xA8)
         self.wait_write()?;
@@ -216,7 +280,18 @@ impl Ps2Mouse {
         Ok(())
     }
 
-    /// Tries the IntelliMouse handshake; true if the mouse now sends wheel packets.
+    /// Attempts the Microsoft IntelliMouse 4-byte packet wheel handshake sequence.
+    ///
+    /// Transmits sample rates 200, 100, 80 sequentially, queries the device ID (`0xF2`),
+    /// and checks if ID `3` (wheel mouse) is returned.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the device supports scroll wheel 4-byte packets; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn enable_wheel(&mut self) -> bool {
         for rate in [200u8, 100, 80] {
             if self.write_mouse_cmd(0xF3).is_err() || self.write_mouse_cmd(rate).is_err() {
@@ -233,8 +308,24 @@ impl Ps2Mouse {
         id == 3
     }
 
-    /// Polls for incoming mouse packet bytes and updates coordinates. Once IRQ 12 is
-    /// enabled the interrupt handler consumes the bytes and this reports what it decoded.
+    /// Polls for incoming mouse packet bytes and updates coordinates.
+    ///
+    /// In polled mode (before IRQ 12 is enabled), inspects status port `0x64` for pending
+    /// auxiliary data bytes and feeds them into the packet assembler. In IRQ mode, returns
+    /// any pending event decoded by the interrupt handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `screen_width` - Current display width in pixels for boundary clamping.
+    /// * `screen_height` - Current display height in pixels for boundary clamping.
+    ///
+    /// # Returns
+    ///
+    /// `Some(MouseEvent)` if a complete mouse packet was assembled; `None` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn poll(&mut self, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
         self.screen = (screen_width, screen_height);
         if self.irq_mode {
@@ -259,7 +350,25 @@ impl Ps2Mouse {
         self.feed(byte, screen_width, screen_height)
     }
 
-    /// Adds one byte of a 3-byte packet; returns the event once a packet is complete.
+    /// Appends one byte to the active packet buffer and decodes complete mouse packets.
+    ///
+    /// Assembles standard 3-byte PS/2 packets (or 4-byte IntelliMouse wheel packets),
+    /// performs 9-bit sign extension on X and Y movement deltas, inverts screen Y coordinates,
+    /// updates internal position clamping against screen boundaries, and detects button transitions.
+    ///
+    /// # Arguments
+    ///
+    /// * `byte` - Incoming byte from the 8042 auxiliary port.
+    /// * `screen_width` - Maximum horizontal boundary in pixels.
+    /// * `screen_height` - Maximum vertical boundary in pixels.
+    ///
+    /// # Returns
+    ///
+    /// `Some(MouseEvent)` when a full packet is assembled; `None` while receiving partial bytes.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     fn feed(&mut self, byte: u8, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
 
         // Byte 0 must have bit 3 set (always 1 in standard PS/2 packet)
@@ -330,6 +439,13 @@ impl Ps2Mouse {
 static MOUSE_DRIVER: Mutex<Ps2Mouse> = Mutex::new(Ps2Mouse::new());
 
 /// Initializes the PS/2 auxiliary mouse driver subsystem.
+///
+/// Sends initialization commands to the 8042 controller, sets up default sample rates,
+/// attempts IntelliMouse wheel probing, and enables data packet streaming.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn init() {
     let mut mouse = MOUSE_DRIVER.lock();
     if !mouse.initialized {
@@ -355,13 +471,31 @@ pub fn init() {
 /// Polls for incoming mouse events and returns an updated pointer event if movement occurred.
 ///
 /// # Arguments
-/// - `screen_width`: Display width in pixels (used for coordinate clamping).
-/// - `screen_height`: Display height in pixels (used for coordinate clamping).
+///
+/// * `screen_width` - Display width in pixels (used for coordinate clamping).
+/// * `screen_height` - Display height in pixels (used for coordinate clamping).
+///
+/// # Returns
+///
+/// `Some(MouseEvent)` if a movement or button state change was decoded; `None` otherwise.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn poll_mouse(screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
     MOUSE_DRIVER.lock().poll(screen_width, screen_height)
 }
 
 /// Sets the current pointer coordinates (e.g. upon resolution change or center reset).
+///
+/// # Arguments
+///
+/// * `x` - Target horizontal coordinate in pixels.
+/// * `y` - Target vertical coordinate in pixels.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn set_position(x: usize, y: usize) {
     let mut mouse = MOUSE_DRIVER.lock();
     mouse.state.x = x;
@@ -369,11 +503,26 @@ pub fn set_position(x: usize, y: usize) {
 }
 
 /// Returns the current snapshot of pointer coordinates and button states.
+///
+/// # Returns
+///
+/// A copy of the current `MouseState` containing coordinates and button press flags.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn current_state() -> MouseState {
     MOUSE_DRIVER.lock().state
 }
 
 /// Switches the mouse to interrupt-driven input (IRQ 12), once Hydra owns the PIC and IDT.
+///
+/// Unmasks IRQ 2 (cascade line) and IRQ 12 on the Slave PIC, activates interrupt mode in
+/// the driver state, and performs the wheel handshake without firmware interference.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn enable_irq() {
     {
         let mut mouse = MOUSE_DRIVER.lock();
@@ -406,7 +555,15 @@ pub fn enable_irq() {
     crate::arch::pic::unmask_irq(12);
 }
 
-/// IRQ 12: one byte from the auxiliary port.
+/// Handles incoming bytes from the auxiliary PS/2 port on IRQ 12 (IDT Vector 44).
+///
+/// Reads the byte from data port `0x60`, feeds it into the packet decoder, merges any
+/// unconsumed pending motion events, dispatches events to Linux evdev, and wakes
+/// waiting graphical tasks via the Wayland input wait queue.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn on_mouse_irq() {
     let mut data_port: Port<u8> = Port::new(PS2_DATA_PORT);
     let byte = unsafe { data_port.read() };

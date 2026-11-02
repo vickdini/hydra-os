@@ -81,6 +81,15 @@ struct Bo {
 }
 
 impl Bo {
+    /// Allocates physical frames for a new buffer object and assigns a virtual mmap offset.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Arc<Bo>)` on success, or `None` if allocation fails.
     fn new(size: u64) -> Option<Arc<Bo>> {
         let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         let mut frames = Vec::with_capacity(pages as usize);
@@ -103,6 +112,12 @@ impl Bo {
     }
 
     /// Copies `len` bytes at byte offset `off` to `dst`.
+    ///
+    /// # Arguments
+    ///
+    /// * `off` - Offset in bytes into buffer object.
+    /// * `dst` - Raw destination pointer.
+    /// * `len` - Number of bytes to copy.
     fn read(&self, mut off: u64, dst: *mut u8, len: usize) {
         let mut done = 0usize;
         while done < len && off < self.size {
@@ -196,6 +211,15 @@ unsafe impl Send for Kms {}
 static KMS: Mutex<Option<Kms>> = Mutex::new(None);
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
 
+/// Executes a closure with access to the global KMS subsystem.
+///
+/// # Arguments
+///
+/// * `f` - Closure taking a mutable reference to [`Kms`].
+///
+/// # Returns
+///
+/// Result of the closure execution.
 fn with_kms<R>(f: impl FnOnce(&mut Kms) -> R) -> R {
     let mut guard = KMS.lock();
     let kms = guard.get_or_insert_with(|| {
@@ -222,6 +246,10 @@ fn with_kms<R>(f: impl FnOnce(&mut Kms) -> R) -> R {
 }
 
 /// True while a DRM client shows a picture (the console and other compositors are hidden).
+///
+/// # Returns
+///
+/// `true` if a DRM client is displaying to the screen; `false` otherwise.
 pub fn showing() -> bool {
     with_kms(|k| k.screen.is_some())
 }
@@ -233,12 +261,20 @@ static SESSION_HIDDEN: AtomicBool = AtomicBool::new(false);
 static VTD_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// True while a DRM session runs but the console is shown (Ctrl+Alt+F2 returns to it).
+///
+/// # Returns
+///
+/// `true` if DRM session is active but hidden; `false` otherwise.
 pub fn session_hidden() -> bool {
     SESSION_HIDDEN.load(Ordering::Acquire)
 }
 
 /// Keyboard interrupt: asks the `vtd` task to switch between the session (`to_session`)
 /// and the console. The copying happens in task context, not in the interrupt.
+///
+/// # Arguments
+///
+/// * `to_session` - `true` to switch to graphical session; `false` to switch to text console.
 pub fn request_vt_switch(to_session: bool) {
     VT_REQUEST.store(if to_session { 2 } else { 1 }, Ordering::Release);
     VT_WQ.wake_all();
@@ -251,6 +287,7 @@ fn start_vtd() {
     }
 }
 
+/// Main loop for the `vtd` kernel task handling display switching.
 fn vtd_main() {
     loop {
         VT_WQ.register();
@@ -269,6 +306,11 @@ fn vtd_main() {
 }
 
 impl Kms {
+    /// Formats the current resolution into a 68-byte Linux `drm_mode_modeinfo` structure.
+    ///
+    /// # Returns
+    ///
+    /// 68-byte binary mode info record.
     fn mode(&self) -> [u8; 68] {
         let (w, h) = (self.width, self.height);
         let (hs, he, ht) = (w + 16, w + 16 + 96, w + 160);
@@ -288,6 +330,10 @@ impl Kms {
     }
 
     /// Takes the screen from the console (first picture of a session).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
     fn take_screen(&mut self) -> Result<(), i64> {
         if self.screen.is_some() {
             return Ok(());
@@ -340,6 +386,13 @@ impl Kms {
     }
 
     /// Copies rows `y0..y1`, columns `x0..x1` of the scanout framebuffer to the screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `x0` - Starting X column.
+    /// * `y0` - Starting Y row.
+    /// * `x1` - Ending X column (exclusive).
+    /// * `y1` - Ending Y row (exclusive).
     fn copy_rect(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
         let (screen, stride, bgr) = match self.screen {
             Some(s) => s,
@@ -455,6 +508,16 @@ pub struct DrmFile {
 }
 
 /// Opens minor `minor` (`card0` only).
+///
+/// # Arguments
+///
+/// * `minor` - Device minor number (`0` for `card0`).
+/// * `nonblock` - Initial non-blocking status.
+///
+/// # Returns
+///
+/// * `Ok(Arc<dyn CharDevice>)` on successful open.
+/// * `Err(-ENXIO)` if minor != 0.
 pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
     if minor != 0 {
         return Err(ENXIO);
@@ -495,20 +558,68 @@ impl Drop for DrmFile {
     }
 }
 
+/// Reads a 32-bit little-endian integer from `b` at `off`.
+///
+/// # Arguments
+///
+/// * `b` - Source buffer slice.
+/// * `off` - Starting byte offset.
+///
+/// # Returns
+///
+/// Decoded 32-bit value.
 fn get32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
 }
+
+/// Reads a 64-bit little-endian integer from `b` at `off`.
+///
+/// # Arguments
+///
+/// * `b` - Source buffer slice.
+/// * `off` - Starting byte offset.
+///
+/// # Returns
+///
+/// Decoded 64-bit value.
 fn get64(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
+
+/// Writes a 32-bit little-endian integer to `b` at `off`.
+///
+/// # Arguments
+///
+/// * `b` - Destination buffer slice.
+/// * `off` - Starting byte offset.
+/// * `v` - Value to write.
 fn put32(b: &mut [u8], off: usize, v: u32) {
     b[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
+
+/// Writes a 64-bit little-endian integer to `b` at `off`.
+///
+/// # Arguments
+///
+/// * `b` - Destination buffer slice.
+/// * `off` - Starting byte offset.
+/// * `v` - Value to write.
 fn put64(b: &mut [u8], off: usize, v: u64) {
     b[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Writes `items` to the user array at `ptr` if its capacity `cap` holds them all.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer.
+/// * `cap` - Maximum element count user allocated.
+/// * `items` - Elements to write.
+/// * `to_bytes` - Element serializer closure.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative Linux errno on error.
 fn put_array<T: Copy>(ptr: u64, cap: u32, items: &[T], to_bytes: impl Fn(T) -> Vec<u8>) -> Result<(), i64> {
     if ptr == 0 || (cap as usize) < items.len() || items.is_empty() {
         return Ok(());
@@ -520,15 +631,47 @@ fn put_array<T: Copy>(ptr: u64, cap: u32, items: &[T], to_bytes: impl Fn(T) -> V
     copy_out(ptr, &out)
 }
 
+/// Writes an array of 32-bit integers to user space.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer.
+/// * `cap` - User capacity.
+/// * `items` - Array elements.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` on error.
 fn u32s(ptr: u64, cap: u32, items: &[u32]) -> Result<(), i64> {
     put_array(ptr, cap, items, |v| v.to_le_bytes().to_vec())
 }
 
+/// Writes an array of 64-bit integers to user space.
+///
+/// # Arguments
+///
+/// * `ptr` - User pointer.
+/// * `cap` - User capacity.
+/// * `items` - Array elements.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` on error.
 fn u64s(ptr: u64, cap: u32, items: &[u64]) -> Result<(), i64> {
     put_array(ptr, cap, items, |v| v.to_le_bytes().to_vec())
 }
 
 /// Copies a string to a `drm_version`-style (length, pointer) pair.
+///
+/// # Arguments
+///
+/// * `b` - ioctl parameter buffer containing length and pointer fields.
+/// * `len_off` - Offset within buffer of the length field.
+/// * `s` - Source string slice.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `-EFAULT` on copy error.
 fn put_string(b: &mut [u8], len_off: usize, s: &str) -> Result<(), i64> {
     let cap = get64(b, len_off) as usize;
     let ptr = get64(b, len_off + 8);
@@ -540,11 +683,24 @@ fn put_string(b: &mut [u8], len_off: usize, s: &str) -> Result<(), i64> {
 }
 
 /// Microseconds on the monotonic clock (`CLOCK_MONOTONIC`, which libdrm assumes).
+///
+/// # Returns
+///
+/// Current monotonic time in microseconds.
 fn now_us() -> u64 {
     crate::arch::pit::ticks() * 10_000
 }
 
 /// Properties of an object: (ids, values).
+///
+/// # Arguments
+///
+/// * `k` - KMS state reference.
+/// * `obj` - DRM object identifier.
+///
+/// # Returns
+///
+/// `Some((property_ids, property_values))` if object exists, or `None`.
 fn object_props(k: &Kms, obj: u32) -> Option<(Vec<u32>, Vec<u64>)> {
     match obj {
         CONNECTOR_ID => Some((alloc::vec![PROP_DPMS, PROP_EDID, PROP_NON_DESKTOP], alloc::vec![k.dpms, 0, 0])),
@@ -556,14 +712,35 @@ fn object_props(k: &Kms, obj: u32) -> Option<(Vec<u32>, Vec<u64>)> {
 }
 
 impl DrmFile {
+    /// Checks whether this open file descriptor currently holds DRM master privileges.
+    ///
+    /// # Returns
+    ///
+    /// `true` if master; `false` otherwise.
     fn is_master(&self) -> bool {
         with_kms(|k| k.master == Some(self.id))
     }
 
+    /// Looks up a buffer object by its per-file handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Local handle index.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Arc<Bo>)` on success, or `Err(-ENOENT)` if handle not found.
     fn bo(&self, handle: u32) -> Result<Arc<Bo>, i64> {
         self.handles.lock().get(&handle).cloned().ok_or(ENOENT)
     }
 
+    /// Queues a vblank or page flip completion event for delivery to `read`.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Event type identifier.
+    /// * `user_data` - 64-bit user cookie.
+    /// * `crtc` - CRTC index.
     fn queue_event(&self, kind: u32, user_data: u64, crtc: u32) {
         let now = now_us();
         let mut ev = [0u8; 32];
@@ -578,6 +755,20 @@ impl DrmFile {
         self.wq.wake_all();
     }
 
+    /// Registers a new framebuffer wrapping an existing buffer object.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Buffer width in pixels.
+    /// * `height` - Buffer height in pixels.
+    /// * `format` - Pixel format (`DRM_FORMAT_XRGB8888`, etc.).
+    /// * `handle` - Local GEM handle.
+    /// * `pitch` - Stride in bytes.
+    /// * `offset` - Byte offset into buffer object.
+    ///
+    /// # Returns
+    ///
+    /// Newly assigned framebuffer ID on success, or negative errno on error.
     fn add_fb(&self, width: u32, height: u32, format: u32, handle: u32, pitch: u32, offset: u32) -> Result<u32, i64> {
         if format != FMT_XRGB8888 && format != FMT_ARGB8888 {
             return Err(EINVAL);
@@ -594,6 +785,16 @@ impl DrmFile {
         }))
     }
 
+    /// Primary ioctl command dispatch handler for DRM operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `nr` - ioctl command number.
+    /// * `b` - In/out ioctl argument buffer.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(result)` on success, or `Err(errno)` on error.
     fn handle(&self, nr: u64, b: &mut [u8]) -> Result<i64, i64> {
         match nr {
             0x00 => {
@@ -1148,6 +1349,16 @@ impl DrmFile {
         }
     }
 
+    /// Sets a DRM property value on an object (such as DPMS mode).
+    ///
+    /// # Arguments
+    ///
+    /// * `prop` - Property identifier.
+    /// * `value` - New property value.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(0)` on success, or a negative Linux errno on error.
     fn set_property(&self, prop: u32, value: u64) -> Result<i64, i64> {
         if !self.is_master() {
             return Err(EACCES);

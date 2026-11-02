@@ -61,11 +61,30 @@ pub mod fs {
         /// Symbolic links followed in one path at most (Linux `MAXSYMLINKS`).
         const SYMLOOP_MAX: usize = 40;
 
+        /// Splits a path into non-empty, non-dot directory components.
+        ///
+        /// # Arguments
+        /// * `path` - Byte slice representing the file path.
+        ///
+        /// # Returns
+        /// Vector of component byte vectors.
         fn components(path: &[u8]) -> Vec<Vec<u8>> {
             path.split(|&c| c == b'/').filter(|c| !c.is_empty() && *c != b".").map(|c| c.to_vec()).collect()
         }
 
         /// Resolves `path` relative to `base` (the pool root for absolute paths).
+        ///
+        /// # Arguments
+        /// * `s` - Active ZFS server.
+        /// * `base` - Base directory object ID.
+        /// * `path` - Path byte slice.
+        /// * `follow_last` - Whether to resolve trailing symlink.
+        ///
+        /// # Returns
+        /// Resolved object ID on success.
+        ///
+        /// # Errors
+        /// Returns negative Linux error code on resolution failure.
         pub fn resolve_at(s: &mut ZfsServer, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
             let root = s.root_obj();
             resolve_in(s, root, base, path, follow_last)
@@ -73,6 +92,19 @@ pub mod fs {
 
         /// Resolves `path` inside the `root` directory (a `chroot`), expanding symbolic links
         /// in every component and, when `follow_last` or with a trailing `/`, in the last.
+        ///
+        /// # Arguments
+        /// * `s` - Active ZFS server.
+        /// * `root` - Root directory object ID.
+        /// * `base` - Base directory object ID.
+        /// * `path` - Path byte slice.
+        /// * `follow_last` - Whether to resolve trailing symlink.
+        ///
+        /// # Returns
+        /// Resolved object ID on success.
+        ///
+        /// # Errors
+        /// Returns negative Linux error code on resolution failure.
         pub fn resolve_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
             if path.is_empty() {
                 return Err(ENOENT);
@@ -116,6 +148,17 @@ pub mod fs {
         }
 
         /// Resolves the parent directory of `path` and returns it with the last component.
+        ///
+        /// # Arguments
+        /// * `s` - Active ZFS server.
+        /// * `base` - Base directory object ID.
+        /// * `path` - Path byte slice.
+        ///
+        /// # Returns
+        /// Tuple of `(parent_object_id, component_name)` on success.
+        ///
+        /// # Errors
+        /// Returns negative Linux error code on resolution failure.
         pub fn resolve_parent_at(s: &mut ZfsServer, base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
             let root = s.root_obj();
             let trimmed = {
@@ -153,11 +196,21 @@ pub mod memory {
 
         static REFS: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
 
+        /// Computes memory layout for `pages` 4 KiB frames.
+        ///
+        /// # Arguments
+        /// * `pages` - Number of 4 KiB pages.
+        ///
+        /// # Returns
+        /// Page-aligned [`Layout`].
         fn layout(pages: usize) -> Layout {
             Layout::from_size_align(pages * 4096, 4096).unwrap()
         }
 
         /// A zeroed buffer with one reference.
+        ///
+        /// # Returns
+        /// `Some(PhysFrame)` containing allocated buffer on success, or `None`.
         pub fn alloc_user_frame() -> Option<PhysFrame<Size4KiB>> {
             let p = unsafe { alloc_zeroed(layout(1)) };
             if p.is_null() {
@@ -168,6 +221,9 @@ pub mod memory {
         }
 
         /// Adds a reference to a buffer.
+        ///
+        /// # Arguments
+        /// * `frame` - Physical frame representation of buffer.
         pub fn frame_ref_inc(frame: PhysFrame<Size4KiB>) {
             if let Some(r) = REFS.lock().get_mut(&frame.start_address().as_u64()) {
                 *r += 1;
@@ -175,6 +231,9 @@ pub mod memory {
         }
 
         /// Drops a reference; the buffer is freed with the last one.
+        ///
+        /// # Arguments
+        /// * `frame` - Physical frame representation of buffer.
         pub fn frame_ref_dec(frame: PhysFrame<Size4KiB>) {
             let addr = frame.start_address().as_u64();
             let mut refs = REFS.lock();
@@ -198,6 +257,12 @@ pub mod memory {
 
         impl Contiguous {
             /// Allocates `pages` contiguous zeroed pages (never freed).
+            ///
+            /// # Arguments
+            /// * `pages` - Number of contiguous 4 KiB pages to allocate.
+            ///
+            /// # Returns
+            /// `Some(PhysFrame)` pointing to base of range, or `None`.
             pub fn allocate_contiguous_frames(&mut self, pages: usize) -> Option<PhysFrame<Size4KiB>> {
                 let p = unsafe { alloc_zeroed(layout(pages)) };
                 (!p.is_null()).then(|| PhysFrame::containing_address(PhysAddr::new(p as u64)))
@@ -214,6 +279,9 @@ pub mod arch {
     /// Real-time clock interface.
     pub mod rtc {
         /// Wall-clock time: `(seconds since 1970, nanoseconds)`.
+        ///
+        /// # Returns
+        /// Tuple of `(seconds, nanoseconds)`.
         pub fn now() -> (u64, u32) {
             hydra_rt::sys::clock()
         }
@@ -235,11 +303,24 @@ pub mod ipc {
 
     impl Message {
         /// A message with no arguments.
+        ///
+        /// # Arguments
+        /// * `label` - Message operation label.
+        ///
+        /// # Returns
+        /// Initialized [`Message`] with zeroed arguments.
         pub fn new(label: u32) -> Self {
             Self { label, args: [0; 4] }
         }
 
         /// A message with arguments.
+        ///
+        /// # Arguments
+        /// * `label` - Message operation label.
+        /// * `args` - Array of 4 argument words.
+        ///
+        /// # Returns
+        /// Initialized [`Message`].
         pub fn with_args(label: u32, args: [u64; 4]) -> Self {
             Self { label, args }
         }
@@ -261,6 +342,12 @@ pub mod ipc {
         static BLOCK_WINDOW: AtomicU64 = AtomicU64::new(0);
 
         /// Maps the disk driver's window into this server.
+        ///
+        /// # Returns
+        /// `Ok(())` on success.
+        ///
+        /// # Errors
+        /// Returns negative error code on attachment failure.
         pub fn attach_block() -> Result<(), i64> {
             let addr = hydra_rt::sys::svc_attach(super::protocol::ENDPOINT_BLOCK_DEV)?;
             BLOCK_WINDOW.store(addr, Ordering::Release);
@@ -268,17 +355,40 @@ pub mod ipc {
         }
 
         /// Whether `endpoint` (the disk driver) can be called.
+        ///
+        /// # Arguments
+        /// * `endpoint` - Target endpoint ID.
+        ///
+        /// # Returns
+        /// `true` if online, `false` otherwise.
         pub fn is_online(endpoint: u32) -> bool {
             endpoint == super::protocol::ENDPOINT_BLOCK_DEV && BLOCK_WINDOW.load(Ordering::Acquire) != 0
         }
 
         /// The disk driver's window.
+        ///
+        /// # Arguments
+        /// * `endpoint` - Target endpoint ID.
+        ///
+        /// # Returns
+        /// `Some(&mut [u8])` slice of shared window memory, or `None`.
         pub fn window(endpoint: u32) -> Option<&'static mut [u8]> {
             let addr = BLOCK_WINDOW.load(Ordering::Acquire);
             (is_online(endpoint)).then(|| unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, WINDOW_SIZE) })
         }
 
         /// Calls the disk driver.
+        ///
+        /// # Arguments
+        /// * `endpoint` - Target endpoint ID.
+        /// * `request` - Request message.
+        /// * `timeout_ticks` - Timeout in ticks.
+        ///
+        /// # Returns
+        /// Reply [`Message`] on success.
+        ///
+        /// # Errors
+        /// Returns negative error code on failure or timeout.
         pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
             let r = hydra_rt::sys::svc_call(endpoint, hydra_rt::Message::new(request.label as u64, request.args), timeout_ticks)?;
             Ok(Message::with_args(r.label as u32, r.args))
@@ -291,6 +401,12 @@ pub mod task {
     /// Supervisor interface shim.
     pub mod supervisor {
         /// Not available here (the kernel restarts the driver when this server calls it).
+        ///
+        /// # Arguments
+        /// * `_endpoint` - Service endpoint ID.
+        ///
+        /// # Returns
+        /// Always returns `false`.
         pub fn revive(_endpoint: u32) -> bool {
             false
         }
@@ -334,26 +450,47 @@ pub mod compat {
             static COOKIE: AtomicU32 = AtomicU32::new(1);
 
             /// Events are always collected (the kernel drops those nobody watches).
+            ///
+            /// # Returns
+            /// Always returns `true`.
             pub fn active() -> bool {
                 true
             }
 
             /// Every directory may be watched (the kernel decides).
+            ///
+            /// # Arguments
+            /// * `_ino` - Inode number.
+            ///
+            /// # Returns
+            /// Always returns `true`.
             pub fn watched(_ino: u64) -> bool {
                 true
             }
 
             /// A cookie pairing a rename's two events.
+            ///
+            /// # Returns
+            /// Unique monotonically increasing event cookie.
             pub fn cookie() -> u32 {
                 COOKIE.fetch_add(1, Ordering::Relaxed)
             }
 
             /// Records an event for the reply.
+            ///
+            /// # Arguments
+            /// * `ino` - Target inode number.
+            /// * `mask` - Inotify event mask.
+            /// * `cookie` - Event pair cookie.
+            /// * `name` - Associated entry name.
             pub fn event(ino: u64, mask: u32, cookie: u32, name: &[u8]) {
                 EVENTS.lock().push(Event { ino, mask, cookie, name: name.to_vec() });
             }
 
             /// The events recorded since the last call.
+            ///
+            /// # Returns
+            /// Vector of recorded [`Event`] structs.
             pub fn take() -> Vec<Event> {
                 core::mem::take(&mut *EVENTS.lock())
             }
@@ -365,12 +502,27 @@ use zfs::fsproto::*;
 use zfs::server::{with_server, ZfsServer, ZFS_SERVER};
 
 /// Copies what the request encoded (it is overwritten by the reply).
+///
+/// # Arguments
+/// * `window` - Shared service window slice.
+/// * `len` - Length of parameters in bytes.
+///
+/// # Returns
+/// Byte vector copy of request payload.
 fn params(window: &[u8], len: usize) -> Vec<u8> {
     window[..len.min(window.len())].to_vec()
 }
 
 /// Serves one request: returns `(status, value, reply bytes)`, the reply data written to
 /// `out`.
+///
+/// # Arguments
+/// * `op` - Filesystem operation code.
+/// * `req` - Request parameter byte slice.
+/// * `out` - Destination reply byte buffer.
+///
+/// # Returns
+/// Tuple of `(status_code, return_value, reply_byte_length)`.
 fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
     let mut r = Reader::new(req);
     let mut w = Writer::new(out);
@@ -560,6 +712,10 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
     }
 }
 
+/// Entry point of the ZFS userspace file server daemon.
+///
+/// # Arguments
+/// * `_args` - Command-line argument strings.
 fn main(_args: &[&str]) {
     if let Err(e) = zfs_init() {
         hydra_rt::println!("[zfs-server] {}", e);
@@ -592,6 +748,12 @@ fn main(_args: &[&str]) {
 }
 
 /// Attaches the disk driver's window and imports the pool.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Static error string if disk driver is unavailable.
 fn zfs_init() -> Result<(), &'static str> {
     // The disk driver starts first; it may still be coming up
     let mut tries = 0;

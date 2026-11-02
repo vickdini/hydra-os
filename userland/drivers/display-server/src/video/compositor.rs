@@ -70,6 +70,14 @@ impl Color {
     }
 
     /// Performs linear alpha blending between a background pixel and a foreground pixel with alpha.
+    ///
+    /// # Arguments
+    /// * `bg` - Background pixel color.
+    /// * `fg` - Foreground pixel color.
+    /// * `alpha` - Alpha blending factor (0 = full bg, 255 = full fg).
+    ///
+    /// # Returns
+    /// Blended 32-bit RGB color.
     #[inline(always)]
     pub fn blend(bg: u32, fg: u32, alpha: u8) -> u32 {
         if alpha == 255 {
@@ -99,6 +107,13 @@ pub struct Compositor {
 
 impl Compositor {
     /// Creates a new off-screen canvas with the given pixel dimensions.
+    ///
+    /// # Arguments
+    /// * `width` - Canvas width in pixels.
+    /// * `height` - Canvas height in pixels.
+    ///
+    /// # Returns
+    /// Newly allocated [`Compositor`] instance.
     pub fn new(width: usize, height: usize) -> Self {
         let total = width.saturating_mul(height);
         Self {
@@ -109,31 +124,51 @@ impl Compositor {
     }
 
     /// Returns the horizontal canvas width in pixels.
+    ///
+    /// # Returns
+    /// Canvas width in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
     /// Returns the vertical canvas height in pixels.
+    ///
+    /// # Returns
+    /// Canvas height in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
 
     /// Sets the entire canvas to a uniform background color.
+    ///
+    /// # Arguments
+    /// * `color` - 32-bit ARGB fill color.
     pub fn clear(&mut self, color: u32) {
         self.pixels.fill(color);
     }
 
     /// Returns an immutable slice of the 32-bit ARGB pixel buffer.
+    ///
+    /// # Returns
+    /// Slice of 32-bit pixel words.
     pub fn pixels(&self) -> &[u32] {
         &self.pixels
     }
 
     /// Returns a mutable slice of the 32-bit ARGB pixel buffer.
+    ///
+    /// # Returns
+    /// Mutable slice of 32-bit pixel words.
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         &mut self.pixels
     }
 
     /// Sets a single pixel to the given color without bounds checking.
+    ///
+    /// # Arguments
+    /// * `x` - X coordinate.
+    /// * `y` - Y coordinate.
+    /// * `color` - 32-bit ARGB color.
     #[inline(always)]
     pub fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x < self.width && y < self.height {
@@ -142,6 +177,11 @@ impl Compositor {
     }
 
     /// Blends a pixel using its embedded alpha channel into the canvas.
+    ///
+    /// # Arguments
+    /// * `x` - X coordinate.
+    /// * `y` - Y coordinate.
+    /// * `color` - 32-bit ARGB color with embedded alpha.
     #[inline(always)]
     pub fn blend_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x < self.width && y < self.height {
@@ -153,6 +193,13 @@ impl Compositor {
     }
 
     /// Fills an opaque rectangular region.
+    ///
+    /// # Arguments
+    /// * `x` - Left coordinate.
+    /// * `y` - Top coordinate.
+    /// * `w` - Rectangle width.
+    /// * `h` - Rectangle height.
+    /// * `color` - 32-bit ARGB color.
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         let x_end = (x + w).min(self.width);
         let y_end = (y + h).min(self.height);
@@ -166,6 +213,14 @@ impl Compositor {
     }
 
     /// Fills a translucent rectangular region with global alpha blending.
+    ///
+    /// # Arguments
+    /// * `x` - Left coordinate.
+    /// * `y` - Top coordinate.
+    /// * `w` - Rectangle width.
+    /// * `h` - Rectangle height.
+    /// * `color` - 32-bit ARGB color.
+    /// * `alpha` - Global alpha blend factor.
     pub fn fill_rect_alpha(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u8) {
         let x_end = (x + w).min(self.width);
         let y_end = (y + h).min(self.height);
@@ -181,6 +236,14 @@ impl Compositor {
     }
 
     /// Draws an outlined rectangular border.
+    ///
+    /// # Arguments
+    /// * `x` - Left coordinate.
+    /// * `y` - Top coordinate.
+    /// * `w` - Rectangle width.
+    /// * `h` - Rectangle height.
+    /// * `color` - Border color.
+    /// * `border` - Border line width in pixels.
     pub fn draw_rect_outline(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32, border: usize) {
         if w == 0 || h == 0 || border == 0 {
             return;
@@ -194,6 +257,14 @@ impl Compositor {
     }
 
     /// Fills a vertical linear color gradient between two colors.
+    ///
+    /// # Arguments
+    /// * `x` - Left coordinate.
+    /// * `y` - Top coordinate.
+    /// * `w` - Rectangle width.
+    /// * `h` - Rectangle height.
+    /// * `top_col` - Top border color.
+    /// * `bottom_col` - Bottom border color.
     pub fn draw_gradient_v(&mut self, x: usize, y: usize, w: usize, h: usize, top_col: u32, bottom_col: u32) {
         if h == 0 {
             return;
@@ -226,6 +297,13 @@ impl Compositor {
     }
 
     /// Renders a single 8x16 font glyph.
+    ///
+    /// # Arguments
+    /// * `x` - X coordinate.
+    /// * `y` - Y coordinate.
+    /// * `c` - Character to render.
+    /// * `fg` - Foreground text color.
+    /// * `bg` - Optional background color.
     pub fn draw_char(&mut self, x: usize, y: usize, c: char, fg: u32, bg: Option<u32>) {
         if x + FONT_WIDTH > self.width || y + FONT_HEIGHT > self.height {
             return;
@@ -250,6 +328,13 @@ impl Compositor {
     }
 
     /// Renders an ASCII text string at the specified coordinates.
+    ///
+    /// # Arguments
+    /// * `x` - Starting X coordinate.
+    /// * `y` - Starting Y coordinate.
+    /// * `text` - String slice to render.
+    /// * `fg` - Foreground text color.
+    /// * `bg` - Optional background fill color.
     pub fn draw_string(&mut self, mut x: usize, y: usize, text: &str, fg: u32, bg: Option<u32>) {
         for c in text.chars() {
             if x + FONT_WIDTH > self.width {
@@ -261,6 +346,10 @@ impl Compositor {
     }
 
     /// Renders the mouse cursor arrow sprite at `(cx, cy)` with a 1px dark shadow outline.
+    ///
+    /// # Arguments
+    /// * `cx` - Cursor tip X coordinate.
+    /// * `cy` - Cursor tip Y coordinate.
     pub fn draw_cursor(&mut self, cx: usize, cy: usize) {
         // High-definition 12x19 cursor sprite bitmap:
         // 'X' = black outline (#111111), '.' = white interior (#FFFFFF), ' ' = transparent
@@ -310,8 +399,14 @@ impl Compositor {
 
     /// Flushes the complete in-memory canvas directly to raw linear video memory.
     ///
-    /// # Safety
+    /// # Arguments
+    /// * `dst_base` - Pointer to destination framebuffer memory.
+    /// * `dst_width` - Destination screen width.
+    /// * `dst_height` - Destination screen height.
+    /// * `dst_stride` - Destination line stride in pixels.
+    /// * `dst_is_bgr` - Whether destination format requires BGR conversion.
     ///
+    /// # Safety
     /// The caller must ensure that `dst_base` points to a valid, writable linear framebuffer
     /// region in the current address space with at least `dst_stride * dst_height * 4` bytes.
     pub unsafe fn flip_raw(
@@ -351,6 +446,9 @@ impl Compositor {
     }
 
     /// Flushes the complete in-memory canvas to the physical hardware Framebuffer.
+    ///
+    /// # Arguments
+    /// * `fb` - Target [`Framebuffer`] to update.
     pub fn flip(&self, fb: &mut Framebuffer) {
         unsafe {
             self.flip_raw(

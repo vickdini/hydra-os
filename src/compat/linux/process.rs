@@ -49,6 +49,14 @@ const RLIMIT_NOFILE: u64 = 7;
 const RLIMIT_NLIMITS: u64 = 16;
 
 /// Default (soft, hard) limit for a resource, matching a stock Linux login session.
+///
+/// # Arguments
+///
+/// * `resource` - Linux resource identifier (`RLIMIT_*`).
+///
+/// # Returns
+///
+/// `(soft_limit, hard_limit)` tuple for the specified resource.
 fn default_limit(resource: u64) -> (u64, u64) {
     match resource {
         RLIMIT_STACK => (8 * 1024 * 1024, RLIM_INFINITY),
@@ -57,6 +65,16 @@ fn default_limit(resource: u64) -> (u64, u64) {
     }
 }
 
+/// Writes a 16-byte `(rlim_cur, rlim_max)` pair into user virtual memory.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to `struct rlimit` (or `0` to ignore).
+/// * `limit` - `(soft, hard)` limit values to write.
+///
+/// # Returns
+///
+/// `0` on success, or `-EFAULT` if user memory cannot be prefaulted.
 fn write_rlimit(ptr: u64, limit: (u64, u64)) -> i64 {
     if ptr == 0 {
         return 0;
@@ -72,10 +90,24 @@ fn write_rlimit(ptr: u64, limit: (u64, u64)) -> i64 {
 }
 
 /// The calling process's auxiliary vector.
+///
+/// # Returns
+///
+/// Raw ELF auxiliary vector bytes stored in the current process's memory manager.
 pub fn current_auxv() -> alloc::vec::Vec<u8> {
     super::mm::current_mm().map(|mm| mm.lock().auxv.clone()).unwrap_or_default()
 }
 
+/// Copies byte data to user virtual address space after prefaulting.
+///
+/// # Arguments
+///
+/// * `ptr` - User destination address.
+/// * `data` - Source bytes to copy.
+///
+/// # Returns
+///
+/// `0` on success, or `-EFAULT` if destination pages cannot be mapped.
 fn copy_out(ptr: u64, data: &[u8]) -> i64 {
     if !crate::memory::vm::prefault_current(ptr, data.len() as u64, true) {
         return EFAULT;
@@ -84,6 +116,11 @@ fn copy_out(ptr: u64, data: &[u8]) -> i64 {
     0
 }
 
+/// Returns the thread group ID (process ID) of the current task.
+///
+/// # Returns
+///
+/// The current thread group ID (or `1` as fallback).
 fn current_tgid() -> u64 {
     crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(1)
 }
@@ -95,6 +132,15 @@ static SLEEP_DEADLINES: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = sp
 
 /// Sleeps until `deadline_ns` (boot clock). If a signal interrupts the sleep, the remaining
 /// time is written to `rem` (when given) and the call reports `ERESTART_RESTARTBLOCK`.
+///
+/// # Arguments
+///
+/// * `deadline_ns` - Absolute monotonic deadline in nanoseconds.
+/// * `rem` - Optional user pointer to write remaining duration if interrupted (`0` if null).
+///
+/// # Returns
+///
+/// `0` if full duration elapsed, or `-ERESTART_RESTARTBLOCK` if interrupted by a signal.
 fn sleep_until(deadline_ns: u64, rem: u64) -> i64 {
     loop {
         let now = crate::arch::pit::ticks() * 10_000_000;
@@ -117,6 +163,15 @@ fn sleep_until(deadline_ns: u64, rem: u64) -> i64 {
     }
 }
 
+/// Reads a 16-byte `struct timespec` from user space and converts it to nanoseconds.
+///
+/// # Arguments
+///
+/// * `ptr` - User virtual pointer to `struct timespec`.
+///
+/// # Returns
+///
+/// `Some(nanoseconds)` if valid, or `None` if invalid or memory cannot be accessed.
 fn read_timespec_ns(ptr: u64) -> Option<u64> {
     if !crate::memory::vm::prefault_current(ptr, 16, false) {
         return None;
@@ -129,6 +184,16 @@ fn read_timespec_ns(ptr: u64) -> Option<u64> {
 }
 
 /// Handles process-attribute system calls; `None` if `num` is not one of them.
+///
+/// # Arguments
+///
+/// * `num` - System call number.
+/// * `a` - System call argument register array `[arg0..arg5]`.
+///
+/// # Returns
+///
+/// * `Some(result)` if the system call is handled by this dispatcher.
+/// * `None` if `num` does not belong to process-attribute system calls.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     Some(match num {
         NR_SET_ROBUST_LIST => {

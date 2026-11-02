@@ -62,6 +62,13 @@ pub struct VideoConsole {
 
 impl VideoConsole {
     /// Creates a new VideoConsole wrapping the given Framebuffer.
+    ///
+    /// # Arguments
+    /// * `framebuffer` - Framebuffer instance used for text rendering.
+    ///
+    /// # Returns
+    ///
+    /// A new initialized [`VideoConsole`] instance.
     pub fn new(framebuffer: Framebuffer) -> Self {
         let max_cols = framebuffer.width() / FONT_WIDTH;
         let max_rows = framebuffer.height() / FONT_HEIGHT;
@@ -90,21 +97,37 @@ impl VideoConsole {
     }
 
     /// Returns the total number of character columns supported across the screen.
+    ///
+    /// # Returns
+    ///
+    /// Maximum character columns.
     pub fn cols(&self) -> usize {
         self.max_cols
     }
 
     /// Returns the total number of character rows supported across the screen.
+    ///
+    /// # Returns
+    ///
+    /// Maximum character rows.
     pub fn rows(&self) -> usize {
         self.max_rows
     }
 
     /// Returns the active `(col, row)` text cursor coordinates.
+    ///
+    /// # Returns
+    ///
+    /// The `(col, row)` tuple of the cursor.
     pub fn cursor_pos(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
     }
 
     /// Updates foreground and background RGB colors for subsequently rendered text.
+    ///
+    /// # Arguments
+    /// * `fg` - Foreground text color tuple.
+    /// * `bg` - Background color tuple.
     pub fn set_color(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         self.default_fg = fg;
         self.default_bg = bg;
@@ -112,6 +135,16 @@ impl VideoConsole {
         self.bg = bg;
     }
 
+    /// Computes the pixel bounding box `(x, y, w, h)` for the cursor.
+    ///
+    /// # Arguments
+    /// * `col` - Column index.
+    /// * `row` - Row index.
+    /// * `shape` - Cursor visual shape.
+    ///
+    /// # Returns
+    ///
+    /// A pixel coordinate tuple `(x, y, w, h)`.
     fn cursor_rect(&self, col: usize, row: usize, shape: CursorShape) -> (usize, usize, usize, usize) {
         let col = col.min(self.max_cols.saturating_sub(1));
         let row = row.min(self.max_rows.saturating_sub(1));
@@ -173,6 +206,9 @@ impl VideoConsole {
     }
 
     /// Enables or disables the visual cursor.
+    ///
+    /// # Arguments
+    /// * `enabled` - `true` to display the cursor, `false` to hide it.
     pub fn set_cursor_enabled(&mut self, enabled: bool) {
         if self.cursor_enabled != enabled {
             self.cursor_enabled = enabled;
@@ -183,11 +219,18 @@ impl VideoConsole {
     }
 
     /// Returns whether the visual cursor is enabled.
+    ///
+    /// # Returns
+    ///
+    /// `true` if enabled, `false` otherwise.
     pub fn is_cursor_enabled(&self) -> bool {
         self.cursor_enabled
     }
 
     /// Configures the cursor rendering shape (Underline, Block, or Bar).
+    ///
+    /// # Arguments
+    /// * `shape` - Visual cursor shape to set.
     pub fn set_cursor_shape(&mut self, shape: CursorShape) {
         if self.cursor_shape != shape {
             let was_drawn = self.cursor_drawn;
@@ -202,11 +245,19 @@ impl VideoConsole {
     }
 
     /// Returns the current cursor rendering shape.
+    ///
+    /// # Returns
+    ///
+    /// The current [`CursorShape`].
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
     }
 
     /// Moves the cursor to the specified column and row coordinate.
+    ///
+    /// # Arguments
+    /// * `col` - New column coordinate (0-indexed).
+    /// * `row` - New row coordinate (0-indexed).
     pub fn set_cursor_pos(&mut self, col: usize, row: usize) {
         let was_drawn = self.cursor_drawn;
         if was_drawn {
@@ -243,6 +294,9 @@ impl VideoConsole {
     }
 
     /// Renders a single character or processes a control byte (`\n`, `\r`, `\t`, backspace).
+    ///
+    /// # Arguments
+    /// * `c` - Character to render or process.
     pub fn write_char(&mut self, c: char) {
         if self.ansi_feed(c) {
             return;
@@ -302,6 +356,9 @@ impl VideoConsole {
     }
 
     /// Writes a UTF-8 string slice to the graphical console.
+    ///
+    /// # Arguments
+    /// * `s` - String slice to render.
     pub fn write_str(&mut self, s: &str) {
         for c in s.chars() {
             self.write_char(c);
@@ -309,6 +366,10 @@ impl VideoConsole {
     }
 
     /// Obtains a mutable reference to the underlying linear [`Framebuffer`].
+    ///
+    /// # Returns
+    ///
+    /// Mutable reference to the internal [`Framebuffer`].
     pub fn framebuffer_mut(&mut self) -> &mut Framebuffer {
         if self.cursor_drawn {
             self.hide_cursor();
@@ -317,12 +378,24 @@ impl VideoConsole {
     }
 
     /// Obtains an immutable reference to the underlying linear [`Framebuffer`].
+    ///
+    /// # Returns
+    ///
+    /// Immutable reference to the internal [`Framebuffer`].
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.framebuffer
     }
 }
 
 impl Write for VideoConsole {
+    /// Formats a string slice to the video console.
+    ///
+    /// # Arguments
+    /// * `s` - String slice to write.
+    ///
+    /// # Returns
+    ///
+    /// `fmt::Result` indicating formatting success.
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_str(s);
         Ok(())
@@ -330,6 +403,10 @@ impl Write for VideoConsole {
 }
 
 /// Returns true if the autonomous video console has been initialized.
+///
+/// # Returns
+///
+/// `true` if active, `false` otherwise.
 pub fn is_active() -> bool {
     VIDEO_CONSOLE.lock().is_some()
 }
@@ -341,6 +418,10 @@ static SHADOW: Mutex<Option<(alloc::vec::Vec<u8>, usize)>> = Mutex::new(None);
 /// Gives the screen to a compositor: the console keeps drawing, into a shadow copy of
 /// the framebuffer. Returns the real framebuffer (address, width, height, stride in
 /// pixels, BGR order) for the compositor to draw on.
+///
+/// # Returns
+///
+/// `Some((addr, width, height, stride, is_bgr))` if video console is active, or `None`.
 pub fn release_display() -> Option<(*mut u8, usize, usize, usize, bool)> {
     let mut guard = VIDEO_CONSOLE.lock();
     let console = guard.as_mut()?;
@@ -374,11 +455,18 @@ pub fn reclaim_display() {
 }
 
 /// True while a compositor owns the screen.
+///
+/// # Returns
+///
+/// `true` if display is currently released to compositor, `false` otherwise.
 pub fn display_released() -> bool {
     SHADOW.lock().is_some()
 }
 
 /// Writes a string to the autonomous video console if active.
+///
+/// # Arguments
+/// * `s` - String slice to output.
 pub fn write_str(s: &str) {
     let mut guard = VIDEO_CONSOLE.lock();
     if let Some(ref mut console) = *guard {
@@ -387,6 +475,10 @@ pub fn write_str(s: &str) {
 }
 
 /// Sets the current foreground and background colors for the autonomous video console.
+///
+/// # Arguments
+/// * `fg` - Foreground color tuple.
+/// * `bg` - Background color tuple.
 pub fn set_colors(fg: (u8, u8, u8), bg: (u8, u8, u8)) {
     let mut guard = VIDEO_CONSOLE.lock();
     if let Some(ref mut console) = *guard {
@@ -403,6 +495,10 @@ pub fn clear_screen() {
 }
 
 /// Returns the current (col, row) of the video console cursor.
+///
+/// # Returns
+///
+/// A `(col, row)` tuple of the cursor coordinates.
 pub fn cursor_position() -> (usize, usize) {
     let guard = VIDEO_CONSOLE.lock();
     if let Some(ref console) = *guard {
@@ -413,6 +509,10 @@ pub fn cursor_position() -> (usize, usize) {
 }
 
 /// Sets the current (col, row) of the video console cursor.
+///
+/// # Arguments
+/// * `col` - Target column coordinate.
+/// * `row` - Target row coordinate.
 pub fn set_cursor_position(col: usize, row: usize) {
     let mut guard = VIDEO_CONSOLE.lock();
     if let Some(ref mut console) = *guard {
@@ -421,6 +521,10 @@ pub fn set_cursor_position(col: usize, row: usize) {
 }
 
 /// Returns the (cols, rows) dimensions of the video console matrix.
+///
+/// # Returns
+///
+/// A `(cols, rows)` tuple indicating terminal dimensions.
 pub fn dimensions() -> (usize, usize) {
     let guard = VIDEO_CONSOLE.lock();
     if let Some(ref console) = *guard {
@@ -455,6 +559,9 @@ pub fn toggle_cursor() {
 }
 
 /// Enables or disables the visual cursor.
+///
+/// # Arguments
+/// * `enabled` - `true` to enable, `false` to disable cursor rendering.
 pub fn set_cursor_enabled(enabled: bool) {
     let mut guard = VIDEO_CONSOLE.lock();
     if let Some(ref mut console) = *guard {
@@ -463,6 +570,10 @@ pub fn set_cursor_enabled(enabled: bool) {
 }
 
 /// Returns whether the visual cursor is enabled.
+///
+/// # Returns
+///
+/// `true` if cursor is enabled, `false` otherwise.
 pub fn is_cursor_enabled() -> bool {
     let guard = VIDEO_CONSOLE.lock();
     if let Some(ref console) = *guard {
@@ -473,6 +584,9 @@ pub fn is_cursor_enabled() -> bool {
 }
 
 /// Sets the visual cursor rendering shape.
+///
+/// # Arguments
+/// * `shape` - Desired [`CursorShape`].
 pub fn set_cursor_shape(shape: CursorShape) {
     let mut guard = VIDEO_CONSOLE.lock();
     if let Some(ref mut console) = *guard {
@@ -481,6 +595,10 @@ pub fn set_cursor_shape(shape: CursorShape) {
 }
 
 /// Returns the current cursor rendering shape.
+///
+/// # Returns
+///
+/// The current [`CursorShape`].
 pub fn cursor_shape() -> CursorShape {
     let guard = VIDEO_CONSOLE.lock();
     if let Some(ref console) = *guard {
@@ -522,6 +640,13 @@ const ANSI_COLORS: [(u8, u8, u8); 16] = [
 
 impl VideoConsole {
     /// Consumes `c` if it is part of an escape sequence. Returns true when handled.
+    ///
+    /// # Arguments
+    /// * `c` - Input character to process.
+    ///
+    /// # Returns
+    ///
+    /// `true` if consumed by the ANSI state machine, `false` if it should be displayed.
     fn ansi_feed(&mut self, c: char) -> bool {
         match self.esc_state {
             EscState::Ground => {
@@ -571,6 +696,15 @@ impl VideoConsole {
         }
     }
 
+    /// Retrieves a numerical parameter from the CSI sequence with a fallback default.
+    ///
+    /// # Arguments
+    /// * `i` - Parameter index in the escape buffer.
+    /// * `default` - Default value if omitted or zero.
+    ///
+    /// # Returns
+    ///
+    /// The decoded parameter value or `default`.
     fn csi_param(&self, i: usize, default: usize) -> usize {
         let v = self.esc_params[i] as usize;
         if v == 0 {
@@ -581,6 +715,11 @@ impl VideoConsole {
     }
 
     /// Paints columns `from..to` of row `row` with the background colour.
+    ///
+    /// # Arguments
+    /// * `row` - Row index.
+    /// * `from` - Starting column index.
+    /// * `to` - Ending column index (exclusive).
     fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
         if from >= to {
             return;
@@ -596,6 +735,11 @@ impl VideoConsole {
         );
     }
 
+    /// Dispatches a completed CSI escape command.
+    ///
+    /// # Arguments
+    /// * `cmd` - Command character (e.g. 'm', 'H', 'J').
+    /// * `nparams` - Number of parsed parameters.
     fn csi_dispatch(&mut self, cmd: char, nparams: usize) {
         if self.cursor_drawn {
             self.hide_cursor();

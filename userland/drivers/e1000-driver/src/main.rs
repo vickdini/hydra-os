@@ -110,18 +110,44 @@ const TX_BUF_OFF: usize = RX_BUF_OFF + NUM_RX * BUF;
 const DMA_LEN: usize = TX_BUF_OFF + NUM_TX * BUF;
 
 impl Nic {
+    /// Reads a 32-bit MMIO register from the controller.
+    ///
+    /// # Arguments
+    /// * `reg` - Register byte offset.
+    ///
+    /// # Returns
+    /// 32-bit register value.
     fn read(&self, reg: usize) -> u32 {
         unsafe { core::ptr::read_volatile(self.regs.add(reg) as *const u32) }
     }
 
+    /// Writes a 32-bit MMIO register on the controller.
+    ///
+    /// # Arguments
+    /// * `reg` - Register byte offset.
+    /// * `v` - Value to write.
     fn write(&self, reg: usize, v: u32) {
         unsafe { core::ptr::write_volatile(self.regs.add(reg) as *mut u32, v) }
     }
 
+    /// Returns a pointer to the receive descriptor at index `i`.
+    ///
+    /// # Arguments
+    /// * `i` - Descriptor ring index.
+    ///
+    /// # Returns
+    /// Raw pointer to descriptor structure.
     fn rx_desc(&self, i: usize) -> *mut Desc {
         unsafe { self.mem.add(RX_DESC_OFF + i * 16) as *mut Desc }
     }
 
+    /// Returns a pointer to the transmit descriptor at index `i`.
+    ///
+    /// # Arguments
+    /// * `i` - Descriptor ring index.
+    ///
+    /// # Returns
+    /// Raw pointer to descriptor structure.
     fn tx_desc(&self, i: usize) -> *mut Desc {
         unsafe { self.mem.add(TX_DESC_OFF + i * 16) as *mut Desc }
     }
@@ -189,12 +215,19 @@ impl Nic {
         }
     }
 
+    /// Checks whether link is established.
+    ///
+    /// # Returns
+    /// `true` if link is up, `false` otherwise.
     fn link_up(&self) -> bool {
         self.read(REG_STATUS) & STATUS_LU != 0
     }
 
     /// Routes the adapter's interrupt to this driver and enables the causes the kernel's
     /// network task waits for.
+    ///
+    /// # Arguments
+    /// * `irq` - Hardware IRQ line number.
     fn enable_interrupts(&mut self, irq: u8) {
         if sys::irq_register(irq).is_err() {
             println!("[e1000-driver] interrupt line {} unavailable; the network is polled", irq);
@@ -206,6 +239,16 @@ impl Nic {
         self.write(REG_IMS, INT_RXT0 | INT_RXO | INT_RXDMT0 | INT_LSC);
     }
 
+    /// Transmits an Ethernet frame via DMA.
+    ///
+    /// # Arguments
+    /// * `frame` - Raw Ethernet frame bytes.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string if frame length is invalid or transmit times out.
     fn transmit(&mut self, frame: &[u8]) -> Result<(), &'static str> {
         if frame.is_empty() || frame.len() > BUF {
             return Err("bad frame length");
@@ -233,6 +276,12 @@ impl Nic {
 
     /// Moves received frames into `out` (length-prefixed); returns how many. Acknowledges
     /// the interrupt and unmasks the line.
+    ///
+    /// # Arguments
+    /// * `out` - Destination buffer to store received frames.
+    ///
+    /// # Returns
+    /// Count of complete frames stored.
     fn receive(&mut self, out: &mut [u8]) -> usize {
         self.read(REG_ICR); // acknowledge: the adapter stops asserting the line
         let (mut count, mut at) = (0, 0);
@@ -262,11 +311,25 @@ impl Nic {
     }
 }
 
+/// Constructs a network service reply message.
+///
+/// # Arguments
+/// * `args` - Array of 4 argument words.
+///
+/// # Returns
+/// Formatted reply [`Message`].
 fn reply(args: [u64; 4]) -> Message {
     Message::new(MSG_NET_REPLY as u64, args)
 }
 
 /// Value of a `key=<number>` argument (decimal or `0x` hex).
+///
+/// # Arguments
+/// * `args` - Argument string list.
+/// * `key` - Key name to search for.
+///
+/// # Returns
+/// Parsed integer value if found, or `None`.
 fn arg(args: &[&str], key: &str) -> Option<u64> {
     let v = args.iter().find_map(|a| a.strip_prefix(key)?.strip_prefix('='))?;
     match v.strip_prefix("0x") {
@@ -275,6 +338,10 @@ fn arg(args: &[&str], key: &str) -> Option<u64> {
     }
 }
 
+/// Driver entry point that configures the Intel 8254x NIC and services packet I/O requests.
+///
+/// # Arguments
+/// * `args` - Command-line argument strings.
 fn main(args: &[&str]) {
     let Some(bar0) = arg(args, "bar0") else {
         println!("[e1000-driver] no adapter given (bar0=...)");

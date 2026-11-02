@@ -620,6 +620,13 @@ pub fn read_line(prompt: &str, buf: &mut [u8], state: &mut ShellState) -> Option
 }
 
 /// Handles Zsh-style Tab completion for commands and file paths.
+///
+/// # Arguments
+/// * `prompt` - Current shell prompt string slice.
+/// * `buf` - Line editing byte buffer.
+/// * `len` - Total length in bytes of the text currently in `buf`.
+/// * `cursor_pos` - Current cursor column index within `buf`.
+/// * `state` - Reference to the active [`ShellState`].
 fn handle_tab_completion(
     prompt: &str,
     buf: &mut [u8],

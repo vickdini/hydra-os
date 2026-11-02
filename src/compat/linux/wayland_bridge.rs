@@ -229,6 +229,14 @@ pub struct WaylandSurfaceState {
 
 impl WaylandSurfaceState {
     /// Creates a new unconfigured [`WaylandSurfaceState`] with the given Wayland object `id`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Wayland object ID for the new surface.
+    ///
+    /// # Returns
+    ///
+    /// Initialized [`WaylandSurfaceState`] instance.
     pub fn new(id: u32) -> Self {
         Self {
             id,
@@ -284,6 +292,14 @@ pub struct WaylandClientSession {
 
 impl WaylandClientSession {
     /// Creates a new [`WaylandClientSession`] wrapping an accepted client `socket`.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Shared handle to the accepted client socket.
+    ///
+    /// # Returns
+    ///
+    /// A new [`WaylandClientSession`] instance.
     pub fn new(socket: Arc<Mutex<UnixSocket>>) -> Self {
         Self {
             socket,
@@ -318,6 +334,10 @@ pub struct WaylandBridge {
 
 impl WaylandBridge {
     /// Creates an empty [`WaylandBridge`] with `next_serial` initialized to `1`.
+    ///
+    /// # Returns
+    ///
+    /// A default initialized [`WaylandBridge`].
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
@@ -332,6 +352,11 @@ pub static WAYLAND_BRIDGE: Mutex<Option<WaylandBridge>> = Mutex::new(None);
 pub static SIMULATED_CLICKS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
 /// Injects a simulated mouse click event at screen coordinates `(x, y)` for interactive testing and automation.
+///
+/// # Arguments
+///
+/// * `x` - Horizontal screen coordinate in pixels.
+/// * `y` - Vertical screen coordinate in pixels.
 pub fn inject_simulated_click(x: usize, y: usize) {
     SIMULATED_CLICKS.lock().push((x, y));
 }
@@ -570,6 +595,13 @@ pub fn dispatch_wayland_events() {
 // -----------------------------------------------------------------------------
 
 /// Appends an 8-byte Wayland wire protocol message header (`object_id`, `opcode`, and total length) to `buf`.
+///
+/// # Arguments
+///
+/// * `buf` - Destination buffer to append to.
+/// * `object_id` - Wayland target object ID.
+/// * `opcode` - Message opcode.
+/// * `payload_len` - Byte length of the message payload.
 fn write_msg_header(buf: &mut Vec<u8>, object_id: u32, opcode: u16, payload_len: usize) {
     let total_len = (8 + payload_len) as u32;
     let op_len = ((total_len as u32) << 16) | (opcode as u32);
@@ -578,16 +610,31 @@ fn write_msg_header(buf: &mut Vec<u8>, object_id: u32, opcode: u16, payload_len:
 }
 
 /// Appends a native-endian `u32` value to a Wayland wire buffer.
+///
+/// # Arguments
+///
+/// * `buf` - Destination buffer.
+/// * `val` - 32-bit unsigned value to append.
 fn write_u32(buf: &mut Vec<u8>, val: u32) {
     buf.extend_from_slice(&val.to_ne_bytes());
 }
 
 /// Appends a native-endian `i32` value to a Wayland wire buffer.
+///
+/// # Arguments
+///
+/// * `buf` - Destination buffer.
+/// * `val` - 32-bit signed value to append.
 fn write_i32(buf: &mut Vec<u8>, val: i32) {
     buf.extend_from_slice(&val.to_ne_bytes());
 }
 
 /// Appends a length-prefixed, NUL-terminated, 32-bit padded UTF-8 string to a Wayland wire buffer.
+///
+/// # Arguments
+///
+/// * `buf` - Destination buffer.
+/// * `s` - String slice to write.
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len() + 1; // null-terminated
@@ -601,6 +648,15 @@ fn write_string(buf: &mut Vec<u8>, s: &str) {
 }
 
 /// Reads a native-endian `u32` from `payload` at `*offset`, advancing `*offset` by 4 bytes.
+///
+/// # Arguments
+///
+/// * `payload` - Message payload bytes.
+/// * `offset` - Current read offset pointer.
+///
+/// # Returns
+///
+/// Decoded `u32` value, or `None` if insufficient bytes remain.
 fn read_u32(payload: &[u8], offset: &mut usize) -> Option<u32> {
     if *offset + 4 <= payload.len() {
         let val = u32::from_ne_bytes(payload[*offset..*offset + 4].try_into().ok()?);
@@ -612,6 +668,15 @@ fn read_u32(payload: &[u8], offset: &mut usize) -> Option<u32> {
 }
 
 /// Reads a native-endian `i32` from `payload` at `*offset`, advancing `*offset` by 4 bytes.
+///
+/// # Arguments
+///
+/// * `payload` - Message payload bytes.
+/// * `offset` - Current read offset pointer.
+///
+/// # Returns
+///
+/// Decoded `i32` value, or `None` if insufficient bytes remain.
 fn read_i32(payload: &[u8], offset: &mut usize) -> Option<i32> {
     if *offset + 4 <= payload.len() {
         let val = i32::from_ne_bytes(payload[*offset..*offset + 4].try_into().ok()?);
@@ -623,6 +688,15 @@ fn read_i32(payload: &[u8], offset: &mut usize) -> Option<i32> {
 }
 
 /// Reads a length-prefixed, NUL-terminated, 32-bit padded string from `payload` at `*offset`.
+///
+/// # Arguments
+///
+/// * `payload` - Message payload bytes.
+/// * `offset` - Current read offset pointer.
+///
+/// # Returns
+///
+/// Decoded `String`, or `None` if malformed or incomplete.
 fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
     let len = read_u32(payload, offset)? as usize;
     if *offset + len <= payload.len() {
@@ -637,6 +711,14 @@ fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
 }
 
 /// Serializes a `wl_registry.global` advertisement event into `out`.
+///
+/// # Arguments
+///
+/// * `out` - Destination buffer.
+/// * `reg_id` - Registry object ID.
+/// * `name` - Numeric name of the advertised global interface.
+/// * `iface` - Interface name string.
+/// * `ver` - Interface version supported.
 fn send_global(out: &mut Vec<u8>, reg_id: u32, name: u32, iface: &str, ver: u32) {
     let mut payload = Vec::new();
     write_u32(&mut payload, name);
@@ -651,6 +733,15 @@ fn send_global(out: &mut Vec<u8>, reg_id: u32, name: u32, iface: &str, ver: u32)
 // -----------------------------------------------------------------------------
 
 /// Handles a single decoded client request message and appends any resulting compositor events to `out_events`.
+///
+/// # Arguments
+///
+/// * `session` - Active client session state.
+/// * `object_id` - Target object ID.
+/// * `opcode` - Request opcode.
+/// * `payload` - Raw payload bytes.
+/// * `out_events` - Destination buffer for response events.
+/// * `serial_counter` - Monotonic serial counter reference.
 fn handle_client_message(
     session: &mut WaylandClientSession,
     object_id: u32,

@@ -39,6 +39,19 @@ impl Message {
     }
 }
 
+/// Invokes a raw Hydra syscall with 3 arguments.
+///
+/// # Arguments
+/// * `num` - Syscall number.
+/// * `a0` - First argument.
+/// * `a1` - Second argument.
+/// * `a2` - Third argument.
+///
+/// # Returns
+/// Raw integer return value from `rax`.
+///
+/// # Safety
+/// Executing a syscall can violate memory safety or cause undefined behavior if passed invalid arguments.
 #[inline(always)]
 unsafe fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) -> i64 {
     let ret: i64;
@@ -55,6 +68,16 @@ unsafe fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) -> i64 {
     ret
 }
 
+/// Converts a raw syscall return integer into a `Result<u64, i64>`.
+///
+/// # Arguments
+/// * `r` - Return code from syscall.
+///
+/// # Returns
+/// `Ok(val)` on non-negative values, `Err(err)` on negative values.
+///
+/// # Errors
+/// Returns `r` if `r < 0`.
 fn check(r: i64) -> Result<u64, i64> {
     if r < 0 {
         Err(r)
@@ -64,6 +87,10 @@ fn check(r: i64) -> Result<u64, i64> {
 }
 
 /// Writes `data` to descriptor `fd` (1: console).
+///
+/// # Arguments
+/// * `fd` - Destination file descriptor.
+/// * `data` - Byte slice to write.
 pub fn write(fd: u64, data: &[u8]) {
     if !data.is_empty() {
         unsafe { syscall3(SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
@@ -71,6 +98,12 @@ pub fn write(fd: u64, data: &[u8]) {
 }
 
 /// Ends the process.
+///
+/// # Arguments
+/// * `code` - Exit status code.
+///
+/// # Returns
+/// Does not return (`!`).
 pub fn exit(code: u64) -> ! {
     unsafe { syscall3(SYS_EXIT, code, 0, 0) };
     loop {
@@ -84,36 +117,79 @@ pub fn yield_now() {
 }
 
 /// Sleeps for `ms` milliseconds.
+///
+/// # Arguments
+/// * `ms` - Duration to sleep in milliseconds.
 pub fn sleep_ms(ms: u64) {
     unsafe { syscall3(SYS_SLEEP, ms, 0, 0) };
 }
 
 /// Process id.
+///
+/// # Returns
+/// Current process ID.
 pub fn getpid() -> u64 {
     unsafe { syscall3(SYS_GETPID, 0, 0, 0) as u64 }
 }
 
 /// Timer ticks since boot (100 Hz).
+///
+/// # Returns
+/// Number of 100 Hz timer ticks since boot.
 pub fn uptime_ticks() -> u64 {
     unsafe { syscall3(SYS_UPTIME, 0, 0, 0) as u64 }
 }
 
 /// Maps `len` bytes of zeroed private memory.
+///
+/// # Arguments
+/// * `len` - Number of bytes to map.
+///
+/// # Returns
+/// Virtual address of the mapped region on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn map_anon(len: usize) -> Result<u64, i64> {
     check(unsafe { syscall3(SYS_MAP_ANON, len as u64, 0, 0) })
 }
 
 /// Allows this driver to use I/O ports.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn iopl() -> Result<(), i64> {
     check(unsafe { syscall3(SYS_IOPL, 3, 0, 0) }).map(|_| ())
 }
 
 /// Maps device memory the supervisor granted this driver.
+///
+/// # Arguments
+/// * `phys` - Physical address to map.
+/// * `len` - Length of the physical memory range in bytes.
+///
+/// # Returns
+/// Pointer to mapped virtual address on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn physmap(phys: u64, len: usize) -> Result<*mut u8, i64> {
     check(unsafe { syscall3(SYS_PHYSMAP, phys, len as u64, 0) }).map(|a| a as *mut u8)
 }
 
 /// Allocates physically contiguous memory for DMA: `(address, physical address)`.
+///
+/// # Arguments
+/// * `len` - Number of bytes to allocate.
+///
+/// # Returns
+/// Tuple of `(virtual_pointer, physical_address)` on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn dma_alloc(len: usize) -> Result<(*mut u8, u64), i64> {
     let mut phys = 0u64;
     let addr = check(unsafe { syscall3(SYS_DMA_ALLOC, len as u64, &mut phys as *mut u64 as u64, 0) })?;
@@ -121,41 +197,96 @@ pub fn dma_alloc(len: usize) -> Result<(*mut u8, u64), i64> {
 }
 
 /// Routes interrupt line `irq` to this driver.
+///
+/// # Arguments
+/// * `irq` - Hardware IRQ line number.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn irq_register(irq: u8) -> Result<(), i64> {
     check(unsafe { syscall3(SYS_IRQ_REGISTER, irq as u64, 0, 0) }).map(|_| ())
 }
 
-/// Unmasks `irq` and waits up to `timeout_ticks` (0: forever) for it; returns how many
-/// interrupts arrived (0 on timeout).
+/// Unmasks `irq` and waits up to `timeout_ticks` (0: forever) for it.
+///
+/// # Arguments
+/// * `irq` - Hardware IRQ line number.
+/// * `timeout_ticks` - Timeout in 100 Hz ticks (0 for indefinite wait).
+///
+/// # Returns
+/// Count of interrupts that arrived (0 on timeout) on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn irq_wait(irq: u8, timeout_ticks: u64) -> Result<u32, i64> {
     check(unsafe { syscall3(SYS_IRQ_WAIT, irq as u64, timeout_ticks, 0) }).map(|n| n as u32)
 }
 
-/// Unmasks `irq` after servicing the device, without waiting; returns how many
-/// interrupts arrived since the last wait or acknowledgement.
+/// Unmasks `irq` after servicing the device, without waiting.
+///
+/// # Arguments
+/// * `irq` - Hardware IRQ line number.
+///
+/// # Returns
+/// Count of interrupts that arrived since last wait/acknowledgement on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn irq_ack(irq: u8) -> Result<u32, i64> {
     check(unsafe { syscall3(SYS_IRQ_ACK, irq as u64, 0, 0) }).map(|n| n as u32)
 }
 
 /// Wall-clock time: `(seconds since 1970, nanoseconds)`.
+///
+/// # Returns
+/// Tuple of `(seconds_since_epoch, nanoseconds)`.
 pub fn clock() -> (u64, u32) {
     let mut t = [0u64; 2];
     unsafe { syscall3(SYS_CLOCK, t.as_mut_ptr() as u64, 0, 0) };
     (t[0], t[1] as u32)
 }
 
-/// Maps the window of service `endpoint`, which this driver uses (as the file server
-/// uses the disk driver's); returns its address.
+/// Maps the window of service `endpoint`, which this driver uses.
+///
+/// # Arguments
+/// * `endpoint` - Target service endpoint ID.
+///
+/// # Returns
+/// Base virtual address of the attached service window on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn svc_attach(endpoint: u32) -> Result<u64, i64> {
     check(unsafe { syscall3(SYS_SVC_ATTACH, endpoint as u64, 0, 0) })
 }
 
 /// Becomes the server of `endpoint`; returns the service window's address.
+///
+/// # Arguments
+/// * `endpoint` - Service endpoint ID.
+///
+/// # Returns
+/// Base virtual address of the registered service window on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn svc_register(endpoint: u32) -> Result<u64, i64> {
     check(unsafe { syscall3(SYS_SVC_REGISTER, endpoint as u64, 0, 0) })
 }
 
 /// Waits for the next request to `endpoint`.
+///
+/// # Arguments
+/// * `endpoint` - Service endpoint ID.
+///
+/// # Returns
+/// Received [`Message`] on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn svc_recv(endpoint: u32) -> Result<Message, i64> {
     let mut m = Message::default();
     check(unsafe { syscall3(SYS_SVC_RECV, endpoint as u64, &mut m as *mut Message as u64, 0) })?;
@@ -163,11 +294,32 @@ pub fn svc_recv(endpoint: u32) -> Result<Message, i64> {
 }
 
 /// Answers the request being served on `endpoint`.
+///
+/// # Arguments
+/// * `endpoint` - Service endpoint ID.
+/// * `reply` - Reply message payload.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative error code on failure.
 pub fn svc_reply(endpoint: u32, reply: &Message) -> Result<(), i64> {
     check(unsafe { syscall3(SYS_SVC_REPLY, endpoint as u64, reply as *const Message as u64, 0) }).map(|_| ())
 }
 
 /// Calls another service; `timeout_ticks` 0 means the kernel's default.
+///
+/// # Arguments
+/// * `endpoint` - Target service endpoint ID.
+/// * `request` - Request message payload.
+/// * `timeout_ticks` - Timeout in ticks (0 for default).
+///
+/// # Returns
+/// Reply [`Message`] on success.
+///
+/// # Errors
+/// Returns negative error code on failure or timeout.
 pub fn svc_call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
     let mut m = request;
     check(unsafe { syscall3(SYS_SVC_CALL, endpoint as u64, &mut m as *mut Message as u64, timeout_ticks) })?;

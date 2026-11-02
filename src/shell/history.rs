@@ -87,16 +87,28 @@ impl History {
     }
 
     /// Returns the number of commands currently stored in the ring buffer (capped at `MAX_HISTORY`).
+    ///
+    /// # Returns
+    ///
+    /// The count of resident history entries.
     pub fn len(&self) -> usize {
         self.count.min(MAX_HISTORY)
     }
 
     /// Returns `true` if no commands have been recorded in the history buffer.
+    ///
+    /// # Returns
+    ///
+    /// `true` if empty, `false` otherwise.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
     /// Returns the total number of commands entered during the entire shell session.
+    ///
+    /// # Returns
+    ///
+    /// Total commands count entered across the session.
     pub fn total_count(&self) -> usize {
         self.count
     }
@@ -154,7 +166,9 @@ impl History {
 
     /// Returns the lowest 1-based chronological session index currently resident in the buffer.
     ///
-    /// Returns `0` if the history buffer is empty.
+    /// # Returns
+    ///
+    /// The lowest session index, or `0` if the history buffer is empty.
     pub fn start_session_index(&self) -> usize {
         if self.count > MAX_HISTORY {
             self.count - MAX_HISTORY + 1

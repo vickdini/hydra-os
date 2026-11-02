@@ -88,6 +88,14 @@ impl AddressSpace {
     }
 
     /// Returns the physical address of this address space's root PML4 table.
+    ///
+    /// # Returns
+    ///
+    /// Physical address of the PML4 table loaded into `CR3`.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn pml4_physical_address(&self) -> PhysAddr {
         self.pml4_phys
     }
@@ -106,6 +114,14 @@ impl AddressSpace {
     /// In UEFI x86_64 identity-mapped environments or direct-mapped kernels,
     /// read a page table at a given physical address.
     ///
+    /// # Arguments
+    ///
+    /// * `phys` - Physical address of the page table to inspect.
+    ///
+    /// # Returns
+    ///
+    /// Immutable reference to the `PageTable` residing at `phys`.
+    ///
     /// # Safety
     ///
     /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
@@ -118,6 +134,14 @@ impl AddressSpace {
     /// In UEFI x86_64 identity-mapped environments or direct-mapped kernels,
     /// get a mutable reference to a page table at a given physical address.
     ///
+    /// # Arguments
+    ///
+    /// * `phys` - Physical address of the page table to mutate.
+    ///
+    /// # Returns
+    ///
+    /// Mutable reference to the `PageTable` residing at `phys`.
+    ///
     /// # Safety
     ///
     /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
@@ -129,6 +153,14 @@ impl AddressSpace {
 
     /// Traverses the page table entry to find the next level page table,
     /// allocating a new 4 KiB frame from `allocator` and initializing it if not present.
+    ///
+    /// # Arguments
+    /// * `entry` - Mutable reference to the parent page table entry.
+    /// * `allocator` - Physical memory manager used for allocating new page table frames.
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to the next-level [`PageTable`] on success, or an error message on failure.
     ///
     /// # Safety
     ///
@@ -160,6 +192,14 @@ impl AddressSpace {
     }
 
     /// Walk the 4-level page table to translate a virtual address to physical address if mapped.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Virtual address to translate.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PhysAddr)` with the resolved physical address if mapped; `None` if unmapped or not present.
     ///
     /// # Safety
     ///
@@ -204,6 +244,13 @@ impl AddressSpace {
     }
 
     /// Queries the mapped physical frame and protection flags for a given 4 KiB virtual page.
+    ///
+    /// # Arguments
+    /// * `page` - The virtual page to translate.
+    ///
+    /// # Returns
+    ///
+    /// `Some((frame, flags))` if mapped, or `None` if unmapped or backed by huge pages.
     ///
     /// # Safety
     ///
@@ -253,6 +300,16 @@ impl AddressSpace {
     /// Allocates intermediate page tables (PDPT, PD, PT) as needed from `allocator`.
     /// Flushes the CPU Translation Lookaside Buffer (TLB) for `page`.
     ///
+    /// # Arguments
+    /// * `page` - The virtual page to map.
+    /// * `frame` - The target physical frame.
+    /// * `flags` - Protection flags to set on the entry.
+    /// * `allocator` - Physical memory manager used for allocating intermediate tables.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error message on allocation failure or existing mapping.
+    ///
     /// # Safety
     ///
     /// Mapping an arbitrary virtual page to a physical frame can alias memory or corrupt
@@ -287,6 +344,13 @@ impl AddressSpace {
     /// Unmaps a 4 KiB virtual page and returns the previously mapped physical frame.
     ///
     /// Flushes the CPU Translation Lookaside Buffer (TLB) for `page`.
+    ///
+    /// # Arguments
+    /// * `page` - The virtual page to unmap.
+    ///
+    /// # Returns
+    ///
+    /// The unmapped [`PhysFrame`] on success, or an error message if the page is not present.
     ///
     /// # Safety
     ///
@@ -333,6 +397,14 @@ impl AddressSpace {
 
     /// Updates protection flags (e.g. read-write, user-accessible, no-execute) for an existing mapped page.
     ///
+    /// # Arguments
+    /// * `page` - The virtual page whose flags are to be updated.
+    /// * `flags` - New protection flags to apply.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error message if intermediate tables or entry are not present.
+    ///
     /// # Safety
     ///
     /// Changing page permissions on active code or data pages can fault or expose kernel memory if
@@ -374,6 +446,14 @@ impl AddressSpace {
 
     /// Ensures that the specified virtual address range is marked USER_ACCESSIBLE
     /// across all hierarchical page table levels (PML4, PDPT, PD, and PT / huge page).
+    ///
+    /// # Arguments
+    /// * `virt_start` - The base virtual address of the range.
+    /// * `size` - Size in bytes of the address range to mark user-accessible.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error string on failure.
     ///
     /// # Safety
     ///
@@ -456,6 +536,15 @@ impl AddressSpace {
     /// Required for memory-mapped I/O (MMIO), such as the Local APIC,
     /// ACPI tables, and the GOP linear framebuffer.
     ///
+    /// # Arguments
+    /// * `frame` - The physical frame to identity-map.
+    /// * `flags` - Protection flags to set on the mapped page.
+    /// * `allocator` - Physical memory manager for intermediate table allocations.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error string on failure.
+    ///
     /// # Safety
     ///
     /// The caller must ensure `frame` does not collide with an already mapped virtual page
@@ -472,6 +561,17 @@ impl AddressSpace {
     }
 
     /// Maps a contiguous range of physical frames to a contiguous virtual page range.
+    ///
+    /// # Arguments
+    /// * `start_page` - First virtual page of the range.
+    /// * `start_frame` - First physical frame of the range.
+    /// * `page_count` - Number of contiguous 4 KiB pages to map.
+    /// * `flags` - Protection flags applied to all pages in the range.
+    /// * `allocator` - Physical memory manager for intermediate table allocations.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error string on failure.
     ///
     /// # Safety
     ///
@@ -496,6 +596,22 @@ impl AddressSpace {
 
     /// Creates Hydra's autonomous kernel address space by allocating a new PML4
     /// frame from conventional RAM and cloning the active firmware mappings.
+    ///
+    /// # Arguments
+    ///
+    /// * `allocator` - Mutable physical memory frame allocator.
+    ///
+    /// # Returns
+    ///
+    /// A newly initialized autonomous kernel `AddressSpace` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if physical frame allocation for the PML4 table fails.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn create_kernel_space(allocator: &mut PhysicalMemoryManager) -> Result<Self, &'static str> {
         let new_pml4_frame = allocator
             .allocate_frame()
@@ -521,6 +637,22 @@ impl AddressSpace {
     }
 
     /// Creates a new isolated user address space with higher-half kernel mappings shared.
+    ///
+    /// # Arguments
+    ///
+    /// * `allocator` - Mutable physical memory frame allocator.
+    ///
+    /// # Returns
+    ///
+    /// A newly initialized user `AddressSpace` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if physical frame allocation for page tables fails.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn create_user_space(allocator: &mut PhysicalMemoryManager) -> Result<Self, &'static str> {
         let new_pml4_frame = allocator
             .allocate_frame()
@@ -558,6 +690,19 @@ impl AddressSpace {
 }
 
 /// Marks a memory region as user-accessible in the active/kernel PML4 page tables.
+///
+/// # Arguments
+///
+/// * `virt_start` - Virtual start address of the memory range to update.
+/// * `size` - Size of the range in bytes.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error string if traversal encounters invalid mappings.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn make_user_accessible(virt_start: VirtAddr, size: usize) -> Result<(), &'static str> {
     if let Some(ref mut space) = *KERNEL_SPACE.lock() {
         unsafe { space.make_user_accessible(virt_start, size) }

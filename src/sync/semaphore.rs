@@ -76,6 +76,10 @@ impl Semaphore {
     }
 
     /// Attempts to acquire a permit without blocking.
+    ///
+    /// # Returns
+    ///
+    /// `true` if a permit was successfully claimed, `false` if none available.
     pub fn try_acquire(&self) -> bool {
         let mut current = self.permits.load(Ordering::Acquire);
         while current > 0 {
@@ -100,11 +104,19 @@ impl Semaphore {
     }
 
     /// Returns the currently available permits.
+    ///
+    /// # Returns
+    ///
+    /// The count of available permits as `isize`.
     pub fn available_permits(&self) -> isize {
         self.permits.load(Ordering::Relaxed)
     }
 
     /// Returns the number of tasks waiting for a permit.
+    ///
+    /// # Returns
+    ///
+    /// Number of queued waiters as `usize`.
     pub fn waiting_count(&self) -> usize {
         self.waiters.lock().len()
     }

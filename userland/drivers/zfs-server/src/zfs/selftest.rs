@@ -14,10 +14,23 @@ use crate::fs::client::resolve_at;
 const BIG_FILE_BYTES: usize = 5 * 1024 * 1024 + 1234;
 const MANY_FILES: usize = 3000;
 
+/// Computes a pseudo-random byte value for index `i`.
+///
+/// # Arguments
+/// * `i` - Seed byte index.
+///
+/// # Returns
+/// Deterministic pseudo-random byte.
 fn pattern(i: usize) -> u8 {
     (i.wrapping_mul(2_654_435_761) >> 13) as u8
 }
 
+/// Asserts an expectation and updates the failure count.
+///
+/// # Arguments
+/// * `name` - Description of test assertion.
+/// * `ok` - Whether the test condition passed.
+/// * `failures` - Mutable failure counter.
 fn check(name: &str, ok: bool, failures: &mut u32) {
     println!("[zfstest] {:<52} {}", name, if ok { "PASS" } else { "FAIL" });
     if !ok {
@@ -25,12 +38,34 @@ fn check(name: &str, ok: bool, failures: &mut u32) {
     }
 }
 
+/// Resolves an absolute path string to its ZFS object number.
+///
+/// # Arguments
+/// * `s` - Active ZFS server instance.
+/// * `p` - Path string to resolve.
+///
+/// # Returns
+/// Resolved inode / object number on success.
+///
+/// # Errors
+/// Returns negative Linux error code on resolution failure.
 fn path(s: &mut ZfsServer, p: &str) -> Result<u64, i64> {
     let root = s.root_obj();
     resolve_at(s, root, p.as_bytes(), true)
 }
 
 /// Removes the directory tree `dir/name` recursively.
+///
+/// # Arguments
+/// * `s` - Active ZFS server instance.
+/// * `dir` - Parent directory object number.
+/// * `name` - Directory entry name.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative Linux error code on deletion failure.
 fn remove_tree(s: &mut ZfsServer, dir: u64, name: &[u8]) -> Result<(), i64> {
     let ino = s.lookup(dir, name)?;
     if s.getattr(ino)?.is_dir() {
@@ -49,6 +84,16 @@ fn remove_tree(s: &mut ZfsServer, dir: u64, name: &[u8]) -> Result<(), i64> {
     }
 }
 
+/// Builds the `/zfstest` comprehensive directory tree.
+///
+/// # Arguments
+/// * `s` - Active ZFS server instance.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative Linux error code on filesystem error.
 fn build(s: &mut ZfsServer) -> Result<(), i64> {
     let root = s.root_obj();
     if s.lookup(root, b"zfstest").is_ok() {
@@ -101,6 +146,17 @@ fn build(s: &mut ZfsServer) -> Result<(), i64> {
     Ok(())
 }
 
+/// Verifies all test artifacts created in `/zfstest`.
+///
+/// # Arguments
+/// * `s` - Active ZFS server instance.
+/// * `failures` - Mutable failure counter.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns negative Linux error code on I/O or lookup error.
 fn verify(s: &mut ZfsServer, failures: &mut u32) -> Result<(), i64> {
     let big = path(s, "/zfstest/big.bin")?;
     let attr = s.getattr(big)?;
@@ -177,6 +233,10 @@ fn verify(s: &mut ZfsServer, failures: &mut u32) -> Result<(), i64> {
     Ok(())
 }
 
+/// Prints summary test results to the console.
+///
+/// # Arguments
+/// * `failures` - Count of failed assertions.
 fn report(failures: u32) {
     println!("[zfstest] {} ({} failure{})", if failures == 0 { "ALL PASSED" } else { "FAILED" }, failures, if failures == 1 { "" } else { "s" });
 }
@@ -213,6 +273,10 @@ pub fn run_verify() {
 /// `zfs fsck <dir> [repair]`: walks the namespace below `dir` and reports directory
 /// entries whose object cannot be read (left behind when a crash loses blocks). With
 /// `repair` those entries are removed, so the names can be created again.
+///
+/// # Arguments
+/// * `root_path` - Path of root directory to inspect.
+/// * `repair` - Whether dangling entries should be deleted.
 pub fn run_fsck(root_path: &str, repair: bool) {
     let r = with_server(|s| {
         let root = path(s, root_path)?;

@@ -73,6 +73,10 @@ impl TextPager {
     /// # Arguments
     ///
     /// * `idx` - Zero-based line index (`0..self.len()`).
+    ///
+    /// # Returns
+    ///
+    /// String slice of the line at `idx`.
     pub fn line(&self, idx: usize) -> &str {
         if idx < self.count {
             let len = self.lens[idx];
@@ -83,11 +87,19 @@ impl TextPager {
     }
 
     /// Returns the number of lines currently buffered in the pager.
+    ///
+    /// # Returns
+    ///
+    /// Number of buffered lines.
     pub fn len(&self) -> usize {
         self.count
     }
 
     /// Returns `true` if the pager contains no lines.
+    ///
+    /// # Returns
+    ///
+    /// `true` if empty, `false` otherwise.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }

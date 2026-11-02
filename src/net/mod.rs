@@ -75,26 +75,46 @@ impl Interface {
     }
 
     /// Returns the 6-byte hardware MAC address of this interface.
+    ///
+    /// # Returns
+    ///
+    /// The 6-byte Ethernet MAC address array.
     pub fn mac(&self) -> [u8; 6] {
         self.mac
     }
 
     /// Returns the currently assigned 4-byte IPv4 address of this interface.
+    ///
+    /// # Returns
+    ///
+    /// The 4-byte IPv4 address array.
     pub fn ip(&self) -> [u8; 4] {
         self.ip
     }
 
     /// Returns the 4-byte IPv4 subnet mask of this interface.
+    ///
+    /// # Returns
+    ///
+    /// The 4-byte IPv4 subnet mask array.
     pub fn subnet_mask(&self) -> [u8; 4] {
         self.subnet_mask
     }
 
     /// Returns the 4-byte IPv4 address of the default gateway router.
+    ///
+    /// # Returns
+    ///
+    /// The 4-byte default gateway IPv4 address.
     pub fn gateway(&self) -> [u8; 4] {
         self.gateway
     }
 
     /// Returns the 4-byte IPv4 address of the configured DNS server.
+    ///
+    /// # Returns
+    ///
+    /// The 4-byte DNS server IPv4 address.
     pub fn dns_server(&self) -> [u8; 4] {
         self.dns_server
     }

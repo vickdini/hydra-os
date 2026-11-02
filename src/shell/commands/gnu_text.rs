@@ -324,6 +324,15 @@ impl Command for WcCommand {
 }
 
 /// Formats and prints the requested line, word, and byte counts for a single [`WcCommand`] entry.
+///
+/// # Arguments
+/// * `opt_l` - Whether to display line count.
+/// * `opt_w` - Whether to display word count.
+/// * `opt_c` - Whether to display byte count.
+/// * `l` - Number of lines.
+/// * `w` - Number of words.
+/// * `c` - Number of bytes.
+/// * `name` - Filename or label string.
 fn print_wc_counts(opt_l: bool, opt_w: bool, opt_c: bool, l: usize, w: usize, c: usize, name: &str) {
     if opt_l {
         print!("{:>7} ", l);
@@ -505,6 +514,14 @@ impl Command for GrepCommand {
 }
 
 /// Checks whether `line` contains `pattern` using ASCII case-insensitive byte comparison.
+///
+/// # Arguments
+/// * `line` - Text line string slice to search in.
+/// * `pattern` - Target substring pattern.
+///
+/// # Returns
+///
+/// `true` if pattern is found ignoring ASCII case, `false` otherwise.
 fn line_contains_case_insensitive(line: &str, pattern: &str) -> bool {
     let line_b = line.as_bytes();
     let pat_b = pattern.as_bytes();

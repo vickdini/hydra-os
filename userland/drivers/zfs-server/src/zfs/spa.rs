@@ -49,6 +49,12 @@ const RAM_POOL_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_BLOCKS: usize = 32 * 1024;
 
 /// Returns the 4 KiB contents of a frame through the identity map.
+///
+/// # Arguments
+/// * `frame` - Physical frame containing 4 KiB of memory.
+///
+/// # Returns
+/// Mutable static reference to the 4096-byte array in identity-mapped memory.
 pub fn frame_bytes(frame: PhysFrame<Size4KiB>) -> &'static mut [u8; ZFS_BLOCK_SIZE] {
     unsafe { &mut *(frame.start_address().as_u64() as *mut [u8; ZFS_BLOCK_SIZE]) }
 }
@@ -77,11 +83,18 @@ pub struct DiskInfo {
 static DISK_INFO: Mutex<Option<DiskInfo>> = Mutex::new(None);
 
 /// The pool's disk, if the pool is on one.
+///
+/// # Returns
+/// Cloned [`DiskInfo`] if a disk is attached and queried, or `None`.
 pub fn disk_info() -> Option<DiskInfo> {
     DISK_INFO.lock().clone()
 }
 
 /// The disk driver's service window (starting the driver if it is not running).
+///
+/// # Returns
+/// Mutable slice referencing the shared memory window to the disk driver on success,
+/// or an error message if the driver cannot be revived.
 fn driver_window() -> Result<&'static mut [u8], &'static str> {
     if let Some(w) = service::window(ENDPOINT_BLOCK_DEV) {
         return Ok(w);
@@ -91,6 +104,14 @@ fn driver_window() -> Result<&'static mut [u8], &'static str> {
 }
 
 /// Sends a request to the disk driver; returns its reply or an error message.
+///
+/// # Arguments
+/// * `label` - IPC message protocol label.
+/// * `args` - IPC message payload arguments.
+/// * `what` - Context description for error reporting.
+///
+/// # Returns
+/// IPC response message on success, or an error string on failure.
 fn driver_request(label: u32, args: [u64; 4], what: &'static str) -> Result<crate::ipc::Message, &'static str> {
     match service::call(ENDPOINT_BLOCK_DEV, crate::ipc::Message::with_args(label, args), service::CALL_TIMEOUT_TICKS) {
         Ok(r) if r.label == MSG_BLOCK_REPLY && (r.args[0] as i64) >= 0 => Ok(r),
@@ -111,6 +132,9 @@ unsafe impl Send for Vdev {}
 impl Vdev {
     /// Opens the disk through the disk driver (started at the hardware takeover), or a RAM
     /// disk if there is none.
+    ///
+    /// # Returns
+    /// Initialized [`Vdev`] instance backed by the disk driver or memory.
     pub fn open() -> Self {
         if service::is_online(ENDPOINT_BLOCK_DEV) {
             match Self::query_driver() {
@@ -134,6 +158,10 @@ impl Vdev {
     }
 
     /// Asks the disk driver about its disk; returns its size in blocks.
+    ///
+    /// # Returns
+    /// Number of addressable 4 KiB logical blocks on the physical drive on success,
+    /// or an error message on IPC failure.
     fn query_driver() -> Result<u64, &'static str> {
         let reply = driver_request(MSG_BLOCK_GET_SIZE, [0; 4], "ZFS: the disk driver cannot size the disk")?;
         let window = driver_window()?;
@@ -148,11 +176,21 @@ impl Vdev {
     }
 
     /// Returns true if this virtual device is a disk rather than RAM.
+    ///
+    /// # Returns
+    /// `true` if backed by `Backend::Driver`, or `false` if backed by `Backend::Ram`.
     pub fn is_hardware_backed(&self) -> bool {
         matches!(self.backend, Backend::Driver)
     }
 
     /// Reads `count` consecutive blocks starting at `block` into `buf`.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to begin reading from.
+    /// * `buf` - Destination byte buffer whose length is a multiple of `ZFS_BLOCK_SIZE`.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful read, or an error string if out of bounds or read fails.
     pub fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
         let count = buf.len() / ZFS_BLOCK_SIZE;
         if block + count as u64 > self.total_blocks {
@@ -177,6 +215,13 @@ impl Vdev {
     }
 
     /// Writes `buf` (a whole number of blocks) starting at `block`.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to begin writing to.
+    /// * `buf` - Source byte buffer whose length is a multiple of `ZFS_BLOCK_SIZE`.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful write, or an error string if out of bounds or write fails.
     pub fn write(&mut self, block: u64, buf: &[u8]) -> Result<(), &'static str> {
         let count = buf.len() / ZFS_BLOCK_SIZE;
         if block + count as u64 > self.total_blocks {
@@ -201,6 +246,9 @@ impl Vdev {
     }
 
     /// Flushes the disk's write cache to non-volatile storage.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful flush, or an error string if disk cache flush failed.
     pub fn flush(&mut self) -> Result<(), &'static str> {
         match &self.backend {
             Backend::Driver => driver_request(MSG_BLOCK_FLUSH, [0; 4], "ZFS: disk cache flush failed").map(|_| ()),
@@ -226,6 +274,13 @@ pub struct BlockCache {
 }
 
 impl BlockCache {
+    /// Creates a new physical frame block cache with the specified capacity cap.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum number of cached blocks to retain before evictions.
+    ///
+    /// # Returns
+    /// Initialized [`BlockCache`] instance.
     fn new(capacity: usize) -> Self {
         Self {
             map: BTreeMap::new(),
@@ -236,6 +291,13 @@ impl BlockCache {
         }
     }
 
+    /// Looks up a cached frame by block index and updates its recency timestamp.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to retrieve.
+    ///
+    /// # Returns
+    /// `Some(PhysFrame)` containing the block data if cached, or `None`.
     fn get(&mut self, block: u64) -> Option<PhysFrame<Size4KiB>> {
         self.clock += 1;
         let clock = self.clock;
@@ -246,6 +308,10 @@ impl BlockCache {
     }
 
     /// Stores a copy of `data` for `block`.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to store.
+    /// * `data` - Raw 4 KiB block payload.
     fn put(&mut self, block: u64, data: &[u8; ZFS_BLOCK_SIZE]) {
         self.clock += 1;
         if let Some(e) = self.map.get_mut(&block) {
@@ -275,6 +341,10 @@ impl BlockCache {
         }
     }
 
+    /// Evicts a specific block from the cache and releases its physical frame.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to invalidate.
     fn invalidate(&mut self, block: u64) {
         if let Some(e) = self.map.remove(&block) {
             frame_ref_dec(e.frame);
@@ -282,6 +352,9 @@ impl BlockCache {
     }
 
     /// Returns the number of blocks currently held in the block cache.
+    ///
+    /// # Returns
+    /// Number of active cache entries.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -324,6 +397,14 @@ pub struct Spa {
 }
 
 impl Spa {
+    /// Creates an empty storage pool allocator with allocated bitmaps and cursor at `label.data_start`.
+    ///
+    /// # Arguments
+    /// * `vdev` - Virtual block device for the pool.
+    /// * `label` - Validated virtual device configuration label.
+    ///
+    /// # Returns
+    /// In-memory initialized [`Spa`] struct.
     fn empty(vdev: Vdev, label: VdevLabel) -> Self {
         let words = ((label.total_blocks + 63) / 64) as usize;
         Self {
@@ -340,6 +421,13 @@ impl Spa {
     }
 
     /// Lays out a brand-new pool on `vdev`. The caller commits the first uberblock.
+    ///
+    /// # Arguments
+    /// * `vdev` - Virtual block device to format.
+    /// * `name` - Pool name string.
+    ///
+    /// # Returns
+    /// Formatted [`Spa`] instance on success, or an error message on failure.
     pub fn create(mut vdev: Vdev, name: &str) -> Result<Self, &'static str> {
         let total = vdev.total_blocks;
         if total < 256 {
@@ -389,6 +477,12 @@ impl Spa {
 
     /// Probes block 0 of a device to determine its contents: nothing (all zeros), a pool
     /// label, or foreign data. Read errors are retried; returns `None` if device read fails.
+    ///
+    /// # Arguments
+    /// * `vdev` - Virtual block device to inspect.
+    ///
+    /// # Returns
+    /// `Some(DiskContents)` indicating detected format, or `None` if device reads fail.
     pub fn probe(vdev: &Vdev) -> Option<DiskContents> {
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         for _ in 0..3 {
@@ -458,6 +552,11 @@ impl Spa {
         Ok((spa, ub))
     }
 
+    /// Sets or clears the allocation bit for `block` in the allocation bitmap.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to update.
+    /// * `used` - `true` to mark allocated, `false` to mark free.
     fn mark(&mut self, block: u64, used: bool) {
         let (w, bit) = ((block / 64) as usize, block % 64);
         if used {
@@ -468,11 +567,21 @@ impl Spa {
         self.dirty_bitmap_blocks.insert(block / (BLOCK * 8), ());
     }
 
+    /// Checks whether `block` is currently marked as allocated in the bitmap.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to test.
+    ///
+    /// # Returns
+    /// `true` if the block is currently allocated, or `false` if free.
     fn is_used(&self, block: u64) -> bool {
         self.bitmap[(block / 64) as usize] & (1 << (block % 64)) != 0
     }
 
     /// Allocates one data block, scanning the bitmap a word at a time from the cursor.
+    ///
+    /// # Returns
+    /// Allocated logical block number on success, or an error string if pool is full.
     pub fn alloc(&mut self) -> Result<u64, &'static str> {
         let words = self.bitmap.len();
         let start_word = (self.alloc_cursor.max(self.label.data_start) / 64) as usize % words;
@@ -501,6 +610,9 @@ impl Spa {
     }
 
     /// Schedules a block to be freed once the current transaction group is on disk.
+    ///
+    /// # Arguments
+    /// * `block` - Logical block index to free after next commit.
     pub fn free_deferred(&mut self, block: u64) {
         if block >= self.label.data_start {
             self.pending_free.push(block);
@@ -508,6 +620,12 @@ impl Spa {
     }
 
     /// Reads a block, verifying it against its block pointer, via the cache.
+    ///
+    /// # Arguments
+    /// * `bp` - Block pointer identifying the physical block and expected checksum.
+    ///
+    /// # Returns
+    /// Physical frame holding verified block contents on success, or an error string.
     pub fn read_bp(&mut self, bp: &BlockPointer) -> Result<PhysFrame<Size4KiB>, &'static str> {
         if let Some(frame) = self.cache.get(bp.block) {
             self.cache.hits += 1;
@@ -525,6 +643,12 @@ impl Spa {
 
     /// Writes a batch of freshly allocated blocks, coalescing consecutive block numbers
     /// into multi-block device writes, and caches them.
+    ///
+    /// # Arguments
+    /// * `blocks` - List of `(block_number, frame)` pairs to write and cache.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful writes, or an error string on I/O failure.
     pub fn write_blocks(&mut self, mut blocks: Vec<(u64, PhysFrame<Size4KiB>)>) -> Result<(), &'static str> {
         blocks.sort_unstable_by_key(|(b, _)| *b);
         let mut run: Vec<u8> = Vec::with_capacity(ZFS_BLOCK_SIZE * MAX_RUN);
@@ -546,6 +670,12 @@ impl Spa {
 
     /// Finishes a transaction group: persists dirty bitmap blocks, writes the uberblock,
     /// then releases blocks freed during the group.
+    ///
+    /// # Arguments
+    /// * `ub` - Active uberblock updated with allocation count and written to disk.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful commit, or an error string on flush/write failure.
     pub fn commit(&mut self, ub: &mut Uberblock) -> Result<(), &'static str> {
         // Blocks stay dirty until written, so a failed commit is redone by the next one
         let dirty: Vec<u64> = self.dirty_bitmap_blocks.keys().copied().collect();
@@ -584,27 +714,42 @@ impl Spa {
     }
 
     /// Returns the pool name as a UTF-8 string slice.
+    ///
+    /// # Returns
+    /// UTF-8 string slice representing the pool name.
     pub fn pool_name_str(&self) -> &str {
         let len = self.pool_name.iter().position(|&b| b == 0).unwrap_or(self.pool_name.len());
         core::str::from_utf8(&self.pool_name[..len]).unwrap_or("hydrapool")
     }
 
     /// Returns the total capacity of the pool in bytes.
+    ///
+    /// # Returns
+    /// Total capacity in bytes.
     pub fn total_capacity_bytes(&self) -> u64 {
         self.label.total_blocks * BLOCK
     }
 
     /// Returns the total number of bytes currently allocated in the pool.
+    ///
+    /// # Returns
+    /// Total allocated bytes across the pool.
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated_blocks * BLOCK
     }
 
     /// Returns the remaining free space in the pool in bytes.
+    ///
+    /// # Returns
+    /// Free unallocated capacity in bytes.
     pub fn free_bytes(&self) -> u64 {
         self.total_capacity_bytes().saturating_sub(self.allocated_bytes())
     }
 
     /// Returns true if the pool's virtual device is backed by physical hardware.
+    ///
+    /// # Returns
+    /// `true` if the underlying vdev is hardware-backed, or `false` if RAM-backed.
     pub fn is_hardware_backed(&self) -> bool {
         self.vdev.is_hardware_backed()
     }

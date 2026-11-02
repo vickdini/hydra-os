@@ -22,6 +22,13 @@ pub const FONT_HEIGHT: usize = 16;
 
 /// Returns the 16-byte bitmap slice for a given ASCII character.
 /// If the character is outside printable ASCII, a fallback glyph (box/question mark) is returned.
+///
+/// # Arguments
+/// * `c` - The ASCII character to query.
+///
+/// # Returns
+///
+/// A static reference to the 16-byte glyph bitmap.
 pub fn get_char_glyph(c: char) -> &'static [u8; 16] {
     let ascii = c as u32;
     if (32..=126).contains(&ascii) {

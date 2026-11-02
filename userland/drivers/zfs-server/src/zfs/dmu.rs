@@ -34,15 +34,35 @@ pub type DmuResult<T> = Result<T, &'static str>;
 
 type Indirect = [BlockPointer; BP_PER_BLOCK];
 
+/// Computes 64 raised to power `level`.
+///
+/// # Arguments
+/// * `level` - Tree depth exponent.
+///
+/// # Returns
+/// Computed 64^level value.
 fn pow64(level: u32) -> u64 {
     1u64 << (6 * level)
 }
 
 /// Leaf blocks addressable by a tree of `nlevels` levels.
+///
+/// # Arguments
+/// * `nlevels` - Tree height in levels.
+///
+/// # Returns
+/// Total number of leaf blocks capacity.
 fn capacity(nlevels: u8) -> u64 {
     DN_TOP_PTRS as u64 * pow64(nlevels as u32 - 1)
 }
 
+/// Copies an indirect block pointer array from a memory frame into a heap box.
+///
+/// # Arguments
+/// * `frame` - Physical frame containing block pointers.
+///
+/// # Returns
+/// Boxed array of 64 block pointers.
 fn read_indirect(frame: PhysFrame<Size4KiB>) -> Box<Indirect> {
     let mut entries = Box::new([BlockPointer::HOLE; BP_PER_BLOCK]);
     unsafe {
@@ -72,6 +92,13 @@ pub struct Dmu {
 
 impl Dmu {
     /// Wraps an opened or freshly created pool.
+    ///
+    /// # Arguments
+    /// * `spa` - Storage Pool Allocator instance.
+    /// * `ub` - Uberblock anchoring the object set.
+    ///
+    /// # Returns
+    /// Initialized [`Dmu`] instance.
     pub fn new(spa: Spa, ub: Uberblock) -> Self {
         Self {
             open_txg: ub.txg + 1,
@@ -86,6 +113,9 @@ impl Dmu {
     }
 
     /// An empty uberblock for a new pool (txg 0, no objects).
+    ///
+    /// # Returns
+    /// Initialized [`Uberblock`] with default empty meta dnode.
     pub fn initial_uberblock() -> Uberblock {
         let mut meta = DnodePhys::empty();
         meta.obj_type = DnodeType::MasterNode as u8;
@@ -110,6 +140,15 @@ impl Dmu {
     // ------------------------------------------------------------------
 
     /// Returns a copy of an object's dnode.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID to query.
+    ///
+    /// # Returns
+    /// Object's [`DnodePhys`] record on success.
+    ///
+    /// # Errors
+    /// DMU error string if object does not exist.
     pub fn get_dnode(&mut self, obj: u64) -> DmuResult<DnodePhys> {
         if obj == 0 {
             return Ok(self.ub.meta_dnode);
@@ -132,6 +171,10 @@ impl Dmu {
     }
 
     /// Updates an object's dnode (written to disk at the next commit).
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID to update.
+    /// * `dn` - New dnode record.
     pub fn put_dnode(&mut self, obj: u64, dn: DnodePhys) {
         if obj == 0 {
             self.ub.meta_dnode = dn;
@@ -142,6 +185,15 @@ impl Dmu {
     }
 
     /// Allocates a new object number with an empty dnode of the given mode.
+    ///
+    /// # Arguments
+    /// * `mode` - File mode and type bits.
+    ///
+    /// # Returns
+    /// Allocated object ID on success.
+    ///
+    /// # Errors
+    /// DMU error string on allocation failure.
     pub fn alloc_object(&mut self, mode: u32) -> DmuResult<u64> {
         let (obj, generation) = if self.ub.free_obj_head != 0 {
             let obj = self.ub.free_obj_head;
@@ -163,6 +215,15 @@ impl Dmu {
     }
 
     /// Frees an object and (at the next commit) all of its blocks.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID to free.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string if object does not exist.
     pub fn free_object(&mut self, obj: u64) -> DmuResult<()> {
         let old = self.get_dnode(obj)?;
         self.freed_trees.push(old);
@@ -176,6 +237,11 @@ impl Dmu {
         Ok(())
     }
 
+    /// Discards cached dirty frames belonging to `obj` starting at `first_blkid`.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID.
+    /// * `first_blkid` - Starting block index to discard.
     fn drop_dirty_from(&mut self, obj: u64, first_blkid: u64) {
         let keys: Vec<(u64, u64)> = self.dirty_data.range((obj, first_blkid)..=(obj, u64::MAX)).map(|(&k, _)| k).collect();
         for k in keys {
@@ -190,6 +256,16 @@ impl Dmu {
     // ------------------------------------------------------------------
 
     /// Finds the committed block pointer for leaf `blkid`.
+    ///
+    /// # Arguments
+    /// * `dn` - Dnode representing the object.
+    /// * `blkid` - Leaf block index.
+    ///
+    /// # Returns
+    /// [`BlockPointer`] for the block, or [`BlockPointer::HOLE`].
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn lookup_bp(&mut self, dn: &DnodePhys, blkid: u64) -> DmuResult<BlockPointer> {
         let levels = dn.nlevels.max(1) as u32;
         let top = blkid / pow64(levels - 1);
@@ -209,6 +285,18 @@ impl Dmu {
     }
 
     /// Reads leaf block `blkid` of `obj` into `out`. Holes read as zeroes.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID.
+    /// * `dn` - Object dnode.
+    /// * `blkid` - Block index to read.
+    /// * `out` - Destination 4 KiB block buffer.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn read_block(&mut self, obj: u64, dn: &DnodePhys, blkid: u64, out: &mut [u8; ZFS_BLOCK_SIZE]) -> DmuResult<()> {
         if let Some(&frame) = self.dirty_data.get(&(obj, blkid)) {
             out.copy_from_slice(frame_bytes(frame));
@@ -229,6 +317,17 @@ impl Dmu {
     }
 
     /// Reads up to `buf.len()` bytes at `offset`, bounded by the object size.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID.
+    /// * `offset` - Byte offset within object.
+    /// * `buf` - Destination byte buffer.
+    ///
+    /// # Returns
+    /// Number of bytes read on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     pub fn read(&mut self, obj: u64, offset: u64, buf: &mut [u8]) -> DmuResult<usize> {
         let dn = self.get_dnode(obj)?;
         if offset >= dn.size {
@@ -253,6 +352,17 @@ impl Dmu {
     // ------------------------------------------------------------------
 
     /// Writes `data` at `offset`, growing the object if needed.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID.
+    /// * `offset` - Byte offset within object.
+    /// * `data` - Source data slice.
+    ///
+    /// # Returns
+    /// Number of bytes written on success.
+    ///
+    /// # Errors
+    /// DMU error string on write or allocation failure.
     pub fn write(&mut self, obj: u64, offset: u64, data: &[u8]) -> DmuResult<usize> {
         let mut dn = self.get_dnode(obj)?;
         let mut done = 0;
@@ -286,6 +396,16 @@ impl Dmu {
     }
 
     /// Sets the object size, discarding data past the new end.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID.
+    /// * `new_size` - New size in bytes.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on failure.
     pub fn truncate(&mut self, obj: u64, new_size: u64) -> DmuResult<()> {
         let mut dn = self.get_dnode(obj)?;
         if new_size < dn.size {
@@ -316,11 +436,17 @@ impl Dmu {
     }
 
     /// Number of dirty blocks waiting for the next commit.
+    ///
+    /// # Returns
+    /// Count of pending uncommitted dirty data blocks.
     pub fn dirty_blocks(&self) -> usize {
         self.dirty_data.len()
     }
 
     /// Returns true if uncommitted dirty blocks, dnodes, or truncations are pending commit.
+    ///
+    /// # Returns
+    /// `true` if dirty changes exist, `false` otherwise.
     pub fn has_pending_changes(&self) -> bool {
         !self.dirty_data.is_empty() || !self.dirty_dnodes.is_empty() || !self.truncated.is_empty() || !self.freed_trees.is_empty()
     }
@@ -329,6 +455,10 @@ impl Dmu {
     // Commit
     // ------------------------------------------------------------------
 
+    /// Frees the physical block referenced by `bp` unless protected by a snapshot.
+    ///
+    /// # Arguments
+    /// * `bp` - Block pointer to release.
     fn free_bp(&mut self, bp: &BlockPointer) {
         if bp.is_hole() {
             return;
@@ -339,6 +469,17 @@ impl Dmu {
         self.spa.free_deferred(bp.block);
     }
 
+    /// Recursively frees all blocks in the indirect subtree rooted at `bp`.
+    ///
+    /// # Arguments
+    /// * `bp` - Root block pointer of subtree.
+    /// * `level` - Tree height level of the root.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn free_subtree(&mut self, bp: BlockPointer, level: u32) -> DmuResult<()> {
         if bp.is_hole() {
             return Ok(());
@@ -354,6 +495,18 @@ impl Dmu {
     }
 
     /// Block pointer of the tree node at (`level`, `idx`), honouring dirty indirects.
+    ///
+    /// # Arguments
+    /// * `dn` - Object dnode.
+    /// * `ind` - Map of in-memory dirty indirect blocks.
+    /// * `level` - Node level.
+    /// * `idx` - Block pointer index.
+    ///
+    /// # Returns
+    /// Resolved [`BlockPointer`] on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn get_entry(&mut self, dn: &DnodePhys, ind: &BTreeMap<(u32, u64), Box<Indirect>>, level: u32, idx: u64) -> DmuResult<BlockPointer> {
         let top_level = dn.nlevels as u32 - 1;
         if level == top_level {
@@ -373,6 +526,18 @@ impl Dmu {
     }
 
     /// Loads indirect block (`level`, `idx`) into the dirty set for modification.
+    ///
+    /// # Arguments
+    /// * `dn` - Object dnode.
+    /// * `ind` - Map of in-memory dirty indirect blocks.
+    /// * `level` - Node level.
+    /// * `idx` - Block index at this level.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on read failure.
     fn load_indirect(&mut self, dn: &DnodePhys, ind: &mut BTreeMap<(u32, u64), Box<Indirect>>, level: u32, idx: u64) -> DmuResult<()> {
         if ind.contains_key(&(level, idx)) {
             return Ok(());
@@ -388,6 +553,19 @@ impl Dmu {
     }
 
     /// Points tree slot (`level`, `idx`) at `bp`, freeing what it pointed to before.
+    ///
+    /// # Arguments
+    /// * `dn` - Object dnode.
+    /// * `ind` - Map of in-memory dirty indirect blocks.
+    /// * `level` - Node level.
+    /// * `idx` - Slot index.
+    /// * `bp` - New block pointer to store.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on failure.
     fn set_entry(&mut self, dn: &mut DnodePhys, ind: &mut BTreeMap<(u32, u64), Box<Indirect>>, level: u32, idx: u64, bp: BlockPointer) -> DmuResult<()> {
         let top_level = dn.nlevels as u32 - 1;
         let old = if level == top_level {
@@ -405,6 +583,19 @@ impl Dmu {
     }
 
     /// Frees every leaf at or past `first` in the subtree rooted at (`level`, `idx`).
+    ///
+    /// # Arguments
+    /// * `dn` - Object dnode.
+    /// * `ind` - Map of in-memory dirty indirect blocks.
+    /// * `level` - Current node level.
+    /// * `idx` - Current node index.
+    /// * `first` - First leaf block index to truncate.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on failure.
     fn trunc_node(&mut self, dn: &mut DnodePhys, ind: &mut BTreeMap<(u32, u64), Box<Indirect>>, level: u32, idx: u64, first: u64) -> DmuResult<()> {
         let span = pow64(level);
         let start = idx * span;
@@ -439,6 +630,17 @@ impl Dmu {
     }
 
     /// Writes all dirty state of one object into fresh blocks and updates its dnode.
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID being committed.
+    /// * `dn` - Mutable reference to object's dnode.
+    /// * `txg` - Committing transaction group number.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// DMU error string on write or allocation failure.
     fn commit_tree(&mut self, obj: u64, dn: &mut DnodePhys, txg: u64) -> DmuResult<()> {
         let mut ind: BTreeMap<(u32, u64), Box<Indirect>> = BTreeMap::new();
         let mut writes: Vec<(u64, PhysFrame<Size4KiB>)> = Vec::new();
@@ -519,6 +721,12 @@ impl Dmu {
     }
 
     /// Commits the open transaction group. Returns the committed txg.
+    ///
+    /// # Returns
+    /// Committed transaction group number on success.
+    ///
+    /// # Errors
+    /// DMU error string on commit failure.
     pub fn sync(&mut self) -> DmuResult<u64> {
         if !self.has_pending_changes() {
             return Ok(self.ub.txg);

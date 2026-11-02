@@ -52,6 +52,7 @@ fn demo_rogue_process() {
 /// Global demo mutex for lock contention and sleeping wait-queue testing.
 static DEMO_MUTEX: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
 
+/// Background demonstration worker thread contending for [`DEMO_MUTEX`].
 fn demo_mutex_worker_a() {
     println!("  [Task A] Attempting to acquire DEMO_MUTEX...");
     let mut guard = DEMO_MUTEX.lock();
@@ -61,6 +62,7 @@ fn demo_mutex_worker_a() {
     println!("  [Task A] Releasing DEMO_MUTEX.");
 }
 
+/// Secondary demonstration worker thread showing mutex blocking and handoff.
 fn demo_mutex_worker_b() {
     task::sleep_ms(40); // Allow Task A to acquire the lock first
     println!("  [Task B] Attempting to acquire DEMO_MUTEX (contended -> transitioning to Blocked)...");
@@ -69,6 +71,7 @@ fn demo_mutex_worker_b() {
     println!("  [Task B] Lock acquired after being unblocked! Value={}", *guard);
 }
 
+/// Demonstration thread producing test messages to system endpoint #1.
 fn demo_producer() {
     if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(1) {
         for i in 1..=3 {
@@ -82,6 +85,7 @@ fn demo_producer() {
     }
 }
 
+/// Demonstration thread consuming test messages from system endpoint #1.
 fn demo_consumer() {
     if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(1) {
         println!("  [Consumer] Calling receive_blocking() on Endpoint #1 (will Block if empty)...");

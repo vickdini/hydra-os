@@ -65,6 +65,14 @@ impl Endpoint {
     }
 
     /// Returns the unique numeric identifier of this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// The numeric ID (0..63 for system endpoints).
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn id(&self) -> u32 {
         self.id
     }
@@ -110,16 +118,40 @@ impl Endpoint {
     }
 
     /// Returns the count of pending unconsumed messages currently in the queue.
+    ///
+    /// # Returns
+    ///
+    /// Number of queued `Message` objects waiting to be received (0..16).
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn pending_count(&self) -> usize {
         self.count
     }
 
     /// Returns the number of threads currently blocked waiting to receive from this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Count of receiver tasks suspended on `recv_waiters`.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn waiting_receivers(&self) -> usize {
         self.recv_waiters.len()
     }
 
     /// Returns the number of threads currently blocked waiting to send into this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Count of sender tasks suspended on `send_waiters`.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn waiting_senders(&self) -> usize {
         self.send_waiters.len()
     }
@@ -148,16 +180,48 @@ impl SharedEndpoint {
     }
 
     /// Non-blocking send: returns an error immediately if the endpoint is full.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The message to enqueue.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful enqueue; `Err(&'static str)` if the queue is full.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if all 16 slots in the endpoint ring buffer are saturated.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn send(&self, msg: Message) -> Result<(), &'static str> {
         self.0.lock().send(msg)
     }
 
     /// Non-blocking receive: returns `None` immediately if no messages are pending.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Message)` if a message was dequeued; `None` if the queue is empty.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn receive(&self) -> Option<Message> {
         self.0.lock().receive()
     }
 
     /// Blocking send: suspends the current task if the endpoint queue is full until space frees up.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The message to deliver to the endpoint.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn send_blocking(&self, msg: Message) {
         let current_id = crate::task::SCHEDULER.lock().current_task_id();
         loop {
@@ -175,6 +239,14 @@ impl SharedEndpoint {
     }
 
     /// Blocking receive: suspends the current task until an incoming message is deposited.
+    ///
+    /// # Returns
+    ///
+    /// The next `Message` delivered to this endpoint.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn receive_blocking(&self) -> Message {
         let current_id = crate::task::SCHEDULER.lock().current_task_id();
         loop {
@@ -191,21 +263,53 @@ impl SharedEndpoint {
     }
 
     /// Returns the numeric identifier of the encapsulated endpoint.
+    ///
+    /// # Returns
+    ///
+    /// The numeric ID (0..63 for system endpoints).
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn id(&self) -> u32 {
         self.0.lock().id()
     }
 
     /// Returns the number of messages currently waiting in the queue.
+    ///
+    /// # Returns
+    ///
+    /// Count of unconsumed messages in the buffer.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn pending_count(&self) -> usize {
         self.0.lock().pending_count()
     }
 
     /// Returns the count of receivers currently blocked on this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Number of suspended receiver threads.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn waiting_receivers(&self) -> usize {
         self.0.lock().waiting_receivers()
     }
 
     /// Returns the count of senders currently blocked on this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Number of suspended sender threads.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn waiting_senders(&self) -> usize {
         self.0.lock().waiting_senders()
     }
@@ -240,6 +344,18 @@ pub static SYSTEM_ENDPOINTS: [SharedEndpoint; 64] = [
 pub use super::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, ENDPOINT_SUPERVISOR, ENDPOINT_ZFS_SERVER};
 
 /// Retrieves a reference to a system endpoint by its numeric ID.
+///
+/// # Arguments
+///
+/// * `id` - Endpoint index (0..63).
+///
+/// # Returns
+///
+/// `Some(&SharedEndpoint)` if `id < 64`; `None` if out of bounds.
+///
+/// # Panics
+///
+/// *Guaranteed to never panic under normal execution.*
 pub fn get_system_endpoint(id: u32) -> Option<&'static SharedEndpoint> {
     if (id as usize) < SYSTEM_ENDPOINTS.len() {
         Some(&SYSTEM_ENDPOINTS[id as usize])

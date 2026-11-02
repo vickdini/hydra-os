@@ -94,6 +94,9 @@ impl Command for EfifsCommand {
 }
 
 /// Lists directory contents on the raw UEFI firmware boot partition with proper string decoding.
+///
+/// # Arguments
+/// * `dir_path` - Path string on the UEFI boot filesystem to list.
 fn list_uefi_directory(dir_path: &str) {
     let mut root = match open_root_volume() {
         Ok(r) => r,

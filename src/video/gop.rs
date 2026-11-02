@@ -48,6 +48,10 @@ pub struct VideoModeInfo {
 /// Discovers the hardware Graphics Output Protocol (GOP), extracts the linear framebuffer,
 /// maps the physical video memory into Hydra's autonomous kernel PML4 table, and initializes
 /// the autonomous video console.
+///
+/// # Returns
+///
+/// The discovered [`VideoModeInfo`] on success, or an error description string on failure.
 pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
     let handle = uefi::boot::get_handle_for_protocol::<GraphicsOutput>()
         .map_err(|_| "Failed to find GraphicsOutput protocol handle")?;
@@ -127,6 +131,10 @@ pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
 }
 
 /// Returns the detected video mode information if GOP is active.
+///
+/// # Returns
+///
+/// `Some(VideoModeInfo)` if GOP is initialized, or `None` otherwise.
 pub fn get_video_info() -> Option<VideoModeInfo> {
     let guard = VIDEO_CONSOLE.lock();
     guard.as_ref().map(|console| {

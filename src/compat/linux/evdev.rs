@@ -57,11 +57,19 @@ pub static INPUT_WQ: WaitQueue = WaitQueue::new();
 static ROUTING: AtomicBool = AtomicBool::new(false);
 
 /// Sends the keyboard and mouse to the event devices (`true`) or back to Hydra (`false`).
+///
+/// # Arguments
+///
+/// * `on` - `true` to route input to evdev; `false` to route back to Hydra.
 pub fn set_routing(on: bool) {
     ROUTING.store(on, Ordering::Release);
 }
 
 /// True while input goes to the event devices.
+///
+/// # Returns
+///
+/// `true` if input routing to evdev is active; `false` otherwise.
 pub fn routing() -> bool {
     ROUTING.load(Ordering::Acquire)
 }
@@ -83,6 +91,11 @@ struct Ring {
 
 static RING: Mutex<Ring> = Mutex::new(Ring { buf: [(Raw::Scancode(0), 0); 512], head: 0, len: 0 });
 
+/// Enqueues a raw input event into the ring buffer.
+///
+/// # Arguments
+///
+/// * `r` - Raw input event to push.
 fn push_raw(r: Raw) {
     if !routing() {
         return;
@@ -101,16 +114,32 @@ fn push_raw(r: Raw) {
 }
 
 /// Keyboard interrupt: one set-1 scancode byte.
+///
+/// # Arguments
+///
+/// * `code` - Set-1 scancode byte.
 pub fn push_scancode(code: u8) {
     push_raw(Raw::Scancode(code));
 }
 
 /// Mouse interrupt: one decoded packet (`dy` positive = down, `wheel` positive = away
 /// from the user).
+///
+/// # Arguments
+///
+/// * `dx` - Relative X movement.
+/// * `dy` - Relative Y movement.
+/// * `wheel` - Wheel scroll delta.
+/// * `buttons` - Mouse buttons bitmask.
 pub fn push_mouse(dx: i32, dy: i32, wheel: i32, buttons: u8) {
     push_raw(Raw::Mouse(dx as i16, dy as i16, wheel as i8, buttons));
 }
 
+/// Checks whether any raw input events are currently queued in the ring buffer.
+///
+/// # Returns
+///
+/// `true` if one or more raw events are pending in the ring buffer.
 fn ring_pending() -> bool {
     x86_64::instructions::interrupts::without_interrupts(|| RING.lock().len > 0)
 }
@@ -127,6 +156,18 @@ static STATE: Mutex<Translator> = Mutex::new(Translator { e0: false, keys: [0; 9
 /// Open files of the keyboard (`[0]`) and mouse (`[1]`).
 static CLIENTS: Mutex<[Vec<Weak<EvdevFile>>; 2]> = Mutex::new([Vec::new(), Vec::new()]);
 
+/// Formats a 24-byte Linux `input_event` struct.
+///
+/// # Arguments
+///
+/// * `t` - Timestamp in scheduler ticks.
+/// * `ty` - Event type (`EV_KEY`, `EV_REL`, `EV_SYN`, etc.).
+/// * `code` - Event code.
+/// * `value` - Event value.
+///
+/// # Returns
+///
+/// A 24-byte array containing the serialized `input_event`.
 fn event(t: u64, ty: u16, code: u16, value: i32) -> [u8; 24] {
     let us = t * 10_000;
     let mut e = [0u8; 24];
@@ -244,6 +285,10 @@ fn pump() {
 }
 
 /// Appends events to the queues of the open files of each device.
+///
+/// # Arguments
+///
+/// * `per_dev` - Array containing batches of formatted events for keyboard (`[0]`) and mouse (`[1]`).
 fn deliver(per_dev: &[Vec<[u8; 24]>; 2]) {
     let mut clients = CLIENTS.lock();
     for (dev, events) in per_dev.iter().enumerate() {
@@ -274,6 +319,16 @@ pub struct EvdevFile {
 }
 
 /// Opens `event0` (minor 64, keyboard) or `event1` (minor 65, mouse).
+///
+/// # Arguments
+///
+/// * `minor` - Device minor number (`64` for keyboard, `65` for mouse).
+/// * `nonblock` - Initial non-blocking state.
+///
+/// # Returns
+///
+/// * `Ok(Arc<dyn CharDevice>)` reference to the opened event file.
+/// * `Err(-ENXIO)` if `minor` does not match a known evdev device.
 pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
     let dev = match minor {
         64 => 0,
@@ -299,11 +354,25 @@ const INFO: [Info; 2] = [
 ];
 
 /// Device names and identities for sysfs ([`super::devices`]).
+///
+/// # Arguments
+///
+/// * `dev` - Device index (`0` for keyboard, `1` for mouse).
+///
+/// # Returns
+///
+/// `(name, phys_path, id_quad)` tuple.
 pub fn device_info(dev: usize) -> (&'static str, &'static str, [u16; 4]) {
     let i = &INFO[dev];
     (i.name, i.phys, i.id)
 }
 
+/// Sets a single bit in a capability byte array.
+///
+/// # Arguments
+///
+/// * `map` - Mutable byte slice representing bitmask.
+/// * `bit` - Index of the bit to set.
 fn set_bit(map: &mut [u8], bit: usize) {
     if bit / 8 < map.len() {
         map[bit / 8] |= 1 << (bit % 8);
@@ -311,6 +380,15 @@ fn set_bit(map: &mut [u8], bit: usize) {
 }
 
 /// Capability bitmap of event type `ty` (0 = the event types themselves), in bytes.
+///
+/// # Arguments
+///
+/// * `dev` - Device index (`0` for keyboard, `1` for mouse).
+/// * `ty` - Event type code.
+///
+/// # Returns
+///
+/// Byte vector containing capability bitmask.
 pub fn capabilities(dev: usize, ty: u16) -> Vec<u8> {
     let bytes = match ty {
         0 => 8,
@@ -341,6 +419,17 @@ pub fn capabilities(dev: usize, ty: u16) -> Vec<u8> {
 }
 
 impl EvdevFile {
+    /// Copies byte slice `data` up to `size` bytes to user memory `arg`.
+    ///
+    /// # Arguments
+    ///
+    /// * `arg` - User pointer to write into.
+    /// * `size` - Max size requested by user.
+    /// * `data` - Source byte data.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes copied on success, or `-EFAULT` on memory error.
     fn put(&self, arg: u64, size: usize, data: &[u8]) -> i64 {
         let n = size.min(data.len());
         if n > 0 && copy_out(arg, &data[..n]).is_err() {

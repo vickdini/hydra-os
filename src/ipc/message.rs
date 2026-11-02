@@ -42,6 +42,19 @@ impl Message {
     }
 
     /// Constructs a message with the specified protocol label and inline argument array.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Protocol operation code (e.g., `FS_READ`, `BLOCK_DEV_WRITE`).
+    /// * `args` - Array of 4 inline 64-bit integer values.
+    ///
+    /// # Returns
+    ///
+    /// A newly constructed `Message` carrying the specified arguments.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn with_args(label: u32, args: [u64; MAX_INLINE_WORDS]) -> Self {
         Self {
             label,
@@ -51,6 +64,18 @@ impl Message {
     }
 
     /// Attaches an object-capability token to be delegated alongside this message.
+    ///
+    /// # Arguments
+    ///
+    /// * `cap` - Security capability token to delegate to the receiving task.
+    ///
+    /// # Returns
+    ///
+    /// The updated `Message` carrying the delegated capability.
+    ///
+    /// # Panics
+    ///
+    /// *Guaranteed to never panic under normal execution.*
     pub fn with_cap(mut self, cap: Capability) -> Self {
         self.capability = Some(cap);
         self

@@ -30,53 +30,123 @@ pub const fn makedev(major: u64, minor: u64) -> u64 {
 
 /// An open character device.
 pub trait CharDevice: Send + Sync {
-    /// `read(2)`: bytes read, or a negative errno.
+    /// Reads bytes from the character device into `buf`.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer to read into.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes read, or a negative Linux errno.
     fn read(&self, buf: &mut [u8]) -> i64;
 
-    /// `write(2)`: bytes written, or a negative errno.
+    /// Writes bytes from `data` into the character device.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Source byte slice to write.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes written, or a negative Linux errno.
     fn write(&self, _data: &[u8]) -> i64 {
         EINVAL
     }
 
-    /// `ioctl(2)` with the request and its (user pointer) argument.
+    /// Performs an I/O control operation on the character device.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - Device-specific ioctl command.
+    /// * `arg` - Argument value or user virtual pointer.
+    ///
+    /// # Returns
+    ///
+    /// Result code, or negative Linux errno on error.
     fn ioctl(&self, _cmd: u64, _arg: u64) -> i64 {
         ENOTTY
     }
 
-    /// Current `poll` readiness (`POLLIN` = 1, `POLLOUT` = 4).
+    /// Queries current `poll` readiness events.
+    ///
+    /// # Returns
+    ///
+    /// Bitmask of poll flags (`POLLIN`, `POLLOUT`, `POLLERR`, `POLLHUP`).
     fn poll_events(&self) -> u32;
 
-    /// Wait queues that announce readiness changes.
+    /// Registers the device's wait queues with the wait set.
+    ///
+    /// # Arguments
+    ///
+    /// * `waits` - Wait set to register queues with.
     fn add_wait_queues(&self, waits: &mut WaitSet);
 
-    /// The device number (`st_rdev`) and the node's path (for `/proc/self/fd`).
+    /// Returns the device number (`st_rdev`).
+    ///
+    /// # Returns
+    ///
+    /// 64-bit device number.
     fn rdev(&self) -> u64;
 
-    /// Path of the device node.
+    /// Returns the filesystem path of the device node.
+    ///
+    /// # Returns
+    ///
+    /// String containing node path.
     fn path(&self) -> String;
 
-    /// The object `mmap` maps pages from, if the device can be mapped.
+    /// Returns the object backing `mmap` for this device, if mappable.
+    ///
+    /// # Returns
+    ///
+    /// Mapped memory object reference, or negative errno if unsupported.
     fn mmap_object(&self) -> Result<Arc<dyn MappedObject>, i64> {
         Err(ENODEV)
     }
 
-    /// `O_NONBLOCK` as set by `open` or `fcntl(F_SETFL)`.
+    /// Sets non-blocking I/O mode on the device.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking mode; `false` to block.
     fn set_nonblock(&self, on: bool);
 
-    /// Current `O_NONBLOCK` state.
+    /// Queries the current non-blocking I/O mode state.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     fn nonblock(&self) -> bool;
 
-    /// The buffer behind a DMA-BUF descriptor (for `DRM_IOCTL_PRIME_FD_TO_HANDLE`).
+    /// Retrieves the buffer behind a DMA-BUF descriptor.
+    ///
+    /// # Returns
+    ///
+    /// Dynamic reference to the underlying DMA-BUF object, or `None`.
     fn dma_buf(&self) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
         None
     }
 
-    /// Socket calls (`bind`, `recvmsg`, ...) on devices that are sockets; `None` = `ENOTSOCK`.
+    /// Dispatches socket calls on devices that represent sockets.
+    ///
+    /// # Arguments
+    ///
+    /// * `num` - System call number.
+    /// * `a` - System call argument register array `[arg0..arg5]`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(result)` if handled, or `None` if this device is not a socket.
     fn socket_call(&self, _num: u64, _a: [u64; 6]) -> Option<i64> {
         None
     }
 
-    /// `stat` of the open device.
+    /// Returns file status metadata for the open device.
+    ///
+    /// # Returns
+    ///
+    /// Populated `LinuxStat` structure.
     fn stat(&self) -> LinuxStat {
         let mut st = LinuxStat::default();
         st.st_dev = 6; // devtmpfs
@@ -90,6 +160,15 @@ pub trait CharDevice: Send + Sync {
 }
 
 /// Opens the driver behind character device `rdev`; `None` if no driver claims it.
+///
+/// # Arguments
+///
+/// * `rdev` - Encoded 64-bit device major and minor number.
+/// * `flags` - Linux open flags bitmask.
+///
+/// # Returns
+///
+/// `Some(Ok(dev))` or `Some(Err(code))` if claimed by a driver, or `None` if unhandled.
 pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     let nonblock = flags & 0o4000 != 0;
@@ -101,6 +180,15 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
 }
 
 /// Socket calls that belong to device-backed sockets (`AF_NETLINK`).
+///
+/// # Arguments
+///
+/// * `num` - System call number.
+/// * `a` - System call argument registers.
+///
+/// # Returns
+///
+/// `Some(result)` if handled, or `None` if `num` is not a device socket call.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     match num {
         41 => super::netlink::socket(a),

@@ -28,6 +28,13 @@ pub use super::fsproto::{Attr, ReaddirEntry, SetAttr};
 /// Result type returned by ZPL operations, encoding negative Linux errnos on failure.
 pub type ZplResult<T> = Result<T, i64>;
 
+/// Translates internal error messages into POSIX error numbers (`ENOSPC` or `EIO`).
+///
+/// # Arguments
+/// * `e` - Error string message to translate.
+///
+/// # Returns
+/// Linux errno as a negative integer.
 fn io(e: &'static str) -> i64 {
     crate::kprintln!("[zfs] {}", e);
     if e.contains("out of space") {
@@ -38,11 +45,22 @@ fn io(e: &'static str) -> i64 {
 }
 
 
+/// Returns the current real-time clock timestamp in seconds and nanoseconds.
+///
+/// # Returns
+/// Tuple of `(seconds, nanoseconds)`.
 fn now() -> (i64, u32) {
     let (s, ns) = crate::arch::rtc::now();
     (s as i64, ns)
 }
 
+/// Validates a directory entry name for illegal characters or excessive length.
+///
+/// # Arguments
+/// * `name` - Filename byte slice to validate.
+///
+/// # Returns
+/// `Ok(())` if valid, or `Err(EINVAL)` / `Err(ENAMETOOLONG)`.
 fn check_name(name: &[u8]) -> ZplResult<()> {
     if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0) {
         return Err(EINVAL);
@@ -56,6 +74,10 @@ fn check_name(name: &[u8]) -> ZplResult<()> {
 impl ZfsServer {
     /// Reports a change of `ino` to inotify: to the inode's own watches and, under its
     /// name, to its directory's watches.
+    ///
+    /// # Arguments
+    /// * `ino` - Inode number undergoing changes.
+    /// * `mask` - Inotify event mask flags.
     pub fn notify_file(&mut self, ino: u64, mask: u32) {
         if !crate::compat::linux::inotify::active() {
             return;
@@ -76,6 +98,13 @@ impl ZfsServer {
     }
 
     /// The name under which directory `dir` holds `ino` (a scan; only for notification).
+    ///
+    /// # Arguments
+    /// * `dir` - Directory inode number to search within.
+    /// * `ino` - Child inode number to resolve.
+    ///
+    /// # Returns
+    /// `Some(Vec<u8>)` containing the entry name if found, or `None`.
     fn name_in(&mut self, dir: u64, ino: u64) -> Option<Vec<u8>> {
         let mut pos = 0;
         loop {
@@ -89,12 +118,26 @@ impl ZfsServer {
     }
 
     /// Reports an entry change in directory `dir`.
+    ///
+    /// # Arguments
+    /// * `dir` - Directory inode number.
+    /// * `mask` - Inotify event mask.
+    /// * `cookie` - Correlation cookie for paired events (e.g. rename).
+    /// * `name` - Filename byte slice.
+    /// * `is_dir` - Whether the target entry is a directory.
     fn notify_entry(&self, dir: u64, mask: u32, cookie: u32, name: &[u8], is_dir: bool) {
         if crate::compat::linux::inotify::active() {
             crate::compat::linux::inotify::event(dir, mask | if is_dir { crate::compat::linux::inotify::IN_ISDIR } else { 0 }, cookie, name);
         }
     }
 
+    /// Fetches the on-disk dnode structure for `ino`, verifying it is not unlinked.
+    ///
+    /// # Arguments
+    /// * `ino` - Target inode number.
+    ///
+    /// # Returns
+    /// Cloned [`DnodePhys`] object on success, or `Err(ENOENT)`.
     fn dnode(&mut self, ino: u64) -> ZplResult<DnodePhys> {
         let dn = self.dmu.get_dnode(ino).map_err(|_| ENOENT)?;
         if dn.mode == 0 {
@@ -103,6 +146,13 @@ impl ZfsServer {
         Ok(dn)
     }
 
+    /// Fetches the on-disk dnode structure for `ino` and asserts that it is a directory.
+    ///
+    /// # Arguments
+    /// * `ino` - Target directory inode number.
+    ///
+    /// # Returns
+    /// Directory [`DnodePhys`] on success, or `Err(ENOTDIR)`.
     fn dir_dnode(&mut self, ino: u64) -> ZplResult<DnodePhys> {
         let dn = self.dnode(ino)?;
         if dn.mode & S_IFMT != S_IFDIR {
@@ -111,6 +161,15 @@ impl ZfsServer {
         Ok(dn)
     }
 
+    /// Updates modification and/or change timestamps on `ino`.
+    ///
+    /// # Arguments
+    /// * `ino` - Target inode number.
+    /// * `m` - Whether to update `mtime`.
+    /// * `c` - Whether to update `ctime`.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error code.
     fn touch(&mut self, ino: u64, m: bool, c: bool) -> ZplResult<()> {
         let mut dn = self.dnode(ino)?;
         let t = now();
@@ -127,6 +186,12 @@ impl ZfsServer {
     }
 
     /// Returns the attributes of an inode.
+    ///
+    /// # Arguments
+    /// * `ino` - Target inode number.
+    ///
+    /// # Returns
+    /// Populated [`Attr`] descriptor on success, or `Err(ENOENT)`.
     pub fn getattr(&mut self, ino: u64) -> ZplResult<Attr> {
         let dn = self.dnode(ino)?;
         Ok(Attr {
@@ -147,6 +212,13 @@ impl ZfsServer {
     }
 
     /// Looks up `name` in directory `dir` (handles `.` and `..`).
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Filename byte slice to search for.
+    ///
+    /// # Returns
+    /// Resolved child inode number on success, or `Err(ENOENT)` / `Err(ENOTDIR)`.
     pub fn lookup(&mut self, dir: u64, name: &[u8]) -> ZplResult<u64> {
         let dn = self.dir_dnode(dir)?;
         match name {
@@ -160,6 +232,17 @@ impl ZfsServer {
     }
 
     /// Allocates an inode and links it into `dir` as `name`.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Filename byte slice.
+    /// * `mode` - File type and permission bits.
+    /// * `uid` - Owner user ID.
+    /// * `gid` - Owner group ID.
+    /// * `rdev` - Special device identifier for device nodes.
+    ///
+    /// # Returns
+    /// Newly allocated inode number on success, or an error code.
     fn make_node(&mut self, dir: u64, name: &[u8], mode: u32, uid: u32, gid: u32, rdev: u64) -> ZplResult<u64> {
         if name == b"." || name == b".." {
             // Always present in a directory (`mkdir .` fails with EEXIST on Linux)
@@ -193,11 +276,32 @@ impl ZfsServer {
     }
 
     /// Creates a regular file.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Filename byte slice.
+    /// * `perm` - Permission bits.
+    /// * `uid` - Owner user ID.
+    /// * `gid` - Owner group ID.
+    ///
+    /// # Returns
+    /// Newly allocated file inode number on success, or an error code.
     pub fn create(&mut self, dir: u64, name: &[u8], perm: u32, uid: u32, gid: u32) -> ZplResult<u64> {
         self.make_node(dir, name, S_IFREG | (perm & 0o7777), uid, gid, 0)
     }
 
     /// Creates a device node, FIFO, socket or regular file from a full `st_mode`.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Filename byte slice.
+    /// * `mode` - File mode specifying type and permissions.
+    /// * `rdev` - Device major/minor number encoding.
+    /// * `uid` - Owner user ID.
+    /// * `gid` - Owner group ID.
+    ///
+    /// # Returns
+    /// Newly created inode number on success, or `Err(EINVAL)` if attempting directory/symlink creation.
     pub fn mknod(&mut self, dir: u64, name: &[u8], mode: u32, rdev: u64, uid: u32, gid: u32) -> ZplResult<u64> {
         let mode = if mode & S_IFMT == 0 { mode | S_IFREG } else { mode };
         if mode & S_IFMT == S_IFDIR || mode & S_IFMT == S_IFLNK {
@@ -207,6 +311,16 @@ impl ZfsServer {
     }
 
     /// Creates a directory.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Subdirectory name byte slice.
+    /// * `perm` - Permission bits.
+    /// * `uid` - Owner user ID.
+    /// * `gid` - Owner group ID.
+    ///
+    /// # Returns
+    /// Newly allocated directory inode number on success, or an error code.
     pub fn mkdir(&mut self, dir: u64, name: &[u8], perm: u32, uid: u32, gid: u32) -> ZplResult<u64> {
         let ino = self.make_node(dir, name, S_IFDIR | (perm & 0o7777), uid, gid, 0)?;
         let mut parent = self.dnode(dir)?;
@@ -216,6 +330,16 @@ impl ZfsServer {
     }
 
     /// Creates a symbolic link pointing at `target`.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Symlink name byte slice.
+    /// * `target` - Target destination path byte slice.
+    /// * `uid` - Owner user ID.
+    /// * `gid` - Owner group ID.
+    ///
+    /// # Returns
+    /// Newly allocated symlink inode number on success, or an error code.
     pub fn symlink(&mut self, dir: u64, name: &[u8], target: &[u8], uid: u32, gid: u32) -> ZplResult<u64> {
         if target.is_empty() || target.len() > 4095 {
             return Err(if target.is_empty() { ENOENT } else { ENAMETOOLONG });
@@ -234,6 +358,12 @@ impl ZfsServer {
     }
 
     /// Returns a symbolic link's target.
+    ///
+    /// # Arguments
+    /// * `ino` - Target symlink inode number.
+    ///
+    /// # Returns
+    /// Target path byte vector on success, or `Err(EINVAL)` if not a symlink.
     pub fn readlink(&mut self, ino: u64) -> ZplResult<Vec<u8>> {
         let dn = self.dnode(ino)?;
         if dn.mode & S_IFMT != S_IFLNK {
@@ -249,6 +379,14 @@ impl ZfsServer {
     }
 
     /// Adds a hard link `dir/name` to `ino`.
+    ///
+    /// # Arguments
+    /// * `ino` - Existing source inode number.
+    /// * `dir` - Target parent directory inode number.
+    /// * `name` - Hard link name byte slice.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error code if target is a directory or link count exceeded.
     pub fn link(&mut self, ino: u64, dir: u64, name: &[u8]) -> ZplResult<()> {
         check_name(name)?;
         let mut dn = self.dnode(ino)?;
@@ -277,6 +415,12 @@ impl ZfsServer {
     }
 
     /// Drops one link to `ino`, freeing it when no links and no open handles remain.
+    ///
+    /// # Arguments
+    /// * `ino` - Inode number whose link count is decremented.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error code.
     fn drop_link(&mut self, ino: u64) -> ZplResult<()> {
         let mut dn = self.dnode(ino)?;
         let is_dir = dn.mode & S_IFMT == S_IFDIR;
@@ -299,6 +443,13 @@ impl ZfsServer {
     }
 
     /// Removes a non-directory entry.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Filename byte slice to unlink.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or `Err(EISDIR)` if entry is a directory.
     pub fn unlink(&mut self, dir: u64, name: &[u8]) -> ZplResult<()> {
         let ino = self.lookup(dir, name)?;
         if self.dnode(ino)?.mode & S_IFMT == S_IFDIR {
@@ -317,6 +468,13 @@ impl ZfsServer {
     }
 
     /// Removes an empty directory.
+    ///
+    /// # Arguments
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Subdirectory name byte slice to remove.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or `Err(ENOTEMPTY)` if directory contains entries.
     pub fn rmdir(&mut self, dir: u64, name: &[u8]) -> ZplResult<()> {
         if name == b"." {
             return Err(EINVAL);
@@ -342,6 +500,15 @@ impl ZfsServer {
     }
 
     /// Renames `sdir/sname` to `ddir/dname`, replacing a compatible existing target.
+    ///
+    /// # Arguments
+    /// * `sdir` - Source parent directory inode number.
+    /// * `sname` - Source entry name byte slice.
+    /// * `ddir` - Destination parent directory inode number.
+    /// * `dname` - Destination entry name byte slice.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error code.
     pub fn rename(&mut self, sdir: u64, sname: &[u8], ddir: u64, dname: &[u8]) -> ZplResult<()> {
         check_name(dname)?;
         let ino = self.lookup(sdir, sname)?;
@@ -423,6 +590,14 @@ impl ZfsServer {
     }
 
     /// Reads file data at `offset`.
+    ///
+    /// # Arguments
+    /// * `ino` - File inode number to read.
+    /// * `offset` - Byte offset within the file.
+    /// * `buf` - Destination buffer to receive file bytes.
+    ///
+    /// # Returns
+    /// Number of bytes read on success, or `Err(EISDIR)` if target is a directory.
     pub fn read(&mut self, ino: u64, offset: u64, buf: &mut [u8]) -> ZplResult<usize> {
         let dn = self.dnode(ino)?;
         if dn.mode & S_IFMT == S_IFDIR {
@@ -432,6 +607,14 @@ impl ZfsServer {
     }
 
     /// Writes file data at `offset`.
+    ///
+    /// # Arguments
+    /// * `ino` - File inode number to write to.
+    /// * `offset` - Byte offset within the file.
+    /// * `data` - Payload byte slice to append or overwrite.
+    ///
+    /// # Returns
+    /// Number of bytes written on success, or `Err(EFBIG)` / `Err(EISDIR)`.
     pub fn write(&mut self, ino: u64, offset: u64, data: &[u8]) -> ZplResult<usize> {
         let dn = self.dnode(ino)?;
         if dn.mode & S_IFMT == S_IFDIR {
@@ -448,6 +631,13 @@ impl ZfsServer {
     }
 
     /// Changes attributes (chmod, chown, truncate, utimens).
+    ///
+    /// # Arguments
+    /// * `ino` - Target inode number.
+    /// * `set` - Attribute modifications to apply.
+    ///
+    /// # Returns
+    /// Updated inode [`Attr`] descriptor on success, or an error code.
     pub fn setattr(&mut self, ino: u64, set: SetAttr) -> ZplResult<Attr> {
         let mut dn = self.dnode(ino)?;
         if let Some(size) = set.size {
@@ -487,6 +677,14 @@ impl ZfsServer {
     }
 
     /// Lists a directory from `cookie` (0 starts with `.`, 1 is `..`).
+    ///
+    /// # Arguments
+    /// * `dir` - Directory inode number.
+    /// * `cookie` - Cursor position token.
+    /// * `max` - Maximum number of entries to return.
+    ///
+    /// # Returns
+    /// Vector of [`ReaddirEntry`] items on success, or an error code.
     pub fn readdir(&mut self, dir: u64, cookie: u64, max: usize) -> ZplResult<Vec<ReaddirEntry>> {
         let dn = self.dir_dnode(dir)?;
         let mut out = Vec::new();
@@ -508,11 +706,17 @@ impl ZfsServer {
     }
 
     /// Records an open handle on `ino` (keeps unlinked files alive until closed).
+    ///
+    /// # Arguments
+    /// * `ino` - Inode number being opened.
     pub fn open_ref(&mut self, ino: u64) {
         *self.open_counts.entry(ino).or_insert(0) += 1;
     }
 
     /// Releases an open handle, freeing the inode if it was unlinked meanwhile.
+    ///
+    /// # Arguments
+    /// * `ino` - Inode number whose open handle count is decremented.
     pub fn release(&mut self, ino: u64) {
         if let Some(c) = self.open_counts.get_mut(&ino) {
             *c -= 1;
@@ -526,6 +730,9 @@ impl ZfsServer {
     }
 
     /// Pool usage: (total blocks, free blocks, objects in use).
+    ///
+    /// # Returns
+    /// 3-tuple of `(total_blocks, free_blocks, objects_in_use)`.
     pub fn statfs(&self) -> (u64, u64, u64) {
         let total = self.dmu.spa.label.total_blocks;
         let free = total.saturating_sub(self.dmu.spa.allocated_blocks);

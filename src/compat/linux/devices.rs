@@ -36,6 +36,11 @@ struct Vga {
     revision: u8,
 }
 
+/// Probes PCI bus for display adapter or returns fallback VGA controller details.
+///
+/// # Returns
+///
+/// Populated [`Vga`] descriptor.
 fn vga() -> Vga {
     use crate::arch::pci;
     match pci::find_class(0x03, 0x00) {
@@ -55,6 +60,10 @@ fn vga() -> Vga {
 }
 
 /// PCI slot name of the display adapter (`DRM_IOCTL_GET_UNIQUE`).
+///
+/// # Returns
+///
+/// PCI slot identifier string (e.g. `"0000:00:02.0"`).
 pub fn vga_slot() -> String {
     vga().slot
 }
@@ -67,6 +76,15 @@ struct Tree {
     at: String,
 }
 
+/// Splits a path into its parent directory string and final filename component.
+///
+/// # Arguments
+///
+/// * `path` - Path string to split.
+///
+/// # Returns
+///
+/// `(parent_dir, file_name)` tuple.
 fn split(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[..i], &path[i + 1..]),
@@ -75,6 +93,16 @@ fn split(path: &str) -> (&str, &str) {
 }
 
 impl Tree {
+    /// Ensures directory hierarchy exists under tree root, returning final directory inode.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Directory path relative to root.
+    ///
+    /// # Returns
+    ///
+    /// Directory inode number on success, or a negative Linux errno on error.
     fn dir(&mut self, s: &mut ZfsServer, path: &str) -> Result<u64, i64> {
         self.at = String::from(path);
         let mut ino = self.root;
@@ -92,6 +120,17 @@ impl Tree {
     }
 
     /// The entry `name` in `dir` if it has file type `ty`; anything else there is removed.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `dir` - Parent directory inode number.
+    /// * `name` - Child name to look up.
+    /// * `ty` - Expected file type bits (`S_IFREG`, `S_IFLNK`, `S_IFCHR`).
+    ///
+    /// # Returns
+    ///
+    /// Inode number if matching entry exists, `None` if not found or unlinked, or negative errno on error.
     fn existing(&mut self, s: &mut ZfsServer, dir: u64, name: &str, ty: u32) -> Result<Option<u64>, i64> {
         match s.lookup(dir, name.as_bytes()) {
             Ok(i) if s.getattr(i)?.mode & S_IFMT == ty => Ok(Some(i)),
@@ -105,10 +144,33 @@ impl Tree {
         }
     }
 
+    /// Creates or updates a UTF-8 text file with mode 0644.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Target file path.
+    /// * `content` - String text content to write.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
     fn file(&mut self, s: &mut ZfsServer, path: &str, content: &str) -> Result<(), i64> {
         self.file_bytes(s, path, content.as_bytes(), 0o644)
     }
 
+    /// Creates or updates a binary file with specified permissions.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Target file path.
+    /// * `content` - Raw bytes to write.
+    /// * `perm` - File mode permission bits.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
     fn file_bytes(&mut self, s: &mut ZfsServer, path: &str, content: &[u8], perm: u32) -> Result<(), i64> {
         self.at = String::from(path);
         let (parent, name) = split(path);
@@ -131,6 +193,17 @@ impl Tree {
         Ok(())
     }
 
+    /// Creates or updates a symbolic link pointing to `target`.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Symlink location.
+    /// * `target` - Symlink target path string.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
     fn link(&mut self, s: &mut ZfsServer, path: &str, target: &str) -> Result<(), i64> {
         self.at = String::from(path);
         let (parent, name) = split(path);
@@ -146,6 +219,18 @@ impl Tree {
         Ok(())
     }
 
+    /// Creates or updates a character device node (`S_IFCHR`).
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Node path to create.
+    /// * `rdev` - 64-bit device number.
+    /// * `gid` - Group ownership ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
     fn node(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32) -> Result<(), i64> {
         self.at = String::from(path);
         let (parent, name) = split(path);
@@ -166,6 +251,16 @@ impl Tree {
 
 /// Looks `path` up below directory `root` without following symbolic links (the caller
 /// holds the file server, so `ZfsClient` cannot be used).
+///
+/// # Arguments
+///
+/// * `s` - Active ZFS server reference.
+/// * `root` - Starting root inode number.
+/// * `path` - Slash-separated path.
+///
+/// # Returns
+///
+/// `Some(inode)` if found, or `None`.
 fn lookup_path(s: &mut ZfsServer, root: u64, path: &str) -> Option<u64> {
     let mut ino = root;
     for comp in path.split('/').filter(|c| !c.is_empty()) {
@@ -175,6 +270,17 @@ fn lookup_path(s: &mut ZfsServer, root: u64, path: &str) -> Option<u64> {
 }
 
 /// Group id of `name` in the root's `/etc/group` (`fallback` if absent).
+///
+/// # Arguments
+///
+/// * `s` - Active ZFS server reference.
+/// * `root` - Root inode number.
+/// * `name` - Group name to query.
+/// * `fallback` - Default GID if not found.
+///
+/// # Returns
+///
+/// Discovered GID or `fallback`.
 fn group_id(s: &mut ZfsServer, root: u64, name: &str, fallback: u32) -> u32 {
     let ino = match lookup_path(s, root, "/etc/group") {
         Some(i) => i,
@@ -194,6 +300,14 @@ fn group_id(s: &mut ZfsServer, root: u64, name: &str, fallback: u32) -> u32 {
 }
 
 /// A capability bitmap as sysfs prints it: 64-bit words in hex, most significant first.
+///
+/// # Arguments
+///
+/// * `bytes` - Raw capability bitmap byte slice.
+///
+/// # Returns
+///
+/// Hex-formatted sysfs string representation.
 fn bitmap_words(bytes: &[u8]) -> String {
     let words: Vec<u64> = bytes
         .chunks(8)
@@ -218,6 +332,14 @@ fn bitmap_words(bytes: &[u8]) -> String {
 }
 
 /// Event codes set in a bitmap, as `MODALIAS` lists them.
+///
+/// # Arguments
+///
+/// * `bytes` - Raw bitmap byte slice.
+///
+/// # Returns
+///
+/// Comma-separated hex list of set bit indexes.
 fn bit_list(bytes: &[u8]) -> String {
     let mut out = String::new();
     for bit in 0..bytes.len() * 8 {
@@ -228,6 +350,16 @@ fn bit_list(bytes: &[u8]) -> String {
     out
 }
 
+/// Populates all sysfs device directories, uevent files, and dev nodes.
+///
+/// # Arguments
+///
+/// * `t` - Active filesystem tree builder.
+/// * `s` - Active ZFS server reference.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative Linux errno on error.
 fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     let video = group_id(s, t.root, "video", 44);
     let input = group_id(s, t.root, "input", 106);
@@ -443,6 +575,15 @@ MaximumUid=60000
 }
 
 /// Contents of a file imported from the boot volume into the pool's `/bin`.
+///
+/// # Arguments
+///
+/// * `s` - Active ZFS server reference.
+/// * `path` - Slash-separated path on root dataset.
+///
+/// # Returns
+///
+/// `Some(bytes)` if read successfully, or `None`.
 fn boot_binary(s: &mut ZfsServer, path: &str) -> Option<Vec<u8>> {
     let root = s.root_obj();
     let ino = lookup_path(s, root, path)?;
@@ -454,6 +595,14 @@ fn boot_binary(s: &mut ZfsServer, path: &str) -> Option<Vec<u8>> {
 }
 
 /// Writes the device nodes, sysfs tree and udev records into the Linux root at `root`.
+///
+/// # Arguments
+///
+/// * `root` - Target root directory path string.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error description string on failure.
 pub fn populate(root: &str) -> Result<(), &'static str> {
     let root_ino = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true).map_err(|_| "no such root directory")?;
     let mut tree = Tree { root: root_ino, changed: false, at: String::new() };

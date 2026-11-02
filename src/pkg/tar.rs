@@ -214,6 +214,13 @@ impl<'a> TarArchive<'a> {
 }
 
 /// Parses an ASCII octal byte field from a TAR header into a `usize`.
+///
+/// # Arguments
+/// * `bytes` - Byte slice containing ASCII octal digits.
+///
+/// # Returns
+///
+/// The parsed `usize` numeric value.
 fn parse_octal(bytes: &[u8]) -> usize {
     let mut val: usize = 0;
     for &b in bytes {
@@ -229,6 +236,13 @@ fn parse_octal(bytes: &[u8]) -> usize {
 }
 
 /// Extracts a NUL-terminated UTF-8 string slice from a fixed-size TAR header field.
+///
+/// # Arguments
+/// * `bytes` - Byte slice containing a NUL-terminated string.
+///
+/// # Returns
+///
+/// A trimmed UTF-8 string slice up to the first NUL byte.
 fn extract_null_terminated_str(bytes: &[u8]) -> &str {
     let mut len = 0;
     while len < bytes.len() && bytes[len] != 0 {

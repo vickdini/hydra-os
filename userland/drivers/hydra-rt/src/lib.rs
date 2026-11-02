@@ -56,6 +56,12 @@ extern "Rust" {
 }
 
 /// Sets up the heap and the arguments, runs `main`, and exits.
+///
+/// # Arguments
+/// * `stack` - Pointer to initial stack frame containing argument count and pointers.
+///
+/// # Returns
+/// Does not return (`!`).
 extern "C" fn rt_start(stack: *const u64) -> ! {
     let heap = sys::map_anon(HEAP_SIZE).unwrap_or_else(|_| sys::exit(127));
     unsafe { ALLOCATOR.lock().init(heap as *mut u8, HEAP_SIZE) };
@@ -79,6 +85,10 @@ extern "C" fn rt_start(stack: *const u64) -> ! {
 macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
+        /// Program entry point dispatched by the runtime.
+        ///
+        /// # Arguments
+        /// * `args` - Program command line arguments.
         fn hydra_main(args: &[&'static str]) {
             $main(args)
         }
@@ -86,6 +96,9 @@ macro_rules! entry {
 }
 
 /// Heap bytes `(used, free)`.
+///
+/// # Returns
+/// Tuple of `(used_bytes, free_bytes)`.
 pub fn heap_usage() -> (usize, usize) {
     let heap = ALLOCATOR.lock();
     (heap.used(), heap.free())
@@ -120,6 +133,13 @@ macro_rules! println {
     }};
 }
 
+/// Driver panic handler that prints the panic info and terminates the driver process.
+///
+/// # Arguments
+/// * `info` - Panic information payload.
+///
+/// # Returns
+/// Does not return (`!`).
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     let mut line = alloc::string::String::new();
@@ -143,18 +163,36 @@ pub const WINDOW_SIZE: usize = 64 * 4096;
 impl Server {
     /// Registers the calling process as the server of `endpoint` (the supervisor started
     /// it for that service) and maps the service window.
+    ///
+    /// # Arguments
+    /// * `endpoint` - Service endpoint ID.
+    ///
+    /// # Returns
+    /// New [`Server`] instance on success.
+    ///
+    /// # Errors
+    /// Returns negative error code if registration fails.
     pub fn register(endpoint: u32) -> Result<Self, i64> {
         let window = sys::svc_register(endpoint)?;
         Ok(Self { endpoint, window: window as *mut u8, window_len: WINDOW_SIZE })
     }
 
     /// The data window shared with clients.
+    ///
+    /// # Returns
+    /// Mutable byte slice referencing the shared service window.
     pub fn window(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.window, self.window_len) }
     }
 
     /// Serves requests forever: each request goes to `handle`, whose result is the reply.
     /// Supervisor heartbeats are answered here.
+    ///
+    /// # Arguments
+    /// * `handle` - Request handler closure.
+    ///
+    /// # Returns
+    /// Does not return (`!`).
     pub fn serve(&mut self, mut handle: impl FnMut(&mut Self, &Message) -> Message) -> ! {
         loop {
             let req = match sys::svc_recv(self.endpoint) {

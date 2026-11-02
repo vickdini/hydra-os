@@ -143,11 +143,19 @@ static WATCHES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_COOKIE: AtomicU32 = AtomicU32::new(1);
 
 /// Returns `true` if at least one `inotify` watch is currently active anywhere in the system.
+///
+/// # Returns
+///
+/// `true` if the global watch count is greater than zero; `false` otherwise.
 pub fn active() -> bool {
     WATCHES.load(Ordering::Relaxed) != 0
 }
 
 /// Generates a fresh, non-zero rename cookie pairing an [`IN_MOVED_FROM`] event with [`IN_MOVED_TO`].
+///
+/// # Returns
+///
+/// A unique 32-bit cookie value.
 pub fn cookie() -> u32 {
     NEXT_COOKIE.fetch_add(1, Ordering::Relaxed)
 }
@@ -156,11 +164,26 @@ pub fn cookie() -> u32 {
 ///
 /// # Arguments
 /// * `ino` - ZFS inode number to check.
+///
+/// # Returns
+///
+/// `true` if an active inotify instance is watching the specified inode; `false` otherwise.
 pub fn watched(ino: u64) -> bool {
     active() && INSTANCES.lock().iter().filter_map(|w| w.upgrade()).any(|i| i.inner.lock().by_ino.contains_key(&ino))
 }
 
 /// Serializes a single `struct inotify_event` record (16-byte header plus 16-byte-padded `NUL`-terminated name).
+///
+/// # Arguments
+///
+/// * `wd` - Watch descriptor index.
+/// * `mask` - Event bitmask.
+/// * `cookie` - Rename cookie identifier.
+/// * `name` - Filename byte slice.
+///
+/// # Returns
+///
+/// Byte vector containing the padded event record.
 fn record(wd: i32, mask: u32, cookie: u32, name: &[u8]) -> Vec<u8> {
     let len = if name.is_empty() { 0 } else { (name.len() + 1 + 15) & !15 };
     let mut r = Vec::with_capacity(16 + len);
@@ -176,6 +199,10 @@ fn record(wd: i32, mask: u32, cookie: u32, name: &[u8]) -> Vec<u8> {
 impl Inner {
     /// Appends a serialized event record to the queue, coalescing identical consecutive events
     /// and emitting [`IN_Q_OVERFLOW`] if [`MAX_QUEUED`] is reached.
+    ///
+    /// # Arguments
+    ///
+    /// * `rec` - Serialized event record bytes to enqueue.
     fn push(&mut self, rec: Vec<u8>) {
         if self.queue.back() == Some(&rec) {
             return; // identical to the previous unread event: coalesced, as on Linux
@@ -193,6 +220,14 @@ impl Inner {
     }
 
     /// Removes watch descriptor `wd`, decrements [`WATCHES`], and queues an [`IN_IGNORED`] event.
+    ///
+    /// # Arguments
+    ///
+    /// * `wd` - Watch descriptor to remove.
+    ///
+    /// # Returns
+    ///
+    /// `true` if watch was found and removed; `false` if `wd` was not found.
     fn remove_watch(&mut self, wd: i32) -> bool {
         match self.watches.remove(&wd) {
             Some(w) => {
@@ -249,6 +284,10 @@ pub fn event(ino: u64, mask: u32, cookie: u32, name: &[u8]) {
 
 impl Inotify {
     /// Returns `POLLIN` (`0x0001`) if at least one event record is queued for reading.
+    ///
+    /// # Returns
+    ///
+    /// `0x0001` (`POLLIN`) if events are waiting, or `0` if empty.
     pub fn poll_events(&self) -> u32 {
         if self.inner.lock().queue.is_empty() {
             0
@@ -258,16 +297,28 @@ impl Inotify {
     }
 
     /// Returns the total byte size of all queued event records (for `ioctl(FIONREAD)`).
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes queued across all pending event records.
     pub fn pending_bytes(&self) -> usize {
         self.inner.lock().bytes
     }
 
     /// Updates the `O_NONBLOCK` status flag on this `inotify` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - `true` to enable non-blocking operations; `false` to block.
     pub fn set_nonblock(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
     }
 
     /// Returns `true` if `O_NONBLOCK` is enabled on this `inotify` instance.
+    ///
+    /// # Returns
+    ///
+    /// `true` if non-blocking mode is set; `false` otherwise.
     pub fn get_nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
@@ -319,6 +370,14 @@ impl Inotify {
 }
 
 /// Resolves file descriptor `fd` to an [`Arc<Inotify>`] if it refers to an `inotify` instance.
+///
+/// # Arguments
+///
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+///
+/// `Some(Arc<Inotify>)` if `fd` refers to an inotify instance; `None` otherwise.
 fn inotify_of(fd: u64) -> Option<Arc<Inotify>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(crate::fs::FileDescriptor::Inotify(i)) => Some(i.clone()),

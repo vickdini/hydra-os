@@ -45,6 +45,9 @@ static SCANCODES: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
 /// Called from the keyboard interrupt in raw mode. Never allocates beyond the queue's
 /// capacity (reserved when the compositor starts).
+///
+/// # Arguments
+/// * `code` - Raw PS/2 scancode byte from the keyboard controller.
 pub fn push_scancode(code: u8) {
     if let Some(mut q) = SCANCODES.try_lock() {
         if q.len() < q.capacity() {
@@ -65,6 +68,16 @@ struct Config {
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
 
 /// Starts the compositor for the Linux root `root_ino` (socket at `path` inside it).
+///
+/// # Arguments
+/// * `root_ino` - Inode number of the Linux filesystem root directory.
+/// * `path` - Path string for the Wayland UNIX domain socket.
+/// * `uid` - Owner user ID for the socket.
+/// * `gid` - Owner group ID for the socket.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error string if already running.
 pub fn start(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<(), &'static str> {
     if RUNNING.swap(true, Ordering::AcqRel) {
         return Err("the compositor is already running");
@@ -76,6 +89,10 @@ pub fn start(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<(), &'stat
 }
 
 /// Returns true if the Wayland compositor service daemon is currently running.
+///
+/// # Returns
+///
+/// `true` if the compositor background thread is active, `false` otherwise.
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Acquire)
 }
@@ -91,6 +108,11 @@ struct Args<'a> {
 }
 
 impl<'a> Args<'a> {
+    /// Decodes the next little-endian 32-bit unsigned integer argument.
+    ///
+    /// # Returns
+    ///
+    /// The decoded `u32` value, or 0 if end-of-buffer reached.
     fn u32(&mut self) -> u32 {
         if self.off + 4 > self.b.len() {
             self.off = self.b.len();
@@ -101,10 +123,20 @@ impl<'a> Args<'a> {
         v
     }
 
+    /// Decodes the next little-endian 32-bit signed integer argument.
+    ///
+    /// # Returns
+    ///
+    /// The decoded `i32` value, or 0 if end-of-buffer reached.
     fn i32(&mut self) -> i32 {
         self.u32() as i32
     }
 
+    /// Decodes a length-prefixed, NUL-terminated 32-bit aligned string argument.
+    ///
+    /// # Returns
+    ///
+    /// The decoded [`String`] argument.
     fn string(&mut self) -> String {
         let len = self.u32() as usize;
         let start = self.off;
@@ -162,6 +194,11 @@ struct Surface {
 }
 
 impl Surface {
+    /// Creates a new unmapped Wayland surface with default empty state.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Surface`] instance.
     fn new() -> Self {
         Self {
             pending_buffer: None,
@@ -243,6 +280,14 @@ enum K {
     Other,
 }
 
+/// Maps a protocol [`Obj`] instance to its dispatch category key [`K`].
+///
+/// # Arguments
+/// * `o` - Reference to protocol object variant.
+///
+/// # Returns
+///
+/// The mapped [`K`] discriminator.
 fn kind(o: &Obj) -> K {
     match o {
         Obj::Display => K::Display,
@@ -282,6 +327,12 @@ struct Client {
 }
 
 impl Client {
+    /// Emits a protocol event message into the client's output buffer.
+    ///
+    /// # Arguments
+    /// * `obj` - Target object ID.
+    /// * `opcode` - Event opcode identifier.
+    /// * `args` - Event payload arguments slice.
     fn event(&mut self, obj: u32, opcode: u16, args: &[A]) {
         let start = self.out.len();
         self.out.extend_from_slice(&obj.to_le_bytes());
@@ -315,21 +366,48 @@ impl Client {
         self.out[start + 4..start + 8].copy_from_slice(&word.to_le_bytes());
     }
 
+    /// Retrieves the negotiated protocol version of an object.
+    ///
+    /// # Arguments
+    /// * `obj` - Target object ID.
+    ///
+    /// # Returns
+    ///
+    /// The object interface version number.
     fn version(&self, obj: u32) -> u32 {
         self.objects.get(&obj).map_or(1, |o| o.1)
     }
 
     /// Destroys a client object (`wl_display.delete_id` lets the client reuse the id).
+    ///
+    /// # Arguments
+    /// * `obj` - Object ID to remove and delete.
     fn destroy(&mut self, obj: u32) {
         if self.objects.remove(&obj).is_some() {
             self.event(1, 1, &[A::U(obj)]);
         }
     }
 
+    /// Finds all object IDs matching a predicate filter.
+    ///
+    /// # Arguments
+    /// * `pred` - Predicate closure checking object variants.
+    ///
+    /// # Returns
+    ///
+    /// A vector of matching object IDs.
     fn objects_of(&self, pred: impl Fn(&Obj) -> bool) -> Vec<u32> {
         self.objects.iter().filter(|(_, (o, _))| pred(o)).map(|(id, _)| *id).collect()
     }
 
+    /// Looks up a mutable reference to a surface by its object ID.
+    ///
+    /// # Arguments
+    /// * `id` - Object ID of the surface.
+    ///
+    /// # Returns
+    ///
+    /// An `Option` with a mutable reference to the [`Surface`] if found.
     fn surface(&mut self, id: u32) -> Option<&mut Surface> {
         match self.objects.get_mut(&id) {
             Some((Obj::Surface(s), _)) => Some(s),
@@ -359,6 +437,10 @@ struct Mods {
 
 impl Mods {
     /// (depressed, locked) XKB modifier masks: Shift, Lock, Control, Mod1 (Alt), Mod4.
+    ///
+    /// # Returns
+    ///
+    /// A `(depressed, locked)` bitmask tuple.
     fn masks(&self) -> (u32, u32) {
         let mut d = 0;
         if self.shift {
@@ -429,14 +511,24 @@ struct Compositor {
 }
 
 /// Protocol tracing follows `linux trace on`.
+///
+/// # Returns
+///
+/// `true` if tracing is active, `false` otherwise.
 fn tracing() -> bool {
     crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
 }
 
+/// Returns current timestamp in milliseconds.
+///
+/// # Returns
+///
+/// Monotonic milliseconds timestamp.
 fn now_ms() -> u32 {
     (crate::arch::pit::ticks() * 10) as u32
 }
 
+/// Top-level main loop entry point for the Wayland compositor daemon thread.
 fn compositor_main() {
     let cfg = CONFIG.lock().take().expect("compositor configuration");
     let listener = match crate::compat::linux::unix::kernel_listen(cfg.root_ino, &cfg.path, cfg.uid, cfg.gid) {
@@ -498,6 +590,10 @@ fn compositor_main() {
 impl Compositor {
     /// One pass over connections, requests, input and output. Returns true if it accepted
     /// new clients.
+    ///
+    /// # Returns
+    ///
+    /// `true` to continue loop execution, `false` to shut down.
     fn step(&mut self) -> bool {
         let mut accepted = false;
         while let Some(sock) = self.listener.kernel_accept() {
@@ -538,6 +634,7 @@ impl Compositor {
         accepted
     }
 
+    /// Cleans up disconnected and dead client connection records.
     fn reap(&mut self) {
         let dead: Vec<u64> = self.clients.iter().filter(|c| c.dead).map(|c| c.id).collect();
         if dead.is_empty() {
@@ -555,10 +652,23 @@ impl Compositor {
         self.dirty = true;
     }
 
+    /// Finds the index in `self.clients` corresponding to a client ID.
+    ///
+    /// # Arguments
+    /// * `id` - Client numerical ID.
+    ///
+    /// # Returns
+    ///
+    /// The index in `self.clients`, or `None` if not found.
     fn client_index(&self, id: u64) -> Option<usize> {
         self.clients.iter().position(|c| c.id == id)
     }
 
+    /// Generates a monotonically increasing event sequence serial number.
+    ///
+    /// # Returns
+    ///
+    /// A new unique 32-bit event serial.
     fn next_serial(&mut self) -> u32 {
         self.serial = self.serial.wrapping_add(1);
         self.serial
@@ -568,6 +678,10 @@ impl Compositor {
     // Requests
     // ------------------------------------------------------------------
 
+    /// Reads incoming request byte streams from client socket descriptor into its buffer.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client in `self.clients`.
     fn read_client(&mut self, ci: usize) {
         let mut buf = alloc::vec![0u8; 65536];
         loop {
@@ -608,6 +722,13 @@ impl Compositor {
         }
     }
 
+    /// Dispatches a single incoming request opcode for an object.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `obj` - Target object ID.
+    /// * `op` - Request opcode.
+    /// * `payload` - Request byte payload.
     fn request(&mut self, ci: usize, obj: u32, op: u16, payload: &[u8]) {
         if tracing() {
             crate::kprintln!("[wayland] client {} -> object {} op {} ({} bytes)", self.clients[ci].id, obj, op, payload.len());
@@ -871,6 +992,13 @@ impl Compositor {
         }
     }
 
+    /// Binds a global interface object instance for a client.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `name` - Global interface name identifier.
+    /// * `version` - Requested interface version.
+    /// * `id` - New client object ID to instantiate.
     fn bind(&mut self, ci: usize, name: u32, version: u32, id: u32) {
         let max = GLOBALS.iter().find(|g| g.0 == name).map_or(1, |g| g.2);
         let v = version.min(max).max(1);
@@ -916,6 +1044,13 @@ impl Compositor {
         }
     }
 
+    /// Handles requests addressed to a `wl_surface` object.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `obj` - Surface object ID.
+    /// * `op` - Surface opcode.
+    /// * `a` - Argument decoder cursor.
     fn surface_request(&mut self, ci: usize, obj: u32, op: u16, a: &mut Args) {
         let c = &mut self.clients[ci];
         match op {
@@ -942,6 +1077,11 @@ impl Compositor {
         }
     }
 
+    /// Applies pending state (buffer, frame callbacks) to a committed surface.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `obj` - Surface object ID.
     fn commit(&mut self, ci: usize, obj: u32) {
         let c = &mut self.clients[ci];
         let (pending, frames, role, xdg, sub_pos) = match c.surface(obj) {
@@ -1012,6 +1152,11 @@ impl Compositor {
         }
     }
 
+    /// Emits XDG toplevel configuration events to size the window.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `xdg` - XDG surface object ID.
     fn configure_toplevel(&mut self, ci: usize, xdg: u32) {
         let serial = self.next_serial();
         let c = &mut self.clients[ci];
@@ -1026,6 +1171,15 @@ impl Compositor {
         c.event(xdg, 0, &[A::U(serial)]);
     }
 
+    /// Instantiates and positions an XDG popup surface relative to its parent window.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `xdg` - XDG surface object ID.
+    /// * `surface` - Underlying surface object ID.
+    /// * `id` - New popup object ID.
+    /// * `parent_xdg` - Parent window XDG surface ID.
+    /// * `pos_id` - Positioner object ID.
     fn create_popup(&mut self, ci: usize, xdg: u32, surface: u32, id: u32, parent_xdg: u32, pos_id: u32) {
         let cid = self.clients[ci].id;
         let pos = match self.clients[ci].objects.get(&pos_id) {
@@ -1075,6 +1229,15 @@ impl Compositor {
         self.dirty = true;
     }
 
+    /// Resolves the underlying surface object ID from an XDG surface ID.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `xdg` - XDG surface object ID.
+    ///
+    /// # Returns
+    ///
+    /// The surface object ID, or `None` if unmapped.
     fn xdg_surface_of(&self, ci: usize, xdg: u32) -> Option<u32> {
         match self.clients[ci].objects.get(&xdg) {
             Some((Obj::XdgSurface { surface, .. }, _)) => Some(*surface),
@@ -1082,6 +1245,11 @@ impl Compositor {
         }
     }
 
+    /// Unmaps surfaces or all windows belonging to a client upon destruction.
+    ///
+    /// # Arguments
+    /// * `ci` - Index of the client.
+    /// * `surface` - Optional specific surface ID to unmap (or all if `None`).
     fn unmap(&mut self, ci: usize, surface: Option<u32>) {
         let surface = match surface {
             Some(s) => s,
@@ -1106,6 +1274,7 @@ impl Compositor {
     // Display ownership
     // ------------------------------------------------------------------
 
+    /// Takes ownership of the hardware linear framebuffer from the console.
     fn take_display(&mut self) {
         if self.owns_display {
             return;
@@ -1121,6 +1290,7 @@ impl Compositor {
         }
     }
 
+    /// Releases the hardware linear framebuffer back to the text console.
     fn give_display(&mut self) {
         if !self.owns_display {
             return;
@@ -1130,6 +1300,7 @@ impl Compositor {
         crate::video::console::reclaim_display();
     }
 
+    /// Handles hotkey or user requests to switch display between console and compositor.
     fn handle_display_switch(&mut self) {
         if SWITCH_TO_COMPOSITOR.swap(false, Ordering::AcqRel) && !self.windows.is_empty() {
             self.take_display();
@@ -1140,6 +1311,10 @@ impl Compositor {
     // Input
     // ------------------------------------------------------------------
 
+    /// Directs keyboard input focus to a specific client surface.
+    ///
+    /// # Arguments
+    /// * `focus` - Optional `(client_id, surface_id)` tuple.
     fn set_keyboard_focus(&mut self, focus: Option<(u64, u32)>) {
         if self.kbd_focus == focus {
             return;
@@ -1173,6 +1348,7 @@ impl Compositor {
         self.set_keyboard_focus(top);
     }
 
+    /// Polls pending scancodes, updates modifier state, and sends key events to focused window.
     fn handle_keyboard(&mut self) {
         // The keyboard interrupt also takes this lock: hold it with interrupts off
         let codes: Vec<u8> = x86_64::instructions::interrupts::without_interrupts(|| SCANCODES.lock().drain(..).collect());
@@ -1226,6 +1402,14 @@ impl Compositor {
 
     /// The window and surface under screen point (x, y), topmost first; returns
     /// (window index, surface, surface-local x, y).
+    ///
+    /// # Arguments
+    /// * `x` - Screen horizontal coordinate.
+    /// * `y` - Screen vertical coordinate.
+    ///
+    /// # Returns
+    ///
+    /// `Some((client_index, client_id, surface_id, local_x, local_y))` if a surface was hit, or `None`.
     fn surface_at(&self, x: i32, y: i32) -> Option<(usize, u64, u32, i32, i32)> {
         for (wi, w) in self.windows.iter().enumerate().rev() {
             let ci = match self.client_index(w.client) {
@@ -1242,6 +1426,14 @@ impl Compositor {
     }
 
     /// Screen position of a window's main surface (its geometry origin is at w.x, w.y).
+    ///
+    /// # Arguments
+    /// * `c` - Reference to the owning client.
+    /// * `w` - Window record.
+    ///
+    /// # Returns
+    ///
+    /// A `(x, y)` coordinate tuple.
     fn window_origin(&self, c: &Client, w: &Window) -> (i32, i32) {
         let geo = match c.objects.get(&w.surface) {
             Some((Obj::Surface(s), _)) => s.xdg.and_then(|x| match c.objects.get(&x) {
@@ -1256,6 +1448,7 @@ impl Compositor {
         }
     }
 
+    /// Processes mouse updates, updates cursor coordinate, performs hit tests, and dispatches pointer events.
     fn handle_pointer(&mut self) {
         if !self.owns_display {
             return;
@@ -1349,6 +1542,9 @@ impl Compositor {
     }
 
     /// A button press: closes popups clicked outside of, raises and focuses the window.
+    ///
+    /// # Arguments
+    /// * `window` - Optional index of the pressed window in `self.windows`.
     fn on_press(&mut self, window: Option<usize>) {
         let on_popup = window.map_or(false, |wi| self.windows[wi].popup);
         if !on_popup {
@@ -1380,6 +1576,7 @@ impl Compositor {
     // Output
     // ------------------------------------------------------------------
 
+    /// Blits all mapped surface trees onto the back buffer, draws cursor, and flushes to display.
     fn render(&mut self) {
         let (sw, sh) = (self.screen.w, self.screen.h);
         for px in self.back.iter_mut() {
@@ -1412,6 +1609,7 @@ impl Compositor {
         }
     }
 
+    /// Emits `wl_callback.done` frame events to clients that requested frame timing.
     fn send_frame_done(&mut self) {
         let time = now_ms();
         for c in self.clients.iter_mut() {
@@ -1430,6 +1628,16 @@ impl Compositor {
 }
 
 /// Finds the surface (main or subsurface) of `surface`'s tree under local point (x, y).
+///
+/// # Arguments
+/// * `c` - Client owning the surface tree.
+/// * `surface` - Root surface ID.
+/// * `x` - Local horizontal coordinate relative to surface.
+/// * `y` - Local vertical coordinate relative to surface.
+///
+/// # Returns
+///
+/// `Some((hit_surface_id, local_x, local_y))` if inside surface bounds, or `None`.
 fn hit_test(c: &Client, surface: u32, x: i32, y: i32) -> Option<(u32, i32, i32)> {
     let s = match c.objects.get(&surface) {
         Some((Obj::Surface(s), _)) => s,
@@ -1450,6 +1658,15 @@ fn hit_test(c: &Client, surface: u32, x: i32, y: i32) -> Option<(u32, i32, i32)>
 }
 
 /// Draws a surface and its subsurfaces with its top-left at screen (x, y).
+///
+/// # Arguments
+/// * `c` - Client owning the surface tree.
+/// * `surface` - Root surface ID to draw.
+/// * `x` - Destination screen horizontal position.
+/// * `y` - Destination screen vertical position.
+/// * `back` - Destination 32-bit pixel framebuffer.
+/// * `sw` - Screen width in pixels.
+/// * `sh` - Screen height in pixels.
 fn draw_tree(c: &Client, surface: u32, x: i32, y: i32, back: &mut [u32], sw: usize, sh: usize) {
     let s = match c.objects.get(&surface) {
         Some((Obj::Surface(s), _)) => s,
@@ -1466,6 +1683,17 @@ fn draw_tree(c: &Client, surface: u32, x: i32, y: i32, back: &mut [u32], sw: usi
 }
 
 /// Copies (or, for ARGB, blends: Wayland pixels are premultiplied) `src` onto `back`.
+///
+/// # Arguments
+/// * `src` - Source 32-bit pixel slice.
+/// * `w` - Source image width.
+/// * `h` - Source image height.
+/// * `alpha` - Whether to perform alpha blending.
+/// * `x` - Destination screen horizontal position.
+/// * `y` - Destination screen vertical position.
+/// * `back` - Destination 32-bit pixel framebuffer.
+/// * `sw` - Screen width in pixels.
+/// * `sh` - Screen height in pixels.
 fn blit(src: &[u32], w: usize, h: usize, alpha: bool, x: i32, y: i32, back: &mut [u32], sw: usize, sh: usize) {
     let x0 = x.max(0) as usize;
     let y0 = y.max(0) as usize;
@@ -1507,6 +1735,13 @@ const POINTER: [&[u8]; 16] = [
     b"12222211111", b"1221221", b"121 1221", b"11  1221", b"1    1221", b"      11",
 ];
 
+/// Renders a software cursor icon at position `(px, py)` into the back buffer.
+///
+/// # Arguments
+/// * `back` - Destination 32-bit pixel framebuffer.
+/// * `sw` - Screen width in pixels.
+/// * `sh` - Screen height in pixels.
+/// * `pos` - Cursor screen coordinates tuple `(px, py)`.
 fn draw_pointer(back: &mut [u32], sw: usize, sh: usize, (px, py): (i32, i32)) {
     for (dy, row) in POINTER.iter().enumerate() {
         for (dx, &c) in row.iter().enumerate() {
@@ -1525,6 +1760,9 @@ fn draw_pointer(back: &mut [u32], sw: usize, sh: usize, (px, py): (i32, i32)) {
 }
 
 /// Sends queued events (and their descriptors).
+///
+/// # Arguments
+/// * `c` - Mutable reference to the target client.
 fn flush(c: &mut Client) {
     if c.out.is_empty() || c.dead {
         return;
@@ -1542,6 +1780,13 @@ fn flush(c: &mut Client) {
 }
 
 /// Linux key code for a set-1 scancode after an `0xE0` prefix (0 = ignored).
+///
+/// # Arguments
+/// * `make` - PS/2 make code byte following 0xE0 prefix.
+///
+/// # Returns
+///
+/// The mapped evdev key code.
 pub(crate) fn e0_keycode(make: u8) -> u32 {
     match make {
         0x1C => 96,  // KP Enter

@@ -74,10 +74,18 @@ struct Deadline {
 }
 
 impl Deadline {
+    /// Creates a new deadline timer instance.
+    ///
+    /// # Returns
+    /// Newly initialized [`Deadline`] structure.
     fn new() -> Self {
         Self { polls: 0, end: 0 }
     }
 
+    /// Checks whether the deadline timeout (30 seconds) has expired.
+    ///
+    /// # Returns
+    /// `true` if deadline has passed, `false` otherwise.
     fn expired(&mut self) -> bool {
         self.polls += 1;
         if self.polls % 4096 != 0 {
@@ -98,12 +106,14 @@ struct Ports {
 }
 
 impl Ports {
+    /// Delays execution by at least 400 nanoseconds by reading the control port 4 times.
     fn delay_400ns(&self) {
         for _ in 0..4 {
             inb(self.ctrl);
         }
     }
 
+    /// Issues an ATA software reset to the channel and waits for BSY to clear.
     fn soft_reset(&self) {
         outb(self.ctrl, 0x04 | 0x02); // SRST, interrupts off
         self.delay_400ns();
@@ -114,6 +124,13 @@ impl Ports {
         let _ = self.wait_not_busy();
     }
 
+    /// Polls the status register until the BSY bit clears or deadline expires.
+    ///
+    /// # Returns
+    /// Final status register byte on success.
+    ///
+    /// # Errors
+    /// Static error string if timeout occurs.
     fn wait_not_busy(&self) -> Result<u8, &'static str> {
         let mut d = Deadline::new();
         while !d.expired() {
@@ -126,6 +143,13 @@ impl Ports {
         Err("timeout waiting for BSY to clear")
     }
 
+    /// Polls the status register until DRQ is set and BSY is clear.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string if timeout or device fault occurs.
     fn wait_data_ready(&self) -> Result<(), &'static str> {
         let mut d = Deadline::new();
         while !d.expired() {
@@ -145,6 +169,11 @@ impl Ports {
     }
 
     /// Selects the drive and loads the address and count registers for a command.
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address.
+    /// * `count` - Sector count.
+    /// * `lba48` - Whether to issue 48-bit LBA command registers.
     fn setup(&self, lba: u64, count: u8, lba48: bool) {
         outb(self.io + 6, if lba48 { 0x40 } else { 0xE0 | ((lba >> 24) & 0x0F) as u8 });
         self.delay_400ns();
@@ -173,6 +202,13 @@ struct BusMaster {
 }
 
 impl BusMaster {
+    /// Initializes the bus-master DMA controller and allocates PRDT/buffer memory.
+    ///
+    /// # Arguments
+    /// * `base` - Bus-master I/O base port.
+    ///
+    /// # Returns
+    /// `Some(BusMaster)` on success, `None` if allocation fails or exceeds 32-bit physical limit.
     fn new(base: u16) -> Option<Self> {
         let (mem, phys) = sys::dma_alloc((DMA_PAGES + 1) * 4096).ok()?;
         if phys + ((DMA_PAGES as u64 + 1) * 4096) > 0x1_0000_0000 {
@@ -182,6 +218,9 @@ impl BusMaster {
     }
 
     /// Describes `bytes` of the bounce buffer, one entry per page (none crosses 64 KiB).
+    ///
+    /// # Arguments
+    /// * `bytes` - Total transfer size in bytes.
     fn build_prdt(&self, bytes: usize) {
         let pages = (bytes + 4095) / 4096;
         for i in 0..pages {
@@ -207,6 +246,12 @@ struct Disk {
 
 impl Disk {
     /// Identifies the primary master; `None` if there is no ATA disk there.
+    ///
+    /// # Arguments
+    /// * `ports` - Channel task-file port registers.
+    ///
+    /// # Returns
+    /// `Some(Disk)` if an ATA hard drive is detected, or `None`.
     fn probe(ports: Ports) -> Option<Self> {
         outb(ports.ctrl, 0x02); // interrupts off
         outb(ports.io + 6, 0xA0);
@@ -243,16 +288,39 @@ impl Disk {
         (sectors != 0).then_some(Self { ports, model, sectors, lba48, dma: None, dma_failures: 0 })
     }
 
+    /// Returns the drive model string trimmed of trailing spaces.
+    ///
+    /// # Returns
+    /// Drive model name as a string slice.
     fn model_str(&self) -> &str {
         let len = self.model.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
         core::str::from_utf8(&self.model[..len]).unwrap_or("ATA disk")
     }
 
+    /// Determines whether 48-bit LBA addressing must be used for `lba`.
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address.
+    ///
+    /// # Returns
+    /// `true` if 48-bit commands should be issued, `false` for 28-bit.
     fn use_lba48(&self, lba: u64) -> bool {
         !(lba < 0x1000_0000 && !self.lba48)
     }
 
     /// Moves `count` sectors at `lba` by DMA.
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address.
+    /// * `count` - Number of sectors to transfer.
+    /// * `data` - Sector data buffer.
+    /// * `write` - `true` for write, `false` for read.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string on DMA or device fault.
     fn dma_transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         let bm = self.dma.as_ref().ok_or("no DMA")?;
         let bytes = count as usize * SECTOR;
@@ -304,6 +372,18 @@ impl Disk {
     }
 
     /// Moves `count` sectors at `lba` with port I/O.
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address.
+    /// * `count` - Number of sectors to transfer.
+    /// * `data` - Sector data buffer.
+    /// * `write` - `true` for write, `false` for read.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string on timeout or device fault.
     fn pio_transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         self.ports.wait_not_busy()?;
         let lba48 = self.use_lba48(lba);
@@ -336,6 +416,18 @@ impl Disk {
 
     /// One command: DMA if available (port I/O after a DMA failure, and from then on
     /// after repeated ones), retried once after a reset.
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address.
+    /// * `count` - Number of sectors to transfer.
+    /// * `data` - Sector data buffer.
+    /// * `write` - `true` for write, `false` for read.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string on persistent failure.
     fn transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         if lba + count as u64 > self.sectors {
             return Err("past the end of the disk");
@@ -360,6 +452,13 @@ impl Disk {
         })
     }
 
+    /// Flushes write cache to disk media.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string on flush failure.
     fn flush(&mut self) -> Result<(), &'static str> {
         let once = |p: &Ports, ext: bool| -> Result<(), &'static str> {
             p.wait_not_busy()?;
@@ -374,6 +473,18 @@ impl Disk {
     }
 
     /// Reads or writes `count` 4 KiB blocks at `block` to or from `data`.
+    ///
+    /// # Arguments
+    /// * `block` - 4 KiB block index.
+    /// * `count` - Number of 4 KiB blocks.
+    /// * `data` - Block data buffer.
+    /// * `write` - `true` for write, `false` for read.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Static error string on transfer failure.
     fn blocks(&mut self, block: u64, count: usize, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         for (i, chunk) in data[..count * BLOCK].chunks_mut(MAX_RUN * BLOCK).enumerate() {
             let lba = (block + (i * MAX_RUN) as u64) * SECTORS_PER_BLOCK;
@@ -383,11 +494,26 @@ impl Disk {
     }
 }
 
+/// Constructs a block service reply message.
+///
+/// # Arguments
+/// * `status` - Status code (0 for success or negative error code).
+/// * `value` - Return value (e.g. transferred count).
+///
+/// # Returns
+/// Constructed [`Message`].
 fn reply(status: i64, value: u64) -> Message {
     Message::new(MSG_BLOCK_REPLY as u64, [status as u64, value, 0, 0])
 }
 
 /// Value of a `key=<number>` argument (decimal or `0x` hex).
+///
+/// # Arguments
+/// * `args` - Program argument list.
+/// * `key` - Argument key name.
+///
+/// # Returns
+/// Parsed integer value if found, or `None`.
 fn arg(args: &[&str], key: &str) -> Option<u64> {
     let v = args.iter().find_map(|a| a.strip_prefix(key)?.strip_prefix('='))?;
     match v.strip_prefix("0x") {
@@ -396,6 +522,10 @@ fn arg(args: &[&str], key: &str) -> Option<u64> {
     }
 }
 
+/// Driver entry point that probes the ATA controller, registers service, and dispatches requests.
+///
+/// # Arguments
+/// * `args` - Command-line argument strings.
 fn main(args: &[&str]) {
     if let Err(e) = sys::iopl() {
         println!("[ata-driver] no I/O port access: error {}", e);

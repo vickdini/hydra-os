@@ -125,6 +125,16 @@ const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 // ----------------------------------------------------------------------
 
 /// Copies a NUL-terminated string (at most `PATH_MAX`) from user memory.
+///
+/// # Arguments
+/// * `ptr` - User virtual address pointing to the C string.
+///
+/// # Returns
+/// Vector of bytes excluding the trailing NUL on success.
+///
+/// # Errors
+/// * `-EFAULT` if memory cannot be read or prefaulted.
+/// * `-ENAMETOOLONG` if string exceeds 4096 bytes.
 pub(crate) fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
     if ptr == 0 {
         return Err(EFAULT);
@@ -150,6 +160,17 @@ pub(crate) fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
     }
 }
 
+/// Reads a non-empty NUL-terminated path string from user memory.
+///
+/// # Arguments
+/// * `ptr` - User virtual address pointing to the path string.
+///
+/// # Returns
+/// Vector of bytes containing the path on success.
+///
+/// # Errors
+/// * `-EFAULT` if address is invalid.
+/// * `-ENOENT` if the path string is empty.
 pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
     let p = user_cstr(ptr)?;
     if p.is_empty() {
@@ -159,6 +180,16 @@ pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
 }
 
 /// Copies `data` to user memory at `ptr`.
+///
+/// # Arguments
+/// * `ptr` - Destination user virtual address.
+/// * `data` - Byte slice to copy.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// * `-EFAULT` if user memory cannot be prefaulted or written.
 pub(crate) fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     if ptr == 0 || !prefault_current(ptr, data.len() as u64, true) {
         return Err(EFAULT);
@@ -167,6 +198,17 @@ pub(crate) fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+/// Copies `len` bytes from user memory at `ptr` into a new `Vec<u8>`.
+///
+/// # Arguments
+/// * `ptr` - Source user virtual address.
+/// * `len` - Number of bytes to copy.
+///
+/// # Returns
+/// Vector containing the copied bytes on success.
+///
+/// # Errors
+/// * `-EFAULT` if user memory cannot be prefaulted or read.
 pub(crate) fn copy_in(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
     if ptr == 0 || !prefault_current(ptr, len as u64, false) {
         return Err(EFAULT);
@@ -187,6 +229,10 @@ pub(crate) struct Creds {
     pub egid: u32,
 }
 
+/// Retrieves current process credentials (UID, GID, EUID, EGID).
+///
+/// # Returns
+/// [`Creds`] struct containing the caller's credentials.
 pub(crate) fn creds() -> Creds {
     crate::task::with_current_task_mut(|t| Creds { uid: t.uid, gid: t.gid, euid: t.euid, egid: t.egid }).unwrap_or(Creds {
         uid: 0,
@@ -196,21 +242,49 @@ pub(crate) fn creds() -> Creds {
     })
 }
 
+/// Returns the current process file mode creation mask (`umask`).
+///
+/// # Returns
+/// Current umask value as `u32`.
 fn umask() -> u32 {
     crate::task::with_current_fds_mut(|fds| fds.umask)
 }
 
-/// The process root directory (0 = pool root).
+/// Returns the process root directory inode (0 = pool root).
+///
+/// # Returns
+/// Root inode number for the current process.
 pub(crate) fn proc_root() -> u64 {
     crate::task::with_current_fds_mut(|fds| fds.root_ino)
 }
 
+/// Resolves a relative or absolute path against a base inode inside the process root.
+///
+/// # Arguments
+/// * `base` - Base inode to start resolution from.
+/// * `path` - Path byte slice to resolve.
+/// * `follow` - Whether to follow trailing symlinks.
+///
+/// # Returns
+/// Inode number of the resolved target on success.
+///
+/// # Errors
+/// Returns negative Linux error code on lookup or permission failure.
 pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
     ZfsClient::resolve_in(proc_root(), base, path, follow)
 }
 
 /// Lookup key of a Unix socket path: the process root and the absolute path, so the
 /// same name means the same socket to every process sharing that root.
+///
+/// # Arguments
+/// * `path` - Socket path byte slice.
+///
+/// # Returns
+/// Byte vector representing the canonical socket key.
+///
+/// # Errors
+/// Returns negative Linux error code if path resolution fails.
 pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
     // A socket is attached to its node, as on Linux: it is found under any name the node
     // gets (programs bind in a temporary directory and rename the node into place)
@@ -227,12 +301,27 @@ pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
 }
 
 /// Name under which the socket bound to node `ino` is found.
+///
+/// # Arguments
+/// * `ino` - Inode number of the socket.
+///
+/// # Returns
+/// Byte vector representing the inode key (`ino:<ino>`).
 pub(crate) fn socket_ino_key(ino: u64) -> Vec<u8> {
     alloc::format!("ino:{}", ino).into_bytes()
 }
 
 /// Creates the socket node `bind` makes for a path name (mode 0777 minus the umask);
 /// returns its inode.
+///
+/// # Arguments
+/// * `path` - Destination path for the socket node.
+///
+/// # Returns
+/// Inode number of the created socket node.
+///
+/// # Errors
+/// Returns negative Linux error code on creation or permission failure.
 pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     const S_IFSOCK: u32 = 0o140000;
     let (base, _) = base_dir(AT_FDCWD, path)?;
@@ -247,6 +336,16 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
 }
 
 /// Resolves a user path to (inode, is a directory) for the caller.
+///
+/// # Arguments
+/// * `path_ptr` - User virtual address of path string.
+/// * `follow` - Whether to follow trailing symlinks.
+///
+/// # Returns
+/// Tuple `(inode, is_directory)` on success.
+///
+/// # Errors
+/// Returns negative Linux error code on lookup failure.
 pub(crate) fn lookup_path(path_ptr: u64, follow: bool) -> Result<(u64, bool), i64> {
     let path = user_path(path_ptr)?;
     let (base, _) = base_dir(AT_FDCWD, &path)?;
@@ -255,16 +354,42 @@ pub(crate) fn lookup_path(path_ptr: u64, follow: bool) -> Result<(u64, bool), i6
 }
 
 /// True if `path` names an existing file.
+///
+/// # Arguments
+/// * `path` - Path byte slice to test.
+///
+/// # Returns
+/// `true` if file exists, `false` otherwise.
 pub(crate) fn path_exists(path: &[u8]) -> bool {
     base_dir(AT_FDCWD, path).and_then(|(base, _)| resolve(base, path, true)).is_ok()
 }
 
+/// Resolves the parent directory and final component name of a path.
+///
+/// # Arguments
+/// * `base` - Base inode to start resolution from.
+/// * `path` - Path byte slice.
+///
+/// # Returns
+/// Tuple `(parent_inode, component_name)` on success.
+///
+/// # Errors
+/// Returns negative Linux error code on lookup failure.
 fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
     ZfsClient::resolve_parent_in(proc_root(), base, path)
 }
 
-/// The directory a path is resolved against: (inode, absolute path). Inode 0 means the
-/// process root.
+/// Returns the directory a path is resolved against: `(inode, absolute path)`. Inode 0 means the process root.
+///
+/// # Arguments
+/// * `dirfd` - Directory file descriptor or `AT_FDCWD`.
+/// * `path` - Path byte slice.
+///
+/// # Returns
+/// Tuple `(base_inode, base_absolute_path)` on success.
+///
+/// # Errors
+/// Returns `-ENOTDIR` or `-EBADF` if `dirfd` is invalid or not a directory.
 pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
     if path.first() == Some(&b'/') {
         return Ok((0, String::from("/")));
@@ -281,6 +406,13 @@ pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
     }
 }
 
+/// Retrieves the open VFS file object corresponding to `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<Mutex<OpenFile>>)` if descriptor is a VFS node, `None` otherwise.
 fn fd_vnode(fd: i32) -> Option<Arc<Mutex<OpenFile>>> {
     if fd < 0 {
         return None;
@@ -291,6 +423,13 @@ fn fd_vnode(fd: i32) -> Option<Arc<Mutex<OpenFile>>> {
     })
 }
 
+/// Retrieves the internet socket object corresponding to `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<Mutex<InetSocket>>)` if descriptor is an internet socket, `None` otherwise.
 fn inet_of(fd: usize) -> Option<Arc<Mutex<super::inet::InetSocket>>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::Inet(s)) => Some(s.clone()),
@@ -298,11 +437,25 @@ fn inet_of(fd: usize) -> Option<Arc<Mutex<super::inet::InetSocket>>> {
     })
 }
 
+/// Checks whether file descriptor `fd` exists in current process table.
+///
+/// # Arguments
+/// * `fd` - File descriptor index to check.
+///
+/// # Returns
+/// `true` if descriptor exists, `false` otherwise.
 fn fd_exists(fd: i32) -> bool {
     fd >= 0 && crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).is_some())
 }
 
 /// Lexically joins and normalises `path` onto absolute directory `base`.
+///
+/// # Arguments
+/// * `base` - Absolute directory path string.
+/// * `path` - Relative or absolute path byte slice.
+///
+/// # Returns
+/// Canonicalized absolute path string.
 pub(crate) fn join_path(base: &str, path: &[u8]) -> String {
     let mut parts: Vec<&[u8]> = Vec::new();
     let path_abs = path.first() == Some(&b'/');
@@ -328,11 +481,24 @@ pub(crate) fn join_path(base: &str, path: &[u8]) -> String {
     out
 }
 
+/// Checks whether an absolute path matches a registered pseudo-filesystem path.
+///
+/// # Arguments
+/// * `abs` - Absolute path string.
+///
+/// # Returns
+/// `true` if path is a pseudo file, `false` otherwise.
 fn is_pseudo(abs: &str) -> bool {
     super::fs::match_pseudo_path(abs).is_some()
 }
 
 /// Pseudo file path served for a character device number.
+///
+/// # Arguments
+/// * `rdev` - Device major/minor encoded number.
+///
+/// # Returns
+/// Static string path if known pseudo device, or `None`.
 fn chardev_path(rdev: u64) -> Option<&'static str> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     match (major, minor) {
@@ -345,6 +511,12 @@ fn chardev_path(rdev: u64) -> Option<&'static str> {
 
 /// Path of a pseudo-terminal device node by device number (`/dev/ptmx`, `/dev/pts/N`,
 /// and `/dev/tty`, 5:0, which names the caller's controlling terminal).
+///
+/// # Arguments
+/// * `rdev` - Device major/minor encoded number.
+///
+/// # Returns
+/// String path of the PTY node if applicable, or `None`.
 fn pty_chardev_path(rdev: u64) -> Option<String> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     match (major, minor) {
@@ -357,6 +529,16 @@ fn pty_chardev_path(rdev: u64) -> Option<String> {
 
 /// Opens `/dev/ptmx`, a `/dev/pts/N` slave, or `/dev/tty` when the caller's controlling
 /// terminal is a pseudo-terminal. `None` for other paths.
+///
+/// # Arguments
+/// * `abs` - Absolute path to open.
+/// * `flags` - File open flags.
+///
+/// # Returns
+/// `Some(FileDescriptor)` on success, `None` if not a PTY path.
+///
+/// # Errors
+/// Returns negative Linux error code on open failure.
 fn open_pty_path(abs: &str, flags: u32) -> Result<Option<FileDescriptor>, i64> {
     let nonblock = flags & O_NONBLOCK != 0;
     if abs == "/dev/ptmx" {
@@ -371,6 +553,16 @@ fn open_pty_path(abs: &str, flags: u32) -> Result<Option<FileDescriptor>, i64> {
     Ok(None)
 }
 
+/// Checks whether a given (uid, gid) possesses the requested access permissions (`want`) on an inode.
+///
+/// # Arguments
+/// * `attr` - Inode attributes.
+/// * `uid` - Requesting user ID.
+/// * `gid` - Requesting group ID.
+/// * `want` - Bitmask of required access permissions (r=4, w=2, x=1).
+///
+/// # Returns
+/// `true` if access is granted, `false` otherwise.
 pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
     if uid == 0 {
         // root may read/write anything and execute anything with an x bit (or a directory)
@@ -390,6 +582,13 @@ pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
 // stat structures
 // ----------------------------------------------------------------------
 
+/// Populates a Linux `stat` structure from filesystem attributes.
+///
+/// # Arguments
+/// * `attr` - Inode attributes.
+///
+/// # Returns
+/// Filled [`super::types::LinuxStat`] structure.
 fn fill_stat(attr: &Attr) -> super::types::LinuxStat {
     let mut st = super::types::LinuxStat::default();
     st.st_dev = ZFS_DEV;
@@ -413,6 +612,9 @@ fn fill_stat(attr: &Attr) -> super::types::LinuxStat {
 
 /// stat of the Hydra console (`/dev/tty1`, char device 4:1, and its aliases): what
 /// `fstat` on a console descriptor reports, so `ttyname` can match the two.
+///
+/// # Returns
+/// Filled [`super::types::LinuxStat`] structure for the console.
 fn console_stat() -> super::types::LinuxStat {
     let mut st = super::types::LinuxStat::default();
     st.st_dev = super::pty::PTS_DEV + 1;
@@ -425,13 +627,24 @@ fn console_stat() -> super::types::LinuxStat {
     st
 }
 
-/// The console and its virtual terminals: `/dev/console`, `/dev/tty0` (the active VT) and
-/// `/dev/ttyN`. Hydra has one text console; VT switching is between sessions (see
-/// `tty::ioctl`).
+/// Returns `true` if `abs` designates the console or one of its virtual terminals.
+///
+/// # Arguments
+/// * `abs` - Absolute path string to test.
+///
+/// # Returns
+/// `true` if console or VT path, `false` otherwise.
 fn is_console_path(abs: &str) -> bool {
     abs == "/dev/console" || abs.strip_prefix("/dev/tty").is_some_and(|n| !n.is_empty() && n.len() <= 2 && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Generates a `stat` structure for a pseudo-filesystem file.
+///
+/// # Arguments
+/// * `abs` - Absolute path of the pseudo file.
+///
+/// # Returns
+/// Filled [`super::types::LinuxStat`] structure.
 fn pseudo_stat(abs: &str) -> super::types::LinuxStat {
     let mut st = super::types::LinuxStat::default();
     if let Some(p) = super::fs::match_pseudo_path(abs) {
@@ -440,6 +653,14 @@ fn pseudo_stat(abs: &str) -> super::types::LinuxStat {
     st
 }
 
+/// Copies a `LinuxStat` structure into user memory.
+///
+/// # Arguments
+/// * `ptr` - User virtual address destination.
+/// * `st` - Source stat buffer.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn write_stat(ptr: u64, st: &super::types::LinuxStat) -> i64 {
     let bytes = unsafe {
         core::slice::from_raw_parts(st as *const _ as *const u8, core::mem::size_of::<super::types::LinuxStat>())
@@ -450,6 +671,14 @@ fn write_stat(ptr: u64, st: &super::types::LinuxStat) -> i64 {
     }
 }
 
+/// Converts and copies a `LinuxStat` structure into user memory as `statx`.
+///
+/// # Arguments
+/// * `ptr` - User virtual address destination.
+/// * `st` - Source stat buffer.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn write_statx(ptr: u64, st: &super::types::LinuxStat) -> i64 {
     let mut b = [0u8; 256];
     let put32 = |b: &mut [u8; 256], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
@@ -489,6 +718,17 @@ fn write_statx(ptr: u64, st: &super::types::LinuxStat) -> i64 {
 // ----------------------------------------------------------------------
 
 /// Resolves `dirfd`/`path` to a stat buffer, honouring pseudo files.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `flags` - Stat flags (`AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH`).
+///
+/// # Returns
+/// Filled [`super::types::LinuxStat`] on success.
+///
+/// # Errors
+/// Returns negative Linux error code on failure.
 fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxStat, i64> {
     let path = user_cstr(path_ptr)?;
     if path.is_empty() {
@@ -512,7 +752,13 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
     Ok(fill_stat(&ZfsClient::getattr(ino)?))
 }
 
-/// stat of an open descriptor, or `None` if the descriptor is not a file this layer owns.
+/// Stat of an open descriptor, or `None` if the descriptor is not a file this layer owns.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Ok(stat))` or `Some(Err(e))` if handled, or `None` if not owned by this layer.
 fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
     if fd < 0 {
         return Some(Err(EBADF));
@@ -563,6 +809,13 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
 
 /// Stat for a kernel object without a filesystem inode: owned by the caller, with the
 /// object's address as a stable inode number (shared by dup'd descriptors, as on Linux).
+///
+/// # Arguments
+/// * `obj` - Pointer to the underlying kernel object.
+/// * `mode` - File type and permission mode.
+///
+/// # Returns
+/// Filled [`super::types::LinuxStat`] structure.
 fn anon_stat(obj: *const u8, mode: u32) -> super::types::LinuxStat {
     let c = creds();
     let mut st = super::types::LinuxStat::default();
@@ -576,6 +829,16 @@ fn anon_stat(obj: *const u8, mode: u32) -> super::types::LinuxStat {
     st
 }
 
+/// Opens a file relative to a directory file descriptor.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `flags` - Open flags.
+/// * `mode` - Permission mode for created files.
+///
+/// # Returns
+/// Allocated file descriptor index on success, or a negative Linux error code on failure.
 fn open_at(dirfd: i64, path_ptr: u64, flags: u32, mode: u32) -> i64 {
     let path = match user_path(path_ptr) {
         Ok(p) => p,
@@ -588,6 +851,18 @@ fn open_at(dirfd: i64, path_ptr: u64, flags: u32, mode: u32) -> i64 {
 }
 
 /// Opens a path for the current process, returning the new descriptor.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path` - Path byte slice.
+/// * `flags` - File open flags.
+/// * `mode` - Permission mode if creating.
+///
+/// # Returns
+/// New file descriptor index on success.
+///
+/// # Errors
+/// Returns negative Linux error code on open failure.
 pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize, i64> {
     if flags & O_TMPFILE_MASK != 0 {
         return Err(EOPNOTSUPP);
@@ -704,6 +979,17 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     install(FileDescriptor::Vnode(OpenFile::new(ino, keep, abs)), flags)
 }
 
+/// Installs a new file descriptor into the calling process's descriptor table.
+///
+/// # Arguments
+/// * `desc` - File descriptor entry to insert.
+/// * `flags` - Open flags (checks `O_CLOEXEC`).
+///
+/// # Returns
+/// Allocated descriptor index on success.
+///
+/// # Errors
+/// Returns `-EMFILE` if descriptor table is full.
 fn install(desc: FileDescriptor, flags: u32) -> Result<usize, i64> {
     crate::task::with_current_fds_mut(|fds| {
         let fd = fds.alloc_fd(desc).map_err(|_| EMFILE)?;
@@ -712,6 +998,15 @@ fn install(desc: FileDescriptor, flags: u32) -> Result<usize, i64> {
     })
 }
 
+/// Reads directory entries from an open directory into user-space `linux_dirent64` buffer.
+///
+/// # Arguments
+/// * `fd` - Directory file descriptor.
+/// * `buf` - User virtual address destination buffer.
+/// * `count` - Buffer size in bytes.
+///
+/// # Returns
+/// Number of bytes written on success, 0 at end of directory, or negative error code.
 fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     let file = match fd_vnode(fd) {
         Some(f) => f,
@@ -761,6 +1056,15 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     out.len() as i64
 }
 
+/// Repositions the file offset of open file descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+/// * `offset` - Byte offset relative to `whence`.
+/// * `whence` - Reference directive (`SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `SEEK_DATA`, `SEEK_HOLE`).
+///
+/// # Returns
+/// `Some(new_offset)` on success, `Some(err)` on error, or `None` if `fd` not handled here.
 fn lseek(fd: i32, offset: i64, whence: u32) -> Option<i64> {
     let file = fd_vnode(fd)?;
     let mut f = file.lock();
@@ -807,6 +1111,16 @@ fn lseek(fd: i32, offset: i64, whence: u32) -> Option<i64> {
     Some(new)
 }
 
+/// Checks user permissions for a file relative to a directory file descriptor.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `mode` - Access mode to check (R_OK, W_OK, X_OK, F_OK).
+/// * `flags` - Flags modifying check behavior (`AT_EACCESS`, `AT_SYMLINK_NOFOLLOW`).
+///
+/// # Returns
+/// `0` if access allowed, or a negative Linux error code on failure.
 fn access_at(dirfd: i64, path_ptr: u64, mode: u32, flags: u64) -> i64 {
     let path = match user_path(path_ptr) {
         Ok(p) => p,
@@ -834,6 +1148,12 @@ fn access_at(dirfd: i64, path_ptr: u64, mode: u32, flags: u64) -> i64 {
 }
 
 /// Target of `/proc/self/fd/N` (also `/proc/<own pid>/fd/N`): what descriptor N refers to.
+///
+/// # Arguments
+/// * `abs` - Absolute `/proc/...` path string.
+///
+/// # Returns
+/// Link destination string if descriptor is valid, or `None`.
 fn fd_link(abs: &str) -> Option<String> {
     let rest = abs.strip_prefix("/proc/")?;
     let (who, fd) = rest.split_once("/fd/")?;
@@ -865,6 +1185,16 @@ fn fd_link(abs: &str) -> Option<String> {
     })
 }
 
+/// Reads the target of a symbolic link relative to `dirfd`.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to symlink path string.
+/// * `buf` - User virtual address destination buffer.
+/// * `size` - Size of user buffer.
+///
+/// # Returns
+/// Number of bytes copied on success, or a negative Linux error code on failure.
 fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
     if size == 0 {
         return EINVAL;
@@ -897,9 +1227,19 @@ fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
 
 /// Runs `f` on the parent directory and final name of `dirfd`/`path`, after checking that
 /// the caller may modify the parent.
+///
 /// Runs a directory-entry operation on the parent of `path` after the checks Linux makes:
 /// creating (`create`) an existing name fails with `EEXIST` and removing a missing one with
 /// `ENOENT`, both before write permission on the directory is considered.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `create` - True if creating an entry, false if removing/operating on existing.
+/// * `f` - Closure invoked with `(parent_inode, component_name, creds)`.
+///
+/// # Returns
+/// Result code from closure `f`, or a negative Linux error code on permission/lookup failure.
 fn with_parent(dirfd: i64, path_ptr: u64, create: bool, f: impl FnOnce(u64, &[u8], &Creds) -> Result<i64, i64>) -> i64 {
     let r: Result<i64, i64> = (|| {
         let path = user_path(path_ptr)?;
@@ -925,10 +1265,31 @@ fn with_parent(dirfd: i64, path_ptr: u64, create: bool, f: impl FnOnce(u64, &[u8
     r.unwrap_or_else(|e| e)
 }
 
+/// Helper to execute an operation with the global ZFS server.
+///
+/// # Arguments
+/// * `f` - Closure receiving mutable reference to `ZfsServer`.
+///
+/// # Returns
+/// Result of the closure execution.
+///
+/// # Errors
+/// Returns negative Linux error code if closure fails.
 fn zfs<R>(f: impl FnOnce(&mut crate::fs::zfs::ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
     crate::fs::zfs::with_server(f)
 }
 
+/// Renames a file or directory across directories.
+///
+/// # Arguments
+/// * `olddir` - Source directory file descriptor or `AT_FDCWD`.
+/// * `oldp` - User pointer to source path string.
+/// * `newdir` - Destination directory file descriptor or `AT_FDCWD`.
+/// * `newp` - User pointer to destination path string.
+/// * `flags` - Rename flags (`RENAME_NOREPLACE`).
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
     if flags & !RENAME_NOREPLACE != 0 {
         return EINVAL; // RENAME_EXCHANGE / RENAME_WHITEOUT are not supported
@@ -956,6 +1317,17 @@ fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 
     r.unwrap_or_else(|e| e)
 }
 
+/// Creates a hard link pointing to an existing file.
+///
+/// # Arguments
+/// * `olddir` - Source directory file descriptor or `AT_FDCWD`.
+/// * `oldp` - User pointer to source path string.
+/// * `newdir` - Destination directory file descriptor or `AT_FDCWD`.
+/// * `newp` - User pointer to destination path string.
+/// * `flags` - Link flags (`AT_EMPTY_PATH`, `AT_SYMLINK_FOLLOW`).
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
     let r: Result<i64, i64> = (|| {
         let op = user_cstr(oldp)?;
@@ -975,6 +1347,17 @@ fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
 
 /// Applies an attribute change to `dirfd`/`path` (or the descriptor itself for an empty
 /// path with `AT_EMPTY_PATH`), after an ownership/permission check by `check`.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `follow` - Whether to follow symlinks.
+/// * `empty_ok` - Whether an empty path targets `dirfd` itself.
+/// * `set` - Attributes to modify.
+/// * `check` - Permission check closure.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetAttr, check: impl FnOnce(&Attr, &Creds) -> bool) -> i64 {
     let r: Result<i64, i64> = (|| {
         let path = if path_ptr == 0 { Vec::new() } else { user_cstr(path_ptr)? };
@@ -1004,10 +1387,26 @@ fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetA
     r.unwrap_or_else(|e| e)
 }
 
+/// Checks whether credentials match the file owner or root.
+///
+/// # Arguments
+/// * `a` - Inode attributes.
+/// * `c` - Calling process credentials.
+///
+/// # Returns
+/// `true` if root or owner, `false` otherwise.
 fn owner_or_root(a: &Attr, c: &Creds) -> bool {
     c.euid == 0 || c.euid == a.uid
 }
 
+/// Prepares a `SetAttr` structure for ownership changes.
+///
+/// # Arguments
+/// * `uid` - New UID, or `-1` (`u32::MAX`) to leave unchanged.
+/// * `gid` - New GID, or `-1` (`u32::MAX`) to leave unchanged.
+///
+/// # Returns
+/// Prepared [`SetAttr`] struct.
 fn chown_set(uid: u64, gid: u64) -> SetAttr {
     SetAttr {
         uid: if uid as u32 == u32::MAX { None } else { Some(uid as u32) },
@@ -1016,6 +1415,16 @@ fn chown_set(uid: u64, gid: u64) -> SetAttr {
     }
 }
 
+/// Updates file access and modification timestamps.
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to path string.
+/// * `times_ptr` - User pointer to array of two `timespec` structures.
+/// * `flags` - Flags (`AT_SYMLINK_NOFOLLOW`).
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn utimens(dirfd: i64, path_ptr: u64, times_ptr: u64, flags: u64) -> i64 {
     let now = crate::arch::rtc::now();
     let now = (now.0 as i64, now.1);
@@ -1047,6 +1456,12 @@ const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
 /// The file system type `statfs` reports for an absolute path: the pseudo file systems
 /// Linux mounts at `/proc`, `/sys` and `/dev/pts` (programs such as libudev check their
 /// magic numbers), the pool for everything else.
+///
+/// # Arguments
+/// * `abs` - Absolute path string.
+///
+/// # Returns
+/// Filesystem magic number constant.
 fn fs_magic(abs: &str) -> i64 {
     let under = |dir: &str| abs == dir || abs.starts_with(&alloc::format!("{}/", dir));
     if under("/dev/pts") || abs == "/dev/ptmx" {
@@ -1060,6 +1475,14 @@ fn fs_magic(abs: &str) -> i64 {
     }
 }
 
+/// Populates and writes a `struct statfs` to user space.
+///
+/// # Arguments
+/// * `ptr` - User pointer to `struct statfs`.
+/// * `magic` - Filesystem magic identifier to report.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn statfs_out(ptr: u64, magic: i64) -> i64 {
     let (total, free, objs) = match zfs(|s| Ok(s.statfs())) {
         Ok(v) => v,
@@ -1084,6 +1507,15 @@ fn statfs_out(ptr: u64, magic: i64) -> i64 {
 
 /// Physical absolute path (inside the process root) of a directory inode, built by
 /// walking `..` upwards.
+///
+/// # Arguments
+/// * `ino` - Directory inode number.
+///
+/// # Returns
+/// Canonical absolute path string on success.
+///
+/// # Errors
+/// Returns negative Linux error code on lookup failure or loop detection.
 fn dir_path(ino: u64) -> Result<String, i64> {
     let root = match proc_root() {
         0 => ZfsClient::root_ino(),
@@ -1125,6 +1557,13 @@ fn dir_path(ino: u64) -> Result<String, i64> {
     Ok(out)
 }
 
+/// Changes current working directory of calling process to directory inode `ino`.
+///
+/// # Arguments
+/// * `ino` - Target directory inode number.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
 fn chdir_to(ino: u64) -> i64 {
     let attr = match ZfsClient::getattr(ino) {
         Ok(a) => a,
@@ -1148,6 +1587,15 @@ fn chdir_to(ino: u64) -> i64 {
     0
 }
 
+/// Executes file control operations on descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+/// * `cmd` - Control command (`F_DUPFD`, `F_GETFL`, `F_SETFL`, etc.).
+/// * `arg` - Command-specific argument.
+///
+/// # Returns
+/// `Some(result)` on success, or `None` if command/descriptor not handled here.
 fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
     const F_DUPFD: u64 = 0;
     const F_GETFD: u64 = 1;
@@ -1298,11 +1746,24 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
     })
 }
 
+/// Checks whether a descriptor corresponds to a console TTY stream.
+///
+/// # Arguments
+/// * `d` - File descriptor reference.
+///
+/// # Returns
+/// `true` if console in/out/err, `false` otherwise.
 fn is_tty(d: &FileDescriptor) -> bool {
     matches!(d, FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr)
 }
 
-/// The eventfd, timerfd or inotify object behind descriptor `fd`.
+/// Retrieves the eventfd, timerfd or inotify object behind descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(FileDescriptor)` if event/timer/inotify object, or `None`.
 fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_))) => Some(d.clone()),
@@ -1310,7 +1771,13 @@ fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
     })
 }
 
-/// The character device behind descriptor `fd`.
+/// Retrieves the character device behind descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<dyn CharDevice>)` if device descriptor, or `None`.
 fn device_of(fd: usize) -> Option<Arc<dyn super::chardev::CharDevice>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::Device(d)) => Some(d.clone()),
@@ -1318,7 +1785,13 @@ fn device_of(fd: usize) -> Option<Arc<dyn super::chardev::CharDevice>> {
     })
 }
 
-/// The Unix socket behind descriptor `fd`.
+/// Retrieves the Unix socket behind descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<UnixSocket>)` if Unix socket descriptor, or `None`.
 fn unix_of(fd: usize) -> Option<Arc<super::unix::UnixSocket>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::Unix(s)) => Some(s.clone()),
@@ -1326,7 +1799,13 @@ fn unix_of(fd: usize) -> Option<Arc<super::unix::UnixSocket>> {
     })
 }
 
-/// The signalfd behind descriptor `fd`.
+/// Retrieves the signalfd behind descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<SignalFd>)` if signalfd descriptor, or `None`.
 fn signalfd_of(fd: usize) -> Option<Arc<super::signalfd::SignalFd>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::SignalFd(s)) => Some(s.clone()),
@@ -1334,7 +1813,13 @@ fn signalfd_of(fd: usize) -> Option<Arc<super::signalfd::SignalFd>> {
     })
 }
 
-/// The pseudo-terminal end behind descriptor `fd`.
+/// Retrieves the pseudo-terminal end behind descriptor `fd`.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some(Arc<PtyFile>)` if PTY descriptor, or `None`.
 fn pty_of(fd: usize) -> Option<Arc<super::pty::PtyFile>> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::Pty(p)) => Some(p.clone()),
@@ -1343,6 +1828,12 @@ fn pty_of(fd: usize) -> Option<Arc<super::pty::PtyFile>> {
 }
 
 /// The pipe behind descriptor `fd` and whether it is the write end.
+///
+/// # Arguments
+/// * `fd` - File descriptor index.
+///
+/// # Returns
+/// `Some((pipe_buffer, is_write_end))` if pipe descriptor, or `None`.
 fn pipe_of(fd: usize) -> Option<(Arc<Mutex<crate::fs::PipeBuffer>>, bool)> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
         Some(FileDescriptor::PipeRead(p)) => Some((p.clone(), false)),
@@ -1351,8 +1842,14 @@ fn pipe_of(fd: usize) -> Option<(Arc<Mutex<crate::fs::PipeBuffer>>, bool)> {
     })
 }
 
-/// Read from a pipe: waits for data (unless `O_NONBLOCK`), or returns 0 once every
-/// writer is gone.
+/// Reads from a pipe: waits for data (unless `O_NONBLOCK`), or returns 0 once every writer is gone.
+///
+/// # Arguments
+/// * `pipe` - Pipe buffer reference.
+/// * `buf` - Destination byte buffer.
+///
+/// # Returns
+/// Number of bytes read on success, `0` on EOF, or negative error code.
 fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
     let waits = pipe_wait_set(pipe);
     loop {
@@ -1376,7 +1873,13 @@ fn pipe_read(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, buf: &mut [u8]) -> i64 {
     }
 }
 
-/// Wait set of a pipe's readers and writers.
+/// Returns wait set of a pipe's readers and writers.
+///
+/// # Arguments
+/// * `pipe` - Pipe buffer reference.
+///
+/// # Returns
+/// Wait set containing the pipe's wait queue.
 fn pipe_wait_set(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>) -> crate::task::wait::WaitSet {
     let mut waits = crate::task::wait::WaitSet::new();
     waits.add(crate::task::wait::QueueRef::Shared(pipe.lock().wq.clone()));
@@ -1384,6 +1887,13 @@ fn pipe_wait_set(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>) -> crate::task::wait:
 }
 
 /// Blocking write to a pipe: waits for space; `EPIPE` (and `SIGPIPE`) without readers.
+///
+/// # Arguments
+/// * `pipe` - Pipe buffer reference.
+/// * `data` - Source data slice.
+///
+/// # Returns
+/// Number of bytes written on success, or a negative Linux error code on failure.
 fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
     let mut done = 0;
     let waits = pipe_wait_set(pipe);
@@ -1421,6 +1931,13 @@ fn pipe_write(pipe: &Arc<Mutex<crate::fs::PipeBuffer>>, data: &[u8]) -> i64 {
 }
 
 /// Terminal and pipe I/O, which may block. `None` for other descriptor kinds.
+///
+/// # Arguments
+/// * `num` - Syscall number (`read`, `write`, `readv`, `writev`).
+/// * `a` - Syscall argument array.
+///
+/// # Returns
+/// `Some(bytes_transferred)` on success, `Some(err)` on error, or `None` if descriptor is not a stream.
 fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let fd = a[0] as usize;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
@@ -1493,6 +2010,13 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
 
 /// Handles the file-system system calls. Returns `None` when the call (or the kind of
 /// descriptor it targets) belongs to another handler.
+///
+/// # Arguments
+/// * `num` - Syscall number.
+/// * `a` - Syscall argument array.
+///
+/// # Returns
+/// `Some(result)` if handled by the VFS subsystem, or `None` otherwise.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     let r = match num {
         0 | 1 | 19 | 20 => return stream_io(num, a),

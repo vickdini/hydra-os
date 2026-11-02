@@ -55,6 +55,10 @@ impl EtherType {
     }
 
     /// Returns the raw 16-bit numeric representation of this [`EtherType`].
+    ///
+    /// # Returns
+    ///
+    /// The 16-bit network protocol number.
     pub fn as_u16(&self) -> u16 {
         match *self {
             EtherType::Ipv4 => Self::IPV4,

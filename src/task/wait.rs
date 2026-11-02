@@ -45,6 +45,10 @@ static PENDING: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static OVERFLOW: AtomicBool = AtomicBool::new(false);
 
 /// Enqueues `id` into the lock-free `PENDING` wakeup ring, setting `OVERFLOW` if all slots are full.
+///
+/// # Arguments
+///
+/// * `id` - 64-bit task ID (or task ID bitwise-ORed with `PROCESS_WAKE`).
 fn defer_wake(id: u64) {
     for slot in PENDING.iter() {
         if slot.compare_exchange(0, id + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
@@ -59,18 +63,34 @@ const PROCESS_WAKE: u64 = 1 << 62;
 
 /// Wakes every thread of process `tgid` (as for a newly pending signal) without taking
 /// the scheduler lock, for code that may run under it (task exit paths).
+///
+/// # Arguments
+///
+/// * `tgid` - Thread Group ID (process ID) to wake.
 pub fn wake_process_deferred(tgid: u64) {
     defer_wake(tgid | PROCESS_WAKE);
     flush();
 }
 
 /// True if wakeups are waiting for the scheduler (the idle loop then reschedules).
+///
+/// # Returns
+///
+/// `true` if deferred wakeups exist in the pending ring or overflow occurred.
 pub fn wakes_pending() -> bool {
     OVERFLOW.load(Ordering::Acquire) || PENDING.iter().any(|s| s.load(Ordering::Acquire) != 0)
 }
 
 /// Takes the recorded wakeups: calls `wake(id, whole_process)` for each, and returns
 /// whether the ring overflowed (every waiting task must then be woken).
+///
+/// # Arguments
+///
+/// * `wake` - Closure invoked with `(id, whole_process)` for each pending wakeup slot.
+///
+/// # Returns
+///
+/// `true` if ring overflowed requiring a global sweep, `false` otherwise.
 pub(super) fn drain(mut wake: impl FnMut(u64, bool)) -> bool {
     for slot in PENDING.iter() {
         let v = slot.swap(0, Ordering::AcqRel);
@@ -103,6 +123,10 @@ impl WaitQueue {
     }
 
     /// Creates a new `WaitQueue` wrapped in an [`Arc`].
+    ///
+    /// # Returns
+    ///
+    /// An [`Arc<WaitQueue>`] reference.
     pub fn new_shared() -> Arc<Self> {
         Arc::new(Self::new())
     }
@@ -113,6 +137,10 @@ impl WaitQueue {
     }
 
     /// Registers task `id` in the waiter list with interrupts disabled if not already present.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - 64-bit Task ID to register.
     fn register_id(&self, id: u64) {
         x86_64::instructions::interrupts::without_interrupts(|| {
             let mut w = self.waiters.lock();
@@ -155,6 +183,11 @@ pub enum QueueRef {
 
 impl core::ops::Deref for QueueRef {
     type Target = WaitQueue;
+    /// Dereferences this wrapper to the underlying [`WaitQueue`].
+    ///
+    /// # Returns
+    ///
+    /// Reference to the underlying [`WaitQueue`].
     fn deref(&self) -> &WaitQueue {
         match self {
             QueueRef::Static(q) => q,
@@ -179,21 +212,37 @@ pub struct WaitSet {
 /// Something that becomes ready at a known timer tick (a `timerfd`).
 pub trait Deadline: Send + Sync {
     /// The tick at which it next becomes ready, if armed.
+    ///
+    /// # Returns
+    ///
+    /// `Some(u64)` timer tick deadline, or `None` if disarmed.
     fn next_tick(&self) -> Option<u64>;
 }
 
 impl WaitSet {
     /// Creates an empty `WaitSet` with no queues or deadlines.
+    ///
+    /// # Returns
+    ///
+    /// An empty [`WaitSet`].
     pub fn new() -> Self {
         Self { queues: Vec::new(), polled: false, deadlines: Vec::new() }
     }
 
     /// Adds a `QueueRef` to the set of queues this wait depends on.
+    ///
+    /// # Arguments
+    ///
+    /// * `q` - Queue reference to add.
     pub fn add(&mut self, q: QueueRef) {
         self.queues.push(q);
     }
 
     /// Also ends waits when `d` becomes ready (checked each time the set sleeps).
+    ///
+    /// # Arguments
+    ///
+    /// * `d` - Shared dynamic trait object implementing [`Deadline`].
     pub fn add_deadline(&mut self, d: Arc<dyn Deadline>) {
         self.deadlines.push(d);
     }
@@ -210,6 +259,10 @@ impl WaitSet {
     }
 
     /// Sleeps until a queue is woken, a signal arrives, or tick `deadline` passes.
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - Optional maximum timer tick to sleep until.
     pub fn wait(&self, deadline: Option<u64>) {
         let deadline = self.deadlines.iter().filter_map(|d| d.next_tick()).fold(deadline, |acc, t| Some(acc.map_or(t, |a| a.min(t))));
         let deadline = if self.polled {
@@ -223,6 +276,7 @@ impl WaitSet {
 }
 
 impl Drop for WaitSet {
+    /// Automatically unregisters this task from all subscribed wait queues when dropped.
     fn drop(&mut self) {
         for q in &self.queues {
             q.unregister();
@@ -233,6 +287,10 @@ impl Drop for WaitSet {
 /// Sleeps the current task until a wait queue it registered on wakes it, a signal is
 /// posted to its process, or tick `deadline` passes. Returns at once if a wakeup arrived
 /// since the previous wait. Callers re-check their condition afterwards.
+///
+/// # Arguments
+///
+/// * `deadline` - Optional PIT tick deadline after which sleep terminates.
 pub fn wait(deadline: Option<u64>) {
     if !super::is_active() || !crate::arch::pit::is_active() {
         crate::arch::pit::sleep_ticks(1);

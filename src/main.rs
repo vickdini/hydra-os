@@ -98,6 +98,10 @@ use ipc::{Endpoint, Message};
 /// # Arguments
 ///
 /// * `_info` - Diagnostic metadata describing the source file, line number, and panic message.
+///
+/// # Returns
+///
+/// This function never returns (`!`). It disables interrupts and halts the CPU indefinitely.
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();

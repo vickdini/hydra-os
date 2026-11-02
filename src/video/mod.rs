@@ -35,6 +35,13 @@ pub use framebuffer::Framebuffer;
 pub use gop::{get_video_info, init_gop, VideoModeInfo};
 
 /// Executes a closure with mutable access to the global display Framebuffer.
+///
+/// # Arguments
+/// * `f` - Closure taking a mutable reference to [`Framebuffer`].
+///
+/// # Returns
+///
+/// `Some(R)` with the closure result if the video console is active, or `None` otherwise.
 pub fn with_framebuffer<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
     VIDEO_CONSOLE.lock().as_mut().map(|vc| f(vc.framebuffer_mut()))
 }

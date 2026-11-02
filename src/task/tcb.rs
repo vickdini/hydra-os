@@ -53,6 +53,10 @@ pub enum TaskState {
 
 impl TaskState {
     /// Returns a static string name for this task state.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice representing the state name (e.g. `"Ready"`, `"Running"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskState::Ready => "Ready",
@@ -81,6 +85,10 @@ pub enum TaskPriority {
 
 impl TaskPriority {
     /// Returns a static string name for this priority level.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice representing the priority level (e.g. `"Normal"`, `"Realtime"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskPriority::Idle => "Idle",
@@ -168,6 +176,11 @@ impl TaskRegisters {
     }
 
     /// Captures register state from the hardware interrupt context frame.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - Read-only reference to the architectural CPU interrupt stack frame.
+    /// * `cr3` - Physical CR3 base register address for this task's address space.
     pub fn save_from_context(&mut self, ctx: &ExceptionContext, cr3: u64) {
         self.r15 = ctx.r15;
         self.r14 = ctx.r14;
@@ -193,6 +206,10 @@ impl TaskRegisters {
     }
 
     /// Restores saved register state into the hardware interrupt context frame before iretq.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - Mutable reference to the interrupt stack frame to populate.
     pub fn restore_to_context(&self, ctx: &mut ExceptionContext) {
         ctx.r15 = self.r15;
         ctx.r14 = self.r14;
@@ -228,6 +245,10 @@ pub enum PrivilegeMode {
 
 impl PrivilegeMode {
     /// Returns a static string name for this privilege mode.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice representing privilege level (`"Kernel"` or `"User"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             PrivilegeMode::Kernel => "Kernel",
@@ -247,6 +268,10 @@ pub enum TaskPersonality {
 
 impl TaskPersonality {
     /// Returns a static string name for this OS personality.
+    ///
+    /// # Returns
+    ///
+    /// Static string slice representing personality (`"Hydra"` or `"Linux"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskPersonality::Hydra => "Hydra",
@@ -341,6 +366,16 @@ pub struct Task {
 
 impl Task {
     /// Creates a placeholder task descriptor for the already-executing main thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique Task Identifier allocated for the main thread.
+    /// * `name` - Static human-readable label for the main thread.
+    /// * `cr3` - Physical CR3 page directory address active at boot.
+    ///
+    /// # Returns
+    ///
+    /// An initialized [`Task`] structure configured for Ring 0 execution.
     pub fn new_main(id: TaskId, name: &'static str, cr3: u64) -> Self {
         let mut regs = TaskRegisters::empty();
         regs.cr3 = cr3;
@@ -388,6 +423,14 @@ impl Task {
     }
 
     /// Joins program arguments into the `NUL`-terminated form of `/proc/<pid>/cmdline`.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Iterator yielding byte slices of arguments.
+    ///
+    /// # Returns
+    ///
+    /// Shared byte slice `Arc<[u8]>` with null-separated arguments.
     pub fn join_cmdline<'a>(args: impl IntoIterator<Item = &'a [u8]>) -> alloc::sync::Arc<[u8]> {
         let mut out = alloc::vec::Vec::new();
         for a in args {
@@ -398,11 +441,19 @@ impl Task {
     }
 
     /// Path of the running executable, or the task name for kernel tasks.
+    ///
+    /// # Returns
+    ///
+    /// String slice containing the executable path or task name.
     pub fn exe_path(&self) -> &str {
         self.exe.as_deref().unwrap_or(self.name)
     }
 
     /// Returns the top address of the task's kernel stack (used for TSS RSP0 and hardware SYSCALL).
+    ///
+    /// # Returns
+    ///
+    /// 16-byte aligned 64-bit virtual memory address of the stack top.
     pub fn kernel_stack_top(&self) -> u64 {
         if let Some(ref stack) = self.stack {
             let bottom = stack.as_ptr() as u64;
@@ -442,12 +493,25 @@ impl Caps {
     }
 
     /// True if capability `cap` (a `Caps::*` bit) is effective.
+    ///
+    /// # Arguments
+    ///
+    /// * `cap` - Bitmask representing the requested capability bit.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the capability bit is set in the effective set, `false` otherwise.
     pub fn has(&self, cap: u64) -> bool {
         self.effective & cap != 0
     }
 
     /// Applies the capability rules for a change of user ids from `old` to `new`
     /// (each `(real, effective, saved)`).
+    ///
+    /// # Arguments
+    ///
+    /// * `old` - Previous `(real, effective, saved)` UID tuple.
+    /// * `new` - Updated `(real, effective, saved)` UID tuple.
     pub fn on_uid_change(&mut self, old: (u32, u32, u32), new: (u32, u32, u32)) {
         let had_root = old.0 == 0 || old.1 == 0 || old.2 == 0;
         let has_root = new.0 == 0 || new.1 == 0 || new.2 == 0;
@@ -463,6 +527,11 @@ impl Caps {
     }
 
     /// The sets after `execve` (no file capabilities): full for root, none otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `uid` - Real user ID after execve.
+    /// * `euid` - Effective user ID after execve.
     pub fn on_exec(&mut self, uid: u32, euid: u32) {
         self.permitted = if uid == 0 || euid == 0 { Self::FULL } else { 0 };
         self.effective = if euid == 0 { self.permitted } else { 0 };
