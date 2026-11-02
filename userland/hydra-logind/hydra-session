@@ -1,12 +1,17 @@
 #!/bin/sh
 # hydra-session [--uid N] PROGRAM [ARGS...]
+# hydra-session --display-manager
 #
 # Starts what systemd starts at boot for a graphical login on Hydra -- the D-Bus system
-# bus and the login manager (hydra-logind) -- then runs PROGRAM as user N (default 1000)
-# in session 1 on seat0, e.g.
+# bus and the login manager (hydra-logind) -- then either runs PROGRAM as user N (default
+# 1000) in session 1 on seat0, e.g.
 #     hydra-session dbus-run-session kwin_wayland --drm konsole
+# or, with --display-manager, the display manager (SDDM), which shows the login screen and
+# starts the session of whoever logs in (sessions are then created through PAM).
 uid=1000
+dm=0
 if [ "$1" = "--uid" ]; then uid=$2; shift 2; fi
+if [ "$1" = "--display-manager" ]; then dm=1; shift; fi
 
 ping() {
     dbus-send --system --dest="$1" --type=method_call --print-reply "$2" "$3" >/dev/null 2>&1
@@ -26,11 +31,21 @@ if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId;
     dbus-daemon --system || exit 1
 fi
 if ! ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping; then
-    /usr/libexec/hydra-logind --uid "$uid" $HYDRA_LOGIND_OPTS &
+    # Without a display manager the session exists from the start
+    if [ "$dm" = 1 ]; then
+        /usr/libexec/hydra-logind $HYDRA_LOGIND_OPTS &
+    else
+        /usr/libexec/hydra-logind --uid "$uid" $HYDRA_LOGIND_OPTS &
+    fi
     for i in 1 2 3 4 5 6 7 8 9 10; do
         ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping && break
         sleep 1
     done
+fi
+
+if [ "$dm" = 1 ]; then
+    unset WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+    exec sddm $HYDRA_SDDM_OPTS
 fi
 
 entry=$(getent passwd "$uid")

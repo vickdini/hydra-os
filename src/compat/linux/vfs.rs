@@ -212,6 +212,13 @@ pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> 
 /// Lookup key of a Unix socket path: the process root and the absolute path, so the
 /// same name means the same socket to every process sharing that root.
 pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
+    // A socket is attached to its node, as on Linux: it is found under any name the node
+    // gets (programs bind in a temporary directory and rename the node into place)
+    if let Ok((base, _)) = base_dir(AT_FDCWD, path) {
+        if let Ok(ino) = resolve(base, path, true) {
+            return Ok(socket_ino_key(ino));
+        }
+    }
     let (_, base_path) = base_dir(AT_FDCWD, path)?;
     let abs = join_path(&base_path, path);
     let mut key = alloc::format!("{}:", proc_root()).into_bytes();
@@ -219,8 +226,14 @@ pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
     Ok(key)
 }
 
-/// Creates the socket node `bind` makes for a path name (mode 0777 minus the umask).
-pub(crate) fn make_socket_node(path: &[u8]) -> Result<(), i64> {
+/// Name under which the socket bound to node `ino` is found.
+pub(crate) fn socket_ino_key(ino: u64) -> Vec<u8> {
+    alloc::format!("ino:{}", ino).into_bytes()
+}
+
+/// Creates the socket node `bind` makes for a path name (mode 0777 minus the umask);
+/// returns its inode.
+pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     const S_IFSOCK: u32 = 0o140000;
     let (base, _) = base_dir(AT_FDCWD, path)?;
     let (dir, name) = resolve_parent(base, path)?;
@@ -230,7 +243,7 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<(), i64> {
         return Err(EACCES);
     }
     let mode = S_IFSOCK | (0o777 & !umask());
-    zfs(|s| s.mknod(dir, &name, mode, 0, c.euid, c.egid).map(|_| ()))
+    zfs(|s| s.mknod(dir, &name, mode, 0, c.euid, c.egid))
 }
 
 /// Resolves a user path to (inode, is a directory) for the caller.
@@ -412,8 +425,11 @@ fn console_stat() -> super::types::LinuxStat {
     st
 }
 
+/// The console and its virtual terminals: `/dev/console`, `/dev/tty0` (the active VT) and
+/// `/dev/ttyN`. Hydra has one text console; VT switching is between sessions (see
+/// `tty::ioctl`).
 fn is_console_path(abs: &str) -> bool {
-    matches!(abs, "/dev/tty1" | "/dev/tty0" | "/dev/console")
+    abs == "/dev/console" || abs.strip_prefix("/dev/tty").is_some_and(|n| !n.is_empty() && n.len() <= 2 && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn pseudo_stat(abs: &str) -> super::types::LinuxStat {
@@ -590,7 +606,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             return open_path(AT_FDCWD, target.as_bytes(), flags, mode);
         }
     }
-    if matches!(abs.as_str(), "/dev/tty" | "/dev/console" | "/dev/tty0" | "/dev/tty1") {
+    if abs == "/dev/tty" || is_console_path(&abs) {
         return install(FileDescriptor::ConsoleOut, flags);
     }
     // Per-process /proc files are captured now: generating them takes the scheduler and

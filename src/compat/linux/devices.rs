@@ -398,6 +398,40 @@ systemdBoot=false
 ")?;
     }
 
+    // The display manager: a Wayland greeter on KWin (software rendering, as the sessions)
+    if lookup_path(s, t.root, "/usr/bin/sddm").is_some() && lookup_path(s, t.root, "/etc/sddm.conf.d/hydra.conf").is_none() {
+        t.dir(s, "/etc/sddm.conf.d")?;
+        t.file(s, "/etc/sddm.conf.d/hydra.conf", "# Written by Hydra: the greeter runs on KWin under Wayland
+[General]
+DisplayServer=wayland
+
+[Wayland]
+CompositorCommand=kwin_wayland --drm --no-lockscreen --no-global-shortcuts --locale1
+
+[Theme]
+Current=breeze
+CursorTheme=breeze_cursors
+
+[Users]
+MinimumUid=1000
+MaximumUid=60000
+")?;
+    }
+    // Every session (and the greeter) composites in software and uses the Breeze cursor
+    if let Some(ino) = lookup_path(s, t.root, "/etc/environment") {
+        let size = s.getattr(ino)?.size as usize;
+        let mut env = alloc::vec![0u8; size];
+        let n = s.read(ino, 0, &mut env)?;
+        env.truncate(n);
+        if !env.windows(12).any(|w| w == b"KWIN_COMPOSE") {
+            if !env.is_empty() && !env.ends_with(b"\n") {
+                env.push(b'\n');
+            }
+            env.extend_from_slice(b"# Added by Hydra: no GPU acceleration\nKWIN_COMPOSE=Q\nXCURSOR_THEME=breeze_cursors\n");
+            t.file_bytes(s, "/etc/environment", &env, 0o644)?;
+        }
+    }
+
     // ---- The login manager and the script that starts a graphical session ----
     t.file(s, "/usr/share/dbus-1/system.d/org.freedesktop.login1.conf", include_str!("../../../userland/hydra-logind/org.freedesktop.login1.conf"))?;
     t.file_bytes(s, "/usr/libexec/hydra-session", include_bytes!("../../../userland/hydra-logind/hydra-session"), 0o755)?;

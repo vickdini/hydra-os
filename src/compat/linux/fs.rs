@@ -103,7 +103,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (file == "cmdline" || file == "comm" || file.strip_prefix("fdinfo/").is_some_and(numeric))
+        && (file == "cmdline" || file == "comm" || file == "status" || file.strip_prefix("fdinfo/").is_some_and(numeric))
 }
 
 /// Text of `/proc/<pid>/cmdline`, `comm` or `fdinfo/<fd>` (`rest` is the path after
@@ -122,10 +122,29 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         n => n.parse().ok()?,
     };
     // The descriptor table has its own lock, taken after the scheduler's is released
-    let (exe, cmdline, fds) = crate::task::SCHEDULER
-        .lock()
-        .with_process(pid, |t| (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), t.fds.clone()))?;
+    let (exe, cmdline, fds, ids) = crate::task::SCHEDULER.lock().with_process(pid, |t| {
+        (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), t.fds.clone(), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid])
+    })?;
     match file {
+        "status" => {
+            // The fields tools read: name, ids, parent (login managers walk it to a session)
+            let ppid = super::proc::PROCS.lock().get(&pid).map_or(0, |p| p.ppid);
+            let name: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
+            Some(
+                alloc::format!(
+                    "Name:	{}
+State:	R (running)
+Tgid:	{}
+Pid:	{}
+PPid:	{}
+Uid:	{}	{}	{}	{}
+Gid:	{}	{}	{}	{}
+",
+                    name, pid, pid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4]
+                )
+                .into_bytes(),
+            )
+        }
         "cmdline" => Some(cmdline.map(|c| c.to_vec()).unwrap_or_default()),
         "comm" => {
             // The executable's file name, truncated to TASK_COMM_LEN - 1 bytes

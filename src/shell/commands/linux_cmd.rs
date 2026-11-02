@@ -238,12 +238,20 @@ impl Command for LinuxCommand {
             }
 
             "plasma" => {
-                // linux plasma [root]: the graphical KDE session on the DRM display, started
-                // as root (the login manager needs it) for the desktop user, uid 1000
+                // linux plasma [root] [nologin]: the graphical KDE desktop on the DRM display:
+                // the login screen (SDDM) if installed, otherwise (or with `nologin`) the
+                // session of the desktop user, uid 1000, started as root (the login manager
+                // needs it)
                 let root = args.get(1).copied().unwrap_or("/ubuntu");
                 let has = |p: &str| crate::fs::ZfsClient::resolve(0, alloc::format!("{}{}", root.trim_end_matches('/'), p).as_bytes(), true).is_ok();
                 if !has("/usr/libexec/hydra-session") && !has("/usr/bin/kwin_wayland") {
                     println!("[!] linux plasma: no KDE in {} (apt-get install kwin-wayland konsole)", root);
+                    return;
+                }
+                // With a display manager installed the desktop starts at its login screen
+                if has("/usr/bin/sddm") && args.get(2).copied() != Some("nologin") {
+                    println!("[*] Starting the login screen (SDDM)...");
+                    run_chroot(root, &["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"], 0, 0);
                     return;
                 }
                 let mut argv: alloc::vec::Vec<&str> = alloc::vec![

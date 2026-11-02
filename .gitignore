@@ -12,3 +12,4 @@ dist/x86_64/hydrapool.damaged.qcow2
 dist/x86_64/hydrapool.pre-apps.qcow2
 dist/x86_64/hydrapool.pre-drivers.qcow2
 dist/x86_64/hydrapool.pre-zfsserver.qcow2
+dist/x86_64/hydrapool.pre-sddm.qcow2

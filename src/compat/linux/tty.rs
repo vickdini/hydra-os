@@ -479,8 +479,53 @@ fn copy_in(ptr: u64, len: usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
+/// Active virtual terminal (`VT_ACTIVATE`), as display managers see it.
+static ACTIVE_VT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+/// Next virtual terminal `VT_OPENQRY` hands out.
+static NEXT_VT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2);
+
+/// Virtual terminal `ioctl`s on the console. Hydra has one text console: VT numbers only
+/// tell sessions apart (the login manager decides which one owns the display), so
+/// allocating and switching VTs just records them. `None` for other requests.
+fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let put = |bytes: &[u8]| super::vfs::copy_out(arg, bytes).map_or_else(|e| e, |()| 0);
+    Some(match request {
+        0x5600 => put(&(NEXT_VT.fetch_add(1, Relaxed) as i32).to_le_bytes()), // VT_OPENQRY
+        0x5601 => put(&[0u8; 8]),                                              // VT_GETMODE: VT_AUTO
+        0x5602 | 0x5605 | 0x5607 | 0x5608 => 0, // VT_SETMODE, VT_RELDISP, VT_WAITACTIVE, VT_DISALLOCATE
+        0x5603 => {
+            // VT_GETSTATE: active VT, signal, bitmask of VTs in use
+            let active = ACTIVE_VT.load(Relaxed) as u16;
+            let used = ((1u32 << NEXT_VT.load(Relaxed).min(16)) - 1) as u16;
+            let mut st = [0u8; 6];
+            st[..2].copy_from_slice(&active.to_le_bytes());
+            st[4..].copy_from_slice(&used.to_le_bytes());
+            put(&st)
+        }
+        0x5606 => {
+            // VT_ACTIVATE
+            ACTIVE_VT.store(arg as u32, Relaxed);
+            0
+        }
+        0x4B3A | 0x4B45 => 0,                    // KDSETMODE, KDSKBMODE
+        0x4B3B => put(&0i32.to_le_bytes()),      // KDGETMODE: KD_TEXT
+        0x4B44 => put(&3i32.to_le_bytes()),      // KDGKBMODE: K_UNICODE
+        0x4B33 => put(&[2u8]),                   // KDGKBTYPE: KB_101
+        _ => return None,
+    })
+}
+
+/// The virtual terminal display managers last activated.
+pub fn active_vt() -> u32 {
+    ACTIVE_VT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Console terminal `ioctl`s.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
+    if let Some(r) = vt_ioctl(request, arg) {
+        return r;
+    }
     if request == 0x541B {
         pump(); // FIONREAD counts keystrokes not yet pumped
     }

@@ -141,6 +141,26 @@ struct Segment {
     cred: Ucred,
 }
 
+impl Drop for Segment {
+    /// Descriptors never received (the socket closed with them queued) are closed.
+    fn drop(&mut self) {
+        for desc in self.fds.drain(..) {
+            release_in_flight(desc);
+        }
+    }
+}
+
+/// Descriptors being sent: closed again if the send fails before they are queued.
+struct InFlight(Vec<FileDescriptor>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        for desc in self.0.drain(..) {
+            release_in_flight(desc);
+        }
+    }
+}
+
 /// One direction of a connection.
 #[derive(Default)]
 struct Queue {
@@ -311,7 +331,8 @@ impl UnixSocket {
     }
 
     /// Sends `data` with `fds`. Returns the bytes sent or an error.
-    fn send(&self, data: &[u8], mut fds: Vec<FileDescriptor>, flags: u64) -> i64 {
+    fn send(&self, data: &[u8], fds: Vec<FileDescriptor>, flags: u64) -> i64 {
+        let mut fds = InFlight(fds);
         let (pair, side) = match self.pair() {
             Some(p) => p,
             None => return ENOTCONN,
@@ -352,7 +373,7 @@ impl UnixSocket {
                     q.segs.push_back(Segment {
                         data: data[sent..sent + n].to_vec(),
                         pos: 0,
-                        fds: core::mem::take(&mut fds),
+                        fds: core::mem::take(&mut fds.0),
                         cred,
                     });
                     q.bytes += n;
@@ -436,13 +457,13 @@ impl UnixSocket {
 /// per-user runtime socket. An existing node at the path is replaced.
 pub fn kernel_listen(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<Arc<UnixSocket>, i64> {
     const S_IFSOCK: u32 = 0o140000;
-    let key = alloc::format!("{}:{}", root_ino, path).into_bytes();
     let sock = UnixSocket::new(SOCK_STREAM, true);
-    crate::fs::zfs::with_server(|s| {
+    let ino = crate::fs::zfs::with_server(|s| {
         let (dir, name) = crate::fs::client::resolve_parent_in(s, root_ino, root_ino, path.as_bytes())?;
         let _ = s.unlink(dir, &name);
-        s.mknod(dir, &name, S_IFSOCK | 0o700, 0, uid, gid).map(|_| ())
+        s.mknod(dir, &name, S_IFSOCK | 0o700, 0, uid, gid)
     })?;
+    let key = super::vfs::socket_ino_key(ino);
     {
         let mut names = NAMES.lock();
         if names.get(&key).map_or(false, |w| w.strong_count() > 0) {
@@ -533,9 +554,9 @@ fn take_record(q: &mut Queue, buf: &mut [u8], peek: bool) -> (usize, Vec<FileDes
     if peek {
         return (n, Vec::new(), cred, truncated);
     }
-    let seg = q.segs.pop_front().unwrap();
+    let mut seg = q.segs.pop_front().unwrap();
     q.bytes -= seg.data.len();
-    (n, seg.fds, cred, truncated)
+    (n, core::mem::take(&mut seg.fds), cred, truncated)
 }
 
 // ----------------------------------------------------------------------
@@ -633,7 +654,14 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
             for c in buf[off + 16..off + clen].chunks_exact(4) {
                 let fd = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 let desc = crate::task::with_current_fds_mut(|t| if fd < 0 { None } else { t.get(fd as usize).cloned() });
-                fds.push(desc.ok_or(EBADF)?);
+                let desc = desc.ok_or(EBADF)?;
+                // The message holds a reference, like a dup: a pipe end stays open while in flight
+                match &desc {
+                    FileDescriptor::PipeRead(pipe) => pipe.lock().add_reader(),
+                    FileDescriptor::PipeWrite(pipe) => pipe.lock().add_writer(),
+                    _ => {}
+                }
+                fds.push(desc);
                 if fds.len() > MAX_FDS {
                     return Err(EINVAL);
                 }
@@ -643,6 +671,15 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
         off += align8(clen);
     }
     Ok(fds)
+}
+
+/// Drops a descriptor that was in flight in a message and never installed.
+fn release_in_flight(desc: FileDescriptor) {
+    match desc {
+        FileDescriptor::PipeRead(pipe) => pipe.lock().drop_reader(),
+        FileDescriptor::PipeWrite(pipe) => pipe.lock().drop_writer(),
+        _ => {}
+    }
 }
 
 /// Builds the received control messages into the caller's buffer: installs descriptors
@@ -656,7 +693,11 @@ fn build_control(ptr: u64, cap: usize, fds: Vec<FileDescriptor>, cred: Option<Uc
             flags |= MSG_CTRUNC;
         }
         let mut nums = Vec::new();
-        for desc in fds.into_iter().take(room) {
+        let mut fds = fds;
+        for extra in fds.split_off(room.min(fds.len())) {
+            release_in_flight(extra); // closed: no room for it in the receiver's buffer
+        }
+        for desc in fds {
             let fd = crate::task::with_current_fds_mut(|t| match t.alloc_fd(desc) {
                 Ok(n) => {
                     t.set_cloexec(n, cloexec);
@@ -762,16 +803,19 @@ fn bind(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     if sock.local.lock().is_some() {
         return EINVAL;
     }
+    let mut addr = addr;
+    if let Addr::Path { shown, key } = &mut addr {
+        // The name is a socket node in the file system (EADDRINUSE if the path exists);
+        // the socket is found through the node
+        match super::vfs::make_socket_node(shown) {
+            Ok(ino) => *key = super::vfs::socket_ino_key(ino),
+            Err(e) => return if e == -17 { EADDRINUSE } else { e },
+        }
+    }
     let key = addr.key();
     let mut names = NAMES.lock();
     if names.get(&key).map_or(false, |w| w.strong_count() > 0) {
         return EADDRINUSE;
-    }
-    if let Addr::Path { shown, .. } = &addr {
-        // The name is a socket node in the file system (EADDRINUSE if the path exists)
-        if let Err(e) = super::vfs::make_socket_node(shown) {
-            return if e == -17 { EADDRINUSE } else { e };
-        }
     }
     names.insert(key, Arc::downgrade(sock));
     *sock.local.lock() = Some(addr);
