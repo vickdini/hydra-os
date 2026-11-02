@@ -1,0 +1,9 @@
+[package]
+name = "hydra-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime for Hydra's Ring 3 driver and server programs"
+
+[dependencies]
+linked_list_allocator = { workspace = true }
+spin = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "display-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra display server: framebuffer owner and built-in Plasma-style desktop"
+
+[dependencies]
+hydra-rt = { workspace = true }

@@ -69,10 +69,9 @@ impl Command for IfconfigCommand {
         let mask = iface.subnet_mask();
         let gw = iface.gateway();
         let dns = iface.dns_server();
-        let (rx_pkts, tx_pkts, rx_bytes, tx_bytes) = {
-            let guard = e1000::E1000_NIC.lock();
-            guard.as_ref().map(|d| d.metrics()).unwrap_or((0, 0, 0, 0))
-        };
+        let (rx_pkts, tx_pkts, rx_bytes, tx_bytes) = e1000::metrics();
+        let (calls, frames, head, cur) = e1000::rx_diagnostics();
+        println!("  - Driver RX:         {} requests, {} frames, ring head/tail {:#x} / driver {:#x}", calls, frames, head, cur);
 
         set_color(Color::LightGreen, Color::Black);
         println!("\nInterface: eth0 (Intel 82540EM Gigabit Ethernet)");

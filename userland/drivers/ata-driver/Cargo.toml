@@ -1,0 +1,8 @@
+[package]
+name = "ata-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra ATA disk driver (primary master IDE disk, PIO and bus-master DMA)"
+
+[dependencies]
+hydra-rt = { workspace = true }

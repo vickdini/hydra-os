@@ -382,15 +382,48 @@ fn main() -> Status {
         );
     }
 
-    // 7. ZFS Microkernel File Server Initialization
+    // Where the image was loaded, to symbolize addresses with a linker map (as the watchdog's
+    // `anchor`)
+    crate::kprintln!("[boot] anchor (hydra_syscall_dispatcher) = {:#x}", crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize);
+
+    // 7. Devices the kernel keeps, and what the boot volume provides (it is unreachable
+    //    after the hardware takeover)
     console::set_color(Color::Yellow, Color::Black);
-    println!("\n[*] Step 6: Initializing Storage Subsystem & ZFS File Server...");
+    println!("
+[*] Step 6: Initializing Devices & Reading the Boot Volume...");
     crate::arch::rtc::init();
-    crate::arch::ata::init();
     crate::arch::mouse::init();
-    net::init();
+    let boot_files = fs::ZfsClient::read_boot_files();
+    console::set_color(Color::LightGreen, Color::Black);
+    println!("[+] Boot volume: {} files staged for the pool", boot_files.len());
+
+    // 8. Preemptive Multitasking & Scheduler Initialization
+    console::set_color(Color::Yellow, Color::Black);
+    println!("
+[*] Step 7: Initializing Multitasking Scheduler...");
+    let active_cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    task::init(active_cr3);
+    console::set_color(Color::LightGreen, Color::Black);
+    println!("[+] Multitasking Subsystem Online:");
+    println!("    - Main Thread registered: Task #0 ('shell')");
+    println!("    - Background Idle Thread: Task #1 ('idle', priority 0)");
+    println!("    - Round-Robin Timeslice : {} ms (100 Hz timer tick preemption)",
+        task::scheduler::DEFAULT_TIMESLICE_TICKS * 10
+    );
+    task::supervisor_init();
+
+    // 9. Hardware takeover: the kernel leaves the firmware behind and the driver programs
+    //    (the disk driver among them) start in Ring 3
+    if let Err(e) = crate::arch::boot_services::take_hardware_ownership() {
+        console::set_color(Color::LightRed, Color::Black);
+        println!("[!] Hardware takeover failed: {}", e);
+    }
+
+    // 10. ZFS file server, on the disk driver
+    console::set_color(Color::Yellow, Color::Black);
+    println!("[*] Step 8: Initializing the ZFS File Server...");
     fs::init_server();
-    fs::ZfsClient::sync_boot_binaries();
+    fs::ZfsClient::import_boot_files(boot_files);
     console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[+] ZFS File Server Online (Endpoint #{:#x}):",
@@ -404,26 +437,12 @@ fn main() -> Status {
             txg
         );
     }
-    println!("    - Persistence : {}", if crate::arch::ata::is_drive_present() { "Active (Primary Master ATA Hard Disk)" } else { "In-Memory RAM Fallback" });
+    println!("    - Persistence : {}", if fs::zfs::spa::disk_info().is_some() { "Active (disk, through the Ring 3 ata-driver)" } else { "In-Memory RAM Fallback" });
     println!("    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)");
 
-    // 8. Preemptive Multitasking & Scheduler Initialization
-    console::set_color(Color::Yellow, Color::Black);
-    println!("\n[*] Step 7: Initializing Multitasking Scheduler...");
-    let active_cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    task::init(active_cr3);
-    console::set_color(Color::LightGreen, Color::Black);
-    println!("[+] Multitasking Subsystem Online:");
-    println!("    - Main Thread registered: Task #0 ('shell')");
-    println!("    - Background Idle Thread: Task #1 ('idle', priority 0)");
-    println!("    - Round-Robin Timeslice : {} ms (100 Hz timer tick preemption)",
-        task::scheduler::DEFAULT_TIMESLICE_TICKS * 10
-    );
-    task::supervisor_init();
-    println!("    - Reincarnation Server  : Active (MINIX 3 Process Supervisor, 4 System Drivers)");
-
     console::set_color(Color::LightCyan, Color::Black);
-    println!("\n============================================================");
+    println!("
+============================================================");
     println!(" [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  ");
     println!("============================================================");
 

@@ -1,0 +1,8 @@
+[package]
+name = "e1000-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra network driver for the Intel 82540EM (e1000) adapter"
+
+[dependencies]
+hydra-rt = { workspace = true }

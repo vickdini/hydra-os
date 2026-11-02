@@ -1,54 +1,38 @@
-//! # Video Subsystem: Graphics, Framebuffer, and Wayland Compositor
+//! # Video Subsystem: Framebuffer, Text Console, and Display Client
 //!
-//! Provides the UEFI Graphics Output Protocol (GOP) linear framebuffer driver, bitmap text console,
-//! 32-bit alpha compositor, and Wayland window server.
+//! Provides the UEFI Graphics Output Protocol (GOP) linear framebuffer, the kernel's
+//! bitmap text console, and the client side of the display server.
 //!
 //! ## Architectural Role & Design Rationale
 //!
 //! Modern graphical displays in UEFI systems provide a linear frame buffer configured via GOP.
-//! This subsystem encapsulates raw Video RAM into a safe 32-bit pixel canvas (`Framebuffer`),
-//! renders ASCII text through an embedded 8x16 bitmap font, and runs a double-buffered compositor
-//! (`Compositor`) driving both an interactive desktop shell (`render_plasma_desktop`) and
-//! native Wayland client windows (`WaylandCompositor`).
+//! The kernel keeps only what it needs to print: the framebuffer and a text console with an
+//! embedded 8x16 font. The graphical desktop (compositor, window management, the
+//! Plasma-style shell) is the display server, a Ring 3 program (`userland/drivers/display-server`)
+//! that the supervisor starts with the framebuffer granted to it; [`display`] talks to it.
 //!
 //! ## Key Modules
 //!
 //! - `gop`: Discovers and maps the UEFI GOP linear framebuffer before ExitBootServices.
-//! - `framebuffer`: Double-buffered 32-bit ARGB/BGR canvas abstractions and drawing primitives.
-//! - `font`: Embedded 8x16 VGA font glyphs and character blitting routines.
+//! - `framebuffer`: 32-bit ARGB/BGR canvas abstraction and drawing primitives.
+//! - `font`: Embedded 8x16 VGA font glyphs (shared with the display server).
 //! - [`console`]: Terminal emulation layer rendering scrolling text onto the graphical framebuffer.
-//! - `compositor`: Window surface blending, title bars, and Breeze-style desktop controls.
-//! - [`wayland`]: Wayland surface registry, focus routing, and window geometry management.
-//! - `plasma`: KDE Plasma 6.8 desktop shell rendering (panel, system tray, app launcher, widgets).
-//! - `server`: Unprivileged Ring 3 display server, event dispatcher, and Wayland compositor daemon.
+//! - [`display`]: Requests to the display server (input events, frames).
 
-/// 32-bit software alpha compositor and window surface rendering.
-pub mod compositor;
 /// Graphical text console emulation backed by the GOP framebuffer.
 pub mod console;
+/// Client of the Ring 3 display server.
+pub mod display;
 /// Embedded 8x16 bitmap font glyph table and character blitting.
 pub mod font;
 /// Linear framebuffer memory abstraction and pixel manipulation primitives.
 pub mod framebuffer;
 /// UEFI Graphics Output Protocol (GOP) discovery and hardware mode query.
 pub mod gop;
-/// KDE Plasma-styled desktop shell widgets, panel, and wallpaper rendering.
-pub mod plasma;
-/// Wayland window surfaces, client buffer attachments, and input focus.
-pub mod wayland;
-/// Unprivileged Ring 3 display server, event dispatcher, and Wayland compositor daemon.
-pub mod server;
 
-pub use compositor::{Color, Compositor};
 pub use console::{clear_screen, is_active, set_colors, write_str, VideoConsole, VIDEO_CONSOLE};
 pub use framebuffer::Framebuffer;
 pub use gop::{get_video_info, init_gop, VideoModeInfo};
-pub use plasma::render_plasma_desktop;
-pub use server::{
-    forward_key_char, forward_mouse_event, run_user_display_daemon, set_use_display_endpoint,
-    DisplayServer, USE_DISPLAY_ENDPOINT,
-};
-pub use wayland::WaylandCompositor;
 
 /// Executes a closure with mutable access to the global display Framebuffer.
 pub fn with_framebuffer<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {

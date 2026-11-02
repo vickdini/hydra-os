@@ -36,7 +36,7 @@ impl Command for ZpoolCommand {
                 set_color(Color::White, Color::Black);
                 println!(" state: ONLINE");
                 println!("status: The pool is operating normally via the Microkernel ZFS File Server.");
-                let is_disk = crate::arch::ata::is_drive_present();
+                let is_disk = crate::fs::zfs::spa::disk_info().is_some();
                 println!("config:");
                 println!("        NAME                 STATE     READ WRITE CKSUM");
                 println!("        hydrapool            ONLINE       0     0     0");
@@ -266,25 +266,17 @@ impl Command for DisksCommand {
         set_color(Color::LightCyan, Color::Black);
         println!("=== Hydra OS Storage Subsystem & Block Devices ===");
 
-        let is_present = crate::arch::ata::is_drive_present();
-        if is_present {
-            let mut model_buf = [0u8; 40];
-            let model = crate::arch::ata::get_drive_model(&mut model_buf).unwrap_or("ATA Hard Disk");
-            let info = crate::arch::ata::drive_info();
-
+        if let Some(disk) = crate::fs::zfs::spa::disk_info() {
+            let cap_bytes = disk.sectors * 512;
             set_color(Color::LightGreen, Color::Black);
             println!("\nDevice: /dev/hda (Primary Master ATA/IDE)");
             set_color(Color::White, Color::Black);
-            println!("  - Model:             {}", model);
-            println!("  - Controller Port:   I/O Base 0x1F0, Control 0x3F6");
-            if let Some((cap_bytes, sectors, is_lba48)) = info {
-                let cap_mb = cap_bytes / (1024 * 1024);
-                println!("  - Capacity:          {} MiB ({} bytes)", cap_mb, cap_bytes);
-                println!("  - Total Sectors:     {} (512 bytes/sector)", sectors);
-                println!("  - Addressing:        {}", if is_lba48 { "LBA48 (48-bit Logical Block Addressing)" } else { "LBA28 (28-bit Logical Block Addressing)" });
-            }
-            println!("  - I/O Mode:          Programmed I/O (Polled PIO, nIEN=1)");
-            println!("  - Cache Flushing:    Hardware ATA CACHE FLUSH supported");
+            println!("  - Model:             {}", disk.model);
+            println!("  - Driven by:         ata-driver (Ring 3 process, `service status`)");
+            println!("  - Capacity:          {} MiB ({} bytes)", cap_bytes / (1024 * 1024), cap_bytes);
+            println!("  - Total Sectors:     {} (512 bytes/sector)", disk.sectors);
+            println!("  - Addressing:        {}", if disk.lba48 { "LBA48 (48-bit Logical Block Addressing)" } else { "LBA28 (28-bit Logical Block Addressing)" });
+            println!("  - I/O Mode:          {}", if disk.dma { "Bus-master DMA" } else { "Programmed I/O (polled)" });
             println!("  - Vdev Association:  vdev-ata-0 -> Backs OpenZFS pool 'hydrapool'");
             println!("  - Persistence:       ENABLED (Durably saved across reboots)");
         } else {

@@ -175,6 +175,18 @@ impl PhysicalMemoryManager {
         }
     }
 
+    /// Gives a frame from [`Self::allocate_contiguous_frames`] (which hands out frames
+    /// without a reference count) a count of 1, so [`Self::ref_dec`] frees it later.
+    pub fn adopt(&mut self, frame: PhysFrame<Size4KiB>) {
+        if let Some(p) = self.refcount_slot(frame) {
+            unsafe {
+                if *p == 0 {
+                    *p = 1;
+                }
+            }
+        }
+    }
+
     /// Drops a reference to a managed frame, returning it to the free list when the last
     /// reference goes away. Unmanaged frames are never freed.
     ///

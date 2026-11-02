@@ -102,7 +102,7 @@ def main():
     ap.add_argument("--wait", type=float, default=60)
     ap.add_argument("--until", default=None)
     ap.add_argument("--log", default=os.path.join(ROOT, "scratch", "qemu_run.log"))
-    ap.add_argument("--boot-wait", type=float, default=25)
+    ap.add_argument("--boot-wait", type=float, default=60)
     ap.add_argument("--gap", type=float, default=1.0, help="seconds between commands")
     ap.add_argument("--prompt", default=None, help="wait for one more occurrence of this text before typing each command after the first")
     ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
@@ -145,9 +145,10 @@ def main():
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
         qmp = Qmp(proc)
-        # Wait for the shell prompt (the countdown to bare-metal mode is cancelled by a key)
+        # Wait for the boot countdown (to bare-metal mode in older kernels, to the Plasma
+        # autostart since the kernel takes over the hardware at boot); a key cancels it
         deadline = time.time() + a.boot_wait
-        while time.time() < deadline and "Transitioning to bare-metal" not in read_log(a.log):
+        while time.time() < deadline and not any(t in read_log(a.log) for t in ("Transitioning to bare-metal", "Starting KDE Plasma in")):
             time.sleep(0.5)
         time.sleep(1.0)
         if not a.no_cancel:

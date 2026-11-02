@@ -92,12 +92,19 @@ impl Command for ServiceCommand {
                         };
 
                         set_color(Color::White, Color::Black);
-                        crate::print!("{:<16} {:<8} {:#<10x} ", s.name, pid_str, s.endpoint_id);
+                        crate::print!("{:<16} {:<8} {:<#10x} ", s.name, pid_str, s.endpoint_id);
                         set_color(state_color, Color::Black);
                         crate::print!("{:<12} ", state_str);
                         set_color(Color::White, Color::Black);
                         crate::println!("{:<10} {:<12} {:<10}", s.restart_count, s.unanswered_pings, health_str);
                     }
+                }
+                for (irq, owner, count, notified, pending, masked) in crate::ipc::service::irq_stats() {
+                    set_color(Color::LightGray, Color::Black);
+                    crate::println!(
+                        "  IRQ {:<3} -> process {:<6} {} interrupts, {} client wakes, {} pending, {}",
+                        irq, owner, count, notified, pending, if masked { "masked" } else { "unmasked" }
+                    );
                 }
                 set_color(Color::LightCyan, Color::Black);
                 crate::println!("=========================================================================================\n");

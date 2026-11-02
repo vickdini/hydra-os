@@ -1,0 +1,6 @@
+Windows Hypervisor Platform accelerator is operational
+[hydra_run] log stalled for 12.0 s: CPU state saved to scratch/hydra_stall.txt
+su root
+[+] Switched to superuser 'root' (UID 0, GID 0)
+hydra:/bin# linux chroot /ubuntu /usr/bin/true
+

@@ -316,6 +316,9 @@ pub struct Task {
     pub exe: Option<alloc::sync::Arc<str>>,
     /// Arguments of the running program, each `NUL`-terminated (`/proc/<pid>/cmdline`).
     pub cmdline: Option<alloc::sync::Arc<[u8]>>,
+    /// Endpoint of the driver service this process was started to serve (by the
+    /// supervisor). Only such processes may use the driver system calls.
+    pub service: Option<u32>,
     /// Nesting depth of `task::preemptible` wait points this task is inside; saved and
     /// restored with the task so the timer only preempts the task that is actually waiting.
     pub preempt_depth: u32,
@@ -372,6 +375,7 @@ impl Task {
             mm: None,
             exe: None,
             cmdline: None,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],

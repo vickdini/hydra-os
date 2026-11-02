@@ -15,6 +15,17 @@
 //! All operations fit within the 4-argument [`super::Message`] structure, ensuring zero heap allocation
 //! across client-server IPC boundaries.
 
+/// Well-known endpoint of the OpenZFS file server (0x20 = 32).
+pub const ENDPOINT_ZFS_SERVER: u32 = 0x20;
+/// Well-known endpoint of the block device (ATA) driver (0x21 = 33).
+pub const ENDPOINT_BLOCK_DEV: u32 = 0x21;
+/// Well-known endpoint of the network interface (e1000) driver (0x22 = 34).
+pub const ENDPOINT_NET_DEV: u32 = 0x22;
+/// Well-known endpoint of the display server (0x23 = 35).
+pub const ENDPOINT_DISPLAY_DEV: u32 = 0x23;
+/// Well-known endpoint of the process supervisor (0x24 = 36).
+pub const ENDPOINT_SUPERVISOR: u32 = 0x24;
+
 /// Protocol label for a block device read operation.
 ///
 /// Inline arguments:

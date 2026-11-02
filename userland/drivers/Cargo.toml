@@ -1,0 +1,20 @@
+# Hydra driver and server programs: static native ELFs that the kernel embeds as boot
+# modules and the supervisor runs in Ring 3, each in an address space of its own.
+# Built by the kernel's build.rs (target/drivers); `cargo build --release` here works too.
+[workspace]
+resolver = "2"
+members = ["hydra-rt", "display-server", "ata-driver", "e1000-driver"]
+
+[workspace.dependencies]
+hydra-rt = { path = "hydra-rt" }
+linked_list_allocator = "0.10.6"
+spin = "0.9"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = false
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

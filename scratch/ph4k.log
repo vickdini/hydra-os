@@ -1,0 +1,3281 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd797913
+    RFLAGS: 0x206, RSP: 0xbfe627d0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0xbfc01000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 3036 MiB
+    - Allocated: 2560 KiB
+    - Allocated Test Frame: 0x40280000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x40281000
+    - Total Size:    512 MiB (536870912 bytes)
+    - Available:     512 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd797540 -> PhysAddr 0xbd797540
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0xc0000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[boot] anchor (hydra_syscall_dispatcher) = 0xbd76d6c0
+[1m[33m[40m
+[*] Step 6: Initializing Devices & Reading the Boot Volume...
+[1m[32m[40m[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Boot volume: 25 files staged for the pool
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[ata-driver] 'QEMU HARDDISK': 16384 MiB, LBA48, bus-master DMA
+[supervisor] started 'ata_driver' (process 2, endpoint 0x21)
+[supervisor] started 'net_driver' (process 3, endpoint 0x22)
+[supervisor] started 'display_server' (process 4, endpoint 0x23)
+[e1000-driver] MAC 52:54:00:12:34:56, link up
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+
+[*] Step 8: Initializing the ZFS File Server...
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #47297, 77770 objects)
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 2825 MiB used, TXG #47297, Fletcher-4, CoW)
+    - Persistence : Active (disk, through the Ring 3 ata-driver)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... CANCELLED
+    Type 'linux plasma' to start the desktop later.
+
+hydra:/bin$ su root
+[+] Switched to superuser 'root' (UID 0, GID 0)
+hydra:/bin# linux trace on python3
+[+] Linux syscall tracing enabled
+hydra:/bin# linux chroot /ubuntu /usr/bin/python3 -c "import urllib.request;d=urllib.request.urlopen('http://archive.ubuntu.com/ubuntu/dists/noble/Release',timeout=20).read();print('GOT',len(d))"
+[fault] addr=0x7fffbf7e3340 rip=0x7fffbf7e3340 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7fe0f6 rip=0x7fffbf7e3f02 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7fca80 rip=0x7fffbf7e3f1a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e41b8 rip=0x7fffbf7e41b8 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c0d18 rip=0x7fffbf7e4157 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7fb5a0 rip=0x7fffbf7e4147 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e0f80 rip=0x7fffbf7e0f80 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d4ca0 rip=0x7fffbf7d4ca0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e2d40 rip=0x7fffbf7e2d40 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e1e00 rip=0x7fffbf7e1e00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d75e0 rip=0x7fffbf7d75e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7f03e0 rip=0x7fffbf7d7708 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e84c0 rip=0x7fffbf7e84c0 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1547 8 > 12(0x0, 0x0, 0x0, 0x37f)
+[trace]   = 12140544
+[fault] addr=0x7fffbf7dc940 rip=0x7fffbf7dc940 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7db220 rip=0x7fffbf7db220 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7da020 rip=0x7fffbf7da020 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7f6888 rip=0x7fffbf7dbac3 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ecb60 rip=0x7fffbf7ecb60 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d6df0 rip=0x7fffbf7d6df0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7dff20 rip=0x7fffbf7dff20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7cdc40 rip=0x7fffbf7cdc40 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ce040 rip=0x7fffbf7ce040 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ea960 rip=0x7fffbf7ea960 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7f30f4 rip=0x7fffbf7ea99f err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x400040 rip=0x7fffbf7e4da0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7f1220 rip=0x7fffbf7e4db4 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e5098 rip=0x7fffbf7e5098 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c8be0 rip=0x7fffbf7c8be0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa85b08 rip=0x7fffbf7c8c64 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c5120 rip=0x7fffbf7c5120 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7eb520 rip=0x7fffbf7eb520 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e6dbb rip=0x7fffbf7e6dbb err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa86dd8 rip=0x7fffbf7e5274 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e75ab rip=0x7fffbf7e75ab err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c3890 rip=0x7fffbf7c3890 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d5c70 rip=0x7fffbf7d5c70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa86ed0 rip=0x7fffbf7e6198 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7dd060 rip=0x7fffbf7dd060 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7e9480 rip=0x7fffbf7e9480 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1559 8 > 21(0x7fffbf7f3720, 0x4, 0x0, 0x3b000)
+[trace]   = -2
+[fault] addr=0x7fffbf7c47d8 rip=0x7fffbf7c47d8 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c7e90 rip=0x7fffbf7c7e90 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x413582 rip=0x7fffbf7eb317 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c2470 rip=0x7fffbf7c2470 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7cb4d0 rip=0x7fffbf7cb4d0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ca770 rip=0x7fffbf7ca770 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffffffdeb8 rip=0x7fffbf7ca8a4 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d8850 rip=0x7fffbf7d8850 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1561 8 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1563 8 > 5(0x3, 0x7fffffffdcf0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=1563 8 > 9(0x0, 0xf163, 0x1, 0x2)
+[trace]   = 140736405897216
+[trace] t=1563 8 > 3(0x3, 0xf163, 0x7fffbf7b0000, 0x2)
+[trace]   = 0
+[fault] addr=0x7fffbf7b0000 rip=0x7fffbf7d8c1c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d9041 rip=0x7fffbf7d9041 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b2914 rip=0x7fffbf7d88e1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b5b10 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b148c rip=0x7fffbf7d88e1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bd9ef rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bc779 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b998a rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b73e3 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bb356 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b88bb rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7c6e30 rip=0x7fffbf7c6e30 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1569 8 > 257(0xffffff9c, 0x7fffbf7fea40, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1570 8 > 0(0x3, 0x7fffffffdee8, 0x340, 0x0)
+[trace]   = 832
+[fault] addr=0x7fffbf7c9390 rip=0x7fffbf7c9390 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1572 8 > 5(0x3, 0x7fffffffdd90, 0x3, 0x0)
+[trace]   = 0
+[trace] t=1572 8 > 9(0x0, 0x125018, 0x1, 0x802)
+[trace]   = 140736404692992
+[trace] t=1572 8 > 9(0x7fffbf69c000, 0xa0000, 0x5, 0x812)
+[trace]   = 140736404766720
+[trace] t=1572 8 > 9(0x7fffbf73c000, 0x72000, 0x1, 0x812)
+[trace]   = 140736405422080
+[trace] t=1573 8 > 9(0x7fffbf7ae000, 0x2000, 0x3, 0x812)
+[trace]   = 140736405889024
+[fault] addr=0x7fffbf7af00c rip=0x7fffbf7eac10 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7aeb98 rip=0x7fffbf7c9780 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7aec30 rip=0x7fffbf7c987c err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf68a2a8 rip=0x7fffbf7c9aa5 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ad248 rip=0x7fffbf7c8c64 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1575 8 > 3(0x3, 0x7fffbf7ad278, 0x1, 0xc0000002)
+[trace]   = 0
+[fault] addr=0x7fffbf68c8b8 rip=0x7fffbf7d4cbd err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf69a1e5 rip=0x7fffbf7eb53a err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ba953 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[trace] t=1577 8 > 257(0xffffff9c, 0x7fffbf7fef90, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1580 8 > 0(0x3, 0x7fffffffdec8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=1580 8 > 5(0x3, 0x7fffffffdd70, 0x3, 0x0)
+[trace]   = 0
+[trace] t=1580 8 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736404684800
+[fault] addr=0x7fffbf688028 rip=0x7fffbf7cdcbd err=0x6 user=true -> Some(Ok(()))
+[trace] t=1581 8 > 9(0x0, 0x1d098, 0x1, 0x802)
+[trace]   = 140736404561920
+[trace] t=1581 8 > 9(0x7fffbf66d000, 0x13000, 0x5, 0x812)
+[trace]   = 140736404574208
+[trace] t=1581 8 > 9(0x7fffbf680000, 0x6000, 0x1, 0x812)
+[trace]   = 140736404652032
+[trace] t=1581 8 > 9(0x7fffbf686000, 0x2000, 0x3, 0x812)
+[trace]   = 140736404676608
+[fault] addr=0x7fffbf687090 rip=0x7fffbf7eac10 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf686dc0 rip=0x7fffbf7c9780 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf686e98 rip=0x7fffbf7c9889 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf66a2a8 rip=0x7fffbf7c9aa5 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf685d58 rip=0x7fffbf7c8c64 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1584 8 > 3(0x3, 0x7fffbf685d78, 0x7fffbf685d78, 0xc0000002)
+[trace]   = 0
+[fault] addr=0x7fffbf66b742 rip=0x7fffbf7eb53a err=0x4 user=true -> Some(Ok(()))
+[trace] t=1585 8 > 257(0xffffff9c, 0x7fffbf688520, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1587 8 > 0(0x3, 0x7fffffffdea8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=1588 8 > 5(0x3, 0x7fffffffdd50, 0x3, 0x0)
+[trace]   = 0
+[trace] t=1588 8 > 9(0x0, 0x2d080, 0x1, 0x802)
+[trace]   = 140736404373504
+[trace] t=1588 8 > 9(0x7fffbf640000, 0x1f000, 0x5, 0x812)
+[trace]   = 140736404389888
+[trace] t=1589 8 > 9(0x7fffbf65f000, 0x8000, 0x1, 0x812)
+[trace]   = 140736404516864
+[trace] t=1589 8 > 9(0x7fffbf667000, 0x3000, 0x3, 0x812)
+[trace]   = 140736404549632
+[fault] addr=0x7fffbf669078 rip=0x7fffbf7eac10 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf668dc8 rip=0x7fffbf7c9780 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf668ea0 rip=0x7fffbf7c9889 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf63c2a8 rip=0x7fffbf7c9aa5 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf666c10 rip=0x7fffbf7c8c64 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1592 8 > 3(0x3, 0x7fffbf666c30, 0x7fffbf666c30, 0xc0000002)
+[trace]   = 0
+[fault] addr=0x7fffbf63d65c rip=0x7fffbf7eb53a err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b3d84 rip=0x7fffbf7d88e1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7b6760 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bf091 rip=0x7fffbf7d877e err=0x4 user=true -> Some(Ok(()))
+[trace] t=1594 8 > 257(0xffffff9c, 0x7fffbf688a70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1596 8 > 0(0x3, 0x7fffffffde88, 0x340, 0x0)
+[trace]   = 832
+[trace] t=1597 8 > 17(0x3, 0x7fffffffda60, 0x348, 0x40)
+[trace]   = 840
+[trace] t=1597 8 > 5(0x3, 0x7fffffffdd30, 0x3, 0x40)
+[trace]   = 0
+[trace] t=1597 8 > 17(0x3, 0x7fffffffd940, 0x348, 0x40)
+[trace]   = 840
+[trace] t=1597 8 > 9(0x0, 0x220d90, 0x1, 0x802)
+[trace]   = 140736402141184
+[trace] t=1597 8 > 9(0x7fffbf443000, 0x198000, 0x5, 0x812)
+[trace]   = 140736402305024
+[trace] t=1597 8 > 9(0x7fffbf5db000, 0x4e000, 0x1, 0x812)
+[trace]   = 140736403976192
+[trace] t=1598 8 > 9(0x7fffbf629000, 0x6000, 0x3, 0x812)
+[trace]   = 140736404295680
+[fault] addr=0x7fffbf62e688 rip=0x7fffbf7eab8a err=0x6 user=true -> Some(Ok(()))
+[trace] t=1599 8 > 9(0x7fffbf62f000, 0xcd90, 0x3, 0x32)
+[trace]   = 140736404320256
+[fault] addr=0x7fffbf62c940 rip=0x7fffbf7c9780 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf62c988 rip=0x7fffbf7c987c err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf41b350 rip=0x7fffbf7c9aa5 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf628b20 rip=0x7fffbf7c8c64 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1601 8 > 3(0x3, 0x7fffbf628b50, 0x1, 0xc0000002)
+[trace]   = 0
+[fault] addr=0x7fffbf41f570 rip=0x7fffbf7d4cbd err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43f970 rip=0x7fffbf7ebf24 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf689000 rip=0x7fffbf7c3c11 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x41ded0 rip=0x7fffbf7d7ddd err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x41cab0 rip=0x7fffbf7ec6a8 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf69b000 rip=0x7fffbf7d7f5b err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf441478 rip=0x7fffbf7d7f2d err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x41e008 rip=0x7fffbf7d7ea0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7edf10 rip=0x7fffbf7edf10 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7ee515 rip=0x7fffbf7ee515 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1605 8 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736402132992
+[fault] addr=0x7fffbf419000 rip=0x7fffbf7e3e57 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf41a4b8 rip=0x7fffbf7d60b2 err=0x6 user=true -> Some(Ok(()))
+[trace] t=1605 8 > 158(0x1002, 0x7fffbf419b80, 0x7fffbf41a610, 0x7)
+[trace]   = 0
+[trace] t=1606 8 > 218(0x7fffbf41a1a8, 0x7fffbf7fd810, 0x7fffbf419b80, 0x7)
+[trace]   = 8
+[trace] t=1606 8 > 273(0x7fffbf419e60, 0x18, 0x7fffbf419b80, 0x7)
+[trace]   = 0
+[trace] t=1606 8 > 334(0x7fffbf419ac0, 0x20, 0x0, 0x53053053)
+[trace]   = -38
+[fault] addr=0x7fffbf7d07a0 rip=0x7fffbf7d07a0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d231f rip=0x7fffbf7d231f err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4428e0 rip=0x7fffbf7d0933 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf629b98 rip=0x7fffbf7d0923 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d1888 rip=0x7fffbf7d1888 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf62a000 rip=0x7fffbf7d0984 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf62b000 rip=0x7fffbf7d0984 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf62d3a0 rip=0x7fffbf7d0923 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf434914 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7cc680 rip=0x7fffbf7cc680 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43e07f rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf68dc50 rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf421308 rip=0x7fffbf7cbde6 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf423ff4 rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4246cc rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43642c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43915d rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x401630 rip=0x7fffbf7cbde6 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x402f1c rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf437247 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4204d0 rip=0x7fffbf7cbb82 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4408b4 rip=0x7fffbf7d0f2c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42e4dc rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf422f48 rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42dc9c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf438feb rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43ccf4 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42a9cc rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4277d4 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x40a3c4 rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x41ad70 rip=0x7fffbf7ec7e8 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x411f30 rip=0x7fffbf7ec428 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42bd7c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf435664 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf428524 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42556c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43a454 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf68e540 rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7d34cc rip=0x7fffbf7d34cc err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf426424 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42fd6c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x40c02c rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf42c9ac rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43b499 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4298d4 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4336fc rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x4034fc rip=0x7fffbf7cbe4e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf43d4ab rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x4090a4 rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x40e8dc rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4eb150 rip=0x7fffbf4eb150 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf634298 rip=0x7fffbf4eb1aa err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d7a00 rip=0x7fffbf4d7a00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d5ac0 rip=0x7fffbf4d5ac0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4eeef0 rip=0x7fffbf4eeef0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d4b20 rip=0x7fffbf4d4b20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf55fa70 rip=0x7fffbf55fa70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d3f00 rip=0x7fffbf4d3f00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4ed3d0 rip=0x7fffbf4ed3d0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4fc750 rip=0x7fffbf4fc750 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d6ba0 rip=0x7fffbf4d6ba0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4ecdf0 rip=0x7fffbf4ecdf0 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1631 8 > 10(0x7fffbf629000, 0x4000, 0x1, 0x7fffbf442328)
+[trace]   = 0
+[fault] addr=0x7fffbf667510 rip=0x7fffbf7d0e81 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf63e000 rip=0x7fffbf7d0e73 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf63f000 rip=0x7fffbf7d0e60 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4321b4 rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1633 8 > 10(0x7fffbf667000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[fault] addr=0x7fffbf66c008 rip=0x7fffbf7d0b5c err=0x4 user=true -> Some(Ok(()))
+[trace] t=1633 8 > 10(0x7fffbf686000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[fault] addr=0x7fffbf68f244 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf697650 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6956ac rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf698a2e rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf692424 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf431e9c rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4300e4 rip=0x7fffbf7cb903 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf699ec3 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf693f3c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf711220 rip=0x7fffbf711220 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7173a0 rip=0x7fffbf7173a0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6ea2b0 rip=0x7fffbf6ea2b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf704e90 rip=0x7fffbf704e90 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7156e0 rip=0x7fffbf7156e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf706390 rip=0x7fffbf706390 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6fb8a0 rip=0x7fffbf6fb8a0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf718cf0 rip=0x7fffbf718cf0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7165d0 rip=0x7fffbf7165d0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6fe3b0 rip=0x7fffbf6fe3b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6fc3b0 rip=0x7fffbf6fc3b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf703220 rip=0x7fffbf703220 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6e7810 rip=0x7fffbf6e7810 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf702a80 rip=0x7fffbf702a80 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf719400 rip=0x7fffbf719400 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6e9cd0 rip=0x7fffbf6e9cd0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6e8560 rip=0x7fffbf6e8560 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf705900 rip=0x7fffbf705900 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1648 8 > 10(0x7fffbf7ae000, 0x1000, 0x1, 0x7fffbf69b368)
+[trace]   = 0
+[fault] addr=0x406434 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x405e4c rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x4129c6 rip=0x7fffbf7cc6a1 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xaca9e8 rip=0x7fffbf7d10db err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x404a24 rip=0x7fffbf7d0f8c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xa87000 rip=0x7fffbf7d0b4c err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x41f010 rip=0x7fffbf7d0b5c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x420000 rip=0x7fffbf7d0b5c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x421008 rip=0x7fffbf7d0b5c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xa88000 rip=0x7fffbf7d0b4c err=0x6 user=true -> Some(Ok(()))
+[trace] t=1653 8 > 10(0xa86000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1653 8 > 10(0x7fffbf7fb000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[fault] addr=0x7fffbf5af260 rip=0x7fffbf5af260 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf457420 rip=0x7fffbf457420 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf6350c0 rip=0x7fffbf5af291 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf63bd89 rip=0x7fffbf5af293 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf545a40 rip=0x7fffbf545a40 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1656 8 > 302(0x0, 0x3, 0x0, 0x7fffffffe8c0)
+[trace]   = 0
+[fault] addr=0x7fffbf633830 rip=0x7fffbf5af2e8 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4c1f40 rip=0x7fffbf4c1f40 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf443710 rip=0x7fffbf443710 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf464b00 rip=0x7fffbf464b00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4cfb60 rip=0x7fffbf4cfb60 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1659 8 > 318(0x7fffbf6341c0, 0x8, 0x1, 0x7fffffffe8c0)
+[trace]   = 8
+[fault] addr=0x7fffbf5d5890 rip=0x7fffbf5d5890 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1660 8 > 11(0x7fffbf7b0000, 0xf163, 0x0, 0x7fffffffe8c0)
+[trace]   = 0
+[fault] addr=0x7fffbf4452a0 rip=0x7fffbf4452a0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5523e0 rip=0x7fffbf5523e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4ea540 rip=0x7fffbf4ea540 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf640000 rip=0x7fffbf640000 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf66d000 rip=0x7fffbf66d000 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf69c000 rip=0x7fffbf69c000 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x672c20 rip=0x672c20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf462cb0 rip=0x7fffbf462cb0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf62f3d0 rip=0x7fffbf462a84 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x422000 rip=0x422000 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa9bd30 rip=0x672e30 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xa9bd30 rip=0x672e4a err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0xb2a6d0 rip=0x672ec9 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x424f80 rip=0x424f80 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf54fc70 rip=0x7fffbf54fc70 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1669 8 > 318(0x7fffffffebb0, 0x20, 0x1, 0x7fffbf62d680)
+[trace]   = 32
+[fault] addr=0x7a8034 rip=0x672f1f err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x67302f rip=0x67302f err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7a6fe0 rip=0x7a6fe0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xb224c0 rip=0x672d81 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xa9aec8 rip=0x672da4 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x84dcb8 rip=0x673247 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7a9aad rip=0x67339f err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x506120 rip=0x506120 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa9aec8 rip=0x673294 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4c6790 rip=0x7fffbf4c6790 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5375d0 rip=0x7fffbf5375d0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5f3830 rip=0x7fffbf5377c4 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf547e30 rip=0x7fffbf547e30 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1676 8 > 2(0x7bf0a0, 0x0, 0x0, 0x1)
+[trace]   = -2
+[fault] addr=0x426622 rip=0x426622 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf510c70 rip=0x7fffbf510c70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4608b0 rip=0x7fffbf4608b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x6778b0 rip=0x6778b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xad49b8 rip=0x6778c8 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xad7038 rip=0x6778cf err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xad4fe4 rip=0x7fffbf4c10e9 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0xad7038 rip=0x67791d err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x425610 rip=0x425610 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x423520 rip=0x423520 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4bea20 rip=0x7fffbf4bea20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x676ac0 rip=0x676ac0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf456290 rip=0x7fffbf456290 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x6785b0 rip=0x6785b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e4650 rip=0x7fffbf4e4650 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5f7d1e rip=0x7fffbf4e467a err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d0090 rip=0x7fffbf4d0090 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5f1278 rip=0x7fffbf4d00d3 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4cef20 rip=0x7fffbf4cef20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4cd680 rip=0x7fffbf4cd680 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4cce30 rip=0x7fffbf4cce30 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1686 8 > 12(0x0, 0x7fffbf62dae8, 0x0, 0x20)
+[trace]   = 12140544
+[trace] t=1686 8 > 12(0xbb5000, 0x7fffbf62dae8, 0xb94000, 0x20)
+[trace]   = 12275712
+[fault] addr=0xb94008 rip=0x7fffbf4ce8fa err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4cbb50 rip=0x7fffbf4cbb50 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4dd600 rip=0x7fffbf4dd600 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4c5b70 rip=0x7fffbf4c5b70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e2830 rip=0x7fffbf4e2830 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7b80c0 rip=0x7fffbf4e284a err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e3c50 rip=0x7fffbf4e3c50 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5f6386 rip=0x7fffbf4645b2 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e7ab0 rip=0x7fffbf4e7ab0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e92e0 rip=0x7fffbf4e92e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf452a80 rip=0x7fffbf452a80 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5dbb20 rip=0x7fffbf452c23 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf45330f rip=0x7fffbf45330f err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4dcca0 rip=0x7fffbf4dcca0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf45ca00 rip=0x7fffbf45ca00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5dd96a rip=0x7fffbf45ca46 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5dcb14 rip=0x7fffbf45cac0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf544020 rip=0x7fffbf544020 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1697 8 > 257(0xffffff9c, 0x7fffbf5ffac0, 0x80000, 0x0)
+[trace]   = -2
+[fault] addr=0x7fffbf45bc00 rip=0x7fffbf45bc00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5fad78 rip=0x7fffbf45bc77 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4a7a20 rip=0x7fffbf4a7a20 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b8b90 rip=0x7fffbf4b8b90 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b3e00 rip=0x7fffbf4b3e00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b7780 rip=0x7fffbf4b7780 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4bba30 rip=0x7fffbf4bba30 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b42e0 rip=0x7fffbf4b42e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5f0b04 rip=0x7fffbf4b4366 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1704 8 > 257(0xffffff9c, 0x7fffffffe210, 0x80000, 0x0)
+[trace]   = -2
+[fault] addr=0x7fffbf4de210 rip=0x7fffbf4de210 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf454b20 rip=0x7fffbf454b20 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1707 8 > 257(0xffffff9c, 0xb945d0, 0x80000, 0x0)
+[trace]   = -2
+[trace] t=1707 8 > 257(0xffffff9c, 0xb946c0, 0x80000, 0x0)
+[trace]   = 3
+[fault] addr=0x7fffbf53eaf0 rip=0x7fffbf53eaf0 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1710 8 > 5(0x3, 0x7fffffffe3c0, 0x0, 0x0)
+[trace]   = 0
+[fault] addr=0x7fffbf54e140 rip=0x7fffbf54e140 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1710 8 > 9(0x0, 0x5a1e0, 0x1, 0x2)
+[trace]   = 140736401760256
+[fault] addr=0x7fffbf543e20 rip=0x7fffbf543e20 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1711 8 > 3(0x3, 0x5a1e0, 0x1, 0x2)
+[trace]   = 0
+[fault] addr=0x7fffbf3be000 rip=0x7fffbf453de7 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf3c9d48 rip=0x7fffbf454b01 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf3ca554 rip=0x7fffbf454b01 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf3f7898 rip=0x7fffbf454b01 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4477a0 rip=0x7fffbf4477a0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf449120 rip=0x7fffbf449120 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4c47f0 rip=0x7fffbf4c47f0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf448d90 rip=0x7fffbf448d90 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf451880 rip=0x7fffbf451880 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1716 8 > 257(0xffffff9c, 0x7fffbf5fabc0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1719 8 > 5(0x3, 0x7fffffffe1d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1719 8 > 9(0x0, 0x6994, 0x1, 0x1)
+[trace]   = 140736405934080
+[trace] t=1719 8 > 3(0x3, 0x6994, 0x1, 0x1)
+[trace]   = 0
+[fault] addr=0x7fffbf7b9000 rip=0x7fffbf451938 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1720 8 > 202(0x7fffbf62e6ec, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[fault] addr=0x7fffbf45e940 rip=0x7fffbf45e940 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bccca rip=0x7fffbf4516e0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bb430 rip=0x7fffbf4e2e78 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7baaa9 rip=0x7fffbf4e284e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf455f80 rip=0x7fffbf455f80 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xad6e40 rip=0x678633 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7b29e2 rip=0x7fffbf4e284e err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf465470 rip=0x7fffbf465470 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4d1008 rip=0x7fffbf4d1008 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7beaee rip=0x7fffbf4516e0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bd87e rip=0x7fffbf4516e0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf7bf92e rip=0x7fffbf451c4c err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf44d2c0 rip=0x7fffbf44d2c0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x4278be rip=0x4278be err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x679200 rip=0x679200 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7ea504 rip=0x679222 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf500170 rip=0x7fffbf500170 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4fffe0 rip=0x7fffbf4fffe0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4e83c0 rip=0x7fffbf4e83c0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xb95018 rip=0x7fffbf4ce274 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fd988 rip=0x679a20 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf501050 rip=0x7fffbf501050 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fe010 rip=0x679a3f err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x67a190 rip=0x67a190 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x67c1b0 rip=0x67c1b0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x67b1a6 rip=0x67b1a6 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x67d000 rip=0x67d000 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x67e050 rip=0x67e050 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xb6ab30 rip=0x67e29a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf560870 rip=0x7fffbf560870 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b2120 rip=0x7fffbf4b2120 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf488cc0 rip=0x7fffbf488cc0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf47ffa0 rip=0x7fffbf47ffa0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf480040 rip=0x7fffbf480040 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf5ef433 rip=0x7fffbf488ed0 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf489188 rip=0x7fffbf489188 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf48abc0 rip=0x7fffbf48abc0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7b33f8 rip=0x7fffbf4e467a err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf48b1c9 rip=0x7fffbf48b1c9 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x6842f0 rip=0x6842f0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xa9c620 rip=0x684320 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1739 8 > 318(0xb21fd0, 0x18, 0x1, 0x0)
+[trace]   = 24
+[fault] addr=0x42e97f rip=0x42e97f err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xad5150 rip=0x6787d3 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xb961b8 rip=0x7fffbf4ce274 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xad5150 rip=0x67887d err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0xaec5d0 rip=0x684448 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xaec618 rip=0x684461 err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0xafe930 rip=0x684540 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xaff008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb00000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb01000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb02008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb03000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb04000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb05008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb06000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb07000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb08008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb09000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0a000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0b008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0c000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0d000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0e008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb0f000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb10000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb11008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb12000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb13000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb14008 rip=0x68454a err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb15000 rip=0x68456b err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xb16000 rip=0x684551 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0xaed3b8 rip=0x684582 err=0x6 user=true -> Some(Ok(()))
+[fault] addr=0x685290 rip=0x685290 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x84e120 rip=0x685326 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0xadd058 rip=0x506f74 err=0x4 user=true -> Some(Ok(()))
+[fault] addr=0x507000 rip=0x506ffc err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xadd068 rip=0x50722c err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0xaea940 rip=0x685455 err=0x4 user=true -> Some(Ok(()))
+[trace] t=1754 8 > 186(0x0, 0x3e, 0x0, 0x0)
+[trace]   = 8
+[fault] addr=0x7fffbf4c0e70 rip=0x7fffbf4c0e70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4c2040 rip=0x7fffbf4c2040 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4bdc70 rip=0x7fffbf4bdc70 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0xaea950 rip=0x6856de err=0x7 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4bcf20 rip=0x7fffbf4bcf20 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1756 8 > 257(0xffffff9c, 0x7fffbf5f779a, 0x80000, 0x0)
+[trace]   = 3
+[fault] addr=0x7fffbf4d8280 rip=0x7fffbf4d8280 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1757 8 > 302(0x0, 0x3, 0x0, 0x7fffffffe450)
+[trace]   = 0
+[fault] addr=0x7fffbf47e9e0 rip=0x7fffbf47e9e0 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4a8820 rip=0x7fffbf4a8820 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b5108 rip=0x7fffbf4b5108 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4a6c00 rip=0x7fffbf4a6c00 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf4b62f0 rip=0x7fffbf4b62f0 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1759 8 > 5(0x3, 0x7fffffffe270, 0x7fffbf62bee0, 0x80)
+[trace]   = 0
+[fault] addr=0xb977c8 rip=0x7fffbf4ce274 err=0x6 user=true -> Some(Ok(()))
+[trace] t=1760 8 > 0(0x3, 0xb967c0, 0x1000, 0x1010)
+[trace]   = 154
+[fault] addr=0x7fffbf4ba210 rip=0x7fffbf4ba210 err=0x14 user=true -> Some(Ok(()))
+[fault] addr=0x7fffbf48c003 rip=0x7fffbf48c003 err=0x14 user=true -> Some(Ok(()))
+[trace] t=1762 8 > 3(0x3, 0xb94050, 0x7fffbf62bee0, 0x81)
+[trace]   = 0
+[trace] t=1762 8 > 204(0x8, 0x20, 0xb967c0, 0x30)
+[trace]   = 8
+[trace] t=1765 8 > 9(0x0, 0x100000, 0x3, 0x22)
+[trace]   = 140736400711680
+[trace] t=1765 8 > 9(0x0, 0x41000, 0x3, 0x22)
+[trace]   = 140736400445440
+[trace] t=1766 8 > 9(0x0, 0x21000, 0x3, 0x22)
+[trace]   = 140736400310272
+[trace] t=1774 8 > 12(0xbd6000, 0x7fffbf62dd78, 0xbb5000, 0x2b0)
+[trace]   = 12410880
+[trace] t=1781 8 > 9(0x0, 0x4000, 0x3, 0x22)
+[trace]   = 140736405917696
+[trace] t=1788 8 > 12(0xbf7000, 0x7fffbf62dec8, 0xbd6000, 0x410)
+[trace]   = 12546048
+[trace] t=1792 8 > 257(0xffffffffffffff9c, 0xb952d0, 0x0, 0x0)
+[trace]   = -2
+[trace] t=1792 8 > 257(0xffffffffffffff9c, 0xb95340, 0x0, 0x0)
+[trace]   = -2
+[trace] t=1793 8 > 89(0xb952d0, 0x7fffffff9130, 0x1000, 0x0)
+[trace]   = 10
+[trace] t=1793 8 > 89(0xb952d0, 0x7fffffff9130, 0x1000, 0x4)
+[trace]   = -22
+[trace] t=1794 8 > 257(0xffffffffffffff9c, 0xb952d0, 0x0, 0x0)
+[trace]   = -2
+[trace] t=1794 8 > 257(0xffffffffffffff9c, 0xb94ff0, 0x0, 0x0)
+[trace]   = -2
+[trace] t=1794 8 > 257(0xffffffffffffff9c, 0xb952d0, 0x0, 0x0)
+[trace]   = -2
+[trace] t=1795 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = -2
+[trace] t=1795 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffddf0, 0x0)
+[trace]   = -2
+[trace] t=1796 8 > 262(0xffffff9c, 0xb95340, 0x7fffffffe110, 0x0)
+[trace]   = -2
+[trace] t=1796 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = -2
+[trace] t=1796 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = -2
+[trace] t=1796 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = 0
+[trace] t=1801 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = 0
+[trace] t=1801 8 > 262(0xffffff9c, 0xb94ff0, 0x7fffffffe110, 0x0)
+[trace]   = 0
+[trace] t=1807 8 > 9(0x0, 0x100000, 0x3, 0x22)
+[trace]   = 140736399261696
+[trace] t=1808 8 > 12(0xc18000, 0x7fffbf62deb8, 0xbf7000, 0x3f0)
+[trace]   = 12681216
+[trace] t=1810 8 > 201(0x0, 0x0, 0x28, 0x0)
+[trace]   = 1793607615
+[trace] t=1811 8 > 257(0xffffff9c, 0x7fffbf5f7d0d, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1815 8 > 5(0x3, 0x7fffffffd0f0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1815 8 > 5(0x3, 0x7fffffffcef0, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=1815 8 > 0(0x3, 0xbf9ff0, 0x1000, 0x1010)
+[trace]   = 114
+[trace] t=1817 8 > 8(0x3, 0xffffffffffffffc4, 0x1, 0x1010)
+[trace]   = 54
+[trace] t=1818 8 > 0(0x3, 0xbf9ff0, 0x1000, 0x1010)
+[trace]   = 60
+[trace] t=1819 8 > 8(0x3, 0x71, 0x0, 0x1)
+[trace]   = 113
+[trace] t=1819 8 > 3(0x3, 0x71, 0x7fffbf62bee0, 0x1)
+[trace]   = 0
+[trace] t=1820 8 > 262(0xffffff9c, 0x7fffbf176a90, 0x7fffffffd8d0, 0x0)
+[trace]   = -2
+[trace] t=1821 8 > 262(0xffffff9c, 0x7fffbf3ba360, 0x7fffffffd8f0, 0x0)
+[trace]   = 0
+[trace] t=1822 8 > 262(0xffffff9c, 0x7fffbf176a90, 0x7fffffffddb0, 0x0)
+[trace]   = -2
+[trace] t=1823 8 > 262(0xffffff9c, 0x7fffbf176a90, 0x7fffffffd8f0, 0x0)
+[trace]   = 0
+[trace] t=1823 8 > 262(0xffffff9c, 0x7fffbf176ad0, 0x7fffffffddb0, 0x0)
+[trace]   = 0
+[trace] t=1823 8 > 262(0xffffff9c, 0x7fffbf1769d0, 0x7fffffffddb0, 0x0)
+[trace]   = 0
+[trace] t=1824 8 > 257(0xffffff9c, 0x7fffbf1769d0, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1824 8 > 5(0x3, 0x7fffffffdcd0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1824 8 > 217(0x3, 0xbfeb50, 0x8000, 0x0)
+[trace]   = 6760
+[trace] t=1824 8 > 217(0x3, 0xbfeb50, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1825 8 > 3(0x3, 0x8040, 0x7fffbf62dac8, 0x0)
+[trace]   = 0
+[trace] t=1826 8 > 262(0xffffff9c, 0x7fffbf30a660, 0x7fffffffddb0, 0x0)
+[trace]   = -2
+[trace] t=1827 8 > 262(0xffffff9c, 0x7fffbf171b80, 0x7fffffffddb0, 0x0)
+[trace]   = -2
+[trace] t=1827 8 > 262(0xffffff9c, 0x7fffbf3928d0, 0x7fffffffddb0, 0x0)
+[trace]   = -2
+[trace] t=1827 8 > 262(0xffffff9c, 0x7fffbf171bd0, 0x7fffffffddb0, 0x0)
+[trace]   = -2
+[trace] t=1827 8 > 262(0xffffff9c, 0x7fffbf171b80, 0x7fffffffddb0, 0x0)
+[trace]   = 0
+[trace] t=1829 8 > 262(0xffffff9c, 0x7fffbf171bd0, 0x7fffffffddb0, 0x0)
+[trace]   = 0
+[trace] t=1830 8 > 257(0xffffffffffffff9c, 0x7fffbf30a7b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1830 8 > 72(0x3, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=1830 8 > 5(0x3, 0x7fffbf318780, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1831 8 > 9(0x0, 0x21000, 0x3, 0x22)
+[trace]   = 140736399126528
+[trace] t=1831 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1832 8 > 0(0x3, 0xc01360, 0x1a53, 0x0)
+[trace]   = 6738
+[trace] t=1834 8 > 0(0x3, 0xc02db2, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1834 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1834 8 > 11(0x7fffbf13b000, 0x21000, 0xfffffffffffdf000, 0x0)
+[trace]   = 0
+[trace] t=1837 8 > 262(0xffffff9c, 0x7fffbf182510, 0x7fffffffc860, 0x0)
+[trace]   = 0
+[trace] t=1838 8 > 262(0xffffff9c, 0x7fffbf182590, 0x7fffffffcd20, 0x0)
+[trace]   = 0
+[trace] t=1838 8 > 262(0xffffff9c, 0x7fffbf1824d0, 0x7fffffffcd20, 0x0)
+[trace]   = 0
+[trace] t=1838 8 > 257(0xffffff9c, 0x7fffbf1824d0, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1838 8 > 5(0x3, 0x7fffffffcc60, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1838 8 > 217(0x3, 0xc0b830, 0x8000, 0x0)
+[trace]   = 4264
+[trace] t=1838 8 > 217(0x3, 0xc0b830, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1839 8 > 3(0x3, 0xc810, 0x47d0, 0x0)
+[trace]   = 0
+[trace] t=1839 8 > 262(0xffffff9c, 0x7fffbf172300, 0x7fffffffcd20, 0x0)
+[trace]   = 0
+[trace] t=1840 8 > 262(0xffffff9c, 0x7fffbf172710, 0x7fffffffcd20, 0x0)
+[trace]   = 0
+[trace] t=1841 8 > 257(0xffffffffffffff9c, 0x7fffbf30b0e0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1841 8 > 5(0x3, 0x7fffbf319c50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1841 8 > 12(0xc4f000, 0x7fffbf62e278, 0xc18000, 0x20010)
+[trace]   = 12906496
+[trace] t=1842 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1842 8 > 0(0x3, 0xc2e050, 0x310d, 0x0)
+[trace]   = 12556
+[trace] t=1843 8 > 0(0x3, 0xc3115c, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1843 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1845 8 > 262(0xffffff9c, 0x7fffbf18fd10, 0x7fffffffdb00, 0x0)
+[trace]   = 0
+[trace] t=1845 8 > 262(0xffffff9c, 0x7fffbf171d60, 0x7fffffffdb00, 0x0)
+[trace]   = 0
+[trace] t=1845 8 > 262(0xffffff9c, 0x7fffbf172710, 0x7fffffffdb00, 0x0)
+[trace]   = 0
+[trace] t=1846 8 > 257(0xffffffffffffff9c, 0x7fffbf393050, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1846 8 > 5(0x3, 0x7fffbf319c50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1846 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1846 8 > 0(0x3, 0xc0e040, 0x91b, 0x0)
+[trace]   = 2330
+[trace] t=1847 8 > 0(0x3, 0xc0e95a, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1847 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1848 8 > 13(0xd, 0x7fffffffe430, 0x7fffffffe4d0, 0x8)
+[trace]   = 0
+[trace] t=1848 8 > 13(0x19, 0x7fffffffe430, 0x7fffffffe4d0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 13(0x1, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 13(0x2, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 13(0x3, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 13(0x4, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 13(0x5, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1849 8 > 14(0x0, 0x7fffbf5ff0b0, 0x7fffffffdd30, 0x8)
+[trace]   = 0
+[trace] t=1850 8 > 13(0x6, 0x0, 0x7fffffffdc60, 0x8)
+[trace]   = 0
+[trace] t=1850 8 > 14(0x2, 0x7fffffffdd30, 0x0, 0x8)
+[trace]   = 0
+[trace] t=1850 8 > 13(0x7, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1850 8 > 13(0x8, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1850 8 > 13(0x9, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1851 8 > 13(0xa, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1851 8 > 13(0xb, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1851 8 > 13(0xc, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1851 8 > 13(0xd, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1851 8 > 13(0xe, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0xf, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0x10, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0x11, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0x12, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0x13, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1852 8 > 13(0x14, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1853 8 > 13(0x15, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1853 8 > 13(0x16, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1853 8 > 13(0x17, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1853 8 > 13(0x18, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1853 8 > 13(0x19, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1854 8 > 13(0x1a, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1854 8 > 13(0x1b, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1854 8 > 13(0x1c, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1854 8 > 13(0x1d, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1854 8 > 13(0x1e, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1855 8 > 13(0x1f, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1855 8 > 13(0x22, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1855 8 > 13(0x23, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1855 8 > 13(0x24, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1856 8 > 13(0x25, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1856 8 > 13(0x26, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1856 8 > 13(0x27, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1857 8 > 13(0x28, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1857 8 > 13(0x29, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1857 8 > 13(0x2a, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1857 8 > 13(0x2b, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1858 8 > 13(0x2c, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1858 8 > 13(0x2d, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1858 8 > 13(0x2e, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1858 8 > 13(0x2f, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1858 8 > 13(0x30, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1859 8 > 13(0x31, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1859 8 > 13(0x32, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1859 8 > 13(0x33, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1859 8 > 13(0x34, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1860 8 > 13(0x35, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1860 8 > 13(0x36, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1860 8 > 13(0x37, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1860 8 > 13(0x38, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1860 8 > 13(0x39, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1861 8 > 13(0x3a, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1861 8 > 13(0x3b, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1861 8 > 13(0x3c, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1861 8 > 13(0x3d, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1862 8 > 13(0x3e, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1862 8 > 13(0x3f, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1862 8 > 13(0x40, 0x0, 0x7fffffffdca0, 0x8)
+[trace]   = 0
+[trace] t=1862 8 > 13(0x2, 0x7fffffffdb50, 0x7fffffffdbf0, 0x8)
+[trace]   = 0
+[trace] t=1862 8 > 5(0x0, 0x7fffffffe750, 0x7, 0x3f)
+[trace]   = 0
+[trace] t=1863 8 > 72(0x0, 0x1, 0x0, 0x3f)
+[trace]   = 0
+[trace] t=1863 8 > 5(0x0, 0x7fffbf319e90, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1864 8 > 16(0x0, 0x802c542a, 0x7fffffffe300, 0x0)
+[trace]   = 0
+[trace] t=1864 8 > 8(0x0, 0x0, 0x1, 0x0)
+[trace]   = -29
+[trace] t=1864 8 > 16(0x0, 0x802c542a, 0x7fffffffe590, 0x0)
+[trace]   = 0
+[trace] t=1865 8 > 72(0x1, 0x1, 0x1, 0xff)
+[trace]   = 0
+[trace] t=1865 8 > 5(0x1, 0x7fffbf319c50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1865 8 > 16(0x1, 0x802c542a, 0x7fffffffe300, 0x0)
+[trace]   = 0
+[trace] t=1866 8 > 12(0xc74000, 0x7fffbf62e278, 0xc4f000, 0x20010)
+[trace]   = 13058048
+[trace] t=1866 8 > 8(0x1, 0x0, 0x1, 0x0)
+[trace]   = -29
+[trace] t=1866 8 > 16(0x1, 0x802c542a, 0x7fffffffe590, 0x0)
+[trace]   = 0
+[trace] t=1866 8 > 72(0x2, 0x1, 0x2, 0xff)
+[trace]   = 0
+[trace] t=1866 8 > 5(0x2, 0x7fffbf319620, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1867 8 > 16(0x2, 0x802c542a, 0x7fffffffe300, 0x0)
+[trace]   = 0
+[trace] t=1867 8 > 8(0x2, 0x0, 0x1, 0x0)
+[trace]   = -29
+[trace] t=1867 8 > 16(0x2, 0x802c542a, 0x7fffffffe590, 0x0)
+[trace]   = 0
+[trace] t=1868 8 > 12(0xc95000, 0x7fffbf62e1e8, 0xc74000, 0x760)
+[trace]   = 13193216
+[trace] t=1873 8 > 12(0xcb6000, 0x7fffbf62ddd8, 0xc95000, 0x310)
+[trace]   = 13328384
+[trace] t=1874 8 > 262(0xffffff9c, 0x7fffbf1f5690, 0x7fffffffd610, 0x0)
+[trace]   = -2
+[trace] t=1874 8 > 262(0xffffff9c, 0x7fffbf19aa80, 0x7fffffffd630, 0x0)
+[trace]   = -2
+[trace] t=1875 8 > 107(0x7fffbf3b2340, 0x0, 0xaafb80, 0x0)
+[trace]   = 0
+[trace] t=1876 8 > 102(0x7fffbf3b2340, 0x0, 0xaafc60, 0x0)
+[trace]   = 0
+[trace] t=1876 8 > 108(0x7fffbf3b2340, 0x0, 0xaafb60, 0x0)
+[trace]   = 0
+[trace] t=1876 8 > 104(0x7fffbf3b2340, 0x0, 0xaafba0, 0x0)
+[trace]   = 0
+[trace] t=1877 8 > 262(0xffffff9c, 0x7fffbf186710, 0x7fffffffd960, 0x0)
+[trace]   = -2
+[trace] t=1878 8 > 262(0xffffff9c, 0x7fffbf1dfde0, 0x7fffffffd980, 0x0)
+[trace]   = 0
+[trace] t=1880 8 > 257(0xffffff9c, 0x7fffbf1dfe30, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1880 8 > 5(0x3, 0x7fffffffd8a0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1880 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 48
+[trace] t=1881 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1881 8 > 3(0x3, 0x129f0, 0xa9b0, 0x0)
+[trace]   = 0
+[trace] t=1881 8 > 262(0xffffff9c, 0x7fffbf1f5690, 0x7fffffffd980, 0x0)
+[trace]   = 0
+[trace] t=1882 8 > 257(0xffffff9c, 0x7fffbf1f5690, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1882 8 > 5(0x3, 0x7fffffffd8c0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1882 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 48
+[trace] t=1882 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1883 8 > 3(0x3, 0x129f0, 0xa9b0, 0x0)
+[trace]   = 0
+[trace] t=1883 8 > 262(0xffffff9c, 0x7fffbf1dfe80, 0x7fffffffd980, 0x0)
+[trace]   = -2
+[trace] t=1883 8 > 262(0xffffff9c, 0x7fffbf1f5c10, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1883 8 > 262(0xffffff9c, 0x7fffbf200050, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1886 8 > 262(0xffffff9c, 0x7fffbf200050, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1886 8 > 257(0xffffffffffffff9c, 0x7fffbf1a8bf0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1887 8 > 5(0x3, 0x7fffbf31a5e0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1887 8 > 12(0xce4000, 0x7fffbf62e278, 0xcb6000, 0x20010)
+[trace]   = 13516800
+[trace] t=1888 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1888 8 > 0(0x3, 0x7fffbf301390, 0x132, 0x0)
+[trace]   = 305
+[trace] t=1889 8 > 0(0x3, 0x7fffbf3014c1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1889 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1889 8 > 262(0xffffff9c, 0x7fffbf1f5e50, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1890 8 > 262(0xffffff9c, 0x7fffbf1f5f10, 0x7fffffffc3b0, 0x0)
+[trace]   = 0
+[trace] t=1890 8 > 262(0xffffff9c, 0x7fffbf1f5f90, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1890 8 > 262(0xffffff9c, 0x7fffbf1f5e90, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1890 8 > 257(0xffffff9c, 0x7fffbf1f5e90, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1891 8 > 5(0x3, 0x7fffffffc7b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1891 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 3200
+[trace] t=1892 8 > 217(0x3, 0xca3650, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1892 8 > 3(0x3, 0x409f0, 0x389b0, 0x0)
+[trace]   = 0
+[trace] t=1892 8 > 262(0xffffff9c, 0x7fffbf200640, 0x7fffffffc3b0, 0x0)
+[trace]   = 0
+[trace] t=1892 8 > 262(0xffffff9c, 0x7fffbf200640, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1892 8 > 262(0xffffff9c, 0x7fffbf200640, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1892 8 > 257(0xffffff9c, 0x7fffbf200640, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1893 8 > 5(0x3, 0x7fffffffc7b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1893 8 > 217(0x3, 0xca3e60, 0x8000, 0x0)
+[trace]   = 48
+[trace] t=1893 8 > 217(0x3, 0xca3e60, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1893 8 > 3(0x3, 0x401e0, 0x381a0, 0x0)
+[trace]   = 0
+[trace] t=1893 8 > 262(0xffffff9c, 0x7fffbf1f6050, 0x7fffffffc3b0, 0x0)
+[trace]   = 0
+[trace] t=1893 8 > 262(0xffffff9c, 0x7fffbf1f6090, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1894 8 > 262(0xffffff9c, 0x7fffbf1f6010, 0x7fffffffc870, 0x0)
+[trace]   = 0
+[trace] t=1894 8 > 257(0xffffff9c, 0x7fffbf1f6010, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1894 8 > 5(0x3, 0x7fffffffc7b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1894 8 > 217(0x3, 0xca3e60, 0x8000, 0x0)
+[trace]   = 48
+[trace] t=1894 8 > 217(0x3, 0xca3e60, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1894 8 > 3(0x3, 0x401e0, 0x381a0, 0x0)
+[trace]   = 0
+[trace] t=1895 8 > 262(0xffffff9c, 0x7fffbf1f61d0, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1895 8 > 262(0xffffff9c, 0x7fffbf1f61d0, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1895 8 > 262(0xffffff9c, 0x7fffbf2001e0, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1896 8 > 262(0xffffff9c, 0x7fffbf1f61d0, 0x7fffffffd310, 0x0)
+[trace]   = 0
+[trace] t=1902 8 > 79(0xc97be0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1902 8 > 262(0xffffff9c, 0xada788, 0x7fffffffdad0, 0x0)
+[trace]   = 0
+[trace] t=1903 8 > 262(0xffffff9c, 0xada788, 0x7fffffffdf90, 0x0)
+[trace]   = 0
+[trace] t=1903 8 > 262(0xffffff9c, 0xada788, 0x7fffffffdf90, 0x0)
+[trace]   = 0
+[trace] t=1903 8 > 257(0xffffff9c, 0xada788, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1903 8 > 5(0x3, 0x7fffffffded0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1904 8 > 217(0x3, 0xcac6f0, 0x8000, 0x0)
+[trace]   = 520
+[trace] t=1904 8 > 217(0x3, 0xcac6f0, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1904 8 > 3(0x3, 0x37950, 0x2f910, 0x0)
+[trace]   = 0
+[trace] t=1904 8 > 262(0xffffff9c, 0x7fffbf1f6dd0, 0x7fffffffdf90, 0x0)
+[trace]   = 0
+[trace] t=1904 8 > 262(0xffffff9c, 0x7fffbf1dff70, 0x7fffffffdf90, 0x0)
+[trace]   = 0
+[trace] t=1905 8 > 262(0xffffff9c, 0x7fffbf1dff70, 0x7fffffffdf90, 0x0)
+[trace]   = 0
+[trace] t=1905 8 > 257(0xffffffffffffff9c, 0x7fffbf1ab950, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1906 8 > 5(0x3, 0x7fffbf31a5e0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1906 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1906 8 > 0(0x3, 0xca6690, 0x251b, 0x0)
+[trace]   = 9498
+[trace] t=1908 8 > 0(0x3, 0xca8baa, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1908 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1909 8 > 79(0xca9db0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1909 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd7a0, 0x0)
+[trace]   = 0
+[trace] t=1909 8 > 262(0xffffff9c, 0x7fffbf1f65d0, 0x7fffffffd7a0, 0x0)
+[trace]   = 0
+[trace] t=1910 8 > 262(0xffffff9c, 0x7fffbf1a6430, 0x7fffffffd7a0, 0x0)
+[trace]   = -2
+[trace] t=1910 8 > 262(0xffffff9c, 0x7fffbf2009b0, 0x7fffffffd7a0, 0x0)
+[trace]   = -2
+[trace] t=1910 8 > 262(0xffffff9c, 0x7fffbf1abb90, 0x7fffffffd7a0, 0x0)
+[trace]   = -2
+[trace] t=1910 8 > 262(0xffffff9c, 0x7fffbf2009b0, 0x7fffffffd7a0, 0x0)
+[trace]   = -2
+[trace] t=1911 8 > 262(0xffffff9c, 0x7fffbf200a00, 0x7fffffffd7a0, 0x0)
+[trace]   = 0
+[trace] t=1912 8 > 262(0xffffff9c, 0x7fffbf200a00, 0x7fffffffd7a0, 0x0)
+[trace]   = 0
+[trace] t=1912 8 > 257(0xffffffffffffff9c, 0x7fffbf1abbf0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1913 8 > 5(0x3, 0x7fffbf31a5e0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1913 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1913 8 > 0(0x3, 0x7fffbf1ffcd0, 0x8a, 0x0)
+[trace]   = 137
+[trace] t=1914 8 > 0(0x3, 0x7fffbf1ffd59, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1914 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1914 8 > 262(0xffffff9c, 0x7fffbf1f6590, 0x7fffffffd950, 0x0)
+[trace]   = 0
+[trace] t=1914 8 > 262(0xffffff9c, 0x7fffbf1f6550, 0x7fffffffde10, 0x0)
+[trace]   = 0
+[trace] t=1914 8 > 262(0xffffff9c, 0x7fffbf1f6610, 0x7fffffffde10, 0x0)
+[trace]   = 0
+[trace] t=1914 8 > 257(0xffffff9c, 0x7fffbf1f6610, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=1915 8 > 5(0x3, 0x7fffffffdd50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1915 8 > 217(0x3, 0xcac6f0, 0x8000, 0x0)
+[trace]   = 280
+[trace] t=1915 8 > 217(0x3, 0xcac6f0, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=1915 8 > 3(0x3, 0x37950, 0x2f910, 0x0)
+[trace]   = 0
+[trace] t=1916 8 > 262(0xffffff9c, 0x7fffbf2008c0, 0x7fffffffde10, 0x0)
+[trace]   = 0
+[trace] t=1916 8 > 262(0xffffff9c, 0x7fffbf2008c0, 0x7fffffffde10, 0x0)
+[trace]   = 0
+[trace] t=1916 8 > 257(0xffffffffffffff9c, 0x7fffbf1abb90, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1916 8 > 5(0x3, 0x7fffbf31a5e0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1917 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1917 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1917 8 > 0(0x3, 0xccc6f0, 0x1647c, 0x0)
+[trace]   = 91259
+[trace] t=1921 8 > 0(0x3, 0xce2b6b, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1921 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1921 8 > 79(0xca9db0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1921 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1921 8 > 262(0xffffff9c, 0x7fffbf215c90, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1921 8 > 262(0xffffff9c, 0x7fffbf215c90, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1924 8 > 262(0xffffff9c, 0x7fffbf217190, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1924 8 > 257(0xffffffffffffff9c, 0x7fffbf2082f0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1925 8 > 5(0x3, 0x7fffbf31adc0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1926 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1926 8 > 0(0x3, 0xcd7f70, 0x67f3, 0x0)
+[trace]   = 26610
+[trace] t=1929 8 > 0(0x3, 0xcde762, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1929 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1929 8 > 79(0xca9db0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1929 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1929 8 > 262(0xffffff9c, 0x7fffbf229650, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1929 8 > 262(0xffffff9c, 0x7fffbf229650, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1930 8 > 262(0xffffff9c, 0x7fffbf2296d0, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1930 8 > 257(0xffffffffffffff9c, 0x7fffbf20a870, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1931 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1931 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1931 8 > 0(0x3, 0x7fffbf3832a0, 0x148, 0x0)
+[trace]   = 327
+[trace] t=1932 8 > 0(0x3, 0x7fffbf3833e7, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1932 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1934 8 > 79(0xc97be0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1934 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1934 8 > 262(0xffffff9c, 0x7fffbf22a050, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1935 8 > 262(0xffffff9c, 0x7fffbf22a050, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1935 8 > 262(0xffffff9c, 0x7fffbf22a090, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1935 8 > 257(0xffffffffffffff9c, 0x7fffbf20a9f0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1936 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1936 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1936 8 > 0(0x3, 0xcda710, 0xe09, 0x0)
+[trace]   = 3592
+[trace] t=1937 8 > 0(0x3, 0xcdb518, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1937 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1938 8 > 79(0xc97be0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1938 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1938 8 > 262(0xffffff9c, 0x7fffbf22a590, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1938 8 > 262(0xffffff9c, 0x7fffbf225c20, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1939 8 > 262(0xffffff9c, 0x7fffbf225c20, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1939 8 > 257(0xffffffffffffff9c, 0x7fffbf20a990, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1940 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1940 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1940 8 > 0(0x3, 0xcda710, 0x79a1, 0x0)
+[trace]   = 31136
+[trace] t=1942 8 > 0(0x3, 0xce20b0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1942 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1942 8 > 79(0xc97be0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1942 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1942 8 > 262(0xffffff9c, 0x7fffbf22b750, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1943 8 > 262(0xffffff9c, 0x7fffbf218440, 0x7fffffffc8d0, 0x0)
+[trace]   = -2
+[trace] t=1943 8 > 262(0xffffff9c, 0x7fffbf20ab70, 0x7fffffffc8d0, 0x0)
+[trace]   = -2
+[trace] t=1943 8 > 262(0xffffff9c, 0x7fffbf219470, 0x7fffffffc8d0, 0x0)
+[trace]   = -2
+[trace] t=1943 8 > 262(0xffffff9c, 0x7fffbf2274d0, 0x7fffffffc8d0, 0x0)
+[trace]   = -2
+[trace] t=1944 8 > 262(0xffffff9c, 0x7fffbf227660, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1944 8 > 262(0xffffff9c, 0x7fffbf227660, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1944 8 > 257(0xffffffffffffff9c, 0x7fffbf219780, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1945 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1945 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1945 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1945 8 > 12(0xd0f000, 0x7fffbf62e278, 0xce4000, 0x12440)
+[trace]   = 13692928
+[trace] t=1945 8 > 0(0x3, 0xcdbd90, 0x12408, 0x0)
+[trace]   = 74759
+[trace] t=1947 8 > 0(0x3, 0xcee197, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1948 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1948 8 > 9(0x0, 0x100000, 0x3, 0x22)
+[trace]   = 140736398213120
+[trace] t=1948 8 > 12(0xce1000, 0xd0f000, 0xd0f000, 0x0)
+[trace]   = 13504512
+[trace] t=1950 8 > 79(0xc05630, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1950 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1950 8 > 262(0xffffff9c, 0x7fffbf066b50, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1950 8 > 262(0xffffff9c, 0x7fffbf066b50, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1951 8 > 262(0xffffff9c, 0x7fffbf066bd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1951 8 > 257(0xffffffffffffff9c, 0x7fffbf248bf0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1952 8 > 5(0x3, 0x7fffbf230540, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1952 8 > 12(0xd05000, 0x7fffbf62e278, 0xce1000, 0x20010)
+[trace]   = 13651968
+[trace] t=1953 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1953 8 > 0(0x3, 0xce4680, 0x5fc, 0x0)
+[trace]   = 1531
+[trace] t=1953 8 > 0(0x3, 0xce4c7b, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1953 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1954 8 > 79(0xc05630, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1954 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1954 8 > 262(0xffffff9c, 0x7fffbf066dd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1954 8 > 262(0xffffff9c, 0x7fffbf066dd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1954 8 > 262(0xffffff9c, 0x7fffbf066d90, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1954 8 > 257(0xffffffffffffff9c, 0x7fffbf2486b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1955 8 > 5(0x3, 0x7fffbf230540, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1955 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1955 8 > 0(0x3, 0xce4e90, 0x4a35, 0x0)
+[trace]   = 18996
+[trace] t=1957 8 > 0(0x3, 0xce98c4, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1957 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1958 8 > 79(0xcc55f0, 0x400, 0x0, 0x410)
+[trace]   = 2
+[trace] t=1958 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1958 8 > 262(0xffffff9c, 0x7fffbf067150, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1958 8 > 262(0xffffff9c, 0x7fffbf067150, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1959 8 > 262(0xffffff9c, 0x7fffbf067150, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1959 8 > 257(0xffffffffffffff9c, 0x7fffbf249190, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1960 8 > 5(0x3, 0x7fffbf230540, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1960 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1960 8 > 0(0x3, 0xce9800, 0x2da1, 0x0)
+[trace]   = 11680
+[trace] t=1961 8 > 0(0x3, 0xcec5a0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1961 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1962 8 > 79(0xcc0540, 0x400, 0x0, 0x410)
+[trace]   = 2
+[trace] t=1962 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1963 8 > 262(0xffffff9c, 0x7fffbf090e10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1963 8 > 262(0xffffff9c, 0x7fffbf2446e0, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1964 8 > 262(0xffffff9c, 0x7fffbf2446e0, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1964 8 > 257(0xffffffffffffff9c, 0x7fffbf248290, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1965 8 > 5(0x3, 0x7fffbf2308a0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1965 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1965 8 > 0(0x3, 0xcf2180, 0xbb76, 0x0)
+[trace]   = 47989
+[trace] t=1966 8 > 0(0x3, 0xcfdcf5, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1966 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1967 8 > 79(0xcc0540, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1967 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1967 8 > 262(0xffffff9c, 0x7fffbf093110, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1967 8 > 262(0xffffff9c, 0x7fffbf093110, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1967 8 > 262(0xffffff9c, 0x7fffbf0930d0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=1968 8 > 257(0xffffffffffffff9c, 0x7fffbf24a7b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1968 8 > 5(0x3, 0x7fffbf2308a0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1968 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1968 8 > 0(0x3, 0xcf5ba0, 0x3de1, 0x0)
+[trace]   = 15840
+[trace] t=1969 8 > 0(0x3, 0xcf9980, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1969 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1972 8 > 79(0xcdc820, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1972 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1972 8 > 262(0xffffff9c, 0x7fffbf22aa50, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1973 8 > 262(0xffffff9c, 0x7fffbf218c20, 0x7fffffffd370, 0x0)
+[trace]   = -2
+[trace] t=1974 8 > 262(0xffffff9c, 0x7fffbf0add60, 0x7fffffffd370, 0x0)
+[trace]   = -2
+[trace] t=1974 8 > 262(0xffffff9c, 0x7fffbf249f70, 0x7fffffffd370, 0x0)
+[trace]   = -2
+[trace] t=1974 8 > 262(0xffffff9c, 0x7fffbf0add60, 0x7fffffffd370, 0x0)
+[trace]   = -2
+[trace] t=1974 8 > 262(0xffffff9c, 0x7fffbf0ade00, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1975 8 > 262(0xffffff9c, 0x7fffbf0ade00, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1975 8 > 257(0xffffffffffffff9c, 0x7fffbf24a0f0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1976 8 > 5(0x3, 0x7fffbf230ed0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1976 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1976 8 > 0(0x3, 0xd047d0, 0x74e, 0x0)
+[trace]   = 1869
+[trace] t=1977 8 > 0(0x3, 0xd04f1d, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1977 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1978 8 > 79(0xcdc820, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1978 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1978 8 > 262(0xffffff9c, 0x7fffbf0b7090, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1978 8 > 262(0xffffff9c, 0x7fffbf0b7090, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1979 8 > 262(0xffffff9c, 0x7fffbf0b7090, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=1979 8 > 257(0xffffffffffffff9c, 0x7fffbf24b9b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1980 8 > 5(0x3, 0x7fffbf230ae0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1980 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1981 8 > 12(0xd27000, 0x7fffbf62e178, 0xd05000, 0x20d0)
+[trace]   = 13791232
+[trace] t=1981 8 > 0(0x3, 0xd047d0, 0x209c, 0x0)
+[trace]   = 8347
+[trace] t=1982 8 > 0(0x3, 0xd0686b, 0x1, 0x0)
+[trace]   = 0
+[trace] t=1983 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=1983 8 > 79(0xcdc820, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=1983 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1983 8 > 262(0xffffff9c, 0x7fffbf0b7710, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1984 8 > 262(0xffffff9c, 0x7fffbf0b7710, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1984 8 > 262(0xffffff9c, 0x7fffbf21bf50, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=1985 8 > 257(0xffffff9c, 0xbe5010, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1986 8 > 0(0x3, 0x7fffffffbc08, 0x340, 0x0)
+[trace]   = 832
+[trace] t=1988 8 > 5(0x3, 0x7fffffffbab0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=1988 8 > 9(0x0, 0x102f0, 0x1, 0x802)
+[trace]   = 140736398143488
+[trace] t=1988 8 > 9(0x7fffbf04f000, 0x6000, 0x5, 0x812)
+[trace]   = 140736398159872
+[trace] t=1989 8 > 9(0x7fffbf055000, 0x4000, 0x1, 0x812)
+[trace]   = 140736398184448
+[trace] t=1989 8 > 9(0x7fffbf059000, 0x3000, 0x3, 0x812)
+[trace]   = 140736398200832
+[trace] t=1990 8 > 3(0x3, 0x7fffbf0582d0, 0x7fffbf0582d0, 0xc0000002)
+[trace]   = 0
+[trace] t=1991 8 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1991 8 > 5(0x3, 0x7fffffffb380, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=1991 8 > 9(0x0, 0xf163, 0x1, 0x2)
+[trace]   = 140736398077952
+[trace] t=1991 8 > 3(0x3, 0xf163, 0x7fffbf03b000, 0x2)
+[trace]   = 0
+[trace] t=1992 8 > 257(0xffffff9c, 0xbc3cb0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=1993 8 > 0(0x3, 0x7fffffffb578, 0x340, 0x0)
+[trace]   = 832
+[trace] t=1994 8 > 5(0x3, 0x7fffffffb420, 0x3, 0x0)
+[trace]   = 0
+[trace] t=1994 8 > 9(0x0, 0x619cb8, 0x1, 0x802)
+[trace]   = 140736391680000
+[trace] t=1995 8 > 9(0x7fffbeb05000, 0x394000, 0x5, 0x812)
+[trace]   = 140736392613888
+[trace] t=1995 8 > 9(0x7fffbee99000, 0x11f000, 0x1, 0x812)
+[trace]   = 140736396365824
+[trace] t=1995 8 > 9(0x7fffbefb8000, 0x80000, 0x3, 0x812)
+[trace]   = 140736397541376
+[trace] t=1996 8 > 9(0x7fffbf038000, 0x2cb8, 0x3, 0x32)
+[trace]   = 140736398065664
+[trace] t=1997 8 > 3(0x3, 0x7fffbefb7910, 0x7fffbefb7910, 0xc0000002)
+[trace]   = 0
+[trace] t=1998 8 > 257(0xffffff9c, 0xbef610, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2000 8 > 0(0x3, 0x7fffffffb518, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2003 8 > 5(0x3, 0x7fffffffb3c0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2003 8 > 9(0x0, 0xc2030, 0x1, 0x802)
+[trace]   = 140736390881280
+[trace] t=2003 8 > 9(0x7fffbe962000, 0xb0000, 0x5, 0x812)
+[trace]   = 140736390897664
+[trace] t=2003 8 > 9(0x7fffbea12000, 0xd000, 0x1, 0x812)
+[trace]   = 140736391618560
+[trace] t=2004 8 > 9(0x7fffbea1f000, 0x2000, 0x3, 0x812)
+[trace]   = 140736391671808
+[trace] t=2007 8 > 3(0x3, 0x7fffbea1ea98, 0x7fffbea1ea98, 0xc0000002)
+[trace]   = 0
+[trace] t=2009 8 > 10(0x7fffbea1f000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2034 8 > 10(0x7fffbefb8000, 0x7d000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2037 8 > 10(0x7fffbf059000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2041 8 > 11(0x7fffbf03b000, 0xf163, 0x7fffffffecd8, 0x0)
+[trace]   = 0
+[trace] t=2042 8 > 202(0x7fffbf0383ac, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2043 8 > 202(0x7fffbf037fdc, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2043 8 > 257(0xffffffffffffff9c, 0x7fffbeea4a37, 0x0, 0x0)
+[trace]   = -2
+[trace] t=2043 8 > 257(0xffffffffffffff9c, 0x7fffbeea4a8b, 0x0, 0x0)
+[trace]   = -2
+[trace] t=2043 8 > 202(0x7fffbf037fcc, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2048 8 > 202(0x7fffbf038374, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2055 8 > 202(0x7fffbf037b08, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2055 8 > 202(0x7fffbf037e6c, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2056 8 > 202(0x7fffbf038368, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2056 8 > 202(0x7fffbf038360, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2057 8 > 202(0x7fffbf038460, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2059 8 > 202(0x7fffbf038348, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2060 8 > 202(0x7fffbf038340, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2063 8 > 202(0x7fffbf037da4, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2063 8 > 202(0x7fffbf0383b4, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2063 8 > 202(0x7fffbf037d98, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2069 8 > 202(0x7fffbf038358, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2069 8 > 257(0xffffffffffffff9c, 0xd0b250, 0x0, 0x0)
+[trace]   = -2
+[trace] t=2070 8 > 202(0x7fffbf038338, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2075 8 > 79(0xcddd70, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2075 8 > 262(0xffffff9c, 0xada788, 0x7fffffffcd00, 0x0)
+[trace]   = 0
+[trace] t=2075 8 > 262(0xffffff9c, 0x7fffbf0c5210, 0x7fffffffcd00, 0x0)
+[trace]   = 0
+[trace] t=2075 8 > 262(0xffffff9c, 0x7fffbf21bf50, 0x7fffffffcd00, 0x0)
+[trace]   = -2
+[trace] t=2078 8 > 262(0xffffff9c, 0x7fffbf0afbb0, 0x7fffffffcd00, 0x0)
+[trace]   = -2
+[trace] t=2078 8 > 262(0xffffff9c, 0x7fffbf24ba70, 0x7fffffffcd00, 0x0)
+[trace]   = -2
+[trace] t=2078 8 > 262(0xffffff9c, 0x7fffbf0afbb0, 0x7fffffffcd00, 0x0)
+[trace]   = -2
+[trace] t=2078 8 > 262(0xffffff9c, 0x7fffbf0afc00, 0x7fffffffcd00, 0x0)
+[trace]   = 0
+[trace] t=2078 8 > 262(0xffffff9c, 0x7fffbf0afc00, 0x7fffffffcd00, 0x0)
+[trace]   = 0
+[trace] t=2078 8 > 257(0xffffffffffffff9c, 0x7fffbf24bb30, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2079 8 > 5(0x3, 0x7fffbf230db0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2079 8 > 12(0xd57000, 0x7fffbf62e278, 0xd27000, 0x20010)
+[trace]   = 13987840
+[trace] t=2079 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2079 8 > 0(0x3, 0xd36950, 0x2888, 0x0)
+[trace]   = 10375
+[trace] t=2080 8 > 0(0x3, 0xd391d7, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2080 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2081 8 > 79(0xcddd70, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2081 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc260, 0x0)
+[trace]   = 0
+[trace] t=2081 8 > 262(0xffffff9c, 0x7fffbf0c7550, 0x7fffffffc260, 0x0)
+[trace]   = 0
+[trace] t=2081 8 > 262(0xffffff9c, 0x7fffbf0c7550, 0x7fffffffc260, 0x0)
+[trace]   = 0
+[trace] t=2081 8 > 262(0xffffff9c, 0x7fffbf0c7510, 0x7fffffffc260, 0x0)
+[trace]   = 0
+[trace] t=2082 8 > 257(0xffffffffffffff9c, 0x7fffbf0cc710, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2082 8 > 5(0x3, 0x7fffbf230db0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2082 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2082 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2083 8 > 0(0x3, 0xd37b50, 0x157db, 0x0)
+[trace]   = 88026
+[trace] t=2086 8 > 0(0x3, 0xd4d32a, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2086 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2086 8 > 9(0x0, 0x33000, 0x3, 0x22)
+[trace]   = 140736390672384
+[trace] t=2087 8 > 262(0xffffff9c, 0x7fffbf0eb150, 0x7fffffffceb0, 0x0)
+[trace]   = 0
+[trace] t=2087 8 > 262(0xffffff9c, 0x7fffbf0eb110, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2087 8 > 262(0xffffff9c, 0x7fffbf0eb190, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2087 8 > 257(0xffffff9c, 0x7fffbf0eb190, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2087 8 > 5(0x3, 0x7fffffffd2b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2087 8 > 217(0x3, 0xc81f80, 0x8000, 0x0)
+[trace]   = 240
+[trace] t=2088 8 > 217(0x3, 0xc81f80, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2088 8 > 3(0x3, 0xe1e0, 0x7fffbf62dac8, 0x0)
+[trace]   = 0
+[trace] t=2088 8 > 262(0xffffff9c, 0x7fffbf0afac0, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2088 8 > 262(0xffffff9c, 0x7fffbf0afac0, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2089 8 > 257(0xffffffffffffff9c, 0x7fffbf249f70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2089 8 > 5(0x3, 0x7fffbf231350, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2089 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2089 8 > 0(0x3, 0xd45a90, 0xec20, 0x0)
+[trace]   = 60447
+[trace] t=2091 8 > 0(0x3, 0xd546af, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2091 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2091 8 > 262(0xffffff9c, 0x7fffbf0ff610, 0x7fffffffc410, 0x0)
+[trace]   = 0
+[trace] t=2092 8 > 262(0xffffff9c, 0x7fffbf0ff690, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2092 8 > 262(0xffffff9c, 0x7fffbf0ff2d0, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2092 8 > 257(0xffffff9c, 0x7fffbf0ff2d0, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2092 8 > 5(0x3, 0x7fffffffc810, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2092 8 > 217(0x3, 0xd25a90, 0x8000, 0x0)
+[trace]   = 864
+[trace] t=2093 8 > 217(0x3, 0xd25a90, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2093 8 > 3(0x3, 0x315b0, 0x29570, 0x0)
+[trace]   = 0
+[trace] t=2093 8 > 262(0xffffff9c, 0x7fffbf0df570, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2094 8 > 262(0xffffff9c, 0x7fffbf0df570, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2095 8 > 257(0xffffffffffffff9c, 0x7fffbf0cef30, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2095 8 > 5(0x3, 0x7fffbf232160, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2095 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2095 8 > 0(0x3, 0xc8a900, 0x19c7, 0x0)
+[trace]   = 6598
+[trace] t=2097 8 > 0(0x3, 0xc8c2c6, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2097 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2098 8 > 262(0xffffff9c, 0x7fffbf1090d0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2098 8 > 262(0xffffff9c, 0x7fffbf10cf00, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2099 8 > 262(0xffffff9c, 0x7fffbf10cf00, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2099 8 > 257(0xffffffffffffff9c, 0x7fffbf09d470, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2100 8 > 5(0x3, 0x7fffbf232160, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2100 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2100 8 > 0(0x3, 0xd45a90, 0x5224, 0x0)
+[trace]   = 21027
+[trace] t=2101 8 > 0(0x3, 0xd4acb3, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2101 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2101 8 > 79(0xc8fc20, 0x400, 0x0, 0x410)
+[trace]   = 2
+[trace] t=2101 8 > 262(0xffffff9c, 0xada788, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2101 8 > 262(0xffffff9c, 0x7fffbf10b8d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2102 8 > 262(0xffffff9c, 0x7fffbf0cfdd0, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2102 8 > 262(0xffffff9c, 0x7fffbf10dc70, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2102 8 > 262(0xffffff9c, 0x7fffbf0cfd10, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2103 8 > 262(0xffffff9c, 0x7fffbf10dc20, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2103 8 > 262(0xffffff9c, 0x7fffbf10dcc0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2103 8 > 262(0xffffff9c, 0x7fffbf10dcc0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2104 8 > 257(0xffffffffffffff9c, 0x7fffbf0cfdd0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2104 8 > 5(0x3, 0x7fffbf232160, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2104 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2104 8 > 0(0x3, 0xd46020, 0x4dfe, 0x0)
+[trace]   = 19965
+[trace] t=2106 8 > 0(0x3, 0xd4ae1d, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2106 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2107 8 > 262(0xffffff9c, 0x7fffbf118d90, 0x7fffffff9e40, 0x0)
+[trace]   = 0
+[trace] t=2107 8 > 262(0xffffff9c, 0x7fffbf118e10, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2107 8 > 262(0xffffff9c, 0x7fffbf118ed0, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2107 8 > 257(0xffffff9c, 0x7fffbf118ed0, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2108 8 > 5(0x3, 0x7fffffffa240, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2108 8 > 217(0x3, 0xd27650, 0x8000, 0x0)
+[trace]   = 248
+[trace] t=2108 8 > 217(0x3, 0xd27650, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2108 8 > 3(0x3, 0x2f9f0, 0x279b0, 0x0)
+[trace]   = 0
+[trace] t=2109 8 > 262(0xffffff9c, 0x7fffbf10e210, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2109 8 > 262(0xffffff9c, 0x7fffbf10e210, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2109 8 > 257(0xffffffffffffff9c, 0x7fffbf0cfd10, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2109 8 > 5(0x3, 0x7fffbf2321f0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2110 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2110 8 > 0(0x3, 0xd47650, 0x73e0, 0x0)
+[trace]   = 29663
+[trace] t=2111 8 > 0(0x3, 0xd4ea2f, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2111 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2111 8 > 262(0xffffff9c, 0x7fffbf11bb10, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2111 8 > 262(0xffffff9c, 0x7fffbf10fbb0, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2111 8 > 262(0xffffff9c, 0x7fffbf10fbb0, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2112 8 > 257(0xffffffffffffff9c, 0x7fffbf114bf0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2112 8 > 5(0x3, 0x7fffbf2324c0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2112 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2113 8 > 12(0xd7b000, 0x7fffbf62e278, 0xd57000, 0xb0f0)
+[trace]   = 14135296
+[trace] t=2113 8 > 0(0x3, 0xd4f550, 0xb0c6, 0x0)
+[trace]   = 45253
+[trace] t=2115 8 > 0(0x3, 0xd5a615, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2115 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2115 8 > 262(0xffffff9c, 0x7fffbf12a550, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2116 8 > 262(0xffffff9c, 0x7fffbf12c190, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2116 8 > 262(0xffffff9c, 0x7fffbf12c190, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2116 8 > 257(0xffffffffffffff9c, 0x7fffbf114fb0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2116 8 > 5(0x3, 0x7fffbf2324c0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2117 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2117 8 > 0(0x3, 0xd33c30, 0x15f8, 0x0)
+[trace]   = 5623
+[trace] t=2118 8 > 0(0x3, 0xd35227, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2118 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2119 8 > 262(0xffffff9c, 0x7fffbf142210, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2119 8 > 262(0xffffff9c, 0x7fffbf12d3b0, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2119 8 > 262(0xffffff9c, 0x7fffbf12d3b0, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2120 8 > 257(0xffffffffffffff9c, 0x7fffbf114d70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2120 8 > 5(0x3, 0x7fffbf2328b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2120 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2120 8 > 0(0x3, 0xd5c7e0, 0x711, 0x0)
+[trace]   = 1808
+[trace] t=2121 8 > 0(0x3, 0xd5cef0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2122 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2126 8 > 79(0xd3fd20, 0x400, 0x0, 0x410)
+[trace]   = 2
+[trace] t=2126 8 > 262(0xffffff9c, 0xada788, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2127 8 > 262(0xffffff9c, 0x7fffbf143990, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2127 8 > 262(0xffffff9c, 0x7fffbf143990, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2127 8 > 262(0xffffff9c, 0x7fffbf1439d0, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2127 8 > 257(0xffffffffffffff9c, 0x7fffbf115850, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2128 8 > 5(0x3, 0x7fffbf2328b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2128 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2128 8 > 0(0x3, 0xd60160, 0x1eed, 0x0)
+[trace]   = 7916
+[trace] t=2130 8 > 0(0x3, 0xd6204c, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2130 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2131 8 > 262(0xffffff9c, 0x7fffbf1503d0, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2131 8 > 262(0xffffff9c, 0x7fffbf12dc70, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2132 8 > 262(0xffffff9c, 0x7fffbf12dc70, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2132 8 > 257(0xffffffffffffff9c, 0x7fffbf114fb0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2132 8 > 5(0x3, 0x7fffbf232940, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2132 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2132 8 > 0(0x3, 0xd610f0, 0x1d9d, 0x0)
+[trace]   = 7580
+[trace] t=2133 8 > 0(0x3, 0xd62e8c, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2133 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2133 8 > 9(0x0, 0x100000, 0x3, 0x22)
+[trace]   = 140736389623808
+[trace] t=2133 8 > 262(0xffffff9c, 0x7fffbf151d10, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2133 8 > 262(0xffffff9c, 0x7fffbf12f520, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2135 8 > 262(0xffffff9c, 0x7fffbf12f520, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2135 8 > 257(0xffffffffffffff9c, 0x7fffbf158670, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2135 8 > 5(0x3, 0x7fffbf232940, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2136 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2136 8 > 0(0x3, 0xd68190, 0x48c5, 0x0)
+[trace]   = 18628
+[trace] t=2137 8 > 0(0x3, 0xd6ca54, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2137 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2137 8 > 262(0xffffff9c, 0x7fffbf1533d0, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2137 8 > 262(0xffffff9c, 0x7fffbf12fcf0, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2138 8 > 262(0xffffff9c, 0x7fffbf12fcf0, 0x7fffffffa300, 0x0)
+[trace]   = 0
+[trace] t=2138 8 > 257(0xffffffffffffff9c, 0x7fffbf116e70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2138 8 > 5(0x3, 0x7fffbf2329d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2138 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2139 8 > 0(0x3, 0xd69a90, 0x63ca, 0x0)
+[trace]   = 25545
+[trace] t=2140 8 > 0(0x3, 0xd6fe59, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2140 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2140 8 > 262(0xffffff9c, 0x7fffbe82d850, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2140 8 > 262(0xffffff9c, 0x7fffbe834780, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2141 8 > 262(0xffffff9c, 0x7fffbe834780, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2142 8 > 257(0xffffffffffffff9c, 0x7fffbf158d70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2142 8 > 5(0x3, 0x7fffbf232ca0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2142 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2142 8 > 0(0x3, 0xd6ea70, 0x2872, 0x0)
+[trace]   = 10353
+[trace] t=2144 8 > 0(0x3, 0xd712e1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2144 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2144 8 > 79(0xd4ed00, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2145 8 > 262(0xffffff9c, 0xada788, 0x7fffffff8dc0, 0x0)
+[trace]   = 0
+[trace] t=2145 8 > 262(0xffffff9c, 0x7fffbe82e950, 0x7fffffff8dc0, 0x0)
+[trace]   = 0
+[trace] t=2145 8 > 262(0xffffff9c, 0x7fffbf158e50, 0x7fffffff8dc0, 0x0)
+[trace]   = -2
+[trace] t=2146 8 > 262(0xffffff9c, 0x7fffbe834c30, 0x7fffffff8dc0, 0x0)
+[trace]   = -2
+[trace] t=2146 8 > 262(0xffffff9c, 0x7fffbf1173b0, 0x7fffffff8dc0, 0x0)
+[trace]   = -2
+[trace] t=2146 8 > 262(0xffffff9c, 0x7fffbe834c30, 0x7fffffff8dc0, 0x0)
+[trace]   = -2
+[trace] t=2146 8 > 262(0xffffff9c, 0x7fffbe834c80, 0x7fffffff8dc0, 0x0)
+[trace]   = 0
+[trace] t=2147 8 > 262(0xffffff9c, 0x7fffbe834c80, 0x7fffffff8dc0, 0x0)
+[trace]   = 0
+[trace] t=2147 8 > 257(0xffffffffffffff9c, 0x7fffbf117770, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2148 8 > 5(0x3, 0x7fffbf232d30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2149 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2149 8 > 0(0x3, 0xd6f140, 0x3249, 0x0)
+[trace]   = 12872
+[trace] t=2150 8 > 0(0x3, 0xd72388, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2150 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2151 8 > 262(0xffffff9c, 0x7fffbe838310, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2152 8 > 262(0xffffff9c, 0x7fffbe8349b0, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2152 8 > 262(0xffffff9c, 0x7fffbe8349b0, 0x7fffffff9860, 0x0)
+[trace]   = 0
+[trace] t=2152 8 > 257(0xffffffffffffff9c, 0x7fffbf159550, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2153 8 > 5(0x3, 0x7fffbf232d30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2153 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2153 8 > 0(0x3, 0xd73640, 0xfa5, 0x0)
+[trace]   = 4004
+[trace] t=2154 8 > 0(0x3, 0xd745e4, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2154 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2155 8 > 262(0xffffff9c, 0x7fffbe838690, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2155 8 > 262(0xffffff9c, 0x7fffbe835720, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2156 8 > 262(0xffffff9c, 0x7fffbe835720, 0x7fffffff9270, 0x0)
+[trace]   = 0
+[trace] t=2156 8 > 257(0xffffffffffffff9c, 0x7fffbe840290, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2156 8 > 5(0x3, 0x7fffbf232d30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2156 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2156 8 > 0(0x3, 0xd73d20, 0x3ac2, 0x0)
+[trace]   = 15041
+[trace] t=2157 8 > 0(0x3, 0xd777e1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2157 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2157 8 > 262(0xffffff9c, 0x7fffbe839c50, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2157 8 > 262(0xffffff9c, 0x7fffbe835bd0, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2158 8 > 262(0xffffff9c, 0x7fffbe835bd0, 0x7fffffff87d0, 0x0)
+[trace]   = 0
+[trace] t=2158 8 > 257(0xffffffffffffff9c, 0x7fffbe840470, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2158 8 > 5(0x3, 0x7fffbf232d30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2158 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2159 8 > 0(0x3, 0xd769a0, 0x82a, 0x0)
+[trace]   = 2089
+[trace] t=2159 8 > 0(0x3, 0xd771c9, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2159 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2159 8 > 79(0xd4ed00, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2160 8 > 262(0xffffff9c, 0xada788, 0x7fffffff7d30, 0x0)
+[trace]   = 0
+[trace] t=2160 8 > 262(0xffffff9c, 0x7fffbe83a410, 0x7fffffff7d30, 0x0)
+[trace]   = 0
+[trace] t=2160 8 > 262(0xffffff9c, 0x7fffbe83a410, 0x7fffffff7d30, 0x0)
+[trace]   = 0
+[trace] t=2160 8 > 262(0xffffff9c, 0x7fffbe83a3d0, 0x7fffffff7d30, 0x0)
+[trace]   = 0
+[trace] t=2161 8 > 257(0xffffffffffffff9c, 0x7fffbe840770, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2161 8 > 5(0x3, 0x7fffbf232dc0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2161 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2162 8 > 0(0x3, 0xd769a0, 0x2656, 0x0)
+[trace]   = 9813
+[trace] t=2162 8 > 0(0x3, 0xd78ff5, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2162 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2165 8 > 262(0xffffff9c, 0x7fffbe83b510, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2165 8 > 262(0xffffff9c, 0x7fffbe836c10, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2165 8 > 262(0xffffff9c, 0x7fffbe836c10, 0x7fffffffa8f0, 0x0)
+[trace]   = 0
+[trace] t=2165 8 > 257(0xffffffffffffff9c, 0x7fffbf117530, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2165 8 > 5(0x3, 0x7fffbf2331b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2166 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2166 8 > 12(0xd9f000, 0x7fffbf62e1e8, 0xd7b000, 0x4260)
+[trace]   = 14282752
+[trace] t=2166 8 > 0(0x3, 0xd7ab20, 0x422e, 0x0)
+[trace]   = 16941
+[trace] t=2167 8 > 0(0x3, 0xd7ed4d, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2167 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2167 8 > 12(0xd7d000, 0xd9f000, 0xd9f000, 0x0)
+[trace]   = 14143488
+[trace] t=2167 8 > 79(0xd579f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2168 8 > 262(0xffffff9c, 0xada788, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2168 8 > 262(0xffffff9c, 0x7fffbe8508d0, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2168 8 > 262(0xffffff9c, 0x7fffbe8508d0, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2169 8 > 262(0xffffff9c, 0x7fffbe850910, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2169 8 > 257(0xffffffffffffff9c, 0x7fffbe840cb0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2169 8 > 5(0x3, 0x7fffbf233240, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2169 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2169 8 > 0(0x3, 0xd28170, 0x1f3, 0x0)
+[trace]   = 498
+[trace] t=2170 8 > 0(0x3, 0xd28362, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2170 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2171 8 > 262(0xffffff9c, 0x7fffbe850c90, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2171 8 > 262(0xffffff9c, 0x7fffbe837a20, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2171 8 > 262(0xffffff9c, 0x7fffbe837a20, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2171 8 > 257(0xffffffffffffff9c, 0x7fffbe840dd0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2171 8 > 5(0x3, 0x7fffbf233240, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2172 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2172 8 > 12(0xdaa000, 0x7fffbf62e278, 0xd7d000, 0xd190)
+[trace]   = 14327808
+[trace] t=2172 8 > 0(0x3, 0xd7c9e0, 0xd15a, 0x0)
+[trace]   = 53593
+[trace] t=2174 8 > 0(0x3, 0xd89b39, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2174 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2174 8 > 12(0xd83000, 0xdaa000, 0xdaa000, 0x0)
+[trace]   = 14168064
+[trace] t=2175 8 > 79(0xd579f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2175 8 > 262(0xffffff9c, 0xada788, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2175 8 > 262(0xffffff9c, 0x7fffbe868990, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2175 8 > 262(0xffffff9c, 0x7fffbe868990, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2176 8 > 262(0xffffff9c, 0x7fffbe868950, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2176 8 > 257(0xffffffffffffff9c, 0x7fffbe841010, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2176 8 > 5(0x3, 0x7fffbf233240, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2176 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2177 8 > 0(0x3, 0xd823f0, 0x9c1, 0x0)
+[trace]   = 2496
+[trace] t=2178 8 > 0(0x3, 0xd82db0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2178 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2180 8 > 79(0xd579f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2180 8 > 262(0xffffff9c, 0xada788, 0x7fffffff8910, 0x0)
+[trace]   = 0
+[trace] t=2180 8 > 262(0xffffff9c, 0x7fffbf118c90, 0x7fffffff8910, 0x0)
+[trace]   = 0
+[trace] t=2180 8 > 262(0xffffff9c, 0x7fffbf0dd1d0, 0x7fffffff8910, 0x0)
+[trace]   = 0
+[trace] t=2181 8 > 262(0xffffff9c, 0x7fffbf0dd1d0, 0x7fffffff8910, 0x0)
+[trace]   = 0
+[trace] t=2181 8 > 257(0xffffffffffffff9c, 0x7fffbf20b410, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2182 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2182 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2182 8 > 12(0xdac000, 0x7fffbf62e278, 0xd83000, 0x90a0)
+[trace]   = 14336000
+[trace] t=2182 8 > 0(0x3, 0xd82680, 0x9075, 0x0)
+[trace]   = 36980
+[trace] t=2184 8 > 0(0x3, 0xd8b6f4, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2184 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2184 8 > 12(0xd85000, 0xdac000, 0xdac000, 0x0)
+[trace]   = 14176256
+[trace] t=2184 8 > 79(0xd4ed00, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2185 8 > 262(0xffffff9c, 0xada788, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2185 8 > 262(0xffffff9c, 0x7fffbe869210, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2185 8 > 262(0xffffff9c, 0x7fffbe85b980, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2186 8 > 262(0xffffff9c, 0x7fffbe85b980, 0x7fffffff93b0, 0x0)
+[trace]   = 0
+[trace] t=2186 8 > 257(0xffffffffffffff9c, 0x7fffbf20ae10, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2187 8 > 5(0x3, 0x7fffbf31bf30, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2187 8 > 12(0xda6000, 0x7fffbf62e278, 0xd85000, 0x20010)
+[trace]   = 14311424
+[trace] t=2187 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2188 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2188 8 > 0(0x3, 0xd85390, 0x16f42, 0x0)
+[trace]   = 94017
+[trace] t=2190 8 > 0(0x3, 0xd9c2d1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2190 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2192 8 > 262(0xffffff9c, 0x7fffbe851ad0, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2193 8 > 262(0xffffff9c, 0x7fffbe878d20, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2193 8 > 262(0xffffff9c, 0x7fffbe878d20, 0x7fffffff9e50, 0x0)
+[trace]   = 0
+[trace] t=2193 8 > 257(0xffffffffffffff9c, 0x7fffbe87d240, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2193 8 > 5(0x3, 0x7fffbf2335a0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2194 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2194 8 > 0(0x3, 0xd9b8c0, 0x5d4f, 0x0)
+[trace]   = 23886
+[trace] t=2196 8 > 0(0x3, 0xda160e, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2196 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2197 8 > 262(0xffffff9c, 0x7fffbf108b10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2197 8 > 262(0xffffff9c, 0x7fffbe879d60, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2198 8 > 262(0xffffff9c, 0x7fffbe879d60, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2198 8 > 257(0xffffffffffffff9c, 0x7fffbf0cfc50, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2199 8 > 5(0x3, 0x7fffbe864780, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2199 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2199 8 > 12(0xdd0000, 0x7fffbf62e248, 0xda6000, 0xcd10)
+[trace]   = 14483456
+[trace] t=2200 8 > 0(0x3, 0xda3110, 0xcce6, 0x0)
+[trace]   = 52453
+[trace] t=2202 8 > 0(0x3, 0xdafdf5, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2202 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2202 8 > 12(0xdab000, 0xdd0000, 0xdd0000, 0x0)
+[trace]   = 14331904
+[trace] t=2203 8 > 262(0xffffff9c, 0x7fffbe8c2a50, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2203 8 > 262(0xffffff9c, 0x7fffbe87b200, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2203 8 > 262(0xffffff9c, 0x7fffbe87b200, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2204 8 > 257(0xffffffffffffff9c, 0x7fffbe87db70, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2204 8 > 5(0x3, 0x7fffbe864a50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2204 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2204 8 > 12(0xdcd000, 0x7fffbf62e278, 0xdab000, 0x2180)
+[trace]   = 14471168
+[trace] t=2205 8 > 0(0x3, 0xdaa050, 0x2154, 0x0)
+[trace]   = 8531
+[trace] t=2205 8 > 0(0x3, 0xdac1a3, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2205 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2205 8 > 12(0xdab000, 0xdcd000, 0xdcd000, 0x0)
+[trace]   = 14331904
+[trace] t=2207 8 > 262(0xffffff9c, 0x7fffbe8c3dd0, 0x7fffffffba30, 0x0)
+[trace]   = 0
+[trace] t=2207 8 > 262(0xffffff9c, 0x7fffbe87bcf0, 0x7fffffffba30, 0x0)
+[trace]   = 0
+[trace] t=2208 8 > 262(0xffffff9c, 0x7fffbe87bcf0, 0x7fffffffba30, 0x0)
+[trace]   = 0
+[trace] t=2208 8 > 257(0xffffffffffffff9c, 0x7fffbe889b50, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2208 8 > 5(0x3, 0x7fffbe864a50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2209 8 > 12(0xdcc000, 0x7fffbf62e278, 0xdab000, 0x20010)
+[trace]   = 14467072
+[trace] t=2209 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2209 8 > 0(0x3, 0xdab660, 0xb51, 0x0)
+[trace]   = 2896
+[trace] t=2210 8 > 0(0x3, 0xdac1b0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2210 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2210 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2210 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2210 8 > 262(0xffffff9c, 0x7fffbe8d8410, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2211 8 > 262(0xffffff9c, 0x7fffbe8d8410, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2211 8 > 262(0xffffff9c, 0x7fffbe8d8410, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2211 8 > 257(0xffffffffffffff9c, 0x7fffbe889df0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2212 8 > 5(0x3, 0x7fffbe864a50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2212 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2212 8 > 0(0x3, 0xdad160, 0xa7d4, 0x0)
+[trace]   = 42963
+[trace] t=2214 8 > 0(0x3, 0xdb7933, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2214 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2216 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2216 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2216 8 > 262(0xffffff9c, 0x7fffbe8d8b10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2217 8 > 262(0xffffff9c, 0x7fffbe8d8b10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2217 8 > 262(0xffffff9c, 0x7fffbe8d8ad0, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2217 8 > 257(0xffffffffffffff9c, 0x7fffbe889fd0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2218 8 > 5(0x3, 0x7fffbe865620, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2218 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2218 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2218 8 > 12(0xdf4000, 0x7fffbf62e258, 0xdcc000, 0x101a0)
+[trace]   = 14630912
+[trace] t=2219 8 > 0(0x3, 0xdc3d30, 0x1016b, 0x0)
+[trace]   = 65898
+[trace] t=2220 8 > 0(0x3, 0xdd3e9a, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2221 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2221 8 > 12(0xdcb000, 0xdf4000, 0xdf4000, 0x0)
+[trace]   = 14462976
+[trace] t=2221 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2221 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2222 8 > 262(0xffffff9c, 0x7fffbe8ff710, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2222 8 > 262(0xffffff9c, 0x7fffbe8ff710, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2222 8 > 262(0xffffff9c, 0x7fffbe87f7e0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2222 8 > 257(0xffffff9c, 0xbfe1d0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2223 8 > 0(0x3, 0x7fffffffb168, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2223 8 > 5(0x3, 0x7fffffffb010, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2223 8 > 9(0x0, 0x3a3f0, 0x1, 0x802)
+[trace]   = 140736389382144
+[trace] t=2223 8 > 9(0x7fffbe804000, 0xd000, 0x5, 0x812)
+[trace]   = 140736389464064
+[trace] t=2225 8 > 9(0x7fffbe811000, 0xf000, 0x1, 0x812)
+[trace]   = 140736389517312
+[trace] t=2225 8 > 9(0x7fffbe820000, 0xb000, 0x3, 0x812)
+[trace]   = 140736389578752
+[trace] t=2226 8 > 3(0x3, 0x7fffbe81f358, 0x7fffbe81f358, 0xc0000002)
+[trace]   = 0
+[trace] t=2226 8 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2226 8 > 5(0x3, 0x7fffffffa8e0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2226 8 > 9(0x0, 0xf163, 0x1, 0x2)
+[trace]   = 140736398077952
+[trace] t=2226 8 > 3(0x3, 0xf163, 0x7fffbf03b000, 0x2)
+[trace]   = 0
+[trace] t=2227 8 > 257(0xffffff9c, 0xd13b50, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2227 8 > 0(0x3, 0x7fffffffaad8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2230 8 > 5(0x3, 0x7fffffffa980, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2230 8 > 9(0x0, 0x10d7e8, 0x1, 0x802)
+[trace]   = 140736388276224
+[trace] t=2230 8 > 9(0x7fffbe704000, 0xb1000, 0x5, 0x812)
+[trace]   = 140736388415488
+[trace] t=2230 8 > 9(0x7fffbe7b5000, 0x2d000, 0x1, 0x812)
+[trace]   = 140736389140480
+[trace] t=2230 8 > 9(0x7fffbe7e2000, 0xe000, 0x3, 0x812)
+[trace]   = 140736389324800
+[trace] t=2235 8 > 3(0x3, 0x7fffbe7e1ea0, 0x7fffbe7e1ea0, 0xc0000002)
+[trace]   = 0
+[trace] t=2250 8 > 10(0x7fffbe7e2000, 0xa000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2253 8 > 10(0x7fffbe820000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2254 8 > 11(0x7fffbf03b000, 0xf163, 0x7fffffffecd8, 0x21)
+[trace]   = 0
+[trace] t=2256 8 > 9(0x0, 0x100000, 0x3, 0x22)
+[trace]   = 140736387227648
+[trace] t=2256 8 > 12(0xdf2000, 0x7fffbf62e258, 0xdcb000, 0x12020)
+[trace]   = 14622720
+[trace] t=2257 8 > 79(0x7fffffff3490, 0x1000, 0x7fffffff853c, 0x7fffbe87f518)
+[trace]   = 2
+[trace] t=2259 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2259 8 > 262(0xffffff9c, 0xada788, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2259 8 > 262(0xffffff9c, 0x7fffbf0ff5d0, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2260 8 > 262(0xffffff9c, 0x7fffbf0ff5d0, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2260 8 > 262(0xffffff9c, 0x7fffbf0ff5d0, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2260 8 > 257(0xffffffffffffff9c, 0x7fffbe909bb0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2260 8 > 5(0x3, 0x7fffbe864c90, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2261 8 > 12(0xe18000, 0x7fffbf62e278, 0xdf2000, 0x20010)
+[trace]   = 14778368
+[trace] t=2261 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2261 8 > 0(0x3, 0xdf75b0, 0xa459, 0x0)
+[trace]   = 42072
+[trace] t=2262 8 > 0(0x3, 0xe01a08, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2262 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2262 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2262 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2263 8 > 262(0xffffff9c, 0x7fffbe638d10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2263 8 > 262(0xffffff9c, 0x7fffbe638d10, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2263 8 > 262(0xffffff9c, 0x7fffbe638d50, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2263 8 > 257(0xffffffffffffff9c, 0x7fffbe90a570, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2264 8 > 5(0x3, 0x7fffbe865f20, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2264 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2264 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2264 8 > 0(0x3, 0xdf9da0, 0x11a0d, 0x0)
+[trace]   = 72204
+[trace] t=2266 8 > 0(0x3, 0xe0b7ac, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2266 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2266 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2266 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2266 8 > 262(0xffffff9c, 0x7fffbe64c890, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2266 8 > 262(0xffffff9c, 0x7fffbe64c890, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2267 8 > 262(0xffffff9c, 0x7fffbe64c8d0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2267 8 > 257(0xffffffffffffff9c, 0x7fffbe90bf50, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2267 8 > 5(0x3, 0x7fffbe866790, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2267 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2267 8 > 0(0x3, 0xe09040, 0x1eb7, 0x0)
+[trace]   = 7862
+[trace] t=2268 8 > 0(0x3, 0xe0aef6, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2268 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2269 8 > 79(0xd8a2f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2269 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2269 8 > 262(0xffffff9c, 0x7fffbe64dfd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2269 8 > 262(0xffffff9c, 0x7fffbe64dfd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2270 8 > 262(0xffffff9c, 0x7fffbe64dfd0, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2271 8 > 257(0xffffffffffffff9c, 0x7fffbe650350, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2272 8 > 5(0x3, 0x7fffbe8668b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2272 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2272 8 > 0(0x3, 0xe09040, 0x3bb2, 0x0)
+[trace]   = 15281
+[trace] t=2273 8 > 0(0x3, 0xe0cbf1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2273 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2273 8 > 79(0xd408c0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2274 8 > 262(0xffffff9c, 0xada788, 0x7fffffffad20, 0x0)
+[trace]   = 0
+[trace] t=2274 8 > 262(0xffffff9c, 0x7fffbe64f610, 0x7fffffffad20, 0x0)
+[trace]   = 0
+[trace] t=2274 8 > 262(0xffffff9c, 0x7fffbe90dfd0, 0x7fffffffad20, 0x0)
+[trace]   = -2
+[trace] t=2275 8 > 262(0xffffff9c, 0x7fffbe6509b0, 0x7fffffffad20, 0x0)
+[trace]   = -2
+[trace] t=2275 8 > 262(0xffffff9c, 0x7fffbe90e040, 0x7fffffffad20, 0x0)
+[trace]   = -2
+[trace] t=2275 8 > 262(0xffffff9c, 0x7fffbe646300, 0x7fffffffad20, 0x0)
+[trace]   = -2
+[trace] t=2275 8 > 262(0xffffff9c, 0x7fffbe6463a0, 0x7fffffffad20, 0x0)
+[trace]   = 0
+[trace] t=2275 8 > 262(0xffffff9c, 0x7fffbe6463a0, 0x7fffffffad20, 0x0)
+[trace]   = 0
+[trace] t=2276 8 > 257(0xffffffffffffff9c, 0x7fffbe90e0b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2276 8 > 5(0x3, 0x7fffbe866820, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2276 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2276 8 > 0(0x3, 0x7fffbe632af0, 0x8f, 0x0)
+[trace]   = 142
+[trace] t=2277 8 > 0(0x3, 0x7fffbe632b7e, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2278 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2278 8 > 262(0xffffff9c, 0x7fffbe64f690, 0x7fffffffaed0, 0x0)
+[trace]   = 0
+[trace] t=2278 8 > 262(0xffffff9c, 0x7fffbe64f6d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2278 8 > 262(0xffffff9c, 0x7fffbe64f650, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2278 8 > 257(0xffffff9c, 0x7fffbe64f650, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2279 8 > 5(0x3, 0x7fffffffb2d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2279 8 > 217(0x3, 0xde9040, 0x8000, 0x0)
+[trace]   = 296
+[trace] t=2279 8 > 217(0x3, 0xde9040, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2279 8 > 3(0x3, 0x2f000, 0x26fc0, 0x0)
+[trace]   = 0
+[trace] t=2280 8 > 262(0xffffff9c, 0x7fffbe62dd50, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2280 8 > 262(0xffffff9c, 0x7fffbe650410, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2280 8 > 262(0xffffff9c, 0x7fffbe90e040, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2280 8 > 262(0xffffff9c, 0x7fffbe650b30, 0x7fffffffb390, 0x0)
+[trace]   = -2
+[trace] t=2281 8 > 262(0xffffff9c, 0x7fffbe650410, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2281 8 > 262(0xffffff9c, 0x7fffbe650b90, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2281 8 > 257(0xffffffffffffff9c, 0x7fffbe90e040, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2282 8 > 5(0x3, 0x7fffbe866820, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2282 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2282 8 > 0(0x3, 0x7fffbf0a7dd0, 0x97, 0x0)
+[trace]   = 150
+[trace] t=2283 8 > 0(0x3, 0x7fffbf0a7e66, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2283 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2283 8 > 262(0xffffff9c, 0x7fffbe646490, 0x7fffffffa8e0, 0x0)
+[trace]   = 0
+[trace] t=2283 8 > 262(0xffffff9c, 0x7fffbe646490, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2283 8 > 262(0xffffff9c, 0x7fffbe646490, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2283 8 > 257(0xffffff9c, 0x7fffbe646490, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2284 8 > 5(0x3, 0x7ffffffface0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2284 8 > 217(0x3, 0xde9040, 0x8000, 0x0)
+[trace]   = 144
+[trace] t=2284 8 > 217(0x3, 0xde9040, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2284 8 > 3(0x3, 0x2f000, 0x26fc0, 0x0)
+[trace]   = 0
+[trace] t=2285 8 > 262(0xffffff9c, 0x7fffbe650b90, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2285 8 > 262(0xffffff9c, 0x7fffbe650d10, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2285 8 > 257(0xffffffffffffff9c, 0x7fffbe90e040, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2285 8 > 5(0x3, 0x7fffbe866820, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2285 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2286 8 > 0(0x3, 0xe09040, 0x1e7c, 0x0)
+[trace]   = 7803
+[trace] t=2287 8 > 0(0x3, 0xe0aebb, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2287 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2287 8 > 79(0xde75f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2288 8 > 262(0xffffff9c, 0xada788, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2288 8 > 262(0xffffff9c, 0x7fffbe64f8d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2288 8 > 262(0xffffff9c, 0x7fffbe64f8d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2288 8 > 262(0xffffff9c, 0x7fffbe90e0b0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2289 8 > 257(0xffffff9c, 0xd93dc0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2289 8 > 0(0x3, 0x7fffffffa6c8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2291 8 > 5(0x3, 0x7fffffffa570, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2291 8 > 9(0x0, 0x84f0, 0x1, 0x802)
+[trace]   = 140736398106624
+[trace] t=2292 8 > 9(0x7fffbf044000, 0x3000, 0x5, 0x812)
+[trace]   = 140736398114816
+[trace] t=2292 8 > 9(0x7fffbf047000, 0x2000, 0x1, 0x812)
+[trace]   = 140736398127104
+[trace] t=2292 8 > 9(0x7fffbf049000, 0x2000, 0x3, 0x812)
+[trace]   = 140736398135296
+[trace] t=2293 8 > 3(0x3, 0x7fffbf048260, 0x7fffbf048260, 0xc0000002)
+[trace]   = 0
+[trace] t=2293 8 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2293 8 > 5(0x3, 0x7fffffff9e40, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2293 8 > 9(0x0, 0xf163, 0x1, 0x2)
+[trace]   = 140736387162112
+[trace] t=2294 8 > 3(0x3, 0xf163, 0x7fffbe5d2000, 0x2)
+[trace]   = 0
+[trace] t=2294 8 > 257(0xffffff9c, 0xd13b00, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2294 8 > 0(0x3, 0x7fffffffa038, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2295 8 > 5(0x3, 0x7fffffff9ee0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2295 8 > 9(0x0, 0x14c28, 0x1, 0x802)
+[trace]   = 140736387076096
+[trace] t=2295 8 > 9(0x7fffbe5bf000, 0xf000, 0x5, 0x812)
+[trace]   = 140736387084288
+[trace] t=2295 8 > 9(0x7fffbe5ce000, 0x2000, 0x1, 0x812)
+[trace]   = 140736387145728
+[trace] t=2295 8 > 9(0x7fffbe5d0000, 0x2000, 0x3, 0x812)
+[trace]   = 140736387153920
+[trace] t=2296 8 > 3(0x3, 0x7fffbe5cf390, 0x7fffbe5cf390, 0xc0000002)
+[trace]   = 0
+[trace] t=2296 8 > 10(0x7fffbe5d0000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2297 8 > 10(0x7fffbf049000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2297 8 > 11(0x7fffbe5d2000, 0xf163, 0x7fffffffecd8, 0x21)
+[trace]   = 0
+[trace] t=2298 8 > 79(0xde75f0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2298 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2298 8 > 262(0xffffff9c, 0x7fffbe658f90, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2299 8 > 262(0xffffff9c, 0x7fffbe658f90, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2299 8 > 262(0xffffff9c, 0x7fffbe658f90, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2299 8 > 257(0xffffffffffffff9c, 0x7fffbe651370, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2300 8 > 5(0x3, 0x7fffbe8669d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2300 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2301 8 > 0(0x3, 0xe0b7b0, 0x404e, 0x0)
+[trace]   = 16461
+[trace] t=2301 8 > 0(0x3, 0xe0f7fd, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2301 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2301 8 > 79(0xd408c0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2302 8 > 262(0xffffff9c, 0xada788, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2302 8 > 262(0xffffff9c, 0x7fffbe65a1d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2302 8 > 262(0xffffff9c, 0x7fffbe65a1d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2302 8 > 262(0xffffff9c, 0x7fffbe90e6d0, 0x7fffffffb390, 0x0)
+[trace]   = 0
+[trace] t=2303 8 > 257(0xffffff9c, 0xd61240, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2303 8 > 0(0x3, 0x7fffffffa6c8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2307 8 > 5(0x3, 0x7fffffffa570, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2307 8 > 9(0x0, 0xb7d0, 0x1, 0x802)
+[trace]   = 140736387178496
+[trace] t=2307 8 > 9(0x7fffbe5d9000, 0x4000, 0x5, 0x812)
+[trace]   = 140736387190784
+[trace] t=2307 8 > 9(0x7fffbe5dd000, 0x3000, 0x1, 0x812)
+[trace]   = 140736387207168
+[trace] t=2308 8 > 9(0x7fffbe5e0000, 0x2000, 0x3, 0x812)
+[trace]   = 140736387219456
+[trace] t=2309 8 > 3(0x3, 0x7fffbe5df2a8, 0x7fffbe5df2a8, 0xc0000002)
+[trace]   = 0
+[trace] t=2310 8 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2310 8 > 5(0x3, 0x7fffffff9e40, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2310 8 > 9(0x0, 0xf163, 0x1, 0x2)
+[trace]   = 140736387010560
+[trace] t=2310 8 > 3(0x3, 0xf163, 0x7fffbe5ad000, 0x2)
+[trace]   = 0
+[trace] t=2310 8 > 257(0xffffff9c, 0xd139d0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2311 8 > 0(0x3, 0x7fffffffa038, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2312 8 > 5(0x3, 0x7fffffff9ee0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2312 8 > 9(0x0, 0x340d8, 0x1, 0x802)
+[trace]   = 140736386793472
+[trace] t=2312 8 > 9(0x7fffbe57c000, 0x24000, 0x5, 0x812)
+[trace]   = 140736386809856
+[trace] t=2313 8 > 9(0x7fffbe5a0000, 0xb000, 0x1, 0x812)
+[trace]   = 140736386957312
+[trace] t=2313 8 > 9(0x7fffbe5ab000, 0x2000, 0x3, 0x812)
+[trace]   = 140736387002368
+[trace] t=2314 8 > 3(0x3, 0x7fffbe5aaa28, 0x7fffbe5aaa28, 0xc0000002)
+[trace]   = 0
+[trace] t=2315 8 > 10(0x7fffbe5ab000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2315 8 > 10(0x7fffbe5e0000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2316 8 > 11(0x7fffbe5ad000, 0xf163, 0x7fffffffecd8, 0x21)
+[trace]   = 0
+[trace] t=2316 8 > 262(0xffffff9c, 0x7fffbe65a890, 0x7fffffffb840, 0x0)
+[trace]   = 0
+[trace] t=2316 8 > 262(0xffffff9c, 0x7fffbe90e740, 0x7fffffffb840, 0x0)
+[trace]   = -2
+[trace] t=2318 8 > 262(0xffffff9c, 0x7fffbe6513d0, 0x7fffffffb840, 0x0)
+[trace]   = -2
+[trace] t=2318 8 > 262(0xffffff9c, 0x7fffbe90e900, 0x7fffffffb840, 0x0)
+[trace]   = -2
+[trace] t=2319 8 > 262(0xffffff9c, 0x7fffbe6513d0, 0x7fffffffb840, 0x0)
+[trace]   = -2
+[trace] t=2319 8 > 262(0xffffff9c, 0x7fffbe6512b0, 0x7fffffffb840, 0x0)
+[trace]   = 0
+[trace] t=2319 8 > 262(0xffffff9c, 0x7fffbe651910, 0x7fffffffb840, 0x0)
+[trace]   = 0
+[trace] t=2319 8 > 257(0xffffffffffffff9c, 0x7fffbe90e740, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2320 8 > 5(0x3, 0x7fffbe8669d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2320 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2320 8 > 0(0x3, 0xe10500, 0x2dca, 0x0)
+[trace]   = 11721
+[trace] t=2321 8 > 0(0x3, 0xe132c9, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2321 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2321 8 > 79(0xd408c0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2322 8 > 262(0xffffff9c, 0xada788, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2322 8 > 262(0xffffff9c, 0x7fffbe668190, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2322 8 > 262(0xffffff9c, 0x7fffbe668190, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2322 8 > 262(0xffffff9c, 0x7fffbe90e9e0, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2323 8 > 257(0xffffff9c, 0xd328d0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2324 8 > 0(0x3, 0x7fffffffa0d8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2324 8 > 5(0x3, 0x7fffffff9f80, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2324 8 > 9(0x0, 0xedd0, 0x1, 0x802)
+[trace]   = 140736387014656
+[trace] t=2324 8 > 9(0x7fffbe5b1000, 0x6000, 0x5, 0x812)
+[trace]   = 140736387026944
+[trace] t=2325 8 > 9(0x7fffbe5b7000, 0x4000, 0x1, 0x812)
+[trace]   = 140736387051520
+[trace] t=2325 8 > 9(0x7fffbe5bb000, 0x2000, 0x3, 0x812)
+[trace]   = 140736387067904
+[trace] t=2326 8 > 3(0x3, 0x7fffbe5baea0, 0x7fffbe5baea0, 0xc0000002)
+[trace]   = 0
+[trace] t=2327 8 > 10(0x7fffbe5bb000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2329 8 > 262(0xffffff9c, 0x7fffbe6652c0, 0x7fffffffa8e0, 0x0)
+[trace]   = 0
+[trace] t=2329 8 > 262(0xffffff9c, 0x7fffbe6652c0, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2330 8 > 262(0xffffff9c, 0x7fffbe665310, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2330 8 > 257(0xffffff9c, 0x7fffbe665310, 0x90800, 0x0)
+[trace]   = 3
+[trace] t=2330 8 > 5(0x3, 0x7ffffffface0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2330 8 > 217(0x3, 0xdf2330, 0x8000, 0x0)
+[trace]   = 144
+[trace] t=2330 8 > 217(0x3, 0xdf2330, 0x8000, 0x0)
+[trace]   = 0
+[trace] t=2330 8 > 3(0x3, 0x25d10, 0x1dcd0, 0x0)
+[trace]   = 0
+[trace] t=2331 8 > 262(0xffffff9c, 0x7fffbe651af0, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2332 8 > 262(0xffffff9c, 0x7fffbe651f10, 0x7fffffffada0, 0x0)
+[trace]   = 0
+[trace] t=2332 8 > 257(0xffffffffffffff9c, 0x7fffbe90e9e0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2333 8 > 5(0x3, 0x7fffbe866e50, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2333 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2333 8 > 0(0x3, 0xe12330, 0x3d73, 0x0)
+[trace]   = 15730
+[trace] t=2334 8 > 0(0x3, 0xe160a2, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2334 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2334 8 > 79(0xdf3cf0, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2334 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2334 8 > 262(0xffffff9c, 0x7fffbe674a50, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2334 8 > 262(0xffffff9c, 0x7fffbe674a50, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2335 8 > 262(0xffffff9c, 0x7fffbe674a50, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2335 8 > 257(0xffffffffffffff9c, 0x7fffbe6528d0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2335 8 > 5(0x3, 0x7fffbe866f70, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2335 8 > 12(0xe3d000, 0x7fffbf62e278, 0xe18000, 0x20010)
+[trace]   = 14929920
+[trace] t=2335 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2336 8 > 0(0x3, 0xe1cc30, 0x9392, 0x0)
+[trace]   = 37777
+[trace] t=2337 8 > 0(0x3, 0xe25fc1, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2337 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2339 8 > 318(0x7fffffffb610, 0x9c0, 0x1, 0x0)
+[trace]   = 2496
+[trace] t=2339 8 > 79(0xdfb420, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2339 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2339 8 > 262(0xffffff9c, 0x7fffbe677490, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2340 8 > 262(0xffffff9c, 0x7fffbe677490, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2340 8 > 262(0xffffff9c, 0x7fffbe677490, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2340 8 > 257(0xffffffffffffff9c, 0x7fffbe652f30, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2340 8 > 5(0x3, 0x7fffbe867000, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2340 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2340 8 > 0(0x3, 0xe1f3a0, 0x6bef, 0x0)
+[trace]   = 27630
+[trace] t=2342 8 > 0(0x3, 0xe25f8e, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2342 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2342 8 > 79(0xdfb420, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2342 8 > 262(0xffffff9c, 0xada788, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2342 8 > 262(0xffffff9c, 0x7fffbe67cd50, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2342 8 > 262(0xffffff9c, 0x7fffbe679630, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2343 8 > 262(0xffffff9c, 0x7fffbe679630, 0x7fffffffbe30, 0x0)
+[trace]   = 0
+[trace] t=2343 8 > 257(0xffffffffffffff9c, 0x7fffbe653ad0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2343 8 > 5(0x3, 0x7fffbe867000, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2343 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2343 8 > 0(0x3, 0xe1f3a0, 0x24ba, 0x0)
+[trace]   = 9401
+[trace] t=2344 8 > 0(0x3, 0xe21859, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2344 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 262(0xffffff9c, 0x7fffbe67fd90, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 262(0xffffff9c, 0x7fffbe67b250, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 262(0xffffff9c, 0x7fffbe67b250, 0x7fffffffd370, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 257(0xffffffffffffff9c, 0x7fffbe909d90, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2345 8 > 5(0x3, 0x7fffbe866550, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2345 8 > 0(0x3, 0xe24e00, 0xf0d, 0x0)
+[trace]   = 3852
+[trace] t=2346 8 > 0(0x3, 0xe25d0c, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2346 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2346 8 > 262(0xffffff9c, 0x7fffbe6a4550, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2346 8 > 262(0xffffff9c, 0x7fffbe67b660, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2346 8 > 262(0xffffff9c, 0x7fffbe67b660, 0x7fffffffc8d0, 0x0)
+[trace]   = 0
+[trace] t=2347 8 > 257(0xffffffffffffff9c, 0x7fffbe652870, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2347 8 > 5(0x3, 0x7fffbe8671b0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2347 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2347 8 > 0(0x3, 0xe25070, 0x125b, 0x0)
+[trace]   = 4698
+[trace] t=2348 8 > 0(0x3, 0xe262ca, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2348 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2352 8 > 202(0x7fffbf038350, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2353 8 > 202(0x7fffbe7ef7e0, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2353 8 > 202(0x7fffbe7ef7d8, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2358 8 > 12(0xe5e000, 0x7fffbf62daf8, 0xe3d000, 0x30)
+[trace]   = 15065088
+[trace] t=2359 8 > 202(0x7fffbf037ba4, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2361 8 > 202(0x7fffbf038484, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2362 8 > 202(0x7fffbf03849c, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2363 8 > 12(0xe7f000, 0x7fffbf62dfb8, 0xe5e000, 0x7c0)
+[trace]   = 15200256
+[trace] t=2365 8 > 202(0x7fffbf0384c0, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2367 8 > 39(0x0, 0x0, 0x0, 0x130)
+[trace]   = 8
+[trace] t=2368 8 > 318(0xe5ef10, 0x30, 0x0, 0x40)
+[trace]   = 48
+[trace] t=2369 8 > 201(0x0, 0xb94050, 0xf, 0x41)
+[trace]   = 1793607620
+[trace] t=2369 8 > 39(0x0, 0x0, 0x0, 0x130)
+[trace]   = 8
+[trace] t=2370 8 > 39(0x0, 0xe5f920, 0x2, 0x40)
+[trace]   = 8
+[trace] t=2370 8 > 201(0x0, 0xe5f920, 0x0, 0x40)
+[trace]   = 1793607620
+[trace] t=2371 8 > 201(0x0, 0xb94050, 0xf, 0x41)
+[trace]   = 1793607620
+[trace] t=2371 8 > 39(0x0, 0xe14c00, 0x10, 0x7fffbf4e2e70)
+[trace]   = 8
+[trace] t=2371 8 > 201(0x0, 0xe14c00, 0x0, 0x7fffbf4e2e70)
+[trace]   = 1793607620
+[trace] t=2372 8 > 39(0x0, 0xe5f960, 0x2, 0x30)
+[trace]   = 8
+[trace] t=2372 8 > 201(0x0, 0xe5f960, 0x0, 0x30)
+[trace]   = 1793607620
+[trace] t=2372 8 > 201(0x0, 0x0, 0x0, 0x0)
+[trace]   = 1793607620
+[trace] t=2372 8 > 39(0x0, 0x0, 0x0, 0x130)
+[trace]   = 8
+[trace] t=2372 8 > 39(0x0, 0xe5f920, 0x2, 0x7fffbee79b70)
+[trace]   = 8
+[trace] t=2373 8 > 201(0x0, 0xe5f920, 0x0, 0x7fffbee79b70)
+[trace]   = 1793607620
+[trace] t=2373 8 > 201(0x0, 0xb94050, 0xf, 0x41)
+[trace]   = 1793607620
+[trace] t=2373 8 > 39(0x0, 0xe5c080, 0x20, 0x7fffbf4e2e70)
+[trace]   = 8
+[trace] t=2373 8 > 201(0x0, 0xe5c080, 0x0, 0x7fffbf4e2e70)
+[trace]   = 1793607620
+[trace] t=2374 8 > 39(0x0, 0xe60360, 0x2, 0x30)
+[trace]   = 8
+[trace] t=2374 8 > 201(0x0, 0xe60360, 0x0, 0x30)
+[trace]   = 1793607620
+[trace] t=2374 8 > 201(0x0, 0x0, 0x0, 0x0)
+[trace]   = 1793607620
+[trace] t=2374 8 > 39(0x0, 0xe5c0a0, 0x20, 0x7fffbf4e2e70)
+[trace]   = 8
+[trace] t=2374 8 > 201(0x0, 0xe5c0a0, 0x0, 0x7fffbf4e2e70)
+[trace]   = 1793607620
+[trace] t=2375 8 > 39(0x0, 0xe14cc0, 0x20, 0x7fffbf4e2e70)
+[trace]   = 8
+[trace] t=2375 8 > 201(0x0, 0xe14cc0, 0x0, 0x7fffbf4e2e70)
+[trace]   = 1793607620
+[trace] t=2376 8 > 202(0x7fffbf037b10, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2379 8 > 257(0xffffffffffffff9c, 0x7fffbeeb2e9b, 0x0, 0x0)
+[trace]   = -2
+[trace] t=2382 8 > 262(0xffffff9c, 0x7fffbe6a7590, 0x7fffffffd330, 0x0)
+[trace]   = 0
+[trace] t=2382 8 > 262(0xffffff9c, 0x7fffbf2035c0, 0x7fffffffd330, 0x0)
+[trace]   = 0
+[trace] t=2383 8 > 262(0xffffff9c, 0x7fffbf2035c0, 0x7fffffffd330, 0x0)
+[trace]   = 0
+[trace] t=2383 8 > 257(0xffffffffffffff9c, 0x7fffbf20a330, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2384 8 > 5(0x3, 0x7fffbe866550, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2384 8 > 12(0xea1000, 0x7fffbf62e278, 0xe7f000, 0x20010)
+[trace]   = 15339520
+[trace] t=2384 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2384 8 > 0(0x3, 0xe80680, 0x3a91, 0x0)
+[trace]   = 14992
+[trace] t=2385 8 > 0(0x3, 0xe84110, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2386 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2386 8 > 79(0xe5d490, 0x400, 0x3f, 0x0)
+[trace]   = 2
+[trace] t=2386 8 > 262(0xffffff9c, 0xada788, 0x7fffffffc890, 0x0)
+[trace]   = 0
+[trace] t=2386 8 > 262(0xffffff9c, 0x7fffbe6a7fd0, 0x7fffffffc890, 0x0)
+[trace]   = 0
+[trace] t=2386 8 > 262(0xffffff9c, 0x7fffbe6a93b0, 0x7fffffffc890, 0x0)
+[trace]   = 0
+[trace] t=2387 8 > 262(0xffffff9c, 0x7fffbe6a93b0, 0x7fffffffc890, 0x0)
+[trace]   = 0
+[trace] t=2387 8 > 257(0xffffffffffffff9c, 0x7fffbf2095b0, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2388 8 > 5(0x3, 0x7fffbe866550, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2388 8 > 8(0x3, 0x0, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2388 8 > 0(0x3, 0xe847f0, 0x6321, 0x0)
+[trace]   = 25376
+[trace] t=2390 8 > 0(0x3, 0xe8ab10, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2390 8 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2391 8 > 12(0xec5000, 0x7fffbf62e258, 0xea1000, 0x10030)
+[trace]   = 15486976
+[trace] t=2392 8 > 12(0xe95000, 0xec5000, 0xec5000, 0x0)
+[trace]   = 15290368
+[trace] t=2393 8 > 12(0xec5000, 0x7fffbf62e258, 0xe95000, 0x10030)
+[trace]   = 15486976
+[trace] t=2393 8 > 12(0xe95000, 0xec5000, 0xec5000, 0x0)
+[trace]   = 15290368
+[trace] t=2393 8 > 79(0x7fffffff4900, 0x1000, 0x7fffffff99a4, 0x7fffbf203ef8)
+[trace]   = 2
+[trace] t=2396 8 > 41(0x1, 0x80801, 0x0, 0x7fffbf5fa582)
+[trace]   = 3
+[trace] t=2396 8 > 42(0x3, 0x7fffffffd0c0, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2407 8 > 3(0x3, 0x7fffffffd0c0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2408 8 > 41(0x1, 0x80801, 0x0, 0x0)
+[trace]   = 3
+[trace] t=2408 8 > 42(0x3, 0x7fffffffd2c0, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2408 8 > 3(0x3, 0x7fffffffd2c0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2409 8 > 262(0xffffff9c, 0x7fffbf5fa060, 0x7fffffffd180, 0x0)
+[trace]   = 0
+[trace] t=2412 8 > 262(0xffffff9c, 0x7fffbf5f633d, 0x7fffffffd2d0, 0x0)
+[trace]   = 0
+[trace] t=2412 8 > 257(0xffffff9c, 0x7fffbf5fa060, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2412 8 > 5(0x3, 0x7fffffffd0b0, 0x7fffbf62bee0, 0x80)
+[trace]   = 0
+[trace] t=2413 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 494
+[trace] t=2415 8 > 0(0x3, 0xe67b80, 0x1000, 0xe68ff0)
+[trace]   = 0
+[trace] t=2415 8 > 5(0x3, 0x7fffffffd180, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2415 8 > 3(0x3, 0x7fffffffd180, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=2416 8 > 262(0xffffff9c, 0x7fffbf5f9e76, 0x7fffffffd2a0, 0x0)
+[trace]   = 0
+[trace] t=2417 8 > 257(0xffffff9c, 0x7fffbf5f9dcf, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2417 8 > 5(0x3, 0x7fffffffcce0, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=2417 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 92
+[trace] t=2419 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 0
+[trace] t=2419 8 > 3(0x3, 0xe67b80, 0x7fffbf62bee0, 0x1010)
+[trace]   = 0
+[trace] t=2419 8 > 202(0x7fffbf6356ec, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2419 8 > 257(0xffffff9c, 0x7fffbf5f9e76, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2419 8 > 5(0x3, 0x7fffffffcf40, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=2419 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 61
+[trace] t=2421 8 > 0(0x3, 0xe67b80, 0x1000, 0x0)
+[trace]   = 0
+[trace] t=2421 8 > 63(0x7fffffffcf10, 0xff, 0xfbada498, 0x0)
+[trace]   = 0
+[trace] t=2421 8 > 5(0x3, 0x7fffffffd010, 0x800, 0x0)
+[trace]   = 0
+[trace] t=2421 8 > 3(0x3, 0xb94050, 0x7fffbf62bee0, 0x21)
+[trace]   = 0
+[trace] t=2422 8 > 257(0xffffff9c, 0x7fffbf5fa57d, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2422 8 > 5(0x3, 0x7fffffffd170, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=2422 8 > 8(0x3, 0x0, 0x0, 0x1010)
+[trace]   = 0
+[trace] t=2423 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 77
+[trace] t=2423 8 > 0(0x3, 0xe67b80, 0x1000, 0x1)
+[trace]   = 0
+[trace] t=2423 8 > 3(0x3, 0xe67b80, 0x7fffbf62bee0, 0x1)
+[trace]   = 0
+[trace] t=2424 8 > 41(0x2, 0x80802, 0x0, 0x7fffbf635714)
+[trace]   = 3
+[trace] t=2424 8 > 54(0x3, 0x0, 0xb, 0x7fffffffb6b4)
+[trace]   = 0
+[trace] t=2424 8 > 42(0x3, 0x7fffbf635714, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2424 8 > 7(0x7fffffffb858, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2425 8 > 307(0x3, 0x7fffffffb880, 0x2, 0x4000)
+[trace]   = 2
+[trace] t=2426 8 > 7(0x7fffffffb858, 0x1, 0x1388, 0x0)
+[trace]   = 1
+[trace] t=2433 8 > 16(0x3, 0x541b, 0x7fffffffb81c, 0xffffffffffffff90)
+[trace]   = 0
+[trace] t=2433 8 > 45(0x3, 0x7fffffffcc10, 0x800, 0x0)
+[trace]   = 288
+[trace] t=2434 8 > 7(0x7fffffffb858, 0x1, 0x1324, 0x0)
+[trace]   = 1
+[trace] t=2434 8 > 16(0x3, 0x541b, 0x7fffffffc7d0, 0xffffffffffffff90)
+[trace]   = 0
+[trace] t=2434 8 > 45(0x3, 0xe74140, 0x10000, 0x0)
+[trace]   = 180
+[trace] t=2434 8 > 3(0x3, 0x0, 0x1, 0x7fffffffae60)
+[trace]   = 0
+[trace] t=2435 8 > 257(0xffffff9c, 0x7fffbf5fa1f1, 0x80000, 0x0)
+[trace]   = 3
+[trace] t=2435 8 > 5(0x3, 0x7fffffffd310, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2435 8 > 5(0x3, 0x7fffffffd0f0, 0x7fffbf62bee0, 0x0)
+[trace]   = 0
+[trace] t=2435 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 2584
+[trace] t=2440 8 > 0(0x3, 0xe67b80, 0x1000, 0x1010)
+[trace]   = 0
+[trace] t=2440 8 > 3(0x3, 0xb94050, 0x7fffbf62bee0, 0x81)
+[trace]   = 0
+[trace] t=2440 8 > 202(0x7fffbf63aec4, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2441 8 > 41(0x10, 0x80003, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2441 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2441 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2441 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2441 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2442 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2442 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2442 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2442 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2442 8 > 41(0xa, 0x80002, 0x0, 0x0)
+[trace]   = -97
+[trace] t=2443 8 > 41(0x2, 0x80002, 0x0, 0x0)
+[trace]   = 3
+[trace] t=2443 8 > 42(0x3, 0xe62a90, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2443 8 > 51(0x3, 0x7fffffffdbf8, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2443 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2444 8 > 42(0x3, 0xe63300, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2444 8 > 51(0x3, 0x7fffffffdc28, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2444 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2444 8 > 42(0x3, 0xe617c0, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2445 8 > 51(0x3, 0x7fffffffdc58, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2445 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2445 8 > 42(0x3, 0xe61810, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2445 8 > 51(0x3, 0x7fffffffdc88, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2445 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2446 8 > 42(0x3, 0xe61860, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2446 8 > 51(0x3, 0x7fffffffdcb8, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2446 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2446 8 > 42(0x3, 0xe618b0, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2447 8 > 51(0x3, 0x7fffffffdce8, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2447 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2447 8 > 42(0x3, 0xe62600, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2447 8 > 51(0x3, 0x7fffffffdd18, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2447 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2448 8 > 42(0x3, 0xe62650, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2448 8 > 51(0x3, 0x7fffffffdd48, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2448 8 > 42(0x3, 0x7fffffffd590, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2448 8 > 42(0x3, 0xe626a0, 0x10, 0x0)
+[trace]   = 0
+[trace] t=2449 8 > 51(0x3, 0x7fffffffdd78, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2449 8 > 3(0x3, 0x7fffffffdd78, 0x7fffffffd540, 0x0)
+[trace]   = 0
+[trace] t=2451 8 > 41(0x2, 0x80001, 0x6, 0x0)
+[trace]   = 3
+[trace] t=2451 8 > 16(0x3, 0x5421, 0x7fffffffe08c, 0x0)
+[trace]   = 0
+[trace] t=2452 8 > 42(0x3, 0x7fffffffe040, 0x10, 0x0)
+[trace]   = -115
+[trace] t=2452 8 > 7(0x7fffffffdf38, 0x1, 0x4e20, 0x0)
+[trace]   = 1
+[trace] t=2459 8 > 55(0x3, 0x1, 0x4, 0x7fffffffdf3c)
+[trace]   = 0
+[trace] t=2459 8 > 54(0x3, 0x6, 0x1, 0x7fffffffe01c)
+[trace]   = 0
+[trace] t=2459 8 > 7(0x7fffffffdf28, 0x1, 0x4e20, 0x0)
+[trace]   = 1
+[trace] t=2459 8 > 44(0x3, 0x7fffbf3074d0, 0x94, 0x0)
+[trace]   = 148
+[trace] t=2461 8 > 7(0x7fffffffda08, 0x1, 0x4e20, 0x0)
+[trace]   = 1
+[trace] t=2467 8 > 45(0x3, 0xe74140, 0x20000, 0x0)
+[trace]   = 14520
+[trace] t=2469 8 > 9(0x0, 0x3f000, 0x3, 0x22)
+[trace]   = 140736386535424
+[trace] t=2469 8 > 7(0x7fffffffde48, 0x1, 0x4e20, 0x0)

@@ -3,7 +3,7 @@ name = "hydra"
 version = "0.1.0"
 edition = "2021"
 authors = ["Vick Dini"]
-build = false
+build = "build_drivers.rs"
 
 [dependencies]
 uefi = "0.41.0"

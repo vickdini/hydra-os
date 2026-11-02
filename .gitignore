@@ -10,3 +10,4 @@ dist/x86_64/rootfs-media.vdi
 dist/x86_64/hydrapool.before-repair.qcow2
 dist/x86_64/hydrapool.damaged.qcow2
 dist/x86_64/hydrapool.pre-apps.qcow2
+dist/x86_64/hydrapool.pre-drivers.qcow2

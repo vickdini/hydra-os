@@ -119,6 +119,16 @@ pub fn spawn_linux_elf(
     uid: u32,
     gid: u32,
 ) -> Result<TaskId, &'static str> {
+    if exec::is_vm_loadable(elf_data) {
+        // /proc/self/exe must be absolute; `linux run` resolves bare names in /bin
+        let arg0 = args.first().copied().unwrap_or(name);
+        let exec_path = if arg0.starts_with('/') { alloc::string::String::from(arg0) } else { alloc::format!("/bin/{}", arg0) };
+        let source = exec::ElfSource::from_bytes(elf_data.to_vec().into_boxed_slice());
+        let image = scheduler::load_linux_image(source, &exec_path, args, uid, gid, None)?;
+        return x86_64::instructions::interrupts::without_interrupts(|| {
+            SCHEDULER.lock().spawn_linux_process(name, image, &exec_path, args, priority, uid, gid, None)
+        });
+    }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
         sched.spawn_linux_elf(name, elf_data, args, priority, uid, gid)
@@ -142,12 +152,40 @@ pub fn spawn_linux_chroot(
     if !elf::ElfBinary::parse(&source.head).is_ok() || !exec::is_vm_loadable(&source.head) {
         return Err(alloc::format!("{} is not a position-independent x86_64 ELF executable", exe));
     }
+    let image = scheduler::load_linux_image(source, exe, args, uid, gid, Some(root)).map_err(alloc::string::String::from)?;
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
         sched
-            .spawn_linux_process("linux_app", source, exe, args, TaskPriority::Normal, uid, gid, Some(root))
+            .spawn_linux_process("linux_app", image, exe, args, TaskPriority::Normal, uid, gid, Some(root))
             .map_err(alloc::string::String::from)
     })
+}
+
+/// Starts a driver or server program (a static native ELF built into the kernel image as
+/// a boot module) in an address space of its own, as the server of `endpoint`.
+///
+/// `args[0]` is its path for `/proc` and diagnostics; the rest describe its devices.
+pub fn spawn_service(name: &'static str, image: &[u8], args: &[&str], endpoint: u32) -> Result<TaskId, &'static str> {
+    if !exec::is_vm_loadable(image) {
+        return Err("not a loadable static ELF executable");
+    }
+    let source = exec::ElfSource::from_bytes(image.to_vec().into_boxed_slice());
+    let path = args.first().copied().unwrap_or(name);
+    let loaded = scheduler::load_linux_image(source, path, args, 0, 0, None)?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched = SCHEDULER.lock();
+        let id = sched.spawn_linux_process(name, loaded, path, args, TaskPriority::High, 0, 0, None)?;
+        sched.with_task_mut(id, |t| {
+            t.personality = TaskPersonality::Hydra;
+            t.service = Some(endpoint);
+        });
+        Ok(id)
+    })
+}
+
+/// Endpoint of the driver service the current task serves, if it is a driver process.
+pub fn current_service() -> Option<u32> {
+    with_current_task_mut(|t| t.service).flatten()
 }
 
 /// Sets credentials for a specific task.
@@ -229,6 +267,14 @@ pub fn sleep_ms(ms: u64) {
 
 /// Terminates the calling task and relinquishes CPU ownership permanently.
 pub fn exit() -> ! {
+    // Close the descriptors while still alive: closing may call a driver, whose reply only
+    // a live task resumes from
+    // (bound first: an `if let` would hold the scheduler lock through its block)
+    let own = SCHEDULER.lock().take_current_fds_if_last();
+    if let Some(mut fds) = own {
+        fds.close_all();
+    }
+    close_retired();
     {
         let mut sched = SCHEDULER.lock();
         sched.terminate_current();
@@ -254,8 +300,22 @@ pub fn exit_group() -> ! {
 
 /// Terminates a task by its TaskId.
 pub fn kill(id: TaskId) -> bool {
-    let mut sched = SCHEDULER.lock();
-    sched.kill_task(id)
+    let killed = SCHEDULER.lock().kill_task(id);
+    close_retired();
+    killed
+}
+
+/// Closes the descriptors of exited tasks (which [`scheduler::Scheduler`] retires under its
+/// lock, where closing cannot happen). Must be called without the scheduler lock, and not
+/// while a driver serves a call (its caller may hold locks closing takes).
+pub fn close_retired() {
+    if scheduler::handoff_active() {
+        return;
+    }
+    let tables = SCHEDULER.lock().take_pending_close();
+    for mut fds in tables {
+        fds.close_all();
+    }
 }
 
 /// Returns true if a task with the given ID is still active (not Dead).
@@ -293,13 +353,22 @@ pub fn with_current_fds_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut crate::fs::FdTable) -> R,
 {
-    let mut sched = SCHEDULER.lock();
-    if sched.is_initialized() {
-        sched.current_task_fds_mut(f).expect("Task FdTable missing")
-    } else {
-        drop(sched);
-        let mut fallback = FALLBACK_FDS.lock();
-        fallback.init_default();
-        f(&mut fallback)
+    // Only the table is locked while `f` runs, not the scheduler: file I/O in `f` calls the
+    // disk driver process, which needs the scheduler to run
+    let fds = {
+        let sched = SCHEDULER.lock();
+        if sched.is_initialized() {
+            Some(sched.current_fds().expect("Task FdTable missing"))
+        } else {
+            None
+        }
+    };
+    match fds {
+        Some(fds) => f(&mut fds.lock()),
+        None => {
+            let mut fallback = FALLBACK_FDS.lock();
+            fallback.init_default();
+            f(&mut fallback)
+        }
     }
 }

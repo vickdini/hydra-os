@@ -13,27 +13,36 @@
 //! unfinished commit, but never hands out a block the last valid uberblock still uses.
 //!
 //! ## Key Types & Interfaces
-//! - [`Vdev`]: Abstraction over ATA drive or contiguous RAM disk backend.
+//! - [`Vdev`]: The disk under the pool, driven by the Ring 3 disk driver (`ata-driver`), or
+//!   a RAM disk.
 //! - [`BlockCache`]: LRU physical frame cache avoiding redundant device read cycles.
 //! - [`Spa`]: Storage Pool Allocator controlling allocation cursors, bitmaps, and labels.
 //! - [`DiskContents`]: Detection state for disk inspection prior to pool import.
 //!
 //! ## Concurrency & Hardware Semantics
-//! All disk I/O synchronizes against underlying ATA controller locks or atomic frame
-//! refcounts. Allocations and frees are staged in transaction groups and committed atomically.
+//! The kernel has no disk driver of its own. Requests to the disk driver are calls to its
+//! service ([`crate::ipc::service::call`]), which run the driver in the caller's place, so
+//! they may be made with the file system's locks held. Allocations and frees are staged
+//! in transaction groups and committed atomically.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
+use spin::Mutex;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 use super::types::{Fletcher4, Uberblock, VdevLabel, BlockPointer, UBERBLOCK_RING, ZFS_BLOCK_SIZE};
+use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_REPLY, MSG_BLOCK_WRITE};
+use crate::ipc::service;
 use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec, FRAME_ALLOCATOR};
 
 /// Logical block size in bytes for SPA allocations (4 KiB).
 pub const BLOCK: u64 = ZFS_BLOCK_SIZE as u64;
-const SECTORS_PER_BLOCK: u64 = BLOCK / crate::arch::ata::ATA_SECTOR_SIZE as u64;
-/// Largest number of blocks moved in one ATA command (255 sectors / 8 per block).
-const MAX_RUN: usize = 31;
+/// Disk sector size the pool is laid out in.
+const SECTOR: u64 = 512;
+/// Largest number of consecutive blocks gathered into one disk request (one disk driver
+/// window).
+const MAX_RUN: usize = crate::ipc::service::WINDOW_PAGES as usize;
 /// Size of the RAM-backed pool used when no ATA disk is present.
 const RAM_POOL_BYTES: u64 = 64 * 1024 * 1024;
 /// Default cap on cached blocks (128 MiB of frames).
@@ -44,10 +53,50 @@ pub fn frame_bytes(frame: PhysFrame<Size4KiB>) -> &'static mut [u8; ZFS_BLOCK_SI
     unsafe { &mut *(frame.start_address().as_u64() as *mut [u8; ZFS_BLOCK_SIZE]) }
 }
 
+/// Where the pool's blocks live.
 enum Backend {
-    Ata,
+    /// The disk, through the disk driver program.
+    Driver,
+    /// Memory, when there is no disk.
     Ram(*mut u8),
-    BlockDeviceEndpoint(u32),
+}
+
+/// What the disk driver reported about the pool's disk (`disks`, `zpool status`).
+#[derive(Clone)]
+pub struct DiskInfo {
+    /// Drive model.
+    pub model: String,
+    /// Size in 512-byte sectors.
+    pub sectors: u64,
+    /// Whether the driver uses 48-bit addressing.
+    pub lba48: bool,
+    /// Whether the driver uses bus-master DMA.
+    pub dma: bool,
+}
+
+static DISK_INFO: Mutex<Option<DiskInfo>> = Mutex::new(None);
+
+/// The pool's disk, if the pool is on one.
+pub fn disk_info() -> Option<DiskInfo> {
+    DISK_INFO.lock().clone()
+}
+
+/// The disk driver's service window (starting the driver if it is not running).
+fn driver_window() -> Result<&'static mut [u8], &'static str> {
+    if let Some(w) = service::window(ENDPOINT_BLOCK_DEV) {
+        return Ok(w);
+    }
+    crate::task::supervisor::revive(ENDPOINT_BLOCK_DEV);
+    service::window(ENDPOINT_BLOCK_DEV).ok_or("ZFS: the disk driver is not running")
+}
+
+/// Sends a request to the disk driver; returns its reply or an error message.
+fn driver_request(label: u32, args: [u64; 4], what: &'static str) -> Result<crate::ipc::Message, &'static str> {
+    match service::call(ENDPOINT_BLOCK_DEV, crate::ipc::Message::with_args(label, args), service::CALL_TIMEOUT_TICKS) {
+        Ok(r) if r.label == MSG_BLOCK_REPLY && (r.args[0] as i64) >= 0 => Ok(r),
+        Ok(_) => Err(what),
+        Err(_) => Err("ZFS: the disk driver did not answer"),
+    }
 }
 
 /// The block device under the pool.
@@ -60,38 +109,13 @@ pub struct Vdev {
 unsafe impl Send for Vdev {}
 
 impl Vdev {
-    /// Connects to a decoupled user-space block device driver running on an IPC endpoint.
-    ///
-    /// # Arguments
-    /// * `endpoint_id` - Numeric ID of the IPC endpoint registered by the block driver.
-    ///
-    /// # Errors
-    /// Returns `Err` if the endpoint is invalid or the driver fails to report capacity.
-    pub fn open_endpoint(endpoint_id: u32) -> Result<Self, &'static str> {
-        let ep = crate::ipc::endpoint::get_system_endpoint(endpoint_id).ok_or("Invalid block endpoint")?;
-        let msg = crate::ipc::Message::new(crate::ipc::protocol::MSG_BLOCK_GET_SIZE);
-        ep.send_blocking(msg);
-        let reply = ep.receive_blocking();
-        if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && (reply.args[0] as i64) >= 0 {
-            let total_blocks = reply.args[1];
-            Ok(Self {
-                backend: Backend::BlockDeviceEndpoint(endpoint_id),
-                total_blocks,
-            })
-        } else {
-            Err("Failed to query block device size over IPC")
-        }
-    }
-
-    /// Opens the primary ATA disk, or a RAM disk if none is attached.
+    /// Opens the disk through the disk driver (started at the hardware takeover), or a RAM
+    /// disk if there is none.
     pub fn open() -> Self {
-        if crate::arch::ata::is_drive_present() {
-            let sectors = crate::arch::ata::PRIMARY_ATA.lock().as_ref().map_or(0, |d| d.total_sectors());
-            if sectors >= SECTORS_PER_BLOCK * 64 {
-                return Self {
-                    backend: Backend::Ata,
-                    total_blocks: sectors / SECTORS_PER_BLOCK,
-                };
+        if service::is_online(ENDPOINT_BLOCK_DEV) {
+            match Self::query_driver() {
+                Ok(blocks) => return Self { backend: Backend::Driver, total_blocks: blocks },
+                Err(e) => crate::println!("[!] {}", e),
             }
         }
         let pages = (RAM_POOL_BYTES / BLOCK) as usize;
@@ -109,9 +133,23 @@ impl Vdev {
         }
     }
 
-    /// Returns true if this virtual device is backed by physical hardware (ATA disk) rather than RAM.
+    /// Asks the disk driver about its disk; returns its size in blocks.
+    fn query_driver() -> Result<u64, &'static str> {
+        let reply = driver_request(MSG_BLOCK_GET_SIZE, [0; 4], "ZFS: the disk driver cannot size the disk")?;
+        let window = driver_window()?;
+        let model = core::str::from_utf8(&window[..40]).unwrap_or("").trim_end_matches(|c: char| c == ' ' || c == '\0');
+        *DISK_INFO.lock() = Some(DiskInfo {
+            model: String::from(model),
+            sectors: reply.args[1] * (BLOCK / SECTOR),
+            lba48: reply.args[2] != 0,
+            dma: reply.args[3] != 0,
+        });
+        Ok(reply.args[1])
+    }
+
+    /// Returns true if this virtual device is a disk rather than RAM.
     pub fn is_hardware_backed(&self) -> bool {
-        matches!(self.backend, Backend::Ata | Backend::BlockDeviceEndpoint(_))
+        matches!(self.backend, Backend::Driver)
     }
 
     /// Reads `count` consecutive blocks starting at `block` into `buf`.
@@ -125,32 +163,15 @@ impl Vdev {
                 core::ptr::copy_nonoverlapping(base.add((block * BLOCK) as usize), buf.as_mut_ptr(), buf.len());
                 Ok(())
             },
-            Backend::Ata => {
-                let mut guard = crate::arch::ata::PRIMARY_ATA.lock();
-                let dev = guard.as_mut().ok_or("ZFS: ATA disk vanished")?;
-                for (i, chunk) in buf.chunks_mut(ZFS_BLOCK_SIZE * MAX_RUN).enumerate() {
-                    let lba = (block + (i * MAX_RUN) as u64) * SECTORS_PER_BLOCK;
-                    let sectors = (chunk.len() / crate::arch::ata::ATA_SECTOR_SIZE) as u8;
-                    dev.read_sectors(lba, sectors, chunk)?;
+            Backend::Driver => {
+                let run = service::WINDOW_SIZE;
+                for (i, chunk) in buf.chunks_mut(run).enumerate() {
+                    let n = (chunk.len() / ZFS_BLOCK_SIZE) as u64;
+                    let at = block + (i * run / ZFS_BLOCK_SIZE) as u64;
+                    driver_request(MSG_BLOCK_READ, [at, n, 0, 0], "ZFS: disk read failed")?;
+                    chunk.copy_from_slice(&driver_window()?[..chunk.len()]);
                 }
                 Ok(())
-            }
-            Backend::BlockDeviceEndpoint(ep_id) => {
-                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
-                    let msg = crate::ipc::Message::with_args(
-                        crate::ipc::protocol::MSG_BLOCK_READ,
-                        [block, count as u64, buf.as_mut_ptr() as u64, 0],
-                    );
-                    ep.send_blocking(msg);
-                    let reply = ep.receive_blocking();
-                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
-                        Ok(())
-                    } else {
-                        Err("ZFS: block read failed over IPC endpoint")
-                    }
-                } else {
-                    Err("ZFS: block device endpoint missing")
-                }
             }
         }
     }
@@ -166,62 +187,23 @@ impl Vdev {
                 core::ptr::copy_nonoverlapping(buf.as_ptr(), base.add((block * BLOCK) as usize), buf.len());
                 Ok(())
             },
-            Backend::Ata => {
-                let mut guard = crate::arch::ata::PRIMARY_ATA.lock();
-                let dev = guard.as_mut().ok_or("ZFS: ATA disk vanished")?;
-                for (i, chunk) in buf.chunks(ZFS_BLOCK_SIZE * MAX_RUN).enumerate() {
-                    let lba = (block + (i * MAX_RUN) as u64) * SECTORS_PER_BLOCK;
-                    let sectors = (chunk.len() / crate::arch::ata::ATA_SECTOR_SIZE) as u8;
-                    dev.write_sectors(lba, sectors, chunk)?;
+            Backend::Driver => {
+                let run = service::WINDOW_SIZE;
+                for (i, chunk) in buf.chunks(run).enumerate() {
+                    let n = (chunk.len() / ZFS_BLOCK_SIZE) as u64;
+                    let at = block + (i * run / ZFS_BLOCK_SIZE) as u64;
+                    driver_window()?[..chunk.len()].copy_from_slice(chunk);
+                    driver_request(MSG_BLOCK_WRITE, [at, n, 0, 0], "ZFS: disk write failed")?;
                 }
                 Ok(())
-            }
-            Backend::BlockDeviceEndpoint(ep_id) => {
-                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
-                    let msg = crate::ipc::Message::with_args(
-                        crate::ipc::protocol::MSG_BLOCK_WRITE,
-                        [block, count as u64, buf.as_ptr() as u64, 0],
-                    );
-                    ep.send_blocking(msg);
-                    let reply = ep.receive_blocking();
-                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
-                        Ok(())
-                    } else {
-                        Err("ZFS: block write failed over IPC endpoint")
-                    }
-                } else {
-                    Err("ZFS: block device endpoint missing")
-                }
             }
         }
     }
 
-    /// Flushes hardware write caches to non-volatile storage.
-    ///
-    /// # Errors
-    /// Returns an error if the underlying ATA controller command fails.
+    /// Flushes the disk's write cache to non-volatile storage.
     pub fn flush(&mut self) -> Result<(), &'static str> {
         match &self.backend {
-            Backend::Ata => {
-                if let Some(dev) = crate::arch::ata::PRIMARY_ATA.lock().as_mut() {
-                    dev.flush()?;
-                }
-                Ok(())
-            }
-            Backend::BlockDeviceEndpoint(ep_id) => {
-                if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(*ep_id) {
-                    let msg = crate::ipc::Message::new(crate::ipc::protocol::MSG_BLOCK_FLUSH);
-                    ep.send_blocking(msg);
-                    let reply = ep.receive_blocking();
-                    if reply.label == crate::ipc::protocol::MSG_BLOCK_REPLY && reply.args[0] == 0 {
-                        Ok(())
-                    } else {
-                        Err("ZFS: block cache flush failed over IPC endpoint")
-                    }
-                } else {
-                    Err("ZFS: block device endpoint missing")
-                }
-            }
+            Backend::Driver => driver_request(MSG_BLOCK_FLUSH, [0; 4], "ZFS: disk cache flush failed").map(|_| ()),
             Backend::Ram(_) => Ok(()),
         }
     }

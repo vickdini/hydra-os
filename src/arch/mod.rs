@@ -26,8 +26,6 @@
 //! - **Hardware Interaction**: Control registers (`CR0`..`CR4`), MSRs, `GDTR`/`IDTR`/`TR`, and legacy/PCI x86 I/O ports.
 //! - **Concurrency**: Interrupt-safe spinlocks (`spin::Mutex`) and lock-free atomic state variables.
 
-/// Bare-metal ATA/IDE PIO and Bus-Master DMA hard disk driver.
-pub mod ata;
 /// UEFI Boot Services termination and full bare-metal hardware takeover sequence.
 pub mod boot_services;
 /// `x86_64` control register (`CR0`, `CR2`, `CR3`, `CR4`) state inspection.

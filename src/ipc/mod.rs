@@ -29,6 +29,8 @@ pub mod endpoint;
 pub mod message;
 /// Microkernel service protocol operation codes and serialization formats.
 pub mod protocol;
+/// Request/reply calls to Ring 3 driver and server processes, with shared data windows.
+pub mod service;
 
 pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
 pub use endpoint::{

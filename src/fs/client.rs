@@ -18,7 +18,7 @@
 //!
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
-//! - Hardware Interaction: Accesses the ZFS storage pool via [`with_server`] and UEFI boot media in [`ZfsClient::sync_boot_binaries`].
+//! - Hardware Interaction: Accesses the ZFS storage pool via [`with_server`] and UEFI boot media in [`ZfsClient::read_boot_files`].
 //! - Concurrency: Acquires the global [`ZFS_SERVER`] spinlock for the duration of each operation.
 
 use alloc::vec::Vec;
@@ -994,23 +994,20 @@ impl ZfsClient {
         });
     }
 
-    /// Imports userland ELF test binaries and configuration files from the UEFI boot volume into the ZFS pool.
+    /// Reads the userland ELF test binaries and configuration files the UEFI boot volume
+    /// provides, for [`Self::import_boot_files`].
     ///
-    /// Must be called while UEFI Boot Services are still active (prior to `ExitBootServices`).
-    /// Skips files that already exist in ZFS with identical byte contents, and commits the pool
-    /// if at least one file was imported or updated.
-    ///
-    /// # Returns
-    ///
-    /// The number of newly imported or updated files written into ZFS.
-    pub fn sync_boot_binaries() -> usize {
+    /// Must be called while UEFI Boot Services are still active (prior to `ExitBootServices`):
+    /// the pool is mounted only after the hardware takeover, through the disk driver.
+    pub fn read_boot_files() -> Vec<BootFile> {
+        let mut files = Vec::new();
         if crate::console::is_hardware_mode() {
-            return 0;
+            return files;
         }
 
         let mut root = match crate::shell::fs::open_root_volume() {
             Ok(r) => r,
-            Err(_) => return 0,
+            Err(_) => return files,
         };
 
         let fixed_files = [
@@ -1055,7 +1052,6 @@ impl ZfsClient {
             }
         }
 
-        let mut imported_count = 0;
         let mut path_u16 = [0u16; 128];
 
         for (fat_path, zfs_path) in candidate_files.iter() {
@@ -1085,7 +1081,23 @@ impl ZfsClient {
                     Ok(n) => total_read += n,
                 }
             }
-            let data = &file_buf[..total_read];
+            file_buf.truncate(total_read);
+            files.push(BootFile { boot_path: alloc::string::String::from(fat_path), pool_path: alloc::string::String::from(zfs_path), data: file_buf });
+        }
+        files
+    }
+
+    /// Imports files read by [`Self::read_boot_files`] into the pool. Skips files that
+    /// already exist with identical contents, and commits the pool if at least one file was
+    /// imported or updated.
+    ///
+    /// # Returns
+    ///
+    /// The number of newly imported or updated files written into ZFS.
+    pub fn import_boot_files(files: Vec<BootFile>) -> usize {
+        let mut imported_count = 0;
+        for f in files.iter() {
+            let (fat_path, zfs_path, data) = (f.boot_path.as_str(), f.pool_path.as_str(), f.data.as_slice());
 
             // Skip files already imported with identical contents
             if let Ok(st) = Self::file_stat(zfs_path) {
@@ -1110,7 +1122,7 @@ impl ZfsClient {
                 }
                 imported_count += 1;
                 crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
-                crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes)", fat_path, zfs_path, total_read);
+                crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes)", fat_path, zfs_path, data.len());
             }
         }
 
@@ -1119,6 +1131,16 @@ impl ZfsClient {
         }
         imported_count
     }
+}
+
+/// A file from the boot volume, read before the hardware takeover for import into the pool.
+pub struct BootFile {
+    /// Path on the boot volume.
+    pub boot_path: alloc::string::String,
+    /// Path in the pool.
+    pub pool_path: alloc::string::String,
+    /// Contents.
+    pub data: Vec<u8>,
 }
 
 /// Recursively creates `path` and any missing parent directories under the pool root, returning the final directory inode.

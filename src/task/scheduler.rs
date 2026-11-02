@@ -82,6 +82,33 @@ pub struct TaskSnapshot {
     pub rip: u64,
 }
 
+/// Loads a Linux program into a new address space, for [`Scheduler::spawn_linux_process`].
+///
+/// Reads files (its dynamic linker), so it must run without the scheduler lock: disk reads
+/// are calls to the disk driver process, which need the scheduler.
+pub fn load_linux_image(
+    exe: super::exec::ElfSource,
+    exec_path: &str,
+    args: &[&str],
+    uid: u32,
+    gid: u32,
+    root: Option<u64>,
+) -> Result<super::exec::LinuxExecImage, &'static str> {
+    let read_in_root = |path: &str| -> Option<super::exec::ElfSource> {
+        let root = root?;
+        let ino = crate::fs::ZfsClient::resolve_in(root, root, path.as_bytes(), true).ok()?;
+        crate::compat::linux::mm::inode_source(ino).ok()
+    };
+    let read_legacy = |path: &str| -> Option<super::exec::ElfSource> {
+        read_interpreter(path).map(|b| super::exec::ElfSource::from_bytes(b.into_boxed_slice()))
+    };
+    let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
+    let env = linux_env(uid);
+    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+    super::exec::load_linux_exec(exe, exec_path, args, &env, super::exec::ExecCreds { uid, gid, euid: uid, egid: gid }, interp_reader)
+        .map_err(|e| e.as_str())
+}
+
 /// Global preemptive round-robin scheduler instance.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
@@ -100,6 +127,40 @@ pub struct Scheduler {
     /// The kernel's own page table root, which kernel tasks always run on (never a Linux
     /// process's tables: those are freed when the process exits).
     kernel_cr3: u64,
+    /// Driver calls in progress, innermost last (a server may call another service).
+    handoffs: [Option<Handoff>; MAX_HANDOFFS],
+    /// The caller of a driver call that just ended: it runs next, before any other task,
+    /// since it may hold kernel locks (as when an in-kernel driver returned to it).
+    resume_first: Option<u64>,
+    /// Descriptor tables of exited tasks, to close without the scheduler lock (closing a
+    /// socket or a file talks to a driver process, which needs the scheduler).
+    pending_close: Vec<crate::fs::FdTable>,
+}
+
+/// Nesting limit of driver calls (kernel -> file server -> disk driver needs 2).
+const MAX_HANDOFFS: usize = 8;
+
+/// Whether a driver call is in progress (mirrors [`Scheduler::handoffs`] for lock-free
+/// checks): its caller may hold kernel locks.
+static HANDOFF_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether a driver is serving a call, whose caller may hold kernel locks (the file
+/// system's): work that takes such locks must wait until it is over.
+pub fn handoff_active() -> bool {
+    HANDOFF_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// A driver call in progress ([`crate::ipc::service::call`]): `caller` waits while only
+/// `server` runs, as an in-kernel driver would have run in the caller's place. Callers may
+/// hold kernel locks; no other task runs until the reply, so none can contend for them.
+#[derive(Clone, Copy)]
+struct Handoff {
+    /// Task serving the call.
+    server: u64,
+    /// Task waiting for the reply.
+    caller: u64,
+    /// Tick after which the caller resumes without a reply.
+    deadline: u64,
 }
 
 impl Scheduler {
@@ -112,6 +173,74 @@ impl Scheduler {
             default_timeslice: DEFAULT_TIMESLICE_TICKS,
             initialized: false,
             kernel_cr3: 0,
+            handoffs: [None; MAX_HANDOFFS],
+            resume_first: None,
+            pending_close: Vec::new(),
+        }
+    }
+
+    /// Takes the descriptor tables of exited tasks, for [`crate::task::close_retired`].
+    pub fn take_pending_close(&mut self) -> Vec<crate::fs::FdTable> {
+        core::mem::take(&mut self.pending_close)
+    }
+
+    /// Takes the current task's descriptor table if no other thread shares it (it is
+    /// about to exit and closes it itself, before it is retired).
+    pub fn take_current_fds_if_last(&mut self) -> Option<crate::fs::FdTable> {
+        if !self.initialized || self.current_index >= self.tasks.len() {
+            return None;
+        }
+        let task = &mut self.tasks[self.current_index];
+        if alloc::sync::Arc::strong_count(&task.fds) != 1 {
+            return None;
+        }
+        let fds = core::mem::replace(&mut task.fds, crate::fs::FdTable::empty().into_shared());
+        alloc::sync::Arc::try_unwrap(fds).ok().map(|m| m.into_inner())
+    }
+
+    /// Innermost driver call in progress.
+    fn handoff_top(&self) -> Option<Handoff> {
+        self.handoffs.iter().rev().find_map(|h| *h)
+    }
+
+    /// Publishes whether a driver call is in progress (after the stack changed).
+    fn note_handoffs(&self) {
+        HANDOFF_ACTIVE.store(self.handoffs.iter().any(|h| h.is_some()), core::sync::atomic::Ordering::Release);
+    }
+
+    /// Blocks the current task in a call to the driver task `server` and lets only that
+    /// task run (the caller then yields) until [`Self::end_handoff`] or tick `deadline`.
+    /// Returns `false` if calls are nested too deeply.
+    pub fn begin_handoff(&mut self, server: u64, deadline: u64) -> bool {
+        let Some(slot) = self.handoffs.iter().position(|h| h.is_none()) else { return false };
+        let caller = self.current_task_id().0;
+        self.handoffs[slot] = Some(Handoff { server, caller, deadline });
+        self.note_handoffs();
+        self.block_current();
+        true
+    }
+
+    /// Ends the innermost driver call, served by `server`, and makes its caller runnable.
+    pub fn end_handoff(&mut self, server: u64) {
+        if let Some(i) = self.handoffs.iter().rposition(|h| h.is_some()) {
+            if let Some(h) = self.handoffs[i] {
+                if h.server == server {
+                    self.handoffs[i] = None;
+                    self.note_handoffs();
+                    self.resume_caller(h.caller);
+                }
+            }
+        }
+    }
+
+    /// Makes a task blocked in a driver call runnable again, and the next to run.
+    fn resume_caller(&mut self, caller: u64) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id.0 == caller) {
+            if t.state == TaskState::Blocked {
+                t.state = TaskState::Ready;
+                t.woken = true;
+                self.resume_first = Some(caller);
+            }
         }
     }
 
@@ -216,6 +345,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             cmdline: None,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -305,6 +435,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             cmdline: None,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -390,6 +521,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             cmdline: None,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -414,13 +546,8 @@ impl Scheduler {
         uid: u32,
         gid: u32,
     ) -> Result<TaskId, &'static str> {
-        if super::exec::is_vm_loadable(elf_data) {
-            // /proc/self/exe must be absolute; `linux run` resolves bare names in /bin
-            let arg0 = args.first().copied().unwrap_or(name);
-            let exec_path = if arg0.starts_with('/') { alloc::string::String::from(arg0) } else { alloc::format!("/bin/{}", arg0) };
-            let source = super::exec::ElfSource::from_bytes(elf_data.to_vec().into_boxed_slice());
-            return self.spawn_linux_process(name, source, &exec_path, args, priority, uid, gid, None);
-        }
+        // Programs for a private address space go through `task::spawn_linux_elf`, which
+        // loads them before taking the scheduler lock
 
         let current_cr3 = Cr3::read().0.start_address().as_u64();
         let image = super::elf::load_linux_elf(elf_data, args).map_err(|e| e.as_str())?;
@@ -466,6 +593,7 @@ impl Scheduler {
             mm: None,
             exe: None,
             cmdline: None,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -485,10 +613,13 @@ impl Scheduler {
     ///
     /// With `root` set, the process runs `chroot`ed into that directory inode: the dynamic
     /// linker is looked up inside it and it becomes the process's root and working directory.
+    ///
+    /// `image` comes from [`load_linux_image`], which must run before the scheduler lock is
+    /// taken.
     pub fn spawn_linux_process(
         &mut self,
         name: &'static str,
-        exe: super::exec::ElfSource,
+        image: super::exec::LinuxExecImage,
         exec_path: &str,
         args: &[&str],
         priority: TaskPriority,
@@ -496,27 +627,6 @@ impl Scheduler {
         gid: u32,
         root: Option<u64>,
     ) -> Result<TaskId, &'static str> {
-        let read_in_root = |path: &str| -> Option<super::exec::ElfSource> {
-            let root = root?;
-            let ino = crate::fs::ZfsClient::resolve_in(root, root, path.as_bytes(), true).ok()?;
-            crate::compat::linux::mm::inode_source(ino).ok()
-        };
-        let read_legacy = |path: &str| -> Option<super::exec::ElfSource> {
-            read_interpreter(path).map(|b| super::exec::ElfSource::from_bytes(b.into_boxed_slice()))
-        };
-        let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
-        let env = linux_env(uid);
-        let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
-        let image = super::exec::load_linux_exec(
-            exe,
-            exec_path,
-            args,
-            &env,
-            super::exec::ExecCreds { uid, gid, euid: uid, egid: gid },
-            interp_reader,
-        )
-        .map_err(|e| e.as_str())?;
-
         let id = TaskId(self.next_id);
         self.next_id += 1;
 
@@ -566,6 +676,7 @@ impl Scheduler {
             mm: Some(mm),
             exe: Some(alloc::sync::Arc::from(exec_path)),
             cmdline: Some(Task::join_cmdline(args.iter().map(|a| a.as_bytes()))),
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -724,6 +835,7 @@ impl Scheduler {
             mm: parent_mm,
             exe: parent_exe,
             cmdline: parent_cmdline,
+            service: None,
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
@@ -771,6 +883,21 @@ impl Scheduler {
             }
         }
 
+        // 1b. A driver call whose server died or missed its deadline ends: the caller
+        // resumes and finds no reply
+        while let Some(h) = self.handoff_top() {
+            let server_alive = self.tasks.iter().any(|t| t.id.0 == h.server && t.state != TaskState::Dead);
+            if server_alive && current_ticks < h.deadline {
+                break;
+            }
+            if let Some(i) = self.handoffs.iter().rposition(|x| x.is_some()) {
+                self.handoffs[i] = None;
+            }
+            self.note_handoffs();
+            self.resume_caller(h.caller);
+        }
+        let handoff_server = self.handoff_top().map(|h| h.server);
+
         let mut curr_idx = self.current_index;
         let curr_task = &mut self.tasks[curr_idx];
         curr_task.ticks_run += 1;
@@ -779,8 +906,12 @@ impl Scheduler {
         // woken by an event (input, a socket, a futex; not a timed sleep, which polling
         // loops use) preempts it: interactive work waits at most one tick instead of a
         // full timeslice per busy task ahead of it.
-        if curr_task.state == TaskState::Running && curr_task.timeslice_remaining > 1 {
+        let may_continue = handoff_server.map_or(true, |s| s == curr_task.id.0) && self.resume_first.is_none();
+        if curr_task.state == TaskState::Running && curr_task.timeslice_remaining > 1 && may_continue {
             curr_task.timeslice_remaining -= 1;
+            if handoff_server.is_some() {
+                return; // the server of a driver call runs undisturbed until it replies
+            }
             let woken_waiting = self
                 .tasks
                 .iter()
@@ -839,9 +970,24 @@ impl Scheduler {
         let num_tasks = self.tasks.len();
         let mut next_idx = None;
 
+        // The caller of a driver call that just ended runs first
+        if let Some(caller) = self.resume_first.take() {
+            next_idx = self.tasks.iter().position(|t| t.id.0 == caller && t.state == TaskState::Ready);
+        }
+        // During a driver call only its server runs, or the idle task while the server
+        // waits for its device
+        if let (Some(server), None) = (handoff_server, next_idx) {
+            let server_idx = self.tasks.iter().position(|t| t.id.0 == server && t.state == TaskState::Ready);
+            let idle_idx = self.tasks.iter().position(|t| t.priority == TaskPriority::Idle && t.state == TaskState::Ready);
+            next_idx = server_idx.or(idle_idx);
+        }
+
         // First pass: high-priority service tasks (the network task) run as soon as they
         // are ready; then non-idle Ready tasks in round-robin order
         for offset in 1..=num_tasks {
+            if next_idx.is_some() {
+                break;
+            }
             let idx = (curr_idx + offset) % num_tasks;
             if self.tasks[idx].state == TaskState::Ready && self.tasks[idx].priority >= TaskPriority::High {
                 next_idx = Some(idx);
@@ -868,7 +1014,7 @@ impl Scheduler {
         }
 
         // Second pass: If no standard task is ready, allow Idle task (priority 0)
-        if next_idx.is_none() {
+        if next_idx.is_none() && handoff_server.is_none() {
             for offset in 1..=num_tasks {
                 let idx = (curr_idx + offset) % num_tasks;
                 if self.tasks[idx].state == TaskState::Ready {
@@ -951,6 +1097,11 @@ impl Scheduler {
         self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| alloc::string::String::from(t.exe_path()))
     }
 
+    /// Runs `f` on task `id`, or returns `None` if there is no such task.
+    pub fn with_task_mut<R>(&mut self, id: TaskId, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
+        self.tasks.iter_mut().find(|t| t.id == id).map(f)
+    }
+
     /// Runs `f` on a live thread of process `tgid`, or returns `None` if there is none.
     pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
         self.tasks.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(f)
@@ -961,8 +1112,8 @@ impl Scheduler {
         self.tasks.iter().filter(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| t.ticks_run).sum()
     }
 
-    /// Wakes task `id` from an event wait; a task that is not waiting yet keeps the wakeup
-    /// for its next wait. Tasks blocked for other reasons (futexes, IPC) are not disturbed.
+    /// Wakes task `id` from an event wait; a task that is not waiting yet, or is blocked for
+    /// another reason (a futex, a driver call), keeps the wakeup for its next wait.
     pub fn wake_task(&mut self, id: u64) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id.0 == id) {
             match task.state {
@@ -972,7 +1123,9 @@ impl Scheduler {
                     task.event_wait = false;
                     task.woken = true;
                 }
-                TaskState::Blocked | TaskState::Sleeping { .. } => {}
+                // Blocked for another reason (a futex, a driver call it is making): not
+                // disturbed, but the wakeup is kept for its next wait, as for a running task
+                // (an interrupt can wake a task while it waits for its driver's reply)
                 _ => task.wake_pending = true,
             }
         }
@@ -1075,10 +1228,11 @@ impl Scheduler {
             }
         }
 
-        // The last thread using the descriptor table closes its descriptors
+        // The last thread using the descriptor table has its descriptors closed, after the
+        // scheduler lock is released (see `task::close_retired`)
         let fds = core::mem::replace(&mut self.tasks[idx].fds, crate::fs::FdTable::empty().into_shared());
         if let Ok(fds) = alloc::sync::Arc::try_unwrap(fds) {
-            fds.into_inner().close_all();
+            self.pending_close.push(fds.into_inner());
         }
         if self.tasks[idx].personality == super::tcb::TaskPersonality::Linux {
             crate::compat::linux::proc::thread_exited(self.tasks[idx].tgid, self.tasks[idx].id.0);
@@ -1173,17 +1327,11 @@ impl Scheduler {
         }
     }
 
-    /// Executes a closure with a mutable reference to the currently executing task's FD table.
-    pub fn current_task_fds_mut<F, R>(&mut self, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut crate::fs::FdTable) -> R,
-    {
-        if self.initialized && self.current_index < self.tasks.len() {
-            Some(f(&mut self.tasks[self.current_index].fds.lock()))
-        } else {
-            None
-        }
+    /// The current task's descriptor table (shared, with a lock of its own).
+    pub fn current_fds(&self) -> Option<crate::fs::SharedFdTable> {
+        (self.initialized && self.current_index < self.tasks.len()).then(|| self.tasks[self.current_index].fds.clone())
     }
+
 
     /// Returns true if a task with the given ID exists and is active (not Dead).
     pub fn is_task_alive(&self, id: TaskId) -> bool {

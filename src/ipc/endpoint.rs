@@ -236,16 +236,8 @@ pub static SYSTEM_ENDPOINTS: [SharedEndpoint; 64] = [
     SharedEndpoint::new(60), SharedEndpoint::new(61), SharedEndpoint::new(62), SharedEndpoint::new(63),
 ];
 
-/// Well-known Endpoint ID for the microkernel OpenZFS File Server (0x20 = 32).
-pub const ENDPOINT_ZFS_SERVER: u32 = 0x20;
-/// Well-known Endpoint ID for the Ring 3 Block Device Driver daemon (0x21 = 33).
-pub const ENDPOINT_BLOCK_DEV: u32 = 0x21;
-/// Well-known Endpoint ID for the Ring 3 Network Interface Driver daemon (0x22 = 34).
-pub const ENDPOINT_NET_DEV: u32 = 0x22;
-/// Well-known Endpoint ID for the Ring 3 Display / Compositor Server (0x23 = 35).
-pub const ENDPOINT_DISPLAY_DEV: u32 = 0x23;
-/// Well-known Endpoint ID for the MINIX 3 Reincarnation / Process Supervisor (0x24 = 36).
-pub const ENDPOINT_SUPERVISOR: u32 = 0x24;
+// The well-known endpoint numbers are part of the protocol shared with Ring 3 programs
+pub use super::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, ENDPOINT_SUPERVISOR, ENDPOINT_ZFS_SERVER};
 
 /// Retrieves a reference to a system endpoint by its numeric ID.
 pub fn get_system_endpoint(id: u32) -> Option<&'static SharedEndpoint> {

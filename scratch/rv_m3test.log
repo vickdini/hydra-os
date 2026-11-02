@@ -11,8 +11,8 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd77fc43
-    RFLAGS: 0x202, RSP: 0xbfe627f0
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd789393
+    RFLAGS: 0x206, RSP: 0xbfe627d0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
     - CR3 (Active PML4 Root): 0xbfc01000
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd77f870 -> PhysAddr 0xbd77f870
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd788fc0 -> PhysAddr 0xbd788fc0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -54,40 +54,17 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 5: Testing Microkernel IPC Rendezvous...
 [1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
 [+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[boot] anchor (hydra_syscall_dispatcher) = 0xbd7cf040
 [1m[33m[40m
-[*] Step 6: Initializing Storage Subsystem & ZFS File Server...
-[ata] bus-master DMA enabled
-[1m[32m[40m[+] ATA Storage: Detected Primary Master 'QEMU HARDDISK' (16384 MiB, 33554432 sectors, LBA48)
-[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
-[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
-[1m[33m[40m    - DHCP Lease: Acquiring dynamic IPv4 configuration... [1m[32m[40mONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #47239, 77762 objects)
-[+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 2824 MiB used, TXG #47239, Fletcher-4, CoW)
-    - Persistence : Active (Primary Master ATA Hard Disk)
-    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+[*] Step 6: Initializing Devices & Reading the Boot Volume...
+[1m[32m[40m[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Boot volume: 25 files staged for the pool
 [1m[33m[40m
 [*] Step 7: Initializing Multitasking Scheduler...
 [1m[32m[40m[+] Multitasking Subsystem Online:
     - Main Thread registered: Task #0 ('shell')
     - Background Idle Thread: Task #1 ('idle', priority 0)
     - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
-    - Reincarnation Server  : Active (MINIX 3 Process Supervisor, 4 System Drivers)
-[1m[36m[40m
-============================================================
- [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
-============================================================
-
-+--------------------------------------------------------------+
-|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
-|  Type 'help' for available commands, or 'info' for details.  |
-+--------------------------------------------------------------+
-
-[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): [1m[33m[40m3... 2... [1m[31m[40mCANCELLED
-[1m[37m[40m    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.
-
-[1m[32m[40mhydra:/bin$ linux run /bin/m3test.elf
-[1m[37m[40m[1m[33m[40m[*] Auto-transitioning to bare-metal hardware mode to launch Ring 3 Linux ELF '/bin/m3test.elf'...
 [mouse] 4 packets (wheel enabled)
 
 ============================================================
@@ -103,10 +80,36 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
   - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
 ============================================================
 
-[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
+[ata-driver] 'QEMU HARDDISK': 16384 MiB, LBA48, bus-master DMA
+[supervisor] started 'ata_driver' (process 2, endpoint 0x21)
+[e1000-driver] MAC 52:54:00:12:34:56, link up
+[supervisor] started 'net_driver' (process 3, endpoint 0x22)
+[supervisor] started 'display_server' (process 4, endpoint 0x23)
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
 
+[*] Step 8: Initializing the ZFS File Server...
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #47335, 81887 objects)
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 2878 MiB used, TXG #47335, Fletcher-4, CoW)
+    - Persistence : Active (disk, through the Ring 3 ata-driver)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... CANCELLED
+    Type 'linux plasma' to start the desktop later.
+
+hydra:/bin$ linux run /bin/m3test.elf
 [+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 4 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
 [m3test] eventfd2 with EFD_CLOEXEC                              PASS
 [m3test] eventfd read returns the sum and resets                PASS
 [m3test] blocking eventfd read waits for a writer               PASS
@@ -137,5 +140,5 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [m3test] rm_watch queues IN_IGNORED                             PASS
 [m3test] EPOLLONESHOT reports once until re-armed               PASS
 [m3test] ALL PASSED (0 failures)
-[+] Linux process 4 exited with status 0.
+[+] Linux process 8 exited with status 0.
 hydra:/bin$ 

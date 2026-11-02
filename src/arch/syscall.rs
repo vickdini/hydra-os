@@ -65,14 +65,28 @@ pub const SYS_READ: u64 = 11;
 pub const SYS_PIPE: u64 = 12;
 /// Native Hydra system call: duplicate a file descriptor (`sys_dup2`).
 pub const SYS_DUP2: u64 = 13;
-/// Native Hydra system call: set CPU I/O privilege level for driver tasks (`sys_iopl`).
+/// Native Hydra system call: let a driver process use I/O ports (`sys_iopl`).
 pub const SYS_IOPL: u64 = 20;
-/// Native Hydra system call: map physical memory frame / MMIO into user space (`sys_physmap`).
+/// Native Hydra system call: map device memory granted to a driver (`sys_physmap`).
 pub const SYS_PHYSMAP: u64 = 21;
-/// Native Hydra system call: allocate contiguous DMA memory frames (`sys_dma_alloc`).
+/// Native Hydra system call: allocate physically contiguous DMA memory (`sys_dma_alloc`).
 pub const SYS_DMA_ALLOC: u64 = 22;
-/// Native Hydra system call: register an IPC endpoint for hardware IRQ notifications (`sys_irq_register`).
+/// Native Hydra system call: route an interrupt line to a driver (`sys_irq_register`).
 pub const SYS_IRQ_REGISTER: u64 = 23;
+/// Native Hydra system call: become the server of a driver service (`sys_svc_register`).
+pub const SYS_SVC_REGISTER: u64 = 24;
+/// Native Hydra system call: wait for the next request to a service (`sys_svc_recv`).
+pub const SYS_SVC_RECV: u64 = 25;
+/// Native Hydra system call: answer the request being served (`sys_svc_reply`).
+pub const SYS_SVC_REPLY: u64 = 26;
+/// Native Hydra system call: call another service (`sys_svc_call`).
+pub const SYS_SVC_CALL: u64 = 27;
+/// Native Hydra system call: map zeroed anonymous memory (`sys_map_anon`).
+pub const SYS_MAP_ANON: u64 = 28;
+/// Native Hydra system call: wait for an interrupt routed to the driver (`sys_irq_wait`).
+pub const SYS_IRQ_WAIT: u64 = 29;
+/// Native Hydra system call: unmask a serviced interrupt without waiting (`sys_irq_ack`).
+pub const SYS_IRQ_ACK: u64 = 30;
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
@@ -252,14 +266,35 @@ pub fn init() {
     }
 }
 
+/// Reads a [`crate::ipc::service::WireMessage`] from user memory.
+fn load_wire_message(ptr: u64) -> Result<crate::ipc::Message, i64> {
+    let bytes = crate::compat::linux::vfs::copy_in(ptr, core::mem::size_of::<crate::ipc::service::WireMessage>())?;
+    let wire = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const crate::ipc::service::WireMessage) };
+    Ok(wire.into())
+}
+
+/// Writes `msg` to user memory as a [`crate::ipc::service::WireMessage`]; returns 0 or `-EFAULT`.
+fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
+    let wire = crate::ipc::service::WireMessage::from(msg);
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&wire as *const _ as *const u8, core::mem::size_of::<crate::ipc::service::WireMessage>())
+    };
+    crate::compat::linux::vfs::copy_out(ptr, bytes).map_or_else(|e| e, |()| 0)
+}
+
 /// High-level Rust system call dispatcher called by `asm_syscall_entry`.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
 
-    // Release address spaces of exited processes (no locks are held at syscall entry)
-    crate::memory::vm::reap_retired_mms();
-    crate::task::scheduler::reap_dead_tasks();
+    // Release address spaces of exited processes: no locks are held at syscall entry,
+    // except while a driver serves a call (its caller may hold the file system's lock,
+    // which releasing file mappings takes), so not then
+    if !crate::task::scheduler::handoff_active() {
+        crate::task::close_retired();
+        crate::memory::vm::reap_retired_mms();
+        crate::task::scheduler::reap_dead_tasks();
+    }
 
     // Check if active task uses Linux ABI personality
     if crate::task::current_personality() == crate::task::TaskPersonality::Linux {
@@ -595,106 +630,94 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         SYS_IOPL => {
             stats.iopl_calls += 1;
             drop(stats);
-            // arg0: requested IOPL level (0..3)
-            let level = (arg0 as u64) & 3;
-            frame.rflags = (frame.rflags & !0x3000) | (level << 12);
-            if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                sched.current_task_mut(|task| {
-                    task.regs.rflags = (task.regs.rflags & !0x3000) | (level << 12);
-                });
+            // arg0: requested IOPL (0 or 3); driver processes only
+            match crate::ipc::service::iopl_allowed() {
+                Ok(()) => {
+                    let level = if arg0 & 3 != 0 { 3u64 } else { 0 };
+                    frame.rflags = (frame.rflags & !0x3000) | (level << 12);
+                    0
+                }
+                Err(e) => e,
             }
-            0
         }
         SYS_PHYSMAP => {
             stats.physmap_calls += 1;
             drop(stats);
-            let phys_addr = arg0;
-            let size = arg1 as usize;
-            if phys_addr == 0 || size == 0 {
-                -22 // -EINVAL
-            } else {
-                let user_virt_base = 0x0000_6000_0000_0000u64 | (phys_addr & 0x0000_00FF_FFFF_F000);
-                let pages = (size + 4095) / 4096;
-                let mut alloc = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
-                let mut mapped_ok = true;
-                let mut space_guard = crate::memory::paging::KERNEL_SPACE.lock();
-                if let Some(ref mut space) = *space_guard {
-                    use x86_64::structures::paging::{Page, PhysFrame, PageTableFlags, Size4KiB};
-                    use x86_64::{VirtAddr, PhysAddr};
-                    for i in 0..pages {
-                        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_virt_base + (i as u64 * 4096)));
-                        let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr + (i as u64 * 4096)));
-                        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-                        unsafe {
-                            if space.map_page(page, frame, flags, &mut *alloc).is_err() {
-                                mapped_ok = false;
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    mapped_ok = false;
-                }
-                if mapped_ok {
-                    user_virt_base as i64
-                } else {
-                    -12 // -ENOMEM
-                }
-            }
+            // arg0: physical address, arg1: length; returns the mapped address
+            crate::ipc::service::physmap(arg0, arg1).map_or_else(|e| e, |a| a as i64)
         }
         SYS_DMA_ALLOC => {
             stats.dma_alloc_calls += 1;
             drop(stats);
-            let size = arg0 as usize;
-            let out_phys_ptr = arg1 as *mut u64;
-            if size == 0 {
-                -22 // -EINVAL
-            } else {
-                let pages = (size + 4095) / 4096;
-                let mut alloc = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
-                if let Some(first_frame) = alloc.allocate_contiguous_frames(pages) {
-                    let phys_base = first_frame.start_address().as_u64();
-                    let user_virt_base = 0x0000_5000_0000_0000u64 | (phys_base & 0x0000_00FF_FFFF_F000);
-                    let mut space_guard = crate::memory::paging::KERNEL_SPACE.lock();
-                    let mut mapped = true;
-                    if let Some(ref mut space) = *space_guard {
-                        use x86_64::structures::paging::{Page, PhysFrame, PageTableFlags, Size4KiB};
-                        use x86_64::{VirtAddr, PhysAddr};
-                        for i in 0..pages {
-                            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_virt_base + (i as u64 * 4096)));
-                            let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_base + (i as u64 * 4096)));
-                            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-                            unsafe {
-                                if space.map_page(page, frame, flags, &mut *alloc).is_err() {
-                                    mapped = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if mapped {
-                        if !out_phys_ptr.is_null() {
-                            unsafe { *out_phys_ptr = phys_base; }
-                        }
-                        user_virt_base as i64
-                    } else {
-                        -12 // -ENOMEM
-                    }
-                } else {
-                    -12 // -ENOMEM
-                }
+            // arg0: length, arg1: where to store the physical address; returns the address
+            match crate::ipc::service::dma_alloc(arg0) {
+                Ok((addr, phys)) => match crate::compat::linux::vfs::copy_out(arg1, &phys.to_le_bytes()) {
+                    Ok(()) => addr as i64,
+                    Err(e) => e,
+                },
+                Err(e) => e,
             }
         }
         SYS_IRQ_REGISTER => {
             stats.irq_register_calls += 1;
             drop(stats);
-            let irq = arg0 as u8;
-            let ep_id = arg1 as u32;
-            if irq < 16 {
-                crate::arch::idt::register_user_irq_endpoint(irq, ep_id);
-                0
+            // arg0: interrupt line
+            crate::ipc::service::irq_register(arg0).map_or_else(|e| e, |()| 0)
+        }
+        SYS_IRQ_WAIT => {
+            drop(stats);
+            // arg0: interrupt line, arg1: timeout in ticks (0: none); returns the count
+            crate::ipc::service::irq_wait(arg0, arg1).map_or_else(|e| e, |n| n as i64)
+        }
+        SYS_IRQ_ACK => {
+            drop(stats);
+            // arg0: interrupt line; returns the count since the last wait or acknowledgement
+            crate::ipc::service::irq_ack(arg0).map_or_else(|e| e, |n| n as i64)
+        }
+        SYS_SVC_REGISTER => {
+            drop(stats);
+            // arg0: endpoint; returns the window address
+            crate::ipc::service::register(arg0 as u32).map_or_else(|e| e, |a| a as i64)
+        }
+        SYS_SVC_RECV => {
+            drop(stats);
+            // arg0: endpoint, arg1: where to store the request (`WireMessage`)
+            match crate::ipc::service::recv(arg0 as u32) {
+                Ok(m) => store_wire_message(arg1, m),
+                Err(e) => e,
+            }
+        }
+        SYS_SVC_REPLY => {
+            drop(stats);
+            // arg0: endpoint, arg1: the answer (`WireMessage`)
+            match load_wire_message(arg1) {
+                Ok(m) => crate::ipc::service::reply(arg0 as u32, m).map_or_else(|e| e, |()| 0),
+                Err(e) => e,
+            }
+        }
+        SYS_SVC_CALL => {
+            drop(stats);
+            // arg0: endpoint, arg1: request in, reply out (`WireMessage`), arg2: timeout
+            // in ticks (0: the default); driver processes only
+            if crate::task::current_service().is_none() {
+                -1 // -EPERM
             } else {
-                -22 // -EINVAL
+                let timeout = if _arg2 == 0 { crate::ipc::service::CALL_TIMEOUT_TICKS } else { _arg2 };
+                match load_wire_message(arg1).and_then(|m| crate::ipc::service::call(arg0 as u32, m, timeout)) {
+                    Ok(r) => store_wire_message(arg1, r),
+                    Err(e) => e,
+                }
+            }
+        }
+        SYS_MAP_ANON => {
+            drop(stats);
+            // arg0: length; returns the address of zeroed, private, read-write memory
+            match crate::task::with_current_task_mut(|t| t.mm.clone()).flatten() {
+                Some(mm) => mm
+                    .lock()
+                    .mmap(0, arg0, 3, false, false, false, crate::memory::vm::Backing::Anon)
+                    .map_or_else(|e| e, |a| a as i64),
+                None => -14, // -EFAULT: no address space of its own
             }
         }
         _ => {
