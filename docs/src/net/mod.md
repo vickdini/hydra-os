@@ -38,11 +38,12 @@ Hydra OS implements a zero-dependency, `no_std` native network protocol stack ru
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|            Intel 82540EM (E1000) Gigabit NIC Controller Driver            |
+|      Ring 3 Intel 82540EM (E1000) NIC Driver (Endpoint 0x22, MMIO/DMA)   |
 |     - PCI Bus Enumeration (Vendor: 0x8086, Device: 0x100E)               |
 |     - 32-Entry Circular Ring Transmit (TX) & Receive (RX) Descriptors    |
-|     - Memory Mapped I/O (MMIO) Registers (CTRL, RCTL, TCTL, RAL/RAH)     |
+|     - Memory Mapped I/O (MMIO) Registers via Supervisor Grant            |
 |     - Direct Memory Access (DMA) Packet Buffers (2048 bytes per slot)    |
+|     - Fast IPC Packet Streaming via 256 KiB Shared Data Window           |
 +--------------------------------------------------------------------------+
                                      │
                                      ▼

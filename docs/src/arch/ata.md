@@ -4,6 +4,8 @@
 
 Hydra OS requires autonomous persistent secondary storage that remains fully functional after UEFI boot services are terminated (`ExitBootServices`). The **ATA / IDE Programmed I/O (PIO)** driver provides direct bare-metal block access to virtual and physical hard disk controllers (e.g. Intel PIIX3/PIIX4 IDE controllers or SATA controllers operating in IDE legacy compatibility mode) without any runtime BIOS/UEFI firmware dependencies.
 
+In accordance with Hydra's microkernel isolation model, the ATA block driver executes as an **unprivileged Ring 3 daemon (`userland/drivers/ata-driver`)**. The kernel grants it access to standard I/O port ranges `0x1F0..0x1F7` and `0x3F6`. It receives block read/write/flush requests over IPC endpoint `0x21` (`ENDPOINT_BLOCK_DEV`) backed by a 256 KiB zero-copy shared window.
+
 The driver acts as the physical block device backing the **OpenZFS Storage Pool Allocator (SPA)**, binding physical 512-byte sectors to ZFS 4096-byte virtual blocks (`vdev-ata-0`).
 
 ```text
@@ -13,17 +15,12 @@ The driver acts as the physical block device backing the **OpenZFS Storage Pool 
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|                  Microkernel ZFS Client & DMU Subsystem                  |
+|              Ring 3 ZFS Microkernel Server (Endpoint 0x20)               |
 +--------------------------------------------------------------------------+
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|            OpenZFS Storage Pool Allocator (SPA - 32 MiB Pool)             |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|               ATA / IDE Block Driver (Polled PIO, Ring 0)                |
+|              Ring 3 ATA Block Driver (Endpoint 0x21, PIO)                |
 +--------------------------------------------------------------------------+
                   │                                     │
                   ▼                                     ▼

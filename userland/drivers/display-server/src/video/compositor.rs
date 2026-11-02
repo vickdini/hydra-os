@@ -7,20 +7,20 @@
 //! Drawing directly to physical Video RAM (VRAM) over PCIe or legacy buses causes severe
 //! visible flickering, screen tearing, and sluggish redraw performance.
 //!
-//! The [`Compositor`] maintains an in-memory double buffer (`Vec<u32>`) in fast system RAM.
+//! The `Compositor` maintains an in-memory double buffer (`Vec<u32>`) in fast system RAM.
 //! All window primitives, geometric gradients, wallpaper meshes, desktop taskbars, and
 //! mouse pointer sprites are drawn off-screen. Once the frame is assembled, a single contiguous
 //! blit transfers the complete raster image to the physical UEFI GOP linear framebuffer.
 //!
 //! ## Key Types & Interfaces
 //!
-//! - [`Compositor`]: 32-bit ARGB off-screen canvas with alpha-blending and geometry primitives.
-//! - [`Color`]: Packed 32-bit ARGB color helpers (hex conversion, alpha blending, gradients).
+//! - `Compositor`: 32-bit ARGB off-screen canvas with alpha-blending and geometry primitives.
+//! - `Color`: Packed 32-bit ARGB color helpers (hex conversion, alpha blending, gradients).
 //!
 //! ## Privilege Level & Memory Context
 //!
-//! - Allocation: Backed by the dynamic microkernel heap (`alloc::vec::Vec`).
-//! - Execution: Ring 0 microkernel core.
+//! - Allocation: Backed by the userland driver heap (`alloc::vec::Vec`).
+//! - Execution: Ring 3 isolated display server daemon.
 
 extern crate alloc;
 

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["alloc_user_frame","frame_ref_dec","frame_ref_inc","layout"],"static":["FRAME_ALLOCATOR","REFS"],"struct":["Contiguous"]};

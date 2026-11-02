@@ -12,7 +12,7 @@
 //! - **Supervisor & Reincarnation Protocol** (`0x6000..0x600F`): Heartbeat ping/pong, vitality queries, and driver restart coordination for MINIX 3-style fault tolerance.
 //!
 //! ## Concurrency & Performance
-//! All operations fit within the 4-argument [`super::Message`] structure, ensuring zero heap allocation
+//! All operations fit within the 4-argument `Message` structure, ensuring zero heap allocation
 //! across client-server IPC boundaries.
 
 /// Well-known endpoint of the OpenZFS file server (0x20 = 32).

@@ -51,6 +51,7 @@ pub mod zfs {
 
 /// Path resolution over the server (the kernel's `fs::client` helpers).
 pub mod fs {
+    /// Client-side path resolution helper routines.
     pub mod client {
         use crate::zfs::fsproto::{ELOOP, ENOENT, ENOTDIR, EEXIST};
         use crate::zfs::server::ZfsServer;
@@ -142,6 +143,7 @@ pub mod fs {
 /// frames reached through its identity mapping; here they are page-aligned heap blocks,
 /// named by their address, with the same reference counting.
 pub mod memory {
+    /// Userland page buffer frame allocator compatibility shim.
     pub mod frame_allocator {
         use alloc::alloc::{alloc_zeroed, dealloc, Layout};
         use alloc::collections::BTreeMap;
@@ -209,6 +211,7 @@ pub mod memory {
 
 /// The clock.
 pub mod arch {
+    /// Real-time clock interface.
     pub mod rtc {
         /// Wall-clock time: `(seconds since 1970, nanoseconds)`.
         pub fn now() -> (u64, u32) {
@@ -242,6 +245,7 @@ pub mod ipc {
         }
     }
 
+    /// Service communications and shared window operations.
     pub mod service {
         use super::Message;
         use core::sync::atomic::{AtomicU64, Ordering};
@@ -284,6 +288,7 @@ pub mod ipc {
 
 /// Restarting the disk driver is the kernel's business: a call to a dead driver restarts it.
 pub mod task {
+    /// Supervisor interface shim.
     pub mod supervisor {
         /// Not available here (the kernel restarts the driver when this server calls it).
         pub fn revive(_endpoint: u32) -> bool {
@@ -295,22 +300,34 @@ pub mod task {
 /// inotify, as the ZPL reports to it: events are collected during a request and returned
 /// to the kernel with the reply.
 pub mod compat {
+    /// Linux compatibility shims.
     pub mod linux {
+        /// Inotify event definitions and buffer collector.
         pub mod inotify {
             use crate::zfs::fsproto::Event;
             use alloc::vec::Vec;
             use core::sync::atomic::{AtomicU32, Ordering};
             use spin::Mutex;
 
+            /// File was modified.
             pub const IN_MODIFY: u32 = 0x2;
+            /// Metadata changed.
             pub const IN_ATTRIB: u32 = 0x4;
+            /// Writable file was closed.
             pub const IN_CLOSE_WRITE: u32 = 0x8;
+            /// File was moved from X.
             pub const IN_MOVED_FROM: u32 = 0x40;
+            /// File was moved to Y.
             pub const IN_MOVED_TO: u32 = 0x80;
+            /// File/directory created in watched directory.
             pub const IN_CREATE: u32 = 0x100;
+            /// File/directory deleted from watched directory.
             pub const IN_DELETE: u32 = 0x200;
+            /// Watched file/directory was itself deleted.
             pub const IN_DELETE_SELF: u32 = 0x400;
+            /// Watched file/directory was itself moved.
             pub const IN_MOVE_SELF: u32 = 0x800;
+            /// Subject of this event is a directory.
             pub const IN_ISDIR: u32 = 0x4000_0000;
 
             static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());

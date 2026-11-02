@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IN_ATTRIB","IN_CLOSE_WRITE","IN_CREATE","IN_DELETE","IN_DELETE_SELF","IN_ISDIR","IN_MODIFY","IN_MOVED_FROM","IN_MOVED_TO","IN_MOVE_SELF"],"fn":["active","cookie","event","take","watched"],"static":["COOKIE","EVENTS"]};

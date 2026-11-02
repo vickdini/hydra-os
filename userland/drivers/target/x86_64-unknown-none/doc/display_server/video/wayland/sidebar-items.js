@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CONTROL_BTN_WIDTH","TITLEBAR_HEIGHT"],"enum":["WindowType"],"fn":["execute_terminal_command"],"struct":["WaylandCompositor","WlSurface"]};

@@ -7,8 +7,8 @@
 //!
 //! A service is an endpoint ([`ENDPOINT_BLOCK_DEV`], ...) with at most one server: the
 //! process the supervisor started for it ([`crate::task::spawn_service`]). The server
-//! registers ([`register`]), then loops receiving a request ([`recv`]) and answering it
-//! ([`reply`]). A client calls ([`call`]) and gets the reply.
+//! registers (`register`), then loops receiving a request (`recv`) and answering it
+//! (`reply`). A client calls (`call`) and gets the reply.
 //!
 //! Bulk data travels through the service's window: physically contiguous memory mapped
 //! into the server and reachable by the kernel through its identity mapping of physical
@@ -27,10 +27,10 @@
 //! ## Device access
 //!
 //! Driver processes get only what the supervisor granted their service: physical ranges
-//! they may map ([`set_grants`]; the framebuffer, a NIC's registers), DMA memory they
-//! allocate themselves ([`dma_alloc`]), and interrupt lines ([`irq_register`]). Interrupts
+//! they may map (`set_grants`; the framebuffer, a NIC's registers), DMA memory they
+//! allocate themselves (`dma_alloc`), and interrupt lines (`irq_register`). Interrupts
 //! never run driver code or take locks: the handler masks the line, counts it and wakes
-//! the driver ([`irq_raised`]); the driver unmasks it when it waits again ([`irq_wait`]).
+//! the driver (`irq_raised`); the driver unmasks it when it waits again (`irq_wait`).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;

@@ -10,7 +10,7 @@
 //! cannot be loaded from the disk it drives). Each runs in Ring 3 in an address space of
 //! its own and serves one endpoint ([`crate::ipc::service`]). The supervisor:
 //!
-//! 1. starts them when the kernel takes over the hardware ([`start_all`]), with the
+//! 1. starts them when the kernel takes over the hardware (`start_all`), with the
 //!    device memory each may map ([`crate::ipc::service::set_grants`]) and arguments
 //!    describing its devices;
 //! 2. checks every second that each is alive and answers a heartbeat
@@ -18,7 +18,7 @@
 //! 3. restarts one that died or stopped answering, up to a limit, after which the service
 //!    is marked faulted.
 //!
-//! A kernel caller whose driver died revives it on the spot ([`revive`]): the caller may
+//! A kernel caller whose driver died revives it on the spot (`revive`): the caller may
 //! hold locks of its subsystem, so it cannot wait for the supervisor task to run.
 //!
 //! ## Concurrency & Safety

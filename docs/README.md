@@ -34,10 +34,13 @@ docs/
     │   └── table.md               # Task capability table & CSpace (src/capability/table.rs)
     ├── video.md                   # Hardware GOP display driver & framebuffer console (src/video/)
     ├── shell.md                   # Interactive microkernel shell & command REPL (src/shell.rs)
-    └── ipc/
-        ├── mod.md                 # IPC subsystem root (src/ipc/mod.rs)
-        ├── message.md             # Fast register payload & transferred caps (src/ipc/message.rs)
-        └── endpoint.md            # Message rendezvous channels (src/ipc/endpoint.rs)
+    ├── ipc/
+    │   ├── mod.md                 # IPC subsystem root (src/ipc/mod.rs)
+    │   ├── message.md             # Fast register payload & transferred caps (src/ipc/message.rs)
+    │   ├── endpoint.md            # Message rendezvous channels (src/ipc/endpoint.rs)
+    │   └── service.md             # Shared window driver services & CPU handoff (src/ipc/service.rs)
+    └── task/
+        └── supervisor.md          # MINIX 3-style driver reincarnation supervisor (src/task/supervisor.rs)
 ```
 
 ---
@@ -63,7 +66,9 @@ docs/
 | **Capability Table**| [`src/capability/table.rs`](file:///d:/os/src/capability/table.rs) | [docs/src/capability/table.md](file:///d:/os/docs/src/capability/table.md) | Per-task CSpace keyring, permission checking, access revocation. |
 | **IPC Message** | [`src/ipc/message.rs`](file:///d:/os/src/ipc/message.rs) | [docs/src/ipc/message.md](file:///d:/os/docs/src/ipc/message.md) | Registered courier package: 4 fast inline register arguments + security token. |
 | **IPC Endpoint** | [`src/ipc/endpoint.rs`](file:///d:/os/src/ipc/endpoint.rs) | [docs/src/ipc/endpoint.md](file:///d:/os/docs/src/ipc/endpoint.md) | Postal mailbox rendezvous point, FIFO circular ring buffer. |
+| **IPC Service** | [`src/ipc/service.rs`](file:///d:/os/src/ipc/service.rs) | [docs/src/ipc/service.md](file:///d:/os/docs/src/ipc/service.md) | Driver services, shared data windows (256 KiB zero-copy), and direct CPU handoff. |
 | **IPC Root** | [`src/ipc/mod.rs`](file:///d:/os/src/ipc/mod.rs) | [docs/src/ipc/mod.md](file:///d:/os/docs/src/ipc/mod.md) | Inter-process communication module export. |
+| **Driver Supervisor** | [`src/task/supervisor.rs`](file:///d:/os/src/task/supervisor.rs) | [docs/src/task/supervisor.md](file:///d:/os/docs/src/task/supervisor.md) | MINIX 3-style driver reincarnation server, on-the-spot crash revival, heartbeats. |
 | **Build Automation**| [`build.rs`](file:///d:/os/build.rs) | [docs/build.md](file:///d:/os/docs/build.md) | NASM assembly build script and link configuration. |
 | **Legacy Boot** | [`src/arch/x86_64/boot/`](file:///d:/os/src/arch/x86_64/boot) | [docs/src/arch/x86_64/boot.md](file:///d:/os/docs/src/arch/x86_64/boot.md) | Multiboot2 header and 32-bit to 64-bit assembly trampoline. |
 

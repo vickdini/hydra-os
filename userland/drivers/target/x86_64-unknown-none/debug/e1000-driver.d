@@ -1,0 +1,1 @@
+D:\os\userland\drivers\target\x86_64-unknown-none\debug\e1000-driver: D:\os\userland\drivers\e1000-driver\src\main.rs D:\os\userland\drivers\hydra-rt\src\..\..\..\..\src\ipc\protocol.rs D:\os\userland\drivers\hydra-rt\src\lib.rs D:\os\userland\drivers\hydra-rt\src\port.rs D:\os\userland\drivers\hydra-rt\src\sys.rs

@@ -9,7 +9,7 @@
 //! The kernel keeps only what it needs to print: the framebuffer and a text console with an
 //! embedded 8x16 font. The graphical desktop (compositor, window management, the
 //! Plasma-style shell) is the display server, a Ring 3 program (`userland/drivers/display-server`)
-//! that the supervisor starts with the framebuffer granted to it; [`display`] talks to it.
+//! that the supervisor starts with the framebuffer granted to it; `display` talks to it.
 //!
 //! ## Key Modules
 //!
@@ -17,7 +17,7 @@
 //! - `framebuffer`: 32-bit ARGB/BGR canvas abstraction and drawing primitives.
 //! - `font`: Embedded 8x16 VGA font glyphs (shared with the display server).
 //! - [`console`]: Terminal emulation layer rendering scrolling text onto the graphical framebuffer.
-//! - [`display`]: Requests to the display server (input events, frames).
+//! - `display`: Requests to the display server (input events, frames).
 
 /// Graphical text console emulation backed by the GOP framebuffer.
 pub mod console;

@@ -2,7 +2,7 @@
 
 ## 1. Architectural Role & Design Rationale
 
-Hydra OS introduces a native microkernel graphical desktop environment modeled after **KDE Plasma** running on a **Wayland Compositor**. Rather than relying on legacy monolithic X11 servers or bloated graphics stacks, Hydra implements a modern, memory-safe, double-buffered graphics pipeline executing in Ring 0 / Ring 3.
+Hydra OS introduces a native microkernel graphical desktop environment modeled after **KDE Plasma** running on a **Wayland Compositor**. Rather than relying on legacy monolithic X11 servers or bloated graphics stacks, Hydra implements a modern, memory-safe, double-buffered graphics pipeline executing as an **isolated Ring 3 display server (`userland/drivers/display-server`)** over endpoint `0x23` (`ENDPOINT_DISPLAY_DEV`), with physical framebuffer MMIO access granted by the kernel supervisor.
 
 ```text
 +--------------------------------------------------------------------------+

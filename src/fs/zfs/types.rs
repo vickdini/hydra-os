@@ -16,18 +16,18 @@
 //! ```
 //!
 //! Every object (file, directory, symlink, the dnode array itself) is described by a
-//! 512-byte [`DnodePhys`] whose three top-level [`BlockPointer`]s root a tree of 64-way
+//! 512-byte `DnodePhys` whose three top-level `BlockPointer`s root a tree of 64-way
 //! indirect blocks. The dnode for object N lives at byte N * 512 of the *meta object*,
-//! whose own dnode is embedded in the active [`Uberblock`]. A commit (transaction group)
+//! whose own dnode is embedded in the active `Uberblock`. A commit (transaction group)
 //! writes changed blocks to fresh locations bottom-up and finishes by writing a new
 //! uberblock, so the on-disk state is always a consistent tree.
 //!
 //! ## Key Types & Interfaces
-//! - [`Fletcher4`]: 256-bit checksum accumulator protecting labels, block pointers, and uberblocks.
-//! - [`BlockPointer`]: 64-byte block descriptor storing LBA, birth TXG, compression, and checksum.
-//! - [`DnodePhys`]: 512-byte inode equivalent holding POSIX attributes, bonus buffer, and block pointers.
-//! - [`VdevLabel`]: Persistent geometry descriptor on block 0 storing partition metrics and pool GUID.
-//! - [`Uberblock`]: Transactional root tracking active meta-dnode and transaction state.
+//! - `Fletcher4`: 256-bit checksum accumulator protecting labels, block pointers, and uberblocks.
+//! - `BlockPointer`: 64-byte block descriptor storing LBA, birth TXG, compression, and checksum.
+//! - `DnodePhys`: 512-byte inode equivalent holding POSIX attributes, bonus buffer, and block pointers.
+//! - `VdevLabel`: Persistent geometry descriptor on block 0 storing partition metrics and pool GUID.
+//! - `Uberblock`: Transactional root tracking active meta-dnode and transaction state.
 //!
 //! ## Hardware & Privilege Semantics
 //! These structures directly represent on-disk byte arrays read from or written to non-volatile

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEADER","INDEX_CACHE_LIMIT","NAME_MAX"],"fn":["block_slack","parse","rec_size","write_header"],"struct":["DirEntry","DirIndex","Record","Zap"]};

@@ -207,6 +207,13 @@ DOCS_ORDER = [
         "subtitle": "Circular FIFO ring buffers, rendezvous mailboxes, and thread-safe SharedEndpoint.",
     },
     {
+        "stage": "Stage 7: IPC Subsystem",
+        "title": "Driver Services & Shared Data Windows",
+        "file": "docs/src/ipc/service.md",
+        "anchor": "doc-boot-stage7-ipc-service",
+        "subtitle": "256 KiB zero-copy shared window IPC, direct CPU handoff, and driver capability grants.",
+    },
+    {
         "stage": "Stage 8: File Server & Storage",
         "title": "ATA / IDE PIO Hard Disk Block Driver",
         "file": "docs/src/arch/ata.md",
@@ -276,6 +283,13 @@ DOCS_ORDER = [
         "file": "docs/src/task/elf.md",
         "anchor": "doc-boot-stage9-elf",
         "subtitle": "Parsing standalone ELF64 binaries from ZFS, PIE relocation, Ring 3 memory mapping, and syscall execution.",
+    },
+    {
+        "stage": "Stage 9: Multitasking & Scheduler",
+        "title": "Driver Supervisor & MINIX 3 Reincarnation Server",
+        "file": "docs/src/task/supervisor.md",
+        "anchor": "doc-boot-stage9-supervisor",
+        "subtitle": "Spawning Ring 3 drivers, on-the-spot crash revival, heartbeat monitoring, and transparent state handoff.",
     },
     {
         "stage": "Stage 10: Interactive Shell",

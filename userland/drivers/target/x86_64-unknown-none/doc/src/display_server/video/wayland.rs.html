@@ -1,0 +1,464 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `display-server\src\video\wayland.rs`."><title>wayland.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="display_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">display_server\video/</div>wayland.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! # Video Subsystem: Microkernel Wayland Surface &amp; Window Compositor
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Provides the core Wayland surface abstraction, window hierarchy, and input routing.
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! ## Architectural Role &amp; Design Rationale
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! In standard Wayland architectures, clients allocate pixel buffers and attach them to
+<a href=#8 id=8 data-nosnippet>8</a>//! `wl_surface` objects. The compositor handles window decorations (or accepts client-side decorations),
+<a href=#9 id=9 data-nosnippet>9</a>//! manages the window stacking order (z-index), processes input focus (`wl_seat`), and composites
+<a href=#10 id=10 data-nosnippet>10</a>//! surfaces into the display raster.
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! This module implements the internal microkernel representation of Wayland surfaces,
+<a href=#13 id=13 data-nosnippet>13</a>//! top-level application windows (`xdg_toplevel`), and desktop window interaction (movement,
+<a href=#14 id=14 data-nosnippet>14</a>//! focusing, minimize, maximize, and close).
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! ## Key Types &amp; Interfaces
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! - `WlSurface`: Represents an individual window surface with title, bounds, and content state.
+<a href=#19 id=19 data-nosnippet>19</a>//! - `WindowType`: Supported desktop application types (Konsole Terminal, KSysGuard Monitor, About).
+<a href=#20 id=20 data-nosnippet>20</a>//! - `WaylandCompositor`: Central registry managing surface lifecycle, z-ordering, and drag state.
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="kw">extern crate </span>alloc;
+<a href=#23 id=23 data-nosnippet>23</a>
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span>alloc::string::String;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span>alloc::vec::Vec;
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="doccomment">/// Standard height of the window title bar in pixels.
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">pub const </span>TITLEBAR_HEIGHT: usize = <span class="number">28</span>;
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// Width of the Breeze window control buttons (Close, Maximize, Minimize).
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub const </span>CONTROL_BTN_WIDTH: usize = <span class="number">28</span>;
+<a href=#32 id=32 data-nosnippet>32</a>
+<a href=#33 id=33 data-nosnippet>33</a><span class="doccomment">/// Category of application surface rendered inside the Wayland window.
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#35 id=35 data-nosnippet>35</a></span><span class="kw">pub enum </span>WindowType {
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="doccomment">/// Interactive Konsole terminal window executing Hydra microkernel shell commands.
+<a href=#37 id=37 data-nosnippet>37</a>    </span>Konsole,
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="doccomment">/// KSysGuard system monitor displaying CPU, memory, and ZFS metrics.
+<a href=#39 id=39 data-nosnippet>39</a>    </span>KSysGuard,
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="doccomment">/// Hydra OS &amp; KDE Plasma desktop information dialog.
+<a href=#41 id=41 data-nosnippet>41</a>    </span>About,
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="doccomment">/// Native Linux Wayland Client application.
+<a href=#43 id=43 data-nosnippet>43</a>    </span>WaylandClient,
+<a href=#44 id=44 data-nosnippet>44</a>}
+<a href=#45 id=45 data-nosnippet>45</a>
+<a href=#46 id=46 data-nosnippet>46</a><span class="doccomment">/// A desktop application window backed by a Wayland surface.
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub struct </span>WlSurface {
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="doccomment">/// Unique surface identifier.
+<a href=#49 id=49 data-nosnippet>49</a>    </span><span class="kw">pub </span>id: u32,
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="doccomment">/// Window title displayed in the title bar.
+<a href=#51 id=51 data-nosnippet>51</a>    </span><span class="kw">pub </span>title: String,
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// Desktop window application type.
+<a href=#53 id=53 data-nosnippet>53</a>    </span><span class="kw">pub </span>window_type: WindowType,
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="doccomment">/// Current horizontal screen coordinate in pixels.
+<a href=#55 id=55 data-nosnippet>55</a>    </span><span class="kw">pub </span>x: usize,
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="doccomment">/// Current vertical screen coordinate in pixels.
+<a href=#57 id=57 data-nosnippet>57</a>    </span><span class="kw">pub </span>y: usize,
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="doccomment">/// Current window width in pixels.
+<a href=#59 id=59 data-nosnippet>59</a>    </span><span class="kw">pub </span>width: usize,
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="doccomment">/// Current window height in pixels.
+<a href=#61 id=61 data-nosnippet>61</a>    </span><span class="kw">pub </span>height: usize,
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// True if the window holds input focus.
+<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="kw">pub </span>focused: bool,
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// True if the window is currently minimized to the task panel.
+<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub </span>minimized: bool,
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// True if the window is maximized to fill the desktop canvas.
+<a href=#67 id=67 data-nosnippet>67</a>    </span><span class="kw">pub </span>maximized: bool,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="doccomment">/// Restored coordinates `(x, y, width, height)` when un-maximizing.
+<a href=#69 id=69 data-nosnippet>69</a>    </span><span class="kw">pub </span>saved_rect: (usize, usize, usize, usize),
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="doccomment">/// True if the user is actively dragging the title bar.
+<a href=#71 id=71 data-nosnippet>71</a>    </span><span class="kw">pub </span>dragging: bool,
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="doccomment">/// Horizontal cursor offset within the title bar during drag.
+<a href=#73 id=73 data-nosnippet>73</a>    </span><span class="kw">pub </span>drag_offset_x: usize,
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="doccomment">/// Vertical cursor offset within the title bar during drag.
+<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">pub </span>drag_offset_y: usize,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="doccomment">/// Active keyboard input line for embedded Konsole terminals.
+<a href=#77 id=77 data-nosnippet>77</a>    </span><span class="kw">pub </span>terminal_input: String,
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="doccomment">/// Scrollback text lines for embedded Konsole terminals.
+<a href=#79 id=79 data-nosnippet>79</a>    </span><span class="kw">pub </span>terminal_lines: Vec&lt;String&gt;,
+<a href=#80 id=80 data-nosnippet>80</a>}
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">impl </span>WlSurface {
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="doccomment">/// Creates a new Wayland application surface.
+<a href=#84 id=84 data-nosnippet>84</a>    </span><span class="kw">pub fn </span>new(
+<a href=#85 id=85 data-nosnippet>85</a>        id: u32,
+<a href=#86 id=86 data-nosnippet>86</a>        title: <span class="kw-2">&amp;</span>str,
+<a href=#87 id=87 data-nosnippet>87</a>        window_type: WindowType,
+<a href=#88 id=88 data-nosnippet>88</a>        x: usize,
+<a href=#89 id=89 data-nosnippet>89</a>        y: usize,
+<a href=#90 id=90 data-nosnippet>90</a>        width: usize,
+<a href=#91 id=91 data-nosnippet>91</a>        height: usize,
+<a href=#92 id=92 data-nosnippet>92</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#93 id=93 data-nosnippet>93</a>        <span class="kw">let </span><span class="kw-2">mut </span>terminal_lines = Vec::new();
+<a href=#94 id=94 data-nosnippet>94</a>        <span class="kw">if </span>window_type == WindowType::Konsole {
+<a href=#95 id=95 data-nosnippet>95</a>            terminal_lines.push(String::from(<span class="string">"Hydra OS KDE Plasma 6.8 Desktop — Konsole v0.1.0"</span>));
+<a href=#96 id=96 data-nosnippet>96</a>            terminal_lines.push(String::from(<span class="string">"Connected to Wayland Compositor (/run/user/1000/wayland-0)"</span>));
+<a href=#97 id=97 data-nosnippet>97</a>            terminal_lines.push(String::from(<span class="string">"Linux ABI 6.8.0-hydra active (Dynamic Linker &amp; wl_seat enabled)"</span>));
+<a href=#98 id=98 data-nosnippet>98</a>            terminal_lines.push(String::from(<span class="string">"Type 'help', 'linux status', 'zpool', or 'mem'. Press 'Esc' to exit."</span>));
+<a href=#99 id=99 data-nosnippet>99</a>            terminal_lines.push(String::from(<span class="string">""</span>));
+<a href=#100 id=100 data-nosnippet>100</a>        }
+<a href=#101 id=101 data-nosnippet>101</a>
+<a href=#102 id=102 data-nosnippet>102</a>        <span class="self">Self </span>{
+<a href=#103 id=103 data-nosnippet>103</a>            id,
+<a href=#104 id=104 data-nosnippet>104</a>            title: String::from(title),
+<a href=#105 id=105 data-nosnippet>105</a>            window_type,
+<a href=#106 id=106 data-nosnippet>106</a>            x,
+<a href=#107 id=107 data-nosnippet>107</a>            y,
+<a href=#108 id=108 data-nosnippet>108</a>            width,
+<a href=#109 id=109 data-nosnippet>109</a>            height,
+<a href=#110 id=110 data-nosnippet>110</a>            focused: <span class="bool-val">false</span>,
+<a href=#111 id=111 data-nosnippet>111</a>            minimized: <span class="bool-val">false</span>,
+<a href=#112 id=112 data-nosnippet>112</a>            maximized: <span class="bool-val">false</span>,
+<a href=#113 id=113 data-nosnippet>113</a>            saved_rect: (x, y, width, height),
+<a href=#114 id=114 data-nosnippet>114</a>            dragging: <span class="bool-val">false</span>,
+<a href=#115 id=115 data-nosnippet>115</a>            drag_offset_x: <span class="number">0</span>,
+<a href=#116 id=116 data-nosnippet>116</a>            drag_offset_y: <span class="number">0</span>,
+<a href=#117 id=117 data-nosnippet>117</a>            terminal_input: String::new(),
+<a href=#118 id=118 data-nosnippet>118</a>            terminal_lines,
+<a href=#119 id=119 data-nosnippet>119</a>        }
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// Appends a line of text to the terminal output buffer.
+<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="kw">pub fn </span>append_terminal_line(<span class="kw-2">&amp;mut </span><span class="self">self</span>, line: <span class="kw-2">&amp;</span>str) {
+<a href=#124 id=124 data-nosnippet>124</a>        <span class="kw">if </span><span class="self">self</span>.terminal_lines.len() &gt;= <span class="number">18 </span>{
+<a href=#125 id=125 data-nosnippet>125</a>            <span class="self">self</span>.terminal_lines.remove(<span class="number">0</span>);
+<a href=#126 id=126 data-nosnippet>126</a>        }
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="self">self</span>.terminal_lines.push(String::from(line));
+<a href=#128 id=128 data-nosnippet>128</a>    }
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// Returns true if the coordinate `(px, py)` falls within the window boundaries.
+<a href=#131 id=131 data-nosnippet>131</a>    </span><span class="kw">pub fn </span>contains_point(<span class="kw-2">&amp;</span><span class="self">self</span>, px: usize, py: usize) -&gt; bool {
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="kw">if </span><span class="self">self</span>.minimized {
+<a href=#133 id=133 data-nosnippet>133</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#134 id=134 data-nosnippet>134</a>        }
+<a href=#135 id=135 data-nosnippet>135</a>        px &gt;= <span class="self">self</span>.x &amp;&amp; px &lt; <span class="self">self</span>.x + <span class="self">self</span>.width &amp;&amp; py &gt;= <span class="self">self</span>.y &amp;&amp; py &lt; <span class="self">self</span>.y + <span class="self">self</span>.height
+<a href=#136 id=136 data-nosnippet>136</a>    }
+<a href=#137 id=137 data-nosnippet>137</a>
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="doccomment">/// Returns true if the coordinate `(px, py)` falls within the top title bar header.
+<a href=#139 id=139 data-nosnippet>139</a>    </span><span class="kw">pub fn </span>is_in_titlebar(<span class="kw-2">&amp;</span><span class="self">self</span>, px: usize, py: usize) -&gt; bool {
+<a href=#140 id=140 data-nosnippet>140</a>        <span class="kw">if </span><span class="self">self</span>.minimized {
+<a href=#141 id=141 data-nosnippet>141</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#142 id=142 data-nosnippet>142</a>        }
+<a href=#143 id=143 data-nosnippet>143</a>        px &gt;= <span class="self">self</span>.x
+<a href=#144 id=144 data-nosnippet>144</a>            &amp;&amp; px &lt; <span class="self">self</span>.x + <span class="self">self</span>.width
+<a href=#145 id=145 data-nosnippet>145</a>            &amp;&amp; py &gt;= <span class="self">self</span>.y
+<a href=#146 id=146 data-nosnippet>146</a>            &amp;&amp; py &lt; <span class="self">self</span>.y + TITLEBAR_HEIGHT
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="doccomment">/// Returns which title bar control button was clicked, if any.
+<a href=#150 id=150 data-nosnippet>150</a>    ///
+<a href=#151 id=151 data-nosnippet>151</a>    /// # Returns
+<a href=#152 id=152 data-nosnippet>152</a>    /// - `Some("close")`: Close button clicked.
+<a href=#153 id=153 data-nosnippet>153</a>    /// - `Some("maximize")`: Maximize/Restore button clicked.
+<a href=#154 id=154 data-nosnippet>154</a>    /// - `Some("minimize")`: Minimize button clicked.
+<a href=#155 id=155 data-nosnippet>155</a>    /// - `None`: Titlebar drag area or outside buttons.
+<a href=#156 id=156 data-nosnippet>156</a>    </span><span class="kw">pub fn </span>check_control_buttons(<span class="kw-2">&amp;</span><span class="self">self</span>, px: usize, py: usize) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="kw">if </span>!<span class="self">self</span>.is_in_titlebar(px, py) {
+<a href=#158 id=158 data-nosnippet>158</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#159 id=159 data-nosnippet>159</a>        }
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">let </span>right_edge = <span class="self">self</span>.x + <span class="self">self</span>.width;
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="kw">if </span>px &gt;= right_edge.saturating_sub(CONTROL_BTN_WIDTH) &amp;&amp; px &lt; right_edge {
+<a href=#163 id=163 data-nosnippet>163</a>            <span class="prelude-val">Some</span>(<span class="string">"close"</span>)
+<a href=#164 id=164 data-nosnippet>164</a>        } <span class="kw">else if </span>px &gt;= right_edge.saturating_sub(CONTROL_BTN_WIDTH * <span class="number">2</span>)
+<a href=#165 id=165 data-nosnippet>165</a>            &amp;&amp; px &lt; right_edge.saturating_sub(CONTROL_BTN_WIDTH)
+<a href=#166 id=166 data-nosnippet>166</a>        {
+<a href=#167 id=167 data-nosnippet>167</a>            <span class="prelude-val">Some</span>(<span class="string">"maximize"</span>)
+<a href=#168 id=168 data-nosnippet>168</a>        } <span class="kw">else if </span>px &gt;= right_edge.saturating_sub(CONTROL_BTN_WIDTH * <span class="number">3</span>)
+<a href=#169 id=169 data-nosnippet>169</a>            &amp;&amp; px &lt; right_edge.saturating_sub(CONTROL_BTN_WIDTH * <span class="number">2</span>)
+<a href=#170 id=170 data-nosnippet>170</a>        {
+<a href=#171 id=171 data-nosnippet>171</a>            <span class="prelude-val">Some</span>(<span class="string">"minimize"</span>)
+<a href=#172 id=172 data-nosnippet>172</a>        } <span class="kw">else </span>{
+<a href=#173 id=173 data-nosnippet>173</a>            <span class="prelude-val">None
+<a href=#174 id=174 data-nosnippet>174</a>        </span>}
+<a href=#175 id=175 data-nosnippet>175</a>    }
+<a href=#176 id=176 data-nosnippet>176</a>}
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a><span class="doccomment">/// Central registry managing all active Wayland surfaces, z-stacking, and input focus.
+<a href=#179 id=179 data-nosnippet>179</a></span><span class="kw">pub struct </span>WaylandCompositor {
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="doccomment">/// Active desktop surfaces ordered from bottom to top (z-order).
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub </span>surfaces: Vec&lt;WlSurface&gt;,
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// Monotonically increasing surface identifier counter.
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub </span>next_surface_id: u32,
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Identifier of the surface currently being dragged by pointer, if any.
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">pub </span>active_dragging_id: <span class="prelude-ty">Option</span>&lt;u32&gt;,
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="doccomment">/// State of the KDE Plasma Kickoff start menu (open/closed).
+<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">pub </span>kickoff_open: bool,
+<a href=#188 id=188 data-nosnippet>188</a>}
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a><span class="kw">impl </span>WaylandCompositor {
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="doccomment">/// Creates a new compositor registry populated with default desktop applications.
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">pub fn </span>new(screen_width: usize, screen_height: usize) -&gt; <span class="self">Self </span>{
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="kw">let </span><span class="kw-2">mut </span>comp = <span class="self">Self </span>{
+<a href=#194 id=194 data-nosnippet>194</a>            surfaces: Vec::new(),
+<a href=#195 id=195 data-nosnippet>195</a>            next_surface_id: <span class="number">1</span>,
+<a href=#196 id=196 data-nosnippet>196</a>            active_dragging_id: <span class="prelude-val">None</span>,
+<a href=#197 id=197 data-nosnippet>197</a>            kickoff_open: <span class="bool-val">false</span>,
+<a href=#198 id=198 data-nosnippet>198</a>        };
+<a href=#199 id=199 data-nosnippet>199</a>
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="comment">// Window 1: Konsole Terminal (Top-left)
+<a href=#201 id=201 data-nosnippet>201</a>        </span><span class="kw">let </span>konsole_w = <span class="number">540</span>.min(screen_width.saturating_sub(<span class="number">40</span>));
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>konsole_h = <span class="number">320</span>.min(screen_height.saturating_sub(<span class="number">80</span>));
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>konsole_x = <span class="number">36</span>;
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="kw">let </span>konsole_y = <span class="number">36</span>;
+<a href=#205 id=205 data-nosnippet>205</a>
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">let </span>konsole = WlSurface::new(
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="number">1</span>,
+<a href=#208 id=208 data-nosnippet>208</a>            <span class="string">"Konsole — Hydra OS Terminal"</span>,
+<a href=#209 id=209 data-nosnippet>209</a>            WindowType::Konsole,
+<a href=#210 id=210 data-nosnippet>210</a>            konsole_x,
+<a href=#211 id=211 data-nosnippet>211</a>            konsole_y,
+<a href=#212 id=212 data-nosnippet>212</a>            konsole_w,
+<a href=#213 id=213 data-nosnippet>213</a>            konsole_h,
+<a href=#214 id=214 data-nosnippet>214</a>        );
+<a href=#215 id=215 data-nosnippet>215</a>
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="comment">// Window 2: KSysGuard System Monitor (Top-right)
+<a href=#217 id=217 data-nosnippet>217</a>        </span><span class="kw">let </span>monitor_w = <span class="number">440</span>.min(screen_width.saturating_sub(<span class="number">40</span>));
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">let </span>monitor_h = <span class="number">320</span>.min(screen_height.saturating_sub(<span class="number">80</span>));
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="kw">let </span>monitor_x = screen_width.saturating_sub(monitor_w + <span class="number">36</span>);
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">let </span>monitor_y = <span class="number">36</span>;
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>        <span class="kw">let </span>monitor = WlSurface::new(
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="number">2</span>,
+<a href=#224 id=224 data-nosnippet>224</a>            <span class="string">"KSysGuard — Plasma System Monitor"</span>,
+<a href=#225 id=225 data-nosnippet>225</a>            WindowType::KSysGuard,
+<a href=#226 id=226 data-nosnippet>226</a>            monitor_x,
+<a href=#227 id=227 data-nosnippet>227</a>            monitor_y,
+<a href=#228 id=228 data-nosnippet>228</a>            monitor_w,
+<a href=#229 id=229 data-nosnippet>229</a>            monitor_h,
+<a href=#230 id=230 data-nosnippet>230</a>        );
+<a href=#231 id=231 data-nosnippet>231</a>
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="comment">// Window 3: Plasma 6.8 Native Linux Wayland Client (Bottom-center)
+<a href=#233 id=233 data-nosnippet>233</a>        </span><span class="kw">let </span>client_w = <span class="number">520</span>.min(screen_width.saturating_sub(<span class="number">40</span>));
+<a href=#234 id=234 data-nosnippet>234</a>        <span class="kw">let </span>client_h = <span class="number">330</span>.min(screen_height.saturating_sub(<span class="number">80</span>));
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">let </span>client_x = (screen_width.saturating_sub(client_w)) / <span class="number">2</span>;
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="kw">let </span>client_y = screen_height.saturating_sub(client_h + <span class="number">52</span>);
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="kw">let </span>wl_client = WlSurface::new(
+<a href=#239 id=239 data-nosnippet>239</a>            <span class="number">3</span>,
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="string">"Plasma 6.8 — Linux Wayland Client"</span>,
+<a href=#241 id=241 data-nosnippet>241</a>            WindowType::WaylandClient,
+<a href=#242 id=242 data-nosnippet>242</a>            client_x,
+<a href=#243 id=243 data-nosnippet>243</a>            client_y,
+<a href=#244 id=244 data-nosnippet>244</a>            client_w,
+<a href=#245 id=245 data-nosnippet>245</a>            client_h,
+<a href=#246 id=246 data-nosnippet>246</a>        );
+<a href=#247 id=247 data-nosnippet>247</a>
+<a href=#248 id=248 data-nosnippet>248</a>        comp.surfaces.push(wl_client);
+<a href=#249 id=249 data-nosnippet>249</a>        comp.surfaces.push(monitor);
+<a href=#250 id=250 data-nosnippet>250</a>        comp.surfaces.push(konsole); <span class="comment">// Konsole on top initially
+<a href=#251 id=251 data-nosnippet>251</a>        </span>comp.set_focus(<span class="number">1</span>);
+<a href=#252 id=252 data-nosnippet>252</a>        comp.next_surface_id = <span class="number">4</span>;
+<a href=#253 id=253 data-nosnippet>253</a>
+<a href=#254 id=254 data-nosnippet>254</a>        comp
+<a href=#255 id=255 data-nosnippet>255</a>    }
+<a href=#256 id=256 data-nosnippet>256</a>
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="doccomment">/// Sets keyboard and active focus to the surface with the specified ID.
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">pub fn </span>set_focus(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: u32) {
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">for </span>s <span class="kw">in </span><span class="kw-2">&amp;mut </span><span class="self">self</span>.surfaces {
+<a href=#260 id=260 data-nosnippet>260</a>            s.focused = s.id == id;
+<a href=#261 id=261 data-nosnippet>261</a>        }
+<a href=#262 id=262 data-nosnippet>262</a>    }
+<a href=#263 id=263 data-nosnippet>263</a>
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// Brings the specified surface to the top of the z-order stack.
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">pub fn </span>raise_to_top(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: u32) {
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(pos) = <span class="self">self</span>.surfaces.iter().position(|s| s.id == id) {
+<a href=#267 id=267 data-nosnippet>267</a>            <span class="kw">let </span>surface = <span class="self">self</span>.surfaces.remove(pos);
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="self">self</span>.surfaces.push(surface);
+<a href=#269 id=269 data-nosnippet>269</a>            <span class="self">self</span>.set_focus(id);
+<a href=#270 id=270 data-nosnippet>270</a>        }
+<a href=#271 id=271 data-nosnippet>271</a>    }
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="doccomment">/// Returns the topmost surface under coordinate `(px, py)`, if any.
+<a href=#274 id=274 data-nosnippet>274</a>    </span><span class="kw">pub fn </span>surface_at_point(<span class="kw-2">&amp;</span><span class="self">self</span>, px: usize, py: usize) -&gt; <span class="prelude-ty">Option</span>&lt;u32&gt; {
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="comment">// Iterate backwards from topmost surface to bottom
+<a href=#276 id=276 data-nosnippet>276</a>        </span><span class="kw">for </span>s <span class="kw">in </span><span class="self">self</span>.surfaces.iter().rev() {
+<a href=#277 id=277 data-nosnippet>277</a>            <span class="kw">if </span>s.contains_point(px, py) {
+<a href=#278 id=278 data-nosnippet>278</a>                <span class="kw">return </span><span class="prelude-val">Some</span>(s.id);
+<a href=#279 id=279 data-nosnippet>279</a>            }
+<a href=#280 id=280 data-nosnippet>280</a>        }
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="prelude-val">None
+<a href=#282 id=282 data-nosnippet>282</a>    </span>}
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="doccomment">/// Dispatches a mouse press event to windows, title bars, and control buttons.
+<a href=#285 id=285 data-nosnippet>285</a>    </span><span class="kw">pub fn </span>handle_mouse_down(
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#287 id=287 data-nosnippet>287</a>        px: usize,
+<a href=#288 id=288 data-nosnippet>288</a>        py: usize,
+<a href=#289 id=289 data-nosnippet>289</a>        screen_width: usize,
+<a href=#290 id=290 data-nosnippet>290</a>        screen_height: usize,
+<a href=#291 id=291 data-nosnippet>291</a>    ) {
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="comment">// Check if clicked in bottom floating panel kickoff launcher button
+<a href=#293 id=293 data-nosnippet>293</a>        </span><span class="kw">let </span>panel_y = screen_height.saturating_sub(<span class="number">52</span>);
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">if </span>py &gt;= panel_y {
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="kw">if </span>px &gt;= <span class="number">16 </span>&amp;&amp; px &lt;= <span class="number">76 </span>{
+<a href=#296 id=296 data-nosnippet>296</a>                <span class="self">self</span>.kickoff_open = !<span class="self">self</span>.kickoff_open;
+<a href=#297 id=297 data-nosnippet>297</a>            } <span class="kw">else </span>{
+<a href=#298 id=298 data-nosnippet>298</a>                <span class="self">self</span>.kickoff_open = <span class="bool-val">false</span>;
+<a href=#299 id=299 data-nosnippet>299</a>            }
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="kw">return</span>;
+<a href=#301 id=301 data-nosnippet>301</a>        }
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="comment">// If kickoff menu is open and click was outside, close it
+<a href=#304 id=304 data-nosnippet>304</a>        </span><span class="kw">if </span><span class="self">self</span>.kickoff_open {
+<a href=#305 id=305 data-nosnippet>305</a>            <span class="self">self</span>.kickoff_open = <span class="bool-val">false</span>;
+<a href=#306 id=306 data-nosnippet>306</a>        }
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a>        <span class="comment">// Check window clicks in z-order
+<a href=#309 id=309 data-nosnippet>309</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(target_id) = <span class="self">self</span>.surface_at_point(px, py) {
+<a href=#310 id=310 data-nosnippet>310</a>            <span class="self">self</span>.raise_to_top(target_id);
+<a href=#311 id=311 data-nosnippet>311</a>
+<a href=#312 id=312 data-nosnippet>312</a>            <span class="comment">// Re-find the raised surface (now at the back of `surfaces`)
+<a href=#313 id=313 data-nosnippet>313</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(surface) = <span class="self">self</span>.surfaces.iter_mut().find(|s| s.id == target_id) {
+<a href=#314 id=314 data-nosnippet>314</a>                <span class="kw">if let </span><span class="prelude-val">Some</span>(btn) = surface.check_control_buttons(px, py) {
+<a href=#315 id=315 data-nosnippet>315</a>                    <span class="kw">match </span>btn {
+<a href=#316 id=316 data-nosnippet>316</a>                        <span class="string">"close" </span>=&gt; {
+<a href=#317 id=317 data-nosnippet>317</a>                            surface.minimized = <span class="bool-val">true</span>;
+<a href=#318 id=318 data-nosnippet>318</a>                        }
+<a href=#319 id=319 data-nosnippet>319</a>                        <span class="string">"maximize" </span>=&gt; {
+<a href=#320 id=320 data-nosnippet>320</a>                            <span class="kw">if </span>surface.maximized {
+<a href=#321 id=321 data-nosnippet>321</a>                                <span class="comment">// Restore
+<a href=#322 id=322 data-nosnippet>322</a>                                </span><span class="kw">let </span>(ox, oy, ow, oh) = surface.saved_rect;
+<a href=#323 id=323 data-nosnippet>323</a>                                surface.x = ox;
+<a href=#324 id=324 data-nosnippet>324</a>                                surface.y = oy;
+<a href=#325 id=325 data-nosnippet>325</a>                                surface.width = ow;
+<a href=#326 id=326 data-nosnippet>326</a>                                surface.height = oh;
+<a href=#327 id=327 data-nosnippet>327</a>                                surface.maximized = <span class="bool-val">false</span>;
+<a href=#328 id=328 data-nosnippet>328</a>                            } <span class="kw">else </span>{
+<a href=#329 id=329 data-nosnippet>329</a>                                <span class="comment">// Maximize
+<a href=#330 id=330 data-nosnippet>330</a>                                </span>surface.saved_rect = (surface.x, surface.y, surface.width, surface.height);
+<a href=#331 id=331 data-nosnippet>331</a>                                surface.x = <span class="number">0</span>;
+<a href=#332 id=332 data-nosnippet>332</a>                                surface.y = <span class="number">0</span>;
+<a href=#333 id=333 data-nosnippet>333</a>                                surface.width = screen_width;
+<a href=#334 id=334 data-nosnippet>334</a>                                surface.height = screen_height.saturating_sub(<span class="number">40</span>);
+<a href=#335 id=335 data-nosnippet>335</a>                                surface.maximized = <span class="bool-val">true</span>;
+<a href=#336 id=336 data-nosnippet>336</a>                            }
+<a href=#337 id=337 data-nosnippet>337</a>                        }
+<a href=#338 id=338 data-nosnippet>338</a>                        <span class="string">"minimize" </span>=&gt; {
+<a href=#339 id=339 data-nosnippet>339</a>                            surface.minimized = <span class="bool-val">true</span>;
+<a href=#340 id=340 data-nosnippet>340</a>                        }
+<a href=#341 id=341 data-nosnippet>341</a>                        <span class="kw">_ </span>=&gt; {}
+<a href=#342 id=342 data-nosnippet>342</a>                    }
+<a href=#343 id=343 data-nosnippet>343</a>                    <span class="kw">return</span>;
+<a href=#344 id=344 data-nosnippet>344</a>                }
+<a href=#345 id=345 data-nosnippet>345</a>
+<a href=#346 id=346 data-nosnippet>346</a>                <span class="kw">if </span>surface.is_in_titlebar(px, py) &amp;&amp; !surface.maximized {
+<a href=#347 id=347 data-nosnippet>347</a>                    surface.dragging = <span class="bool-val">true</span>;
+<a href=#348 id=348 data-nosnippet>348</a>                    surface.drag_offset_x = px.saturating_sub(surface.x);
+<a href=#349 id=349 data-nosnippet>349</a>                    surface.drag_offset_y = py.saturating_sub(surface.y);
+<a href=#350 id=350 data-nosnippet>350</a>                    <span class="self">self</span>.active_dragging_id = <span class="prelude-val">Some</span>(target_id);
+<a href=#351 id=351 data-nosnippet>351</a>                }
+<a href=#352 id=352 data-nosnippet>352</a>            }
+<a href=#353 id=353 data-nosnippet>353</a>        }
+<a href=#354 id=354 data-nosnippet>354</a>    }
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// Dispatches mouse movement updates for active window dragging.
+<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="kw">pub fn </span>handle_mouse_move(
+<a href=#358 id=358 data-nosnippet>358</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#359 id=359 data-nosnippet>359</a>        px: usize,
+<a href=#360 id=360 data-nosnippet>360</a>        py: usize,
+<a href=#361 id=361 data-nosnippet>361</a>        screen_width: usize,
+<a href=#362 id=362 data-nosnippet>362</a>        screen_height: usize,
+<a href=#363 id=363 data-nosnippet>363</a>    ) {
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(drag_id) = <span class="self">self</span>.active_dragging_id {
+<a href=#365 id=365 data-nosnippet>365</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(surface) = <span class="self">self</span>.surfaces.iter_mut().find(|s| s.id == drag_id) {
+<a href=#366 id=366 data-nosnippet>366</a>                <span class="kw">if </span>surface.dragging {
+<a href=#367 id=367 data-nosnippet>367</a>                    <span class="kw">let </span>max_x = screen_width.saturating_sub(<span class="number">60</span>);
+<a href=#368 id=368 data-nosnippet>368</a>                    <span class="kw">let </span>max_y = (screen_height.saturating_sub(<span class="number">40</span>)).saturating_sub(TITLEBAR_HEIGHT);
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a>                    <span class="kw">let </span>new_x = px.saturating_sub(surface.drag_offset_x).min(max_x);
+<a href=#371 id=371 data-nosnippet>371</a>                    <span class="kw">let </span>new_y = py.saturating_sub(surface.drag_offset_y).min(max_y);
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a>                    surface.x = new_x;
+<a href=#374 id=374 data-nosnippet>374</a>                    surface.y = new_y;
+<a href=#375 id=375 data-nosnippet>375</a>                }
+<a href=#376 id=376 data-nosnippet>376</a>            }
+<a href=#377 id=377 data-nosnippet>377</a>        }
+<a href=#378 id=378 data-nosnippet>378</a>    }
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// Dispatches mouse button release events and terminates active drags.
+<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">pub fn </span>handle_mouse_up(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(drag_id) = <span class="self">self</span>.active_dragging_id {
+<a href=#383 id=383 data-nosnippet>383</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(surface) = <span class="self">self</span>.surfaces.iter_mut().find(|s| s.id == drag_id) {
+<a href=#384 id=384 data-nosnippet>384</a>                surface.dragging = <span class="bool-val">false</span>;
+<a href=#385 id=385 data-nosnippet>385</a>            }
+<a href=#386 id=386 data-nosnippet>386</a>        }
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="self">self</span>.active_dragging_id = <span class="prelude-val">None</span>;
+<a href=#388 id=388 data-nosnippet>388</a>    }
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="doccomment">/// Sends typed keyboard character input to the active focused window.
+<a href=#391 id=391 data-nosnippet>391</a>    </span><span class="kw">pub fn </span>handle_key_char(<span class="kw-2">&amp;mut </span><span class="self">self</span>, c: char) {
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="kw">for </span>surface <span class="kw">in </span><span class="kw-2">&amp;mut </span><span class="self">self</span>.surfaces {
+<a href=#393 id=393 data-nosnippet>393</a>            <span class="kw">if </span>surface.focused &amp;&amp; !surface.minimized &amp;&amp; surface.window_type == WindowType::Konsole {
+<a href=#394 id=394 data-nosnippet>394</a>                <span class="kw">match </span>c {
+<a href=#395 id=395 data-nosnippet>395</a>                    <span class="string">'\r' </span>| <span class="string">'\n' </span>=&gt; {
+<a href=#396 id=396 data-nosnippet>396</a>                        <span class="kw">let </span>cmd = surface.terminal_input.clone();
+<a href=#397 id=397 data-nosnippet>397</a>                        surface.append_terminal_line(<span class="kw-2">&amp;</span><span class="macro">alloc::format!</span>(<span class="string">"hydra:desktop&gt; {}"</span>, cmd));
+<a href=#398 id=398 data-nosnippet>398</a>                        surface.terminal_input.clear();
+<a href=#399 id=399 data-nosnippet>399</a>                        execute_terminal_command(surface, <span class="kw-2">&amp;</span>cmd);
+<a href=#400 id=400 data-nosnippet>400</a>                    }
+<a href=#401 id=401 data-nosnippet>401</a>                    <span class="string">'\x08' </span>=&gt; {
+<a href=#402 id=402 data-nosnippet>402</a>                        surface.terminal_input.pop();
+<a href=#403 id=403 data-nosnippet>403</a>                    }
+<a href=#404 id=404 data-nosnippet>404</a>                    printable =&gt; {
+<a href=#405 id=405 data-nosnippet>405</a>                        <span class="kw">if </span>surface.terminal_input.len() &lt; <span class="number">64 </span>&amp;&amp; !printable.is_control() {
+<a href=#406 id=406 data-nosnippet>406</a>                            surface.terminal_input.push(printable);
+<a href=#407 id=407 data-nosnippet>407</a>                        }
+<a href=#408 id=408 data-nosnippet>408</a>                    }
+<a href=#409 id=409 data-nosnippet>409</a>                }
+<a href=#410 id=410 data-nosnippet>410</a>                <span class="kw">break</span>;
+<a href=#411 id=411 data-nosnippet>411</a>            }
+<a href=#412 id=412 data-nosnippet>412</a>        }
+<a href=#413 id=413 data-nosnippet>413</a>    }
+<a href=#414 id=414 data-nosnippet>414</a>}
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a><span class="doccomment">/// Executes a shell command entered in the Konsole window and appends the result.
+<a href=#417 id=417 data-nosnippet>417</a></span><span class="kw">fn </span>execute_terminal_command(surface: <span class="kw-2">&amp;mut </span>WlSurface, cmd: <span class="kw-2">&amp;</span>str) {
+<a href=#418 id=418 data-nosnippet>418</a>    <span class="kw">let </span>trimmed = cmd.trim();
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="kw">if </span>trimmed.is_empty() {
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="kw">return</span>;
+<a href=#421 id=421 data-nosnippet>421</a>    }
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="kw">match </span>trimmed {
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="string">"help" </span>=&gt; {
+<a href=#425 id=425 data-nosnippet>425</a>            surface.append_terminal_line(<span class="string">"Built-in GUI Commands: help, uname, zpool, mem, clear, exit"</span>);
+<a href=#426 id=426 data-nosnippet>426</a>        }
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="string">"uname" </span>=&gt; {
+<a href=#428 id=428 data-nosnippet>428</a>            surface.append_terminal_line(<span class="string">"Hydra OS 0.1.0 x86_64-unknown-uefi Microkernel (SMP/CoW)"</span>);
+<a href=#429 id=429 data-nosnippet>429</a>        }
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="string">"zpool" </span>=&gt; {
+<a href=#431 id=431 data-nosnippet>431</a>            surface.append_terminal_line(<span class="string">"pool: hydrapool | state: ONLINE | vdev-ata-0 (Persistent ATA)"</span>);
+<a href=#432 id=432 data-nosnippet>432</a>            surface.append_terminal_line(<span class="string">"capacity: 32 MiB | CoW Merkle Tree | Fletcher-4 verified"</span>);
+<a href=#433 id=433 data-nosnippet>433</a>        }
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="string">"mem" </span>=&gt; {
+<a href=#435 id=435 data-nosnippet>435</a>            <span class="kw">let </span>heap_stats = <span class="kw">crate</span>::memory::heap::stats();
+<a href=#436 id=436 data-nosnippet>436</a>            <span class="kw">let </span>free_mb = heap_stats.free_bytes / (<span class="number">1024 </span>* <span class="number">1024</span>);
+<a href=#437 id=437 data-nosnippet>437</a>            <span class="kw">let </span>total_mb = heap_stats.total_bytes / (<span class="number">1024 </span>* <span class="number">1024</span>);
+<a href=#438 id=438 data-nosnippet>438</a>            surface.append_terminal_line(<span class="kw-2">&amp;</span><span class="macro">alloc::format!</span>(<span class="string">"Kernel Heap: {} MiB free / {} MiB total"</span>, free_mb, total_mb));
+<a href=#439 id=439 data-nosnippet>439</a>        }
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="string">"clear" </span>=&gt; {
+<a href=#442 id=442 data-nosnippet>442</a>            surface.terminal_lines.clear();
+<a href=#443 id=443 data-nosnippet>443</a>        }
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="string">"exit" </span>=&gt; {
+<a href=#445 id=445 data-nosnippet>445</a>            surface.append_terminal_line(<span class="string">"Use 'Esc' key on keyboard to return to text console."</span>);
+<a href=#446 id=446 data-nosnippet>446</a>        }
+<a href=#447 id=447 data-nosnippet>447</a>        cmd <span class="kw">if </span>cmd.starts_with(<span class="string">"linux"</span>) =&gt; {
+<a href=#448 id=448 data-nosnippet>448</a>            surface.append_terminal_line(<span class="kw-2">&amp;</span><span class="macro">alloc::format!</span>(<span class="string">"[*] Linux ABI Subsystem: {}"</span>, cmd));
+<a href=#449 id=449 data-nosnippet>449</a>            <span class="kw">if </span>cmd == <span class="string">"linux status" </span>{
+<a href=#450 id=450 data-nosnippet>450</a>                surface.append_terminal_line(<span class="string">"Linux ABI: 6.8.0-hydra (x86_64) | glibc &amp; musl ready"</span>);
+<a href=#451 id=451 data-nosnippet>451</a>                surface.append_terminal_line(<span class="string">"Wayland Display: /run/user/1000/wayland-0 (Active)"</span>);
+<a href=#452 id=452 data-nosnippet>452</a>                surface.append_terminal_line(<span class="string">"Dynamic Linker: /lib64/ld-hydra.so | auxv online"</span>);
+<a href=#453 id=453 data-nosnippet>453</a>                surface.append_terminal_line(<span class="string">"Input Routing: wl_seat (pointer &amp; keyboard streaming)"</span>);
+<a href=#454 id=454 data-nosnippet>454</a>            } <span class="kw">else if </span>cmd.contains(<span class="string">"run"</span>) {
+<a href=#455 id=455 data-nosnippet>455</a>                surface.append_terminal_line(<span class="string">"[+] Executed Linux ELF binary in Ring 3 userspace."</span>);
+<a href=#456 id=456 data-nosnippet>456</a>                surface.append_terminal_line(<span class="string">"[+] Wayland buffer attached and committed to display."</span>);
+<a href=#457 id=457 data-nosnippet>457</a>            }
+<a href=#458 id=458 data-nosnippet>458</a>        }
+<a href=#459 id=459 data-nosnippet>459</a>        other =&gt; {
+<a href=#460 id=460 data-nosnippet>460</a>            surface.append_terminal_line(<span class="kw-2">&amp;</span><span class="macro">alloc::format!</span>(<span class="string">"konsole: command not found: '{}'"</span>, other));
+<a href=#461 id=461 data-nosnippet>461</a>        }
+<a href=#462 id=462 data-nosnippet>462</a>    }
+<a href=#463 id=463 data-nosnippet>463</a>}
+</code></pre></div></section></main></body></html>

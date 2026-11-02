@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BLOCK","CACHE_BLOCKS","MAX_RUN","RAM_POOL_BYTES","SECTOR"],"enum":["Backend","DiskContents"],"fn":["disk_info","driver_request","driver_window","frame_bytes"],"static":["DISK_INFO"],"struct":["BlockCache","CacheEntry","DiskInfo","Spa","Vdev"]};

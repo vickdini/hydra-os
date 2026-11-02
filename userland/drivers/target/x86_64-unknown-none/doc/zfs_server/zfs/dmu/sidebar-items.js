@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DIRTY_SYNC_THRESHOLD","DNODE_CACHE_LIMIT"],"fn":["capacity","pow64","read_indirect"],"struct":["Dmu"],"type":["DmuResult","Indirect"]};

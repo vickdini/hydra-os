@@ -17,7 +17,7 @@
 //!
 //! - `WlSurface`: Represents an individual window surface with title, bounds, and content state.
 //! - `WindowType`: Supported desktop application types (Konsole Terminal, KSysGuard Monitor, About).
-//! - [`WaylandCompositor`]: Central registry managing surface lifecycle, z-ordering, and drag state.
+//! - `WaylandCompositor`: Central registry managing surface lifecycle, z-ordering, and drag state.
 
 extern crate alloc;
 

@@ -2,17 +2,17 @@
 //!
 //! The OpenZFS implementation runs as a Ring 3 program (`userland/drivers/zfs-server`); the
 //! kernel's file layer asks it for ZPL operations (POSIX-style, by inode) over
-//! [`crate::ipc::protocol::ENDPOINT_ZFS_SERVER`]. This module is shared by both sides
+//! `ENDPOINT_ZFS_SERVER`. This module is shared by both sides
 //! (the server includes it with `#[path]`): the operation codes, the types they carry, and
 //! their encoding in the service window.
 //!
 //! ## Wire format
 //!
 //! A request is a message whose label is the operation; its parameters are encoded in the
-//! window from offset 0 ([`Writer`]: little-endian `u64`s and length-prefixed byte strings).
+//! window from offset 0 (`Writer`: little-endian `u64`s and length-prefixed byte strings).
 //! The reply carries `args = [status (value or -errno), value, reply bytes, events]`: reply
 //! data is in the window from offset 0, and the inotify events the operation caused are at
-//! [`EVENT_OFFSET`] (the kernel delivers them to its watchers).
+//! `EVENT_OFFSET` (the kernel delivers them to its watchers).
 
 use alloc::string::String;
 use alloc::vec::Vec;

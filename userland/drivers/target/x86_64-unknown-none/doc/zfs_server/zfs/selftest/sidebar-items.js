@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BIG_FILE_BYTES","MANY_FILES"],"fn":["build","check","path","pattern","remove_tree","report","run_fsck","run_selftest","run_verify","verify"]};

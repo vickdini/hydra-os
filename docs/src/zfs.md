@@ -8,9 +8,9 @@
 
 ## 1. Architectural Motivation
 
-In traditional monolithic operating systems, the filesystem runs in kernel space (Ring 0) with direct block device access. This violates principle-of-least-privilege and microkernel design tenants. A single bug or corruption in the filesystem driver can compromise the entire operating system kernel.
+In traditional monolithic operating systems, the filesystem runs in kernel space (Ring 0) with direct block device access. This violates principle-of-least-privilege and microkernel design tenets. A single bug or corruption in the filesystem driver can compromise the entire operating system kernel.
 
-Hydra implements **ZFS (Zettabyte File System)** as the default filesystem, structured strictly as an **autonomous Microkernel File Server (`ZfsServer`)**.
+Hydra implements **ZFS (Zettabyte File System)** as the default filesystem, structured strictly as an **autonomous Ring 3 Microkernel File Server (`userland/drivers/zfs-server`)** running in an isolated userland address space, communicating with an unprivileged **ATA Block Device Driver (`userland/drivers/ata-driver`)** via shared data windows and IPC.
 
 ```
 +--------------------------------------------------------------+
@@ -20,9 +20,10 @@ Hydra implements **ZFS (Zettabyte File System)** as the default filesystem, stru
                                |
                    Capability Token Validation
                    Microkernel IPC Rendezvous (Endpoint 0x20)
+                   Shared Data Window (256 KiB)
                                v
 +--------------------------------------------------------------+
-|               ZFS MICROKERNEL FILE SERVER                    |
+|             RING 3 ZFS MICROKERNEL FILE SERVER               |
 |                                                              |
 |   +------------------------------------------------------+   |
 |   | ZPL (ZFS POSIX Layer) / IPC Server Dispatcher        |   |
@@ -42,6 +43,14 @@ Hydra implements **ZFS (Zettabyte File System)** as the default filesystem, stru
 |   | - Fletcher-4 End-to-End Checksum Validation          |   |
 |   | - Uberblock Transaction Groups (TXG)                 |   |
 |   +------------------------------------------------------+   |
++--------------------------------------------------------------+
+                               |
+                   Shared Data Window Block I/O
+                   IPC Service Call (Endpoint 0x21)
+                               v
++--------------------------------------------------------------+
+|              RING 3 ATA BLOCK DEVICE DRIVER                  |
+|                 (userland/drivers/ata-driver)                |
 +--------------------------------------------------------------+
 ```
 

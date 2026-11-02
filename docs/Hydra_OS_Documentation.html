@@ -397,7 +397,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
         <strong>Target Architecture:</strong> x86_64-unknown-uefi (Native 64-bit Long Mode)<br>
         <strong>Security Model:</strong> Capability-Based Access Control (seL4-style)<br>
         <strong>IPC Subsystem:</strong> Synchronous &amp; Asynchronous Message Rendezvous<br>
-        <strong>Generated:</strong> November 01, 2026
+        <strong>Generated:</strong> November 02, 2026
     </div>
 </div>
 
@@ -439,6 +439,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-mod" class="toc-link"><span class="toc-title">Inter-Process Communication Overview</span><span class="toc-sub">Microkernel message passing coordinating isolated userland services.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-msg" class="toc-link"><span class="toc-title">Fast Register Messages & Delegation</span><span class="toc-sub">Fast 4-word inline register payload, protocol labels, and transferred capability tokens.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage7-ipc-ep" class="toc-link"><span class="toc-title">Rendezvous Channels & Endpoints</span><span class="toc-sub">Circular FIFO ring buffers, rendezvous mailboxes, and thread-safe SharedEndpoint.</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage7-ipc-service" class="toc-link"><span class="toc-title">Driver Services & Shared Data Windows</span><span class="toc-sub">256 KiB zero-copy shared window IPC, direct CPU handoff, and driver capability grants.</span></a></li>
 <li class="toc-stage-header">Stage 8: File Server & Storage</li>
 <li class="toc-item"><a href="#doc-boot-stage8-ata" class="toc-link"><span class="toc-title">ATA / IDE PIO Hard Disk Block Driver</span><span class="toc-sub">Legacy PC/AT I/O port command blocks (0x1F0/0x3F6), polled PIO transfers, and hardware persistent vdev.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage8-zfs" class="toc-link"><span class="toc-title">ZFS Microkernel File Server Architecture</span><span class="toc-sub">Microkernel ZFS File Server (Endpoint 0x20), CoW Merkle tree, Fletcher-4 checksums, and datasets.</span></a></li>
@@ -454,6 +455,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li class="toc-item"><a href="#doc-boot-stage9-scheduler" class="toc-link"><span class="toc-title">Preemptive Multitasking & Context Switching</span><span class="toc-sub">Round-robin timeslicing at 100 Hz, iretq context switching, idle task, and task commands (ps, spawn, kill).</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-sync" class="toc-link"><span class="toc-title">Synchronization Primitives & Wait Queues</span><span class="toc-sub">TaskState::Blocked wait queues, sleep Mutex, Semaphore, CondVar, and blocking rendezvous IPC.</span></a></li>
 <li class="toc-item"><a href="#doc-boot-stage9-elf" class="toc-link"><span class="toc-title">Userspace ELF64 Binary Loader & Execution</span><span class="toc-sub">Parsing standalone ELF64 binaries from ZFS, PIE relocation, Ring 3 memory mapping, and syscall execution.</span></a></li>
+<li class="toc-item"><a href="#doc-boot-stage9-supervisor" class="toc-link"><span class="toc-title">Driver Supervisor & MINIX 3 Reincarnation Server</span><span class="toc-sub">Spawning Ring 3 drivers, on-the-spot crash revival, heartbeat monitoring, and transparent state handoff.</span></a></li>
 <li class="toc-stage-header">Stage 10: Interactive Shell</li>
 <li class="toc-item"><a href="#doc-boot-stage10-shell" class="toc-link"><span class="toc-title">Interactive Microkernel Shell & Command REPL</span><span class="toc-sub">Command REPL, real-time memory/CPU inspection, CSpace manipulation, ZFS commands, and IPC testing.</span></a></li>
 <li class="toc-stage-header">Stage 11: Linux Compatibility (ABI Layer)</li>
@@ -496,10 +498,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">└──</span><span class="w"> </span><span class="n">table</span><span class="o">.</span><span class="n">md</span><span class="w">               </span><span class="c1"># Task capability table &amp; CSpace (src/capability/table.rs)</span>
 <span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">video</span><span class="o">.</span><span class="n">md</span><span class="w">                   </span><span class="c1"># Hardware GOP display driver &amp; framebuffer console (src/video/)</span>
 <span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">shell</span><span class="o">.</span><span class="n">md</span><span class="w">                   </span><span class="c1"># Interactive microkernel shell &amp; command REPL (src/shell.rs)</span>
-<span class="w">    </span><span class="err">└──</span><span class="w"> </span><span class="n">ipc</span><span class="o">/</span>
-<span class="w">        </span><span class="err">├──</span><span class="w"> </span><span class="n">mod</span><span class="o">.</span><span class="n">md</span><span class="w">                 </span><span class="c1"># IPC subsystem root (src/ipc/mod.rs)</span>
-<span class="w">        </span><span class="err">├──</span><span class="w"> </span><span class="n">message</span><span class="o">.</span><span class="n">md</span><span class="w">             </span><span class="c1"># Fast register payload &amp; transferred caps (src/ipc/message.rs)</span>
-<span class="w">        </span><span class="err">└──</span><span class="w"> </span><span class="n">endpoint</span><span class="o">.</span><span class="n">md</span><span class="w">            </span><span class="c1"># Message rendezvous channels (src/ipc/endpoint.rs)</span>
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">ipc</span><span class="o">/</span>
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">mod</span><span class="o">.</span><span class="n">md</span><span class="w">                 </span><span class="c1"># IPC subsystem root (src/ipc/mod.rs)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">message</span><span class="o">.</span><span class="n">md</span><span class="w">             </span><span class="c1"># Fast register payload &amp; transferred caps (src/ipc/message.rs)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">endpoint</span><span class="o">.</span><span class="n">md</span><span class="w">            </span><span class="c1"># Message rendezvous channels (src/ipc/endpoint.rs)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">└──</span><span class="w"> </span><span class="n">service</span><span class="o">.</span><span class="n">md</span><span class="w">             </span><span class="c1"># Shared window driver services &amp; CPU handoff (src/ipc/service.rs)</span>
+<span class="w">    </span><span class="err">└──</span><span class="w"> </span><span class="n">task</span><span class="o">/</span>
+<span class="w">        </span><span class="err">└──</span><span class="w"> </span><span class="n">supervisor</span><span class="o">.</span><span class="n">md</span><span class="w">          </span><span class="c1"># MINIX 3-style driver reincarnation supervisor (src/task/supervisor.rs)</span>
 </code></pre></div>
 
 <hr />
@@ -617,10 +622,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <td style="text-align: left;">Postal mailbox rendezvous point, FIFO circular ring buffer.</td>
 </tr>
 <tr>
+<td style="text-align: left;"><strong>IPC Service</strong></td>
+<td style="text-align: left;"><a href="file:///d:/os/src/ipc/service.rs"><code>src/ipc/service.rs</code></a></td>
+<td style="text-align: left;"><a href="#doc-boot-stage7-ipc-service">docs/src/ipc/service.md</a></td>
+<td style="text-align: left;">Driver services, shared data windows (256 KiB zero-copy), and direct CPU handoff.</td>
+</tr>
+<tr>
 <td style="text-align: left;"><strong>IPC Root</strong></td>
 <td style="text-align: left;"><a href="file:///d:/os/src/ipc/mod.rs"><code>src/ipc/mod.rs</code></a></td>
 <td style="text-align: left;"><a href="#doc-boot-stage3-mod">docs/src/ipc/mod.md</a></td>
 <td style="text-align: left;">Inter-process communication module export.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Driver Supervisor</strong></td>
+<td style="text-align: left;"><a href="file:///d:/os/src/task/supervisor.rs"><code>src/task/supervisor.rs</code></a></td>
+<td style="text-align: left;"><a href="#doc-boot-stage9-supervisor">docs/src/task/supervisor.md</a></td>
+<td style="text-align: left;">MINIX 3-style driver reincarnation server, on-the-spot crash revival, heartbeats.</td>
 </tr>
 <tr>
 <td style="text-align: left;"><strong>Build Automation</strong></td>
@@ -2730,11 +2747,14 @@ hydra&gt; unmap 0x7000000000
 <ul>
 <li><a href="#doc-boot-stage7-ipc-ep"><code>endpoint.rs</code></a>: Provides the <a href="file:///d:/os/docs/src/ipc/endpoint.md#endpoint"><code>Endpoint</code></a> and <a href="file:///d:/os/docs/src/ipc/endpoint.md#sharedendpoint"><code>SharedEndpoint</code></a> message queues.</li>
 <li><a href="#doc-boot-stage7-ipc-msg"><code>message.rs</code></a>: Defines the structure of an IPC <a href="file:///d:/os/docs/src/ipc/message.md#the-message-struct"><code>Message</code></a>, including inline arguments and security capability tokens.</li>
+<li><a href="#doc-boot-stage7-ipc-service"><code>service.rs</code></a>: Driver service registry, shared data window IPC (256 KiB zero-copy memory frames), and direct CPU handoffs.</li>
+<li><code>protocol.rs</code>: Well-known microkernel service endpoints (<code>0x20</code> ZFS, <code>0x21</code> Block Device, <code>0x22</code> Network, <code>0x23</code> Display, <code>0x24</code> Supervisor) and standard operation codes.</li>
 </ul>
 <hr />
 <h2>3. Re-exported Types</h2>
 <div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">endpoint</span><span class="p">::</span><span class="n">Endpoint</span><span class="p">;</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">message</span><span class="p">::</span><span class="n">Message</span><span class="p">;</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">service</span><span class="p">::{</span><span class="n">call</span><span class="p">,</span><span class="w"> </span><span class="n">register</span><span class="p">,</span><span class="w"> </span><span class="n">recv</span><span class="p">,</span><span class="w"> </span><span class="n">reply</span><span class="p">,</span><span class="w"> </span><span class="n">SharedWindow</span><span class="p">};</span>
 </code></pre></div>
 
 <p>These re-exports allow any other module in the kernel to conveniently import IPC types directly via <code>use crate::ipc::{Endpoint, Message};</code>.</p>
@@ -2956,11 +2976,82 @@ hydra&gt; unmap 0x7000000000
 
 
 
+<div id="doc-boot-stage7-ipc-service" class="doc-section">
+    <div class="section-stage-badge">Stage 7: IPC Subsystem &bull; Boot Sequence Order #25</div>
+    <h1>IPC Subsystem: Driver Services &amp; Shared Windows</h1>
+<ul>
+<li><strong>Source File</strong>: <a href="file:///d:/os/src/ipc/service.rs"><code>src/ipc/service.rs</code></a></li>
+<li><strong>Subsystem</strong>: Microkernel IPC Service Infrastructure</li>
+<li><strong>Core Interfaces</strong>: <code>call()</code>, <code>register()</code>, <code>recv()</code>, <code>reply()</code>, <code>attach()</code></li>
+</ul>
+<hr />
+<h2>1. Architectural Role &amp; Design Rationale</h2>
+<p>Hydra's microkernel design requires that client subsystems (such as the VFS or file server) communicate frequently with Ring 3 device drivers without incurring the performance penalty of traditional context switching or multi-copy socket buffers.</p>
+<p>The <code>service</code> module solves this through three primary innovations:
+1. <strong>Shared Data Windows (<code>SharedWindow</code>)</strong>: Each registered service is allocated a physically contiguous, 256 KiB (64 pages) memory window. The window is identity-mapped in Ring 0 and mapped into the driver's Ring 3 address space. Large payloads (such as disk sectors or network frames) are written directly into this buffer, eliminating intermediate copies.
+2. <strong>Direct CPU Handoff</strong>: When a client issues a synchronous <code>call()</code> to a driver, the kernel scheduler performs a direct CPU handoff (<code>Scheduler::begin_handoff</code>). The target driver process is scheduled immediately to consume the request, and no other unprivileged tasks can interleave or contend for subsystem locks.
+3. <strong>Hardware Isolation via Least Privilege Grants</strong>: Drivers cannot arbitrarily touch system memory. Instead, the supervisor provisions explicit grants:
+   - <strong>MMIO Grants</strong>: Specific physical address ranges the driver is permitted to map (e.g., GOP video framebuffer, NIC registers).
+   - <strong>DMA Buffers</strong>: Contiguous physical frames allocated via <code>dma_alloc</code> for hardware bus-mastering.
+   - <strong>IRQ Notification</strong>: Hardware interrupts are acknowledged and masked in the kernel ISR; the driver is woken asynchronously via wait queues without executing untrusted code in interrupt context.</p>
+<div class="codehilite"><pre><span></span><code>+-------------------+                           +--------------------+
+|   Kernel Caller   |                           |    Ring 3 Driver   |
+| (e.g. ZFS Client) |                           |  (e.g. ATA Server) |
++-------------------+                           +--------------------+
+          |                                               |
+          | 1. Write payload into Shared Window (256 KiB) |
+          |----------------------------------------------&gt;|
+          |                                               |
+          | 2. svc_call(ENDPOINT, label, args)            |
+          |----------------------------------------------&gt;|
+          |    (Direct CPU Handoff: driver runs now)      |
+          |                                               |
+          |                                               | 3. Process I/O
+          |                                               |    (Ports / DMA)
+          |                                               |
+          | 4. svc_reply(status, args)                    |
+          |&lt;----------------------------------------------|
+          |                                               |
+          | 5. Read results from Shared Window            |
+          v                                               v
+</code></pre></div>
+
+<hr />
+<h2>2. Key Types &amp; Interfaces</h2>
+<h3>1. <code>SharedWindow</code></h3>
+<p>Manages the life cycle of the contiguous 256 KiB physical memory buffer backing bulk IPC:
+- <code>WINDOW_PAGES</code>: 64 frames (262,144 bytes).
+- <code>attach()</code>: Maps the window into the client or server's page tables.
+- <code>as_slice_mut()</code>: Provides safe typed mutable access to the underlying bytes.</p>
+<h3>2. Service Protocol Call Envelopes</h3>
+<ul>
+<li><code>call(endpoint, request, timeout_ticks)</code>: Issues a request, performs CPU handoff, and blocks the calling thread until a reply arrives or the timeout expires.</li>
+<li><code>register(endpoint)</code>: Enrolls the calling Ring 3 process as the authoritative daemon for a designated service endpoint.</li>
+<li><code>recv(endpoint)</code>: Called by the server daemon to wait for incoming client requests.</li>
+<li><code>reply(endpoint, response)</code>: Delivers the result back to the waiting client and unblocks it.</li>
+</ul>
+<h3>3. Driver Capability Grants</h3>
+<ul>
+<li><code>set_grants(endpoint, mmio_ranges, port_ranges)</code>: Restricts which physical memory pages and hardware I/O ports the driver is permitted to access.</li>
+<li><code>irq_register(irq_num)</code>: Associates an interrupt vector with the service.</li>
+<li><code>irq_wait(irq_num)</code>: Puts the driver thread to sleep until the hardware line triggers.</li>
+</ul>
+<hr />
+<h2>3. Hardware &amp; Concurrency Context</h2>
+<ul>
+<li><strong>Privilege Boundary</strong>: Clients may reside in Ring 0 or Ring 3; services reside in Ring 3.</li>
+<li><strong>Deadlock Avoidance</strong>: Service locks are never held across blocking rendezvous points. Dead drivers are detected via call timeouts (<code>CALL_TIMEOUT_TICKS = 500</code> / 5 seconds) and trigger automatic resuscitation via the process supervisor.</li>
+</ul>
+</div>
+
+
+
 <div id="doc-boot-stage8-ata" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #25</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #26</div>
     <h1>ATA / IDE PIO Hard Disk Block Driver</h1>
 <h2>1. Architectural Role &amp; Design Rationale</h2>
 <p>Hydra OS requires autonomous persistent secondary storage that remains fully functional after UEFI boot services are terminated (<code>ExitBootServices</code>). The <strong>ATA / IDE Programmed I/O (PIO)</strong> driver provides direct bare-metal block access to virtual and physical hard disk controllers (e.g. Intel PIIX3/PIIX4 IDE controllers or SATA controllers operating in IDE legacy compatibility mode) without any runtime BIOS/UEFI firmware dependencies.</p>
+<p>In accordance with Hydra's microkernel isolation model, the ATA block driver executes as an <strong>unprivileged Ring 3 daemon (<code>userland/drivers/ata-driver</code>)</strong>. The kernel grants it access to standard I/O port ranges <code>0x1F0..0x1F7</code> and <code>0x3F6</code>. It receives block read/write/flush requests over IPC endpoint <code>0x21</code> (<code>ENDPOINT_BLOCK_DEV</code>) backed by a 256 KiB zero-copy shared window.</p>
 <p>The driver acts as the physical block device backing the <strong>OpenZFS Storage Pool Allocator (SPA)</strong>, binding physical 512-byte sectors to ZFS 4096-byte virtual blocks (<code>vdev-ata-0</code>).</p>
 <div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
 |                        Hydra Shell / Userland Apps                       |
@@ -2968,17 +3059,12 @@ hydra&gt; unmap 0x7000000000
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|                  Microkernel ZFS Client &amp; DMU Subsystem                  |
+|              Ring 3 ZFS Microkernel Server (Endpoint 0x20)               |
 +--------------------------------------------------------------------------+
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|            OpenZFS Storage Pool Allocator (SPA - 32 MiB Pool)             |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|               ATA / IDE Block Driver (Polled PIO, Ring 0)                |
+|              Ring 3 ATA Block Driver (Endpoint 0x21, PIO)                |
 +--------------------------------------------------------------------------+
                   │                                     │
                   ▼                                     ▼
@@ -3143,7 +3229,7 @@ Device: /dev/hda (Primary Master ATA/IDE)
 
 
 <div id="doc-boot-stage8-zfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #26</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #27</div>
     <h1>ZFS Microkernel File Server Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/fs/zfs/"><code>src/fs/zfs/</code></a> &amp; <a href="file:///d:/os/src/fs/client.rs"><code>src/fs/client.rs</code></a></li>
@@ -3152,8 +3238,8 @@ Device: /dev/hda (Primary Master ATA/IDE)
 </ul>
 <hr />
 <h2>1. Architectural Motivation</h2>
-<p>In traditional monolithic operating systems, the filesystem runs in kernel space (Ring 0) with direct block device access. This violates principle-of-least-privilege and microkernel design tenants. A single bug or corruption in the filesystem driver can compromise the entire operating system kernel.</p>
-<p>Hydra implements <strong>ZFS (Zettabyte File System)</strong> as the default filesystem, structured strictly as an <strong>autonomous Microkernel File Server (<code>ZfsServer</code>)</strong>.</p>
+<p>In traditional monolithic operating systems, the filesystem runs in kernel space (Ring 0) with direct block device access. This violates principle-of-least-privilege and microkernel design tenets. A single bug or corruption in the filesystem driver can compromise the entire operating system kernel.</p>
+<p>Hydra implements <strong>ZFS (Zettabyte File System)</strong> as the default filesystem, structured strictly as an <strong>autonomous Ring 3 Microkernel File Server (<code>userland/drivers/zfs-server</code>)</strong> running in an isolated userland address space, communicating with an unprivileged <strong>ATA Block Device Driver (<code>userland/drivers/ata-driver</code>)</strong> via shared data windows and IPC.</p>
 <div class="codehilite"><pre><span></span><code><span class="nb">+--------------------------------------------------------------+</span>
 <span class="c">|                     Client Applications                       |</span>
 <span class="c">|           (Hydra Interactive Shell</span><span class="nt">,</span><span class="c"> Process Loader)          |</span>
@@ -3161,9 +3247,10 @@ Device: /dev/hda (Primary Master ATA/IDE)
 <span class="c">                               |</span>
 <span class="c">                   Capability Token Validation</span>
 <span class="c">                   Microkernel IPC Rendezvous (Endpoint 0x20)</span>
+<span class="c">                   Shared Data Window (256 KiB)</span>
 <span class="c">                               v</span>
 <span class="nb">+--------------------------------------------------------------+</span>
-<span class="c">|               ZFS MICROKERNEL FILE SERVER                    |</span>
+<span class="c">|             RING 3 ZFS MICROKERNEL FILE SERVER               |</span>
 <span class="c">|                                                              |</span>
 <span class="c">|   </span><span class="nb">+------------------------------------------------------+</span><span class="c">   |</span>
 <span class="c">|   | ZPL (ZFS POSIX Layer) / IPC Server Dispatcher        |   |</span>
@@ -3183,6 +3270,14 @@ Device: /dev/hda (Primary Master ATA/IDE)
 <span class="c">|   | </span><span class="nb">-</span><span class="c"> Fletcher</span><span class="nb">-</span><span class="c">4 End</span><span class="nb">-</span><span class="c">to</span><span class="nb">-</span><span class="c">End Checksum Validation          |   |</span>
 <span class="c">|   | </span><span class="nb">-</span><span class="c"> Uberblock Transaction Groups (TXG)                 |   |</span>
 <span class="c">|   </span><span class="nb">+------------------------------------------------------+</span><span class="c">   |</span>
+<span class="nb">+--------------------------------------------------------------+</span>
+<span class="c">                               |</span>
+<span class="c">                   Shared Data Window Block I/O</span>
+<span class="c">                   IPC Service Call (Endpoint 0x21)</span>
+<span class="c">                               v</span>
+<span class="nb">+--------------------------------------------------------------+</span>
+<span class="c">|              RING 3 ATA BLOCK DEVICE DRIVER                  |</span>
+<span class="c">|                 (userland/drivers/ata</span><span class="nb">-</span><span class="c">driver)                |</span>
 <span class="nb">+--------------------------------------------------------------+</span>
 </code></pre></div>
 
@@ -3333,7 +3428,7 @@ hydra:/bin&gt; sync
 
 
 <div id="doc-boot-stage8-vfs" class="doc-section">
-    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #27</div>
+    <div class="section-stage-badge">Stage 8: File Server & Storage &bull; Boot Sequence Order #28</div>
     <h1>Unix File Descriptor Table &amp; Shell Pipelines</h1>
 <ul>
 <li><strong>Source Files</strong>: <a href="file:///d:/os/src/fs/fd.rs"><code>src/fs/fd.rs</code></a>, <a href="file:///d:/os/src/fs/pipe.rs"><code>src/fs/pipe.rs</code></a>, <a href="file:///d:/os/src/shell/pipeline.rs"><code>src/shell/pipeline.rs</code></a></li>
@@ -3500,7 +3595,7 @@ ps<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<s
 
 
 <div id="doc-boot-stage8b-video" class="doc-section">
-    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #28</div>
+    <div class="section-stage-badge">Stage 8b: Hardware Video & Framebuffer &bull; Boot Sequence Order #29</div>
     <h1>Hardware Video Driver &amp; GOP Framebuffer Documentation</h1>
 <ul>
 <li><strong>Source Module</strong>: <a href="file:///d:/os/src/video/"><code>src/video/</code></a></li>
@@ -3595,10 +3690,10 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage8c-plasma" class="doc-section">
-    <div class="section-stage-badge">Stage 8c: Graphical Desktop & Wayland &bull; Boot Sequence Order #29</div>
+    <div class="section-stage-badge">Stage 8c: Graphical Desktop & Wayland &bull; Boot Sequence Order #30</div>
     <h1>Wayland Compositor &amp; KDE Plasma Desktop Shell</h1>
 <h2>1. Architectural Role &amp; Design Rationale</h2>
-<p>Hydra OS introduces a native microkernel graphical desktop environment modeled after <strong>KDE Plasma</strong> running on a <strong>Wayland Compositor</strong>. Rather than relying on legacy monolithic X11 servers or bloated graphics stacks, Hydra implements a modern, memory-safe, double-buffered graphics pipeline executing in Ring 0 / Ring 3.</p>
+<p>Hydra OS introduces a native microkernel graphical desktop environment modeled after <strong>KDE Plasma</strong> running on a <strong>Wayland Compositor</strong>. Rather than relying on legacy monolithic X11 servers or bloated graphics stacks, Hydra implements a modern, memory-safe, double-buffered graphics pipeline executing as an <strong>isolated Ring 3 display server (<code>userland/drivers/display-server</code>)</strong> over endpoint <code>0x23</code> (<code>ENDPOINT_DISPLAY_DEV</code>), with physical framebuffer MMIO access granted by the kernel supervisor.</p>
 <div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
 |                       KDE Plasma Desktop Shell                           |
 |       - Breeze Window Theme Engine (Titlebars, Close, Max, Min)          |
@@ -3710,7 +3805,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage8d-net" class="doc-section">
-    <div class="section-stage-badge">Stage 8d: Network Subsystem &bull; Boot Sequence Order #30</div>
+    <div class="section-stage-badge">Stage 8d: Network Subsystem &bull; Boot Sequence Order #31</div>
     <h1>Intel E1000 Gigabit Ethernet Driver &amp; Microkernel Network Stack</h1>
 <h2>1. Architectural Role &amp; Design Rationale</h2>
 <p>Hydra OS implements a zero-dependency, <code>no_std</code> native network protocol stack running directly in Ring 0 / Ring 3 microkernel space. Rather than relying on monolithic Linux network subsystems or third-party crates with external POSIX requirements, Hydra OS provides a purpose-built networking architecture designed for microkernel efficiency, zero-copy packet processing, and direct integration with persistent OpenZFS storage.</p>
@@ -3747,11 +3842,12 @@ hydra&gt; video clear
                                      │
                                      ▼
 +--------------------------------------------------------------------------+
-|            Intel 82540EM (E1000) Gigabit NIC Controller Driver            |
+|      Ring 3 Intel 82540EM (E1000) NIC Driver (Endpoint 0x22, MMIO/DMA)   |
 |     - PCI Bus Enumeration (Vendor: 0x8086, Device: 0x100E)               |
 |     - 32-Entry Circular Ring Transmit (TX) &amp; Receive (RX) Descriptors    |
-|     - Memory Mapped I/O (MMIO) Registers (CTRL, RCTL, TCTL, RAL/RAH)     |
+|     - Memory Mapped I/O (MMIO) Registers via Supervisor Grant            |
 |     - Direct Memory Access (DMA) Packet Buffers (2048 bytes per slot)    |
+|     - Fast IPC Packet Streaming via 256 KiB Shared Data Window           |
 +--------------------------------------------------------------------------+
                                      │
                                      ▼
@@ -3851,7 +3947,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-tcb" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #31</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #32</div>
     <h1>Task Control Block (TCB) &amp; Thread State</h1>
 <h2>Overview</h2>
 <p>The <strong>Task Control Block (<code>Task</code> / <code>TCB</code>)</strong> forms the foundational abstraction of thread execution and process representation in the Hydra 64-bit microkernel. Each execution thread is managed through an independent TCB that encapsulates its unique 64-bit identifier (<code>TaskId</code>), descriptive thread label, lifecycle execution state (<code>TaskState</code>), scheduling priority (<code>TaskPriority</code>), architectural register frame (<code>TaskRegisters</code>), dedicated 16 KiB execution stack, CPU tick consumption statistics, and an isolated per-task capability security space (<code>CapabilityTable</code>).</p>
@@ -3986,7 +4082,7 @@ hydra&gt; video clear
 
 
 <div id="doc-boot-stage9-scheduler" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #32</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #33</div>
     <h1>Preemptive Multitasking &amp; Context Switching</h1>
 <h2>Overview</h2>
 <p>The Hydra multitasking subsystem implements a <strong>preemptive round-robin scheduler</strong> driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.</p>
@@ -4195,7 +4291,7 @@ Total tasks: 3 | Timeslice: 50 ms | Worker counter: 0
 
 
 <div id="doc-boot-stage9-sync" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #33</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #34</div>
     <h1>Microkernel Synchronization Primitives &amp; Wait Queues</h1>
 <h2>Overview</h2>
 <p>In <strong>Phase 4</strong>, Hydra OS activates the <code>TaskState::Blocked</code> lifecycle state in the scheduler and introduces true sleeping synchronization primitives. Unlike busy-wait spinlocks that burn CPU cycles, sleep-locks transition contended threads to a suspended state and deschedule them immediately. When the lock or resource becomes available, the wait-queue awakens the thread, returning it to <code>TaskState::Ready</code>.</p>
@@ -4342,7 +4438,7 @@ hydra:/bin&gt;  [Producer] Depositing message #1 to Endpoint #1...
 
 
 <div id="doc-boot-stage9-elf" class="doc-section">
-    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #34</div>
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #35</div>
     <h1>Userspace ELF64 Binary Loader &amp; Execution</h1>
 <h2>Overview</h2>
 <p>Hydra OS features an autonomous <strong>Userspace ELF64 Binary Loader</strong> capable of parsing, relocating, mapping, and executing standalone compiled x86_64 binaries directly from the OpenZFS storage medium (<code>hydrapool/bin</code>) in unprivileged <strong>Ring 3 (CPL = 3)</strong>.</p>
@@ -4681,8 +4777,83 @@ hydra:/bin&gt;<span class="w"> </span>ps
 
 
 
+<div id="doc-boot-stage9-supervisor" class="doc-section">
+    <div class="section-stage-badge">Stage 9: Multitasking & Scheduler &bull; Boot Sequence Order #36</div>
+    <h1>Task Subsystem: Driver Supervisor (MINIX 3-Style Reincarnation Server)</h1>
+<ul>
+<li><strong>Source File</strong>: <a href="file:///d:/os/src/task/supervisor.rs"><code>src/task/supervisor.rs</code></a></li>
+<li><strong>Subsystem</strong>: Microkernel Fault Tolerance &amp; Service Lifecycle</li>
+<li><strong>Endpoint</strong>: <code>0x24</code> (<code>ENDPOINT_SUPERVISOR</code>)</li>
+</ul>
+<hr />
+<h2>1. Architectural Role &amp; Design Rationale</h2>
+<p>In monolithic operating systems (such as Linux), device drivers and filesystems execute directly in Ring 0. A single null-pointer dereference, kernel panics, or memory corruption in any third-party driver instantly crashes the entire operating system (kernel panic / Blue Screen of Death).</p>
+<p>Hydra eliminates this failure mode by adhering strictly to a <strong>MINIX 3-style Reincarnation Architecture</strong>:
+1. <strong>Ring 3 Isolation</strong>: Device drivers (<code>ata-driver</code>, <code>e1000-driver</code>, <code>display-server</code>) and storage servers (<code>zfs-server</code>) are decoupled from Ring 0 and compiled as static, standalone ELF64 userland daemons. Each runs in an isolated address space with separate page tables (PML4) and capability spaces.
+2. <strong>On-the-Spot Revival</strong>: When a driver process terminates unexpectedly, faults, or misses its deadline, the calling kernel thread revives the server <em>on the spot</em> using cached service parameters and capability grants. The subsystem does not dead-lock waiting for an asynchronous supervisor thread.
+3. <strong>Transparent State Handoff</strong>: Each service maintains a shared data window (<code>SharedWindow</code>) and state snapshot. Upon revival, the newly spawned daemon re-attaches to the existing physical memory window, restoring communication without client-side data loss.
+4. <strong>Heartbeat Health Monitoring</strong>: A background supervisor thread periodically sends ping probes (<code>MSG_SUPERVISOR_PING</code>) every second to ensure non-blocking liveness.</p>
+<div class="codehilite"><pre><span></span><code>+--------------------------------------------------------------------------+
+|                            RING 0 MICROKERNEL                            |
+|                                                                          |
+|   +---------------------+        Revives        +--------------------+   |
+|   |  Subsystem Caller   | --------------------&gt; | Process Supervisor |   |
+|   | (ZFS client / VFS)  | &lt;-------------------- |  (Reincarnation)   |   |
+|   +---------------------+     Snapshot Handoff  +--------------------+   |
+|              |                                             |             |
++--------------|---------------------------------------------|-------------+
+               | Shared Data Window (256 KiB)                | Spawns &amp;
+               | Direct CPU Handoff IPC                      | Monitors
+               v                                             v
++--------------------------------------------------------------------------+
+|                            RING 3 USERLAND                               |
+|                                                                          |
+|   +--------------------+  Crash Detected  +--------------------------+   |
+|   | ATA / Disk Driver  | ---------------&gt; | Dead Process Terminated  |   |
+|   +--------------------+                  +--------------------------+   |
+|                                                        |                 |
+|                                            Replaced by Fresh Daemon      |
+|                                                        v                 |
+|                                           +--------------------------+   |
+|                                           | Reincarnated ATA Driver  |   |
+|                                           +--------------------------+   |
++--------------------------------------------------------------------------+
+</code></pre></div>
+
+<hr />
+<h2>2. Key Types &amp; Interfaces</h2>
+<h3>1. <code>Supervisor</code></h3>
+<p>The central registry tracking all supervised services, their target ELF binaries, device grants, process identifiers, and restart history.</p>
+<ul>
+<li><code>start_all()</code>: Invoked during hardware takeover (<code>ExitBootServices</code>) to launch userland drivers (<code>ata-driver</code>, <code>e1000-driver</code>, <code>zfs-server</code>, <code>display-server</code>) in their respective address spaces.</li>
+<li><code>revive(endpoint)</code>: Synchronously restarts a failed service upon demand from an active kernel caller.</li>
+<li><code>tick()</code>: Periodic heartbeat check verifying that running services are alive and responsive to ping requests.</li>
+</ul>
+<h3>2. <code>ServiceState</code></h3>
+<p>Tracks the lifecycle status of each driver:
+- <code>Running</code>: The driver process is active, registered, and accepting IPC requests.
+- <code>Restarting</code>: The driver encountered a failure and is currently being respawned.
+- <code>Faulted</code>: The driver exceeded maximum restart limits (<code>MAX_RESTARTS = 5</code>) within the cooldown window, preventing restart loops.
+- <code>Stopped</code>: Service is intentionally disabled or absent due to missing physical hardware.</p>
+<h3>3. <code>ServiceSnapshot</code></h3>
+<p>Stores the configuration required to cleanly resurrect a dead driver:
+- Target endpoint identifier (<code>ENDPOINT_BLOCK_DEV</code>, <code>ENDPOINT_NET_DEV</code>, etc.).
+- Embedded ELF binary slice.
+- Device grants (I/O port ranges, MMIO memory mappings, DMA allowances).
+- Command-line arguments passed to the driver's <code>main()</code>.</p>
+<hr />
+<h2>3. Hardware &amp; Concurrency Context</h2>
+<ul>
+<li><strong>Privilege Level</strong>: Supervisor coordination logic resides in Ring 0; driver targets execute exclusively in Ring 3.</li>
+<li><strong>Concurrency</strong>: The global supervisor state is protected by a <code>spin::Mutex</code>. To prevent inversion deadlocks, the lock is held strictly for table inspection and task spawning, never held across IPC transmissions or wait loops.</li>
+<li><strong>Failure Boundaries</strong>: Hardware exceptions (<code>#PF</code>, <code>#GP</code>, <code>#UD</code>) occurring inside a driver daemon are trapped by the kernel IDT and converted into a graceful process termination, triggering the revival mechanism.</li>
+</ul>
+</div>
+
+
+
 <div id="doc-boot-stage10-shell" class="doc-section">
-    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #35</div>
+    <div class="section-stage-badge">Stage 10: Interactive Shell &bull; Boot Sequence Order #37</div>
     <h1>Interactive Microkernel Shell Documentation</h1>
 <ul>
 <li><strong>Source Directory</strong>: <a href="file:///d:/os/src/shell/"><code>src/shell/</code></a></li>
@@ -5337,7 +5508,7 @@ hydra:/bin&gt; cursor block
 
 
 <div id="doc-boot-stage11-linux" class="doc-section">
-    <div class="section-stage-badge">Stage 11: Linux Compatibility (ABI Layer) &bull; Boot Sequence Order #36</div>
+    <div class="section-stage-badge">Stage 11: Linux Compatibility (ABI Layer) &bull; Boot Sequence Order #38</div>
     <h1>Stage 11: Linux Binary Compatibility Subsystem (ABI Layer)</h1>
 <h2>Architectural Role &amp; Design Rationale</h2>
 <p>To support existing modern open-source graphical ecosystems—specifically standard C/C++ runtimes, <code>musl-libc</code>, and Wayland/KDE Plasma components—without requiring thousands of manual userspace ports, Hydra OS implements an in-kernel <strong>Linux Binary Compatibility Subsystem</strong> (<code>src/compat/linux</code>).</p>

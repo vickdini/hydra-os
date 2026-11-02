@@ -2,7 +2,7 @@
 //!
 //! The graphical desktop belongs to the display server, a Ring 3 program the supervisor
 //! starts with the framebuffer granted to it. The kernel forwards input to it and asks it
-//! for frames over [`ENDPOINT_DISPLAY_DEV`] (see [`crate::ipc::service`]).
+//! for frames over [`crate::ipc::protocol::ENDPOINT_DISPLAY_DEV`] (see [`crate::ipc::service`]).
 
 use crate::ipc::protocol::{ENDPOINT_DISPLAY_DEV, MSG_FB_FLUSH, MSG_FB_INPUT_EVENT};
 use crate::ipc::service::{self, CALL_TIMEOUT_TICKS};
