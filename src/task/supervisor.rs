@@ -30,13 +30,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
+use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, ENDPOINT_ZFS_SERVER, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
 use crate::ipc::service;
 use crate::ipc::Message;
 use crate::task::{is_task_alive, kill, TaskId};
 
 /// The ATA disk driver program.
 static ATA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/ata-driver"));
+/// The ZFS file server program.
+static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/zfs-server"));
 /// The e1000 network driver program.
 static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/e1000-driver"));
 /// The display server program.
@@ -138,6 +140,11 @@ fn e1000_args() -> Option<Vec<String>> {
 /// e1000 driver: its 128 KiB register window.
 fn e1000_grants() -> Vec<(u64, u64)> {
     crate::net::e1000::find_adapter().map_or_else(Vec::new, |(bar0, _)| alloc::vec![(bar0, 128 * 1024)])
+}
+
+/// ZFS file server: no arguments; it finds the pool through the disk driver.
+fn zfs_args() -> Option<Vec<String>> {
+    Some(Vec::new())
 }
 
 /// No device memory (port I/O and its own DMA buffers only).
@@ -273,6 +280,9 @@ pub fn supervisor_init() {
     if sup.services.is_empty() {
         // The disk first: everything else may need files
         sup.services.push(ServiceDescriptor::new("ata_driver", ENDPOINT_BLOCK_DEV, ATA_DRIVER_ELF, ata_args, no_grants));
+        // The file server imports the pool through the disk driver
+        sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
+        service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
         sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
         sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
     }
@@ -281,7 +291,8 @@ pub fn supervisor_init() {
 /// Waits (letting only process `id` run) until it registers as a server of `endpoint` or
 /// gives up; for kernel callers that may hold locks.
 fn await_registration(endpoint: u32, id: TaskId) -> bool {
-    let deadline = crate::arch::pit::ticks() + service::CALL_TIMEOUT_TICKS;
+    // Generous: the file server imports the pool before it registers
+    let deadline = crate::arch::pit::ticks() + 6000;
     while !service::is_online(endpoint) && is_task_alive(id) && crate::arch::pit::ticks() < deadline {
         let handed = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().begin_handoff(id.0, deadline));
         if !handed {

@@ -87,6 +87,10 @@ pub const SYS_MAP_ANON: u64 = 28;
 pub const SYS_IRQ_WAIT: u64 = 29;
 /// Native Hydra system call: unmask a serviced interrupt without waiting (`sys_irq_ack`).
 pub const SYS_IRQ_ACK: u64 = 30;
+/// Native Hydra system call: wall-clock time (`sys_clock`).
+pub const SYS_CLOCK: u64 = 31;
+/// Native Hydra system call: map the window of a service the driver uses (`sys_svc_attach`).
+pub const SYS_SVC_ATTACH: u64 = 32;
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
@@ -287,10 +291,11 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
 
-    // Release address spaces of exited processes: no locks are held at syscall entry,
-    // except while a driver serves a call (its caller may hold the file system's lock,
-    // which releasing file mappings takes), so not then
-    if !crate::task::scheduler::handoff_active() {
+    // Release what exited processes held: no locks are held at syscall entry, except while
+    // a driver serves a call (its caller may hold the file system's lock, which releasing
+    // file mappings takes). Not in driver processes either: releasing files calls the file
+    // server, which may be the caller itself (ordinary processes do it soon enough)
+    if !crate::task::scheduler::handoff_active() && crate::task::current_service().is_none() {
         crate::task::close_retired();
         crate::memory::vm::reap_retired_mms();
         crate::task::scheduler::reap_dead_tasks();
@@ -378,30 +383,17 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             } else if len == 0 {
                 0
             } else {
-                let is_file = crate::task::with_current_fds_mut(|fds| {
-                    matches!(fds.get(fd), Some(crate::fs::FileDescriptor::File { .. }))
-                });
-
-                if is_file && crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
-                    let msg = crate::ipc::Message::with_args(
-                        crate::ipc::protocol::MSG_FS_WRITE,
-                        [fd as u64, ptr as u64, len as u64, 0],
-                    );
-                    let reply = crate::fs::forward_fs_ipc(msg);
-                    reply.args[0] as i64
-                } else {
-                    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                    crate::task::with_current_fds_mut(|fds| {
-                        if let Some(desc) = fds.get_mut(fd) {
-                            match desc.write(slice) {
-                                Ok(n) => n as i64,
-                                Err(_) => -5, // -EIO
-                            }
-                        } else {
-                            -9 // -EBADF
+                let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(fd) {
+                        match desc.write(slice) {
+                            Ok(n) => n as i64,
+                            Err(_) => -5, // -EIO
                         }
-                    })
-                }
+                    } else {
+                        -9 // -EBADF
+                    }
+                })
             }
         }
         SYS_OPEN => {
@@ -414,13 +406,6 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             let flags = _arg2;
             if ptr.is_null() || len == 0 {
                 -14 // -EFAULT
-            } else if crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
-                let msg = crate::ipc::Message::with_args(
-                    crate::ipc::protocol::MSG_FS_OPEN,
-                    [ptr as u64, len as u64, flags, 0],
-                );
-                let reply = crate::fs::forward_fs_ipc(msg);
-                reply.args[0] as i64
             } else {
                 let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                 if let Ok(path_str) = core::str::from_utf8(slice) {
@@ -457,21 +442,12 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             drop(stats);
             // arg0: fd
             let fd = arg0 as usize;
-            if crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
-                let msg = crate::ipc::Message::with_args(
-                    crate::ipc::protocol::MSG_FS_CLOSE,
-                    [fd as u64, 0, 0, 0],
-                );
-                let reply = crate::fs::forward_fs_ipc(msg);
-                reply.args[0] as i64
-            } else {
-                crate::task::with_current_fds_mut(|fds| {
-                    match fds.close(fd) {
-                        Ok(_) => 0,
-                        Err(_) => -9, // -EBADF
-                    }
-                })
-            }
+            crate::task::with_current_fds_mut(|fds| {
+                match fds.close(fd) {
+                    Ok(_) => 0,
+                    Err(_) => -9, // -EBADF
+                }
+            })
         }
         SYS_READ => {
             stats.read_calls += 1;
@@ -485,30 +461,17 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             } else if count == 0 {
                 0
             } else {
-                let is_file = crate::task::with_current_fds_mut(|fds| {
-                    matches!(fds.get(fd), Some(crate::fs::FileDescriptor::File { .. }))
-                });
-
-                if is_file && crate::fs::USE_FS_ENDPOINT.load(core::sync::atomic::Ordering::Relaxed) {
-                    let msg = crate::ipc::Message::with_args(
-                        crate::ipc::protocol::MSG_FS_READ,
-                        [fd as u64, ptr as u64, count as u64, 0],
-                    );
-                    let reply = crate::fs::forward_fs_ipc(msg);
-                    reply.args[0] as i64
-                } else {
-                    let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
-                    crate::task::with_current_fds_mut(|fds| {
-                        if let Some(desc) = fds.get_mut(fd) {
-                            match desc.read(slice) {
-                                Ok(n) => n as i64,
-                                Err(_) => -5, // -EIO
-                            }
-                        } else {
-                            -9 // -EBADF
+                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
+                crate::task::with_current_fds_mut(|fds| {
+                    if let Some(desc) = fds.get_mut(fd) {
+                        match desc.read(slice) {
+                            Ok(n) => n as i64,
+                            Err(_) => -5, // -EIO
                         }
-                    })
-                }
+                    } else {
+                        -9 // -EBADF
+                    }
+                })
             }
         }
         SYS_PIPE => {
@@ -673,6 +636,20 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             drop(stats);
             // arg0: interrupt line; returns the count since the last wait or acknowledgement
             crate::ipc::service::irq_ack(arg0).map_or_else(|e| e, |n| n as i64)
+        }
+        SYS_CLOCK => {
+            drop(stats);
+            // arg0: where to store [seconds since 1970, nanoseconds]
+            let (secs, nanos) = crate::arch::rtc::now();
+            let mut out = [0u8; 16];
+            out[..8].copy_from_slice(&secs.to_le_bytes());
+            out[8..].copy_from_slice(&(nanos as u64).to_le_bytes());
+            crate::compat::linux::vfs::copy_out(arg0, &out).map_or_else(|e| e, |()| 0)
+        }
+        SYS_SVC_ATTACH => {
+            drop(stats);
+            // arg0: endpoint whose window to map; returns its address
+            crate::ipc::service::attach(arg0 as u32).map_or_else(|e| e, |a| a as i64)
         }
         SYS_SVC_REGISTER => {
             drop(stats);

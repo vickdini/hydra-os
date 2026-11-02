@@ -309,7 +309,8 @@ pub fn kill(id: TaskId) -> bool {
 /// lock, where closing cannot happen). Must be called without the scheduler lock, and not
 /// while a driver serves a call (its caller may hold locks closing takes).
 pub fn close_retired() {
-    if scheduler::handoff_active() {
+    // Not in a driver process: closing files calls the file server, which may be the caller
+    if scheduler::handoff_active() || current_service().is_some() {
         return;
     }
     let tables = SCHEDULER.lock().take_pending_close();

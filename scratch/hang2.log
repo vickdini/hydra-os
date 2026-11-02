@@ -11,7 +11,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 1b: Initializing IDT & Exception Handling Gates...
 [1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
 [1m[36m[40m
-[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd789393
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd6e7cc3
     RFLAGS: 0x206, RSP: 0xbfe627d0
 [1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
 [1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
@@ -32,7 +32,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
     - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
 [1m[33m[40m
 [*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
-[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd788fc0 -> PhysAddr 0xbd788fc0
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd6e78f0 -> PhysAddr 0xbd6e78f0
 [+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
 [+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
     - Dynamic Unmap & TLB Invalidation: PASSED
@@ -54,7 +54,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 [*] Step 5: Testing Microkernel IPC Rendezvous...
 [1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
 [+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
-[boot] anchor (hydra_syscall_dispatcher) = 0xbd7cf040
+[boot] anchor (hydra_syscall_dispatcher) = 0xbd6d3170
 [1m[33m[40m
 [*] Step 6: Initializing Devices & Reading the Boot Volume...
 [1m[32m[40m[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
@@ -82,16 +82,17 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 
 [ata-driver] 'QEMU HARDDISK': 16384 MiB, LBA48, bus-master DMA
 [supervisor] started 'ata_driver' (process 2, endpoint 0x21)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #47375, 81895 objects)
+[supervisor] started 'zfs_server' (process 3, endpoint 0x20)
 [e1000-driver] MAC 52:54:00:12:34:56, link up
-[supervisor] started 'net_driver' (process 3, endpoint 0x22)
-[supervisor] started 'display_server' (process 4, endpoint 0x23)
+[supervisor] started 'net_driver' (process 4, endpoint 0x22)
+[supervisor] started 'display_server' (process 5, endpoint 0x23)
 [+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
     - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
 
 [*] Step 8: Initializing the ZFS File Server...
-[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #47323, 77834 objects)
 [+] ZFS File Server Online (Endpoint #0x20):
-    - Storage Pool: 'hydrapool' (16384 MiB, 2852 MiB used, TXG #47323, Fletcher-4, CoW)
+    - Storage Pool: 'hydrapool' (16384 MiB, 2878 MiB used, TXG #47375, Fletcher-4, CoW)
     - Persistence : Active (disk, through the Ring 3 ata-driver)
     - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
 
@@ -104,10 +105,7 @@ BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1
 |  Type 'help' for available commands, or 'info' for details.  |
 +--------------------------------------------------------------+
 
-[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... CANCELLED
-    Type 'linux plasma' to start the desktop later.
-
-hydra:/bin$ su root
-[+] Switched to superuser 'root' (UID 0, GID 0)
-hydra:/bin# linux chroot /ubuntu /usr/bin/bash -c 'apt-get update 2>&1 | tail -4'
-[watchdog] kernel busy for 5 s: rip=0xbd6d5d02 rsp=0x40457b10 anchor=0xbd7cf040
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... 1... NOW
+[*] Starting KDE Plasma...
+hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
+[watchdog] kernel busy for 5 s: rip=0xbd714752 rsp=0x402afd70 anchor=0xbd6d3170

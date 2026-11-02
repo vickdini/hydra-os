@@ -307,7 +307,6 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
                 let copy = t.fds.lock().fork_copy();
                 t.fds = copy.into_shared();
             }
-            t.fds.lock().close_on_exec();
             core::mem::replace(&mut t.mm, Some(new_mm.clone()))
         })
         .flatten()
@@ -320,6 +319,9 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         crate::arch::syscall::wrmsr(0xC000_0100, 0);
     }
     crate::memory::vm::set_current_mm(Some(&new_mm));
+    // Close-on-exec descriptors close outside the scheduler lock: releasing a file is a
+    // request to the file server
+    crate::task::with_current_fds_mut(|fds| fds.close_on_exec());
     // The old address space is no longer loaded; release it (unless a vfork parent shares it)
     drop(old_mm);
     super::proc::exec_reset(pid);

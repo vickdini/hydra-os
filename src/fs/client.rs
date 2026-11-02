@@ -8,7 +8,7 @@
 //! numbers, higher layers work with hierarchical paths (`/bin/hello.elf`, `../etc/passwd`),
 //! `chroot` jails, relative directory descriptors (`openat`), and symbolic links. This module
 //! implements the iterative path walker ([`resolve_in`], following up to [`SYMLOOP_MAX`] symlinks)
-//! and wraps the global [`ZFS_SERVER`] lock in ergonomic helper methods on [`ZfsClient`].
+//! and wraps requests to the ZFS file server (a Ring 3 program, see [`crate::fs::zfs`]) in helper methods on [`ZfsClient`].
 //!
 //! ## Key Types & Interfaces
 //! - [`ZfsClient`]: Stateless facade offering path-based and inode-based ZFS operations.
@@ -19,11 +19,11 @@
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
 //! - Hardware Interaction: Accesses the ZFS storage pool via [`with_server`] and UEFI boot media in [`ZfsClient::read_boot_files`].
-//! - Concurrency: Acquires the global [`ZFS_SERVER`] spinlock for the duration of each operation.
+//! - Concurrency: Each operation is one or more requests to the file server, which runs in the caller's place.
 
 use alloc::vec::Vec;
 
-use super::zfs::server::{with_server, ZfsServer, ZFS_SERVER};
+use super::zfs::{with_server, ZfsServer};
 use super::zfs::types::DnodeType;
 use super::zfs::zap::ZapEntry;
 use super::zfs::zpl::{self, Attr, ReaddirEntry, SetAttr};
@@ -146,11 +146,6 @@ pub fn normalize_path<'a>(cwd: &str, path: &str, out: &'a mut [u8; 128]) -> &'a 
     core::str::from_utf8(&out[..pos]).unwrap_or("/")
 }
 
-/// Splits a raw byte path on `'/'`, discarding empty and `"."` segments.
-fn components(path: &[u8]) -> Vec<Vec<u8>> {
-    path.split(|&c| c == b'/').filter(|c| !c.is_empty() && *c != b".").map(|c| c.to_vec()).collect()
-}
-
 /// Resolves `path` relative to directory inode `base` (or the pool root when `path` starts with `'/'`).
 ///
 /// Symbolic links are expanded in every intermediate component, and in the final component
@@ -201,42 +196,8 @@ pub fn resolve_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_l
     if path.is_empty() {
         return Err(zpl::ENOENT);
     }
-    let follow_last = follow_last || path.ends_with(b"/");
-    let mut cur = if path[0] == b'/' { root } else { base };
-    let mut pending: Vec<Vec<u8>> = components(path);
-    pending.reverse();
-    let mut links = 0;
-    while let Some(comp) = pending.pop() {
-        if comp == b".." {
-            cur = if cur == root { root } else { s.lookup(cur, b"..")? };
-            continue;
-        }
-        let next = s.lookup(cur, &comp)?;
-        let is_last = pending.is_empty();
-        let attr = s.getattr(next)?;
-        if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
-            links += 1;
-            if links > SYMLOOP_MAX {
-                return Err(ELOOP);
-            }
-            let target = s.readlink(next)?;
-            if target.first() == Some(&b'/') {
-                cur = root;
-            }
-            let mut more = components(&target);
-            more.reverse();
-            pending.extend(more);
-            continue;
-        }
-        if !is_last && !attr.is_dir() {
-            return Err(zpl::ENOTDIR);
-        }
-        cur = next;
-    }
-    if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
-        return Err(zpl::ENOTDIR);
-    }
-    Ok(cur)
+    // The file server walks the path (one request instead of one per component)
+    s.resolve_in(root, base, path, follow_last)
 }
 
 /// Resolves the parent directory of `path` relative to `base` and returns `(parent_ino, child_name)`.
@@ -362,10 +323,10 @@ pub fn resolve_parent_and_name(path: &str) -> Result<(u64, &str), &'static str> 
     Ok((parent, name))
 }
 
-/// Stateless client facade providing path-based and inode-based operations over [`ZFS_SERVER`].
+/// Stateless client facade providing path-based and inode-based operations over the ZFS file server.
 ///
 /// # Concurrency & Thread Safety
-/// All methods acquire the global [`ZFS_SERVER`] spinlock via [`with_server`] for the duration
+/// All methods make their requests through [`with_server`] for the duration
 /// of the call, making [`ZfsClient`] safe to invoke from any kernel thread or syscall handler.
 pub struct ZfsClient;
 
@@ -380,7 +341,7 @@ impl ZfsClient {
     ///
     /// * `Err("ZFS I/O error")` - If the ZFS server has not been initialized.
     pub fn ping() -> Result<u64, &'static str> {
-        with_server(|s| Ok(s.dmu.ub.txg)).map_err(errno_str)
+        with_server(|s| s.pool_status().map(|p| p.3)).map_err(errno_str)
     }
 
     /// Queries storage pool capacity and transaction status.
@@ -394,12 +355,8 @@ impl ZfsClient {
     /// * `Err("ZFS I/O error")` - If the ZFS server is not mounted.
     pub fn pool_status() -> Result<(u64, u64, u64, u64), &'static str> {
         with_server(|s| {
-            Ok((
-                s.dmu.spa.total_capacity_bytes() / (1024 * 1024),
-                s.dmu.spa.allocated_bytes() / 1024,
-                s.dmu.spa.free_bytes() / 1024,
-                s.dmu.ub.txg,
-            ))
+            let (total, allocated, free, txg, _) = s.pool_status()?;
+            Ok((total / (1024 * 1024), allocated / 1024, free / 1024, txg))
         })
         .map_err(errno_str)
     }
@@ -459,7 +416,7 @@ impl ZfsClient {
         with_server(|s| {
             s.setattr(obj_id, SetAttr { size: Some(0), ..SetAttr::default() })?;
             s.write(obj_id, 0, data)?;
-            Ok(s.dmu.open_txg)
+            s.pool_status().map(|p| p.4)
         })
         .map_err(errno_str)
     }
@@ -543,7 +500,7 @@ impl ZfsClient {
                 Err(e) => return Err(e),
             };
             s.write(ino, 0, data)?;
-            Ok(s.dmu.open_txg)
+            s.pool_status().map(|p| p.4)
         })
         .map_err(errno_str)
     }
@@ -677,17 +634,11 @@ impl ZfsClient {
         with_server(|s| s.sync().map(|_| ())).map_err(errno_str)
     }
 
-    /// Opportunistically commits pending changes if the [`ZFS_SERVER`] lock is uncontended and the DMU has dirty state.
+    /// Commits pending changes, if there are any.
     ///
     /// Called every few seconds by the `txgd` task ([`start_txg_sync`]).
     pub fn sync_if_dirty() {
-        if let Some(mut guard) = ZFS_SERVER.try_lock() {
-            if let Some(s) = guard.as_mut() {
-                if s.dmu.has_pending_changes() {
-                    let _ = s.sync();
-                }
-            }
-        }
+        let _ = with_server(|s| s.sync_if_dirty());
     }
 
     /// Copies the contents of regular file `src_path` to `dst_path` and commits the transaction.
@@ -753,8 +704,7 @@ impl ZfsClient {
             let root = s.root_obj();
             let ino = resolve_at(s, root, path.as_bytes(), true)?;
             let a = s.getattr(ino)?;
-            let dn = s.dmu.get_dnode(ino).map_err(|_| zpl::EIO)?;
-            let bp = dn.blkptr[0];
+            let (_, is_allocated, checksum) = s.object_info(ino)?;
             let mut name = [0u8; 32];
             let base = path.trim_end_matches('/').rsplit('/').next().unwrap_or("/");
             let n = base.len().min(31);
@@ -764,8 +714,8 @@ impl ZfsClient {
                 obj_type: a.kind(),
                 size: a.size,
                 birth_txg: a.birth_txg,
-                checksum: [bp.checksum.a, bp.checksum.b, bp.checksum.c, bp.checksum.d],
-                is_allocated: !bp.is_hole(),
+                checksum,
+                is_allocated,
                 name,
                 mode: a.mode,
                 uid: a.uid,

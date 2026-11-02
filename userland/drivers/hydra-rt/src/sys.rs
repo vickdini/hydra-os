@@ -19,6 +19,8 @@ const SYS_SVC_CALL: u64 = 27;
 const SYS_MAP_ANON: u64 = 28;
 const SYS_IRQ_WAIT: u64 = 29;
 const SYS_IRQ_ACK: u64 = 30;
+const SYS_CLOCK: u64 = 31;
+const SYS_SVC_ATTACH: u64 = 32;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -133,6 +135,19 @@ pub fn irq_wait(irq: u8, timeout_ticks: u64) -> Result<u32, i64> {
 /// interrupts arrived since the last wait or acknowledgement.
 pub fn irq_ack(irq: u8) -> Result<u32, i64> {
     check(unsafe { syscall3(SYS_IRQ_ACK, irq as u64, 0, 0) }).map(|n| n as u32)
+}
+
+/// Wall-clock time: `(seconds since 1970, nanoseconds)`.
+pub fn clock() -> (u64, u32) {
+    let mut t = [0u64; 2];
+    unsafe { syscall3(SYS_CLOCK, t.as_mut_ptr() as u64, 0, 0) };
+    (t[0], t[1] as u32)
+}
+
+/// Maps the window of service `endpoint`, which this driver uses (as the file server
+/// uses the disk driver's); returns its address.
+pub fn svc_attach(endpoint: u32) -> Result<u64, i64> {
+    check(unsafe { syscall3(SYS_SVC_ATTACH, endpoint as u64, 0, 0) })
 }
 
 /// Becomes the server of `endpoint`; returns the service window's address.

@@ -34,7 +34,7 @@ pub mod __private {
 
 /// Virtual size of the heap. It is reserved, not committed: pages are allocated on
 /// first use.
-const HEAP_SIZE: usize = 256 * 1024 * 1024;
+const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();

@@ -1,0 +1,10 @@
+[package]
+name = "zfs-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra ZFS file server: the OpenZFS pool, in Ring 3"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }
+x86_64 = { workspace = true }

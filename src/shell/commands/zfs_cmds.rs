@@ -6,7 +6,6 @@ use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
 use crate::fs::client::ZfsClient;
-use crate::fs::zfs::server::ZFS_SERVER;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
@@ -36,7 +35,7 @@ impl Command for ZpoolCommand {
                 set_color(Color::White, Color::Black);
                 println!(" state: ONLINE");
                 println!("status: The pool is operating normally via the Microkernel ZFS File Server.");
-                let is_disk = crate::fs::zfs::spa::disk_info().is_some();
+                let is_disk = crate::fs::zfs::disk_info().is_some();
                 println!("config:");
                 println!("        NAME                 STATE     READ WRITE CKSUM");
                 println!("        hydrapool            ONLINE       0     0     0");
@@ -112,25 +111,24 @@ impl Command for ZfsCommand {
                 println!("{:<24} {:>8} {:>8} {:<16}", "NAME", "USED", "AVAIL", "MOUNTPOINT");
                 println!("------------------------------------------------------------------");
 
-                let guard = ZFS_SERVER.lock();
-                if let Some(server) = guard.as_ref() {
-                    let used_k = server.dmu.spa.allocated_bytes() / 1024;
-                    let avail_k = server.dmu.spa.free_bytes() / 1024;
-                    for ds in server.datasets.iter().filter(|d| d.is_snapshot == 0) {
+                let pool = crate::fs::zfs::with_server(|s| Ok((s.pool_status()?, s.datasets()?)));
+                if let Ok(((_, allocated, free, _, _), datasets)) = pool {
+                    let (used_k, avail_k) = (allocated / 1024, free / 1024);
+                    for (name, mount, _, _) in datasets.iter().filter(|d| !d.3) {
                         set_color(Color::LightCyan, Color::Black);
-                        print!("{:<24} ", ds.name_str());
+                        print!("{:<24} ", name);
                         set_color(Color::White, Color::Black);
-                        println!("{:>7}K {:>7}K {:<16}", used_k, avail_k, ds.mountpoint_str());
+                        println!("{:>7}K {:>7}K {:<16}", used_k, avail_k, mount);
                     }
                     let mut has_snaps = false;
-                    for snap in server.datasets.iter().filter(|d| d.is_snapshot != 0) {
+                    for (name, _, txg, _) in datasets.iter().filter(|d| d.3) {
                         if !has_snaps {
                             println!("
 Snapshots:");
                             has_snaps = true;
                         }
                         set_color(Color::LightGreen, Color::Black);
-                        println!("  {} (Created at TXG #{})", snap.name_str(), snap.txg);
+                        println!("  {} (Created at TXG #{})", name, txg);
                     }
                 }
             }
@@ -186,12 +184,18 @@ Snapshots:");
                 }
             }
 
-            "selftest" => crate::fs::zfs::selftest::run_selftest(),
-            "verify" => crate::fs::zfs::selftest::run_verify(),
+            // Run by the file server; their output appears on the console
+            "selftest" => {
+                let _ = crate::fs::zfs::with_server(|s| s.diagnostic(crate::fs::zfs::fsproto::FS_SELFTEST, "", false));
+            }
+            "verify" => {
+                let _ = crate::fs::zfs::with_server(|s| s.diagnostic(crate::fs::zfs::fsproto::FS_VERIFY, "", false));
+            }
             "fsck" => {
                 // zfs fsck <dir> [repair]
                 let dir = args.get(1).copied().unwrap_or("/");
-                crate::fs::zfs::selftest::run_fsck(dir, args.get(2).copied() == Some("repair"));
+                let repair = args.get(2).copied() == Some("repair");
+                let _ = crate::fs::zfs::with_server(|s| s.diagnostic(crate::fs::zfs::fsproto::FS_FSCK, dir, repair));
             }
 
             "write" => {
@@ -266,7 +270,7 @@ impl Command for DisksCommand {
         set_color(Color::LightCyan, Color::Black);
         println!("=== Hydra OS Storage Subsystem & Block Devices ===");
 
-        if let Some(disk) = crate::fs::zfs::spa::disk_info() {
+        if let Some(disk) = crate::fs::zfs::disk_info() {
             let cap_bytes = disk.sectors * 512;
             set_color(Color::LightGreen, Color::Black);
             println!("\nDevice: /dev/hda (Primary Master ATA/IDE)");

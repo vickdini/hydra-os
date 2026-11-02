@@ -62,6 +62,7 @@ const EINVAL: i64 = -22;
 const ENOMEM: i64 = -12;
 const EPERM: i64 = -1;
 const ETIMEDOUT: i64 = -110;
+const EDEADLK: i64 = -35;
 
 /// `PROT_READ | PROT_WRITE` for mappings made here.
 const PROT_RW: u32 = 3;
@@ -176,6 +177,9 @@ pub struct Service {
     /// Kernel queue woken when its driver's interrupt arrives (the client then asks the
     /// driver what happened).
     irq_notify: AtomicPtr<WaitQueue>,
+    /// Services whose servers may call this one and map its window (the file server uses
+    /// the disk driver).
+    clients: Mutex<Vec<u32>>,
 }
 
 impl Service {
@@ -188,8 +192,34 @@ impl Service {
             window: Mutex::new(None),
             grants: Mutex::new(Vec::new()),
             irq_notify: AtomicPtr::new(core::ptr::null_mut()),
+            clients: Mutex::new(Vec::new()),
         }
     }
+}
+
+/// Lets the server of service `client` call service `endpoint` and map its window.
+pub fn allow_client(endpoint: u32, client: u32) {
+    if let Some(svc) = service(endpoint) {
+        let mut clients = svc.clients.lock();
+        if !clients.contains(&client) {
+            clients.push(client);
+        }
+    }
+}
+
+/// `SYS_SVC_ATTACH`: maps the window of `endpoint` into the calling driver, which must be
+/// allowed to use it ([`allow_client`]) and whose server must have registered.
+pub fn attach(endpoint: u32) -> Result<u64, i64> {
+    let me = crate::task::current_service().ok_or(EPERM)?;
+    let svc = service(endpoint).ok_or(ENODEV)?;
+    if !svc.clients.lock().contains(&me) {
+        return Err(EPERM);
+    }
+    if svc.server.load(Ordering::Acquire) == 0 {
+        return Err(ENODEV);
+    }
+    let window = svc.window.lock().clone().ok_or(ENODEV)?;
+    map_into_current(window, WINDOW_PAGES)
 }
 
 /// The services, one per system endpoint.
@@ -283,6 +313,9 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
     let server = svc.server.load(Ordering::Acquire);
     if server == 0 || !crate::task::is_active() {
         return Err(ENODEV);
+    }
+    if crate::task::SCHEDULER.lock().current_task_id().0 == server {
+        return Err(EDEADLK); // a server calling its own service would wait for itself
     }
     let seq = {
         let mut slot = svc.slot.lock();

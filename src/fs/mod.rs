@@ -14,12 +14,12 @@
 //! - `ZfsClient`: High-level path and inode facade for querying and mutating the ZFS pool.
 //! - `FdTable` & `FileDescriptor`: Per-process descriptor table and polymorphic I/O handle.
 //! - `PipeBuffer`: Lock-protected ring buffer backing unidirectional POSIX pipes.
-//! - `ZfsServer` & `init_server`: Singleton OpenZFS storage server and its bootstrap routine.
+//! - `ZfsServer` & `init_server`: The ZFS file server (a Ring 3 program) as the kernel calls it.
 //!
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
-//! - Hardware Interaction: Indirectly drives ATA PIO/DMA disk sectors and UEFI boot media via `zfs`.
-//! - Concurrency: Spinlock-synchronized global server (`ZFS_SERVER`) and shared `Arc<Mutex<...>>` descriptors.
+//! - Hardware Interaction: None: the ZFS file server and the disk driver are Ring 3 programs.
+//! - Concurrency: Requests to the file server run it in the caller's place; descriptors are shared `Arc<Mutex<...>>`.
 
 pub mod client;
 pub mod fd;
@@ -29,8 +29,6 @@ pub mod zfs;
 pub use client::ZfsClient;
 pub use fd::{FdTable, FileDescriptor, SharedFdTable, MAX_FDS};
 pub use pipe::{PipeBuffer, PIPE_BUFFER_SIZE};
-pub use zfs::{
-    forward_fs_ipc, init_server, set_use_fs_endpoint, ZfsServer, USE_FS_ENDPOINT, ZFS_SERVER,
-};
+pub use zfs::{init_server, ZfsServer};
 
 

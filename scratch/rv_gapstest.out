@@ -1,7 +1,7 @@
 Windows Hypervisor Platform accelerator is operational
 linux run /bin/gapstest.elf
 [+] Read 976520 bytes from OpenZFS (/bin/gapstest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
 [gapstest] pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT)      PASS
 [gapstest] PI mutex init                                            PASS
 [gapstest] two threads under a PI mutex count to 4000               PASS
@@ -15,7 +15,7 @@ linux run /bin/gapstest.elf
 [gapstest] periodic timer delivered repeated SIGALRMs               PASS
 [gapstest] disarmed timer reads back as zero                        PASS
 [gapstest] ITIMER_PROF fires after CPU time is used                 PASS
-[linux] pid 13 killed by signal 14
+[linux] pid 14 killed by signal 14
 [gapstest] an unhandled SIGALRM terminates the process              PASS
 [gapstest] pidfd_open on a child                                    PASS
 [gapstest] pidfd not readable while the child runs                  PASS
@@ -31,5 +31,5 @@ linux run /bin/gapstest.elf
 [gapstest] process-shared semaphore between parent and child        PASS
 [gapstest] a private wake does not reach another process            PASS
 [gapstest] ALL PASSED (0 failures)
-[+] Linux process 8 exited with status 0.
+[+] Linux process 9 exited with status 0.
 hydra:/bin$ 

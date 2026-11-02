@@ -1,7 +1,7 @@
 Windows Hypervisor Platform accelerator is operational
 linux run /bin/ptytest.elf
 [+] Read 996952 bytes from OpenZFS (/bin/ptytest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
 [ptytest] fd opened by a thread is usable by main thread     PASS
 [ptytest] pipe created by a thread works in main thread      PASS
 [ptytest] fd closed by a thread is closed for main thread    PASS
@@ -29,5 +29,5 @@ linux run /bin/ptytest.elf
 [ptytest] ^C on master sends SIGINT to the slave's foreground PASS
 [ptytest] forkpty child sees a terminal on stdio             PASS
 [ptytest] ALL PASSED (0 failures)
-[+] Linux process 8 exited with status 0.
+[+] Linux process 9 exited with status 0.
 hydra:/bin$ 

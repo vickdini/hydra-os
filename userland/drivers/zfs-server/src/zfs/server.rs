@@ -25,9 +25,6 @@ use super::spa::{Spa, Vdev};
 use super::types::*;
 use super::zap::Zap;
 
-/// Well-known Endpoint ID for the Hydra ZFS File Server
-pub const ENDPOINT_ZFS_SERVER: u32 = 0x20;
-
 /// A dataset or snapshot record (stored in the datasets object, 152 bytes each).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -133,10 +130,6 @@ impl ZfsServer {
     fn imported((spa, ub): (Spa, super::types::Uberblock)) -> Self {
         let mut server = Self::with_dmu(Dmu::new(spa, ub));
         server.load_datasets();
-        crate::console::set_color(
-            uefi::proto::console::text::Color::LightGreen,
-            uefi::proto::console::text::Color::Black,
-        );
         crate::println!(
             "[+] OpenZFS: Imported pool '{}' ({} MiB, TXG #{}, {} objects)",
             server.dmu.spa.pool_name_str(),
@@ -287,158 +280,10 @@ impl ZfsServer {
     pub fn root_obj(&self) -> u64 {
         self.dmu.ub.root_obj
     }
-
-    /// Handles an incoming microkernel filesystem IPC message and generates the reply message.
-    ///
-    /// # Arguments
-    /// * `msg` - The incoming filesystem request message payload.
-    ///
-    /// # Returns
-    /// An IPC reply message containing status and output parameters.
-    pub fn handle_ipc_message(&mut self, msg: &crate::ipc::Message) -> crate::ipc::Message {
-        Self::serve_request(msg, &mut || self.sync())
-    }
-
-    /// Serves one filesystem protocol request without holding the server across it.
-    ///
-    /// Open, read, write and close go through [`crate::fs::ZfsClient`], which takes
-    /// [`ZFS_SERVER`] for each operation itself, so only `MSG_FS_SYNC` needs the server
-    /// object, supplied by the caller as `sync`.
-    ///
-    /// # Arguments
-    /// * `msg` - The incoming filesystem request message payload.
-    /// * `sync` - Commits the open transaction group (for `MSG_FS_SYNC`).
-    ///
-    /// # Returns
-    /// An IPC reply message containing status and output parameters.
-    pub fn serve_request(
-        msg: &crate::ipc::Message,
-        sync: &mut dyn FnMut() -> Result<u64, i64>,
-    ) -> crate::ipc::Message {
-        use crate::ipc::protocol::*;
-        match msg.label {
-            MSG_FS_OPEN => {
-                let path_ptr = msg.args[0] as *const u8;
-                let path_len = (msg.args[1] as usize).min(256);
-                let flags = msg.args[2];
-                if path_ptr.is_null() || path_len == 0 {
-                    return crate::ipc::Message::with_args(MSG_FS_REPLY, [(-14i64) as u64, 0, 0, 0]);
-                }
-                let slice = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-                if let Ok(path_str) = core::str::from_utf8(slice) {
-                    let readable = flags == 0 || flags == 2;
-                    let writable = flags == 1 || flags == 2 || flags == 3;
-                    let append = flags == 3;
-                    if writable {
-                        let _ = crate::fs::ZfsClient::touch_file(path_str);
-                    }
-                    let desc = crate::fs::FileDescriptor::File {
-                        path: alloc::string::String::from(path_str),
-                        cursor: 0,
-                        readable,
-                        writable,
-                        append,
-                    };
-                    let res = crate::task::with_current_fds_mut(|fds| {
-                        match fds.alloc_fd(desc) {
-                            Ok(fd) => fd as i64,
-                            Err(_) => -24,
-                        }
-                    });
-                    crate::ipc::Message::with_args(MSG_FS_REPLY, [res as u64, 0, 0, 0])
-                } else {
-                    crate::ipc::Message::with_args(MSG_FS_REPLY, [(-22i64) as u64, 0, 0, 0])
-                }
-            }
-            MSG_FS_READ => {
-                let fd = msg.args[0] as usize;
-                let buf_ptr = msg.args[1] as *mut u8;
-                let len = msg.args[2] as usize;
-                if buf_ptr.is_null() {
-                    return crate::ipc::Message::with_args(MSG_FS_REPLY, [(-14i64) as u64, 0, 0, 0]);
-                }
-                let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                let res = crate::task::with_current_fds_mut(|fds| {
-                    if let Some(desc) = fds.get_mut(fd) {
-                        match desc.read(slice) {
-                            Ok(n) => n as i64,
-                            Err(_) => -5,
-                        }
-                    } else {
-                        -9
-                    }
-                });
-                crate::ipc::Message::with_args(MSG_FS_REPLY, [res as u64, 0, 0, 0])
-            }
-            MSG_FS_WRITE => {
-                let fd = msg.args[0] as usize;
-                let buf_ptr = msg.args[1] as *const u8;
-                let len = msg.args[2] as usize;
-                if buf_ptr.is_null() {
-                    return crate::ipc::Message::with_args(MSG_FS_REPLY, [(-14i64) as u64, 0, 0, 0]);
-                }
-                let slice = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                let res = crate::task::with_current_fds_mut(|fds| {
-                    if let Some(desc) = fds.get_mut(fd) {
-                        match desc.write(slice) {
-                            Ok(n) => n as i64,
-                            Err(_) => -5,
-                        }
-                    } else {
-                        -9
-                    }
-                });
-                crate::ipc::Message::with_args(MSG_FS_REPLY, [res as u64, 0, 0, 0])
-            }
-            MSG_FS_CLOSE => {
-                let fd = msg.args[0] as usize;
-                let res = crate::task::with_current_fds_mut(|fds| {
-                    if fds.close(fd).is_ok() { 0i64 } else { -9i64 }
-                });
-                crate::ipc::Message::with_args(MSG_FS_REPLY, [res as u64, 0, 0, 0])
-            }
-            MSG_FS_SYNC => {
-                match sync() {
-                    Ok(txg) => crate::ipc::Message::with_args(MSG_FS_REPLY, [0, txg, 0, 0]),
-                    Err(e) => crate::ipc::Message::with_args(MSG_FS_REPLY, [e as u64, 0, 0, 0]),
-                }
-            }
-            MSG_SUPERVISOR_PING => {
-                crate::ipc::Message::with_args(MSG_SUPERVISOR_PONG, [msg.args[0], 1, 0, 0])
-            }
-            _ => crate::ipc::Message::with_args(MSG_FS_REPLY, [(-38i64) as u64, 0, 0, 0]),
-        }
-    }
 }
 
-/// Runs the isolated OpenZFS filesystem server daemon loop on the specified IPC endpoint.
-///
-/// Continuously receives filesystem requests over the microkernel IPC endpoint, dispatches
-/// them against the active OpenZFS state, and sends reply messages.
-///
-/// # Arguments
-/// * `endpoint_id` - Numeric ID of the rendezvous endpoint to serve requests on.
-pub fn run_zfs_server_daemon(endpoint_id: u32) -> ! {
-    let mut server = ZfsServer::new();
-    let mut msg = crate::ipc::Message::new(0);
-    loop {
-        if crate::syscall::user::sys_ipc_recv_blocking(endpoint_id, &mut msg).is_ok() {
-            let reply = server.handle_ipc_message(&msg);
-            let _ = crate::syscall::user::sys_ipc_send(endpoint_id, &reply);
-        }
-    }
-}
-
-/// Global singleton instance of the ZFS File Server protected by spinlock
+/// The file server (one pool), created at startup.
 pub static ZFS_SERVER: Mutex<Option<ZfsServer>> = Mutex::new(None);
-
-/// Initializes the microkernel ZFS File Server.
-pub fn init_server() {
-    let mut lock = ZFS_SERVER.lock();
-    if lock.is_none() {
-        *lock = Some(ZfsServer::new());
-    }
-}
 
 /// Runs `f` with the mounted file server, or fails with `-EIO` if none is mounted.
 pub fn with_server<R>(f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
@@ -447,44 +292,4 @@ pub fn with_server<R>(f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Resul
         Some(s) => f(s),
         None => Err(-5),
     }
-}
-
-/// Global flag controlling whether POSIX file syscalls route through the decoupled microkernel IPC endpoint.
-pub static USE_FS_ENDPOINT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// Enables or disables microkernel IPC routing for POSIX file system calls.
-///
-/// # Arguments
-///
-/// * `enable` - True to forward file I/O operations across [`ENDPOINT_ZFS_SERVER`], false for direct in-kernel VFS calls.
-pub fn set_use_fs_endpoint(enable: bool) {
-    USE_FS_ENDPOINT.store(enable, core::sync::atomic::Ordering::Release);
-}
-
-/// Forwards a filesystem IPC message to [`ENDPOINT_ZFS_SERVER`].
-///
-/// If a daemon is actively listening on the endpoint, uses blocking endpoint messaging;
-/// otherwise serves the request in the caller's context with the same protocol handler.
-/// [`ZFS_SERVER`] is not held across the handler: its file operations take that lock
-/// themselves, and holding it here would spin forever on the second acquisition.
-///
-/// # Arguments
-///
-/// * `msg` - The filesystem request message envelope to dispatch.
-///
-/// # Returns
-///
-/// A [`crate::ipc::Message`] containing the reply status and payload.
-pub fn forward_fs_ipc(msg: crate::ipc::Message) -> crate::ipc::Message {
-    if let Some(ep) = crate::ipc::endpoint::get_system_endpoint(ENDPOINT_ZFS_SERVER) {
-        if ep.waiting_receivers() > 0 {
-            ep.send_blocking(msg);
-            return ep.receive_blocking();
-        }
-    }
-
-    if ZFS_SERVER.lock().is_none() {
-        return crate::ipc::Message::with_args(crate::ipc::protocol::MSG_FS_REPLY, [(-5i64) as u64, 0, 0, 0]);
-    }
-    ZfsServer::serve_request(&msg, &mut || with_server(|s| s.sync()))
 }

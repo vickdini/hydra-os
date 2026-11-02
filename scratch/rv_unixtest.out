@@ -1,7 +1,7 @@
 Windows Hypervisor Platform accelerator is operational
 linux run /bin/unixtest.elf
 [+] Read 860400 bytes from OpenZFS (/bin/unixtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
 [unixtest] socketpair(SOCK_STREAM)                              PASS
 [unixtest] stream write/read                                    PASS
 [unixtest] stream reads merge writes                            PASS
@@ -38,5 +38,5 @@ linux run /bin/unixtest.elf
 [unixtest] getsockname returns the bound name (abstract)        PASS
 [unixtest] non-blocking accept -> EAGAIN (abstract)             PASS
 [unixtest] ALL PASSED (0 failures)
-[+] Linux process 8 exited with status 0.
+[+] Linux process 9 exited with status 0.
 hydra:/bin$ 

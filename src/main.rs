@@ -437,7 +437,7 @@ fn main() -> Status {
             txg
         );
     }
-    println!("    - Persistence : {}", if fs::zfs::spa::disk_info().is_some() { "Active (disk, through the Ring 3 ata-driver)" } else { "In-Memory RAM Fallback" });
+    println!("    - Persistence : {}", if fs::zfs::disk_info().is_some() { "Active (disk, through the Ring 3 ata-driver)" } else { "In-Memory RAM Fallback" });
     println!("    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)");
 
     console::set_color(Color::LightCyan, Color::Black);

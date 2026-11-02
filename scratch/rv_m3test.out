@@ -1,7 +1,7 @@
 Windows Hypervisor Platform accelerator is operational
 linux run /bin/m3test.elf
 [+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
 [m3test] eventfd2 with EFD_CLOEXEC                              PASS
 [m3test] eventfd read returns the sum and resets                PASS
 [m3test] blocking eventfd read waits for a writer               PASS
@@ -32,5 +32,5 @@ linux run /bin/m3test.elf
 [m3test] rm_watch queues IN_IGNORED                             PASS
 [m3test] EPOLLONESHOT reports once until re-armed               PASS
 [m3test] ALL PASSED (0 failures)
-[+] Linux process 8 exited with status 0.
+[+] Linux process 9 exited with status 0.
 hydra:/bin$ 

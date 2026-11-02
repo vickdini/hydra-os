@@ -102,40 +102,7 @@ pub struct DirEntry {
     pub next_pos: u64,
 }
 
-/// A directory listing entry for shell commands (`ZfsClient::list_dir`).
-#[derive(Debug, Clone)]
-pub struct ZapEntry {
-    /// Name of the directory entry.
-    pub name: alloc::string::String,
-    /// Inode / target object ID.
-    pub object_id: u64,
-    /// Dnode type representation (e.g. file, directory, symlink).
-    pub obj_type: super::types::DnodeType,
-    /// Whether this directory entry represents a valid record.
-    pub is_valid: bool,
-}
-
-impl ZapEntry {
-    /// Creates a new directory entry record.
-    ///
-    /// # Arguments
-    /// * `name` - Raw byte slice of the file name.
-    /// * `object_id` - Target object identifier.
-    /// * `obj_type` - Dnode type of the target.
-    pub fn new(name: &[u8], object_id: u64, obj_type: super::types::DnodeType) -> Self {
-        Self {
-            name: alloc::string::String::from_utf8_lossy(name).into_owned(),
-            object_id,
-            obj_type,
-            is_valid: true,
-        }
-    }
-
-    /// Returns a string slice of the entry name.
-    pub fn name_str(&self) -> &str {
-        &self.name
-    }
-}
+pub use super::fsproto::ZapEntry;
 
 struct DirIndex {
     names: BTreeMap<Vec<u8>, (u64, u8, u64)>,

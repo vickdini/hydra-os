@@ -17,14 +17,14 @@
 //!
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
-//! - Hardware Interaction: Commits extracted objects to the OpenZFS pool via [`crate::fs::zfs::server::with_server`].
+//! - Hardware Interaction: Commits extracted objects to the OpenZFS pool via [`crate::fs::zfs::with_server`].
 //! - Concurrency: Acquires the global ZFS server lock per entry and flushes the transaction group at completion.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fs::client::{resolve_in, resolve_parent_in};
-use crate::fs::zfs::server::{with_server, ZfsServer};
+use crate::fs::zfs::{with_server, ZfsServer};
 use crate::fs::zfs::types::{S_IFBLK, S_IFCHR, S_IFIFO};
 use crate::fs::zfs::zpl::{self, SetAttr};
 

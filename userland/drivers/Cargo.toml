@@ -3,12 +3,13 @@
 # Built by the kernel's build.rs (target/drivers); `cargo build --release` here works too.
 [workspace]
 resolver = "2"
-members = ["hydra-rt", "display-server", "ata-driver", "e1000-driver"]
+members = ["hydra-rt", "display-server", "ata-driver", "e1000-driver", "zfs-server"]
 
 [workspace.dependencies]
 hydra-rt = { path = "hydra-rt" }
 linked_list_allocator = "0.10.6"
 spin = "0.9"
+x86_64 = { version = "0.15", default-features = false }
 
 [profile.release]
 panic = "abort"

@@ -1,7 +1,7 @@
 Windows Hypervisor Platform accelerator is operational
 linux run /bin/vmtest.elf
 [+] Read 968248 bytes from OpenZFS (/bin/vmtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 8 (UID 1000, GID 1000). Executing...
+[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
 [vmtest] Hydra VM test starting (argc=1, argv[0]=/bin/vmtest.elf)
 [vmtest] malloc small (brk) + large (mmap)            PASS
 [vmtest] realloc 8 MiB -> 32 MiB keeps contents (mremap) PASS
@@ -26,5 +26,5 @@ linux run /bin/vmtest.elf
 [vmtest] 4 threads share memory (counter == 4000)     PASS
 [vmtest] per-thread SSE state isolated                PASS
 [vmtest] ALL PASSED (0 failures)
-[+] Linux process 8 exited with status 0.
+[+] Linux process 9 exited with status 0.
 hydra:/bin$ 

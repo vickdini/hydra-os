@@ -22,32 +22,8 @@ use super::server::ZfsServer;
 use super::spa::BLOCK;
 use super::types::*;
 
-/// Operation not permitted.
-pub const EPERM: i64 = -1;
-/// No such file or directory.
-pub const ENOENT: i64 = -2;
-/// I/O error.
-pub const EIO: i64 = -5;
-/// File exists.
-pub const EEXIST: i64 = -17;
-/// Cross-device link.
-pub const EXDEV: i64 = -18;
-/// Not a directory.
-pub const ENOTDIR: i64 = -20;
-/// Is a directory.
-pub const EISDIR: i64 = -21;
-/// Invalid argument.
-pub const EINVAL: i64 = -22;
-/// File too large.
-pub const EFBIG: i64 = -27;
-/// No space left on device.
-pub const ENOSPC: i64 = -28;
-/// Too many links.
-pub const EMLINK: i64 = -31;
-/// File name too long.
-pub const ENAMETOOLONG: i64 = -36;
-/// Directory not empty.
-pub const ENOTEMPTY: i64 = -39;
+pub use super::fsproto::{EEXIST, EFBIG, EINVAL, EIO, EISDIR, EMLINK, ENAMETOOLONG, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, EPERM, EXDEV};
+pub use super::fsproto::{Attr, ReaddirEntry, SetAttr};
 
 /// Result type returned by ZPL operations, encoding negative Linux errnos on failure.
 pub type ZplResult<T> = Result<T, i64>;
@@ -61,77 +37,6 @@ fn io(e: &'static str) -> i64 {
     }
 }
 
-/// Attributes of an inode (the fields of Linux `struct stat`).
-#[derive(Debug, Clone, Copy)]
-pub struct Attr {
-    /// Inode / object identifier.
-    pub ino: u64,
-    /// File mode and permission bits (e.g. `S_IFREG | 0o644`).
-    pub mode: u32,
-    /// Number of hard links pointing to this inode.
-    pub nlink: u32,
-    /// Owner user ID.
-    pub uid: u32,
-    /// Owner group ID.
-    pub gid: u32,
-    /// Device ID for character / block special files.
-    pub rdev: u64,
-    /// Logical size of the file in bytes.
-    pub size: u64,
-    /// Allocated size in 512-byte units.
-    pub blocks: u64,
-    /// Last access timestamp as (seconds, nanoseconds).
-    pub atime: (i64, u32),
-    /// Last modification timestamp as (seconds, nanoseconds).
-    pub mtime: (i64, u32),
-    /// Status change timestamp as (seconds, nanoseconds).
-    pub ctime: (i64, u32),
-    /// Inode generation counter for NFS / stale handle detection.
-    pub generation: u64,
-    /// Transaction group in which this inode was created.
-    pub birth_txg: u64,
-}
-
-impl Attr {
-    /// Determines the dnode type from the mode bits.
-    pub fn kind(&self) -> DnodeType {
-        DnodeType::from_mode(self.mode)
-    }
-
-    /// Returns true if this inode represents a directory.
-    pub fn is_dir(&self) -> bool {
-        self.mode & S_IFMT == S_IFDIR
-    }
-}
-
-/// Attribute changes for [`ZfsServer::setattr`]; `None` leaves a field unchanged.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SetAttr {
-    /// Optional updated file mode and permissions.
-    pub mode: Option<u32>,
-    /// Optional updated owner user ID.
-    pub uid: Option<u32>,
-    /// Optional updated owner group ID.
-    pub gid: Option<u32>,
-    /// Optional updated file size (truncates or extends).
-    pub size: Option<u64>,
-    /// Optional updated access time (seconds, nanoseconds).
-    pub atime: Option<(i64, u32)>,
-    /// Optional updated modification time (seconds, nanoseconds).
-    pub mtime: Option<(i64, u32)>,
-}
-
-/// One entry returned by [`ZfsServer::readdir`].
-pub struct ReaddirEntry {
-    /// Name of the directory entry as a byte vector.
-    pub name: Vec<u8>,
-    /// Inode number of the target object.
-    pub ino: u64,
-    /// Directory entry type identifier (`DT_REG`, `DT_DIR`, etc.).
-    pub dtype: u8,
-    /// Cookie to pass to `readdir` to continue after this entry.
-    pub next_cookie: u64,
-}
 
 fn now() -> (i64, u32) {
     let (s, ns) = crate::arch::rtc::now();

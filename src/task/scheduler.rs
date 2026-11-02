@@ -1359,6 +1359,19 @@ impl Scheduler {
                 h.total_bytes / 1024
             ));
         }
+        for h in self.handoffs.iter().flatten() {
+            let mut b = crate::console::FixedBuf::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut b,
+                format_args!("[handoff] server {} caller {} deadline {} (now {})\n", h.server, h.caller, h.deadline, crate::arch::pit::ticks()),
+            );
+            crate::console::serial_write(b.as_str());
+        }
+        if let Some(r) = self.resume_first {
+            let mut b = crate::console::FixedBuf::new();
+            let _ = core::fmt::Write::write_fmt(&mut b, format_args!("[handoff] resume first {}\n", r));
+            crate::console::serial_write(b.as_str());
+        }
         crate::console::serial_write("[tasks] id state tgid syscall rip ticks exe\n");
         for (i, task) in self.tasks.iter().enumerate() {
             if task.state == TaskState::Dead {
