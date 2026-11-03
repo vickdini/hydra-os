@@ -781,6 +781,15 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
             st.st_blksize = 4096;
             Some(Ok(st))
         }
+        Some(FileDescriptor::Socket(s)) => {
+            let mut st = super::types::LinuxStat::default();
+            st.st_dev = 0x8;
+            st.st_ino = alloc::sync::Arc::as_ptr(&s) as u64;
+            st.st_mode = 0o140777;
+            st.st_nlink = 1;
+            st.st_blksize = 4096;
+            Some(Ok(st))
+        }
         Some(FileDescriptor::ConsoleIn) | Some(FileDescriptor::ConsoleOut) | Some(FileDescriptor::ConsoleErr) => {
             Some(Ok(console_stat()))
         }

@@ -1113,13 +1113,21 @@ static DBusMessage *create_session(DBusMessage *m) {
 
 /* polkit action for `what` ("power-off", "reboot", "halt") requested by the sender of `m`. */
 static void power_action(DBusMessage *m, const char *what, char *out, size_t len) {
-    pid_t pid;
+    pid_t pid = 0;
     unsigned uid = 0;
     int others = 0;
-    if (sender_creds(m, &pid, &uid) == 0)
-        for (int i = 0; i < MAX_SESSIONS; i++)
-            if (sessions[i].used && sessions[i].uid != uid && strcmp(sessions[i].klass, "greeter") != 0)
+    int creds_rc = sender_creds(m, &pid, &uid);
+    if (creds_rc == 0) {
+        for (int i = 0; i < MAX_SESSIONS; i++) {
+            if (sessions[i].used && sessions[i].uid != uid && strcmp(sessions[i].klass, "greeter") != 0) {
                 others = 1;
+                logmsg("power_action: other active session [%d] id=%s uid=%u klass=%s (caller uid=%u)",
+                       i, sessions[i].id, sessions[i].uid, sessions[i].klass, uid);
+            }
+        }
+    } else {
+        logmsg("power_action: sender_creds failed for sender %s", dbus_message_get_sender(m));
+    }
     snprintf(out, len, "org.freedesktop.login1.%s%s", what, others ? "-multiple-sessions" : "");
 }
 
@@ -1171,14 +1179,25 @@ static int polkit_result(DBusMessage *r, int *challenge) {
 static DBusMessage *can_power(DBusMessage *m, const char *what) {
     char action[96];
     power_action(m, what, action, sizeof action);
+    logmsg("can_power: what='%s' action='%s' sender='%s'", what, action, dbus_message_get_sender(m));
     DBusMessage *q = polkit_check(m, action, 0);
-    DBusMessage *r = dbus_connection_send_with_reply_and_block(bus, q, 5000, NULL);
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *r = dbus_connection_send_with_reply_and_block(bus, q, 5000, &err);
     dbus_message_unref(q);
-    int challenge;
-    int ok = polkit_result(r, &challenge);
-    if (r)
+    int challenge = 0;
+    int ok = 0;
+    if (!r) {
+        logmsg("can_power: polkit error: %s: %s", err.name ? err.name : "?", err.message ? err.message : "?");
+        dbus_error_free(&err);
+    } else {
+        ok = polkit_result(r, &challenge);
+        logmsg("can_power: polkit reply ok=%d challenge=%d", ok, challenge);
         dbus_message_unref(r);
-    return reply_string(m, ok ? "yes" : challenge ? "challenge" : "no");
+    }
+    const char *ans = ok ? "yes" : challenge ? "challenge" : "no";
+    logmsg("can_power: returning '%s'", ans);
+    return reply_string(m, ans);
 }
 
 /* Ends every process, commits the file systems and powers off / restarts / halts. */
@@ -1247,6 +1266,7 @@ static DBusMessage *power(DBusMessage *m, const char *what, int how) {
 
 static DBusMessage *handle_manager(DBusMessage *m, const char *member) {
     const char *id = NULL;
+    logmsg("handle_manager: member='%s' sender='%s'", member, dbus_message_get_sender(m));
     if (!strcmp(member, "CanPowerOff"))
         return can_power(m, "power-off");
     if (!strcmp(member, "CanReboot"))
