@@ -99,6 +99,9 @@ static struct session sessions[MAX_SESSIONS];
 static int active = -1;
 static unsigned next_id = 1;
 
+#define STATE_DIR "/run/systemd"
+static void save_state(void);
+
 static unsigned long long now_usec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -163,9 +166,33 @@ static int proc_status(pid_t pid, pid_t *ppid, unsigned *uid) {
     return 0;
 }
 
-/* Session of process `pid`: the session whose leader it descends from; failing that, the
- * active session of its user, or any session of its user. */
+/* Session whose scope holds process `pid` (its cgroup ends in /session-<id>.scope), or -1. */
+static int session_of_cgroup(pid_t pid) {
+    char path[64], line[512];
+    snprintf(path, sizeof path, "/proc/%d/cgroup", pid);
+    FILE *f = fopen(path, "re");
+    if (!f)
+        return -1;
+    int found = -1;
+    if (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\n")] = 0;
+        const char *scope = strstr(line, "/session-");
+        if (scope && strlen(scope) > 15 && !strcmp(scope + strlen(scope) - 6, ".scope")) {
+            char id[16];
+            snprintf(id, sizeof id, "%.*s", (int)(strlen(scope) - 15), scope + 9);
+            found = session_by_id(id);
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Session of process `pid`: the session whose scope holds it, else the one whose leader
+ * it descends from; failing that, the active session of its user, or any of its user's. */
 static int session_of_pid(pid_t pid) {
+    int by_cgroup = session_of_cgroup(pid);
+    if (by_cgroup >= 0)
+        return by_cgroup;
     unsigned uid = (unsigned)-1, u;
     pid_t p = pid, parent;
     for (int depth = 0; p > 1 && depth < 64; depth++) {
@@ -432,6 +459,7 @@ static void activate(int s) {
         properties_changed(sessions[s].path, SESSION_IFACE, s, session_active_props);
         logmsg("session %s (%s, %s) is active", sessions[s].id, sessions[s].user, sessions[s].klass);
     }
+    save_state();
     properties_changed(SEAT_PATH, SEAT_IFACE, -1, seat_active_props);
 }
 
@@ -458,6 +486,14 @@ static void remove_session(int s) {
         properties_changed(SEAT_PATH, SEAT_IFACE, -1, seat_active_props);
     }
     se->used = 0;
+    char file[128];
+    snprintf(file, sizeof file, STATE_DIR "/sessions/%s", se->id);
+    unlink(file);
+    if (!user_has_sessions(se->uid)) {
+        snprintf(file, sizeof file, STATE_DIR "/users/%u", se->uid);
+        unlink(file);
+    }
+    save_state();
     const char *id = se->id;
     const char *path = se->path;
     DBusMessage *sig = dbus_message_new_signal(ROOT_PATH, MANAGER_IFACE, "SessionRemoved");
@@ -474,6 +510,148 @@ static void remove_session(int s) {
     }
     if (was_active)
         activate(next_graphical());
+}
+
+/* ---------- state files ---------- */
+
+/* sd-login (libsystemd, which polkit, pam_systemd and KDE use) does not ask logind over
+ * the bus: it reads logind's state files in /run/systemd, and finds a process's session
+ * from its cgroup (.../session-<id>.scope). These are kept as systemd-logind writes them. */
+
+/* Writes `text` to `path` atomically (readers never see a partial file). */
+static void write_state(const char *path, const char *text) {
+    char tmp[160];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "we");
+    if (!f) {
+        logmsg("cannot write %s: %s", path, strerror(errno));
+        return;
+    }
+    fputs("# This is private data. Do not parse.\n", f);
+    fputs(text, f);
+    fclose(f);
+    chmod(tmp, 0644);
+    if (rename(tmp, path) < 0)
+        logmsg("cannot write %s: %s", path, strerror(errno));
+}
+
+/* Appends `fmt` to buffer `b` (capacity `cap`, used `*n`). */
+static void addf(char *b, size_t cap, size_t *n, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static void addf(char *b, size_t cap, size_t *n, const char *fmt, ...) {
+    if (*n >= cap)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(b + *n, cap - *n, fmt, ap);
+    va_end(ap);
+    if (k > 0)
+        *n = *n + (size_t)k < cap ? *n + (size_t)k : cap;
+}
+
+static unsigned long long monotonic_usec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000000ull + ts.tv_nsec / 1000;
+}
+
+/* Rewrites the files of every session and user, and seat0's. */
+static void save_state(void) {
+    char path[128], b[2048];
+    size_t n;
+    mkdir(STATE_DIR, 0755);
+    mkdir(STATE_DIR "/sessions", 0755);
+    mkdir(STATE_DIR "/users", 0755);
+    mkdir(STATE_DIR "/seats", 0755);
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        struct session *se = &sessions[i];
+        if (!se->used)
+            continue;
+        n = 0;
+        addf(b, sizeof b, &n, "UID=%u\nUSER=%s\nACTIVE=%d\nIS_DISPLAY=%d\nSTATE=%s\nREMOTE=%d\n", se->uid, se->user, i == active,
+             se->on_seat, i == active ? "active" : "online", se->remote);
+        addf(b, sizeof b, &n, "TYPE=%s\nORIGINAL_TYPE=%s\nCLASS=%s\nSCOPE=session-%s.scope\nSERVICE=%s\n", se->type, se->type, se->klass,
+             se->id, se->service);
+        if (*se->desktop)
+            addf(b, sizeof b, &n, "DESKTOP=%s\n", se->desktop);
+        if (se->on_seat)
+            addf(b, sizeof b, &n, "SEAT=seat0\nVTNR=%u\n", se->vtnr);
+        if (*se->tty)
+            addf(b, sizeof b, &n, "TTY=%s\n", se->tty);
+        if (*se->display)
+            addf(b, sizeof b, &n, "DISPLAY=%s\n", se->display);
+        if (*se->remote_host)
+            addf(b, sizeof b, &n, "REMOTE_HOST=%s\n", se->remote_host);
+        if (*se->remote_user)
+            addf(b, sizeof b, &n, "REMOTE_USER=%s\n", se->remote_user);
+        if (*se->controller)
+            addf(b, sizeof b, &n, "CONTROLLER=%s\n", se->controller);
+        addf(b, sizeof b, &n, "LEADER=%d\nREALTIME=%llu\nMONOTONIC=%llu\n", (int)se->leader, se->timestamp, monotonic_usec());
+        snprintf(path, sizeof path, STATE_DIR "/sessions/%s", se->id);
+        write_state(path, b);
+    }
+
+    /* Users: one file per user with sessions */
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!sessions[i].used)
+            continue;
+        unsigned uid = sessions[i].uid;
+        int first = 1;
+        for (int j = 0; j < i; j++)
+            if (sessions[j].used && sessions[j].uid == uid)
+                first = 0;
+        if (!first)
+            continue;
+        int has_active = active >= 0 && sessions[active].uid == uid;
+        int display = has_active ? active : -1;
+        char all[256] = "", seated[256] = "";
+        for (int j = 0; j < MAX_SESSIONS; j++) {
+            if (!sessions[j].used || sessions[j].uid != uid)
+                continue;
+            if (display < 0 && sessions[j].on_seat)
+                display = j;
+            snprintf(all + strlen(all), sizeof all - strlen(all), "%s%s", *all ? " " : "", sessions[j].id);
+            if (sessions[j].on_seat && !*seated)
+                strcpy(seated, "seat0");
+        }
+        n = 0;
+        addf(b, sizeof b, &n, "NAME=%s\nSTATE=%s\nSTOPPING=no\nRUNTIME=/run/user/%u\n", sessions[i].user, has_active ? "active" : "online",
+             uid);
+        if (display >= 0)
+            addf(b, sizeof b, &n, "DISPLAY=%s\n", sessions[display].id);
+        addf(b, sizeof b, &n, "REALTIME=%llu\nMONOTONIC=%llu\nSESSIONS=%s\nSEATS=%s\nACTIVE_SESSIONS=%s\nONLINE_SESSIONS=%s\n",
+             sessions[i].timestamp, monotonic_usec(), all, seated, has_active ? sessions[active].id : "", all);
+        addf(b, sizeof b, &n, "ACTIVE_SEATS=%s\nONLINE_SEATS=%s\n", has_active && sessions[active].on_seat ? "seat0" : "", seated);
+        snprintf(path, sizeof path, STATE_DIR "/users/%u", uid);
+        write_state(path, b);
+    }
+
+    /* seat0 */
+    char ids[256] = "", uids[256] = "";
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!sessions[i].used || !sessions[i].on_seat)
+            continue;
+        snprintf(ids + strlen(ids), sizeof ids - strlen(ids), "%s%s", *ids ? " " : "", sessions[i].id);
+        snprintf(uids + strlen(uids), sizeof uids - strlen(uids), "%s%u", *uids ? " " : "", sessions[i].uid);
+    }
+    n = 0;
+    addf(b, sizeof b, &n, "IS_SEAT0=1\nCAN_MULTI_SESSION=1\nCAN_TTY=1\nCAN_GRAPHICAL=1\n");
+    if (active >= 0)
+        addf(b, sizeof b, &n, "ACTIVE=%s\nACTIVE_UID=%u\n", sessions[active].id, sessions[active].uid);
+    addf(b, sizeof b, &n, "SESSIONS=%s\nUIDS=%s\n", ids, uids);
+    write_state(STATE_DIR "/seats/seat0", b);
+}
+
+/* Moves process `pid` into session `s`'s scope; its children are born there. */
+static void place_in_scope(int s, pid_t pid) {
+    char path[160];
+    char text[16];
+    snprintf(path, sizeof path, "/sys/fs/cgroup/user.slice/user-%u.slice/session-%s.scope/cgroup.procs", sessions[s].uid, sessions[s].id);
+    int len = snprintf(text, sizeof text, "%d\n", (int)pid);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0 || write(fd, text, len) != len)
+        logmsg("cannot move %d into session %s's scope: %s", (int)pid, sessions[s].id, fd < 0 ? strerror(errno) : "no such process");
+    if (fd >= 0)
+        close(fd);
 }
 
 /* Creates /run/user/<uid> for a user's first session. */
@@ -537,6 +715,8 @@ static int add_session(unsigned uid, pid_t leader, const char *service, const ch
         emit(sig);
     }
     logmsg("session %s for %s (uid %u, %s, %s, vt %u)", se->id, se->user, uid, se->klass, se->type, se->vtnr);
+    place_in_scope(s, leader);
+    save_state();
     /* A new graphical session takes the display, as a VT switch to it would */
     if (se->on_seat && (!strcmp(se->klass, "user") || !strcmp(se->klass, "greeter")))
         activate(s);
@@ -917,8 +1097,10 @@ static DBusMessage *handle_manager(DBusMessage *m, const char *member) {
     if (!strcmp(member, "ReleaseSession")) {
         dbus_message_get_args(m, NULL, DBUS_TYPE_STRING, &id, DBUS_TYPE_INVALID);
         int s = session_by_id(id ? id : "");
-        if (s >= 0)
+        if (s >= 0) {
+            logmsg("session %s released by %s", sessions[s].id, dbus_message_get_sender(m));
             remove_session(s);
+        }
         return dbus_message_new_method_return(m);
     }
     if (!strcmp(member, "GetSession")) {
@@ -1069,6 +1251,7 @@ static DBusMessage *handle_session(DBusMessage *m, int s, const char *member) {
             release_all(s);
         snprintf(se->controller, sizeof se->controller, "%s", sender);
         logmsg("session %s controller is %s", se->id, sender);
+        save_state();
         return dbus_message_new_method_return(m);
     }
     if (!strcmp(member, "ReleaseControl")) {
@@ -1411,8 +1594,10 @@ int main(int argc, char **argv) {
             if (!p[k].revents)
                 continue;
             char c;
-            if (read(p[k].fd, &c, 1) <= 0)
+            if (read(p[k].fd, &c, 1) <= 0) {
+                logmsg("session %s: its leader closed the session (revents %#x)", sessions[owner[k]].id, p[k].revents);
                 remove_session(owner[k]);
+            }
         }
         if (p[0].revents & (POLLHUP | POLLERR))
             break;

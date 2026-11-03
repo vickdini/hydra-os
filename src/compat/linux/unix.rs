@@ -51,11 +51,13 @@ const MSG_NOSIGNAL: u64 = 0x4000;
 const MSG_CMSG_CLOEXEC: u64 = 0x4000_0000;
 
 const ENOENT: i64 = -2;
+const ESRCH: i64 = -3;
 const EBADF: i64 = -9;
 const EAGAIN: i64 = -11;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EMFILE: i64 = -24;
+const ENODATA: i64 = -61;
 const EPIPE: i64 = -32;
 const EMSGSIZE: i64 = -90;
 const EPROTOTYPE: i64 = -91;
@@ -878,7 +880,7 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
                 // The message holds a reference, like a dup: a pipe end stays open while in flight
                 match &desc {
                     FileDescriptor::PipeRead(pipe) => pipe.lock().add_reader(),
-                    FileDescriptor::PipeWrite(pipe) => pipe.lock().drop_writer(),
+                    FileDescriptor::PipeWrite(pipe) => pipe.lock().add_writer(),
                     _ => {}
                 }
                 fds.push(desc);
@@ -1343,6 +1345,25 @@ fn getsockopt(sock: &Arc<UnixSocket>, level: u64, opt: u64, val: u64, len_ptr: u
             State::Listening { cred, .. } => cred.bytes().to_vec(),
             State::Unconnected => Ucred { pid: 0, uid: u32::MAX, gid: u32::MAX }.bytes().to_vec(),
         },
+        77 => {
+            // SO_PEERPIDFD: a pidfd for the peer process (services such as polkit's
+            // helper identify their client by it, immune to pid reuse)
+            let pid = match &*sock.state.lock() {
+                State::Connected { peer_cred, .. } => peer_cred.pid as u64,
+                _ => 0,
+            };
+            if pid == 0 {
+                return ENODATA;
+            }
+            if crate::task::SCHEDULER.lock().with_process(pid, |_| ()).is_none() {
+                return ESRCH;
+            }
+            let fd = super::pidfd::install(pid, false);
+            if fd < 0 {
+                return fd;
+            }
+            int(fd as u32)
+        }
         30 => int(matches!(*sock.state.lock(), State::Listening { .. }) as u32), // SO_ACCEPTCONN
         38 => int(0),                                                         // SO_PROTOCOL
         39 => int(AF_UNIX),                                                   // SO_DOMAIN

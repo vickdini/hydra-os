@@ -1,0 +1,2663 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd74afe3
+    RFLAGS: 0x206, RSP: 0xbfe627d0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0xbfc01000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 3036 MiB
+    - Allocated: 2560 KiB
+    - Allocated Test Frame: 0x40280000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x40281000
+    - Total Size:    512 MiB (536870912 bytes)
+    - Available:     512 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd74ac10 -> PhysAddr 0xbd74ac10
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0xc0000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[boot] anchor (hydra_syscall_dispatcher) = 0xbd68dbb0
+[1m[33m[40m
+[*] Step 6: Initializing Devices & Reading the Boot Volume...
+[1m[32m[40m[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Boot volume: 25 files staged for the pool
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[ata-driver] 'QEMU HARDDISK': 16384 MiB, LBA48, bus-master DMA
+[supervisor] started 'ata_driver' (process 2, endpoint 0x21)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #48639, 82504 objects)
+[supervisor] started 'zfs_server' (process 3, endpoint 0x20)
+[supervisor] started 'net_driver' (process 4, endpoint 0x22)
+[supervisor] started 'display_server' (process 5, endpoint 0x23)
+[e1000-driver] MAC 52:54:00:12:34:56, link up
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+
+[*] Step 8: Initializing the ZFS File Server...
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 3105 MiB used, TXG #48639, Fletcher-4, CoW)
+    - Persistence : Active (disk, through the Ring 3 ata-driver)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... CANCELLED
+    Type 'linux plasma' to start the desktop later.
+
+Hydra administration console. Log in as root or as a member of 'sudo'.
+login: hydra
+Password: 
+[+] Logged in as 'hydra' (UID 1000).
+
+hydra:/bin$ sudo -s
+[sudo] password for hydra: 
+[+] Switched to superuser 'root' (UID 0, GID 0)
+hydra:/bin# linux trace on polkitd
+[+] Linux syscall tracing enabled
+hydra:/bin# linux plasma
+[*] Starting the login screen (SDDM)...
+[+] Started /bin/sh /usr/libexec/hydra-session --display-manager (process 11).
+hydra:/bin# hydra-logind: seat0 ready on org.freedesktop.login1
+hydra:/bin# [07:44:47.480] (II) DAEMON: Initializing...
+hydra:/bin# [trace] t=2193 25 > 12(0x0, 0x0, 0x0, 0x37f)
+[trace]   = 93824992374784
+[trace] t=2193 25 > 21(0x7fffbf7f3720, 0x4, 0x0, 0x3b000)
+[trace]   path "/etc/ld.so.preload"
+[trace]   = -2
+[trace] t=2193 25 > 257(0xffffff9c, 0x7fffbf7f2491, 0x80000, 0x0)
+[trace]   path "/etc/ld.so.cache"
+[trace]   = 3
+[trace] t=2194 25 > 5(0x3, 0x7fffffffde10, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2194 25 > 9(0x0, 0xf27f, 0x1, 0x2)
+[trace]   = 140736405897216
+[trace] t=2194 25 > 3(0x3, 0xf27f, 0x7fffbf7b0000, 0x2)
+[trace]   = 0
+[trace] t=2195 25 > 257(0xffffff9c, 0x7fffbf7fea40, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libpolkit-gobject-1.so.0"
+[trace]   = 3
+[trace] t=2197 25 > 0(0x3, 0x7fffffffe008, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2198 25 > 5(0x3, 0x7fffffffdeb0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2199 25 > 9(0x0, 0x21188, 0x1, 0x802)
+[trace]   = 140736405757952
+[trace] t=2199 25 > 9(0x7fffbf796000, 0x10000, 0x5, 0x812)
+[trace]   = 140736405790720
+[trace] t=2199 25 > 9(0x7fffbf7a6000, 0x8000, 0x1, 0x812)
+[trace]   = 140736405856256
+[trace] t=2200 25 > 9(0x7fffbf7ae000, 0x2000, 0x3, 0x812)
+[trace]   = 140736405889024
+[trace] t=2201 25 > 3(0x3, 0x7fffbf7ad728, 0x7fffbf7ad728, 0xc0000002)
+[trace]   = 0
+[trace] t=2201 25 > 257(0xffffff9c, 0x7fffbf7fefc0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libexpat.so.1"
+[trace]   = 3
+[trace] t=2202 25 > 0(0x3, 0x7fffffffdfe8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2202 25 > 5(0x3, 0x7fffffffde90, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2202 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736405749760
+[trace] t=2203 25 > 9(0x0, 0x2d080, 0x1, 0x802)
+[trace]   = 140736405561344
+[trace] t=2203 25 > 9(0x7fffbf762000, 0x1f000, 0x5, 0x812)
+[trace]   = 140736405577728
+[trace] t=2203 25 > 9(0x7fffbf781000, 0x8000, 0x1, 0x812)
+[trace]   = 140736405704704
+[trace] t=2203 25 > 9(0x7fffbf789000, 0x3000, 0x3, 0x812)
+[trace]   = 140736405737472
+[trace] t=2204 25 > 3(0x3, 0x7fffbf788c30, 0x7fffbf788c30, 0xc0000002)
+[trace]   = 0
+[trace] t=2204 25 > 257(0xffffff9c, 0x7fffbf78c520, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0"
+[trace]   = 3
+[trace] t=2205 25 > 0(0x3, 0x7fffffffdfc8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2205 25 > 5(0x3, 0x7fffffffde70, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2205 25 > 9(0x0, 0x1dc528, 0x1, 0x802)
+[trace]   = 140736403607552
+[trace] t=2205 25 > 9(0x7fffbf5be000, 0x11e000, 0x5, 0x812)
+[trace]   = 140736403857408
+[trace] t=2206 25 > 9(0x7fffbf6dc000, 0x76000, 0x1, 0x812)
+[trace]   = 140736405028864
+[trace] t=2206 25 > 9(0x7fffbf752000, 0xa000, 0x3, 0x812)
+[trace]   = 140736405512192
+[trace] t=2206 25 > 9(0x7fffbf75c000, 0x1528, 0x3, 0x32)
+[trace]   = 140736405553152
+[trace] t=2207 25 > 3(0x3, 0x7fffbf7519d8, 0x7fffbf7519d8, 0xc0000002)
+[trace]   = 0
+[trace] t=2207 25 > 257(0xffffff9c, 0x7fffbf78ca70, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0"
+[trace]   = 3
+[trace] t=2208 25 > 0(0x3, 0x7fffffffdfa8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2208 25 > 5(0x3, 0x7fffffffde50, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2208 25 > 9(0x0, 0x63c48, 0x1, 0x802)
+[trace]   = 140736403197952
+[trace] t=2208 25 > 9(0x7fffbf52d000, 0x37000, 0x5, 0x812)
+[trace]   = 140736403263488
+[trace] t=2209 25 > 9(0x7fffbf564000, 0x19000, 0x1, 0x812)
+[trace]   = 140736403488768
+[trace] t=2209 25 > 9(0x7fffbf57d000, 0x4000, 0x3, 0x812)
+[trace]   = 140736403591168
+[trace] t=2209 25 > 3(0x3, 0x7fffbf57c048, 0x7fffbf57c048, 0xc0000002)
+[trace]   = 0
+[trace] t=2210 25 > 257(0xffffff9c, 0x7fffbf78cfc0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0"
+[trace]   = 3
+[trace] t=2210 25 > 0(0x3, 0x7fffffffdf88, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2211 25 > 5(0x3, 0x7fffffffde30, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2211 25 > 9(0x0, 0x1572a8, 0x1, 0x802)
+[trace]   = 140736401788928
+[trace] t=2211 25 > 9(0x7fffbf3e4000, 0xa6000, 0x5, 0x812)
+[trace]   = 140736401915904
+[trace] t=2212 25 > 9(0x7fffbf48a000, 0x90000, 0x1, 0x812)
+[trace]   = 140736402595840
+[trace] t=2212 25 > 9(0x7fffbf51a000, 0x2000, 0x3, 0x812)
+[trace]   = 140736403185664
+[trace] t=2212 25 > 9(0x7fffbf51c000, 0x2a8, 0x3, 0x32)
+[trace]   = 140736403193856
+[trace] t=2213 25 > 3(0x3, 0x7fffbf519888, 0x7fffbf519888, 0xc0000002)
+[trace]   = 0
+[trace] t=2213 25 > 257(0xffffff9c, 0x7fffbf78d510, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libduktape.so.207"
+[trace]   = 3
+[trace] t=2213 25 > 0(0x3, 0x7fffffffdf68, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2214 25 > 5(0x3, 0x7fffffffde10, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2214 25 > 9(0x0, 0x4a010, 0x1, 0x802)
+[trace]   = 140736401481728
+[trace] t=2214 25 > 9(0x7fffbf381000, 0x32000, 0x5, 0x812)
+[trace]   = 140736401510400
+[trace] t=2215 25 > 9(0x7fffbf3b3000, 0x10000, 0x1, 0x812)
+[trace]   = 140736401715200
+[trace] t=2215 25 > 9(0x7fffbf3c3000, 0x2000, 0x3, 0x812)
+[trace]   = 140736401780736
+[trace] t=2215 25 > 3(0x3, 0x7fffbf3c2698, 0x7fffbf3c2698, 0xc0000002)
+[trace]   = 0
+[trace] t=2216 25 > 257(0xffffff9c, 0x7fffbf78da60, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libsystemd.so.0"
+[trace]   = 3
+[trace] t=2216 25 > 0(0x3, 0x7fffffffdf48, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2217 25 > 5(0x3, 0x7fffffffddf0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2217 25 > 9(0x0, 0x113988, 0x1, 0x802)
+[trace]   = 140736400351232
+[trace] t=2217 25 > 9(0x7fffbf27f000, 0xb7000, 0x5, 0x812)
+[trace]   = 140736400453632
+[trace] t=2218 25 > 9(0x7fffbf336000, 0x3a000, 0x1, 0x812)
+[trace]   = 140736401203200
+[trace] t=2218 25 > 9(0x7fffbf370000, 0x9000, 0x3, 0x812)
+[trace]   = 140736401440768
+[trace] t=2218 25 > 9(0x7fffbf379000, 0x988, 0x3, 0x32)
+[trace]   = 140736401477632
+[trace] t=2219 25 > 3(0x3, 0x7fffbf36f840, 0x7fffbf36f840, 0xc0000002)
+[trace]   = 0
+[trace] t=2219 25 > 257(0xffffff9c, 0x7fffbf78dfb0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libc.so.6"
+[trace]   = 3
+[trace] t=2219 25 > 0(0x3, 0x7fffffffdf28, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2220 25 > 17(0x3, 0x7fffffffdb00, 0x348, 0x40)
+[trace]   = 840
+[trace] t=2220 25 > 5(0x3, 0x7fffffffddd0, 0x3, 0x40)
+[trace]   = 0
+[trace] t=2220 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736400343040
+[trace] t=2221 25 > 17(0x3, 0x7fffffffd9e0, 0x348, 0x40)
+[trace]   = 840
+[trace] t=2221 25 > 9(0x0, 0x220d90, 0x1, 0x802)
+[trace]   = 140736398110720
+[trace] t=2221 25 > 9(0x7fffbf06b000, 0x198000, 0x5, 0x812)
+[trace]   = 140736398274560
+[trace] t=2221 25 > 9(0x7fffbf203000, 0x4e000, 0x1, 0x812)
+[trace]   = 140736399945728
+[trace] t=2222 25 > 9(0x7fffbf251000, 0x6000, 0x3, 0x812)
+[trace]   = 140736400265216
+[trace] t=2222 25 > 9(0x7fffbf257000, 0xcd90, 0x3, 0x32)
+[trace]   = 140736400289792
+[trace] t=2223 25 > 3(0x3, 0x7fffbf250b50, 0x1, 0xc0000002)
+[trace]   = 0
+[trace] t=2223 25 > 257(0xffffff9c, 0x7fffbf2645c0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0"
+[trace]   = 3
+[trace] t=2223 25 > 0(0x3, 0x7fffffffdf08, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2224 25 > 5(0x3, 0x7fffffffddb0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2224 25 > 9(0x0, 0x6088, 0x1, 0x802)
+[trace]   = 140736398082048
+[trace] t=2224 25 > 9(0x7fffbf03e000, 0x2000, 0x5, 0x812)
+[trace]   = 140736398090240
+[trace] t=2224 25 > 9(0x7fffbf040000, 0x1000, 0x1, 0x812)
+[trace]   = 140736398098432
+[trace] t=2225 25 > 9(0x7fffbf041000, 0x2000, 0x3, 0x812)
+[trace]   = 140736398102528
+[trace] t=2225 25 > 3(0x3, 0x7fffbf0404b8, 0x7fffbf0404b8, 0xc0000002)
+[trace]   = 0
+[trace] t=2226 25 > 257(0xffffff9c, 0x7fffbf264b10, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libz.so.1"
+[trace]   = 3
+[trace] t=2226 25 > 0(0x3, 0x7fffffffdee8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2227 25 > 5(0x3, 0x7fffffffdd90, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2227 25 > 9(0x0, 0x1d098, 0x1, 0x802)
+[trace]   = 140736397959168
+[trace] t=2227 25 > 9(0x7fffbf021000, 0x13000, 0x5, 0x812)
+[trace]   = 140736397971456
+[trace] t=2227 25 > 9(0x7fffbf034000, 0x6000, 0x1, 0x812)
+[trace]   = 140736398049280
+[trace] t=2228 25 > 9(0x7fffbf03a000, 0x2000, 0x3, 0x812)
+[trace]   = 140736398073856
+[trace] t=2228 25 > 3(0x3, 0x7fffbf039d78, 0x7fffbf039d78, 0xc0000002)
+[trace]   = 0
+[trace] t=2228 25 > 257(0xffffff9c, 0x7fffbf265060, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libmount.so.1"
+[trace]   = 3
+[trace] t=2229 25 > 0(0x3, 0x7fffffffdec8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2229 25 > 5(0x3, 0x7fffffffdd70, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2229 25 > 9(0x0, 0x52268, 0x1, 0x802)
+[trace]   = 140736397619200
+[trace] t=2230 25 > 9(0x7fffbefd5000, 0x38000, 0x5, 0x812)
+[trace]   = 140736397660160
+[trace] t=2230 25 > 9(0x7fffbf00d000, 0xe000, 0x1, 0x812)
+[trace]   = 140736397889536
+[trace] t=2230 25 > 9(0x7fffbf01b000, 0x3000, 0x3, 0x812)
+[trace]   = 140736397946880
+[trace] t=2231 25 > 3(0x3, 0x7fffbf01adc8, 0x7fffbf01adc8, 0xc0000002)
+[trace]   = 0
+[trace] t=2231 25 > 257(0xffffff9c, 0x7fffbf2655b0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libselinux.so.1"
+[trace]   = 3
+[trace] t=2232 25 > 0(0x3, 0x7fffffffdea8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2232 25 > 5(0x3, 0x7fffffffdd50, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2232 25 > 9(0x0, 0x325d0, 0x1, 0x802)
+[trace]   = 140736397410304
+[trace] t=2232 25 > 9(0x7fffbef9f000, 0x21000, 0x5, 0x812)
+[trace]   = 140736397438976
+[trace] t=2233 25 > 9(0x7fffbefc0000, 0x7000, 0x1, 0x812)
+[trace]   = 140736397574144
+[trace] t=2233 25 > 9(0x7fffbefc7000, 0x2000, 0x3, 0x812)
+[trace]   = 140736397602816
+[trace] t=2234 25 > 9(0x7fffbefc9000, 0x15d0, 0x3, 0x32)
+[trace]   = 140736397611008
+[trace] t=2234 25 > 3(0x3, 0x7fffbefc6cf8, 0x7fffbefc6cf8, 0xc0000002)
+[trace]   = 0
+[trace] t=2234 25 > 257(0xffffff9c, 0x7fffbf265b90, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libffi.so.8"
+[trace]   = 3
+[trace] t=2235 25 > 0(0x3, 0x7fffffffde88, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2235 25 > 5(0x3, 0x7fffffffdd30, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2235 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736397402112
+[trace] t=2236 25 > 9(0x0, 0x106d0, 0x1, 0x802)
+[trace]   = 140736397332480
+[trace] t=2236 25 > 9(0x7fffbef87000, 0xb000, 0x5, 0x812)
+[trace]   = 140736397340672
+[trace] t=2236 25 > 9(0x7fffbef92000, 0x2000, 0x1, 0x812)
+[trace]   = 140736397385728
+[trace] t=2237 25 > 9(0x7fffbef94000, 0x2000, 0x3, 0x812)
+[trace]   = 140736397393920
+[trace] t=2237 25 > 3(0x3, 0x7fffbef930a8, 0x7fffbef930a8, 0xc0000002)
+[trace]   = 0
+[trace] t=2237 25 > 257(0xffffff9c, 0x7fffbef96570, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libatomic.so.1"
+[trace]   = 3
+[trace] t=2238 25 > 0(0x3, 0x7fffffffde68, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2238 25 > 5(0x3, 0x7fffffffdd10, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2238 25 > 9(0x0, 0xa088, 0x1, 0x802)
+[trace]   = 140736397287424
+[trace] t=2239 25 > 9(0x7fffbef7c000, 0x4000, 0x5, 0x812)
+[trace]   = 140736397295616
+[trace] t=2239 25 > 9(0x7fffbef80000, 0x2000, 0x1, 0x812)
+[trace]   = 140736397312000
+[trace] t=2239 25 > 9(0x7fffbef82000, 0x2000, 0x3, 0x812)
+[trace]   = 140736397320192
+[trace] t=2240 25 > 9(0x7fffbef84000, 0x88, 0x3, 0x32)
+[trace]   = 140736397328384
+[trace] t=2240 25 > 3(0x3, 0x7fffbef81878, 0x7fffbef81878, 0xc0000002)
+[trace]   = 0
+[trace] t=2240 25 > 257(0xffffff9c, 0x7fffbef96ac0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libm.so.6"
+[trace]   = 3
+[trace] t=2241 25 > 0(0x3, 0x7fffffffde48, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2241 25 > 5(0x3, 0x7fffffffdcf0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2241 25 > 9(0x0, 0x125018, 0x1, 0x802)
+[trace]   = 140736396083200
+[trace] t=2242 25 > 9(0x7fffbee66000, 0xa0000, 0x5, 0x812)
+[trace]   = 140736396156928
+[trace] t=2242 25 > 9(0x7fffbef06000, 0x72000, 0x1, 0x812)
+[trace]   = 140736396812288
+[trace] t=2242 25 > 9(0x7fffbef78000, 0x2000, 0x3, 0x812)
+[trace]   = 140736397279232
+[trace] t=2243 25 > 3(0x3, 0x7fffbef77278, 0x1, 0xc0000002)
+[trace]   = 0
+[trace] t=2243 25 > 257(0xffffff9c, 0x7fffbef97010, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"
+[trace]   = 3
+[trace] t=2244 25 > 0(0x3, 0x7fffffffde28, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2244 25 > 5(0x3, 0x7fffffffdcd0, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2244 25 > 9(0x0, 0xab2b8, 0x1, 0x802)
+[trace]   = 140736395378688
+[trace] t=2244 25 > 9(0x7fffbedab000, 0x7c000, 0x5, 0x812)
+[trace]   = 140736395390976
+[trace] t=2245 25 > 9(0x7fffbee27000, 0x2b000, 0x1, 0x812)
+[trace]   = 140736395898880
+[trace] t=2245 25 > 9(0x7fffbee52000, 0x2000, 0x3, 0x812)
+[trace]   = 140736396075008
+[trace] t=2245 25 > 3(0x3, 0x7fffbee51200, 0x7fffbee51200, 0xc0000002)
+[trace]   = 0
+[trace] t=2246 25 > 257(0xffffff9c, 0x7fffbef976f0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/libblkid.so.1"
+[trace]   = 3
+[trace] t=2246 25 > 0(0x3, 0x7fffffffdde8, 0x340, 0x0)
+[trace]   = 832
+[trace] t=2247 25 > 5(0x3, 0x7fffffffdc90, 0x3, 0x0)
+[trace]   = 0
+[trace] t=2247 25 > 9(0x0, 0x3b378, 0x1, 0x802)
+[trace]   = 140736395132928
+[trace] t=2247 25 > 9(0x7fffbed73000, 0x25000, 0x5, 0x812)
+[trace]   = 140736395161600
+[trace] t=2248 25 > 9(0x7fffbed98000, 0x9000, 0x1, 0x812)
+[trace]   = 140736395313152
+[trace] t=2248 25 > 9(0x7fffbeda1000, 0x7000, 0x3, 0x812)
+[trace]   = 140736395350016
+[trace] t=2248 25 > 3(0x3, 0x7fffbeda0b88, 0x7fffbeda0b88, 0xc0000002)
+[trace]   = 0
+[trace] t=2249 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736395124736
+[trace] t=2249 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736395116544
+[trace] t=2249 25 > 158(0x1002, 0x7fffbed69400, 0x7fffbed69e90, 0xc)
+[trace]   = 0
+[trace] t=2250 25 > 218(0x7fffbed69a28, 0x7fffbf7fd810, 0x7fffbed69400, 0xc)
+[trace]   = 25
+[trace] t=2250 25 > 273(0x7fffbed696e0, 0x18, 0x7fffbed69400, 0xc)
+[trace]   = 0
+[trace] t=2250 25 > 334(0x7fffbed69180, 0x20, 0x0, 0x53053053)
+[trace]   = -38
+hydra:/bin# [trace] t=2254 25 > 10(0x7fffbf251000, 0x4000, 0x1, 0x7fffbf06a328)
+[trace]   = 0
+[trace] t=2255 25 > 10(0x7fffbeda1000, 0x6000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2255 25 > 10(0x7fffbee52000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2255 25 > 10(0x7fffbef78000, 0x1000, 0x1, 0x7fffbee65368)
+[trace]   = 0
+[trace] t=2256 25 > 10(0x7fffbef82000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2256 25 > 10(0x7fffbef94000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2256 25 > 10(0x7fffbefc7000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2257 25 > 10(0x7fffbf01b000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2257 25 > 10(0x7fffbf03a000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2257 25 > 10(0x7fffbf51a000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2258 25 > 10(0x7fffbf041000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2258 25 > 10(0x7fffbf370000, 0x8000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2258 25 > 10(0x7fffbf3c3000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2258 25 > 10(0x7fffbf57d000, 0x3000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2259 25 > 10(0x7fffbf752000, 0x9000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2259 25 > 10(0x7fffbf789000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2260 25 > 10(0x7fffbf7ae000, 0x1000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2260 25 > 10(0x555555574000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2261 25 > 9(0x0, 0x2000, 0x3, 0x22)
+[trace]   = 140736395108352
+[trace] t=2261 25 > 10(0x7fffbf7fb000, 0x2000, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2261 25 > 302(0x0, 0x3, 0x0, 0x7fffffffe9e0)
+[trace]   = 0
+[trace] t=2262 25 > 318(0x7fffbf25c1c0, 0x8, 0x1, 0x7fffffffe9e0)
+[trace]   = 8
+[trace] t=2262 25 > 11(0x7fffbf7b0000, 0xf27f, 0x0, 0x7fffffffe9e0)
+[trace]   = 0
+[trace] t=2262 25 > 137(0x7fffbefc0229, 0x7fffffffec30, 0x0, 0x7fffffffe9e0)
+[trace]   = 0
+[trace] t=2262 25 > 137(0x7fffbefc0230, 0x7fffffffec30, 0x0, 0x7fffffffe9e0)
+[trace]   = 0
+[trace] t=2263 25 > 12(0x0, 0x7fffbf255ca8, 0x0, 0x1e0)
+[trace]   = 93824992374784
+[trace] t=2263 25 > 12(0x555555598000, 0x7fffbf255ca8, 0x555555577000, 0x1e0)
+[trace]   = 93824992509952
+[trace] t=2263 25 > 257(0xffffffffffffff9c, 0x7fffbefc020d, 0x80000, 0x0)
+[trace]   path "/proc/filesystems"
+[trace]   = -2
+[trace] t=2264 25 > 257(0xffffffffffffff9c, 0x7fffbefc0239, 0x80000, 0x0)
+[trace]   path "/proc/mounts"
+[trace]   = 3
+[trace] t=2265 25 > 5(0x3, 0x7fffffffeb40, 0x7fffbf253ee0, 0x80)
+[trace]   = 0
+[trace] t=2265 25 > 0(0x3, 0x555555577570, 0x1000, 0x0)
+[trace]   = 441
+[trace] t=2265 25 > 0(0x3, 0x555555577570, 0x1000, 0x0)
+[trace]   = 0
+[trace] t=2265 25 > 3(0x3, 0x5555555771f0, 0x7fffbf253ee0, 0x81)
+[trace]   = 0
+[trace] t=2266 25 > 21(0x7fffbefc0251, 0x0, 0xf, 0x1e1)
+[trace]   path "/etc/selinux/config"
+[trace]   = -2
+[trace] t=2266 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2266 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2268 25 > 257(0xffffffffffffff9c, 0x55555556d926, 0x2, 0x0)
+[trace]   path "/dev/null"
+[trace]   = 3
+[trace] t=2268 25 > 33(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2268 25 > 33(0x3, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2268 25 > 33(0x3, 0x2, 0x0, 0x0)
+[trace]   = 2
+[trace] t=2269 25 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2269 25 > 41(0x1, 0x80801, 0x0, 0x7fffbf2225f3)
+[trace]   = 3
+[trace] t=2269 25 > 42(0x3, 0x7fffffffe760, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2269 25 > 3(0x3, 0x7fffffffe760, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2270 25 > 41(0x1, 0x80801, 0x0, 0x0)
+[trace]   = 3
+[trace] t=2270 25 > 42(0x3, 0x7fffffffe960, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2270 25 > 3(0x3, 0x7fffffffe960, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2271 25 > 262(0xffffff9c, 0x7fffbf222060, 0x7fffffffe850, 0x0)
+[trace]   path "/etc/nsswitch.conf"
+[trace]   = 0
+[trace] t=2271 25 > 262(0xffffff9c, 0x7fffbf21e33d, 0x7fffffffe9a0, 0x0)
+[trace]   path "/"
+[trace]   = 0
+[trace] t=2272 25 > 257(0xffffff9c, 0x7fffbf222060, 0x80000, 0x0)
+[trace]   path "/etc/nsswitch.conf"
+[trace]   = 3
+[trace] t=2272 25 > 5(0x3, 0x7fffffffe780, 0x7fffbf253ee0, 0x80)
+[trace]   = 0
+[trace] t=2272 25 > 0(0x3, 0x555555582540, 0x1000, 0x1010)
+[trace]   = 494
+[trace] t=2273 25 > 0(0x3, 0x555555582540, 0x1000, 0x555555583ef0)
+[trace]   = 0
+[trace] t=2273 25 > 5(0x3, 0x7fffffffe850, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2273 25 > 3(0x3, 0x7fffffffe850, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2274 25 > 257(0xffffff9c, 0x7fffbf2225ee, 0x80000, 0x0)
+[trace]   path "/etc/passwd"
+[trace]   = 3
+[trace] t=2274 25 > 5(0x3, 0x7fffffffe8d0, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2274 25 > 8(0x3, 0x0, 0x0, 0x1010)
+[trace]   = 0
+[trace] t=2275 25 > 0(0x3, 0x555555582540, 0x1000, 0x1010)
+[trace]   = 1279
+[trace] t=2275 25 > 8(0x3, 0x4b8, 0x0, 0xffffffffffffffe5)
+[trace]   = 1208
+[trace] t=2275 25 > 3(0x3, 0x4b8, 0x7fffbf253ee0, 0xffffffffffffffe5)
+[trace]   = 0
+[trace] t=2276 25 > 107(0x7fffffffebb8, 0x7fffbf2223f6, 0x0, 0x1e1)
+[trace]   = 0
+[trace] t=2276 25 > 116(0x0, 0x0, 0x0, 0x1e1)
+[trace]   = 0
+[trace] t=2276 25 > 257(0xffffff9c, 0x7fffbf21ffe8, 0x80000, 0x0)
+[trace]   path "/proc/sys/kernel/ngroups"
+[trace]   = -2
+[trace] t=2277 25 > 41(0x1, 0x80801, 0x0, 0x7fffbf222524)
+[trace]   = 3
+[trace] t=2277 25 > 42(0x3, 0x7fffffffe7f0, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2277 25 > 3(0x3, 0x7fffffffe7f0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2278 25 > 41(0x1, 0x80801, 0x0, 0x0)
+[trace]   = 3
+[trace] t=2278 25 > 42(0x3, 0x7fffffffe9f0, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2278 25 > 3(0x3, 0x7fffffffe9f0, 0xffffffffffffffff, 0x0)
+[trace]   = 0
+[trace] t=2278 25 > 262(0xffffff9c, 0x7fffbf222060, 0x7fffffffe890, 0x0)
+[trace]   path "/etc/nsswitch.conf"
+[trace]   = 0
+[trace] t=2279 25 > 262(0xffffff9c, 0x7fffbf222060, 0x7fffffffe890, 0x0)
+[trace]   path "/etc/nsswitch.conf"
+[trace]   = 0
+[trace] t=2280 25 > 257(0xffffff9c, 0x7fffbf22251f, 0x80000, 0x0)
+[trace]   path "/etc/group"
+[trace]   = 3
+[trace] t=2280 25 > 5(0x3, 0x7fffffffe430, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2280 25 > 8(0x3, 0x0, 0x0, 0x1010)
+[trace]   = 0
+[trace] t=2280 25 > 0(0x3, 0x5555555841b0, 0x1000, 0x1010)
+[trace]   = 674
+[trace] t=2281 25 > 0(0x3, 0x5555555841b0, 0x1000, 0x0)
+[trace]   = 0
+[trace] t=2281 25 > 3(0x3, 0x5555555771f0, 0x7fffbf253ee0, 0x81)
+[trace]   = 0
+[trace] t=2281 25 > 116(0x1, 0x555555582540, 0x0, 0x1e1)
+[trace]   = 0
+[trace] t=2282 25 > 114(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 0
+[trace] t=2282 25 > 113(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 0
+[trace] t=2282 25 > 107(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 990
+[trace] t=2282 25 > 102(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 990
+[trace] t=2283 25 > 108(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 990
+[trace] t=2283 25 > 104(0x3de, 0x3de, 0x0, 0x111)
+[trace]   = 990
+[trace] t=2283 25 > 80(0x55555556d9a1, 0x3de, 0x0, 0x111)
+[trace]   = 0
+[trace] t=2284 25 > 16(0x1, 0x802c542a, 0x7fffffffeaa0, 0x30)
+[trace]   = 0
+[trace] t=2285 25 > 257(0xffffffffffffff9c, 0x555555582680, 0x0, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/charset.alias"
+[trace]   = -2
+[trace] t=2285 25 > 257(0xffffff9c, 0x7fffbf222bc0, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache"
+[trace]   = 3
+[trace] t=2286 25 > 5(0x3, 0x7fffffffe570, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2286 25 > 9(0x0, 0x6994, 0x1, 0x1)
+[trace]   = 140736405934080
+[trace] t=2286 25 > 3(0x3, 0x6994, 0x1, 0x1)
+[trace]   = 0
+[trace] t=2287 25 > 202(0x7fffbf2566ec, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2292 25 > 5(0x1, 0x7fffffffe920, 0x7fffbf253ee0, 0xe1)
+[trace]   = 0
+[trace] t=2292 25 > 16(0x1, 0x802c542a, 0x7fffffffe8d0, 0xe1)
+[trace]   = 0
+[trace] t=2292 25 > 1(0x1, 0x5555555841b0, 0x25, 0x0)
+[trace]   = 37
+[trace] t=2292 25 > 39(0x6, 0x55555556d9c6, 0x1, 0x2)
+[trace]   = 25
+[trace] t=2293 25 > 257(0xffffff9c, 0x7fffbf21fd0d, 0x80000, 0x0)
+[trace]   path "/etc/localtime"
+[trace]   = 3
+[trace] t=2293 25 > 5(0x3, 0x7fffffffe4d0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2293 25 > 5(0x3, 0x7fffffffe2d0, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2294 25 > 0(0x3, 0x5555555851c0, 0x1000, 0x1010)
+[trace]   = 114
+[trace] t=2294 25 > 8(0x3, 0xffffffffffffffc4, 0x1, 0x1010)
+[trace]   = 54
+[trace] t=2294 25 > 0(0x3, 0x5555555851c0, 0x1000, 0x1010)
+[trace]   = 60
+[trace] t=2295 25 > 8(0x3, 0x71, 0x0, 0x1)
+[trace]   = 113
+[trace] t=2295 25 > 3(0x3, 0x71, 0x7fffbf253ee0, 0x1)
+[trace]   = 0
+[trace] t=2295 25 > 41(0x1, 0x80002, 0x0, 0x21)
+[trace]   = 3
+[trace] t=2296 25 > 42(0x3, 0x7fffbf21be00, 0x6e, 0x0)
+[trace]   = -2
+[trace] t=2296 25 > 3(0x3, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2296 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2297 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2297 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2299 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2301 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2301 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2303 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2304 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2304 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2304 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2305 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2305 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2306 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2306 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2307 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2307 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2308 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2309 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2310 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2310 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2311 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2311 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2312 25 > 257(0xffffff9c, 0x555555588290, 0x90800, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules"
+[trace]   = 3
+[trace] t=2314 25 > 5(0x3, 0x7fffffffdfe0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2314 25 > 262(0xffffff9c, 0x555555590340, 0x7fffffffe150, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache"
+[trace]   = 0
+[trace] t=2316 25 > 257(0xffffffffffffff9c, 0x555555590340, 0x80000, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache"
+[trace]   = 4
+[trace] t=2317 25 > 5(0x4, 0x7fffffffe020, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2317 25 > 0(0x4, 0x5555555903d0, 0x96, 0x0)
+[trace]   = 150
+[trace] t=2318 25 > 3(0x4, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2319 25 > 217(0x3, 0x5555555882f0, 0x8000, 0x51)
+[trace]   = 248
+[trace] t=2319 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2320 25 > 262(0xffffff9c, 0x5555555908d0, 0x7fffffffe150, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so"
+[trace]   = 0
+[trace] t=2322 25 > 262(0xffffff9c, 0x5555555908d0, 0x7fffffffe150, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/libdconfsettings.so"
+[trace]   = 0
+[trace] t=2324 25 > 262(0xffffff9c, 0x5555555908d0, 0x7fffffffe150, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so"
+[trace]   = 0
+[trace] t=2325 25 > 262(0xffffff9c, 0x5555555908d0, 0x7fffffffe150, 0x0)
+[trace]   path "/usr/lib/x86_64-linux-gnu/gio/modules/libgiognomeproxy.so"
+[trace]   = 0
+[trace] t=2325 25 > 217(0x3, 0x5555555882f0, 0x8000, 0x91)
+[trace]   = 0
+[trace] t=2326 25 > 3(0x3, 0x8040, 0x7fffbf255ac8, 0x0)
+[trace]   = 0
+[trace] t=2326 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2326 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2327 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2327 25 > 21(0x7fffbf6fdc03, 0x0, 0x0, 0x10)
+[trace]   path "/.flatpak-info"
+[trace]   = -2
+[trace] t=2328 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2328 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2328 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2329 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2329 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2330 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2330 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2330 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2331 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2331 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2332 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2333 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2333 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2333 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2334 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2334 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2334 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2334 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2335 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2335 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2336 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2336 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2337 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2337 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2337 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2338 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2338 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2338 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2339 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2340 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2341 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2341 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2342 25 > 102(0x55555558cc50, 0x7fffbf2561c8, 0x0, 0x410)
+[trace]   = 990
+[trace] t=2342 25 > 262(0xffffff9c, 0x7fffbf222060, 0x7fffffffde00, 0x0)
+[trace]   path "/etc/nsswitch.conf"
+[trace]   = 0
+[trace] t=2342 25 > 257(0xffffff9c, 0x7fffbf2225ee, 0x80000, 0x0)
+[trace]   path "/etc/passwd"
+[trace]   = 3
+[trace] t=2343 25 > 5(0x3, 0x7fffffffde90, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2343 25 > 8(0x3, 0x0, 0x0, 0x1010)
+[trace]   = 0
+[trace] t=2343 25 > 0(0x3, 0x55555558d070, 0x1000, 0x1010)
+[trace]   = 1279
+[trace] t=2344 25 > 8(0x3, 0x4b8, 0x0, 0x0)
+[trace]   = 1208
+[trace] t=2344 25 > 3(0x3, 0x4b8, 0x7fffbf253ee0, 0x0)
+[trace]   = 0
+[trace] t=2344 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2345 25 > 137(0x55555558d070, 0x7fffffffe130, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2345 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2347 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2347 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2348 25 > 294(0x80800, 0x55555557dc90, 0x3, 0x30)
+[trace]   = 3
+[trace] t=2348 25 > 14(0x2, 0x7fffffffe0e0, 0x7fffffffe160, 0x8)
+[trace]   = 0
+[trace] t=2349 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2349 25 > 290(0x0, 0x80800, 0x0, 0x30)
+[trace]   = 4
+[trace] t=2349 25 > 202(0x7fffbf51c260, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2350 25 > 39(0x55555558ff20, 0x55555558ff10, 0x1, 0x20)
+[trace]   = 25
+[trace] t=2350 25 > 186(0x0, 0x1, 0x7fffbf14298b, 0x0)
+[trace]   = 25
+[trace] t=2350 25 > 13(0x21, 0x7fffffffdd60, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2350 25 > 14(0x1, 0x7fffffffdf28, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2351 25 > 9(0x0, 0x801000, 0x3, 0x20022)
+[trace]   = 140736386715648
+[trace] t=2351 25 > 28(0x7fffbe565000, 0x1000, 0x66, 0x801000)
+[trace]   = 0
+[trace] t=2351 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffdf18, 0x8)
+[trace]   = 0
+[trace] t=2352 25 > 435(0x7fffffffde10, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 26
+[trace] t=2352 25 > 14(0x2, 0x7fffffffdf18, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2352 25 > 14(0x2, 0x7fffffffe160, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2353 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2353 25 > 1(0x4, 0x7fffffffe140, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2353 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2354 25 > 290(0x0, 0x80800, 0x0, 0x20)
+[trace]   = 5
+[trace] t=2354 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2355 25 > 254(0x3, 0x555555591d40, 0x1002fce, 0x40)
+[trace]   = -2
+[trace] t=2357 25 > 254(0x3, 0x555555592650, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2358 25 > 254(0x3, 0x555555592b50, 0x1002fce, 0x30)
+[trace]   = -2
+[trace] t=2358 25 > 254(0x3, 0x555555593060, 0x1002fce, 0x30)
+[trace]   = 1
+[trace] t=2361 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2362 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2362 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2363 25 > 9(0x0, 0x801000, 0x3, 0x20022)
+[trace]   = 140736378322944
+[trace] t=2363 25 > 28(0x7fffbdd64000, 0x1000, 0x66, 0x801000)
+[trace]   = 0
+[trace] t=2363 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe298, 0x8)
+[trace]   = 0
+[trace] t=2364 25 > 435(0x7fffffffe190, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 27
+[trace] t=2364 25 > 14(0x2, 0x7fffffffe298, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2364 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2365 25 > 202(0x7fffbf75d4e0, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2366 25 > 39(0x4, 0x5555555938b0, 0x20, 0x0)
+[trace]   = 25
+[trace] t=2366 25 > 186(0x0, 0x20, 0x7fffbf14298b, 0x12)
+[trace]   = 25
+[trace] t=2367 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2373 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2373 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2373 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2374 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2374 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2375 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2376 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2376 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2377 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2377 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2377 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2378 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2378 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2379 25 > 12(0x5555555b9000, 0x7fffbf255ec8, 0x555555598000, 0x410)
+[trace]   = 93824992645120
+[trace] t=2379 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2380 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2380 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2380 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2381 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2381 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2382 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2382 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2382 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2383 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2383 25 > 13(0xd, 0x7fffffffe1c0, 0x7fffffffe260, 0x8)
+[trace]   = 0
+[trace] t=2383 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2384 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2385 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2385 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2386 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2386 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2386 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2387 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2387 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2387 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2388 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2388 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2388 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2389 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2389 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2390 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2390 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2390 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2390 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2391 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2391 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2392 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2392 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2393 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2393 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2393 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2394 25 > 41(0x1, 0x80801, 0x0, 0x0)
+[trace]   = 6
+[trace] t=2394 25 > 54(0x6, 0x6, 0x1, 0x7fffffffdd0c)
+[trace]   = -92
+[trace] t=2395 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2395 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2396 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2396 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2397 25 > 42(0x6, 0x7fffffffe260, 0x6e, 0x0)
+[trace]   = 0
+[trace] t=2397 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2398 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2398 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2398 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2398 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2399 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2399 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2400 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2400 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2400 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2401 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2401 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2401 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2402 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2402 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2402 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2403 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2403 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2403 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2404 25 > 39(0x5555555a2050, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 25
+[trace] t=2404 25 > 107(0x5555555a2050, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 990
+[trace] t=2405 25 > 108(0x5555555a2050, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 990
+[trace] t=2405 25 > 39(0x5555555a2080, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 25
+[trace] t=2405 25 > 107(0x5555555a2080, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 990
+[trace] t=2406 25 > 108(0x5555555a2080, 0x55555559b320, 0x555555582c10, 0x30)
+[trace]   = 990
+[trace] t=2406 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2406 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2407 25 > 46(0x6, 0x7fffffffe320, 0x4000, 0x0)
+[trace]   controllen 32 flags 0x0
+[trace]   = 1
+[trace] t=2408 25 > 44(0x6, 0x7fffbf6fc96c, 0x6, 0x4000)
+[trace]   = 6
+[trace] t=2408 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = -11
+[trace] t=2408 25 > 7(0x7fffffffe2a0, 0x1, 0xffffffffffffffff, 0x0)
+hydra:/bin# [trace] t=2413 26 > 273(0x7fffbed659a0, 0x18, 0x0, 0x801000)
+[trace]   = 0
+[trace] t=2413 26 > 14(0x2, 0x7fffbed65fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2414 26 > 157(0xf, 0x7fffbed64ca0, 0xfe20, 0xca0)
+[trace]   = 0
+[trace] t=2414 26 > 9(0x0, 0x8000000, 0x0, 0x22)
+[trace]   = 140736244105216
+[trace] t=2414 26 > 11(0x7fffb5d64000, 0x229c000, 0x229c000, 0x22)
+[trace]   = 0
+[trace] t=2415 26 > 11(0x7fffbc000000, 0x1d64000, 0x229c000, 0x22)
+[trace]   = 0
+[trace] t=2415 26 > 10(0x7fffb8000000, 0x21000, 0x3, 0x22)
+[trace]   = 0
+[trace] t=2415 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 850000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2416 26 > 0(0x4, 0x7fffbed64ac0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2416 26 > 39(0x0, 0x7fffb8000890, 0x1, 0x20)
+[trace]   = 25
+[trace] t=2417 26 > 186(0x0, 0x1, 0x7fffbf14298b, 0x0)
+[trace]   = 26
+[trace] t=2417 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 830000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+[trace] t=2418 27 > 273(0x7fffbe5649a0, 0x18, 0x7fffbe563c90, 0x1)
+[trace]   = 0
+[trace] t=2418 27 > 14(0x2, 0x7fffbe564fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2418 27 > 157(0xf, 0x7fffbe563ca0, 0xf000, 0xca0)
+[trace]   = 0
+[trace] t=2419 27 > 202(0x5555555953e0, 0x80, 0x0, 0x0)
+hydra:/bin# [trace]   = 1
+[trace] t=2422 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = 19
+[trace] t=2422 25 > 44(0x6, 0x5555555a2550, 0xf, 0x4000)
+[trace]   = 15
+[trace] t=2423 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = -11
+[trace] t=2423 25 > 7(0x7fffffffe2a0, 0x1, 0xffffffffffffffff, 0x0)
+[trace]   = 1
+[trace] t=2424 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = 6
+[trace] t=2424 25 > 44(0x6, 0x5555555a2550, 0x6, 0x4000)
+[trace]   = 6
+[trace] t=2424 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = -11
+[trace] t=2425 25 > 7(0x7fffffffe2a0, 0x1, 0xffffffffffffffff, 0x0)
+hydra:/bin# [trace]   = 1
+[trace] t=2428 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = 37
+[trace] t=2428 25 > 44(0x6, 0x7fffbf6fca26, 0x13, 0x4000)
+[trace]   = 19
+[trace] t=2428 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = -11
+[trace] t=2429 25 > 7(0x7fffffffe2a0, 0x1, 0xffffffffffffffff, 0x0)
+hydra:/bin# [trace]   = 1
+[trace] t=2432 25 > 45(0x6, 0x5555555a0040, 0x1000, 0x0)
+[trace]   = 15
+[trace] t=2432 25 > 44(0x6, 0x7fffbf6fca3a, 0x7, 0x4000)
+[trace]   = 7
+[trace] t=2432 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2433 25 > 290(0x0, 0x80800, 0x0, 0x20)
+[trace]   = 7
+[trace] t=2433 25 > 9(0x0, 0x801000, 0x3, 0x20022)
+[trace]   = 140736369930240
+[trace] t=2433 25 > 28(0x7fffbd563000, 0x1000, 0x66, 0x801000)
+[trace]   = 0
+[trace] t=2434 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe2f8, 0x8)
+[trace]   = 0
+[trace] t=2434 25 > 435(0x7fffffffe1f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 28
+[trace] t=2434 25 > 14(0x2, 0x7fffffffe2f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2434 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2435 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2436 25 > 290(0x0, 0x80800, 0x0, 0x30)
+[trace]   = 8
+[trace] t=2438 25 > 271(0x5555555a2e90, 0x1, 0x7fffffffe220, 0x0)
+[trace]   timeout 25s 0ns
+[trace]   pollfd 8:eventfd=0x4 events 0x1
+hydra:/bin# [trace] t=2442 28 > 273(0x7fffbdd639a0, 0x18, 0x7fffbdd62c90, 0x1)
+[trace]   = 0
+[trace] t=2442 28 > 14(0x2, 0x7fffbdd63fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2442 28 > 157(0xf, 0x7fffbdd62ca0, 0xfe20, 0xca0)
+[trace]   = 0
+[trace] t=2443 28 > 9(0x0, 0x8000000, 0x0, 0x22)
+[trace]   = 140736146178048
+[trace] t=2443 28 > 11(0x7fffb4000000, 0x4000000, 0x0, 0x22)
+[trace]   = 0
+[trace] t=2443 28 > 10(0x7fffb0000000, 0x21000, 0x3, 0x22)
+[trace]   = 0
+[trace] t=2443 28 > 39(0x0, 0x7fffb00008d0, 0x1, 0x20)
+[trace]   = 25
+[trace] t=2444 28 > 186(0x0, 0x1, 0x7fffbf14298b, 0x0)
+[trace]   = 28
+[trace] t=2444 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2445 28 > 7(0x7fffbdd629f0, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2445 28 > 1(0x7, 0x7fffbdd62960, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2446 28 > 46(0x6, 0x7fffbdd628f0, 0x4000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 128
+[trace] t=2446 28 > 271(0x7fffb00008c0, 0x2, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2447 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2447 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2452 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2452 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2452 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2453 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 73
+[trace] t=2453 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2453 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2454 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2454 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2455 28 > 1(0x8, 0x7fffbdd628a0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2455 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2455 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2456 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2456 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2457 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 153
+[trace] t=2457 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2458 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2458 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2458 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2459 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2459 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2463 25 > 0(0x8, 0x7fffffffe150, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2463 25 > 1(0x8, 0x7fffffffe110, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2463 25 > 202(0x5555555a0d10, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2464 25 > 3(0x8, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2464 25 > 294(0x80800, 0x5555555a3248, 0x2, 0x80)
+[trace]   = 8
+[trace] t=2464 25 > 254(0x8, 0x7fffbf344023, 0x280, 0x80)
+[trace]   = 1
+[trace] t=2465 25 > 1(0x5, 0x7fffffffe530, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2465 25 > 1(0x7, 0x7fffffffe690, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2466 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2466 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2472 25 > 12(0x5555555da000, 0x7fffbf255b08, 0x5555555b9000, 0x40)
+[trace]   = 93824992780288
+[trace] t=2473 25 > 96(0x7fffffffe958, 0x0, 0x0, 0x41)
+[trace]   = 0
+[trace] t=2475 25 > 254(0x3, 0x5555555a28f0, 0x1002fce, 0x30)
+[trace]   = 2
+[trace] t=2475 25 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x30)
+[trace]   = -2
+[trace] t=2475 25 > 254(0x3, 0x555555591f80, 0x1002fce, 0x30)
+[trace]   = -2
+[trace] t=2476 25 > 254(0x3, 0x5555555c4f30, 0x1002fce, 0x30)
+[trace]   = 3
+[trace] t=2476 25 > 257(0xffffff9c, 0x5555555c4590, 0x90800, 0x0)
+[trace]   path "/etc/polkit-1/rules.d"
+[trace]   = 9
+[trace] t=2477 25 > 5(0x9, 0x7fffffffe820, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2477 25 > 217(0x9, 0x5555555c50f0, 0x8000, 0x5555555a3530)
+[trace]   = 48
+[trace] t=2477 25 > 217(0x9, 0x5555555c50f0, 0x8000, 0x5555555a3530)
+[trace]   = 0
+[trace] t=2477 25 > 3(0x9, 0x14f50, 0xcf10, 0x0)
+[trace]   = 0
+[trace] t=2478 25 > 257(0xffffff9c, 0x5555555c4450, 0x90800, 0x0)
+[trace]   path "/run/polkit-1/rules.d"
+[trace]   = -2
+[trace] t=2478 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2479 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2479 25 > 257(0xffffff9c, 0x5555555bfe90, 0x90800, 0x0)
+[trace]   path "/usr/local/share/polkit-1/rules.d"
+[trace]   = -2
+[trace] t=2480 25 > 257(0xffffff9c, 0x5555555bc150, 0x90800, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d"
+[trace]   = 9
+[trace] t=2480 25 > 5(0x9, 0x7fffffffe820, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2481 25 > 217(0x9, 0x5555555c6ad0, 0x8000, 0x555555591fb0)
+[trace]   = 488
+[trace] t=2481 25 > 217(0x9, 0x5555555c6ad0, 0x8000, 0x20)
+[trace]   = 0
+[trace] t=2482 25 > 3(0x9, 0x13570, 0xb530, 0x0)
+[trace]   = 0
+[trace] t=2482 25 > 9(0x0, 0x801000, 0x3, 0x20022)
+[trace]   = 140736361537536
+[trace] t=2482 25 > 28(0x7fffbcd62000, 0x1000, 0x66, 0x801000)
+[trace]   = 0
+[trace] t=2483 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2483 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 29
+[trace] t=2483 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2484 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace]   = 1
+[trace] t=2493 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2493 28 > 46(0x6, 0x7fffbdd628f0, 0x4000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 280
+[trace] t=2494 28 > 271(0x7fffb00008c0, 0x2, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2494 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace] t=2495 29 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2495 29 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2496 29 > 9(0x7fffb4000000, 0x4000000, 0x0, 0x22)
+[trace]   = 140736213286912
+[trace] t=2496 29 > 10(0x7fffb4000000, 0x21000, 0x3, 0x22)
+[trace]   = 0
+hydra:/bin# [trace] t=2500 29 > 257(0xffffffffffffff9c, 0x7fffb40008b0, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/10-systemd-logind-root-ignore-inhibitors.rules"
+[trace]   = 9
+[trace] t=2501 29 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2501 29 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2502 29 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2502 29 > 0(0x9, 0x7fffb4001370, 0x2000, 0x0)
+[trace]   = 863
+[trace] t=2503 29 > 0(0x9, 0x7fffb40016cf, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2503 29 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2504 29 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2504 29 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2504 29 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2505 29 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 1
+[trace] t=2508 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2508 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2508 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2509 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 56
+[trace] t=2509 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2509 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2510 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2510 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2511 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2511 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2511 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2512 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2512 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2513 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2513 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2513 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 30
+[trace] t=2514 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2514 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace] t=2517 30 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2517 30 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2517 30 > 257(0xffffffffffffff9c, 0x7fffb4006510, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/49-ubuntu-admin.rules"
+[trace]   = 9
+[trace] t=2518 30 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2518 30 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 104
+[trace] t=2519 30 > 0(0x9, 0x7fffb4001348, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2519 30 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2519 30 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2519 30 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2520 30 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2520 30 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 0
+[trace] t=2523 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2523 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2523 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 31
+[trace] t=2524 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2524 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace] t=2527 31 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2527 31 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2528 31 > 257(0xffffffffffffff9c, 0x7fffb4006510, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/50-default.rules"
+[trace]   = 9
+[trace] t=2528 31 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2529 31 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 325
+[trace] t=2529 31 > 0(0x9, 0x7fffb4001425, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2529 31 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2529 31 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2530 31 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2530 31 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2530 31 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [07:44:51.330] (II) DAEMON: Starting...
+[trace]   = 0
+[trace] t=2534 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2534 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2534 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 32
+[trace] t=2535 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2535 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [07:44:51.380] (II) DAEMON: Logind interface found
+[trace] t=2541 32 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2542 32 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2542 32 > 257(0xffffffffffffff9c, 0x7fffb4006510, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/empower.rules"
+[trace]   = 9
+[trace] t=2543 32 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2543 32 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 260
+[trace] t=2543 32 > 0(0x9, 0x7fffb40013e4, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2544 32 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2544 32 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2544 32 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2544 32 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2545 32 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 0
+[trace] t=2548 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2548 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2548 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 33
+[trace] t=2548 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2549 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace] t=2552 33 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2552 33 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2552 33 > 257(0xffffffffffffff9c, 0x7fffb4000ae0, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/org.freedesktop.GeoClue2.rules"
+[trace]   = 9
+[trace] t=2553 33 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2553 33 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 287
+[trace] t=2554 33 > 0(0x9, 0x7fffb40013ff, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2555 33 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2555 33 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2555 33 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2556 33 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2556 33 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 0
+[trace] t=2559 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2559 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2559 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 34
+[trace] t=2560 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2560 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace] t=2563 34 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2563 34 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2564 34 > 257(0xffffffffffffff9c, 0x7fffb4006570, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/org.freedesktop.packagekit.rules"
+[trace]   = 9
+[trace] t=2564 34 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2565 34 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 549
+[trace] t=2566 34 > 0(0x9, 0x7fffb4001505, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2567 34 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2567 34 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2567 34 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2567 34 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2568 34 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 0
+[trace] t=2571 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2571 25 > 14(0x0, 0x7fffbf2270b0, 0x7fffffffe7f8, 0x8)
+[trace]   = 0
+[trace] t=2572 25 > 435(0x7fffffffe6f0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 35
+[trace] t=2572 25 > 14(0x2, 0x7fffffffe7f8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2572 25 > 202(0x7fffffffe990, 0x189, 0x0, 0x7fffffffe8e0)
+hydra:/bin# [trace] t=2576 35 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2576 35 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2576 35 > 257(0xffffffffffffff9c, 0x7fffb4000ae0, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/rules.d/systemd-networkd.rules"
+[trace]   = 9
+[trace] t=2577 35 > 332(0x9, 0x7fffbf6fa612, 0x1000, 0x1)
+[trace]   path ""
+[trace]   = 0
+[trace] t=2577 35 > 0(0x9, 0x7fffb40012e0, 0x2000, 0x0)
+[trace]   = 620
+[trace] t=2578 35 > 0(0x9, 0x7fffb400154c, 0x2000, 0x0)
+[trace]   = 0
+[trace] t=2578 35 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2578 35 > 202(0x7fffffffe990, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2579 35 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2579 35 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=2579 35 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+hydra:/bin# [trace]   = 0
+[trace] t=2582 25 > 202(0x7fffffffe9a0, 0x81, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2582 25 > 13(0x2, 0x7fffffffe9f0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2582 25 > 13(0xf, 0x7fffffffe9f0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2583 25 > 13(0x1, 0x7fffffffe9f0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2583 25 > 202(0x5555555953e0, 0x81, 0x1, 0x0)
+[trace]   = 1
+[trace] t=2584 25 > 202(0x7fffbf51bee8, 0x80, 0x0, 0x0)
+hydra:/bin# [trace]   = 0
+[trace] t=2587 27 > 39(0x4, 0x555555585320, 0x20, 0x21)
+[trace]   = 25
+[trace] t=2587 27 > 186(0x0, 0x20, 0x7fffbf14298b, 0x12)
+[trace]   = 27
+[trace] t=2587 27 > 14(0x0, 0x7fffbf2270b0, 0x7fffbe563aa8, 0x8)
+[trace]   = 0
+[trace] t=2587 27 > 435(0x7fffbe5639a0, 0x58, 0x7fffbf0e6d80, 0x8)
+[trace]   = 36
+[trace] t=2588 27 > 14(0x2, 0x7fffbe563aa8, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2588 27 > 202(0x7fffbf51bee8, 0x81, 0x7fffffff, 0x0)
+[trace]   = 1
+[trace] t=2588 27 > 202(0x5555555953e0, 0x80, 0x1, 0x0)
+[trace]   = 0
+[trace] t=2589 25 > 257(0xffffffffffffff9c, 0x55555556d04c, 0x80000, 0x0)
+[trace]   path "/etc/polkit-1/polkitd.conf"
+[trace]   = -2
+[trace] t=2590 25 > 257(0xffffffffffffff9c, 0x55555556d067, 0x80000, 0x0)
+[trace]   path "/run/polkit-1/polkitd.conf"
+[trace]   = -2
+[trace] t=2590 25 > 257(0xffffffffffffff9c, 0x55555556df08, 0x80000, 0x0)
+[trace]   path "/usr/share/polkit-1/polkitd.conf"
+[trace]   = 9
+[trace] t=2591 25 > 5(0x9, 0x7fffffffda70, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2591 25 > 0(0x9, 0x7fffffffdb00, 0x1000, 0x0)
+[trace]   = 33
+[trace] t=2591 25 > 0(0x9, 0x7fffffffdb00, 0x1000, 0x0)
+[trace]   = 0
+[trace] t=2592 25 > 3(0x9, 0x0, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2592 25 > 16(0x1, 0x802c542a, 0x7fffffffeaa0, 0x61)
+[trace]   = 0
+[trace] t=2592 25 > 1(0x1, 0x5555555841b0, 0x19, 0x0)
+[trace]   = 25
+[trace] t=2593 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x5 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 1
+[trace] t=2593 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2594 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace] t=2597 36 > 273(0x7fffbd5629a0, 0x18, 0x7fffbd561c90, 0x1)
+[trace]   = 0
+[trace] t=2597 36 > 14(0x2, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=2597 36 > 157(0xf, 0x7fffbd561ca0, 0xc240, 0xca0)
+[trace]   = 0
+[trace] t=2597 36 > 9(0x0, 0x8000000, 0x0, 0x22)
+[trace]   = 140736011960320
+[trace] t=2598 36 > 11(0x7fffac000000, 0x4000000, 0x0, 0x22)
+[trace]   = 0
+[trace] t=2598 36 > 10(0x7fffa8000000, 0x21000, 0x3, 0x22)
+[trace]   = 0
+[trace] t=2599 36 > 1(0x5, 0x7fffbd561b20, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2599 36 > 39(0x0, 0x7fffa8000cf0, 0x1, 0x20)
+[trace]   = 25
+[trace] t=2599 36 > 186(0x0, 0x1, 0x7fffbf14298b, 0x0)
+[trace]   = 36
+[trace] t=2599 36 > 202(0x555555595340, 0x80, 0x0, 0x7fffbd561bc0)
+[07:44:52.000] (II) DAEMON: Adding new display...
+[07:44:52.180] (II) DAEMON: Loaded empty theme configuration
+hydra:/bin# [trace]   = 1
+[trace] t=2621 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2621 25 > 202(0x7fffbf51bf18, 0x81, 0x7fffffff, 0x0)
+[trace]   = 0
+[trace] t=2621 25 > 16(0x1, 0x802c542a, 0x7fffffffe810, 0x555555595000)
+[trace]   = 0
+[trace] t=2622 25 > 1(0x1, 0x5555555841b0, 0x1c, 0x0)
+[trace]   = 28
+[trace] t=2623 25 > 1(0x7, 0x7fffffffe660, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2623 25 > 271(0x5555555a2f50, 0x2, 0x7fffffffeb60, 0x0)
+[trace]   timeout 25s 0ns
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2627 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2627 28 > 46(0x6, 0x7fffbdd628f0, 0x4000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 180
+[trace] t=2627 28 > 271(0x7fffb00008c0, 0x2, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2628 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [DEBUG-TEMP] kill(24, 9) from pid 16
+hydra:/bin# [trace]   = 1
+[trace] t=2635 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2635 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2635 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2636 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 193
+[trace] t=2636 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2636 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2637 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2637 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2637 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2638 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2638 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2638 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2639 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2639 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 175
+[trace] t=2640 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2640 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2641 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2641 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2641 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2642 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2642 28 > 47(0x6, 0x7fffbdd62810, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 68
+[trace] t=2643 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2643 28 > 1(0x5, 0x7fffbdd628a0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2644 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2644 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2644 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2645 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2645 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[DEBUG-TEMP] pid 24 dies of signal 9
+[trace]   = 1
+[trace] t=2646 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2646 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2650 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2650 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2650 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2651 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=2651 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2651 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2652 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2652 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2653 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2653 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2653 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2653 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2654 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2654 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 1
+[trace] t=2655 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2655 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = -110
+[trace] t=2656 36 > 202(0x555555595390, 0x80, 0x0, 0x7fffbd561b90)
+hydra:/bin# [07:44:52.640] (II) DAEMON: Using VT 1
+[07:44:52.640] (II) DAEMON: Display server started.
+[07:44:52.640] (II) DAEMON: Socket server starting...
+[07:44:52.680] (II) DAEMON: Socket server started.
+[07:44:52.810] (II) DAEMON: Loading theme configuration from "/usr/share/sddm/themes/breeze/theme.conf"
+[07:44:52.910] (II) DAEMON: Greeter starting...
+hydra:/bin# Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[07:44:53.640] (II) HELPER: [PAM] Starting...
+[07:44:53.640] (II) HELPER: [PAM] Authenticating...
+[07:44:53.650] (II) HELPER: [PAM] returning.
+hydra:/bin# [linux] pid 37: unimplemented syscall 250 (0x1, 0x0, 0x7fffbeaf0c8d) -> ENOSYS
+hydra:/bin# [trace]   = 1
+[trace] t=2798 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2798 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2799 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2799 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=2799 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2800 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2800 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2801 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2801 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2801 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2801 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2802 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2802 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2802 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 1
+[trace] t=2803 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2803 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=2807 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2807 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2807 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2808 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2808 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x20)
+[trace]   = -2
+[trace] t=2808 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 920000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# hydra-logind: session 1 for sddm (uid 101, greeter, wayland, vt 1)
+hydra-logind: session 1 (sddm, greeter) is active
+hydra:/bin# [trace]   = 1
+[trace] t=2823 25 > 1(0x5, 0x7fffffffea80, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2824 25 > 1(0x7, 0x7fffffffdd90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2824 25 > 271(0x7fffffffe258, 0x1, 0x7fffffffe1d0, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 8:inotify=0x1 events 0x1
+[trace]   = 1
+[trace] t=2825 25 > 0(0x8, 0x7fffffffe260, 0x800, 0x0)
+[trace]   = 64
+[trace] t=2825 25 > 271(0x7fffffffe258, 0x1, 0x7fffffffe1d0, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 0
+[trace] t=2825 25 > 1(0x5, 0x7fffffffea80, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2826 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x5 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 1
+[trace] t=2826 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2827 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2835 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2835 28 > 46(0x6, 0x7fffbdd628f0, 0x4000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 138
+[trace] t=2836 28 > 271(0x7fffb00008c0, 0x2, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=2836 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=2840 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2840 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=2841 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=2841 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=2842 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2842 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2842 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2843 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2843 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2843 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=2844 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2844 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=2844 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2845 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 1
+[trace] t=2845 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=2845 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[H[2J 
+hydra:/bin# [07:44:54.590] (II) DAEMON: Greeter session started successfully
+hydra:/bin# [trace]   = 0
+[trace] t=3770 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=3770 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=3770 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=3770 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=3771 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=3771 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 290000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=3792 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3792 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=3792 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=3792 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=3793 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3793 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3793 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=3794 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3794 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3794 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=3794 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3794 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=3795 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3795 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 1
+[trace] t=3796 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3796 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# hydra-logind: session 1 controller is :1.7
+hydra:/bin# [trace]   = 1
+[trace] t=3805 25 > 1(0x5, 0x7fffffffea80, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3805 25 > 1(0x7, 0x7fffffffdd90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3805 25 > 271(0x7fffffffe258, 0x1, 0x7fffffffe1d0, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 8:inotify=0x1 events 0x1
+[trace]   = 1
+[trace] t=3806 25 > 0(0x8, 0x7fffffffe260, 0x800, 0x0)
+[trace]   = 32
+[trace] t=3806 25 > 271(0x7fffffffe258, 0x1, 0x7fffffffe1d0, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 0
+[trace] t=3807 25 > 1(0x5, 0x7fffffffea80, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3807 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x5 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 1
+[trace] t=3808 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3808 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+[trace]   = 1
+[trace] t=3808 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=3809 28 > 46(0x6, 0x7fffbdd628f0, 0x4000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 138
+[trace] t=3809 28 > 271(0x7fffb00008c0, 0x2, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 0
+[trace] t=3810 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = -110
+[trace] t=4555 36 > 14(0x0, 0x7fffbd562fb0, 0x0, 0x8)
+[trace]   = 0
+[trace] t=4555 36 > 28(0x7fffbcd62000, 0x7fb000, 0x4, 0x8)
+[trace]   = 0
+[trace] t=4555 36 > 60(0x0, 0x801000, 0x7fffbf21f6e8, 0x8)
+[trace]   = 0
+[trace] t=4556 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=4556 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=4556 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=4557 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=4557 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=4557 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 430000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=5020 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5020 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5020 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5021 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5021 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5021 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 790000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=5201 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5201 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=5202 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=5202 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+hydra:/bin# [trace] t=5226 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5226 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5226 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=5227 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5227 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5227 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=5227 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5228 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=5228 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5228 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=5232 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5232 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=5327 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5327 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=5327 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=5328 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=5328 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5328 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5329 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=5329 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5329 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5330 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=5330 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5330 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=5331 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5331 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=5356 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=5356 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=5436 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5436 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5436 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5437 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5437 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5437 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 630000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [07:45:20.680] (II) DAEMON: Message received from greeter: Connect
+hydra:/bin# [trace]   = 0
+[trace] t=5941 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5941 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5941 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5942 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5942 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=5942 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 580000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=6406 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6406 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6406 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6407 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6407 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6407 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 930000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 1
+[trace] t=6541 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6541 28 > 47(0x6, 0x7fffbdd62940, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 16
+[trace] t=6542 28 > 7(0x7fffbdd62890, 0x1, 0x0, 0x0)
+[trace]   = 1
+[trace] t=6542 28 > 47(0x6, 0x7fffbdd62750, 0x40000000, 0x0)
+[trace]   controllen 0 flags 0x0
+[trace]   = 173
+[trace] t=6542 28 > 1(0x7, 0x7fffbdd62aa0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6543 28 > 1(0x7, 0x7fffbdd62a90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6543 28 > 271(0x7fffb00008c0, 0x1, 0x7fffbdd62b80, 0x0)
+[trace]   timeout 0s 0ns
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=6544 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6544 28 > 1(0x5, 0x7fffbdd62820, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6544 28 > 7(0x7fffbdd62950, 0x1, 0x0, 0x0)
+[trace]   = 0
+[trace] t=6544 28 > 1(0x7, 0x7fffbdd628c0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6545 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x5 events 0x1
+[trace]   = 1
+[trace] t=6545 28 > 0(0x7, 0x7fffbdd62ab0, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6546 28 > 271(0x7fffb00008c0, 0x2, 0x0, 0x0)
+[trace]   pollfd 6:unix=0x4 events 0x1
+[trace]   pollfd 7:eventfd=0x4 events 0x1
+[trace]   = 1
+[trace] t=6546 25 > 0(0x5, 0x7fffffffea90, 0x8, 0x0)
+[trace]   = 8
+[trace] t=6546 25 > 271(0x5555555a2f50, 0x2, 0x0, 0x0)
+[trace]   pollfd 5:eventfd=0x4 events 0x1
+[trace]   pollfd 8:inotify=0x0 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=6939 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6939 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6939 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6940 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6940 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=6940 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 600000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=7471 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=7471 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=7472 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=7472 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=7472 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=7473 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 4s 270000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=8216 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8216 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8216 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8217 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8217 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8218 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 820000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=8601 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8601 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8602 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8602 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8603 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=8603 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=9006 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9006 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9007 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9007 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9007 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9008 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 920000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=9404 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9404 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9405 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9405 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9406 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9406 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 940000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=9801 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9801 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9801 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9802 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9802 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=9802 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 980000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=10211 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10211 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10211 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10212 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10212 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10212 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 880000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=10601 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10601 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10602 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10602 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10602 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=10603 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=11006 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11006 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11007 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11007 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11007 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11008 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 920000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [heap] 13478 KiB used, 510809 KiB free of 524288 KiB
+[tasks] id state tgid syscall rip ticks exe
+[tasks] 0 Running 0 -1(0x0,0x0) 0xbd6acf81 4849 shell
+[tasks] 1 Ready 1 -1(0x0,0x0) 0xbd6adde0 0 idle
+[tasks] 2 Blocked 2 -1(0x0,0x0) 0xbd6df217 42580 /drivers/ata_driver
+[tasks] 3 Blocked 3 -1(0x0,0x0) 0xbd6df217 149193 /drivers/zfs_server
+[tasks] 4 Blocked 4 -1(0x0,0x0) 0xbd6df217 244 /drivers/net_driver
+[tasks] 5 Blocked 5 -1(0x0,0x0) 0xbd6df217 139 /drivers/display_server
+[tasks] 6 Sleeping 6 -1(0x0,0x0) 0xbd6893c7 341 supervisor
+[tasks] 7 Blocked 7 -1(0x0,0x0) 0xbd729356 2 netd
+[tasks] 8 Sleeping 8 -1(0x0,0x0) 0xbd6893c7 37 txgd
+[tasks] 11 Blocked 11 271(0x555555659f70,0x9) 0xbd6df217 7349 /usr/bin/sddm
+[tasks] 16 Blocked 16 232(0x3,0x7fffffffe510) 0xbd6df217 583 /usr/bin/dbus-daemon
+[tasks] 20 Blocked 20 7(0x7fffffffeaf0,0x2) 0xbd6df217 499 /usr/libexec/hydra-logind
+[tasks] 42 Sleeping 42 271(0x555555ec88b0,0xa) 0xbd6df217 35435 /usr/bin/sddm-greeter-qt6
+[tasks] 23 Blocked 11 271(0x7fffb40013c0,0x2) 0xbd6df217 203 /usr/bin/sddm
+[tasks] 28 Blocked 25 271(0x7fffb00008c0,0x2) 0xbd6df217 35 /usr/lib/polkit-1/polkitd
+[tasks] 25 Blocked 25 271(0x5555555a2f50,0x2) 0xbd6df217 1269 /usr/lib/polkit-1/polkitd
+[tasks] 26 Sleeping 25 271(0x7fffb8000880,0x2) 0xbd6df217 103 /usr/lib/polkit-1/polkitd
+[tasks] 27 Blocked 25 202(0x5555555953e0,0x80) 0xbd6df217 2 /usr/lib/polkit-1/polkitd
+[tasks] 37 Blocked 37 271(0x555555600ac0,0x8) 0xbd6df217 1775 /usr/lib/x86_64-linux-gnu/sddm/sddm-helper
+[tasks] 39 Blocked 39 271(0x55555558b9b0,0xa) 0xbd6df217 572 /usr/lib/x86_64-linux-gnu/sddm/sddm-helper-start-wayland
+[tasks] 40 Blocked 40 271(0x555555a571c0,0x6) 0xbd6df217 40171 /usr/bin/kwin_wayland
+[tasks] 41 Blocked 40 271(0x7fffb0001620,0x2) 0xbd6df217 69 /usr/bin/kwin_wayland
+[tasks] 43 Blocked 40 271(0x7fffa00014f0,0x2) 0xbd6df217 7 /usr/bin/kwin_wayland
+[tasks] 44 Blocked 44 -1(0x0,0x0) 0xbd72a477 1 vtd
+[tasks] 54 Blocked 42 202(0x7fff984acc58,0x189) 0xbd6df217 5990 /usr/bin/sddm-greeter-qt6
+[tasks] 47 Blocked 42 7(0x7fffb885e730,0x2) 0xbd6df217 274 /usr/bin/sddm-greeter-qt6
+[tasks] 48 Blocked 42 7(0x7fffb805d730,0x2) 0xbd6df217 177 /usr/bin/sddm-greeter-qt6
+[tasks] 49 Blocked 42 271(0x7fffac0013c0,0x2) 0xbd6df217 25 /usr/bin/sddm-greeter-qt6
+[tasks] 50 Blocked 42 271(0x7fff980013c0,0x1) 0xbd6df217 7499 /usr/bin/sddm-greeter-qt6
+[tasks] 51 Blocked 42 271(0x7fff90049f50,0x1) 0xbd6df217 3783 /usr/bin/sddm-greeter-qt6
+[tasks] 53 Blocked 42 202(0x5555556d8dc0,0x189) 0xbd6df217 1 /usr/bin/sddm-greeter-qt6
+[trace]   = 0
+[trace] t=11401 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11401 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11402 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11402 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11403 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11403 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=11802 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11802 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11802 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11803 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11803 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=11803 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=12201 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12201 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12202 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12202 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12202 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12203 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=12604 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12604 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12604 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12605 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12605 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=12605 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 950000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=13001 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13001 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13002 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13002 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13002 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13003 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=13402 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13402 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13402 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13403 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13403 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13403 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 970000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=13801 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13801 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13801 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13802 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13802 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=13802 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 980000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# [trace]   = 0
+[trace] t=14206 26 > 254(0x3, 0x555555591f80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=14206 26 > 254(0x3, 0x5555555c3d80, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=14206 26 > 254(0x3, 0x555555592b50, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=14207 26 > 254(0x3, 0x555555592650, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=14207 26 > 254(0x3, 0x555555591d40, 0x1002fce, 0x5555555955c0)
+[trace]   = -2
+[trace] t=14208 26 > 271(0x7fffb8000880, 0x2, 0x7fffbed64b90, 0x0)
+[trace]   timeout 3s 920000000ns
+[trace]   pollfd 3:inotify=0x0 events 0x1
+[trace]   pollfd 4:eventfd=0x4 events 0x1
+hydra:/bin# 

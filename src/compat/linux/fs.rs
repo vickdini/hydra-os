@@ -48,13 +48,20 @@ pub enum PseudoFile {
     /// `/proc/<pid>/cmdline`, `comm` and `fdinfo/<fd>` (the path after `/proc/`). Their
     /// text is captured when opened ([`proc_pid_file_text`]); reads through the path see EOF.
     ProcPidFile(alloc::string::String),
+    /// `/sys/fs/cgroup<group>/cgroup.procs`: the processes in a control group (`group` is
+    /// empty for the root). Writing a process ID moves the process there.
+    CgroupProcs(alloc::string::String),
 }
+
+/// Where the cgroup v2 hierarchy is mounted.
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// The mounts a Linux system has, as Hydra presents them: the pool at `/` (device 8:1,
 /// mount id 2069 = what `statx` reports for its files), and the pseudo file systems.
 const MOUNTINFO: &str = "2069 1 8:1 / / rw,relatime shared:1 - zfs hydrapool/root rw,xattr
 22 2069 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:2 - proc proc rw
 23 2069 0:23 / /sys rw,nosuid,nodev,noexec,relatime shared:3 - sysfs sysfs rw
+27 23 0:27 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:7 - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot
 24 2069 0:6 / /dev rw,nosuid,relatime shared:4 - devtmpfs udev rw,mode=755
 25 24 0:25 / /dev/pts rw,nosuid,noexec,relatime shared:5 - devpts devpts rw,gid=5,mode=620,ptmxmode=000
 26 2069 0:26 / /run rw,nosuid,nodev,noexec,relatime shared:6 - tmpfs tmpfs rw,mode=755
@@ -63,6 +70,7 @@ const MOUNTINFO: &str = "2069 1 8:1 / / rw,relatime shared:1 - zfs hydrapool/roo
 const MOUNTS: &str = "hydrapool/root / zfs rw,relatime,xattr 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot 0 0
 udev /dev devtmpfs rw,nosuid,relatime,mode=755 0 0
 devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0
 tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,mode=755 0 0
@@ -92,7 +100,10 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
             Some(PseudoFile::ProcMountinfo)
         }
         p if p.starts_with("/proc/") && is_proc_pid_file(&p[6..]) => Some(PseudoFile::ProcPidFile(alloc::string::String::from(&p[6..]))),
-        _ => None,
+        p => {
+            let group = p.strip_prefix(CGROUP_ROOT)?.strip_suffix("/cgroup.procs")?;
+            (group.is_empty() || group.starts_with('/')).then(|| PseudoFile::CgroupProcs(alloc::string::String::from(group)))
+        }
     }
 }
 
@@ -111,7 +122,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (file == "cmdline" || file == "comm" || file == "status" || file.strip_prefix("fdinfo/").is_some_and(numeric))
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup") || file.strip_prefix("fdinfo/").is_some_and(numeric))
 }
 
 /// Text of `/proc/<pid>/cmdline`, `comm` or `fdinfo/<fd>` (`rest` is the path after
@@ -137,6 +148,17 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         "self" | "thread-self" => super::proc::current_ids().1,
         n => n.parse().ok()?,
     };
+    if file == "cgroup" {
+        // cgroup v2 only. libsystemd finds the hierarchy's root from pid 1's group (the
+        // init process Hydra does not have: it is the kernel's)
+        let group = super::proc::PROCS.lock().get(&pid).map(|p| p.cgroup.clone());
+        let path = match (group, pid) {
+            (Some(g), _) => alloc::string::String::from(g.as_deref().unwrap_or("/")),
+            (None, 1) => alloc::string::String::from("/init.scope"),
+            (None, _) => return None,
+        };
+        return Some(alloc::format!("0::{}\n", path).into_bytes());
+    }
     // The descriptor table has its own lock, taken after the scheduler's is released
     let (exe, cmdline, fds, ids) = crate::task::SCHEDULER.lock().with_process(pid, |t| {
         (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), t.fds.clone(), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid])
@@ -160,6 +182,31 @@ Gid:	{}	{}	{}	{}
                 )
                 .into_bytes(),
             )
+        }
+        "stat" => {
+            // The 52 fields of proc(5); those Hydra does not keep (fault counts, CPU
+            // times, memory addresses) are 0
+            let (ppid, pgid, sid, threads, start, zombie) = super::proc::PROCS
+                .lock()
+                .get(&pid)
+                .map_or((0, pid, pid, 1, 0, false), |p| (p.ppid, p.pgid, p.sid, p.threads_alive().max(1), p.start_time, p.zombie));
+            let comm: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
+            let mut text = alloc::format!(
+                "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {} 0 {}",
+                pid,
+                comm,
+                if zombie { 'Z' } else { 'S' },
+                ppid,
+                pgid,
+                sid,
+                threads,
+                start
+            );
+            for _ in 23..=52 {
+                text.push_str(" 0");
+            }
+            text.push('\n');
+            Some(text.into_bytes())
         }
         "cmdline" => Some(cmdline.map(|c| c.to_vec()).unwrap_or_default()),
         "comm" => {
@@ -248,6 +295,13 @@ impl PseudoFile {
             PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
             PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
             PseudoFile::ProcPidFile(_) => 0,
+            PseudoFile::CgroupProcs(group) => {
+                let mut text = alloc::string::String::new();
+                for p in super::proc::PROCS.lock().values().filter(|p| !p.zombie && p.cgroup.as_deref().unwrap_or("") == group.as_str()) {
+                    text.push_str(&alloc::format!("{}\n", p.pid));
+                }
+                read_slice(text.as_bytes(), cursor, buf)
+            }
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
                 read_slice(text.as_bytes(), cursor, buf)
@@ -268,6 +322,21 @@ impl PseudoFile {
     pub fn write(&self, buf: &[u8]) -> usize {
         match self {
             PseudoFile::DevNull | PseudoFile::DevZero | PseudoFile::DevUrandom => buf.len(),
+            PseudoFile::CgroupProcs(group) => {
+                // A process ID ("0": the writer) moves that whole process into the group
+                let text = core::str::from_utf8(buf).unwrap_or("");
+                let Ok(mut pid) = text.trim().parse::<u64>() else { return 0 };
+                if pid == 0 {
+                    pid = super::proc::current_ids().1;
+                }
+                match super::proc::PROCS.lock().get_mut(&pid) {
+                    Some(p) => {
+                        p.cgroup = if group.is_empty() { None } else { Some(alloc::sync::Arc::from(group.as_str())) };
+                        buf.len()
+                    }
+                    None => 0,
+                }
+            }
             _ => 0, // /proc is read-only
         }
     }
@@ -287,6 +356,10 @@ impl PseudoFile {
         match self {
             PseudoFile::DevNull | PseudoFile::DevZero | PseudoFile::DevUrandom => {
                 statbuf.st_mode = S_IFCHR | 0o666;
+                statbuf.st_size = 0;
+            }
+            PseudoFile::CgroupProcs(_) => {
+                statbuf.st_mode = S_IFREG | 0o644;
                 statbuf.st_size = 0;
             }
             _ => {

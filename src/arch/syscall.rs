@@ -397,6 +397,20 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         if tracing {
             let pid = crate::task::SCHEDULER.lock().current_task_id().0;
             crate::kprintln!("[trace] t={} {} > {}({:#x}, {:#x}, {:#x}, {:#x})", crate::arch::pit::ticks(), pid, num, args[0], args[1], args[2], args[3]);
+            // Calls naming a file: show the path (open, stat, lstat, access, execve, readlink,
+            // openat, faccessat, newfstatat, statx, faccessat2)
+            let path_arg = match num {
+                2 | 4 | 6 | 21 | 59 | 89 => Some(args[0]),
+                257 | 262 | 269 | 332 | 439 => Some(args[1]),
+                _ => None,
+            };
+            if let Some(p) = path_arg.filter(|&p| p != 0 && crate::memory::vm::prefault_current(p, 1, false)) {
+                // Up to the end of the page the path starts in (the next may be unmapped)
+                let len = (4096 - (p as usize & 4095)).min(256);
+                let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, len) };
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(len);
+                crate::kprintln!("[trace]   path \"{}\"", core::str::from_utf8(&bytes[..end]).unwrap_or("?"));
+            }
             // ppoll: show the timeout itself (a busy loop shows up as zero timeouts)
             if num == 271 && args[2] != 0 && crate::memory::vm::prefault_current(args[2], 16, false) {
                 let ts = unsafe { core::ptr::read_unaligned(args[2] as *const [i64; 2]) };

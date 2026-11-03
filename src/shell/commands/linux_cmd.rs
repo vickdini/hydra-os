@@ -249,9 +249,10 @@ impl Command for LinuxCommand {
                     return;
                 }
                 // With a display manager installed the desktop starts at its login screen
+                // (a service, as on Ubuntu: the console stays free for its own login)
                 if has("/usr/bin/sddm") && args.get(2).copied() != Some("nologin") {
                     println!("[*] Starting the login screen (SDDM)...");
-                    run_chroot(root, &["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"], 0, 0);
+                    start_service(root, &["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"]);
                     return;
                 }
                 let mut argv: alloc::vec::Vec<&str> = alloc::vec![
@@ -330,6 +331,26 @@ impl Command for LinuxCommand {
 /// * `uid` - User ID for execution.
 /// * `gid` - Group ID for execution.
 fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
+    if let Some(tid) = spawn_in_root(root, argv, uid, gid) {
+        run_in_foreground(tid);
+    }
+}
+
+/// Starts a Linux program in `root` as root, in the background: a system service (the
+/// display manager), which does not take the console.
+///
+/// # Arguments
+/// * `root` - Root directory of the Linux system.
+/// * `argv` - Program and its arguments.
+fn start_service(root: &str, argv: &[&str]) {
+    if let Some(tid) = spawn_in_root(root, argv, 0, 0) {
+        println!("[+] Started {} (process {}).", argv.join(" "), tid.0);
+    }
+}
+
+/// Prepares `root` (devices, network files, the user's runtime directory) and starts
+/// `argv` there as `uid`/`gid`. Returns its task, or `None` (reported) on failure.
+fn spawn_in_root(root: &str, argv: &[&str], uid: u32, gid: u32) -> Option<crate::task::TaskId> {
     if !crate::arch::boot_services::is_hardware_takeover_complete() {
         let _ = crate::arch::boot_services::take_hardware_ownership();
     }
@@ -339,11 +360,12 @@ fn run_chroot(root: &str, argv: &[&str], uid: u32, gid: u32) {
         println!("[!] linux chroot: device files: {}", e);
     }
     match crate::task::spawn_linux_chroot(root, argv[0], argv, uid, gid) {
-        Ok(tid) => run_in_foreground(tid),
+        Ok(tid) => Some(tid),
         Err(e) => {
             console::set_color(Color::LightRed, Color::Black);
             println!("[!] linux chroot: {}", e);
             console::set_color(Color::White, Color::Black);
+            None
         }
     }
 }

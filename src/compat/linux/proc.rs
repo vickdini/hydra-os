@@ -165,7 +165,7 @@ pub struct SigAction {
 }
 
 /// Per-thread signal mask, pending signal bitmask, and alternate signal stack state.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ThreadSig {
     /// Bitmask of signals currently blocked by this thread.
     mask: u64,
@@ -177,7 +177,31 @@ struct ThreadSig {
     alt_size: u64,
     /// Alternate stack flags (`SS_DISABLE`, `SS_ONSTACK`).
     alt_flags: u32,
+    /// Senders of the signals pending for this thread (`tkill`/`tgkill`), by number.
+    senders: [SigSender; NSIG + 1],
 }
+
+impl Default for ThreadSig {
+    fn default() -> Self {
+        ThreadSig { mask: 0, pending: 0, alt_sp: 0, alt_size: 0, alt_flags: 0, senders: [SigSender::default(); NSIG + 1] }
+    }
+}
+
+/// The sender of a signal, as its handler's `siginfo` reports it.
+#[derive(Clone, Copy, Default)]
+struct SigSender {
+    /// `si_code`: `SI_USER` (`kill`), `SI_TKILL` (`tkill`/`tgkill`); 0 also for the kernel's.
+    code: i32,
+    /// `si_pid`: the sending process.
+    pid: u32,
+    /// `si_uid`: its real user ID.
+    uid: u32,
+}
+
+/// `si_code` of a signal sent by `kill`.
+const SI_USER: i32 = 0;
+/// `si_code` of a signal sent by `tkill` or `tgkill`.
+const SI_TKILL: i32 = -6;
 
 /// One process (thread group).
 pub struct Process {
@@ -212,6 +236,14 @@ pub struct Process {
     stop_reported: bool,
     /// Whether a `SIGCONT` continuation is awaiting reporting via `wait` (`WCONTINUED`).
     continued: bool,
+    /// Control group (cgroup v2 path, e.g. `/user.slice/user-1000.slice/session-2.scope`);
+    /// `None` is the root group. Login managers place sessions in groups with `cgroup.procs`.
+    pub cgroup: Option<alloc::sync::Arc<str>>,
+    /// Who sent each signal pending for the process as a whole (`kill`), by number.
+    senders: [SigSender; NSIG + 1],
+    /// When the process started, in clock ticks (`USER_HZ`, 100 per second) since boot
+    /// (`/proc/<pid>/stat`; polkit tells processes apart by pid and start time).
+    pub start_time: u64,
 }
 
 /// All Linux processes, including zombies not yet reaped.
@@ -253,12 +285,12 @@ pub fn current_ids() -> (u64, u64) {
 /// * `inherit_from` - Optional parent process ID to inherit signal dispositions and IDs from.
 pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>) {
     let mut procs = PROCS.lock();
-    let (pgid, sid, actions, mask, groups) = match inherit_from.and_then(|p| procs.get(&p)) {
+    let (pgid, sid, actions, mask, groups, cgroup) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone())
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone())
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new()),
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None),
     };
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
@@ -280,6 +312,9 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             groups,
             stop_reported: false,
             continued: false,
+            cgroup,
+            senders: [SigSender::default(); NSIG + 1],
+            start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
         },
     );
 }
@@ -826,6 +861,35 @@ pub fn post_thread(pid: u64, tid: u64, sig: u32) -> bool {
     true
 }
 
+/// Records the calling process as the sender of `sig` to process `pid`, or to its thread
+/// `tid` (`Some`), with `code`, for the `siginfo` its handler receives. glibc's handler for
+/// the signal it uses to apply `setuid` to every thread ignores a signal not sent by its
+/// own process with `tgkill`.
+///
+/// # Arguments
+/// * `pid` - Receiving process ID.
+/// * `tid` - Receiving thread, for a signal directed at one thread.
+/// * `sig` - Signal number.
+/// * `code` - `si_code` to report.
+fn record_sender(pid: u64, tid: Option<u64>, sig: u32, code: i32) {
+    if sig == 0 || sig as usize > NSIG {
+        return;
+    }
+    let (_, me) = current_ids();
+    let uid = crate::task::with_current_task_mut(|t| t.uid).unwrap_or(0);
+    let sender = SigSender { code, pid: me as u32, uid };
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        match tid {
+            Some(tid) => {
+                if let Some(t) = p.threads.get_mut(&tid) {
+                    t.senders[sig as usize] = sender;
+                }
+            }
+            None => p.senders[sig as usize] = sender,
+        }
+    }
+}
+
 /// Posts `sig` to every process in process group `pgid`.
 ///
 /// # Arguments
@@ -856,18 +920,22 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
     }
     let sig = sig as u32;
     let (_, me) = current_ids();
-    let n = match pid {
-        p if p > 0 => post_process(p as u64, sig) as usize,
-        0 => {
-            let pgid = PROCS.lock().get(&me).map_or(me, |p| p.pgid);
-            post_group(pgid, sig)
+    let targets: Vec<u64> = {
+        let procs = PROCS.lock();
+        match pid {
+            p if p > 0 => alloc::vec![p as u64],
+            0 => {
+                let pgid = procs.get(&me).map_or(me, |p| p.pgid);
+                procs.values().filter(|p| p.pgid == pgid && !p.zombie).map(|p| p.pid).collect()
+            }
+            -1 => procs.keys().copied().filter(|&p| p != me).collect(),
+            p => procs.values().filter(|q| q.pgid == (-p) as u64 && !q.zombie).map(|q| q.pid).collect(),
         }
-        -1 => {
-            let all: Vec<u64> = PROCS.lock().keys().copied().filter(|&p| p != me).collect();
-            all.iter().filter(|&&p| post_process(p, sig)).count()
-        }
-        p => post_group((-p) as u64, sig),
     };
+    for &t in &targets {
+        record_sender(t, None, sig, SI_USER);
+    }
+    let n = targets.iter().filter(|&&t| post_process(t, sig)).count();
     if n == 0 {
         ESRCH
     } else {
@@ -888,6 +956,7 @@ pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
     if sig as usize > NSIG {
         return EINVAL;
     }
+    record_sender(pid, Some(tid), sig as u32, SI_TKILL);
     if post_thread(pid, tid, sig as u32) {
         0
     } else {
@@ -1448,8 +1517,22 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     put(&mut f, mc + 192, fp_addr);
     // uc_sigmask
     put(&mut f, 8 + 296, old_mask);
-    // siginfo: si_signo, si_errno, si_code (SI_USER = 0)
+    // siginfo: si_signo, si_errno, si_code, then si_pid and si_uid (for kill/tkill/tgkill)
+    let sender = {
+        let mut procs = PROCS.lock();
+        // The thread's own record (tgkill) first, then the process's (kill)
+        procs
+            .get_mut(&pid)
+            .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
+                Some(s) if s.pid != 0 => s,
+                _ => core::mem::take(&mut p.senders[sig as usize]),
+            })
+            .unwrap_or_default()
+    };
     f[312..316].copy_from_slice(&(sig as i32).to_le_bytes());
+    f[320..324].copy_from_slice(&sender.code.to_le_bytes());
+    f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
+    f[332..336].copy_from_slice(&sender.uid.to_le_bytes());
 
     if !write_bytes(fp_addr, &fpu.0) || !write_bytes(frame, &f) {
         return false;

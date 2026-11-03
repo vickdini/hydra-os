@@ -43,6 +43,22 @@ if ! ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Pe
     done
 fi
 
+# Since polkit 127 its authentication helper is no longer setuid root: systemd runs it as
+# root for each connection to a socket (polkit-agent-helper.socket), which the desktop's
+# password dialog uses. Without it, every password typed there is rejected
+helper=/usr/lib/polkit-1/polkit-agent-helper-1
+if [ -x "$helper" ] && [ -e /usr/lib/systemd/system/polkit-agent-helper.socket ]; then
+    /usr/libexec/hydra-socket-activate /run/polkit/agent-helper.socket "$helper" --socket-activated &
+fi
+
+# polkit, which decides what users may administer, starts on demand through the bus. On a
+# loaded system its first start can outlast the bus's activation timeout, and the desktop's
+# authentication agent then fails to register: start it now, in the background
+if [ -e /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service ]; then
+    dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus \
+        org.freedesktop.DBus.StartServiceByName string:org.freedesktop.PolicyKit1 uint32:0 >/dev/null 2>&1 &
+fi
+
 if [ "$dm" = 1 ]; then
     unset WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
     exec sddm $HYDRA_SDDM_OPTS

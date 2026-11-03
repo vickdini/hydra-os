@@ -360,6 +360,10 @@ pub struct Task {
     pub woken: bool,
     /// Lost the CPU to a woken task mid-timeslice: scheduled before other ready tasks.
     pub preempted: bool,
+    /// Times the scheduler chose another task while this one was ready. Woken and
+    /// preempted tasks go first, so under a steady stream of events plain ready tasks (a
+    /// new thread, a computation) would wait indefinitely; past a limit they go first.
+    pub passed_over: u32,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -417,6 +421,7 @@ impl Task {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }

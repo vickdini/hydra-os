@@ -893,6 +893,10 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         return install(FileDescriptor::MemFd(snapshot), flags);
     }
     if is_pseudo(&abs) {
+        // Only root moves processes between control groups (cgroup.procs is root's, 0644)
+        if wants_write && matches!(super::fs::match_pseudo_path(&abs), Some(super::fs::PseudoFile::CgroupProcs(_))) && creds().euid != 0 {
+            return Err(EACCES);
+        }
         return install(
             FileDescriptor::File {
                 path: abs,
@@ -1468,6 +1472,8 @@ fn fs_magic(abs: &str) -> i64 {
         DEVPTS_SUPER_MAGIC
     } else if under("/proc") {
         0x9fa0 // PROC_SUPER_MAGIC
+    } else if under(super::fs::CGROUP_ROOT) {
+        0x6367_7270 // CGROUP2_SUPER_MAGIC (libsystemd refuses a hierarchy without it)
     } else if under("/sys") {
         0x6265_6572 // SYSFS_MAGIC
     } else {

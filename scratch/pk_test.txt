@@ -1,0 +1,1 @@
+linux chroot /ubuntu /bin/sh -c 'grep -A8 "set-timezone\"" /usr/share/polkit-1/actions/org.freedesktop.timedate1.policy | grep allow_; setpriv --reuid 1000 --regid 1000 --init-groups sh -c "pkcheck --action-id org.freedesktop.login1.power-off --process \$\$; echo pk_nosession_poweroff=\$?"'

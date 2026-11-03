@@ -33,6 +33,9 @@ use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskS
 
 /// Default timeslice granted to a scheduled task in PIT timer ticks (50 ms at 100 Hz).
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
+/// Scheduling decisions a ready task may lose before it goes first (about 100 ms when
+/// woken tasks take every tick).
+const STARVATION_LIMIT: u32 = 10;
 /// Default kernel stack size allocated per thread in bytes (64 KiB).
 pub const DEFAULT_STACK_SIZE: usize = 65536;
 
@@ -435,6 +438,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -535,6 +539,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -621,6 +626,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -710,6 +716,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
@@ -812,6 +819,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
@@ -971,6 +979,7 @@ impl Scheduler {
             event_wait: false,
             woken: false,
             preempted: false,
+            passed_over: 0,
             wake_pending: false,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
@@ -1131,6 +1140,16 @@ impl Scheduler {
                 break;
             }
         }
+        // A ready task passed over too often runs now (the longest-waiting one), so the
+        // tiers below cannot starve it
+        if next_idx.is_none() && handoff_server.is_none() {
+            next_idx = (0..num_tasks)
+                .filter(|&i| {
+                    let t = &self.tasks[i];
+                    t.state == TaskState::Ready && t.priority > TaskPriority::Idle && t.passed_over >= STARVATION_LIMIT
+                })
+                .max_by_key(|&i| self.tasks[i].passed_over);
+        }
         // (event-woken tasks first, then tasks they preempted, then the rest)
         for tier in 0..3 {
             for offset in 1..=num_tasks {
@@ -1162,8 +1181,14 @@ impl Scheduler {
         }
 
         let next_idx = next_idx.unwrap_or(curr_idx);
+        for (i, t) in self.tasks.iter_mut().enumerate() {
+            if i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle {
+                t.passed_over = t.passed_over.saturating_add(1);
+            }
+        }
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].passed_over = 0;
         if next_idx == curr_idx {
             self.tasks[curr_idx].state = TaskState::Running;
             self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;

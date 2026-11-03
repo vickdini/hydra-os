@@ -400,6 +400,8 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     t.link(s, &alloc::format!("{}/subsystem", card), "../../../../../class/drm")?;
     t.link(s, &alloc::format!("{}/device", card), &alloc::format!("../../../{}", v.slot))?;
     t.file(s, "/sys/class/drm/version", "drm 1.1.0 20060810\n")?;
+    // The cgroup v2 mount point (its cgroup.procs files are the kernel's)
+    t.dir(s, super::fs::CGROUP_ROOT)?;
     t.link(s, "/sys/class/drm/card0", &alloc::format!("../../devices/pci0000:00/{}/drm/card0", v.slot))?;
     t.link(s, "/sys/dev/char/226:0", &alloc::format!("../../devices/pci0000:00/{}/drm/card0", v.slot))?;
     t.node(s, "/dev/dri/card0", super::chardev::makedev(226, 0), video)?;
@@ -570,6 +572,9 @@ MaximumUid=60000
     t.file_bytes(s, "/usr/libexec/hydra-session", include_bytes!("../../../userland/hydra-logind/hydra-session"), 0o755)?;
     if let Some(logind) = boot_binary(s, "/bin/hydra-logind.elf") {
         t.file_bytes(s, "/usr/libexec/hydra-logind", &logind, 0o755)?;
+    }
+    if let Some(sockact) = boot_binary(s, "/bin/hydra-socket-activate.elf") {
+        t.file_bytes(s, "/usr/libexec/hydra-socket-activate", &sockact, 0o755)?;
     }
     Ok(())
 }
