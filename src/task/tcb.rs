@@ -490,6 +490,8 @@ impl Caps {
     pub const SETGID: u64 = 1 << 6;
     /// `CAP_SETUID`.
     pub const SETUID: u64 = 1 << 7;
+    /// `CAP_SYS_BOOT`: may power off or restart the machine (`reboot`).
+    pub const SYS_BOOT: u64 = 1 << 22;
 
     /// The sets a process starts with: all for root, none otherwise.
     pub const fn for_euid(euid: u32) -> Self {

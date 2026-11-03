@@ -12,6 +12,7 @@ const EACCES: i64 = -13;
 const ENOSYS: i64 = -38;
 
 const NR_GETRLIMIT: u64 = 97;
+const NR_REBOOT: u64 = 169;
 const NR_GETPPID: u64 = 110;
 const NR_GETPGRP: u64 = 111;
 const NR_SETSID: u64 = 112;
@@ -340,6 +341,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 write_rlimit(a[3], default_limit(a[1]))
             }
         }
+        NR_REBOOT => sys_reboot(a[0] as u32, a[1] as u32, a[2] as u32),
         NR_GETPPID => super::proc::getppid(),
         NR_GETPGRP => super::proc::getpgid(0),
         NR_GETPGID => super::proc::getpgid(a[0] as u32 as u64),
@@ -533,4 +535,37 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         },
         _ => return None,
     })
+}
+
+/// `reboot(2)`: powers the machine off, halts or restarts it (after committing the pool),
+/// as systemd and login managers do at the end of a shutdown. Needs `CAP_SYS_BOOT` and
+/// the magic numbers that guard against stray calls.
+///
+/// # Arguments
+/// * `magic` - `LINUX_REBOOT_MAGIC1`.
+/// * `magic2` - One of the `LINUX_REBOOT_MAGIC2*` values.
+/// * `cmd` - What to do (`LINUX_REBOOT_CMD_*`).
+///
+/// # Returns
+/// `0` for the commands that return (Ctrl+Alt+Del handling), or a negative error.
+fn sys_reboot(magic: u32, magic2: u32, cmd: u32) -> i64 {
+    const MAGIC1: u32 = 0xfee1_dead;
+    const MAGIC2: [u32; 4] = [672274793, 85072278, 369367448, 537993216];
+    const CMD_RESTART: u32 = 0x0123_4567;
+    const CMD_HALT: u32 = 0xcdef_0123;
+    const CMD_POWER_OFF: u32 = 0x4321_fedc;
+    const CMD_CAD_ON: u32 = 0x89ab_cdef;
+    const CMD_CAD_OFF: u32 = 0;
+    if magic != MAGIC1 || !MAGIC2.contains(&magic2) {
+        return -22; // EINVAL
+    }
+    if !crate::task::with_current_task_mut(|t| t.caps.has(crate::task::tcb::Caps::SYS_BOOT)).unwrap_or(false) {
+        return -1; // EPERM
+    }
+    match cmd {
+        CMD_POWER_OFF | CMD_HALT => crate::arch::power::power_off(),
+        CMD_RESTART => crate::arch::power::reboot(),
+        CMD_CAD_ON | CMD_CAD_OFF => 0,
+        _ => -22,
+    }
 }

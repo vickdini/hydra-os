@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <time.h>
@@ -1101,8 +1102,163 @@ static DBusMessage *create_session(DBusMessage *m) {
     return r;
 }
 
+/* ---------- power ---------- */
+
+/* Who may power off, restart or halt is polkit's decision (the actions logind declares,
+ * org.freedesktop.login1.power-off and so on, with "-multiple-sessions" variants when
+ * other users are logged in). Carrying it out is the kernel's: reboot(2), after every
+ * process has been asked to end. */
+
+#define POLKIT_NAME "org.freedesktop.PolicyKit1"
+
+/* polkit action for `what` ("power-off", "reboot", "halt") requested by the sender of `m`. */
+static void power_action(DBusMessage *m, const char *what, char *out, size_t len) {
+    pid_t pid;
+    unsigned uid = 0;
+    int others = 0;
+    if (sender_creds(m, &pid, &uid) == 0)
+        for (int i = 0; i < MAX_SESSIONS; i++)
+            if (sessions[i].used && sessions[i].uid != uid && strcmp(sessions[i].klass, "greeter") != 0)
+                others = 1;
+    snprintf(out, len, "org.freedesktop.login1.%s%s", what, others ? "-multiple-sessions" : "");
+}
+
+/* A CheckAuthorization call to polkit for the sender of `m` and `action`. */
+static DBusMessage *polkit_check(DBusMessage *m, const char *action, int interactive) {
+    DBusMessage *q = dbus_message_new_method_call(POLKIT_NAME, "/org/freedesktop/PolicyKit1/Authority",
+                                                  "org.freedesktop.PolicyKit1.Authority", "CheckAuthorization");
+    DBusMessageIter it, st, dict, entry, var, details;
+    const char *kind = "system-bus-name", *key = "name", *sender = dbus_message_get_sender(m), *cancel = "";
+    dbus_uint32_t flags = interactive ? 1 : 0; /* AllowUserInteraction */
+    dbus_message_iter_init_append(q, &it);
+    dbus_message_iter_open_container(&it, DBUS_TYPE_STRUCT, NULL, &st);
+    dbus_message_iter_append_basic(&st, DBUS_TYPE_STRING, &kind);
+    dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "s", &var);
+    dbus_message_iter_append_basic(&var, DBUS_TYPE_STRING, &sender);
+    dbus_message_iter_close_container(&entry, &var);
+    dbus_message_iter_close_container(&dict, &entry);
+    dbus_message_iter_close_container(&st, &dict);
+    dbus_message_iter_close_container(&it, &st);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &action);
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{ss}", &details);
+    dbus_message_iter_close_container(&it, &details);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &flags);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &cancel);
+    return q;
+}
+
+/* polkit's answer: 1 authorized, 0 not; *challenge: authorization possible with a password. */
+static int polkit_result(DBusMessage *r, int *challenge) {
+    DBusMessageIter it, st;
+    dbus_bool_t authorized = FALSE, chal = FALSE;
+    *challenge = 0;
+    if (!r || dbus_message_get_type(r) != DBUS_MESSAGE_TYPE_METHOD_RETURN || !dbus_message_iter_init(r, &it) ||
+        dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_STRUCT)
+        return 0;
+    dbus_message_iter_recurse(&it, &st);
+    if (dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_BOOLEAN)
+        dbus_message_iter_get_basic(&st, &authorized);
+    if (dbus_message_iter_next(&st) && dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_BOOLEAN)
+        dbus_message_iter_get_basic(&st, &chal);
+    *challenge = chal;
+    return authorized;
+}
+
+/* CanPowerOff and friends: "yes", "challenge" (with a password) or "no". */
+static DBusMessage *can_power(DBusMessage *m, const char *what) {
+    char action[96];
+    power_action(m, what, action, sizeof action);
+    DBusMessage *q = polkit_check(m, action, 0);
+    DBusMessage *r = dbus_connection_send_with_reply_and_block(bus, q, 5000, NULL);
+    dbus_message_unref(q);
+    int challenge;
+    int ok = polkit_result(r, &challenge);
+    if (r)
+        dbus_message_unref(r);
+    return reply_string(m, ok ? "yes" : challenge ? "challenge" : "no");
+}
+
+/* Ends every process, commits the file systems and powers off / restarts / halts. */
+static void shut_down(int how) {
+    logmsg("%s", how == RB_AUTOBOOT ? "restarting" : "powering off");
+    dbus_bool_t start = TRUE;
+    DBusMessage *sig = dbus_message_new_signal(ROOT_PATH, MANAGER_IFACE, "PrepareForShutdown");
+    dbus_message_append_args(sig, DBUS_TYPE_BOOLEAN, &start, DBUS_TYPE_INVALID);
+    emit(sig);
+    dbus_connection_flush(bus);
+    sleep(1);
+    kill(-1, SIGTERM);
+    sleep(3);
+    kill(-1, SIGKILL);
+    sync();
+    reboot(how);
+    logmsg("reboot: %s", strerror(errno));
+}
+
+struct power_request {
+    DBusMessage *call;
+    int how;
+};
+
+/* polkit has decided on a PowerOff/Reboot/Halt request. */
+static void power_decided(DBusPendingCall *pc, void *data) {
+    struct power_request *pr = data;
+    DBusMessage *r = dbus_pending_call_steal_reply(pc);
+    int challenge;
+    int ok = polkit_result(r, &challenge);
+    if (r)
+        dbus_message_unref(r);
+    DBusMessage *reply = ok ? dbus_message_new_method_return(pr->call)
+                            : error(pr->call, DBUS_ERROR_ACCESS_DENIED, "Not authorized to shut down the system");
+    dbus_connection_send(bus, reply, NULL);
+    dbus_message_unref(reply);
+    dbus_message_unref(pr->call);
+    int how = pr->how;
+    free(pr);
+    if (ok)
+        shut_down(how);
+}
+
+/* PowerOff(b interactive), Reboot(b), Halt(b) and their *WithFlags(t) forms: asks polkit
+ * without blocking (the answer may wait for a password dialog), then acts. */
+static DBusMessage *power(DBusMessage *m, const char *what, int how) {
+    dbus_bool_t interactive = TRUE;
+    if (dbus_message_has_signature(m, "b"))
+        dbus_message_get_args(m, NULL, DBUS_TYPE_BOOLEAN, &interactive, DBUS_TYPE_INVALID);
+    char action[96];
+    power_action(m, what, action, sizeof action);
+    DBusMessage *q = polkit_check(m, action, interactive);
+    DBusPendingCall *pc = NULL;
+    if (!dbus_connection_send_with_reply(bus, q, &pc, DBUS_TIMEOUT_INFINITE) || !pc) {
+        dbus_message_unref(q);
+        return error(m, DBUS_ERROR_FAILED, "polkit is not available");
+    }
+    dbus_message_unref(q);
+    struct power_request *pr = malloc(sizeof *pr);
+    pr->call = dbus_message_ref(m);
+    pr->how = how;
+    dbus_pending_call_set_notify(pc, power_decided, pr, NULL);
+    dbus_pending_call_unref(pc);
+    return NULL; /* answered when polkit has decided */
+}
+
 static DBusMessage *handle_manager(DBusMessage *m, const char *member) {
     const char *id = NULL;
+    if (!strcmp(member, "CanPowerOff"))
+        return can_power(m, "power-off");
+    if (!strcmp(member, "CanReboot"))
+        return can_power(m, "reboot");
+    if (!strcmp(member, "CanHalt"))
+        return can_power(m, "halt");
+    if (!strcmp(member, "PowerOff") || !strcmp(member, "PowerOffWithFlags"))
+        return power(m, "power-off", RB_POWER_OFF);
+    if (!strcmp(member, "Reboot") || !strcmp(member, "RebootWithFlags"))
+        return power(m, "reboot", RB_AUTOBOOT);
+    if (!strcmp(member, "Halt") || !strcmp(member, "HaltWithFlags"))
+        return power(m, "halt", RB_HALT_SYSTEM);
     if (!strcmp(member, "CreateSession"))
         return create_session(m);
     if (!strcmp(member, "CreateSessionWithPIDFD"))

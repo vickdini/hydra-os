@@ -890,6 +890,12 @@ fn record_sender(pid: u64, tid: Option<u64>, sig: u32, code: i32) {
     }
 }
 
+/// Whether `pid` is one of the system's driver processes (started by the supervisor to
+/// serve a driver endpoint), which Linux signals never reach.
+fn is_system_service(pid: u64) -> bool {
+    crate::task::SCHEDULER.lock().with_process(pid, |t| t.service.is_some()).unwrap_or(false)
+}
+
 /// Posts `sig` to every process in process group `pgid`.
 ///
 /// # Arguments
@@ -932,6 +938,12 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
             p => procs.values().filter(|q| q.pgid == (-p) as u64 && !q.zombie).map(|q| q.pid).collect(),
         }
     };
+    // The system's driver processes are not Linux processes to signal (as kernel threads
+    // are not on Linux): kill(-1) passes over them, and signalling one is refused
+    let targets: Vec<u64> = targets.into_iter().filter(|&t| !is_system_service(t)).collect();
+    if pid > 0 && targets.is_empty() && is_system_service(pid as u64) {
+        return EPERM;
+    }
     for &t in &targets {
         record_sender(t, None, sig, SI_USER);
     }
@@ -955,6 +967,9 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
 pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
     if sig as usize > NSIG {
         return EINVAL;
+    }
+    if is_system_service(pid) {
+        return EPERM;
     }
     record_sender(pid, Some(tid), sig as u32, SI_TKILL);
     if post_thread(pid, tid, sig as u32) {
