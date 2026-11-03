@@ -492,6 +492,19 @@ static void remove_session(int s) {
     if (!user_has_sessions(se->uid)) {
         snprintf(file, sizeof file, STATE_DIR "/users/%u", se->uid);
         unlink(file);
+        /* The user's last session is over: what it left running (the sound server and
+         * other per-user services, which systemd's user manager would stop) is ended */
+        snprintf(file, sizeof file, "/sys/fs/cgroup/user.slice/user-%u.slice/session-%s.scope/cgroup.procs", se->uid, se->id);
+        FILE *f = fopen(file, "re");
+        if (f) {
+            int pid, n = 0;
+            while (fscanf(f, "%d", &pid) == 1)
+                if (pid > 1 && kill(pid, SIGTERM) == 0)
+                    n++;
+            fclose(f);
+            if (n)
+                logmsg("ended %d process(es) left by %s", n, se->user);
+        }
     }
     save_state();
     const char *id = se->id;
