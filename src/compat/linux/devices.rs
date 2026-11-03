@@ -517,13 +517,15 @@ X-KDE-autostart-phase={}
             ),
         )?;
     }
-    // The session logs in without a password: Plasma must not lock it on idle
-    if lookup_path(s, t.root, "/etc/xdg/kscreenlockerrc").is_none() {
-        t.file(s, "/etc/xdg/kscreenlockerrc", "# Written by Hydra: the session has no password to unlock with
-[Daemon]
-Autolock=false
-LockOnResume=false
-")?;
+    // Sessions start at the login screen, with a password: the screen locks on idle as on
+    // Ubuntu. Remove the override older Hydra versions wrote (sessions had no password)
+    if let (Some(dir), Some(ino)) = (lookup_path(s, t.root, "/etc/xdg"), lookup_path(s, t.root, "/etc/xdg/kscreenlockerrc")) {
+        let mut head = [0u8; 18];
+        let n = s.read(ino, 0, &mut head)?;
+        if &head[..n] == b"# Written by Hydra" {
+            s.unlink(dir, b"kscreenlockerrc")?;
+            t.changed = true;
+        }
     }
     // Plasma starts through systemd user units by default; there is no systemd here
     if lookup_path(s, t.root, "/etc/xdg/startkderc").is_none() {

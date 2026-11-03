@@ -505,6 +505,14 @@ pub struct DrmFile {
     wq: Arc<WaitQueue>,
     nonblock: AtomicBool,
     universal_planes: AtomicBool,
+    /// Most recent scanout framebuffer presented by this file when active master.
+    last_scanout: Mutex<Option<Arc<Framebuffer>>>,
+    /// CRTC viewport origin `(x, y)` for the scanout framebuffer.
+    last_crtc_xy: Mutex<(u32, u32)>,
+    /// Most recent cursor buffer object and dimensions `(bo, w, h)`.
+    last_cursor_bo: Mutex<Option<(Arc<Bo>, u32, u32)>>,
+    /// Most recent cursor position `(x, y)`.
+    last_cursor: Mutex<Cursor>,
 }
 
 /// Opens minor `minor` (`card0` only).
@@ -529,6 +537,7 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
             k.master = Some(id);
         }
     });
+    crate::kprintln!("[DRM] file {} OPENED", id);
     Ok(Arc::new(DrmFile {
         id,
         handles: Mutex::new(BTreeMap::new()),
@@ -537,12 +546,17 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
         wq: WaitQueue::new_shared(),
         nonblock: AtomicBool::new(nonblock),
         universal_planes: AtomicBool::new(false),
+        last_scanout: Mutex::new(None),
+        last_crtc_xy: Mutex::new((0, 0)),
+        last_cursor_bo: Mutex::new(None),
+        last_cursor: Mutex::new(Cursor { x: 0, y: 0 }),
     }))
 }
 
 impl Drop for DrmFile {
     fn drop(&mut self) {
         let id = self.id;
+        crate::kprintln!("[DRM] file {} DROPPED", id);
         with_kms(|k| {
             k.fbs.retain(|_, fb| fb.owner != id);
             if k.scanout.as_ref().map_or(false, |fb| fb.owner == id) {
@@ -883,22 +897,51 @@ impl DrmFile {
             }
             0x1e => {
                 // SET_MASTER
+                let last_fb = self.last_scanout.lock().clone();
+                let last_xy = *self.last_crtc_xy.lock();
+                let last_cur_bo = self.last_cursor_bo.lock().clone();
+                let last_cur = *self.last_cursor.lock();
+                crate::kprintln!("[DRM] file {} SET_MASTER (has_last_fb: {})", self.id, last_fb.is_some());
                 with_kms(|k| match k.master {
                     None => {
                         k.master = Some(self.id);
+                        let _ = k.take_screen();
+                        if let Some(fb) = last_fb {
+                            k.scanout = Some(fb);
+                            k.crtc_xy = last_xy;
+                            if let Some(c) = last_cur_bo {
+                                k.cursor_bo = Some(c);
+                                k.cursor = last_cur;
+                            }
+                            k.present();
+                        }
                         Ok(0)
                     }
-                    Some(m) if m == self.id => Ok(0),
+                    Some(m) if m == self.id => {
+                        let _ = k.take_screen();
+                        if let Some(fb) = last_fb {
+                            k.scanout = Some(fb);
+                            k.crtc_xy = last_xy;
+                            if let Some(c) = last_cur_bo {
+                                k.cursor_bo = Some(c);
+                                k.cursor = last_cur;
+                            }
+                            k.present();
+                        }
+                        Ok(0)
+                    }
                     Some(_) => Err(EBUSY),
                 })
             }
             0x1f => {
                 // DROP_MASTER
+                crate::kprintln!("[DRM] file {} DROP_MASTER", self.id);
                 with_kms(|k| {
                     if k.master != Some(self.id) {
                         return Err(EINVAL);
                     }
                     k.master = None;
+                    k.cursor_bo = None;
                     Ok(0)
                 })
             }
@@ -979,8 +1022,10 @@ impl DrmFile {
                 let fb_id = get32(b, 16);
                 let (x, y) = (get32(b, 20), get32(b, 24));
                 let mode_valid = get32(b, 32) != 0;
+                crate::kprintln!("[DRM] file {} SETCRTC fb_id={} valid={}", self.id, fb_id, mode_valid);
                 with_kms(|k| {
                     if !mode_valid {
+                        *self.last_scanout.lock() = None;
                         k.scanout = None;
                         k.give_screen();
                         return Ok(0);
@@ -991,7 +1036,7 @@ impl DrmFile {
                         return Err(EINVAL);
                     }
                     let fb = if fb_id == u32::MAX {
-                        k.scanout.clone().ok_or(EINVAL)?
+                        k.scanout.clone().or_else(|| self.last_scanout.lock().clone()).ok_or(EINVAL)?
                     } else {
                         k.fbs.get(&fb_id).cloned().ok_or(ENOENT)?
                     };
@@ -999,6 +1044,8 @@ impl DrmFile {
                         return Err(ENOSPC);
                     }
                     k.take_screen()?;
+                    *self.last_scanout.lock() = Some(fb.clone());
+                    *self.last_crtc_xy.lock() = (x, y);
                     k.scanout = Some(fb);
                     k.crtc_xy = (x, y);
                     k.present();
@@ -1023,9 +1070,11 @@ impl DrmFile {
                 };
                 with_kms(|k| {
                     if flags & 1 != 0 {
+                        *self.last_cursor_bo.lock() = new_bo.clone().map(|bo| (bo, w, h));
                         k.cursor_bo = new_bo.map(|bo| (bo, w, h));
                     }
                     if flags & 2 != 0 {
+                        *self.last_cursor.lock() = Cursor { x, y };
                         k.cursor = Cursor { x, y };
                     }
                     k.update_cursor();
@@ -1154,6 +1203,10 @@ impl DrmFile {
                         return Err(ENOENT);
                     }
                     k.fbs.remove(&id);
+                    let mut last = self.last_scanout.lock();
+                    if last.as_ref().map_or(false, |s| Arc::ptr_eq(s, &fb)) {
+                        *last = None;
+                    }
                     if k.scanout.as_ref().map_or(false, |s| Arc::ptr_eq(s, &fb)) {
                         k.scanout = None;
                         k.present();
@@ -1170,14 +1223,14 @@ impl DrmFile {
                     return Err(ENOENT);
                 }
                 let (fb_id, flags, user_data) = (get32(b, 4), get32(b, 8), get64(b, 16));
+                crate::kprintln!("[DRM] file {} PAGE_FLIP fb_id={}", self.id, fb_id);
                 if flags & !0x3 != 0 {
                     return Err(EINVAL);
                 }
-                with_kms(|k| {
-                    if k.scanout.is_none() {
-                        return Err(EINVAL);
-                    }
+                with_kms(|k| -> Result<(), i64> {
                     let fb = k.fbs.get(&fb_id).cloned().ok_or(ENOENT)?;
+                    k.take_screen()?;
+                    *self.last_scanout.lock() = Some(fb.clone());
                     k.scanout = Some(fb);
                     k.present();
                     Ok(())
