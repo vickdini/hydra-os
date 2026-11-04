@@ -274,44 +274,51 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             }
 
             let mut statbuf = LinuxStat::default();
-            if fd <= 2 {
-                // stdin, stdout, stderr are character devices (tty)
-                statbuf.st_mode = S_IFCHR | 0o666;
-                statbuf.st_rdev = 5;
-                unsafe { *stat_ptr = statbuf; }
-                0
-            } else {
-                crate::task::with_current_fds_mut(|fds| {
-                    if let Some(desc) = fds.get(fd) {
-                        match desc {
-                            crate::fs::FileDescriptor::File { path, .. } => {
-                                if let Ok(st) = crate::fs::ZfsClient::file_stat(path) {
-                                    let is_dir = st.obj_type == crate::fs::zfs::DnodeType::Directory;
-                                    statbuf.st_mode = if is_dir { S_IFDIR | 0o755 } else { S_IFREG | 0o644 };
-                                    statbuf.st_size = st.size as i64;
-                                    statbuf.st_blksize = 4096;
-                                    unsafe { *stat_ptr = statbuf; }
-                                    0
-                                } else {
-                                    -ENOENT
-                                }
-                            }
-                            crate::fs::FileDescriptor::PipeRead(_) | crate::fs::FileDescriptor::PipeWrite(_) => {
-                                statbuf.st_mode = S_IFIFO | 0o600;
+            crate::task::with_current_fds_mut(|fds| {
+                if let Some(desc) = fds.get(fd) {
+                    match desc {
+                        crate::fs::FileDescriptor::ConsoleIn
+                        | crate::fs::FileDescriptor::ConsoleOut
+                        | crate::fs::FileDescriptor::ConsoleErr => {
+                            statbuf.st_mode = S_IFCHR | 0o666;
+                            statbuf.st_rdev = 5;
+                            unsafe { *stat_ptr = statbuf; }
+                            0
+                        }
+                        crate::fs::FileDescriptor::File { path, .. } => {
+                            if let Ok(st) = crate::fs::ZfsClient::file_stat(path) {
+                                let is_dir = st.obj_type == crate::fs::zfs::DnodeType::Directory;
+                                statbuf.st_mode = if is_dir { S_IFDIR | 0o755 } else { S_IFREG | 0o644 };
+                                statbuf.st_size = st.size as i64;
+                                statbuf.st_blksize = 4096;
                                 unsafe { *stat_ptr = statbuf; }
                                 0
-                            }
-                            _ => {
-                                statbuf.st_mode = S_IFREG | 0o644;
-                                unsafe { *stat_ptr = statbuf; }
-                                0
+                            } else {
+                                -ENOENT
                             }
                         }
-                    } else {
-                        -EBADF
+                        crate::fs::FileDescriptor::PipeRead(_) | crate::fs::FileDescriptor::PipeWrite(_) => {
+                            statbuf.st_mode = S_IFIFO | 0o600;
+                            unsafe { *stat_ptr = statbuf; }
+                            0
+                        }
+                        crate::fs::FileDescriptor::Socket(_)
+                        | crate::fs::FileDescriptor::Unix(_)
+                        | crate::fs::FileDescriptor::Inet(_) => {
+                            statbuf.st_mode = S_IFSOCK | 0o777;
+                            unsafe { *stat_ptr = statbuf; }
+                            0
+                        }
+                        _ => {
+                            statbuf.st_mode = S_IFREG | 0o644;
+                            unsafe { *stat_ptr = statbuf; }
+                            0
+                        }
                     }
-                })
-            }
+                } else {
+                    -EBADF
+                }
+            })
         }
 
         SYS_LSEEK => {

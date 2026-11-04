@@ -1,0 +1,639 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[01;01H[1m[36m[40m============================================================
+                HYDRA MICROKERNEL v0.1.0                     
+     UNIX-like Distributed Cloud/Fog/Edge Operating System  
+============================================================
+
+[1m[33m[40m[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...
+[1m[32m[40m[+] GDT loaded successfully.
+[1m[33m[40m
+[*] Step 1b: Initializing IDT & Exception Handling Gates...
+[1m[32m[40m[+] IDT loaded successfully (256 gates, double-fault IST stack attached).
+[1m[36m[40m
+[i] CPU BREAKPOINT TRAP (#BP) at RIP: 0xbd7324c3
+    RFLAGS: 0x206, RSP: 0xbfe627d0
+[1m[32m[40m[+] CPU exception dispatch verified: resumed cleanly from #BP trap.
+[1m[37m[40m    - CR0: Cr0Flags(PROTECTED_MODE_ENABLE | MONITOR_COPROCESSOR | EXTENSION_TYPE | NUMERIC_ERROR | WRITE_PROTECT | PAGING)
+    - CR3 (Active PML4 Root): 0xbfc01000
+    - CR4: Cr4Flags(DEBUGGING_EXTENSIONS | PHYSICAL_ADDRESS_EXTENSION | MACHINE_CHECK_EXCEPTION | OSFXSR | OSXMMEXCPT_ENABLE)
+[1m[33m[40m
+[*] Step 2: Discovering Memory & Initializing Frame Allocator...
+[1m[32m[40m[+] Physical Memory Manager Online:
+    - Total Usable RAM: 3036 MiB
+    - Allocated: 2560 KiB
+    - Allocated Test Frame: 0x40280000
+[1m[33m[40m
+[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...
+[1m[32m[40m[+] Kernel Heap Online:
+    - Start Address: 0x40281000
+    - Total Size:    512 MiB (536870912 bytes)
+    - Available:     512 MiB
+    - Self-Test:     PASSED (Box, Vec, String, RAII drops verified)
+[1m[33m[40m
+[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...
+[1m[32m[40m[+] Firmware Boot Translation: VirtAddr 0xbd7320f0 -> PhysAddr 0xbd7320f0
+[+] Hydra Autonomous PML4 Root Initialized at PhysAddr 0x60281000
+[+] Dynamic Page Mapping: Page 0x700000000000 -> Frame 0x60282000 (flags: PageTableFlags(PRESENT | WRITABLE))
+    - Dynamic Unmap & TLB Invalidation: PASSED
+[1m[33m[40m
+[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...
+[1m[32m[40m[+] Hardware Linear Framebuffer Online:
+    - Resolution:   1280x800 (32 bpp)
+    - Stride/Pitch: 1280 pixels/line (5120 bytes)
+    - Pixel Format: BGR888 (Little-Endian)
+    - Video RAM:    0xc0000000 (3 MiB)
+    - Text Matrix:  160 columns x 50 rows (8x16 font)
+    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4
+[1m[33m[40m
+[*] Step 4: Initializing Task Capability Space...
+[1m[32m[40m[+] Capability Table configured:
+    - Slot 0: CapType::AddressSpace with Rights::ALL
+    - Slot 1: CapType::Endpoint (id=1) with READ|WRITE|CALL
+[1m[33m[40m
+[*] Step 5: Testing Microkernel IPC Rendezvous...
+[1m[32m[40m[+] IPC Message queued on Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[+] IPC Message received from Endpoint #1: label=0x1001, args=[42, 1337, 0, 0]
+[boot] anchor (hydra_syscall_dispatcher) = 0xbd708ec0
+[1m[33m[40m
+[*] Step 6: Initializing Devices & Reading the Boot Volume...
+[1m[32m[40m[+] PS/2 Mouse: Initialized auxiliary pointing device with 3-byte packet streaming.
+[+] Boot volume: 26 files staged for the pool
+[1m[33m[40m
+[*] Step 7: Initializing Multitasking Scheduler...
+[1m[32m[40m[+] Multitasking Subsystem Online:
+    - Main Thread registered: Task #0 ('shell')
+    - Background Idle Thread: Task #1 ('idle', priority 0)
+    - Round-Robin Timeslice : 50 ms (100 Hz timer tick preemption)
+[mouse] 4 packets (wheel enabled)
+
+============================================================
+ [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
+============================================================
+  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
+  - Memory Map Entries : 99 descriptors captured
+  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
+  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
+  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
+  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
+  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
+  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
+============================================================
+
+[ata-driver] 'QEMU HARDDISK': 16384 MiB, LBA48, bus-master DMA
+[supervisor] started 'ata_driver' (process 2, endpoint 0x21)
+[+] OpenZFS: Imported pool 'hydrapool' (16384 MiB, TXG #50516, 82811 objects)
+[supervisor] started 'zfs_server' (process 3, endpoint 0x20)
+[e1000-driver] MAC 52:54:00:12:34:56, link up
+[supervisor] started 'net_driver' (process 4, endpoint 0x22)
+[supervisor] started 'display_server' (process 5, endpoint 0x23)
+[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP)
+    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)
+
+[*] Step 8: Initializing the ZFS File Server...
+[+] ZFS File Server Online (Endpoint #0x20):
+    - Storage Pool: 'hydrapool' (16384 MiB, 3109 MiB used, TXG #50516, Fletcher-4, CoW)
+    - Persistence : Active (disk, through the Ring 3 ata-driver)
+    - Datasets: hydrapool/root (/), hydrapool/bin (/bin), hydrapool/home (/root)
+
+============================================================
+ [+] HYDRA MICROKERNEL PHASE 1 & 2 SUBSYSTEMS OPERATIONAL!  
+============================================================
+
++--------------------------------------------------------------+
+|             HYDRA MICROKERNEL INTERACTIVE SHELL              |
+|  Type 'help' for available commands, or 'info' for details.  |
++--------------------------------------------------------------+
+
+[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): 3... 2... 1... NOW
+[*] Starting the login screen (SDDM)...
+[+] Started /bin/sh /usr/libexec/hydra-session --display-manager (process 9).
+Hydra administration console. Log in as root or as a member of 'sudo'.
+login: hydra-logind: seat0 ready on org.freedesktop.login1
+[07:43:10.890] (II) DAEMON: Initializing...
+[07:43:12.280] (II) DAEMON: Starting...
+[07:43:12.330] (II) DAEMON: Logind interface found
+hydra-logind: handle_manager: member='ListSeats' sender=':1.4'
+[07:43:12.480] (II) DAEMON: Adding new display...
+[07:43:12.650] (II) DAEMON: Loaded empty theme configuration
+hydra-logind: handle_manager: member='GetSeat' sender=':1.4'
+hydra-logind: handle_manager: member='ListSessions' sender=':1.4'
+[07:43:12.730] (II) DAEMON: Using VT 1
+[07:43:12.740] (II) DAEMON: Display server started.
+[07:43:12.740] (II) DAEMON: Socket server starting...
+[07:43:12.760] (II) DAEMON: Socket server started.
+[07:43:12.850] (II) DAEMON: Loading theme configuration from "/usr/share/sddm/themes/breeze/theme.conf"
+[07:43:12.900] (II) DAEMON: Greeter starting...
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[07:43:13.600] (II) HELPER: [PAM] Starting...
+[07:43:13.600] (II) HELPER: [PAM] Authenticating...
+[07:43:13.610] (II) HELPER: [PAM] returning.
+[linux] pid 36: unimplemented syscall 250 (0x1, 0x0, 0x7fffbeaf0c8d) -> ENOSYS
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+hydra-logind: handle_manager: member='CreateSessionWithPIDFD' sender=':1.6'
+hydra-logind: handle_manager: member='CreateSession' sender=':1.6'
+hydra-logind: session 1 for sddm (uid 101, greeter, wayland, vt 1)
+hydra-logind: session 1 (sddm, greeter) is active
+[sddm-helper] stat_at dirfd=18 flags=0x1800
+[sddm-helper] stat_at dirfd=18 flags=0x1800
+[H[2J [07:43:14.230] (II) DAEMON: Greeter session started successfully
+hydra-logind: handle_manager: member='GetSession' sender=':1.7'
+hydra-logind: session 1 controller is :1.7
+[DRM] file 1 OPENED
+[DRM] file 1 SET_MASTER (has_last_fb: false)
+[DRM] file 2 OPENED
+[DRM] file 1 SETCRTC fb_id=100 valid=true
+[DRM] file 1 PAGE_FLIP fb_id=102
+[DRM] file 1 PAGE_FLIP fb_id=104
+[07:43:39.370] (II) DAEMON: Message received from greeter: Connect
+hydra-logind: handle_manager: member='CanPowerOff' sender=':1.4'
+hydra-logind: can_power: what='power-off' action='org.freedesktop.login1.power-off' sender=':1.4'
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanReboot' sender=':1.4'
+hydra-logind: can_power: what='reboot' action='org.freedesktop.login1.reboot' sender=':1.4'
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanSuspend' sender=':1.4'
+hydra-logind: handle_manager: member='CanHibernate' sender=':1.4'
+hydra-logind: handle_manager: member='CanHybridSleep' sender=':1.4'
+[DRM] file 1 PAGE_FLIP fb_id=104
+[DRM] file 1 PAGE_FLIP fb_id=106
+[DRM] file 1 PAGE_FLIP fb_id=106
+[DRM] file 1 PAGE_FLIP fb_id=108
+[DRM] file 1 PAGE_FLIP fb_id=109
+[DRM] file 1 PAGE_FLIP fb_id=110
+[DRM] file 1 PAGE_FLIP fb_id=111
+[DRM] file 1 PAGE_FLIP fb_id=112
+[DRM] file 1 PAGE_FLIP fb_id=113
+[DRM] file 1 PAGE_FLIP fb_id=114
+[DRM] file 1 PAGE_FLIP fb_id=115
+[DRM] file 1 PAGE_FLIP fb_id=116
+[DRM] file 1 PAGE_FLIP fb_id=117
+[DRM] file 1 PAGE_FLIP fb_id=118
+[DRM] file 1 PAGE_FLIP fb_id=119
+[DRM] file 1 PAGE_FLIP fb_id=120
+[DRM] file 1 PAGE_FLIP fb_id=121
+[DRM] file 1 PAGE_FLIP fb_id=122
+[DRM] file 1 PAGE_FLIP fb_id=123
+[DRM] file 1 PAGE_FLIP fb_id=124
+[DRM] file 1 PAGE_FLIP fb_id=125
+[DRM] file 1 PAGE_FLIP fb_id=126
+[DRM] file 1 PAGE_FLIP fb_id=127
+[DRM] file 1 PAGE_FLIP fb_id=128
+[DRM] file 1 PAGE_FLIP fb_id=129
+[DRM] file 1 PAGE_FLIP fb_id=130
+[DRM] file 1 PAGE_FLIP fb_id=131
+[DRM] file 1 PAGE_FLIP fb_id=132
+[DRM] file 1 PAGE_FLIP fb_id=133
+[DRM] file 1 PAGE_FLIP fb_id=134
+[DRM] file 1 PAGE_FLIP fb_id=135
+[DRM] file 1 PAGE_FLIP fb_id=136
+[DRM] file 1 PAGE_FLIP fb_id=137
+[DRM] file 1 PAGE_FLIP fb_id=138
+[DRM] file 1 PAGE_FLIP fb_id=139
+[DRM] file 1 PAGE_FLIP fb_id=140
+[DRM] file 1 PAGE_FLIP fb_id=141
+[DRM] file 1 PAGE_FLIP fb_id=142
+[DRM] file 1 PAGE_FLIP fb_id=143
+[DRM] file 1 PAGE_FLIP fb_id=144
+[DRM] file 1 PAGE_FLIP fb_id=145
+[DRM] file 1 PAGE_FLIP fb_id=146
+[DRM] file 1 PAGE_FLIP fb_id=147
+[DRM] file 1 PAGE_FLIP fb_id=148
+[DRM] file 1 PAGE_FLIP fb_id=149
+[DRM] file 1 PAGE_FLIP fb_id=150
+[DRM] file 1 PAGE_FLIP fb_id=151
+[DRM] file 1 PAGE_FLIP fb_id=152
+[DRM] file 1 PAGE_FLIP fb_id=153
+[DRM] file 1 PAGE_FLIP fb_id=154
+[DRM] file 1 PAGE_FLIP fb_id=155
+[DRM] file 1 PAGE_FLIP fb_id=156
+[DRM] file 1 PAGE_FLIP fb_id=157
+[DRM] file 1 PAGE_FLIP fb_id=158
+[DRM] file 1 PAGE_FLIP fb_id=159
+[DRM] file 1 PAGE_FLIP fb_id=160
+[DRM] file 1 PAGE_FLIP fb_id=161
+[DRM] file 1 PAGE_FLIP fb_id=162
+[07:44:24.270] (II) DAEMON: Message received from greeter: Login
+[07:44:24.270] (II) DAEMON: Reading from "/usr/share/wayland-sessions/plasma.desktop"
+hydra-logind: handle_manager: member='ListSessions' sender=':1.4'
+[DRM] file 1 PAGE_FLIP fb_id=163
+hydra-logind: handle_manager: member='GetSeat' sender=':1.4'
+[07:44:24.590] (II) DAEMON: Session "/usr/share/wayland-sessions/plasma.desktop" selected, command: "/usr/lib/x86_64-linux-gnu/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland" for VT 2
+[DRM] file 1 PAGE_FLIP fb_id=164
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+[sddm-helper] stat_at dirfd=3 flags=0x1800
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[DRM] file 1 PAGE_FLIP fb_id=165
+[07:44:24.870] (II) HELPER: [PAM] Starting...
+[07:44:24.870] (II) HELPER: [PAM] Authenticating...
+[DRM] file 1 PAGE_FLIP fb_id=166
+[DRM] file 1 PAGE_FLIP fb_id=167
+[DRM] file 1 PAGE_FLIP fb_id=168
+[07:44:25.500] (II) HELPER: [PAM] Preparing to converse...
+[07:44:25.500] (II) HELPER: [PAM] Conversation with 1 messages
+[DRM] file 1 PAGE_FLIP fb_id=169
+[07:44:25.680] (II) HELPER: [PAM] returning.
+[07:44:25.740] (II) DAEMON: Authentication for user  "hydra"  successful
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+[sddm-helper] stat_at dirfd=11 flags=0x1000
+[sddm-helper] stat_at dirfd=12 flags=0x1000
+hydra-logind: handle_manager: member='CreateSessionWithPIDFD' sender=':1.10'
+hydra-logind: handle_manager: member='CreateSession' sender=':1.10'
+[DRM] file 1 PAGE_FLIP fb_id=170
+hydra-logind: session 2 for hydra (uid 1000, user, wayland, vt 2)
+[DRM] file 1 DROP_MASTER
+hydra-logind: session 2 (hydra, user) is active
+[07:44:26.080] (II) HELPER: Starting Wayland user session: "/etc/sddm/wayland-session" "/usr/lib/x86_64-linux-gnu/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland"
+[sddm-helper] stat_at dirfd=18 flags=0x1800
+[sddm-helper] stat_at dirfd=18 flags=0x1800
+[H[2J [07:44:26.640] (II) DAEMON: Session started true
+[07:44:26.650] (WW) HELPER: Failed to write utmpx:  No such file or directory
+[linux] pid 66: unimplemented syscall 275 (0x3, 0x0, 0x1) -> ENOSYS
+[DRM] file 2 DROPPED
+[DRM] file 1 DROP_MASTER
+[DRM] file 1 DROPPED
+[07:44:31.410] (II) HELPER: [PAM] Closing session
+hydra-logind: handle_manager: member='ReleaseSession' sender=':1.11'
+hydra-logind: session 1 released by :1.11
+hydra-logind: session 1 (sddm) ended
+hydra-logind: ended 1 process(es) left by sddm
+[07:44:31.600] (II) HELPER: [PAM] Ended.
+[07:44:31.610] (II) DAEMON: Auth: sddm-helper exited successfully
+[07:44:31.610] (II) DAEMON: Greeter stopped. SDDM::Auth::HELPER_SUCCESS
+hydra-logind: handle_manager: member='GetSession' sender=':1.13'
+hydra-logind: session 2 controller is :1.13
+[DRM] file 3 OPENED
+[DRM] file 3 SET_MASTER (has_last_fb: false)
+[DRM] file 4 OPENED
+[DRM] file 3 SETCRTC fb_id=172 valid=true
+hydra-logind: handle_manager: member='GetSession' sender=':1.13'
+[DRM] file 3 PAGE_FLIP fb_id=174
+[DRM] file 3 PAGE_FLIP fb_id=176
+hydra-logind: handle_manager: member='Inhibit' sender=':1.13'
+[DRM] file 5 OPENED
+[DRM] file 3 PAGE_FLIP fb_id=178
+[DRM] file 3 PAGE_FLIP fb_id=179
+[DRM] file 3 PAGE_FLIP fb_id=180
+[DRM] file 3 PAGE_FLIP fb_id=181
+[DRM] file 3 PAGE_FLIP fb_id=182
+[DRM] file 3 PAGE_FLIP fb_id=183
+[DRM] file 3 PAGE_FLIP fb_id=184
+[DRM] file 3 PAGE_FLIP fb_id=185
+[DRM] file 3 PAGE_FLIP fb_id=186
+[DRM] file 3 PAGE_FLIP fb_id=187
+[DRM] file 3 PAGE_FLIP fb_id=188
+[DRM] file 3 PAGE_FLIP fb_id=189
+[DRM] file 3 PAGE_FLIP fb_id=190
+[DRM] file 3 PAGE_FLIP fb_id=191
+[DRM] file 3 PAGE_FLIP fb_id=192
+[DRM] file 3 PAGE_FLIP fb_id=193
+[DRM] file 3 PAGE_FLIP fb_id=194
+[DRM] file 3 PAGE_FLIP fb_id=195
+[DRM] file 3 PAGE_FLIP fb_id=196
+[DRM] file 3 PAGE_FLIP fb_id=197
+[DRM] file 3 PAGE_FLIP fb_id=198
+[DRM] file 3 PAGE_FLIP fb_id=199
+[DRM] file 3 PAGE_FLIP fb_id=200
+[DRM] file 3 PAGE_FLIP fb_id=201
+[DRM] file 3 PAGE_FLIP fb_id=202
+[DRM] file 3 PAGE_FLIP fb_id=203
+[DRM] file 3 PAGE_FLIP fb_id=204
+[DRM] file 3 PAGE_FLIP fb_id=205
+[DRM] file 3 PAGE_FLIP fb_id=206
+[DRM] file 3 PAGE_FLIP fb_id=207
+[DRM] file 3 PAGE_FLIP fb_id=208
+[DRM] file 3 PAGE_FLIP fb_id=209
+[DRM] file 3 PAGE_FLIP fb_id=210
+[DRM] file 3 PAGE_FLIP fb_id=211
+[DRM] file 3 PAGE_FLIP fb_id=212
+[DRM] file 3 PAGE_FLIP fb_id=213
+[DRM] file 3 PAGE_FLIP fb_id=214
+[DRM] file 3 PAGE_FLIP fb_id=215
+[DRM] file 3 PAGE_FLIP fb_id=216
+[DRM] file 3 PAGE_FLIP fb_id=217
+[DRM] file 3 PAGE_FLIP fb_id=218
+[DRM] file 3 PAGE_FLIP fb_id=219
+[DRM] file 3 PAGE_FLIP fb_id=220
+[DRM] file 3 PAGE_FLIP fb_id=221
+[DRM] file 3 PAGE_FLIP fb_id=222
+[DRM] file 3 PAGE_FLIP fb_id=223
+[DRM] file 3 PAGE_FLIP fb_id=224
+[DRM] file 3 PAGE_FLIP fb_id=225
+[DRM] file 3 PAGE_FLIP fb_id=226
+[DRM] file 3 PAGE_FLIP fb_id=227
+[DRM] file 3 PAGE_FLIP fb_id=228
+[DRM] file 3 PAGE_FLIP fb_id=229
+[DRM] file 3 PAGE_FLIP fb_id=230
+[DRM] file 3 PAGE_FLIP fb_id=231
+[DRM] file 3 PAGE_FLIP fb_id=232
+[DRM] file 3 PAGE_FLIP fb_id=233
+[DRM] file 3 PAGE_FLIP fb_id=234
+[DRM] file 3 PAGE_FLIP fb_id=235
+[DRM] file 3 PAGE_FLIP fb_id=236
+[DRM] file 3 PAGE_FLIP fb_id=237
+[DRM] file 3 PAGE_FLIP fb_id=238
+[DRM] file 3 PAGE_FLIP fb_id=239
+[DRM] file 3 PAGE_FLIP fb_id=240
+[DRM] file 3 PAGE_FLIP fb_id=241
+[DRM] file 3 PAGE_FLIP fb_id=242
+[DRM] file 3 PAGE_FLIP fb_id=243
+[DRM] file 3 PAGE_FLIP fb_id=244
+[DRM] file 3 PAGE_FLIP fb_id=245
+[DRM] file 3 PAGE_FLIP fb_id=246
+[DRM] file 3 PAGE_FLIP fb_id=247
+[DRM] file 3 PAGE_FLIP fb_id=248
+[DRM] file 3 PAGE_FLIP fb_id=249
+[DRM] file 3 PAGE_FLIP fb_id=250
+[DRM] file 3 PAGE_FLIP fb_id=251
+[DRM] file 3 PAGE_FLIP fb_id=252
+[DRM] file 3 PAGE_FLIP fb_id=253
+[DRM] file 3 PAGE_FLIP fb_id=254
+[DRM] file 3 PAGE_FLIP fb_id=255
+[DRM] file 3 PAGE_FLIP fb_id=256
+[DRM] file 3 PAGE_FLIP fb_id=257
+[DRM] file 3 PAGE_FLIP fb_id=258
+[DRM] file 3 PAGE_FLIP fb_id=259
+[DRM] file 3 PAGE_FLIP fb_id=260
+[DRM] file 3 PAGE_FLIP fb_id=261
+[DRM] file 3 PAGE_FLIP fb_id=262
+[DRM] file 3 PAGE_FLIP fb_id=263
+[DRM] file 3 PAGE_FLIP fb_id=264
+[DRM] file 3 PAGE_FLIP fb_id=265
+[DRM] file 3 PAGE_FLIP fb_id=266
+[DRM] file 3 PAGE_FLIP fb_id=267
+[DRM] file 3 PAGE_FLIP fb_id=268
+[DRM] file 3 PAGE_FLIP fb_id=269
+[DRM] file 3 PAGE_FLIP fb_id=270
+[DRM] file 3 PAGE_FLIP fb_id=271
+[DRM] file 3 PAGE_FLIP fb_id=272
+[DRM] file 3 PAGE_FLIP fb_id=273
+[linux] pid 127: unimplemented syscall 29 (0x0, 0x1, 0x380) -> ENOSYS
+[DRM] file 3 PAGE_FLIP fb_id=274
+[DRM] file 3 PAGE_FLIP fb_id=275
+[DRM] file 3 PAGE_FLIP fb_id=276
+[DRM] file 3 PAGE_FLIP fb_id=277
+[DRM] file 3 PAGE_FLIP fb_id=278
+[DRM] file 3 PAGE_FLIP fb_id=279
+[DRM] file 3 PAGE_FLIP fb_id=280
+[DRM] file 3 PAGE_FLIP fb_id=281
+[DRM] file 3 PAGE_FLIP fb_id=282
+[DRM] file 3 PAGE_FLIP fb_id=283
+[DRM] file 3 PAGE_FLIP fb_id=284
+[DRM] file 3 PAGE_FLIP fb_id=285
+[DRM] file 3 PAGE_FLIP fb_id=286
+[DRM] file 3 PAGE_FLIP fb_id=287
+[DRM] file 3 PAGE_FLIP fb_id=288
+[DRM] file 3 PAGE_FLIP fb_id=289
+[DRM] file 3 PAGE_FLIP fb_id=290
+[DRM] file 3 PAGE_FLIP fb_id=291
+[DRM] file 3 PAGE_FLIP fb_id=292
+[DRM] file 3 PAGE_FLIP fb_id=293
+[DRM] file 3 PAGE_FLIP fb_id=294
+[DRM] file 3 PAGE_FLIP fb_id=295
+[DRM] file 3 PAGE_FLIP fb_id=296
+[DRM] file 3 PAGE_FLIP fb_id=297
+[DRM] file 3 PAGE_FLIP fb_id=298
+[DRM] file 3 PAGE_FLIP fb_id=299
+[DRM] file 3 PAGE_FLIP fb_id=300
+[DRM] file 3 PAGE_FLIP fb_id=301
+[DRM] file 3 PAGE_FLIP fb_id=302
+[DRM] file 3 PAGE_FLIP fb_id=303
+[DRM] file 3 PAGE_FLIP fb_id=304
+[DRM] file 3 PAGE_FLIP fb_id=305
+[DRM] file 3 PAGE_FLIP fb_id=306
+[DRM] file 3 PAGE_FLIP fb_id=307
+[DRM] file 3 PAGE_FLIP fb_id=308
+[DRM] file 3 PAGE_FLIP fb_id=309
+[DRM] file 3 PAGE_FLIP fb_id=310
+[DRM] file 3 PAGE_FLIP fb_id=311
+[DRM] file 3 PAGE_FLIP fb_id=312
+[DRM] file 3 PAGE_FLIP fb_id=313
+[DRM] file 3 PAGE_FLIP fb_id=314
+[DRM] file 3 PAGE_FLIP fb_id=315
+[DRM] file 3 PAGE_FLIP fb_id=316
+[DRM] file 3 PAGE_FLIP fb_id=317
+[DRM] file 3 PAGE_FLIP fb_id=318
+[DRM] file 3 PAGE_FLIP fb_id=319
+[DRM] file 3 PAGE_FLIP fb_id=320
+[DRM] file 3 PAGE_FLIP fb_id=321
+[DRM] file 3 PAGE_FLIP fb_id=322
+[DRM] file 3 PAGE_FLIP fb_id=323
+[DRM] file 3 PAGE_FLIP fb_id=324
+[DRM] file 3 PAGE_FLIP fb_id=325
+[DRM] file 3 PAGE_FLIP fb_id=326
+[DRM] file 3 PAGE_FLIP fb_id=327
+[DRM] file 3 PAGE_FLIP fb_id=328
+[DRM] file 3 PAGE_FLIP fb_id=329
+[DRM] file 3 PAGE_FLIP fb_id=330
+[DRM] file 3 PAGE_FLIP fb_id=331
+[DRM] file 3 PAGE_FLIP fb_id=332
+[DRM] file 3 PAGE_FLIP fb_id=333
+[DRM] file 3 PAGE_FLIP fb_id=334
+hydra-logind: handle_manager: member='CanPowerOff' sender=':1.15'
+[DRM] file 3 PAGE_FLIP fb_id=335
+[DRM] file 3 PAGE_FLIP fb_id=336
+hydra-logind: can_power: what='power-off' action='org.freedesktop.login1.power-off' sender=':1.15'
+[DRM] file 3 PAGE_FLIP fb_id=337
+[DRM] file 3 PAGE_FLIP fb_id=338
+[DRM] file 3 PAGE_FLIP fb_id=339
+[DRM] file 3 PAGE_FLIP fb_id=340
+[DRM] file 3 PAGE_FLIP fb_id=341
+[DRM] file 3 PAGE_FLIP fb_id=342
+[DRM] file 3 PAGE_FLIP fb_id=343
+[DRM] file 3 PAGE_FLIP fb_id=344
+[DRM] file 3 PAGE_FLIP fb_id=345
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanReboot' sender=':1.15'
+[DRM] file 3 PAGE_FLIP fb_id=346
+hydra-logind: can_power: what='reboot' action='org.freedesktop.login1.reboot' sender=':1.15'
+[DRM] file 3 PAGE_FLIP fb_id=347
+[DRM] file 3 PAGE_FLIP fb_id=348
+[DRM] file 3 PAGE_FLIP fb_id=349
+[DRM] file 3 PAGE_FLIP fb_id=350
+[DRM] file 3 PAGE_FLIP fb_id=351
+[DRM] file 3 PAGE_FLIP fb_id=352
+[DRM] file 3 PAGE_FLIP fb_id=353
+[DRM] file 3 PAGE_FLIP fb_id=354
+[DRM] file 3 PAGE_FLIP fb_id=355
+[DRM] file 3 PAGE_FLIP fb_id=356
+[DRM] file 3 PAGE_FLIP fb_id=357
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanSuspend' sender=':1.15'
+hydra-logind: handle_manager: member='CanHybridSleep' sender=':1.15'
+hydra-logind: handle_manager: member='CanHibernate' sender=':1.15'
+hydra-logind: handle_manager: member='CanSuspendThenHibernate' sender=':1.15'
+[DRM] file 3 PAGE_FLIP fb_id=358
+[DRM] file 3 PAGE_FLIP fb_id=359
+[DRM] file 3 PAGE_FLIP fb_id=360
+[DRM] file 3 PAGE_FLIP fb_id=361
+[DRM] file 3 PAGE_FLIP fb_id=362
+[DRM] file 3 PAGE_FLIP fb_id=363
+[DRM] file 3 PAGE_FLIP fb_id=364
+[DRM] file 3 PAGE_FLIP fb_id=365
+[DRM] file 3 PAGE_FLIP fb_id=366
+[DRM] file 3 PAGE_FLIP fb_id=367
+[DRM] file 3 PAGE_FLIP fb_id=368
+[DRM] file 3 PAGE_FLIP fb_id=369
+[DRM] file 3 PAGE_FLIP fb_id=370
+[DRM] file 3 PAGE_FLIP fb_id=371
+[DRM] file 3 PAGE_FLIP fb_id=372
+[DRM] file 3 PAGE_FLIP fb_id=373
+[DRM] file 3 PAGE_FLIP fb_id=374
+[DRM] file 3 PAGE_FLIP fb_id=375
+[DRM] file 3 PAGE_FLIP fb_id=376
+[DRM] file 3 PAGE_FLIP fb_id=377
+[DRM] file 3 PAGE_FLIP fb_id=378
+[DRM] file 3 PAGE_FLIP fb_id=379
+[DRM] file 3 PAGE_FLIP fb_id=380
+[DRM] file 3 PAGE_FLIP fb_id=381
+[DRM] file 3 PAGE_FLIP fb_id=382
+[DRM] file 3 PAGE_FLIP fb_id=383
+[DRM] file 3 PAGE_FLIP fb_id=384
+[DRM] file 3 PAGE_FLIP fb_id=385
+[DRM] file 3 PAGE_FLIP fb_id=386
+[DRM] file 3 PAGE_FLIP fb_id=387
+[DRM] file 3 PAGE_FLIP fb_id=388
+[DRM] file 3 PAGE_FLIP fb_id=389
+[DRM] file 3 PAGE_FLIP fb_id=390
+[DRM] file 3 PAGE_FLIP fb_id=391
+[DRM] file 3 PAGE_FLIP fb_id=392
+[DRM] file 3 PAGE_FLIP fb_id=393
+[DRM] file 3 PAGE_FLIP fb_id=394
+[DRM] file 3 PAGE_FLIP fb_id=395
+[DRM] file 3 PAGE_FLIP fb_id=396
+[DRM] file 3 PAGE_FLIP fb_id=397
+[DRM] file 3 PAGE_FLIP fb_id=398
+[DRM] file 3 PAGE_FLIP fb_id=399
+[DRM] file 3 PAGE_FLIP fb_id=400
+[DRM] file 3 PAGE_FLIP fb_id=401
+[DRM] file 3 PAGE_FLIP fb_id=402
+[DRM] file 3 PAGE_FLIP fb_id=403
+[DRM] file 3 PAGE_FLIP fb_id=404
+[DRM] file 3 PAGE_FLIP fb_id=405
+[DRM] file 3 PAGE_FLIP fb_id=406
+[DRM] file 3 PAGE_FLIP fb_id=407
+[DRM] file 3 PAGE_FLIP fb_id=408
+[DRM] file 3 PAGE_FLIP fb_id=409
+[DRM] file 3 PAGE_FLIP fb_id=410
+[DRM] file 3 PAGE_FLIP fb_id=411
+[DRM] file 3 PAGE_FLIP fb_id=412
+[DRM] file 3 PAGE_FLIP fb_id=413
+[DRM] file 3 PAGE_FLIP fb_id=414
+[DRM] file 3 PAGE_FLIP fb_id=415
+[DRM] file 3 PAGE_FLIP fb_id=416
+[DRM] file 3 PAGE_FLIP fb_id=417
+[DRM] file 3 PAGE_FLIP fb_id=418
+[DRM] file 3 PAGE_FLIP fb_id=419
+[DRM] file 3 PAGE_FLIP fb_id=420
+[DRM] file 3 PAGE_FLIP fb_id=421
+[DRM] file 3 PAGE_FLIP fb_id=422
+[DRM] file 3 PAGE_FLIP fb_id=423
+[DRM] file 3 PAGE_FLIP fb_id=424
+[DRM] file 3 PAGE_FLIP fb_id=425
+[DRM] file 3 PAGE_FLIP fb_id=426
+[DRM] file 3 PAGE_FLIP fb_id=427
+[linux] pid 190: unimplemented syscall 326 (0x12, 0x7fffffffc9f0, 0x13) -> ENOSYS
+[DRM] file 3 PAGE_FLIP fb_id=428
+[DRM] file 3 PAGE_FLIP fb_id=429
+[DRM] file 3 PAGE_FLIP fb_id=430
+[DRM] file 3 PAGE_FLIP fb_id=431
+[DRM] file 3 PAGE_FLIP fb_id=433
+[DRM] file 3 PAGE_FLIP fb_id=433
+hydra-logind: handle_manager: member='CanPowerOff' sender=':1.24'
+hydra-logind: can_power: what='power-off' action='org.freedesktop.login1.power-off' sender=':1.24'
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanReboot' sender=':1.24'
+hydra-logind: can_power: what='reboot' action='org.freedesktop.login1.reboot' sender=':1.24'
+hydra-logind: can_power: polkit reply ok=1 challenge=0
+hydra-logind: can_power: returning 'yes'
+hydra-logind: handle_manager: member='CanSuspend' sender=':1.24'
+hydra-logind: handle_manager: member='CanHybridSleep' sender=':1.24'
+hydra-logind: handle_manager: member='CanHibernate' sender=':1.24'
+hydra-logind: handle_manager: member='CanSuspendThenHibernate' sender=':1.24'
+[DRM] file 3 PAGE_FLIP fb_id=435
+[DRM] file 3 PAGE_FLIP fb_id=435
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=437
+[DRM] file 3 PAGE_FLIP fb_id=438
+[DRM] file 3 PAGE_FLIP fb_id=438
+[DRM] file 3 PAGE_FLIP fb_id=439
+[DRM] file 3 PAGE_FLIP fb_id=440
+[DRM] file 3 PAGE_FLIP fb_id=441
+[DRM] file 3 PAGE_FLIP fb_id=442
+[DRM] file 3 PAGE_FLIP fb_id=443
+[DRM] file 3 PAGE_FLIP fb_id=444
+[DRM] file 3 PAGE_FLIP fb_id=445
+[DRM] file 3 PAGE_FLIP fb_id=446
+[DRM] file 3 PAGE_FLIP fb_id=447
+[DRM] file 3 PAGE_FLIP fb_id=448
+[DRM] file 3 PAGE_FLIP fb_id=449
+[DRM] file 3 PAGE_FLIP fb_id=449
+[DRM] file 3 PAGE_FLIP fb_id=450
+[DRM] file 3 PAGE_FLIP fb_id=451
+[DRM] file 3 PAGE_FLIP fb_id=452
+[DRM] file 3 PAGE_FLIP fb_id=453
+[DRM] file 3 PAGE_FLIP fb_id=453
+[DRM] file 3 PAGE_FLIP fb_id=454
+[DRM] file 3 PAGE_FLIP fb_id=455
+[DRM] file 3 PAGE_FLIP fb_id=456
+[DRM] file 3 PAGE_FLIP fb_id=457
+[DRM] file 3 PAGE_FLIP fb_id=457
+[DRM] file 3 PAGE_FLIP fb_id=458
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=459
+[DRM] file 3 PAGE_FLIP fb_id=460

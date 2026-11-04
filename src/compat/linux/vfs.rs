@@ -174,7 +174,7 @@ pub(crate) fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
 pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
     let p = user_cstr(ptr)?;
     if p.is_empty() {
-        return Err(ENOENT);
+        return Err(-ENOENT);
     }
     Ok(p)
 }
@@ -731,11 +731,19 @@ fn write_statx(ptr: u64, st: &super::types::LinuxStat) -> i64 {
 /// Returns negative Linux error code on failure.
 fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxStat, i64> {
     let path = user_cstr(path_ptr)?;
+    if dirfd == 0 || (path.is_empty() && (flags & AT_EMPTY_PATH != 0)) {
+        let exe = crate::task::SCHEDULER.lock().current_task_mut(|t| alloc::string::String::from(t.exe.as_deref().unwrap_or(t.name)));
+        if let Some(ref e) = exe {
+            if e.contains("sddm-helper") {
+                crate::kprintln!("[sddm-helper] stat_at dirfd={} flags=0x{:x}", dirfd, flags);
+            }
+        }
+    }
     if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
-            return Err(ENOENT);
+            return Err(-ENOENT);
         }
-        return fstat_fd(dirfd as i32).ok_or(EBADF)?;
+        return fstat_fd(dirfd as i32).ok_or(-EBADF)?;
     }
     let (base, base_path) = base_dir(dirfd, &path)?;
     let abs = join_path(&base_path, &path);
@@ -761,9 +769,24 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
 /// `Some(Ok(stat))` or `Some(Err(e))` if handled, or `None` if not owned by this layer.
 fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
     if fd < 0 {
-        return Some(Err(EBADF));
+        return Some(Err(-EBADF));
     }
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).cloned());
+    if fd == 0 {
+        let exe = crate::task::SCHEDULER.lock().current_task_mut(|t| alloc::string::String::from(t.exe.as_deref().unwrap_or(t.name)));
+        if let Some(ref e) = exe {
+            if e.contains("sddm-helper") {
+                let dname = match &desc {
+                    None => "None",
+                    Some(FileDescriptor::ConsoleIn) => "ConsoleIn",
+                    Some(FileDescriptor::Socket(_)) => "Socket",
+                    Some(FileDescriptor::Unix(_)) => "Unix",
+                    _ => "Other",
+                };
+                crate::kprintln!("[sddm-helper] fstat_fd(0) desc={}", dname);
+            }
+        }
+    }
     match desc {
         Some(FileDescriptor::Vnode(f)) => {
             let ino = f.lock().ino;
@@ -811,7 +834,7 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::TimerFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::Inotify(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::PidFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        None => Some(Err(EBADF)),
+        None => Some(Err(-EBADF)),
         _ => None,
     }
 }
@@ -1346,7 +1369,7 @@ fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
         let op = user_cstr(oldp)?;
         let ino = if op.is_empty() {
             if flags & AT_EMPTY_PATH == 0 {
-                return Err(ENOENT);
+                return Err(-ENOENT);
             }
             fd_vnode(olddir as i32).ok_or(EBADF)?.lock().ino
         } else {
@@ -1376,7 +1399,7 @@ fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetA
         let path = if path_ptr == 0 { Vec::new() } else { user_cstr(path_ptr)? };
         let ino = if path.is_empty() {
             if !empty_ok {
-                return Err(ENOENT);
+                return Err(-ENOENT);
             }
             fd_vnode(dirfd as i32).ok_or(EBADF)?.lock().ino
         } else {
@@ -2100,7 +2123,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 {
                     super::tty::NOT_A_TTY
                 }
-                None => EBADF,
+                None => -EBADF,
                 _ => return None,
             }
         }
@@ -2302,7 +2325,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 let ino = f.lock().ino;
                 chdir_to(ino)
             }
-            None => EBADF,
+            None => -EBADF,
         },
         NR_UMASK => crate::task::with_current_fds_mut(|fds| {
             let old = fds.umask;
@@ -2310,18 +2333,18 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             old as i64
         }),
 
-        NR_DUP => crate::task::with_current_fds_mut(|fds| fds.dup_from(a[0] as usize, 0).map(|n| n as i64).unwrap_or(EBADF)),
-        NR_DUP2 => crate::task::with_current_fds_mut(|fds| fds.dup2(a[0] as usize, a[1] as usize).map(|n| n as i64).unwrap_or(EBADF)),
+        NR_DUP => crate::task::with_current_fds_mut(|fds| fds.dup_from(a[0] as usize, 0).map(|n| n as i64).unwrap_or(-EBADF)),
+        NR_DUP2 => crate::task::with_current_fds_mut(|fds| fds.dup2(a[0] as usize, a[1] as usize).map(|n| n as i64).unwrap_or(-EBADF)),
         NR_DUP3 => {
             if a[0] == a[1] {
-                EINVAL
+                -EINVAL
             } else {
                 crate::task::with_current_fds_mut(|fds| match fds.dup2(a[0] as usize, a[1] as usize) {
                     Ok(n) => {
                         fds.set_cloexec(n, a[2] as u32 & O_CLOEXEC != 0);
                         n as i64
                     }
-                    Err(_) => EBADF,
+                    Err(_) => -EBADF,
                 })
             }
         }
