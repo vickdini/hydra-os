@@ -731,14 +731,6 @@ fn write_statx(ptr: u64, st: &super::types::LinuxStat) -> i64 {
 /// Returns negative Linux error code on failure.
 fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxStat, i64> {
     let path = user_cstr(path_ptr)?;
-    if dirfd == 0 || (path.is_empty() && (flags & AT_EMPTY_PATH != 0)) {
-        let exe = crate::task::SCHEDULER.lock().current_task_mut(|t| alloc::string::String::from(t.exe.as_deref().unwrap_or(t.name)));
-        if let Some(ref e) = exe {
-            if e.contains("sddm-helper") {
-                crate::kprintln!("[sddm-helper] stat_at dirfd={} flags=0x{:x}", dirfd, flags);
-            }
-        }
-    }
     if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(-ENOENT);
@@ -772,21 +764,6 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         return Some(Err(-EBADF));
     }
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).cloned());
-    if fd == 0 {
-        let exe = crate::task::SCHEDULER.lock().current_task_mut(|t| alloc::string::String::from(t.exe.as_deref().unwrap_or(t.name)));
-        if let Some(ref e) = exe {
-            if e.contains("sddm-helper") {
-                let dname = match &desc {
-                    None => "None",
-                    Some(FileDescriptor::ConsoleIn) => "ConsoleIn",
-                    Some(FileDescriptor::Socket(_)) => "Socket",
-                    Some(FileDescriptor::Unix(_)) => "Unix",
-                    _ => "Other",
-                };
-                crate::kprintln!("[sddm-helper] fstat_fd(0) desc={}", dname);
-            }
-        }
-    }
     match desc {
         Some(FileDescriptor::Vnode(f)) => {
             let ino = f.lock().ino;
