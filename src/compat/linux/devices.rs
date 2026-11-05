@@ -707,10 +707,10 @@ MaximumUid=60000
         0o755,
     )?;
 
-    // Brave: its own launcher (/opt/brave.com/brave/brave-browser), on Wayland, without
-    // Chromium's sandbox (it needs user namespaces Hydra does not have). It uses Ubuntu's
+    // Brave: its own launcher (/opt/brave.com/brave/brave-browser), on Wayland, with
+    // Chromium's sandbox (user, PID and network namespaces, seccomp-bpf). It uses Ubuntu's
     // NSS like on any Ubuntu system: no private copies, no LD_LIBRARY_PATH
-    let brave_wrapper = b"#!/bin/sh\n# Written by Hydra\nexec /opt/brave.com/brave/brave-browser --no-sandbox --ozone-platform=wayland \"$@\"\n";
+    let brave_wrapper = b"#!/bin/sh\n# Written by Hydra\nexec /opt/brave.com/brave/brave-browser --ozone-platform=wayland \"$@\"\n";
     if lookup_path(s, t.root, "/opt/brave.com/brave/brave-browser").is_some() {
         for path in ["/usr/bin/brave-browser", "/usr/bin/brave-browser-stable", "/usr/bin/brave"] {
             let _ = t.file_bytes(s, path, brave_wrapper, 0o755);

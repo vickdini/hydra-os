@@ -55,6 +55,9 @@ pub enum PseudoFile {
     /// `/sys/fs/cgroup<group>/cgroup.procs`: the processes in a control group (`group` is
     /// empty for the root). Writing a process ID moves the process there.
     CgroupProcs(alloc::string::String),
+    /// `/proc/<pid>/uid_map`, `gid_map`, `setgroups` and `ns/<kind>` (the path after
+    /// `/proc/`): read and written through [`super::ns`].
+    ProcNs(alloc::string::String),
 }
 
 /// Where the cgroup v2 hierarchy is mounted.
@@ -107,6 +110,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
             Some(PseudoFile::ProcMountinfo)
         }
+        p if p.starts_with("/proc/") && super::ns::is_ns_file(&p[6..]) => Some(PseudoFile::ProcNs(alloc::string::String::from(&p[6..]))),
         p if p.starts_with("/proc/") && is_proc_pid_file(&p[6..]) => Some(PseudoFile::ProcPidFile(alloc::string::String::from(&p[6..]))),
         p => {
             let group = p.strip_prefix(CGROUP_ROOT)?.strip_suffix("/cgroup.procs")?;
@@ -122,7 +126,7 @@ pub fn is_proc_dir(path: &str) -> bool {
     let Some(rest) = clean.strip_prefix("/proc/") else { return false };
     let Some((who, dir)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    (who == "self" || who == "thread-self" || numeric(who)) && (dir == "task" || dir == "fd")
+    (who == "self" || who == "thread-self" || numeric(who)) && (dir == "task" || dir == "fd" || dir == "ns")
 }
 
 /// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
@@ -185,6 +189,7 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         "status" => {
             // The fields tools read: name, ids, parent (login managers walk it to a session)
             let ppid = super::proc::PROCS.lock().get(&pid).map_or(0, |p| p.ppid);
+            let (nnp, seccomp_mode) = super::seccomp::status_of(pid);
             let name: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
             Some(
                 alloc::format!(
@@ -195,8 +200,10 @@ Pid:	{}
 PPid:	{}
 Uid:	{}	{}	{}	{}
 Gid:	{}	{}	{}	{}
+NoNewPrivs:	{}
+Seccomp:	{}
 ",
-                    name, pid, pid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4]
+                    name, pid, pid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nnp as u8, seccomp_mode
                 )
                 .into_bytes(),
             )
@@ -308,6 +315,8 @@ impl PseudoFile {
             PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
             PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
             PseudoFile::ProcPidFile(_) => 0,
+            PseudoFile::ProcNs(rest) if rest.contains("/ns/") => 0,
+            PseudoFile::ProcNs(rest) => read_slice(super::ns::read_file(rest).as_bytes(), cursor, buf),
             PseudoFile::CgroupProcs(group) => {
                 let mut text = alloc::string::String::new();
                 for p in super::proc::PROCS.lock().values().filter(|p| !p.zombie && p.cgroup.as_deref().unwrap_or("") == group.as_str()) {
@@ -352,6 +361,7 @@ impl PseudoFile {
                     None => 0,
                 }
             }
+            PseudoFile::ProcNs(rest) => super::ns::write_file(rest, buf).max(0) as usize,
             _ => 0, // /proc is read-only
         }
     }
@@ -375,6 +385,11 @@ impl PseudoFile {
             }
             PseudoFile::CgroupProcs(_) => {
                 statbuf.st_mode = S_IFREG | 0o644;
+                statbuf.st_size = 0;
+            }
+            PseudoFile::ProcNs(rest) => {
+                // ns/<kind> stats as the namespace (nsfs inodes are regular files, 0444)
+                statbuf.st_mode = S_IFREG | if rest.contains("/ns/") { 0o444 } else { 0o644 };
                 statbuf.st_size = 0;
             }
             PseudoFile::ProcDir(path) => {
@@ -430,6 +445,9 @@ fn read_slice(data: &[u8], cursor: usize, buf: &mut [u8]) -> usize {
 /// * `Some(String)` containing the target path if `path` is a known `/proc/self` symlink.
 /// * `None` if `path` is not a dynamic `/proc` symlink.
 pub fn proc_link(path: &str) -> Option<alloc::string::String> {
+    if let Some(rest) = path.strip_prefix("/proc/").filter(|r| r.contains("/ns/")) {
+        return super::ns::ns_link(rest);
+    }
     match path {
         "/proc/self/cwd" => Some(crate::task::with_current_fds_mut(|fds| fds.cwd_path.clone())),
         "/proc/self/exe" => crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())),

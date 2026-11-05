@@ -222,6 +222,10 @@ fn read_sockaddr(ptr: u64, len: u64) -> Result<Option<([u8; 4], u16)>, i64> {
     if family == 0 {
         return Ok(None);
     }
+    if super::ns::net_isolated() {
+        // A network namespace of its own: no interfaces, nothing reachable
+        return Err(-101); // ENETUNREACH
+    }
     if family == AF_INET6 {
         return Err(EAFNOSUPPORT);
     }

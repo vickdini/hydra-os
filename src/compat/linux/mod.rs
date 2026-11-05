@@ -10,6 +10,7 @@ pub mod drm;
 pub mod epoll;
 pub mod evdev;
 pub mod netlink;
+pub mod ns;
 pub mod eventfd;
 pub mod fs;
 pub mod itimer;
@@ -23,6 +24,7 @@ pub mod proc;
 pub mod pidfd;
 pub mod pty;
 pub mod process;
+pub mod seccomp;
 pub mod select;
 pub mod signalfd;
 pub mod socket;
@@ -100,6 +102,15 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     {
         let mut stats = LINUX_STATS.lock();
         stats.total_calls += 1;
+    }
+
+    if let seccomp::Verdict::Return(r) = seccomp::check(frame) {
+        return r;
+    }
+    match num {
+        317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
+        272 => return ns::sys_unshare(arg0),
+        _ => {}
     }
 
     if let Some(r) = dispatch_process_calls(frame, num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
@@ -1113,11 +1124,13 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         }
 
         SYS_GETPID => {
-            crate::task::with_current_task_mut(|t| t.tgid as i64).unwrap_or(0)
+            let tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
+            ns::pid_to_caller(tgid) as i64
         }
 
         SYS_GETTID => {
-            crate::task::SCHEDULER.lock().current_task_id().0 as i64
+            let tid = crate::task::SCHEDULER.lock().current_task_id().0;
+            ns::pid_to_caller(tid) as i64
         }
 
         SYS_CLONE => {
@@ -1225,16 +1238,20 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         }
 
         SYS_GETUID => {
-            crate::task::with_current_task_mut(|t| t.uid as i64).unwrap_or(0)
+            let id = crate::task::with_current_task_mut(|t| t.uid).unwrap_or(0);
+            ns::id_for_caller(id, false) as i64
         }
         SYS_GETGID => {
-            crate::task::with_current_task_mut(|t| t.gid as i64).unwrap_or(0)
+            let id = crate::task::with_current_task_mut(|t| t.gid).unwrap_or(0);
+            ns::id_for_caller(id, true) as i64
         }
         SYS_GETEUID => {
-            crate::task::with_current_task_mut(|t| t.euid as i64).unwrap_or(0)
+            let id = crate::task::with_current_task_mut(|t| t.euid).unwrap_or(0);
+            ns::id_for_caller(id, false) as i64
         }
         SYS_GETEGID => {
-            crate::task::with_current_task_mut(|t| t.egid as i64).unwrap_or(0)
+            let id = crate::task::with_current_task_mut(|t| t.egid).unwrap_or(0);
+            ns::id_for_caller(id, true) as i64
         }
 
         SYS_SETUID => {
@@ -1358,14 +1375,14 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let ruid_p = arg0 as *mut u32;
             let euid_p = arg1 as *mut u32;
             let suid_p = arg2 as *mut u32;
-            crate::task::with_current_task_mut(|t| {
-                unsafe {
-                    if !ruid_p.is_null() { *ruid_p = t.uid; }
-                    if !euid_p.is_null() { *euid_p = t.euid; }
-                    if !suid_p.is_null() { *suid_p = t.suid; }
-                }
-                0
-            }).unwrap_or(-EFAULT)
+            let Some(ids) = crate::task::with_current_task_mut(|t| [t.uid, t.euid, t.suid]) else { return -EFAULT };
+            let ids = ids.map(|id| ns::id_for_caller(id, false));
+            unsafe {
+                if !ruid_p.is_null() { *ruid_p = ids[0]; }
+                if !euid_p.is_null() { *euid_p = ids[1]; }
+                if !suid_p.is_null() { *suid_p = ids[2]; }
+            }
+            0
         }
 
         SYS_SETRESGID => {
@@ -1393,14 +1410,14 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let rgid_p = arg0 as *mut u32;
             let egid_p = arg1 as *mut u32;
             let sgid_p = arg2 as *mut u32;
-            crate::task::with_current_task_mut(|t| {
-                unsafe {
-                    if !rgid_p.is_null() { *rgid_p = t.gid; }
-                    if !egid_p.is_null() { *egid_p = t.egid; }
-                    if !sgid_p.is_null() { *sgid_p = t.sgid; }
-                }
-                0
-            }).unwrap_or(-EFAULT)
+            let Some(ids) = crate::task::with_current_task_mut(|t| [t.gid, t.egid, t.sgid]) else { return -EFAULT };
+            let ids = ids.map(|id| ns::id_for_caller(id, true));
+            unsafe {
+                if !rgid_p.is_null() { *rgid_p = ids[0]; }
+                if !egid_p.is_null() { *egid_p = ids[1]; }
+                if !sgid_p.is_null() { *sgid_p = ids[2]; }
+            }
+            0
         }
 
         SYS_CAPGET => {
@@ -1983,10 +2000,18 @@ const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>) -> i64 {
     const CLONE_VFORK: u64 = 0x4000;
     args[0] &= !CLONE_PIDFD;
+    if let Err(e) = ns::check_clone(args[0]) {
+        return e;
+    }
     let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
         Ok(id) => id.0,
         Err(_) => return -ENOMEM,
     };
+    ns::after_clone(child, args[0]);
+    if args[0] & (types::CLONE_FS | types::CLONE_FILES | types::CLONE_THREAD) == types::CLONE_FS {
+        // Shares our root and working directory, which live in the descriptor table
+        proc::set_fs_peer(child, proc::current_ids().1);
+    }
     if let Some(ptr) = pidfd_ptr {
         let fd = pidfd::install(child, false) as i32;
         if !crate::memory::vm::prefault_current(ptr, 4, true) {
@@ -2069,7 +2094,11 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
         127 => proc::sys_rt_sigpending(a[0], a[1]),
         130 => proc::sys_rt_sigsuspend(a[0], a[1]),
         131 => proc::sys_sigaltstack(a[0], a[1]),
-        61 => proc::sys_wait4(a[0] as i32 as i64, a[1], a[2], a[3]),
+        61 => {
+            let pid = a[0] as i32 as i64;
+            let pid = if pid > 0 { ns::pid_from_caller(pid as u64) as i64 } else { pid };
+            proc::sys_wait4(pid, a[1], a[2], a[3])
+        }
         247 => proc::sys_waitid(a[0], a[1], a[2], a[3]),
         59 => execve::sys_execve(frame, fpu, -100, a[0], a[1], a[2], 0),
         322 => execve::sys_execve(frame, fpu, a[0] as i32 as i64, a[1], a[2], a[3], a[4]),

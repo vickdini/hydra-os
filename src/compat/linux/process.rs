@@ -349,9 +349,13 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_SETPGID => super::proc::setpgid(a[0] as u32 as u64, a[1] as u32 as u64),
         NR_SETSID => super::proc::setsid(),
         // pid_t arguments are 32-bit: sign-extend from the low half of the register
-        NR_KILL => super::proc::sys_kill(a[0] as i32 as i64, a[1]),
-        NR_TKILL => super::proc::sys_tkill(a[0] as u32 as u64, a[1]),
-        NR_TGKILL => super::proc::sys_tgkill(a[0] as u32 as u64, a[1] as u32 as u64, a[2]),
+        // PID namespace: 1 is the namespace's init
+        NR_KILL => {
+            let pid = a[0] as i32 as i64;
+            super::proc::sys_kill(if pid > 0 { super::ns::pid_from_caller(pid as u64) as i64 } else { pid }, a[1])
+        }
+        NR_TKILL => super::proc::sys_tkill(super::ns::pid_from_caller(a[0] as u32 as u64), a[1]),
+        NR_TGKILL => super::proc::sys_tgkill(super::ns::pid_from_caller(a[0] as u32 as u64), super::ns::pid_from_caller(a[1] as u32 as u64), a[2]),
         NR_SCHED_GETAFFINITY => {
             // One CPU: report a mask with only CPU 0 set, sized as the kernel's cpumask (8 bytes)
             if (a[1] as usize) < 8 {
@@ -512,7 +516,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
                 auxv.len() as i64
             }
-            PR_SET_NAME | PR_SET_PDEATHSIG | PR_SET_DUMPABLE | PR_SET_CHILD_SUBREAPER | PR_SET_NO_NEW_PRIVS => 0,
+            PR_SET_NAME | PR_SET_PDEATHSIG | PR_SET_DUMPABLE | PR_SET_CHILD_SUBREAPER => 0,
+            // PR_GET_SECCOMP, PR_SET_SECCOMP, PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS
+            21 | 22 | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => super::seccomp::prctl(a[0], a[1], a[2]).unwrap_or(EINVAL),
             8 => {
                 // PR_SET_KEEPCAPS
                 if a[1] > 1 {
@@ -530,7 +536,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 copy_out(a[1], &name)
             }
             PR_GET_DUMPABLE | PR_CAPBSET_READ => 1,
-            PR_GET_NO_NEW_PRIVS => 0,
             _ => EINVAL,
         },
         _ => return None,

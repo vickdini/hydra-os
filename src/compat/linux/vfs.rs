@@ -73,6 +73,17 @@ const NR_DUP3: u64 = 292;
 const NR_SYNCFS: u64 = 306;
 const NR_RENAMEAT2: u64 = 316;
 const NR_STATX: u64 = 332;
+const NR_CHROOT: u64 = 161;
+
+/// Process root after `chroot` into a `/proc` directory (Chromium's sandbox uses
+/// `/proc/self/fdinfo/` of a short-lived helper): an empty directory, so nothing can be
+/// looked up from `/` or the working directory. Lookups through directory descriptors
+/// opened before reach only `/proc` files; the pool is out of reach.
+pub(crate) const EMPTY_ROOT: u64 = u64::MAX;
+
+/// Base "inode" of a lookup relative to a descriptor of a `/proc` pseudo directory: only
+/// `/proc` names resolve under it, never pool files.
+const PSEUDO_DIR_BASE: u64 = u64::MAX - 1;
 const NR_FACCESSAT2: u64 = 439;
 
 // errno
@@ -271,7 +282,13 @@ pub(crate) fn proc_root() -> u64 {
 /// # Errors
 /// Returns negative Linux error code on lookup or permission failure.
 pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
-    ZfsClient::resolve_in(proc_root(), base, path, follow)
+    match proc_root() {
+        _ if base == PSEUDO_DIR_BASE => Err(ENOENT),
+        // An open directory can still be reopened ("."), but nothing reached from it
+        EMPTY_ROOT if base != 0 && base != EMPTY_ROOT && matches!(path, b"." | b"./") => Ok(base),
+        EMPTY_ROOT => Err(ENOENT),
+        root => ZfsClient::resolve_in(root, base, path, follow),
+    }
 }
 
 /// Lookup key of a Unix socket path: the process root and the absolute path, so the
@@ -376,7 +393,11 @@ pub(crate) fn path_exists(path: &[u8]) -> bool {
 /// # Errors
 /// Returns negative Linux error code on lookup failure.
 fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
-    ZfsClient::resolve_parent_in(proc_root(), base, path)
+    match proc_root() {
+        _ if base == PSEUDO_DIR_BASE => Err(ENOENT),
+        EMPTY_ROOT => Err(ENOENT),
+        root => ZfsClient::resolve_parent_in(root, base, path),
+    }
 }
 
 /// Returns the directory a path is resolved against: `(inode, absolute path)`. Inode 0 means the process root.
@@ -391,6 +412,9 @@ fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
 /// # Errors
 /// Returns `-ENOTDIR` or `-EBADF` if `dirfd` is invalid or not a directory.
 pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
+    if (path.first() == Some(&b'/') || dirfd as i32 == AT_FDCWD as i32) && proc_root() == EMPTY_ROOT {
+        return Err(ENOENT);
+    }
     if path.first() == Some(&b'/') {
         return Ok((0, String::from("/")));
     }
@@ -402,7 +426,17 @@ pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
             let f = f.lock();
             Ok((f.ino, f.path.clone()))
         }
-        None => Err(if fd_exists(dirfd as i32) { ENOTDIR } else { EBADF }),
+        None => {
+            // A /proc directory (Chromium walks /proc/self/fd through one)
+            let pseudo_dir = crate::task::with_current_fds_mut(|fds| match fds.get(dirfd as usize) {
+                Some(FileDescriptor::File { path, .. }) if super::fs::is_proc_dir(path) => Some(path.clone()),
+                _ => None,
+            });
+            match pseudo_dir {
+                Some(path) => Ok((PSEUDO_DIR_BASE, path)),
+                None => Err(if fd_exists(dirfd as i32) { ENOTDIR } else { EBADF }),
+            }
+        }
     }
 }
 
@@ -747,6 +781,18 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
     }
     if is_pseudo(&abs) {
         return Ok(pseudo_stat(&abs));
+    }
+    if let Some(fd) = own_fd_number(&abs) {
+        // /proc/self/fd/N: a link to the open file, which stat follows
+        if flags & AT_SYMLINK_NOFOLLOW == 0 {
+            if let Some(st) = fstat_fd(fd) {
+                return st;
+            }
+        }
+        let mut st = super::types::LinuxStat::default();
+        st.st_mode = if flags & AT_SYMLINK_NOFOLLOW != 0 { 0o120700 } else { 0o010600 };
+        st.st_nlink = 1;
+        return Ok(st);
     }
     let ino = resolve(base, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
     Ok(fill_stat(&ZfsClient::getattr(ino)?))
@@ -1126,7 +1172,11 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
     entries.push((1, alloc::string::String::from("."), 4));
     entries.push((1, alloc::string::String::from(".."), 4));
 
-    if dir == "task" {
+    if dir == "ns" {
+        for (i, kind) in ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "user", "uts"].iter().enumerate() {
+            entries.push((200 + i as u64, alloc::string::String::from(*kind), 10));
+        }
+    } else if dir == "task" {
         for tid in super::proc::thread_ids_of(target_pid) {
             entries.push((tid, alloc::format!("{}", tid), 4));
         }
@@ -1280,6 +1330,24 @@ fn access_at(dirfd: i64, path_ptr: u64, mode: u32, flags: u64) -> i64 {
         }
     })();
     r.err().unwrap_or(0)
+}
+
+/// The descriptor number named by `/proc/self/fd/N` (or `/proc/<own pid>/fd/N`, or
+/// `/dev/fd/N`) if it is open.
+///
+/// # Arguments
+/// * `abs` - Absolute path.
+///
+/// # Returns
+/// The descriptor number, or `None`.
+fn own_fd_number(abs: &str) -> Option<i32> {
+    let (who, fd) = abs.strip_prefix("/dev/fd/").map(|n| ("self", n)).or_else(|| abs.strip_prefix("/proc/")?.split_once("/fd/"))?;
+    let (_, pid) = super::proc::current_ids();
+    if who != "self" && who != "thread-self" && who.parse::<u64>().ok() != Some(pid) {
+        return None;
+    }
+    let fd: i32 = fd.trim_end_matches('/').parse().ok()?;
+    fd_exists(fd).then_some(fd)
 }
 
 /// Target of `/proc/self/fd/N` (also `/proc/<own pid>/fd/N`): what descriptor N refers to.
@@ -1642,6 +1710,72 @@ fn statfs_out(ptr: u64, magic: i64) -> i64 {
     }
 }
 
+/// `chroot(2)`: makes `path` the root of the caller, and of the process it shares its
+/// root with (`CLONE_FS`). Needs `CAP_SYS_CHROOT`, in the system or in the caller's own
+/// user namespace. A directory under `/proc` becomes [`EMPTY_ROOT`].
+///
+/// # Arguments
+/// * `ptr` - User pointer to the new root's path.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code.
+fn sys_chroot(ptr: u64) -> i64 {
+    const CAP_SYS_CHROOT: u64 = 1 << 18;
+    if !crate::task::with_current_task_mut(|t| t.caps.effective & CAP_SYS_CHROOT != 0).unwrap_or(false) {
+        return EPERM;
+    }
+    let path = match user_path(ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (base, base_path) = match base_dir(AT_FDCWD, &path) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let abs = join_path(&base_path, &path);
+    let proc_dir = abs.trim_end_matches('/').strip_prefix("/proc/").and_then(|r| r.split_once('/')).is_some_and(|(who, dir)| {
+        (who == "self" || who == "thread-self" || who.bytes().all(|b| b.is_ascii_digit())) && matches!(dir, "fdinfo" | "fd" | "task" | "ns")
+    });
+    let root = if proc_dir {
+        EMPTY_ROOT
+    } else {
+        let ino = match resolve(base, &path, true) {
+            Ok(i) => i,
+            Err(e) => return e,
+        };
+        match ZfsClient::getattr(ino) {
+            Ok(a) if !a.is_dir() => return ENOTDIR,
+            Ok(a) if !may_access(&a, creds().euid, creds().egid, 1) => return EACCES,
+            Ok(_) => ino,
+            Err(e) => return e,
+        }
+    };
+    let set = |fds: &mut crate::fs::FdTable| {
+        fds.root_ino = root;
+        if root == EMPTY_ROOT {
+            // Nothing outside it stays reachable through the working directory either
+            fds.cwd_ino = EMPTY_ROOT;
+            fds.cwd_path = String::from("/");
+        }
+    };
+    crate::task::with_current_fds_mut(|fds| set(fds));
+    // The process sharing our root (CLONE_FS) changes with us
+    let (_, me) = super::proc::current_ids();
+    let peers: Vec<u64> = {
+        let procs = super::proc::PROCS.lock();
+        let mine = procs.get(&me).map_or(0, |p| p.fs_peer);
+        procs.values().filter(|p| !p.zombie && (p.pid == mine || p.fs_peer == me)).map(|p| p.pid).collect()
+    };
+    for pid in peers {
+        let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone());
+        if let Some(fds) = fds {
+            set(&mut fds.lock());
+        }
+    }
+    0
+}
+
+
 /// Physical absolute path (inside the process root) of a directory inode, built by
 /// walking `..` upwards.
 ///
@@ -1656,6 +1790,7 @@ fn statfs_out(ptr: u64, magic: i64) -> i64 {
 fn dir_path(ino: u64) -> Result<String, i64> {
     let root = match proc_root() {
         0 => ZfsClient::root_ino(),
+        EMPTY_ROOT => return Err(ENOENT),
         r => r,
     };
     let mut names: Vec<Vec<u8>> = Vec::new();
@@ -2471,6 +2606,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
             }
         }
+        NR_CHROOT => sys_chroot(a[0]),
+        NR_CHDIR if proc_root() == EMPTY_ROOT => match user_path(a[0]) {
+            Ok(p) if p == b"/" || p == b"." => 0,
+            Ok(_) => ENOENT,
+            Err(e) => e,
+        },
         NR_CHDIR => match user_path(a[0]).and_then(|p| {
             let (base, _) = base_dir(AT_FDCWD, &p)?;
             resolve(base, &p, true)

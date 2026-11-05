@@ -90,6 +90,8 @@ pub const SIGVTALRM: u32 = 26;
 pub const SIGPROF: u32 = 27;
 /// Terminal window size change (`SIGWINCH`).
 pub const SIGWINCH: u32 = 28;
+/// Bad system call (raised by a seccomp `TRAP` filter).
+pub const SIGSYS: u32 = 31;
 
 /// Default signal disposition constant (`SIG_DFL`).
 const SIG_DFL: u64 = 0;
@@ -196,12 +198,20 @@ struct SigSender {
     pid: u32,
     /// `si_uid`: its real user ID.
     uid: u32,
+    /// `SIGSYS` from seccomp: `si_call_addr`, the address after the `syscall` instruction.
+    call_addr: u64,
+    /// `SIGSYS` from seccomp: `si_syscall`, the call number.
+    syscall: i32,
+    /// `SIGSYS` from seccomp: `si_errno`, the filter's return data.
+    errno: i32,
 }
 
 /// `si_code` of a signal sent by `kill`.
 const SI_USER: i32 = 0;
 /// `si_code` of a signal sent by `tkill` or `tgkill`.
 const SI_TKILL: i32 = -6;
+/// `si_code` of a `SIGSYS` raised by a seccomp filter.
+const SYS_SECCOMP: i32 = 1;
 
 /// One process (thread group).
 pub struct Process {
@@ -244,6 +254,11 @@ pub struct Process {
     /// When the process started, in clock ticks (`USER_HZ`, 100 per second) since boot
     /// (`/proc/<pid>/stat`; polkit tells processes apart by pid and start time).
     pub start_time: u64,
+    /// Namespaces the process is in.
+    pub ns: super::ns::Ns,
+    /// Process sharing this one's root and working directory (`clone` with `CLONE_FS`
+    /// only: they live in the descriptor table, which is not shared), or 0.
+    pub fs_peer: u64,
 }
 
 /// All Linux processes, including zombies not yet reaped.
@@ -285,12 +300,12 @@ pub fn current_ids() -> (u64, u64) {
 /// * `inherit_from` - Optional parent process ID to inherit signal dispositions and IDs from.
 pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>) {
     let mut procs = PROCS.lock();
-    let (pgid, sid, actions, mask, groups, cgroup) = match inherit_from.and_then(|p| procs.get(&p)) {
+    let (pgid, sid, actions, mask, groups, cgroup, ns) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone())
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid))
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None),
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default()),
     };
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
@@ -315,8 +330,21 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             cgroup,
             senders: [SigSender::default(); NSIG + 1],
             start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
+            ns,
+            fs_peer: 0,
         },
     );
+}
+
+/// Records that process `pid` shares process `peer`'s root and working directory.
+///
+/// # Arguments
+/// * `pid` - Process created with `CLONE_FS`.
+/// * `peer` - Its creator.
+pub fn set_fs_peer(pid: u64, peer: u64) {
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        p.fs_peer = peer;
+    }
 }
 
 /// Adds a thread to an existing process (inherits the creating thread's mask).
@@ -374,6 +402,16 @@ pub fn thread_exited(pid: u64, tid: u64) {
     };
     if !now_zombie {
         return;
+    }
+    // The init of a PID namespace takes the namespace with it
+    if procs.get(&pid).is_some_and(|p| p.ns.pid_inits.last() == Some(&pid)) {
+        let members: Vec<u64> = procs.values().filter(|q| q.pid != pid && !q.zombie && q.ns.pid_inits.contains(&pid)).map(|q| q.pid).collect();
+        for m in members {
+            if let Some(q) = procs.get_mut(&m) {
+                q.pending |= bit(SIGKILL);
+            }
+            crate::task::wait::wake_process_deferred(m);
+        }
     }
     // Orphans are adopted by "init" (pid 1); zombies of init are reaped at once
     let orphans: Vec<u64> = procs.values().filter(|c| c.ppid == pid).map(|c| c.pid).collect();
@@ -519,7 +557,12 @@ pub fn process_count() -> usize {
 /// Parent process ID as `i64`.
 pub fn getppid() -> i64 {
     let (_, pid) = current_ids();
-    PROCS.lock().get(&pid).map_or(1, |p| p.ppid as i64)
+    let (ppid, ns_init) = PROCS.lock().get(&pid).map_or((1, false), |p| (p.ppid, p.ns.pid_inits.last() == Some(&pid)));
+    if ns_init {
+        // The init of a PID namespace has its parent outside it
+        return 0;
+    }
+    super::ns::pid_to_caller(ppid) as i64
 }
 
 /// Returns the process group ID of `target` (or the caller when `target == 0`).
@@ -897,7 +940,7 @@ fn record_sender(pid: u64, tid: Option<u64>, sig: u32, code: i32) {
     }
     let (_, me) = current_ids();
     let uid = crate::task::with_current_task_mut(|t| t.uid).unwrap_or(0);
-    let sender = SigSender { code, pid: me as u32, uid };
+    let sender = SigSender { code, pid: me as u32, uid, ..Default::default() };
     if let Some(p) = PROCS.lock().get_mut(&pid) {
         match tid {
             Some(tid) => {
@@ -1491,12 +1534,45 @@ fn dequeue() -> Action {
 /// Does not return (`!`).
 fn die(sig: u32) -> ! {
     let (_, pid) = current_ids();
-    let core = matches!(sig, SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV);
+    let core = matches!(sig, SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV | SIGSYS);
     if sig != SIGPIPE && sig != SIGTERM && sig != SIGINT && sig != SIGKILL {
         crate::kprintln!("[linux] pid {} killed by signal {}{}", pid, sig, if core { " (core dumped)" } else { "" });
     }
     set_exit_status(pid, (sig as i32) | if core { 0x80 } else { 0 });
     crate::task::exit_group();
+}
+
+/// Terminates the calling process as if killed by `sig` (seccomp `KILL` actions).
+///
+/// # Arguments
+/// * `sig` - Signal number reported as the cause.
+///
+/// # Returns
+/// Does not return (`!`).
+pub fn die_by_signal(sig: u32) -> ! {
+    die(sig)
+}
+
+/// Raises `SIGSYS` for a call a seccomp filter trapped, the way the kernel forces it: the
+/// signal is unblocked and an ignored disposition is reset, and its `siginfo` names the
+/// call. It is delivered as the skipped call returns.
+///
+/// # Arguments
+/// * `nr` - Trapped system call number.
+/// * `ip` - Address after the `syscall` instruction.
+/// * `errno` - Filter return data, reported as `si_errno`.
+pub fn force_seccomp_sigsys(nr: i32, ip: u64, errno: i32) {
+    let (tid, pid) = current_ids();
+    let mut procs = PROCS.lock();
+    if let Some(p) = procs.get_mut(&pid) {
+        if p.actions[SIGSYS as usize].handler == SIG_IGN {
+            p.actions[SIGSYS as usize] = SigAction::default();
+        }
+        let t = p.threads.entry(tid).or_default();
+        t.mask &= !bit(SIGSYS);
+        t.pending |= bit(SIGSYS);
+        t.senders[SIGSYS as usize] = SigSender { code: SYS_SECCOMP, call_addr: ip, syscall: nr, errno, ..Default::default() };
+    }
 }
 
 /// Writes an `rt_sigframe` for `sig` onto the user stack and redirects `regs` to the
@@ -1559,7 +1635,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
         procs
             .get_mut(&pid)
             .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
-                Some(s) if s.pid != 0 => s,
+                Some(s) if s.pid != 0 || s.code == SYS_SECCOMP => s,
                 _ => core::mem::take(&mut p.senders[sig as usize]),
             })
             .unwrap_or_default()
@@ -1568,6 +1644,13 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     f[320..324].copy_from_slice(&sender.code.to_le_bytes());
     f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
     f[332..336].copy_from_slice(&sender.uid.to_le_bytes());
+    if sig == SIGSYS && sender.code == SYS_SECCOMP {
+        // _sigsys: si_call_addr, si_syscall, si_arch (in place of si_pid/si_uid)
+        f[316..320].copy_from_slice(&sender.errno.to_le_bytes());
+        put(&mut f, 328, sender.call_addr);
+        f[336..340].copy_from_slice(&sender.syscall.to_le_bytes());
+        f[340..344].copy_from_slice(&super::seccomp::AUDIT_ARCH_X86_64.to_le_bytes());
+    }
 
     if !write_bytes(fp_addr, &fpu.0) || !write_bytes(frame, &f) {
         return false;

@@ -316,6 +316,8 @@ pub struct Task {
     pub sgid: u32,
     /// Linux capability sets (what privileged operations are allowed).
     pub caps: Caps,
+    /// Seccomp state: `no_new_privs`, mode and filter chain (inherited by children).
+    pub seccomp: crate::compat::linux::seccomp::State,
     /// Saved CPU general-purpose and control register state.
     pub regs: TaskRegisters,
     /// Dedicated kernel stack buffer (used for Ring 0 execution and TSS `RSP0`).
@@ -402,6 +404,7 @@ impl Task {
             suid: 0,
             sgid: 0,
             caps: Caps::for_euid(0),
+            seccomp: Default::default(),
             regs,
             stack: None,      // Uses existing firmware/boot stack
             user_stack: None,
@@ -481,6 +484,9 @@ pub struct Caps {
     pub permitted: u64,
     /// Keep the permitted set when no user id stays 0 (`PR_SET_KEEPCAPS`).
     pub keep: bool,
+    /// The sets hold capabilities in a user namespace of the process's own: they pass
+    /// namespace-scoped checks only, never [`Caps::has`].
+    pub in_userns: bool,
 }
 
 impl Caps {
@@ -496,7 +502,7 @@ impl Caps {
     /// The sets a process starts with: all for root, none otherwise.
     pub const fn for_euid(euid: u32) -> Self {
         let all = if euid == 0 { Self::FULL } else { 0 };
-        Self { effective: all, permitted: all, keep: false }
+        Self { effective: all, permitted: all, keep: false, in_userns: false }
     }
 
     /// True if capability `cap` (a `Caps::*` bit) is effective.
@@ -509,7 +515,14 @@ impl Caps {
     ///
     /// `true` if the capability bit is set in the effective set, `false` otherwise.
     pub fn has(&self, cap: u64) -> bool {
-        self.effective & cap != 0
+        !self.in_userns && self.effective & cap != 0
+    }
+
+    /// Enters a new user namespace: every capability, valid inside it only.
+    pub fn enter_userns(&mut self) {
+        self.effective = Self::FULL;
+        self.permitted = Self::FULL;
+        self.in_userns = true;
     }
 
     /// Applies the capability rules for a change of user ids from `old` to `new`

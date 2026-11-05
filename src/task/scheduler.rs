@@ -419,6 +419,7 @@ impl Scheduler {
             suid: 0,
             sgid: 0,
             caps: crate::task::tcb::Caps::for_euid(0),
+            seccomp: Default::default(),
             regs,
             stack: Some(stack),
             user_stack: None,
@@ -520,6 +521,7 @@ impl Scheduler {
             suid: 0,
             sgid: 0,
             caps: crate::task::tcb::Caps::for_euid(0),
+            seccomp: Default::default(),
             regs,
             stack: Some(kernel_stack),
             user_stack: Some(user_stack),
@@ -607,6 +609,7 @@ impl Scheduler {
             suid: 0,
             sgid: 0,
             caps: crate::task::tcb::Caps::for_euid(0),
+            seccomp: Default::default(),
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -697,6 +700,7 @@ impl Scheduler {
             suid: uid,
             sgid: gid,
             caps: crate::task::tcb::Caps::for_euid(uid),
+            seccomp: Default::default(),
             regs,
             stack: Some(image.kernel_stack),
             user_stack: Some(image.user_stack),
@@ -793,6 +797,7 @@ impl Scheduler {
             suid: uid,
             sgid: gid,
             caps: crate::task::tcb::Caps::for_euid(uid),
+            seccomp: Default::default(),
             regs,
             stack: Some(alloc::vec![0u8; DEFAULT_STACK_SIZE].into_boxed_slice()),
             user_stack: None,
@@ -868,6 +873,7 @@ impl Scheduler {
         let parent_suid = parent.suid;
         let parent_sgid = parent.sgid;
         let parent_caps = parent.caps;
+        let parent_seccomp = parent.seccomp.clone();
         let parent_exe = parent.exe.clone();
         let parent_cmdline = parent.cmdline.clone();
         let parent_mm = if flags & CLONE_VM != 0 {
@@ -960,6 +966,7 @@ impl Scheduler {
             suid: parent_suid,
             sgid: parent_sgid,
             caps: parent_caps,
+            seccomp: parent_seccomp,
             regs,
             stack: Some(kernel_stack),
             user_stack: None,
@@ -1283,6 +1290,17 @@ impl Scheduler {
     /// `Some(R)` produced by `f`, or `None` if task ID not found.
     pub fn with_task_mut<R>(&mut self, id: TaskId, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         self.tasks.iter_mut().find(|t| t.id == id).map(f)
+    }
+
+    /// Runs `f` on every live task.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Closure applied to each task.
+    pub fn for_each_task_mut(&mut self, mut f: impl FnMut(&mut Task)) {
+        for t in self.tasks.iter_mut().filter(|t| t.state != TaskState::Dead) {
+            f(t);
+        }
     }
 
     /// Runs `f` on a live thread of process `tgid`, or returns `None` if there is none.

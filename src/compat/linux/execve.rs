@@ -223,6 +223,12 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         let data = &source.head;
         set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
         set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
+        if crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
+            // no_new_privs, or a user namespace (the owner, root, is not mapped in it):
+            // set-user/group-ID bits are ignored
+            set_uid = None;
+            set_gid = None;
+        }
 
         if let Some((interp, arg)) = parse_shebang(data) {
             via_script = true;
@@ -254,6 +260,9 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
 
         let root = proc_root();
         let read_in_root = |p: &str| -> Option<crate::task::exec::ElfSource> {
+            if root == super::vfs::EMPTY_ROOT {
+                return None;
+            }
             let ino = ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?;
             super::mm::inode_source(ino).ok()
         };
