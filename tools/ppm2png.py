@@ -1,6 +1,6 @@
 """Converts a QEMU screendump (binary PPM) to PNG without third-party modules.
 
-Usage: python scratch/ppm2png.py in.ppm out.png [scale]
+Usage: python tools/ppm2png.py in.ppm out.png [scale]
 (the harness takes a screendump with the token "!screendump D:/os/scratch/screen.ppm")
 """
 import struct

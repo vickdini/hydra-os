@@ -19,9 +19,6 @@ dist/x86_64/brave-media.img
 # Build output of the userland crates
 **/target/
 
-# Scratch: keep scripts and test sources, not logs, screenshots or binaries
-scratch/**
-!scratch/**/
-!scratch/**/*.py
-!scratch/**/*.sh
-!scratch/**/*.c
+# Scratch: logs, screenshots and throwaway files (tools live in tools/)
+scratch/*
+!scratch/.gitkeep

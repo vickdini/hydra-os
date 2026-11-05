@@ -20,7 +20,7 @@ set -- \
     "!screendump D:/os/scratch/m6_back.ppm" \
     "%f12" "~2"
 unset IFS
-timeout 1000 python scratch/hydra_run.py --no-cancel --wait 3 "$@" > scratch/m6_run.log 2>&1
+timeout 1000 python tools/hydra_run.py --no-cancel --wait 3 "$@" > scratch/m6_run.log 2>&1
 for n in m6_desktop m6_launcher m6_console m6_back; do
-    python scratch/ppm2png.py scratch/$n.ppm scratch/$n.png
+    python tools/ppm2png.py scratch/$n.ppm scratch/$n.png
 done

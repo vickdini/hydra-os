@@ -1,7 +1,7 @@
 """Boot Hydra headless in QEMU, type shell commands, and capture the serial log.
 
 Usage:
-    python scratch/hydra_run.py [--mem 4G] [--wait SECONDS] [--until TEXT] [--log PATH] "cmd1" "cmd2" ...
+    python tools/hydra_run.py [--mem 4G] [--wait SECONDS] [--until TEXT] [--log PATH] "cmd1" "cmd2" ...
 
 Each command is typed into the Hydra shell followed by Enter. After the last command the
 script waits until TEXT appears in the serial log (or SECONDS elapse), prints the log tail

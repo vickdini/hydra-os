@@ -21,7 +21,7 @@ set -- \
     "!screendump D:/os/scratch/rb_after_wheel.ppm" \
     "%f12" "~2"
 unset IFS
-timeout 1600 python scratch/hydra_run.py --no-cancel --wait 3 --stall-dump 300 "$@" > scratch/rb_run.log 2>&1
+timeout 1600 python tools/hydra_run.py --no-cancel --wait 3 --stall-dump 300 "$@" > scratch/rb_run.log 2>&1
 for n in rb_konsole rb_before_wheel rb_after_wheel; do
-    python scratch/ppm2png.py scratch/$n.ppm scratch/$n.png
+    python tools/ppm2png.py scratch/$n.ppm scratch/$n.png
 done
