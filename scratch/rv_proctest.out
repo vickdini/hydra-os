@@ -1,28 +1,0 @@
-Windows Hypervisor Platform accelerator is operational
-linux run /bin/proctest.elf
-[+] Read 860568 bytes from OpenZFS (/bin/proctest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
-[proctest] pid=9 ppid=0
-[proctest] SIGUSR1 handler runs (kill to self)              PASS
-[proctest] FPU state survives handler                       PASS
-[proctest] blocked signal is pending, not delivered         PASS
-[proctest] unblocking delivers it                           PASS
-[proctest] SIGSEGV handler + siglongjmp recovery            PASS
-[proctest] write to PROT_READ page raises SIGSEGV           PASS
-[proctest] fork + waitpid exit status 42                    PASS
-[proctest] child writes are copy-on-write                   PASS
-[proctest] SIGCHLD delivered to parent                      PASS
-[proctest] child killed by SIGTERM reported                 PASS
-[proctest] 10000 bytes through a pipe, then EOF             PASS
-[proctest] write without readers -> EPIPE                   PASS
-[proctest] fork + execve(/proc/self/exe) exit status 7      PASS
-[proctest] posix_spawn exit status 9                        PASS
-[proctest] wait with no children -> ECHILD                  PASS
-[proctest] signal interrupts blocking read with EINTR       PASS
-[proctest] SIGSTOP: waitpid(WUNTRACED) reports stopped      PASS
-[proctest] SIGCONT: waitpid(WCONTINUED) reports continued   PASS
-[proctest] SIGKILL ends a stopped child                     PASS
-[proctest] stopped nanosleep restarts for the remaining time PASS
-[proctest] ALL PASSED (0 failures)
-[+] Linux process 9 exited with status 0.
-hydra:/bin$ 

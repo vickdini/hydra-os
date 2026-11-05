@@ -48,6 +48,10 @@ pub enum PseudoFile {
     /// `/proc/<pid>/cmdline`, `comm` and `fdinfo/<fd>` (the path after `/proc/`). Their
     /// text is captured when opened ([`proc_pid_file_text`]); reads through the path see EOF.
     ProcPidFile(alloc::string::String),
+    /// Static read-only byte slice pseudo-file (e.g. `/proc/sys/fs/inotify/max_user_watches`).
+    ProcStatic(&'static [u8]),
+    /// Virtual directory under `/proc` (e.g. `/proc/self/task`, `/proc/self/fd`, `/proc/<pid>/task`).
+    ProcDir(alloc::string::String),
     /// `/sys/fs/cgroup<group>/cgroup.procs`: the processes in a control group (`group` is
     /// empty for the root). Writing a process ID moves the process there.
     CgroupProcs(alloc::string::String),
@@ -96,6 +100,10 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
         "/proc/self/mountinfo" | "/proc/thread-self/mountinfo" => Some(PseudoFile::ProcMountinfo),
         "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts" => Some(PseudoFile::ProcMounts),
+        "/proc/sys/fs/inotify/max_user_watches" => Some(PseudoFile::ProcStatic(b"1048576\n")),
+        "/proc/sys/fs/inotify/max_user_instances" => Some(PseudoFile::ProcStatic(b"1024\n")),
+        "/proc/sys/fs/inotify/max_queued_events" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        p if is_proc_dir(p) => Some(PseudoFile::ProcDir(alloc::string::String::from(p))),
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
             Some(PseudoFile::ProcMountinfo)
         }
@@ -105,6 +113,16 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
             (group.is_empty() || group.starts_with('/')).then(|| PseudoFile::CgroupProcs(alloc::string::String::from(group)))
         }
     }
+}
+
+/// Whether `path` names a dynamic `/proc` directory like `/proc/self/task`,
+/// `/proc/self/fd`, `/proc/<pid>/task`, `/proc/<pid>/fd`.
+pub fn is_proc_dir(path: &str) -> bool {
+    let clean = path.trim_end_matches('/');
+    let Some(rest) = clean.strip_prefix("/proc/") else { return false };
+    let Some((who, dir)) = rest.split_once('/') else { return false };
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (who == "self" || who == "thread-self" || numeric(who)) && (dir == "task" || dir == "fd")
 }
 
 /// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
@@ -260,12 +278,7 @@ impl PseudoFile {
                 buf.len()
             }
             PseudoFile::DevUrandom => {
-                // Generate pseudo-random bytes using PIT ticks and linear-feedback PRNG
-                let mut seed = crate::arch::pit::ticks().wrapping_mul(0x5DEECE66D).wrapping_add(11);
-                for byte in buf.iter_mut() {
-                    seed = seed.wrapping_mul(0x5DEECE66D).wrapping_add(11);
-                    *byte = (seed >> 16) as u8;
-                }
+                crate::arch::random::fill(buf);
                 buf.len()
             }
             PseudoFile::ProcVersion => {
@@ -302,6 +315,8 @@ impl PseudoFile {
                 }
                 read_slice(text.as_bytes(), cursor, buf)
             }
+            PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
+            PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
                 read_slice(text.as_bytes(), cursor, buf)
@@ -361,6 +376,21 @@ impl PseudoFile {
             PseudoFile::CgroupProcs(_) => {
                 statbuf.st_mode = S_IFREG | 0o644;
                 statbuf.st_size = 0;
+            }
+            PseudoFile::ProcDir(path) => {
+                statbuf.st_mode = S_IFDIR | 0o555;
+                statbuf.st_size = 4096;
+                // A directory links "." and ".." plus one per subdirectory: for task/ that is
+                // one per thread (Chromium counts threads this way and checks it is above 2)
+                statbuf.st_nlink = 2;
+                if let Some(rest) = path.trim_end_matches('/').strip_prefix("/proc/").and_then(|r| r.strip_suffix("/task")) {
+                    let pid = if rest == "self" || rest == "thread-self" { super::proc::current_ids().1 } else { rest.parse().unwrap_or(0) };
+                    statbuf.st_nlink += super::proc::thread_ids_of(pid).len() as u64;
+                }
+            }
+            PseudoFile::ProcStatic(content) => {
+                statbuf.st_mode = S_IFREG | 0o444;
+                statbuf.st_size = content.len() as i64;
             }
             _ => {
                 statbuf.st_mode = S_IFREG | 0o444;

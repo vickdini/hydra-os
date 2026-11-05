@@ -30,8 +30,8 @@ use uefi::mem::memory_map::MemoryType;
 
 use super::frame_allocator::{FRAME_ALLOCATOR, PAGE_SIZE};
 
-/// Preferred kernel heap size: 512 MiB (room to unpack root filesystem archives in memory).
-pub const HEAP_SIZE: usize = 512 * 1024 * 1024;
+/// Preferred kernel heap size: 1024 MiB (room to unpack large root filesystem archives in memory).
+pub const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 /// Smallest heap accepted when memory is short.
 const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 
@@ -190,9 +190,9 @@ pub fn init() -> Result<HeapStats, &'static str> {
         return Ok(stats());
     }
 
-    // Use at most a quarter of usable RAM, halving down to the minimum if no region fits
+    // Use at most half of usable RAM, halving down to the minimum if no region fits
     let usable = FRAME_ALLOCATOR.lock().total_usable_memory() as usize;
-    let mut size = HEAP_SIZE.min((usable / 4).max(MIN_HEAP_SIZE));
+    let mut size = HEAP_SIZE.min((usable / 2).max(MIN_HEAP_SIZE));
     let mut heap_start_ptr: Option<*mut u8> = None;
     while heap_start_ptr.is_none() && size >= MIN_HEAP_SIZE {
         let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;

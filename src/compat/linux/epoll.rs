@@ -242,7 +242,7 @@ pub fn epoll_collect_ready(
             if let Some(desc) = fds.get(watch.fd as usize) {
                 // Files are always ready, so an edge-triggered watch on one fires once (as on
                 // Linux); other descriptors stay level-triggered
-                let always_ready = matches!(desc, FileDescriptor::File { .. } | FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_));
+                let always_ready = matches!(desc, FileDescriptor::File { .. } | FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. });
                 if watch.events & EPOLLET != 0 && always_ready {
                     if watch.reported {
                         continue;

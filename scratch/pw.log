@@ -1,38 +1,0 @@
-linux chroot /ubuntu /usr/bin/pipewire
-[1m[37m[40m
-============================================================
- [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
-============================================================
-  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
-  - Memory Map Entries : 100 descriptors captured
-  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
-  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
-  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
-  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
-  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
-  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
-============================================================
-
-[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
-
-[tasks] id state tgid syscall rip ticks exe
-[tasks] 0 Running 0 -1 0x0 0 shell
-[tasks] 1 Ready 1 -1 0xbd37ef70 0 idle
-[tasks] 2 Ready 2 -1 0xbd37ef70 0 netd
-[tasks] 3 Ready 3 -1 0xbd37ef70 0 txgd
-[!] linux chroot: device files: could not write the device tree
-[1;31m[E][06:04:38.120000] mod.rt       | [     module-rt.c:  293 pw_rtkit_bus_get()] Failed to connect to session bus: Unable to autolaunch a dbus-daemon without a $DISPLAY for X11[0m
-[1;31m[E][06:04:38.200000] mod.rt       | [     module-rt.c:  293 pw_rtkit_bus_get()] Failed to connect to system bus: Failed to connect to socket /run/dbus/system_bus_socket: Connection refused[0m
-[1;33m[W][06:04:38.200000] mod.rt       | [     module-rt.c:  973 rtkit_get_bus()] Realtime scheduling disabled: insufficient realtime privileges, Portal not found on session bus, and no system bus for RTKit: Connection refused[0m
-[1;33m[W][06:04:38.540000] default      | [        thread.c:  119 impl_create()] pthread_setname error: No such file or directory[0m
-[1;31m[E][06:04:38.560000] spa.dbus     | [          dbus.c:  357 impl_connection_get()] Failed to connect to session bus: Unable to autolaunch a dbus-daemon without a $DISPLAY for X11[0m
-[1;31m[E][06:04:38.560000] mod.portal   | [ module-portal.c:  318 pipewire__module_init()] Failed to connect to session bus: Input/output error[0m
-[1;31m[E][06:04:38.780000] spa.dbus     | [          dbus.c:  357 impl_connection_get()] Failed to connect to session bus: Unable to autolaunch a dbus-daemon without a $DISPLAY for X11[0m
-[1;31m[E][06:04:38.780000] mod.jackdbus-detect | [module-jackdbus-:  393 pipewire__module_init()] Failed to connect to session bus: Input/output error[0m
-[1;31m[E][06:04:38.820000] pw.mem       | [           mem.c:  408 pw_memblock_map()] 0x555555569c50: block 0x555555598100[0] mapping 0+2312 of file=21/0:0 with size=0[0m
-[1;33m[W][06:04:38.830000] pw.mem       | [           mem.c:  602 pw_mempool_alloc()] 0x555555569c50: Failed to map: Invalid argument[0m
-[1;31m[E][06:04:38.840000] pw.resource  | [      resource.c:  255 pw_resource_errorf_id()] can't create node: Invalid argument[0m
-[1;31m[E][06:04:38.840000] pw.conf      | [          conf.c:  831 create_object()] can't create object from factory spa-node-factory: Invalid argument[0m
-[1;31m[E][06:04:38.910000] default      | [      pipewire.c:  124 main()] failed to create context: Invalid argument[0m
-[+] Linux process 4 exited with status 234.
-hydra:/bin$ 

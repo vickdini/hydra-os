@@ -1,528 +1,0 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-2... 1... NOW
-[*] Starting KDE Plasma...
-hydra-logind: seat0 session 1 for uid 1000 (hydra) on org.freedesktop.login1
-org.kde.startup: not a reply org.freedesktop.locale1 QDBusMessage(type=Error, service="", error name="org.freedesktop.DBus.Error.Spawn.PermissionsInvalid", error message="The permission of the setuid helper is not correct", signature="s", contents=("The permission of the setuid helper is not correct") )
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.0' (uid=1000 pid=31 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.3' (uid=1000 pid=52 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
-No backend specified, automatically choosing drm
-hydra-logind: session controller is :1.4
-pci id for fd 19: 1234:1111, driver (null)
-pci id for fd 20: 1234:1111, driver (null)
-pci id for fd 21: 1234:1111, driver (null)
-pci id for fd 20: 1234:1111, driver (null)
-pci id for fd 21: 1234:1111, driver (null)
-kwin_wayland_drm: drmSetClientCap for Atomic Mode Setting failed. Using legacy mode on GPU "/dev/dri/card0"
-kwin_wayland_drm: drmModeListLessees() failed: Invalid argument
-kwin_wayland_drm: Could not find edid for connector DrmConnector(id=42, gpu="/dev/dri/card0", name="Virtual-1", connection="Connected", countMode=1)
-Failed to gain real time thread priority (See CAP_SYS_NICE in the capabilities(7) man page). error: Operation not permitted
-[1;33m[W][21:14:52.070000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:14:52.070000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kwin_screencast: Failed to create PipeWire context
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: MESA-LOADER: failed to retrieve device information
-
-libEGL warning: failed to get driver name for fd -1
-
-Xwayland glamor: GBM Wayland interfaces not available
-Failed to initialize glamor, falling back to sw
-MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
-libEGL warning: egl: failed to create dri2 screen
-The XKEYBOARD keymap compiler (xkbcomp) reports:
-> Warning:          Unsupported maximum keycode 708, clipping.
->                   X11 cannot support keycodes above 255.
-> Warning:          Virtual modifier Hyper multiply defined
->                   Using 0, ignoring 0
-> Warning:          Virtual modifier ScrollLock multiply defined
->                   Using 0, ignoring 0
-Errors from xkbcomp are not fatal to the X server
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.KSplash'
-org.kde.plasma.session: process job  "kcminit_startup" finished with exit code  0
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.4' (uid=1000 pid=60 comm="")
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: MESA-LOADER: failed to retrieve device information
-
-libEGL warning: failed to get driver name for fd -1
-
-MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
-libEGL warning: egl: failed to create dri2 screen
-kf.solid.backends.fstab: Failed to acquire watch file descriptor No such file or directory
-[linux] pid 104: unimplemented syscall 29 (0x0, 0x1, 0x380) -> ENOSYS
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-QDBusObjectPath: invalid path "/modules/oom-notifier"
-kf.dbusaddons: The kded module name "oom-notifier" is invalid!
-QDBusObjectPath: invalid path "/modules/plasma-session-shortcuts"
-kf.dbusaddons: The kded module name "plasma-session-shortcuts" is invalid!
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.9' (uid=1000 pid=104 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.freedesktop.systemd1' requested by ':1.2' (uid=1000 pid=50 comm="")
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.freedesktop.systemd1' failed: Process org.freedesktop.systemd1 exited with status 1
-kf.kio.gui: Failed to determine systemd version, falling back to extremely legacy forking mode.
-Xlib XKB extension major= 1  minor= 0
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: MESA-LOADER: failed to retrieve device information
-
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: MESA-LOADER: failed to retrieve device information
-
-libEGL warning: failed to get driver name for fd -1
-
-MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
-libEGL warning: egl: failed to create dri2 screen
-MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
-libEGL warning: egl: failed to create dri2 screen
-New PolkitAgentListener  0x5555570d1e30
-Adding new listener  PolkitQt1::Agent::Listener(0x5555570d1bd0) for  0x5555570d1e30
-Listener online
-"Cannot create unix session: No session for pid 118"
-
-** (process:118): [1;35mCRITICAL[0m **: [34m21:15:39.520[0m: polkit_agent_listener_register_with_options: assertion 'POLKIT_IS_SUBJECT (subject)' failed
-"Cannot register authentication agent!"
-Authentication agent result: false
-Couldn't register listener!
-QThreadStorage: entry 2 destroyed before end of thread 0x555555576fb0
-QThreadStorage: entry 1 destroyed before end of thread 0x555555576fb0
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-libEGL warning: failed to get driver name for fd -1
-
-libEGL warning: MESA-LOADER: failed to retrieve device information
-
-libEGL warning: failed to get driver name for fd -1
-
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.ActivityManager' requested by ':1.11' (uid=1000 pid=117 comm="")
-MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
-libEGL warning: egl: failed to create dri2 screen
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-[linux] pid 146: unimplemented syscall 326 (0x12, 0x7fffffffcaf0, 0x13) -> ENOSYS
-org.kde.kactivities.resources: Creating the backup of the current database failed!
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'org.kde.ActivityManager'
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-X server XKB extension major= 1  minor= 0
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='ca.desrt.dconf' requested by ':1.18' (uid=1000 pid=156 comm="")
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Successfully activated service 'ca.desrt.dconf'
-qt.qpa.services: Failed to register with host portal QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.freedesktop.portal.Desktop was not provided by any .service files")
-kf.package: Could not find required file "mainscript" for package "/usr/share/plasma/plasmoids/org.kde.plasma.icontasks/" should be QList("ui/main.qml")
-org.kde.plasma.libtaskmanager: The PlasmaWindowManagement protocol hasn't activated in time. The client possibly got denied by kwin? Check kwin output.
-[linux] pid 117: unimplemented syscall 149 (0x7fff92fe7000, 0x1018068, 0x0) -> ENOSYS
-kf.coreaddons: Cache is inaccessible /home/hydra/.cache/plasma_theme_default.kcache
-kf.coreaddons: Deleting corrupted cache "/home/hydra/.cache/plasma_theme_default.kcache"
-kf.coreaddons: Cache is inaccessible /home/hydra/.cache/plasma_theme_default.kcache
-kf.coreaddons: Even a brand-new cache starts off corrupted, something is seriously wrong. :-(
-kf.coreaddons: Couldn't establish file backed memory mapping, will fallback to anonymous memory
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activating service name='org.kde.KSplash' requested by ':1.11' (uid=1000 pid=117 comm="")
-kf.solid.backends.fstab: Failed to acquire watch file descriptor No such file or directory
-org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "preferred://browser" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.discover.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "systemsettings.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.plasma-systemmonitor.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.dolphin.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.kate.desktop" 0x5555572aa910
-org.kde.plasma.kicker: Entry is not valid "org.kde.kontact.desktop" 0x5555572aa910
-[1;33m[W][21:16:14.630000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:14.640000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-qrc:/qt/qml/plasma/applet/org/kde/plasma/notifications/global/PulseAudio.qml:9:1: module "org.kde.plasma.private.volume" is not installed
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-kf.solid.backends.udisks2: Failed to fetch all devices "org.freedesktop.DBus.Error.Spawn.PermissionsInvalid" "The permission of the setuid helper is not correct"
-[1;33m[W][21:16:22.570000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:22.570000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:16:30.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:30.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:16:40.930000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:40.940000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:16:46.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:46.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:16:51.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:51.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:16:56.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:16:56.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:01.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:01.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-org.kde.plasma.waitforname: WaitForName: Service was not registered within timeout
-dbus-daemon[30]: [session uid=1000 pid=18446744073709551615 pidfd=5] Activated service 'org.kde.KSplash' failed: Process org.kde.KSplash exited with status 1
-[1;33m[W][21:17:06.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:06.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:11.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:11.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:16.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:16.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:21.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:21.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:26.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:26.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:31.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:31.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:36.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:36.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:41.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:41.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:46.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:46.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:51.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:51.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:17:56.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:17:56.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:01.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:01.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:06.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:06.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:11.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:11.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:16.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:16.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:21.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:21.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:26.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:26.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:31.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:31.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:36.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:36.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:41.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:41.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:46.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:46.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:51.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:51.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:18:56.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:18:56.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:01.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:01.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:06.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:06.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:11.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:11.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:16.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:16.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:21.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:21.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:26.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:26.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:31.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:31.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:36.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:36.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:41.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:41.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:46.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:46.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:51.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:51.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:19:56.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:19:56.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:01.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:01.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:06.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:06.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:11.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:11.000000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:16.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:16.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:21.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:21.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:26.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:26.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:31.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:31.040000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-kwin_libinput: Libinput: event1  - ImPS/2 Generic Wheel Mouse: client bug: event processing lagging behind by 110ms, your system is too slow
-
-[1;33m[W][21:20:36.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:36.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:41.670000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:41.670000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:46.970000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:46.970000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:52.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:52.060000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:20:57.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:20:57.060000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:02.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:02.060000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:07.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:07.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:12.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:12.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:17.050000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:17.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:22.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:22.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:27.020000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:27.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:32.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:32.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:37.040000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:37.050000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:42.000000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:42.010000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[1;33m[W][21:21:47.030000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:47.030000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-[tasks] id state tgid syscall rip ticks exe
-[tasks] 0 Sleeping 0 -1 0xbd4451e7 1800 shell
-[tasks] 1 Running 1 -1 0xbd4528d9 29070 idle
-[tasks] 2 Blocked 2 -1 0xbd4451e7 2 netd
-[tasks] 3 Sleeping 3 -1 0xbd3b9243 91 txgd
-[tasks] 4 Blocked 4 61 0xbd4451e7 188 /usr/bin/dbus-run-session
-[tasks] 9 Blocked 9 232 0xbd4451e7 226 /usr/bin/dbus-daemon
-[tasks] 13 Blocked 13 7 0xbd4451e7 38 /usr/libexec/hydra-logind
-[tasks] 30 Blocked 30 232 0xbd4451e7 950 /usr/bin/dbus-daemon
-[tasks] 31 Blocked 31 271 0xbd4451e7 908 /usr/bin/startplasma-wayland
-[tasks] 32 Blocked 31 271 0xbd4451e7 61 /usr/bin/startplasma-wayland
-[tasks] 50 Blocked 50 271 0xbd4451e7 209 /usr/bin/plasma_session
-[tasks] 51 Blocked 50 271 0xbd4451e7 99 /usr/bin/plasma_session
-[tasks] 52 Blocked 52 271 0xbd4451e7 95 /usr/bin/kwin_wayland_wrapper
-[tasks] 53 Blocked 53 271 0xbd4451e7 2292 /usr/bin/kwin_wayland
-[tasks] 54 Blocked 52 271 0xbd4451e7 10 /usr/bin/kwin_wayland_wrapper
-[tasks] 63 Blocked 53 271 0xbd4451e7 490 /usr/bin/kwin_wayland
-[tasks] 64 Blocked 53 271 0xbd4451e7 34 /usr/bin/kwin_wayland
-[tasks] 65 Blocked 65 -1 0xbd4451e7 3 vtd
-[tasks] 72 Blocked 72 232 0xbd4451e7 483 /usr/bin/Xwayland
-[tasks] 76 Blocked 76 -1 0xbd4451e7 259 itimerd
-[tasks] 97 Blocked 97 271 0xbd4451e7 353 /usr/bin/kded6
-[tasks] 98 Blocked 97 271 0xbd4451e7 171 /usr/bin/kded6
-[tasks] 101 Blocked 97 7 0xbd4451e7 6 /usr/bin/kded6
-[tasks] 102 Blocked 97 7 0xbd4451e7 19 /usr/bin/kded6
-[tasks] 103 Blocked 97 202 0xbd4451e7 2 /usr/bin/kded6
-[tasks] 104 Blocked 104 271 0xbd4451e7 328 /usr/bin/ksmserver
-[tasks] 105 Blocked 104 271 0xbd4451e7 40 /usr/bin/ksmserver
-[tasks] 108 Blocked 104 7 0xbd4451e7 144 /usr/bin/ksmserver
-[tasks] 109 Blocked 104 202 0xbd4451e7 1 /usr/bin/ksmserver
-[tasks] 115 Blocked 115 271 0xbd4451e7 111 /usr/bin/xembedsniproxy
-[tasks] 116 Blocked 115 271 0xbd4451e7 24 /usr/bin/xembedsniproxy
-[tasks] 117 Sleeping 117 271 0xbd4451e7 4039 /usr/bin/plasmashell
-[tasks] 119 Blocked 119 271 0xbd4451e7 293 /usr/bin/kaccess
-[tasks] 120 Blocked 117 271 0xbd4451e7 533 /usr/bin/plasmashell
-[tasks] 122 Blocked 119 271 0xbd4451e7 49 /usr/bin/kaccess
-[tasks] 124 Blocked 115 7 0xbd4451e7 89 /usr/bin/xembedsniproxy
-[tasks] 125 Blocked 125 271 0xbd4451e7 100 /usr/bin/gmenudbusmenuproxy
-[tasks] 126 Blocked 125 271 0xbd4451e7 26 /usr/bin/gmenudbusmenuproxy
-[tasks] 127 Blocked 117 7 0xbd4451e7 138 /usr/bin/plasmashell
-[tasks] 128 Blocked 117 7 0xbd4451e7 163 /usr/bin/plasmashell
-[tasks] 131 Blocked 119 7 0xbd4451e7 98 /usr/bin/kaccess
-[tasks] 132 Blocked 132 271 0xbd4451e7 74 /usr/libexec/geoclue-2.0/demos/agent
-[tasks] 134 Blocked 125 7 0xbd4451e7 77 /usr/bin/gmenudbusmenuproxy
-[tasks] 136 Blocked 132 202 0xbd4451e7 3 /usr/libexec/geoclue-2.0/demos/agent
-[tasks] 137 Blocked 132 271 0xbd4451e7 1 /usr/libexec/geoclue-2.0/demos/agent
-[tasks] 139 Blocked 117 202 0xbd4451e7 2 /usr/bin/plasmashell
-[tasks] 141 Blocked 132 271 0xbd4451e7 14 /usr/libexec/geoclue-2.0/demos/agent
-[tasks] 146 Blocked 146 271 0xbd4451e7 121 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 147 Blocked 146 271 0xbd4451e7 54 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 149 Blocked 146 7 0xbd4451e7 2 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 150 Blocked 146 7 0xbd4451e7 2 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 151 Blocked 146 271 0xbd4451e7 1 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 152 Blocked 146 271 0xbd4451e7 5 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 153 Blocked 146 271 0xbd4451e7 1 /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
-[tasks] 154 Blocked 119 202 0xbd4451e7 2 /usr/bin/kaccess
-[tasks] 162 Blocked 162 271 0xbd4451e7 14 /usr/libexec/dconf-service
-[tasks] 163 Blocked 162 202 0xbd4451e7 1 /usr/libexec/dconf-service
-[tasks] 164 Blocked 162 271 0xbd4451e7 1 /usr/libexec/dconf-service
-[tasks] 165 Blocked 162 271 0xbd4451e7 7 /usr/libexec/dconf-service
-[tasks] 166 Blocked 117 271 0xbd4451e7 878 /usr/bin/plasmashell
-[tasks] 168 Blocked 117 202 0xbd4451e7 1081 /usr/bin/plasmashell
-[tasks] 177 Blocked 117 7 0xbd4451e7 97 /usr/bin/plasmashell
-[tasks] 215 Blocked 117 202 0xbd4451e7 192 /usr/bin/plasmashell
-[tasks] 217 Blocked 117 202 0xbd4451e7 63 /usr/bin/plasmashell
-[tasks] 220 Blocked 117 202 0xbd4451e7 470 /usr/bin/plasmashell
-[tasks] 221 Sleeping 53 202 0xbd4451e7 2 /usr/bin/kwin_wayland
-[1;33m[W][21:21:52.010000] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory[0m
-[1;31m[E][21:21:52.020000] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory[0m
-kpipewire_logging: Failed to create PipeWire context
-received error while creating the stream "Failed to create PipeWire context" Media monitor will not work.
-

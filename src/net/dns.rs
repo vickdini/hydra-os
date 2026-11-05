@@ -269,7 +269,7 @@ pub fn resolve(domain: &str) -> Result<[u8; 4], &'static str> {
 
     let mut iface = GLOBAL_INTERFACE.lock();
     if iface.ip() == [0, 0, 0, 0] {
-        if crate::net::e1000::is_present() && crate::net::e1000::is_link_up() {
+        if crate::net::e1000::is_present() {
             drop(iface);
             let _ = crate::net::dhcp_acquire();
             iface = GLOBAL_INTERFACE.lock();

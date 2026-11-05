@@ -1,1 +1,0 @@
-linux chroot /ubuntu /bin/sh -c 'ls /usr/lib/x86_64-linux-gnu/libexec/ | grep -i polkit; ls /etc/xdg/autostart/ | grep -i polkit; cat /etc/xdg/autostart/polkit-kde-authentication-agent-1.desktop | grep -v "^Name\|^Comment"; dpkg -l | grep -i polkit'

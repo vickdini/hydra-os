@@ -1,9 +1,0 @@
-(function() {
-    const implementors = Object.fromEntries([["hydra_rt",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.99.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"hydra_rt/sys/struct.Message.html\" title=\"struct hydra_rt::sys::Message\">Message</a>",0]]],["zfs_server",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.99.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"zfs_server/zfs/fsproto/struct.Attr.html\" title=\"struct zfs_server::zfs::fsproto::Attr\">Attr</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.99.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"zfs_server/zfs/types/struct.BlockPointer.html\" title=\"struct zfs_server::zfs::types::BlockPointer\">BlockPointer</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.99.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"zfs_server/zfs/types/struct.Fletcher4.html\" title=\"struct zfs_server::zfs::types::Fletcher4\">Fletcher4</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.99.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"zfs_server/zfs/fsproto/struct.SetAttr.html\" title=\"struct zfs_server::zfs::fsproto::SetAttr\">SetAttr</a>",0]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":59,"fragment_lengths":[287,1197]}

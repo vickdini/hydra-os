@@ -136,7 +136,12 @@ pub enum FileDescriptor {
     /// Linux event notification counter (`eventfd2`).
     EventFd(Arc<Mutex<crate::compat::linux::eventfd::EventFd>>),
     /// Anonymous RAM-backed file created via `memfd_create`.
-    MemFd(Arc<Mutex<crate::compat::linux::memfd::MemFd>>),
+    MemFd {
+        /// Reference-counted shared memory buffer.
+        memfd: Arc<Mutex<crate::compat::linux::memfd::MemFd>>,
+        /// Access mode and status flags (`O_RDONLY`, `O_RDWR`, etc.).
+        flags: u32,
+    },
     /// Open ZFS inode managed through the Linux VFS layer (`openat`).
     Vnode(Arc<Mutex<OpenFile>>),
     /// Internet (`AF_INET` TCP/UDP) socket managed by the network stack.
@@ -288,7 +293,10 @@ impl FileDescriptor {
             FileDescriptor::Epoll(_) => {
                 Err("Cannot read from epoll file descriptor")
             }
-            FileDescriptor::MemFd(memfd) => {
+            FileDescriptor::MemFd { memfd, flags } => {
+                if *flags & 3 == 1 {
+                    return Err("File not opened for reading");
+                }
                 let mut m = memfd.lock();
                 m.read(buf)
             }
@@ -336,7 +344,12 @@ impl FileDescriptor {
     /// * `Err("ZFS read error")` / `Err("File not found")` - Underlying storage read failed.
     pub fn pread(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, &'static str> {
         match self {
-            FileDescriptor::MemFd(memfd) => Ok(memfd.lock().read_at(offset, buf)),
+            FileDescriptor::MemFd { memfd, flags } => {
+                if *flags & 3 == 1 {
+                    return Err("File not opened for reading");
+                }
+                Ok(memfd.lock().read_at(offset, buf))
+            }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
                 ZfsClient::read_at(ino, offset as u64, buf).map_err(|_| "ZFS read error")
@@ -363,7 +376,12 @@ impl FileDescriptor {
     /// * `Err("ZFS write error")` / `Err("File not found")` - Underlying storage write failed.
     pub fn pwrite(&mut self, data: &[u8], offset: usize) -> Result<usize, &'static str> {
         match self {
-            FileDescriptor::MemFd(memfd) => Ok(memfd.lock().write_at(offset, data)),
+            FileDescriptor::MemFd { memfd, flags } => {
+                if *flags & 3 == 0 {
+                    return Err("File not opened for writing");
+                }
+                Ok(memfd.lock().write_at(offset, data))
+            }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
                 ZfsClient::write_at(ino, offset as u64, data).map_err(|_| "ZFS write error")
@@ -426,7 +444,10 @@ impl FileDescriptor {
             FileDescriptor::Epoll(_) => {
                 Err("Cannot write to epoll file descriptor")
             }
-            FileDescriptor::MemFd(memfd) => {
+            FileDescriptor::MemFd { memfd, flags } => {
+                if *flags & 3 == 0 {
+                    return Err("File not opened for writing");
+                }
                 let mut m = memfd.lock();
                 m.write(data)
             }
@@ -501,16 +522,15 @@ impl FileDescriptor {
             FileDescriptor::Device(d) => d.add_wait_queues(waits),
             FileDescriptor::EventFd(e) => waits.add(QueueRef::Shared(e.lock().wq.clone())),
             FileDescriptor::Inet(s) => {
-                let s = s.lock();
+                let mut s = s.lock();
                 match s.wait_queue() {
                     Some(q) if crate::net::stack::service_running() => waits.add(QueueRef::Shared(q)),
                     Some(_) => waits.polled = true,
-                    // No endpoint yet: readiness only changes through the owner's own calls
-                    None => {}
+                    None => waits.polled = true,
                 }
             }
             // Always ready
-            FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) | FileDescriptor::File { .. } => {}
+            FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. } | FileDescriptor::File { .. } => {}
             // A nested epoll instance's readiness changes are not announced
             FileDescriptor::Epoll(_) => waits.polled = true,
         }
@@ -563,8 +583,15 @@ impl FileDescriptor {
             FileDescriptor::Inotify(i) => i.poll_events(),
             FileDescriptor::PidFd(p) => p.poll_events(),
             FileDescriptor::Device(d) => d.poll_events(),
-            // Regular files are always ready
-            FileDescriptor::Vnode(_) | FileDescriptor::MemFd(_) => 0x0001 | 0x0004,
+            // Regular and anonymous files are always ready
+            FileDescriptor::Vnode(_) => 0x0001 | 0x0004,
+            FileDescriptor::MemFd { flags, .. } => {
+                let acc = *flags & 3;
+                let mut ev = 0;
+                if acc != 1 { ev |= 0x0001; } // EPOLLIN
+                if acc != 0 { ev |= 0x0004; } // EPOLLOUT
+                ev
+            }
             FileDescriptor::Epoll(_) => 0,
         }
     }
@@ -740,7 +767,7 @@ impl FdTable {
             FileDescriptor::Socket(_) => "socket",
             FileDescriptor::Epoll(_) => "epoll",
             FileDescriptor::EventFd(_) => "eventfd",
-            FileDescriptor::MemFd(_) => "memfd",
+            FileDescriptor::MemFd { .. } => "memfd",
             FileDescriptor::Vnode(_) => "vnode",
             FileDescriptor::Inet(_) => "inet",
             FileDescriptor::Pty(_) => "pty",

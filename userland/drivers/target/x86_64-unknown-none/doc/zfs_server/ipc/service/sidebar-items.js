@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["CALL_TIMEOUT_TICKS","WINDOW_PAGES","WINDOW_SIZE"],"fn":["attach_block","call","is_online","window"],"static":["BLOCK_WINDOW"]};

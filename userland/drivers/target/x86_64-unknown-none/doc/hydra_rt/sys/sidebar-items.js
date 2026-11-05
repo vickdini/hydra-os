@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["clock","dma_alloc","exit","getpid","iopl","irq_ack","irq_register","irq_wait","map_anon","physmap","sleep_ms","svc_attach","svc_call","svc_recv","svc_register","svc_reply","uptime_ticks","write","yield_now"],"struct":["Message"]};

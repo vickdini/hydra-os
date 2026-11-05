@@ -1,36 +1,0 @@
-Windows Hypervisor Platform accelerator is operational
-linux run /bin/m3test.elf
-[+] Read 972344 bytes from OpenZFS (/bin/m3test.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
-[m3test] eventfd2 with EFD_CLOEXEC                              PASS
-[m3test] eventfd read returns the sum and resets                PASS
-[m3test] blocking eventfd read waits for a writer               PASS
-[m3test] EFD_SEMAPHORE counts down by one                       PASS
-[m3test] empty non-blocking eventfd -> EAGAIN                   PASS
-[m3test] poll wakes when another thread writes the eventfd      PASS
-[m3test] timerfd_create                                         PASS
-[m3test] timerfd_settime one-shot 300 ms                        PASS
-[m3test] timerfd_gettime shows it armed                         PASS
-[m3test] read blocks until expiry (one expiration)              PASS
-[m3test] periodic timer counts missed expirations               PASS
-[m3test] epoll_wait wakes on timer expiry                       PASS
-[m3test] disarmed non-blocking read -> EAGAIN                   PASS
-[m3test] inotify_init1                                          PASS
-[m3test] inotify_add_watch on a directory                       PASS
-[m3test] watching the same inode again returns the same wd      PASS
-[m3test] no events yet -> EAGAIN                                PASS
-[m3test] IN_CREATE with the entry name                          PASS
-[m3test] IN_MODIFY for a write to a file in the directory       PASS
-[m3test] IN_CLOSE_WRITE on close                                PASS
-[m3test] FIONREAD counts queued bytes                           PASS
-[m3test] IN_ATTRIB on chmod                                     PASS
-[m3test] rename gives MOVED_FROM/MOVED_TO with one cookie       PASS
-[m3test] IN_DELETE in the directory                             PASS
-[m3test] IN_DELETE_SELF then IN_IGNORED on the file's watch     PASS
-[m3test] mkdir gives IN_CREATE|IN_ISDIR                         PASS
-[m3test] inotify_rm_watch                                       PASS
-[m3test] rm_watch queues IN_IGNORED                             PASS
-[m3test] EPOLLONESHOT reports once until re-armed               PASS
-[m3test] ALL PASSED (0 failures)
-[+] Linux process 9 exited with status 0.
-hydra:/bin$ 

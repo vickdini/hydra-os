@@ -1,4 +1,0 @@
-zfs verify
-[1m[37m[40m[zfstest] aborted with errno -2
-[zfstest] FAILED (1 failure)
-[1m[32m[40mhydra:/bin$ 

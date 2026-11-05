@@ -1,1 +1,0 @@
-linux chroot /ubuntu /bin/sh -c 'echo $$ > /sys/fs/cgroup/user.slice/user-1000.slice/session-2.scope/cgroup.procs; cat /proc/self/cgroup; setpriv --reuid 1000 --regid 1000 --init-groups pkexec /usr/bin/id; echo pkexec_rc=$?'

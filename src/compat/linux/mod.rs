@@ -132,7 +132,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         if let Some(mm) = mm::current_mm() {
             LINUX_STATS.lock().memory_calls += 1;
             return match num {
-                SYS_MMAP => mm::sys_mmap(&mm, arg0, arg1, arg2, arg3, arg4 as i64, arg5),
+                SYS_MMAP => mm::sys_mmap(&mm, arg0, arg1, arg2, arg3, (arg4 as i32) as i64, arg5),
                 SYS_MUNMAP => mm::sys_munmap(&mm, arg0, arg1),
                 SYS_MPROTECT => mm::sys_mprotect(&mm, arg0, arg1, arg2),
                 SYS_BRK => mm::sys_brk(&mm, arg0),
@@ -359,7 +359,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let length = arg1 as usize;
             let _prot = arg2;
             let flags = arg3;
-            let fd = arg4 as i64;
+            let fd = arg4 as i32;
 
             if length == 0 {
                 return -EINVAL;
@@ -370,8 +370,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             // Check if fd is a shared memory descriptor (memfd)
             if fd >= 0 {
                 let is_memfd = crate::task::with_current_fds_mut(|fds| {
-                    if let Some(crate::fs::FileDescriptor::MemFd(m)) = fds.get(fd as usize) {
-                        Some(m.clone())
+                    if let Some(crate::fs::FileDescriptor::MemFd { memfd, .. }) = fds.get(fd as usize) {
+                        Some(memfd.clone())
                     } else {
                         None
                     }
@@ -1171,8 +1171,8 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
             let fd = arg0 as usize;
             let length = arg1 as usize;
             let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::MemFd(m)) = fds.get(fd) {
-                    m.lock().truncate(length);
+                if let Some(crate::fs::FileDescriptor::MemFd { memfd, .. }) = fds.get(fd) {
+                    memfd.lock().truncate(length);
                     Ok(0)
                 } else if let Some(crate::fs::FileDescriptor::File { .. }) = fds.get(fd) {
                     Ok(0)
@@ -1563,8 +1563,7 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
                 return -EFAULT;
             }
             let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buflen) };
-            let pseudo = fs::PseudoFile::DevUrandom;
-            pseudo.read(0, slice);
+            crate::arch::random::fill(slice);
             buflen as i64
         }
 
@@ -1773,14 +1772,45 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         SYS_MEMFD_CREATE => {
             // sys_memfd_create(name: const char*, flags: unsigned int)
             let name_ptr = arg0 as *const u8;
-            let _flags = arg1 as u32;
-            let name = read_user_string(name_ptr).unwrap_or_else(|| String::from("memfd"));
+            let flags = arg1 as u32;
+            if name_ptr.is_null() {
+                return -EFAULT;
+            }
+            // Validate flags against Linux MFD_ALL_FLAGS. Chromium explicitly calls
+            // memfd_create with ~0 to check if the kernel properly rejects invalid flags.
+            const MFD_ALL_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | (0x3f << 26);
+            if flags & !MFD_ALL_FLAGS != 0 {
+                return -EINVAL;
+            }
+            let name = match read_user_string(name_ptr) {
+                Some(n) if n.len() <= 249 => n,
+                Some(_) => return -EINVAL,
+                None => return -EFAULT,
+            };
             let memfd = MemFd::new(&name);
-            let desc = crate::fs::FileDescriptor::MemFd(memfd);
+            let desc = crate::fs::FileDescriptor::MemFd {
+                memfd,
+                flags: 2, // O_RDWR
+            };
             crate::task::with_current_fds_mut(|fds| {
-                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
+                match fds.alloc_fd(desc) {
+                    Ok(fd) => {
+                        if flags & memfd::MFD_CLOEXEC != 0 {
+                            fds.set_cloexec(fd, true);
+                        }
+                        fd as i64
+                    }
+                    Err(_) => -EMFILE,
+                }
             })
         }
+
+        // pkey_alloc: return ENOSPC (-28) indicating hardware or OS does not support protection keys
+        330 => -28,
+        // pkey_free: return EINVAL (-22)
+        331 => -22,
+        // pkey_mprotect: return EINVAL (-22)
+        332 => -22,
 
         _ => {
             let mut stats = LINUX_STATS.lock();

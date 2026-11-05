@@ -25,7 +25,7 @@ $(SOCKACT): userland/hydra-logind/hydra-socket-activate.c
 	strip $@
 
 $(EFI_BIN):
-	cargo build --release --target $(TARGET)
+	@echo "EFI binary must be pre-built via Windows cargo"
 
 build: $(EFI_BIN) $(LOGIND) $(SOCKACT)
 	mkdir -p $(DIST_DIR)
@@ -34,8 +34,8 @@ build: $(EFI_BIN) $(LOGIND) $(SOCKACT)
 		dd if=/dev/zero of=$(STORAGE_IMG) bs=1M count=32; \
 	fi
 	cp $(EFI_BIN) $(DIST_DIR)/bootx64.efi
-	# Create FAT EFI disk image (16MB; El Torito limits the boot image size)
-	dd if=/dev/zero of=$(IMG) bs=1M count=16
+	# Create FAT EFI disk image (32MB; El Torito boot image size)
+	dd if=/dev/zero of=$(IMG) bs=1M count=32
 	mkfs.vfat $(IMG)
 	mmd -i $(IMG) ::/EFI ::/EFI/BOOT ::/bin ::/apps
 	mcopy -i $(IMG) $(DIST_DIR)/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI

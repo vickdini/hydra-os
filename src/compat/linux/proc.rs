@@ -427,6 +427,14 @@ impl Process {
     pub fn threads_alive(&self) -> usize {
         self.threads.len()
     }
+
+    /// Returns the IDs of this process's running threads, in ascending order.
+    ///
+    /// # Returns
+    /// Thread IDs (`tid`) of every live thread.
+    pub fn thread_ids(&self) -> Vec<u64> {
+        self.threads.keys().copied().collect()
+    }
 }
 
 /// Retrieves the list of supplementary group IDs for the calling process.
@@ -584,6 +592,18 @@ pub fn setsid() -> i64 {
         Some(_) => EPERM,
         None => ESRCH,
     }
+}
+
+/// Thread IDs of process `pid` (just `pid` itself if the process has no thread records).
+///
+/// # Arguments
+/// * `pid` - Process ID.
+///
+/// # Returns
+/// Thread IDs in ascending order.
+pub fn thread_ids_of(pid: u64) -> Vec<u64> {
+    let ids = PROCS.lock().get(&pid).map(|p| p.thread_ids()).unwrap_or_default();
+    if ids.is_empty() { alloc::vec![pid] } else { ids }
 }
 
 /// Returns `true` if process `pid` is in the process table (alive or a zombie).

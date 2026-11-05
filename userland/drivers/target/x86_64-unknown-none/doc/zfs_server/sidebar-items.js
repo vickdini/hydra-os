@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["hydra_main","main","params","serve","zfs_init"],"macro":[["kprintln",1],["println",1]],"mod":["arch","compat","fs","ipc","memory","task","zfs"]};

@@ -793,9 +793,10 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::ConsoleIn) | Some(FileDescriptor::ConsoleOut) | Some(FileDescriptor::ConsoleErr) => {
             Some(Ok(console_stat()))
         }
-        Some(FileDescriptor::MemFd(m)) => {
-            // PipeWire checks st_size (and st_dev/st_ino) before mapping a shared block
-            let mut st = anon_stat(Arc::as_ptr(&m) as *const u8, S_IFREG | 0o777);
+        Some(FileDescriptor::MemFd { memfd: m, flags }) => {
+            // PipeWire and Chromium check st_size and permissions before mapping
+            let mode = if flags & 3 == 0 { S_IFREG | 0o444 } else { S_IFREG | 0o666 };
+            let mut st = anon_stat(Arc::as_ptr(&m) as *const u8, mode);
             st.st_size = m.lock().size() as i64;
             st.st_blocks = (st.st_size + 511) / 512;
             Some(Ok(st))
@@ -884,6 +885,34 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     if let Some(desc) = open_pty_path(&abs, flags)? {
         return install(desc, flags);
     }
+    // Opening /proc/self/fd/N, /proc/<own-pid>/fd/N or /dev/fd/N (Linux magic link re-open;
+    // shells pass pipes as /dev/fd/N for process substitution)
+    let fd_path = abs.strip_prefix("/dev/fd/").map(|n| ("self", n)).or_else(|| abs.strip_prefix("/proc/")?.split_once("/fd/"));
+    if let Some((who, fd_str)) = fd_path {
+        let (_, pid) = super::proc::current_ids();
+        if who == "self" || who.parse::<u64>().ok() == Some(pid) {
+            if let Ok(target_fd) = fd_str.parse::<usize>() {
+                let desc = crate::task::with_current_fds_mut(|fds| fds.get(target_fd).cloned());
+                if let Some(desc) = desc {
+                    match desc {
+                        FileDescriptor::MemFd { memfd: m, .. } => {
+                            return install(FileDescriptor::MemFd { memfd: m, flags }, flags);
+                        }
+                        // A pipe opens as a new end of the same pipe, of the access asked for
+                        FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) if acc == O_RDONLY => {
+                            p.lock().add_reader();
+                            return install(FileDescriptor::PipeRead(p), flags);
+                        }
+                        FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) if acc == O_WRONLY => {
+                            p.lock().add_writer();
+                            return install(FileDescriptor::PipeWrite(p), flags);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     if let Some(target) = fd_link(&abs).or_else(|| super::fs::proc_link(&abs)) {
         // Magic links (/proc/self/exe, /proc/self/fd/N) open what they point at
         if target.starts_with('/') && target != abs {
@@ -899,7 +928,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         let text = super::fs::proc_pid_file_text(&rest).ok_or(ENOENT)?;
         let snapshot = super::memfd::MemFd::new(&abs);
         snapshot.lock().write_at(0, &text);
-        return install(FileDescriptor::MemFd(snapshot), flags);
+        return install(FileDescriptor::MemFd { memfd: snapshot, flags: 0 }, flags);
     }
     if is_pseudo(&abs) {
         // Only root moves processes between control groups (cgroup.procs is root's, 0644)
@@ -1021,6 +1050,19 @@ fn install(desc: FileDescriptor, flags: u32) -> Result<usize, i64> {
 /// # Returns
 /// Number of bytes written on success, 0 at end of directory, or negative error code.
 fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
+    if fd < 0 {
+        return EBADF;
+    }
+    if let Some((path, cursor)) = crate::task::with_current_fds_mut(|fds| {
+        match fds.get(fd as usize) {
+            Some(FileDescriptor::File { path, cursor, .. }) => Some((path.clone(), *cursor)),
+            _ => None,
+        }
+    }) {
+        if super::fs::is_proc_dir(&path) {
+            return getdents64_proc(&path, cursor, buf, count, fd);
+        }
+    }
     let file = match fd_vnode(fd) {
         Some(f) => f,
         None => return if fd_exists(fd) { ENOTDIR } else { EBADF },
@@ -1066,6 +1108,86 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
         return e;
     }
     file.lock().offset = next;
+    out.len() as i64
+}
+
+fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -> i64 {
+    let clean = path.trim_end_matches('/');
+    let Some(rest) = clean.strip_prefix("/proc/") else { return ENOTDIR };
+    let Some((who, dir)) = rest.split_once('/') else { return ENOTDIR };
+    let (_, my_pid) = super::proc::current_ids();
+    let target_pid = if who == "self" || who == "thread-self" {
+        my_pid
+    } else {
+        who.parse::<u64>().unwrap_or(my_pid)
+    };
+
+    let mut entries: Vec<(u64, alloc::string::String, u8)> = Vec::new();
+    entries.push((1, alloc::string::String::from("."), 4));
+    entries.push((1, alloc::string::String::from(".."), 4));
+
+    if dir == "task" {
+        for tid in super::proc::thread_ids_of(target_pid) {
+            entries.push((tid, alloc::format!("{}", tid), 4));
+        }
+    } else if dir == "fd" {
+        if target_pid == my_pid {
+            let open_fds = crate::task::with_current_fds_mut(|fds| {
+                let mut list = Vec::new();
+                for i in 0..1024 {
+                    if fds.get(i).is_some() {
+                        list.push(i);
+                    }
+                }
+                list
+            });
+            for fd_num in open_fds {
+                entries.push((fd_num as u64 + 100, alloc::format!("{}", fd_num), 10));
+            }
+        } else {
+            for fd_num in 0..3 {
+                entries.push((fd_num as u64 + 100, alloc::format!("{}", fd_num), 10));
+            }
+        }
+    }
+
+    if cursor >= entries.len() {
+        return 0;
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(count);
+    let mut next_cursor = cursor;
+    for (idx, (ino, name, dtype)) in entries.iter().enumerate().skip(cursor) {
+        let reclen = (19 + name.len() + 1 + 7) & !7;
+        if out.len() + reclen > count {
+            break;
+        }
+        let start = out.len();
+        let cookie = (idx + 1) as i64;
+        out.extend_from_slice(&ino.to_le_bytes());
+        out.extend_from_slice(&cookie.to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(*dtype);
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        out.resize(start + reclen, 0);
+        next_cursor = idx + 1;
+    }
+
+    if out.is_empty() && next_cursor == cursor {
+        return EINVAL;
+    }
+
+    if let Err(e) = copy_out(buf, &out) {
+        return e;
+    }
+
+    crate::task::with_current_fds_mut(|fds| {
+        if let Some(FileDescriptor::File { cursor: c, .. }) = fds.get_mut(fd as usize) {
+            *c = next_cursor;
+        }
+    });
+
     out.len() as i64
 }
 
@@ -1193,7 +1315,7 @@ fn fd_link(abs: &str) -> Option<String> {
         FileDescriptor::Epoll(_) => String::from("anon_inode:[eventpoll]"),
         FileDescriptor::EventFd(_) => String::from("anon_inode:[eventfd]"),
         FileDescriptor::SignalFd(_) => String::from("anon_inode:[signalfd]"),
-        FileDescriptor::MemFd(_) => String::from("/memfd: (deleted)"),
+        FileDescriptor::MemFd { .. } => String::from("/memfd: (deleted)"),
         FileDescriptor::Device(d) => d.path(),
     })
 }
@@ -1736,18 +1858,49 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 (if write_end { 1 } else { 0 }) | if *flag { O_NONBLOCK as i64 } else { 0 }
             }
         }
-        F_GETFL => match fd_vnode(fd as i32) {
-            Some(f) => f.lock().flags as i64,
-            None => return None,
-        },
-        F_SETFL => match fd_vnode(fd as i32) {
-            Some(f) => {
-                let mut f = f.lock();
-                f.flags = (f.flags & !(O_APPEND | O_NONBLOCK)) | (arg as u32 & (O_APPEND | O_NONBLOCK));
-                0
+        F_GETFL => {
+            let fl = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+                Some(FileDescriptor::MemFd { flags, .. }) => Some(*flags as i64),
+                Some(FileDescriptor::File { readable, writable, append, .. }) => {
+                    let mode = if *readable && *writable { 2 } else if *writable { 1 } else { 0 };
+                    Some(mode | if *append { 0o2000 } else { 0 })
+                }
+                _ => None,
+            });
+            if let Some(flags) = fl {
+                flags
+            } else {
+                match fd_vnode(fd as i32) {
+                    Some(f) => f.lock().flags as i64,
+                    None => return None,
+                }
             }
-            None => return None,
-        },
+        }
+        F_SETFL => {
+            let handled = crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
+                Some(FileDescriptor::MemFd { flags, .. }) => {
+                    *flags = (*flags & !(O_APPEND | O_NONBLOCK)) | (arg as u32 & (O_APPEND | O_NONBLOCK));
+                    Some(0)
+                }
+                Some(FileDescriptor::File { append, .. }) => {
+                    *append = arg as u32 & O_APPEND != 0;
+                    Some(0)
+                }
+                _ => None,
+            });
+            if let Some(res) = handled {
+                res
+            } else {
+                match fd_vnode(fd as i32) {
+                    Some(f) => {
+                        let mut f = f.lock();
+                        f.flags = (f.flags & !(O_APPEND | O_NONBLOCK)) | (arg as u32 & (O_APPEND | O_NONBLOCK));
+                        0
+                    }
+                    None => return None,
+                }
+            }
+        }
         F_GETLK => {
             // No other process holds locks: report the region as unlocked (l_type = F_UNLCK)
             match copy_out(arg, &2i16.to_le_bytes()) {
@@ -1756,7 +1909,35 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             }
         }
         F_SETLK | F_SETLKW => 0,
-        F_ADD_SEALS | F_GET_SEALS => 0,
+        F_GET_SEALS => {
+            let m = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+                Some(FileDescriptor::MemFd { memfd, .. }) => Some(memfd.clone()),
+                _ => None,
+            });
+            match m {
+                Some(memfd) => memfd.lock().seals as i64,
+                None => -EINVAL,
+            }
+        }
+        F_ADD_SEALS => {
+            let m = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+                Some(FileDescriptor::MemFd { memfd, .. }) => Some(memfd.clone()),
+                _ => None,
+            });
+            match m {
+                Some(memfd) => {
+                    let mut mem = memfd.lock();
+                    const F_SEAL_SEAL: u32 = 0x0001;
+                    if mem.seals & F_SEAL_SEAL != 0 && (arg as u32 & !mem.seals) != 0 {
+                        -EPERM
+                    } else {
+                        mem.seals |= arg as u32;
+                        0
+                    }
+                }
+                None => -EINVAL,
+            }
+        }
         _ => return None,
     })
 }
@@ -2198,10 +2379,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 
         NR_TRUNCATE => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { size: Some(a[1]), ..SetAttr::default() }, |at, c| may_access(at, c.euid, c.egid, 2)),
-        285 if matches!(crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()), Some(FileDescriptor::MemFd(_))) => {
+        285 if matches!(crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()), Some(FileDescriptor::MemFd { .. })) => {
             // fallocate on a memfd: pages are allocated when touched; only the size grows
             let m = match crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()) {
-                Some(FileDescriptor::MemFd(m)) => m,
+                Some(FileDescriptor::MemFd { memfd, .. }) => memfd,
                 _ => return Some(EBADF),
             };
             let (mode, offset, len) = (a[1], a[2] as i64, a[3] as i64);

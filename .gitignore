@@ -13,3 +13,15 @@ dist/x86_64/hydrapool.pre-apps.qcow2
 dist/x86_64/hydrapool.pre-drivers.qcow2
 dist/x86_64/hydrapool.pre-zfsserver.qcow2
 dist/x86_64/hydrapool.pre-sddm.qcow2
+dist/x86_64/hydrapool*.qcow2
+dist/x86_64/brave-media.img
+
+# Build output of the userland crates
+**/target/
+
+# Scratch: keep scripts and test sources, not logs, screenshots or binaries
+scratch/**
+!scratch/**/
+!scratch/**/*.py
+!scratch/**/*.sh
+!scratch/**/*.c

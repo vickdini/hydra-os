@@ -1,5 +1,0 @@
-zfs fsck /ubuntu
-[1m[37m[40m[fsck] ... 2000 directories, 53711 entries, 0 dangling (at /ubuntu/usr/share/locale/kk/LC_TIME)
-[fsck] ... 4000 directories, 61483 entries, 0 dangling (at /ubuntu/usr/libexec/gcc)
-[fsck] /ubuntu: 4813 directories, 70259 entries, 0 dangling, 0 unreadable directories
-[1m[32m[40mhydra:/bin$ 

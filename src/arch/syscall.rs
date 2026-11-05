@@ -392,7 +392,9 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         x86_64::instructions::interrupts::enable();
         let tracing = crate::compat::linux::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed)
             && crate::compat::linux::trace_matches_current()
-            && frame.rax != 228; // clock_gettime: too frequent to be useful
+            && frame.rax != 228 // clock_gettime
+            && frame.rax != 10  // mprotect (thousands of relocation calls)
+            && frame.rax != 14; // rt_sigprocmask
         let (num, args) = (frame.rax, [frame.rdi, frame.rsi, frame.rdx, frame.r10]);
         if tracing {
             let pid = crate::task::SCHEDULER.lock().current_task_id().0;

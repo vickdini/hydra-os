@@ -152,7 +152,7 @@ pub fn current_mm() -> Option<Arc<Mutex<Mm>>> {
 fn fd_object(fd: usize) -> Result<Arc<dyn MappedObject>, i64> {
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned()).ok_or(-EBADF)?;
     match desc {
-        crate::fs::FileDescriptor::MemFd(m) => Ok(m),
+        crate::fs::FileDescriptor::MemFd { memfd, .. } => Ok(memfd),
         crate::fs::FileDescriptor::Vnode(f) => {
             let (ino, readable) = {
                 let f = f.lock();
@@ -191,6 +191,7 @@ fn fd_object(fd: usize) -> Result<Arc<dyn MappedObject>, i64> {
 ///
 /// Starting virtual address of the mapped range on success, or a negative Linux errno on error.
 pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
+    let fd = fd as i32;
     if len == 0 || offset & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;
     }
@@ -199,9 +200,12 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         MAP_PRIVATE => false,
         _ => return -EINVAL,
     };
-    let backing = if flags & MAP_ANONYMOUS != 0 {
+    let backing = if flags & MAP_ANONYMOUS != 0 || fd == -1 {
         Backing::Anon
     } else {
+        if fd < 0 {
+            return -EBADF;
+        }
         match fd_object(fd as usize) {
             Ok(obj) => Backing::Object { obj, pgoff: offset / PAGE_SIZE },
             Err(e) => return e,

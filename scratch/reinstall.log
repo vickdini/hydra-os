@@ -1,371 +1,0 @@
-su root
-[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
-[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/bash
-[1m[37m[40m
-============================================================
- [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
-============================================================
-  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
-  - Memory Map Entries : 100 descriptors captured
-  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
-  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
-  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
-  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
-  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
-  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
-============================================================
-
-[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
-
-export DEBIAN_FRONTEND=noninteractive; d[?2004hroot@hydra:/# export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; apt-get update; apt-get -y dist-upgrade; apt-get install -y --reinstall $(dpkg-query -W -f='${Package} '); sync; echo REINSTALL-DONE-$((40+2))
-[?2004l0% [Working]            Get:1 http://security.ubuntu.com/ubuntu resolute-security InRelease [137 kB]
-0% [Connecting to archive.ubuntu.com] [1 InRelease 14.2 kB/137 kB 10%]                                                                      0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]0% [Connecting to archive.ubuntu.com]                                     Hit:2 http://archive.ubuntu.com/ubuntu resolute InRelease
-                                     0% [Waiting for headers]                        Get:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
-0% [3 InRelease 15.7 kB/137 kB 11%]                                   0% [Waiting for headers]                        Get:4 http://archive.ubuntu.com/ubuntu resolute-backports InRelease [137 kB]
-0% [4 InRelease 6952 B/137 kB 5%]                                 0% [Working]0% [Working]                                                                                                                                       68.3 kB/s 0s0% [Working]                                                                                                                                      68.3 kB/s 17s                                                                                                                                                               Get:5 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Packages [803 kB]
-0% [5 Packages 65.1 kB/803 kB 8%]                                                                                                                 68.3 kB/s 16s0% [Working]                                                                                                                                       68.3 kB/s 5s0% [5 Packages store 0 B] [Waiting for headers]                                                                                                    68.3 kB/s 5s                                                                                                                                                               Get:6 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 Packages [374 kB]
-0% [5 Packages store 0 B] [6 Packages 65.1 kB/374 kB 17%]                                                                                          68.3 kB/s 4s99% [5 Packages store 0 B]                                                                                                                         68.3 kB/s 0s99% [5 Packages store 0 B]                                                                                                                         68.3 kB/s 0s100% [Working]                                                                                                                                     68.3 kB/s 0s100% [6 Packages store 0 B]                                                                                                                        68.3 kB/s 0s100% [Working]                                                                                                                                     68.3 kB/s 0s                                                                                                                                                               Fetched 1588 kB in 8s (202 kB/s)
-Reading package lists... 0%Reading package lists... 0%Reading package lists... 0%Reading package lists... 3%Reading package lists... 5%Reading package lists... 5%Reading package lists... 6%Reading package lists... 7%Reading package lists... 7%Reading package lists... 9%Reading package lists... 10%Reading package lists... 13%Reading package lists... 16%Reading package lists... 19%Reading package lists... 22%Reading package lists... 25%Reading package lists... 28%Reading package lists... 31%Reading package lists... 34%Reading package lists... 36%Reading package lists... 38%Reading package lists... 41%Reading package lists... 44%Reading package lists... 47%Reading package lists... 50%Reading package lists... 53%Reading package lists... 56%Reading package lists... 57%Reading package lists... 57%Reading package lists... 60%Reading package lists... 65%Reading package lists... 70%Reading package lists... 75%Reading package lists... 80%Reading package lists... 80%Reading package lists... 80%Reading package lists... 80%Reading package lists... 80%Reading package lists... 81%Reading package lists... 81%Reading package lists... 81%Reading package lists... 81%Reading package lists... 82%Reading package lists... 82%Reading package lists... 84%Reading package lists... 85%Reading package lists... 85%Reading package lists... 86%Reading package lists... 86%Reading package lists... 87%Reading package lists... 87%Reading package lists... 88%Reading package lists... 88%Reading package lists... 88%Reading package lists... 90%Reading package lists... 90%Reading package lists... 91%Reading package lists... 91%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 92%Reading package lists... 94%Reading package lists... 94%Reading package lists... 95%Reading package lists... 95%Reading package lists... 95%Reading package lists... 95%Reading package lists... 96%Reading package lists... 96%Reading package lists... 97%Reading package lists... 98%Reading package lists... 98%Reading package lists... 99%Reading package lists... 99%Reading package lists... 99%Reading package lists... 99%Reading package lists... 99%Reading package lists... 99%Reading package lists... 99%Reading package lists... Done
-Reading package lists... 0%Reading package lists... 100%Reading package lists... Done
-Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 61%Building dependency tree... 85%Building dependency tree... Done
-Reading state information... 0% Reading state information... 0%Reading state information... 0%Reading state information... Done
-Calculating upgrade... 0%Calculating upgrade... 10%Calculating upgrade... Done
-The following packages will be upgraded:
-  diffutils gnu-coreutils gpgv libattr1 libaudit-common libaudit1 libbz2-1.0 libc-bin libc-gconv-modules-extra libc6 libgcrypt20 liblzma5 libpam-modules
-  libpam-modules-bin libpam-runtime libpam0g libssl3t64 openssl-provider-legacy perl-base rust-coreutils zlib1g
-21 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
-Need to get 16.1 MB of archives.
-After this operation, 750 kB of additional disk space will be used.
-0% [Working]            Get:1 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 diffutils amd64 1:3.12-1ubuntu0.1 [176 kB]
-0% [1 diffutils 65.2 kB/176 kB 37%]                                   2% [Waiting for headers]                        Get:2 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 perl-base amd64 5.40.1-7ubuntu0.3 [1850 kB]
-2% [2 perl-base 79.6 kB/1850 kB 4%]                                   Get:3 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libc-gconv-modules-extra amd64 2.43-2ubuntu2.4 [1362 kB]
-12% [3 libc-gconv-modules-extra 23.2 kB/1362 kB 2%]                                                   Get:4 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libc6 amd64 2.43-2ubuntu2.4 [2104 kB]
-                                                   20% [4 libc6 21.5 kB/2104 kB 1%]                                Get:5 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libc-bin amd64 2.43-2ubuntu2.4 [701 kB]
-31% [5 libc-bin 55.6 kB/701 kB 8%]                                  Get:6 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gnu-coreutils amd64 9.7-3ubuntu2.1 [1339 kB]
-36% [6 gnu-coreutils 2332 B/1339 kB 0%]                                       Get:7 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpam-runtime all 1.7.0-5ubuntu3.2 [149 kB]
-43% [7 libpam-runtime 24.1 kB/149 kB 16%]                                         Get:8 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libaudit-common all 1:4.1.2-1ubuntu0.1 [4958 B]
-45% [8 libaudit-common 4397 B/4958 B 89%]                                         Get:9 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libaudit1 amd64 1:4.1.2-1ubuntu0.1 [55.1 kB]
-                                         Get:10 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpam0g amd64 1.7.0-5ubuntu3.2 [65.0 kB]
-                                         47% [10 libpam0g 8545 B/65.0 kB 13%]                                    Get:11 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpam-modules-bin amd64 1.7.0-5ubuntu3.2 [45.6 kB]
-48% [11 libpam-modules-bin 8053 B/45.6 kB 18%]                                              Get:12 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpam-modules amd64 1.7.0-5ubuntu3.2 [193 kB]
-                                              50% [12 libpam-modules 26.9 kB/193 kB 14%]                                          Get:13 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libattr1 amd64 1:2.5.2-4ubuntu0.1 [12.0 kB]
-                                          Get:14 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libbz2-1.0 amd64 1.0.8-6ubuntu0.1 [36.2 kB]
-                                          53% [14 libbz2-1.0 15.4 kB/36.2 kB 43%]                                       Get:15 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 liblzma5 amd64 5.8.3-1ubuntu0.1 [146 kB]
-                                       54% [15 liblzma5 43.8 kB/146 kB 30%]                                    Get:16 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 openssl-provider-legacy amd64 3.5.5-1ubuntu3.7 [39.7 kB]
-55% [16 openssl-provider-legacy 27.3 kB/39.7 kB 69%]                                                    Get:17 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 zlib1g amd64 1:1.3.dfsg+really1.3.1-1ubuntu3.2 [61.8 kB]
-                                                    57% [17 zlib1g 52.1 kB/61.8 kB 84%]                                   Get:18 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libssl3t64 amd64 3.5.5-1ubuntu3.7 [2368 kB]
-58% [18 libssl3t64 54.9 kB/2368 kB 2%]                                      Get:19 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 rust-coreutils amd64 0.10.0-1ubuntu2~26.04.1 [4515 kB]
-71% [19 rust-coreutils 19.3 kB/4515 kB 0%]90% [19 rust-coreutils 3907 kB/4515 kB 87%]                                           Get:20 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libgcrypt20 amd64 1.12.0-2ubuntu1.1 [675 kB]
-                                           94% [20 libgcrypt20 39.6 kB/675 kB 6%]                                      Get:21 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gpgv amd64 2.4.8-4ubuntu3.1 [155 kB]
-                                      98% [21 gpgv 12.8 kB/155 kB 8%]                               100% [Working]              Fetched 16.1 MB in 3s (5064 kB/s)
-Preconfiguring packages ...
-(Reading database ... dpkg: warning: files list file for package 'libkglobalacceld0:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'kwin-data' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'udisks2' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libqt6multimedia6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxmu6:amd64' missing; assuming package has no files currently installed
-(Reading database ... 5%dpkg: warning: files list file for package 'knighttime' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libknighttime0:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxpm4:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'qt6-base-dev-tools' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libzvbi0t64:amd64' missing; assuming package has no files currently installed
-(Reading database ... 10%dpkg: warning: files list file for package 'libpulse0:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libqt6texttospeech6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkf6holidays6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libavformat62:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'x11-xkb-utils' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'kwayland6-data' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'qml6-module-qtquick-virtualkeyboard:amd64' missing; assuming package has no files currently installed
-(Reading database ... 15%dpkg: warning: files list file for package 'libkdecorations3-6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libqt6positioning6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'systemd' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxaw7:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libsoup-3.0-common' missing; assuming package has no files currently installed
-(Reading database ... 20%dpkg: warning: files list file for package 'konsole-kpart' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkf6textwidgets6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxvidcore4:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'x11-xserver-utils' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'konsole' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkf6notifyconfig-data' missing; assuming package has no files currently installed
-(Reading database ... 25%dpkg: warning: files list file for package 'libfontenc1:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libei1:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libgl1:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkf6notifyconfig6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libepoxy0:amd64' missing; assuming package has no files currently installed
-(Reading database ... 30%dpkg: warning: files list file for package 'qt6-svg-plugins:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libswscale9:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxt6t64:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxrandr2:amd64' missing; assuming package has no files currently installed
-(Reading database ... 35%(Reading database ... 40%dpkg: warning: files list file for package 'libasyncns0:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxcvt0:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'x11-utils' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libdecor-0-0:amd64' missing; assuming package has no files currently installed
-(Reading database ... 45%dpkg: warning: files list file for package 'libkf6itemmodels6:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxkbfile1:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkf6holidays-data' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'xserver-common' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'xwayland' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libx265-215:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libkdecorations3private2:amd64' missing; assuming package has no files currently installed
-(Reading database ... 50%dpkg: warning: files list file for package 'libxfont2:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'accountsservice' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libzvbi-common' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'liboeffis1:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'qml6-module-qtpositioning:amd64' missing; assuming package has no files currently installed
-dpkg: warning: files list file for package 'libxcb-record0:amd64' missing; assuming package has no files currently installed
-(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 79532 files and directories currently installed.)
-Preparing to unpack .../diffutils_1%3a3.12-1ubuntu0.1_amd64.deb ...
-Unpacking diffutils (1:3.12-1ubuntu0.1) over (1:3.12-1) ...
-[zfs] ZFS Checksum verification failed (silent data corruption detected)
-dpkg: error processing archive /var/cache/apt/archives/diffutils_1%3a3.12-1ubuntu0.1_amd64.deb (--unpack):
- unable to create '/usr/share/doc/diffutils/copyright.dpkg-new' (while processing './usr/share/doc/diffutils/copyright'): Input/output error
-Errors were encountered while processing:
- /var/cache/apt/archives/diffutils_1%3a3.12-1ubuntu0.1_amd64.deb
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-Reading package lists... 0%Reading package lists... 100%Reading package lists... Done
-Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 69%Building dependency tree... Done
-Reading state information... 0% Reading state information... 0%Reading state information... Done
-Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
-The following packages will be upgraded:
-  diffutils gnu-coreutils gpgv libattr1 libaudit-common libaudit1 libbz2-1.0 libc-bin libc-gconv-modules-extra libc6 libgcrypt20 liblzma5 libpam-modules
-  libpam-modules-bin libpam-runtime libpam0g libssl3t64 openssl-provider-legacy perl-base rust-coreutils zlib1g
-21 upgraded, 0 newly installed, 800 reinstalled, 0 to remove and 0 not upgraded.
-Need to get 17.3 MB/414 MB of archives.
-After this operation, 750 kB of additional disk space will be used.
-95% [Working]             Get:1 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 base-files amd64 14ubuntu6.2 [74.9 kB]
-95% [Waiting for headers]                         Get:2 http://archive.ubuntu.com/ubuntu resolute/main amd64 bash amd64 5.3-2ubuntu1 [860 kB]
-95% [2 bash 20.0 kB/860 kB 2%]                              Get:3 http://archive.ubuntu.com/ubuntu resolute/main amd64 coreutils-from-uutils all 0.0.0~ubuntu25 [7124 B]
-                              Get:4 http://archive.ubuntu.com/ubuntu resolute/main amd64 coreutils all 9.5-1ubuntu2+0.0.0~ubuntu25 [3060 B]
-                              Get:5 http://archive.ubuntu.com/ubuntu resolute/main amd64 dash amd64 0.5.12-12ubuntu3 [96.0 kB]
-95% [5 dash 36.3 kB/96.0 kB 38%]                                Get:6 http://archive.ubuntu.com/ubuntu resolute/main amd64 debianutils amd64 5.23.2build1 [93.3 kB]
-95% [6 debianutils 4783 B/93.3 kB 5%]                                     Get:7 http://archive.ubuntu.com/ubuntu resolute/main amd64 libapt-pkg7.0 amd64 3.2.0 [1138 kB]
-95% [7 libapt-pkg7.0 42.3 kB/1138 kB 4%]                                        Get:8 http://archive.ubuntu.com/ubuntu resolute/main amd64 dpkg amd64 1.23.7ubuntu1 [1285 kB]
-                                        96% [8 dpkg 5311 B/1285 kB 0%]                              Get:9 http://archive.ubuntu.com/ubuntu resolute/main amd64 findutils amd64 4.10.0-3build2 [307 kB]
-96% [9 findutils 16.5 kB/307 kB 5%]                                   Get:10 http://archive.ubuntu.com/ubuntu resolute/main amd64 grep amd64 3.12-1 [168 kB]
-                                   96% [10 grep 32.8 kB/168 kB 20%]                                Get:11 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 gzip amd64 1.14-1~exp2ubuntu1.1 [106 kB]
-96% [11 gzip 59.1 kB/106 kB 56%][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                Get:12 http://archive.ubuntu.com/ubuntu resolute/main amd64 hostname amd64 3.25build1 [11.2 kB]
-                                Err:13 http://archive.ubuntu.com/ubuntu resolute/main amd64 ncurses-bin amd64 6.6+20251231-1
-  Could not open file /var/cache/apt/archives/partial/ncurses-bin_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Ign:14 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 sed amd64 4.9-2ubuntu1
-96% [Connecting to archive.ubuntu.com (91.189.92.23)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Ign:15 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 tar amd64 1.35+dfsg-4ubuntu0.4
-96% [Connecting to archive.ubuntu.com (91.189.91.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:14 http://security.ubuntu.com/ubuntu resolute-updates/main amd64 sed amd64 4.9-2ubuntu1
-  Could not open file /var/cache/apt/archives/partial/sed_4.9-2ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-  Could not open file /var/cache/apt/archives/partial/sed_4.9-2ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-                                                     96% [Waiting for headers][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                         Err:16 http://archive.ubuntu.com/ubuntu resolute/main amd64 base-passwd amd64 3.6.8
-  Could not open file /var/cache/apt/archives/partial/base-passwd_3.6.8_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Waiting for headers] [Connecting to archive.ubuntu.com (91.189.91.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                           Err:15 http://security.ubuntu.com/ubuntu resolute-updates/main amd64 tar amd64 1.35+dfsg-4ubuntu0.4
-  Could not open file /var/cache/apt/archives/partial/tar_1.35+dfsg-4ubuntu0.4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-  Could not open file /var/cache/apt/archives/partial/tar_1.35+dfsg-4ubuntu0.4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-                                                                           96% [Connecting to archive.ubuntu.com (91.189.91.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:17 http://archive.ubuntu.com/ubuntu resolute/main amd64 init-system-helpers all 1.69
-  Could not open file /var/cache/apt/archives/partial/init-system-helpers_1.69_all.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:18 http://archive.ubuntu.com/ubuntu resolute/main amd64 ncurses-base all 6.6+20251231-1
-  Could not open file /var/cache/apt/archives/partial/ncurses-base_6.6+20251231-1_all.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:19 http://archive.ubuntu.com/ubuntu resolute/main amd64 sysvinit-utils amd64 3.15-5ubuntu1
-  Could not open file /var/cache/apt/archives/partial/sysvinit-utils_3.15-5ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:20 http://archive.ubuntu.com/ubuntu resolute/main amd64 apt amd64 3.2.0
-  Could not open file /var/cache/apt/archives/partial/apt_3.2.0_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-                                                       96% [Connecting to archive.ubuntu.com (91.189.92.22)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:21 http://archive.ubuntu.com/ubuntu resolute/main amd64 logsave amd64 1.47.2-3ubuntu4
-  Could not open file /var/cache/apt/archives/partial/logsave_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-96% [Connecting to archive.ubuntu.com (2a06:bc80:0:1000::18)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                             Err:22 http://archive.ubuntu.com/ubuntu resolute/main amd64 e2fsprogs amd64 1.47.2-3ubuntu4
-  Could not open file /var/cache/apt/archives/partial/e2fsprogs_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-                                                             96% [Connecting to archive.ubuntu.com (91.189.91.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:23 http://archive.ubuntu.com/ubuntu resolute/main amd64 debconf all 1.5.92
-  Could not open file /var/cache/apt/archives/partial/debconf_1.5.92_all.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.23)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:24 http://archive.ubuntu.com/ubuntu resolute/main amd64 gcc-16-base amd64 16-20260322-1ubuntu1
-  Could not open file /var/cache/apt/archives/partial/gcc-16-base_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:25 http://archive.ubuntu.com/ubuntu resolute/main amd64 libacl1 amd64 2.3.2-2
-  Could not open file /var/cache/apt/archives/partial/libacl1_2.3.2-2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:26 http://archive.ubuntu.com/ubuntu resolute/main amd64 libbsd0 amd64 0.12.2-2build2
-  Could not open file /var/cache/apt/archives/partial/libbsd0_0.12.2-2build2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:27 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcap-ng0 amd64 0.8.5-4build5
-  Could not open file /var/cache/apt/archives/partial/libcap-ng0_0.8.5-4build5_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:28 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcrypt1 amd64 1:4.5.1-1
-  Could not open file /var/cache/apt/archives/partial/libcrypt1_1%3a4.5.1-1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:29 http://archive.ubuntu.com/ubuntu resolute/main amd64 libdb5.3t64 amd64 5.3.28+dfsg2-10ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libdb5.3t64_5.3.28+dfsg2-10ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-                                                       96% [Connecting to archive.ubuntu.com (91.189.92.22)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:30 http://archive.ubuntu.com/ubuntu resolute/main amd64 libdebconfclient0 amd64 0.280ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libdebconfclient0_0.280ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.24)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:31 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgcc-s1 amd64 16-20260322-1ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libgcc-s1_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:32 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgmp10 amd64 2:6.3.0+dfsg-5ubuntu2
-  Could not open file /var/cache/apt/archives/partial/libgmp10_2%3a6.3.0+dfsg-5ubuntu2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.23)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:33 http://archive.ubuntu.com/ubuntu resolute/main amd64 libmd0 amd64 1.1.0-2build4
-  Could not open file /var/cache/apt/archives/partial/libmd0_1.1.0-2build4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:34 http://archive.ubuntu.com/ubuntu resolute/main amd64 libpcre2-8-0 amd64 10.46-1build1
-  Could not open file /var/cache/apt/archives/partial/libpcre2-8-0_10.46-1build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:35 http://archive.ubuntu.com/ubuntu resolute/main amd64 libselinux1 amd64 3.9-4build1
-  Could not open file /var/cache/apt/archives/partial/libselinux1_3.9-4build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:36 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsemanage-common all 3.9-1build1
-  Could not open file /var/cache/apt/archives/partial/libsemanage-common_3.9-1build1_all.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:37 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsemanage2 amd64 3.9-1build1
-  Could not open file /var/cache/apt/archives/partial/libsemanage2_3.9-1build1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:38 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsepol2 amd64 3.9-2
-  Could not open file /var/cache/apt/archives/partial/libsepol2_3.9-2_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-                                                       96% [Connecting to archive.ubuntu.com (91.189.92.22)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:39 http://archive.ubuntu.com/ubuntu resolute/main amd64 libtinfo6 amd64 6.6+20251231-1
-  Could not open file /var/cache/apt/archives/partial/libtinfo6_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.24)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:40 http://archive.ubuntu.com/ubuntu resolute/main amd64 libzstd1 amd64 1.5.7+dfsg-3
-  Could not open file /var/cache/apt/archives/partial/libzstd1_1.5.7+dfsg-3_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:41 http://archive.ubuntu.com/ubuntu resolute/main amd64 login.defs all 1:4.17.4-2ubuntu3
-  Could not open file /var/cache/apt/archives/partial/login.defs_1%3a4.17.4-2ubuntu3_all.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.23)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:42 http://archive.ubuntu.com/ubuntu resolute/main amd64 passwd amd64 1:4.17.4-2ubuntu3
-  Could not open file /var/cache/apt/archives/partial/passwd_1%3a4.17.4-2ubuntu3_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-                                                     96% [Working][zfs] ZFS Checksum verification failed (silent data corruption detected)
-             Err:43 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgpg-error0 amd64 1.58-2
-  Could not open file /var/cache/apt/archives/partial/libgpg-error0_1.58-2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:44 http://archive.ubuntu.com/ubuntu resolute/main amd64 liblz4-1 amd64 1.10.0-8
-  Could not open file /var/cache/apt/archives/partial/liblz4-1_1.10.0-8_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:45 http://archive.ubuntu.com/ubuntu resolute/main amd64 libseccomp2 amd64 2.6.0-2ubuntu5
-  Could not open file /var/cache/apt/archives/partial/libseccomp2_2.6.0-2ubuntu5_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:46 http://archive.ubuntu.com/ubuntu resolute/main amd64 libstdc++6 amd64 16-20260322-1ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libstdc++6_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                       Err:47 http://archive.ubuntu.com/ubuntu resolute/main amd64 libxxhash0 amd64 0.8.3-2build1
-  Could not open file /var/cache/apt/archives/partial/libxxhash0_0.8.3-2build1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-                                                       96% [Connecting to archive.ubuntu.com (91.189.92.22)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:48 http://archive.ubuntu.com/ubuntu resolute/main amd64 ubuntu-keyring all 2023.11.28.1build1
-  Could not open file /var/cache/apt/archives/partial/ubuntu-keyring_2023.11.28.1build1_all.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.24)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:49 http://archive.ubuntu.com/ubuntu resolute/main amd64 libcom-err2 amd64 1.47.2-3ubuntu4
-  Could not open file /var/cache/apt/archives/partial/libcom-err2_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.82)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:50 http://archive.ubuntu.com/ubuntu resolute/main amd64 libext2fs2t64 amd64 1.47.2-3ubuntu4
-  Could not open file /var/cache/apt/archives/partial/libext2fs2t64_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.23)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:51 http://archive.ubuntu.com/ubuntu resolute/main amd64 libncursesw6 amd64 6.6+20251231-1
-  Could not open file /var/cache/apt/archives/partial/libncursesw6_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.81)][zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                     Err:52 http://archive.ubuntu.com/ubuntu resolute/main amd64 libproc2-0 amd64 2:4.0.4-9ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libproc2-0_2%3a4.0.4-9ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Working]                                                                                                                                      64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:53 http://archive.ubuntu.com/ubuntu resolute/main amd64 libss2 amd64 1.47.2-3ubuntu4
-  Could not open file /var/cache/apt/archives/partial/libss2_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:54 http://archive.ubuntu.com/ubuntu resolute/main amd64 mawk amd64 1.3.4.20260129-1
-  Could not open file /var/cache/apt/archives/partial/mawk_1.3.4.20260129-1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:55 http://archive.ubuntu.com/ubuntu resolute/main amd64 procps amd64 2:4.0.4-9ubuntu1
-  Could not open file /var/cache/apt/archives/partial/procps_2%3a4.0.4-9ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:56 http://archive.ubuntu.com/ubuntu resolute/main amd64 sensible-utils all 0.0.26build1
-  Could not open file /var/cache/apt/archives/partial/sensible-utils_0.0.26build1_all.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.22)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:57 http://archive.ubuntu.com/ubuntu resolute/main amd64 libuv1t64 amd64 1.51.0-2ubuntu1
-  Could not open file /var/cache/apt/archives/partial/libuv1t64_1.51.0-2ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.24)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:58 http://archive.ubuntu.com/ubuntu resolute/main amd64 liblua5.4-0 amd64 5.4.8-1build1
-  Could not open file /var/cache/apt/archives/partial/liblua5.4-0_5.4.8-1build1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.82)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:59 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpipewire-0.3-modules amd64 1.6.2-1ubuntu1.2
-  Could not open file /var/cache/apt/archives/partial/libpipewire-0.3-modules_1.6.2-1ubuntu1.2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-96% [Connecting to archive.ubuntu.com (91.189.92.23)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Ign:60 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libroc0.4 amd64 0.4.0+dfsg-5ubuntu3.1
-96% [Connecting to archive.ubuntu.com (91.189.91.81)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:60 http://security.ubuntu.com/ubuntu resolute-updates/main amd64 libroc0.4 amd64 0.4.0+dfsg-5ubuntu3.1
-  Could not open file /var/cache/apt/archives/partial/libroc0.4_0.4.0+dfsg-5ubuntu3.1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-  Could not open file /var/cache/apt/archives/partial/libroc0.4_0.4.0+dfsg-5ubuntu3.1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.81)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:61 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsnapd-glib-2-1 amd64 1.72-0ubuntu3
-  Could not open file /var/cache/apt/archives/partial/libsnapd-glib-2-1_1.72-0ubuntu3_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-96% [Connecting to archive.ubuntu.com (91.189.91.83)]                                                                                              64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:62 http://archive.ubuntu.com/ubuntu resolute/main amd64 libspeexdsp1 amd64 1.2.1-3build1
-  Could not open file /var/cache/apt/archives/partial/libspeexdsp1_1.2.1-3build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.83)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:63 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libwireplumber-0.5-0 amd64 0.5.13-1ubuntu1.1
-  Could not open file /var/cache/apt/archives/partial/libwireplumber-0.5-0_0.5.13-1ubuntu1.1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.81)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:64 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 pipewire-bin amd64 1.6.2-1ubuntu1.2
-  Could not open file /var/cache/apt/archives/partial/pipewire-bin_1.6.2-1ubuntu1.2_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-96% [Connecting to archive.ubuntu.com (185.125.190.82)]                                                                                            64.6 MB/s 0s[zfs] ZFS Checksum verification failed (silent data corruption detected)
-                                                                                                                                                               Err:65 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 breeze-cursor-theme all 4:6.6.5-0ubuntu0.1
-  Could not open file /var/cache/apt/archives/partial/breeze-cursor-theme_4%3a6.6.5-0ubuntu0.1_all.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-96% [Working]                                                                                                                                      64.6 MB/s 0s                                                                                                                                                               Fetched 4149 kB in 8s (535 kB/s)
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/ncurses-bin_6.6%2b20251231-1_amd64.deb  Could not open file /var/cache/apt/archives/partial/ncurses-bin_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/s/sed/sed_4.9-2ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/sed_4.9-2ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/t/tar/tar_1.35%2bdfsg-4ubuntu0.4_amd64.deb  Could not open file /var/cache/apt/archives/partial/tar_1.35+dfsg-4ubuntu0.4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/b/base-passwd/base-passwd_3.6.8_amd64.deb  Could not open file /var/cache/apt/archives/partial/base-passwd_3.6.8_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/i/init-system-helpers/init-system-helpers_1.69_all.deb  Could not open file /var/cache/apt/archives/partial/init-system-helpers_1.69_all.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/ncurses-base_6.6%2b20251231-1_all.deb  Could not open file /var/cache/apt/archives/partial/ncurses-base_6.6+20251231-1_all.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/sysvinit/sysvinit-utils_3.15-5ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/sysvinit-utils_3.15-5ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/a/apt/apt_3.2.0_amd64.deb  Could not open file /var/cache/apt/archives/partial/apt_3.2.0_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/logsave_1.47.2-3ubuntu4_amd64.deb  Could not open file /var/cache/apt/archives/partial/logsave_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/e2fsprogs_1.47.2-3ubuntu4_amd64.deb  Could not open file /var/cache/apt/archives/partial/e2fsprogs_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/d/debconf/debconf_1.5.92_all.deb  Could not open file /var/cache/apt/archives/partial/debconf_1.5.92_all.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-16/gcc-16-base_16-20260322-1ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/gcc-16-base_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/a/acl/libacl1_2.3.2-2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libacl1_2.3.2-2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libb/libbsd/libbsd0_0.12.2-2build2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libbsd0_0.12.2-2build2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libc/libcap-ng/libcap-ng0_0.8.5-4build5_amd64.deb  Could not open file /var/cache/apt/archives/partial/libcap-ng0_0.8.5-4build5_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcrypt/libcrypt1_4.5.1-1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libcrypt1_1%3a4.5.1-1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/d/db5.3/libdb5.3t64_5.3.28%2bdfsg2-10ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libdb5.3t64_5.3.28+dfsg2-10ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/c/cdebconf/libdebconfclient0_0.280ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libdebconfclient0_0.280ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libgcc-s1_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/g/gmp/libgmp10_6.3.0%2bdfsg-5ubuntu2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libgmp10_2%3a6.3.0+dfsg-5ubuntu2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libm/libmd/libmd0_1.1.0-2build4_amd64.deb  Could not open file /var/cache/apt/archives/partial/libmd0_1.1.0-2build4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/pcre2/libpcre2-8-0_10.46-1build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libpcre2-8-0_10.46-1build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libs/libselinux/libselinux1_3.9-4build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libselinux1_3.9-4build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libs/libsemanage/libsemanage-common_3.9-1build1_all.deb  Could not open file /var/cache/apt/archives/partial/libsemanage-common_3.9-1build1_all.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libs/libsemanage/libsemanage2_3.9-1build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libsemanage2_3.9-1build1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libs/libsepol/libsepol2_3.9-2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libsepol2_3.9-2_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo6_6.6%2b20251231-1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libtinfo6_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libz/libzstd/libzstd1_1.5.7%2bdfsg-3_amd64.deb  Could not open file /var/cache/apt/archives/partial/libzstd1_1.5.7+dfsg-3_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/shadow/login.defs_4.17.4-2ubuntu3_all.deb  Could not open file /var/cache/apt/archives/partial/login.defs_1%3a4.17.4-2ubuntu3_all.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/shadow/passwd_4.17.4-2ubuntu3_amd64.deb  Could not open file /var/cache/apt/archives/partial/passwd_1%3a4.17.4-2ubuntu3_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libg/libgpg-error/libgpg-error0_1.58-2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libgpg-error0_1.58-2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/l/lz4/liblz4-1_1.10.0-8_amd64.deb  Could not open file /var/cache/apt/archives/partial/liblz4-1_1.10.0-8_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libs/libseccomp/libseccomp2_2.6.0-2ubuntu5_amd64.deb  Could not open file /var/cache/apt/archives/partial/libseccomp2_2.6.0-2ubuntu5_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-16/libstdc%2b%2b6_16-20260322-1ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libstdc++6_16-20260322-1ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/x/xxhash/libxxhash0_0.8.3-2build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libxxhash0_0.8.3-2build1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/u/ubuntu-keyring/ubuntu-keyring_2023.11.28.1build1_all.deb  Could not open file /var/cache/apt/archives/partial/ubuntu-keyring_2023.11.28.1build1_all.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/libcom-err2_1.47.2-3ubuntu4_amd64.deb  Could not open file /var/cache/apt/archives/partial/libcom-err2_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/libext2fs2t64_1.47.2-3ubuntu4_amd64.deb  Could not open file /var/cache/apt/archives/partial/libext2fs2t64_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libncursesw6_6.6%2b20251231-1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libncursesw6_6.6+20251231-1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.23 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/procps/libproc2-0_4.0.4-9ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libproc2-0_2%3a4.0.4-9ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/libss2_1.47.2-3ubuntu4_amd64.deb  Could not open file /var/cache/apt/archives/partial/libss2_1.47.2-3ubuntu4_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/m/mawk/mawk_1.3.4.20260129-1_amd64.deb  Could not open file /var/cache/apt/archives/partial/mawk_1.3.4.20260129-1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/procps/procps_4.0.4-9ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/procps_2%3a4.0.4-9ubuntu1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/sensible-utils/sensible-utils_0.0.26build1_all.deb  Could not open file /var/cache/apt/archives/partial/sensible-utils_0.0.26build1_all.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/libu/libuv1/libuv1t64_1.51.0-2ubuntu1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libuv1t64_1.51.0-2ubuntu1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.22 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/l/lua5.4/liblua5.4-0_5.4.8-1build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/liblua5.4-0_5.4.8-1build1_amd64.deb - open (5: Input/output error) [IP: 91.189.92.24 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire/libpipewire-0.3-modules_1.6.2-1ubuntu1.2_amd64.deb  Could not open file /var/cache/apt/archives/partial/libpipewire-0.3-modules_1.6.2-1ubuntu1.2_amd64.deb - open (5: Input/output error) [IP: 91.189.91.82 80]
-E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/r/roc-toolkit/libroc0.4_0.4.0%2bdfsg-5ubuntu3.1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libroc0.4_0.4.0+dfsg-5ubuntu3.1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/snapd-glib/libsnapd-glib-2-1_1.72-0ubuntu3_amd64.deb  Could not open file /var/cache/apt/archives/partial/libsnapd-glib-2-1_1.72-0ubuntu3_amd64.deb - open (5: Input/output error) [IP: 91.189.91.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/speexdsp/libspeexdsp1_1.2.1-3build1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libspeexdsp1_1.2.1-3build1_amd64.deb - open (5: Input/output error) [IP: 91.189.91.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/libwireplumber-0.5-0_0.5.13-1ubuntu1.1_amd64.deb  Could not open file /var/cache/apt/archives/partial/libwireplumber-0.5-0_0.5.13-1ubuntu1.1_amd64.deb - open (5: Input/output error) [IP: 185.125.190.83 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire/pipewire-bin_1.6.2-1ubuntu1.2_amd64.deb  Could not open file /var/cache/apt/archives/partial/pipewire-bin_1.6.2-1ubuntu1.2_amd64.deb - open (5: Input/output error) [IP: 185.125.190.81 80]
-E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/universe/b/breeze/breeze-cursor-theme_6.6.5-0ubuntu0.1_all.deb  Could not open file /var/cache/apt/archives/partial/breeze-cursor-theme_4%3a6.6.5-0ubuntu0.1_all.deb - open (5: Input/output error) [IP: 185.125.190.82 80]
-E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?
-REINSTALL-DONE-42
-[?2004hroot@hydra:/# 

@@ -50,7 +50,12 @@ const REG_TDT: usize = 0x3818;
 const REG_RAL0: usize = 0x5400;
 const REG_RAH0: usize = 0x5404;
 
+const CTRL_FD: u32 = 1 << 0;
+const CTRL_ASDE: u32 = 1 << 5;
 const CTRL_SLU: u32 = 1 << 6;
+const CTRL_SPEED_1000: u32 = 2 << 8;
+const CTRL_FRCSPD: u32 = 1 << 11;
+const CTRL_FRCDPX: u32 = 1 << 12;
 const CTRL_RST: u32 = 1 << 26;
 const STATUS_LU: u32 = 1 << 1;
 const RCTL_EN: u32 = 1 << 1;
@@ -157,6 +162,9 @@ impl Nic {
         self.write(REG_IMC, 0xFFFF_FFFF);
         self.write(REG_CTRL, self.read(REG_CTRL) | CTRL_RST);
         for _ in 0..100_000 {
+            if self.read(REG_CTRL) & CTRL_RST == 0 {
+                break;
+            }
             core::hint::spin_loop();
         }
         self.write(REG_IMC, 0xFFFF_FFFF);
@@ -206,8 +214,17 @@ impl Nic {
         self.write(REG_RDT, (NUM_RX - 1) as u32);
         self.write(REG_RCTL, RCTL_EN | RCTL_SBP | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
 
-        self.write(REG_CTRL, self.read(REG_CTRL) | CTRL_SLU);
-        for _ in 0..50 {
+        let ctrl = (self.read(REG_CTRL) & !CTRL_RST)
+            | CTRL_SLU
+            | CTRL_ASDE
+            | CTRL_FD
+            | CTRL_SPEED_1000
+            | CTRL_FRCSPD
+            | CTRL_FRCDPX;
+        self.write(REG_CTRL, ctrl);
+        self.read(REG_ICR);
+
+        for _ in 0..100 {
             if self.link_up() {
                 break;
             }
@@ -265,11 +282,17 @@ impl Nic {
         }
         self.tx_cur = (cur + 1) % NUM_TX;
         self.write(REG_TDT, self.tx_cur as u32);
-        for _ in 0..1_000_000 {
+        for _ in 0..100_000 {
             if unsafe { self.tx_desc(cur).read_volatile().status } & 1 != 0 {
                 return Ok(());
             }
             core::hint::spin_loop();
+        }
+        for _ in 0..100 {
+            if unsafe { self.tx_desc(cur).read_volatile().status } & 1 != 0 {
+                return Ok(());
+            }
+            sys::sleep_ms(2);
         }
         Err("transmit timed out")
     }

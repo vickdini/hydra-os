@@ -254,6 +254,7 @@ impl ZfsServer {
             return Err(EEXIST);
         }
         let ino = self.dmu.alloc_object(mode).map_err(io)?;
+        self.zap.forget(ino);
         let mut dn = self.dmu.get_dnode(ino).map_err(io)?;
         let t = now();
         dn.uid = uid;
@@ -723,6 +724,8 @@ impl ZfsServer {
             if *c == 0 {
                 self.open_counts.remove(&ino);
                 if self.orphans.remove(&ino) {
+                    // A reused object number must not inherit this directory's cached index
+                    self.zap.forget(ino);
                     let _ = self.dmu.free_object(ino);
                 }
             }

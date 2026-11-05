@@ -1,42 +1,0 @@
-Windows Hypervisor Platform accelerator is operational
-linux run /bin/unixtest.elf
-[+] Read 860400 bytes from OpenZFS (/bin/unixtest.elf). Spawning Linux process...
-[+] Linux process spawned with Task ID 9 (UID 1000, GID 1000). Executing...
-[unixtest] socketpair(SOCK_STREAM)                              PASS
-[unixtest] stream write/read                                    PASS
-[unixtest] stream reads merge writes                            PASS
-[unixtest] MSG_PEEK                                             PASS
-[unixtest] MSG_DONTWAIT on empty -> EAGAIN                      PASS
-[unixtest] poll: not readable when empty                        PASS
-[unixtest] poll: readable after write                           PASS
-[unixtest] sendmsg SCM_RIGHTS                                   PASS
-[unixtest] recvmsg delivers the descriptor with its byte        PASS
-[unixtest] passed descriptor refers to the same pipe            PASS
-[unixtest] following data arrives separately                    PASS
-[unixtest] SO_PEERCRED on a pair is ourselves                   PASS
-[unixtest] SO_PASSCRED adds SCM_CREDENTIALS                     PASS
-[unixtest] read after peer close -> EOF                         PASS
-[unixtest] send after peer close -> EPIPE (MSG_NOSIGNAL)        PASS
-[unixtest] socketpair(SOCK_SEQPACKET)                           PASS
-[unixtest] seqpacket keeps message boundaries                   PASS
-[unixtest] seqpacket short read sets MSG_TRUNC                  PASS
-[unixtest] bind + listen (path)                                 PASS
-[unixtest] second bind -> EADDRINUSE (path)                     PASS
-[unixtest] accept (path)                                        PASS
-[unixtest] SO_PEERCRED is the client (path)                     PASS
-[unixtest] client/server exchange (path)                        PASS
-[unixtest] getsockname returns the bound name (path)            PASS
-[unixtest] non-blocking accept -> EAGAIN (path)                 PASS
-[unixtest] bound path is a socket node                          PASS
-[unixtest] connect after the listener closed -> ECONNREFUSED    PASS
-[unixtest] connect to a missing path -> ENOENT                  PASS
-[unixtest] bind + listen (abstract)                             PASS
-[unixtest] second bind -> EADDRINUSE (abstract)                 PASS
-[unixtest] accept (abstract)                                    PASS
-[unixtest] SO_PEERCRED is the client (abstract)                 PASS
-[unixtest] client/server exchange (abstract)                    PASS
-[unixtest] getsockname returns the bound name (abstract)        PASS
-[unixtest] non-blocking accept -> EAGAIN (abstract)             PASS
-[unixtest] ALL PASSED (0 failures)
-[+] Linux process 9 exited with status 0.
-hydra:/bin$ 

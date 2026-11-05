@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["with_server"],"static":["ZFS_SERVER"],"struct":["DatasetRecord","ZfsServer"]};

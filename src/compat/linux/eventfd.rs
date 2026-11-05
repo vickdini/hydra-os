@@ -39,6 +39,8 @@ const EAGAIN: i64 = -11;
 const EINVAL: i64 = -22;
 /// Negative errno for per-process open file descriptor table full.
 const EMFILE: i64 = -24;
+/// Negative errno for function not implemented.
+const ENOSYS: i64 = -38;
 
 /// Represents an in-kernel Linux `eventfd` counter synchronization object.
 ///
@@ -255,6 +257,12 @@ pub fn write(efd: &Arc<Mutex<EventFd>>, data: &[u8]) -> i64 {
 /// # Returns
 /// Non-negative file descriptor index on success, or `-EINVAL` / `-EMFILE` on error.
 pub fn sys_eventfd2(initval: u64, flags: u64) -> i64 {
+    // Chromium's ChannelLinux probes kernel support via syscall(__NR_eventfd2, 0, ~0).
+    // If it gets -ENOSYS, it safely disables ChannelLinux and falls back to standard
+    // POSIX domain sockets (ChannelPosix), avoiding Mojo Linux-specific channel crashes.
+    if flags as u32 == !0 || flags == !0 {
+        return ENOSYS;
+    }
     if flags as u32 & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 {
         return EINVAL;
     }

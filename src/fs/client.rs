@@ -1053,7 +1053,7 @@ impl ZfsClient {
                     let mut entry_buf = [0u8; 512];
                     while let Ok(Some(info)) = dir.read_entry(&mut entry_buf) {
                         let name = alloc::format!("{}", info.file_name());
-                        if name.ends_with(".elf") && !candidate_files.iter().any(|(_, z)| z.ends_with(&alloc::format!("/{}", name))) {
+                        if (name.ends_with(".elf") || name.ends_with(".so") || name.ends_with(".chk") || name.contains(".so.")) && !candidate_files.iter().any(|(_, z)| z.ends_with(&alloc::format!("/{}", name))) {
                             candidate_files.push((alloc::format!(r"\bin\{}", name), alloc::format!("/bin/{}", name)));
                         }
                     }
@@ -1124,15 +1124,15 @@ impl ZfsClient {
 
             let is_elf = data.len() >= 4 && data[..4] == crate::task::elf::ELF_MAGIC;
             let is_config = !data.is_empty() && zfs_path.starts_with("/etc/");
-            if (is_elf || is_config) && Self::write_file_by_path_batch(zfs_path, data).is_ok() {
-                if is_elf {
-                    let _ = with_server(|s| {
-                        let root = s.root_obj();
-                        let ino = resolve_at(s, root, zfs_path.as_bytes(), true)?;
-                        s.setattr(ino, SetAttr { mode: Some(0o755), ..SetAttr::default() })?;
-                        Ok(())
-                    });
-                }
+            let is_chk = !data.is_empty() && zfs_path.ends_with(".chk");
+            if (is_elf || is_config || is_chk) && Self::write_file_by_path_batch(zfs_path, data).is_ok() {
+                let mode = if is_elf { 0o755 } else { 0o644 };
+                let _ = with_server(|s| {
+                    let root = s.root_obj();
+                    let ino = resolve_at(s, root, zfs_path.as_bytes(), true)?;
+                    s.setattr(ino, SetAttr { mode: Some(mode), ..SetAttr::default() })?;
+                    Ok(())
+                });
                 imported_count += 1;
                 crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
                 crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes)", fat_path, zfs_path, data.len());

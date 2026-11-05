@@ -215,7 +215,12 @@ fn seq_le(a: u32, b: u32) -> bool {
 ///
 /// The 4-byte local IPv4 address.
 fn local_ip() -> [u8; 4] {
-    GLOBAL_INTERFACE.lock().ip()
+    let mut ip = GLOBAL_INTERFACE.lock().ip();
+    if ip == [0, 0, 0, 0] && e1000::is_present() {
+        let _ = crate::net::dhcp_acquire();
+        ip = GLOBAL_INTERFACE.lock().ip();
+    }
+    ip
 }
 
 /// Returns `true` once the hardware interface is present and has a non-zero IPv4 address (DHCP finished).
@@ -234,7 +239,13 @@ pub fn is_up() -> bool {
 /// * `proto` - Transport protocol discriminator.
 /// * `payload` - Packet payload byte slice.
 fn send_ip(dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
-    let _ = GLOBAL_INTERFACE.lock().send_ipv4(dst, proto, payload);
+    let mut iface = GLOBAL_INTERFACE.lock();
+    if iface.ip() == [0, 0, 0, 0] && e1000::is_present() {
+        drop(iface);
+        let _ = crate::net::dhcp_acquire();
+        iface = GLOBAL_INTERFACE.lock();
+    }
+    let _ = iface.send_ipv4(dst, proto, payload);
 }
 
 impl Stack {

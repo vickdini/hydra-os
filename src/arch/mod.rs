@@ -45,6 +45,8 @@ pub mod pic;
 /// 8254 Programmable Interval Timer (PIT) driver and system uptime accounting.
 pub mod pit;
 pub mod power;
+/// Kernel CSPRNG (ChaCha20) for /dev/urandom and getrandom(2).
+pub mod random;
 pub mod raw_serial;
 /// MC146818 CMOS Real-Time Clock (RTC) wall-clock epoch initialization.
 pub mod rtc;

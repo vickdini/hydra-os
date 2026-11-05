@@ -1,157 +1,0 @@
-su root
-[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
-[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg --configure -a
-[1m[37m[40m
-============================================================
- [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
-============================================================
-  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
-  - Memory Map Entries : 100 descriptors captured
-  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
-  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
-  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
-  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
-  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
-  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
-============================================================
-
-[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
-
-Setting up mount (2.41.3-3ubuntu2.2) ...
-Setting up python3.14-minimal (3.14.4-1ubuntu0.2) ...
-[linux] pid 11: unimplemented syscall 275 (0x0, 0x0, 0x1) -> ENOSYS
-Setting up login (1:4.16.0-2+really2.41.3-3ubuntu2.2) ...
-Processing triggers for libc-bin (2.43-2ubuntu2.3) ...
-[+] Linux process 4 exited with status 0.
-hydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends plasma-workspace plasma-desktop kwin-style-breeze breeze
-Reading package lists... 0%Reading package lists... 0%Reading package lists... 22%Reading package lists... Done
-Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 78%Building dependency tree... 95%Building dependency tree... Done
-Reading state information... 0% Reading state information... 0%Reading state information... Done
-Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
-The following additional packages will be installed:
-  accountsservice breeze-wallpaper bsdutils cpp cpp-15 cpp-15-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus-user-session dconf-gsettings-backend dconf-service
-  dmidecode frameworkintegration6 gcc-15-base gdb geoclue-2.0 glib-networking glib-networking-common glib-networking-services gsettings-desktop-schemas
-  hicolor-icon-theme hwdata iso-codes kactivitymanagerd kde-cli-tools kde-cli-tools-data kde-style-breeze kde-style-breeze-data kf6-breeze-icon-theme
-  kglobalacceld kirigami-addons-data knighttime kwin-common kwin-data layer-shell-qt libaccountsservice0 libappstream5 libappstreamqt3 libass9 libatasmart4
-  libavahi-glib1 libavfilter11 libbabeltrace1 libbatterycontrol6 libblockdev-crypto3 libblockdev-fs3 libblockdev-loop3 libblockdev-mdraid3 libblockdev-nvme3
-  libblockdev-part3 libblockdev-smart3 libblockdev-swap3 libblockdev-utils3 libblockdev3 libbs2b0 libbytesize-common libbytesize1 libcryptsetup12 libdconf1
-  libdebuginfod-common libdebuginfod1t64 libdevmapper1.02.1 libdmtx0t64 libdw1t64 libeditorconfig0 libeis1 libexiv2-28 libexiv2-data libfdisk1
-  libfftw3-double3 libflite1 libfyaml0 libgeoclue-2-0 libhunspell-1.7-0 libibus-1.0-5 libinih1 libinireader0 libipt2 libisl23 libjs-underscore libjson-c5
-  libjson-glib-1.0-0 libjson-glib-1.0-common libkexiv2qt6-0 libkf6auth-data libkf6authcore6 libkf6baloo6 libkf6balooengine6 libkf6calendarevents6
-  libkf6config-bin libkf6declarative-data libkf6filemetadata-data libkf6filemetadata3 libkf6holidays-data libkf6holidays6 libkf6i18nlocaledata6
-  libkf6itemmodels6 libkf6kcmutils-data libkf6kcmutils6 libkf6kcmutilscore6 libkf6kcmutilsquick6 libkf6networkmanagerqt6 libkf6prison6 libkf6prisonscanner6
-  libkf6qqc2desktopstyle-data libkf6runner6 libkf6statusnotifieritem-data libkf6statusnotifieritem6 libkf6style6 libkf6su-bin libkf6su-data libkf6su6
-  libkf6syntaxhighlighting-data libkf6syntaxhighlighting6 libkf6texteditor-bin libkf6texteditor-data libkf6texteditor6 libkf6unitconversion-data
-  libkf6unitconversion6 libkf6userfeedback-data libkf6userfeedbackcore6 libkfontinst6 libkfontinstui6 libkirigami-data libkirigami6 libkirigamicontrols6
-  libkirigamidelegates6 libkirigamidialogs6 libkirigamilayouts6 libkirigamilayoutsprivate6 libkirigamiplatform6 libkirigamipolyfill6 libkirigamiprimitives6
-  libkirigamiprivate6 libkirigamitemplates6 libklipper6 libklookandfeel6 libkmod2 libkmpris6 libknighttime0 libkpipewire-data libkpipewire6
-  libkpipewiredmabuf6 libkpipewirerecord6 libkquickcontrolsprivate0 libksysguard-data libksysguardformatter2 libksysguardsensorfaces2 libksysguardsensors2
-  libksysguardsystemstats2 libkworkspace6-6 liblilv-0-0 liblmdb0 libmm-glib0 libmysofa1 libnotificationmanager1 libnotify4 libnspr4 libnss3 libnvme1t64
-  libpackagekitqt6-2 libpam-systemd libparted2t64 libplacebo360 libplasma-geolocation-interface6 libplasma5support-data libplasma5support6
-  libplasmaactivitiesstats1 libpolkit-agent-1-0 libpolkit-gobject-1-0 libpolkit-qt6-1-1 libprocesscore10 libpython3-stdlib libpython3.14 libpython3.14-stdlib
-  libqalculate-data libqalculate23 libqrencode4 libqt6labsplatform6 libqt6openglwidgets6 libqt6positioning6 libqt6positioning6-plugins libqt6positioningquick6
-  libqt6quickcontrols2-6 libqt6quickshapes6 libqt6quicktemplates2-6 libqt6serialport6 libqt6shadertools6 libqt6sql6 libqt6sql6-sqlite libqt6test6
-  libqt6uitools6 libqt6virtualkeyboard6 libquickcharts1 libquickchartscontrols1 librubberband3 libsamplerate0 libscim8v5 libsdl2-2.0-0 libsdl2-classic
-  libserd-0-0 libsord-0-0 libsoup-3.0-0 libsoup-3.0-common libsource-highlight-common libsource-highlight4t64 libsratom-0-0 libstemmer0d libsystemd-shared
-  libsystemd0 libtaskmanager6 libtext-charwidth-perl libtext-wrapi18n-perl libudev1 libudisks2-0 libunibreak6 libvidstab1.1 libvolume-key1 libweather-ion7
-  libxcb-damage0 libxcomposite1 libxcursor1 libxft2 libxinerama1 libxkbregistry0 libxmlb2 libxmuu1 libxtst6 libxv1 libxxf86dga1 libzimg2 libzix-0-0 libzxing3
-  media-types milou netbase ocean-sound-theme oxygen-sounds parted pci.ids plasma-desktop-data plasma-desktoptheme plasma-integration plasma-workspace-data
-  pnp.ids polkit-kde-agent-1 polkitd python3 python3-minimal python3.14 qml6-module-org-kde-activities qml6-module-org-kde-baloo qml6-module-org-kde-breeze
-  qml6-module-org-kde-config qml6-module-org-kde-coreaddons qml6-module-org-kde-desktop qml6-module-org-kde-draganddrop qml6-module-org-kde-graphicaleffects
-  qml6-module-org-kde-guiaddons qml6-module-org-kde-iconthemes qml6-module-org-kde-kcmutils qml6-module-org-kde-kholidays qml6-module-org-kde-kirigami
-  qml6-module-org-kde-kirigamiaddons-components qml6-module-org-kde-kirigamiaddons-delegates qml6-module-org-kde-kirigamiaddons-tableview
-  qml6-module-org-kde-kirigamiaddons-treeview qml6-module-org-kde-kitemmodels qml6-module-org-kde-kquickcontrols qml6-module-org-kde-kquickcontrolsaddons
-  qml6-module-org-kde-ksvg qml6-module-org-kde-ksysguard qml6-module-org-kde-kwindowsystem qml6-module-org-kde-newstuff qml6-module-org-kde-notifications
-  qml6-module-org-kde-pipewire qml6-module-org-kde-plasma-plasma5support qml6-module-org-kde-prison qml6-module-org-kde-quickcharts qml6-module-org-kde-sonnet
-  qml6-module-org-kde-userfeedback qml6-module-qt-labs-folderlistmodel qml6-module-qt-labs-platform qml6-module-qt-labs-qmlmodels
-  qml6-module-qt5compat-graphicaleffects qml6-module-qtcore qml6-module-qtmultimedia qml6-module-qtpositioning qml6-module-qtqml qml6-module-qtqml-models
-  qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs qml6-module-qtquick-effects
-  qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-tooling qml6-module-qtquick-virtualkeyboard
-  qml6-module-qtquick-window qt6-base-dev-tools qt6-svg-plugins sgml-base sudo sudo-common systemd systemd-sysv tzdata ucf udev udisks2 usb.ids
-  user-session-migration x11-utils x11-xserver-utils xdg-user-dirs xml-core
-Suggested packages:
-  gnome-control-center cpp-doc gcc-15-locales cpp-15-doc gdb-doc gdbserver isoquery kwin-addons mdadm exiv2 libfftw3-bin libfftw3-dev libjs-jquery nvme-cli
-  packagekit libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-rc0t64 libparted-dev libparted-i18n xdg-utils serdi sordi libarchive13t64 libbpf1
-  libfido2-1 libpwquality1 parted-doc kde-config-flatpak python3-doc python3-tk python3-venv python3.14-venv python3.14-doc binutils cmake sgml-base-doc
-  systemd-container systemd-homed systemd-userdbd systemd-boot systemd-repart libtss2-tcti-device0 btrfs-progs f2fs-tools nilfs-tools reiserfsprogs udftools
-  udisks2-btrfs udisks2-lvm2 xfsprogs mesa-utils nickle cairo-5c xorg-docs-core debhelper
-Recommended packages:
-  kde-style-breeze-qt5 libc-dbg avahi-daemon iio-sensor-proxy modemmanager wpasupplicant systemsettings libkf6kcmutils-bin dmsetup hunspell-en-us
-  | hunspell-dictionary | myspell-dictionary javascript-common libkf6filemetadata-bin libkf6texteditor-katepart libkf6userfeedback-doc bluedevil
-  breeze-gtk-theme fonts-hack fonts-noto-cjk fonts-noto-hinted fonts-noto-mono fonts-noto-unhinted ibus-data kde-config-gtk-style kde-config-screenlocker
-  kde-config-sddm kde-style-oxygen-qt6 kgamma khelpcenter kinfocenter kio-extras kmenuedit kscreen ksshaskpass kwrited libpam-kwallet5
-  plasma-browser-integration plasma-discover plasma-disks plasma-firewall plasma-nm plasma-pa plasma-systemmonitor plasma-thunderbolt plasma-vault powerdevil
-  xdg-desktop-portal-gtk xdg-desktop-portal-kde fonts-noto-color-emoji fonts-noto-core fonts-noto-ui-core appmenu-gtk3-module kio-fuse ksystemstats
-  plasma-session-wayland ca-certificates qml6-module-org-kde-kirigamiaddons-formcard sudo-rs linux-sysctl-defaults systemd-timesyncd | time-daemon
-  systemd-resolved systemd-cryptsetup libnss-systemd systemd-hwe-hwdb dosfstools eject ntfs-3g exfatprogs luit
-The following NEW packages will be installed:
-  accountsservice breeze breeze-wallpaper cpp cpp-15 cpp-15-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus-user-session dconf-gsettings-backend dconf-service
-  dmidecode frameworkintegration6 gcc-15-base gdb geoclue-2.0 glib-networking glib-networking-common glib-networking-services gsettings-desktop-schemas
-  hicolor-icon-theme hwdata iso-codes kactivitymanagerd kde-cli-tools kde-cli-tools-data kde-style-breeze kde-style-breeze-data kf6-breeze-icon-theme
-  kglobalacceld kirigami-addons-data knighttime kwin-common kwin-data kwin-style-breeze layer-shell-qt libaccountsservice0 libappstream5 libappstreamqt3
-  libass9 libatasmart4 libavahi-glib1 libavfilter11 libbabeltrace1 libbatterycontrol6 libblockdev-crypto3 libblockdev-fs3 libblockdev-loop3
-  libblockdev-mdraid3 libblockdev-nvme3 libblockdev-part3 libblockdev-smart3 libblockdev-swap3 libblockdev-utils3 libblockdev3 libbs2b0 libbytesize-common
-  libbytesize1 libcryptsetup12 libdconf1 libdebuginfod-common libdebuginfod1t64 libdevmapper1.02.1 libdmtx0t64 libdw1t64 libeditorconfig0 libeis1 libexiv2-28
-  libexiv2-data libfdisk1 libfftw3-double3 libflite1 libfyaml0 libgeoclue-2-0 libhunspell-1.7-0 libibus-1.0-5 libinih1 libinireader0 libipt2 libisl23
-  libjs-underscore libjson-c5 libjson-glib-1.0-0 libjson-glib-1.0-common libkexiv2qt6-0 libkf6auth-data libkf6authcore6 libkf6baloo6 libkf6balooengine6
-  libkf6calendarevents6 libkf6config-bin libkf6declarative-data libkf6filemetadata-data libkf6filemetadata3 libkf6holidays-data libkf6holidays6
-  libkf6i18nlocaledata6 libkf6itemmodels6 libkf6kcmutils-data libkf6kcmutils6 libkf6kcmutilscore6 libkf6kcmutilsquick6 libkf6networkmanagerqt6 libkf6prison6
-  libkf6prisonscanner6 libkf6qqc2desktopstyle-data libkf6runner6 libkf6statusnotifieritem-data libkf6statusnotifieritem6 libkf6style6 libkf6su-bin
-  libkf6su-data libkf6su6 libkf6syntaxhighlighting-data libkf6syntaxhighlighting6 libkf6texteditor-bin libkf6texteditor-data libkf6texteditor6
-  libkf6unitconversion-data libkf6unitconversion6 libkf6userfeedback-data libkf6userfeedbackcore6 libkfontinst6 libkfontinstui6 libkirigami-data libkirigami6
-  libkirigamicontrols6 libkirigamidelegates6 libkirigamidialogs6 libkirigamilayouts6 libkirigamilayoutsprivate6 libkirigamiplatform6 libkirigamipolyfill6
-  libkirigamiprimitives6 libkirigamiprivate6 libkirigamitemplates6 libklipper6 libklookandfeel6 libkmod2 libkmpris6 libknighttime0 libkpipewire-data
-  libkpipewire6 libkpipewiredmabuf6 libkpipewirerecord6 libkquickcontrolsprivate0 libksysguard-data libksysguardformatter2 libksysguardsensorfaces2
-  libksysguardsensors2 libksysguardsystemstats2 libkworkspace6-6 liblilv-0-0 liblmdb0 libmm-glib0 libmysofa1 libnotificationmanager1 libnotify4 libnspr4
-  libnss3 libnvme1t64 libpackagekitqt6-2 libpam-systemd libparted2t64 libplacebo360 libplasma-geolocation-interface6 libplasma5support-data libplasma5support6
-  libplasmaactivitiesstats1 libpolkit-agent-1-0 libpolkit-gobject-1-0 libpolkit-qt6-1-1 libprocesscore10 libpython3-stdlib libpython3.14 libpython3.14-stdlib
-  libqalculate-data libqalculate23 libqrencode4 libqt6labsplatform6 libqt6openglwidgets6 libqt6positioning6 libqt6positioning6-plugins libqt6positioningquick6
-  libqt6quickcontrols2-6 libqt6quickshapes6 libqt6quicktemplates2-6 libqt6serialport6 libqt6shadertools6 libqt6sql6 libqt6sql6-sqlite libqt6test6
-  libqt6uitools6 libqt6virtualkeyboard6 libquickcharts1 libquickchartscontrols1 librubberband3 libsamplerate0 libscim8v5 libsdl2-2.0-0 libsdl2-classic
-  libserd-0-0 libsord-0-0 libsoup-3.0-0 libsoup-3.0-common libsource-highlight-common libsource-highlight4t64 libsratom-0-0 libstemmer0d libsystemd-shared
-  libtaskmanager6 libtext-charwidth-perl libtext-wrapi18n-perl libudisks2-0 libunibreak6 libvidstab1.1 libvolume-key1 libweather-ion7 libxcb-damage0
-  libxcomposite1 libxcursor1 libxft2 libxinerama1 libxkbregistry0 libxmlb2 libxmuu1 libxtst6 libxv1 libxxf86dga1 libzimg2 libzix-0-0 libzxing3 media-types
-  milou netbase ocean-sound-theme oxygen-sounds parted pci.ids plasma-desktop plasma-desktop-data plasma-desktoptheme plasma-integration plasma-workspace
-  plasma-workspace-data pnp.ids polkit-kde-agent-1 polkitd python3 python3-minimal python3.14 qml6-module-org-kde-activities qml6-module-org-kde-baloo
-  qml6-module-org-kde-breeze qml6-module-org-kde-config qml6-module-org-kde-coreaddons qml6-module-org-kde-desktop qml6-module-org-kde-draganddrop
-  qml6-module-org-kde-graphicaleffects qml6-module-org-kde-guiaddons qml6-module-org-kde-iconthemes qml6-module-org-kde-kcmutils qml6-module-org-kde-kholidays
-  qml6-module-org-kde-kirigami qml6-module-org-kde-kirigamiaddons-components qml6-module-org-kde-kirigamiaddons-delegates
-  qml6-module-org-kde-kirigamiaddons-tableview qml6-module-org-kde-kirigamiaddons-treeview qml6-module-org-kde-kitemmodels qml6-module-org-kde-kquickcontrols
-  qml6-module-org-kde-kquickcontrolsaddons qml6-module-org-kde-ksvg qml6-module-org-kde-ksysguard qml6-module-org-kde-kwindowsystem
-  qml6-module-org-kde-newstuff qml6-module-org-kde-notifications qml6-module-org-kde-pipewire qml6-module-org-kde-plasma-plasma5support
-  qml6-module-org-kde-prison qml6-module-org-kde-quickcharts qml6-module-org-kde-sonnet qml6-module-org-kde-userfeedback qml6-module-qt-labs-folderlistmodel
-  qml6-module-qt-labs-platform qml6-module-qt-labs-qmlmodels qml6-module-qt5compat-graphicaleffects qml6-module-qtcore qml6-module-qtmultimedia
-  qml6-module-qtpositioning qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls
-  qml6-module-qtquick-dialogs qml6-module-qtquick-effects qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates
-  qml6-module-qtquick-tooling qml6-module-qtquick-virtualkeyboard qml6-module-qtquick-window qt6-base-dev-tools qt6-svg-plugins sgml-base sudo sudo-common
-  systemd systemd-sysv tzdata ucf udev udisks2 usb.ids user-session-migration x11-utils x11-xserver-utils xdg-user-dirs xml-core
-The following packages will be upgraded:
-  bsdutils libsystemd0 libudev1
-3 upgraded, 318 newly installed, 0 to remove and 21 not upgraded.
-Need to get 0 B/201 MB of archives.
-After this operation, 619 MB of additional disk space will be used.
-[ata] DMA failing repeatedly; using port I/O
-Extracting templates from packages: 9%Extracting templates from packages: 18%Extracting templates from packages: 28%Extracting templates from packages: 37%Extracting templates from packages: 46%Extracting templates from packages: 56%Extracting templates from packages: 65%Extracting templates from packages: 74%Extracting templates from packages: 84%Extracting templates from packages: 93%Extracting templates from packages: 100%
-Preconfiguring packages ...
-Selecting previously unselected package python3-minimal.
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 18194 files and directories currently installed.)
-Preparing to unpack .../0-python3-minimal_3.14.3-0ubuntu2_amd64.deb ...
-Unpacking python3-minimal (3.14.3-0ubuntu2) ...
-Selecting previously unselected package media-types.
-Preparing to unpack .../1-media-types_14.0.0build1_all.deb ...
-Unpacking media-types (14.0.0build1) ...
-Selecting previously unselected package netbase.
-Preparing to unpack .../2-netbase_6.5build1_all.deb ...
-Unpacking netbase (6.5build1) ...
-Selecting previously unselected package tzdata.
-Preparing to unpack .../3-tzdata_2026e-0ubuntu0.26.04.1_all.deb ...
-Unpacking tzdata (2026e-0ubuntu0.26.04.1) ...
-[watchdog] kernel busy for 5 s: rip=0xbd44bbde rsp=0x40e35500 anchor=0xbd446b20
-[watchdog] kernel busy for 10 s: rip=0xbd44bbde rsp=0x40e35500 anchor=0xbd446b20
-[watchdog] kernel busy for 15 s: rip=0xbd44bbde rsp=0x40e35500 anchor=0xbd446b20
-[watchdog] kernel busy for 20 s: rip=0xbd44ba02 rsp=0x40e36220 anchor=0xbd446b20
-[watchdog] kernel busy for 25 s: rip=0xbd44bbde rsp=0x40e35500 anchor=0xbd446b20
-Selecting previously unselected package libpython3.14-stdlib:amd64.
-Preparing to unpack .../4-libpython3.14-stdlib_3.14.4-1ubuntu0.2_amd64.deb ...
-Unpacking libpython3.14-stdlib:amd64 (3.14.4-1ubuntu0.2) ...
-

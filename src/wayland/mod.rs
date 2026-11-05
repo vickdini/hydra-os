@@ -790,7 +790,7 @@ impl Compositor {
                 let fd = c.infds.pop_front();
                 let _size = a.i32();
                 match fd {
-                    Some(FileDescriptor::MemFd(m)) => {
+                    Some(FileDescriptor::MemFd { memfd: m, .. }) => {
                         c.objects.insert(id, (Obj::Pool { mem: m }, 1));
                     }
                     _ => {
@@ -829,7 +829,7 @@ impl Compositor {
                     let id = a.u32();
                     let v = c.version(obj);
                     c.objects.insert(id, (Obj::Keyboard, v));
-                    let fd = FileDescriptor::MemFd(self.keymap.clone());
+                    let fd = FileDescriptor::MemFd { memfd: self.keymap.clone(), flags: 0 };
                     let size = self.keymap_size;
                     let c = &mut self.clients[ci];
                     c.event(id, 0, &[A::U(1), A::Fd(fd), A::U(size)]);

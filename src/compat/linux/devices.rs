@@ -107,7 +107,7 @@ impl Tree {
         self.at = String::from(path);
         let mut ino = self.root;
         for comp in path.split('/').filter(|c| !c.is_empty()) {
-            ino = match s.lookup(ino, comp.as_bytes()) {
+            let next = match s.lookup(ino, comp.as_bytes()) {
                 Ok(i) => i,
                 Err(ENOENT) => {
                     self.changed = true;
@@ -115,6 +115,20 @@ impl Tree {
                 }
                 Err(e) => return Err(e),
             };
+            if let Ok(attr) = s.getattr(next) {
+                if attr.mode & S_IFMT == S_IFLNK {
+                    if let Ok(target) = s.readlink(next) {
+                        if let Ok(t_str) = core::str::from_utf8(&target) {
+                            let base = if t_str.starts_with('/') { self.root } else { ino };
+                            if let Some(resolved) = lookup_path(s, base, t_str) {
+                                ino = resolved;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            ino = next;
         }
         Ok(ino)
     }
@@ -249,8 +263,7 @@ impl Tree {
     }
 }
 
-/// Looks `path` up below directory `root` without following symbolic links (the caller
-/// holds the file server, so `ZfsClient` cannot be used).
+/// Looks `path` up below directory `root`, following symbolic links up to 16 hops.
 ///
 /// # Arguments
 ///
@@ -262,9 +275,28 @@ impl Tree {
 ///
 /// `Some(inode)` if found, or `None`.
 fn lookup_path(s: &mut ZfsServer, root: u64, path: &str) -> Option<u64> {
+    lookup_path_hops(s, root, path, 0)
+}
+
+fn lookup_path_hops(s: &mut ZfsServer, root: u64, path: &str, hops: u32) -> Option<u64> {
+    if hops > 16 {
+        return None;
+    }
     let mut ino = root;
     for comp in path.split('/').filter(|c| !c.is_empty()) {
-        ino = s.lookup(ino, comp.as_bytes()).ok()?;
+        let next = s.lookup(ino, comp.as_bytes()).ok()?;
+        if let Ok(attr) = s.getattr(next) {
+            if attr.mode & S_IFMT == S_IFLNK {
+                if let Ok(target) = s.readlink(next) {
+                    if let Ok(t_str) = core::str::from_utf8(&target) {
+                        let base = if t_str.starts_with('/') { root } else { ino };
+                        ino = lookup_path_hops(s, base, t_str, hops + 1)?;
+                        continue;
+                    }
+                }
+            }
+        }
+        ino = next;
     }
     Some(ino)
 }
@@ -490,6 +522,49 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     t.file(s, "/run/udev/control", "")?;
 
     // ---- What systemd-tmpfiles creates at boot: sockets of X11 (Xwayland) and ICE ----
+    let tmp_ino = t.dir(s, "/tmp")?;
+    if s.getattr(tmp_ino)?.mode & 0o7777 != 0o1777 {
+        s.setattr(tmp_ino, crate::fs::zfs::zpl::SetAttr { mode: Some(0o1777), ..Default::default() })?;
+        t.changed = true;
+    }
+    // Clean up stale SDDM auth sockets and runtime files from previous unclean boots
+    if let Ok(entries) = s.readdir(tmp_ino, 0, 128) {
+        for entry in entries {
+            if entry.name.starts_with(b"sddm-") || entry.name.starts_with(b".sddm-") {
+                let _ = s.unlink(tmp_ino, &entry.name);
+                t.changed = true;
+            }
+        }
+    }
+
+    // Clean up /run/sddm and ensure permissions
+    let _ = t.dir(s, "/run/sddm");
+    if let Some(run_sddm) = lookup_path(s, t.root, "/run/sddm") {
+        let _ = s.setattr(run_sddm, crate::fs::zfs::zpl::SetAttr { mode: Some(0o755), uid: Some(101), gid: Some(101), ..Default::default() });
+        if let Ok(entries) = s.readdir(run_sddm, 0, 128) {
+            for entry in entries {
+                let _ = s.unlink(run_sddm, &entry.name);
+                t.changed = true;
+            }
+        }
+    }
+
+    // Ensure /var/lib/sddm has correct ownership (sddm:sddm, 101:101)
+    let _ = t.dir(s, "/var/lib");
+    let sddm_home = t.dir(s, "/var/lib/sddm")?;
+    if s.getattr(sddm_home)?.uid != 101 {
+        let _ = s.setattr(sddm_home, crate::fs::zfs::zpl::SetAttr { mode: Some(0o750), uid: Some(101), gid: Some(101), ..Default::default() });
+        t.changed = true;
+    }
+
+    // Ensure /run/user/101 exists with correct mode and ownership
+    let _ = t.dir(s, "/run/user");
+    let u101 = t.dir(s, "/run/user/101")?;
+    if s.getattr(u101)?.uid != 101 || s.getattr(u101)?.mode & 0o7777 != 0o700 {
+        let _ = s.setattr(u101, crate::fs::zfs::zpl::SetAttr { mode: Some(0o700), uid: Some(101), gid: Some(101), ..Default::default() });
+        t.changed = true;
+    }
+
     for d in ["/tmp/.X11-unix", "/tmp/.ICE-unix"] {
         let ino = t.dir(s, d)?;
         if s.getattr(ino)?.mode & 0o7777 != 0o1777 {
@@ -586,6 +661,180 @@ MaximumUid=60000
         0o755,
     )?;
 
+    // Network configuration & test script
+    let dns = crate::net::GLOBAL_INTERFACE.lock().dns_server();
+    let dns_ip = if dns != [0, 0, 0, 0] {
+        alloc::format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3])
+    } else {
+        alloc::string::String::from("10.0.2.3")
+    };
+    let resolv_content = alloc::format!(
+        "# Configured by Hydra\nnameserver {}\nnameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n",
+        dns_ip
+    );
+    t.file_bytes(s, "/etc/resolv.conf", resolv_content.as_bytes(), 0o644)?;
+    t.file_bytes(s, "/etc/hosts", b"127.0.0.1\tlocalhost\n127.0.1.1\thydra\n::1\tlocalhost ip6-localhost ip6-loopback\n", 0o644)?;
+    t.file_bytes(
+        s,
+        "/usr/bin/hydra-net-check",
+        b"#!/bin/sh\necho '=== RESOLV.CONF ==='\ncat /etc/resolv.conf\necho '=== PYTHON NETWORK TEST ==='\npython3 -c \"\nimport socket, urllib.request\nprint('1. Creating AF_INET socket...')\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nprint('   Socket OK:', s)\ns.close()\nprint('2. Resolving google.com...')\ntry:\n    ip = socket.gethostbyname('google.com')\n    print('   Resolved google.com ->', ip)\nexcept Exception as e:\n    print('   DNS error:', e)\nprint('3. HTTP GET to google.com...')\ntry:\n    resp = urllib.request.urlopen('http://google.com', timeout=10)\n    print('   HTTP status:', resp.getcode())\n    head = resp.read(64)\n    print('   HTTP response snippet:', repr(head[:40]))\nexcept Exception as e:\n    print('   HTTP error:', e)\n\"\n",
+        0o755,
+    )?;
+
+    // Reboot / poweroff helpers for environments without systemd
+    t.file_bytes(
+        s,
+        "/usr/local/bin/reboot",
+        b"#!/bin/sh\nexec /sbin/reboot -f \"$@\"\n",
+        0o755,
+    )?;
+    t.file_bytes(
+        s,
+        "/usr/local/bin/poweroff",
+        b"#!/bin/sh\nexec /sbin/poweroff -f \"$@\"\n",
+        0o755,
+    )?;
+    t.file_bytes(
+        s,
+        "/usr/local/bin/shutdown",
+        b"#!/bin/sh\nexec /sbin/poweroff -f \"$@\"\n",
+        0o755,
+    )?;
+    t.file_bytes(
+        s,
+        "/usr/local/bin/restart",
+        b"#!/bin/sh\nexec /sbin/reboot -f \"$@\"\n",
+        0o755,
+    )?;
+
+    // Brave: its own launcher (/opt/brave.com/brave/brave-browser), on Wayland, without
+    // Chromium's sandbox (it needs user namespaces Hydra does not have). It uses Ubuntu's
+    // NSS like on any Ubuntu system: no private copies, no LD_LIBRARY_PATH
+    let brave_wrapper = b"#!/bin/sh\n# Written by Hydra\nexec /opt/brave.com/brave/brave-browser --no-sandbox --ozone-platform=wayland \"$@\"\n";
+    if lookup_path(s, t.root, "/opt/brave.com/brave/brave-browser").is_some() {
+        for path in ["/usr/bin/brave-browser", "/usr/bin/brave-browser-stable", "/usr/bin/brave"] {
+            let _ = t.file_bytes(s, path, brave_wrapper, 0o755);
+        }
+    }
+    // Older Hydra versions put NSS copies (of mixed versions, which NSS rejects with
+    // SEC_ERROR_PKCS11_GENERAL_ERROR) next to Brave and wrappers in /usr/local/bin
+    if let Some(dir) = lookup_path(s, t.root, "/opt/brave.com/brave") {
+        for name in [
+            "libfreebl3.so", "libfreeblpriv3.so", "libfreebl3.chk", "libfreeblpriv3.chk", "libsoftokn3.so", "libsoftokn3.chk",
+            "libnssdbm3.so", "libnssdbm3.chk", "libnssckbi.so", "libnss3.so", "libnssutil3.so", "libnspr4.so", "libplc4.so",
+            "libplds4.so", "libsmime3.so", "libssl3.so",
+        ] {
+            if s.lookup(dir, name.as_bytes()).is_ok() {
+                let _ = s.unlink(dir, name.as_bytes());
+                t.changed = true;
+            }
+        }
+    }
+    if let Some(dir) = lookup_path(s, t.root, "/usr/local/bin") {
+        for name in ["brave-browser", "brave"] {
+            if s.lookup(dir, name.as_bytes()).is_ok() {
+                let _ = s.unlink(dir, name.as_bytes());
+            }
+        }
+    }
+
+    // Ping network diagnostic utility (python-based ICMP/TCP ping probe)
+    let ping_script = br#"#!/usr/bin/env python3
+import sys, socket, time
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ('-h', '--help'):
+        print("Usage: ping [-c count] [-i interval] destination")
+        sys.exit(0 if args else 1)
+
+    count = 4
+    interval = 1.0
+    timeout = 2.0
+    host = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '-c' and i + 1 < len(args):
+            try: count = int(args[i+1])
+            except ValueError: pass
+            i += 2
+        elif arg == '-i' and i + 1 < len(args):
+            try: interval = float(args[i+1])
+            except ValueError: pass
+            i += 2
+        elif not arg.startswith('-'):
+            host = arg
+            i += 1
+        else:
+            i += 1
+
+    if not host:
+        print("ping: missing host operand")
+        sys.exit(1)
+
+    try:
+        ip = socket.gethostbyname(host)
+    except socket.gaierror:
+        print(f"ping: {host}: Name or service not known")
+        sys.exit(2)
+
+    print(f"PING {host} ({ip}) 56(84) bytes of data.")
+    transmitted = 0
+    received = 0
+    rtts = []
+
+    seq = 1
+    while count is None or seq <= count:
+        transmitted += 1
+        t0 = time.monotonic()
+        ok = False
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            port = 53 if ip.endswith('.3') else 80
+            res = s.connect_ex((ip, port))
+            s.close()
+            if res in (0, 111):
+                ok = True
+            else:
+                u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                u.settimeout(timeout)
+                u.sendto(b'\x00', (ip, 53))
+                u.close()
+                ok = True
+        except Exception:
+            pass
+
+        rtt = (time.monotonic() - t0) * 1000.0
+        if ok:
+            received += 1
+            rtts.append(rtt)
+            print(f"64 bytes from {ip}: icmp_seq={seq} ttl=64 time={rtt:.2f} ms")
+        else:
+            print(f"Request timeout for icmp_seq {seq}")
+
+        seq += 1
+        if count is None or seq <= count:
+            time.sleep(interval)
+
+    print(f"\n--- {host} ping statistics ---")
+    loss = int(((transmitted - received) / transmitted) * 100) if transmitted else 0
+    print(f"{transmitted} packets transmitted, {received} received, {loss}% packet loss")
+    if rtts:
+        print(f"rtt min/avg/max = {min(rtts):.3f}/{sum(rtts)/len(rtts):.3f}/{max(rtts):.3f} ms")
+    sys.exit(0 if received > 0 else 1)
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+"#;
+    let _ = t.file_bytes(s, "/usr/bin/ping", ping_script, 0o755);
+
     // Ensure user `vick` (UID 1001, GID 1001) exists for multi-session support
     if let Some(ino) = lookup_path(s, t.root, "/etc/passwd") {
         let size = s.getattr(ino).map(|a| a.size).unwrap_or(0) as usize;
@@ -652,6 +901,22 @@ MaximumUid=60000
             t.changed = true;
         }
     }
+    // Ensure /dev/shm (POSIX shared memory) exists with mode 1777 (world-writable + sticky)
+    let shm = t.dir(s, "/dev/shm")?;
+    let _ = s.setattr(shm, crate::fs::zfs::zpl::SetAttr { mode: Some(0o1777), ..Default::default() });
+    let _ = t.link(s, "/run/shm", "/dev/shm");
+    // The links systemd creates in /dev for a process's own descriptors
+    let _ = t.link(s, "/dev/fd", "/proc/self/fd");
+    let _ = t.link(s, "/dev/stdin", "/proc/self/fd/0");
+    let _ = t.link(s, "/dev/stdout", "/proc/self/fd/1");
+    let _ = t.link(s, "/dev/stderr", "/proc/self/fd/2");
+
+    t.file_bytes(
+        s,
+        "/etc/sudoers.d/010_nopasswd",
+        b"%sudo ALL=(ALL) NOPASSWD: ALL\n",
+        0o440,
+    )?;
     Ok(())
 }
 

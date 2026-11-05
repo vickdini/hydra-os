@@ -838,7 +838,7 @@ fn handle_client_message(
             if let Some(pool_id) = read_u32(payload, &mut offset) {
                 if let Some(size) = read_i32(payload, &mut offset) {
                     // Extract passed MemFd file descriptor from SCM_RIGHTS queue!
-                    if let Some(crate::fs::FileDescriptor::MemFd(mfd)) =
+                    if let Some(crate::fs::FileDescriptor::MemFd { memfd: mfd, .. }) =
                         session.socket.lock().pop_ancillary_fd()
                     {
                         session.pools.insert(

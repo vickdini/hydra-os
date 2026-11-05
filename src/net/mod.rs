@@ -345,8 +345,17 @@ pub fn init() {
             let mac = e1000::mac_address();
             let mut iface = GLOBAL_INTERFACE.lock();
             iface.mac = mac;
-            let is_up = e1000::is_link_up();
             drop(iface);
+
+            // Give the adapter up to 8 seconds to complete auto-negotiation and link up
+            let mut is_up = false;
+            for _ in 0..80 {
+                if e1000::is_link_up() {
+                    is_up = true;
+                    break;
+                }
+                crate::arch::pit::sleep_ms(100);
+            }
 
             crate::console::set_color(
                 uefi::proto::console::text::Color::LightGreen,
@@ -355,35 +364,33 @@ pub fn init() {
             crate::println!(
                 "[+] Network Subsystem: Intel E1000 Online (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, Link: {})",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                if is_up { "UP" } else { "DOWN" }
+                if is_up { "UP" } else { "NEGOTIATING" }
             );
 
-            if is_up {
-                crate::console::set_color(
-                    uefi::proto::console::text::Color::Yellow,
-                    uefi::proto::console::text::Color::Black,
-                );
-                crate::print!("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ");
-                match dhcp_acquire() {
-                    Ok(lease) => {
-                        crate::console::set_color(
-                            uefi::proto::console::text::Color::LightGreen,
-                            uefi::proto::console::text::Color::Black,
-                        );
-                        crate::println!(
-                            "ONLINE ({}.{}.{}.{}, GW {}.{}.{}.{}, DNS {}.{}.{}.{})",
-                            lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
-                            lease.router[0], lease.router[1], lease.router[2], lease.router[3],
-                            lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]
-                        );
-                    }
-                    Err(e) => {
-                        crate::console::set_color(
-                            uefi::proto::console::text::Color::LightRed,
-                            uefi::proto::console::text::Color::Black,
-                        );
-                        crate::println!("Deferred ({})", e);
-                    }
+            crate::console::set_color(
+                uefi::proto::console::text::Color::Yellow,
+                uefi::proto::console::text::Color::Black,
+            );
+            crate::print!("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ");
+            match dhcp_acquire() {
+                Ok(lease) => {
+                    crate::console::set_color(
+                        uefi::proto::console::text::Color::LightGreen,
+                        uefi::proto::console::text::Color::Black,
+                    );
+                    crate::println!(
+                        "ONLINE ({}.{}.{}.{}, GW {}.{}.{}.{}, DNS {}.{}.{}.{})",
+                        lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
+                        lease.router[0], lease.router[1], lease.router[2], lease.router[3],
+                        lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]
+                    );
+                }
+                Err(e) => {
+                    crate::console::set_color(
+                        uefi::proto::console::text::Color::LightRed,
+                        uefi::proto::console::text::Color::Black,
+                    );
+                    crate::println!("Deferred ({})", e);
                 }
             }
         }
@@ -416,6 +423,14 @@ pub fn dhcp_acquire() -> Result<dhcp::DhcpLease, &'static str> {
     }
 
     let xid: u32 = 0x3903_F326;
+
+    // Ensure carrier link has settled before transmitting
+    for _ in 0..50 {
+        if e1000::is_link_up() {
+            break;
+        }
+        crate::arch::pit::sleep_ms(100);
+    }
 
     // 1. Send DHCP Discover broadcast
     let mut dhcp_payload = [0u8; 350];

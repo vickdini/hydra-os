@@ -469,9 +469,31 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         3 => {
             // #BP - Breakpoint Exception (Int3)
             set_color(Color::LightCyan, Color::Black);
-            println!("\n[i] CPU BREAKPOINT TRAP (#BP) at RIP: {:#x}", ctx.rip);
-            println!("    RFLAGS: {:#x}, RSP: {:#x}", ctx.rflags, ctx.rsp);
-            // Non-fatal: returns from exception handler and resumes execution
+            let pid = if crate::task::is_active() { crate::task::SCHEDULER.lock().current_task_id().0 } else { 0 };
+            let (exe, cmd) = if crate::task::is_active() {
+                crate::task::SCHEDULER.lock().with_process(pid, |t| {
+                    let cmd_str = t.cmdline.as_ref().map(|c| {
+                        c.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| core::str::from_utf8(s).unwrap_or("?")).collect::<alloc::vec::Vec<_>>().join(" ")
+                    });
+                    (alloc::string::String::from(t.exe_path()), cmd_str)
+                }).unwrap_or_default()
+            } else {
+                (alloc::string::String::new(), None)
+            };
+            println!("\n[i] CPU BREAKPOINT TRAP (#BP) in Task PID {} ({}) at RIP: {:#x}", pid, exe, ctx.rip);
+            if let Some(c) = cmd {
+                println!("    Command: {}", c);
+            }
+            println!("    RFLAGS: {:#x}, RSP: {:#x}, RAX: {:#x}, RDI: {:#x}, RSI: {:#x}", ctx.rflags, ctx.rsp, ctx.rax, ctx.rdi, ctx.rsi);
+            if (ctx.cs & 3) == 3 && ctx.rsp != 0 && crate::memory::vm::prefault_current(ctx.rsp, 48, false) {
+                let stack = unsafe { core::slice::from_raw_parts(ctx.rsp as *const u64, 6) };
+                println!("    Stack: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]", stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]);
+            }
+            let rip_start = ctx.rip.saturating_sub(4);
+            if (ctx.cs & 3) == 3 && crate::memory::vm::prefault_current(rip_start, 16, false) {
+                let code = unsafe { core::slice::from_raw_parts(rip_start as *const u8, 16) };
+                println!("    Code: {:02x?}", code);
+            }
         }
         14 => {
             // #PF - Page Fault Exception
@@ -586,9 +608,26 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             let is_user = (ctx.cs & 3) == 3;
             if is_user && crate::task::is_active() {
                 set_color(Color::LightRed, Color::Black);
-                let pid = crate::task::SCHEDULER.lock().current_task_id();
-                println!("\n[!] USER FAULT: Invalid Opcode (#UD) in Task PID {}", pid.0);
+                let pid = crate::task::SCHEDULER.lock().current_task_id().0;
+                let (exe, cmd) = crate::task::SCHEDULER.lock().with_process(pid, |t| {
+                    let cmd_str = t.cmdline.as_ref().map(|c| {
+                        c.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| core::str::from_utf8(s).unwrap_or("?")).collect::<alloc::vec::Vec<_>>().join(" ")
+                    });
+                    (alloc::string::String::from(t.exe_path()), cmd_str)
+                }).unwrap_or_default();
+                println!("\n[!] USER FAULT: Invalid Opcode (#UD) in Task PID {} ({})", pid, exe);
+                if let Some(c) = cmd {
+                    println!("    Command: {}", c);
+                }
                 println!("    Faulting RIP: {:#x}", ctx.rip);
+                if ctx.rsp != 0 && crate::memory::vm::prefault_current(ctx.rsp, 48, false) {
+                    let stack = unsafe { core::slice::from_raw_parts(ctx.rsp as *const u64, 6) };
+                    println!("    Stack: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]", stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]);
+                }
+                if crate::memory::vm::prefault_current(ctx.rip, 16, false) {
+                    let code = unsafe { core::slice::from_raw_parts(ctx.rip as *const u8, 16) };
+                    println!("    Code: {:02x?}", code);
+                }
                 kill_or_signal(ctx, 4);
                 return;
             }

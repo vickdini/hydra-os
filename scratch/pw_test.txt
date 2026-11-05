@@ -1,1 +1,0 @@
-linux chroot /ubuntu /bin/sh -c 'Q="dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager"; echo root_can=$($Q.CanPowerOff | tail -1); echo hydra_can=$(setpriv --reuid 1000 --regid 1000 --init-groups $Q.CanPowerOff | tail -1); $Q.Reboot boolean:false'

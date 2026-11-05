@@ -1,37 +1,0 @@
-su root
-[1m[37m[40m[1m[32m[40m[+] Switched to superuser 'root' (UID 0, GID 0)
-[1m[36m[40mhydra:/bin# linux chroot /ubuntu /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --reinstall --no-install-recommends wireplumber
-[1m[37m[40m
-============================================================
- [+] HYDRA MICROKERNEL: FULL HARDWARE TAKEOVER COMPLETE!    
-============================================================
-  - UEFI Boot Services : TERMINATED (ExitBootServices invoked)
-  - Memory Map Entries : 100 descriptors captured
-  - GDT & TSS Status   : Hydra Ring 0 CS=0x8, DS=0x10, TR=0x28
-  - System Calls (MSR) : Hardware SYSCALL/SYSRET (LSTAR/STAR configured)
-  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)
-  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)
-  - Virtual Memory     : Autonomous PML4 Root at PhysAddr 0x60281000
-  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)
-============================================================
-
-[*] Network: Autonegotiating carrier link and DHCP lease... ONLINE (10.0.2.15, Gateway 10.0.2.2, DNS 10.0.2.3)
-
-Reading package lists... 0%Reading package lists... 0%Reading package lists... 13%Reading package lists... Done
-Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 0%Building dependency tree... 50%Building dependency tree... 50%Building dependency tree... 64%Building dependency tree... 87%Building dependency tree... Done
-Reading state information... 0% Reading state information... 0%Reading state information... Done
-Solving dependencies... 0%Solving dependencies... 10%Solving dependencies... Done
-0 upgraded, 0 newly installed, 1 reinstalled, 0 to remove and 21 not upgraded.
-Need to get 0 B/107 kB of archives.
-After this operation, 0 B of additional disk space will be used.
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 83041 files and directories currently installed.)
-Preparing to unpack .../wireplumber_0.5.13-1ubuntu1.1_amd64.deb ...
-Unpacking wireplumber (0.5.13-1ubuntu1.1) over (0.5.13-1ubuntu1.1) ...
-Setting up wireplumber (0.5.13-1ubuntu1.1) ...
-[+] Linux process 4 exited with status 0.
-hydra:/bin# su hydra
-[+] Switched to standard user 'hydra' (UID 1000, GID 1000)
-hydra:/bin$ linux chroot /ubuntu /usr/bin/passwd -S hydra
-hydra P
-[+] Linux process 348 exited with status 0.
-hydra:/bin$ 

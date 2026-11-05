@@ -126,7 +126,10 @@ impl InetSocket {
     /// # Returns
     ///
     /// `Some(Arc<WaitQueue>)` if an active transport endpoint exists, or `None`.
-    pub fn wait_queue(&self) -> Option<Arc<crate::task::wait::WaitQueue>> {
+    pub fn wait_queue(&mut self) -> Option<Arc<crate::task::wait::WaitQueue>> {
+        if !self.stream && self.udp.is_none() {
+            let _ = self.udp_id();
+        }
         self.tcp.or(self.udp).and_then(stack::wait_queue)
     }
 
@@ -320,14 +323,15 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let (stream, nonblock) = {
-        let s = sock.lock();
-        (s.stream, s.nonblock)
+    let nonblock = {
+        let mut s = sock.lock();
+        if !s.stream {
+            let _ = s.udp_id();
+            s.peer = dest;
+            return 0;
+        }
+        s.nonblock
     };
-    if !stream {
-        sock.lock().peer = dest;
-        return 0;
-    }
     let (ip, port) = match dest {
         Some(d) => d,
         None => return EAFNOSUPPORT,
@@ -667,7 +671,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             SOCK_DGRAM => false,
             _ => return Some(EPROTONOSUPPORT),
         };
-        let sock = InetSocket {
+        let mut sock = InetSocket {
             stream,
             nonblock: a[1] as u32 & SOCK_NONBLOCK != 0,
             tcp: None,
@@ -676,6 +680,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             peer: None,
             shut_rd: false,
         };
+        if !stream {
+            let _ = sock.udp_id();
+        }
         let cloexec = a[1] as u32 & SOCK_CLOEXEC != 0;
         return Some(crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(Arc::new(Mutex::new(sock)))) {
             Ok(fd) => {
