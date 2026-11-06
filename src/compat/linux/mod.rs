@@ -18,6 +18,7 @@ pub mod inotify;
 pub mod futex;
 pub mod inet;
 pub mod memfd;
+pub mod misc;
 pub mod execve;
 pub mod mm;
 pub mod proc;
@@ -35,6 +36,7 @@ pub mod tty;
 pub mod types;
 pub mod unix;
 pub mod vfs;
+pub mod xfer;
 pub mod wayland_bridge;
 
 use alloc::string::String;
@@ -108,8 +110,40 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     if let seccomp::Verdict::Return(r) = seccomp::check(frame) {
         return r;
     }
+    let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
+    dispatch_checked(frame)
+}
+
+/// Runs a system call that seccomp has already allowed. Calls made by the kernel on a
+/// program's behalf (see [`nested`]) start here: seccomp filters only the program's own calls.
+///
+/// # Arguments
+///
+/// * `frame` - Saved user registers holding the call number and arguments.
+///
+/// # Returns
+///
+/// The call's result or a negative errno.
+pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
+    let num = frame.rax;
+    let arg0 = frame.rdi;
+    let arg1 = frame.rsi;
+    let arg2 = frame.rdx;
+    let arg3 = frame.r10;
+    let arg4 = frame.r8;
+    let arg5 = frame.r9;
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
+        // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
+        295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
+        // rt_sigqueueinfo, rt_tgsigqueueinfo
+        129 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, None, arg1, arg2),
+        297 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, Some(arg1 as u32 as u64), arg2, arg3),
+        78 | 100 | 132 | 135 | 148 | 219 | 235 | 261 | 309 | 324 => {
+            if let Some(r) = misc::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
         16 if (0x8910..=0x8933).contains(&arg1) => {
             // Network interface queries (SIOCGIF*) on a socket
             if let Some(r) = rtnetlink::interface_ioctl(arg1, arg2) {
@@ -2138,4 +2172,29 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
         }
         _ => return None,
     })
+}
+
+/// Makes system call `num` with `args` on behalf of the calling program, as if it had made
+/// it itself (same descriptor table, same user memory, same blocking), without seccomp.
+///
+/// # Arguments
+///
+/// * `frame` - The program's saved registers (copied; only the call registers change).
+/// * `num` - System call number.
+/// * `args` - The six argument registers.
+///
+/// # Returns
+///
+/// The call's result or a negative errno.
+pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
+    // SAFETY: SyscallFrame is plain register data (repr(C), no references)
+    let mut f: SyscallFrame = unsafe { core::ptr::read(frame) };
+    f.rax = num;
+    f.rdi = args[0];
+    f.rsi = args[1];
+    f.rdx = args[2];
+    f.r10 = args[3];
+    f.r8 = args[4];
+    f.r9 = args[5];
+    dispatch_checked(&mut f)
 }

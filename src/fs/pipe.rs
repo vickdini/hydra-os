@@ -160,6 +160,23 @@ impl PipeBuffer {
         }
     }
 
+    /// Copies up to `out.len()` buffered bytes into `out` without consuming them (`tee`).
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Destination slice.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied.
+    pub fn peek(&self, out: &mut [u8]) -> usize {
+        let n = out.len().min(self.count);
+        for (i, b) in out[..n].iter_mut().enumerate() {
+            *b = self.buffer[(self.tail + i) % PIPE_BUFFER_SIZE];
+        }
+        n
+    }
+
     /// Drains up to `out.len()` bytes from the pipe ring buffer into `out`.
     ///
     /// Advances the consumer tail pointer modulo [`PIPE_BUFFER_SIZE`] and wakes any tasks

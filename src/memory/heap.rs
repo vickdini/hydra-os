@@ -48,6 +48,80 @@ const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
 /// Bytes requested from the linked-list heap when a class runs out.
 const REFILL_BYTES: usize = 16 * 1024;
 
+/// Debugging aid: free small blocks are filled with [`POISON`] and checked when handed out
+/// again. A changed byte means something wrote to the block after it was freed (or past
+/// the end of the block before it); it is reported on the serial port, and a corrupted
+/// list link is cut so the kernel survives to report more.
+const POISON_FREE: bool = false;
+/// Fill byte of free small blocks (after their link).
+const POISON: u8 = 0xDD;
+/// Reports printed so far (the first few are the useful ones).
+static POISON_REPORTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Fills a free block of `size` bytes with [`POISON`], after its link.
+unsafe fn poison(block: *mut u8, size: usize) {
+    core::ptr::write_bytes(block.add(8), POISON, size - 8);
+}
+
+/// Checks a free block of `size` bytes about to be handed out: its link must be null or a
+/// block of the same class inside the heap, and the rest must still be [`POISON`].
+///
+/// # Returns
+/// `false` if the link is corrupted (the rest of the list must not be followed).
+unsafe fn check_free_block(block: *mut u8, size: usize) -> bool {
+    let next = *(block as *const u64);
+    let start = HEAP_START_ADDR.load(Ordering::Relaxed);
+    let end = start + HEAP_TOTAL_SIZE.load(Ordering::Relaxed) as u64;
+    let link_ok = next == 0 || (next >= start && next < end && next % size as u64 == 0);
+    let bad = (8..size).find(|&i| *block.add(i) != POISON);
+    if link_ok && bad.is_none() {
+        return true;
+    }
+    if POISON_REPORTS.fetch_add(1, Ordering::Relaxed) < 8 {
+        // No allocation here: this runs inside the allocator
+        let off = if link_ok { bad.unwrap_or(0) } else { 0 };
+        let mut b = crate::console::FixedBuf::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut b,
+            format_args!("[heap] free {}-byte block {:#x} written at offset {} (link {:#x}{})
+", size, block as u64, off, next, if link_ok { "" } else { ", bad" }),
+        );
+        crate::console::serial_write(b.as_str());
+        let first = (off & !7).saturating_sub(16).min(size.saturating_sub(64));
+        let mut b = crate::console::FixedBuf::new();
+        let _ = core::fmt::Write::write_str(&mut b, "[heap]  ");
+        for i in 0..8 {
+            let o = first + i * 8;
+            if o + 8 <= size {
+                let _ = core::fmt::Write::write_fmt(&mut b, format_args!(" {:x}", *(block.add(o) as *const u64)));
+            }
+        }
+        let _ = core::fmt::Write::write_str(&mut b, "
+");
+        crate::console::serial_write(b.as_str());
+        // Who is allocating (rough backtrace: kernel code addresses on the stack)
+        let anchor = crate::arch::syscall::hydra_syscall_dispatcher as *const () as u64;
+        let rsp: u64;
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack));
+        let mut b = crate::console::FixedBuf::new();
+        let _ = core::fmt::Write::write_fmt(&mut b, format_args!("[heap]  anchor={:#x} stack:", anchor));
+        let words = (0x1000 - (rsp & 0xfff)) / 8;
+        let mut shown = 0;
+        for i in 0..words {
+            let v = *((rsp + i * 8) as *const u64);
+            if v > anchor.saturating_sub(0x10_0000) && v < anchor + 0x20_0000 && shown < 9 {
+                let _ = core::fmt::Write::write_fmt(&mut b, format_args!(" {:x}", v));
+                shown += 1;
+            }
+        }
+        let _ = core::fmt::Write::write_str(&mut b, "
+");
+        crate::console::serial_write(b.as_str());
+    }
+    // Repair what can be repaired: the block's contents are the new owner's anyway
+    link_ok
+}
+
 /// A free block of a size class (the link lives in the free block itself).
 struct FreeBlock {
     next: *mut FreeBlock,
@@ -119,9 +193,17 @@ unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
                 let block = chunk.add(i * size) as *mut FreeBlock;
                 (*block).next = list.0;
                 list.0 = block;
+                if POISON_FREE {
+                    poison(block as *mut u8, size);
+                }
             }
         }
         let block = list.0;
+        if POISON_FREE && !check_free_block(block as *mut u8, CLASS_SIZES[class]) {
+            // The link is garbage: drop the rest of this list (leaked) instead of following it
+            list.0 = core::ptr::null_mut();
+            return block as *mut u8;
+        }
         list.0 = (*block).next;
         block as *mut u8
     }
@@ -143,6 +225,9 @@ unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
                 let block = ptr as *mut FreeBlock;
                 (*block).next = list.0;
                 list.0 = block;
+                if POISON_FREE {
+                    poison(ptr, CLASS_SIZES[class]);
+                }
             }
             None => HEAP_ALLOCATOR.dealloc(ptr, layout),
         }

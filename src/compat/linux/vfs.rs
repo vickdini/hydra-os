@@ -1653,6 +1653,26 @@ fn utimens(dirfd: i64, path_ptr: u64, times_ptr: u64, flags: u64) -> i64 {
     setattr_at(dirfd, path_ptr, flags & AT_SYMLINK_NOFOLLOW == 0, true, set, |a, c| c.euid == 0 || c.euid == a.uid || times_ptr == 0)
 }
 
+/// Sets a file's access and modification times for the older calls (`utime`, `utimes`,
+/// `futimesat`): `times` as `[(seconds, nanoseconds); 2]`, or `None` for the current time
+/// (allowed to anyone, as `utimensat` with `NULL` times is here).
+///
+/// # Arguments
+/// * `dirfd` - Base directory file descriptor or `AT_FDCWD`.
+/// * `path_ptr` - User pointer to the path.
+/// * `times` - Access and modification times, or `None` for now.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code.
+pub(crate) fn set_times(dirfd: i64, path_ptr: u64, times: Option<[(i64, u32); 2]>) -> i64 {
+    let now = crate::arch::rtc::now();
+    let now = (now.0 as i64, now.1);
+    let explicit = times.is_some();
+    let [atime, mtime] = times.unwrap_or([now, now]);
+    let set = SetAttr { atime: Some(atime), mtime: Some(mtime), ..SetAttr::default() };
+    setattr_at(dirfd, path_ptr, true, false, set, move |a, c| c.euid == 0 || c.euid == a.uid || !explicit)
+}
+
 /// `f_type` of the devpts file system (glibc checks it before using `/dev/ptmx`).
 const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
 

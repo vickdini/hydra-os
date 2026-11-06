@@ -206,6 +206,8 @@ struct SigSender {
     syscall: i32,
     /// `SIGSYS` from seccomp: `si_errno`, the filter's return data.
     errno: i32,
+    /// `si_value` of a signal queued with `rt_sigqueueinfo` (`sigqueue`).
+    value: u64,
 }
 
 /// `si_code` of a signal sent by `kill`.
@@ -261,6 +263,8 @@ pub struct Process {
     /// `/proc/<pid>/oom_score_adj` (-1000..=1000). Hydra has no OOM killer: it is kept
     /// for the programs that set and read it.
     pub oom_score_adj: i32,
+    /// Execution domain (`personality(2)`); inherited by children and kept across `execve`.
+    pub personality: u32,
     /// Process sharing this one's root and working directory (`clone` with `CLONE_FS`
     /// only: they live in the descriptor table, which is not shared), or 0.
     pub fs_peer: u64,
@@ -308,10 +312,11 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
     let (pgid, sid, actions, mask, groups, cgroup, ns, oom_score_adj) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid), parent.oom_score_adj)
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid), (parent.oom_score_adj, parent.personality))
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default(), 0),
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default(), (0, 0)),
     };
+    let (oom_score_adj, personality) = oom_score_adj;
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
     procs.insert(
@@ -337,6 +342,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
             ns,
             oom_score_adj,
+            personality,
             fs_peer: 0,
         },
     );
@@ -409,6 +415,7 @@ pub fn thread_exited(pid: u64, tid: u64) {
     if !now_zombie {
         return;
     }
+    super::misc::forget_process(pid);
     // The init of a PID namespace takes the namespace with it
     if procs.get(&pid).is_some_and(|p| p.ns.pid_inits.last() == Some(&pid)) {
         let members: Vec<u64> = procs.values().filter(|q| q.pid != pid && !q.zombie && q.ns.pid_inits.contains(&pid)).map(|q| q.pid).collect();
@@ -711,6 +718,7 @@ pub fn reset_handlers(pid: u64) {
 /// # Arguments
 /// * `pid` - Process ID undergoing execution reset.
 pub fn exec_reset(pid: u64) {
+    super::misc::forget_process(pid);
     if let Some(p) = PROCS.lock().get_mut(&pid) {
         for a in p.actions.iter_mut() {
             if a.handler != SIG_IGN {
@@ -1361,6 +1369,7 @@ pub fn sys_rt_sigtimedwait(set_ptr: u64, info_ptr: u64, ts_ptr: u64, size: u64) 
                 info[8..12].copy_from_slice(&sender.code.to_le_bytes());
                 info[16..20].copy_from_slice(&sender.pid.to_le_bytes());
                 info[20..24].copy_from_slice(&sender.uid.to_le_bytes());
+                info[24..32].copy_from_slice(&sender.value.to_le_bytes());
                 if !write_bytes(info_ptr, &info) {
                     return EFAULT;
                 }
@@ -1421,6 +1430,54 @@ pub fn write_oom_score_adj(pid: u64, buf: &[u8]) -> i64 {
         }
         None => ESRCH,
     }
+}
+
+/// `rt_sigqueueinfo(2)` (`tid == None`) and `rt_tgsigqueueinfo(2)`: sends `sig` with the
+/// caller's `siginfo` (`sigqueue` passes a value this way). Only a process signalling itself
+/// may claim a kernel or `kill` origin (`si_code >= 0`, or `SI_TKILL`).
+///
+/// # Arguments
+/// * `pid` - Target process (in the caller's PID namespace).
+/// * `tid` - Target thread, for `rt_tgsigqueueinfo`.
+/// * `sig` - Signal number (0 only checks the target exists).
+/// * `info_ptr` - User pointer to the `siginfo_t`.
+///
+/// # Returns
+/// `0` on success, or a negative errno.
+pub fn sys_rt_sigqueueinfo(pid: u64, tid: Option<u64>, sig: u64, info_ptr: u64) -> i64 {
+    if sig as usize > NSIG {
+        return EINVAL;
+    }
+    let pid = super::ns::pid_from_caller(pid);
+    let tid = tid.map(super::ns::pid_from_caller);
+    let Some(raw) = read_u64s::<4>(info_ptr) else { return EFAULT };
+    let code = (raw[1] & 0xffff_ffff) as u32 as i32;
+    let (_, me) = current_ids();
+    if (code >= 0 || code == SI_TKILL) && pid != me {
+        return EPERM;
+    }
+    if !process_exists(pid) || is_system_service(pid) {
+        return ESRCH;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    let sender = SigSender { code, pid: raw[2] as u32, uid: (raw[2] >> 32) as u32, value: raw[3], ..Default::default() };
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        match tid {
+            Some(t) => {
+                if let Some(t) = p.threads.get_mut(&t) {
+                    t.senders[sig as usize] = sender;
+                }
+            }
+            None => p.senders[sig as usize] = sender,
+        }
+    }
+    let posted = match tid {
+        Some(t) => post_thread(pid, t, sig as u32),
+        None => post_process(pid, sig as u32),
+    };
+    if posted { 0 } else { ESRCH }
 }
 
 /// Masks to restore after a signal interrupted `rt_sigsuspend`, by thread.
@@ -1758,6 +1815,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     f[320..324].copy_from_slice(&sender.code.to_le_bytes());
     f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
     f[332..336].copy_from_slice(&sender.uid.to_le_bytes());
+    put(&mut f, 336, sender.value); // si_value
     if sig == SIGSYS && sender.code == SYS_SECCOMP {
         // _sigsys: si_call_addr, si_syscall, si_arch (in place of si_pid/si_uid)
         f[316..320].copy_from_slice(&sender.errno.to_le_bytes());

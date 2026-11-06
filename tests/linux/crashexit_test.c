@@ -1,90 +1,72 @@
-// Processes set up like Chromium's sandboxed renderers (init of new user + PID namespaces,
-// ID maps, open pool files and a directory, descriptors in flight in a socketpair, chroot
-// into an empty /proc directory via a CLONE_FS helper, a seccomp filter) die from a CPU
-// fault, 60 times. Prints CRASHEXIT DONE if the kernel survives.
+// Kernel robustness when processes die abruptly while holding pool files:
+//  1. children that die from their own CPU fault (SIGSEGV);
+//  2. children killed with SIGKILL while spinning in user mode (the signal is delivered
+//     on return from the timer interrupt);
+//  3. the same for the init of a PID namespace, whose namespace dies with it.
+// Prints CRASHEXIT DONE if the kernel survives.
 #define _GNU_SOURCE
 #include <fcntl.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
-#include <string.h>
-#include <sys/prctl.h>
-#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
-static void send_fd(int sock, int fd) {
-    char byte = 'x';
-    struct iovec iov = {&byte, 1};
-    char ctl[CMSG_SPACE(sizeof(int))];
-    memset(ctl, 0, sizeof ctl);
-    struct msghdr m = {0};
-    m.msg_iov = &iov;
-    m.msg_iovlen = 1;
-    m.msg_control = ctl;
-    m.msg_controllen = sizeof ctl;
-    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
-    c->cmsg_level = SOL_SOCKET;
-    c->cmsg_type = SCM_RIGHTS;
-    c->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(c), &fd, sizeof(int));
-    sendmsg(sock, &m, 0);
+static void hold_files(void) {
+    open("/bin/crashexit.elf", O_RDONLY);
+    open("/bin", O_RDONLY | O_DIRECTORY);
+    open("/", O_RDONLY | O_DIRECTORY);
 }
 
-static void write_file(const char *path, const char *text) {
-    int fd = open(path, O_WRONLY);
-    if (fd >= 0) {
-        if (write(fd, text, strlen(text))) {}
-        close(fd);
+static void spin(void) {
+    for (volatile unsigned long n = 0;; n++) {
     }
 }
 
-static int chroot_helper(void *a) {
-    (void)a;
-    if (chroot("/proc/self/fdinfo/") || chdir("/")) _exit(1);
-    _exit(0);
-}
-
-static void renderer(unsigned uid, unsigned gid, int crash) {
-    char buf[64];
-    write_file("/proc/self/setgroups", "deny");
-    snprintf(buf, sizeof buf, "%u %u 1\n", uid, uid);
-    write_file("/proc/self/uid_map", buf);
-    snprintf(buf, sizeof buf, "%u %u 1\n", gid, gid);
-    write_file("/proc/self/gid_map", buf);
-    int proc_fd = open("/proc", O_RDONLY | O_DIRECTORY);
-    int sv[2];
-    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv);
-    for (int k = 0; k < 3; k++) {
-        int f = open(k ? "/bin" : "/bin/sh", O_RDONLY);
-        send_fd(sv[0], f);
-        close(f);
-    }
-    static char stack[65536] __attribute__((aligned(16)));
-    pid_t h = clone(chroot_helper, stack + sizeof stack, CLONE_FS | SIGCHLD, 0);
-    waitpid(h, 0, 0);
-    struct sock_filter allow[] = {BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)};
-    struct sock_fprog p = {1, allow};
-    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &p);
-    (void)proc_fd;
-    if (crash) *(volatile int *)8 = 1; // SIGSEGV
-    _exit(0);
+static void pause_ms(long ms) {
+    struct timespec ts = {0, ms * 1000000};
+    nanosleep(&ts, 0);
 }
 
 int main(void) {
-    unsigned uid = getuid(), gid = getgid();
-    int gone = 0;
-    for (int i = 0; i < 60; i++) {
-        pid_t c = syscall(SYS_clone, CLONE_NEWUSER | CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
-        if (c == 0) renderer(uid, gid, i % 2);
-        int st;
+    int gone = 0, st;
+    for (int i = 0; i < 40; i++) {
+        pid_t c = fork();
+        if (c == 0) {
+            hold_files();
+            *(volatile int *)8 = 1;
+        }
         waitpid(c, &st, 0);
-        gone += WIFSIGNALED(st) || WIFEXITED(st);
+        gone += WIFSIGNALED(st);
     }
-    printf("CRASHEXIT DONE: %d/60 renderers gone\n", gone);
+    for (int i = 0; i < 40; i++) {
+        pid_t c = fork();
+        if (c == 0) {
+            hold_files();
+            spin();
+        }
+        pause_ms(20);
+        kill(c, SIGKILL);
+        waitpid(c, &st, 0);
+        gone += WIFSIGNALED(st);
+    }
+    for (int i = 0; i < 40; i++) {
+        pid_t c = syscall(SYS_clone, CLONE_NEWUSER | CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+        if (c == 0) {
+            hold_files();
+            if (fork() == 0) {
+                hold_files();
+                spin();
+            }
+            spin();
+        }
+        pause_ms(20);
+        kill(c, SIGKILL);
+        waitpid(c, &st, 0);
+        gone += WIFSIGNALED(st);
+    }
+    printf("CRASHEXIT DONE: %d/120 died\n", gone);
     return 0;
 }
