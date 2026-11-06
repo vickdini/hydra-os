@@ -58,6 +58,8 @@ pub enum PseudoFile {
     /// `/proc/<pid>/uid_map`, `gid_map`, `setgroups` and `ns/<kind>` (the path after
     /// `/proc/`): read and written through [`super::ns`].
     ProcNs(alloc::string::String),
+    /// `/proc/<pid>/oom_score_adj` and `oom_score` (the path after `/proc/`).
+    ProcOom(alloc::string::String),
 }
 
 /// Where the cgroup v2 hierarchy is mounted.
@@ -106,6 +108,11 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/fs/inotify/max_user_watches" => Some(PseudoFile::ProcStatic(b"1048576\n")),
         "/proc/sys/fs/inotify/max_user_instances" => Some(PseudoFile::ProcStatic(b"1024\n")),
         "/proc/sys/fs/inotify/max_queued_events" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        // Yama mode 3 ("no attach"): true of Hydra, which has no ptrace at all
+        "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
+        // /proc/<pid>/oom_score_adj and oom_score: off for now. With them, sandboxed Brave
+        // reliably crashes the kernel (memory corruption whose cause is not found yet)
+        p if OOM_FILES && p.starts_with("/proc/") && is_oom_file(&p[6..]) => Some(PseudoFile::ProcOom(alloc::string::String::from(&p[6..]))),
         p if is_proc_dir(p) => Some(PseudoFile::ProcDir(alloc::string::String::from(p))),
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
             Some(PseudoFile::ProcMountinfo)
@@ -144,7 +151,28 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup") || file.strip_prefix("fdinfo/").is_some_and(numeric))
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup")
+            || file.strip_prefix("fdinfo/").is_some_and(numeric)
+            || file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| numeric(t) && matches!(f, "status" | "stat" | "comm")))
+}
+
+/// Serve `/proc/<pid>/oom_score_adj` and `oom_score` (see [`match_pseudo_path`]).
+const OOM_FILES: bool = false;
+
+/// Whether `rest` (a path after `/proc/`) is `<pid>/oom_score_adj` or `<pid>/oom_score`.
+fn is_oom_file(rest: &str) -> bool {
+    let Some((who, file)) = rest.split_once('/') else { return false };
+    (who == "self" || (!who.is_empty() && who.bytes().all(|b| b.is_ascii_digit()))) && matches!(file, "oom_score_adj" | "oom_score")
+}
+
+/// Process ID and file name of a `/proc/<pid>/<file>` path (after `/proc/`).
+fn pid_and_file(rest: &str) -> Option<(u64, &str)> {
+    let (who, file) = rest.split_once('/')?;
+    let pid = match who {
+        "self" | "thread-self" => super::proc::current_ids().1,
+        n => n.parse().ok()?,
+    };
+    Some((pid, file))
 }
 
 /// Text of `/proc/<pid>/cmdline`, `comm` or `fdinfo/<fd>` (`rest` is the path after
@@ -170,6 +198,18 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         "self" | "thread-self" => super::proc::current_ids().1,
         n => n.parse().ok()?,
     };
+    // task/<tid>/<file>: a thread's own status, stat or comm
+    let (file, tid) = match file.strip_prefix("task/") {
+        Some(r) => {
+            let (t, f) = r.split_once('/')?;
+            let t: u64 = t.parse().ok()?;
+            if !super::proc::thread_ids_of(pid).contains(&t) {
+                return None;
+            }
+            (f, t)
+        }
+        None => (file, pid),
+    };
     if file == "cgroup" {
         // cgroup v2 only. libsystemd finds the hierarchy's root from pid 1's group (the
         // init process Hydra does not have: it is the kernel's)
@@ -182,14 +222,24 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         return Some(alloc::format!("0::{}\n", path).into_bytes());
     }
     // The descriptor table has its own lock, taken after the scheduler's is released
-    let (exe, cmdline, fds, ids) = crate::task::SCHEDULER.lock().with_process(pid, |t| {
-        (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), t.fds.clone(), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid])
-    })?;
+    let (exe, cmdline, ids) = crate::task::SCHEDULER
+        .lock()
+        .with_process(pid, |t| (alloc::string::String::from(t.exe_path()), t.cmdline.clone(), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid]))?;
     match file {
         "status" => {
             // The fields tools read: name, ids, parent (login managers walk it to a session)
-            let ppid = super::proc::PROCS.lock().get(&pid).map_or(0, |p| p.ppid);
+            let (ppid, inits) = super::proc::PROCS.lock().get(&pid).map_or((0, alloc::vec::Vec::new()), |p| (p.ppid, p.ns.pid_inits.clone()));
             let (nnp, seccomp_mode) = super::seccomp::status_of(pid);
+            // NStgid/NSpid: the ID in each PID namespace the process is in, outermost first
+            // (only the init of a namespace is renumbered, to 1)
+            let ns_ids = |id: u64| {
+                let mut s = alloc::format!("{}", id);
+                for init in &inits {
+                    s.push_str(&alloc::format!("\t{}", if *init == id { 1 } else { id }));
+                }
+                s
+            };
+            let (nstgid, nspid) = (ns_ids(pid), ns_ids(tid));
             let name: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
             Some(
                 alloc::format!(
@@ -200,10 +250,12 @@ Pid:	{}
 PPid:	{}
 Uid:	{}	{}	{}	{}
 Gid:	{}	{}	{}	{}
+NStgid:	{}
+NSpid:	{}
 NoNewPrivs:	{}
 Seccomp:	{}
 ",
-                    name, pid, pid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nnp as u8, seccomp_mode
+                    name, pid, tid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid, nnp as u8, seccomp_mode
                 )
                 .into_bytes(),
             )
@@ -242,6 +294,9 @@ Seccomp:	{}
         }
         f => {
             let fd: usize = f.strip_prefix("fdinfo/")?.parse().ok()?;
+            // Only fdinfo needs the table: holding a reference to another process's table
+            // can make this caller the one that closes its files when that process exits
+            let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone())?;
             let (pos, cloexec, pidfd) = {
                 let table = fds.lock();
                 let desc = table.get(fd)?;
@@ -315,6 +370,10 @@ impl PseudoFile {
             PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
             PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
             PseudoFile::ProcPidFile(_) => 0,
+            PseudoFile::ProcOom(rest) => match pid_and_file(rest).and_then(|(pid, f)| super::proc::oom_file_text(pid, f)) {
+                Some(text) => read_slice(text.as_bytes(), cursor, buf),
+                None => 0,
+            },
             PseudoFile::ProcNs(rest) if rest.contains("/ns/") => 0,
             PseudoFile::ProcNs(rest) => read_slice(super::ns::read_file(rest).as_bytes(), cursor, buf),
             PseudoFile::CgroupProcs(group) => {
@@ -362,6 +421,10 @@ impl PseudoFile {
                 }
             }
             PseudoFile::ProcNs(rest) => super::ns::write_file(rest, buf).max(0) as usize,
+            PseudoFile::ProcOom(rest) => match pid_and_file(rest) {
+                Some((pid, "oom_score_adj")) => super::proc::write_oom_score_adj(pid, buf).max(0) as usize,
+                _ => 0,
+            },
             _ => 0, // /proc is read-only
         }
     }
@@ -385,6 +448,10 @@ impl PseudoFile {
             }
             PseudoFile::CgroupProcs(_) => {
                 statbuf.st_mode = S_IFREG | 0o644;
+                statbuf.st_size = 0;
+            }
+            PseudoFile::ProcOom(rest) => {
+                statbuf.st_mode = S_IFREG | if rest.ends_with("_adj") { 0o644 } else { 0o444 };
                 statbuf.st_size = 0;
             }
             PseudoFile::ProcNs(rest) => {

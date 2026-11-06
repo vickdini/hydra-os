@@ -835,72 +835,6 @@ if __name__ == '__main__':
 "#;
     let _ = t.file_bytes(s, "/usr/bin/ping", ping_script, 0o755);
 
-    // Ensure user `vick` (UID 1001, GID 1001) exists for multi-session support
-    if let Some(ino) = lookup_path(s, t.root, "/etc/passwd") {
-        let size = s.getattr(ino).map(|a| a.size).unwrap_or(0) as usize;
-        let mut buf = alloc::vec![0u8; size];
-        let n = s.read(ino, 0, &mut buf).unwrap_or(0);
-        buf.truncate(n);
-        let text = alloc::string::String::from_utf8_lossy(&buf);
-        if !text.lines().any(|l| l.starts_with("vick:")) {
-            let mut new_passwd = buf.clone();
-            if !new_passwd.ends_with(b"\n") {
-                new_passwd.push(b'\n');
-            }
-            new_passwd.extend_from_slice(b"vick:x:1001:1001:Vick,,,:/home/vick:/bin/bash\n");
-            t.file_bytes(s, "/etc/passwd", &new_passwd, 0o644)?;
-        }
-    }
-    if let Some(ino) = lookup_path(s, t.root, "/etc/group") {
-        let size = s.getattr(ino).map(|a| a.size).unwrap_or(0) as usize;
-        let mut buf = alloc::vec![0u8; size];
-        let n = s.read(ino, 0, &mut buf).unwrap_or(0);
-        buf.truncate(n);
-        let text = alloc::string::String::from_utf8_lossy(&buf);
-        let mut modified = false;
-        let mut lines: Vec<String> = text.lines().map(String::from).collect();
-        if !lines.iter().any(|l| l.starts_with("vick:")) {
-            lines.push(String::from("vick:x:1001:"));
-            modified = true;
-        }
-        for line in lines.iter_mut() {
-            if line.starts_with("sudo:") && !line.contains("vick") {
-                if !line.ends_with(':') {
-                    line.push(',');
-                }
-                line.push_str("vick");
-                modified = true;
-            }
-        }
-        if modified {
-            let mut new_group = lines.join("\n");
-            new_group.push('\n');
-            t.file_bytes(s, "/etc/group", new_group.as_bytes(), 0o644)?;
-        }
-    }
-    if let Some(ino) = lookup_path(s, t.root, "/etc/shadow") {
-        let size = s.getattr(ino).map(|a| a.size).unwrap_or(0) as usize;
-        let mut buf = alloc::vec![0u8; size];
-        let n = s.read(ino, 0, &mut buf).unwrap_or(0);
-        buf.truncate(n);
-        let text = alloc::string::String::from_utf8_lossy(&buf);
-        if !text.lines().any(|l| l.starts_with("vick:")) {
-            let mut new_shadow = buf.clone();
-            if !new_shadow.ends_with(b"\n") {
-                new_shadow.push(b'\n');
-            }
-            // Password "vick" (SHA-512 crypt hash)
-            new_shadow.extend_from_slice(b"vick:$6$0nBZv0qTNX5PW5ls$/fhO7YXGswbfNLUwzagP1/LiUh6UeViYZ8D6MSDoYLTlxi5PtcvqjDz8ws/puecV4Jz1V.MpK6uqqZ4h5mEiQ.:19800:0:99999:7:::\n");
-            let perm = s.getattr(ino).map(|a| a.mode & 0o777).unwrap_or(0o640);
-            t.file_bytes(s, "/etc/shadow", &new_shadow, perm)?;
-        }
-    }
-    if lookup_path(s, t.root, "/home/vick").is_none() {
-        if let Some(home_dir) = lookup_path(s, t.root, "/home") {
-            let _ = s.mkdir(home_dir, b"vick", 0o755, 1001, 1001);
-            t.changed = true;
-        }
-    }
     // Ensure /dev/shm (POSIX shared memory) exists with mode 1777 (world-writable + sticky)
     let shm = t.dir(s, "/dev/shm")?;
     let _ = s.setattr(shm, crate::fs::zfs::zpl::SetAttr { mode: Some(0o1777), ..Default::default() });
@@ -911,12 +845,19 @@ if __name__ == '__main__':
     let _ = t.link(s, "/dev/stdout", "/proc/self/fd/1");
     let _ = t.link(s, "/dev/stderr", "/proc/self/fd/2");
 
-    t.file_bytes(
-        s,
-        "/etc/sudoers.d/010_nopasswd",
-        b"%sudo ALL=(ALL) NOPASSWD: ALL\n",
-        0o440,
-    )?;
+    // Older Hydra versions let the sudo group use sudo without a password: remove that
+    // rule if it is still the one Hydra wrote
+    if let Some(dir) = lookup_path(s, t.root, "/etc/sudoers.d") {
+        if let Ok(ino) = s.lookup(dir, b"010_nopasswd") {
+            let ours = b"%sudo ALL=(ALL) NOPASSWD: ALL\n";
+            let mut cur = [0u8; 64];
+            let n = s.read(ino, 0, &mut cur).unwrap_or(0);
+            if s.getattr(ino).map(|a| a.size).unwrap_or(0) == ours.len() as u64 && &cur[..n] == ours {
+                let _ = s.unlink(dir, b"010_nopasswd");
+                t.changed = true;
+            }
+        }
+    }
     Ok(())
 }
 

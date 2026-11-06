@@ -586,6 +586,8 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             println!(" [!] CPU EXCEPTION: GENERAL PROTECTION FAULT (#GP)");
             println!("============================================================");
             println!("  Instruction Pointer (RIP): {:#x}", ctx.rip);
+            // rip - anchor + map address of hydra_syscall_dispatcher (tools/symbolize.py)
+            println!("  Image anchor             : {:#x}", crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize);
             println!("  Segment Selector / Error : {:#x}", ctx.error_code);
             print_cpu_dump(ctx);
 
@@ -738,6 +740,35 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
 /// # Arguments
 /// * `ctx` - The CPU exception frame to print.
 fn print_cpu_dump(ctx: &ExceptionContext) {
+    // Which task, and the kernel code addresses on its stack (a rough backtrace for
+    // tools/symbolize.py: address - anchor + map address of hydra_syscall_dispatcher).
+    // Nothing here allocates: the fault may have hit inside the heap allocator.
+    let anchor = crate::arch::syscall::hydra_syscall_dispatcher as *const () as u64;
+    // Copied out under the lock, printed after it (console output may need the scheduler)
+    let mut name = [0u8; 64];
+    let mut len = 0;
+    let id = crate::task::SCHEDULER.try_lock().map(|mut sched| {
+        let id = sched.current_task_id().0;
+        sched.current_task_mut(|t| {
+            let b = t.exe_path().as_bytes();
+            len = b.len().min(64);
+            name[..len].copy_from_slice(&b[..len]);
+        });
+        id
+    });
+    println!("  Task: {:?} ({})  anchor={:#x}", id, core::str::from_utf8(&name[..len]).unwrap_or("?"), anchor);
+    if ctx.cs & 3 == 0 && ctx.rsp > 0x1000 {
+        crate::print!("  Stack code addresses:");
+        // Only to the end of the stack pointer's page: the next one may not be mapped
+        let words = (0x1000 - (ctx.rsp & 0xfff)) / 8;
+        for i in 0..words {
+            let v = unsafe { core::ptr::read_volatile((ctx.rsp + i * 8) as *const u64) };
+            if v > anchor.saturating_sub(0x10_0000) && v < anchor + 0x20_0000 {
+                crate::print!(" {:#x}", v);
+            }
+        }
+        println!();
+    }
     println!("  Register State:");
     println!("    RAX={:#018x}  RBX={:#018x}  RCX={:#018x}", ctx.rax, ctx.rbx, ctx.rcx);
     println!("    RDX={:#018x}  RSI={:#018x}  RDI={:#018x}", ctx.rdx, ctx.rsi, ctx.rdi);

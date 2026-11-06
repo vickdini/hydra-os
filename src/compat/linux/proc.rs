@@ -150,6 +150,8 @@ const EINTR: i64 = -4;
 const ECHILD: i64 = -10;
 /// Negative `EFAULT` error constant (`-14`).
 const EFAULT: i64 = -14;
+/// Permission denied.
+const EACCES: i64 = -13;
 /// Negative `EINVAL` error constant (`-22`).
 const EINVAL: i64 = -22;
 
@@ -256,6 +258,9 @@ pub struct Process {
     pub start_time: u64,
     /// Namespaces the process is in.
     pub ns: super::ns::Ns,
+    /// `/proc/<pid>/oom_score_adj` (-1000..=1000). Hydra has no OOM killer: it is kept
+    /// for the programs that set and read it.
+    pub oom_score_adj: i32,
     /// Process sharing this one's root and working directory (`clone` with `CLONE_FS`
     /// only: they live in the descriptor table, which is not shared), or 0.
     pub fs_peer: u64,
@@ -300,12 +305,12 @@ pub fn current_ids() -> (u64, u64) {
 /// * `inherit_from` - Optional parent process ID to inherit signal dispositions and IDs from.
 pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>) {
     let mut procs = PROCS.lock();
-    let (pgid, sid, actions, mask, groups, cgroup, ns) = match inherit_from.and_then(|p| procs.get(&p)) {
+    let (pgid, sid, actions, mask, groups, cgroup, ns, oom_score_adj) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid))
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid), parent.oom_score_adj)
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default()),
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default(), 0),
     };
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
@@ -331,6 +336,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             senders: [SigSender::default(); NSIG + 1],
             start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
             ns,
+            oom_score_adj,
             fs_peer: 0,
         },
     );
@@ -1307,6 +1313,114 @@ pub fn sys_rt_sigsuspend(mask_ptr: u64, size: u64) -> i64 {
     // The original mask is restored after the handler runs (stored for delivery)
     SUSPEND_RESTORE.lock().insert(tid, saved);
     EINTR
+}
+
+/// `rt_sigtimedwait(2)`: waits for a signal from `set`, takes it without running its
+/// handler, and returns its number.
+///
+/// # Arguments
+/// * `set_ptr` - User pointer to the signal set.
+/// * `info_ptr` - User pointer to a `siginfo_t` to fill, or 0.
+/// * `ts_ptr` - User pointer to the timeout (`struct timespec`), or 0 to wait forever.
+/// * `size` - Size of the signal set (8).
+///
+/// # Returns
+/// The signal number, `-EAGAIN` on timeout, `-EINTR` if another signal arrived.
+pub fn sys_rt_sigtimedwait(set_ptr: u64, info_ptr: u64, ts_ptr: u64, size: u64) -> i64 {
+    if size != 8 {
+        return EINVAL;
+    }
+    let Some([set]) = read_u64s::<1>(set_ptr) else { return EFAULT };
+    let mask = set & !(bit(SIGKILL) | bit(SIGSTOP));
+    let hz = crate::arch::pit::frequency_hz().max(1);
+    let deadline = if ts_ptr != 0 {
+        let Some([sec, nsec]) = read_u64s::<2>(ts_ptr) else { return EFAULT };
+        if (sec as i64) < 0 || nsec >= 1_000_000_000 {
+            return EINVAL;
+        }
+        Some(crate::arch::pit::ticks() + sec * hz + (nsec * hz).div_ceil(1_000_000_000))
+    } else {
+        None
+    };
+    loop {
+        if let Some(sig) = take_signal(mask) {
+            if info_ptr != 0 {
+                let (tid, pid) = current_ids();
+                let sender = {
+                    let mut procs = PROCS.lock();
+                    procs
+                        .get_mut(&pid)
+                        .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
+                            Some(s) if s.pid != 0 => s,
+                            _ => core::mem::take(&mut p.senders[sig as usize]),
+                        })
+                        .unwrap_or_default()
+                };
+                let mut info = [0u8; 128];
+                info[0..4].copy_from_slice(&(sig as i32).to_le_bytes());
+                info[8..12].copy_from_slice(&sender.code.to_le_bytes());
+                info[16..20].copy_from_slice(&sender.pid.to_le_bytes());
+                info[20..24].copy_from_slice(&sender.uid.to_le_bytes());
+                if !write_bytes(info_ptr, &info) {
+                    return EFAULT;
+                }
+            }
+            return sig as i64;
+        }
+        if signal_pending() {
+            return EINTR;
+        }
+        if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+            return -11; // EAGAIN
+        }
+        crate::task::sleep_ticks(1);
+    }
+}
+
+/// Text of `/proc/<pid>/oom_score_adj` or `oom_score` (`file`), or `None` if there is no
+/// such process.
+///
+/// # Arguments
+/// * `pid` - Process ID.
+/// * `file` - `oom_score_adj` or `oom_score`.
+pub fn oom_file_text(pid: u64, file: &str) -> Option<alloc::string::String> {
+    let adj = PROCS.lock().get(&pid).filter(|p| !p.zombie).map(|p| p.oom_score_adj)?;
+    // oom_score: Linux's badness, 0..=2000; without memory accounting, the adjustment
+    Some(alloc::format!("{}
+", if file == "oom_score" { adj.max(0) } else { adj }))
+}
+
+/// Writes `/proc/<pid>/oom_score_adj`: the owner (or root) may set it; going below 0 takes
+/// `CAP_SYS_RESOURCE`.
+///
+/// # Arguments
+/// * `pid` - Process ID.
+/// * `buf` - Bytes written (a decimal number).
+///
+/// # Returns
+/// Bytes accepted, or a negative errno.
+pub fn write_oom_score_adj(pid: u64, buf: &[u8]) -> i64 {
+    let Ok(value) = core::str::from_utf8(buf).unwrap_or("").trim().parse::<i32>() else { return EINVAL };
+    if !(-1000..=1000).contains(&value) {
+        return EINVAL;
+    }
+    let owner = crate::task::SCHEDULER.lock().with_process(pid, |t| t.uid);
+    let (euid, resource) = crate::task::with_current_task_mut(|t| (t.euid, t.caps.has(1 << 24))).unwrap_or((u32::MAX, false));
+    let Some(owner) = owner else { return ESRCH };
+    if euid != 0 && euid != owner {
+        return EPERM;
+    }
+    match PROCS.lock().get_mut(&pid) {
+        Some(p) => {
+            // Linux's floor for unprivileged writers (oom_score_adj_min) starts at 0
+            if value < 0 && value < p.oom_score_adj && !resource {
+                return EACCES;
+            }
+            p.oom_score_adj = value;
+            buf.len() as i64
+        }
+        None => ESRCH,
+    }
 }
 
 /// Masks to restore after a signal interrupted `rt_sigsuspend`, by thread.

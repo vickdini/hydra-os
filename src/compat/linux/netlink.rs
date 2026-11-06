@@ -21,6 +21,7 @@ const EPROTONOSUPPORT: i64 = -93;
 
 const AF_NETLINK: u64 = 16;
 const NETLINK_KOBJECT_UEVENT: u64 = 15;
+const NETLINK_ROUTE: u64 = 0;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 
@@ -48,11 +49,14 @@ pub fn socket(a: [u64; 6]) -> Option<i64> {
     if a[0] != AF_NETLINK {
         return None;
     }
-    if a[2] != NETLINK_KOBJECT_UEVENT {
-        return Some(EAFNOSUPPORT); // routing and the rest: not offered (callers cope)
-    }
     if a[1] & 0xF != 3 && a[1] & 0xF != 2 {
         return Some(EPROTONOSUPPORT); // SOCK_RAW or SOCK_DGRAM
+    }
+    if a[2] == NETLINK_ROUTE {
+        return Some(super::rtnetlink::socket(a[1]));
+    }
+    if a[2] != NETLINK_KOBJECT_UEVENT {
+        return Some(EAFNOSUPPORT); // the other netlink families: not offered (callers cope)
     }
     let sock: Arc<dyn CharDevice> =
         Arc::new(NetlinkSocket { pid: AtomicU32::new(0), groups: AtomicU32::new(0), nonblock: AtomicBool::new(a[1] & SOCK_NONBLOCK != 0) });

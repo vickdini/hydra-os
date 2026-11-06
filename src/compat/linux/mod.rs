@@ -24,6 +24,7 @@ pub mod proc;
 pub mod pidfd;
 pub mod pty;
 pub mod process;
+pub mod rtnetlink;
 pub mod seccomp;
 pub mod select;
 pub mod signalfd;
@@ -109,6 +110,12 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     }
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
+        16 if (0x8910..=0x8933).contains(&arg1) => {
+            // Network interface queries (SIOCGIF*) on a socket
+            if let Some(r) = rtnetlink::interface_ioctl(arg1, arg2) {
+                return r;
+            }
+        }
         272 => return ns::sys_unshare(arg0),
         _ => {}
     }
@@ -2092,6 +2099,7 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
         13 => proc::sys_rt_sigaction(a[0], a[1], a[2], a[3]),
         14 => proc::sys_rt_sigprocmask(a[0], a[1], a[2], a[3]),
         127 => proc::sys_rt_sigpending(a[0], a[1]),
+        128 => proc::sys_rt_sigtimedwait(a[0], a[1], a[2], a[3]),
         130 => proc::sys_rt_sigsuspend(a[0], a[1]),
         131 => proc::sys_sigaltstack(a[0], a[1]),
         61 => {
