@@ -779,6 +779,16 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
     if is_console_path(&abs) {
         return Ok(console_stat());
     }
+    if gone_proc_pid(&abs) {
+        return Err(ENOENT);
+    }
+    if matches!(abs.trim_end_matches('/'), "/proc/self" | "/proc/thread-self") && flags & AT_SYMLINK_NOFOLLOW != 0 && !abs.ends_with('/') {
+        // Symbolic links to the caller's own /proc entries
+        let mut st = super::types::LinuxStat::default();
+        st.st_mode = 0o120777;
+        st.st_nlink = 1;
+        return Ok(st);
+    }
     if is_pseudo(&abs) {
         return Ok(pseudo_stat(&abs));
     }
@@ -976,6 +986,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         snapshot.lock().write_at(0, &text);
         return install(FileDescriptor::MemFd { memfd: snapshot, flags: 0 }, flags);
     }
+    if gone_proc_pid(&abs) {
+        return Err(ENOENT);
+    }
     if is_pseudo(&abs) {
         // Only root moves processes between control groups (cgroup.procs is root's, 0644)
         if wants_write && matches!(super::fs::match_pseudo_path(&abs), Some(super::fs::PseudoFile::CgroupProcs(_))) && creds().euid != 0 {
@@ -1160,7 +1173,7 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
 fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -> i64 {
     let clean = path.trim_end_matches('/');
     let Some(rest) = clean.strip_prefix("/proc/") else { return ENOTDIR };
-    let Some((who, dir)) = rest.split_once('/') else { return ENOTDIR };
+    let (who, dir) = rest.split_once('/').unwrap_or((rest, ""));
     let (_, my_pid) = super::proc::current_ids();
     let target_pid = if who == "self" || who == "thread-self" {
         my_pid
@@ -1172,7 +1185,19 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
     entries.push((1, alloc::string::String::from("."), 4));
     entries.push((1, alloc::string::String::from(".."), 4));
 
-    if dir == "ns" {
+    if dir.is_empty() {
+        // /proc/<pid>: the entries Hydra provides (directories, then files and links)
+        for (i, (name, kind)) in [
+            ("fd", 4u8), ("task", 4), ("ns", 4), ("cmdline", 8), ("comm", 8), ("status", 8), ("stat", 8), ("cgroup", 8),
+            ("mountinfo", 8), ("mounts", 8), ("maps", 8), ("auxv", 8), ("uid_map", 8), ("gid_map", 8), ("setgroups", 8),
+            ("exe", 10), ("cwd", 10), ("root", 10),
+        ]
+        .iter()
+        .enumerate()
+        {
+            entries.push((300 + i as u64, alloc::string::String::from(*name), *kind));
+        }
+    } else if dir == "ns" {
         for (i, kind) in ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "user", "uts"].iter().enumerate() {
             entries.push((200 + i as u64, alloc::string::String::from(*kind), 10));
         }
@@ -1330,6 +1355,15 @@ fn access_at(dirfd: i64, path_ptr: u64, mode: u32, flags: u64) -> i64 {
         }
     })();
     r.err().unwrap_or(0)
+}
+
+/// Whether `abs` is `/proc/<pid>` for a process that does not exist (the path matcher
+/// accepts any number: it cannot take the process table's lock).
+fn gone_proc_pid(abs: &str) -> bool {
+    abs.trim_end_matches('/')
+        .strip_prefix("/proc/")
+        .and_then(|p| p.parse::<u64>().ok())
+        .is_some_and(|pid| !super::proc::process_exists(super::ns::pid_from_caller(pid)))
 }
 
 /// The descriptor number named by `/proc/self/fd/N` (or `/proc/<own pid>/fd/N`, or

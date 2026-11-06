@@ -24,6 +24,7 @@ pub mod mm;
 pub mod proc;
 pub mod pidfd;
 pub mod pty;
+pub mod recent;
 pub mod process;
 pub mod ptimer;
 pub mod rtnetlink;
@@ -138,6 +139,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
         295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
+        // openat2, epoll_pwait2, pidfd_getfd, process_madvise, process_mrelease
+        437 | 441 | 438 | 440 | 448 => return recent::dispatch(frame, num),
+        // futex_waitv, futex_wake, futex_wait, futex_requeue
+        449 => return futex::sys_futex_waitv(arg0, arg1, arg2, arg3, arg4),
+        454 => return futex::sys_futex_wake(arg0, arg1, arg2, arg3),
+        455 => return futex::sys_futex_wait(arg0, arg1, arg2, arg3, arg4, arg5),
+        456 => return futex::sys_futex_requeue(arg0, arg1, arg2, arg3),
         // rt_sigqueueinfo, rt_tgsigqueueinfo
         129 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, None, arg1, arg2),
         297 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, Some(arg1 as u32 as u64), arg2, arg3),

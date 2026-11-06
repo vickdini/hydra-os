@@ -139,8 +139,9 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
 pub fn is_proc_dir(path: &str) -> bool {
     let clean = path.trim_end_matches('/');
     let Some(rest) = clean.strip_prefix("/proc/") else { return false };
-    let Some((who, dir)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    // /proc/<pid> itself (and /proc/self, /proc/thread-self followed)
+    let Some((who, dir)) = rest.split_once('/') else { return rest == "self" || rest == "thread-self" || numeric(rest) };
     (who == "self" || who == "thread-self" || numeric(who)) && (dir == "task" || dir == "fd" || dir == "ns")
 }
 
@@ -524,6 +525,15 @@ pub fn proc_link(path: &str) -> Option<alloc::string::String> {
         return super::ns::ns_link(rest);
     }
     match path {
+        // /proc/self and /proc/thread-self link to the caller's own entries
+        "/proc/self" => {
+            let (_, pid) = super::proc::current_ids();
+            Some(alloc::format!("{}", super::ns::pid_to_caller(pid)))
+        }
+        "/proc/thread-self" => {
+            let (tid, pid) = super::proc::current_ids();
+            Some(alloc::format!("{}/task/{}", super::ns::pid_to_caller(pid), super::ns::pid_to_caller(tid)))
+        }
         "/proc/self/cwd" => Some(crate::task::with_current_fds_mut(|fds| fds.cwd_path.clone())),
         "/proc/self/exe" => crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())),
         // A process's root directory. Every Linux process shares the caller's root, so it

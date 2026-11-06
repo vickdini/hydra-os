@@ -43,14 +43,14 @@ const RWF_SUPPORTED: u64 = 0x1f;
 const RWF_APPEND: u64 = 0x10;
 
 /// A temporary anonymous mapping in the caller's address space, unmapped on drop.
-struct Bounce {
-    addr: u64,
+pub(crate) struct Bounce {
+    pub(crate) addr: u64,
     len: u64,
 }
 
 impl Bounce {
     /// Maps `len` bytes of read-write anonymous memory.
-    fn new(len: u64) -> Result<Self, i64> {
+    pub(crate) fn new(len: u64) -> Result<Self, i64> {
         let mm = super::mm::current_mm().ok_or(EFAULT)?;
         // PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS
         let addr = super::mm::sys_mmap(&mm, 0, len, 3, 0x22, -1, 0);

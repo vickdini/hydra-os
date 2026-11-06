@@ -651,3 +651,148 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
         _ => ENOSYS,
     }
 }
+
+/// `FUTEX2_SIZE_U32`: the futex word is 32 bits (the only size Linux supports).
+const FUTEX2_SIZE_U32: u32 = 2;
+/// `FUTEX2_SIZE_MASK`: the size bits of a futex2 flags word.
+const FUTEX2_SIZE_MASK: u32 = 3;
+/// `FUTEX2_PRIVATE`: private to the process (same bit as `FUTEX_PRIVATE_FLAG`).
+const FUTEX2_PRIVATE: u32 = 128;
+/// Most futexes one `futex_waitv` may wait on.
+const FUTEX_WAITV_MAX: u64 = 128;
+
+/// Checks futex2 flags (32-bit size required) and returns whether the futex is private.
+fn futex2_private(flags: u32) -> Result<bool, i64> {
+    if flags & !(FUTEX2_SIZE_MASK | FUTEX2_PRIVATE) != 0 || flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
+        return Err(EINVAL);
+    }
+    Ok(flags & FUTEX2_PRIVATE != 0)
+}
+
+/// Absolute deadline of a futex2 timeout on `clockid` (`CLOCK_MONOTONIC` or `CLOCK_REALTIME`).
+fn futex2_deadline(timeout: u64, clockid: u64) -> Result<Option<u64>, i64> {
+    match clockid {
+        0 => deadline_tick(timeout, false, true),
+        1 => deadline_tick(timeout, false, false),
+        _ if timeout == 0 => Ok(None),
+        _ => Err(EINVAL),
+    }
+}
+
+/// `futex_waitv(2)`: waits on up to 128 futexes at once; returns the index of one that
+/// was woken.
+///
+/// # Arguments
+/// * `waiters` - User pointer to `struct futex_waitv[nr]` (value, address, flags).
+/// * `nr` - Number of futexes.
+/// * `flags` - Must be 0.
+/// * `timeout` - Absolute timeout on `clockid`, or 0.
+/// * `clockid` - `CLOCK_MONOTONIC` or `CLOCK_REALTIME`.
+///
+/// # Returns
+/// The index of a woken futex, `-EAGAIN` if a value differed, `-ETIMEDOUT`, or `-ERESTARTSYS`.
+pub fn sys_futex_waitv(waiters: u64, nr: u64, flags: u64, timeout: u64, clockid: u64) -> i64 {
+    if flags != 0 || nr == 0 || nr > FUTEX_WAITV_MAX {
+        return EINVAL;
+    }
+    let deadline = match futex2_deadline(timeout, clockid) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    if !crate::memory::vm::prefault_current(waiters, nr * 24, false) {
+        return EFAULT;
+    }
+    let mut entries = Vec::with_capacity(nr as usize);
+    for i in 0..nr {
+        let raw = unsafe { core::ptr::read_unaligned((waiters + i * 24) as *const [u64; 3]) };
+        let (val, uaddr, wflags) = (raw[0], raw[1], (raw[2] & 0xffff_ffff) as u32);
+        if raw[2] >> 32 != 0 || uaddr & 3 != 0 || val > u32::MAX as u64 {
+            return EINVAL;
+        }
+        let private = match futex2_private(wflags) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        entries.push((key_for(uaddr, private), uaddr, val as u32));
+    }
+    let me = crate::task::SCHEDULER.lock().current_task_id();
+    {
+        // All values are checked and all waiters queued under the queue lock
+        let mut fq = GLOBAL_FUTEX.lock();
+        for (_, uaddr, val) in &entries {
+            match read_word(*uaddr) {
+                Ok(v) if v == *val => {}
+                Ok(_) => return EAGAIN,
+                Err(e) => return e,
+            }
+        }
+        for (key, _, _) in &entries {
+            fq.waiters.push(FutexWaiter { key: *key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
+        }
+    }
+    loop {
+        crate::task::wait::wait(deadline);
+        let mut fq = GLOBAL_FUTEX.lock();
+        // A waker removes the entry it wakes: the first missing one is the answer
+        let woken = entries.iter().position(|(key, _, _)| !fq.waiters.iter().any(|w| w.task_id == me && w.key == *key));
+        if let Some(i) = woken {
+            fq.remove(me);
+            return i as i64;
+        }
+        if deadline.map_or(false, |d| crate::arch::pit::ticks() >= d) {
+            fq.remove(me);
+            return ETIMEDOUT;
+        }
+        if super::proc::signal_pending() {
+            fq.remove(me);
+            return super::proc::ERESTARTSYS;
+        }
+    }
+}
+
+/// `futex_wake(2)` (futex2): wakes up to `nr` waiters on `uaddr` matching `mask`.
+pub fn sys_futex_wake(uaddr: u64, mask: u64, nr: u64, flags: u64) -> i64 {
+    let private = match futex2_private(flags as u32) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if flags >> 32 != 0 || mask as u32 == 0 {
+        return EINVAL;
+    }
+    let op = FUTEX_WAKE_BITSET | if private { FUTEX_PRIVATE_FLAG } else { 0 };
+    dispatch_futex(uaddr, op, nr.min(i32::MAX as u64) as u32, 0, 0, mask as u32)
+}
+
+/// `futex_wait(2)` (futex2): waits on `uaddr` while it holds `val`, until woken through
+/// `mask` or the absolute `timeout` on `clockid`.
+pub fn sys_futex_wait(uaddr: u64, val: u64, mask: u64, flags: u64, timeout: u64, clockid: u64) -> i64 {
+    let private = match futex2_private(flags as u32) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if val > u32::MAX as u64 || mask as u32 == 0 {
+        return EINVAL;
+    }
+    match futex2_deadline(timeout, clockid) {
+        Ok(d) => wait(uaddr, val as u32, mask as u32, d, private),
+        Err(e) => e,
+    }
+}
+
+/// `futex_requeue(2)` (futex2): `waiters[0]` must still hold its value; wakes `nr_wake`
+/// of its waiters and moves up to `nr_requeue` to `waiters[1]`.
+pub fn sys_futex_requeue(waiters: u64, flags: u64, nr_wake: u64, nr_requeue: u64) -> i64 {
+    if flags != 0 || !crate::memory::vm::prefault_current(waiters, 48, false) {
+        return if flags != 0 { EINVAL } else { EFAULT };
+    }
+    let w = unsafe { core::ptr::read_unaligned(waiters as *const [u64; 6]) };
+    let (p0, p1) = match (futex2_private(w[2] as u32), futex2_private(w[5] as u32)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return EINVAL,
+    };
+    if p0 != p1 {
+        return EINVAL;
+    }
+    let op = FUTEX_CMP_REQUEUE | if p0 { FUTEX_PRIVATE_FLAG } else { 0 };
+    dispatch_futex(w[1], op, nr_wake.min(i32::MAX as u64) as u32, nr_requeue.min(i32::MAX as u64), w[4], w[0] as u32)
+}
