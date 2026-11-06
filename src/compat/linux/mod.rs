@@ -16,6 +16,7 @@ pub mod eventfd;
 pub mod fs;
 pub mod itimer;
 pub mod inotify;
+pub mod io_uring;
 pub mod futex;
 pub mod inet;
 pub mod memfd;
@@ -145,6 +146,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         101 => return ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
+        // io_uring_setup, io_uring_enter, io_uring_register
+        425..=427 => return io_uring::dispatch(frame, num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // landlock_create_ruleset, landlock_add_rule, landlock_restrict_self
         444..=446 => return landlock::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice

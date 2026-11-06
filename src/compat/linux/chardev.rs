@@ -189,6 +189,11 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// The io_uring instance behind this descriptor, if it is one.
+    fn as_io_uring(&self) -> Option<Arc<super::io_uring::Ring>> {
+        None
+    }
+
     /// The Landlock ruleset behind this descriptor, if it is one.
     fn as_landlock(&self) -> Option<&super::landlock::Ruleset> {
         None

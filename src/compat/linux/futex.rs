@@ -306,7 +306,7 @@ fn wake_ids(ids: &[TaskId]) {
 /// # Returns
 ///
 /// `Ok(Some(tick))` with absolute deadline tick, `Ok(None)` if no timeout, or `Err(errno)` on fault.
-fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
+pub(crate) fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
     if ts_ptr == 0 {
         return Ok(None);
     }

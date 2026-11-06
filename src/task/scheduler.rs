@@ -362,6 +362,39 @@ impl Scheduler {
         self.spawn_internal(name, entry_fn, priority, cr3)
     }
 
+    /// Spawns a kernel thread working for the calling process (io_uring's workers): it runs
+    /// in the process's address space with its descriptor table, credentials and sandbox
+    /// state, and never enters user mode. It dies with the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static string name of the thread.
+    /// * `entry_fn` - Entry function pointer.
+    ///
+    /// # Returns
+    ///
+    /// The new thread's [`TaskId`], or `None` without a current task.
+    pub fn spawn_process_worker(&mut self, name: &'static str, entry_fn: fn()) -> Option<TaskId> {
+        if !self.initialized || self.current_index >= self.tasks.len() {
+            return None;
+        }
+        let cur = &self.tasks[self.current_index];
+        let cr3 = cur.regs.cr3;
+        let (tgid, fds, mm, personality) = (cur.tgid, cur.fds.clone(), cur.mm.clone(), cur.personality);
+        let ids = (cur.uid, cur.gid, cur.euid, cur.egid, cur.suid, cur.sgid);
+        let (caps, seccomp) = (cur.caps, cur.seccomp.clone());
+        let id = self.spawn_internal(name, entry_fn, TaskPriority::Normal, cr3);
+        let t = self.tasks.last_mut()?;
+        t.tgid = tgid;
+        t.fds = fds;
+        t.mm = mm;
+        t.personality = personality;
+        (t.uid, t.gid, t.euid, t.egid, t.suid, t.sgid) = ids;
+        t.caps = caps;
+        t.seccomp = seccomp;
+        Some(id)
+    }
+
     /// Allocates a kernel stack and appends a new Ring 0 task using page table root `cr3`.
     ///
     /// # Arguments
