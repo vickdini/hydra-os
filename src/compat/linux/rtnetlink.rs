@@ -45,9 +45,6 @@ const MSG_PEEK: u64 = 2;
 const MSG_TRUNC: u64 = 0x20;
 const MSG_DONTWAIT: u64 = 0x40;
 
-/// Never woken: replies are queued as requests arrive, so a receive on an empty socket
-/// waits for a signal.
-static NEVER: WaitQueue = WaitQueue::new();
 
 /// A routing netlink socket.
 pub struct RouteSocket {
@@ -57,6 +54,8 @@ pub struct RouteSocket {
     nonblock: AtomicBool,
     /// Reply datagrams not yet received.
     replies: Mutex<VecDeque<Vec<u8>>>,
+    /// Woken when a kernel notification arrives (replies are queued synchronously).
+    wq: Arc<WaitQueue>,
 }
 
 /// Creates a routing netlink socket (`socket(AF_NETLINK, SOCK_RAW|SOCK_DGRAM, NETLINK_ROUTE)`).
@@ -72,6 +71,7 @@ pub fn socket(ty: u64) -> i64 {
         groups: AtomicU32::new(0),
         nonblock: AtomicBool::new(ty & SOCK_NONBLOCK != 0),
         replies: Mutex::new(VecDeque::new()),
+        wq: Arc::new(WaitQueue::new()),
     });
     crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(crate::fs::FileDescriptor::Device(sock)) {
         Ok(fd) => {
@@ -245,9 +245,12 @@ impl RouteSocket {
             return Err(EAGAIN);
         }
         let mut waits = WaitSet::new();
-        waits.add(QueueRef::Static(&NEVER));
+        waits.add(QueueRef::Shared(self.wq.clone()));
         loop {
             waits.register();
+            if let Some(d) = take(&mut self.replies.lock()) {
+                return Ok(d);
+            }
             if super::proc::signal_pending() {
                 return Err(super::proc::ERESTARTSYS);
             }
@@ -308,7 +311,9 @@ impl CharDevice for RouteSocket {
         0x0004 | if self.replies.lock().is_empty() { 0 } else { 0x0001 }
     }
 
-    fn add_wait_queues(&self, _waits: &mut WaitSet) {}
+    fn add_wait_queues(&self, waits: &mut WaitSet) {
+        waits.add(QueueRef::Shared(self.wq.clone()));
+    }
 
     fn rdev(&self) -> u64 {
         0
@@ -324,6 +329,12 @@ impl CharDevice for RouteSocket {
 
     fn nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
+    }
+
+    fn deliver_notification(&self, data: &[u8]) -> bool {
+        self.replies.lock().push_back(data.to_vec());
+        self.wq.wake_all();
+        true
     }
 
     fn socket_call(&self, num: u64, a: [u64; 6]) -> Option<i64> {

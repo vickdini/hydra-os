@@ -417,6 +417,7 @@ pub fn thread_exited(pid: u64, tid: u64) {
     }
     super::misc::forget_process(pid);
     super::ptimer::forget_process(pid);
+    super::aio::forget_process(pid);
     super::sysv::forget_process(pid, true);
     // The init of a PID namespace takes the namespace with it
     if procs.get(&pid).is_some_and(|p| p.ns.pid_inits.last() == Some(&pid)) {
@@ -1530,6 +1531,19 @@ pub fn post_timer_signal(pid: u64, tid: Option<u64>, sig: u32, timer: i32, overr
         Some(t) => post_thread(pid, t, sig),
         None => post_process(pid, sig),
     }
+}
+
+/// Sends `sig` to process `pid` with the given `siginfo` origin (`si_code`, `si_pid`,
+/// `si_uid`, `si_value`), for kernel-generated notifications such as a POSIX message
+/// queue's.
+///
+/// # Returns
+/// `false` if the process no longer exists.
+pub fn post_with_info(pid: u64, sig: u32, code: i32, spid: u32, suid: u32, value: u64) -> bool {
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        p.senders[sig as usize] = SigSender { code, pid: spid, uid: suid, value, ..Default::default() };
+    }
+    post_process(pid, sig)
 }
 
 /// Updates the overrun count (`si_overrun`) of a POSIX timer signal still queued.

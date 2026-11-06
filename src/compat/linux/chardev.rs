@@ -157,6 +157,21 @@ pub trait CharDevice: Send + Sync {
         st.st_blksize = 4096;
         st
     }
+
+    /// Queues a kernel notification message on a netlink socket (POSIX message queue
+    /// `SIGEV_THREAD` notification, which glibc receives on such a socket).
+    ///
+    /// # Returns
+    ///
+    /// `true` if this device took the message.
+    fn deliver_notification(&self, _data: &[u8]) -> bool {
+        false
+    }
+
+    /// The POSIX message queue behind this descriptor, if it is one.
+    fn as_mqueue(&self) -> Option<&super::mqueue::MqHandle> {
+        None
+    }
 }
 
 /// Opens the driver behind character device `rdev`; `None` if no driver claims it.

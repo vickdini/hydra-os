@@ -4,6 +4,7 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod aio;
 pub mod chardev;
 pub mod devices;
 pub mod drm;
@@ -21,6 +22,7 @@ pub mod memfd;
 pub mod misc;
 pub mod execve;
 pub mod mm;
+pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
 pub mod pty;
@@ -139,6 +141,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
         295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
+        // io_setup, io_destroy, io_getevents, io_submit, io_cancel, io_pgetevents
+        206..=210 | 333 => return aio::dispatch(frame, num),
         // openat2, epoll_pwait2, pidfd_getfd, process_madvise, process_mrelease
         437 | 441 | 438 | 440 | 448 => return recent::dispatch(frame, num),
         // futex_waitv, futex_wake, futex_wait, futex_requeue
@@ -153,6 +157,12 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // msgctl semtimedop
         29..=31 | 64..=71 | 220 => {
             if let Some(r) = sysv::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
+        // mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
+        240..=245 => {
+            if let Some(r) = mqueue::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
             }
         }

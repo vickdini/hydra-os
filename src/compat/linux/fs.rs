@@ -108,6 +108,10 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/fs/inotify/max_user_watches" => Some(PseudoFile::ProcStatic(b"1048576\n")),
         "/proc/sys/fs/inotify/max_user_instances" => Some(PseudoFile::ProcStatic(b"1024\n")),
         "/proc/sys/fs/inotify/max_queued_events" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        // POSIX message queue limits (see super::mqueue)
+        "/proc/sys/fs/mqueue/msg_max" | "/proc/sys/fs/mqueue/msg_default" => Some(PseudoFile::ProcStatic(b"10\n")),
+        "/proc/sys/fs/mqueue/msgsize_max" | "/proc/sys/fs/mqueue/msgsize_default" => Some(PseudoFile::ProcStatic(b"8192\n")),
+        "/proc/sys/fs/mqueue/queues_max" => Some(PseudoFile::ProcStatic(b"256\n")),
         // System V IPC limits (see super::sysv)
         "/proc/sys/kernel/shmmax" => Some(PseudoFile::ProcStatic(b"1099511627776\n")),
         "/proc/sys/kernel/shmall" => Some(PseudoFile::ProcStatic(b"268435456\n")),
