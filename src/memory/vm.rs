@@ -1013,6 +1013,59 @@ impl Mm {
         Ok(())
     }
 
+    /// Writes `data` at `addr` even where the mapping is read-only (a debugger's breakpoint
+    /// in program text): a private page gets a copy of its own first and keeps its
+    /// protection. Shared mappings are not written through a read-only view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FaultError`] if a page is unmapped, shared and read-only, or memory runs out.
+    pub fn force_write(&mut self, addr: u64, data: &[u8]) -> Result<(), FaultError> {
+        let mut done = 0usize;
+        while done < data.len() {
+            let va = addr + done as u64;
+            let n = ((PAGE_SIZE - (va & (PAGE_SIZE - 1))) as usize).min(data.len() - done);
+            let vma = self.find_vma(va).cloned().ok_or(FaultError::Segv)?;
+            if vma.prot & PROT_WRITE != 0 {
+                self.write_bytes(va, &data[done..done + n])?;
+                done += n;
+                continue;
+            }
+            if vma.shared {
+                return Err(FaultError::Segv);
+            }
+            // Present first (a read fault maps file pages shared with the page cache)
+            let page = page_down(va);
+            if !self.pte(page, false).map_or(false, |e| e.flags().contains(PageTableFlags::PRESENT)) {
+                let prot = vma.prot;
+                // A PROT_NONE page can still be read by a debugger: fault it in as readable
+                if prot == 0 {
+                    return Err(FaultError::Segv);
+                }
+                self.handle_fault(page, false, false)?;
+            }
+            let entry = self.pte(page, false).ok_or(FaultError::Segv)?;
+            let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
+            let target = if frame_refcount(frame) == 1 {
+                frame
+            } else {
+                let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(frame.start_address().as_u64() as *const u8, copy.start_address().as_u64() as *mut u8, PAGE_SIZE as usize);
+                }
+                entry.set_addr(copy.start_address(), pte_flags_for(vma.prot, false));
+                frame_ref_dec(frame);
+                flush(page);
+                copy
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(data[done..].as_ptr(), (target.start_address().as_u64() + (va & (PAGE_SIZE - 1))) as *mut u8, n);
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Faults in every page of `[addr, addr + len)` so kernel code can access it directly
     /// without page faults (used before I/O into user buffers).
     ///

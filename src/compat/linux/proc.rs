@@ -183,11 +183,13 @@ struct ThreadSig {
     alt_flags: u32,
     /// Senders of the signals pending for this thread (`tkill`/`tgkill`), by number.
     senders: [SigSender; NSIG + 1],
+    /// Signals a tracer let through after a signal-delivery stop: acted on without another.
+    injected: u64,
 }
 
 impl Default for ThreadSig {
     fn default() -> Self {
-        ThreadSig { mask: 0, pending: 0, alt_sp: 0, alt_size: 0, alt_flags: 0, senders: [SigSender::default(); NSIG + 1] }
+        ThreadSig { mask: 0, pending: 0, alt_sp: 0, alt_size: 0, alt_flags: 0, senders: [SigSender::default(); NSIG + 1], injected: 0 }
     }
 }
 
@@ -413,8 +415,22 @@ pub fn thread_exited(pid: u64, tid: u64) {
         }
         None => return,
     };
+    let status = procs.get(&pid).and_then(|p| p.exit_status).unwrap_or(0);
+    if let Some(tracer) = super::ptrace::on_thread_exit(pid, tid, status, ppid) {
+        if let Some(t) = procs.get_mut(&tracer) {
+            t.pending |= bit(SIGCHLD);
+        }
+        crate::task::wait::wake_process_deferred(tracer);
+        super::pidfd::EXIT_WQ.wake_all();
+    }
     if !now_zombie {
         return;
+    }
+    for (tgid, t) in super::ptrace::on_tracer_exit(pid) {
+        if let Some(th) = procs.get_mut(&tgid).and_then(|q| q.threads.get_mut(&t)) {
+            th.pending |= bit(SIGKILL);
+        }
+        crate::task::wait::wake_process_deferred(tgid);
     }
     super::misc::forget_process(pid);
     super::ptimer::forget_process(pid);
@@ -850,6 +866,9 @@ pub fn post_process(pid: u64, sig: u32) -> bool {
         if let Some(ppid) = resumed_ppid {
             notify_parent_stop(&mut procs, ppid);
         }
+    }
+    if sig == SIGCONT {
+        super::ptrace::on_sigcont(pid);
     }
     wake_process(pid);
     true
@@ -1657,6 +1676,82 @@ pub fn take_signal(mask: u64) -> Option<u32> {
     None
 }
 
+/// Whether `sig` is one the CPU raises (its `siginfo` carries `si_addr`).
+fn is_fault_signal(sig: u32) -> bool {
+    matches!(sig, SIGSEGV | SIGBUS | SIGILL | SIGFPE | SIGTRAP)
+}
+
+/// `si_code` and `si_addr` of a fault signal raised by exception `ctx`.
+fn fault_sender(ctx: &ExceptionContext, sig: u32) -> SigSender {
+    let (code, addr) = match (sig, ctx.vector) {
+        // int3: SI_KERNEL; a single step: TRAP_TRACE (debuggers tell them apart)
+        (SIGTRAP, 1) => (2, 0),
+        (SIGTRAP, _) => (0x80, 0),
+        // Page faults: SEGV_MAPERR (nothing mapped) or SEGV_ACCERR (not allowed); BUS_ADRERR
+        (SIGSEGV, 14) => (if ctx.error_code & 1 != 0 { 2 } else { 1 }, x86_64::registers::control::Cr2::read_raw()),
+        (SIGBUS, 14) => (2, x86_64::registers::control::Cr2::read_raw()),
+        // Invalid opcode: ILL_ILLOPN at the instruction; divide error: FPE_INTDIV
+        (SIGILL, _) => (2, ctx.rip),
+        (SIGFPE, 0) => (1, ctx.rip),
+        _ => (0x80, 0),
+    };
+    SigSender { code, call_addr: addr, ..SigSender::default() }
+}
+
+/// `siginfo` for `sig` from `s`, as a handler (or a tracer's `PTRACE_GETSIGINFO`) sees it.
+fn siginfo_of(sig: u32, s: &SigSender) -> [u8; 128] {
+    let mut f = [0u8; 128];
+    f[0..4].copy_from_slice(&(sig as i32).to_le_bytes());
+    f[8..12].copy_from_slice(&s.code.to_le_bytes());
+    f[16..20].copy_from_slice(&s.pid.to_le_bytes());
+    f[20..24].copy_from_slice(&s.uid.to_le_bytes());
+    f[24..32].copy_from_slice(&s.value.to_le_bytes());
+    if is_fault_signal(sig) && s.pid == 0 {
+        f[16..24].copy_from_slice(&s.call_addr.to_le_bytes());
+    }
+    if sig == SIGSYS && s.code == SYS_SECCOMP {
+        f[4..8].copy_from_slice(&s.errno.to_le_bytes());
+        f[16..24].copy_from_slice(&s.call_addr.to_le_bytes());
+        f[24..28].copy_from_slice(&s.syscall.to_le_bytes());
+        f[28..32].copy_from_slice(&super::seccomp::AUDIT_ARCH_X86_64.to_le_bytes());
+    }
+    f
+}
+
+/// Queues `sig` for the calling thread as let through by its tracer.
+fn inject(sig: u32) {
+    let (tid, pid) = current_ids();
+    if sig == 0 || sig as usize > NSIG {
+        return;
+    }
+    if let Some(t) = PROCS.lock().get_mut(&pid).map(|p| p.threads.entry(tid).or_default()) {
+        t.pending |= bit(sig);
+        t.injected |= bit(sig);
+    }
+}
+
+/// Tells tracer `pid` that a tracee stopped (`SIGCHLD`, unless it asked not to).
+pub fn notify_tracer(pid: u64) {
+    let mut procs = PROCS.lock();
+    notify_parent_stop(&mut procs, pid);
+}
+
+/// Whether `SIGKILL` is pending for the calling thread.
+pub fn sigkill_pending() -> bool {
+    let (tid, pid) = current_ids();
+    PROCS.lock().get(&pid).map_or(false, |p| (p.pending | p.threads.get(&tid).map_or(0, |t| t.pending)) & bit(SIGKILL) != 0)
+}
+
+/// Parent of process `pid` (0 if unknown).
+pub fn parent_of(pid: u64) -> u64 {
+    PROCS.lock().get(&pid).map_or(0, |p| p.ppid)
+}
+
+/// The process thread `tid` belongs to.
+pub fn tgid_of(tid: u64) -> Option<u64> {
+    PROCS.lock().values().find(|p| !p.zombie && p.threads.contains_key(&tid)).map(|p| p.pid)
+}
+
 /// Returns `true` if the calling thread has an unblocked pending signal (blocking syscalls poll this).
 ///
 /// # Returns
@@ -1731,6 +1826,8 @@ enum Action {
     Terminate(u32),
     /// Stop the process due to job-control signal `sig`.
     Stop(u32),
+    /// A traced thread's signal-delivery stop for `sig` (sent by the sender given).
+    Trace(u32, SigSender),
 }
 
 /// Takes the next deliverable signal for the calling thread and decides what to do.
@@ -1758,6 +1855,15 @@ fn dequeue() -> Action {
             t.pending &= !bit(sig);
         } else {
             p.pending &= !bit(sig);
+        }
+        // A traced thread stops for every signal but SIGKILL before acting on it; one its
+        // tracer let through is acted on
+        if t.injected & bit(sig) != 0 {
+            t.injected &= !bit(sig);
+        } else if sig != SIGKILL && super::ptrace::is_traced(tid) {
+            let ts = t.senders[sig as usize];
+            let sender = if ts.pid != 0 || ts.code != 0 { ts } else { p.senders[sig as usize] };
+            return Action::Trace(sig, sender);
         }
         let mask = t.mask;
         let act = p.actions[sig as usize];
@@ -1900,7 +2006,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
         procs
             .get_mut(&pid)
             .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
-                Some(s) if s.pid != 0 || s.code == SYS_SECCOMP || s.code == super::ptimer::SI_TIMER => s,
+                Some(s) if s.pid != 0 || s.code != 0 => s,
                 _ => core::mem::take(&mut p.senders[sig as usize]),
             })
             .unwrap_or_default()
@@ -1910,6 +2016,9 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
     f[332..336].copy_from_slice(&sender.uid.to_le_bytes());
     put(&mut f, 336, sender.value); // si_value
+    if is_fault_signal(sig) && sender.pid == 0 {
+        put(&mut f, 328, sender.call_addr); // si_addr
+    }
     if sig == SIGSYS && sender.code == SYS_SECCOMP {
         // _sigsys: si_call_addr, si_syscall, si_arch (in place of si_pid/si_uid)
         f[316..320].copy_from_slice(&sender.errno.to_le_bytes());
@@ -1946,13 +2055,23 @@ pub fn deliver_on_syscall_return(frame: &mut SyscallFrame, fpu: *mut FpuState, o
         if is_stopped(pid) {
             wait_while_stopped();
         }
+        if super::ptrace::interrupt_pending() {
+            super::ptrace::interrupt_stop(frame, fpu, orig_nr);
+        }
         match dequeue() {
+            Action::Stop(sig) if super::ptrace::is_traced(current_ids().0) => super::ptrace::group_stop(frame, fpu, orig_nr, sig),
             Action::Stop(sig) => stop_current(sig),
+            Action::Trace(sig, s) => {
+                let new = super::ptrace::signal_stop(frame, fpu, orig_nr, sig, &siginfo_of(sig, &s));
+                if new != 0 {
+                    inject(new);
+                }
+            }
             a => break a,
         }
     };
     match action {
-        Action::Stop(_) => unreachable!(),
+        Action::Stop(_) | Action::Trace(..) => unreachable!(),
         Action::None => {
             if result == ERESTARTSYS || result == ERESTART_RESTARTBLOCK {
                 // Interrupted by a signal that turned out to be ignored (or a stop): restart
@@ -2017,20 +2136,30 @@ pub fn deliver_on_trap_return(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     }
     let (_, pid) = current_ids();
     let stopped = PROCS.try_lock().map_or(false, |p| p.get(&pid).map_or(false, |p| p.stopped));
-    if !stopped && !signal_pending() {
+    if !stopped && !signal_pending() && !super::ptrace::interrupt_pending() {
         return;
     }
     let action = loop {
         if is_stopped(pid) {
             wait_while_stopped();
         }
+        if super::ptrace::interrupt_pending() {
+            super::ptrace::interrupt_stop(ctx, fpu, u64::MAX);
+        }
         match dequeue() {
+            Action::Stop(sig) if super::ptrace::is_traced(current_ids().0) => super::ptrace::group_stop(ctx, fpu, u64::MAX, sig),
             Action::Stop(sig) => stop_current(sig),
+            Action::Trace(sig, s) => {
+                let new = super::ptrace::signal_stop(ctx, fpu, u64::MAX, sig, &siginfo_of(sig, &s));
+                if new != 0 {
+                    inject(new);
+                }
+            }
             a => break a,
         }
     };
     match action {
-        Action::Stop(_) => unreachable!(),
+        Action::Stop(_) | Action::Trace(..) => unreachable!(),
         Action::None => {}
         Action::Terminate(sig) => die(sig),
         Action::Handler(sig, act, old_mask) => {
@@ -2078,15 +2207,19 @@ pub fn deliver_on_trap_return(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
 /// * `sig` - Synchronous signal to force.
 pub fn force_fault_signal(ctx: &mut ExceptionContext, fpu: *mut FpuState, sig: u32) {
     let (tid, pid) = current_ids();
+    // A tracer sees the fault first, whatever the disposition
+    let traced = super::ptrace::is_traced(tid);
     let handled = {
         let mut procs = PROCS.lock();
         match procs.get_mut(&pid) {
             Some(p) => {
                 let act = p.actions[sig as usize];
                 let t = p.threads.entry(tid).or_default();
-                let usable = act.handler > SIG_IGN && t.mask & bit(sig) == 0;
+                let usable = traced || (act.handler > SIG_IGN && t.mask & bit(sig) == 0);
                 if usable {
                     t.pending |= bit(sig);
+                    t.mask &= !bit(sig);
+                    t.senders[sig as usize] = fault_sender(ctx, sig);
                 }
                 usable
             }
@@ -2116,7 +2249,7 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
     let get = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap());
     let mc = 40;
     let g = |i: usize| get(mc + i * 8);
-    let regs = UserRegs {
+    let mut regs = UserRegs {
         r8: g(0),
         r9: g(1),
         r10: g(2),
@@ -2152,6 +2285,10 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
         let mxcsr = u32::from_le_bytes(fpu.0[24..28].try_into().unwrap()) & 0xFFFF;
         fpu.0[24..28].copy_from_slice(&mxcsr.to_le_bytes());
     }
+    // A tracer's exit stop for rt_sigreturn (it does not return through the dispatcher)
+    if super::ptrace::is_traced(current_ids().0) {
+        super::ptrace::sigreturn_exit(&mut regs, &mut fpu);
+    }
     if regs.rip >= crate::memory::vm::USER_SPACE_END || regs.rsp >= crate::memory::vm::USER_SPACE_END {
         die(SIGSEGV);
     }
@@ -2178,28 +2315,30 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
     core::arch::asm!(
         "fxrstor64 [{fpu}]",
         "push 0x1b",          // SS
-        "push qword ptr [{r} + 15*8]", // RSP
-        "push qword ptr [{r} + 17*8]", // RFLAGS
+        "push qword ptr [rax + 15*8]", // RSP
+        "push qword ptr [rax + 17*8]", // RFLAGS
         "push 0x23",          // CS
-        "push qword ptr [{r} + 16*8]", // RIP
-        "mov r8,  [{r} + 0*8]",
-        "mov r9,  [{r} + 1*8]",
-        "mov r10, [{r} + 2*8]",
-        "mov r11, [{r} + 3*8]",
-        "mov r12, [{r} + 4*8]",
-        "mov r13, [{r} + 5*8]",
-        "mov r14, [{r} + 6*8]",
-        "mov r15, [{r} + 7*8]",
-        "mov rdi, [{r} + 8*8]",
-        "mov rsi, [{r} + 9*8]",
-        "mov rbp, [{r} + 10*8]",
-        "mov rbx, [{r} + 11*8]",
-        "mov rdx, [{r} + 12*8]",
-        "mov rcx, [{r} + 14*8]",
-        "mov rax, [{r} + 13*8]",
+        "push qword ptr [rax + 16*8]", // RIP
+        "mov r8,  [rax + 0*8]",
+        "mov r9,  [rax + 1*8]",
+        "mov r10, [rax + 2*8]",
+        "mov r11, [rax + 3*8]",
+        "mov r12, [rax + 4*8]",
+        "mov r13, [rax + 5*8]",
+        "mov r14, [rax + 6*8]",
+        "mov r15, [rax + 7*8]",
+        "mov rdi, [rax + 8*8]",
+        "mov rsi, [rax + 9*8]",
+        "mov rbp, [rax + 10*8]",
+        "mov rbx, [rax + 11*8]",
+        "mov rdx, [rax + 12*8]",
+        "mov rcx, [rax + 14*8]",
+        "mov rax, [rax + 13*8]",
         "iretq",
-        r = in(reg) &regs as *const UserRegs,
+        // The pointer must sit in the register loaded last: any other could be overwritten
+        // by the loads before it is done with
         fpu = in(reg) fpu as *const FpuState,
+        in("rax") &regs as *const UserRegs,
         options(noreturn)
     );
 }
@@ -2265,6 +2404,10 @@ fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
     let mut procs = PROCS.lock();
     let my_pgid = procs.get(&me).map_or(me, |p| p.pgid);
     let mut any = false;
+    // Stops and exits of threads the caller traces
+    if let Some(r) = super::ptrace::wait_report(me, sel, keep) {
+        return Ok(Some(r));
+    }
     // (pid, status, kind): 0 = exited (reap), 1 = stopped, 2 = continued
     let mut found = None;
     for c in procs.values() {
@@ -2284,7 +2427,7 @@ fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
             }
         }
     }
-    if !any {
+    if !any && !super::ptrace::has_tracee(me, sel) {
         return Err(ECHILD);
     }
     if let Some((pid, _, kind)) = found {

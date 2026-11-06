@@ -182,7 +182,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup")
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv")
             || file.strip_prefix("fdinfo/").is_some_and(numeric)
             || file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| numeric(t) && matches!(f, "status" | "stat" | "comm")))
 }
@@ -241,6 +241,13 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         }
         None => (file, pid),
     };
+    if file == "auxv" {
+        // Another process's auxiliary vector (debuggers find where a program was loaded)
+        super::extra::may_access(pid).ok()?;
+        let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
+        let auxv = mm.lock().auxv.clone();
+        return Some(auxv);
+    }
     if file == "cgroup" {
         // cgroup v2 only. libsystemd finds the hierarchy's root from pid 1's group (the
         // init process Hydra does not have: it is the kernel's)
@@ -271,6 +278,10 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
                 s
             };
             let (nstgid, nspid) = (ns_ids(pid), ns_ids(tid));
+            let tracer = match super::ptrace::tracer_of(pid) {
+                0 => 0,
+                t => super::ns::pid_to_caller(t),
+            };
             let name: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
             Some(
                 alloc::format!(
@@ -279,6 +290,7 @@ State:	R (running)
 Tgid:	{}
 Pid:	{}
 PPid:	{}
+TracerPid:	{}
 Uid:	{}	{}	{}	{}
 Gid:	{}	{}	{}	{}
 NStgid:	{}
@@ -286,7 +298,7 @@ NSpid:	{}
 NoNewPrivs:	{}
 Seccomp:	{}
 ",
-                    name, pid, tid, ppid, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid, nnp as u8, seccomp_mode
+                    name, pid, tid, ppid, tracer, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid, nnp as u8, seccomp_mode
                 )
                 .into_bytes(),
             )

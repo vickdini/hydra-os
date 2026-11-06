@@ -30,6 +30,7 @@ pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
 pub mod pty;
+pub mod ptrace;
 pub mod recent;
 pub mod process;
 pub mod ptimer;
@@ -143,6 +144,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     let arg5 = frame.r9;
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
+        101 => return ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
         // landlock_create_ruleset, landlock_add_rule, landlock_restrict_self
         444..=446 => return landlock::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
@@ -2148,6 +2150,11 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         Err(_) => return -ENOMEM,
     };
     ns::after_clone(child, args[0]);
+    if ptrace::active() {
+        // A traced parent's child may be traced too; the parent reports the event
+        let child_tgid = if args[0] & types::CLONE_THREAD != 0 { proc::current_ids().1 } else { child };
+        ptrace::on_clone(frame, child_tgid, child, args[0]);
+    }
     if args[0] & (types::CLONE_VM | types::CLONE_THREAD) == 0 {
         // The copied address space keeps the shared memory attachments
         sysv::on_fork(proc::current_ids().1, child);
@@ -2172,6 +2179,7 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         while !proc::vfork_released(child) {
             crate::task::sleep_ticks(1);
         }
+        ptrace::on_vfork_done(frame, child);
     }
     child as i64
 }

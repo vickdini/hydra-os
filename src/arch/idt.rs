@@ -471,6 +471,18 @@ fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
 /// * `ctx` - CPU exception register context.
 fn dispatch_exception(ctx: &mut ExceptionContext) {
     match ctx.vector {
+        1 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
+            // #DB - a single step (trap flag): SIGTRAP, and the flag goes
+            ctx.rflags &= !0x100;
+            kill_or_signal(ctx, 5);
+        }
+        1 => {
+            // #DB in the kernel: nothing sets breakpoints there
+        }
+        3 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
+            // int3 in a Linux program: SIGTRAP (debuggers' breakpoints)
+            kill_or_signal(ctx, 5);
+        }
         3 => {
             // #BP - Breakpoint Exception (Int3)
             set_color(Color::LightCyan, Color::Black);

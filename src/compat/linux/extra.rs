@@ -82,7 +82,7 @@ fn target_pid(pid: u64) -> Result<u64, i64> {
 
 /// Ptrace-style access check (`PTRACE_MODE_ATTACH_REALCREDS`): same real, effective and
 /// saved user IDs, or `CAP_SYS_PTRACE`.
-fn may_access(pid: u64) -> Result<(), i64> {
+pub(crate) fn may_access(pid: u64) -> Result<(), i64> {
     let target = crate::task::SCHEDULER.lock().with_process(pid, |t| (t.uid, t.euid, t.suid, t.service.is_some()));
     let Some((uid, euid, suid, service)) = target else { return Err(ESRCH) };
     if pid == super::proc::current_ids().1 {

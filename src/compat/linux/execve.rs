@@ -231,7 +231,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         if noexec {
             return EACCES;
         }
-        if nosuid || crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
+        let traced = super::ptrace::is_traced(super::proc::current_ids().0);
+        if nosuid || traced || crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
             // no_new_privs, or a user namespace (the owner, root, is not mapped in it):
             // set-user/group-ID bits are ignored
             set_uid = None;
@@ -354,6 +355,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     // The thread and process keyrings do not survive exec
     let (tid, tgid) = super::proc::current_ids();
     super::keys::on_exec(tid, tgid);
+    super::ptrace::on_exec(tgid, tid);
     // The old address space is no longer loaded; release it (unless a vfork parent shares it)
     drop(old_mm);
     super::proc::exec_reset(pid);

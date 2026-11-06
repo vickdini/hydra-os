@@ -430,10 +430,29 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
                 }
             }
         }
+        // ptrace: system call entry stop (the tracer may change or cancel the call)
+        let traced = crate::compat::linux::ptrace::active() && crate::compat::linux::ptrace::is_traced(crate::compat::linux::proc::current_ids().0);
+        let (num, cancelled) = if traced {
+            match crate::compat::linux::ptrace::syscall_entry(frame, fpu, num) {
+                Ok(n) => (n, None),
+                Err(r) => (num, Some(r)),
+            }
+        } else {
+            (num, None)
+        };
         crate::task::CURRENT_SYSCALL.store(num, core::sync::atomic::Ordering::Relaxed);
         crate::task::CURRENT_SYSCALL_ARGS[0].store(args[0], core::sync::atomic::Ordering::Relaxed);
         crate::task::CURRENT_SYSCALL_ARGS[1].store(args[1], core::sync::atomic::Ordering::Relaxed);
-        let res = crate::compat::linux::dispatch_linux_syscall(frame);
+        let res = match cancelled {
+            Some(r) => r,
+            None => crate::compat::linux::dispatch_linux_syscall(frame),
+        };
+        // ptrace: exec event and system call exit stop (the tracer may change the result)
+        let res = if traced || crate::compat::linux::ptrace::is_traced(crate::compat::linux::proc::current_ids().0) {
+            crate::compat::linux::ptrace::syscall_exit(frame, fpu, num, res)
+        } else {
+            res
+        };
         crate::task::CURRENT_SYSCALL.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
         if tracing && (num == 46 || num == 47) && crate::memory::vm::prefault_current(args[1], 56, false) {
             // sendmsg/recvmsg: control (SCM_RIGHTS) bytes passed, after the call
