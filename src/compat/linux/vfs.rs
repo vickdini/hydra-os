@@ -354,6 +354,7 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     if !may_access(&pattr, c.euid, c.egid, 2 | 1) {
         return Err(EACCES);
     }
+    super::landlock::check_dir(dir, super::landlock::MAKE_SOCK)?;
     let mode = S_IFSOCK | (0o777 & !umask());
     zfs(|s| s.mknod(dir, &name, mode, 0, c.euid, c.egid))
 }
@@ -959,6 +960,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     let raw = join_path_raw(&base_path, path);
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
+    // Landlock on files outside the pool (/proc, /dev, terminals)
+    if flags & O_PATH == 0 && (is_pseudo(&abs) || abs == "/dev/tty" || is_console_path(&abs) || abs == "/dev/ptmx" || abs.starts_with("/dev/pts/")) {
+        let dir = super::fs::is_proc_dir(&abs);
+        super::landlock::check_at(&raw, 0, dir, true, open_rights(flags, dir, false))?;
+    }
 
     if let Some(desc) = open_pty_path(&abs, flags)? {
         return install(desc, flags);
@@ -1058,6 +1064,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 if !may_access(&pattr, c.euid, c.egid, 2 | 1) {
                     return Err(EACCES);
                 }
+                super::landlock::check_dir(parent, super::landlock::MAKE_REG)?;
                 let perm = mode & 0o7777 & !umask();
                 created = true;
                 crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?
@@ -1096,6 +1103,18 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             return Err(EACCES);
         }
     }
+    let mut no_truncate = false;
+    if flags & O_PATH == 0 {
+        let is_dir = ftype == S_IFDIR;
+        let want = open_rights(flags, is_dir, created);
+        // TRUNCATE is looked up for every file: a later ftruncate depends on it
+        let extra = if is_dir { 0 } else { super::landlock::TRUNCATE };
+        let refused = super::landlock::refused_at(&raw, ino, is_dir, follow, want | extra);
+        if refused & want != 0 {
+            return Err(EACCES);
+        }
+        no_truncate = refused & super::landlock::TRUNCATE != 0;
+    }
     if ftype == S_IFCHR {
         if let Some(dev) = super::chardev::open(attr.rdev, flags) {
             return install(FileDescriptor::Device(dev?), flags);
@@ -1125,7 +1144,42 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     // The path as reached (a mapped proc mount shows where it is mounted, as on Linux)
     let file = OpenFile::new(ino, keep, raw);
     file.lock().mnt = super::mount::last_mount();
+    file.lock().no_truncate = no_truncate;
     install(FileDescriptor::Vnode(file), flags)
+}
+
+/// The Landlock rights opening with `flags` needs.
+fn open_rights(flags: u32, is_dir: bool, created: bool) -> u64 {
+    use super::landlock::{READ_DIR, READ_FILE, TRUNCATE, WRITE_FILE};
+    if is_dir {
+        return READ_DIR;
+    }
+    let acc = flags & O_ACCMODE;
+    let mut r = 0;
+    if acc != O_WRONLY {
+        r |= READ_FILE;
+    }
+    if acc != O_RDONLY {
+        r |= WRITE_FILE;
+    }
+    // A file this call created is not truncated
+    if flags & O_TRUNC != 0 && !created {
+        r |= TRUNCATE;
+    }
+    r
+}
+
+/// Which of the Landlock rights `want` are refused on `dirfd`/`path` (followed).
+pub(crate) fn landlock_path(dirfd: i64, path_ptr: u64, want: u64) -> u64 {
+    let r: Result<u64, i64> = (|| {
+        let path = user_path(path_ptr)?;
+        let (base, base_path) = base_dir(dirfd, &path)?;
+        let raw = join_path_raw(&base_path, &path);
+        let ino = resolve(base, &path, true)?;
+        let is_dir = ZfsClient::getattr(ino)?.is_dir();
+        Ok(super::landlock::refused_at(&raw, ino, is_dir, true, want))
+    })();
+    r.unwrap_or(0)
 }
 
 /// Installs a new file descriptor into the calling process's descriptor table.
@@ -1654,6 +1708,15 @@ fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 
                 return Err(EACCES);
             }
         }
+        if super::landlock::active() {
+            let src = zfs(|s| s.lookup(sdir, &sname))?;
+            let ftype = ZfsClient::getattr(src)?.mode & S_IFMT;
+            let remove_dst = match zfs(|s| s.lookup(ddir, &dname)) {
+                Ok(d) => super::landlock::remove_right(ZfsClient::getattr(d)?.mode & S_IFMT),
+                Err(_) => 0,
+            };
+            super::landlock::check_move(sdir, ddir, ftype, true, remove_dst)?;
+        }
         zfs(|s| {
             if flags & RENAME_NOREPLACE != 0 && s.lookup(ddir, &dname).is_ok() {
                 return Err(EEXIST);
@@ -1678,16 +1741,30 @@ fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 
 fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
     let r: Result<i64, i64> = (|| {
         let op = user_cstr(oldp)?;
-        let ino = if op.is_empty() {
+        // The linked inode and the directory it is reached from
+        let (ino, sdir) = if op.is_empty() {
             if flags & AT_EMPTY_PATH == 0 {
                 return Err(-ENOENT);
             }
-            fd_vnode(olddir as i32).ok_or(EBADF)?.lock().ino
+            let f = fd_vnode(olddir as i32).ok_or(EBADF)?;
+            let (ino, path) = {
+                let f = f.lock();
+                (f.ino, f.path.clone())
+            };
+            let dir = path.rfind('/').map(|i| if i == 0 { "/" } else { &path[..i] }).unwrap_or("/");
+            (ino, resolve(0, dir.as_bytes(), true).unwrap_or(0))
         } else {
             let (ob, _) = base_dir(olddir, &op)?;
-            resolve(ob, &op, flags & AT_SYMLINK_FOLLOW != 0)?
+            let sdir = resolve_parent(ob, &op).map(|(d, _)| d).unwrap_or(0);
+            (resolve(ob, &op, flags & AT_SYMLINK_FOLLOW != 0)?, sdir)
         };
-        Ok(with_parent(newdir, newp, true, |dir, name, _| zfs(|s| s.link(ino, dir, name).map(|_| 0))))
+        Ok(with_parent(newdir, newp, true, |dir, name, _| {
+            if super::landlock::active() {
+                let ftype = ZfsClient::getattr(ino)?.mode & S_IFMT;
+                super::landlock::check_move(sdir, dir, ftype, false, 0)?;
+            }
+            zfs(|s| s.link(ino, dir, name).map(|_| 0))
+        }))
     })();
     r.unwrap_or_else(|e| e)
 }
@@ -2660,7 +2737,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_MKDIR | NR_MKDIRAT => {
             let (dirfd, p, mode) = if num == NR_MKDIR { (AT_FDCWD, a[0], a[1]) } else { (a[0] as i64, a[1], a[2]) };
             let mask = umask();
-            with_parent(dirfd, p, true, |dir, name, c| zfs(|s| s.mkdir(dir, name, mode as u32 & 0o7777 & !mask, c.euid, c.egid).map(|_| 0)))
+            with_parent(dirfd, p, true, |dir, name, c| {
+                super::landlock::check_dir(dir, super::landlock::MAKE_DIR)?;
+                zfs(|s| s.mkdir(dir, name, mode as u32 & 0o7777 & !mask, c.euid, c.egid).map(|_| 0))
+            })
         }
         NR_MKNOD | NR_MKNODAT => {
             let (dirfd, p, mode, dev) = if num == NR_MKNOD { (AT_FDCWD, a[0], a[1], a[2]) } else { (a[0] as i64, a[1], a[2], a[3]) };
@@ -2671,24 +2751,32 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 if devnode && c.euid != 0 {
                     return Err(EPERM);
                 }
+                super::landlock::check_dir(dir, super::landlock::make_right(mode & S_IFMT))?;
                 zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid).map(|_| 0))
             })
         }
         NR_SYMLINK | NR_SYMLINKAT => {
             let (target_ptr, dirfd, p) = if num == NR_SYMLINK { (a[0], AT_FDCWD, a[1]) } else { (a[0], a[1] as i64, a[2]) };
             match user_path(target_ptr) {
-                Ok(target) => with_parent(dirfd, p, true, |dir, name, c| zfs(|s| s.symlink(dir, name, &target, c.euid, c.egid).map(|_| 0))),
+                Ok(target) => with_parent(dirfd, p, true, |dir, name, c| {
+                    super::landlock::check_dir(dir, super::landlock::MAKE_SYM)?;
+                    zfs(|s| s.symlink(dir, name, &target, c.euid, c.egid).map(|_| 0))
+                }),
                 Err(e) => e,
             }
         }
         NR_LINK => link_at(AT_FDCWD, a[0], AT_FDCWD, a[1], 0),
         NR_LINKAT => link_at(a[0] as i64, a[1], a[2] as i64, a[3], a[4]),
 
-        NR_UNLINK => with_parent(AT_FDCWD, a[0], false, |dir, name, _| zfs(|s| s.unlink(dir, name).map(|_| 0))),
-        NR_RMDIR => with_parent(AT_FDCWD, a[0], false, |dir, name, _| zfs(|s| s.rmdir(dir, name).map(|_| 0))),
-        NR_UNLINKAT => {
-            let rmdir = a[2] & AT_REMOVEDIR != 0;
-            with_parent(a[0] as i64, a[1], false, |dir, name, _| {
+        NR_UNLINK | NR_RMDIR | NR_UNLINKAT => {
+            let (dirfd, p, rmdir) = match num {
+                NR_UNLINK => (AT_FDCWD, a[0], false),
+                NR_RMDIR => (AT_FDCWD, a[0], true),
+                _ => (a[0] as i64, a[1], a[2] & AT_REMOVEDIR != 0),
+            };
+            with_parent(dirfd, p, false, |dir, name, _| {
+                let right = if rmdir { super::landlock::REMOVE_DIR } else { super::landlock::REMOVE_FILE };
+                super::landlock::check_dir(dir, right)?;
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))
             })
         }
@@ -2719,6 +2807,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         }
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 
+        NR_TRUNCATE if super::landlock::active() && landlock_path(AT_FDCWD, a[0], super::landlock::TRUNCATE) != 0 => EACCES,
         NR_TRUNCATE => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { size: Some(a[1]), ..SetAttr::default() }, |at, c| may_access(at, c.euid, c.egid, 2)),
         285 if matches!(crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()), Some(FileDescriptor::MemFd { .. })) => {
             // fallocate on a memfd: pages are allocated when touched; only the size grows
@@ -2768,12 +2857,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         }
         NR_FTRUNCATE => {
             let f = fd_vnode(a[0] as i32)?;
-            let (ino, writable) = {
+            let (ino, writable, no_truncate) = {
                 let f = f.lock();
-                (f.ino, f.flags & O_ACCMODE != O_RDONLY)
+                (f.ino, f.flags & O_ACCMODE != O_RDONLY, f.no_truncate)
             };
             if !writable {
                 EINVAL
+            } else if no_truncate {
+                EACCES
             } else {
                 ZfsClient::setattr(ino, SetAttr { size: Some(a[1]), ..SetAttr::default() }).map(|_| 0).unwrap_or_else(|e| e)
             }

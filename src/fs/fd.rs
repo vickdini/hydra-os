@@ -66,6 +66,8 @@ pub struct OpenFile {
     pub path: String,
     /// The mount the file was opened in (mount namespaces; 0: none).
     pub mnt: usize,
+    /// Landlock refused `TRUNCATE` when it was opened (`ftruncate` fails with `EACCES`).
+    pub no_truncate: bool,
 }
 
 impl OpenFile {
@@ -82,7 +84,7 @@ impl OpenFile {
     /// A reference-counted `Arc<Mutex<OpenFile>>` initialized at byte offset `0`.
     pub fn new(ino: u64, flags: u32, path: String) -> Arc<Mutex<Self>> {
         ZfsClient::open_ref(ino);
-        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0 }))
+        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0, no_truncate: false }))
     }
 
     /// Checks whether this open file description permits read operations.

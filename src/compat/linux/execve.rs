@@ -216,6 +216,9 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         if attr.mode & S_IFMT != S_IFREG || !may_access(&attr, c.euid, c.egid, 1) || attr.mode & 0o111 == 0 {
             return EACCES;
         }
+        if super::landlock::check_at(&abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
+            return EACCES;
+        }
         let source = match super::mm::inode_source(ino) {
             Ok(s) => s,
             Err(e) => return e,

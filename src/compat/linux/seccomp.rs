@@ -109,6 +109,8 @@ pub struct State {
     pub mode: u8,
     /// Most recently installed filter.
     pub filter: Option<Arc<Filter>>,
+    /// Landlock domain (kept here: inherited and kept across `execve` the same way).
+    pub landlock: Option<Arc<super::landlock::Domain>>,
 }
 
 // BPF opcode fields

@@ -172,6 +172,11 @@ pub trait CharDevice: Send + Sync {
     fn as_mqueue(&self) -> Option<&super::mqueue::MqHandle> {
         None
     }
+
+    /// The Landlock ruleset behind this descriptor, if it is one.
+    fn as_landlock(&self) -> Option<&super::landlock::Ruleset> {
+        None
+    }
 }
 
 /// Opens the driver behind character device `rdev`; `None` if no driver claims it.

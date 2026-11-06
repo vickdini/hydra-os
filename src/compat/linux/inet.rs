@@ -57,6 +57,7 @@ const MSG_TRUNC: u64 = 0x20;
 /// Negative errno for non-blocking operation that cannot complete immediately.
 const EAGAIN: i64 = -11;
 /// Negative errno for invalid userland buffer or address pointer.
+const EACCES: i64 = -13;
 const EFAULT: i64 = -14;
 /// Negative errno for invalid argument or malformed `sockaddr_in`.
 const EINVAL: i64 = -22;
@@ -340,6 +341,9 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Some(d) => d,
         None => return EAFNOSUPPORT,
     };
+    if super::landlock::check_port(port, super::landlock::CONNECT_TCP).is_err() {
+        return EACCES;
+    }
     let existing = sock.lock().tcp;
     let id = match existing {
         Some(id) => match stack::tcp_state(id) {
@@ -708,6 +712,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             match read_sockaddr(a[1], a[2]) {
                 Ok(Some((_, port))) => {
                     let mut s = sock.lock();
+                    if s.stream && super::landlock::check_port(port, super::landlock::BIND_TCP).is_err() {
+                        return Some(EACCES);
+                    }
                     if s.stream {
                         s.bound_port = port;
                         0

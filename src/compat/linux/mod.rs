@@ -25,6 +25,7 @@ pub mod mm;
 pub mod mount;
 pub mod extra;
 pub mod keys;
+pub mod landlock;
 pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
@@ -142,10 +143,15 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     let arg5 = frame.r9;
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
+        // landlock_create_ruleset, landlock_add_rule, landlock_restrict_self
+        444..=446 => return landlock::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
         295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
         // pivot_root, mount, umount2
         155 | 165 | 166 => {
+            if let Err(e) = landlock::check_mount() {
+                return e;
+            }
             if let Some(r) = mount::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
             }
