@@ -23,6 +23,7 @@ pub mod misc;
 pub mod execve;
 pub mod mm;
 pub mod mount;
+pub mod keys;
 pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
@@ -168,6 +169,12 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             }
         }
         // mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
+        // add_key, request_key, keyctl
+        248..=250 => {
+            if let Some(r) = keys::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
         240..=245 => {
             if let Some(r) = mqueue::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
@@ -2123,6 +2130,10 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     if args[0] & (types::CLONE_VM | types::CLONE_THREAD) == 0 {
         // The copied address space keeps the shared memory attachments
         sysv::on_fork(proc::current_ids().1, child);
+    }
+    if args[0] & types::CLONE_THREAD == 0 {
+        // A new process inherits the session keyring
+        keys::on_fork(proc::current_ids().1, child);
     }
     if args[0] & (types::CLONE_FS | types::CLONE_FILES | types::CLONE_THREAD) == types::CLONE_FS {
         // Shares our root and working directory, which live in the descriptor table

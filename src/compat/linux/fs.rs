@@ -55,6 +55,8 @@ pub enum PseudoFile {
     /// `/proc/sys/kernel/random/boot_id` (`true`: one UUID per boot) and `uuid` (`false`: a
     /// new random UUID on every read).
     ProcUuid(bool),
+    /// `/proc/keys`: the keys the caller may view
+    ProcKeys,
     /// Virtual directory under `/proc` (e.g. `/proc/self/task`, `/proc/self/fd`, `/proc/<pid>/task`).
     ProcDir(alloc::string::String),
     /// `/sys/fs/cgroup<group>/cgroup.procs`: the processes in a control group (`group` is
@@ -123,6 +125,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/user/max_user_namespaces" => Some(PseudoFile::MaxUserNs),
         "/proc/sys/kernel/random/boot_id" => Some(PseudoFile::ProcUuid(true)),
         "/proc/sys/kernel/random/uuid" => Some(PseudoFile::ProcUuid(false)),
+        "/proc/keys" => Some(PseudoFile::ProcKeys),
         "/proc/sys/kernel/random/entropy_avail" | "/proc/sys/kernel/random/poolsize" => Some(PseudoFile::ProcStatic(b"256\n")),
         // POSIX message queue limits (see super::mqueue)
         "/proc/sys/fs/mqueue/msg_max" | "/proc/sys/fs/mqueue/msg_default" => Some(PseudoFile::ProcStatic(b"10\n")),
@@ -422,6 +425,7 @@ impl PseudoFile {
             }
             PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
             PseudoFile::ProcUuid(boot) => read_slice(uuid_text(*boot).as_bytes(), cursor, buf),
+            PseudoFile::ProcKeys => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
             PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
