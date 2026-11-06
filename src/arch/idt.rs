@@ -361,7 +361,12 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     // Returning to user mode: run any pending signal handlers first
     if (ctx.cs & 3) == 3 && crate::task::is_active() {
         crate::compat::linux::tty::pump();
-        crate::compat::linux::proc::deliver_on_trap_return(ctx, fpu);
+        // After a task switch this frame is on the previous task's stack: delivering here
+        // could exit or stop the new task on it. Its next trap on its own stack (a timer
+        // tick within its timeslice, a system call or a fault) delivers instead.
+        if crate::task::on_current_kernel_stack(ctx as *const ExceptionContext as u64) {
+            crate::compat::linux::proc::deliver_on_trap_return(ctx, fpu);
+        }
     }
     CURRENT_TRAP_FPU.store(prev_fpu, Ordering::Release);
 }

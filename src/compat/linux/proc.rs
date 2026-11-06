@@ -574,11 +574,19 @@ pub fn process_count() -> usize {
 /// Parent process ID as `i64`.
 pub fn getppid() -> i64 {
     let (_, pid) = current_ids();
-    let (ppid, ns_init) = PROCS.lock().get(&pid).map_or((1, false), |p| (p.ppid, p.ns.pid_inits.last() == Some(&pid)));
-    if ns_init {
-        // The init of a PID namespace has its parent outside it
-        return 0;
-    }
+    let ppid = {
+        let procs = PROCS.lock();
+        let Some(me) = procs.get(&pid) else { return 1 };
+        let mine = &me.ns.pid_inits;
+        // A parent outside the caller's PID namespace (the init's, or one left behind by
+        // setns or unshare) is not visible in it
+        let visible = mine.last() != Some(&pid)
+            && procs.get(&me.ppid).map_or(mine.is_empty(), |p| p.ns.pid_inits.starts_with(mine));
+        if !visible {
+            return 0;
+        }
+        me.ppid
+    };
     super::ns::pid_to_caller(ppid) as i64
 }
 

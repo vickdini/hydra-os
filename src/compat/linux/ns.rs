@@ -78,8 +78,9 @@ const INIT_IDS: [(&str, u64); 8] = [
     ("uts", 4026531838),
 ];
 
-/// Init process of each PID namespace created by `unshare` (namespace id -> system PID).
-static PID_NS_INIT: Mutex<alloc::collections::BTreeMap<u64, u64>> = Mutex::new(alloc::collections::BTreeMap::new());
+/// The init processes of each PID namespace that has one, outermost first (namespace id ->
+/// system PIDs; the last is the namespace's own init).
+static PID_NS_INIT: Mutex<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>> = Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Next namespace inode number handed out.
 static NEXT_ID: AtomicU64 = AtomicU64::new(4026532200);
@@ -152,8 +153,17 @@ impl Ns {
         let mut ns = self.clone();
         if let Some(id) = self.pid_for_children {
             ns.pid = id;
-            let init = *PID_NS_INIT.lock().entry(id).or_insert(child);
-            ns.pid_inits.push(init);
+            // The first child is the namespace's init; later ones join it (also after setns)
+            let chain = PID_NS_INIT
+                .lock()
+                .entry(id)
+                .or_insert_with(|| {
+                    let mut c = self.pid_inits.clone();
+                    c.push(child);
+                    c
+                })
+                .clone();
+            ns.pid_inits = chain;
         }
         ns.pid_for_children = None;
         ns
@@ -280,6 +290,7 @@ pub fn after_clone(child: u64, flags: u64) {
         apply_new(&mut p.ns, flags, false);
         if flags & CLONE_NEWPID != 0 {
             p.ns.pid_inits.push(child);
+            PID_NS_INIT.lock().insert(p.ns.pid, p.ns.pid_inits.clone());
         }
         child_mnt = p.ns.mnt;
     }
@@ -505,7 +516,14 @@ fn split(rest: &str) -> Option<(u64, &str)> {
 pub fn ns_link(rest: &str) -> Option<String> {
     let (pid, file) = split(rest)?;
     let kind = file.strip_prefix("ns/")?;
-    let id = ns_of(pid)?.id_of(kind)?;
+    let ns = ns_of(pid)?;
+    // A PID namespace for children has no name until its init exists (as on Linux)
+    if kind == "pid_for_children" {
+        if let Some(id) = ns.pid_for_children {
+            PID_NS_INIT.lock().get(&id)?;
+        }
+    }
+    let id = ns.id_of(kind)?;
     let shown = if kind == "pid_for_children" { "pid" } else { kind };
     Some(alloc::format!("{}:[{}]", shown, id))
 }
@@ -676,10 +694,19 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
     if kinds & !CLONE_NEWUSER != 0 && !has_ns_admin() && kinds & CLONE_NEWUSER == 0 {
         return EPERM;
     }
-    // Joining another PID namespace is not supported (children stay in the caller's)
-    if kinds & CLONE_NEWPID != 0 && theirs.pid != mine.pid {
-        return EINVAL;
-    }
+    // A PID namespace is joined for children only, and only one at or below the caller's
+    let pid_for_children = if kinds & CLONE_NEWPID != 0 {
+        if theirs.pid == mine.pid {
+            Some(None)
+        } else if theirs.pid_inits.len() > mine.pid_inits.len() && theirs.pid_inits.starts_with(&mine.pid_inits) {
+            PID_NS_INIT.lock().entry(theirs.pid).or_insert_with(|| theirs.pid_inits.clone());
+            Some(Some(theirs.pid))
+        } else {
+            return EINVAL;
+        }
+    } else {
+        None
+    };
     let target_fds = if kinds & CLONE_NEWNS != 0 && theirs.mnt != mine.mnt {
         match crate::task::SCHEDULER.lock().with_process(target, |t| t.fds.clone()) {
             Some(f) => Some(f),
@@ -694,6 +721,9 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
     if let Some(p) = super::proc::PROCS.lock().get_mut(&me) {
         if user_changed {
             p.ns.user = theirs.user.clone();
+        }
+        if let Some(target) = pid_for_children {
+            p.ns.pid_for_children = target;
         }
         for (flag, slot, value) in [
             (CLONE_NEWNET, &mut p.ns.net, theirs.net),
@@ -725,4 +755,26 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
         crate::task::with_current_task_mut(|t| t.caps.enter_userns());
     }
     0
+}
+
+/// Whether the caller may create a process: not once the PID namespace the child would
+/// live in has lost its init (`ENOMEM`, as on Linux).
+pub fn check_fork() -> Result<(), i64> {
+    const ENOMEM: i64 = -12;
+    let ns = current_ns();
+    let init = match ns.pid_for_children {
+        Some(id) => match PID_NS_INIT.lock().get(&id) {
+            Some(chain) => chain.last().copied(),
+            // The child will be the init
+            None => return Ok(()),
+        },
+        None => ns.pid_inits.last().copied(),
+    };
+    let Some(init) = init else { return Ok(()) };
+    let gone = super::proc::PROCS.lock().get(&init).map_or(true, |p| p.zombie);
+    if gone {
+        Err(ENOMEM)
+    } else {
+        Ok(())
+    }
 }

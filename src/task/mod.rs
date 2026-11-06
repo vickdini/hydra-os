@@ -55,6 +55,31 @@ pub static CURRENT_SYSCALL: core::sync::atomic::AtomicU64 = core::sync::atomic::
 pub static CURRENT_SYSCALL_ARGS: [core::sync::atomic::AtomicU64; 2] =
     [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
 
+/// Kernel stack `[bottom, top)` of the running task (bottom 0: unknown, such as the boot
+/// thread's firmware stack).
+pub static CURRENT_KSTACK: [core::sync::atomic::AtomicU64; 2] =
+    [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+
+/// Whether `addr` (a trap frame) lies on the running task's own kernel stack.
+///
+/// The scheduler switches tasks by rewriting the trap frame being returned through, so
+/// after a switch the handler is still running on the previous task's stack. Work that
+/// may block (exiting, stopping) must not run there for the new task: once it blocks, the
+/// stack's owner resumes and overwrites its frames.
+///
+/// # Arguments
+///
+/// * `addr` - Address to check.
+///
+/// # Returns
+///
+/// `true` if `addr` is on the current task's kernel stack (or the stack is unknown).
+pub fn on_current_kernel_stack(addr: u64) -> bool {
+    let bottom = CURRENT_KSTACK[0].load(core::sync::atomic::Ordering::Acquire);
+    let top = CURRENT_KSTACK[1].load(core::sync::atomic::Ordering::Acquire);
+    bottom == 0 || (addr >= bottom && addr < top)
+}
+
 /// Runs `f` (an idle wait such as `hlt` or a timed sleep) as a preemption point.
 ///
 /// Kernel-mode code is otherwise never preempted by the timer: kernel spinlocks are not

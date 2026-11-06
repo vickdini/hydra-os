@@ -1233,6 +1233,9 @@ impl Scheduler {
         // 4b. Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task
         let kernel_top = next_task.kernel_stack_top();
         crate::arch::gdt::set_privilege_stack(x86_64::VirtAddr::new(kernel_top));
+        let kernel_bottom = next_task.stack.as_ref().map_or(0, |s| s.as_ptr() as u64);
+        super::CURRENT_KSTACK[0].store(kernel_bottom, core::sync::atomic::Ordering::Release);
+        super::CURRENT_KSTACK[1].store(kernel_top, core::sync::atomic::Ordering::Release);
         crate::arch::syscall::set_kernel_rsp(kernel_top);
 
         // 4c. Switch FS_BASE MSR for incoming task

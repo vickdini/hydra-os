@@ -2132,6 +2132,11 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     if let Err(e) = ns::check_clone(args[0]) {
         return e;
     }
+    if args[0] & types::CLONE_THREAD == 0 {
+        if let Err(e) = ns::check_fork() {
+            return e;
+        }
+    }
     let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
         Ok(id) => id.0,
         Err(_) => return -ENOMEM,
