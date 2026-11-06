@@ -23,6 +23,7 @@ pub mod misc;
 pub mod execve;
 pub mod mm;
 pub mod mount;
+pub mod extra;
 pub mod keys;
 pub mod mqueue;
 pub mod proc;
@@ -169,6 +170,15 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             }
         }
         // mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
+        // readahead, mbind, set_mempolicy, migrate_pages, move_pages, process_vm_readv/writev,
+        // kcmp, sched_setattr/getattr, set_mempolicy_home_node, cachestat, mseal
+        187 | 237 | 238 | 256 | 279 | 310..=312 | 314 | 315 | 450 | 451 | 462 => {
+            if let Some(r) = extra::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
+        // setns
+        308 => return ns::sys_setns(arg0, arg1),
         // add_key, request_key, keyctl
         248..=250 => {
             if let Some(r) = keys::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {

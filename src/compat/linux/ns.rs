@@ -51,6 +51,8 @@ const CLONE_SYSVSEM: u64 = 0x0004_0000;
 
 const EINVAL: i64 = -22;
 const EPERM: i64 = -1;
+const EBADF: i64 = -9;
+const ESRCH: i64 = -3;
 const EUSERS: i64 = -87;
 
 /// `CAP_SYS_ADMIN`, needed (in the caller's user namespace) for every other namespace type.
@@ -586,4 +588,141 @@ pub fn write_file(rest: &str, buf: &[u8]) -> i64 {
     }
     *slot = Some(IdMap { inner, outer, count });
     buf.len() as i64
+}
+
+/// The `CLONE_NEW*` flag of a namespace file kind.
+fn flag_of(kind: &str) -> Option<u64> {
+    Some(match kind {
+        "mnt" => CLONE_NEWNS,
+        "cgroup" => CLONE_NEWCGROUP,
+        "uts" => CLONE_NEWUTS,
+        "ipc" => CLONE_NEWIPC,
+        "user" => CLONE_NEWUSER,
+        "pid" | "pid_for_children" => CLONE_NEWPID,
+        "net" => CLONE_NEWNET,
+        _ => return None,
+    })
+}
+
+/// Whether user namespace `inner` lies inside `outer` (`None`: the initial namespace).
+fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> bool {
+    let mut cur = inner.clone();
+    loop {
+        match (&cur, outer) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if Arc::ptr_eq(a, b) => return true,
+            (None, Some(_)) => return false,
+            (Some(a), _) => cur = a.parent.clone(),
+        }
+    }
+}
+
+/// `setns(2)`: joins the namespaces of a `/proc/<pid>/ns/*` file or of a pidfd's process.
+///
+/// # Arguments
+/// * `fd` - Namespace file or pidfd.
+/// * `nstype` - For a namespace file: 0 or its `CLONE_NEW*` flag; for a pidfd: the
+///   namespaces to join.
+///
+/// # Returns
+/// 0 on success, or a negative errno.
+pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
+    let (target, kinds) = if let Ok(pid) = super::pidfd::pid_of(fd) {
+        if nstype == 0 || nstype & !CLONE_NEW_ALL != 0 {
+            return EINVAL;
+        }
+        (pid, nstype)
+    } else {
+        let path = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+            Some(crate::fs::FileDescriptor::File { path, .. }) => Some(path.clone()),
+            _ => None,
+        });
+        let Some(path) = path else {
+            return if crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).is_none()) { EBADF } else { EINVAL };
+        };
+        let Some((pid, file)) = path.strip_prefix("/proc/").and_then(split) else { return EINVAL };
+        let Some(flag) = file.strip_prefix("ns/").and_then(flag_of) else { return EINVAL };
+        if nstype != 0 && nstype != flag {
+            return EINVAL;
+        }
+        (pid, flag)
+    };
+    let Some(theirs) = ns_of(target) else { return ESRCH };
+    let (_, me) = super::proc::current_ids();
+    let mine = current_ns();
+    if kinds & CLONE_NEWUSER != 0 {
+        let same = match (&theirs.user, &mine.user) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        if same {
+            // Joining the namespace one is already in is refused (only for user namespaces)
+            if kinds == CLONE_NEWUSER {
+                return EINVAL;
+            }
+        } else {
+            if super::proc::thread_ids_of(me).len() > 1 {
+                return EINVAL;
+            }
+            // CAP_SYS_ADMIN in the target: it lies below ours and we own it or are privileged
+            let euid = crate::task::with_current_task_mut(|t| t.euid).unwrap_or(u32::MAX);
+            let owner = theirs.user.as_ref().map_or(0, |u| u.owner_uid);
+            if !user_ns_within(&theirs.user, &mine.user) || !(owner == euid || has_ns_admin()) {
+                return EPERM;
+            }
+        }
+    }
+    if kinds & !CLONE_NEWUSER != 0 && !has_ns_admin() && kinds & CLONE_NEWUSER == 0 {
+        return EPERM;
+    }
+    // Joining another PID namespace is not supported (children stay in the caller's)
+    if kinds & CLONE_NEWPID != 0 && theirs.pid != mine.pid {
+        return EINVAL;
+    }
+    let target_fds = if kinds & CLONE_NEWNS != 0 && theirs.mnt != mine.mnt {
+        match crate::task::SCHEDULER.lock().with_process(target, |t| t.fds.clone()) {
+            Some(f) => Some(f),
+            None => return ESRCH,
+        }
+    } else {
+        None
+    };
+    let user_changed = kinds & CLONE_NEWUSER != 0
+        && !matches!((&theirs.user, &mine.user), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+        && !(theirs.user.is_none() && mine.user.is_none());
+    if let Some(p) = super::proc::PROCS.lock().get_mut(&me) {
+        if user_changed {
+            p.ns.user = theirs.user.clone();
+        }
+        for (flag, slot, value) in [
+            (CLONE_NEWNET, &mut p.ns.net, theirs.net),
+            (CLONE_NEWNS, &mut p.ns.mnt, theirs.mnt),
+            (CLONE_NEWIPC, &mut p.ns.ipc, theirs.ipc),
+            (CLONE_NEWUTS, &mut p.ns.uts, theirs.uts),
+            (CLONE_NEWCGROUP, &mut p.ns.cgroup, theirs.cgroup),
+        ] {
+            if kinds & flag != 0 {
+                *slot = value;
+            }
+        }
+    }
+    // A new mount namespace puts the root and working directory at its root
+    if let Some(src) = target_fds {
+        let (root_ino, root_mnt) = {
+            let f = src.lock();
+            (f.root_ino, f.root_mnt)
+        };
+        crate::task::with_current_fds_mut(|f| {
+            f.root_ino = root_ino;
+            f.root_mnt = root_mnt;
+            f.cwd_ino = root_ino;
+            f.cwd_mnt = root_mnt;
+            f.cwd_path = String::from("/");
+        });
+    }
+    if user_changed {
+        crate::task::with_current_task_mut(|t| t.caps.enter_userns());
+    }
+    0
 }
