@@ -409,6 +409,7 @@ impl Scheduler {
             mode: PrivilegeMode::Kernel,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
@@ -511,6 +512,7 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
@@ -599,6 +601,7 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
@@ -690,6 +693,7 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: image.initial_brk,
             clear_child_tid: 0,
             tgid: id.0 as u64,
@@ -787,6 +791,7 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,
@@ -956,6 +961,7 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: child_fs_base,
+            debugregs: [0; 8],
             brk: parent_brk,
             clear_child_tid,
             tgid: child_tgid,
@@ -1242,6 +1248,8 @@ impl Scheduler {
         unsafe {
             crate::arch::syscall::wrmsr(0xC000_0100, next_task.fs_base);
         }
+        // 4d. Its hardware breakpoints and watchpoints (debuggers)
+        crate::arch::debugregs::switch_to(&next_task.debugregs);
 
         // 5. Restore registers into the ExceptionContext frame for iretq execution
         next_task.regs.restore_to_context(ctx);

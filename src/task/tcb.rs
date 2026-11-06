@@ -296,6 +296,9 @@ pub struct Task {
     pub personality: TaskPersonality,
     /// Thread-local storage base address loaded into `IA32_FS_BASE` (`0xC000_0100`).
     pub fs_base: u64,
+    /// Debug registers a debugger set (`[dr0, dr1, dr2, dr3, -, -, dr6, dr7]`), loaded
+    /// when the task runs; not inherited, cleared by `execve`.
+    pub debugregs: [u64; 8],
     /// Legacy program break address (for tasks without a private [`crate::memory::vm::Mm`]).
     pub brk: u64,
     /// User-space address cleared and futex-woken upon thread exit (`CLONE_CHILD_CLEARTID`).
@@ -394,6 +397,7 @@ impl Task {
             mode: PrivilegeMode::Kernel,
             personality: TaskPersonality::Hydra,
             fs_base: 0,
+            debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
             tgid: id.0 as u64,

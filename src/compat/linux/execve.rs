@@ -356,6 +356,10 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     let (tid, tgid) = super::proc::current_ids();
     super::keys::on_exec(tid, tgid);
     super::ptrace::on_exec(tgid, tid);
+    // Hardware breakpoints do not survive exec
+    if crate::task::with_current_task_mut(|t| core::mem::take(&mut t.debugregs)[7] != 0).unwrap_or(false) {
+        crate::arch::debugregs::switch_to(&[0; 8]);
+    }
     // The old address space is no longer loaded; release it (unless a vfork parent shares it)
     drop(old_mm);
     super::proc::exec_reset(pid);

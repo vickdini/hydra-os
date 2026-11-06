@@ -12,8 +12,10 @@
 //! - **Memory**: peeks and pokes go to the tracee's address space; a poke into read-only
 //!   text (a breakpoint) gives the tracee a private copy of the page first.
 //! - **Breakpoints and stepping**: `int3` and the trap flag raise `SIGTRAP`.
-//! - **Not covered**: hardware debug registers (only zero is accepted), `PTRACE_LISTEN`,
-//!   `PTRACE_SYSEMU`, seccomp events.
+//! - **Hardware breakpoints and watchpoints**: `u_debugreg` through PEEKUSER/POKEUSER.
+//! - **`/proc/<pid>/mem`**: the same memory as a file (`pread`/`pwrite`).
+//! - **Seccomp**: a filter's `TRACE` action stops for a tracer asking for seccomp events.
+//! - **Not covered**: `PTRACE_SYSEMU`.
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -70,6 +72,7 @@ const O_TRACECLONE: u64 = 8;
 const O_TRACEEXEC: u64 = 0x10;
 const O_TRACEVFORKDONE: u64 = 0x20;
 const O_TRACEEXIT: u64 = 0x40;
+const O_TRACESECCOMP: u64 = 0x80;
 const O_EXITKILL: u64 = 1 << 20;
 const O_ALL: u64 = 0xff | O_EXITKILL | (1 << 21);
 
@@ -79,6 +82,7 @@ const EV_CLONE: u32 = 3;
 const EV_EXEC: u32 = 4;
 const EV_VFORK_DONE: u32 = 5;
 const EV_EXIT: u32 = 6;
+const EV_SECCOMP: u32 = 7;
 const EV_STOP: u32 = 128;
 
 /// Registers in `struct user_regs_struct` order.
@@ -107,6 +111,8 @@ enum Op {
     Other,
     Entry,
     Exit,
+    /// A seccomp `TRACE` stop, with the filter's data.
+    Seccomp(u16),
 }
 
 /// How the tracer let a stopped thread go.
@@ -755,6 +761,200 @@ fn regs_from(b: &[u8], into: &mut Regs) {
     }
 }
 
+// ----------------------------------------------------------------------
+// Debug registers
+// ----------------------------------------------------------------------
+
+fn debugregs_of(tid: u64) -> Option<[u64; 8]> {
+    crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| t.debugregs)
+}
+
+/// POKEUSER of debug register `i` of stopped thread `tid` (checked as Linux does).
+fn set_debugreg(tid: u64, i: usize, v: u64) -> i64 {
+    let Some(mut dr) = debugregs_of(tid) else { return ESRCH };
+    match i {
+        0..=3 if v >= 0x0000_7fff_ffff_f000 => return EIO,
+        0..=3 | 6 => {}
+        7 => {
+            // Local/global enables, exact-match bits and each breakpoint's type and length
+            if v & !(0xffff_0000 | 0x3ff) != 0 {
+                return EIO;
+            }
+            for n in 0..4 {
+                if v & (3 << (n * 2)) == 0 {
+                    continue;
+                }
+                let rw = (v >> (16 + n * 4)) & 3;
+                let len = (v >> (18 + n * 4)) & 3;
+                let bytes = [1u64, 2, 8, 4][len as usize];
+                // No I/O breakpoints; an instruction breakpoint is one byte; aligned
+                if rw == 2 || (rw == 0 && len != 0) || dr[n] % bytes != 0 {
+                    return EINVAL;
+                }
+            }
+        }
+        _ => return EIO,
+    }
+    dr[i] = v;
+    crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| t.debugregs = dr);
+    0
+}
+
+// ----------------------------------------------------------------------
+// Seccomp
+// ----------------------------------------------------------------------
+
+/// A seccomp filter returned `TRACE` with `data`: a seccomp event stop if the tracer asked
+/// for them (`None` if not: the call fails). `Ok` to run the (possibly changed) call,
+/// `Err(result)` if the tracer skipped it (call number -1).
+pub fn seccomp_stop(frame: &mut SyscallFrame, data: u16) -> Option<Result<(), i64>> {
+    if !active() || options()? & O_TRACESECCOMP == 0 {
+        return None;
+    }
+    let fpu = crate::arch::syscall::SYSCALL_FPU.load(Ordering::Acquire);
+    let num = frame.rax;
+    frame.rax = ENOSYS as u64;
+    let r = stop(frame, fpu, num, wait_status_stop(SIGTRAP, EV_SECCOMP), Op::Seccomp(data), None, Some(data as u64))?;
+    let num = r.regs.map_or(num, |g| g[R_ORIG_RAX]);
+    if num == u64::MAX {
+        return Some(Err(frame.rax as i64));
+    }
+    frame.rax = num;
+    Some(Ok(()))
+}
+
+// ----------------------------------------------------------------------
+// /proc/<pid>/mem
+// ----------------------------------------------------------------------
+
+/// An open `/proc/<pid>/mem`: the process's memory at file offsets equal to addresses.
+/// After the process execs it follows the new address space, if the opener may still
+/// trace the process (so a set-user-ID program's memory stays out of reach).
+pub struct ProcMem {
+    pid: u64,
+    mm: Mutex<alloc::sync::Arc<Mutex<crate::memory::vm::Mm>>>,
+    pos: Mutex<u64>,
+    read: bool,
+    write: bool,
+}
+
+/// Opens process `pid`'s memory (the caller must be allowed to trace it).
+pub fn open_proc_mem(pid: u64, read: bool, write: bool) -> Result<alloc::sync::Arc<dyn super::chardev::CharDevice>, i64> {
+    super::extra::may_access(pid)?;
+    let mm = tracee_mm(pid)?;
+    Ok(alloc::sync::Arc::new(ProcMem { pid, mm: Mutex::new(mm), pos: Mutex::new(0), read, write }))
+}
+
+impl ProcMem {
+    /// Copies between `addr` and `buf` page by page up to the first page that cannot be
+    /// reached: the bytes done, or `EIO` if none.
+    fn access(&self, addr: u64, buf: &mut [u8], write: bool) -> i64 {
+        // The process's address space now (it may have exec'd since the open)
+        let Ok(now) = tracee_mm(self.pid) else { return 0 };
+        let mm = {
+            let mut held = self.mm.lock();
+            if !alloc::sync::Arc::ptr_eq(&held, &now) {
+                if super::extra::may_access(self.pid).is_err() {
+                    return 0;
+                }
+                *held = now;
+            }
+            held.clone()
+        };
+        let mut done = 0usize;
+        while done < buf.len() {
+            let a = addr.wrapping_add(done as u64);
+            let n = ((4096 - (a & 4095)) as usize).min(buf.len() - done);
+            if !canonical(a) || !canonical(a + n as u64) {
+                break;
+            }
+            let mut m = mm.lock();
+            let ok = if write {
+                m.force_write(a, &buf[done..done + n]).is_ok()
+            } else {
+                match m.prefault(a, n as u64, false).ok().and_then(|_| m.translate(a)) {
+                    Some(phys) => {
+                        buf[done..done + n].copy_from_slice(unsafe { core::slice::from_raw_parts(phys.as_u64() as *const u8, n) });
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !ok {
+                break;
+            }
+            done += n;
+        }
+        if done == 0 && !buf.is_empty() {
+            EIO
+        } else {
+            done as i64
+        }
+    }
+}
+
+impl super::chardev::CharDevice for ProcMem {
+    fn read(&self, buf: &mut [u8]) -> i64 {
+        let at = *self.pos.lock();
+        let r = self.pread(buf, at).unwrap_or(EIO);
+        if r > 0 {
+            *self.pos.lock() = at + r as u64;
+        }
+        r
+    }
+    fn write(&self, data: &[u8]) -> i64 {
+        let at = *self.pos.lock();
+        let r = self.pwrite(data, at).unwrap_or(EIO);
+        if r > 0 {
+            *self.pos.lock() = at + r as u64;
+        }
+        r
+    }
+    fn pread(&self, buf: &mut [u8], offset: u64) -> Option<i64> {
+        Some(if self.read { self.access(offset, buf, false) } else { -9 })
+    }
+    fn pwrite(&self, data: &[u8], offset: u64) -> Option<i64> {
+        if !self.write {
+            return Some(-9);
+        }
+        let mut copy = data.to_vec();
+        Some(self.access(offset, &mut copy, true))
+    }
+    fn seek(&self, offset: i64, whence: u32) -> Option<i64> {
+        let mut pos = self.pos.lock();
+        let new = match whence {
+            0 => offset as u64,
+            1 => pos.wrapping_add(offset as u64),
+            _ => return Some(EINVAL),
+        };
+        *pos = new;
+        Some(new as i64)
+    }
+    fn poll_events(&self) -> u32 {
+        0x5 // POLLIN | POLLOUT
+    }
+    fn add_wait_queues(&self, _waits: &mut WaitSet) {}
+    fn rdev(&self) -> u64 {
+        0
+    }
+    fn path(&self) -> alloc::string::String {
+        alloc::format!("/proc/{}/mem", super::ns::pid_to_caller(self.pid))
+    }
+    fn set_nonblock(&self, _on: bool) {}
+    fn nonblock(&self) -> bool {
+        false
+    }
+    fn stat(&self) -> super::types::LinuxStat {
+        let mut st = super::types::LinuxStat::default();
+        st.st_dev = 4; // proc
+        st.st_ino = self.pid << 8 | 0x6d;
+        st.st_mode = 0o100600;
+        st.st_nlink = 1;
+        st.st_blksize = 4096;
+        st
+    }
+}
+
 /// `ptrace(request, pid, addr, data)`.
 pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
     let (my_tid, me) = super::proc::current_ids();
@@ -842,7 +1042,15 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
             if addr & 7 != 0 || addr >= USER_SIZE {
                 return EIO;
             }
-            let v = if (addr as usize) < REGS_SIZE { t.regs[addr as usize / 8] } else { 0 };
+            let v = if (addr as usize) < REGS_SIZE {
+                t.regs[addr as usize / 8]
+            } else if addr >= USER_DEBUGREG {
+                drop(tr);
+                let i = ((addr - USER_DEBUGREG) / 8) as usize;
+                return put_u64(data, debugregs_of(tid).map_or(0, |d| d[i]));
+            } else {
+                0
+            };
             drop(tr);
             put_u64(data, v)
         }
@@ -854,10 +1062,11 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
                 t.regs[addr as usize / 8] = data;
                 t.regs_dirty = true;
                 0
-            } else if addr >= USER_DEBUGREG && data == 0 {
-                0 // debug registers: only "none set"
+            } else if addr >= USER_DEBUGREG {
+                drop(tr);
+                set_debugreg(tid, ((addr - USER_DEBUGREG) / 8) as usize, data)
             } else {
-                EIO
+                0 // the rest of struct user (fpvalid, sizes): nothing to change
             }
         }
         GETREGS => {
@@ -969,6 +1178,15 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
                     info[24..32].copy_from_slice(&rval.to_le_bytes());
                     info[32] = (-4095..0).contains(&rval) as u8;
                     33
+                }
+                Op::Seccomp(d) => {
+                    info[0] = 3;
+                    info[24..32].copy_from_slice(&r[R_ORIG_RAX].to_le_bytes());
+                    for (i, reg) in [14usize, 13, 12, 7, 9, 8].iter().enumerate() {
+                        info[32 + i * 8..40 + i * 8].copy_from_slice(&r[*reg].to_le_bytes());
+                    }
+                    info[80..84].copy_from_slice(&(d as u32).to_le_bytes());
+                    84
                 }
                 Op::Other => 24,
             };

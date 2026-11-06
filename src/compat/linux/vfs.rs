@@ -969,6 +969,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     if let Some(desc) = open_pty_path(&abs, flags)? {
         return install(desc, flags);
     }
+    // /proc/<pid>/mem: the process's memory (debuggers)
+    if let Some(pid) = proc_mem_target(&abs) {
+        let dev = super::ptrace::open_proc_mem(pid, acc != O_WRONLY, acc != O_RDONLY)?;
+        return install(FileDescriptor::Device(dev), flags);
+    }
     // Opening /proc/self/fd/N, /proc/<own-pid>/fd/N or /dev/fd/N (Linux magic link re-open;
     // shells pass pipes as /dev/fd/N for process substitution)
     let fd_path = abs.strip_prefix("/dev/fd/").map(|n| ("self", n)).or_else(|| abs.strip_prefix("/proc/")?.split_once("/fd/"));
@@ -1146,6 +1151,20 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     file.lock().mnt = super::mount::last_mount();
     file.lock().no_truncate = no_truncate;
     install(FileDescriptor::Vnode(file), flags)
+}
+
+/// The process whose memory `/proc/<pid>/mem` or `/proc/<pid>/task/<tid>/mem` (or `self`,
+/// `thread-self`) names.
+fn proc_mem_target(abs: &str) -> Option<u64> {
+    let (who, file) = abs.strip_prefix("/proc/")?.split_once('/')?;
+    let per_thread = file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| f == "mem" && t.bytes().all(|b| b.is_ascii_digit()));
+    if file != "mem" && !per_thread {
+        return None;
+    }
+    match who {
+        "self" | "thread-self" => Some(super::proc::current_ids().1),
+        n => Some(super::ns::pid_from_caller(n.parse().ok()?)),
+    }
 }
 
 /// The Landlock rights opening with `flags` needs.
@@ -1378,6 +1397,14 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
 /// # Returns
 /// `Some(new_offset)` on success, `Some(err)` on error, or `None` if `fd` not handled here.
 fn lseek(fd: i32, offset: i64, whence: u32) -> Option<i64> {
+    // Devices with positions (/proc/<pid>/mem)
+    let dev = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(FileDescriptor::Device(d)) => Some(d.clone()),
+        _ => None,
+    });
+    if let Some(r) = dev.and_then(|d| d.seek(offset, whence)) {
+        return Some(r);
+    }
     let file = fd_vnode(fd)?;
     let mut f = file.lock();
     let attr = match ZfsClient::getattr(f.ino) {

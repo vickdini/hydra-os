@@ -1,10 +1,15 @@
 // ptrace: TRACEME + exec, syscall stops (changing and cancelling calls), signal stops
 // (suppressing and passing), int3, POKEDATA, a breakpoint planted in read-only text,
-// single-step, fork/exit events with the child traced too, ATTACH/DETACH with TracerPid,
-// SEIZE/INTERRUPT, errors.
+// single-step, /proc/<pid>/mem, a hardware watchpoint, fork/exit events with the child
+// traced too, ATTACH/DETACH with TracerPid, SEIZE/INTERRUPT, seccomp TRACE stops, errors.
 // Build: gcc -static-pie -O1 -w -o ptrace_test ptrace_test.c
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +44,7 @@ static long peek(pid_t pid, long addr) {
 
 // ---------------------------------------------------------------- the traced child
 static volatile long magic = 1;
+static volatile long watched;
 static volatile int hits;
 static void on_sig(int s) { hits |= s == SIGUSR1 ? 1 : 2; }
 static int __attribute__((noinline)) target(int x) {
@@ -55,12 +61,15 @@ static int child_main(void) {
     raise(SIGUSR2);                  // passed on
     __asm__ volatile("int3" ::"a"(&magic), "b"(target) : "memory");   // tracer: magic = 99, breakpoint in target
     int t = target(5);               // stops at the planted breakpoint; the tracer undoes it
+    __asm__ volatile("int3" ::"a"(&watched) : "memory");   // tracer: a write watchpoint on it
+    watched = 42;                    // stops on the watchpoint
     int bad = 0;
     if (a != getpid()) bad |= 1;
     if (b != 4242) bad |= 2;
     if (hits != 2) bad |= 4;
     if (magic != 99) bad |= 8;
     if (t != 15) bad |= 16;
+    if (watched != 42) bad |= 64;
     pid_t g = fork();
     if (g == 0) _exit(7);
     int st;
@@ -94,7 +103,8 @@ static void main_trace(void) {
 
     int saw_entry = 0, saw_exit_op = 0, changed = 0, cancelled = 0, cancel_exit = 0, usr1 = 0, usr2 = 0, traps = 0;
     int stepped = 0, bp = 0, fork_ev = 0, gstop = 0, gexit = -1, exit_ev = 0, child_code = -1;
-    long target_addr = 0, orig_text = 0;
+    long target_addr = 0, orig_text = 0, watch_addr = 0;
+    int memfd_ok = 0, watch_set = 0, watch_bad = 0, watch_hit = 0;
     pid_t g = 0;
     pid_t resume = c;
     int sig = 0;
@@ -154,6 +164,13 @@ static void main_trace(void) {
         } else if (ss == SIGTRAP && w == c) {
             ptrace(PTRACE_GETREGS, w, 0, &r);
             if (traps++ == 0) {
+                // /proc/<pid>/mem reads and writes what PEEKDATA sees
+                char mp[64];
+                snprintf(mp, sizeof mp, "/proc/%d/mem", w);
+                int mfd = open(mp, O_RDWR);
+                long v = 0, seven = 7;
+                memfd_ok = mfd >= 0 && pread(mfd, &v, 8, r.rax) == 8 && v == 1 && pwrite(mfd, &seven, 8, r.rax) == 8 && peek(w, r.rax) == 7;
+                close(mfd);
                 // The int3: poke magic, plant a breakpoint in target, then single-step
                 ptrace(PTRACE_POKEDATA, w, r.rax, 99);
                 target_addr = r.rbx;
@@ -171,6 +188,23 @@ static void main_trace(void) {
                 r.rip = target_addr;
                 ptrace(PTRACE_SETREGS, w, 0, &r);
                 bp = 1;
+            } else if (!watch_addr) {
+                // The int3 naming the watched variable: DR0 = its address, DR7 = enabled,
+                // break on writes, 8 bytes
+                watch_addr = r.rax;
+                long dr = offsetof(struct user, u_debugreg);
+                watch_set = ptrace(PTRACE_POKEUSER, w, dr, watch_addr) == 0 &&
+                            ptrace(PTRACE_POKEUSER, w, dr + 7 * 8, 1 | (1 << 16) | (2 << 18)) == 0;
+                // An I/O breakpoint is refused
+                watch_bad = ptrace(PTRACE_POKEUSER, w, dr + 7 * 8, 1 | (2 << 16)) != 0;
+                ptrace(PTRACE_POKEUSER, w, dr + 7 * 8, 1 | (1 << 16) | (2 << 18));
+            } else if (!watch_hit) {
+                siginfo_t si;
+                ptrace(PTRACE_GETSIGINFO, w, 0, &si);
+                long dr = offsetof(struct user, u_debugreg);
+                long dr6 = ptrace(PTRACE_PEEKUSER, w, dr + 6 * 8, 0);
+                watch_hit = si.si_code == 4 /* TRAP_HWBKPT */ && (dr6 & 1) && peek(w, watch_addr) == 42;
+                ptrace(PTRACE_POKEUSER, w, dr + 7 * 8, 0);
             }
         } else {
             sig = ss == SIGTRAP ? 0 : ss;
@@ -182,6 +216,9 @@ static void main_trace(void) {
     check(usr1 == 1 && usr2, "signal stops with GETSIGINFO");
     check(stepped, "PTRACE_SINGLESTEP stops after one instruction");
     check(bp, "breakpoint planted in read-only text is hit");
+    check(memfd_ok, "/proc/<pid>/mem pread and pwrite");
+    check(watch_set && watch_bad, "debug registers set through POKEUSER (I/O breakpoints refused)");
+    check(watch_hit, "hardware watchpoint stops on the write (TRAP_HWBKPT, DR6)");
     check(fork_ev && gstop, "fork event; the new child is traced and starts stopped");
     check(gexit == 7, "tracer sees the traced grandchild exit");
     check(exit_ev == 1, "exit event (status 0)");
@@ -228,6 +265,58 @@ static void attach_and_seize(void) {
     check(w == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "killed tracee is reaped");
 }
 
+// A seccomp filter's TRACE action stops for the tracer, which changes one call and skips
+// another
+static void seccomp_trace(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        pt(PTRACE_TRACEME, 0, 0, 0);
+        raise(SIGSTOP);
+        struct sock_filter f[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getppid, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | 0x42),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog = {4, f};
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(100);
+        long a = syscall(SYS_getppid);   // the tracer makes it getpid
+        long b = syscall(SYS_getppid);   // the tracer skips it: 777
+        _exit((a == getpid() ? 0 : 1) | (b == 777 ? 0 : 2));
+    }
+    int st;
+    waitpid(c, &st, 0);
+    pt(PTRACE_SETOPTIONS, c, 0, PTRACE_O_TRACESECCOMP);
+    int stops = 0, msg_ok = 0, info_ok = 0;
+    pt(PTRACE_CONT, c, 0, 0);
+    while (waitpid(c, &st, 0) == c && WIFSTOPPED(st)) {
+        if ((st >> 16) == PTRACE_EVENT_SECCOMP) {
+            unsigned long m = 0;
+            ptrace(PTRACE_GETEVENTMSG, c, 0, &m);
+            msg_ok = m == 0x42;
+            unsigned char info[88] = {0};
+            long n = pt(PTRACE_GET_SYSCALL_INFO, c, sizeof info, (long)info);
+            info_ok = n == 84 && info[0] == 3 && *(unsigned *)(info + 80) == 0x42 && *(long *)(info + 24) == SYS_getppid;
+            struct user_regs_struct r;
+            ptrace(PTRACE_GETREGS, c, 0, &r);
+            if (stops++ == 0) {
+                r.orig_rax = SYS_getpid;
+            } else {
+                r.orig_rax = -1;
+                r.rax = 777;
+            }
+            ptrace(PTRACE_SETREGS, c, 0, &r);
+            pt(PTRACE_CONT, c, 0, 0);
+        } else {
+            pt(PTRACE_CONT, c, 0, WSTOPSIG(st) == SIGSTOP ? 0 : WSTOPSIG(st));
+        }
+    }
+    check(stops == 2 && msg_ok && info_ok, "seccomp TRACE stops (event message, GET_SYSCALL_INFO)");
+    check(WIFEXITED(st) && WEXITSTATUS(st) == 0, "seccomp-traced call changed, then skipped with a result");
+    if (!WIFEXITED(st) || WEXITSTATUS(st)) printf("     child status %#x\n", st);
+}
+
 static void errors(void) {
     errno = 0;
     check(pt(PTRACE_PEEKDATA, getppid(), 0, 0) == -1 && errno == ESRCH, "PEEKDATA on an untraced process: ESRCH");
@@ -240,6 +329,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     main_trace();
     attach_and_seize();
+    seccomp_trace();
     errors();
     printf(fails ? "PTRACE TEST FAILED (%d)\n" : "PTRACE TEST PASSED\n", fails);
     return fails != 0;

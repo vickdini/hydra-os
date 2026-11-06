@@ -664,6 +664,21 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if !crate::memory::vm::prefault_current(arg1, count as u64, is_read) {
                 return -EFAULT;
             }
+            // Devices with positions (/proc/<pid>/mem), outside the table's lock
+            let dev = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+                Some(crate::fs::FileDescriptor::Device(d)) => Some(d.clone()),
+                _ => None,
+            });
+            if let Some(d) = dev {
+                let r = if is_read {
+                    d.pread(unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, count) }, offset as u64)
+                } else {
+                    d.pwrite(unsafe { core::slice::from_raw_parts(arg1 as *const u8, count) }, offset as u64)
+                };
+                if let Some(r) = r {
+                    return r;
+                }
+            }
             crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
                 Some(desc) => {
                     let res = if is_read {

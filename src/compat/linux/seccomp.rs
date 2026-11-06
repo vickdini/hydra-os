@@ -297,6 +297,11 @@ pub enum Verdict {
 /// # Returns
 /// Whether to run the call or what to return instead. A `KILL` action does not return.
 pub fn check(frame: &mut SyscallFrame) -> Verdict {
+    check_with(frame, false)
+}
+
+/// [`check`]; `after_trace` once a tracer saw the call (a second `TRACE` then allows it).
+fn check_with(frame: &mut SyscallFrame, after_trace: bool) -> Verdict {
     if !ANY_FILTER.load(Ordering::Relaxed) {
         return Verdict::Allow;
     }
@@ -348,7 +353,15 @@ pub fn check(frame: &mut SyscallFrame) -> Verdict {
             // The handler sees the call number in rax, as after the kernel's rollback
             Verdict::Return(nr as i64)
         }
-        RET_TRACE | RET_USER_NOTIF => Verdict::Return(ENOSYS),
+        RET_TRACE if after_trace => Verdict::Allow,
+        // A tracer asking for seccomp events decides (and may change the call, which the
+        // filters then see again); without one the call fails
+        RET_TRACE => match crate::compat::linux::ptrace::seccomp_stop(frame, data as u16) {
+            Some(Ok(())) => check_with(frame, true),
+            Some(Err(r)) => Verdict::Return(r),
+            None => Verdict::Return(ENOSYS),
+        },
+        RET_USER_NOTIF => Verdict::Return(ENOSYS),
         _ => {
             crate::kprintln!("[seccomp] killed on syscall {}", nr);
             crate::compat::linux::proc::die_by_signal(31);

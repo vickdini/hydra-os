@@ -1685,6 +1685,12 @@ fn is_fault_signal(sig: u32) -> bool {
 fn fault_sender(ctx: &ExceptionContext, sig: u32) -> SigSender {
     let (code, addr) = match (sig, ctx.vector) {
         // int3: SI_KERNEL; a single step: TRAP_TRACE (debuggers tell them apart)
+        // #DB: a hardware breakpoint or watchpoint (TRAP_HWBKPT, at its address; DR6 is in
+        // error_code) or a single step (TRAP_TRACE)
+        (SIGTRAP, 1) if ctx.error_code & 0xf != 0 => {
+            let n = (ctx.error_code & 0xf).trailing_zeros() as usize;
+            (4, crate::task::with_current_task_mut(|t| t.debugregs[n]).unwrap_or(0))
+        }
         (SIGTRAP, 1) => (2, 0),
         (SIGTRAP, _) => (0x80, 0),
         // Page faults: SEGV_MAPERR (nothing mapped) or SEGV_ACCERR (not allowed); BUS_ADRERR

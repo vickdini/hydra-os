@@ -472,12 +472,22 @@ fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
 fn dispatch_exception(ctx: &mut ExceptionContext) {
     match ctx.vector {
         1 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
-            // #DB - a single step (trap flag): SIGTRAP, and the flag goes
-            ctx.rflags &= !0x100;
+            // #DB - a single step (trap flag) or a debugger's hardware breakpoint or
+            // watchpoint: SIGTRAP. DR6 says which (kept for the debugger's PEEKUSER).
+            let dr6 = crate::arch::debugregs::take_dr6();
+            crate::task::with_current_task_mut(|t| t.debugregs[6] = dr6);
+            if dr6 & 0xf == 0 || dr6 & 0x4000 != 0 {
+                ctx.rflags &= !0x100;
+            } else {
+                // An instruction breakpoint must not fire again on the way back (RF)
+                ctx.rflags |= 0x1_0000;
+            }
+            ctx.error_code = dr6; // for the signal's si_code
             kill_or_signal(ctx, 5);
         }
         1 => {
-            // #DB in the kernel: nothing sets breakpoints there
+            // #DB in the kernel: a user watchpoint touched by the kernel on the user's behalf
+            crate::arch::debugregs::take_dr6();
         }
         3 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
             // int3 in a Linux program: SIGTRAP (debuggers' breakpoints)

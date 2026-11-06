@@ -173,6 +173,22 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// `pread` at `offset`, for a device with positions (`/proc/<pid>/mem`); `None` if it
+    /// has none.
+    fn pread(&self, _buf: &mut [u8], _offset: u64) -> Option<i64> {
+        None
+    }
+
+    /// `pwrite` at `offset` (see [`CharDevice::pread`]).
+    fn pwrite(&self, _data: &[u8], _offset: u64) -> Option<i64> {
+        None
+    }
+
+    /// `lseek` (see [`CharDevice::pread`]).
+    fn seek(&self, _offset: i64, _whence: u32) -> Option<i64> {
+        None
+    }
+
     /// The Landlock ruleset behind this descriptor, if it is one.
     fn as_landlock(&self) -> Option<&super::landlock::Ruleset> {
         None
