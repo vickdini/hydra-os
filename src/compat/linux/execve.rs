@@ -268,7 +268,11 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             if root == super::vfs::EMPTY_ROOT {
                 return None;
             }
-            let ino = ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?;
+            // Through the mount table in a mount namespace of its own (a sandbox's /usr)
+            let ino = match super::mount::resolve(0, p.as_bytes(), true) {
+                Some(r) => r.ok()?,
+                None => ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?,
+            };
             super::mm::inode_source(ino).ok()
         };
         let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();

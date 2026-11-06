@@ -1122,7 +1122,8 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         ZfsClient::setattr(ino, SetAttr { size: Some(0), ..SetAttr::default() })?;
     }
     let keep = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
-    let file = OpenFile::new(ino, keep, abs);
+    // The path as reached (a mapped proc mount shows where it is mounted, as on Linux)
+    let file = OpenFile::new(ino, keep, raw);
     file.lock().mnt = super::mount::last_mount();
     install(FileDescriptor::Vnode(file), flags)
 }
@@ -1225,7 +1226,7 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
     let target_pid = if who == "self" || who == "thread-self" {
         my_pid
     } else {
-        who.parse::<u64>().unwrap_or(my_pid)
+        who.parse::<u64>().map(super::ns::pid_from_caller).unwrap_or(my_pid)
     };
 
     let mut entries: Vec<(u64, alloc::string::String, u8)> = Vec::new();
@@ -1410,7 +1411,8 @@ fn gone_proc_pid(abs: &str) -> bool {
     abs.trim_end_matches('/')
         .strip_prefix("/proc/")
         .and_then(|p| p.parse::<u64>().ok())
-        .is_some_and(|pid| !super::proc::process_exists(super::ns::pid_from_caller(pid)))
+        // Process 1 is always there on Linux (Hydra's kernel plays init)
+        .is_some_and(|pid| pid != 1 && !super::proc::process_exists(super::ns::pid_from_caller(pid)))
 }
 
 /// Normalizes an absolute path lexically (`.`, `..`, repeated `/`).
@@ -1469,7 +1471,7 @@ pub(crate) fn magic_fd_target(abs: &str) -> Option<(u64, usize, String)> {
 fn own_fd_number(abs: &str) -> Option<i32> {
     let (who, fd) = abs.strip_prefix("/dev/fd/").map(|n| ("self", n)).or_else(|| abs.strip_prefix("/proc/")?.split_once("/fd/"))?;
     let (_, pid) = super::proc::current_ids();
-    if who != "self" && who != "thread-self" && who.parse::<u64>().ok() != Some(pid) {
+    if who != "self" && who != "thread-self" && who.parse::<u64>().ok().map(super::ns::pid_from_caller) != Some(pid) {
         return None;
     }
     let fd: i32 = fd.trim_end_matches('/').parse().ok()?;
@@ -1487,7 +1489,7 @@ fn fd_link(abs: &str) -> Option<String> {
     let rest = abs.strip_prefix("/proc/")?;
     let (who, fd) = rest.split_once("/fd/")?;
     let (_, pid) = super::proc::current_ids();
-    if who != "self" && who.parse::<u64>().ok() != Some(pid) {
+    if who != "self" && who.parse::<u64>().ok().map(super::ns::pid_from_caller) != Some(pid) {
         return None;
     }
     let fd: usize = fd.parse().ok()?;
@@ -1538,6 +1540,9 @@ fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
     let r: Result<i64, i64> = (|| {
         let (base, base_path) = base_dir(dirfd, &path)?;
         let abs = join_path(&base_path, &path);
+        if super::mount::is_named_mountpoint(&join_path_raw(&base_path, &path)) {
+            return Err(EINVAL); // a mount point shows the mounted object, not a link
+        }
         if let Some(target) = fd_link(&abs) {
             let n = target.len().min(size);
             copy_out(buf, &target.as_bytes()[..n])?;
@@ -1547,6 +1552,12 @@ fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
             let n = target.len().min(size);
             copy_out(buf, &target.as_bytes()[..n])?;
             return Ok(n as i64);
+        }
+        if gone_proc_pid(&abs) {
+            return Err(ENOENT);
+        }
+        if served_by_name(&abs) || abs == "/proc" {
+            return Err(EINVAL); // a /proc file or directory, a device: not a link
         }
         let ino = resolve(base, &path, false)?;
         let target = ZfsClient::readlink(ino)?;
@@ -1739,6 +1750,20 @@ fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetA
 fn owner_or_root(a: &Attr, c: &Creds) -> bool {
     c.euid == 0 || c.euid == a.uid
 }
+/// Who may `chown` a file to (`uid`, `gid`) (-1: unchanged), as on Linux: root; or its
+/// owner, keeping the owner and choosing its own effective or supplementary group.
+fn chown_ok(uid: u64, gid: u64) -> impl FnOnce(&Attr, &Creds) -> bool {
+    move |a, c| {
+        let (uid, gid) = (uid as u32, gid as u32);
+        if c.euid == 0 {
+            return true;
+        }
+        let uid_ok = uid == u32::MAX || uid == a.uid;
+        let gid_ok = gid == u32::MAX || gid == a.gid || gid == c.egid || super::proc::in_supplementary_groups(gid);
+        c.euid == a.uid && uid_ok && gid_ok
+    }
+}
+
 
 /// Prepares a `SetAttr` structure for ownership changes.
 ///
@@ -2685,12 +2710,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             fd_vnode(a[0] as i32)?;
             setattr_at(a[0] as i64, 0, true, true, SetAttr { mode: Some(a[1] as u32), ..SetAttr::default() }, owner_or_root)
         }
-        NR_CHOWN => setattr_at(AT_FDCWD, a[0], true, false, chown_set(a[1], a[2]), |_, c| c.euid == 0),
-        NR_LCHOWN => setattr_at(AT_FDCWD, a[0], false, false, chown_set(a[1], a[2]), |_, c| c.euid == 0),
-        NR_FCHOWNAT => setattr_at(a[0] as i64, a[1], a[4] & AT_SYMLINK_NOFOLLOW == 0, a[4] & AT_EMPTY_PATH != 0, chown_set(a[2], a[3]), |_, c| c.euid == 0),
+        NR_CHOWN => setattr_at(AT_FDCWD, a[0], true, false, chown_set(a[1], a[2]), chown_ok(a[1], a[2])),
+        NR_LCHOWN => setattr_at(AT_FDCWD, a[0], false, false, chown_set(a[1], a[2]), chown_ok(a[1], a[2])),
+        NR_FCHOWNAT => setattr_at(a[0] as i64, a[1], a[4] & AT_SYMLINK_NOFOLLOW == 0, a[4] & AT_EMPTY_PATH != 0, chown_set(a[2], a[3]), chown_ok(a[2], a[3])),
         NR_FCHOWN => {
             fd_vnode(a[0] as i32)?;
-            setattr_at(a[0] as i64, 0, true, true, chown_set(a[1], a[2]), |_, c| c.euid == 0)
+            setattr_at(a[0] as i64, 0, true, true, chown_set(a[1], a[2]), chown_ok(a[1], a[2]))
         }
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 

@@ -67,7 +67,8 @@ pub struct RouteSocket {
 /// The new descriptor, or a negative errno.
 pub fn socket(ty: u64) -> i64 {
     let sock: Arc<dyn CharDevice> = Arc::new(RouteSocket {
-        port: AtomicU32::new(super::proc::current_ids().1 as u32),
+        // The automatic port ID is the PID as the caller's PID namespace sees it
+        port: AtomicU32::new(super::ns::pid_to_caller(super::proc::current_ids().1) as u32),
         groups: AtomicU32::new(0),
         nonblock: AtomicBool::new(ty & SOCK_NONBLOCK != 0),
         replies: Mutex::new(VecDeque::new()),
@@ -223,8 +224,17 @@ impl RouteSocket {
                     message(&mut reply, NLMSG_DONE, NLM_F_MULTI, seq, port, &0i32.to_le_bytes());
                 }
                 None => {
-                    // nlmsgerr: the error and the request's header
-                    let mut b = (EOPNOTSUPP as i32).to_le_bytes().to_vec();
+                    // Bringing up the loopback interface or giving it its address (what
+                    // bubblewrap does in a new network namespace): lo is always up, with
+                    // 127.0.0.1. Any other change is refused.
+                    let index = data.get(off + 20..off + 24).map(|b| i32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                    let error = match ty {
+                        RTM_NEWLINK | RTM_NEWADDR if index == 1 => 0,
+                        RTM_NEWLINK | RTM_NEWADDR | 17 | 21 | 25 => -1, // EPERM: DELLINK, DELADDR, DELROUTE too
+                        _ => EOPNOTSUPP as i32,
+                    };
+                    // nlmsgerr: the error (0 acknowledges) and the request's header
+                    let mut b = error.to_le_bytes().to_vec();
                     b.extend_from_slice(&data[off..off + 16]);
                     message(&mut reply, NLMSG_ERROR, 0, seq, port, &b);
                 }

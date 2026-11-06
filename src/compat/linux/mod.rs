@@ -436,6 +436,25 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                             *cursor = new_cursor as usize;
                             new_cursor
                         }
+                        // memfd_create files (and /proc snapshots): seekable like files
+                        crate::fs::FileDescriptor::MemFd { memfd, .. } => {
+                            let mut m = memfd.lock();
+                            let size = m.size() as i64;
+                            let new_cursor = match whence {
+                                0 => offset,
+                                1 => m.cursor as i64 + offset,
+                                2 => size + offset,
+                                3 if offset < size => offset, // SEEK_DATA: no holes
+                                4 if offset < size => size,   // SEEK_HOLE: only past the end
+                                3 | 4 => return -ENXIO,
+                                _ => return -EINVAL,
+                            };
+                            if new_cursor < 0 {
+                                return -EINVAL;
+                            }
+                            m.cursor = new_cursor as usize;
+                            new_cursor
+                        }
                         _ => -ESPIPE,
                     }
                 } else {

@@ -57,6 +57,10 @@ const EUSERS: i64 = -87;
 const CAP_SYS_ADMIN: u64 = 1 << 21;
 /// User ID reported for a system ID with no mapping in the caller's namespace.
 const OVERFLOW_ID: u32 = 65534;
+/// Default `max_user_namespaces`.
+const MAX_USER_NAMESPACES: u64 = 63621;
+/// Limit of user namespaces reached.
+const ENOSPC: i64 = -28;
 /// Deepest nesting of user namespaces Linux allows.
 const MAX_USER_DEPTH: u32 = 32;
 
@@ -105,6 +109,10 @@ pub struct UserNs {
     gid_map: Mutex<Option<IdMap>>,
     /// `setgroups` was set to `deny`.
     setgroups_deny: AtomicBool,
+    /// `/proc/sys/user/max_user_namespaces` here: how many user namespaces may exist below.
+    max_children: AtomicU64,
+    /// User namespaces created below (at any depth).
+    children: AtomicU64,
     parent: Option<Arc<UserNs>>,
 }
 
@@ -188,6 +196,19 @@ fn new_user_ns(parent: Option<Arc<UserNs>>) -> Result<Arc<UserNs>, i64> {
     if depth > MAX_USER_DEPTH {
         return Err(EUSERS);
     }
+    // Every namespace above has a limit on how many may exist below it
+    let mut up = parent.clone();
+    while let Some(a) = up {
+        if a.children.load(Ordering::Relaxed) >= a.max_children.load(Ordering::Relaxed) {
+            return Err(ENOSPC);
+        }
+        up = a.parent.clone();
+    }
+    let mut up = parent.clone();
+    while let Some(a) = up {
+        a.children.fetch_add(1, Ordering::Relaxed);
+        up = a.parent.clone();
+    }
     let (euid, egid) = crate::task::with_current_task_mut(|t| (t.euid, t.egid)).unwrap_or((0, 0));
     Ok(Arc::new(UserNs {
         id: new_id(),
@@ -198,6 +219,8 @@ fn new_user_ns(parent: Option<Arc<UserNs>>) -> Result<Arc<UserNs>, i64> {
         gid_map: Mutex::new(None),
         // Inherited, as on Linux: a denied parent denies its children too
         setgroups_deny: AtomicBool::new(parent.as_ref().is_some_and(|p| p.setgroups_deny.load(Ordering::Relaxed))),
+        max_children: AtomicU64::new(parent.as_ref().map_or(MAX_USER_NAMESPACES, |p| p.max_children.load(Ordering::Relaxed))),
+        children: AtomicU64::new(0),
         parent,
     }))
 }
@@ -410,6 +433,29 @@ pub fn id_for_caller(id: u32, gid: bool) -> u32 {
     }
 }
 
+/// `/proc/sys/user/max_user_namespaces` of the caller's user namespace, as text.
+pub fn max_user_namespaces_text() -> String {
+    let v = current_ns().user.map_or(MAX_USER_NAMESPACES, |u| u.max_children.load(Ordering::Relaxed));
+    alloc::format!("{}\n", v)
+}
+
+/// Writes `/proc/sys/user/max_user_namespaces` of the caller's user namespace
+/// (`CAP_SYS_RESOURCE` there).
+///
+/// # Returns
+/// Bytes accepted, or a negative errno.
+pub fn set_max_user_namespaces(buf: &[u8]) -> i64 {
+    let Ok(v) = core::str::from_utf8(buf).unwrap_or("").trim().parse::<u64>() else { return EINVAL };
+    if !crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 24) != 0).unwrap_or(false) {
+        return EPERM;
+    }
+    match current_ns().user {
+        Some(u) => u.max_children.store(v, Ordering::Relaxed),
+        None => return EPERM, // the initial namespace's limit is fixed
+    }
+    buf.len() as i64
+}
+
 /// Whether the calling process may not change its supplementary groups (`setgroups` is
 /// `deny` in its user namespace).
 pub fn setgroups_denied() -> bool {
@@ -442,7 +488,7 @@ fn split(rest: &str) -> Option<(u64, &str)> {
     let (who, file) = rest.split_once('/')?;
     let pid = match who {
         "self" | "thread-self" => super::proc::current_ids().1,
-        n => n.parse().ok()?,
+        n => super::ns::pid_from_caller(n.parse().ok()?),
     };
     Some((pid, file))
 }

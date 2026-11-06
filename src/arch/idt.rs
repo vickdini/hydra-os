@@ -523,6 +523,10 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 let linux_user = is_user && crate::task::current_personality() == crate::task::TaskPersonality::Linux;
                 if linux_user {
                     let sig = if resolved == Some(Err(crate::memory::vm::FaultError::Bus)) { 7 } else { 11 };
+                    if sig == 7 {
+                        // A file mapping with no page there (past the end of the file)
+                        crate::kprintln!("[linux] SIGBUS: {} at {:#x}, rip {:#x}", if is_write { "write" } else { "read" }, fault_addr, ctx.rip);
+                    }
                     kill_or_signal(ctx, sig);
                     return;
                 }

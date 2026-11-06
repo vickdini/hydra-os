@@ -575,13 +575,8 @@ pub fn kernel_listen(root_ino: u64, path: &str, uid: u32, gid: u32) -> Result<Ar
         s.mknod(dir, &name, S_IFSOCK | 0o700, 0, uid, gid)
     })?;
     let key = super::vfs::socket_ino_key(ino);
-    {
-        let mut names = NAMES.lock();
-        if names.get(&key).map_or(false, |w| w.strong_count() > 0) {
-            return Err(EADDRINUSE);
-        }
-        names.insert(key.clone(), Arc::downgrade(&sock));
-    }
+    // The node is fresh, so an entry under its key is stale (see bind)
+    NAMES.lock().insert(key.clone(), Arc::downgrade(&sock));
     *sock.local.lock() = Some(Addr::Path { shown: path.as_bytes().to_vec(), key });
     *sock.state.lock() = State::Listening { backlog: 64, pending: VecDeque::new(), cred: Ucred { pid: 0, uid, gid } };
     Ok(sock)
@@ -1119,7 +1114,10 @@ fn bind(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     }
     let key = addr.key();
     let mut names = NAMES.lock();
-    if names.get(&key).map_or(false, |w| w.strong_count() > 0) {
+    // A path name was just created as a fresh node, so an entry under its key belongs to
+    // a socket whose node was unlinked (and whose object number the pool reused): replace it
+    let fresh_node = matches!(addr, Addr::Path { .. });
+    if !fresh_node && names.get(&key).map_or(false, |w| w.strong_count() > 0) {
         return EADDRINUSE;
     }
     names.insert(key, Arc::downgrade(sock));

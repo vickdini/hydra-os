@@ -52,6 +52,9 @@ pub enum PseudoFile {
     ProcPidFile(alloc::string::String),
     /// Static read-only byte slice pseudo-file (e.g. `/proc/sys/fs/inotify/max_user_watches`).
     ProcStatic(&'static [u8]),
+    /// `/proc/sys/kernel/random/boot_id` (`true`: one UUID per boot) and `uuid` (`false`: a
+    /// new random UUID on every read).
+    ProcUuid(bool),
     /// Virtual directory under `/proc` (e.g. `/proc/self/task`, `/proc/self/fd`, `/proc/<pid>/task`).
     ProcDir(alloc::string::String),
     /// `/sys/fs/cgroup<group>/cgroup.procs`: the processes in a control group (`group` is
@@ -60,6 +63,8 @@ pub enum PseudoFile {
     /// `/proc/<pid>/uid_map`, `gid_map`, `setgroups` and `ns/<kind>` (the path after
     /// `/proc/`): read and written through [`super::ns`].
     ProcNs(alloc::string::String),
+    /// `/proc/sys/user/max_user_namespaces` (per user namespace, writable there).
+    MaxUserNs,
     /// `/proc/<pid>/oom_score_adj` and `oom_score` (the path after `/proc/`).
     ProcOom(alloc::string::String),
 }
@@ -115,7 +120,10 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/kernel/overflowuid" | "/proc/sys/kernel/overflowgid" | "/proc/sys/fs/overflowuid" | "/proc/sys/fs/overflowgid" => {
             Some(PseudoFile::ProcStatic(b"65534\n"))
         }
-        "/proc/sys/user/max_user_namespaces" => Some(PseudoFile::ProcStatic(b"63621\n")),
+        "/proc/sys/user/max_user_namespaces" => Some(PseudoFile::MaxUserNs),
+        "/proc/sys/kernel/random/boot_id" => Some(PseudoFile::ProcUuid(true)),
+        "/proc/sys/kernel/random/uuid" => Some(PseudoFile::ProcUuid(false)),
+        "/proc/sys/kernel/random/entropy_avail" | "/proc/sys/kernel/random/poolsize" => Some(PseudoFile::ProcStatic(b"256\n")),
         // POSIX message queue limits (see super::mqueue)
         "/proc/sys/fs/mqueue/msg_max" | "/proc/sys/fs/mqueue/msg_default" => Some(PseudoFile::ProcStatic(b"10\n")),
         "/proc/sys/fs/mqueue/msgsize_max" | "/proc/sys/fs/mqueue/msgsize_default" => Some(PseudoFile::ProcStatic(b"8192\n")),
@@ -191,7 +199,7 @@ fn pid_and_file(rest: &str) -> Option<(u64, &str)> {
     let (who, file) = rest.split_once('/')?;
     let pid = match who {
         "self" | "thread-self" => super::proc::current_ids().1,
-        n => n.parse().ok()?,
+        n => super::ns::pid_from_caller(n.parse().ok()?),
     };
     Some((pid, file))
 }
@@ -217,7 +225,7 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
     let (who, file) = rest.split_once('/')?;
     let pid = match who {
         "self" | "thread-self" => super::proc::current_ids().1,
-        n => n.parse().ok()?,
+        n => super::ns::pid_from_caller(n.parse().ok()?),
     };
     // task/<tid>/<file>: a thread's own status, stat or comm
     let (file, tid) = match file.strip_prefix("task/") {
@@ -402,6 +410,7 @@ impl PseudoFile {
                 Some(text) => read_slice(text.as_bytes(), cursor, buf),
                 None => 0,
             },
+            PseudoFile::MaxUserNs => read_slice(super::ns::max_user_namespaces_text().as_bytes(), cursor, buf),
             PseudoFile::ProcNs(rest) if rest.contains("/ns/") => 0,
             PseudoFile::ProcNs(rest) => read_slice(super::ns::read_file(rest).as_bytes(), cursor, buf),
             PseudoFile::CgroupProcs(group) => {
@@ -412,6 +421,7 @@ impl PseudoFile {
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
+            PseudoFile::ProcUuid(boot) => read_slice(uuid_text(*boot).as_bytes(), cursor, buf),
             PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
@@ -449,6 +459,7 @@ impl PseudoFile {
                 }
             }
             PseudoFile::ProcNs(rest) => super::ns::write_file(rest, buf).max(0) as usize,
+            PseudoFile::MaxUserNs => super::ns::set_max_user_namespaces(buf).max(0) as usize,
             PseudoFile::ProcOom(rest) => match pid_and_file(rest) {
                 Some((pid, "oom_score_adj")) => super::proc::write_oom_score_adj(pid, buf).max(0) as usize,
                 _ => 0,
@@ -510,6 +521,28 @@ impl PseudoFile {
     }
 }
 
+/// This boot's ID (`/proc/sys/kernel/random/boot_id`), drawn on first use.
+static BOOT_ID: spin::Mutex<Option<[u8; 16]>> = spin::Mutex::new(None);
+
+/// A random (version 4) UUID as text with a newline: this boot's ID (`boot`), or a new one.
+fn uuid_text(boot: bool) -> alloc::string::String {
+    let mut b = [0u8; 16];
+    if boot {
+        let mut id = BOOT_ID.lock();
+        b = *id.get_or_insert_with(|| {
+            let mut n = [0u8; 16];
+            crate::arch::random::fill(&mut n);
+            n
+        });
+    } else {
+        crate::arch::random::fill(&mut b);
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = |r: core::ops::Range<usize>| b[r].iter().map(|x| alloc::format!("{:02x}", x)).collect::<alloc::string::String>();
+    alloc::format!("{}-{}-{}-{}-{}\n", h(0..4), h(4..6), h(6..8), h(8..10), h(10..16))
+}
+
 /// Copies a window of `data` starting at `cursor` into `buf`.
 ///
 /// # Arguments
@@ -564,7 +597,7 @@ pub fn proc_link(path: &str) -> Option<alloc::string::String> {
             // /proc/<pid>/root and /proc/<pid>/exe of another process (KWin reads the exe
             // link of a Wayland client to decide which privileged protocols it may bind)
             let (pid, entry) = path.strip_prefix("/proc/")?.split_once('/')?;
-            let pid: u64 = pid.parse().ok()?;
+            let pid: u64 = super::ns::pid_from_caller(pid.parse().ok()?);
             match entry {
                 "root" => {
                     let alive = super::proc::PROCS.lock().get(&pid).map_or(false, |p| !p.zombie);

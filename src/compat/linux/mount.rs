@@ -145,6 +145,26 @@ impl MountNs {
     }
 }
 
+/// Holds (`take`) or lets go of the pool objects at the roots of tree mounts: a mounted
+/// file stays alive while mounted even after it is deleted and closed (bubblewrap binds
+/// such files), as on Linux. Called outside the table locks (it talks to the file server).
+fn hold_roots(roots: &[u64], take: bool) {
+    for &r in roots {
+        if r != 0 && r != u64::MAX {
+            if take {
+                ZfsClient::open_ref(r);
+            } else {
+                ZfsClient::release(r);
+            }
+        }
+    }
+}
+
+/// The roots of the tree mounts of a table.
+fn tree_roots<'a>(mounts: impl Iterator<Item = &'a Mount>) -> Vec<u64> {
+    mounts.filter(|m| matches!(m.kind, Kind::Tree { .. })).map(|m| m.root).collect()
+}
+
 /// Mount namespaces by namespace id ([`super::ns::Ns::mnt`]).
 static NAMESPACES: Mutex<BTreeMap<u64, Arc<Mutex<MountNs>>>> = Mutex::new(BTreeMap::new());
 static NEXT_ID: AtomicU32 = AtomicU32::new(100);
@@ -354,7 +374,9 @@ pub fn copy_ns(from: u64, ns_id: u64, fds: &crate::fs::SharedFdTable) {
         None => initial_table(root),
     };
     let root_mnt = copy.root;
+    let held = tree_roots(copy.mounts.iter().flatten());
     NAMESPACES.lock().insert(ns_id, Arc::new(Mutex::new(copy)));
+    hold_roots(&held, true);
     let mut f = fds.lock();
     if from == 0 {
         f.root_mnt = root_mnt;
@@ -373,6 +395,8 @@ fn collect() {
         ids.into_iter().filter_map(|id| all.remove(&id)).collect()
     };
     for ns in dead {
+        let held = tree_roots(ns.lock().mounts.iter().flatten());
+        hold_roots(&held, false);
         let ids: Vec<u32> = ns.lock().mounts.iter().flatten().filter_map(|m| match m.kind {
             Kind::Tree { tmpfs: Some(t) } => Some(t),
             _ => None,
@@ -483,6 +507,18 @@ fn served_source(ptr: u64) -> Option<String> {
     let abs = super::vfs::join_path(&base_path, &path);
     let abs = super::vfs::open_file_path(&abs).unwrap_or(abs);
     super::vfs::served_by_name(&abs).then_some(abs)
+}
+
+/// Whether `raw` (a path as the caller wrote it) is the mount point of a named mount: the
+/// mounted object is there itself, so it is not a link even when it shows a `/proc` link.
+pub fn is_named_mountpoint(raw: &str) -> bool {
+    let id = current_ns_id();
+    if id == 0 {
+        return false;
+    }
+    let Some(t) = table(id) else { return false };
+    let t = t.lock();
+    t.mounts.iter().flatten().any(|m| m.kind == Kind::Named && m.path == raw)
 }
 
 /// [`locate`] for a mount point that may be a named file system's (served by name, with no
@@ -696,6 +732,7 @@ fn mount(source: u64, target: u64, fstype: u64, flags: u64, data: u64) -> i64 {
             path: tpath.clone(),
             serves: None,
         });
+        let mut held = alloc::vec![sino];
         if flags & MS_REC != 0 {
             // The source's submounts, under the new mount at the same places
             let below: Vec<usize> = t.subtree(smnt).into_iter().filter(|i| *i != smnt).collect();
@@ -704,10 +741,15 @@ fn mount(source: u64, target: u64, fstype: u64, flags: u64, data: u64) -> i64 {
             for i in below {
                 let Some(m) = t.get(i).cloned() else { continue };
                 let (Some(&parent), Some(path)) = (map.get(&m.parent), rebase(&m.path, &spath, &tpath)) else { continue };
+                if matches!(m.kind, Kind::Tree { .. }) {
+                    held.push(m.root);
+                }
                 let copy = t.push(Mount { id: new_id(), parent, path, propagation: 0, ..m });
                 map.insert(i, copy);
             }
         }
+        drop(t);
+        hold_roots(&held, true);
         return 0;
     }
     if !attr.is_dir() {
@@ -742,6 +784,9 @@ fn mount(source: u64, target: u64, fstype: u64, flags: u64, data: u64) -> i64 {
         _ => return ENODEV,
     };
     let serves = if kind == Kind::Named { serves_of(&fs).map(String::from) } else { None };
+    if matches!(kind, Kind::Tree { .. }) {
+        hold_roots(&[root], true);
+    }
     ns.lock().push(Mount {
         id: new_id(),
         parent: tmnt,
@@ -778,13 +823,20 @@ fn umount2(target: u64, flags: u64) -> i64 {
         return EBUSY;
     }
     let mut tmpfs = Vec::new();
+    let mut held = Vec::new();
     for i in gone {
-        if let Some(Some(Mount { kind: Kind::Tree { tmpfs: Some(n) }, .. })) = t.mounts.get(i - 1) {
-            tmpfs.push(*n);
+        if let Some(Some(m)) = t.mounts.get(i - 1) {
+            if let Kind::Tree { tmpfs: t } = m.kind {
+                held.push(m.root);
+                if let Some(n) = t {
+                    tmpfs.push(n);
+                }
+            }
         }
         t.mounts[i - 1] = None;
     }
     drop(t);
+    hold_roots(&held, false);
     for n in tmpfs {
         release_tmpfs(n);
     }
