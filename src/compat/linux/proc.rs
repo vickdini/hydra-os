@@ -416,6 +416,7 @@ pub fn thread_exited(pid: u64, tid: u64) {
         return;
     }
     super::misc::forget_process(pid);
+    super::ptimer::forget_process(pid);
     // The init of a PID namespace takes the namespace with it
     if procs.get(&pid).is_some_and(|p| p.ns.pid_inits.last() == Some(&pid)) {
         let members: Vec<u64> = procs.values().filter(|q| q.pid != pid && !q.zombie && q.ns.pid_inits.contains(&pid)).map(|q| q.pid).collect();
@@ -719,6 +720,7 @@ pub fn reset_handlers(pid: u64) {
 /// * `pid` - Process ID undergoing execution reset.
 pub fn exec_reset(pid: u64) {
     super::misc::forget_process(pid);
+    super::ptimer::forget_process(pid);
     if let Some(p) = PROCS.lock().get_mut(&pid) {
         for a in p.actions.iter_mut() {
             if a.handler != SIG_IGN {
@@ -1480,6 +1482,73 @@ pub fn sys_rt_sigqueueinfo(pid: u64, tid: Option<u64>, sig: u64, info_ptr: u64) 
     if posted { 0 } else { ESRCH }
 }
 
+/// Whether `sig` is still pending for process `pid` (or its thread `tid`): a POSIX timer
+/// counts an expiry as an overrun instead of sending the signal again.
+///
+/// # Arguments
+/// * `pid` - Process ID.
+/// * `tid` - Thread the signal was sent to, if any.
+/// * `sig` - Signal number.
+pub fn signal_queued(pid: u64, tid: Option<u64>, sig: u32) -> bool {
+    let procs = PROCS.lock();
+    let Some(p) = procs.get(&pid) else { return false };
+    match tid {
+        Some(t) => p.threads.get(&t).is_some_and(|t| t.pending & bit(sig) != 0),
+        None => p.pending & bit(sig) != 0,
+    }
+}
+
+/// Sends a POSIX timer's signal: `si_code` `SI_TIMER`, with the timer ID, overrun count
+/// and value its handler reads.
+///
+/// # Arguments
+/// * `pid` - Process owning the timer.
+/// * `tid` - Thread to signal (`SIGEV_THREAD_ID`), or the process.
+/// * `sig` - Signal number.
+/// * `timer` - Timer ID (`si_timerid`).
+/// * `overrun` - Expiries not signalled (`si_overrun`).
+/// * `value` - The creator's value (`si_value`).
+///
+/// # Returns
+/// `false` if the process or thread no longer exists.
+pub fn post_timer_signal(pid: u64, tid: Option<u64>, sig: u32, timer: i32, overrun: u32, value: u64) -> bool {
+    // si_timerid and si_overrun sit where si_pid and si_uid do for other signals
+    let sender = SigSender { code: super::ptimer::SI_TIMER, pid: timer as u32, uid: overrun, value, ..Default::default() };
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        match tid {
+            Some(t) => {
+                if let Some(t) = p.threads.get_mut(&t) {
+                    t.senders[sig as usize] = sender;
+                }
+            }
+            None => p.senders[sig as usize] = sender,
+        }
+    }
+    match tid {
+        Some(t) => post_thread(pid, t, sig),
+        None => post_process(pid, sig),
+    }
+}
+
+/// Updates the overrun count (`si_overrun`) of a POSIX timer signal still queued.
+///
+/// # Arguments
+/// * `pid` - Process ID.
+/// * `tid` - Thread the signal was sent to, if any.
+/// * `sig` - Signal number.
+/// * `overrun` - Expiries counted while it was pending.
+pub fn set_timer_overrun(pid: u64, tid: Option<u64>, sig: u32, overrun: u32) {
+    let mut procs = PROCS.lock();
+    let Some(p) = procs.get_mut(&pid) else { return };
+    let sender = match tid {
+        Some(t) => p.threads.get_mut(&t).map(|t| &mut t.senders[sig as usize]),
+        None => Some(&mut p.senders[sig as usize]),
+    };
+    if let Some(s) = sender.filter(|s| s.code == super::ptimer::SI_TIMER) {
+        s.uid = overrun;
+    }
+}
+
 /// Masks to restore after a signal interrupted `rt_sigsuspend`, by thread.
 static SUSPEND_RESTORE: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
@@ -1806,7 +1875,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
         procs
             .get_mut(&pid)
             .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
-                Some(s) if s.pid != 0 || s.code == SYS_SECCOMP => s,
+                Some(s) if s.pid != 0 || s.code == SYS_SECCOMP || s.code == super::ptimer::SI_TIMER => s,
                 _ => core::mem::take(&mut p.senders[sig as usize]),
             })
             .unwrap_or_default()

@@ -25,6 +25,7 @@ pub mod proc;
 pub mod pidfd;
 pub mod pty;
 pub mod process;
+pub mod ptimer;
 pub mod rtnetlink;
 pub mod seccomp;
 pub mod select;
@@ -139,6 +140,11 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // rt_sigqueueinfo, rt_tgsigqueueinfo
         129 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, None, arg1, arg2),
         297 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, Some(arg1 as u32 as u64), arg2, arg3),
+        222..=226 => {
+            if let Some(r) = ptimer::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
         78 | 100 | 132 | 135 | 148 | 219 | 235 | 261 | 309 | 324 => {
             if let Some(r) = misc::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
@@ -1553,6 +1559,17 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 0 | 5 | 8 | 11 => {
                     let (s, ns) = crate::arch::rtc::now();
                     (s as i64, ns as i64)
+                }
+                // CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID: CPU time, not time since boot
+                2 | 3 => {
+                    let ticks = if arg0 == 2 {
+                        let (_, pid) = proc::current_ids();
+                        crate::task::SCHEDULER.lock().process_ticks(pid)
+                    } else {
+                        crate::task::with_current_task_mut(|t| t.ticks_run).unwrap_or(0)
+                    };
+                    let hz = crate::arch::pit::frequency_hz().max(1);
+                    ((ticks / hz) as i64, ((ticks % hz) * (1_000_000_000 / hz)) as i64)
                 }
                 _ => {
                     let ticks = crate::arch::pit::ticks();

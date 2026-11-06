@@ -1065,10 +1065,13 @@ impl Scheduler {
             if handoff_server.is_some() {
                 return; // the server of a driver call runs undisturbed until it replies
             }
-            let woken_waiting = self
-                .tasks
-                .iter()
-                .any(|t| t.woken && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
+            // Also preempted: the idle task by any ready work, and any task by ready work of
+            // higher priority (a timed sleep that ended, such as the timer daemons'); equal
+            // priority tasks woken from timed sleeps still wait for the slice to end
+            let current_priority = self.tasks[curr_idx].priority;
+            let woken_waiting = self.tasks.iter().any(|t| {
+                t.state == TaskState::Ready && t.priority > TaskPriority::Idle && (t.woken || t.priority > current_priority)
+            });
             if !woken_waiting {
                 return;
             }
