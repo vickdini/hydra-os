@@ -141,8 +141,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/kernel/msgmni" => Some(PseudoFile::ProcStatic(b"32000\n")),
         // Yama mode 3 ("no attach"): true of Hydra, which has no ptrace at all
         "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
-        // /proc/<pid>/oom_score_adj and oom_score: off for now. With them, sandboxed Brave
-        // reliably crashes the kernel (memory corruption whose cause is not found yet)
+        // /proc/<pid>/oom_score_adj and oom_score
         p if OOM_FILES && p.starts_with("/proc/") && is_oom_file(&p[6..]) => Some(PseudoFile::ProcOom(alloc::string::String::from(&p[6..]))),
         p if is_proc_dir(p) => Some(PseudoFile::ProcDir(alloc::string::String::from(p))),
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
@@ -189,7 +188,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
 }
 
 /// Serve `/proc/<pid>/oom_score_adj` and `oom_score` (see [`match_pseudo_path`]).
-const OOM_FILES: bool = false;
+const OOM_FILES: bool = true;
 
 /// Whether `rest` (a path after `/proc/`) is `<pid>/oom_score_adj` or `<pid>/oom_score`.
 fn is_oom_file(rest: &str) -> bool {
