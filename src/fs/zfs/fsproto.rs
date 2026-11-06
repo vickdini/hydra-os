@@ -88,6 +88,12 @@ pub const FS_SELFTEST: u32 = 0x311C;
 pub const FS_VERIFY: u32 = 0x311D;
 /// `(path, repair)`: checks (and repairs) a directory tree (output on the console).
 pub const FS_FSCK: u32 = 0x311E;
+/// Resolve a path through a mount table: `root`, its mount, `base`, its mount, `follow`,
+/// path, then the mount count and `(mountpoint, mounted root, parent mount)` triples. Replies with the object ID, and in its
+/// top 16 bits the 1-based index of the mount it lies in (0: the root's own tree).
+pub const FS_RESOLVE_MNT: u32 = 0x311F;
+/// Bit position of the mount index in an [`FS_RESOLVE_MNT`] reply.
+pub const MNT_SHIFT: u32 = 48;
 
 /// Operation not permitted.
 pub const EPERM: i64 = -1;

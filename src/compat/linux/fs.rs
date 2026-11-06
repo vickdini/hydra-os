@@ -29,6 +29,8 @@ pub enum PseudoFile {
     DevNull,
     /// `/dev/zero`: discards all writes and fills read buffers with zero bytes (`0x00`).
     DevZero,
+    /// `/dev/full`: reads zeros; every write fails with `ENOSPC`.
+    DevFull,
     /// `/dev/urandom` and `/dev/random`: generates pseudo-random bytes on read.
     DevUrandom,
     /// `/proc/version`: reports the kernel release and compiler version banner.
@@ -97,6 +99,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
     match path {
         "/dev/null" => Some(PseudoFile::DevNull),
         "/dev/zero" => Some(PseudoFile::DevZero),
+        "/dev/full" => Some(PseudoFile::DevFull),
         "/dev/urandom" | "/dev/random" => Some(PseudoFile::DevUrandom),
         "/proc/version" => Some(PseudoFile::ProcVersion),
         "/proc/meminfo" => Some(PseudoFile::ProcMeminfo),
@@ -108,6 +111,11 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/fs/inotify/max_user_watches" => Some(PseudoFile::ProcStatic(b"1048576\n")),
         "/proc/sys/fs/inotify/max_user_instances" => Some(PseudoFile::ProcStatic(b"1024\n")),
         "/proc/sys/fs/inotify/max_queued_events" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        // The IDs unmapped users and groups show as in a user namespace (see super::ns)
+        "/proc/sys/kernel/overflowuid" | "/proc/sys/kernel/overflowgid" | "/proc/sys/fs/overflowuid" | "/proc/sys/fs/overflowgid" => {
+            Some(PseudoFile::ProcStatic(b"65534\n"))
+        }
+        "/proc/sys/user/max_user_namespaces" => Some(PseudoFile::ProcStatic(b"63621\n")),
         // POSIX message queue limits (see super::mqueue)
         "/proc/sys/fs/mqueue/msg_max" | "/proc/sys/fs/mqueue/msg_default" => Some(PseudoFile::ProcStatic(b"10\n")),
         "/proc/sys/fs/mqueue/msgsize_max" | "/proc/sys/fs/mqueue/msgsize_default" => Some(PseudoFile::ProcStatic(b"8192\n")),
@@ -348,7 +356,7 @@ impl PseudoFile {
     pub fn read(&self, cursor: usize, buf: &mut [u8]) -> usize {
         match self {
             PseudoFile::DevNull => 0,
-            PseudoFile::DevZero => {
+            PseudoFile::DevZero | PseudoFile::DevFull => {
                 buf.fill(0);
                 buf.len()
             }
@@ -380,8 +388,15 @@ impl PseudoFile {
                 let auxv = super::process::current_auxv();
                 read_slice(&auxv, cursor, buf)
             }
-            PseudoFile::ProcMountinfo => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
-            PseudoFile::ProcMounts => read_slice(MOUNTS.as_bytes(), cursor, buf),
+            // A mount namespace of its own lists its own table
+            PseudoFile::ProcMountinfo => match super::mount::mountinfo(super::proc::current_ids().1) {
+                Some(t) => read_slice(t.as_bytes(), cursor, buf),
+                None => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
+            },
+            PseudoFile::ProcMounts => match super::mount::mounts(super::proc::current_ids().1) {
+                Some(t) => read_slice(t.as_bytes(), cursor, buf),
+                None => read_slice(MOUNTS.as_bytes(), cursor, buf),
+            },
             PseudoFile::ProcPidFile(_) => 0,
             PseudoFile::ProcOom(rest) => match pid_and_file(rest).and_then(|(pid, f)| super::proc::oom_file_text(pid, f)) {
                 Some(text) => read_slice(text.as_bytes(), cursor, buf),
@@ -455,7 +470,7 @@ impl PseudoFile {
         statbuf.st_blksize = 4096;
 
         match self {
-            PseudoFile::DevNull | PseudoFile::DevZero | PseudoFile::DevUrandom => {
+            PseudoFile::DevNull | PseudoFile::DevZero | PseudoFile::DevFull | PseudoFile::DevUrandom => {
                 statbuf.st_mode = S_IFCHR | 0o666;
                 statbuf.st_size = 0;
             }

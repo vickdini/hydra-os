@@ -394,6 +394,7 @@ pub fn set_exit_status(pid: u64, status: i32) {
 /// * `pid` - Process ID of the exiting thread.
 /// * `tid` - Thread ID that exited.
 pub fn thread_exited(pid: u64, tid: u64) {
+    super::mount::forget_thread(tid);
     let mut procs = PROCS.lock();
     let (ppid, now_zombie) = match procs.get_mut(&pid) {
         Some(p) => {

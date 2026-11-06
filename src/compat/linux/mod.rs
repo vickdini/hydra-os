@@ -22,6 +22,7 @@ pub mod memfd;
 pub mod misc;
 pub mod execve;
 pub mod mm;
+pub mod mount;
 pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
@@ -141,6 +142,12 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
         295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
+        // pivot_root, mount, umount2
+        155 | 165 | 166 => {
+            if let Some(r) = mount::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
         // io_setup, io_destroy, io_getevents, io_submit, io_cancel, io_pgetevents
         206..=210 | 333 => return aio::dispatch(frame, num),
         // openat2, epoll_pwait2, pidfd_getfd, process_madvise, process_mrelease
@@ -279,7 +286,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.write(slice) {
                         Ok(n) => n as i64,
-                        Err(_) => -EIO,
+                        Err(e) => write_errno(e),
                     }
                 } else {
                     -EBADF
@@ -651,7 +658,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     let slice = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
                     let res = crate::task::with_current_fds_mut(|fds| {
                         if let Some(desc) = fds.get_mut(fd) {
-                            desc.write(slice).map(|n| n as i64).unwrap_or(-EIO)
+                            desc.write(slice).map(|n| n as i64).unwrap_or_else(write_errno)
                         } else {
                             -EBADF
                         }
@@ -964,7 +971,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.write(slice) {
                         Ok(n) => n as i64,
-                        Err(_) => -EIO,
+                        Err(e) => write_errno(e),
                     }
                 } else {
                     -EBADF
@@ -1043,7 +1050,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                         let slice = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
                         let sent = crate::task::with_current_fds_mut(|fds| {
                             if let Some(desc) = fds.get_mut(fd) {
-                                desc.write(slice).map(|n| n as i64).unwrap_or(-EIO)
+                                desc.write(slice).map(|n| n as i64).unwrap_or_else(write_errno)
                             } else {
                                 -EBADF
                             }
@@ -1970,6 +1977,7 @@ fn open_path(path: &str, flags: u64) -> i64 {
             readable: true,
             writable: true,
             append: false,
+            shown: None,
         };
         return crate::task::with_current_fds_mut(|fds| {
             fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
@@ -1995,6 +2003,7 @@ fn open_path(path: &str, flags: u64) -> i64 {
         readable,
         writable,
         append,
+        shown: None,
     };
 
     crate::task::with_current_fds_mut(|fds| {
@@ -2244,4 +2253,9 @@ pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
     f.r8 = args[4];
     f.r9 = args[5];
     dispatch_checked(&mut f)
+}
+
+/// The errno of a failed descriptor write (`ENOSPC` for `/dev/full`, otherwise `EIO`).
+fn write_errno(e: &'static str) -> i64 {
+    if e == crate::fs::fd::ENOSPC_MSG { -28 } else { -EIO }
 }

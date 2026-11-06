@@ -223,7 +223,12 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         let data = &source.head;
         set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
         set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
-        if crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
+        // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
+        let (noexec, nosuid) = super::mount::exec_flags();
+        if noexec {
+            return EACCES;
+        }
+        if nosuid || crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
             // no_new_privs, or a user namespace (the owner, root, is not mapped in it):
             // set-user/group-ID bits are ignored
             set_uid = None;

@@ -196,7 +196,8 @@ fn new_user_ns(parent: Option<Arc<UserNs>>) -> Result<Arc<UserNs>, i64> {
         depth,
         uid_map: Mutex::new(None),
         gid_map: Mutex::new(None),
-        setgroups_deny: AtomicBool::new(false),
+        // Inherited, as on Linux: a denied parent denies its children too
+        setgroups_deny: AtomicBool::new(parent.as_ref().is_some_and(|p| p.setgroups_deny.load(Ordering::Relaxed))),
         parent,
     }))
 }
@@ -245,6 +246,8 @@ pub fn after_clone(child: u64, flags: u64) {
     } else {
         None
     };
+    let parent_mnt = current_ns().mnt;
+    let mut child_mnt = 0;
     if let Some(p) = super::proc::PROCS.lock().get_mut(&child) {
         if let Some(u) = user.clone() {
             p.ns.user = Some(u);
@@ -252,6 +255,14 @@ pub fn after_clone(child: u64, flags: u64) {
         apply_new(&mut p.ns, flags, false);
         if flags & CLONE_NEWPID != 0 {
             p.ns.pid_inits.push(child);
+        }
+        child_mnt = p.ns.mnt;
+    }
+    if flags & CLONE_NEWNS != 0 {
+        // The child's own copy of the mount table
+        let fds = crate::task::SCHEDULER.lock().with_process(child, |t| t.fds.clone());
+        if let Some(fds) = fds {
+            super::mount::copy_ns(parent_mnt, child_mnt, &fds);
         }
     }
     if user.is_some() {
@@ -317,11 +328,20 @@ pub fn sys_unshare(flags: u64) -> i64 {
     } else {
         None
     };
+    let old_mnt = current_ns().mnt;
+    let mut new_mnt = 0;
     if let Some(p) = super::proc::PROCS.lock().get_mut(&pid) {
         if let Some(u) = user.clone() {
             p.ns.user = Some(u);
         }
         apply_new(&mut p.ns, ns_flags, true);
+        new_mnt = p.ns.mnt;
+    }
+    if ns_flags & CLONE_NEWNS != 0 {
+        let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone());
+        if let Some(fds) = fds {
+            super::mount::copy_ns(old_mnt, new_mnt, &fds);
+        }
     }
     if user.is_some() {
         crate::task::with_current_task_mut(|t| t.caps.enter_userns());
@@ -499,8 +519,17 @@ pub fn write_file(rest: &str, buf: &[u8]) -> i64 {
     if count == 0 || inner.checked_add(count - 1).is_none() || outer.checked_add(count - 1).is_none() {
         return EINVAL;
     }
-    // Unprivileged: one ID, the creator's own (groups only once setgroups is denied)
-    let own = if gid { outer == user.owner_gid && euid == user.owner_uid && egid == user.owner_gid } else { outer == user.owner_uid && euid == user.owner_uid };
+    // Unprivileged: one ID, the creator's own (groups only once setgroups is denied). The
+    // outer IDs are the parent namespace's: the creator's, as that namespace sees them
+    let in_parent = |id: u32, g: bool| match &user.parent {
+        Some(p) => map_down(p, id, g),
+        None => Some(id),
+    };
+    let own = if gid {
+        in_parent(user.owner_gid, true) == Some(outer) && euid == user.owner_uid && egid == user.owner_gid
+    } else {
+        in_parent(user.owner_uid, false) == Some(outer) && euid == user.owner_uid
+    };
     let unprivileged_ok = count == 1 && own && (!gid || user.setgroups_deny.load(Ordering::Relaxed));
     if !unprivileged_ok && !privileged {
         return EPERM;

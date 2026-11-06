@@ -402,8 +402,11 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
             // Calls naming a file: show the path (open, stat, lstat, access, execve, readlink,
             // openat, faccessat, newfstatat, statx, faccessat2)
             let path_arg = match num {
-                2 | 4 | 6 | 21 | 59 | 89 => Some(args[0]),
-                257 | 262 | 269 | 332 | 439 => Some(args[1]),
+                // ... creat, mkdir, rmdir, unlink, chdir, chroot
+                2 | 4 | 6 | 21 | 59 | 89 | 85 | 83 | 84 | 87 | 80 | 161 => Some(args[0]),
+                // ... mount and umount2 targets, mkdirat, unlinkat
+                257 | 262 | 269 | 332 | 439 | 165 | 258 | 263 => Some(args[1]),
+                166 => Some(args[0]),
                 _ => None,
             };
             if let Some(p) = path_arg.filter(|&p| p != 0 && crate::memory::vm::prefault_current(p, 1, false)) {
@@ -523,6 +526,7 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
                         readable,
                         writable,
                         append,
+                        shown: None,
                     };
 
                     crate::task::with_current_fds_mut(|fds| {

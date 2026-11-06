@@ -64,6 +64,8 @@ pub struct OpenFile {
     pub flags: u32,
     /// Normalized absolute path recorded at open time (used for `/proc/self/fd` and diagnostics).
     pub path: String,
+    /// The mount the file was opened in (mount namespaces; 0: none).
+    pub mnt: usize,
 }
 
 impl OpenFile {
@@ -80,7 +82,7 @@ impl OpenFile {
     /// A reference-counted `Arc<Mutex<OpenFile>>` initialized at byte offset `0`.
     pub fn new(ino: u64, flags: u32, path: String) -> Arc<Mutex<Self>> {
         ZfsClient::open_ref(ino);
-        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path }))
+        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0 }))
     }
 
     /// Checks whether this open file description permits read operations.
@@ -172,6 +174,9 @@ pub enum FileDescriptor {
         writable: bool,
         /// Whether writes always append to the current end of the file.
         append: bool,
+        /// The path it was opened by, when that differs from `path` (a by-name file reached
+        /// through a mount elsewhere): what `/proc/self/fd/N` shows.
+        shown: Option<String>,
     },
 }
 
@@ -213,8 +218,14 @@ fn read_path_at(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'st
 /// # Errors
 ///
 /// Returns static string error if file resolution, stat, or write fails.
+/// Error message of a write to `/dev/full` (the write calls turn it into `ENOSPC`).
+pub const ENOSPC_MSG: &str = "No space left on device";
+
 fn write_path_at(path: &str, offset: Option<usize>, data: &[u8]) -> Result<(usize, usize), &'static str> {
     if let Some(pseudo) = crate::compat::linux::fs::match_pseudo_path(path) {
+        if matches!(pseudo, crate::compat::linux::fs::PseudoFile::DevFull) && !data.is_empty() {
+            return Err(ENOSPC_MSG);
+        }
         return Ok((pseudo.write(data), offset.unwrap_or(0)));
     }
     let ino = ZfsClient::resolve(0, path.as_bytes(), true).map_err(|_| "File not found")?;
@@ -625,6 +636,10 @@ pub struct FdTable {
     pub umask: u32,
     /// Root directory ZFS inode for path resolution (`chroot(2)`; `0` denotes the pool root).
     pub root_ino: u64,
+    /// The mounts the root and working directory lie in (mount namespaces; 0: none).
+    pub root_mnt: usize,
+    /// See `root_mnt`.
+    pub cwd_mnt: usize,
 }
 
 impl FdTable {
@@ -641,6 +656,8 @@ impl FdTable {
             cwd_path: String::new(),
             umask: 0o022,
             root_ino: 0,
+            root_mnt: 0,
+            cwd_mnt: 0,
         }
     }
 

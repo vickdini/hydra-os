@@ -147,6 +147,91 @@ pub mod fs {
             Ok(cur)
         }
 
+        /// Resolves `path` like [`resolve_in`] through a mount table. Mount `i` (1-based) is
+        /// `(mountpoint, mounted root, parent mount)`: a directory reached inside the parent
+        /// mount that is its mount point continues in the mounted tree (the topmost mount
+        /// wins), and `..` from a mounted tree's root leaves the mount. `root_mnt` and
+        /// `base_mnt` are the mounts the root and the starting directory lie in (0 = none).
+        ///
+        /// # Returns
+        /// The object ID and the mount it lies in.
+        #[allow(clippy::too_many_arguments)]
+        pub fn resolve_mnt(
+            s: &mut ZfsServer,
+            root: u64,
+            root_mnt: usize,
+            base: u64,
+            base_mnt: usize,
+            path: &[u8],
+            follow_last: bool,
+            mounts: &[(u64, u64, usize)],
+        ) -> Result<(u64, usize), i64> {
+            if path.is_empty() {
+                return Err(ENOENT);
+            }
+            let enter = |mut ino: u64, mut mnt: usize| {
+                for _ in 0..=mounts.len() {
+                    match mounts.iter().rposition(|m| m.0 == ino && m.2 == mnt) {
+                        Some(i) => {
+                            ino = mounts[i].1;
+                            mnt = i + 1;
+                        }
+                        None => break,
+                    }
+                }
+                (ino, mnt)
+            };
+            let follow_last = follow_last || path.ends_with(b"/");
+            let (mut cur, mut mnt) = if path[0] == b'/' { (root, root_mnt) } else { (base, base_mnt) };
+            let mut pending: Vec<Vec<u8>> = components(path);
+            pending.reverse();
+            let mut links = 0;
+            while let Some(comp) = pending.pop() {
+                if comp == b".." {
+                    for _ in 0..=mounts.len() {
+                        if (cur, mnt) == (root, root_mnt) || mnt == 0 || mounts[mnt - 1].1 != cur {
+                            break;
+                        }
+                        let m = mounts[mnt - 1];
+                        cur = m.0;
+                        mnt = m.2;
+                    }
+                    if (cur, mnt) != (root, root_mnt) {
+                        cur = s.lookup(cur, b"..")?;
+                    }
+                    continue;
+                }
+                let next = s.lookup(cur, &comp)?;
+                let is_last = pending.is_empty();
+                let attr = s.getattr(next)?;
+                if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
+                    links += 1;
+                    if links > SYMLOOP_MAX {
+                        return Err(ELOOP);
+                    }
+                    let target = s.readlink(next)?;
+                    if target.first() == Some(&b'/') {
+                        cur = root;
+                        mnt = root_mnt;
+                    }
+                    let mut more = components(&target);
+                    more.reverse();
+                    pending.extend(more);
+                    continue;
+                }
+                if !is_last && !attr.is_dir() {
+                    return Err(ENOTDIR);
+                }
+                let (n, m) = enter(next, mnt);
+                cur = n;
+                mnt = m;
+            }
+            if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
+                return Err(ENOTDIR);
+            }
+            Ok((cur, mnt))
+        }
+
         /// Resolves the parent directory of `path` and returns it with the last component.
         ///
         /// # Arguments
@@ -537,6 +622,16 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
             let (root, base, follow) = (r.u64(), r.u64(), r.u64() != 0);
             let path = r.bytes();
             with_server(|s| fs::client::resolve_in(s, root, base, path, follow).map(|i| (i, 0)))
+        }
+        FS_RESOLVE_MNT => {
+            let (root, root_mnt, base, base_mnt, follow) = (r.u64(), r.u64() as usize, r.u64(), r.u64() as usize, r.u64() != 0);
+            let path = r.bytes().to_vec();
+            let n = (r.u64() as usize).min(1024);
+            let mounts: Vec<(u64, u64, usize)> = (0..n).map(|_| (r.u64(), r.u64(), r.u64() as usize)).collect();
+            with_server(|s| {
+                fs::client::resolve_mnt(s, root, root_mnt, base, base_mnt, &path, follow, &mounts)
+                    .map(|(ino, mnt)| (ino | ((mnt as u64) << MNT_SHIFT), 0))
+            })
         }
         FS_GETATTR => {
             let ino = r.u64();

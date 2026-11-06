@@ -282,6 +282,12 @@ pub(crate) fn proc_root() -> u64 {
 /// # Errors
 /// Returns negative Linux error code on lookup or permission failure.
 pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+    if base != PSEUDO_DIR_BASE && proc_root() != EMPTY_ROOT {
+        // A mount namespace of its own: through its mount table
+        if let Some(r) = super::mount::resolve(base, path, follow) {
+            return r;
+        }
+    }
     match proc_root() {
         _ if base == PSEUDO_DIR_BASE => Err(ENOENT),
         // An open directory can still be reopened ("."), but nothing reached from it
@@ -393,6 +399,11 @@ pub(crate) fn path_exists(path: &[u8]) -> bool {
 /// # Errors
 /// Returns negative Linux error code on lookup failure.
 fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
+    if base != PSEUDO_DIR_BASE && proc_root() != EMPTY_ROOT {
+        if let Some(r) = super::mount::resolve_parent(base, path) {
+            return r;
+        }
+    }
     match proc_root() {
         _ if base == PSEUDO_DIR_BASE => Err(ENOENT),
         EMPTY_ROOT => Err(ENOENT),
@@ -424,6 +435,7 @@ pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
     match fd_vnode(dirfd as i32) {
         Some(f) => {
             let f = f.lock();
+            super::mount::note_base(f.mnt);
             Ok((f.ino, f.path.clone()))
         }
         None => {
@@ -491,6 +503,15 @@ fn fd_exists(fd: i32) -> bool {
 /// # Returns
 /// Canonicalized absolute path string.
 pub(crate) fn join_path(base: &str, path: &[u8]) -> String {
+    let out = join_path_raw(base, path);
+    // In a mount namespace of its own, a proc (devpts, cgroup2) mount anywhere serves the
+    // files Hydra keeps under /proc (/dev/pts, /sys/fs/cgroup)
+    super::mount::canonical(&out).unwrap_or(out)
+}
+
+/// [`join_path`] without the mount namespace's mapping of pseudo file system mounts (the
+/// path as the caller wrote it, for the mount table itself).
+pub(crate) fn join_path_raw(base: &str, path: &[u8]) -> String {
     let mut parts: Vec<&[u8]> = Vec::new();
     let path_abs = path.first() == Some(&b'/');
     if !path_abs {
@@ -935,6 +956,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     }
     let (base, base_path) = base_dir(dirfd, path)?;
     let abs = join_path(&base_path, path);
+    let raw = join_path_raw(&base_path, path);
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
 
@@ -976,7 +998,12 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         }
     }
     if abs == "/dev/tty" || is_console_path(&abs) {
-        return install(FileDescriptor::ConsoleOut, flags);
+        let fd = install(FileDescriptor::ConsoleOut, flags)?;
+        if raw != abs {
+            // Reached through a mount elsewhere (a sandbox's bind of /dev/tty)
+            CONSOLE_SHOWN.lock().insert((super::proc::current_ids().1, fd), raw);
+        }
+        return Ok(fd);
     }
     // Per-process /proc files are captured now: generating them takes the scheduler and
     // descriptor table locks, which reads run under
@@ -994,6 +1021,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         if wants_write && matches!(super::fs::match_pseudo_path(&abs), Some(super::fs::PseudoFile::CgroupProcs(_))) && creds().euid != 0 {
             return Err(EACCES);
         }
+        let abs_shown = abs.clone();
         return install(
             FileDescriptor::File {
                 path: abs,
@@ -1001,6 +1029,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 readable: acc != O_WRONLY,
                 writable: acc != O_RDONLY,
                 append: false,
+                shown: Some(raw).filter(|r| *r != abs_shown),
             },
             flags,
         );
@@ -1008,6 +1037,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
 
     let c = creds();
     let follow = flags & O_NOFOLLOW == 0;
+    // A file this call creates opens with the access asked for, whatever its new mode says
+    // (creat(path, 0444) returns a writable descriptor)
+    let mut created = false;
     let ino = if flags & O_CREAT != 0 {
         match resolve(base, path, follow) {
             Ok(ino) => {
@@ -1018,11 +1050,16 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             }
             Err(ENOENT) => {
                 let (parent, name) = resolve_parent(base, path)?;
+                let ro = super::mount::check_write();
+                if ro != 0 {
+                    return Err(ro);
+                }
                 let pattr = ZfsClient::getattr(parent)?;
                 if !may_access(&pattr, c.euid, c.egid, 2 | 1) {
                     return Err(EACCES);
                 }
                 let perm = mode & 0o7777 & !umask();
+                created = true;
                 crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?
             }
             Err(e) => return Err(e),
@@ -1042,7 +1079,14 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     if ftype == S_IFDIR && acc != O_RDONLY {
         return Err(EISDIR);
     }
-    if flags & O_PATH == 0 {
+    if wants_write && flags & O_PATH == 0 && (ftype == S_IFREG || ftype == S_IFDIR) {
+        // A read-only mount (mount namespaces)
+        let ro = super::mount::check_write();
+        if ro != 0 {
+            return Err(ro);
+        }
+    }
+    if flags & O_PATH == 0 && !created {
         let want = match acc {
             O_RDONLY => 4,
             O_WRONLY => 2,
@@ -1069,6 +1113,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 readable: acc != O_WRONLY,
                 writable: acc != O_RDONLY,
                 append: false,
+                shown: None,
             },
             flags,
         );
@@ -1077,7 +1122,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         ZfsClient::setattr(ino, SetAttr { size: Some(0), ..SetAttr::default() })?;
     }
     let keep = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
-    install(FileDescriptor::Vnode(OpenFile::new(ino, keep, abs)), flags)
+    let file = OpenFile::new(ino, keep, abs);
+    file.lock().mnt = super::mount::last_mount();
+    install(FileDescriptor::Vnode(file), flags)
 }
 
 /// Installs a new file descriptor into the calling process's descriptor table.
@@ -1366,6 +1413,51 @@ fn gone_proc_pid(abs: &str) -> bool {
         .is_some_and(|pid| !super::proc::process_exists(super::ns::pid_from_caller(pid)))
 }
 
+/// Normalizes an absolute path lexically (`.`, `..`, repeated `/`).
+fn normalize_path(p: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in p.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() { String::from("/") } else { alloc::format!("/{}", parts.join("/")) }
+}
+
+/// Paths console descriptors were opened by when that was not the console's own path
+/// (a mount namespace's bind of `/dev/tty`), by (process, descriptor): what
+/// `/proc/self/fd/N` shows for them.
+static CONSOLE_SHOWN: Mutex<alloc::collections::BTreeMap<(u64, usize), String>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Whether Hydra serves `abs` by name (a `/proc` file, a device such as `/dev/null`, a
+/// terminal) rather than from the pool.
+pub(crate) fn served_by_name(abs: &str) -> bool {
+    is_pseudo(abs) || super::pty::stat_path(abs).is_some() || is_console_path(abs) || abs == "/dev/tty"
+}
+
+/// The path a by-name file descriptor named by `/proc/self/fd/N` was opened at (pool files
+/// are found by [`magic_fd_target`]).
+pub(crate) fn open_file_path(abs: &str) -> Option<String> {
+    let fd = own_fd_number(abs)?;
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(FileDescriptor::File { path, .. }) => Some(path.clone()),
+        _ => None,
+    })
+}
+
+/// The open directory or file a `/proc/self/fd/N` path names, as `(inode, mount, path)`
+/// (`mount` and `umount2` accept such paths, as bubblewrap passes them).
+pub(crate) fn magic_fd_target(abs: &str) -> Option<(u64, usize, String)> {
+    let fd = own_fd_number(abs)?;
+    let f = fd_vnode(fd)?;
+    let f = f.lock();
+    Some((f.ino, f.mnt, f.path.clone()))
+}
+
 /// The descriptor number named by `/proc/self/fd/N` (or `/proc/<own pid>/fd/N`, or
 /// `/dev/fd/N`) if it is open.
 ///
@@ -1403,8 +1495,11 @@ fn fd_link(abs: &str) -> Option<String> {
     Some(match desc {
         FileDescriptor::Pty(p) => p.path(),
         FileDescriptor::Vnode(f) => f.lock().path.clone(),
-        FileDescriptor::File { path, .. } => path,
-        FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => String::from("/dev/tty1"),
+        FileDescriptor::File { path, shown, .. } => shown.unwrap_or(path),
+        FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {
+            let pid = super::proc::current_ids().1;
+            CONSOLE_SHOWN.lock().get(&(pid, fd)).cloned().unwrap_or_else(|| String::from("/dev/tty1"))
+        }
         FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) => {
             alloc::format!("pipe:[{}]", Arc::as_ptr(&p) as usize as u64 & 0xFFFF_FFFF)
         }
@@ -1482,6 +1577,10 @@ fn with_parent(dirfd: i64, path_ptr: u64, create: bool, f: impl FnOnce(u64, &[u8
         let path = user_path(path_ptr)?;
         let (base, _) = base_dir(dirfd, &path)?;
         let (parent, name) = resolve_parent(base, &path)?;
+        let ro = super::mount::check_write();
+        if ro != 0 {
+            return Err(ro);
+        }
         let c = creds();
         let pattr = ZfsClient::getattr(parent)?;
         if !pattr.is_dir() {
@@ -1612,7 +1711,12 @@ fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetA
             if is_pseudo(&abs) {
                 return Ok(0);
             }
-            resolve(base, &path, follow)?
+            let ino = resolve(base, &path, follow)?;
+            let ro = super::mount::check_write();
+            if ro != 0 {
+                return Err(ro);
+            }
+            ino
         };
         let attr = ZfsClient::getattr(ino)?;
         if !check(&attr, &creds()) {
@@ -1804,8 +1908,10 @@ fn sys_chroot(ptr: u64) -> i64 {
             Err(e) => return e,
         }
     };
+    let root_mnt = if root == EMPTY_ROOT { 0 } else { super::mount::last_mount() };
     let set = |fds: &mut crate::fs::FdTable| {
         fds.root_ino = root;
+        fds.root_mnt = root_mnt;
         if root == EMPTY_ROOT {
             // Nothing outside it stays reachable through the working directory either
             fds.cwd_ino = EMPTY_ROOT;
@@ -1890,7 +1996,22 @@ fn dir_path(ino: u64) -> Result<String, i64> {
 ///
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
+#[allow(dead_code)]
 fn chdir_to(ino: u64) -> i64 {
+    chdir_path(ino, None)
+}
+
+/// [`chdir_to`], with the path the caller named it by: in a mount namespace of its own the
+/// working directory's path is that one (a mounted tree's directories have no path in the
+/// pool that leads back to the process root).
+///
+/// # Arguments
+/// * `ino` - Target directory inode number.
+/// * `lexical` - The absolute path it was reached by, if known.
+///
+/// # Returns
+/// `0` on success, or a negative Linux error code on failure.
+fn chdir_path(ino: u64, lexical: Option<String>) -> i64 {
     let attr = match ZfsClient::getattr(ino) {
         Ok(a) => a,
         Err(e) => return e,
@@ -1902,13 +2023,19 @@ fn chdir_to(ino: u64) -> i64 {
     if !may_access(&attr, c.euid, c.egid, 1) {
         return EACCES;
     }
-    let path = match dir_path(ino) {
-        Ok(p) => p,
-        Err(e) => return e,
+    let mounted = super::mount::last_mount() != 0;
+    let path = match (mounted, lexical) {
+        (true, Some(l)) => normalize_path(&l),
+        _ => match dir_path(ino) {
+            Ok(p) => p,
+            Err(e) => return e,
+        },
     };
+    let mnt = super::mount::last_mount();
     crate::task::with_current_fds_mut(|fds| {
         fds.cwd_ino = ino;
         fds.cwd_path = path;
+        fds.cwd_mnt = mnt;
     });
     0
 }
@@ -2631,8 +2758,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let _ = ZfsClient::sync();
             0
         }
-        NR_STATFS => match user_path(a[0]).and_then(|p| base_dir(AT_FDCWD, &p).map(|(_, base)| join_path(&base, &p))) {
-            Ok(abs) => statfs_out(a[1], fs_magic(&abs)),
+        NR_STATFS => match user_path(a[0]).and_then(|p| base_dir(AT_FDCWD, &p).map(|(b, base)| (b, join_path(&base, &p), p))) {
+            Ok((b, abs, p)) => {
+                let mut magic = fs_magic(&abs);
+                // A tmpfs mount (mount namespaces)
+                if magic == ZFS_SUPER_MAGIC && resolve(b, &p, true).is_ok() && super::mount::last_is_tmpfs() {
+                    magic = 0x0102_1994;
+                }
+                statfs_out(a[1], magic)
+            }
             Err(e) => e,
         },
         NR_FSTATFS => {
@@ -2667,16 +2801,26 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             Err(e) => e,
         },
         NR_CHDIR => match user_path(a[0]).and_then(|p| {
-            let (base, _) = base_dir(AT_FDCWD, &p)?;
-            resolve(base, &p, true)
+            let (base, base_path) = base_dir(AT_FDCWD, &p)?;
+            let ino = resolve(base, &p, true)?;
+            Ok((ino, join_path(&base_path, &p)))
         }) {
-            Ok(ino) => chdir_to(ino),
+            Ok((ino, lexical)) => chdir_path(ino, Some(lexical)),
             Err(e) => e,
         },
         NR_FCHDIR => match fd_vnode(a[0] as i32) {
             Some(f) => {
-                let ino = f.lock().ino;
-                chdir_to(ino)
+                let (ino, mnt) = {
+                    let f = f.lock();
+                    (f.ino, f.mnt)
+                };
+                super::mount::note_base(mnt);
+                let lexical = f.lock().path.clone();
+                let r = chdir_path(ino, Some(lexical));
+                if r == 0 && mnt != 0 {
+                    crate::task::with_current_fds_mut(|fds| fds.cwd_mnt = mnt);
+                }
+                r
             }
             None => -EBADF,
         },

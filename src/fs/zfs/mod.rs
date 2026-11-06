@@ -217,6 +217,49 @@ impl ZfsServer {
         .map(|r| r.0)
     }
 
+    /// Resolves `path` through a mount table (see [`FS_RESOLVE_MNT`]).
+    ///
+    /// # Arguments
+    /// * `root`, `root_mnt` - Root directory and the mount (1-based, 0 = none) it lies in.
+    /// * `base`, `base_mnt` - Starting directory and its mount.
+    /// * `path` - Path byte slice.
+    /// * `follow_last` - Whether to follow a symbolic link in the last component.
+    /// * `mounts` - `(mountpoint, mounted root, parent mount)` per mount.
+    ///
+    /// # Returns
+    ///
+    /// The object ID and the mount it lies in, or a negative errno.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_mnt(
+        &mut self,
+        root: u64,
+        root_mnt: usize,
+        base: u64,
+        base_mnt: usize,
+        path: &[u8],
+        follow_last: bool,
+        mounts: &[(u64, u64, usize)],
+    ) -> Result<(u64, usize), i64> {
+        if path.len() > 4096 {
+            return Err(ENAMETOOLONG);
+        }
+        self.request(FS_RESOLVE_MNT, |w| {
+            w.u64(root);
+            w.u64(root_mnt as u64);
+            w.u64(base);
+            w.u64(base_mnt as u64);
+            w.u64(follow_last as u64);
+            w.bytes(path);
+            w.u64(mounts.len() as u64);
+            for m in mounts {
+                w.u64(m.0);
+                w.u64(m.1);
+                w.u64(m.2 as u64);
+            }
+        })
+        .map(|r| (r.0 & ((1u64 << MNT_SHIFT) - 1), (r.0 >> MNT_SHIFT) as usize))
+    }
+
     /// Attributes of `ino`.
     ///
     /// # Arguments
