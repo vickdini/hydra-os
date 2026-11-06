@@ -396,6 +396,11 @@ pub fn setgroups_denied() -> bool {
     current_ns().user.is_some_and(|u| u.setgroups_deny.load(Ordering::Relaxed))
 }
 
+/// The calling process's IPC namespace (0: the initial one), which scopes System V IPC.
+pub fn ipc_ns() -> u64 {
+    current_ns().ipc
+}
+
 /// Whether the calling process is in a network namespace of its own (which has no
 /// network).
 pub fn net_isolated() -> bool {

@@ -32,6 +32,7 @@ pub mod select;
 pub mod signalfd;
 pub mod socket;
 pub mod syscalls;
+pub mod sysv;
 pub mod timerfd;
 pub mod tty;
 pub mod types;
@@ -140,6 +141,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // rt_sigqueueinfo, rt_tgsigqueueinfo
         129 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, None, arg1, arg2),
         297 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, Some(arg1 as u32 as u64), arg2, arg3),
+        // System V IPC: shmget shmat shmctl semget semop semctl shmdt msgget msgsnd msgrcv
+        // msgctl semtimedop
+        29..=31 | 64..=71 | 220 => {
+            if let Some(r) = sysv::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
+                return r;
+            }
+        }
         222..=226 => {
             if let Some(r) = ptimer::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
@@ -2066,6 +2074,10 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         Err(_) => return -ENOMEM,
     };
     ns::after_clone(child, args[0]);
+    if args[0] & (types::CLONE_VM | types::CLONE_THREAD) == 0 {
+        // The copied address space keeps the shared memory attachments
+        sysv::on_fork(proc::current_ids().1, child);
+    }
     if args[0] & (types::CLONE_FS | types::CLONE_FILES | types::CLONE_THREAD) == types::CLONE_FS {
         // Shares our root and working directory, which live in the descriptor table
         proc::set_fs_peer(child, proc::current_ids().1);

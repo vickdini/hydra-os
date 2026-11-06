@@ -417,6 +417,7 @@ pub fn thread_exited(pid: u64, tid: u64) {
     }
     super::misc::forget_process(pid);
     super::ptimer::forget_process(pid);
+    super::sysv::forget_process(pid, true);
     // The init of a PID namespace takes the namespace with it
     if procs.get(&pid).is_some_and(|p| p.ns.pid_inits.last() == Some(&pid)) {
         let members: Vec<u64> = procs.values().filter(|q| q.pid != pid && !q.zombie && q.ns.pid_inits.contains(&pid)).map(|q| q.pid).collect();
@@ -721,6 +722,7 @@ pub fn reset_handlers(pid: u64) {
 pub fn exec_reset(pid: u64) {
     super::misc::forget_process(pid);
     super::ptimer::forget_process(pid);
+    super::sysv::forget_process(pid, false);
     if let Some(p) = PROCS.lock().get_mut(&pid) {
         for a in p.actions.iter_mut() {
             if a.handler != SIG_IGN {

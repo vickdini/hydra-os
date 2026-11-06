@@ -108,6 +108,14 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/fs/inotify/max_user_watches" => Some(PseudoFile::ProcStatic(b"1048576\n")),
         "/proc/sys/fs/inotify/max_user_instances" => Some(PseudoFile::ProcStatic(b"1024\n")),
         "/proc/sys/fs/inotify/max_queued_events" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        // System V IPC limits (see super::sysv)
+        "/proc/sys/kernel/shmmax" => Some(PseudoFile::ProcStatic(b"1099511627776\n")),
+        "/proc/sys/kernel/shmall" => Some(PseudoFile::ProcStatic(b"268435456\n")),
+        "/proc/sys/kernel/shmmni" => Some(PseudoFile::ProcStatic(b"4096\n")),
+        "/proc/sys/kernel/sem" => Some(PseudoFile::ProcStatic(b"32000\t1024000000\t500\t32000\n")),
+        "/proc/sys/kernel/msgmax" => Some(PseudoFile::ProcStatic(b"8192\n")),
+        "/proc/sys/kernel/msgmnb" => Some(PseudoFile::ProcStatic(b"16384\n")),
+        "/proc/sys/kernel/msgmni" => Some(PseudoFile::ProcStatic(b"32000\n")),
         // Yama mode 3 ("no attach"): true of Hydra, which has no ptrace at all
         "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
         // /proc/<pid>/oom_score_adj and oom_score: off for now. With them, sandboxed Brave
