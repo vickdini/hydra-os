@@ -88,7 +88,7 @@ const MIN_SNDBUF: u32 = 4608;
 const MIN_RCVBUF: u32 = 2304;
 
 /// The options of one socket.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Options {
     vals: BTreeMap<(u32, u32), Vec<u8>>,
     /// `SO_RCVTIMEO` / `SO_SNDTIMEO` in nanoseconds (0: none).
@@ -98,6 +98,8 @@ pub struct Options {
 
 /// What `getsockopt` needs to know about the socket itself.
 pub struct SockInfo {
+    /// The socket listens (`SO_ACCEPTCONN`).
+    pub listening: bool,
     /// A TCP socket (else UDP).
     pub stream: bool,
     /// Connected (TCP past the handshake, or UDP with a default peer).
@@ -158,6 +160,11 @@ fn known(level: u32, name: u32, stream: bool) -> bool {
 }
 
 impl Options {
+    /// Whether boolean option `name` at `level` is set.
+    pub fn flag(&self, level: u32, name: u32) -> bool {
+        self.vals.get(&(level, name)).is_some_and(|v| v.iter().any(|&b| b != 0))
+    }
+
     /// Receive timeout in nanoseconds (`SO_RCVTIMEO`), if any.
     pub fn rcv_timeout(&self) -> Option<u64> {
         (self.rcvtimeo != 0).then_some(self.rcvtimeo)
@@ -359,7 +366,7 @@ impl Options {
             (SOL_SOCKET, SO_ERROR) => i(-info.error as i32),
             (SOL_SOCKET, SO_DOMAIN) => i(2),
             (SOL_SOCKET, SO_PROTOCOL) => i(if info.stream { 6 } else { 17 }),
-            (SOL_SOCKET, SO_ACCEPTCONN) => i(0),
+            (SOL_SOCKET, SO_ACCEPTCONN) => i(info.listening as i32),
             (SOL_SOCKET, SO_SNDBUF) => i(if info.stream { 16_384 } else { BUF_MAX as i32 }),
             (SOL_SOCKET, SO_RCVBUF) => i(if info.stream { 131_072 } else { BUF_MAX as i32 }),
             (SOL_SOCKET, SO_RCVLOWAT | SO_SNDLOWAT) => i(1),

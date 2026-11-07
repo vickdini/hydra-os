@@ -81,6 +81,8 @@ const ENOTCONN: i64 = -107;
 const EALREADY: i64 = -114;
 /// Negative errno for non-blocking `connect` initiated asynchronously.
 const EINPROGRESS: i64 = -115;
+/// Negative errno for `bind` to an address that is not ours.
+const EADDRNOTAVAIL: i64 = -99;
 /// Negative errno for write on a broken TCP connection (`SIGPIPE` is also posted unless `MSG_NOSIGNAL`).
 const EPIPE: i64 = -32;
 
@@ -109,10 +111,22 @@ pub struct InetSocket {
     shut_rd: bool,
     /// Socket options (`setsockopt`).
     opts: super::sockopt::Options,
+    /// Local address given to `bind` (`0.0.0.0`: all of ours).
+    bound_ip: [u8; 4],
+    /// TCP port reservation made by `bind` (or by `listen` without one).
+    bind_id: Option<u32>,
+    /// Listener handle once `listen` was called.
+    listener: Option<u32>,
 }
 
 impl Drop for InetSocket {
     fn drop(&mut self) {
+        if let Some(id) = self.listener {
+            stack::tcp_unlisten(id);
+        }
+        if let Some(id) = self.bind_id {
+            stack::tcp_unbind(id);
+        }
         if let Some(id) = self.tcp {
             stack::tcp_close(id);
         }
@@ -133,7 +147,7 @@ impl InetSocket {
         if !self.stream && self.udp.is_none() {
             let _ = self.udp_id();
         }
-        self.tcp.or(self.udp).and_then(stack::wait_queue)
+        self.tcp.or(self.listener).or(self.udp).and_then(stack::wait_queue)
     }
 
     /// Evaluates current `poll` / `select` / `epoll` readiness bitmask (`POLLIN = 0x1`,
@@ -143,6 +157,10 @@ impl InetSocket {
     ///
     /// Bitmask of poll readiness flags.
     pub fn poll_events(&self) -> u32 {
+        if let Some(id) = self.listener {
+            // A listening socket is readable when a connection waits to be accepted
+            return stack::tcp_acceptable(id) as u32;
+        }
         if let Some(id) = self.tcp {
             let (r, w, hup, err) = stack::tcp_poll(id);
             return (r as u32) | (w as u32) << 2 | (err as u32) << 3 | (hup as u32) << 4;
@@ -346,6 +364,9 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
             s.peer = dest;
             return 0;
         }
+        if s.listener.is_some() {
+            return EISCONN;
+        }
         (s.nonblock, s.opts.snd_timeout())
     };
     let (ip, port) = match dest {
@@ -393,6 +414,90 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Err(EAGAIN) => EINPROGRESS,
         Err(e) => e,
     }
+}
+
+/// `listen(backlog)`: a bound (or automatically bound) TCP socket starts accepting
+/// connections; a second call changes the backlog.
+fn listen(sock: &Arc<Mutex<InetSocket>>, backlog: u64) -> i64 {
+    let mut s = sock.lock();
+    if !s.stream {
+        return EOPNOTSUPP;
+    }
+    if s.tcp.is_some() {
+        return EINVAL;
+    }
+    // Linux caps the backlog at net.core.somaxconn (4096); a negative one means the cap
+    let b = backlog as i32;
+    let backlog = if !(0..=4096).contains(&b) { 4096 } else { b as usize };
+    if let Some(id) = s.listener {
+        stack::tcp_set_backlog(id, backlog);
+        return 0;
+    }
+    let bind = match s.bind_id {
+        Some(b) => b,
+        None => match stack::tcp_bind([0; 4], 0, false, false) {
+            Ok((id, port)) => {
+                s.bind_id = Some(id);
+                s.bound_port = port;
+                id
+            }
+            Err(e) => return e,
+        },
+    };
+    match stack::tcp_listen(bind, backlog) {
+        Ok(id) => {
+            s.listener = Some(id);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// `accept(addr, addrlen)` / `accept4(..., flags)`: waits for a connection on a listening
+/// socket and returns a descriptor for it. The new socket inherits the listener's options.
+fn accept(sock: &Arc<Mutex<InetSocket>>, addr: u64, addrlen: u64, flags: u64) -> i64 {
+    if flags & !((SOCK_NONBLOCK | SOCK_CLOEXEC) as u64) != 0 {
+        return EINVAL;
+    }
+    let (lid, nonblock, timeout, opts) = {
+        let s = sock.lock();
+        match s.listener {
+            Some(l) => (l, s.nonblock, s.opts.rcv_timeout(), s.opts.clone()),
+            None => return EINVAL,
+        }
+    };
+    let cid = match wait_for(lid, nonblock, timeout, || stack::tcp_accept(lid).map(Ok)) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let (lport, rip, rport) = stack::tcp_endpoints(cid).unwrap_or((0, [0; 4], 0));
+    let conn = InetSocket {
+        stream: true,
+        nonblock: flags & SOCK_NONBLOCK as u64 != 0,
+        tcp: Some(cid),
+        udp: None,
+        bound_port: lport,
+        peer: None,
+        shut_rd: false,
+        opts,
+        bound_ip: stack::tcp_local_ip(cid).unwrap_or([0; 4]),
+        bind_id: None,
+        listener: None,
+    };
+    let cloexec = flags & SOCK_CLOEXEC as u64 != 0;
+    let fd = crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(Arc::new(Mutex::new(conn)))) {
+        Ok(fd) => {
+            fds.set_cloexec(fd, cloexec);
+            fd as i64
+        }
+        Err(_) => EMFILE,
+    });
+    if fd >= 0 && addr != 0 {
+        if let Err(e) = write_sockaddr(addr, addrlen, rip, rport) {
+            return e;
+        }
+    }
+    fd
 }
 
 /// Transmits `data` over a TCP stream or UDP datagram socket.
@@ -700,6 +805,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             peer: None,
             shut_rd: false,
             opts: Default::default(),
+            bound_ip: [0; 4],
+            bind_id: None,
+            listener: None,
         };
         if !stream {
             let _ = sock.udp_id();
@@ -723,14 +831,33 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         49 => {
             // bind: remember the local port (address must be ours or INADDR_ANY)
             match read_sockaddr(a[1], a[2]) {
-                Ok(Some((_, port))) => {
+                Ok(Some((ip, port))) => {
                     let mut s = sock.lock();
                     if s.stream && super::landlock::check_port(port, super::landlock::BIND_TCP).is_err() {
                         return Some(EACCES);
                     }
+                    if ip != [0; 4] && !stack::is_local(ip) {
+                        return Some(EADDRNOTAVAIL);
+                    }
+                    // Ports below 1024 need CAP_NET_BIND_SERVICE
+                    if port != 0 && port < 1024 && !crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 10) != 0).unwrap_or(false) {
+                        return Some(EACCES);
+                    }
                     if s.stream {
-                        s.bound_port = port;
-                        0
+                        if s.bind_id.is_some() || s.tcp.is_some() || s.listener.is_some() {
+                            return Some(EINVAL);
+                        }
+                        let ra = s.opts.flag(1, 2); // SO_REUSEADDR
+                        let rp = s.opts.flag(1, 15); // SO_REUSEPORT
+                        match stack::tcp_bind(ip, port, ra, rp) {
+                            Ok((id, p)) => {
+                                s.bind_id = Some(id);
+                                s.bound_port = p;
+                                s.bound_ip = ip;
+                                0
+                            }
+                            Err(e) => e,
+                        }
                     } else if s.udp.is_some() {
                         EINVAL
                     } else {
@@ -747,7 +874,8 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 Err(e) => e,
             }
         }
-        50 | 43 | 288 => EOPNOTSUPP, // listen/accept: server sockets are not supported yet
+        50 => listen(&sock, a[1]),
+        43 | 288 => accept(&sock, a[1], a[2], if num == 288 { a[3] } else { 0 }),
         44 => {
             // sendto(fd, buf, len, flags, dest, addrlen)
             let data = match copy_in(a[1], a[2] as usize) {
@@ -831,9 +959,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let me = crate::net::GLOBAL_INTERFACE.lock().ip();
             let (ip, port) = if num == 51 {
                 match (s.tcp.and_then(stack::tcp_endpoints), s.udp) {
-                    (Some((lp, _, _)), _) => (me, lp),
-                    (None, Some(id)) => (me, stack::udp_port(id)),
-                    _ => ([0; 4], s.bound_port),
+                    (Some((lp, _, _)), _) => (s.tcp.and_then(stack::tcp_local_ip).unwrap_or(me), lp),
+                    (None, Some(id)) => (if s.bound_ip != [0; 4] { s.bound_ip } else { me }, stack::udp_port(id)),
+                    _ => (s.bound_ip, s.bound_port),
                 }
             } else {
                 match (s.tcp.and_then(stack::tcp_endpoints), s.peer) {
@@ -874,12 +1002,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 let s = sock.lock();
                 let state = s.tcp.map(stack::tcp_state);
                 let info = super::sockopt::SockInfo {
+                    listening: s.listener.is_some(),
                     stream: s.stream,
                     connected: matches!(state, Some(st) if st != stack::TcpState::SynSent && st != stack::TcpState::Closed) || s.peer.is_some(),
                     error: if a[1] == 1 && a[2] == 4 { s.tcp.and_then(stack::tcp_take_error).unwrap_or(0) } else { 0 },
                     tcp_state: match state {
                         Some(stack::TcpState::Established) => 1,
                         Some(stack::TcpState::SynSent) => 2,
+                        Some(stack::TcpState::SynReceived) => 3,
                         Some(stack::TcpState::FinWait1) => 4,
                         Some(stack::TcpState::FinWait2) => 5,
                         Some(stack::TcpState::TimeWait) => 6,

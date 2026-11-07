@@ -72,8 +72,11 @@ static int child_can_lock_all(void) {
     return lk(fd, F_SETLK, F_WRLCK, 0, 0) == 0 ? 0 : 1;
 }
 
+static int sync_fd = -1;
+
 static int child_waits(void) {
     int fd = open(path, O_RDWR);
+    write(sync_fd, "w", 1);  // about to block
     long t0 = now_ms();
     if (lk(fd, F_SETLKW, F_WRLCK, 0, 0) != 0) return 1;
     return now_ms() - t0 >= 50 ? 0 : 2;
@@ -115,16 +118,20 @@ int main(void) {
     int c2 = open(path, O_RDONLY);
     check(flock(c2, LOCK_SH | LOCK_NB) == 0, "two shared locks together");
     flock(c2, LOCK_UN);
-    // A blocking flock waits for the holder
+    // A blocking flock waits for the holder (which says when it has the lock)
+    int sp[2];
+    pipe(sp);
+    flock(b, LOCK_UN);
     pid_t h = fork();
     if (h == 0) {
         int x = open(path, O_RDWR);
         flock(x, LOCK_EX);
+        write(sp[1], "l", 1);
         usleep(150000);
         _exit(0);
     }
-    flock(b, LOCK_UN);
-    usleep(50000);
+    char sc;
+    read(sp[0], &sc, 1);
     long t0 = now_ms();
     int r = flock(b, LOCK_EX);
     check(r == 0 && now_ms() - t0 >= 50, "blocking flock waits for the holder to go");
@@ -143,8 +150,10 @@ int main(void) {
     check(in_child(child_can_lock_all) == 0, "closing any descriptor of the file releases our POSIX locks");
     // F_SETLKW waits
     lk(fd, F_SETLK, F_WRLCK, 0, 0);
+    sync_fd = sp[1];
     h = fork();
     if (h == 0) _exit(child_waits());
+    read(sp[0], &sc, 1);
     usleep(100000);
     lk(fd, F_SETLK, F_UNLCK, 0, 0);
     int st;

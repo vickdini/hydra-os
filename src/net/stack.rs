@@ -82,6 +82,8 @@ const EPHEMERAL_FIRST: u16 = 49152;
 pub enum TcpState {
     /// `SYN` sent; waiting for a matching `SYN-ACK` from the remote peer.
     SynSent,
+    /// `SYN` received on a listening port and `SYN-ACK` sent; waiting for the final `ACK`.
+    SynReceived,
     /// Connection established; bidirectional data transfer active.
     Established,
     /// Application closed writing and sent `FIN`; waiting for `ACK` or peer `FIN`.
@@ -102,6 +104,8 @@ pub enum TcpState {
 
 /// Internal TCP connection control block (TCB).
 struct TcpConn {
+    /// Local IPv4 address (our interface's, or a loopback address).
+    local_ip: [u8; 4],
     /// Bound local 16-bit TCP port.
     local_port: u16,
     /// Remote peer 4-byte IPv4 address.
@@ -142,6 +146,40 @@ struct TcpConn {
     error: Option<i64>,
     /// Tasks waiting for this connection to change state (data, space, close, error).
     wq: Arc<WaitQueue>,
+    /// The listener this passively opened connection belongs to until it is accepted.
+    listener: Option<u32>,
+    /// Its port was bound with `SO_REUSEADDR` (inherited from the listener).
+    reuse_addr: bool,
+}
+
+/// A listening TCP port.
+struct Listener {
+    /// Address listened on (`0.0.0.0`: any).
+    ip: [u8; 4],
+    /// Port listened on.
+    port: u16,
+    /// Most connections waiting (handshaking or to be accepted).
+    backlog: usize,
+    /// Established connections not yet accepted.
+    queue: VecDeque<u32>,
+    /// Woken when a connection is ready to accept.
+    wq: Arc<WaitQueue>,
+    /// Bound with `SO_REUSEADDR` (passed on to its connections).
+    reuse_addr: bool,
+}
+
+/// A TCP port reservation made by `bind`.
+struct Bind {
+    /// Address (`0.0.0.0`: all of ours).
+    ip: [u8; 4],
+    /// Port.
+    port: u16,
+    /// `SO_REUSEADDR` was set.
+    reuse_addr: bool,
+    /// `SO_REUSEPORT` was set.
+    reuse_port: bool,
+    /// The socket listens.
+    listening: bool,
 }
 
 /// Internal UDP socket state and receive queue.
@@ -158,6 +196,10 @@ struct UdpSock {
 struct Stack {
     /// Map of TCP connection handle ID to [`TcpConn`].
     tcp: BTreeMap<u32, TcpConn>,
+    /// Listening ports by handle ID.
+    listeners: BTreeMap<u32, Listener>,
+    /// TCP port reservations by handle ID.
+    binds: BTreeMap<u32, Bind>,
     /// Map of UDP socket handle ID to [`UdpSock`].
     udp: BTreeMap<u32, UdpSock>,
     /// Next monotonically increasing socket handle ID.
@@ -169,6 +211,8 @@ struct Stack {
 /// Global spinlock-protected TCP/UDP transport state.
 static STACK: Mutex<Stack> = Mutex::new(Stack {
     tcp: BTreeMap::new(),
+    listeners: BTreeMap::new(),
+    binds: BTreeMap::new(),
     udp: BTreeMap::new(),
     next_id: 1,
     next_port: EPHEMERAL_FIRST,
@@ -238,7 +282,17 @@ pub fn is_up() -> bool {
 /// * `dst` - Destination 4-byte IPv4 address.
 /// * `proto` - Transport protocol discriminator.
 /// * `payload` - Packet payload byte slice.
-fn send_ip(dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
+fn send_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
+    if is_local(dst) {
+        // Loopback: delivered by the next poll (the network task, woken here)
+        let mut q = LOOPBACK.lock();
+        if q.len() < 4096 {
+            q.push_back((src, dst, proto, payload.to_vec()));
+        }
+        drop(q);
+        NET_WQ.wake_all();
+        return;
+    }
     let mut iface = GLOBAL_INTERFACE.lock();
     if iface.ip() == [0, 0, 0, 0] && e1000::is_present() {
         drop(iface);
@@ -246,6 +300,19 @@ fn send_ip(dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
         iface = GLOBAL_INTERFACE.lock();
     }
     let _ = iface.send_ipv4(dst, proto, payload);
+}
+
+/// Packets sent to ourselves, waiting to be received: `(src, dst, protocol, payload)`.
+static LOOPBACK: Mutex<VecDeque<([u8; 4], [u8; 4], IpProtocol, Vec<u8>)>> = Mutex::new(VecDeque::new());
+
+/// Whether `ip` is one of ours: `127.0.0.0/8` or the interface's address.
+pub fn is_local(ip: [u8; 4]) -> bool {
+    ip[0] == 127 || (ip != [0, 0, 0, 0] && ip == GLOBAL_INTERFACE.lock().ip())
+}
+
+/// The source address for packets to `dst`: the loopback address for `127.0.0.0/8`.
+fn source_for(dst: [u8; 4]) -> [u8; 4] {
+    if dst[0] == 127 { [127, 0, 0, 1] } else { local_ip() }
 }
 
 impl Stack {
@@ -258,7 +325,9 @@ impl Stack {
         loop {
             let p = self.next_port;
             self.next_port = if self.next_port == u16::MAX { EPHEMERAL_FIRST } else { self.next_port + 1 };
-            let used = self.tcp.values().any(|c| c.local_port == p) || self.udp.values().any(|u| u.local_port == p);
+            let used = self.tcp.values().any(|c| c.local_port == p)
+                || self.udp.values().any(|u| u.local_port == p)
+                || self.binds.values().any(|b| b.port == p);
             if !used {
                 return p;
             }
@@ -295,7 +364,7 @@ impl TcpConn {
     /// * `payload` - Segment payload byte slice.
     fn send_segment(&mut self, flags: u8, seq: u32, payload: &[u8]) {
         let mut buf = [0u8; 20 + MSS];
-        let src = local_ip();
+        let src = self.local_ip;
         if let Ok(n) = TcpPacket::serialize(
             src,
             self.remote_ip,
@@ -308,7 +377,7 @@ impl TcpConn {
             payload,
             &mut buf,
         ) {
-            send_ip(self.remote_ip, IpProtocol::Tcp, &buf[..n]);
+            send_ip(src, self.remote_ip, IpProtocol::Tcp, &buf[..n]);
         }
     }
 
@@ -320,7 +389,7 @@ impl TcpConn {
 
     /// Sends as much buffered data as the peer's window allows, then a `FIN` if due.
     fn output(&mut self) {
-        if matches!(self.state, TcpState::SynSent | TcpState::Closed | TcpState::TimeWait) {
+        if matches!(self.state, TcpState::SynSent | TcpState::SynReceived | TcpState::Closed | TcpState::TimeWait) {
             return;
         }
         let window = (self.snd_wnd as usize).max(1).min(SEND_BUFFER);
@@ -375,6 +444,23 @@ impl TcpConn {
                 self.output();
             }
             return;
+        }
+        if self.state == TcpState::SynReceived {
+            if flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK == 0 {
+                // The peer did not get our SYN-ACK: send it again
+                let iss = self.iss;
+                self.send_segment(TcpFlags::SYN | TcpFlags::ACK, iss, &[]);
+                return;
+            }
+            if flags & TcpFlags::ACK == 0 || seg.ack_num != self.iss.wrapping_add(1) {
+                return;
+            }
+            // The handshake is done; the segment may carry data too
+            self.state = TcpState::Established;
+            self.snd_una = seg.ack_num;
+            self.snd_wnd = seg.window_size as u32;
+            self.rto = RTO_INITIAL_TICKS;
+            self.retries = 0;
         }
 
         // Acknowledgement of our data (and FIN)
@@ -434,7 +520,7 @@ impl TcpConn {
     ///
     /// `true` if retransmission timer is active, `false` otherwise.
     fn timer_armed(&self) -> bool {
-        self.snd_una != self.snd_nxt || self.state == TcpState::SynSent
+        self.snd_una != self.snd_nxt || matches!(self.state, TcpState::SynSent | TcpState::SynReceived)
     }
 
     /// Retransmits unacknowledged data when the RTO timer expires.
@@ -448,6 +534,9 @@ impl TcpConn {
         self.retries += 1;
         if self.retries > MAX_RETRIES {
             self.error = Some(ETIMEDOUT);
+            if self.state == TcpState::SynReceived {
+                self.detached = true; // never accepted: nobody holds it
+            }
             self.state = TcpState::Closed;
             return true;
         }
@@ -456,6 +545,11 @@ impl TcpConn {
         if self.state == TcpState::SynSent {
             let iss = self.iss;
             self.send_segment(TcpFlags::SYN, iss, &[]);
+            return false;
+        }
+        if self.state == TcpState::SynReceived {
+            let iss = self.iss;
+            self.send_segment(TcpFlags::SYN | TcpFlags::ACK, iss, &[]);
             return false;
         }
         // Go back N: resend everything from the oldest unacknowledged byte
@@ -490,26 +584,39 @@ static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
 /// # Returns
 /// `true` if the receive ring may still hold more frames after 256 iterations, or `false` if drained.
 pub fn poll() -> bool {
-    if !e1000::is_present() {
-        return false;
-    }
-    let mut frame = [0u8; 1518];
     let mut woken: Vec<Arc<WaitQueue>> = Vec::new();
-    let mut more = true;
-    for _ in 0..256 {
+    let mut more = false;
+    // Loopback packets first (answers they cause are queued behind them)
+    for i in 0..1024 {
+        let Some((src, dst, proto, payload)) = LOOPBACK.lock().pop_front() else { break };
+        for q in handle_ip(src, dst, proto, &payload) {
+            if !woken.iter().any(|w| Arc::ptr_eq(w, &q)) {
+                woken.push(q);
+            }
+        }
+        if i == 1023 {
+            more = true;
+        }
+    }
+    let nic = e1000::is_present();
+    let mut frame = [0u8; 1518];
+    let mut nic_more = nic;
+    for _ in 0..if nic { 256 } else { 0 } {
         let len = match e1000::receive_frame(&mut frame) {
             Some(l) => l,
             None => {
-                more = false;
+                nic_more = false;
                 break;
             }
         };
-        if let Some(q) = handle_frame(&frame[..len]) {
+        for q in handle_frame(&frame[..len]) {
             if !woken.iter().any(|w| Arc::ptr_eq(w, &q)) {
                 woken.push(q);
             }
         }
     }
+    more |= nic_more;
+    more |= !LOOPBACK.lock().is_empty();
     {
         let mut stack = STACK.lock();
         for c in stack.tcp.values_mut() {
@@ -551,6 +658,13 @@ fn timers_armed() -> bool {
     STACK.lock().tcp.values().any(|c| c.timer_armed())
 }
 
+/// Polls when there is no network task: loopback traffic still needs processing.
+fn poll_without_service() {
+    if !SERVICE_RUNNING.load(Ordering::Acquire) {
+        poll();
+    }
+}
+
 /// Starts the `netd` kernel task and switches the E1000 NIC to interrupt-driven receive.
 pub fn start_service() {
     if !e1000::is_present() || SERVICE_RUNNING.load(Ordering::Acquire) {
@@ -583,7 +697,12 @@ fn netd_main() {
 /// `Some(Arc<WaitQueue>)` if `id` refers to a live TCP or UDP endpoint, or `None` otherwise.
 pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
     let stack = STACK.lock();
-    stack.tcp.get(&id).map(|c| c.wq.clone()).or_else(|| stack.udp.get(&id).map(|u| u.wq.clone()))
+    stack
+        .tcp
+        .get(&id)
+        .map(|c| c.wq.clone())
+        .or_else(|| stack.udp.get(&id).map(|u| u.wq.clone()))
+        .or_else(|| stack.listeners.get(&id).map(|l| l.wq.clone()))
 }
 
 /// Parses and dispatches a single Ethernet frame; returns the wait queue of the socket it affected.
@@ -594,10 +713,10 @@ pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
 /// # Returns
 ///
 /// An optional wait queue reference to wake if a socket received data.
-fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
+fn handle_frame(raw: &[u8]) -> Vec<Arc<WaitQueue>> {
     let frame = match EthernetFrame::parse(raw) {
         Some(f) => f,
-        None => return None,
+        None => return Vec::new(),
     };
     let my_ip = local_ip();
     match frame.ethertype {
@@ -617,57 +736,124 @@ fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
             }
         }
         EtherType::Ipv4 => {
-            let ip = match Ipv4Packet::parse(frame.payload) {
-                Some(p) => p,
-                None => return None,
-            };
-            if ip.dst_ip != my_ip {
-                return None;
-            }
-            match ip.protocol {
-                IpProtocol::Tcp => {
-                    if let Some(seg) = TcpPacket::parse(ip.payload) {
-                        let mut stack = STACK.lock();
-                        let conn = stack.tcp.values_mut().find(|c| {
-                            c.local_port == seg.dst_port && c.remote_port == seg.src_port && c.remote_ip == ip.src_ip
-                        });
-                        match conn {
-                            Some(c) => {
-                                c.input(&seg);
-                                return Some(c.wq.clone());
-                            }
-                            None => {
-                                // No such connection: reset it (unless it is itself a reset)
-                                if seg.flags & TcpFlags::RST == 0 {
-                                    drop(stack);
-                                    send_reset(ip.src_ip, &seg);
-                                }
-                            }
-                        }
-                    }
+            if let Some(ip) = Ipv4Packet::parse(frame.payload) {
+                if ip.dst_ip == my_ip {
+                    return handle_ip(ip.src_ip, ip.dst_ip, ip.protocol, ip.payload);
                 }
-                IpProtocol::Udp => {
-                    let p = ip.payload;
-                    if p.len() < 8 {
-                        return None;
-                    }
-                    let src_port = u16::from_be_bytes([p[0], p[1]]);
-                    let dst_port = u16::from_be_bytes([p[2], p[3]]);
-                    let len = (u16::from_be_bytes([p[4], p[5]]) as usize).clamp(8, p.len());
-                    let mut stack = STACK.lock();
-                    if let Some(u) = stack.udp.values_mut().find(|u| u.local_port == dst_port) {
-                        if u.queue.len() < 64 {
-                            u.queue.push_back((ip.src_ip, src_port, p[8..len].to_vec()));
-                        }
-                        return Some(u.wq.clone());
-                    }
-                }
-                _ => {}
             }
         }
         _ => {}
     }
-    None
+    Vec::new()
+}
+
+/// Handles an IPv4 packet addressed to us (from the NIC or loopback); returns the wait
+/// queues of the sockets it affected.
+///
+/// # Arguments
+/// * `src`, `dst` - Source and destination addresses.
+/// * `proto` - Transport protocol.
+/// * `payload` - Transport segment or datagram.
+fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) -> Vec<Arc<WaitQueue>> {
+    let mut woken = Vec::new();
+    match proto {
+        IpProtocol::Tcp => {
+            let Some(seg) = TcpPacket::parse(payload) else { return woken };
+            let mut stack = STACK.lock();
+            let found = stack
+                .tcp
+                .iter()
+                .find(|(_, c)| {
+                    c.local_port == seg.dst_port && c.remote_port == seg.src_port && c.remote_ip == src && c.state != TcpState::Closed
+                })
+                .map(|(&id, _)| id);
+            if let Some(id) = found {
+                let c = stack.tcp.get_mut(&id).unwrap();
+                let was = c.state;
+                c.input(&seg);
+                woken.push(c.wq.clone());
+                // A passively opened connection finished its handshake: ready to accept
+                if was == TcpState::SynReceived && c.state != TcpState::SynReceived {
+                    if c.state == TcpState::Closed {
+                        c.detached = true;
+                    } else if let Some(lid) = c.listener {
+                        if let Some(l) = stack.listeners.get_mut(&lid) {
+                            l.queue.push_back(id);
+                            woken.push(l.wq.clone());
+                        }
+                    }
+                }
+                return woken;
+            }
+            // A new connection to a listening port
+            if seg.flags & TcpFlags::SYN != 0 && seg.flags & (TcpFlags::ACK | TcpFlags::RST) == 0 {
+                let listener = stack
+                    .listeners
+                    .iter()
+                    .find(|(_, l)| l.port == seg.dst_port && (l.ip == [0, 0, 0, 0] || l.ip == dst))
+                    .map(|(&id, l)| (id, l.backlog, l.reuse_addr));
+                if let Some((lid, backlog, reuse_addr)) = listener {
+                    let waiting = stack.tcp.values().filter(|c| c.listener == Some(lid)).count();
+                    if waiting >= backlog {
+                        return woken; // full: the peer retries its SYN
+                    }
+                    let id = stack.alloc_id();
+                    let iss = (now() as u32).wrapping_mul(2_654_435_761) ^ ((seg.src_port as u32) << 16) ^ id;
+                    let mut c = TcpConn {
+                        local_ip: dst,
+                        local_port: seg.dst_port,
+                        remote_ip: src,
+                        remote_port: seg.src_port,
+                        state: TcpState::SynReceived,
+                        iss,
+                        snd_una: iss,
+                        snd_nxt: iss.wrapping_add(1),
+                        snd_wnd: seg.window_size as u32,
+                        send_buf: VecDeque::new(),
+                        rcv_nxt: seg.seq_num.wrapping_add(1),
+                        recv_buf: VecDeque::new(),
+                        fin_received: false,
+                        fin_seq: None,
+                        write_closed: false,
+                        detached: false,
+                        last_send: now(),
+                        rto: RTO_INITIAL_TICKS,
+                        retries: 0,
+                        error: None,
+                        wq: WaitQueue::new_shared(),
+                        listener: Some(lid),
+                        reuse_addr,
+                    };
+                    c.send_segment(TcpFlags::SYN | TcpFlags::ACK, iss, &[]);
+                    stack.tcp.insert(id, c);
+                    return woken;
+                }
+            }
+            // No such connection: reset it (unless it is itself a reset)
+            if seg.flags & TcpFlags::RST == 0 {
+                drop(stack);
+                send_reset(dst, src, &seg);
+            }
+        }
+        IpProtocol::Udp => {
+            let p = payload;
+            if p.len() < 8 {
+                return woken;
+            }
+            let src_port = u16::from_be_bytes([p[0], p[1]]);
+            let dst_port = u16::from_be_bytes([p[2], p[3]]);
+            let len = (u16::from_be_bytes([p[4], p[5]]) as usize).clamp(8, p.len());
+            let mut stack = STACK.lock();
+            if let Some(u) = stack.udp.values_mut().find(|u| u.local_port == dst_port) {
+                if u.queue.len() < 64 {
+                    u.queue.push_back((src, src_port, p[8..len].to_vec()));
+                }
+                woken.push(u.wq.clone());
+            }
+        }
+        _ => {}
+    }
+    woken
 }
 
 /// Transmits a stateless TCP `RST` segment in response to an unexpected incoming segment `seg`.
@@ -675,7 +861,7 @@ fn handle_frame(raw: &[u8]) -> Option<Arc<WaitQueue>> {
 /// # Arguments
 /// * `dst` - Destination IPv4 address.
 /// * `seg` - Unexpected incoming segment triggering the reset.
-fn send_reset(dst: [u8; 4], seg: &TcpPacket) {
+fn send_reset(src: [u8; 4], dst: [u8; 4], seg: &TcpPacket) {
     let mut buf = [0u8; 20];
     let (seq, ack, flags) = if seg.flags & TcpFlags::ACK != 0 {
         (seg.ack_num, 0, TcpFlags::RST)
@@ -683,8 +869,8 @@ fn send_reset(dst: [u8; 4], seg: &TcpPacket) {
         let len = seg.payload.len() as u32 + (seg.flags & TcpFlags::SYN != 0) as u32 + (seg.flags & TcpFlags::FIN != 0) as u32;
         (0, seg.seq_num.wrapping_add(len), TcpFlags::RST | TcpFlags::ACK)
     };
-    if let Ok(n) = TcpPacket::serialize(local_ip(), dst, seg.dst_port, seg.src_port, seq, ack, flags, 0, &[], &mut buf) {
-        send_ip(dst, IpProtocol::Tcp, &buf[..n]);
+    if let Ok(n) = TcpPacket::serialize(src, dst, seg.dst_port, seg.src_port, seq, ack, flags, 0, &[], &mut buf) {
+        send_ip(src, dst, IpProtocol::Tcp, &buf[..n]);
     }
 }
 
@@ -705,9 +891,10 @@ fn send_reset(dst: [u8; 4], seg: &TcpPacket) {
 /// # Errors
 /// Returns `Err(ENETUNREACH)` if the network interface is down or unconfigured.
 pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u32, i64> {
-    if !is_up() {
+    if !is_local(ip) && !is_up() {
         return Err(ENETUNREACH);
     }
+    let src = source_for(ip);
     let mut stack = STACK.lock();
     let lport = match local_port {
         Some(p) => p,
@@ -716,6 +903,7 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u3
     let id = stack.alloc_id();
     let iss = (now() as u32).wrapping_mul(2_654_435_761) ^ (lport as u32) << 16;
     let mut c = TcpConn {
+        local_ip: src,
         local_port: lport,
         remote_ip: ip,
         remote_port: port,
@@ -736,9 +924,13 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u3
         retries: 0,
         error: None,
         wq: WaitQueue::new_shared(),
+        listener: None,
+        reuse_addr: local_port.is_some_and(|p| stack.binds.values().any(|b| b.port == p && b.reuse_addr)),
     };
     c.send_segment(TcpFlags::SYN, iss, &[]);
     stack.tcp.insert(id, c);
+    drop(stack);
+    poll_without_service();
     Ok(id)
 }
 
@@ -914,6 +1106,102 @@ pub fn tcp_endpoints(id: u32) -> Option<(u16, [u8; 4], u16)> {
     STACK.lock().tcp.get(&id).map(|c| (c.local_port, c.remote_ip, c.remote_port))
 }
 
+/// Local address of connection `id`.
+pub fn tcp_local_ip(id: u32) -> Option<[u8; 4]> {
+    STACK.lock().tcp.get(&id).map(|c| c.local_ip)
+}
+
+// ----------------------------------------------------------------------
+// Passive TCP: bind, listen, accept
+// ----------------------------------------------------------------------
+
+/// Reserves TCP port `port` (0: a free one) on `ip` (`0.0.0.0`: all of ours) for `bind`,
+/// with Linux's rules: another reservation or connection (`TIME_WAIT` too) on the port
+/// with an overlapping address conflicts unless both set `SO_REUSEADDR` (and the other
+/// does not listen) or both set `SO_REUSEPORT`.
+///
+/// # Returns
+/// The reservation's handle and the port, or `EADDRINUSE`.
+pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool) -> Result<(u32, u16), i64> {
+    let mut stack = STACK.lock();
+    let port = if port == 0 { stack.alloc_port() } else { port };
+    let overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
+    for b in stack.binds.values() {
+        if b.port == port && overlap(b.ip) && !(reuse_port && b.reuse_port) && !(reuse_addr && b.reuse_addr && !b.listening) {
+            return Err(EADDRINUSE);
+        }
+    }
+    if stack.tcp.values().any(|c| c.local_port == port && c.state != TcpState::Closed && overlap(c.local_ip) && !(reuse_addr && c.reuse_addr)) {
+        return Err(EADDRINUSE);
+    }
+    let id = stack.alloc_id();
+    stack.binds.insert(id, Bind { ip, port, reuse_addr, reuse_port, listening: false });
+    Ok((id, port))
+}
+
+/// Releases port reservation `id`.
+pub fn tcp_unbind(id: u32) {
+    STACK.lock().binds.remove(&id);
+}
+
+/// Starts listening on reservation `bind` with `backlog`.
+///
+/// # Returns
+/// The listener's handle, or `EADDRINUSE` if another socket listens on the port.
+pub fn tcp_listen(bind: u32, backlog: usize) -> Result<u32, i64> {
+    let mut stack = STACK.lock();
+    let (ip, port, reuse_port, reuse_addr) = match stack.binds.get(&bind) {
+        Some(b) => (b.ip, b.port, b.reuse_port, b.reuse_addr),
+        None => return Err(-22),
+    };
+    let overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
+    if stack.binds.iter().any(|(&i, b)| i != bind && b.listening && b.port == port && overlap(b.ip) && !(reuse_port && b.reuse_port)) {
+        return Err(EADDRINUSE);
+    }
+    stack.binds.get_mut(&bind).unwrap().listening = true;
+    let id = stack.alloc_id();
+    stack.listeners.insert(id, Listener { ip, port, backlog: backlog.max(1), queue: VecDeque::new(), wq: WaitQueue::new_shared(), reuse_addr });
+    Ok(id)
+}
+
+/// Changes listener `id`'s backlog (a second `listen`).
+pub fn tcp_set_backlog(id: u32, backlog: usize) {
+    if let Some(l) = STACK.lock().listeners.get_mut(&id) {
+        l.backlog = backlog.max(1);
+    }
+}
+
+/// Takes the next established connection of listener `id`.
+pub fn tcp_accept(id: u32) -> Option<u32> {
+    let mut stack = STACK.lock();
+    let cid = stack.listeners.get_mut(&id)?.queue.pop_front()?;
+    if let Some(c) = stack.tcp.get_mut(&cid) {
+        c.listener = None;
+    }
+    Some(cid)
+}
+
+/// Whether listener `id` has a connection to accept.
+pub fn tcp_acceptable(id: u32) -> bool {
+    STACK.lock().listeners.get(&id).map_or(false, |l| !l.queue.is_empty())
+}
+
+/// Stops listener `id`: connections not yet accepted are reset.
+pub fn tcp_unlisten(id: u32) {
+    let mut stack = STACK.lock();
+    if let Some(l) = stack.listeners.remove(&id) {
+        l.wq.wake_all();
+    }
+    for c in stack.tcp.values_mut().filter(|c| c.listener == Some(id)) {
+        let seq = c.snd_nxt;
+        c.send_segment(TcpFlags::RST | TcpFlags::ACK, seq, &[]);
+        c.state = TcpState::Closed;
+        c.detached = true;
+        c.listener = None;
+    }
+}
+
+
 // ----------------------------------------------------------------------
 // UDP API
 // ----------------------------------------------------------------------
@@ -969,13 +1257,13 @@ pub fn udp_port(id: u32) -> u16 {
 /// # Errors
 /// Returns `Err(ENETUNREACH)` if the network interface is down, or `Err(-90)` (`EMSGSIZE`) if serialization fails.
 pub fn udp_send(id: u32, ip: [u8; 4], port: u16, data: &[u8]) -> Result<usize, i64> {
-    if !is_up() {
+    if !is_local(ip) && !is_up() {
         return Err(ENETUNREACH);
     }
     let lport = udp_port(id);
     let mut buf = alloc::vec![0u8; 8 + data.len()];
     let n = super::udp::UdpPacket::serialize(lport, port, data, &mut buf).map_err(|_| -90i64)?; // EMSGSIZE
-    send_ip(ip, IpProtocol::Udp, &buf[..n]);
+    send_ip(source_for(ip), ip, IpProtocol::Udp, &buf[..n]);
     Ok(data.len())
 }
 
