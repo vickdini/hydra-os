@@ -230,9 +230,16 @@ int main(void) {
     // UDP over loopback
     int u2 = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in ul = addr("127.0.0.1", 0);
-    bind(u2, (struct sockaddr *)&ul, sizeof ul);
+    check(bind(u2, (struct sockaddr *)&ul, sizeof ul) == 0, "UDP bind");
+    int u3 = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in taken = addr("127.0.0.1", port_of(u2));
+    errno = 0;
+    check(bind(u3, (struct sockaddr *)&taken, sizeof taken) == -1 && errno == EADDRINUSE, "UDP bind of a used port: EADDRINUSE");
+    close(u3);
     struct sockaddr_in to = addr("127.0.0.1", port_of(u2));
     sendto(u, "ping", 4, 0, (struct sockaddr *)&to, sizeof to);
+    errno = 0;
+    check(bind(u, (struct sockaddr *)&ul, sizeof ul) == -1 && errno == EINVAL, "UDP bind after sending: EINVAL");
     struct sockaddr_in from;
     socklen_t fl = sizeof from;
     struct pollfd up = {.fd = u2, .events = POLLIN};

@@ -1186,6 +1186,49 @@ pub fn tcp_acceptable(id: u32) -> bool {
     STACK.lock().listeners.get(&id).map_or(false, |l| !l.queue.is_empty())
 }
 
+/// A TCP connection as `/proc/net/tcp` shows it.
+pub struct TcpEntry {
+    /// Connection handle.
+    pub id: u32,
+    /// Local address and port.
+    pub local: ([u8; 4], u16),
+    /// Remote address and port.
+    pub remote: ([u8; 4], u16),
+    /// State.
+    pub state: TcpState,
+    /// Bytes queued to send (unsent or unacknowledged) and received but unread.
+    pub tx: usize,
+    /// Bytes received and not yet read.
+    pub rx: usize,
+}
+
+/// All TCP connections.
+pub fn tcp_list() -> Vec<TcpEntry> {
+    STACK
+        .lock()
+        .tcp
+        .iter()
+        .map(|(&id, c)| TcpEntry {
+            id,
+            local: (c.local_ip, c.local_port),
+            remote: (c.remote_ip, c.remote_port),
+            state: c.state,
+            tx: c.send_buf.len(),
+            rx: c.recv_buf.len(),
+        })
+        .collect()
+}
+
+/// All listeners: `(handle, address, port, connections waiting to be accepted, backlog)`.
+pub fn listener_list() -> Vec<(u32, [u8; 4], u16, usize, usize)> {
+    STACK.lock().listeners.iter().map(|(&id, l)| (id, l.ip, l.port, l.queue.len(), l.backlog)).collect()
+}
+
+/// All UDP sockets: `(handle, port, bytes queued)`.
+pub fn udp_list() -> Vec<(u32, u16, usize)> {
+    STACK.lock().udp.iter().map(|(&id, u)| (id, u.local_port, u.queue.iter().map(|d| d.2.len()).sum())).collect()
+}
+
 /// Stops listener `id`: connections not yet accepted are reset.
 pub fn tcp_unlisten(id: u32) {
     let mut stack = STACK.lock();
@@ -1229,6 +1272,20 @@ pub fn udp_open(port: u16) -> Result<u32, i64> {
     let id = stack.alloc_id();
     stack.udp.insert(id, UdpSock { local_port: port, queue: VecDeque::new(), wq: WaitQueue::new_shared() });
     Ok(id)
+}
+
+/// Moves UDP socket `id` to `port` (0: keep its port), as `bind` after an implicit open.
+pub fn udp_rebind(id: u32, port: u16) -> Result<(), i64> {
+    let mut stack = STACK.lock();
+    if port != 0 && stack.udp.iter().any(|(&o, u)| o != id && u.local_port == port) {
+        return Err(EADDRINUSE);
+    }
+    if port != 0 {
+        if let Some(u) = stack.udp.get_mut(&id) {
+            u.local_port = port;
+        }
+    }
+    Ok(())
 }
 
 /// Returns the local 16-bit UDP port bound to socket `id` (or `0` if invalid).

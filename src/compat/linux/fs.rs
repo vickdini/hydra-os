@@ -41,6 +41,8 @@ pub enum PseudoFile {
     ProcSwaps,
     /// `/proc/locks`: the file locks held.
     ProcLocks,
+    /// `/proc/net/{tcp,udp,tcp6,udp6}`: the sockets (index into [`PROC_NET`]).
+    ProcNet(u8),
     /// `/proc/filesystems`: the file system types.
     ProcFilesystems,
     /// `/proc/cpuinfo`: reports `x86_64` processor identification and feature flags.
@@ -106,6 +108,26 @@ devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0
 tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,mode=755 0 0
 ";
 
+/// The socket tables under `/proc/net`.
+const PROC_NET: [&str; 4] = ["tcp", "udp", "tcp6", "udp6"];
+
+/// `/proc/net/<table>`, `/proc/self/net/<table>` or `/proc/<pid>/net/<table>` (one network
+/// namespace view per caller, as `/proc/net` links to `self/net`).
+fn proc_net_index(path: &str) -> Option<u8> {
+    let rest = path.strip_prefix("/proc/")?;
+    let table = match rest.strip_prefix("net/") {
+        Some(t) => t,
+        None => {
+            let (who, t) = rest.split_once("/net/")?;
+            if who != "self" && !who.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            t
+        }
+    };
+    PROC_NET.iter().position(|&n| n == table).map(|i| i as u8)
+}
+
 /// Matches a normalized filesystem path against known `/dev` and `/proc` pseudo-files.
 ///
 /// # Arguments
@@ -124,6 +146,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/meminfo" => Some(PseudoFile::ProcMeminfo),
         "/proc/swaps" => Some(PseudoFile::ProcSwaps),
         "/proc/locks" => Some(PseudoFile::ProcLocks),
+        p if proc_net_index(p).is_some() => proc_net_index(p).map(PseudoFile::ProcNet),
         "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
         "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
@@ -441,6 +464,9 @@ impl PseudoFile {
             }
             PseudoFile::ProcSwaps => read_slice(super::admin::swaps_text().as_bytes(), cursor, buf),
             PseudoFile::ProcLocks => read_slice(super::locks::proc_locks().as_bytes(), cursor, buf),
+            PseudoFile::ProcNet(i) => {
+                read_slice(super::inet::proc_net(PROC_NET[*i as usize]).unwrap_or_default().as_bytes(), cursor, buf)
+            }
             PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
             PseudoFile::ProcCpuinfo => {
                 let text = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n";

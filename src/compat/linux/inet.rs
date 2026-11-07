@@ -117,6 +117,10 @@ pub struct InetSocket {
     bind_id: Option<u32>,
     /// Listener handle once `listen` was called.
     listener: Option<u32>,
+    /// Owner (the creator's effective user ID), for `/proc/net`.
+    uid: u32,
+    /// The UDP endpoint was used to send or connect (bound for good: `bind` gives `EINVAL`).
+    udp_used: bool,
 }
 
 impl Drop for InetSocket {
@@ -361,6 +365,7 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         let mut s = sock.lock();
         if !s.stream {
             let _ = s.udp_id();
+            s.udp_used = true;
             s.peer = dest;
             return 0;
         }
@@ -413,6 +418,144 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Err(e) if e == super::proc::ERESTARTSYS => -4,
         Err(EAGAIN) => EINPROGRESS,
         Err(e) => e,
+    }
+}
+
+/// Every open `AF_INET` socket, for `/proc/net/tcp` and `/proc/net/udp`.
+static SOCKETS: Mutex<Vec<alloc::sync::Weak<Mutex<InetSocket>>>> = Mutex::new(Vec::new());
+
+fn current_euid() -> u32 {
+    crate::task::with_current_task_mut(|t| t.euid).unwrap_or(0)
+}
+
+/// Wraps a new socket and records it.
+fn register(sock: InetSocket) -> Arc<Mutex<InetSocket>> {
+    let a = Arc::new(Mutex::new(sock));
+    let mut all = SOCKETS.lock();
+    all.retain(|w| w.strong_count() > 0);
+    all.push(Arc::downgrade(&a));
+    a
+}
+
+/// What `/proc/net` needs of an open socket: `(inode, uid, bound address, peer)`, by the
+/// transport handles it uses.
+struct Owner {
+    inode: u64,
+    uid: u32,
+    bound_ip: [u8; 4],
+    peer: Option<([u8; 4], u16)>,
+}
+
+fn owners() -> alloc::collections::BTreeMap<u32, Owner> {
+    let socks: Vec<Arc<Mutex<InetSocket>>> = SOCKETS.lock().iter().filter_map(|w| w.upgrade()).collect();
+    let mut map = alloc::collections::BTreeMap::new();
+    for a in socks {
+        let inode = Arc::as_ptr(&a) as usize as u64 & 0xFFFF_FFFF;
+        let s = a.lock();
+        for id in [s.tcp, s.udp, s.listener].into_iter().flatten() {
+            map.insert(id, Owner { inode, uid: s.uid, bound_ip: s.bound_ip, peer: s.peer });
+        }
+    }
+    map
+}
+
+/// An address as `/proc/net` prints it: the 32-bit value in host order, then the port.
+fn hex_addr((ip, port): ([u8; 4], u16)) -> alloc::string::String {
+    alloc::format!("{:08X}:{:04X}", u32::from_le_bytes(ip), port)
+}
+
+/// Linux's TCP state numbers.
+fn tcp_state_num(s: stack::TcpState) -> u8 {
+    use stack::TcpState::*;
+    match s {
+        Established => 1,
+        SynSent => 2,
+        SynReceived => 3,
+        FinWait1 => 4,
+        FinWait2 => 5,
+        TimeWait => 6,
+        Closed => 7,
+        CloseWait => 8,
+        LastAck => 9,
+        Closing => 11,
+    }
+}
+
+/// `/proc/net/tcp` and `/proc/net/udp` (`tcp`), or the IPv6 ones (empty: no IPv6 sockets).
+pub fn proc_net(file: &str) -> Option<alloc::string::String> {
+    let isolated = super::ns::net_isolated();
+    let pad = |mut l: alloc::string::String, width: usize| {
+        while l.len() < width {
+            l.push(' ');
+        }
+        l.push('\n');
+        l
+    };
+    match file {
+        "tcp" | "tcp6" => {
+            let mut out = pad(
+                alloc::string::String::from("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"),
+                149,
+            );
+            if file == "tcp6" || isolated {
+                return Some(out);
+            }
+            let own = owners();
+            let mut rows: Vec<(([u8; 4], u16), ([u8; 4], u16), u8, usize, usize, u32, u64)> = Vec::new();
+            for (id, ip, port, waiting, backlog) in stack::listener_list() {
+                let o = own.get(&id);
+                rows.push(((ip, port), ([0; 4], 0), 0x0A, backlog, waiting, o.map_or(0, |o| o.uid), o.map_or(0, |o| o.inode)));
+            }
+            for c in stack::tcp_list() {
+                let o = own.get(&c.id);
+                rows.push((c.local, c.remote, tcp_state_num(c.state), c.tx, c.rx, o.map_or(0, |o| o.uid), o.map_or(0, |o| o.inode)));
+            }
+            for (i, (l, rem, st, tx, rx, uid, inode)) in rows.into_iter().enumerate() {
+                let line = alloc::format!(
+                    "{:4}: {} {} {:02X} {:08X}:{:08X} 00:00000000 00000000 {:5} {:8} {} 1 0000000000000000 100 0 0 10 0",
+                    i,
+                    hex_addr(l),
+                    hex_addr(rem),
+                    st,
+                    tx,
+                    rx,
+                    uid,
+                    0,
+                    inode
+                );
+                out.push_str(&pad(line, 149));
+            }
+            Some(out)
+        }
+        "udp" | "udp6" => {
+            let mut out = pad(
+                alloc::string::String::from("   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops"),
+                127,
+            );
+            if file == "udp6" || isolated {
+                return Some(out);
+            }
+            let own = owners();
+            for (i, (id, port, rx)) in stack::udp_list().into_iter().enumerate() {
+                let o = own.get(&id);
+                let (bound, peer) = o.map_or(([0; 4], None), |o| (o.bound_ip, o.peer));
+                let line = alloc::format!(
+                    "{:5}: {} {} {:02X} {:08X}:{:08X} 00:00000000 00000000 {:5} {:8} {} 2 0000000000000000 0",
+                    i,
+                    hex_addr((bound, port)),
+                    hex_addr(peer.unwrap_or(([0; 4], 0))),
+                    if peer.is_some() { 1 } else { 7 },
+                    0,
+                    rx,
+                    o.map_or(0, |o| o.uid),
+                    0,
+                    o.map_or(0, |o| o.inode)
+                );
+                out.push_str(&pad(line, 127));
+            }
+            Some(out)
+        }
+        _ => None,
     }
 }
 
@@ -483,9 +626,12 @@ fn accept(sock: &Arc<Mutex<InetSocket>>, addr: u64, addrlen: u64, flags: u64) ->
         bound_ip: stack::tcp_local_ip(cid).unwrap_or([0; 4]),
         bind_id: None,
         listener: None,
+        uid: current_euid(),
+        udp_used: false,
     };
     let cloexec = flags & SOCK_CLOEXEC as u64 != 0;
-    let fd = crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(Arc::new(Mutex::new(conn)))) {
+    let conn = register(conn);
+    let fd = crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(conn.clone())) {
         Ok(fd) => {
             fds.set_cloexec(fd, cloexec);
             fd as i64
@@ -557,9 +703,13 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
         Some(d) => d,
         None => return EDESTADDRREQ,
     };
-    let id = match sock.lock().udp_id() {
-        Ok(id) => id,
-        Err(e) => return e,
+    let id = {
+        let mut s = sock.lock();
+        s.udp_used = true; // sending binds the port for good (Linux autobind)
+        match s.udp_id() {
+            Ok(id) => id,
+            Err(e) => return e,
+        }
     };
     match stack::udp_send(id, ip, port, data) {
         Ok(n) => n as i64,
@@ -808,12 +958,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             bound_ip: [0; 4],
             bind_id: None,
             listener: None,
+            uid: current_euid(),
+            udp_used: false,
         };
         if !stream {
             let _ = sock.udp_id();
         }
         let cloexec = a[1] as u32 & SOCK_CLOEXEC != 0;
-        return Some(crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(Arc::new(Mutex::new(sock)))) {
+        let sock = register(sock);
+        return Some(crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::Inet(sock.clone())) {
             Ok(fd) => {
                 fds.set_cloexec(fd, cloexec);
                 fd as i64
@@ -858,12 +1011,23 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                             }
                             Err(e) => e,
                         }
+                    } else if let (Some(id), false) = (s.udp, s.udp_used) {
+                        // Opened implicitly (at creation, or to be polled): move it to the port
+                        match stack::udp_rebind(id, port) {
+                            Ok(()) => {
+                                s.udp_used = true;
+                                s.bound_ip = ip;
+                                0
+                            }
+                            Err(e) => e,
+                        }
                     } else if s.udp.is_some() {
                         EINVAL
                     } else {
                         match stack::udp_open(port) {
                             Ok(id) => {
                                 s.udp = Some(id);
+                                s.bound_ip = ip;
                                 0
                             }
                             Err(e) => e,
