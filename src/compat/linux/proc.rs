@@ -1407,7 +1407,8 @@ pub fn sys_rt_sigtimedwait(set_ptr: u64, info_ptr: u64, ts_ptr: u64, size: u64) 
         if (sec as i64) < 0 || nsec >= 1_000_000_000 {
             return EINVAL;
         }
-        Some(crate::arch::pit::ticks() + sec * hz + (nsec * hz).div_ceil(1_000_000_000))
+        let _ = hz;
+        Some(crate::arch::pit::now_ns().saturating_add(sec.saturating_mul(1_000_000_000)).saturating_add(nsec))
     } else {
         None
     };
@@ -1440,10 +1441,11 @@ pub fn sys_rt_sigtimedwait(set_ptr: u64, info_ptr: u64, ts_ptr: u64, size: u64) 
         if signal_pending() {
             return EINTR;
         }
-        if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+        if deadline.is_some_and(|d| crate::arch::pit::now_ns() >= d) {
             return -11; // EAGAIN
         }
-        crate::task::sleep_ticks(1);
+        // Until the deadline or a signal (posting one wakes the process)
+        crate::task::wait::wait_ns(deadline);
     }
 }
 

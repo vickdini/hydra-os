@@ -217,6 +217,12 @@ pub trait Deadline: Send + Sync {
     ///
     /// `Some(u64)` timer tick deadline, or `None` if disarmed.
     fn next_tick(&self) -> Option<u64>;
+
+    /// The exact time (nanoseconds since boot) it next becomes ready, when it knows one
+    /// finer than a tick.
+    fn next_ns(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl WaitSet {
@@ -264,6 +270,10 @@ impl WaitSet {
     ///
     /// * `deadline` - Optional maximum timer tick to sleep until.
     pub fn wait(&self, deadline: Option<u64>) {
+        // A deadline that knows its exact time (a timerfd): wait precisely
+        if self.deadlines.iter().any(|d| d.next_ns().is_some()) {
+            return self.wait_ns(deadline.map(|t| t * crate::arch::pit::tick_ns()));
+        }
         let deadline = self.deadlines.iter().filter_map(|d| d.next_tick()).fold(deadline, |acc, t| Some(acc.map_or(t, |a| a.min(t))));
         let deadline = if self.polled {
             let next = crate::arch::pit::ticks() + 1;
@@ -272,6 +282,25 @@ impl WaitSet {
             deadline
         };
         wait(deadline);
+    }
+}
+
+impl WaitSet {
+    /// As [`WaitSet::wait`], with a deadline in nanoseconds since boot (to within a
+    /// fraction of a millisecond).
+    pub fn wait_ns(&self, deadline_ns: Option<u64>) {
+        let tick_ns = crate::arch::pit::tick_ns();
+        let mut deadline = deadline_ns;
+        for d in &self.deadlines {
+            if let Some(t) = d.next_ns().or_else(|| d.next_tick().map(|t| t * tick_ns)) {
+                deadline = Some(deadline.map_or(t, |a| a.min(t)));
+            }
+        }
+        if self.polled {
+            let next = (crate::arch::pit::ticks() + 1) * tick_ns;
+            deadline = Some(deadline.map_or(next, |d| d.min(next)));
+        }
+        wait_ns(deadline);
     }
 }
 
@@ -291,6 +320,22 @@ impl Drop for WaitSet {
 /// # Arguments
 ///
 /// * `deadline` - Optional PIT tick deadline after which sleep terminates.
+pub fn wait_ns(deadline_ns: Option<u64>) {
+    if !super::is_active() || !crate::arch::pit::is_active() {
+        crate::arch::pit::sleep_ticks(1);
+        return;
+    }
+    if deadline_ns.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
+        return;
+    }
+    let sleeping = SCHEDULER.lock().event_wait_current_ns(deadline_ns);
+    if sleeping {
+        super::yield_now();
+    }
+}
+
+/// Sleeps the current task until a wait queue it registered on wakes it, a signal is
+/// posted to its process, or tick `deadline` passes (see [`wait_ns`] for a precise one).
 pub fn wait(deadline: Option<u64>) {
     if !super::is_active() || !crate::arch::pit::is_active() {
         crate::arch::pit::sleep_ticks(1);

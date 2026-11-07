@@ -472,6 +472,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -575,6 +576,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -664,6 +666,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -756,6 +759,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -861,6 +865,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -1024,6 +1029,7 @@ impl Scheduler {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,
@@ -1310,8 +1316,52 @@ impl Scheduler {
     pub fn sleep_current(&mut self, wake_tick: u64) {
         if self.initialized && self.current_index < self.tasks.len() {
             self.tasks[self.current_index].state = TaskState::Sleeping { wake_tick };
+            self.tasks[self.current_index].wake_ns = 0;
             self.tasks[self.current_index].timeslice_remaining = 0;
         }
+    }
+
+    /// Puts the current task to sleep until `deadline_ns` (woken between ticks).
+    pub fn sleep_current_ns(&mut self, deadline_ns: u64) {
+        if self.initialized && self.current_index < self.tasks.len() {
+            let wake_tick = deadline_ns.div_ceil(crate::arch::pit::tick_ns());
+            let task = &mut self.tasks[self.current_index];
+            task.state = TaskState::Sleeping { wake_tick };
+            task.wake_ns = deadline_ns;
+            task.timeslice_remaining = 0;
+            super::HR_EARLIEST.fetch_min(deadline_ns, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Wakes the tasks whose precise sleep is due (between ticks; the idle task calls it
+    /// when it reaches the earliest such deadline). Returns whether it woke any.
+    pub fn hr_wake(&mut self) -> bool {
+        if !self.initialized || self.tasks.is_empty() {
+            return false;
+        }
+        let now = crate::arch::pit::now_ns();
+        let mut earliest = u64::MAX;
+        let mut woke = false;
+        for task in self.tasks.iter_mut() {
+            if task.wake_ns == 0 {
+                continue;
+            }
+            if !matches!(task.state, TaskState::Sleeping { .. }) {
+                task.wake_ns = 0; // woken some other way
+                continue;
+            }
+            if now >= task.wake_ns {
+                task.state = TaskState::Ready;
+                task.event_wait = false;
+                task.woken = true;
+                task.wake_ns = 0;
+                woke = true;
+            } else {
+                earliest = earliest.min(task.wake_ns);
+            }
+        }
+        super::HR_EARLIEST.store(earliest, core::sync::atomic::Ordering::Relaxed);
+        woke
     }
 
     /// Executable path of process `tgid` (`/proc/<pid>/exe`), if it has a live thread.
@@ -1448,11 +1498,25 @@ impl Scheduler {
             return false;
         }
         task.event_wait = true;
+        task.wake_ns = 0;
         task.state = match deadline {
             Some(wake_tick) => TaskState::Sleeping { wake_tick },
             None => TaskState::Blocked,
         };
         task.timeslice_remaining = 0;
+        true
+    }
+
+    /// As [`Self::event_wait_current`], with a precise deadline in nanoseconds.
+    pub fn event_wait_current_ns(&mut self, deadline_ns: Option<u64>) -> bool {
+        let tick = deadline_ns.map(|d| d.div_ceil(crate::arch::pit::tick_ns()));
+        if !self.event_wait_current(tick) {
+            return false;
+        }
+        if let Some(d) = deadline_ns {
+            self.tasks[self.current_index].wake_ns = d;
+            super::HR_EARLIEST.fetch_min(d, core::sync::atomic::Ordering::Relaxed);
+        }
         true
     }
 
@@ -1859,6 +1923,25 @@ extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
 /// Background idle loop executing CPU halts to conserve energy when all tasks are idle.
 fn idle_task_entry() {
     loop {
+        // A precise sleep ends before the next tick: the timer only interrupts at ticks, so
+        // wait for it here (spinning on the time stamp counter, interrupts enabled) and wake
+        // it on time rather than at the tick
+        let due = super::HR_EARLIEST.load(core::sync::atomic::Ordering::Relaxed);
+        if due != u64::MAX && x86_64::instructions::interrupts::are_enabled() {
+            let tick = crate::arch::pit::ticks();
+            if due < (tick + 1) * crate::arch::pit::tick_ns() {
+                while crate::arch::pit::now_ns() < due && crate::arch::pit::ticks() == tick && !crate::task::wait::wakes_pending() {
+                    core::hint::spin_loop();
+                }
+                if crate::arch::pit::now_ns() >= due {
+                    let woke = crate::task::SCHEDULER.try_lock().is_some_and(|mut s| s.hr_wake());
+                    if woke {
+                        crate::task::yield_now();
+                    }
+                }
+                continue;
+            }
+        }
         if x86_64::instructions::interrupts::are_enabled() {
             // Halt until the next interrupt, unless one already woke a task: checking with
             // interrupts disabled and re-enabling them atomically with `hlt` closes the gap

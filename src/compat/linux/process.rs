@@ -127,7 +127,8 @@ fn sleep_until(deadline_ns: u64, rem: u64) -> i64 {
             }
             return super::proc::ERESTART_RESTARTBLOCK;
         }
-        crate::task::sleep_ticks(1);
+        // Until the deadline (to within a fraction of a millisecond) or a signal
+        crate::task::wait::wait_ns(Some(deadline_ns));
     }
 }
 

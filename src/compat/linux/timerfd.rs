@@ -66,6 +66,10 @@ impl Deadline for TimerFd {
     fn next_tick(&self) -> Option<u64> {
         self.timer.lock().next.map(|n| (n + NS_PER_TICK - 1) / NS_PER_TICK)
     }
+
+    fn next_ns(&self) -> Option<u64> {
+        self.timer.lock().next
+    }
 }
 
 impl TimerFd {

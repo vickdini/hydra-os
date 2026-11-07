@@ -35,6 +35,10 @@ const PIT_COMMAND_PORT: u16 = 0x43;
 const PIT_CMD_CHANNEL0_SQUARE_WAVE: u8 = 0x36;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds per tick.
+pub fn tick_ns() -> u64 {
+    1_000_000_000 / frequency_hz().max(1)
+}
 static TIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FREQUENCY: AtomicU64 = AtomicU64::new(100);
 

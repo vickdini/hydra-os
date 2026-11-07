@@ -162,7 +162,7 @@ struct IcmpSock {
     /// ICMPv6 (`::1` only).
     v6: bool,
     /// Received messages and their senders.
-    queue: VecDeque<([u8; 4], Vec<u8>)>,
+    queue: VecDeque<([u8; 4], Vec<u8>, u64)>,
     /// Woken when a message arrives.
     wq: Arc<WaitQueue>,
 }
@@ -208,7 +208,7 @@ struct UdpSock {
     /// Bound local 16-bit UDP port.
     local_port: u16,
     /// Queue of received `(source_ip, source_port, payload)` datagrams.
-    queue: VecDeque<([u8; 4], u16, Vec<u8>)>,
+    queue: VecDeque<([u8; 4], u16, Vec<u8>, u64)>,
     /// Wait queue woken when a new UDP datagram arrives.
     wq: Arc<WaitQueue>,
 }
@@ -341,6 +341,13 @@ pub fn counters() -> [((u64, u64), (u64, u64)); 2] {
     let g = |c: &[AtomicU64; 2]| (c[0].load(Ordering::Relaxed), c[1].load(Ordering::Relaxed));
     let (prx, ptx, brx, btx) = e1000::metrics();
     [(g(&LO), g(&LO)), ((brx, prx), (btx, ptx))]
+}
+
+/// Wall-clock time (nanoseconds) a datagram arrived, kept with it for `SO_TIMESTAMP` and
+/// `SIOCGSTAMP` (the arrival, not when the program reads it, as on Linux).
+fn arrival_stamp() -> u64 {
+    let (s, ns) = crate::arch::rtc::now();
+    s * 1_000_000_000 + ns as u64
 }
 
 /// Packets sent to ourselves, waiting to be received: `(src, dst, protocol, payload)`.
@@ -955,7 +962,7 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) -> V
                 } else {
                     payload.to_vec()
                 };
-                sock.queue.push_back((src, data));
+                sock.queue.push_back((src, data, arrival_stamp()));
                 woken.push(sock.wq.clone());
             }
         }
@@ -970,7 +977,7 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) -> V
             let mut stack = STACK.lock();
             if let Some(u) = stack.udp.values_mut().find(|u| u.local_port == dst_port) {
                 if u.queue.len() < 64 {
-                    u.queue.push_back((src, src_port, p[8..len].to_vec()));
+                    u.queue.push_back((src, src_port, p[8..len].to_vec(), arrival_stamp()));
                 }
                 woken.push(u.wq.clone());
             }
@@ -1470,7 +1477,7 @@ pub fn icmp_send(id: u32, dst: [u8; 4], msg: &[u8]) -> Result<usize, i64> {
 }
 
 /// Takes (or with `peek` copies) the next message of ICMP socket `id`.
-pub fn icmp_recv(id: u32, peek: bool) -> Option<([u8; 4], Vec<u8>)> {
+pub fn icmp_recv(id: u32, peek: bool) -> Option<([u8; 4], Vec<u8>, u64)> {
     let mut stack = STACK.lock();
     let i = stack.icmp.get_mut(&id)?;
     if peek { i.queue.front().cloned() } else { i.queue.pop_front() }
@@ -1544,7 +1551,7 @@ pub fn udp_send(id: u32, ip: [u8; 4], port: u16, data: &[u8]) -> Result<usize, i
 ///
 /// # Returns
 /// `Some((src_ip, src_port, payload))` if a datagram is available, or `None` if the queue is empty.
-pub fn udp_recv(id: u32, peek: bool) -> Option<([u8; 4], u16, Vec<u8>)> {
+pub fn udp_recv(id: u32, peek: bool) -> Option<([u8; 4], u16, Vec<u8>, u64)> {
     let mut stack = STACK.lock();
     let u = stack.udp.get_mut(&id)?;
     if peek {

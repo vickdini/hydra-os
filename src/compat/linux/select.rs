@@ -89,7 +89,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         (Ok(r), Ok(w), Ok(e)) => (r, w, e),
         _ => return EFAULT,
     };
-    let deadline = timeout_ns.map(|ns| crate::arch::pit::ticks() + (ns + 9_999_999) / 10_000_000);
+    let deadline = timeout_ns.map(|ns| crate::arch::pit::now_ns().saturating_add(ns));
     let mut waits = crate::task::wait::WaitSet::new();
     crate::task::with_current_fds_mut(|fds| {
         for fd in 0..nfds {
@@ -135,7 +135,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         if bad {
             return EBADF;
         }
-        let timed_out = deadline.map_or(false, |d| crate::arch::pit::ticks() >= d);
+        let timed_out = deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d);
         if count > 0 || timed_out {
             if rp != 0 {
                 write_set(rp, &out_r);
@@ -151,7 +151,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
         if super::proc::signal_pending() {
             return super::proc::ERESTARTSYS;
         }
-        waits.wait(deadline);
+        waits.wait_ns(deadline);
     }
 }
 

@@ -1781,38 +1781,50 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_ppoll(fds: struct pollfd*, nfds: nfds_t, tmo_p: const struct timespec*, sigmask: const sigset_t*)
             let fds_ptr = arg0 as *mut LinuxPollFd;
             let nfds = arg1 as usize;
-            let timeout_ms = if num == SYS_PPOLL {
+            // The timeout in nanoseconds (None: wait indefinitely)
+            let timeout: Option<u64> = if num == SYS_PPOLL {
                 let ts_ptr = arg2 as *const LinuxTimespec;
                 if ts_ptr.is_null() {
-                    -1
+                    None
                 } else {
                     let ts = unsafe { *ts_ptr };
-                    // Round up: a sub-millisecond timeout must still wait, or GLib's main
-                    // loop spins until the next timer tick
-                    (ts.tv_sec * 1000 + (ts.tv_nsec + 999_999) / 1_000_000).min(i32::MAX as i64) as i32
+                    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+                        return -EINVAL;
+                    }
+                    Some((ts.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(ts.tv_nsec as u64))
                 }
+            } else if (arg2 as i32) < 0 {
+                None
             } else {
-                arg2 as i32
+                Some(arg2 as i32 as u64 * 1_000_000)
+            };
+            let timeout_ms: i64 = match timeout {
+                None => -1,
+                Some(0) => 0,
+                Some(ns) => ns.div_ceil(1_000_000).min(i32::MAX as u64) as i64,
             };
 
             if fds_ptr.is_null() && nfds > 0 {
                 return -EFAULT;
             }
+            let deadline = timeout.map(|ns| crate::arch::pit::now_ns().saturating_add(ns));
             if nfds == 0 {
-                if timeout_ms > 0 {
-                    crate::task::sleep_ms(timeout_ms as u64);
+                // A plain sleep, ended early by a signal
+                while let Some(d) = deadline {
+                    if crate::arch::pit::now_ns() >= d {
+                        break;
+                    }
+                    if proc::signal_pending() {
+                        return -EINTR;
+                    }
+                    crate::task::wait::wait_ns(Some(d));
+                }
+                if deadline.is_none() {
+                    crate::task::wait::wait_ns(None);
+                    return if proc::signal_pending() { -EINTR } else { 0 };
                 }
                 return 0;
             }
-
-            let start_tick = crate::arch::pit::ticks();
-            let timeout_ticks = if timeout_ms < 0 {
-                u64::MAX
-            } else {
-                (timeout_ms as u64 + 9) / 10
-            };
-
-            let deadline = if timeout_ms < 0 { None } else { Some(start_tick + timeout_ticks) };
             let mut waits = crate::task::wait::WaitSet::new();
             crate::task::with_current_fds_mut(|fds| {
                 for i in 0..nfds {
@@ -1857,14 +1869,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     return ready_count as i64;
                 }
 
-                let elapsed = crate::arch::pit::ticks().saturating_sub(start_tick);
-                if elapsed >= timeout_ticks {
+                if deadline.is_some_and(|d| crate::arch::pit::now_ns() >= d) {
                     return 0;
                 }
                 if proc::signal_pending() {
                     return proc::ERESTARTSYS;
                 }
-                waits.wait(deadline);
+                waits.wait_ns(deadline);
             }
         }
 
@@ -1940,14 +1951,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 None => return -EBADF,
             };
 
-            let start_tick = crate::arch::pit::ticks();
-            let timeout_ticks = if timeout_ms < 0 {
-                u64::MAX
-            } else {
-                (timeout_ms as u64 + 9) / 10
-            };
-
-            let deadline = if timeout_ms < 0 { None } else { Some(start_tick + timeout_ticks) };
+            let deadline = if timeout_ms < 0 { None } else { Some(crate::arch::pit::now_ns() + timeout_ms as u64 * 1_000_000) };
             let waits = epoll_wait_set(&epoll_arc);
 
             loop {
@@ -1967,14 +1971,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     return 0;
                 }
 
-                let elapsed = crate::arch::pit::ticks().saturating_sub(start_tick);
-                if elapsed >= timeout_ticks {
+                if deadline.is_some_and(|d| crate::arch::pit::now_ns() >= d) {
                     return 0;
                 }
                 if proc::signal_pending() {
                     return proc::ERESTARTSYS;
                 }
-                waits.wait(deadline);
+                waits.wait_ns(deadline);
             }
         }
 

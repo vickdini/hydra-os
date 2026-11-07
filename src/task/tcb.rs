@@ -363,6 +363,9 @@ pub struct Task {
     /// Became ready by a wakeup (not by using up its timeslice): runs ahead of busy tasks
     /// until it is next scheduled.
     pub woken: bool,
+    /// Precise wakeup time (nanoseconds since boot) of a timed sleep or wait, between
+    /// ticks; 0 when none (the tick deadline alone decides).
+    pub wake_ns: u64,
     /// Lost the CPU to a woken task mid-timeslice: scheduled before other ready tasks.
     pub preempted: bool,
     /// Times the scheduler chose another task while this one was ready. Woken and
@@ -427,6 +430,7 @@ impl Task {
             syscall_args: [0; 2],
             event_wait: false,
             woken: false,
+            wake_ns: 0,
             preempted: false,
             passed_over: 0,
             wake_pending: false,

@@ -397,6 +397,29 @@ pub fn unblock_task(id: TaskId) -> bool {
     sched.unblock_task(id)
 }
 
+/// Earliest precise wakeup time (ns) of a sleeping task (`u64::MAX`: none); the timer
+/// interrupts between ticks wake tasks once it passes.
+pub static HR_EARLIEST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Sleeps the current task until `deadline_ns` (nanoseconds since boot, as
+/// [`crate::arch::pit::now_ns`]), to within a fraction of a millisecond.
+pub fn sleep_until_ns(deadline_ns: u64) {
+    if !is_active() || !crate::arch::pit::is_active() {
+        while crate::arch::pit::now_ns() < deadline_ns {
+            crate::arch::pit::sleep_ticks(1);
+        }
+        return;
+    }
+    if crate::arch::pit::now_ns() >= deadline_ns {
+        return;
+    }
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.sleep_current_ns(deadline_ns);
+    }
+    yield_now();
+}
+
 /// Puts the current task to sleep for a specified number of PIT timer ticks.
 ///
 /// Works inside system calls (which run with interrupts disabled): the task sleeps in the

@@ -307,6 +307,14 @@ fn wake_ids(ids: &[TaskId]) {
 ///
 /// `Ok(Some(tick))` with absolute deadline tick, `Ok(None)` if no timeout, or `Err(errno)` on fault.
 pub(crate) fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
+    let tick = crate::arch::pit::tick_ns();
+    Ok(deadline_ns(ts_ptr, relative, realtime)?.map(|d| d.div_ceil(tick)))
+}
+
+/// Absolute deadline (nanoseconds on the boot clock, [`crate::arch::pit::now_ns`]) of a
+/// futex wait's `struct timespec` timeout: relative, or absolute on `CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC`.
+pub(crate) fn deadline_ns(ts_ptr: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
     if ts_ptr == 0 {
         return Ok(None);
     }
@@ -319,18 +327,17 @@ pub(crate) fn deadline_tick(ts_ptr: u64, relative: bool, realtime: bool) -> Resu
         return Err(EINVAL);
     }
     let total_ns = s as i128 * 1_000_000_000 + ns as i128;
-    let now_ticks = crate::arch::pit::ticks() as i128;
-    let tick_ns = 10_000_000i128;
+    let now = crate::arch::pit::now_ns() as i128;
     let target_ns = if relative {
-        now_ticks * tick_ns + total_ns
+        now + total_ns
     } else if realtime {
         let (rs, rns) = crate::arch::rtc::now();
-        let offset = rs as i128 * 1_000_000_000 + rns as i128 - now_ticks * tick_ns;
+        let offset = rs as i128 * 1_000_000_000 + rns as i128 - now;
         total_ns - offset
     } else {
         total_ns
     };
-    Ok(Some(((target_ns.max(0) + tick_ns - 1) / tick_ns) as u64))
+    Ok(Some(target_ns.max(0) as u64))
 }
 
 /// Implements `FUTEX_WAIT` and `FUTEX_WAIT_BITSET`: verifies `*uaddr == val` under the queue
@@ -368,12 +375,12 @@ fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool)
         fq.waiters.push(FutexWaiter { key, task_id: me, bitset });
     }
     loop {
-        crate::task::wait::wait(deadline);
+        crate::task::wait::wait_ns(deadline);
         let mut fq = GLOBAL_FUTEX.lock();
         if !fq.is_waiting(me) {
             return 0; // woken
         }
-        if deadline.map_or(false, |d| crate::arch::pit::ticks() >= d) {
+        if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
             fq.remove(me);
             return ETIMEDOUT;
         }
@@ -470,8 +477,8 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
                 fq.waiters.push(FutexWaiter { key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
             }
         }
-        crate::task::wait::wait(deadline);
-        if deadline.map_or(false, |d| crate::arch::pit::ticks() >= d) {
+        crate::task::wait::wait_ns(deadline);
+        if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
             GLOBAL_FUTEX.lock().remove(me);
             return ETIMEDOUT;
         }
@@ -588,11 +595,11 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
     let private = op & FUTEX_PRIVATE_FLAG != 0;
     let key_of = |addr: u64| key_for(addr, private);
     match cmd {
-        FUTEX_WAIT => match deadline_tick(timeout, true, false) {
+        FUTEX_WAIT => match deadline_ns(timeout, true, false) {
             Ok(d) => wait(uaddr, val, FUTEX_BITSET_MATCH_ANY, d, private),
             Err(e) => e,
         },
-        FUTEX_WAIT_BITSET => match deadline_tick(timeout, false, realtime) {
+        FUTEX_WAIT_BITSET => match deadline_ns(timeout, false, realtime) {
             Ok(d) => wait(uaddr, val, val3, d, private),
             Err(e) => e,
         },
@@ -640,7 +647,7 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
             // LOCK_PI's absolute timeout is CLOCK_REALTIME; LOCK_PI2 follows the flag
             let rt = cmd == FUTEX_LOCK_PI || realtime;
-            match deadline_tick(timeout, false, rt) {
+            match deadline_ns(timeout, false, rt) {
                 Ok(d) => lock_pi(uaddr, d, private, false),
                 Err(e) => e,
             }
@@ -672,8 +679,8 @@ fn futex2_private(flags: u32) -> Result<bool, i64> {
 /// Absolute deadline of a futex2 timeout on `clockid` (`CLOCK_MONOTONIC` or `CLOCK_REALTIME`).
 fn futex2_deadline(timeout: u64, clockid: u64) -> Result<Option<u64>, i64> {
     match clockid {
-        0 => deadline_tick(timeout, false, true),
-        1 => deadline_tick(timeout, false, false),
+        0 => deadline_ns(timeout, false, true),
+        1 => deadline_ns(timeout, false, false),
         _ if timeout == 0 => Ok(None),
         _ => Err(EINVAL),
     }
@@ -731,7 +738,7 @@ pub fn sys_futex_waitv(waiters: u64, nr: u64, flags: u64, timeout: u64, clockid:
         }
     }
     loop {
-        crate::task::wait::wait(deadline);
+        crate::task::wait::wait_ns(deadline);
         let mut fq = GLOBAL_FUTEX.lock();
         // A waker removes the entry it wakes: the first missing one is the answer
         let woken = entries.iter().position(|(key, _, _)| !fq.waiters.iter().any(|w| w.task_id == me && w.key == *key));
@@ -739,7 +746,7 @@ pub fn sys_futex_waitv(waiters: u64, nr: u64, flags: u64, timeout: u64, clockid:
             fq.remove(me);
             return i as i64;
         }
-        if deadline.map_or(false, |d| crate::arch::pit::ticks() >= d) {
+        if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
             fq.remove(me);
             return ETIMEDOUT;
         }

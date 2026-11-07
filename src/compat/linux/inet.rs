@@ -388,11 +388,8 @@ fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
 ///
 /// Result value produced by `ready()`, or negative Linux errno on error.
 fn wait_for<T>(id: u32, nonblock: bool, timeout: Option<u64>, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
-    // SO_RCVTIMEO / SO_SNDTIMEO: a deadline in timer ticks
-    let deadline = timeout.map(|ns| {
-        let hz = crate::arch::pit::frequency_hz().max(1);
-        crate::arch::pit::ticks() + ((ns as u128 * hz as u128).div_ceil(1_000_000_000) as u64).max(1)
-    });
+    // SO_RCVTIMEO / SO_SNDTIMEO: a deadline on the boot clock
+    let deadline = timeout.map(|ns| crate::arch::pit::now_ns().saturating_add(ns));
     let mut waits = crate::task::wait::WaitSet::new();
     match stack::wait_queue(id) {
         Some(q) if stack::service_running() => waits.add(crate::task::wait::QueueRef::Shared(q)),
@@ -411,10 +408,10 @@ fn wait_for<T>(id: u32, nonblock: bool, timeout: Option<u64>, mut ready: impl Fn
             // With a timeout, an interrupted call is not restarted (Linux: EINTR)
             return Err(if deadline.is_some() { -4 } else { super::proc::ERESTARTSYS });
         }
-        if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+        if deadline.is_some_and(|d| crate::arch::pit::now_ns() >= d) {
             return Err(EAGAIN);
         }
-        waits.wait(deadline);
+        waits.wait_ns(deadline);
     }
 }
 
@@ -503,12 +500,6 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Err(EAGAIN) => EINPROGRESS,
         Err(e) => e,
     }
-}
-
-/// The wall clock in nanoseconds.
-fn wall_ns() -> u64 {
-    let (s, ns) = crate::arch::rtc::now();
-    s as u64 * 1_000_000_000 + ns as u64
 }
 
 /// `ioctl(SIOCGSTAMP)` (`struct timeval`) / `SIOCGSTAMPNS` (`struct timespec`): when the
@@ -953,17 +944,17 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         s.icmp.map(|id| (id, icmp_filter(&s)))
     };
     if let Some((id, filter)) = icmp {
-        let (src, data) = wait_for(id, nonblock, timeout, || loop {
+        let (src, data, arrived) = wait_for(id, nonblock, timeout, || loop {
             match stack::icmp_recv(id, peek) {
                 None => return None,
                 // Raw sockets drop the message types their ICMP filter blocks
-                Some((_, d)) if !peek && filter.as_ref().is_some_and(|f| f(&d)) => continue,
+                Some((_, d, _)) if !peek && filter.as_ref().is_some_and(|f| f(&d)) => continue,
                 Some(m) => return Some(Ok(m)),
             }
         })?;
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
-        sock.lock().rx_stamp = Some(wall_ns());
+        sock.lock().rx_stamp = Some(arrived);
         return Ok((n, Some((src, 0)), data.len() > n));
     }
     if stream {
@@ -985,8 +976,8 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         return Ok((n, None, false));
     }
     let id = sock.lock().udp_id()?;
-    let (ip, port, data) = wait_for(id, nonblock, timeout, || stack::udp_recv(id, peek).map(Ok))?;
-    sock.lock().rx_stamp = Some(wall_ns());
+    let (ip, port, data, arrived) = wait_for(id, nonblock, timeout, || stack::udp_recv(id, peek).map(Ok))?;
+    sock.lock().rx_stamp = Some(arrived);
     let n = data.len().min(buf.len());
     buf[..n].copy_from_slice(&data[..n]);
     Ok((n, Some((ip, port)), data.len() > n))
@@ -1192,7 +1183,7 @@ pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
         let mut probe = alloc::vec![0u8; 65536];
         return stack::tcp_recv(id, &mut probe, true).map_or(0, |(n, _)| n);
     }
-    s.udp.and_then(|id| stack::udp_recv(id, true)).map_or(0, |(_, _, d)| d.len())
+    s.udp.and_then(|id| stack::udp_recv(id, true)).map_or(0, |(_, _, d, _)| d.len())
 }
 
 /// Dispatches Linux socket system calls that operate on `AF_INET` (or `AF_INET6`) sockets.
