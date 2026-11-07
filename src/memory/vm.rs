@@ -143,6 +143,8 @@ pub struct Vma {
     pub backing: Backing,
     /// What `/proc/<pid>/maps` shows for it: a file's path, `[stack]`, `[heap]`, or none.
     pub name: Option<Arc<str>>,
+    /// The userfaultfd its missing pages are reported to (0: none).
+    pub uffd: u64,
 }
 
 impl Vma {
@@ -374,6 +376,10 @@ impl Mm {
     pub fn fork(&mut self) -> Result<Mm, &'static str> {
         let mut child = Mm::new()?;
         child.vmas = self.vmas.clone();
+        // userfaultfd registrations stay with the parent
+        for v in child.vmas.values_mut() {
+            v.uffd = 0;
+        }
         child.brk_start = self.brk_start;
         child.brk = self.brk;
         child.auxv = self.auxv.clone();
@@ -650,6 +656,7 @@ impl Mm {
                 shared,
                 backing,
                 name: None,
+                uffd: 0,
             },
         );
         self.merge_around(start);
@@ -742,6 +749,7 @@ impl Mm {
                     shared: false,
                     backing: Backing::Anon,
                     name: Some(Arc::from("[heap]")),
+                    uffd: 0,
                 },
             );
             self.merge_around(old_top);
@@ -764,7 +772,7 @@ impl Mm {
     ///
     /// `true` if both VMAs have identical permissions and contiguous backing and can merge, `false` otherwise.
     fn can_merge(lower: &Vma, upper: &Vma) -> bool {
-        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared || lower.name != upper.name {
+        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared || lower.name != upper.name || lower.uffd != upper.uffd {
             return false;
         }
         match (&lower.backing, &upper.backing) {
@@ -797,6 +805,77 @@ impl Mm {
             self.vmas.insert(at, v);
             self.merge_around(at);
         }
+    }
+
+    /// Registers `[start, end)` with userfaultfd `id` (or, with `id` 0, unregisters what is
+    /// registered with `only`). Registering needs anonymous memory all the way (`EINVAL`) not
+    /// registered elsewhere (`EBUSY`).
+    pub fn set_uffd(&mut self, start: u64, end: u64, id: u64, only: Option<u64>) -> Result<(), i64> {
+        if id != 0 {
+            let mut at = start;
+            for v in self.vmas.range(..end).map(|(_, v)| v).filter(|v| v.end > start) {
+                if v.start > at || !matches!(v.backing, Backing::Anon) {
+                    return Err(-EINVAL);
+                }
+                if v.uffd != 0 && v.uffd != id {
+                    return Err(-16);
+                }
+                at = v.end;
+            }
+            if at < end {
+                return Err(-EINVAL);
+            }
+        }
+        let keys: Vec<u64> = self.vmas.range(..end).filter(|(_, v)| v.end > start).map(|(k, _)| *k).collect();
+        for k in keys {
+            let Some(mut v) = self.vmas.remove(&k) else { continue };
+            if only.is_some_and(|o| v.uffd != o) {
+                self.vmas.insert(k, v);
+                continue;
+            }
+            if v.start < start {
+                let upper = v.split_off(start);
+                self.vmas.insert(v.start, v);
+                v = upper;
+            }
+            if v.end > end {
+                let upper = v.split_off(end);
+                self.vmas.insert(upper.start, upper);
+            }
+            v.uffd = id;
+            let at = v.start;
+            self.vmas.insert(at, v);
+            self.merge_around(at);
+        }
+        Ok(())
+    }
+
+    /// The userfaultfd to report a fault at `addr` to: the page is not in memory and its
+    /// area is registered.
+    pub fn uffd_missing(&mut self, addr: u64) -> Option<u64> {
+        let id = self.find_vma(addr)?.uffd;
+        if id == 0 {
+            return None;
+        }
+        let present = self.pte(page_down(addr), false).map_or(false, |e| pte_holds_frame(e));
+        (!present).then_some(id)
+    }
+
+    /// Fills missing page `addr` of an area registered with userfaultfd `id` with `data`
+    /// (zeros if none): `UFFDIO_COPY` / `UFFDIO_ZEROPAGE`.
+    pub fn fill_page(&mut self, addr: u64, data: Option<&[u8]>, id: u64) -> Result<(), i64> {
+        if self.find_vma(addr).map_or(true, |v| v.uffd != id) {
+            return Err(-2); // ENOENT: not in a range of this descriptor
+        }
+        if self.uffd_missing(addr).is_none() {
+            return Err(-17); // EEXIST
+        }
+        self.handle_fault(addr, false, false).map_err(|_| -12)?;
+        if let Some(d) = data {
+            let phys = self.translate(page_down(addr)).ok_or(-14i64)?;
+            unsafe { core::ptr::copy_nonoverlapping(d.as_ptr(), phys.as_u64() as *mut u8, (PAGE_SIZE as usize).min(d.len())) };
+        }
+        Ok(())
     }
 
     /// The mappings as `/proc/<pid>/maps` lists them.
@@ -1208,6 +1287,30 @@ impl Drop for Mm {
     }
 }
 
+/// Waits while `addr` is a missing page of a range registered with a userfaultfd, until its
+/// handler supplies it (`kernel`: an access by a system call). `false` if the descriptor
+/// refuses such accesses.
+pub fn uffd_resolve_current(addr: u64, write: bool, kernel: bool) -> bool {
+    use crate::compat::linux::userfaultfd::{wait_fault, Waited};
+    let ptr = CURRENT_MM.load(Ordering::Acquire);
+    if ptr.is_null() || !is_user_addr(addr) || !crate::compat::linux::userfaultfd::active() {
+        return true;
+    }
+    let mm = unsafe { &*ptr };
+    loop {
+        let id = match mm.try_lock() {
+            Some(mut g) => g.uffd_missing(addr),
+            None => return true,
+        };
+        let Some(id) = id else { return true };
+        match wait_fault(id, page_down(addr), write, kernel) {
+            Waited::Again => continue,
+            Waited::Proceed => return true,
+            Waited::Refuse => return false,
+        }
+    }
+}
+
 /// Resolves a page fault against the running process's address space.
 /// Returns `None` if the current task has no address space.
 ///
@@ -1284,6 +1387,16 @@ pub fn prefault_current(addr: u64, len: u64, write: bool) -> bool {
     }
     if !is_user_range(addr, len) {
         return false;
+    }
+    // Pages a userfaultfd handler must supply first
+    if crate::compat::linux::userfaultfd::active() {
+        let mut page = page_down(addr);
+        while page < addr + len {
+            if !uffd_resolve_current(page, write, true) {
+                return false;
+            }
+            page += PAGE_SIZE;
+        }
     }
     let mm = unsafe { &*ptr };
     mm.lock().prefault(addr, len, write).is_ok()

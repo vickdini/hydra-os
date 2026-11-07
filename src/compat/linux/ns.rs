@@ -325,7 +325,12 @@ fn apply_new(ns: &mut Ns, flags: u64, unshare: bool) {
         (CLONE_NEWCGROUP, &mut ns.cgroup),
     ] {
         if flags & flag != 0 {
+            let old = *slot;
             *slot = new_id();
+            if flag == CLONE_NEWUTS {
+                // A new UTS namespace starts with the old one's names
+                super::extra::uts_copy(old, *slot);
+            }
         }
     }
 }

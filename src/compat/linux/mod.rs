@@ -5,6 +5,7 @@
 //! to execute natively on Hydra Microkernel.
 
 pub mod aio;
+pub mod bpf;
 pub mod chardev;
 pub mod devices;
 pub mod drm;
@@ -31,6 +32,7 @@ pub mod landlock;
 pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
+pub mod perf;
 pub mod pty;
 pub mod ptrace;
 pub mod recent;
@@ -47,6 +49,7 @@ pub mod timerfd;
 pub mod tty;
 pub mod types;
 pub mod unix;
+pub mod userfaultfd;
 pub mod vfs;
 pub mod xfer;
 pub mod wayland_bridge;
@@ -147,6 +150,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         101 => return ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
+        323 => return userfaultfd::sys_userfaultfd(arg0),
+        298 => return perf::sys_perf_event_open(arg0, arg1, arg2, arg3, arg4),
+        321 => return bpf::sys_bpf(arg0, arg1, arg2),
         // fanotify_init, fanotify_mark, open_by_handle_at
         300 | 301 => return fanotify::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         304 => return fanotify::open_by_handle_at(arg0, arg1, arg2),
@@ -163,6 +169,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             }
             return mount::dispatch_new(num, [arg0, arg1, arg2, arg3, arg4, arg5]);
         }
+        // statmount, listmount
+        457 | 458 => return mount::dispatch_new(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // pivot_root, mount, umount2
         155 | 165 | 166 => {
             if let Err(e) = landlock::check_mount() {
@@ -194,7 +202,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
         // readahead, mbind, set_mempolicy, migrate_pages, move_pages, process_vm_readv/writev,
         // kcmp, sched_setattr/getattr, set_mempolicy_home_node, cachestat, mseal
-        187 | 237 | 238 | 256 | 279 | 310..=312 | 314 | 315 | 450 | 451 | 462 => {
+        // adjtimex, clock_adjtime, settimeofday, clock_settime, sethostname, setdomainname,
+        // pkey_mprotect, memfd_secret, map_shadow_stack, lsm_get/set_self_attr, lsm_list_modules
+        187 | 237 | 238 | 256 | 279 | 310..=312 | 314 | 315 | 450 | 451 | 462 | 159 | 305 | 164 | 227 | 170 | 171 | 329 | 447 | 453 | 459..=461 => {
             if let Some(r) = extra::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
             }
@@ -1316,8 +1326,15 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if buf_ptr.is_null() {
                 return -EFAULT;
             }
+            let mut u = LinuxUtsname::default();
+            // The host and domain names of the caller's UTS namespace
+            let (host, dom) = extra::uts_names();
+            u.nodename = [0; 65];
+            u.domainname = [0; 65];
+            u.nodename[..host.len().min(64)].copy_from_slice(&host.as_bytes()[..host.len().min(64)]);
+            u.domainname[..dom.len().min(64)].copy_from_slice(&dom.as_bytes()[..dom.len().min(64)]);
             unsafe {
-                *buf_ptr = LinuxUtsname::default();
+                *buf_ptr = u;
             }
             0
         }
@@ -1994,8 +2011,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         330 => -28,
         // pkey_free: return EINVAL (-22)
         331 => -22,
-        // pkey_mprotect: return EINVAL (-22)
-        332 => -22,
 
         _ => {
             let mut stats = LINUX_STATS.lock();

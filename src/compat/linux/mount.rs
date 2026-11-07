@@ -1486,6 +1486,232 @@ fn mount_setattr(dirfd: u64, path: u64, flags: u64, uattr: u64, size: u64) -> i6
     set_attrs(&abs, set, clear, flags & AT_RECURSIVE != 0, prop)
 }
 
+// ----------------------------------------------------------------------
+// statmount, listmount
+// ----------------------------------------------------------------------
+
+/// A mount as `mountinfo` lists it for the caller.
+struct Listed {
+    id: u32,
+    parent: u32,
+    root: String,
+    point: String,
+    opts: String,
+    optional: String,
+    fstype: String,
+    source: String,
+    super_opts: String,
+}
+
+/// Unique (64-bit) mount IDs: the `mountinfo` ID above 2^32, as Linux numbers them apart.
+const UNIQUE_BASE: u64 = 1 << 32;
+
+fn listed() -> Vec<Listed> {
+    let text = super::fs::mountinfo_text();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let (front, back) = match line.split_once(" - ") {
+            Some(p) => p,
+            None => continue,
+        };
+        let f: Vec<&str> = front.split(' ').collect();
+        let b: Vec<&str> = back.split(' ').collect();
+        if f.len() < 6 || b.len() < 3 {
+            continue;
+        }
+        out.push(Listed {
+            id: f[0].parse().unwrap_or(0),
+            parent: f[1].parse().unwrap_or(0),
+            root: String::from(f[3]),
+            point: String::from(f[4]),
+            opts: String::from(f[5]),
+            optional: f[6..].join(" "),
+            fstype: String::from(b[0]),
+            source: String::from(b[1]),
+            super_opts: String::from(b[2]),
+        });
+    }
+    out
+}
+
+/// `listmount(req, mnt_ids, nr_mnt_ids, flags)`: the mounts below `req.mnt_id` (all of them
+/// for `LSMT_ROOT`), by ID, after `req.param`.
+fn listmount(req: u64, ids: u64, nr: u64, flags: u64) -> i64 {
+    const LSMT_ROOT: u64 = u64::MAX;
+    const LISTMOUNT_REVERSE: u64 = 1;
+    if flags & !LISTMOUNT_REVERSE != 0 {
+        return EINVAL;
+    }
+    let hdr = match super::vfs::copy_in(req, 24) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let size = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+    if size < 24 {
+        return EINVAL;
+    }
+    let mnt_id = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
+    let last = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
+    let all = listed();
+    let mut found: Vec<u64> = if mnt_id == LSMT_ROOT {
+        all.iter().map(|m| UNIQUE_BASE + m.id as u64).collect()
+    } else {
+        if !all.iter().any(|m| UNIQUE_BASE + m.id as u64 == mnt_id) {
+            return -2; // ENOENT
+        }
+        all.iter().filter(|m| UNIQUE_BASE + m.parent as u64 == mnt_id && m.id != m.parent).map(|m| UNIQUE_BASE + m.id as u64).collect()
+    };
+    found.sort_unstable();
+    if flags & LISTMOUNT_REVERSE != 0 {
+        found.reverse();
+        if last != 0 {
+            found.retain(|&i| i < last);
+        }
+    } else {
+        found.retain(|&i| i > last);
+    }
+    found.truncate(nr.min(1_000_000) as usize);
+    let bytes: Vec<u8> = found.iter().flat_map(|v| v.to_le_bytes()).collect();
+    if super::vfs::copy_out(ids, &bytes).is_err() {
+        return EFAULT;
+    }
+    found.len() as i64
+}
+
+/// The superblock magic of a file system type.
+fn fs_magic(fstype: &str) -> u64 {
+    match fstype {
+        "zfs" => 0x2fc1_2fc1,
+        "proc" => 0x9fa0,
+        "sysfs" => 0x6265_6572,
+        "tmpfs" | "devtmpfs" | "ramfs" => 0x0102_1994,
+        "devpts" => 0x1cd1,
+        "cgroup2" => 0x6367_7270,
+        "mqueue" => 0x1980_2202,
+        _ => 0,
+    }
+}
+
+/// `statmount(req, buf, bufsize, flags)`: what `req.param` asks about mount `req.mnt_id`.
+fn statmount(req: u64, buf: u64, bufsize: u64, flags: u64) -> i64 {
+    const SB_BASIC: u64 = 1;
+    const MNT_BASIC: u64 = 2;
+    const PROPAGATE_FROM: u64 = 4;
+    const MNT_ROOT: u64 = 8;
+    const MNT_POINT: u64 = 0x10;
+    const FS_TYPE: u64 = 0x20;
+    const MNT_NS_ID: u64 = 0x40;
+    const MNT_OPTS: u64 = 0x80;
+    const SB_SOURCE: u64 = 0x200;
+    const HDR: usize = 512;
+    if flags != 0 {
+        return EINVAL;
+    }
+    let hdr = match super::vfs::copy_in(req, 24) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    if u32::from_le_bytes(hdr[0..4].try_into().unwrap()) < 24 {
+        return EINVAL;
+    }
+    let mnt_id = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
+    let mask = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
+    let all = listed();
+    let Some(m) = all.iter().find(|m| UNIQUE_BASE + m.id as u64 == mnt_id) else { return -2 };
+    let mut out = alloc::vec![0u8; HDR];
+    let mut strings: Vec<u8> = Vec::new();
+    let mut done = 0u64;
+    let put_str = |strings: &mut Vec<u8>, s: &str| -> u32 {
+        let at = strings.len() as u32;
+        strings.extend_from_slice(s.as_bytes());
+        strings.push(0);
+        at
+    };
+    let p64 = |out: &mut [u8], o: usize, v: u64| out[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    let p32 = |out: &mut [u8], o: usize, v: u32| out[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    let ro = m.super_opts.split(',').any(|o| o == "ro");
+    if mask & SB_BASIC != 0 {
+        p32(&mut out, 16, 0);
+        p32(&mut out, 20, m.id);
+        p64(&mut out, 24, fs_magic(&m.fstype));
+        p32(&mut out, 32, if ro { 1 } else { 0 }); // SB_RDONLY
+        done |= SB_BASIC;
+    }
+    if mask & MNT_BASIC != 0 {
+        p64(&mut out, 40, UNIQUE_BASE + m.id as u64);
+        p64(&mut out, 48, UNIQUE_BASE + m.parent as u64);
+        p32(&mut out, 56, m.id);
+        p32(&mut out, 60, m.parent);
+        let mut attr = 0u64;
+        for o in m.opts.split(',') {
+            attr |= match o {
+                "ro" => 1,
+                "nosuid" => 2,
+                "nodev" => 4,
+                "noexec" => 8,
+                "noatime" => 0x10,
+                "strictatime" => 0x20,
+                "nodiratime" => 0x80,
+                "nosymfollow" => 0x20_0000,
+                _ => 0,
+            };
+        }
+        p64(&mut out, 64, attr);
+        // Propagation: MS_SHARED with a peer group, else MS_PRIVATE
+        let peer = m.optional.split(' ').find_map(|o| o.strip_prefix("shared:")).and_then(|v| v.parse::<u64>().ok());
+        p64(&mut out, 72, if peer.is_some() { MS_SHARED } else { MS_PRIVATE });
+        p64(&mut out, 80, peer.unwrap_or(0));
+        done |= MNT_BASIC;
+    }
+    if mask & PROPAGATE_FROM != 0 {
+        p64(&mut out, 96, 0);
+        done |= PROPAGATE_FROM;
+    }
+    if mask & MNT_ROOT != 0 {
+        let at = put_str(&mut strings, &m.root);
+        p32(&mut out, 104, at);
+        done |= MNT_ROOT;
+    }
+    if mask & MNT_POINT != 0 {
+        let at = put_str(&mut strings, &m.point);
+        p32(&mut out, 108, at);
+        done |= MNT_POINT;
+    }
+    if mask & FS_TYPE != 0 {
+        let at = put_str(&mut strings, &m.fstype);
+        p32(&mut out, 36, at);
+        done |= FS_TYPE;
+    }
+    if mask & MNT_NS_ID != 0 {
+        let ns = super::proc::PROCS.lock().get(&super::proc::current_ids().1).map_or(0, |p| p.ns.mnt);
+        p64(&mut out, 112, ns);
+        done |= MNT_NS_ID;
+    }
+    if mask & MNT_OPTS != 0 {
+        // The file system's own options (rw/ro are flags, not options)
+        let opts: Vec<&str> = m.super_opts.split(',').filter(|o| *o != "rw" && *o != "ro").collect();
+        let at = put_str(&mut strings, &opts.join(","));
+        p32(&mut out, 4, at);
+        done |= MNT_OPTS;
+    }
+    if mask & SB_SOURCE != 0 {
+        let at = put_str(&mut strings, &m.source);
+        p32(&mut out, 124, at);
+        done |= SB_SOURCE;
+    }
+    let total = HDR + strings.len();
+    p32(&mut out, 0, total as u32);
+    p64(&mut out, 8, done);
+    out.extend_from_slice(&strings);
+    if (bufsize as usize) < total {
+        return -75; // EOVERFLOW
+    }
+    if super::vfs::copy_out(buf, &out).is_err() {
+        return EFAULT;
+    }
+    0
+}
+
 /// The new mount API's system calls: open_tree (428), move_mount (429), fsopen (430),
 /// fsconfig (431), fsmount (432), fspick (433), mount_setattr (442).
 pub fn dispatch_new(num: u64, a: [u64; 6]) -> i64 {
@@ -1497,6 +1723,8 @@ pub fn dispatch_new(num: u64, a: [u64; 6]) -> i64 {
         431 => fsconfig(a[0], a[1], a[2], a[3], a[4]),
         432 => fsmount(a[0], a[1], a[2]),
         433 => fspick(a[0], a[1], a[2]),
+        457 => statmount(a[0], a[1], a[2], a[3]),
+        458 => listmount(a[0], a[1], a[2], a[3]),
         _ => mount_setattr(a[0], a[1], a[2], a[3], a[4]),
     }
 }

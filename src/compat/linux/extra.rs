@@ -55,8 +55,325 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         450 => set_mempolicy_home_node(a[0], a[1], a[2], a[3]),
         451 => cachestat(a[0], a[1], a[2], a[3]),
         462 => mseal(a[0], a[1], a[2]),
+        159 => adjtimex(0, a[0]),
+        305 => adjtimex(a[0], a[1]),
+        164 => settimeofday(a[0], a[1]),
+        227 => clock_settime(a[0], a[1]),
+        170 => set_uts(a[0], a[1], false),
+        171 => set_uts(a[0], a[1], true),
+        329 => pkey_mprotect(a[0], a[1], a[2], a[3]),
+        447 => memfd_secret(a[0]),
+        453 => map_shadow_stack(a[0], a[1], a[2]),
+        459 => lsm_self_attr(a[0], a[3], false),
+        460 => lsm_self_attr(a[0], a[3], true),
+        461 => lsm_list_modules(a[0], a[1], a[2]),
         _ => return None,
     })
+}
+
+// ----------------------------------------------------------------------
+// Clock and host name
+// ----------------------------------------------------------------------
+
+/// `CAP_SYS_TIME` (25), in the initial user namespace.
+fn may_set_time() -> bool {
+    crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 25) != 0 && !t.caps.in_userns).unwrap_or(false)
+}
+
+fn read_timespec(ptr: u64) -> Result<(i64, i64), i64> {
+    let b = copy_in(ptr, 16)?;
+    Ok((i64::from_le_bytes(b[0..8].try_into().unwrap()), i64::from_le_bytes(b[8..16].try_into().unwrap())))
+}
+
+/// `clock_settime(clockid, tp)`: only `CLOCK_REALTIME` can be set.
+fn clock_settime(clock: u64, tp: u64) -> i64 {
+    if clock != 0 {
+        return EINVAL;
+    }
+    let (s, ns) = match read_timespec(tp) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if s < 0 || !(0..1_000_000_000).contains(&ns) {
+        return EINVAL;
+    }
+    if !may_set_time() {
+        return EPERM;
+    }
+    crate::arch::rtc::set_now(s as u64, ns as u32);
+    0
+}
+
+/// The time zone `settimeofday` set (`gettimeofday` reports it).
+pub static TIMEZONE: Mutex<[i32; 2]> = Mutex::new([0, 0]);
+
+/// `settimeofday(tv, tz)`.
+fn settimeofday(tv: u64, tz: u64) -> i64 {
+    let time = if tv != 0 {
+        let (s, us) = match read_timespec(tv) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        if s < 0 || !(0..1_000_000).contains(&us) {
+            return EINVAL;
+        }
+        Some((s, us))
+    } else {
+        None
+    };
+    let zone = if tz != 0 {
+        match copy_in(tz, 8) {
+            Ok(b) => Some([i32::from_le_bytes(b[0..4].try_into().unwrap()), i32::from_le_bytes(b[4..8].try_into().unwrap())]),
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
+    if (time.is_some() || zone.is_some()) && !may_set_time() {
+        return EPERM;
+    }
+    if let Some(z) = zone {
+        if !(-15 * 60..=15 * 60).contains(&z[0]) {
+            return EINVAL;
+        }
+        *TIMEZONE.lock() = z;
+    }
+    if let Some((s, us)) = time {
+        crate::arch::rtc::set_now(s as u64, (us * 1000) as u32);
+    }
+    0
+}
+
+/// The kernel's NTP state (`adjtimex`): what was set, reported back.
+struct Ntp {
+    offset: i64,
+    freq: i64,
+    maxerror: i64,
+    esterror: i64,
+    status: i32,
+    constant: i64,
+    tick: i64,
+    tai: i32,
+}
+
+static NTP: Mutex<Ntp> = Mutex::new(Ntp { offset: 0, freq: 0, maxerror: 16_000_000, esterror: 16_000_000, status: 0x40, constant: 2, tick: 10_000, tai: 0 });
+
+/// `adjtimex(buf)` / `clock_adjtime(CLOCK_REALTIME, buf)`: `struct timex`. Settings are
+/// kept and reported; `ADJ_SETOFFSET` steps the clock. Returns the clock state.
+fn adjtimex(clock: u64, buf: u64) -> i64 {
+    const ADJ_OFFSET: u32 = 0x1;
+    const ADJ_FREQUENCY: u32 = 0x2;
+    const ADJ_MAXERROR: u32 = 0x4;
+    const ADJ_ESTERROR: u32 = 0x8;
+    const ADJ_STATUS: u32 = 0x10;
+    const ADJ_TIMECONST: u32 = 0x20;
+    const ADJ_TAI: u32 = 0x80;
+    const ADJ_SETOFFSET: u32 = 0x100;
+    const ADJ_MICRO: u32 = 0x1000;
+    const ADJ_NANO: u32 = 0x2000;
+    const ADJ_TICK: u32 = 0x4000;
+    const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
+    const ADJ_OFFSET_SS_READ: u32 = 0xa001;
+    if clock != 0 && clock != 11 {
+        return EINVAL; // CLOCK_REALTIME, CLOCK_TAI
+    }
+    let mut t = match copy_in(buf, 208) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let get = |t: &[u8], o: usize| i64::from_le_bytes(t[o..o + 8].try_into().unwrap());
+    let modes = u32::from_le_bytes(t[0..4].try_into().unwrap());
+    let read_only = modes == 0 || modes == ADJ_OFFSET_SS_READ;
+    if !read_only {
+        if !may_set_time() {
+            return EPERM;
+        }
+        let mut n = NTP.lock();
+        if modes & ADJ_SETOFFSET != 0 {
+            // Step the clock by `time` (seconds and micro- or nanoseconds)
+            let s = get(&t, 72);
+            let frac = get(&t, 80);
+            let ns_off = s as i128 * 1_000_000_000 + if modes & ADJ_NANO != 0 { frac as i128 } else { frac as i128 * 1000 };
+            let (cs, cns) = crate::arch::rtc::now();
+            let now = cs as i128 * 1_000_000_000 + cns as i128 + ns_off;
+            if now < 0 {
+                return EINVAL;
+            }
+            crate::arch::rtc::set_now((now / 1_000_000_000) as u64, (now % 1_000_000_000) as u32);
+        }
+        if modes & ADJ_OFFSET != 0 || modes & ADJ_OFFSET_SINGLESHOT == ADJ_OFFSET_SINGLESHOT {
+            n.offset = get(&t, 8);
+        }
+        if modes & ADJ_FREQUENCY != 0 {
+            n.freq = get(&t, 16);
+        }
+        if modes & ADJ_MAXERROR != 0 {
+            n.maxerror = get(&t, 24);
+        }
+        if modes & ADJ_ESTERROR != 0 {
+            n.esterror = get(&t, 32);
+        }
+        if modes & ADJ_STATUS != 0 {
+            n.status = i32::from_le_bytes(t[40..44].try_into().unwrap());
+        }
+        if modes & ADJ_TIMECONST != 0 {
+            n.constant = get(&t, 48);
+        }
+        if modes & ADJ_TICK != 0 {
+            let tick = get(&t, 88);
+            if !(9000..=11000).contains(&tick) {
+                return EINVAL;
+            }
+            n.tick = tick;
+        }
+        if modes & ADJ_TAI != 0 {
+            n.tai = get(&t, 8) as i32;
+        }
+        let _ = ADJ_MICRO;
+    }
+    let n = NTP.lock();
+    let put = |t: &mut [u8], o: usize, v: i64| t[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put(&mut t, 8, n.offset);
+    put(&mut t, 16, n.freq);
+    put(&mut t, 24, n.maxerror);
+    put(&mut t, 32, n.esterror);
+    t[40..44].copy_from_slice(&n.status.to_le_bytes());
+    put(&mut t, 48, n.constant);
+    put(&mut t, 56, 1); // precision: 1 us
+    put(&mut t, 64, 32_768_000); // tolerance: 500 ppm
+    let (s, ns) = crate::arch::rtc::now();
+    put(&mut t, 72, s as i64);
+    put(&mut t, 80, if modes & ADJ_NANO != 0 { ns as i64 } else { ns as i64 / 1000 });
+    put(&mut t, 88, n.tick);
+    t[160..164].copy_from_slice(&n.tai.to_le_bytes());
+    let state = if n.status & 0x40 != 0 { 5 } else { 0 }; // TIME_ERROR while unsynchronised, else TIME_OK
+    drop(n);
+    if copy_out(buf, &t).is_err() {
+        return EFAULT;
+    }
+    state
+}
+
+/// Host and domain names, by UTS namespace (absent: the defaults).
+static UTS: Mutex<BTreeMap<u64, (alloc::string::String, alloc::string::String)>> = Mutex::new(BTreeMap::new());
+
+/// The calling process's `(host name, domain name)`.
+pub fn uts_names() -> (alloc::string::String, alloc::string::String) {
+    let id = super::proc::PROCS.lock().get(&super::proc::current_ids().1).map_or(0, |p| p.ns.uts);
+    UTS.lock().get(&id).cloned().unwrap_or_else(|| (alloc::string::String::from("hydra"), alloc::string::String::from("localdomain")))
+}
+
+/// A new UTS namespace `to` starts with the names of `from`.
+pub fn uts_copy(from: u64, to: u64) {
+    let mut t = UTS.lock();
+    if let Some(v) = t.get(&from).cloned() {
+        t.insert(to, v);
+    }
+}
+
+/// `sethostname` / `setdomainname(name, len)` (`CAP_SYS_ADMIN` in the namespace's owner).
+fn set_uts(name: u64, len: u64, domain: bool) -> i64 {
+    if len > 64 {
+        return EINVAL;
+    }
+    let raw = match copy_in(name, len as usize) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 21) != 0).unwrap_or(false) {
+        return EPERM;
+    }
+    let value = alloc::string::String::from_utf8_lossy(&raw).into_owned();
+    let id = super::proc::PROCS.lock().get(&super::proc::current_ids().1).map_or(0, |p| p.ns.uts);
+    let (mut host, mut dom) = uts_names();
+    if domain {
+        dom = value;
+    } else {
+        host = value;
+    }
+    UTS.lock().insert(id, (host, dom));
+    0
+}
+
+// ----------------------------------------------------------------------
+// Memory protection keys, secret memory, shadow stacks
+// ----------------------------------------------------------------------
+
+/// `pkey_mprotect(addr, len, prot, pkey)`: no keys exist (`pkey_alloc` gives `ENOSPC`),
+/// so only -1 (the default key: plain `mprotect`) is accepted.
+fn pkey_mprotect(addr: u64, len: u64, prot: u64, pkey: u64) -> i64 {
+    if pkey as i32 != -1 {
+        return EINVAL;
+    }
+    match super::mm::current_mm() {
+        Some(mm) => super::mm::sys_mprotect(&mm, addr, len, prot),
+        None => ENOMEM,
+    }
+}
+
+/// `memfd_secret(flags)`: memory only mappings of the descriptor reach. Hydra gives it a
+/// memory file of its own (named as Linux names it); the kernel's direct map is not changed.
+fn memfd_secret(flags: u64) -> i64 {
+    const O_CLOEXEC: u64 = 0o2000000;
+    if flags & !O_CLOEXEC != 0 {
+        return EINVAL;
+    }
+    let memfd = super::memfd::MemFd::new("secretmem");
+    crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(FileDescriptor::MemFd { memfd, flags: 2 }) {
+        Ok(fd) => {
+            fds.set_cloexec(fd, flags & O_CLOEXEC != 0);
+            fd as i64
+        }
+        Err(_) => -24,
+    })
+}
+
+/// `map_shadow_stack(addr, size, flags)`: user shadow stacks (CET) are not enabled, as on a
+/// kernel or CPU without them.
+fn map_shadow_stack(_addr: u64, _size: u64, flags: u64) -> i64 {
+    if flags & !3 != 0 {
+        return EINVAL;
+    }
+    EOPNOTSUPP
+}
+
+// ----------------------------------------------------------------------
+// LSM attributes
+// ----------------------------------------------------------------------
+
+/// `lsm_list_modules(ids, size, flags)`: capabilities and Landlock.
+fn lsm_list_modules(ids: u64, size: u64, flags: u64) -> i64 {
+    const LSM_ID_CAPABILITY: u64 = 100;
+    const LSM_ID_LANDLOCK: u64 = 110;
+    if flags != 0 {
+        return EINVAL;
+    }
+    let room = match copy_in(size, 4) {
+        Ok(b) => u32::from_le_bytes(b.try_into().unwrap()),
+        Err(e) => return e,
+    };
+    let list = [LSM_ID_CAPABILITY, LSM_ID_LANDLOCK];
+    let need = (list.len() * 8) as u32;
+    if copy_out(size, &need.to_le_bytes()).is_err() {
+        return EFAULT;
+    }
+    if room < need {
+        return E2BIG;
+    }
+    let bytes: Vec<u8> = list.iter().flat_map(|v| v.to_le_bytes()).collect();
+    if copy_out(ids, &bytes).is_err() {
+        return EFAULT;
+    }
+    list.len() as i64
+}
+
+/// `lsm_get_self_attr` / `lsm_set_self_attr`: neither module keeps process attributes.
+fn lsm_self_attr(attr: u64, flags: u64, set: bool) -> i64 {
+    // LSM_ATTR_CURRENT .. LSM_ATTR_SOCKCREATE; LSM_FLAG_SINGLE only for get
+    if !(100..=105).contains(&attr) || flags & !(if set { 0 } else { 1 }) != 0 {
+        return EINVAL;
+    }
+    EOPNOTSUPP
 }
 
 // ----------------------------------------------------------------------

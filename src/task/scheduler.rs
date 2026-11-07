@@ -1093,6 +1093,7 @@ impl Scheduler {
         let mut curr_idx = self.current_index;
         let curr_task = &mut self.tasks[curr_idx];
         curr_task.ticks_run += 1;
+        crate::compat::linux::perf::tick(curr_task.tgid);
 
         // 2. Check if current task still has timeslice and is eligible to continue. A task
         // woken by an event (input, a socket, a futex; not a timed sleep, which polling
@@ -1243,6 +1244,7 @@ impl Scheduler {
             self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;
             return;
         }
+        crate::compat::linux::perf::switched(self.tasks[curr_idx].tgid);
         self.current_index = next_idx;
 
         // 4a. The preemption-point marker belongs to the task, not the CPU

@@ -152,7 +152,20 @@ pub fn init() {
 pub fn now() -> (u64, u32) {
     let ticks = crate::arch::pit::ticks();
     let freq = crate::arch::pit::frequency_hz().max(1);
-    let secs = BOOT_EPOCH.load(Ordering::Relaxed) + ticks / freq;
-    let nanos = ((ticks % freq) * 1_000_000_000 / freq) as u32;
-    (secs, nanos)
+    let base = BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + (ticks as i128 * 1_000_000_000) / freq as i128;
+    let t = (base + OFFSET_NS.load(Ordering::Relaxed) as i128).max(0);
+    ((t / 1_000_000_000) as u64, (t % 1_000_000_000) as u32)
+}
+
+/// Nanoseconds the wall clock was set off the CMOS clock (`settimeofday`, `clock_settime`).
+static OFFSET_NS: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+/// Sets the wall clock to `secs` and `nanos` past the epoch (the hardware clock is not
+/// written).
+pub fn set_now(secs: u64, nanos: u32) {
+    let ticks = crate::arch::pit::ticks();
+    let freq = crate::arch::pit::frequency_hz().max(1);
+    let base = BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + (ticks as i128 * 1_000_000_000) / freq as i128;
+    let want = secs as i128 * 1_000_000_000 + nanos as i128;
+    OFFSET_NS.store((want - base) as i64, Ordering::Relaxed);
 }

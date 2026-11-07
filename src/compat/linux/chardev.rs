@@ -195,6 +195,16 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// The bpf object behind this descriptor, if it is one.
+    fn as_bpf(&self) -> Option<super::bpf::Obj> {
+        None
+    }
+
+    /// The perf counter behind this descriptor, if it is one.
+    fn as_perf(&self) -> Option<Arc<super::perf::Event>> {
+        None
+    }
+
     /// The fanotify group behind this descriptor, if it is one.
     fn as_fanotify(&self) -> Option<Arc<super::fanotify::Group>> {
         None

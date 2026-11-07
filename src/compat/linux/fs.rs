@@ -85,6 +85,12 @@ const MOUNTINFO: &str = "2069 1 8:1 / / rw,relatime shared:1 - zfs hydrapool/roo
 26 2069 0:26 / /run rw,nosuid,nodev,noexec,relatime shared:6 - tmpfs tmpfs rw,mode=755
 ";
 
+/// What `/proc/self/mountinfo` shows the caller (its mount namespace's table, or Hydra's
+/// fixed layout).
+pub fn mountinfo_text() -> alloc::string::String {
+    super::mount::mountinfo(super::proc::current_ids().1).unwrap_or_else(|| alloc::string::String::from(MOUNTINFO))
+}
+
 const MOUNTS: &str = "hydrapool/root / zfs rw,relatime,xattr 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
@@ -141,6 +147,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/kernel/msgmni" => Some(PseudoFile::ProcStatic(b"32000\n")),
         // Yama mode 3 ("no attach"): true of Hydra, which has no ptrace at all
         "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
+        "/proc/sys/kernel/perf_event_paranoid" => Some(PseudoFile::ProcStatic(b"2\n")),
         // /proc/<pid>/oom_score_adj and oom_score
         p if OOM_FILES && p.starts_with("/proc/") && is_oom_file(&p[6..]) => Some(PseudoFile::ProcOom(alloc::string::String::from(&p[6..]))),
         p if is_proc_dir(p) => Some(PseudoFile::ProcDir(alloc::string::String::from(p))),

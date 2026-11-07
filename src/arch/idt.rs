@@ -531,6 +531,10 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
 
             // Demand paging and copy-on-write for processes with their own address space.
             // Kernel accesses to user memory (syscall buffers) are resolved the same way.
+            // A page a userfaultfd handler supplies is waited for first (user faults only)
+            if (ctx.cs & 3) == 3 {
+                crate::memory::vm::uffd_resolve_current(fault_addr, is_write, false);
+            }
             let resolved = crate::memory::vm::handle_current_fault(fault_addr, is_write, is_fetch);
             if crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed) && is_user && crate::compat::linux::trace_matches_current() {
                 static FAULTS_LOGGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -542,6 +546,9 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 }
             }
             if let Some(Ok(())) = resolved {
+                if is_user && crate::compat::linux::perf::active() {
+                    crate::compat::linux::perf::fault(crate::compat::linux::proc::current_ids().1);
+                }
                 return;
             }
             let user_space_fault = resolved.is_some();

@@ -960,6 +960,13 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     let raw = join_path_raw(&base_path, path);
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
+    // Device control for the devices Hydra serves by name
+    if flags & O_PATH == 0 {
+        if let Some((major, minor)) = named_device(&abs) {
+            let access = if acc != O_WRONLY { super::bpf::DEV_READ } else { 0 } | if acc != O_RDONLY { super::bpf::DEV_WRITE } else { 0 };
+            super::bpf::device_check(super::bpf::DEV_CHAR, major, minor, access)?;
+        }
+    }
     // Landlock on files outside the pool (/proc, /dev, terminals)
     if flags & O_PATH == 0 && (is_pseudo(&abs) || abs == "/dev/tty" || is_console_path(&abs) || abs == "/dev/ptmx" || abs.starts_with("/dev/pts/")) {
         let dir = super::fs::is_proc_dir(&abs);
@@ -1120,6 +1127,12 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         }
         no_truncate = refused & super::landlock::TRUNCATE != 0;
     }
+    if ftype == S_IFCHR || ftype == 0o060000 {
+        // Device control (cgroup bpf programs)
+        let access = if acc != O_WRONLY { super::bpf::DEV_READ } else { 0 } | if acc != O_RDONLY { super::bpf::DEV_WRITE } else { 0 };
+        let kind = if ftype == S_IFCHR { super::bpf::DEV_CHAR } else { super::bpf::DEV_BLOCK };
+        super::bpf::device_check(kind, dev_major(attr.rdev), dev_minor(attr.rdev), access)?;
+    }
     if ftype == S_IFCHR {
         if let Some(dev) = super::chardev::open(attr.rdev, flags) {
             return install(FileDescriptor::Device(dev?), flags);
@@ -1172,6 +1185,82 @@ fn proc_mem_target(abs: &str) -> Option<u64> {
         "self" | "thread-self" => Some(super::proc::current_ids().1),
         n => Some(super::ns::pid_from_caller(n.parse().ok()?)),
     }
+}
+
+/// What the pool answers an extended attribute call of kind `k` (0 set, 1 get, 2 list,
+/// 3 remove): it keeps none.
+fn xattr_answer(k: u64) -> i64 {
+    match k {
+        1 => -61, // ENODATA
+        2 => 0,   // an empty list
+        _ => EOPNOTSUPP,
+    }
+}
+
+/// `setxattrat`, `getxattrat` (`dirfd, path, at_flags, name, struct xattr_args *, size`),
+/// `listxattrat` (`dirfd, path, at_flags, list, size`), `removexattrat` (`dirfd, path,
+/// at_flags, name`).
+fn xattrat(num: u64, a: [u64; 6]) -> i64 {
+    let at_flags = a[2];
+    if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return EINVAL;
+    }
+    if matches!(num, 463 | 464) {
+        // struct xattr_args { u64 value; u32 size; u32 flags; }
+        if a[5] < 16 {
+            return EINVAL;
+        }
+        match copy_in(a[4], 16) {
+            Ok(b) if num == 464 && u32::from_le_bytes(b[12..16].try_into().unwrap()) != 0 => return EINVAL,
+            Ok(_) => {}
+            Err(e) => return e,
+        }
+    }
+    let path = if a[1] == 0 { Vec::new() } else {
+        match user_cstr(a[1]) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    };
+    if path.is_empty() {
+        if at_flags & AT_EMPTY_PATH == 0 {
+            return ENOENT;
+        }
+        if !fd_exists(a[0] as i32) && a[0] as i32 != AT_FDCWD as i32 {
+            return EBADF;
+        }
+    } else {
+        let found = base_dir(a[0] as i64, &path).and_then(|(base, _)| resolve(base, &path, at_flags & AT_SYMLINK_NOFOLLOW == 0));
+        if let Err(e) = found {
+            return e;
+        }
+    }
+    xattr_answer(num - 463)
+}
+
+/// A device number's major part (Linux encoding).
+fn dev_major(rdev: u64) -> u32 {
+    (((rdev >> 8) & 0xfff) | ((rdev >> 32) & !0xfff)) as u32
+}
+
+/// A device number's minor part.
+fn dev_minor(rdev: u64) -> u32 {
+    ((rdev & 0xff) | ((rdev >> 12) & !0xff)) as u32
+}
+
+/// The device number of a device Hydra serves by name.
+fn named_device(abs: &str) -> Option<(u32, u32)> {
+    Some(match abs {
+        "/dev/null" => (1, 3),
+        "/dev/zero" => (1, 5),
+        "/dev/full" => (1, 7),
+        "/dev/random" => (1, 8),
+        "/dev/urandom" => (1, 9),
+        "/dev/tty" => (5, 0),
+        "/dev/console" => (5, 1),
+        "/dev/ptmx" => (5, 2),
+        _ => return None,
+    })
 }
 
 /// The Landlock rights opening with `flags` needs.
@@ -2791,6 +2880,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 if devnode && c.euid != 0 {
                     return Err(EPERM);
                 }
+                if devnode {
+                    let kind = if mode & S_IFMT == S_IFCHR { super::bpf::DEV_CHAR } else { super::bpf::DEV_BLOCK };
+                    super::bpf::device_check(kind, dev_major(dev), dev_minor(dev), super::bpf::DEV_MKNOD)?;
+                }
                 super::landlock::check_dir(dir, super::landlock::make_right(mode & S_IFMT))?;
                 zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid).map(|_| 0))
             })
@@ -3026,10 +3119,21 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
 
-        // Extended attributes: the pool stores none, so lists are empty and lookups miss
-        188..=190 | 197..=199 => EOPNOTSUPP, // setxattr family, removexattr family
-        191..=193 => -61,                    // getxattr family: ENODATA
-        194..=196 => 0,                      // listxattr family: empty list
+        // Extended attributes: the pool stores none (like a file system without xattr
+        // support): the file is looked up, then lists are empty, lookups miss, changes fail
+        188..=199 => {
+            // set, lset, fset; get, lget, fget; list, llist, flist; remove, lremove, fremove
+            let found = match (num - 188) % 3 {
+                2 => if fd_exists(a[0] as i32) { Ok(()) } else { Err(EBADF) },
+                k => lookup_path(a[0], k == 0).map(|_| ()),
+            };
+            match found {
+                Err(e) => e,
+                Ok(()) => xattr_answer((num - 188) / 3),
+            }
+        }
+        // setxattrat, getxattrat, listxattrat, removexattrat
+        463..=466 => xattrat(num, a),
 
         _ => return None,
     };

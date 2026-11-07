@@ -426,6 +426,16 @@ pub fn thread_exited(pid: u64, tid: u64) {
     if !now_zombie {
         return;
     }
+    if super::perf::active() {
+        // Its counts go to ancestors counting their descendants
+        let mut ancestors = Vec::new();
+        let mut at = ppid;
+        while at != 0 && ancestors.len() < 64 {
+            ancestors.push(at);
+            at = procs.get(&at).map_or(0, |p| if p.ppid == at { 0 } else { p.ppid });
+        }
+        super::perf::exited(pid, &ancestors);
+    }
     for (tgid, t) in super::ptrace::on_tracer_exit(pid) {
         if let Some(th) = procs.get_mut(&tgid).and_then(|q| q.threads.get_mut(&t)) {
             th.pending |= bit(SIGKILL);
