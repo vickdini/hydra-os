@@ -242,6 +242,7 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     match major {
         226 => Some(super::drm::open(minor, nonblock)),
         13 => Some(super::evdev::open(minor, nonblock)),
+        1 if minor == 11 => Some(super::admin::kmsg_open(flags)),
         _ => None,
     }
 }

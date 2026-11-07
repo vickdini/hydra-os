@@ -370,6 +370,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     super::keys::on_exec(tid, tgid);
     super::ptrace::on_exec(tgid, tid);
     super::perf::on_exec(tgid);
+    super::admin::note_exec(tgid);
     // Hardware breakpoints do not survive exec
     if crate::task::with_current_task_mut(|t| core::mem::take(&mut t.debugregs)[7] != 0).unwrap_or(false) {
         crate::arch::debugregs::switch_to(&[0; 8]);

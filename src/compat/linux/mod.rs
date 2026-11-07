@@ -4,6 +4,7 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod admin;
 pub mod aio;
 pub mod bpf;
 pub mod chardev;
@@ -153,6 +154,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         323 => return userfaultfd::sys_userfaultfd(arg0),
         298 => return perf::sys_perf_event_open(arg0, arg1, arg2, arg3, arg4),
         321 => return bpf::sys_bpf(arg0, arg1, arg2),
+        // syslog, ustat, sysfs, vhangup, acct, swapon, swapoff, quotactl, quotactl_fd
+        103 | 136 | 139 | 153 | 163 | 167 | 168 | 179 | 443 => return admin::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // fanotify_init, fanotify_mark, open_by_handle_at
         300 | 301 => return fanotify::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         304 => return fanotify::open_by_handle_at(arg0, arg1, arg2),

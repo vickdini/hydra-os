@@ -1530,6 +1530,10 @@ impl Scheduler {
             self.pending_close.push(fds.into_inner());
         }
         if self.tasks[idx].personality == super::tcb::TaskPersonality::Linux {
+            if crate::compat::linux::admin::acct_on() {
+                let t = &self.tasks[idx];
+                crate::compat::linux::admin::note_task(t.tgid, t.uid, t.gid, t.exe_path());
+            }
             crate::compat::linux::proc::thread_exited(self.tasks[idx].tgid, self.tasks[idx].id.0);
         }
     }

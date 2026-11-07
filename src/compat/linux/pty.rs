@@ -78,6 +78,8 @@ pub struct Pty {
     state: Mutex<PtyState>,
     /// Readers and writers of both ends.
     pub wq: Arc<WaitQueue>,
+    /// Hangups so far (`vhangup`): descriptors opened before the last one are dead.
+    hangups: core::sync::atomic::AtomicU64,
 }
 
 /// An open end: the open file description shared by `dup` and `fork`.
@@ -88,6 +90,31 @@ pub struct PtyFile {
     pub master: bool,
     /// Atomic flag indicating whether non-blocking I/O is enabled.
     pub nonblock: AtomicBool,
+    /// The terminal's hangup count when this was opened.
+    gen: u64,
+}
+
+impl PtyFile {
+    /// Whether the terminal was hung up since this was opened (slave side).
+    fn hung_up(&self) -> bool {
+        !self.master && self.gen != self.pty.hangups.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Hangs up the controlling terminal of session `sid` (`vhangup`): the session loses it and
+/// earlier descriptors are dead. Returns `(session leader, foreground group)` to signal.
+pub fn hangup(sid: u64) -> Option<(u64, u64)> {
+    let pty = controlling_tty(sid)?;
+    let fg = {
+        let mut t = pty.tty.lock();
+        let fg = t.fg_pgrp;
+        t.session = 0;
+        t.fg_pgrp = 0;
+        fg
+    };
+    pty.hangups.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    pty.wq.wake_all();
+    Some((sid, fg))
 }
 
 impl Drop for PtyFile {
@@ -151,9 +178,10 @@ pub fn open_master(uid: u32, nonblock: bool) -> Arc<PtyFile> {
             mode: 0o620,
         }),
         wq: WaitQueue::new_shared(),
+        hangups: core::sync::atomic::AtomicU64::new(0),
     });
     ptys.insert(index, Arc::downgrade(&pty));
-    Arc::new(PtyFile { pty, master: true, nonblock: AtomicBool::new(nonblock) })
+    Arc::new(PtyFile { pty, master: true, nonblock: AtomicBool::new(nonblock), gen: 0 })
 }
 
 /// Opens slave `/dev/pts/<index>`. A session leader without a controlling terminal
@@ -207,7 +235,8 @@ fn open_slave_of(pty: &Arc<Pty>, nonblock: bool, noctty: bool) -> Result<Arc<Pty
             }
         }
     }
-    Ok(Arc::new(PtyFile { pty: pty.clone(), master: false, nonblock: AtomicBool::new(nonblock) }))
+    let gen = pty.hangups.load(core::sync::atomic::Ordering::Relaxed);
+    Ok(Arc::new(PtyFile { pty: pty.clone(), master: false, nonblock: AtomicBool::new(nonblock), gen }))
 }
 
 /// The pseudo-terminal that is the controlling terminal of session `sid` (`/dev/tty`).
@@ -438,7 +467,7 @@ impl PtyFile {
     ///
     /// Number of bytes read on success, `0` on EOF, or a negative Linux errno on error.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
-        if buf.is_empty() {
+        if buf.is_empty() || self.hung_up() {
             return 0;
         }
         let mut waits = WaitSet::new();
@@ -487,6 +516,9 @@ impl PtyFile {
     ///
     /// Number of bytes written, or a negative Linux errno on error.
     pub fn write(&self, data: &[u8]) -> i64 {
+        if self.hung_up() {
+            return EIO;
+        }
         if self.master {
             self.pty.input(data);
             return data.len() as i64;

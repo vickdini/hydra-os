@@ -96,6 +96,16 @@ static PROCS: Mutex<BTreeMap<u64, Proc>> = Mutex::new(BTreeMap::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Turns the per-process tallies on (process accounting uses them too).
+pub fn force_active() {
+    ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Timer ticks process `tgid` ran and its page faults (while tallies were on).
+pub fn own_ticks(tgid: u64) -> (u64, u64) {
+    PROCS.lock().get(&tgid).map_or((0, 0), |p| (p.own.ticks, p.own.faults))
+}
+
 /// Whether perf counts (the hooks' fast path).
 #[inline]
 pub fn active() -> bool {

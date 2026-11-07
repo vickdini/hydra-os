@@ -380,6 +380,8 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     // server, which may be the caller itself (ordinary processes do it soon enough)
     if !crate::task::scheduler::handoff_active() && crate::task::current_service().is_none() {
         crate::task::close_retired();
+        // Process accounting records of processes that ended
+        crate::compat::linux::admin::flush();
         crate::memory::vm::reap_retired_mms();
         crate::task::scheduler::reap_dead_tasks();
     }

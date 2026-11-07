@@ -718,6 +718,8 @@ macro_rules! kprintln {
 /// *Guaranteed to never panic under normal execution.*
 #[doc(hidden)]
 pub fn _kprint(args: fmt::Arguments) {
+    // The kernel log `syslog`/`dmesg` read
+    crate::compat::linux::admin::klog(args);
     let mut console = CONSOLE.lock();
     let _ = console.write_fmt(args);
 }

@@ -426,6 +426,11 @@ pub fn thread_exited(pid: u64, tid: u64) {
     if !now_zombie {
         return;
     }
+    if super::admin::acct_on() {
+        let (start, status) = procs.get(&pid).map_or((0, 0), |p| (p.start_time, p.exit_status.unwrap_or(0)));
+        let (ticks, faults) = super::perf::own_ticks(pid);
+        super::admin::on_exit(pid, ppid, start, status, ticks, faults);
+    }
     if super::perf::active() {
         // Its counts go to ancestors counting their descendants
         let mut ancestors = Vec::new();

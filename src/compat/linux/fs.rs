@@ -37,6 +37,10 @@ pub enum PseudoFile {
     ProcVersion,
     /// `/proc/meminfo`: reports total and free kernel heap memory in `kB`.
     ProcMeminfo,
+    /// `/proc/swaps`: the active swap areas.
+    ProcSwaps,
+    /// `/proc/filesystems`: the file system types.
+    ProcFilesystems,
     /// `/proc/cpuinfo`: reports `x86_64` processor identification and feature flags.
     ProcCpuinfo,
     /// `/proc/self/maps`: reports the virtual memory regions of the calling process.
@@ -116,6 +120,9 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/dev/urandom" | "/dev/random" => Some(PseudoFile::DevUrandom),
         "/proc/version" => Some(PseudoFile::ProcVersion),
         "/proc/meminfo" => Some(PseudoFile::ProcMeminfo),
+        "/proc/swaps" => Some(PseudoFile::ProcSwaps),
+        "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
+        "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
         "/proc/self/maps" => Some(PseudoFile::ProcSelfMaps),
         "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
@@ -411,11 +418,19 @@ impl PseudoFile {
                 let (total, free) = (fa.total_usable_memory() / 1024, fa.free_memory() / 1024);
                 drop(fa);
                 let mut text = alloc::format!("MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n", total, free, free);
+                let (swap_total, swap_free) = super::admin::swap_kib();
                 for field in ["Buffers", "Cached", "SwapCached", "SwapTotal", "SwapFree", "Shmem", "SReclaimable", "SUnreclaim"] {
-                    text.push_str(&alloc::format!("{:<16}{:8} kB\n", alloc::format!("{}:", field), 0));
+                    let v = match field {
+                        "SwapTotal" => swap_total,
+                        "SwapFree" => swap_free,
+                        _ => 0,
+                    };
+                    text.push_str(&alloc::format!("{:<16}{:8} kB\n", alloc::format!("{}:", field), v));
                 }
                 read_slice(text.as_bytes(), cursor, buf)
             }
+            PseudoFile::ProcSwaps => read_slice(super::admin::swaps_text().as_bytes(), cursor, buf),
+            PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
             PseudoFile::ProcCpuinfo => {
                 let text = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n";
                 read_slice(text.as_bytes(), cursor, buf)
