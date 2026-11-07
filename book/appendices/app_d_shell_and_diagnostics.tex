@@ -1,0 +1,219 @@
+\chapter{Hydra Interactive Shell and Kernel Diagnostics Reference}
+\label{app:shell_diagnostics}
+
+When booting bare-metal or debugging within hypervisor environments, systems software engineers require immediate, low-level introspection into the CPU, page tables, capability tokens, storage pools, and network sockets without relying on high-level graphical compositors or network daemons.
+
+Hydra features a rich, built-in interactive microkernel shell implemented in \texttt{src/shell/}. The shell provides an extensive suite of commands for inspectability, testing, and runtime diagnostics. This appendix serves as a comprehensive reference guide to the Hydra shell environment and debugging facilities.
+
+% ==============================================================================
+\section{Shell Architecture and Execution Pipeline}
+\label{sec:shell_architecture}
+% ==============================================================================
+
+The Hydra microkernel interactive shell operates either directly on the UEFI GOP console, over an 8250/16550 UART serial port (\texttt{COM1}, \texttt{0x3F8}), or within a Linux-compatible pseudo-terminal (\texttt{/dev/pts/}).
+
+The shell pipeline (\texttt{src/shell/pipeline.rs}) supports:
+\begin{itemize}
+    \item Standard command execution with whitespace tokenization and quoted arguments.
+    \item I/O redirection: standard output redirection (\texttt{>}, \texttt{>>}) to OpenZFS files or synthetic devices.
+    \item UNIX pipelines: chaining stdout of one process into stdin of another (\texttt{|}) via in-kernel circular pipe buffers.
+    \item Environment variables: dynamic expansion of variables (e.g., \texttt{\$PATH}, \texttt{\$HOME}, \texttt{\$TERM}).
+    \item Command history and line editing: ANSI escape sequence handling for cursor navigation, word-skipping, and history recall (\texttt{Up}/\texttt{Down} arrows).
+\end{itemize}
+
+% ==============================================================================
+\section{Core System Inspection Commands}
+\label{sec:shell_core_cmds}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Command} & \textbf{Source File} & \textbf{Description and Architectural Diagnostics} \\
+\midrule
+\texttt{help} & \texttt{commands/help.rs} & Lists all available shell commands with syntax summaries. \\
+\texttt{info} & \texttt{commands/info.rs} & Displays microkernel version, compiler commit, CPU architecture, and uptime. \\
+\texttt{cpu} & \texttt{commands/cpu.rs} & Queries CPUID feature flags (APIC, SSE, AVX, FPU, VMX, SMAP, SMEP). \\
+\texttt{mem} & \texttt{commands/mem.rs} & Reports physical frame allocation metrics, total/free RAM, and heap pools. \\
+\texttt{status} & \texttt{commands/status.rs} & Comprehensive subsystem status report (IPC, scheduler, drivers, ZFS). \\
+\texttt{time} & \texttt{commands/time.rs} & Reads CMOS Real-Time Clock (RTC) and PIT/HPET tick counters. \\
+\texttt{power} & \texttt{commands/power.rs} & ACPI power management: \texttt{power off} (shutdown) or \texttt{power reboot}. \\
+\bottomrule
+\end{tabularx}
+\caption{Core System Diagnostics and Inspection Commands.}
+\label{tab:shell_core_cmds}
+\end{table}
+
+\subsection{Physical Memory Diagnostics (\texttt{mem})}
+The \texttt{mem} command queries the microkernel's physical frame allocator and active heap:
+\begin{lstlisting}[language=bash]
+hydra# mem
+======================================================================
+Hydra Physical Frame Allocator & Memory Metrics
+======================================================================
+  Physical Architecture:   x86_64 Long Mode (48-bit Canonical Addressing)
+  Total Memory Regions:    12 (from UEFI GetMemoryMap)
+  Total Physical Frames:   1,048,576 (4,096 MiB)
+  Allocated Frames:        48,320 (188 MiB)
+  Free Physical Frames:    1,000,256 (3,907 MiB)
+  Intrusive Free List:     0x0000_0001_8a40_0000 (Active)
+----------------------------------------------------------------------
+Kernel Heap (Ring 0):
+  Heap Base Virtual:       0xFFFF_8000_4000_0000
+  Total Heap Capacity:     64 MiB
+  Allocated Chunks:        1,842 (8.4 MiB used)
+  Available Heap Space:    55.6 MiB
+======================================================================
+\end{lstlisting}
+
+% ==============================================================================
+\section{Process and Task Inspection Commands}
+\label{sec:shell_task_cmds}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Command} & \textbf{Source File} & \textbf{Description and Functionality} \\
+\midrule
+\texttt{ps} & \texttt{commands/task\_cmds.rs} & Lists all active Task Control Blocks (PID, PPID, state, cycles, name). \\
+\texttt{kill} & \texttt{commands/task\_cmds.rs} & Sends a signal or IPC termination request to a specified Task ID. \\
+\texttt{nice} & \texttt{commands/task\_cmds.rs} & Modifies task scheduling priority or stride ticket weight. \\
+\texttt{ipc} & \texttt{commands/ipc.rs} & Inspects registered microkernel IPC endpoints, queues, and message stats. \\
+\texttt{caps} & \texttt{commands/caps.rs} & Dumps active capability tokens and rights tables for a specific task. \\
+\texttt{service} & \texttt{commands/service\_cmd.rs} & Queries the Ring 3 isolated driver supervisor and restarts failed daemons. \\
+\bottomrule
+\end{tabularx}
+\caption{Task, Scheduler, and IPC Diagnostic Commands.}
+\label{tab:shell_task_cmds}
+\end{table}
+
+\subsection{Process Table Inspection (\texttt{ps})}
+The \texttt{ps} command iterates over the scheduler's Task Control Block list:
+\begin{lstlisting}[language=bash]
+hydra# ps
+  PID  PPID  RING  STATE     CYCLES (M)   SWITCHES  NAME
+    0     0     0  Ready     14,290.41      12,840  [idle_thread]
+    1     0     0  Running    4,812.30       8,190  [supervisor]
+    2     1     3  Blocked      410.12         942  ata-driver (0x21)
+    3     1     3  Blocked    1,824.50       3,410  zfs-server (0x20)
+    4     1     3  Blocked      620.80       1,280  net_driver (0x22)
+    5     1     3  Blocked    8,410.20      24,190  display_server (0x23)
+    6     1     3  Ready        912.40       2,100  hydra-logind
+    7     6     3  Blocked    6,120.90      18,420  kwin_wayland
+    8     7     3  Ready     12,840.10      41,200  brave-browser
+\end{lstlisting}
+
+% ==============================================================================
+\section{Storage and OpenZFS File System Commands}
+\label{sec:shell_zfs_cmds}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Command} & \textbf{Source File} & \textbf{Description and Operational Details} \\
+\midrule
+\texttt{zpool} & \texttt{commands/zfs\_cmds.rs} & Storage pool administration: \texttt{status}, \texttt{list}, \texttt{scrub}, \texttt{import}, \texttt{export}. \\
+\texttt{zfs} & \texttt{commands/zfs\_cmds.rs} & Dataset management: dataset creation, mounting, snapshots, clone. \\
+\texttt{ls} & \texttt{commands/fs\_cmds.rs} & Lists directory contents using ZAP directory leaf walks. \\
+\texttt{cat} & \texttt{commands/fs\_cmds.rs} & Reads and streams file data blocks from OpenZFS dnodes to stdout. \\
+\texttt{mkdir} & \texttt{commands/fs\_cmds.rs} & Allocates a new directory dnode and binds it to parent directory ZAP. \\
+\texttt{rm} & \texttt{commands/fs\_cmds.rs} & Unlinks a directory entry and decrements dnode reference counter. \\
+\texttt{df} & \texttt{commands/fs\_cmds.rs} & Reports total and available storage pool space from space maps. \\
+\bottomrule
+\end{tabularx}
+\caption{Storage and OpenZFS File System Commands.}
+\label{tab:shell_storage_cmds}
+\end{table}
+
+\subsection{Storage Pool Scrubbing and Health Status (\texttt{zpool status})}
+The \texttt{zpool status} command verifies Merkle tree checksums across the entire active storage pool:
+\begin{lstlisting}[language=bash]
+hydra# zpool status
+  pool: hydrapool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:00:04 with 0 errors on Thu Nov  5 14:48:26 2026
+config:
+
+        NAME                  STATE     READ WRITE CKSUM
+        hydrapool             ONLINE       0     0     0
+          ata-0 (16384 MiB)   ONLINE       0     0     0
+
+errors: No known data errors
+\end{lstlisting}
+
+% ==============================================================================
+\section{Networking and Connectivity Commands}
+\label{sec:shell_net_cmds}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Command} & \textbf{Source File} & \textbf{Description and Diagnostic Scope} \\
+\midrule
+\texttt{ifconfig} & \texttt{commands/net\_cmds.rs} & Reports network adapter MAC, assigned IPv4, subnet mask, gateway. \\
+\texttt{ping} & \texttt{commands/net\_cmds.rs} & Transmits ICMP Echo Requests and measures round-trip time (RTT). \\
+\texttt{arp} & \texttt{commands/net\_cmds.rs} & Displays and manipulates the in-memory ARP translation table. \\
+\texttt{dhcp} & \texttt{commands/net\_cmds.rs} & Triggers manual DHCP DORA lease acquisition and renews lease timers. \\
+\texttt{netstat} & \texttt{commands/net\_cmds.rs} & Lists active TCP/UDP sockets, foreign endpoints, and connection states. \\
+\texttt{http} & \texttt{commands/net\_cmds.rs} & Simple HTTP/1.1 client for fetching web resources and testing TCP streams. \\
+\bottomrule
+\end{tabularx}
+\caption{Network Subsystem Diagnostic Commands.}
+\label{tab:shell_net_cmds}
+\end{table}
+
+% ==============================================================================
+\section{Graphics, Wayland, and Desktop Commands}
+\label{sec:shell_desktop_cmds}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Command} & \textbf{Source File} & \textbf{Description and Functionality} \\
+\midrule
+\texttt{video} & \texttt{commands/video.rs} & Reports UEFI GOP resolution, pixel format, stride, and physical address. \\
+\texttt{plasma} & \texttt{commands/plasma\_cmd.rs} & Starts KDE Plasma 6 desktop session via \texttt{hydra-session}. \\
+\texttt{linux} & \texttt{commands/linux\_cmd.rs} & Executes unmodified Linux 64-bit ELF executable under compatibility ABI. \\
+\texttt{elf} & \texttt{commands/elf\_cmd.rs} & Dumps ELF headers, program segments, dynamic symbols, and interpreter tags. \\
+\bottomrule
+\end{tabularx}
+\caption{Graphics, Video, and Desktop Execution Commands.}
+\label{tab:shell_desktop_cmds}
+\end{table}
+
+% ==============================================================================
+\section{Kernel Panic and Exception Triage Workflow}
+\label{sec:kernel_panic_triage}
+% ==============================================================================
+
+When a fatal hardware fault or software assertion failure occurs in Ring~0, Hydra immediately invokes the kernel panic handler (\texttt{src/console.rs}). The system executes the following triage pipeline:
+\begin{enumerate}
+    \item Disables local CPU interrupts immediately using the \texttt{cli} instruction.
+    \item Acquires the emergency console lock, bypassing standard spinlock contention.
+    \item Resets the UEFI GOP linear framebuffer to a clean high-contrast black canvas.
+    \item Dumps all architectural registers:
+    \begin{itemize}
+        \item Instruction Pointer (\texttt{RIP}) and Code Segment (\texttt{CS});
+        \item Flags register (\texttt{RFLAGS});
+        \item Stack Pointer (\texttt{RSP}) and Base Pointer (\texttt{RBP});
+        \item Memory Management Registers: Page Table Base (\texttt{CR3}) and Faulting Address (\texttt{CR2});
+        \item General Registers: \texttt{RAX}, \texttt{RBX}, \texttt{RCX}, \texttt{RDX}, \texttt{RSI}, \texttt{RDI}, \texttt{R8}--\texttt{R15}.
+    \end{itemize}
+    \item Performs a frame-pointer walk starting from \texttt{RBP}, printing up to 16 call stack frames with symbol offsets.
+    \item Emits the complete diagnostic dump simultaneously across the high-speed 16550 UART serial port (\texttt{COM1}) for capture by automated hypervisor loggers.
+    \item Enters an infinite processor halt loop: \texttt{loop \{ core::arch::x86\_64::hlt(); \}}.
+\end{enumerate}

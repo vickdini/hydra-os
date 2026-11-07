@@ -1,56 +1,196 @@
-\chapter{System Call Reference}
+\chapter{Complete System Call Reference}
 \label{app:syscalls}
 
-This appendix provides a comprehensive reference table of the primary Linux system calls implemented by Hydra's binary compatibility subsystem (\texttt{src/compat/linux/mod.rs}).
+This appendix provides an exhaustive, classified reference of the Linux System Calls implemented by Hydra's binary compatibility layer (\texttt{src/compat/linux/}). Calls adhere to the System V AMD64 ABI: the system call number is passed in \texttt{RAX}, arguments in \texttt{RDI}, \texttt{RSI}, \texttt{RDX}, \texttt{R10}, \texttt{R8}, and \texttt{R9}, and return values in \texttt{RAX} (negative values denote \texttt{-errno}).
+
+% ==============================================================================
+\section{File and Directory Operations}
+\label{sec:ref_file_ops}
+% ==============================================================================
 
 \begin{table}[htbp]
 \centering
 \small
 \begin{tabularx}{\textwidth}{rllX}
 \toprule
-\textbf{Number} & \textbf{Name} & \textbf{Registers Used} & \textbf{Description} \\
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
 \midrule
-0 & \texttt{read} & \texttt{rdi, rsi, rdx} & Read bytes from a file descriptor into user buffer. \\
-1 & \texttt{write} & \texttt{rdi, rsi, rdx} & Write bytes from user buffer to file descriptor. \\
-2 & \texttt{open} & \texttt{rdi, rsi, rdx} & Open file path with flags and creation mode. \\
-3 & \texttt{close} & \texttt{rdi} & Close an open file descriptor. \\
-4 & \texttt{stat} & \texttt{rdi, rsi} & Retrieve file metadata by pathname. \\
-5 & \texttt{fstat} & \texttt{rdi, rsi} & Retrieve file metadata by open file descriptor. \\
-8 & \texttt{lseek} & \texttt{rdi, rsi, rdx} & Reposition file read/write offset. \\
-9 & \texttt{mmap} & \texttt{rdi..r9} & Map files or anonymous memory into address space. \\
-10 & \texttt{mprotect} & \texttt{rdi, rsi, rdx} & Modify access permissions of memory region. \\
-11 & \texttt{munmap} & \texttt{rdi, rsi} & Unmap virtual memory pages. \\
-12 & \texttt{brk} & \texttt{rdi} & Expand or shrink application process heap. \\
-13 & \texttt{rt\_sigaction} & \texttt{rdi..r10} & Examine and change a signal action. \\
-14 & \texttt{rt\_sigprocmask} & \texttt{rdi..r10} & Examine and change blocked signal mask. \\
-16 & \texttt{ioctl} & \texttt{rdi, rsi, rdx} & Device control (DRM, evdev, TTY, termios). \\
-21 & \texttt{access} & \texttt{rdi, rsi} & Check real user's permissions for a file path. \\
-22 & \texttt{pipe} & \texttt{rdi} & Create unidirectional interprocess data channel. \\
-24 & \texttt{sched\_yield} & None & Voluntarily yield remaining CPU timeslice. \\
-39 & \texttt{getpid} & None & Returns caller's task process ID. \\
-41 & \texttt{socket} & \texttt{rdi, rsi, rdx} & Create communication endpoint (\texttt{AF\_INET}, \texttt{AF\_UNIX}). \\
-42 & \texttt{connect} & \texttt{rdi, rsi, rdx} & Initiate connection on a socket. \\
-43 & \texttt{accept} & \texttt{rdi, rsi, rdx} & Accept a connection on a listening socket. \\
-44 & \texttt{sendto} & \texttt{rdi..r9} & Transmit datagram to destination address. \\
-45 & \texttt{recvfrom} & \texttt{rdi..r9} & Receive datagram and source address. \\
-56 & \texttt{clone} & \texttt{frame} & Create child task or thread (\texttt{CLONE\_VM}, \texttt{CLONE\_FS}). \\
-57 & \texttt{fork} & \texttt{frame} & Duplicate calling process with Copy-on-Write pages. \\
-59 & \texttt{execve} & \texttt{rdi, rsi, rdx} & Replace task with new program image. \\
-60 & \texttt{exit} & \texttt{rdi} & Terminate current task with exit status code. \\
-61 & \texttt{wait4} & \texttt{rdi..r10} & Wait for child process state change or termination. \\
-72 & \texttt{fcntl} & \texttt{rdi, rsi, rdx} & Manipulate file descriptor properties (\texttt{O\_NONBLOCK}). \\
-79 & \texttt{getcwd} & \texttt{rdi, rsi} & Retrieve current working directory path string. \\
-80 & \texttt{chdir} & \texttt{rdi} & Change current working directory. \\
-89 & \texttt{readlink} & \texttt{rdi, rsi, rdx} & Read value of a symbolic link. \\
-102 & \texttt{getuid} & None & Returns real user ID of calling task. \\
-104 & \texttt{getgid} & None & Returns real group ID of calling task. \\
-107 & \texttt{geteuid} & None & Returns effective user ID of calling task. \\
-108 & \texttt{getegid} & None & Returns effective group ID of calling task. \\
-232 & \texttt{epoll\_wait} & \texttt{rdi..r10} & Wait for I/O events on an epoll file descriptor. \\
-257 & \texttt{openat} & \texttt{rdi..r10} & Open file path relative to directory descriptor. \\
+0 & \texttt{read} & \texttt{fd, buf, count} & Reads up to \texttt{count} bytes from \texttt{fd} into user buffer \texttt{buf}. \\
+1 & \texttt{write} & \texttt{fd, buf, count} & Writes up to \texttt{count} bytes from \texttt{buf} to \texttt{fd}. \\
+2 & \texttt{open} & \texttt{path, flags, mode} & Opens file specified by \texttt{path} with flags (\texttt{O\_RDONLY}, etc.). \\
+3 & \texttt{close} & \texttt{fd} & Closes an active file descriptor handle. \\
+4 & \texttt{stat} & \texttt{path, statbuf} & Retrieves file metadata by pathname. \\
+5 & \texttt{fstat} & \texttt{fd, statbuf} & Retrieves file metadata by open descriptor handle. \\
+6 & \texttt{lstat} & \texttt{path, statbuf} & Retrieves metadata without following symlinks. \\
+8 & \texttt{lseek} & \texttt{fd, offset, whence} & Repositions file offset (\texttt{SEEK\_SET}, \texttt{SEEK\_CUR}, \texttt{SEEK\_END}). \\
+16 & \texttt{ioctl} & \texttt{fd, cmd, arg} & Device-specific control (DRM graphics, terminal termios). \\
+17 & \texttt{pread64} & \texttt{fd, buf, count, off} & Reads from specified offset without modifying file offset. \\
+18 & \texttt{pwrite64} & \texttt{fd, buf, count, off} & Writes to specified offset without modifying file offset. \\
+19 & \texttt{readv} & \texttt{fd, iov, iovcnt} & Scatter-read into array of buffer descriptors. \\
+20 & \texttt{writev} & \texttt{fd, iov, iovcnt} & Gather-write from array of buffer descriptors. \\
+21 & \texttt{access} & \texttt{path, mode} & Checks caller's real permissions for a file path. \\
+22 & \texttt{pipe} & \texttt{pipefd[2]} & Creates a unidirectional FIFO interprocess data channel. \\
+32 & \texttt{dup} & \texttt{oldfd} & Duplicates file descriptor to the lowest available integer. \\
+33 & \texttt{dup2} & \texttt{oldfd, newfd} & Duplicates file descriptor to a specific integer handle. \\
+72 & \texttt{fcntl} & \texttt{fd, cmd, arg} & Manipulates descriptor flags (\texttt{F\_SETFL}, \texttt{O\_NONBLOCK}). \\
+78 & \texttt{getdents} & \texttt{fd, dirent, count} & Reads directory entries into user buffer. \\
+79 & \texttt{getcwd} & \texttt{buf, size} & Retrieves absolute working directory path string. \\
+80 & \texttt{chdir} & \texttt{path} & Changes current process working directory. \\
+83 & \texttt{mkdir} & \texttt{path, mode} & Creates a new directory node on the ZFS dataset. \\
+84 & \texttt{rmdir} & \texttt{path} & Deletes an empty directory node. \\
+87 & \texttt{unlink} & \texttt{path} & Unlinks (deletes) a named file node. \\
+88 & \texttt{symlink} & \texttt{target, linkpath} & Creates a symbolic link referencing \texttt{target}. \\
+89 & \texttt{readlink} & \texttt{path, buf, bufsiz} & Reads the target path contained inside a symlink. \\
+257 & \texttt{openat} & \texttt{dfd, path, flags, mode} & Opens file relative to directory descriptor \texttt{dfd}. \\
+258 & \texttt{mkdirat} & \texttt{dfd, path, mode} & Creates directory relative to directory descriptor. \\
+263 & \texttt{unlinkat} & \texttt{dfd, path, flags} & Unlinks file relative to directory descriptor. \\
+267 & \texttt{readlinkat}& \texttt{dfd, path, buf, size} & Reads symlink relative to directory descriptor. \\
+268 & \texttt{fchmodat} & \texttt{dfd, path, mode, flags} & Modifies file permissions relative to directory descriptor. \\
+269 & \texttt{faccessat}& \texttt{dfd, path, mode, flags} & Checks permissions relative to directory descriptor. \\
+293 & \texttt{pipe2} & \texttt{pipefd[2], flags} & Creates pipe with \texttt{O\_CLOEXEC} and \texttt{O\_NONBLOCK} flags. \\
+332 & \texttt{statx} & \texttt{dfd, path, flags, mask, buf} & Extended file status reporting with 64-bit timestamps. \\
 \bottomrule
 \end{tabularx}
-\caption{Selected Primary Linux System Calls Supported in Hydra.}
-\label{tab:syscall_reference}
+\caption{Linux File and Directory System Calls Supported in Hydra.}
+\label{tab:syscall_file}
 \end{table}
 
+% ==============================================================================
+\section{Memory Management System Calls}
+\label{sec:ref_mem_ops}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
+\midrule
+9 & \texttt{mmap} & \texttt{addr, len, prot, flags, fd, off} & Maps physical frames, files, or anonymous RAM into VM. \\
+10 & \texttt{mprotect} & \texttt{addr, len, prot} & Changes memory protection flags (\texttt{PROT\_READ/WRITE/EXEC}). \\
+11 & \texttt{munmap} & \texttt{addr, len} & Unmaps virtual memory pages from process address space. \\
+12 & \texttt{brk} & \texttt{addr} & Adjusts process heap break pointer. \\
+25 & \texttt{mremap} & \texttt{old\_addr, old\_len, new\_len, flags} & Expands, shrinks, or moves existing virtual memory mapping. \\
+26 & \texttt{msync} & \texttt{addr, len, flags} & Synchronizes dirty mapped pages back to storage media. \\
+27 & \texttt{mincore} & \texttt{addr, len, vec} & Determines whether pages reside in physical RAM. \\
+28 & \texttt{madvise} & \texttt{addr, len, advice} & Provides memory access pattern hints to the page allocator. \\
+319 & \texttt{memfd\_create} & \texttt{name, flags} & Creates an anonymous in-memory file for zero-copy IPC. \\
+\bottomrule
+\end{tabularx}
+\caption{Linux Memory Management System Calls Supported in Hydra.}
+\label{tab:syscall_mem}
+\end{table}
+
+% ==============================================================================
+\section{Process Lifecycle and Credential System Calls}
+\label{sec:ref_proc_ops}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
+\midrule
+39 & \texttt{getpid} & None & Returns current process ID (\texttt{PID}). \\
+56 & \texttt{clone} & \texttt{flags, sp, ptid, ctid, tls} & Spawns thread or child process with shared resources. \\
+57 & \texttt{fork} & None & Clones process using Copy-on-Write page tables. \\
+58 & \texttt{vfork} & None & Spawns child, suspending parent until child calls \texttt{exec}. \\
+59 & \texttt{execve} & \texttt{file, argv, envp} & Replaces process image with newly loaded ELF binary. \\
+60 & \texttt{exit} & \texttt{status} & Terminates calling thread with exit code. \\
+61 & \texttt{wait4} & \texttt{pid, wstatus, options, rusage} & Suspends until specified child changes state or exits. \\
+102 & \texttt{getuid} & None & Returns real user ID (\texttt{UID}). \\
+104 & \texttt{getgid} & None & Returns real group ID (\texttt{GID}). \\
+105 & \texttt{setuid} & \texttt{uid} & Sets real, effective, and saved user ID. \\
+106 & \texttt{setgid} & \texttt{gid} & Sets real, effective, and saved group ID. \\
+107 & \texttt{geteuid} & None & Returns effective user ID (\texttt{EUID}). \\
+108 & \texttt{getegid} & None & Returns effective group ID (\texttt{EGID}). \\
+109 & \texttt{setpgid} & \texttt{pid, pgid} & Sets process group ID for terminal job control. \\
+110 & \texttt{getppid} & None & Returns parent process ID. \\
+111 & \texttt{getpgrp} & None & Returns process group ID of calling process. \\
+112 & \texttt{setsid} & None & Creates a new session and detaches controlling terminal. \\
+158 & \texttt{arch\_prctl} & \texttt{code, addr} & Sets processor architectural state (sets \texttt{FS\_BASE} TLS). \\
+186 & \texttt{gettid} & None & Returns thread ID (\texttt{TID}). \\
+231 & \texttt{exit\_group}& \texttt{status} & Terminates all threads in current thread group. \\
+\bottomrule
+\end{tabularx}
+\caption{Linux Process and Credential System Calls Supported in Hydra.}
+\label{tab:syscall_proc}
+\end{table}
+
+% ==============================================================================
+\section{Networking and Socket System Calls}
+\label{sec:ref_net_ops}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
+\midrule
+41 & \texttt{socket} & \texttt{domain, type, protocol} & Creates communication socket (\texttt{AF\_INET}, \texttt{AF\_UNIX}). \\
+42 & \texttt{connect} & \texttt{fd, addr, addrlen} & Initiates connection to destination IP/port or UNIX socket. \\
+43 & \texttt{accept} & \texttt{fd, addr, addrlen} & Accepts incoming connection on listening socket. \\
+44 & \texttt{sendto} & \texttt{fd, buf, len, flags, dest, dlen} & Transmits datagram to destination endpoint. \\
+45 & \texttt{recvfrom} & \texttt{fd, buf, len, flags, src, slen} & Receives datagram and captures source address. \\
+46 & \texttt{sendmsg} & \texttt{fd, msg, flags} & Transmits message with scatter-gather buffers and ancillary data. \\
+47 & \texttt{recvmsg} & \texttt{fd, msg, flags} & Receives message with scatter-gather buffers and ancillary data. \\
+48 & \texttt{shutdown} & \texttt{fd, how} & Shuts down reading, writing, or both on a duplex socket. \\
+49 & \texttt{bind} & \texttt{fd, addr, addrlen} & Binds local IP address and port to a socket. \\
+50 & \texttt{listen} & \texttt{fd, backlog} & Marks socket as passive listening server. \\
+51 & \texttt{getsockname}& \texttt{fd, addr, addrlen} & Retrieves bound local address of socket. \\
+52 & \texttt{getpeername}& \texttt{fd, addr, addrlen} & Retrieves remote peer address of connected socket. \\
+53 & \texttt{socketpair} & \texttt{domain, type, proto, sv[2]} & Creates connected pair of anonymous UNIX domain sockets. \\
+54 & \texttt{setsockopt} & \texttt{fd, level, optname, optval, optlen} & Modifies socket parameters (\texttt{SO\_REUSEADDR}, etc.). \\
+55 & \texttt{getsockopt} & \texttt{fd, level, optname, optval, optlen} & Queries socket parameters. \\
+288 & \texttt{accept4} & \texttt{fd, addr, addrlen, flags} & Accepts connection, setting \texttt{SOCK\_NONBLOCK/CLOEXEC}. \\
+\bottomrule
+\end{tabularx}
+\caption{Linux Networking and Socket System Calls Supported in Hydra.}
+\label{tab:syscall_net}
+\end{table}
+
+% ==============================================================================
+\section{Event Multiplexing, Signals, and Timing System Calls}
+\label{sec:ref_event_ops}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
+\midrule
+7 & \texttt{poll} & \texttt{fds, nfds, timeout} & Waits for events on file descriptor array. \\
+13 & \texttt{rt\_sigaction} & \texttt{signum, act, oldact, sigsetsize} & Configures action associated with signal. \\
+14 & \texttt{rt\_sigprocmask} & \texttt{how, set, oldset, sigsetsize} & Manipulates calling thread's blocked signal mask. \\
+15 & \texttt{rt\_sigreturn} & None & Returns from signal handler and restores user stack context. \\
+23 & \texttt{select} & \texttt{nfds, readfds, writefds, exceptfds, timeout} & Multiplexes file descriptor bitsets. \\
+24 & \texttt{sched\_yield} & None & Voluntarily surrenders remaining CPU timeslice. \\
+35 & \texttt{nanosleep} & \texttt{req, rem} & Suspends thread execution for high-resolution interval. \\
+62 & \texttt{kill} & \texttt{pid, sig} & Dispatches signal to specified process or group. \\
+127 & \texttt{rt\_sigpending} & \texttt{set, sigsetsize} & Queries signals pending delivery to caller. \\
+128 & \texttt{rt\_sigtimedwait} & \texttt{set, info, timeout, sigsetsize} & Synchronously awaits signal with timeout. \\
+130 & \texttt{rt\_sigsuspend} & \texttt{mask, sigsetsize} & Temporarily replaces signal mask and suspends thread. \\
+202 & \texttt{futex} & \texttt{uaddr, op, val, timeout, uaddr2, val3} & Fast user-space mutual exclusion and wait queues. \\
+213 & \texttt{epoll\_create} & \texttt{size} & Allocates epoll instance descriptor. \\
+228 & \texttt{clock\_gettime} & \texttt{clockid, tp} & Retrieves high-resolution time (\texttt{CLOCK\_MONOTONIC}). \\
+229 & \texttt{clock\_getres} & \texttt{clockid, res} & Queries resolution of target hardware clock. \\
+230 & \texttt{clock\_nanosleep} & \texttt{clockid, flags, req, rem} & High-precision sleep relative to target clock. \\
+232 & \texttt{epoll\_wait} & \texttt{epfd, events, maxevents, timeout} & Waits for events on epoll set in $O(1)$ time. \\
+233 & \texttt{epoll\_ctl} & \texttt{epfd, op, fd, event} & Adds, modifies, or removes descriptors from epoll set. \\
+284 & \texttt{eventfd} & \texttt{initval} & Allocates interprocess event counter notification handle. \\
+286 & \texttt{timerfd\_settime} & \texttt{fd, flags, new\_value, old\_value} & Arms or disarms timer file descriptor. \\
+287 & \texttt{timerfd\_gettime} & \texttt{fd, curr\_value} & Queries current status of timer file descriptor. \\
+290 & \texttt{eventfd2} & \texttt{initval, flags} & Allocates eventfd with \texttt{EFD\_NONBLOCK} and \texttt{EFD\_CLOEXEC}. \\
+291 & \texttt{epoll\_create1} & \texttt{flags} & Allocates epoll instance with \texttt{EPOLL\_CLOEXEC}. \\
+\bottomrule
+\end{tabularx}
+\caption{Linux Event Multiplexing, Signal, and Timing System Calls Supported in Hydra.}
+\label{tab:syscall_event}
+\end{table}

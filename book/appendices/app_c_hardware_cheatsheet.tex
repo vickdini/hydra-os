@@ -1,87 +1,205 @@
-\chapter{x86\_64 Hardware Reference}
+\chapter{x86\_64 Hardware and Architectural Reference}
 \label{app:hardware}
 
-This appendix summarizes the critical x86\_64 machine registers, Model-Specific Registers (MSRs), control registers, and descriptor structures utilized throughout the Hydra microkernel.
+This appendix provides a definitive hardware cheatsheet for systems engineers developing bare-metal operating system software on the x86\_64 Long Mode architecture. It summarizes CPU registers, processor flags, control registers, Model-Specific Registers (MSRs), hardware exception vectors, and standard PC I/O port assignments.
 
 % ==============================================================================
-\section{General-Purpose Registers}
-\label{sec:gpr}
+\section{General-Purpose Registers and ABI Conventions}
+\label{sec:gpr_cheatsheet}
 % ==============================================================================
 
-x86\_64 Long Mode provides sixteen 64-bit general-purpose registers:
+In 64-bit Long Mode, x86\_64 provides sixteen 64-bit general-purpose registers:
+
 \begin{table}[htbp]
 \centering
 \small
-\begin{tabular}{lll}
+\begin{tabular}{llll}
 \toprule
-\textbf{Register} & \textbf{Standard Purpose} & \textbf{System V ABI Role} \\
+\textbf{Register} & \textbf{64-bit Name} & \textbf{System V ABI Role} & \textbf{Preservation Rule} \\
 \midrule
-\texttt{RAX} & Accumulator / Arithmetic & Syscall Number / Return Value \\
-\texttt{RBX} & Base Register & Callee-Saved Register \\
-\texttt{RCX} & Counter / Shift count & \texttt{syscall} return \texttt{RIP} overwrite \\
-\texttt{RDX} & Data Register / I/O Port & 3rd Function / Syscall Argument \\
-\texttt{RSI} & Source Index (String ops) & 2nd Function / Syscall Argument \\
-\texttt{RDI} & Destination Index (String ops) & 1st Function / Syscall Argument \\
-\texttt{RBP} & Base / Frame Pointer & Callee-Saved Register \\
-\texttt{RSP} & Stack Pointer & Current Top of Stack \\
-\texttt{R8} & General Purpose 8 & 5th Function / Syscall Argument \\
-\texttt{R9} & General Purpose 9 & 6th Function / Syscall Argument \\
-\texttt{R10} & General Purpose 10 & 4th Syscall Argument (\texttt{RCX} replaced) \\
-\texttt{R11} & General Purpose 11 & \texttt{syscall} return \texttt{RFLAGS} overwrite \\
-\texttt{R12}--\texttt{R15} & General Purpose 12--15 & Callee-Saved Registers \\
+\texttt{RAX} & Accumulator & Syscall Number / Return Value & Caller-Saved \\
+\texttt{RBX} & Base Register & Optional Base Pointer & Callee-Saved \\
+\texttt{RCX} & Counter & Syscall Return \texttt{RIP} overwrite & Caller-Saved \\
+\texttt{RDX} & Data Register & 3rd Function / Syscall Argument & Caller-Saved \\
+\texttt{RSI} & Source Index & 2nd Function / Syscall Argument & Caller-Saved \\
+\texttt{RDI} & Destination Index & 1st Function / Syscall Argument & Caller-Saved \\
+\texttt{RBP} & Frame Base Pointer & Stack Frame Base Pointer & Callee-Saved \\
+\texttt{RSP} & Stack Pointer & Current Top of Stack & Callee-Saved \\
+\texttt{R8} & Extended 8 & 5th Function / Syscall Argument & Caller-Saved \\
+\texttt{R9} & Extended 9 & 6th Function / Syscall Argument & Caller-Saved \\
+\texttt{R10} & Extended 10 & 4th Syscall Argument & Caller-Saved \\
+\texttt{R11} & Extended 11 & Syscall Return \texttt{RFLAGS} overwrite & Caller-Saved \\
+\texttt{R12} & Extended 12 & General Scratch & Callee-Saved \\
+\texttt{R13} & Extended 13 & General Scratch & Callee-Saved \\
+\texttt{R14} & Extended 14 & General Scratch & Callee-Saved \\
+\texttt{R15} & Extended 15 & General Scratch & Callee-Saved \\
 \bottomrule
 \end{tabular}
-\caption{x86\_64 General-Purpose Registers and Syscall Conventions.}
-\label{tab:gpr_abi}
+\caption{x86\_64 Register Layout and System V Calling Conventions.}
+\label{tab:gpr_calling}
 \end{table}
 
 % ==============================================================================
-\section{Control Registers}
-\label{sec:control_registers}
+\section{Processor Status Flags: The \texttt{RFLAGS} Register}
+\label{sec:rflags_ref}
 % ==============================================================================
 
+The 64-bit \texttt{RFLAGS} register maintains execution status, arithmetic condition codes, and system privilege modes:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Bit} & \textbf{Name} & \textbf{Mnemonic} & \textbf{Architectural Function} \\
+\midrule
+0 & Carry Flag & \texttt{CF} & Set on unsigned arithmetic overflow or borrow. \\
+2 & Parity Flag & \texttt{PF} & Set if least-significant byte of result contains an even number of 1s. \\
+4 & Auxiliary Carry & \texttt{AF} & Binary Coded Decimal (BCD) carry indicator. \\
+6 & Zero Flag & \texttt{ZF} & Set if mathematical result equals zero. \\
+7 & Sign Flag & \texttt{SF} & Set equal to most-significant bit (negative result). \\
+8 & Trap Flag & \texttt{TF} & Single-step debugging mode: CPU traps after every instruction. \\
+9 & Interrupt Enable & \texttt{IF} & Enables maskable hardware interrupts (modified via \texttt{sti}/\texttt{cli}). \\
+10 & Direction Flag & \texttt{DF} & String processing direction (\texttt{0}=increment, \texttt{1}=decrement). \\
+11 & Overflow Flag & \texttt{OF} & Set on signed two's complement integer overflow. \\
+12--13 & I/O Privilege & \texttt{IOPL} & Specifies privilege ring (0..3) required to execute PMIO instructions. \\
+14 & Nested Task & \texttt{NT} & Controls task chaining (must be \texttt{0} in Long Mode). \\
+16 & Resume Flag & \texttt{RF} & Suppresses instruction breakpoint exceptions. \\
+17 & Virtual 8086 & \texttt{VM} & Enables 8086 real-mode emulation (must be \texttt{0} in Long Mode). \\
+18 & Alignment Check & \texttt{AC} & Enables memory alignment fault detection for Ring 3. \\
+19 & Virtual Interrupt & \texttt{VIF} & Virtualized copy of \texttt{IF} for virtual 8086 mode. \\
+20 & Virtual Pending & \texttt{VIP} & Indicates virtualized interrupt is pending. \\
+21 & CPUID Identification & \texttt{ID} & If software can toggle this bit, the \texttt{cpuid} instruction is supported. \\
+\bottomrule
+\end{tabularx}
+\caption{x86\_64 \texttt{RFLAGS} Register Bitfield Assignments.}
+\label{tab:rflags_bits}
+\end{table}
+
+% ==============================================================================
+\section{Control Registers (\texttt{CR0}, \texttt{CR2}, \texttt{CR3}, \texttt{CR4})}
+\label{sec:cr_ref}
+% ==============================================================================
+
+\subsection{\texttt{CR0}: System Control Flags}
 \begin{itemize}
-    \item \textbf{\texttt{CR0}:} Controls fundamental processor operation.
-    \begin{itemize}
-        \item Bit 0 (\texttt{PE}): Protected Mode Enable.
-        \item Bit 16 (\texttt{WP}): Write Protect (prevents Ring 0 from writing to read-only user pages).
-        \item Bit 31 (\texttt{PG}): Paging Enable.
-    \end{itemize}
-    \item \textbf{\texttt{CR2}:} Page Fault Linear Address. When a \#PF exception occurs, the CPU automatically writes the faulting virtual address into \texttt{CR2}.
-    \item \textbf{\texttt{CR3}:} Page Directory Base Register (PDBR). Holds the 64-bit physical frame base address of the PML4 page table root.
-    \item \textbf{\texttt{CR4}:} Architecture extensions.
-    \begin{itemize}
-        \item Bit 5 (\texttt{PAE}): Physical Address Extension (must be \texttt{1} in Long Mode).
-        \item Bit 7 (\texttt{PGE}): Page Global Enable (preserves global TLB entries across CR3 reloads).
-        \item Bit 9 (\texttt{OSFXSR}): Operating System Fast FPU/SSE Save/Restore support.
-        \item Bit 10 (\texttt{OSXMMEXCPT}): Unmasked SSE floating-point exception support.
-    \end{itemize}
+    \item \textbf{Bit 0 (\texttt{PE}, Protection Enable):} Activates protected mode when set.
+    \item \textbf{Bit 1 (\texttt{MP}, Monitor Coprocessor):} Controls interaction of \texttt{wait}/\texttt{fwait} with the \texttt{TS} flag.
+    \item \textbf{Bit 2 (\texttt{EM}, Emulation):} When set, floating-point instructions trigger a \texttt{\#NM} exception for software emulation.
+    \item \textbf{Bit 3 (\texttt{TS}, Task Switched):} Set by hardware on context switch; used for lazy FPU state restoration.
+    \item \textbf{Bit 16 (\texttt{WP}, Write Protect):} When set, the CPU prohibits Ring~0 supervisor code from writing into read-only user pages, preventing kernel-space Copy-on-Write subversion.
+    \item \textbf{Bit 31 (\texttt{PG}, Paging):} Activates virtual memory translation. Must be set for Long Mode.
+\end{itemize}
+
+\subsection{\texttt{CR2}: Page Fault Linear Address}
+When a Page Fault (\texttt{\#PF}, Exception 14) occurs, the CPU automatically deposits the faulting 64-bit virtual address into \texttt{CR2} before jumping to the interrupt handler.
+
+\subsection{\texttt{CR3}: Page Directory Base Register (PDBR)}
+Holds the 64-bit physical base address of the Level~4 Page Map (PML4) table. If Process-Context Identifiers (\texttt{PCID}) are enabled via \texttt{CR4.PCIDE}, bits 11:0 encode the 12-bit PCID tag.
+
+\subsection{\texttt{CR4}: Architectural Feature Extensions}
+\begin{itemize}
+    \item \textbf{Bit 5 (\texttt{PAE}, Physical Address Extension):} Must be \texttt{1} to enable 64-bit Long Mode.
+    \item \textbf{Bit 7 (\texttt{PGE}, Page Global Enable):} Retains translation entries marked with the \texttt{GLOBAL} flag in the TLB across \texttt{CR3} writes.
+    \item \textbf{Bit 9 (\texttt{OSFXSR}, OS Fast FXSAVE/FXRSTOR):} Enables fast 512-byte x87/SSE FPU register save and restore instructions.
+    \item \textbf{Bit 10 (\texttt{OSXMMEXCPT}):} Enables unmasked SSE SIMD floating-point exceptions (\texttt{\#XM}).
+    \item \textbf{Bit 17 (\texttt{PCIDE}, PCID Enable):} Activates Process-Context Identifiers for TLB tagging.
+    \item \textbf{Bit 20 (\texttt{SMEP}, Supervisor Mode Execution Prevention):} Prevents Ring~0 code from executing instructions located in user-accessible pages, neutralizing privilege-escalation exploits.
+    \item \textbf{Bit 21 (\texttt{SMAP}, Supervisor Mode Access Prevention):} Prohibits Ring~0 code from reading or writing user pages unless explicitly permitted by the \texttt{stac} instruction.
 \end{itemize}
 
 % ==============================================================================
 \section{Model-Specific Registers (MSRs)}
-\label{sec:msr_table}
+\label{sec:msr_deep}
 % ==============================================================================
 
-MSRs are read using the \texttt{rdmsr} instruction (with MSR index in \texttt{ECX}, returning 64 bits in \texttt{EDX:EAX}) and written using \texttt{wrmsr}:
+MSRs are 64-bit hardware registers manipulated via the assembly instructions \texttt{rdmsr} (read with MSR index in \texttt{ECX}, returning result in \texttt{EDX:EAX}) and \texttt{wrmsr} (write with value in \texttt{EDX:EAX}):
 
 \begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{lll}
 \toprule
-\textbf{MSR Address} & \textbf{Name} & \textbf{Description} \\
+\textbf{MSR Index} & \textbf{MSR Name} & \textbf{Architectural Function} \\
 \midrule
-\texttt{0xC0000080} & \texttt{IA32\_EFER} & Extended Feature Enable (Long Mode Enable \texttt{LME}, \texttt{NXE}). \\
-\texttt{0xC0000081} & \texttt{IA32\_STAR} & Legacy Target Address (GDT Segments for \texttt{syscall}/\texttt{sysret}). \\
-\texttt{0xC0000082} & \texttt{IA32\_LSTAR} & Long Mode Target Address (Syscall entry point RIP). \\
-\texttt{0xC0000084} & \texttt{IA32\_FMASK} & Syscall Flag Mask (RFLAGS bits cleared on entry). \\
-\texttt{0xC0000100} & \texttt{IA32\_FS\_BASE} & Base address for \texttt{FS} segment (Thread-Local Storage TLS). \\
-\texttt{0xC0000101} & \texttt{IA32\_GS\_BASE} & Base address for \texttt{GS} segment (Per-CPU data structures). \\
-\texttt{0xC0000102} & \texttt{IA32\_KERNEL\_GS\_BASE} & Swap target for \texttt{swapgs} instruction on entry. \\
+\texttt{0x0000\_001B} & \texttt{IA32\_APIC\_BASE} & Base address and enable flags for Local APIC. \\
+\texttt{0xC000\_0080} & \texttt{IA32\_EFER} & Extended Feature Enable Register (\texttt{LME}, \texttt{LMA}, \texttt{NXE}). \\
+\texttt{0xC000\_0081} & \texttt{IA32\_STAR} & GDT Code/Data Segments for \texttt{syscall} and \texttt{sysret}. \\
+\texttt{0xC000\_0082} & \texttt{IA32\_LSTAR} & 64-bit RIP entry point for the \texttt{syscall} instruction. \\
+\texttt{0xC000\_0083} & \texttt{IA32\_CSTAR} & Compatibility Mode target RIP for 32-bit \texttt{syscall}. \\
+\texttt{0xC000\_0084} & \texttt{IA32\_FMASK} & Mask of \texttt{RFLAGS} bits cleared upon \texttt{syscall} execution. \\
+\texttt{0xC000\_0100} & \texttt{IA32\_FS\_BASE} & 64-bit base address for Thread-Local Storage (\texttt{FS}). \\
+\texttt{0xC000\_0101} & \texttt{IA32\_GS\_BASE} & 64-bit base address for per-CPU kernel data structures (\texttt{GS}). \\
+\texttt{0xC000\_0102} & \texttt{IA32\_KERNEL\_GS\_BASE}& Target swapped with \texttt{GS\_BASE} by the \texttt{swapgs} instruction. \\
 \bottomrule
 \end{tabular}
-\caption{Key x86\_64 Model-Specific Registers.}
-\label{tab:msr_reference}
+\caption{Primary Model-Specific Registers Configured by Hydra.}
+\label{tab:msr_complete}
 \end{table}
 
+% ==============================================================================
+\section{CPU Exception Vectors (Interrupts 0 to 31)}
+\label{sec:cpu_exceptions}
+% ==============================================================================
+
+The first 32 entries of the Interrupt Descriptor Table (IDT) are dedicated to hardware-generated processor exceptions:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{rllll}
+\toprule
+\textbf{Vector} & \textbf{Mnemonic} & \textbf{Exception Description} & \textbf{Type} & \textbf{Error Code?} \\
+\midrule
+0 & \texttt{\#DE} & Divide Error & Fault & No \\
+1 & \texttt{\#DB} & Debug Exception & Fault/Trap & No \\
+2 & \texttt{NMI} & Non-Maskable External Interrupt & Interrupt & No \\
+3 & \texttt{\#BP} & Breakpoint (\texttt{int 3} opcode \texttt{0xCC}) & Trap & No \\
+4 & \texttt{\#OF} & Overflow (\texttt{into} instruction) & Trap & No \\
+5 & \texttt{\#BR} & Bound Range Exceeded & Fault & No \\
+6 & \texttt{\#UD} & Invalid Opcode (Undefined instruction) & Fault & No \\
+7 & \texttt{\#NM} & Device Not Available (No Math Coprocessor) & Fault & No \\
+8 & \texttt{\#DF} & Double Fault & Abort & Yes (Always 0) \\
+10 & \texttt{\#TS} & Invalid TSS & Fault & Yes \\
+11 & \texttt{\#NP} & Segment Not Present & Fault & Yes \\
+12 & \texttt{\#SS} & Stack-Segment Fault & Fault & Yes \\
+13 & \texttt{\#GP} & General Protection Fault & Fault & Yes \\
+14 & \texttt{\#PF} & Page Fault & Fault & Yes (\texttt{CR2} set) \\
+16 & \texttt{\#MF} & x87 FPU Floating-Point Error & Fault & No \\
+17 & \texttt{\#AC} & Alignment Check & Fault & Yes \\
+18 & \texttt{\#MC} & Machine Check & Abort & No \\
+19 & \texttt{\#XM} & SIMD Floating-Point Exception & Fault & No \\
+20 & \texttt{\#VE} & Virtualization Exception & Fault & No \\
+21 & \texttt{\#CP} & Control Protection Exception (CET) & Fault & Yes \\
+\bottomrule
+\end{tabular}
+\caption{x86\_64 Architectural CPU Exception Vectors.}
+\label{tab:exception_vectors}
+\end{table}
+
+% ==============================================================================
+\section{Standard PC Legacy Hardware I/O Ports}
+\label{sec:pc_io_ports}
+% ==============================================================================
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Port Range} & \textbf{Device Subsystem} & \textbf{Standard Hardware Role} \\
+\midrule
+\texttt{0x0020}--\texttt{0x0021} & Master 8259 PIC & Command and interrupt mask register. \\
+\texttt{0x0040}--\texttt{0x0043} & 8254 PIT Timer & Channel 0 counter, Channel 2 speaker, Mode command. \\
+\texttt{0x0060}, \texttt{0x0064} & 8042 Keyboard Controller & Scancode buffer and controller status/command. \\
+\texttt{0x0070}--\texttt{0x0071} & Real-Time Clock (RTC) & CMOS index register and NMI mask / Data read. \\
+\texttt{0x00A0}--\texttt{0x00A1} & Slave 8259 PIC & Secondary cascade interrupt controller. \\
+\texttt{0x01F0}--\texttt{0x01F7} & Primary IDE / ATA Controller & Data port, Error, Sector Count, LBA registers, Command. \\
+\texttt{0x03F6} & Primary ATA Control & Alternate Status and Device Control (Software Reset \texttt{SRST}). \\
+\texttt{0x03F8}--\texttt{0x03FF} & Serial Port COM1 & 16550 UART line control, baud divisor, transmitter FIFO. \\
+\texttt{0x0CF8}, \texttt{0x0CFC} & PCI Configuration Space & \texttt{CONFIG\_ADDRESS} (32-bit bus/dev/fn) and \texttt{CONFIG\_DATA}. \\
+\bottomrule
+\end{tabular}
+\caption{Standard PC Hardware I/O Port Assignments Managed by Hydra.}
+\label{tab:io_ports}
+\end{table}

@@ -1,30 +1,74 @@
 \chapter{Memory Management}
 \label{chap:memory}
 
-Memory is the lifeblood of an operating system. While processors have become thousands of times faster over the last forty years, the speed of access to main memory (DRAM) has lagged far behind. To maintain performance, modern CPUs rely on sophisticated hierarchies of L1, L2, and L3 caches backed by hardware-enforced **Virtual Memory**.
+Memory is the lifeblood of an operating system. While processor clock frequencies and execution pipelines have advanced exponentially over the past four decades, the latency and bandwidth of main memory (DRAM) have struggled to keep pace. To maintain system performance while providing robust security, modern computing architectures rely on a deep hierarchy of memory mechanisms: L1, L2, and L3 processor caches backed by hardware-enforced \textbf{Virtual Memory}.
 
-Virtual memory provides two indispensable benefits:
+Virtual memory fulfills two foundational requirements in modern operating systems:
 \begin{enumerate}
-    \item \textbf{Process Isolation:} Every process is granted the illusion of owning a private, continuous, multi-terabyte address space. A process cannot inspect, modify, or corrupt the memory of another process or the microkernel, because it cannot even name those physical memory frames.
-    \item \textbf{Dynamic Resource Multiplexing:} Physical memory does not need to be contiguous, nor does it all need to be present simultaneously. Pages can be loaded on demand, shared lazily via Copy-on-Write (CoW), or mapped directly to hardware devices.
+    \item \textbf{Process Protection and Isolation:} Every process is granted the illusion of owning a contiguous, multi-terabyte address space. A process cannot inspect, modify, or corrupt the memory of another process or the microkernel, because it possesses no capability to name or address those physical frames.
+    \item \textbf{Transparent Resource Multiplexing:} Physical memory does not need to be allocated contiguously, nor does an application's entire address space need to reside in physical RAM simultaneously. Pages can be loaded lazily on demand, shared transparently via Copy-on-Write (CoW), or mapped directly to peripheral devices for high-speed Direct Memory Access (DMA).
 \end{enumerate}
 
-In this chapter, we explore how Hydra implements x86\_64 4-level paging, physical frame allocation, page fault dispatching, and dynamic memory mapping.
+In this chapter, we explore how Hydra implements physical frame allocation, manages x86\_64 4-level page tables, dispatches page faults (\texttt{\#PF}), and powers userland memory management through POSIX-compatible \texttt{mmap} and shared memory abstractions.
 
 % ==============================================================================
-\section{x86\_64 4-Level Paging Architecture}
+\section{Foundations of Memory Management}
+\label{sec:mem_foundations}
+% ==============================================================================
+
+To appreciate the elegance of modern hardware paging, one must first examine the historical solutions developed by operating system designers.
+
+\subsection{Monoprogramming without Swapping or Paging}
+In early batch computing and rudimentary personal computer operating systems (such as CP/M and MS-DOS), only a single program ran at any given moment. Memory was divided simply into a region reserved for the operating system (in ROM or low RAM) and the remainder allocated to the active user application.
+\begin{itemize}
+    \item If the user program contained a bug that overwrote low memory, the operating system was destroyed, requiring a hard machine reboot.
+    \item Concurrency was impossible: one program had to exit completely before another could begin.
+\end{itemize}
+
+\subsection{Multiprogramming with Fixed and Variable Partitions}
+With the advent of timesharing, memory was divided into discrete partitions. In \textbf{fixed partitioning}, memory was segmented into predetermined blocks (e.g., 100~KiB, 200~KiB, 500~KiB). Incoming programs were queued for the smallest partition capable of accommodating them.
+\begin{itemize}
+    \item This introduced severe \textbf{internal fragmentation}: a 105~KiB job placed in a 200~KiB partition wasted 95~KiB of allocated memory.
+\end{itemize}
+
+In \textbf{variable partitioning}, the operating system allocated exactly the memory requested by each program. However, as programs terminated and new ones arrived, memory became riddled with tiny, unusable gaps between active allocations---a pathology known as \textbf{external fragmentation}.
+
+\subsection{Dynamic Relocation and Base/Limit Registers}
+To prevent programs from corrupting each other, early hardware introduced \textbf{Base and Limit registers}:
+\begin{itemize}
+    \item When the CPU scheduled a program, the kernel loaded its physical start address into the Base register and its allocation size into the Limit register.
+    \item On every instruction, hardware automatically added the Base register to the program's relative address and verified that the result did not exceed the Limit register.
+\end{itemize}
+While this provided basic spatial protection, it required that every program occupy a single, contiguous block of physical RAM. If a program needed to grow its heap or stack dynamically, or if physical RAM was exhausted, the operating system was forced to \textbf{swap} the entire process out to a mechanical disk drive, halting execution for hundreds of milliseconds.
+
+% ==============================================================================
+\section{The x86\_64 4-Level Paging Architecture}
 \label{sec:paging_arch}
 % ==============================================================================
 
-On the x86\_64 architecture in standard Long Mode, virtual addresses are 64 bits wide, but the hardware translates 48-bit canonical addresses using a 4-level hierarchical page table structure:
+Modern 64-bit architectures abandon contiguous physical allocations entirely in favor of \textbf{Paging}. The physical memory of the computer is partitioned into uniform, fixed-size chunks called \textbf{Physical Frames} (typically 4096 bytes or 4~KiB). Similarly, a process's virtual memory is divided into fixed-size units called \textbf{Virtual Pages}. A virtual page may be mapped to any physical frame anywhere in RAM, or left unmapped entirely.
+
+\subsection{Canonical Virtual Addresses and the 48-Bit Address Space}
+Although x86\_64 general-purpose registers (\texttt{RAX}, \texttt{RSP}, \texttt{RIP}) are 64 bits wide, current hardware does not implement a full 64-bit physical or virtual address bus ($2^{64} = 16\text{ Exabytes}$). Instead, the architecture implements a **48-bit virtual address space**, spanning $2^{48} = 256\text{ Terabytes}$.
+
+To prevent software from using the upper 16 unused bits for arbitrary pointer tagging (which would cause forward compatibility breaks when processors expand to 57-bit 5-level paging), the hardware enforces **Canonical Addressing**:
 \begin{itemize}
-    \item \textbf{Level 4:} Page Map Level 4 (PML4)
-    \item \textbf{Level 3:} Page Directory Pointer Table (PDPT)
-    \item \textbf{Level 2:} Page Directory (PD)
-    \item \textbf{Level 1:} Page Table (PT)
+    \item Bits 47 through 63 must be identical (a sign-extension of bit 47).
+    \item If bit 47 is \texttt{0}, bits 48 through 63 must all be \texttt{0} (the Lower Half: \texttt{0x0000\_0000\_0000\_0000} to \texttt{0x0000\_7FFF\_FFFF\_FFFF}). This region is reserved for user-space processes.
+    \item If bit 47 is \texttt{1}, bits 48 through 63 must all be \texttt{1} (the Upper Half: \texttt{0xFFFF\_8000\_0000\_0000} to \texttt{0xFFFF\_FFFF\_FFFF\_FFFF}). This region is reserved for the operating system kernel.
+    \item Any attempt to dereference a non-canonical address (e.g., \texttt{0x0001\_0000\_0000\_0000}) triggers an immediate General Protection Fault (\texttt{\#GP}, Exception 13).
 \end{itemize}
 
-Every page table at each level consists of exactly 512 entries (\texttt{u64}), occupying exactly one 4096-byte (4~KiB) physical frame ($512 \times 8 = 4096$).
+\subsection{The 4-Level Page Table Translation Walk}
+The translation of a 48-bit canonical virtual address into a physical address is performed by the hardware Memory Management Unit (MMU) via a 4-level hierarchical walk:
+\begin{enumerate}
+    \item \textbf{Level 4 (PML4):} Page Map Level 4 Table.
+    \item \textbf{Level 3 (PDPT):} Page Directory Pointer Table.
+    \item \textbf{Level 2 (PD):} Page Directory Table.
+    \item \textbf{Level 1 (PT):} Page Table.
+\end{enumerate}
+
+Every table at each of the four levels contains exactly \textbf{512 entries}, each 8 bytes (64 bits) wide. Thus, every individual table occupies exactly one 4096-byte physical frame ($512 \times 8 = 4096$).
 
 \begin{figure}[htbp]
 \centering
@@ -32,7 +76,7 @@ Every page table at each level consists of exactly 512 entries (\texttt{u64}), o
     % Virtual Address decomposition
     \node[draw=hydrablue, fill=hydralight, font=\small\sffamily, minimum width=13cm, minimum height=0.8cm] (va) at (6.5, 6) {
         \begin{tabular}{c|c|c|c|c|c}
-            Sign Extension (16b) & PML4 Index (9b) & PDPT Index (9b) & PD Index (9b) & PT Index (9b) & Offset (12b) \\
+            Sign Extension (16b) & PML4 Index (9b) & PDPT Index (9b) & PD Index (9b) & PT Index (9b) & Page Offset (12b) \\
             \texttt{[63:48]} & \texttt{[47:39]} & \texttt{[38:30]} & \texttt{[29:21]} & \texttt{[20:12]} & \texttt{[11:0]}
         \end{tabular}
     };
@@ -57,104 +101,340 @@ Every page table at each level consists of exactly 512 entries (\texttt{u64}), o
 \label{fig:page_walk}
 \end{figure}
 
-Each 64-bit Page Table Entry (PTE) contains status flags and the physical frame base address:
+The MMU hardware evaluates a virtual address through the following sequential steps:
+\begin{enumerate}
+    \item The physical base address of the PML4 table is retrieved from the \textbf{\texttt{CR3}} control register.
+    \item Bits 47:39 ($9\text{ bits} = 512\text{ indices}$) index into the PML4 table to find the physical address of the PDPT.
+    \item Bits 38:30 ($9\text{ bits}$) index into the PDPT to find the physical address of the Page Directory (PD).
+    \item Bits 29:21 ($9\text{ bits}$) index into the PD to find the physical address of the Page Table (PT).
+    \item Bits 20:12 ($9\text{ bits}$) index into the PT to locate the target 64-bit Page Table Entry (PTE), which yields the physical frame base address.
+    \item Bits 11:0 ($12\text{ bits} = 4096\text{ byte offsets}$) are concatenated with the physical frame address to form the final 52-bit physical address presented to the memory controller.
+\end{enumerate}
+
+\subsection{Page Table Entry (PTE) Bitflags}
+Every 64-bit entry across all four paging levels contains hardware status and control flags:
+
 \begin{lstlisting}[language=Rust, caption={Page Table Entry Bitflags in Hydra (\texttt{src/memory/paging.rs})}]
 bitflags::bitflags! {
     pub struct PageTableFlags: u64 {
-        const PRESENT       = 1 << 0;  // Frame is present in physical memory
-        const WRITABLE      = 1 << 1;  // Read/write permission
+        const PRESENT       = 1 << 0;  // Frame is present in physical RAM
+        const WRITABLE      = 1 << 1;  // Page is writable (read-only if unset)
         const USER          = 1 << 2;  // Accessible from Ring 3 userland
-        const WRITE_THROUGH = 1 << 3;  // Caching policy: write-through
-        const NO_CACHE      = 1 << 4;  // Disable CPU caching (e.g. MMIO)
-        const ACCESSED      = 1 << 5;  // Set by CPU when read
-        const DIRTY         = 1 << 6;  // Set by CPU when written
-        const HUGE_PAGE     = 1 << 7;  // 2 MiB / 1 GiB page size
-        const GLOBAL        = 1 << 8;  // Do not flush on CR3 reload
-        const NO_EXECUTE    = 1 << 63; // Execute-Disable (NX) bit
+        const WRITE_THROUGH = 1 << 3;  // Caching: write-through to DRAM
+        const NO_CACHE      = 1 << 4;  // Caching disabled (used for MMIO)
+        const ACCESSED      = 1 << 5;  // Set by hardware MMU on read/write
+        const DIRTY         = 1 << 6;  // Set by hardware MMU on write
+        const HUGE_PAGE     = 1 << 7;  // 2 MiB (PD) or 1 GiB (PDPT) huge page
+        const GLOBAL        = 1 << 8;  // Retained in TLB across CR3 reload
+        const NO_EXECUTE    = 1 << 63; // Instruction execution disabled (NX)
     }
 }
 \end{lstlisting}
 
+\begin{itemize}
+    \item \textbf{The User/Supervisor Bit (Bit 2):} If bit 2 is \texttt{0}, user-space code running in Ring~3 cannot read or write the page; any attempt triggers a Page Fault. This enforces kernel memory privacy.
+    \item \textbf{The No-Execute (NX) Bit (Bit 63):} Enabled via MSR \texttt{EFER.NXE}. When set, any attempt by the CPU instruction decoder to fetch instructions from this memory page raises a Page Fault. This renders buffer-overflow exploits unable to execute injected shellcode on stacks or heaps.
+\end{itemize}
+
 % ==============================================================================
-\section{Physical Frame Allocation: The Bootstrapping Problem}
-\label{sec:frame_alloc}
+\section{The Translation Lookaside Buffer (TLB)}
+\label{sec:tlb_deep}
 % ==============================================================================
 
-Before an operating system can allocate virtual pages, it must track which physical memory frames are free and which are reserved by motherboard hardware, ACPI tables, and video memory.
+Translating a virtual address via a 4-level page table requires four sequential DRAM accesses simply to locate the target physical frame before the application's actual data can be read. Because DRAM latency is roughly 50 to 100 nanoseconds, performing four DRAM reads on every memory instruction would slow the processor down by a factor of five.
 
-During early boot, Hydra queries the UEFI firmware for its system memory map:
-\begin{lstlisting}[language=Rust, caption={Capturing Physical Frames from UEFI (\texttt{src/arch/boot\_services.rs})}]
+To eliminate this overhead, modern CPUs incorporate a specialized associative hardware cache called the \textbf{Translation Lookaside Buffer (TLB)}.
+
+\subsection{TLB Operation and Hit Rates}
+The TLB stores recently translated virtual-page-to-physical-frame mappings directly on the CPU die:
+\begin{itemize}
+    \item On every instruction, the MMU checks the TLB in parallel.
+    \item If the mapping is present (\textbf{TLB Hit}), the physical address is generated in less than 1 nanosecond (a single clock cycle).
+    \item If the mapping is absent (\textbf{TLB Miss}), the hardware page table walker performs the full 4-level DRAM walk, stores the resulting translation into the TLB, and completes the access.
+\end{itemize}
+
+Because programs exhibit high \textbf{temporal locality} (repeatedly accessing the same variables and loop code) and \textbf{spatial locality} (accessing adjacent array elements), typical TLB hit rates exceed 99\%.
+
+\subsection{TLB Invalidation and \texttt{invlpg}}
+When the operating system modifies a page table entry---such as unmapping a page, changing permissions from read-write to read-only during Copy-on-Write, or recycling a physical frame---the cached translation in the TLB becomes stale and dangerous.
+
+The kernel must explicitly invalidate the stale TLB entry using the privileged x86 assembly instruction \texttt{invlpg}:
+\begin{lstlisting}[language=Rust, caption={Invalidating a Single Page in the TLB (\texttt{src/memory/paging.rs})}]
+pub fn invalidate_tlb_page(addr: VirtAddr) {
+    unsafe {
+        core::arch::asm!(
+            "invlpg [{0}]",
+            in(reg) addr.as_u64(),
+            options(nostack, preserves_flags)
+        );
+    }
+}
+\end{lstlisting}
+
+\subsection{Global Pages and PCIDs}
+Historically, loading a new physical address into \texttt{CR3} during a process context switch automatically flushed the entire TLB, destroying all cached translations. Modern x86\_64 processors provide two hardware mechanisms to eliminate this penalty:
+\begin{enumerate}
+    \item \textbf{Global Pages (\texttt{PGE}, bit 7 of \texttt{CR4}):} When the \texttt{GLOBAL} bit (bit 8) is set in a PTE, that mapping represents shared kernel code. The CPU retains global pages in the TLB across \texttt{CR3} reloads.
+    \item \textbf{Process-Context Identifiers (PCID, bit 17 of \texttt{CR4}):} Hardware tags every TLB entry with a 12-bit address space ID. When switching between tasks, the kernel changes the active PCID in \texttt{CR3} without flushing entries belonging to other processes.
+\end{enumerate}
+
+% ==============================================================================
+\section{Physical Frame Allocation: The Hydra Architecture}
+\label{sec:frame_alloc_deep}
+% ==============================================================================
+
+Before an operating system can construct page tables, it must know which physical memory frames exist, which are reserved by motherboard hardware (such as ACPI tables, PCI Express MMIO apertures, and video framebuffers), and which are available for allocation.
+
+\subsection{Parsing the UEFI Memory Map}
+Hydra boots under modern UEFI firmware. During early boot, the kernel queries the UEFI Boot Services table via \texttt{get\_memory\_map()}:
+
+\begin{lstlisting}[language=Rust, caption={Harvesting Conventional Memory from UEFI (\texttt{src/arch/boot\_services.rs})}]
 let memory_map = uefi_boot_services.get_memory_map()?;
 for descriptor in memory_map.entries() {
     if descriptor.ty == MemoryType::CONVENTIONAL {
         let start_frame = descriptor.phys_start / PAGE_SIZE;
         let frame_count = descriptor.page_count;
-        frame_allocator.mark_free_range(start_frame, frame_count);
+        frame_allocator.register_region(start_frame, frame_count);
     }
 }
 \end{lstlisting}
 
-Hydra implements a high-performance **Bitmap Physical Frame Allocator** (\texttt{src/memory/frame.rs}). Each bit in the bitmap corresponds to a single 4096-byte physical frame. A 64-bit integer tracks 64 frames (256~KiB). Allocating a physical frame requires finding the first unset bit using the x86\_64 \texttt{tzcnt} (count trailing zeros) or \texttt{bsf} instruction, achieving $O(1)$ allocation performance.
+Regions marked as \texttt{MemoryType::CONVENTIONAL} represent clean, usable system RAM. Regions marked as \texttt{ACPI\_RECLAIM}, \texttt{RESERVED}, or \texttt{RUNTIME\_SERVICES} are strictly excluded from allocation.
+
+\subsection{The Intrusive $O(1)$ Free List Allocator}
+In Hydra's \texttt{PhysicalMemoryManager} (\texttt{src/memory/frame\_allocator.rs}), memory allocation is optimized for zero runtime metadata overhead:
+\begin{enumerate}
+    \item \textbf{Bump Pointer for Fresh Frames:} Physical memory descriptors harvested from UEFI are initially carved using a fast monotonic bump pointer.
+    \item \textbf{Intrusive Free List for Recycled Frames:} When an application terminates or frees virtual pages, the returned 4096-byte physical frame is recycled onto an intrusive singly-linked list.
+    \begin{itemize}
+        \item Because the frame is currently unused by any process, the kernel stores the 64-bit physical address of the \textit{next} free frame directly within the first 8 bytes of the freed frame itself!
+        \item When allocating a new frame, the allocator pops the head of this intrusive free list in $O(1)$ time. Only if the free list is empty does the allocator bump the physical memory descriptor.
+    \end{itemize}
+    \item \textbf{Reference Counting Table:} To support Copy-on-Write and shared memory maps, Hydra maintains a 16-bit reference counter for every managed user frame. When a page is shared across multiple processes, its reference count is incremented via \texttt{frame\_ref\_inc()}; when unmapped, it is decremented via \texttt{frame\_ref\_dec()}. The physical frame is returned to the intrusive free list only when its reference count drops to zero.
+\end{enumerate}
 
 % ==============================================================================
 \section{Page Fault Handling (\#PF) and Copy-on-Write}
-\label{sec:page_faults}
+\label{sec:page_fault_handling}
 % ==============================================================================
 
-When a process attempts to access a virtual address that is not mapped (\texttt{PRESENT} flag unset) or violates access permissions (e.g., writing to a read-only page), the CPU aborts instruction execution and raises a **Page Fault Exception (\#PF, Interrupt 14)**.
+A \textbf{Page Fault} is not necessarily an error. Rather, it is a high-speed hardware notification that the executing program requires operating system intervention to resolve an address mapping.
 
-The CPU hardware automatically places the offending virtual address into the \textbf{\texttt{CR2}} control register and pushes a 32-bit error code onto the stack:
+\subsection{Hardware Exception Mechanics}
+When the CPU encounters a virtual address where the \texttt{PRESENT} bit is \texttt{0}, or attempts an operation that violates permissions (e.g., writing to a page where \texttt{WRITABLE=0}, or executing code where \texttt{NO\_EXECUTE=1}), it halts instruction execution and raises **Exception 14 (\#PF)**:
+\begin{enumerate}
+    \item The CPU loads the faulting linear virtual address into the \textbf{\texttt{CR2}} control register.
+    \item The CPU pushes a 32-bit hardware error code onto the stack, encoding the exact nature of the fault:
+\end{enumerate}
+
 \begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{lll}
-\toprule
-\textbf{Bit} & \textbf{Name} & \textbf{Meaning when Set} \\
-\midrule
-0 & \texttt{P (Present)} & Protection violation (page present, but invalid permissions) \\
-1 & \texttt{W/R (Write)} & Fault caused by a memory write \\
-2 & \texttt{U/S (User)} & Fault occurred while executing in Ring 3 \\
-3 & \texttt{RSVD (Reserved)} & Reserved bit violation in page table \\
-4 & \texttt{I/D (Instruction)} & Instruction fetch violation (NX bit violation) \\
-\bottomrule
+\hline
+\textbf{Bit} & \textbf{Flag} & \textbf{Diagnostic Meaning when Set} \\
+\hline
+Bit 0 & \texttt{P (Present)} & Protection fault (page was present, but violated permissions) \\
+Bit 1 & \texttt{W/R (Write)} & Access caused by a write instruction (read if 0) \\
+Bit 2 & \texttt{U/S (User)} & Access originated from Ring 3 user space (Ring 0 supervisor if 0) \\
+Bit 3 & \texttt{RSVD (Reserved)} & Reserved bit set in page table entry (corrupt page table) \\
+Bit 4 & \texttt{I/D (Instruction)} & Fault caused by an instruction fetch (NX bit violation) \\
+Bit 5 & \texttt{PK (Protection Key)} & Memory protection key violation \\
+\hline
 \end{tabular}
-\caption{x86\_64 Page Fault Error Code Bits.}
-\label{tab:pf_error_codes}
+\caption{Architectural x86\_64 Page Fault Error Code Flags.}
+\label{tab:pf_flags}
 \end{table}
 
-\begin{designprinciple}[Copy-on-Write (CoW)]
-When a process forks using POSIX \texttt{fork()}, duplicating gigabytes of physical memory is prohibitively slow. Instead, Hydra points the child process's page tables directly to the parent's physical frames, clearing the \texttt{WRITABLE} bit and setting a custom \texttt{COW} flag in both tables.
+\subsection{The Anatomy of Copy-on-Write (CoW)}
+In traditional UNIX, invoking \texttt{fork()} required the kernel to immediately allocate fresh physical frames for the entire child process and copy every byte of memory from the parent. For a 2~GiB process, this operation wasted hundreds of milliseconds and gigabytes of RAM---especially considering that over 90\% of \texttt{fork()} calls are immediately followed by an \texttt{execve()} that discards the child's address space!
 
-When either process subsequently writes to a shared page:
+Hydra implements high-performance **Copy-on-Write (CoW)**:
 \begin{enumerate}
-    \item The CPU raises a Page Fault (\#PF) with error code $P=1, W=1$.
-    \item The Hydra fault handler reads \texttt{CR2}, recognizes the \texttt{COW} marker, allocates a single fresh physical frame, copies the 4096 bytes into it, updates the faulting PTE to point to the new frame with \texttt{WRITABLE=1}, and flushes the TLB.
-    \item The faulting instruction retries and completes seamlessly.
+    \item \textbf{Fork Phase:} When a process forks, Hydra clones the parent's PML4 page tables. For every writable user page, Hydra:
+    \begin{itemize}
+        \item Clears the \texttt{WRITABLE} bit in both parent and child PTEs;
+        \item Sets a software marker flag (\texttt{COW});
+        \item Increments the physical frame's reference count in the frame allocator table.
+    \end{itemize}
+    This operation takes mere microseconds because \textbf{zero memory is copied}.
+    \item \textbf{Fault Phase:} As long as both parent and child only read their memory, execution proceeds at native hardware speed.
+    \item \textbf{Copy Phase:} When either process attempts to write to a shared page, the CPU detects \texttt{WRITABLE=0} and raises a Page Fault (\#PF) with error code $P=1, W=1, U=1$.
+    \item \textbf{Resolution Phase:} The Hydra fault handler reads \texttt{CR2}:
+    \begin{itemize}
+        \item If the frame's reference count is 1 (the other process already made its copy), Hydra simply restores \texttt{WRITABLE=1} and returns.
+        \item If the reference count is $> 1$, Hydra allocates a single fresh physical frame, copies 4096 bytes from the shared frame into the new frame, decrements the shared frame's reference count, updates the faulting process's PTE to point to the new frame with \texttt{WRITABLE=1}, and flushes the TLB via \texttt{invlpg}.
+    \end{itemize}
+    \item \textbf{Resume:} The CPU retries the write instruction, which now succeeds immediately.
 \end{enumerate}
-\end{designprinciple}
 
 % ==============================================================================
-\section{Userland Memory Management: \texttt{mmap} and Shared Memory}
-\label{sec:mmap}
+\section{Page Replacement Algorithms}
+\label{sec:page_replacement}
 % ==============================================================================
 
-Modern graphical desktop environments, dynamic libraries, and web browsers make intensive use of the POSIX \texttt{mmap(2)} system call. Hydra provides complete virtual memory mapping through \texttt{src/compat/linux/mm.rs}:
+When all physical memory frames are occupied and an application demands additional pages, the operating system must select an existing resident page, evict it (writing it to swap storage if dirty), and reuse its physical frame.
+
+\subsection{Belady's Optimal Algorithm}
+In 1966, Sheldon Belady demonstrated the theoretical optimal page replacement algorithm: evict the page that will not be referenced for the longest period of time in the future. While impossible to implement in a real general-purpose operating system (because the kernel cannot predict the future), Belady's algorithm serves as the gold standard against which all real-world algorithms are measured.
+
+\subsection{The Least Recently Used (LRU) Algorithm}
+A practical approximation of the optimal algorithm is **Least Recently Used (LRU)**: evict the page that has remained unreferenced for the longest duration in the past. 
 \begin{itemize}
-    \item \textbf{Anonymous Private Mapping (\texttt{MAP\_PRIVATE | MAP\_ANONYMOUS}):} Allocates zeroed memory for application heaps and thread stacks.
-    \item \textbf{File-Backed Mapping:} Maps file contents from the ZFS pool directly into the task's address space without intermediate copying.
-    \item \textbf{POSIX Shared Memory (\texttt{/dev/shm}):} Maps shared memory frames between processes with world-writable, sticky-bit permissions (\texttt{01777}). This mechanism powers Wayland surface buffers between KWin and GUI clients, as well as Chromium and Brave browser multi-process rendering.
+    \item True LRU requires hardware to maintain a 64-bit timestamp or matrix for every single memory access, which is too expensive for modern CPUs.
+    \item Operating systems approximate LRU using the hardware \textbf{Accessed (A)} and \textbf{Dirty (D)} bits in the Page Table Entry.
+\end{itemize}
+
+\subsection{The Clock Algorithm and WSClock}
+A standard approximation is the **Clock Algorithm** (Figure~\ref{fig:clock_algorithm}):
+\begin{enumerate}
+    \item All candidate physical pages are organized in a logical circular linked list, like the face of a clock. A hand points to the oldest page.
+    \item When a page fault requires an eviction, the kernel inspects the page pointed to by the hand:
+    \begin{itemize}
+        \item If its Accessed bit $A = 1$, the page was recently referenced. The kernel clears $A \leftarrow 0$, advances the clock hand to the next page, and repeats.
+        \item If its Accessed bit $A = 0$, the page has not been referenced since the last sweep. This page is selected for eviction. If its Dirty bit $D = 1$, it is scheduled for asynchronous write-back to disk; if $D = 0$, its frame is reclaimed immediately!
+    \end{itemize}
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    % Clock face
+    \draw[line width=1.5pt, hydrablue] (0,0) circle (3.0cm);
+    
+    % Clock entries
+    \foreach \angle/\num/\a/\d in {
+        90/Page 0/1/0,
+        45/Page 1/0/1,
+        0/Page 2/1/1,
+        315/Page 3/0/0,
+        270/Page 4/1/0,
+        225/Page 5/0/0,
+        180/Page 6/1/1,
+        135/Page 7/0/1
+    } {
+        \node[draw=hydragray, fill=white, rounded corners, font=\tiny\sffamily, align=center] at (\angle:3.0cm) {
+            \textbf{\num}\\
+            $A=\a, D=\d$
+        };
+    }
+    
+    % Hand
+    \draw[->, >=Stealth, line width=2pt, rustred] (0,0) -- (45:2.0cm);
+    \node[fill=white, draw=rustred, font=\footnotesize\bfseries\color{rustred}] at (0, -0.4) {Clock Hand};
+\end{tikzpicture}
+\caption{The Circular Clock Page Replacement Algorithm.}
+\label{fig:clock_algorithm}
+\end{figure}
+
+% ==============================================================================
+\section{Kernel Heap Management: Slab and Buddy Allocators}
+\label{sec:kernel_heap}
+% ==============================================================================
+
+While the physical frame allocator manages memory at 4096-byte page granularity, the microkernel core requires dynamic memory allocations for structures of arbitrary sizes: 32-byte IPC messages, 256-byte TCB descriptors, 64-byte file paths, and dynamically resizing vectors (\texttt{Vec<T>}).
+
+Hydra implements a dual-layer kernel heap allocator in \texttt{src/memory/heap.rs}:
+\begin{enumerate}
+    \item \textbf{The Buddy Allocator:} Manages contiguous multi-page power-of-two blocks ($4\text{ KiB}, 8\text{ KiB}, 16\text{ KiB}, \dots, 2\text{ MiB}$). When a block of size $2^k$ is freed, the allocator inspects its adjacent "buddy" block in physical memory. If the buddy is also free, they are coalesced into a single larger block of size $2^{k+1}$, eliminating external fragmentation.
+    \item \textbf{The Slab Allocator (Bonwick):} Carves large buddy pages into pre-allocated caches of fixed-size object slots (e.g., 32B, 64B, 128B, 256B, 512B slabs). Allocating an object requires no search: the kernel simply pops the head of the slab's freelist in $O(1)$ time, perfectly avoiding internal fragmentation for small kernel structs.
+\end{enumerate}
+
+\subsection{The Size-Class Free List Cache (\texttt{src/memory/heap.rs})}
+
+To minimize lock contention and memory fragmentation, the Hydra kernel heap organizes allocations into eight discrete power-of-two size classes:
+\begin{equation}
+\mathcal{C} = \{16, 32, 64, 128, 256, 512, 1024, 2048\} \text{ bytes}
+\end{equation}
+
+When an allocation request arrives, the size is rounded up to the nearest class boundary. Each class maintains a private lock-free singly-linked free list:
+
+\begin{lstlisting}[language=Rust, caption={Size-Class Kernel Heap Allocator (\texttt{src/memory/heap.rs})}]
+pub const HEAP_SIZE: usize = 1024 * 1024 * 1024; // 1024 MiB
+const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
+const REFILL_BYTES: usize = 16 * 1024; // 16 KiB refill chunk
+
+pub struct SizeClassHeap {
+    free_lists: [spin::Mutex<Option<*mut FreeNode>>; 8],
+    fallback: linked_list_allocator::LockedHeap,
+}
+
+impl SizeClassHeap {
+    /// Allocates memory from the appropriate size-class cache.
+    pub unsafe fn allocate(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let size = layout.size().max(layout.align());
+
+        // Find smallest size class that accommodates the request
+        if let Some(idx) = CLASS_SIZES.iter().position(|&s| s >= size) {
+            let mut list = self.free_lists[idx].lock();
+            if let Some(node) = *list {
+                *list = (*node).next;
+                return node as *mut u8;
+            }
+
+            // Free list empty: refill by carving a 16 KiB block from fallback heap
+            self.refill_class(idx, &mut list);
+            if let Some(node) = *list {
+                *list = (*node).next;
+                return node as *mut u8;
+            }
+        }
+
+        // Large allocations (> 2048 B) fall back to the main locked heap
+        self.fallback.lock().allocate_first_fit(layout)
+            .ok()
+            .map_or(core::ptr::null_mut(), |p| p.as_ptr())
+    }
+
+    /// Deallocates memory, returning it to the appropriate size-class free list.
+    pub unsafe fn deallocate(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        let size = layout.size().max(layout.align());
+
+        if let Some(idx) = CLASS_SIZES.iter().position(|&s| s >= size) {
+            let mut list = self.free_lists[idx].lock();
+            let node = ptr as *mut FreeNode;
+            (*node).next = *list;
+            *list = Some(node);
+            return;
+        }
+
+        self.fallback.lock().deallocate(core::ptr::NonNull::new_unchecked(ptr), layout);
+    }
+}
+\end{lstlisting}
+
+\subsection{Memory Poisoning and Use-After-Free Detection}
+
+During kernel development and testing, silent heap corruption represents a lethal hazard. When enabled, Hydra's heap allocator implements \textbf{Memory Poisoning}:
+\begin{itemize}
+    \item When an object is deallocated via \texttt{kfree()}, its entire memory body is overwritten with the poison byte pattern \texttt{0xDD}.
+    \item When an object is reallocated, the allocator verifies that every byte still matches \texttt{0xDD}.
+    \item If any byte deviates from \texttt{0xDD}, a wild write or use-after-free occurred while the memory was in the free list! The kernel immediately halts and prints the corruption address and stack trace to the console.
 \end{itemize}
 
 % ==============================================================================
 \section{Summary}
-\label{sec:mem_summary}
+\label{sec:summary_chap3}
 % ==============================================================================
 
-In this chapter, we reviewed the memory management foundation of Hydra:
-\begin{itemize}
-    \item The 4-level x86\_64 paging architecture translates 48-bit canonical virtual addresses into physical frames.
-    \item Physical memory is mapped and managed via a high-speed bitmapped frame allocator initialized directly from the UEFI memory map.
-    \item Page faults (\#PF) drive demand paging and lazy Copy-on-Write page duplication.
-    \item POSIX \texttt{mmap} and shared memory support enable high-performance graphical compositing and large-scale application runtimes.
-\end{itemize}
+Memory management on modern architectures coordinates physical frames and virtual pages through hardware MMU translation. Standard x86\_64 Long Mode translates 48-bit canonical virtual addresses through a 4-level page table hierarchy (PML4, PDPT, PD, PT) into 4~KiB physical frames. The Translation Lookaside Buffer (TLB) caches these translations, delivering near single-cycle memory access.
 
+Hydra harvests usable physical RAM directly from the UEFI memory map, managing frames via an intrusive $O(1)$ singly-linked free list and per-frame reference counts. Page faults (\#PF) drive lazy demand paging and Copy-on-Write address space cloning. Finally, kernel heap allocations are multiplexed through slab and buddy allocators, ensuring bounded allocation latencies across all microkernel subsystems.
+
+% ==============================================================================
+\section{Exercises and Review Problems}
+\label{sec:exercises_chap3}
+% ==============================================================================
+
+\begin{enumerate}
+    \item \textbf{Canonical Addressing:} Why does the x86\_64 architecture require bits 48 through 63 of a virtual address to be a sign-extension of bit 47? What happens if user-space software attempts to dereference \texttt{0x0002\_0000\_0000\_0000}?
+    \item \textbf{Mathematical Paging:} Calculate the maximum physical memory addressable by a standard 4-level x86\_64 page table where each Page Table Entry is 64 bits wide and physical frame pointers are 52 bits wide.
+    \item \textbf{Paging Walk:} Given the virtual address \texttt{0x0000\_7FFF\_DEAD\_BEEF}, decompose this address into its 9-bit PML4 index, PDPT index, PD index, PT index, and 12-bit page offset.
+    \item \textbf{TLB Hit Math:} Suppose a memory access takes 1~nanosecond on a TLB hit and 60~nanoseconds on a TLB miss (requiring four DRAM page table reads). If the system achieves a 98\% TLB hit rate, calculate the effective memory access time (EMAT).
+    \item \textbf{Copy-on-Write:} Detail the sequence of hardware and software events that occur when a child process writes to a Copy-on-Write page. Under what exact condition can the kernel avoid allocating a new physical frame?
+    \item \textbf{Page Fault Flags:} A user thread attempts to execute machine code located on its stack. What bits will be set in the resulting x86\_64 Page Fault error code pushed onto the kernel stack?
+    \item \textbf{Fragmentation Analysis:} Distinguish between internal fragmentation and external fragmentation. How does a slab allocator eliminate both forms of fragmentation when allocating small kernel structs?
+    \item \textbf{Belady's Anomaly:} What is Belady's Anomaly? Name a page replacement algorithm that is susceptible to it, and name one that is mathematically proven to be immune.
+    \item \textbf{Buddy Allocation:} Consider a Buddy Allocator managing 1024~KiB of memory. Show the state of the allocation tree after the following sequence of requests: Allocate 70~KiB, Allocate 200~KiB, Allocate 60~KiB, Free the 70~KiB allocation.
+    \item \textbf{Design Problem:} Modern processors support "Huge Pages" (2~MiB pages at Level~2 and 1~GiB pages at Level~3). What changes to the page table structure are required to configure a 2~MiB huge page? What are the advantages and disadvantages of using 2~MiB huge pages for database buffer caches?
+\end{enumerate}

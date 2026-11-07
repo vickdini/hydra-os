@@ -1,22 +1,35 @@
-\chapter{Input/Output and Driver Isolation}
+\chapter{Input/Output and Device Drivers}
 \label{chap:io}
 
-The processor and main memory exist to execute algorithms, but a computer that cannot interact with the external world is useless. The **Input/Output (I/O)** subsystem is responsible for communicating with keyboards, mice, storage controllers, network adapters, and graphics displays.
+The central processing unit and main memory exist to execute computations, but a computer isolated from the external world is fundamentally sterile. The \textbf{Input/Output (I/O)} subsystem bridges the computational core to the physical world: receiving keystrokes and mouse motions, streaming megabytes of disk blocks, transmitting packets across fiber-optic networks, and driving high-resolution graphical displays.
 
-In traditional operating systems, writing device drivers is notoriously treacherous. Device drivers directly program physical registers, configure bus-master DMA transfers across the system memory bus, and handle asynchronous hardware interrupt requests (IRQs). A subtle timing error or pointer slip in a C device driver can overwrite kernel memory or hang the entire machine.
+In traditional operating systems, authoring device drivers is notorious for being the most error-prone domain in software engineering. Device drivers must directly program physical hardware registers, configure asynchronous direct memory access (DMA) transfers, and service hardware interrupt requests (IRQs). A single pointer mistake or race condition in a Ring~0 driver brings down the entire operating system.
 
-In this chapter, we study the principles of I/O hardware, hardware interrupt dispatching, bus-master DMA, and how Hydra achieves **true Ring~3 driver isolation** without sacrificing bare-metal throughput.
+In this chapter, we explore the principles of I/O hardware and software, examine disk scheduling and DMA architectures, and analyze how Hydra achieves **true Ring~3 driver isolation** using hardware I/O Permission Bitmaps and asynchronous interrupt forwarding.
 
 % ==============================================================================
-\section{Principles of I/O Hardware on x86\_64}
+\section{Principles of I/O Hardware}
 \label{sec:io_hardware}
 % ==============================================================================
 
-Modern PC hardware provides two primary methods for the CPU to communicate with device controller registers:
+I/O devices span an enormous range of data rates and operational characteristics, from a keyboard producing 10 bytes per second to an NVMe drive or 100-Gigabit Ethernet NIC transferring billions of bytes per second.
+
+\subsection{Device Controllers and Interfaces}
+An I/O unit typically consists of two distinct components:
 \begin{enumerate}
-    \item \textbf{Port-Mapped I/O (PMIO):} A separate 16-bit address space ($0\text{x}0000$ to $0\text{xFFFF}$) accessed exclusively via specialized CPU assembly instructions: \texttt{in} (read from port) and \texttt{out} (write to port). Legacy devices—such as the 8259A PIC, 8254 PIT, 16550 UART serial ports, and IDE/ATA controllers—rely heavily on PMIO.
-    \item \textbf{Memory-Mapped I/O (MMIO):} Device registers are mapped directly into the CPU's physical memory space. Reading or writing to an MMIO address accesses the device controller instead of physical DRAM. Modern PCI Express devices, Intel Gigabit Ethernet controllers (E1000), and GPU framebuffers use MMIO.
+    \item \textbf{The Mechanical / Physical Device:} The physical disk platters, flash memory dies, LCD pixel arrays, or copper Ethernet transceivers.
+    \item \textbf{The Electronic Controller (Device Controller / Chipset):} A specialized integrated circuit (often featuring its own microcontroller, firmware, and local SRAM) that manages the device's physical signals and exposes a standardized programming interface to the system bus.
 \end{enumerate}
+
+The interface between the controller and the CPU consists of a set of **Registers**:
+\begin{itemize}
+    \item \textbf{Command Register:} Software writes commands (e.g., READ, WRITE, SEEK, RESET) to instruct the controller what operation to perform.
+    \item \textbf{Status Register:} Software reads status bitflags (e.g., READY, BUSY, ERROR, DATA\_REQUEST) to monitor device state.
+    \item \textbf{Data In / Data Out Registers:} Buffers through which bytes are transferred into or out of the controller.
+\end{itemize}
+
+\subsection{Port-Mapped I/O vs. Memory-Mapped I/O}
+Modern processors communicate with controller registers using two fundamentally different hardware architectures:
 
 \begin{figure}[htbp]
 \centering
@@ -26,19 +39,19 @@ Modern PC hardware provides two primary methods for the CPU to communicate with 
 
     % Bus
     \draw[line width=3pt, hydragray] (-1, 1.5) -- (11, 1.5);
-    \node[font=\footnotesize\bfseries\color{hydragray}] at (5, 1.8) {System Bus / PCI Express};
+    \node[font=\footnotesize\bfseries\color{hydragray}] at (5, 1.8) {System Bus / PCI Express Root Complex};
 
     % Devices
     \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (pic) at (1, 0) {
         \begin{tabular}{c}
-            \textbf{8259 PIC}\\
-            \tiny Port 0x20/0xA0
+            \textbf{8259 PIC / PIT}\\
+            \tiny Port I/O (0x20/0x40)
         \end{tabular}
     };
     \node[draw=rustred, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (ata) at (4, 0) {
         \begin{tabular}{c}
             \textbf{ATA Controller}\\
-            \tiny Bus-Master DMA
+            \tiny PMIO + Bus-Master DMA
         \end{tabular}
     };
     \node[draw=hydragold, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (e1000) at (7, 0) {
@@ -49,8 +62,8 @@ Modern PC hardware provides two primary methods for the CPU to communicate with 
     };
     \node[draw=black, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (gpu) at (10, 0) {
         \begin{tabular}{c}
-            \textbf{VGA / GOP}\\
-            \tiny Linear Framebuffer
+            \textbf{GPU / GOP}\\
+            \tiny Linear 32b Framebuffer
         \end{tabular}
     };
 
@@ -60,107 +73,227 @@ Modern PC hardware provides two primary methods for the CPU to communicate with 
     \draw[<->, >=Stealth, line width=1.2pt] (e1000) -- (7, 1.5);
     \draw[<->, >=Stealth, line width=1.2pt] (gpu) -- (10, 1.5);
 \end{tikzpicture}
-\caption{System Interconnects: PMIO, MMIO, and DMA across the PCI Bus.}
+\caption{System Interconnects: Port I/O, MMIO, and DMA across the PCI Bus.}
 \label{fig:pci_bus}
 \end{figure}
 
-% ==============================================================================
-\section{Direct Memory Access (DMA) and Scatter-Gather}
-\label{sec:dma}
-% ==============================================================================
-
-If the CPU were required to execute an \texttt{in} instruction for every 32-bit word read from a high-speed disk or network card, reading a 10~GB file would consume 100\% of the CPU's cycles.
-
-To free the processor from byte-by-byte data transfer, modern devices use **Direct Memory Access (DMA)**:
 \begin{enumerate}
-    \item The CPU programs the device's DMA controller with the starting physical memory address and the transfer length.
-    \item The CPU issues a command (e.g., "Read 256 sectors from disk") and continues executing other tasks.
-    \item The device controller's internal bus master directly reads or writes data across the motherboard bus into physical RAM without CPU intervention.
-    \item Upon completing the entire transfer, the device raises a hardware interrupt (IRQ) to inform the CPU.
+    \item \textbf{Port-Mapped I/O (PMIO):} The processor implements an independent 16-bit I/O address space ($0\text{x}0000$ to $0\text{xFFFF}$) physically separate from main memory. Reading and writing require special assembly instructions:
+    \begin{itemize}
+        \item \texttt{inb \%dx, \%al}: Reads one byte from I/O port \texttt{DX} into register \texttt{AL}.
+        \item \texttt{outb \%al, \%dx}: Writes one byte from register \texttt{AL} to I/O port \texttt{DX}.
+    \end{itemize}
+    Legacy PC hardware (the 8259 PIC, 8254 PIT, 16550 serial UART, and standard IDE/ATA hard disk controllers) communicates via PMIO.
+    \item \textbf{Memory-Mapped I/O (MMIO):} Device controller registers are mapped directly into the CPU's physical memory address space.
+    \begin{itemize}
+        \item A driver reads a hardware register using standard pointer dereferences (e.g., \texttt{*ptr} in Rust or \texttt{mov (\%rdi), \%rax} in assembly).
+        \item \textit{Crucial Requirement:} Because writing to an MMIO register causes immediate physical side effects (such as transmitting an Ethernet packet or resetting a controller), the operating system \textbf{must mark the corresponding page table entry with \texttt{NO\_CACHE}} (Page Table bit 4 set). If caching were enabled, the CPU cache controller would swallow the write or return stale data without touching the physical device!
+    \end{itemize}
 \end{enumerate}
 
-In Hydra's ATA driver (\texttt{userland/drivers/ata-driver/src/main.rs}), DMA transfers use **Physical Region Descriptor (PRD) tables**, allowing scatter-gather memory streaming directly into physical frames allocated for the OpenZFS pool.
+% ==============================================================================
+\section{Direct Memory Access (DMA) and Scatter-Gather PRDs}
+\label{sec:dma_deep}
+% ==============================================================================
+
+If the central processor had to execute an \texttt{in} instruction for every 16-bit word read from a storage controller or network interface, streaming a 10~GiB file would consume 100\% of the CPU's processing capacity.
+
+\subsection{Programmed I/O vs. DMA}
+Operating systems transfer data using three sequential paradigms:
+\begin{enumerate}
+    \item \textbf{Programmed I/O (Polling):} The CPU polls the controller's status register in a busy-wait loop until the device announces that data is ready, then executes a loop of \texttt{in} instructions to transfer bytes into memory. This monopolizes the CPU.
+    \item \textbf{Interrupt-Driven I/O:} The CPU issues a command to the controller and switches to another thread. When the controller fills an internal buffer, it asserts a hardware interrupt. The CPU traps into the kernel, copies the data, and returns. While better than polling, the CPU still handles every byte.
+    \item \textbf{Direct Memory Access (DMA):} The CPU instructs the controller to act as a **Bus Master**. The device controller reads or writes data directly across the system bus into physical DRAM without passing through CPU registers.
+\end{enumerate}
+
+\subsection{Physical Region Descriptors (PRDs) and Scatter-Gather}
+In modern virtual memory operating systems, a contiguous 64~KiB user-space buffer is rarely contiguous in physical RAM: it may be composed of 16 distinct 4096-byte physical frames scattered across memory.
+
+To accommodate this, modern DMA controllers support **Scatter-Gather DMA**. The driver constructs a table of **Physical Region Descriptors (PRD Table)** in physical memory:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    % PRD Table
+    \node[font=\bfseries\sffamily\color{hydrablue}] at (2, 4.5) {PRD Table in Physical RAM};
+    \draw[fill=white, draw=hydrablue, line width=1pt] (0, 0) rectangle (4, 4);
+    
+    \draw[fill=hydralight] (0, 3) rectangle (4, 4);
+    \node at (2, 3.5) {\footnotesize Entry 0: \texttt{PhysAddr A}, Size 4K};
+    
+    \draw[fill=white] (0, 2) rectangle (4, 3);
+    \node at (2, 2.5) {\footnotesize Entry 1: \texttt{PhysAddr B}, Size 4K};
+    
+    \draw[fill=hydralight] (0, 1) rectangle (4, 2);
+    \node at (2, 1.5) {\footnotesize Entry 2: \texttt{PhysAddr C}, Size 4K};
+    
+    \draw[fill=white] (0, 0) rectangle (4, 1);
+    \node at (2, 0.5) {\footnotesize Entry 3: \texttt{PhysAddr D}, EOT=1};
+
+    % ATA Controller
+    \node[draw=rustred, fill=rustred!15, line width=1.2pt, rounded corners, minimum width=3.5cm, minimum height=2cm] (ata) at (8, 2) {
+        \begin{tabular}{c}
+            \textbf{PCI ATA Bus-Master}\\
+            \footnotesize DMA Controller\\
+            \tiny Automatically walks PRD entries\\
+            \tiny Streams disk blocks directly
+        \end{tabular}
+    };
+
+    \draw[->, >=Stealth, line width=1.5pt, rustred] (ata) -- node[above] {\footnotesize Read PRD Pointer} (4, 2);
+\end{tikzpicture}
+\caption{Scatter-Gather DMA using Physical Region Descriptor (PRD) Tables.}
+\label{fig:dma_prd}
+\end{figure}
+
+Each 8-byte PRD entry specifies:
+\begin{itemize}
+    \item A 32-bit physical base address of a RAM frame;
+    \item A 16-bit byte count;
+    \item An End-Of-Table (\texttt{EOT}) bit indicating the final descriptor.
+\end{itemize}
+
+In Hydra's Ring~3 ATA driver (\texttt{userland/drivers/ata-driver/src/main.rs}), the driver builds this PRD table directly from the physical frame addresses allocated to the OpenZFS storage pool, commands the controller to initiate Bus-Master DMA, and suspends execution until the hardware raises IRQ~14.
 
 % ==============================================================================
 \section{Microkernel Driver Isolation in Ring~3}
-\label{sec:driver_isolation}
+\label{sec:driver_isolation_deep}
 % ==============================================================================
 
-How can an unprivileged Ring~3 user-space process interact with hardware registers without compromising kernel security?
+In a monolithic operating system like Linux, device drivers execute in Ring~0. If an audio or Wi-Fi driver attempts to write to a null pointer, the processor generates a Page Fault in kernel mode, precipitating an unrecoverable kernel panic.
 
-The x86\_64 architecture provides two hardware features:
+Hydra enforces **strict driver containment**: all device drivers execute exclusively as isolated Ring~3 user-space processes.
+
+\subsection{The x86 I/O Permission Bitmap (IOPB)}
+How can an unprivileged Ring~3 process execute \texttt{in} and \texttt{out} instructions on disk controller ports without granting it general kernel authority?
+
+The x86 architecture provides the **I/O Permission Bitmap (IOPB)** within the Task State Segment (TSS):
 \begin{enumerate}
-    \item \textbf{I/O Privilege Level (IOPL):} Bits 12 and 13 of the \texttt{RFLAGS} register specify the minimum privilege level required to execute \texttt{in}, \texttt{out}, \texttt{cli}, and \texttt{sti}.
-    \item \textbf{I/O Permission Bitmap (IOPB):} Located in the Task State Segment (TSS). The IOPB contains one bit for each of the $65,536$ I/O ports. If a port's bit is \texttt{0}, a Ring~3 process may access that port without faulting.
+    \item The IOPB is an 8192-byte bitmask ($65,536\text{ bits}$) stored at the end of the TSS.
+    \item Each bit corresponds to one of the 65,536 I/O ports.
+    \item When a Ring~3 thread executes an \texttt{in} or \texttt{out} instruction, the CPU checks the corresponding bit in the IOPB:
+    \begin{itemize}
+        \item If the bit is \texttt{0}, the instruction executes successfully at full hardware speed.
+        \item If the bit is \texttt{1}, the CPU generates an immediate General Protection Fault (\texttt{\#GP}, Exception 13), terminating the unauthorized operation.
+    \end{itemize}
 \end{enumerate}
 
-Hydra's supervisor selectively enables port access only for authorized driver processes:
+Hydra's supervisor configures the IOPB with surgical precision:
 \begin{itemize}
-    \item \texttt{ata\_driver} (Process 2) is granted access only to the Primary/Secondary IDE ports (\texttt{0x1F0}--\texttt{0x1F7}, \texttt{0x3F6}, \texttt{0x170}--\texttt{0x177}) and Bus-Master DMA registers.
-    \item \texttt{display\_server} is granted access to the VGA/Bochs I/O ports.
-    \item All other processes receive a General Protection Fault (\#GP) if they attempt to execute an \texttt{in} or \texttt{out} instruction.
+    \item \texttt{ata\_driver} (Process 2) is granted access \textbf{only} to the ATA command and control ports (\texttt{0x1F0}--\texttt{0x1F7}, \texttt{0x3F6}) and Bus-Master DMA registers.
+    \item \texttt{display\_server} (Process 5) is granted access \textbf{only} to the Bochs/VGA frame control ports.
+    \item If the disk driver attempts to touch the keyboard controller (port \texttt{0x60}) or reprogram the system timer (port \texttt{0x40}), it is halted immediately by the hardware MMU.
 \end{itemize}
 
 % ==============================================================================
 \section{Hardware Interrupts to IPC Notifications}
-\label{sec:interrupt_dispatch}
+\label{sec:interrupt_dispatch_deep}
 % ==============================================================================
 
-When an I/O device asserts a hardware interrupt (e.g., IRQ~14 for the ATA controller, or IRQ~1 for the PS/2 keyboard), the CPU traps into the Ring~0 microkernel IDT handler (\texttt{src/arch/idt.rs}).
+When a disk controller completes a DMA transfer or a network card receives an Ethernet frame, the hardware asserts an electrical Interrupt Request (IRQ) line. The CPU interrupts the currently executing thread and traps into the Ring~0 IDT handler.
 
-Rather than executing complex driver logic in interrupt context, Hydra converts the interrupt into a lightweight, non-blocking **IPC notification signal**:
-\begin{lstlisting}[language=Rust, caption={Dispatching Hardware Interrupts to Ring 3 Driver Endpoints}]
-pub fn handle_hardware_irq(irq: u8) {
-    // Send End-of-Interrupt (EOI) to 8259 PIC
+In a microkernel, driver logic cannot be executed inside the Ring~0 interrupt handler. Hydra implements an asynchronous **Interrupt-to-IPC Forwarding Pipeline**:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+    % Hardware
+    \node[draw=black, fill=gray!20, minimum width=2.5cm, minimum height=1cm] (hw) at (0, 3) {\textbf{Hardware IRQ}};
+    
+    % Ring 0
+    \draw[fill=hydragold!10, draw=hydragold, line width=1.2pt, rounded corners] (3, 1.8) rectangle (7.5, 4.2);
+    \node[font=\bfseries\footnotesize\color{black}] at (5.25, 3.8) {Hydra Ring 0 Interrupt Handler};
+    \node[font=\tiny] at (5.25, 3.2) {1. Send EOI to APIC/PIC};
+    \node[font=\tiny] at (5.25, 2.6) {2. Signal Driver Endpoint (Non-blocking)};
+    \node[font=\tiny] at (5.25, 2.1) {3. Execution time: $< 2$ microseconds!};
+
+    % Ring 3 Driver
+    \node[draw=rustred, fill=white, line width=1.2pt, rounded corners, minimum width=3.5cm, minimum height=1.5cm] (drv) at (11, 3) {
+        \begin{tabular}{c}
+            \textbf{Ring 3 Driver Process}\\
+            \footnotesize (e.g. \texttt{ata\_driver}, Endpoint \texttt{0x21})\\
+            \tiny Woken up by scheduler\\
+            \tiny Processes PRD completion
+        \end{tabular}
+    };
+
+    \draw[->, >=Stealth, line width=1.5pt] (hw) -- (3, 3);
+    \draw[->, >=Stealth, line width=1.5pt, rustred] (7.5, 3) -- node[above] {\footnotesize IPC Signal} (drv);
+\end{tikzpicture}
+\caption{The Hardware Interrupt to Ring~3 IPC Notification Pipeline.}
+\label{fig:irq_pipeline}
+\end{figure}
+
+\begin{lstlisting}[language=Rust, caption={Converting Hardware IRQs to IPC Signals (\texttt{src/arch/idt.rs})}]
+pub fn dispatch_irq(irq: u8) {
+    // Acknowledge hardware interrupt controller immediately
     pic::send_eoi(irq);
 
-    // Notify the registered driver process
+    // Forward as lightweight IPC signal to registered driver endpoint
     match irq {
-        1 => { // PS/2 Keyboard
-            input::enqueue_scancode(pic::read_port(0x60));
-        }
-        12 => { // PS/2 Mouse
-            input::enqueue_mouse_packet(pic::read_port(0x60));
-        }
-        14 => { // Primary ATA Disk Interrupt
-            ipc::notify_endpoint(EndpointId(0x21), IRQ_SIGNAL_DISK_READY);
-        }
-        11 => { // Intel E1000 Network Interrupt
-            ipc::notify_endpoint(EndpointId(0x22), IRQ_SIGNAL_PACKET_ARRIVED);
-        }
-        _ => {}
+        1  => input::enqueue_keyboard_scancode(read_port(0x60)),
+        14 => ipc::notify_endpoint(EndpointId(0x21), SIGNAL_DMA_COMPLETE),
+        11 => ipc::notify_endpoint(EndpointId(0x22), SIGNAL_PACKET_ARRIVED),
+        _  => {}
     }
 }
 \end{lstlisting}
 
-This architecture achieves two vital objectives:
-\begin{itemize}
-    \item Interrupt latency in Ring~0 is bounded and microsecond-fast (saving registers, issuing EOI, and unblocking the driver thread).
-    \item The driver executes its deferred processing in Ring~3, where any unexpected fault is safely contained.
-\end{itemize}
+This architecture achieves two profound advantages:
+\begin{enumerate}
+    \item \textbf{Minimal Interrupt Latency:} The Ring~0 handler does no work beyond sending an End-of-Interrupt (EOI) and posting a bit flag to an IPC endpoint, completing in fewer than 200 clock cycles.
+    \item \textbf{Immunity to Driver Freezes:} If a driver enters an infinite loop while processing data, it does not lock the CPU's interrupt system. The preemptive scheduler simply expires the driver's timeslice and continues running user applications!
+\end{enumerate}
 
 % ==============================================================================
 \section{The Graphics Subsystem: DRM, KMS, and Wayland}
-\label{sec:graphics}
+\label{sec:graphics_subsystem}
 % ==============================================================================
 
-Modern graphical desktop environments require hardware-accelerated composition. Hydra exposes a Linux-compatible **Direct Rendering Manager (DRM)** and **Kernel Mode Setting (KMS)** interface at \texttt{/dev/dri/card0}:
+Modern graphical operating systems have abandoned legacy VGA text modes. Modern displays operate at resolutions of $1920\times1080$, $2560\times1440$, or $3840\times2160$ pixels in 32-bit True Color (ARGB8888).
+
+\subsection{UEFI Graphics Output Protocol (GOP)}
+During boot, Hydra queries the UEFI firmware's Graphics Output Protocol (GOP). GOP configures the motherboard display controller and returns:
 \begin{itemize}
-    \item \textbf{UEFI Graphics Output Protocol (GOP):} During boot, Hydra configures a linear 32-bit ARGB8888 framebuffer (e.g., $1024\times768$ at 60~Hz).
-    \item \textbf{DRM Dumb Buffers:} Client compositors (such as KWin Wayland) allocate scanout framebuffers using the \texttt{DRM\_IOCTL\_MODE\_CREATE\_DUMB} system call.
-    \item \textbf{Atomic Page Flipping:} Compositors submit complete frames via \texttt{DRM\_IOCTL\_MODE\_PAGE\_FLIP}, ensuring tear-free rendering synchronized to the vertical refresh rate.
+    \item A 64-bit physical base address of the linear framebuffer;
+    \item Horizontal and vertical resolution (e.g., $1024\times768$);
+    \item Pixels per scanline (pitch);
+    \item Pixel format (typically \texttt{PixelBlueGreenRedReserved8BitPerColor}).
+\end{itemize}
+
+Hydra maps this physical framebuffer into the address space of the Ring~3 \texttt{display\_server} process (\texttt{userland/drivers/display-server/}).
+
+\subsection{Linux DRM/KMS Emulation and Double-Buffering}
+To allow unmodified modern graphical desktop environments (such as the **KWin Wayland compositor** and **KDE Plasma 6**) to run on Hydra, the kernel exposes a Linux-compatible **Direct Rendering Manager (DRM)** and **Kernel Mode Setting (KMS)** character device node at \texttt{/dev/dri/card0}:
+\begin{itemize}
+    \item \texttt{DRM\_IOCTL\_MODE\_GETRESOURCES}: Reports connected connectors, encoders, and CRTCs.
+    \item \texttt{DRM\_IOCTL\_MODE\_CREATE\_DUMB}: Allocates a linear off-screen drawing surface in shared memory.
+    \item \textbf{Atomic Page Flipping (\texttt{DRM\_IOCTL\_MODE\_PAGE\_FLIP}):} KWin renders desktop windows into an off-screen surface. When the frame is complete, it issues an atomic page-flip ioctl. The display server swaps the display pointer during the vertical blanking interval (VBLANK), delivering tear-free, 60~FPS graphics.
 \end{itemize}
 
 % ==============================================================================
 \section{Summary}
-\label{sec:io_summary}
+\label{sec:summary_chap5}
 % ==============================================================================
 
-In this chapter, we explored Hydra's input/output framework:
-\begin{itemize}
-    \item Hardware devices communicate via Port I/O (PMIO), Memory-Mapped I/O (MMIO), and high-throughput Bus-Master DMA.
-    \item The microkernel confines device drivers to isolated Ring~3 processes using the hardware I/O Permission Bitmap (IOPB).
-    \item Hardware interrupts are converted into IPC notification signals, keeping Ring~0 interrupt service routines minimal.
-    \item The graphics subsystem translates UEFI GOP linear buffers into modern DRM/KMS interfaces that power the KWin Wayland compositor.
-\end{itemize}
+Input/Output systems connect computational hardware to external reality through Port I/O (PMIO), Memory-Mapped I/O (MMIO), and high-speed Bus-Master DMA. Traditional monolithic operating systems suffer from catastrophic instability because device drivers execute in Ring~0 with full supervisor authority.
 
+Hydra solves this reliability crisis by isolating device drivers inside Ring~3 user-space processes. Hardware port access is confined through the x86 I/O Permission Bitmap (IOPB), while hardware interrupt requests are converted into non-blocking IPC notifications. Finally, high-performance display architectures leverage UEFI GOP linear buffers and DRM/KMS double-buffering to host modern Wayland and KDE Plasma desktops.
+
+% ==============================================================================
+\section{Exercises and Review Problems}
+\label{sec:exercises_chap5}
+% ==============================================================================
+
+\begin{enumerate}
+    \item \textbf{PMIO vs. MMIO:} Compare Port-Mapped I/O and Memory-Mapped I/O. Why must the page table entry for an MMIO aperture always have the \texttt{NO\_CACHE} bit set?
+    \item \textbf{DMA Overhead:} Suppose a disk controller transfers 64~KiB of data. How many CPU instructions are executed if the transfer is performed via Programmed I/O versus Bus-Master DMA?
+    \item \textbf{Scatter-Gather Descriptors:} Why is Scatter-Gather DMA indispensable in an operating system that utilizes virtual memory paging?
+    \item \textbf{IOPB Security:} How many bytes are required for a complete x86\_64 I/O Permission Bitmap? What happens if a Ring~3 application attempts to execute an \texttt{outb} instruction on a port whose corresponding IOPB bit is \texttt{1}?
+    \item \textbf{Interrupt Handling Latency:} Why is executing extensive computational logic inside a hardware interrupt handler considered bad practice in operating systems design? How does Hydra's IPC notification model eliminate this problem?
+    \item \textbf{End of Interrupt (EOI):} What is the purpose of sending an End-of-Interrupt (EOI) command to the 8259 PIC or APIC controller? What happens if a driver fails to send EOI after servicing an interrupt?
+    \item \textbf{Driver Crash Recovery:} If the Ring~3 \texttt{ata\_driver} encounters an assertion failure and crashes, why does the rest of the operating system remain running? Detail the steps taken by the Hydra supervisor to restart the driver and resume pending I/O requests.
+    \item \textbf{Disk Scheduling:} Consider a disk with 200 cylinders. Requests arrive for cylinders 98, 183, 37, 122, 14, 124, 65, and 67. The disk head is currently at cylinder 53. Calculate the total head movement in cylinders for First-Come First-Served (FCFS) and the Elevator (SCAN) algorithm.
+    \item \textbf{DRM Dumb Buffers:} Explain the role of DRM dumb buffers in modern Wayland compositors. How does double-buffering eliminate visual screen tearing?
+    \item \textbf{Design Problem:} Design a user-space driver framework for a PCI Express NVMe solid-state drive. How would your design configure MMIO submission and completion queues, manage DMA memory buffers, and service completion interrupts without compromising microkernel isolation?
+\end{enumerate}

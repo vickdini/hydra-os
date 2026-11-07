@@ -1,23 +1,93 @@
 \chapter{Security, Capabilities, and Microkernel Hardening}
 \label{chap:security}
 
-In traditional operating systems, security has historically been treated as an afterthought—an auxiliary layer of access control lists (ACLs) patched onto a fundamentally vulnerable monolithic foundation.
+In traditional operating systems, security has historically been treated as an afterthought---an auxiliary layer of access control lists (ACLs), firewalls, and antiviral scanners patched onto a fundamentally vulnerable monolithic foundation.
 
-Experience has repeatedly demonstrated the perils of this model:
+Experience across the computing industry has repeatedly demonstrated the catastrophic failure of this model:
 \begin{enumerate}
-    \item \textbf{The Ambient Authority Trap:} Under standard UNIX discretionary access control (DAC), an application running as a user possesses all the privileges of that user. When a text editor or web browser is compromised, the attacker inherits the ambient authority to read SSH keys, corrupt documents, or open network sockets.
-    \item \textbf{The Confused Deputy Problem:} A privileged service (such as a compiler or print daemon) can be tricked into abusing its authority on behalf of an unprivileged client because the identity of the caller is separated from the permission to access the resource.
-    \item \textbf{Kernel-Space Memory Exploits:} In a monolithic C kernel, a single buffer overflow in a file system driver or network stack yields unrestricted Ring~0 code execution, bypassing all user-space security controls.
+    \item \textbf{The Ambient Authority Trap:} Under standard UNIX discretionary access control (DAC), an application running as a user possesses all the privileges of that user. When a text editor, PDF viewer, or web browser is compromised, the attacker inherits the ambient authority to read private SSH keys, corrupt personal documents, or open backdoor network sockets.
+    \item \textbf{The Confused Deputy Problem:} A privileged service (such as a print spooler or setuid compiler) can be tricked into abusing its authority on behalf of an unprivileged client because the identity of the caller is separated from the permission to access the resource.
+    \item \textbf{Monolithic Kernel-Space Memory Exploits:} In a monolithic C kernel, a single buffer overflow in a file system driver or network stack yields unrestricted Ring~0 code execution, bypassing all user-space security controls.
 \end{enumerate}
 
-In this chapter, we explore how Hydra achieves defense-in-depth through **Capability-Based Security**, strict microkernel isolation, and compiler-verified memory safety in Rust.
+In this chapter, we explore how Hydra achieves true defense-in-depth through **Capability-Based Security**, strict microkernel isolation, compiler-verified memory safety in Rust, and microarchitectural hardware hardening.
 
 % ==============================================================================
-\section{The Capability-Based Security Model}
+\section{Foundations of Computer Security: Saltzer and Schroeder's Principles}
+\label{sec:saltzer_schroeder}
+% ==============================================================================
+
+In their seminal 1975 paper, Jerome Saltzer and Michael Schroeder articulated eight foundational design principles for building secure computing systems~\cite{saltzer1975protection}:
+
+\begin{enumerate}
+    \item \textbf{Economy of Mechanism:} The design should be as small and simple as possible. Complexity is the worst enemy of security. A 10,000-line microkernel can be audited and mathematically verified; a 30,000,000-line monolithic kernel cannot.
+    \item \textbf{Fail-Safe Defaults:} Access decisions should be based on explicit permission rather than exclusion. The default state for any resource must be "access denied".
+    \item \textbf{Complete Mediation:} Every access to every resource must be checked for authority on every single invocation, with no caching of access decisions that can become stale.
+    \item \textbf{Open Design (Kerckhoffs' Principle):} The security of the system must not depend on the secrecy of the design or implementation. Assuming attackers possess full access to the source code guarantees realistic security.
+    \item \textbf{Separation of Privilege:} Where feasible, access to sensitive operations should require multiple independent conditions (e.g., two distinct cryptographic tokens).
+    \item \textbf{Least Privilege:} Every program and every privileged subsystem must operate using the minimum set of privileges necessary to complete its legitimate task.
+    \item \textbf{Least Common Mechanism:} Minimize mechanisms shared between different users to prevent covert timing channels and unintended data leaks.
+    \item \textbf{Psychological Acceptability:} Security mechanisms must not impose excessive friction or bizarre workflows on users, lest users actively bypass them.
+\end{enumerate}
+
+Hydra's architecture is constructed from the ground up to embody every one of these eight principles.
+
+% ==============================================================================
+\section{Access Control Models: ACLs vs. Capabilities}
+\label{sec:access_control_models}
+% ==============================================================================
+
+Operating systems govern access to objects (files, memory regions, hardware devices, IPC endpoints) by subjects (threads, processes, users) through an abstract **Access Matrix**:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+    % Matrix table
+    \node (table) at (0,0) {
+        \begin{tabular}{c|c|c|c|c}
+            \textbf{Subjects $\backslash$ Objects} & \textbf{File \texttt{/etc/shadow}} & \textbf{Disk Driver (\texttt{0x21})} & \textbf{ZFS Pool} & \textbf{Display (\texttt{0x23})} \\
+            \hline
+            \textbf{Process 1 (Init)} & Read, Write & Admin & Admin & Admin \\
+            \textbf{Process 2 (\texttt{ata})} & None & Port I/O, DMA & None & None \\
+            \textbf{Process 3 (\texttt{zfs})} & None & IPC Client & Read, Write & None \\
+            \textbf{Process 4 (\texttt{browser})} & None & None & IPC File Read & Wayland Surface \\
+        \end{tabular}
+    };
+\end{tikzpicture}
+\caption{The Conceptual Access Control Matrix.}
+\label{fig:access_matrix}
+\end{figure}
+
+Operating systems decompose this matrix into practical data structures in two competing ways:
+\begin{enumerate}
+    \item \textbf{Access Control Lists (ACLs)---Decomposition by Column:} Each object stores a list of authorized subjects and their permissions (e.g., \texttt{file: [alice: read, bob: read/write]}). When a subject requests access, the kernel inspects the caller's identity (\texttt{UID}) against the list.
+    \begin{itemize}
+        \item \textit{Vulnerability:} Susceptible to the \textbf{Confused Deputy Problem}: if a server running as \texttt{root} opens a file based on a filename passed by an unprivileged client, the kernel grants access based on the server's identity, allowing the client to overwrite critical system files!
+    \end{itemize}
+    \item \textbf{Capabilities (C-Lists)---Decomposition by Row:} Each subject possesses a private list of unforgeable tokens called **Capabilities**. A capability acts like an uncopyable physical key: holding the capability provides both the designation of the resource and the authority to perform operations on it.
+    \begin{itemize}
+        \item \textit{Immunity:} Completely immune to the Confused Deputy problem. The client cannot say \textit{"Open file X for me"}; it must explicitly pass the specific capability token along with the request!
+    \end{itemize}
+\end{enumerate}
+
+% ==============================================================================
+\section{The Capability-Based Security Model in Hydra}
 \label{sec:capability_model}
 % ==============================================================================
 
-In a capability-based operating system, a **capability** is an unforgeable token that designates both a specific system resource (an address space, an IPC endpoint, an I/O device, or a storage dataset) and a set of permitted operations (Read, Write, Grant, Revoke):
+In Hydra, every system interaction is governed by **Capabilities** (\texttt{src/capability/mod.rs}). A capability is a 128-bit descriptor encapsulating:
+\begin{enumerate}
+    \item \textbf{Object Identifier (\texttt{ObjectId}):} A 64-bit unique cryptographic identifier pointing to an address space, IPC endpoint, hardware I/O range, or storage pool.
+    \item \textbf{Rights Bitmask (\texttt{Rights}):} Specifies permitted operations:
+    \begin{itemize}
+        \item \texttt{READ}: Authority to read data or receive IPC messages.
+        \item \texttt{WRITE}: Authority to modify data or transmit IPC messages.
+        \item \texttt{EXECUTE}: Authority to map memory into an execution segment.
+        \item \texttt{GRANT}: Authority to delegate this capability to another process.
+        \item \texttt{REVOKE}: Authority to invalidate all derived child capabilities.
+    \end{itemize}
+    \item \textbf{Generation Badge:} A 32-bit generation counter ensuring that when an object is destroyed and its identifier recycled, stale capabilities held by other processes are instantly invalidated.
+\end{enumerate}
 
 \begin{figure}[htbp]
 \centering
@@ -25,50 +95,60 @@ In a capability-based operating system, a **capability** is an unforgeable token
     \draw[fill=hydralight, draw=hydrablue, line width=1.2pt, rounded corners] (0, 0) rectangle (9, 2);
     \node[font=\bfseries\sffamily\color{hydrablue}] at (4.5, 1.5) {Hydra Capability Descriptor};
     
-    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (1.8, 0.7) {\footnotesize Object ID};
-    \node[draw=rustred, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (4.5, 0.7) {\footnotesize Permitted Rights};
-    \node[draw=hydragold, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (7.2, 0.7) {\footnotesize Generation Tag};
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (1.8, 0.7) {\footnotesize Object ID (64b)};
+    \node[draw=rustred, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (4.5, 0.7) {\footnotesize Rights Mask (32b)};
+    \node[draw=hydragold, fill=white, rounded corners, minimum width=2.2cm, minimum height=0.7cm] at (7.2, 0.7) {\footnotesize Badge / Gen (32b)};
 \end{tikzpicture}
 \caption{Structure of an Unforgeable Capability Descriptor in Hydra.}
 \label{fig:cap_descriptor}
 \end{figure}
 
-Unlike ambient authority:
+\subsection{Unforgeability and Capability Spaces (\texttt{CSpace})}
+Capabilities cannot be created, forged, or altered by user-space software:
 \begin{itemize}
-    \item A process cannot access any resource unless it holds an explicit capability for it in its private **Capability Table** (\texttt{CSpace}).
-    \item Capabilities cannot be forged or guessed by user processes. They are created and manipulated solely by the microkernel supervisor via type-safe handle references.
-    \item When a process creates a child task or communicates with a server, it delegates only the minimal subset of capabilities required for the sub-task.
+    \item All capability descriptors reside inside the Ring~0 microkernel in a per-process **Capability Table (\texttt{CSpace})** (\texttt{src/capability/table.rs}).
+    \item User-space programs refer to capabilities using abstract integer handles (analogous to file descriptors).
+    \item When an application attempts an operation (e.g., mapping a page or sending an IPC message), it passes the capability handle to the kernel. The kernel indexes into the process's \texttt{CSpace}, validates that the requested right is present, and executes the operation.
 \end{itemize}
+
+\subsection{Capability Attenuation and Delegation}
+A process holding a capability with rights \texttt{READ | WRITE | GRANT} can **attenuate** (weaken) the capability before delegating it to an untrusted worker thread:
+\begin{equation}
+    \text{Child Capability} \longleftarrow \text{Attenuate}(\text{Parent Capability}, \texttt{READ})
+\end{equation}
+The child receives a capability containing only \texttt{READ} authority. Because capabilities can only be attenuated and never amplified, no subordinate process can ever elevate its own privileges.
 
 % ==============================================================================
 \section{Least Privilege Across Ring~3 Servers}
 \label{sec:least_privilege}
 % ==============================================================================
 
-The principle of least privilege states that every module must be able to access only the information and resources necessary for its legitimate purpose:
+In a monolithic operating system, every device driver possesses the ambient authority of Ring~0: an audio driver can inspect network packets, and a Wi-Fi driver can read disk encryption keys.
+
+Hydra strictly enforces the Principle of Least Privilege across all Ring~3 servers:
 
 \begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{llll}
-\toprule
-\textbf{Process Name} & \textbf{I/O Port Rights} & \textbf{IPC Rights} & \textbf{Memory Rights} \\
-\midrule
-\texttt{ata\_driver} & Ports \texttt{0x1F0}--\texttt{0x1F7}, \texttt{0x3F6} & Server on \texttt{0x21} & DMA buffer frames only \\
-\texttt{zfs\_server} & None (No I/O ports) & Server on \texttt{0x20}, Client on \texttt{0x21} & ZFS cache frames only \\
-\texttt{net\_driver} & None (MMIO mapped) & Server on \texttt{0x22} & E1000 DMA rings only \\
-\texttt{display\_server} & VGA ports & Server on \texttt{0x23} & Framebuffer mapping only \\
-User Applications & None & Client endpoints & Private virtual address space \\
-\bottomrule
+\hline
+\textbf{Process Name} & \textbf{I/O Port Authority} & \textbf{IPC Capability Rights} & \textbf{Memory Rights} \\
+\hline
+\texttt{ata\_driver} & Ports \texttt{0x1F0}--\texttt{0x1F7}, \texttt{0x3F6} & Server on \texttt{0x21} & Dedicated DMA buffer frames only \\
+\texttt{zfs\_server} & None (Zero I/O ports) & Server on \texttt{0x20}, Client on \texttt{0x21} & ZFS cache frames only \\
+\texttt{net\_driver} & None (MMIO aperture) & Server on \texttt{0x22} & E1000 DMA ring frames only \\
+\texttt{display\_server} & VGA control ports & Server on \texttt{0x23} & GOP Framebuffer aperture only \\
+User Applications & None & Client on authorized endpoints & Private user address space only \\
+\hline
 \end{tabular}
 \caption{Capability Allocations for Hydra System Services.}
 \label{tab:cap_alloc}
 \end{table}
 
-Notice the defensive boundaries:
+Notice the defensive boundaries established by this architecture:
 \begin{itemize}
-    \item If an attacker compromises the OpenZFS server, they cannot send malicious packets over the network or access display memory, because the ZFS server has zero capabilities for Endpoint \texttt{0x22} (Network) or Endpoint \texttt{0x23} (Display).
-    \item If a network packet triggers a flaw in the network driver, the driver cannot write to disk, because it possesses no capabilities for the ATA controller or ZFS pool.
+    \item If an attacker exploits a vulnerability in the OpenZFS server by mounting a malformed disk image, they cannot transmit malicious packets over the network or access the display, because the ZFS server has zero capabilities for Endpoint \texttt{0x22} (Network) or Endpoint \texttt{0x23} (Display).
+    \item If a malicious network packet compromises the network driver, the driver cannot write to disk, because it possesses zero capabilities for the ATA controller or ZFS pool.
 \end{itemize}
 
 % ==============================================================================
@@ -86,26 +166,179 @@ Hydra eliminates entire vulnerability classes by construction:
 \end{enumerate}
 
 % ==============================================================================
-\section{Hardware Vulnerability Mitigation}
+\section{Microarchitectural Attacks and Hardware Hardening}
 \label{sec:hardware_mitigations}
 % ==============================================================================
 
-Modern x86\_64 processors are subject to microarchitectural speculative execution vulnerabilities (e.g., Meltdown and Spectre). Hydra incorporates modern hardening strategies:
+Modern x86\_64 processors utilize aggressive out-of-order execution and branch prediction pipelines to maximize instruction throughput. In 2018, computer scientists discovered that these performance optimizations can be exploited to leak secret data across hardware protection boundaries (e.g., Meltdown and Spectre).
+
+\subsection{Meltdown (Rogue Data Cache Load, CVE-2017-5754)}
+Meltdown exploits the fact that when an instruction dereferences an unmapped or privileged kernel address from Ring~3, the processor speculatively reads the physical data into the L1 CPU cache before the hardware exception (\texttt{\#PF}) is officially retired. By measuring the cache reload latency of a secondary array (\textbf{Flush+Reload Cache Side-Channel Attack}), an attacker could read arbitrary kernel memory at megabytes per second!
+
+Hydra mitigates Meltdown through **Kernel Page Table Isolation (KPTI)**:
 \begin{itemize}
-    \item \textbf{Kernel Page Table Isolation (KPTI):} When executing in Ring~3 user mode, the user-space PML4 page table maps only the minimal trampoline code required to handle entry into the kernel, preventing speculative reading of privileged kernel memory across privilege boundaries.
-    \item \textbf{User-Space Pointer Sanitization:} All pointers passed from user space across the system call interface are validated against canonical range boundaries and checked for alignment before dereferencing.
+    \item When running user applications in Ring~3, the active \texttt{CR3} page table maps \textbf{only} user space plus the minimal assembly trampoline necessary to service system calls and interrupts.
+    \item The rest of kernel memory is completely unmapped from the user page directory.
+    \item Even if the processor speculatively accesses kernel memory, the translation is physically absent from the MMU, rendering cache side-channel attacks impossible.
 \end{itemize}
+
+\subsection{User-Space Pointer Sanitization}
+Whenever an application passes a pointer to the kernel across a system call (e.g., \texttt{sys\_read(fd, buf, count)}):
+\begin{enumerate}
+    \item The kernel validates that the memory range $[buf, buf + count)$ resides entirely within the lower canonical half ($< \texttt{0x0000\_8000\_0000\_0000}$).
+    \item The kernel verifies alignment and ensures that the buffer does not wrap around the 64-bit integer boundary.
+    \item Accessing the buffer is performed through checked memory copy functions that catch Page Faults gracefully rather than causing a kernel panic.
+\end{enumerate}
+
+% ==============================================================================
+\section{Annotated Source Code: The Hydra Capability Engine}
+\label{sec:code_capability_engine}
+% ==============================================================================
+
+To demonstrate how capability-based security is enforced at bare-metal speed without runtime overhead, we examine the annotated source code of Hydra's capability subsystem in \texttt{src/capability/}:
+
+\begin{lstlisting}[language=Rust, caption={Capability Rights and Type Definitions (\texttt{src/capability/mod.rs})}]
+//! # Security Subsystem: Object-Capability Security Model
+//!
+//! Provides the core object-capability security primitives, resource tokens, and access rights
+//! bitmasks for Hydra Microkernel.
+
+pub mod table;
+
+/// Access rights bitmask governing permitted operations on a capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rights(pub u32);
+
+impl Rights {
+    pub const READ: Rights    = Rights(1 << 0);
+    pub const WRITE: Rights   = Rights(1 << 1);
+    pub const EXECUTE: Rights = Rights(1 << 2);
+    pub const GRANT: Rights   = Rights(1 << 3);
+    pub const CALL: Rights    = Rights(1 << 4);
+    pub const ALL: Rights     = Rights(0x1F);
+
+    /// Checks if this rights set includes all permissions specified in `other`.
+    #[inline(always)]
+    pub fn contains(&self, other: Rights) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// Attenuates permissions by intersecting with a mask.
+    #[inline(always)]
+    pub fn attenuate(&self, mask: Rights) -> Rights {
+        Rights(self.0 & mask.0)
+    }
+}
+
+/// Identifies the specific kernel resource referenced by a capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapType {
+    Endpoint(u64),    // IPC Rendezvous Endpoint ID
+    PageTable(u64),   // PML4 Page Table physical frame address
+    Frame(u64),       // Physical memory frame
+    IoPort(u16, u16), // Port range (start_port, end_port)
+    Dataset(u64),     // OpenZFS Dataset object ID
+}
+
+/// A discrete capability token held in a task's capability table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capability {
+    pub resource: CapType,
+    pub rights: Rights,
+    pub badge: u32,
+    pub valid: bool,
+}
+\end{lstlisting}
+
+\subsection{The Per-Task Capability Table (\texttt{src/capability/table.rs})}
+
+Every Task Control Block (TCB) maintains a private \texttt{CapabilityTable}. When a thread attempts an operation (such as sending a message over IPC or mapping physical memory), the microkernel looks up the capability in the task's table and validates the required right:
+
+\begin{lstlisting}[language=Rust, caption={Per-Task Capability Table (\texttt{src/capability/table.rs})}]
+pub const MAX_CAPS: usize = 256;
+
+pub struct CapabilityTable {
+    slots: [Option<Capability>; MAX_CAPS],
+    count: usize,
+}
+
+impl CapabilityTable {
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; MAX_CAPS],
+            count: 0,
+        }
+    }
+
+    /// Inserts a capability into the first available slot.
+    pub fn insert(&mut self, cap: Capability) -> Result<usize, &'static str> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(cap);
+                self.count += 1;
+                return Ok(i);
+            }
+        }
+        Err("Capability table full")
+    }
+
+    /// Verifies that a slot contains a valid capability with the required rights.
+    pub fn verify_rights(&self, slot_idx: usize, required: Rights) -> Result<CapType, &'static str> {
+        if slot_idx >= MAX_CAPS {
+            return Err("Invalid capability slot index");
+        }
+
+        match self.slots[slot_idx] {
+            Some(cap) if cap.valid && cap.rights.contains(required) => {
+                Ok(cap.resource)
+            }
+            Some(_) => Err("Insufficient capability rights"),
+            None    => Err("Empty capability slot"),
+        }
+    }
+
+    /// Attenuates an existing capability, storing the weakened token in a new slot.
+    pub fn attenuate_to(&mut self, src_slot: usize, mask: Rights) -> Result<usize, &'static str> {
+        let cap = self.slots.get(src_slot).copied().flatten().ok_or("Invalid source slot")?;
+        let weakened = Capability {
+            resource: cap.resource,
+            rights: cap.rights.attenuate(mask),
+            badge: cap.badge,
+            valid: true,
+        };
+        self.insert(weakened)
+    }
+}
+\end{lstlisting}
 
 % ==============================================================================
 \section{Summary}
-\label{sec:sec_summary}
+\label{sec:summary_chap8}
 % ==============================================================================
 
-In this chapter, we analyzed Hydra's security architecture:
+Operating system security requires synthesizing organizational principles with bare-metal enforcement:
 \begin{itemize}
-    \item Capability descriptors replace ambient authority with fine-grained, unforgeable tokens of authority.
-    \item The principle of least privilege strictly confines Ring~3 driver processes to minimal I/O ports and IPC endpoints.
-    \item Writing the microkernel in Rust mathematically eliminates buffer overflows, use-after-free, and data races from over 95\% of the codebase.
-    \item Microarchitectural mitigations protect against speculative execution vulnerabilities.
+    \item Saltzer and Schroeder's design principles provide the intellectual framework for building resilient systems.
+    \item Capability-based security replaces ambient authority with unforgeable, fine-grained object tokens, eliminating the Confused Deputy problem.
+    \item Partitioning drivers into isolated Ring~3 processes enforces the Principle of Least Privilege, reducing the catastrophic blast radius of hardware faults.
+    \item Developing the operating system in Rust mathematically guarantees spatial and temporal memory safety across 95\% of the kernel codebase.
+    \item Modern hardware hardening techniques (KPTI and canonical address sanitization) protect against microarchitectural speculative execution side-channel attacks.
 \end{itemize}
 
+% ==============================================================================
+\section{Exercises and Review Problems}
+\label{sec:exercises_chap8}
+% ==============================================================================
+
+\begin{enumerate}
+    \item \textbf{Principles of Security:} State three of Saltzer and Schroeder's security principles. Give a specific example of how Hydra implements each principle.
+    \item \textbf{Ambient Authority:} What is ambient authority? Why does standard UNIX discretionary access control suffer from ambient authority, and how do capabilities prevent it?
+    \item \textbf{The Confused Deputy Problem:} Describe the classic Confused Deputy problem. Why does an access control list (ACL) fail to prevent this attack, while a capability-based system prevents it by construction?
+    \item \textbf{Capability Descriptors:} Detail the three components of a Hydra capability descriptor. What is the purpose of the 32-bit generation badge?
+    \item \textbf{Capability Attenuation:} If a process holds a capability for an OpenZFS dataset with rights \texttt{READ | WRITE | GRANT}, what rights can it grant to a child worker process? Can the child elevate its permissions back to \texttt{WRITE}?
+    \item \textbf{Memory Safety Statistics:} Why do memory safety violations account for over 70\% of vulnerabilities in large C/C++ operating system kernels? Which three specific vulnerability classes does the Rust compiler eliminate?
+    \item \textbf{Meltdown Side-Channel Attack:} Explain the physical mechanism behind the Meltdown vulnerability. How does Kernel Page Table Isolation (KPTI) neutralize this attack?
+    \item \textbf{Blast Radius Analysis:} Suppose an attacker discovers a remote code execution vulnerability in Hydra's Intel e1000 network driver. What specific hardware resources can the attacker access, and what resources remain strictly inaccessible?
+    \item \textbf{Pointer Sanitization:} Why must an operating system kernel verify that a user-supplied pointer does not point into the upper canonical memory half during a \texttt{read()} system call?
+    \item \textbf{Design Problem:} Design a fine-grained capability revocation mechanism for Hydra. If a parent process revokes a capability it previously granted to three subordinate services, how can the microkernel invalidate those capabilities efficiently without scanning all capability tables in memory?
+\end{enumerate}

@@ -1,23 +1,94 @@
 \chapter{File Systems and Enterprise Storage: The OpenZFS Deep Dive}
 \label{chap:zfs}
 
-In classical operating systems literature—including Andrew Tanenbaum's dissection of the MINIX file system~\cite{tanenbaum2006operating}—file systems are depicted as static disk structures: a boot block, a superblock, an inode bitmap, a zone bitmap, an array of fixed-size inodes, and data blocks.
+In classical operating systems literature---including Andrew Tanenbaum's dissection of the MINIX file system~\cite{tanenbaum2006operating}---file systems are depicted as static disk structures: a boot block, a superblock, an inode bitmap, a zone bitmap, an array of fixed-size inodes, and data blocks.
 
 While conceptually straightforward, traditional file systems suffer from fatal structural liabilities in production environments:
 \begin{enumerate}
-    \item \textbf{Silent Data Corruption (Bit Rot):} Magnetic decay, bus errors, or cosmic rays can flip bits in storage media. Traditional file systems have no mechanism to detect when a sector read from disk differs from what was originally written.
+    \item \textbf{Silent Data Corruption (Bit Rot):} Magnetic decay, cosmic rays, firmware bugs, or bus errors can flip bits in storage media. Traditional file systems have no mechanism to detect when a sector read from disk differs from what was originally written.
     \item \textbf{Destructive In-Place Overwrites:} When writing to an existing file, old data blocks and inode metadata are overwritten directly. An unexpected power failure or system reset mid-write leaves the file system in an inconsistent state, requiring lengthy, error-prone \texttt{fsck} recovery.
     \item \textbf{Rigid Partition Boundaries:} Physical disks are partitioned into fixed slices. If the \texttt{/usr} partition fills up while \texttt{/home} has 500~GB of empty space, the user must repartition the entire drive.
 \end{enumerate}
 
-To overcome these liabilities, Hydra implements a complete, native **OpenZFS** enterprise storage engine directly within its microkernel hierarchy. In this chapter, we dissect ZFS pools, Copy-on-Write transactions, Merkle tree checksumming, dnodes, and the Ring~3 storage server architecture.
+To overcome these liabilities, Hydra implements a complete, native **OpenZFS** enterprise storage engine directly within its microkernel hierarchy. In this chapter, we dissect file system principles, ZFS storage pools, Copy-on-Write transactions, Merkle tree checksumming, dnodes, and the Ring~3 storage server architecture.
 
 % ==============================================================================
-\section{The ZFS Pooled Storage Architecture}
+\section{File System Fundamentals: Abstractions and Operations}
+\label{sec:fs_fundamentals}
+% ==============================================================================
+
+From the user's perspective, a file system provides long-term persistence for data and programs. Unlike physical RAM, which is volatile and lost upon power failure, magnetic and solid-state storage media retain information indefinitely.
+
+\subsection{File Concepts, Naming, and Types}
+A \textbf{file} is an abstract data type consisting of a named sequence of bytes. Operating systems categorize files into distinct types:
+\begin{itemize}
+    \item \textbf{Regular Files:} Contain arbitrary user data (source code, executable ELF binaries, compressed archives, documents). In Hydra and UNIX, the operating system treats regular files as uninterpreted linear streams of bytes.
+    \item \textbf{Directories:} Special system files that maintain the structural mapping between human-readable file names and unique internal identifiers (inodes or dnodes).
+    \item \textbf{Symbolic Links (Symlinks):} Small files that contain the text path of another file or directory.
+    \item \textbf{Special Device Files:} Character and block special files (located in \texttt{/dev}) that provide standard POSIX file descriptor interfaces (\texttt{read}, \texttt{write}, \texttt{ioctl}) to physical and virtual device drivers.
+    \item \textbf{Named Pipes (FIFOs) and UNIX Domain Sockets:} Interprocess communication channels exposed as file system nodes.
+\end{itemize}
+
+\subsection{Directory Hierarchies and Path Resolution}
+Modern systems organize files into directed acyclic graphs (hierarchical trees) rooted at \texttt{/}. A path name may be:
+\begin{itemize}
+    \item \textbf{Absolute:} Commencing at the root directory (e.g., \texttt{/usr/bin/bash}).
+    \item \textbf{Relative:} Evaluated relative to the current process's working directory (\texttt{cwd}).
+\end{itemize}
+
+When an application invokes \texttt{open("/usr/bin/bash", O\_RDONLY)}, the kernel or file system server performs **Path Resolution**:
+\begin{enumerate}
+    \item It opens the root directory dnode and searches its directory table for \texttt{"usr"}.
+    \item It acquires the dnode for \texttt{usr}, verifies execute/search permissions, and searches its entries for \texttt{"bin"}.
+    \item It acquires the dnode for \texttt{bin} and searches for \texttt{"bash"}.
+    \item Finally, it verifies read permissions, allocates a file descriptor (\texttt{fd}) in the process's descriptor table, and returns the integer handle.
+\end{enumerate}
+
+% ==============================================================================
+\section{The Failure of Traditional File Systems: fsck and Journaling}
+\label{sec:failure_traditional}
+% ==============================================================================
+
+In traditional file systems (such as the original UNIX Fast File System (FFS) or Linux ext2), modifying a file requires updating multiple disk blocks:
+\begin{equation}
+    \text{Append to File} \Longrightarrow \{\text{Data Block}\} + \{\text{Data Bitmap}\} + \{\text{Inode}\} + \{\text{Superblock}\}
+\end{equation}
+
+Because a magnetic disk or SSD cannot write four discontiguous sectors simultaneously, a power cut occurring between these writes leaves the file system in an inconsistent state:
+\begin{itemize}
+    \item The data bitmap might claim a block is allocated, but no inode references it (an orphaned block leak).
+    \item An inode might claim to own block 4096, but the free bitmap claims block 4096 is free, leading to catastrophic double-allocation when another process writes a new file!
+\end{itemize}
+
+\subsection{The Nightmare of fsck}
+Historically, systems relied on the **File System Check (\texttt{fsck})** utility upon reboot. \texttt{fsck} swept every inode, directory entry, and allocation bitmap across the entire physical disk, rebuilding free lists and repairing broken pointers.
+\begin{itemize}
+    \item On modern multi-terabyte drives, an \texttt{fsck} pass can take hours or even days.
+    \item Worse, \texttt{fsck} uses heuristics to guess what the disk state was intended to be, frequently moving corrupted user files into the notorious \texttt{lost+found} directory with their original names and directory paths destroyed.
+\end{itemize}
+
+\subsection{Journaling File Systems and Their Limitations}
+To avoid full-disk \texttt{fsck} sweeps, second-generation file systems (ext3, ext4, NTFS) introduced **Write-Ahead Journaling**:
+\begin{enumerate}
+    \item Before modifying the real file system structures, the proposed metadata changes are written sequentially to a dedicated circular disk log (the journal).
+    \item Once the journal write is committed with a hardware flush barrier (\texttt{sync}), the real metadata is updated in place.
+    \item Upon reboot after a crash, the operating system replays the journal in seconds.
+\end{enumerate}
+
+However, journaling does not solve the fundamental flaw of in-place overwrites:
+\begin{itemize}
+    \item \textbf{Write Amplification:} Writing metadata twice (once to the journal, once to the file system) halves storage throughput.
+    \item \textbf{Silent Bit Rot Vulnerability:} If a disk controller sector corrupts data silently due to cosmic rays, electromagnetic interference, or firmware bugs, a journaling file system will happily read the corrupt bits and pass them to user applications without error. Journaling guarantees \textit{consistency}, but never guarantees \textbf{data integrity}.
+\end{itemize}
+
+% ==============================================================================
+\section{The OpenZFS Pooled Storage Architecture}
 \label{sec:zfs_pools}
 % ==============================================================================
 
-ZFS eliminates the concept of traditional disk partitions. Instead, all available physical storage devices (hard drives, NVMe SSDs, or virtual disk images) are aggregated into a single shared storage pool called a \textbf{zpool} (in Hydra, named \texttt{hydrapool}).
+OpenZFS, designed originally at Sun Microsystems by Jeff Bonwick and Matt Ahrens, revolutionizes storage by eliminating the artificial distinction between volume managers and file systems.
+
+ZFS eliminates the concept of static disk partitions. Instead, all available physical storage devices (hard drives, NVMe SSDs, or virtual disk images) are aggregated into a single shared storage pool called a \textbf{zpool} (in Hydra, named \texttt{hydrapool}).
 
 \begin{figure}[htbp]
 \centering
@@ -48,14 +119,25 @@ ZFS eliminates the concept of traditional disk partitions. Instead, all availabl
 \label{fig:zfs_hierarchy}
 \end{figure}
 
-Datasets draw space dynamically from the common pool. There is no artificial partition boundary; if \texttt{hydrapool} has 10~GB of unallocated space, every dataset can draw from that space on demand.
+\subsection{Virtual Devices (vdevs)}
+A storage pool is constructed from a tree of **Virtual Devices (vdevs)**:
+\begin{itemize}
+    \item \textbf{Leaf vdevs:} Physical disks, partitions, or virtual disk image files (e.g., \texttt{hydrapool.vdi}).
+    \item \textbf{Interior vdevs:} RAID topologies:
+    \begin{itemize}
+        \item \textbf{Mirror:} Mirrors data identically across two or more devices ($N$-way mirroring).
+        \item \textbf{RAID-Z1, RAID-Z2, RAID-Z3:} Parity-based distributed striping tolerant of 1, 2, or 3 concurrent disk failures.
+    \end{itemize}
+\end{itemize}
+
+All datasets created within a pool draw dynamically from its common free space. There are no fixed partition sizes; if \texttt{hydrapool} has 10~GB of unallocated space, every dataset can draw from that space on demand.
 
 % ==============================================================================
 \section{The Uberblock Ring and Transaction Groups (TXGs)}
 \label{sec:uberblock_ring}
 % ==============================================================================
 
-In ZFS, the root of all trust on the physical disk is the \textbf{Uberblock}. The uberblock identifies the current transaction group number (\texttt{txg}), the physical location of the space maps, and the root dnode pointing to the Master Node Object.
+In ZFS, the fundamental root of trust on physical media is the \textbf{Uberblock}. The uberblock identifies the current transaction group number (\texttt{txg}), the physical location of the space maps, and the root dnode pointing to the Master Node Object.
 
 To prevent write failures from corrupting the uberblock, ZFS reserves blocks 1 through 32 of each vdev as an **Uberblock Ring**:
 \begin{equation}
@@ -118,12 +200,27 @@ ZFS never overwrites existing data blocks in place. When a write occurs:
 
 Because the new tree is completely written to disk before the new uberblock is committed, **ZFS is crash-consistent by design**. A power outage mid-transaction simply abandons the partially written unreferenced blocks; on reboot, the system safely mounts the previous valid TXG without corruption.
 
+\subsection{The Fletcher-4 Checksum Algorithm}
+Every block pointer in ZFS contains a 256-bit cryptographic or mathematical checksum of the block it references. The primary algorithm used for high performance in Hydra is **Fletcher-4**:
+
+\begin{equation}
+\begin{aligned}
+A &= \sum_{i=1}^{N} D_i \pmod{2^{64}} \\
+B &= \sum_{i=1}^{N} A_i \pmod{2^{64}} \\
+C &= \sum_{i=1}^{N} B_i \pmod{2^{64}} \\
+D &= \sum_{i=1}^{N} C_i \pmod{2^{64}}
+\end{aligned}
+\end{equation}
+
+When reading a block from disk, the ZFS server recalculates Fletcher-4 across the 4096 bytes and compares it to the 256-bit hash stored in the parent block pointer. If a discrepancy is detected (silent data corruption), ZFS refuses to return corrupt data to user space. If redundant mirrors or RAID-Z vdevs are present, ZFS automatically fetches the uncorrupted copy from another device, repairs the corrupted sector on disk, and returns clean data---a feature known as **Self-Healing Storage**.
+
 % ==============================================================================
 \section{Dnodes and the ZFS POSIX Layer (ZPL)}
 \label{sec:dnodes}
 % ==============================================================================
 
 In ZFS, every file, directory, and dataset is represented by a **dnode** (the ZFS equivalent of an inode). A standard dnode occupies 512 bytes:
+
 \begin{lstlisting}[language=Rust, caption={ZFS Dnode Structure in Hydra (\texttt{src/fs/zfs/types.rs})}]
 #[repr(C)]
 pub struct DNodePhys {
@@ -142,6 +239,13 @@ pub struct DNodePhys {
 }
 \end{lstlisting}
 
+\subsection{The ZFS Attribute Processor (ZAP)}
+To store directory entries and extended attributes (xattrs), ZFS implements the **ZFS Attribute Processor (ZAP)**:
+\begin{itemize}
+    \item \textbf{Micro-ZAP:} For small directories containing fewer than a few dozen files, entries are packed into a single 4096-byte leaf block using an array of name-value pairs.
+    \item \textbf{Fat-ZAP:} When directories scale to thousands of files, ZAP promotes the object to an on-disk hash table indexed by a 64-bit hash of the filename, ensuring $O(1)$ lookup performance regardless of directory size.
+\end{itemize}
+
 % ==============================================================================
 \section{The Microkernel Storage Server Hierarchy}
 \label{sec:storage_server}
@@ -153,13 +257,13 @@ In accordance with microkernel design principles, Hydra divides the storage subs
 \centering
 \small
 \begin{tabular}{llll}
-\toprule
+\hline
 \textbf{Component} & \textbf{Ring Mode} & \textbf{Endpoint} & \textbf{Primary Responsibility} \\
-\midrule
+\hline
 \texttt{ata\_driver} & Ring 3 Process & \texttt{0x21} & ATA controller registers, Bus-Master DMA, PRD tables \\
 \texttt{zfs\_server} & Ring 3 Process & \texttt{0x20} & TXG management, space maps, dnode walks, Fletcher-4 \\
 \texttt{ZfsClient} / VFS & Kernel / Lib & N/A & Path resolution, file descriptors, POSIX syscall shims \\
-\bottomrule
+\hline
 \end{tabular}
 \caption{The Three-Tier Storage Server Hierarchy in Hydra.}
 \label{tab:storage_layers}
@@ -169,14 +273,31 @@ When an application calls \texttt{read(fd, buf, count)}, the request passes thro
 
 % ==============================================================================
 \section{Summary}
-\label{sec:zfs_summary}
+\label{sec:summary_chap4}
 % ==============================================================================
 
 Hydra’s adoption of OpenZFS represents a qualitative leap over classic educational operating system file systems:
 \begin{itemize}
     \item Pooled storage unifies physical devices and eliminates static partition boundaries.
-    \item The 32-slot Uberblock Ring and Copy-on-Write transaction model provide mathematical crash-resilience.
-    \item Fletcher-4 checksumming embedded in block pointers guarantees detection and isolation of silent data corruption.
+    \item The 32-slot Uberblock Ring and Copy-on-Write transaction model provide mathematical crash-resilience without the overhead of write-ahead logging.
+    \item Fletcher-4 checksumming embedded in block pointers forms a Merkle tree that guarantees detection and isolation of silent data corruption.
     \item Separating raw disk I/O (\texttt{ata\_driver}) from file system logic (\texttt{zfs\_server}) maintains the microkernel principle of least privilege.
 \end{itemize}
 
+% ==============================================================================
+\section{Exercises and Review Problems}
+\label{sec:exercises_chap4}
+% ==============================================================================
+
+\begin{enumerate}
+    \item \textbf{File System Integrity:} Why is \texttt{fsck} inherently incapable of detecting silent data corruption (bit rot)? How does OpenZFS solve this problem?
+    \item \textbf{Copy-on-Write Mechanics:} Diagram the exact sequence of block writes that occur when modifying a single byte inside a 100~MiB file in ZFS. Why does the top-level Uberblock have to be updated last?
+    \item \textbf{Uberblock Ring Math:} Why does ZFS maintain a 32-slot ring of uberblocks rather than simply updating a single fixed uberblock at sector 0? What mathematical formula determines the slot index of transaction group $N$?
+    \item \textbf{Fletcher-4 Math:} Compute the four 64-bit accumulators ($A, B, C, D$) of the Fletcher-4 checksum algorithm for a simple four-word data sequence $[1, 2, 3, 4]$.
+    \item \textbf{Merkle Trees:} Explain how embedding the checksum of a child block inside its parent block pointer prevents malicious spoofing of disk blocks.
+    \item \textbf{Dnodes vs. Inodes:} Contrast the 512-byte ZFS \texttt{DNodePhys} structure with a classic 128-byte UNIX ext2 inode. What purpose is served by the 320-byte bonus buffer?
+    \item \textbf{Directory Hashing:} Describe the difference between a Micro-ZAP and a Fat-ZAP. Why is a hash-table directory structure preferable to a linear array when a directory contains 100,000 files?
+    \item \textbf{Microkernel Separation:} Suppose the Ring~3 \texttt{ata\_driver} process crashes while servicing a disk request. How does the microkernel supervisor recover the system without losing data or crashing the \texttt{zfs\_server}?
+    \item \textbf{Write Amplification:} Compare the write amplification of a journaling file system (ext4 with data journaling) versus a Copy-on-Write file system (ZFS) during heavy random write workloads.
+    \item \textbf{Design Problem:} Design an atomic snapshot mechanism for OpenZFS. How does the Copy-on-Write tree structure allow a snapshot of a 10~Terabyte file system to be created instantaneously in zero seconds without copying data?
+\end{enumerate}

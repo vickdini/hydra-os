@@ -1,0 +1,567 @@
+\chapter{The Microkernel Core: Annotated Source Code}
+\label{chap:source_core}
+
+In accordance with the pedagogical model established by Andrew Tanenbaum in \textit{Operating Systems: Design and Implementation}, this chapter presents the complete, annotated source code for the core subsystems of the **Hydra Microkernel**.
+
+We trace the implementation of the boot orchestrator, hardware exception descriptors, physical frame allocation, 4-level PML4 paging, task control blocks, the preemptive scheduler, and synchronous IPC rendezvous endpoints.
+
+% ==============================================================================
+\section{Kernel Entry Point and Panic Handler (\texttt{src/main.rs})}
+\label{sec:code_main}
+% ==============================================================================
+
+The entry point orchestrates early hardware takeover under modern UEFI firmware:
+
+\begin{lstlisting}[language=Rust, caption={Hydra Kernel Entry Point and Panic Handler (\texttt{src/main.rs})}]
+//! # Hydra OS: Microkernel Entry Point & Bootstrap Orchestrator
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+pub mod arch;
+pub mod capability;
+#[macro_use]
+pub mod console;
+pub mod fs;
+pub mod ipc;
+pub mod memory;
+pub mod shell;
+pub mod sync;
+pub mod syscall;
+pub mod task;
+pub mod video;
+pub mod net;
+pub mod compat;
+
+use core::panic::PanicInfo;
+use uefi::prelude::*;
+use uefi::proto::console::text::Color;
+use x86_64::VirtAddr;
+
+/// Bare-metal kernel panic handler invoked on unrecoverable runtime faults.
+///
+/// Formats the panic location and message to the serial console (COM1) and
+/// the active GOP framebuffer console, masks hardware interrupts (CLI),
+/// and enters an infinite low-power CPU halt loop (HLT).
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    // 1. Immediately disable all maskable CPU hardware interrupts
+    x86_64::instructions::interrupts::disable();
+
+    // 2. Transmit diagnostic panic message directly to COM1 serial I/O (Port 0x3F8)
+    // Avoids heap allocation or console spinlocks to ensure delivery even if memory is corrupt
+    {
+        use core::fmt::Write;
+        let mut com1 = crate::arch::raw_serial::RawSerial;
+        let _ = write!(com1, "\n[!] KERNEL PANIC: {}\n", _info);
+        if let Some(h) = crate::memory::heap::try_stats() {
+            let _ = write!(
+                com1, 
+                "[!] Heap Status: {} KiB used, {} KiB free of {} KiB total\n", 
+                h.used_bytes / 1024, h.free_bytes / 1024, h.total_bytes / 1024
+            );
+        }
+    }
+
+    // 3. Render panic banner onto the UEFI GOP framebuffer console
+    console::set_color(Color::LightRed, Color::Black);
+    println!("\n============================================================");
+    println!("                   [!] HYDRA KERNEL PANIC                   ");
+    println!("============================================================");
+    println!("{:?}", _info);
+    println!("\nCPU halted. Please reboot the physical or virtual machine.");
+
+    // 4. Halt processor execution pipeline
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Native 64-bit UEFI application entry point (efi_main).
+#[entry]
+fn main() -> Status {
+    uefi::helpers::init().unwrap();
+
+    console::clear_screen();
+    console::set_color(Color::LightCyan, Color::Black);
+    println!("============================================================");
+    println!("                HYDRA MICROKERNEL v0.1.0                     ");
+    println!("     UNIX-like Distributed Cloud/Fog/Edge Operating System  ");
+    println!("============================================================\n");
+
+    // Phase 1: Configure GDT, Task State Segment (TSS), and IDT exception gates
+    console::set_color(Color::Yellow, Color::Black);
+    print!("[*] Step 1: Initializing GDT, TSS, and Exception IDT... ");
+    arch::gdt::init();
+    arch::idt::init();
+    println!("OK");
+
+    // Phase 2: Frame Allocator, 8 MiB Kernel Heap, and PML4 Paging Takeover
+    print!("[*] Step 2: Initializing Physical Memory Allocator & Heap... ");
+    memory::init();
+    println!("OK");
+
+    // Phase 3: Hardware Interrupt Controllers (8259 PIC and Local APIC)
+    print!("[*] Step 3: Remapping PIC and Initializing Local APIC... ");
+    arch::pic::remap_and_mask();
+    arch::apic::init();
+    println!("OK");
+
+    // Phase 4: Configure MSRs for Fast SYSCALL / SYSRET Execution
+    print!("[*] Step 4: Configuring MSR LSTAR System Call Dispatcher... ");
+    arch::syscall::init_msrs();
+    println!("OK");
+
+    // Phase 5: Initialize OpenZFS Storage Pool ('hydrapool')
+    print!("[*] Step 5: Mounting OpenZFS Pool 'hydrapool'... ");
+    fs::zfs::init_pool("hydrapool").expect("Fatal: Could not mount hydrapool");
+    println!("OK");
+
+    // Phase 6: Launch Ring 3 Isolated System Driver Servers
+    println!("[*] Step 6: Spawning Ring 3 Microkernel Server Hierarchy...");
+    task::supervisor::spawn_server("ata_driver", "/bin/ata_driver.elf", ipc::EndpointId(0x21));
+    task::supervisor::spawn_server("zfs_server", "/bin/zfs_server.elf", ipc::EndpointId(0x20));
+    task::supervisor::spawn_server("net_driver", "/bin/net_driver.elf", ipc::EndpointId(0x22));
+    task::supervisor::spawn_server("display_server", "/bin/display_server.elf", ipc::EndpointId(0x23));
+
+    // Phase 7: Activate Preemptive Multitasking Scheduler at 100 Hz
+    println!("[*] Step 7: Starting 100 Hz Preemptive Scheduler & Shell...\n");
+    task::scheduler::start_multitasking();
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Physical Frame Allocator (\texttt{src/memory/frame\_allocator.rs})}
+\label{sec:code_frame_alloc}
+% ==============================================================================
+
+Physical RAM management is performed using an intrusive $O(1)$ singly-linked free list:
+
+\begin{lstlisting}[language=Rust, caption={Physical Frame Allocator Implementation (\texttt{src/memory/frame\_allocator.rs})}]
+use spin::Mutex;
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
+use x86_64::PhysAddr;
+
+pub const PAGE_SIZE: u64 = 4096;
+const MAX_REGIONS: usize = 64;
+
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRegion {
+    pub start: PhysAddr,
+    pub page_count: u64,
+}
+
+pub struct PhysicalMemoryManager {
+    regions: [MemoryRegion; MAX_REGIONS],
+    region_count: usize,
+    current_region: usize,
+    next_frame: u64,
+    free_list_head: Option<PhysAddr>,
+    total_frames: u64,
+    allocated_frames: u64,
+}
+
+pub static FRAME_ALLOCATOR: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMemoryManager {
+    regions: [MemoryRegion { start: PhysAddr::new(0), page_count: 0 }; MAX_REGIONS],
+    region_count: 0,
+    current_region: 0,
+    next_frame: 0,
+    free_list_head: None,
+    total_frames: 0,
+    allocated_frames: 0,
+});
+
+impl PhysicalMemoryManager {
+    /// Registers a contiguous region of conventional RAM discovered from UEFI.
+    pub fn register_region(&mut self, start: PhysAddr, page_count: u64) {
+        // Exclude physical memory below 1 MiB (0x100000) to protect legacy BIOS/VGA structures
+        let adjusted_start = if start.as_u64() < 0x100000 {
+            PhysAddr::new(0x100000)
+        } else {
+            start
+        };
+
+        if self.region_count < MAX_REGIONS && page_count > 0 {
+            self.regions[self.region_count] = MemoryRegion {
+                start: adjusted_start,
+                page_count,
+            };
+            self.region_count += 1;
+            self.total_frames += page_count;
+        }
+    }
+
+    /// Allocates a single 4096-byte physical frame.
+    pub fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        // Fast Path: Check intrusive free list for recycled frames (O(1))
+        if let Some(phys_addr) = self.free_list_head {
+            unsafe {
+                // Read next pointer stored in the first 8 bytes of the freed frame
+                let next_ptr = *(phys_addr.as_u64() as *const u64);
+                self.free_list_head = if next_ptr != 0 {
+                    Some(PhysAddr::new(next_ptr))
+                } else {
+                    None
+                };
+            }
+            self.allocated_frames += 1;
+            return Some(PhysFrame::containing_address(phys_addr));
+        }
+
+        // Slow Path: Carve a fresh frame from conventional UEFI memory descriptors
+        while self.current_region < self.region_count {
+            let reg = &self.regions[self.current_region];
+            if self.next_frame < reg.page_count {
+                let addr = reg.start + (self.next_frame * PAGE_SIZE);
+                self.next_frame += 1;
+                self.allocated_frames += 1;
+                return Some(PhysFrame::containing_address(addr));
+            }
+            // Advance to next conventional memory descriptor
+            self.current_region += 1;
+            self.next_frame = 0;
+        }
+
+        None // Out of physical RAM
+    }
+
+    /// Recycles a freed physical frame back onto the intrusive free list.
+    pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        let addr = frame.start_address();
+        unsafe {
+            // Write previous head pointer into the first 8 bytes of the freed frame
+            let head_val = self.free_list_head.map_or(0, |a| a.as_u64());
+            *(addr.as_u64() as *mut u64) = head_val;
+        }
+        self.free_list_head = Some(addr);
+        self.allocated_frames -= 1;
+    }
+
+    pub fn free_frames(&self) -> u64 {
+        self.total_frames.saturating_sub(self.allocated_frames)
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{4-Level PML4 Page Table Manager (\texttt{src/memory/paging.rs})}
+\label{sec:code_paging}
+% ==============================================================================
+
+The virtual memory subsystem manages x86\_64 4-level hierarchical page tables and TLB flushes:
+
+\begin{lstlisting}[language=Rust, caption={4-Level Page Table Management (\texttt{src/memory/paging.rs})}]
+use spin::Mutex;
+use x86_64::structures::paging::page_table::PageTableEntry;
+use x86_64::structures::paging::{Page, PageTable, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::{PhysAddr, VirtAddr};
+use super::frame_allocator::{PhysicalMemoryManager, FRAME_ALLOCATOR};
+
+pub struct AddressSpace {
+    pml4_frame: PhysFrame<Size4KiB>,
+}
+
+impl AddressSpace {
+    /// Constructs a new isolated address space with shared higher-half kernel mappings.
+    pub fn create_user_space(allocator: &mut PhysicalMemoryManager) -> Result<Self, &'static str> {
+        let root_frame = allocator.allocate_frame().ok_or("Out of memory for user PML4")?;
+        let root_ptr = root_frame.start_address().as_u64() as *mut PageTable;
+
+        unsafe {
+            // Zero lower-half user entries (0..256)
+            core::ptr::write_bytes(root_ptr, 0, 1);
+
+            // Copy upper-half kernel mappings (256..512) from master kernel address space
+            if let Some(ref kernel_space) = *super::paging::KERNEL_SPACE.lock() {
+                let k_pml4 = kernel_space.pml4_frame.start_address().as_u64() as *const PageTable;
+                for i in 256..512 {
+                    (*root_ptr)[i] = (*k_pml4)[i].clone();
+                }
+            }
+        }
+
+        Ok(Self { pml4_frame: root_frame })
+    }
+
+    /// Maps a 4 KiB virtual page to a physical frame with specified flags.
+    pub fn map_page(
+        &mut self,
+        page: Page<Size4KiB>,
+        frame: PhysFrame<Size4KiB>,
+        flags: PageTableFlags,
+        allocator: &mut PhysicalMemoryManager,
+    ) -> Result<(), &'static str> {
+        let pml4 = self.get_pml4_mut();
+
+        // Level 4 -> Level 3
+        let pml4_entry = &mut pml4[page.pml4_index()];
+        let pdpt = Self::get_or_create_table(pml4_entry, allocator)?;
+
+        // Level 3 -> Level 2
+        let pdpt_entry = &mut pdpt[page.pdp_index()];
+        let pd = Self::get_or_create_table(pdpt_entry, allocator)?;
+
+        // Level 2 -> Level 1
+        let pd_entry = &mut pd[page.pd_index()];
+        let pt = Self::get_or_create_table(pd_entry, allocator)?;
+
+        // Populate Level 1 Page Table Entry
+        let pt_entry = &mut pt[page.pt_index()];
+        pt_entry.set_addr(
+            frame.start_address(),
+            flags | PageTableFlags::PRESENT
+        );
+
+        // Invalidate single virtual page in the TLB
+        unsafe {
+            core::arch::asm!(
+                "invlpg [{0}]",
+                in(reg) page.start_address().as_u64(),
+                options(nostack, preserves_flags)
+            );
+        }
+
+        Ok(())
+    }
+
+    fn get_pml4_mut(&mut self) -> &mut PageTable {
+        unsafe { &mut *(self.pml4_frame.start_address().as_u64() as *mut PageTable) }
+    }
+
+    fn get_or_create_table<'a>(
+        entry: &mut PageTableEntry,
+        allocator: &mut PhysicalMemoryManager,
+    ) -> Result<&'a mut PageTable, &'static str> {
+        if entry.is_unused() {
+            let frame = allocator.allocate_frame().ok_or("Out of memory for page table")?;
+            let pt_ptr = frame.start_address().as_u64() as *mut PageTable;
+            unsafe {
+                core::ptr::write_bytes(pt_ptr, 0, 1);
+            }
+            entry.set_frame(
+                frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+            );
+        }
+        let pt_ptr = entry.addr().as_u64() as *mut PageTable;
+        Ok(unsafe { &mut *pt_ptr })
+    }
+
+    pub fn pml4_cr3(&self) -> u64 {
+        self.pml4_frame.start_address().as_u64()
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Task Control Block and Scheduler (\texttt{src/task/tcb.rs} and \texttt{scheduler.rs})}
+\label{sec:code_task_scheduler}
+% ==============================================================================
+
+The Task Control Block represents threads and processes, while the scheduler implements preemptive timeslicing at 100~Hz:
+
+\begin{lstlisting}[language=Rust, caption={Task Control Block and Context Definition (\texttt{src/task/tcb.rs})}]
+use alloc::boxed::Box;
+use crate::arch::idt::ExceptionContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Ready,
+    Running,
+    Blocked,
+    Sleeping { wake_tick: u64 },
+    Dead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskPriority {
+    Idle = 0,
+    Low = 1,
+    Normal = 2,
+    High = 3,
+    Realtime = 4,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TaskRegisters {
+    pub r15: u64, pub r14: u64, pub r13: u64, pub r12: u64,
+    pub rbp: u64, pub rbx: u64, pub r11: u64, pub r10: u64,
+    pub r9:  u64, pub r8:  u64, pub rdi: u64, pub rsi: u64,
+    pub rdx: u64, pub rcx: u64, pub rax: u64,
+    pub rip: u64, pub cs:  u64, pub rflags: u64,
+    pub rsp: u64, pub ss:  u64,
+}
+
+pub struct Task {
+    pub id: TaskId,
+    pub parent_id: Option<TaskId>,
+    pub state: TaskState,
+    pub priority: TaskPriority,
+    pub cr3: u64,
+    pub registers: TaskRegisters,
+    pub fs_base: u64,
+    pub stack_base: u64,
+    pub stack_size: usize,
+    pub timeslice_remaining: u32,
+    pub starvation_ticks: u32,
+    pub total_cpu_ticks: u64,
+}
+
+impl Task {
+    pub fn save_context(&mut self, ctx: &ExceptionContext) {
+        self.registers.rax = ctx.rax;
+        self.registers.rbx = ctx.rbx;
+        self.registers.rcx = ctx.rcx;
+        self.registers.rdx = ctx.rdx;
+        self.registers.rsi = ctx.rsi;
+        self.registers.rdi = ctx.rdi;
+        self.registers.rbp = ctx.rbp;
+        self.registers.r8  = ctx.r8;
+        self.registers.r9  = ctx.r9;
+        self.registers.r10 = ctx.r10;
+        self.registers.r11 = ctx.r11;
+        self.registers.r12 = ctx.r12;
+        self.registers.r13 = ctx.r13;
+        self.registers.r14 = ctx.r14;
+        self.registers.r15 = ctx.r15;
+        self.registers.rip = ctx.rip;
+        self.registers.cs  = ctx.cs;
+        self.registers.rflags = ctx.rflags;
+        self.registers.rsp = ctx.rsp;
+        self.registers.ss  = ctx.ss;
+    }
+
+    pub fn restore_context(&self, ctx: &mut ExceptionContext) {
+        ctx.rax = self.registers.rax;
+        ctx.rbx = self.registers.rbx;
+        ctx.rcx = self.registers.rcx;
+        ctx.rdx = self.registers.rdx;
+        ctx.rsi = self.registers.rsi;
+        ctx.rdi = self.registers.rdi;
+        ctx.rbp = self.registers.rbp;
+        ctx.r8  = self.registers.r8;
+        ctx.r9  = self.registers.r9;
+        ctx.r10 = self.registers.r10;
+        ctx.r11 = self.registers.r11;
+        ctx.r12 = self.registers.r12;
+        ctx.r13 = self.registers.r13;
+        ctx.r14 = self.registers.r14;
+        ctx.r15 = self.registers.r15;
+        ctx.rip = self.registers.rip;
+        ctx.cs  = self.registers.cs;
+        ctx.rflags = self.registers.rflags;
+        ctx.rsp = self.registers.rsp;
+        ctx.ss  = self.registers.ss;
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Synchronous IPC Rendezvous Engine (\texttt{src/ipc/endpoint.rs})}
+\label{sec:code_ipc}
+% ==============================================================================
+
+The synchronous message rendezvous subsystem ensures zero-copy, memory-safe communication:
+
+\begin{lstlisting}[language=Rust, caption={Synchronous Rendezvous Engine (\texttt{src/ipc/endpoint.rs})}]
+use alloc::vec::Vec;
+use crate::task::tcb::TaskId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EndpointId(pub u32);
+
+#[derive(Debug, Clone, Copy)]
+pub struct Message {
+    pub sender: TaskId,
+    pub command: u32,
+    pub arg0: u64,
+    pub arg1: u64,
+    pub arg2: u64,
+    pub arg3: u64,
+}
+
+pub struct Endpoint {
+    pub id: EndpointId,
+    pub send_queue: Vec<TaskId>,
+    pub recv_queue: Vec<TaskId>,
+}
+
+impl Endpoint {
+    pub fn new(id: EndpointId) -> Self {
+        Self {
+            id,
+            send_queue: Vec::new(),
+            recv_queue: Vec::new(),
+        }
+    }
+
+    pub fn send(&mut self, sender: TaskId, msg: Message) -> Result<(), &'static str> {
+        // If a receiver is already waiting, execute instant rendezvous
+        if !self.recv_queue.is_empty() {
+            let receiver = self.recv_queue.remove(0);
+            unsafe {
+                Self::deliver_message_direct(sender, receiver, msg);
+            }
+            crate::task::scheduler::wake_task(receiver);
+            return Ok(());
+        }
+
+        // Otherwise, suspend sender thread in send queue
+        self.send_queue.push(sender);
+        crate::task::scheduler::block_task(sender);
+        Ok(())
+    }
+
+    pub fn recv(&mut self, receiver: TaskId) -> Result<Option<Message>, &'static str> {
+        // If a sender is already waiting, execute instant rendezvous
+        if !self.send_queue.is_empty() {
+            let sender = self.send_queue.remove(0);
+            let msg = unsafe { Self::fetch_message_direct(sender) };
+            crate::task::scheduler::wake_task(sender);
+            return Ok(Some(msg));
+        }
+
+        // Otherwise, suspend receiver thread in recv queue
+        self.recv_queue.push(receiver);
+        crate::task::scheduler::block_task(receiver);
+        Ok(None)
+    }
+
+    unsafe fn deliver_message_direct(sender: TaskId, receiver: TaskId, msg: Message) {
+        // Deposited directly into the receiver's mailbox structure
+        crate::ipc::mailbox::deposit(receiver, msg);
+    }
+
+    unsafe fn fetch_message_direct(sender: TaskId) -> Message {
+        crate::ipc::mailbox::retrieve(sender)
+    }
+}
+\end{lstlisting}
+
+\subsubsection*{Engineering Summary of Chapter 9}
+The annotated modules presented in this chapter reveal the core mechanics of the Hydra Ring~0 microkernel:
+\begin{itemize}
+    \item Bootstrapping takes ownership of UEFI memory maps and transitions into an autonomous higher-half virtual address space.
+    \item Physical frames are managed with $O(1)$ latency using an intrusive free list that consumes zero additional RAM metadata.
+    \item 4-level PML4 paging isolates user address spaces while sharing upper-half kernel mappings across all processes.
+    \item Context switching swaps complete 64-bit general registers, \texttt{CR3} page tables, and \texttt{IA32\_FS\_BASE} TLS pointers without corrupting state.
+    \item Synchronous IPC endpoints provide deterministic, zero-buffer-bloat messaging that connects the microkernel to its user-space server hierarchy.
+\end{itemize}
+
+% ==============================================================================
+\section{Review Questions and Design Exercises}
+\label{sec:core_source_exercises}
+% ==============================================================================
+
+\begin{enumerate}
+    \item \textbf{Intrusive Free Lists}: In \texttt{src/memory/frame\_allocator.rs}, why is storing the 64-bit next pointer directly within the freed $4\,\text{KiB}$ physical frame completely safe? What would happen if a freed frame were simultaneously referenced by an active page table?
+    \item \textbf{Higher-Half Kernel Mapping}: Why does \texttt{AddressSpace::create\_user\_space} copy entries 256 through 511 from the master kernel PML4 page table into every newly created process's PML4 table? What would occur during a system call if these entries were omitted?
+    \item \textbf{Context Switch Register Ordering}: In the x86\_64 assembly context switch stub, why must general-purpose registers (\texttt{\%r15} through \texttt{\%rax}) be pushed onto the stack before the stack pointer (\texttt{\%rsp}) is saved into the outgoing task's Task Control Block?
+    \item \textbf{MSR Switching Overhead}: Explain why writing to Model-Specific Registers such as \texttt{IA32\_FS\_BASE} is significantly more expensive in clock cycles than moving values between general-purpose registers. How can lazy MSR restoration mitigate this overhead?
+    \item \textbf{Synchronous Rendezvous}: In \texttt{src/ipc/endpoint.rs}, explain what happens when Thread $A$ sends a message to Thread $B$ on an endpoint where Thread $B$ is already waiting in \texttt{recv\_queue}. Why does this exchange avoid allocating dynamic kernel memory?
+    \item \textbf{Design Problem}: Design an asynchronous notification mechanism for Hydra's IPC subsystem that allows a thread to receive non-blocking 64-bit event bitmasks without suspending execution.
+\end{enumerate}
