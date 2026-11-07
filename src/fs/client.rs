@@ -961,6 +961,26 @@ impl ZfsClient {
         with_server(|s| s.readlink(ino))
     }
 
+    /// Extended attribute `name` of `ino` (`ENODATA` if absent).
+    pub fn getxattr(ino: u64, name: &[u8]) -> Result<Vec<u8>, i64> {
+        with_server(|s| s.getxattr(ino, name))
+    }
+
+    /// Sets extended attribute `name` of `ino`.
+    pub fn setxattr(ino: u64, name: &[u8], value: &[u8], flags: u32) -> Result<(), i64> {
+        with_server(|s| s.setxattr(ino, name, value, flags))
+    }
+
+    /// `ino`'s extended attribute names, each NUL-terminated.
+    pub fn listxattr(ino: u64) -> Result<Vec<u8>, i64> {
+        with_server(|s| s.listxattr(ino))
+    }
+
+    /// Removes extended attribute `name` of `ino`.
+    pub fn removexattr(ino: u64, name: &[u8]) -> Result<(), i64> {
+        with_server(|s| s.removexattr(ino, name))
+    }
+
     /// Increments the active open-handle count on `ino` so unlinked files stay allocated until closed.
     ///
     /// # Arguments

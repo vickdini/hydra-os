@@ -92,6 +92,14 @@ pub const FS_FSCK: u32 = 0x311E;
 /// path, then the mount count and `(mountpoint, mounted root, parent mount)` triples. Replies with the object ID, and in its
 /// top 16 bits the 1-based index of the mount it lies in (0: the root's own tree).
 pub const FS_RESOLVE_MNT: u32 = 0x311F;
+/// Reads extended attribute `name` of an inode.
+pub const FS_GETXATTR: u32 = 0x3120;
+/// Sets extended attribute `name` of an inode (flags: `XATTR_CREATE` 1, `XATTR_REPLACE` 2).
+pub const FS_SETXATTR: u32 = 0x3121;
+/// Lists an inode's extended attribute names (each NUL-terminated).
+pub const FS_LISTXATTR: u32 = 0x3122;
+/// Removes extended attribute `name` of an inode.
+pub const FS_REMOVEXATTR: u32 = 0x3123;
 /// Bit position of the mount index in an [`FS_RESOLVE_MNT`] reply.
 pub const MNT_SHIFT: u32 = 48;
 
@@ -123,6 +131,14 @@ pub const ENAMETOOLONG: i64 = -36;
 pub const ENOTEMPTY: i64 = -39;
 /// Too many levels of symbolic links.
 pub const ELOOP: i64 = -40;
+/// Argument list too long (an extended attribute value over 64 KiB).
+pub const E2BIG: i64 = -7;
+/// Result too large (an extended attribute name over 255 bytes).
+pub const ERANGE: i64 = -34;
+/// No such extended attribute.
+pub const ENODATA: i64 = -61;
+/// Operation not supported (extended attributes of symbolic links).
+pub const EOPNOTSUPP: i64 = -95;
 
 /// Attributes of an inode (the fields of Linux `struct stat`).
 #[derive(Debug, Clone, Copy, Default)]

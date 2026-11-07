@@ -73,6 +73,8 @@ pub struct ExecCreds {
     pub euid: u32,
     /// Effective group ID (`AT_EGID`).
     pub egid: u32,
+    /// File capabilities raise privileges: secure mode (`AT_SECURE`) as for set-ID.
+    pub secure: bool,
 }
 
 /// Returns true if the binary can be loaded into a private address space: position
@@ -405,7 +407,7 @@ pub fn load_linux_exec(
         (AT_GID, creds.gid as u64),
         (AT_EGID, creds.egid as u64),
         // Secure mode (the C library ignores LD_PRELOAD and the like) for set-ID programs
-        (AT_SECURE, (creds.uid != creds.euid || creds.gid != creds.egid) as u64),
+        (AT_SECURE, (creds.uid != creds.euid || creds.gid != creds.egid || creds.secure) as u64),
         (AT_RANDOM, addr_of(random_off)),
         (AT_HWCAP2, 0),
         (AT_EXECFN, addr_of(execfn_off)),

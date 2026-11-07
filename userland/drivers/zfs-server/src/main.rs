@@ -676,6 +676,32 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
             let (uid, gid) = (r.u64() as u32, r.u64() as u32);
             with_server(|s| s.symlink(dir, name, target, uid, gid)).map(|i| (i, 0))
         }
+        FS_GETXATTR | FS_LISTXATTR => {
+            let ino = r.u64();
+            let v = if op == FS_GETXATTR {
+                let name = r.bytes();
+                with_server(|s| s.getxattr(ino, name))
+            } else {
+                with_server(|s| s.listxattr(ino))
+            };
+            v.map(|v| {
+                let n = v.len().min(out.len());
+                out[..n].copy_from_slice(&v[..n]);
+                (v.len() as u64, n)
+            })
+        }
+        FS_SETXATTR => {
+            let ino = r.u64();
+            let name = r.bytes();
+            let value = r.bytes();
+            let flags = r.u64() as u32;
+            with_server(|s| s.setxattr(ino, name, value, flags)).map(|()| (0, 0))
+        }
+        FS_REMOVEXATTR => {
+            let ino = r.u64();
+            let name = r.bytes();
+            with_server(|s| s.removexattr(ino, name)).map(|()| (0, 0))
+        }
         FS_READLINK => {
             let ino = r.u64();
             with_server(|s| s.readlink(ino)).map(|t| {

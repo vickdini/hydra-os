@@ -125,7 +125,7 @@ pub fn load_linux_image(
     let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
     let env = linux_env(uid);
     let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
-    super::exec::load_linux_exec(exe, exec_path, args, &env, super::exec::ExecCreds { uid, gid, euid: uid, egid: gid }, interp_reader)
+    super::exec::load_linux_exec(exe, exec_path, args, &env, super::exec::ExecCreds { uid, gid, euid: uid, egid: gid, secure: false }, interp_reader)
         .map_err(|e| e.as_str())
 }
 

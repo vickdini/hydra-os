@@ -243,6 +243,9 @@ pub const S_IFIFO: u32 = 0o010000;
 
 /// Dnode flag: a symlink target is stored inline in the bonus area.
 pub const DNODE_FLAG_INLINE: u8 = 0x01;
+/// The first 8 bonus bytes hold the object number of the inode's extended attributes (not
+/// used on symbolic links, whose bonus holds the target).
+pub const DNODE_FLAG_XATTR: u8 = 0x02;
 
 /// Bytes available in a dnode's bonus area (inline symlink targets).
 pub const DNODE_BONUS_SIZE: usize = 216;

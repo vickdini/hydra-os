@@ -1187,14 +1187,147 @@ fn proc_mem_target(abs: &str) -> Option<u64> {
     }
 }
 
-/// What the pool answers an extended attribute call of kind `k` (0 set, 1 get, 2 list,
-/// 3 remove): it keeps none.
-fn xattr_answer(k: u64) -> i64 {
-    match k {
-        1 => -61, // ENODATA
-        2 => 0,   // an empty list
-        _ => EOPNOTSUPP,
+/// Extended attribute call of kind `k` (0 set, 1 get, 2 list, 3 remove) on inode `ino`,
+/// with Linux's namespace rules:
+/// - `user.*`: regular files and directories only, read (get) or write (set, remove)
+///   permission on the file;
+/// - `trusted.*`: `CAP_SYS_ADMIN` (without it: hidden from lists, `ENODATA`, `EPERM`);
+/// - `security.*`: anyone reads; `security.capability` (a revision 2 or 3 header) needs
+///   `CAP_SETFCAP` to change, other names `CAP_SYS_ADMIN`;
+/// - `system.*` (POSIX ACLs): not supported.
+///
+/// Get and list return the size with `size` 0, `ERANGE` if the buffer is too small.
+fn xattr_op(ino: u64, k: u64, name_ptr: u64, value: u64, size: u64, flags: u64) -> i64 {
+    const ENODATA: i64 = -61;
+    const ERANGE: i64 = -34;
+    const E2BIG: i64 = -7;
+    let cap = |bit: u32| crate::task::with_current_task_mut(|t| t.caps.has(1u64 << bit)).unwrap_or(false);
+    let attr = match ZfsClient::getattr(ino) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let c = creds();
+    let out = |data: &[u8]| -> i64 {
+        if size == 0 {
+            return data.len() as i64;
+        }
+        if (size as usize) < data.len() {
+            return ERANGE;
+        }
+        match copy_out(value, data) {
+            Ok(()) => data.len() as i64,
+            Err(e) => e,
+        }
+    };
+    if k == 2 {
+        // listxattr: trusted.* only for CAP_SYS_ADMIN
+        let names = match ZfsClient::listxattr(ino) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let admin = cap(21);
+        let mut shown = Vec::new();
+        for n in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+            if admin || !n.starts_with(b"trusted.") {
+                shown.extend_from_slice(n);
+                shown.push(0);
+            }
+        }
+        return out(&shown);
     }
+    let name = match user_cstr(name_ptr) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    if name.is_empty() || name.len() > 255 {
+        return ERANGE;
+    }
+    let write = k != 1;
+    let ns = [&b"user."[..], b"trusted.", b"security.", b"system."].into_iter().find(|p| name.starts_with(p));
+    let Some(ns) = ns else { return EOPNOTSUPP };
+    if name.len() == ns.len() {
+        return EINVAL;
+    }
+    match ns {
+        b"system." => return if write && k == 0 { EOPNOTSUPP } else { ENODATA },
+        b"trusted." if !cap(21) => return if write { EPERM } else { ENODATA },
+        b"user." => {
+            let kind = attr.mode & 0o170000;
+            if kind != 0o100000 && kind != 0o040000 {
+                return if write { EPERM } else { ENODATA };
+            }
+            if !may_access(&attr, c.euid, c.egid, if write { 2 } else { 4 }) {
+                return EACCES;
+            }
+        }
+        b"security." if write => {
+            let needed = if &name[..] == b"security.capability" { 31 } else { 21 };
+            if !cap(needed) {
+                return EPERM;
+            }
+        }
+        _ => {}
+    }
+    match k {
+        1 => match ZfsClient::getxattr(ino, &name) {
+            Ok(v) => out(&v[..v.len().min(65536)]),
+            Err(e) => e,
+        },
+        3 => ZfsClient::removexattr(ino, &name).map_or_else(|e| e, |_| 0),
+        _ => {
+            if flags & !3 != 0 {
+                return EINVAL;
+            }
+            if size > 65536 {
+                return E2BIG;
+            }
+            let data = if size == 0 {
+                Vec::new()
+            } else {
+                match copy_in(value, size as usize) {
+                    Ok(d) => d,
+                    Err(e) => return e,
+                }
+            };
+            if &name[..] == b"security.capability" {
+                // struct vfs_cap_data: revision 2 (20 bytes) or 3 (24, with a root ID)
+                let magic = data.get(..4).map_or(0, |m| u32::from_le_bytes(m.try_into().unwrap()));
+                let ok = (data.len() == 20 && magic & 0xff00_0000 == 0x0200_0000)
+                    || (data.len() == 24 && magic & 0xff00_0000 == 0x0300_0000);
+                if !ok || magic & 0x00ff_fffe != 0 {
+                    return EINVAL;
+                }
+            }
+            ZfsClient::setxattr(ino, &name, &data, flags as u32).map_or_else(|e| e, |_| 0)
+        }
+    }
+}
+
+/// The inode an extended attribute call on descriptor `fd` acts on.
+fn xattr_fd_ino(fd: u64) -> Result<u64, i64> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(FileDescriptor::Vnode(f)) => {
+            let f = f.lock();
+            if f.flags & crate::fs::fd::O_PATH != 0 { Err(EBADF) } else { Ok(f.ino) }
+        }
+        Some(_) => Err(EOPNOTSUPP),
+        None => Err(EBADF),
+    })
+}
+
+/// File capabilities of executable `ino` (`security.capability`): `(permitted,
+/// effective)`, if it has any (a revision 3 one only with root ID 0, the initial
+/// namespace's root).
+pub(crate) fn file_caps(ino: u64) -> Option<(u64, bool)> {
+    let v = ZfsClient::getxattr(ino, b"security.capability").ok()?;
+    let u = |o: usize| v.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64);
+    let magic = u(0)?;
+    match (magic & 0xff00_0000, v.len()) {
+        (0x0200_0000, 20) => {}
+        (0x0300_0000, 24) if u(20)? == 0 => {}
+        _ => return None,
+    }
+    Some((u(4)? | u(12)? << 32, magic & 1 != 0))
 }
 
 /// `setxattrat`, `getxattrat` (`dirfd, path, at_flags, name, struct xattr_args *, size`),
@@ -1235,7 +1368,39 @@ fn xattrat(num: u64, a: [u64; 6]) -> i64 {
             return e;
         }
     }
-    xattr_answer(num - 463)
+    let ino = if path.is_empty() {
+        if a[0] as i32 == AT_FDCWD as i32 {
+            match base_dir(AT_FDCWD, b".").and_then(|(base, _)| resolve(base, b".", true)) {
+                Ok(i) => i,
+                Err(e) => return e,
+            }
+        } else {
+            match xattr_fd_ino(a[0]) {
+                Ok(i) => i,
+                Err(e) => return e,
+            }
+        }
+    } else {
+        match base_dir(a[0] as i64, &path).and_then(|(base, _)| resolve(base, &path, at_flags & AT_SYMLINK_NOFOLLOW == 0)) {
+            Ok(i) => i,
+            Err(e) => return e,
+        }
+    };
+    match num {
+        // setxattrat / getxattrat: struct xattr_args { value, size, flags }
+        463 | 464 => {
+            let b = match copy_in(a[4], 16) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let value = u64::from_le_bytes(b[0..8].try_into().unwrap());
+            let size = u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64;
+            let flags = u32::from_le_bytes(b[12..16].try_into().unwrap()) as u64;
+            xattr_op(ino, num - 463, a[3], value, size, flags)
+        }
+        465 => xattr_op(ino, 2, 0, a[3], a[4], 0),
+        _ => xattr_op(ino, 3, a[3], 0, 0, 0),
+    }
 }
 
 /// A device number's major part (Linux encoding).
@@ -3127,17 +3292,21 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
 
-        // Extended attributes: the pool stores none (like a file system without xattr
-        // support): the file is looked up, then lists are empty, lookups miss, changes fail
+        // Extended attributes, kept by the pool per inode (see xattr_op)
         188..=199 => {
             // set, lset, fset; get, lget, fget; list, llist, flist; remove, lremove, fremove
-            let found = match (num - 188) % 3 {
-                2 => if fd_exists(a[0] as i32) { Ok(()) } else { Err(EBADF) },
-                k => lookup_path(a[0], k == 0).map(|_| ()),
+            let ino = match (num - 188) % 3 {
+                2 => xattr_fd_ino(a[0]),
+                k => lookup_path(a[0], k == 0).map(|(i, _)| i),
             };
-            match found {
+            match ino {
                 Err(e) => e,
-                Ok(()) => xattr_answer((num - 188) / 3),
+                Ok(ino) => match (num - 188) / 3 {
+                    0 => xattr_op(ino, 0, a[1], a[2], a[3], a[4]),
+                    1 => xattr_op(ino, 1, a[1], a[2], a[3], 0),
+                    2 => xattr_op(ino, 2, 0, a[1], a[2], 0),
+                    _ => xattr_op(ino, 3, a[1], 0, 0, 0),
+                },
             }
         }
         // setxattrat, getxattrat, listxattrat, removexattrat

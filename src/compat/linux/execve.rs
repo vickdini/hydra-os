@@ -178,6 +178,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     let mut follow = flags & AT_SYMLINK_NOFOLLOW == 0;
     // Set-user-ID / set-group-ID of the program finally run (never of a script)
     let mut set_uid: Option<u32>;
+    let mut file_caps: Option<(u64, bool)>;
+    let mut caps_secure: bool;
     let mut set_gid: Option<u32>;
     let mut via_script = false;
     let mut dirfd = dirfd;
@@ -232,6 +234,10 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         };
         let data = &source.head;
         set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
+        // File capabilities (security.capability) of the program that will run; with the
+        // effective bit the program runs in secure mode even if they are not granted
+        file_caps = super::vfs::file_caps(ino);
+        caps_secure = file_caps.is_some_and(|(_, e)| e);
         set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
         // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
         let (noexec, nosuid) = super::mount::exec_flags();
@@ -244,6 +250,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             // set-user/group-ID bits are ignored
             set_uid = None;
             set_gid = None;
+            file_caps = None;
         }
 
         if let Some((interp, arg)) = parse_shebang(data) {
@@ -306,6 +313,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
                 gid: c.gid,
                 euid: if via_script { c.euid } else { set_uid.unwrap_or(c.euid) },
                 egid: if via_script { c.egid } else { set_gid.unwrap_or(c.egid) },
+                secure: (caps_secure || file_caps.is_some_and(|(p, _)| p != 0)) && c.euid != 0,
             },
             &read_in_root,
         ) {
@@ -344,6 +352,17 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             }
             let (uid, euid) = (t.uid, t.euid);
             t.caps.on_exec(uid, euid);
+            // File capabilities: permitted = the file's permitted set (every capability is
+            // in the bounding set); effective = all of them if the file's effective bit is
+            // set. Root already holds everything.
+            if let Some((fp, fe)) = file_caps {
+                if euid != 0 {
+                    t.caps.permitted |= fp & crate::task::tcb::Caps::FULL;
+                    if fe {
+                        t.caps.effective = t.caps.permitted;
+                    }
+                }
+            }
             t.clear_child_tid = 0;
             // The new image gets a descriptor table of its own (as Linux's unshare_files)
             if alloc::sync::Arc::strong_count(&t.fds) > 1 {

@@ -23,6 +23,50 @@ use super::spa::BLOCK;
 use super::types::*;
 
 pub use super::fsproto::{EEXIST, EFBIG, EINVAL, EIO, EISDIR, EMLINK, ENAMETOOLONG, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, EPERM, EXDEV};
+pub use super::fsproto::{E2BIG, ENODATA, EOPNOTSUPP, ERANGE};
+
+/// Largest extended attribute value (Linux's `XATTR_SIZE_MAX`).
+const XATTR_SIZE_MAX: usize = 65536;
+/// Largest extended attribute name (Linux's `XATTR_NAME_MAX`).
+const XATTR_NAME_MAX: usize = 255;
+/// Most bytes of extended attributes one inode keeps.
+const XATTR_TOTAL_MAX: usize = 1 << 20;
+
+/// Extended attributes as stored: `[count u32]`, then per attribute `[name length u16]
+/// [value length u32] [name] [value]`.
+fn xattr_decode(b: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    if b.len() < 4 {
+        return out;
+    }
+    let n = u32::from_le_bytes(b[0..4].try_into().unwrap());
+    let mut at = 4;
+    for _ in 0..n {
+        if at + 6 > b.len() {
+            break;
+        }
+        let nl = u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let vl = u32::from_le_bytes(b[at + 2..at + 6].try_into().unwrap()) as usize;
+        at += 6;
+        if at + nl + vl > b.len() {
+            break;
+        }
+        out.push((b[at..at + nl].to_vec(), b[at + nl..at + nl + vl].to_vec()));
+        at += nl + vl;
+    }
+    out
+}
+
+fn xattr_encode(list: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut b = (list.len() as u32).to_le_bytes().to_vec();
+    for (n, v) in list {
+        b.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        b.extend_from_slice(n);
+        b.extend_from_slice(v);
+    }
+    b
+}
 pub use super::fsproto::{Attr, ReaddirEntry, SetAttr};
 
 /// Result type returned by ZPL operations, encoding negative Linux errnos on failure.
@@ -182,6 +226,135 @@ impl ZfsServer {
             dn.ctime_ns = t.1;
         }
         self.dmu.put_dnode(ino, dn);
+        Ok(())
+    }
+
+    /// The object holding `ino`'s extended attributes, if it has any.
+    fn xattr_object(&mut self, ino: u64) -> ZplResult<Option<u64>> {
+        let dn = self.dnode(ino)?;
+        if dn.flags & DNODE_FLAG_XATTR == 0 || dn.mode & S_IFMT == S_IFLNK {
+            return Ok(None);
+        }
+        Ok(Some(u64::from_le_bytes(dn.bonus[0..8].try_into().unwrap())))
+    }
+
+    /// `ino`'s extended attributes.
+    fn xattr_load(&mut self, ino: u64) -> ZplResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(obj) = self.xattr_object(ino)? else { return Ok(Vec::new()) };
+        let size = self.dnode(obj)?.size as usize;
+        let mut buf = alloc::vec![0u8; size];
+        let n = self.dmu.read(obj, 0, &mut buf).map_err(io)?;
+        buf.truncate(n);
+        Ok(xattr_decode(&buf))
+    }
+
+    /// Replaces `ino`'s extended attributes (none: their object is freed).
+    fn xattr_save(&mut self, ino: u64, list: &[(Vec<u8>, Vec<u8>)]) -> ZplResult<()> {
+        let existing = self.xattr_object(ino)?;
+        let mut dn = self.dnode(ino)?;
+        if list.is_empty() {
+            if let Some(obj) = existing {
+                self.dmu.free_object(obj).map_err(io)?;
+                dn = self.dnode(ino)?;
+                dn.flags &= !DNODE_FLAG_XATTR;
+                dn.bonus[0..8].fill(0);
+            }
+        } else {
+            let data = xattr_encode(list);
+            let obj = match existing {
+                Some(o) => o,
+                None => {
+                    let o = self.dmu.alloc_object(S_IFREG).map_err(io)?;
+                    dn = self.dnode(ino)?;
+                    dn.flags |= DNODE_FLAG_XATTR;
+                    dn.bonus[0..8].copy_from_slice(&o.to_le_bytes());
+                    o
+                }
+            };
+            self.dmu.write(obj, 0, &data).map_err(io)?;
+            self.dmu.truncate(obj, data.len() as u64).map_err(io)?;
+        }
+        let t = now();
+        dn.ctime = t.0;
+        dn.ctime_ns = t.1;
+        self.dmu.put_dnode(ino, dn);
+        Ok(())
+    }
+
+    /// Frees `ino`'s extended attributes along with the inode.
+    fn xattr_free(&mut self, ino: u64) {
+        if let Ok(Some(obj)) = self.xattr_object(ino) {
+            let _ = self.dmu.free_object(obj);
+        }
+    }
+
+    /// Drops a file capability (`security.capability`), as Linux does when the file is
+    /// written, truncated or changes owner.
+    fn kill_caps(&mut self, ino: u64) -> ZplResult<()> {
+        if self.xattr_object(ino)?.is_none() {
+            return Ok(());
+        }
+        let mut list = self.xattr_load(ino)?;
+        let before = list.len();
+        list.retain(|(n, _)| n != b"security.capability");
+        if list.len() != before {
+            self.xattr_save(ino, &list)?;
+        }
+        Ok(())
+    }
+
+    /// Extended attribute `name` of `ino` (`ENODATA` if it has none by that name).
+    pub fn getxattr(&mut self, ino: u64, name: &[u8]) -> ZplResult<Vec<u8>> {
+        self.xattr_load(ino)?.into_iter().find(|(n, _)| n == name).map(|(_, v)| v).ok_or(ENODATA)
+    }
+
+    /// Sets extended attribute `name` of `ino` to `value`; `flags`: `XATTR_CREATE` (1, fail
+    /// with `EEXIST` if present), `XATTR_REPLACE` (2, fail with `ENODATA` if absent).
+    pub fn setxattr(&mut self, ino: u64, name: &[u8], value: &[u8], flags: u32) -> ZplResult<()> {
+        if self.dnode(ino)?.mode & S_IFMT == S_IFLNK {
+            return Err(EOPNOTSUPP);
+        }
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
+            return Err(ERANGE);
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(E2BIG);
+        }
+        let mut list = self.xattr_load(ino)?;
+        match list.iter_mut().find(|(n, _)| n == name) {
+            Some(_) if flags & 1 != 0 => return Err(EEXIST),
+            Some(e) => e.1 = value.to_vec(),
+            None if flags & 2 != 0 => return Err(ENODATA),
+            None => list.push((name.to_vec(), value.to_vec())),
+        }
+        if list.iter().map(|(n, v)| n.len() + v.len() + 6).sum::<usize>() > XATTR_TOTAL_MAX {
+            return Err(ENOSPC);
+        }
+        self.xattr_save(ino, &list)?;
+        self.notify_file(ino, crate::compat::linux::inotify::IN_ATTRIB);
+        Ok(())
+    }
+
+    /// `ino`'s extended attribute names, each followed by a NUL.
+    pub fn listxattr(&mut self, ino: u64) -> ZplResult<Vec<u8>> {
+        let mut out = Vec::new();
+        for (n, _) in self.xattr_load(ino)? {
+            out.extend_from_slice(&n);
+            out.push(0);
+        }
+        Ok(out)
+    }
+
+    /// Removes extended attribute `name` of `ino`.
+    pub fn removexattr(&mut self, ino: u64, name: &[u8]) -> ZplResult<()> {
+        let mut list = self.xattr_load(ino)?;
+        let before = list.len();
+        list.retain(|(n, _)| n != name);
+        if list.len() == before {
+            return Err(ENODATA);
+        }
+        self.xattr_save(ino, &list)?;
+        self.notify_file(ino, crate::compat::linux::inotify::IN_ATTRIB);
         Ok(())
     }
 
@@ -437,6 +610,7 @@ impl ZfsServer {
                 if is_dir {
                     self.zap.forget(ino);
                 }
+                self.xattr_free(ino);
                 self.dmu.free_object(ino).map_err(io)?;
             }
         }
@@ -624,6 +798,9 @@ impl ZfsServer {
         if offset.checked_add(data.len() as u64).map_or(true, |e| e > (1u64 << 46)) {
             return Err(EFBIG);
         }
+        if dn.flags & DNODE_FLAG_XATTR != 0 {
+            self.kill_caps(ino)?;
+        }
         let n = self.dmu.write(ino, offset, data).map_err(io)?;
         self.touch(ino, true, true)?;
         self.notify_file(ino, crate::compat::linux::inotify::IN_MODIFY);
@@ -640,6 +817,9 @@ impl ZfsServer {
     /// # Returns
     /// Updated inode [`Attr`] descriptor on success, or an error code.
     pub fn setattr(&mut self, ino: u64, set: SetAttr) -> ZplResult<Attr> {
+        if set.size.is_some() || set.uid.is_some() || set.gid.is_some() {
+            self.kill_caps(ino)?;
+        }
         let mut dn = self.dnode(ino)?;
         if let Some(size) = set.size {
             if dn.mode & S_IFMT == S_IFDIR {
@@ -726,6 +906,7 @@ impl ZfsServer {
                 if self.orphans.remove(&ino) {
                     // A reused object number must not inherit this directory's cached index
                     self.zap.forget(ino);
+                    self.xattr_free(ino);
                     let _ = self.dmu.free_object(ino);
                 }
             }

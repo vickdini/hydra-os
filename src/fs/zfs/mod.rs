@@ -443,6 +443,43 @@ impl ZfsServer {
         .map(|r| r.0)
     }
 
+    /// Extended attribute `name` of `ino`.
+    pub fn getxattr(&mut self, ino: u64, name: &[u8]) -> Result<Vec<u8>, i64> {
+        let (_, got) = self.request(FS_GETXATTR, |w| {
+            w.u64(ino);
+            w.bytes(name);
+        })?;
+        Ok(self.reply(got).to_vec())
+    }
+
+    /// Sets extended attribute `name` of `ino` (`flags`: `XATTR_CREATE`, `XATTR_REPLACE`).
+    pub fn setxattr(&mut self, ino: u64, name: &[u8], value: &[u8], flags: u32) -> Result<(), i64> {
+        self.request(FS_SETXATTR, |w| {
+            w.u64(ino);
+            w.bytes(name);
+            w.bytes(value);
+            w.u64(flags as u64);
+        })
+        .map(|_| ())
+    }
+
+    /// `ino`'s extended attribute names, each NUL-terminated.
+    pub fn listxattr(&mut self, ino: u64) -> Result<Vec<u8>, i64> {
+        let (_, got) = self.request(FS_LISTXATTR, |w| {
+            w.u64(ino);
+        })?;
+        Ok(self.reply(got).to_vec())
+    }
+
+    /// Removes extended attribute `name` of `ino`.
+    pub fn removexattr(&mut self, ino: u64, name: &[u8]) -> Result<(), i64> {
+        self.request(FS_REMOVEXATTR, |w| {
+            w.u64(ino);
+            w.bytes(name);
+        })
+        .map(|_| ())
+    }
+
     /// Target of symbolic link `ino`.
     ///
     /// # Arguments
