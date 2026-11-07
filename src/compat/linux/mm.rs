@@ -213,8 +213,25 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
     };
     let fixed = flags & MAP_FIXED != 0;
     let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
-    match mm.lock().mmap(addr, len, prot as u32, shared, fixed, noreplace, backing) {
-        Ok(a) => a as i64,
+    // The name /proc/<pid>/maps shows: the file's path
+    let name = if matches!(backing, Backing::Object { .. }) {
+        crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+            Some(crate::fs::FileDescriptor::Vnode(f)) => Some(f.lock().path.clone()),
+            Some(crate::fs::FileDescriptor::MemFd { memfd, .. }) => Some(alloc::format!("/memfd:{} (deleted)", memfd.lock().name)),
+            Some(crate::fs::FileDescriptor::Device(d)) => Some(d.path()),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let mut m = mm.lock();
+    match m.mmap(addr, len, prot as u32, shared, fixed, noreplace, backing) {
+        Ok(a) => {
+            if name.is_some() {
+                m.set_name(a, a + len, name.as_deref());
+            }
+            a as i64
+        }
         Err(e) => e,
     }
 }

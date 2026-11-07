@@ -43,6 +43,8 @@ pub const O_WRONLY: u32 = 0o1;
 pub const O_RDWR: u32 = 0o2;
 /// `open(2)` status flag: reposition the file offset to the end of the file prior to each write (`0o2000`).
 pub const O_APPEND: u32 = 0o2000;
+/// `O_PATH`: a descriptor naming a file, not open for reading or writing.
+pub const O_PATH: u32 = 0o10000000;
 
 /// Shared open file description for a ZFS inode (`struct file` in Linux VFS).
 ///
@@ -93,7 +95,7 @@ impl OpenFile {
     ///
     /// `true` if the access mode is [`O_RDONLY`] or [`O_RDWR`].
     pub fn readable(&self) -> bool {
-        self.flags & O_ACCMODE != O_WRONLY
+        self.flags & O_ACCMODE != O_WRONLY && self.flags & O_PATH == 0
     }
 
     /// Checks whether this open file description permits write operations.
@@ -102,7 +104,7 @@ impl OpenFile {
     ///
     /// `true` if the access mode is [`O_WRONLY`] or [`O_RDWR`].
     pub fn writable(&self) -> bool {
-        self.flags & O_ACCMODE != O_RDONLY
+        self.flags & O_ACCMODE != O_RDONLY && self.flags & O_PATH == 0
     }
 }
 

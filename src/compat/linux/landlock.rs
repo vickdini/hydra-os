@@ -11,6 +11,7 @@
 //!   each directory's `..` in the pool. Moving or linking a file to another directory needs
 //!   `REFER` on both sides and must not gain rights; a layer that does not handle `REFER`
 //!   (ABI 1) never allows it. A landlocked thread cannot change mounts.
+//! - **Exec** needs `EXECUTE` on the program, a script's interpreter and the dynamic loader.
 //! - **Not covered**: device `ioctl` (ABI 5) and scoping (ABI 6) are not offered, so
 //!   programs fall back as they would on Linux 6.7.
 use alloc::collections::BTreeMap;

@@ -16,7 +16,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/auxv.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define A_EXEC (1ULL << 0)
@@ -168,6 +170,20 @@ static int exec_case(void) {
     struct ruleset_attr a = {A_EXEC, 0};
     int rs = ll_create(&a, 8, 0);
     add_path(rs, at("rw"), A_EXEC);
+    // A dynamic build also runs the dynamic loader, which needs EXECUTE too: the mapping at
+    // the loader's base address names its file
+    unsigned long ld_base = getauxval(AT_BASE);
+    FILE *maps = ld_base ? fopen("/proc/self/maps", "r") : NULL;
+    char line[512];
+    while (maps && fgets(line, sizeof line, maps)) {
+        char *p = strchr(line, '/');
+        if (strtoul(line, NULL, 16) == ld_base && p) {
+            p[strcspn(p, "\n")] = 0;
+            add_path(rs, p, A_EXEC);
+            break;
+        }
+    }
+    if (maps) fclose(maps);
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (ll_restrict(rs) != 0) return 1;
     char *argv[] = {"me", "--exit0", NULL};
@@ -210,7 +226,7 @@ int main(int argc, char **argv) {
     }
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("Landlock ABI %d\n", abi);
-    snprintf(T, sizeof T, "/tmp/ll.%d", getpid());
+    snprintf(T, sizeof T, "/tmp/ll.%d.%ld", getpid(), (long)time(NULL));   // PIDs repeat across boots
     mkdir(T, 0755);
     mkdir(at("ro"), 0755);
     mkdir(at("rw"), 0755);

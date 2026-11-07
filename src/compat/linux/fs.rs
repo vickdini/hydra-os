@@ -182,7 +182,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv")
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv" | "maps")
             || file.strip_prefix("fdinfo/").is_some_and(numeric)
             || file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| numeric(t) && matches!(f, "status" | "stat" | "comm")))
 }
@@ -241,6 +241,13 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         }
         None => (file, pid),
     };
+    if file == "maps" {
+        // Another process's mappings (debuggers, profilers)
+        super::extra::may_access(pid).ok()?;
+        let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
+        let text = mm.lock().maps_text();
+        return Some(text.into_bytes());
+    }
     if file == "auxv" {
         // Another process's auxiliary vector (debuggers find where a program was loaded)
         super::extra::may_access(pid).ok()?;
@@ -439,7 +446,7 @@ impl PseudoFile {
             PseudoFile::ProcKeys => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
             PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
-                let text = "00400000-00452000 r-xp 00000000 00:00 0 /bin/app\n00652000-00653000 rw-p 00052000 00:00 0 /bin/app\n7ffffffde000-7ffffffff000 rw-p 00000000 00:00 0 [stack]\n";
+                let text = super::mm::current_mm().map(|m| m.lock().maps_text()).unwrap_or_default();
                 read_slice(text.as_bytes(), cursor, buf)
             }
         }

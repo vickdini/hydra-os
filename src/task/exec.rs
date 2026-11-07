@@ -202,7 +202,7 @@ struct MappedElf {
 /// # Errors
 ///
 /// Returns [`ElfError`] if parsing, segment validation, or virtual memory mapping fails.
-fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<MappedElf, ElfError> {
+fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>, name: &str) -> Result<MappedElf, ElfError> {
     let elf = ElfBinary::parse(&src.head)?;
     let segs = elf.load_segments();
     if segs.is_empty() {
@@ -255,6 +255,7 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>) -> Result<Mapped
                 },
             )
             .map_err(|_| ElfError::AllocationFailed)?;
+            mm.set_name(map_start, file_map_end, Some(name));
             anon_start = file_map_end;
 
             // The rest of the last file page belongs to .bss and must read as zero
@@ -340,7 +341,7 @@ pub fn load_linux_exec(
     let mut mm = Mm::new().map_err(|e| ElfError::PagingError(e))?;
 
     let interp_path = ElfBinary::parse(&exe.head)?.interp_path().map(String::from);
-    let main = map_elf(&mut mm, &exe, Some(PIE_BASE))?;
+    let main = map_elf(&mut mm, &exe, Some(PIE_BASE), exec_path)?;
 
     mm.brk_start = page_up(main.end);
     mm.brk = mm.brk_start;
@@ -348,7 +349,7 @@ pub fn load_linux_exec(
     let (entry, interp_base) = match interp_path {
         Some(path) => {
             let interp_src = read_file(&path).ok_or(ElfError::InterpreterNotFound)?;
-            let interp = map_elf(&mut mm, &interp_src, None)?;
+            let interp = map_elf(&mut mm, &interp_src, None, &path)?;
             (interp.entry, interp.bias)
         }
         None => (main.entry, 0),
@@ -358,6 +359,7 @@ pub fn load_linux_exec(
     let stack_base = STACK_TOP - STACK_SIZE;
     mm.mmap(stack_base, STACK_SIZE, PROT_READ | PROT_WRITE, false, true, false, Backing::Anon)
         .map_err(|_| ElfError::AllocationFailed)?;
+    mm.set_name(stack_base, stack_base + STACK_SIZE, Some("[stack]"));
 
     // --- Strings area at the top of the stack ---
     let mut strings: Vec<u8> = Vec::new();

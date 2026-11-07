@@ -141,6 +141,8 @@ pub struct Vma {
     pub shared: bool,
     /// Backing store from which pages in this area are populated.
     pub backing: Backing,
+    /// What `/proc/<pid>/maps` shows for it: a file's path, `[stack]`, `[heap]`, or none.
+    pub name: Option<Arc<str>>,
 }
 
 impl Vma {
@@ -647,6 +649,7 @@ impl Mm {
                 prot,
                 shared,
                 backing,
+                name: None,
             },
         );
         self.merge_around(start);
@@ -738,6 +741,7 @@ impl Mm {
                     prot: PROT_READ | PROT_WRITE,
                     shared: false,
                     backing: Backing::Anon,
+                    name: Some(Arc::from("[heap]")),
                 },
             );
             self.merge_around(old_top);
@@ -760,7 +764,7 @@ impl Mm {
     ///
     /// `true` if both VMAs have identical permissions and contiguous backing and can merge, `false` otherwise.
     fn can_merge(lower: &Vma, upper: &Vma) -> bool {
-        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared {
+        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared || lower.name != upper.name {
             return false;
         }
         match (&lower.backing, &upper.backing) {
@@ -770,6 +774,61 @@ impl Mm {
             }
             _ => false,
         }
+    }
+
+    /// Names the mappings in `[start, end)` (splitting those that reach outside it), for
+    /// `/proc/<pid>/maps`.
+    pub fn set_name(&mut self, start: u64, end: u64, name: Option<&str>) {
+        let name: Option<Arc<str>> = name.map(Arc::from);
+        let keys: Vec<u64> = self.vmas.range(..end).filter(|(_, v)| v.end > start).map(|(k, _)| *k).collect();
+        for k in keys {
+            let Some(mut v) = self.vmas.remove(&k) else { continue };
+            if v.start < start {
+                let upper = v.split_off(start);
+                self.vmas.insert(v.start, v);
+                v = upper;
+            }
+            if v.end > end {
+                let upper = v.split_off(end);
+                self.vmas.insert(upper.start, upper);
+            }
+            v.name = name.clone();
+            let at = v.start;
+            self.vmas.insert(at, v);
+            self.merge_around(at);
+        }
+    }
+
+    /// The mappings as `/proc/<pid>/maps` lists them.
+    pub fn maps_text(&self) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut out = alloc::string::String::new();
+        for v in self.vmas.values() {
+            let off = match &v.backing {
+                Backing::Object { pgoff, .. } => pgoff * PAGE_SIZE,
+                Backing::Anon => 0,
+            };
+            let mut line = alloc::format!(
+                "{:08x}-{:08x} {}{}{}{} {:08x} 00:00 0",
+                v.start,
+                v.end,
+                if v.prot & PROT_READ != 0 { 'r' } else { '-' },
+                if v.prot & PROT_WRITE != 0 { 'w' } else { '-' },
+                if v.prot & PROT_EXEC != 0 { 'x' } else { '-' },
+                if v.shared { 's' } else { 'p' },
+                off
+            );
+            if let Some(n) = &v.name {
+                // The name starts at a fixed column, as on Linux
+                while line.len() < 72 {
+                    line.push(' ');
+                }
+                let _ = write!(line, " {}", n);
+            }
+            line.push('\n');
+            out.push_str(&line);
+        }
+        out
     }
 
     /// Merges the area starting at `start` with compatible neighbours on either side.

@@ -268,6 +268,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         }
 
         let root = proc_root();
+        // Landlock refusing EXECUTE on the dynamic loader fails the exec with EACCES
+        let interp_refused = core::cell::Cell::new(false);
         let read_in_root = |p: &str| -> Option<crate::task::exec::ElfSource> {
             if root == super::vfs::EMPTY_ROOT {
                 return None;
@@ -277,6 +279,10 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
                 Some(r) => r.ok()?,
                 None => ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?,
             };
+            if super::landlock::check_at(p, ino, false, true, super::landlock::EXECUTE).is_err() {
+                interp_refused.set(true);
+                return None;
+            }
             super::mm::inode_source(ino).ok()
         };
         let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();
@@ -297,7 +303,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             &read_in_root,
         ) {
             Ok(img) => break img,
-            Err(crate::task::elf::ElfError::InterpreterNotFound) => return ENOENT,
+            Err(crate::task::elf::ElfError::InterpreterNotFound) => return if interp_refused.get() { EACCES } else { ENOENT },
             Err(crate::task::elf::ElfError::AllocationFailed) => return ENOMEM,
             Err(_) => return ENOEXEC,
         }

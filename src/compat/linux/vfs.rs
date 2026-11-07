@@ -185,7 +185,7 @@ pub(crate) fn user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
 pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
     let p = user_cstr(ptr)?;
     if p.is_empty() {
-        return Err(-ENOENT);
+        return Err(ENOENT);
     }
     Ok(p)
 }
@@ -789,7 +789,7 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
     let path = user_cstr(path_ptr)?;
     if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
-            return Err(-ENOENT);
+            return Err(ENOENT);
         }
         return fstat_fd(dirfd as i32).ok_or(-EBADF)?;
     }
@@ -839,7 +839,7 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
 /// `Some(Ok(stat))` or `Some(Err(e))` if handled, or `None` if not owned by this layer.
 fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
     if fd < 0 {
-        return Some(Err(-EBADF));
+        return Some(Err(EBADF));
     }
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).cloned());
     match desc {
@@ -890,7 +890,7 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::TimerFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::Inotify(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::PidFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        None => Some(Err(-EBADF)),
+        None => Some(Err(EBADF)),
         _ => None,
     }
 }
@@ -1771,7 +1771,7 @@ fn link_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 {
         // The linked inode and the directory it is reached from
         let (ino, sdir) = if op.is_empty() {
             if flags & AT_EMPTY_PATH == 0 {
-                return Err(-ENOENT);
+                return Err(ENOENT);
             }
             let f = fd_vnode(olddir as i32).ok_or(EBADF)?;
             let (ino, path) = {
@@ -1814,7 +1814,7 @@ fn setattr_at(dirfd: i64, path_ptr: u64, follow: bool, empty_ok: bool, set: SetA
         let path = if path_ptr == 0 { Vec::new() } else { user_cstr(path_ptr)? };
         let ino = if path.is_empty() {
             if !empty_ok {
-                return Err(-ENOENT);
+                return Err(ENOENT);
             }
             fd_vnode(dirfd as i32).ok_or(EBADF)?.lock().ino
         } else {

@@ -152,6 +152,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         444..=446 => return landlock::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // preadv, pwritev, preadv2, pwritev2, sendfile, copy_file_range, splice, tee, vmsplice
         295 | 296 | 327 | 328 | 40 | 326 | 275 | 276 | 278 => return xfer::dispatch(frame, num),
+        // open_tree, move_mount, fsopen, fsconfig, fsmount, fspick, mount_setattr
+        428..=433 | 442 => {
+            if let Err(e) = landlock::check_mount() {
+                return e;
+            }
+            return mount::dispatch_new(num, [arg0, arg1, arg2, arg3, arg4, arg5]);
+        }
         // pivot_root, mount, umount2
         155 | 165 | 166 => {
             if let Err(e) = landlock::check_mount() {
@@ -286,6 +293,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.read(slice) {
                         Ok(n) => n as i64,
+                        // Write-only or O_PATH
+                        Err("File not opened for reading") => -EBADF,
                         Err(_) => -EIO,
                     }
                 } else {
@@ -1062,6 +1071,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.read(slice) {
                         Ok(n) => n as i64,
+                        // Write-only or O_PATH
+                        Err("File not opened for reading") => -EBADF,
                         Err(_) => -EIO,
                     }
                 } else {
@@ -2334,5 +2345,10 @@ pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
 
 /// The errno of a failed descriptor write (`ENOSPC` for `/dev/full`, otherwise `EIO`).
 fn write_errno(e: &'static str) -> i64 {
-    if e == crate::fs::fd::ENOSPC_MSG { -28 } else { -EIO }
+    match e {
+        crate::fs::fd::ENOSPC_MSG => -28,
+        // Read-only or O_PATH
+        "File not opened for writing" => -EBADF,
+        _ => -EIO,
+    }
 }
