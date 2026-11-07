@@ -45,6 +45,8 @@ const AF_INET6: u32 = 10;
 const SOCK_STREAM: u32 = 1;
 /// Socket type constant for connectionless datagrams (UDP).
 const SOCK_DGRAM: u32 = 2;
+/// Socket type constant for raw sockets (ICMP only).
+const SOCK_RAW: u32 = 3;
 /// Socket type flag: enable non-blocking mode (`O_NONBLOCK`) on the new socket descriptor.
 const SOCK_NONBLOCK: u32 = 0o4000;
 /// Socket type flag: atomically mark the new socket descriptor close-on-exec (`FD_CLOEXEC`).
@@ -86,6 +88,10 @@ const EALREADY: i64 = -114;
 const EINPROGRESS: i64 = -115;
 /// Negative errno for `bind` to an address that is not ours.
 const EADDRNOTAVAIL: i64 = -99;
+/// Negative errno for a privileged socket type (raw sockets need `CAP_NET_RAW`).
+const EPERM: i64 = -1;
+/// Negative errno for an unsupported socket type.
+const ESOCKTNOSUPPORT: i64 = -94;
 /// Negative errno for a destination without a route (IPv6 beyond loopback).
 const ENETUNREACH: i64 = -101;
 /// Negative errno for write on a broken TCP connection (`SIGPIPE` is also posted unless `MSG_NOSIGNAL`).
@@ -128,10 +134,20 @@ pub struct InetSocket {
     udp_used: bool,
     /// An `AF_INET6` socket.
     v6: bool,
+    /// ICMP socket handle: a ping socket (`SOCK_DGRAM`, `IPPROTO_ICMP`/`ICMPV6`) or a raw
+    /// one (`raw`).
+    icmp: Option<u32>,
+    /// A raw (`SOCK_RAW`) socket.
+    raw: bool,
+    /// Wall-clock time (ns) the last datagram was received (`SIOCGSTAMP`, `SO_TIMESTAMP`).
+    rx_stamp: Option<u64>,
 }
 
 impl Drop for InetSocket {
     fn drop(&mut self) {
+        if let Some(id) = self.icmp {
+            stack::icmp_close(id);
+        }
         if let Some(id) = self.listener {
             stack::tcp_unlisten(id);
         }
@@ -155,6 +171,9 @@ impl InetSocket {
     ///
     /// `Some(Arc<WaitQueue>)` if an active transport endpoint exists, or `None`.
     pub fn wait_queue(&mut self) -> Option<Arc<crate::task::wait::WaitQueue>> {
+        if self.icmp.is_some() {
+            return self.icmp.and_then(stack::wait_queue);
+        }
         if !self.stream && self.udp.is_none() {
             let _ = self.udp_id();
         }
@@ -168,6 +187,9 @@ impl InetSocket {
     ///
     /// Bitmask of poll readiness flags.
     pub fn poll_events(&self) -> u32 {
+        if let Some(id) = self.icmp {
+            return 0x4 | stack::icmp_readable(id) as u32;
+        }
         if let Some(id) = self.listener {
             // A listening socket is readable when a connection waits to be accepted
             return stack::tcp_acceptable(id) as u32;
@@ -271,6 +293,8 @@ fn read_sockaddr(ptr: u64, len: u64, v6: bool) -> Result<Option<([u8; 4], u16)>,
             [0; 4] // ::
         } else if a[..15].iter().all(|&b| b == 0) && a[15] == 1 {
             stack::V6_LOOPBACK // ::1
+        } else if stack::link_local6().is_some_and(|ll| ll[..] == a[..]) {
+            stack::V6_LINKLOCAL // our fe80:: address
         } else if a[..10].iter().all(|&b| b == 0) && a[10] == 0xff && a[11] == 0xff {
             [a[12], a[13], a[14], a[15]] // ::ffff:a.b.c.d
         } else {
@@ -316,6 +340,9 @@ fn write_sockaddr(ptr: u64, len_ptr: u64, ip: [u8; 4], port: u16, v6: bool) -> R
         sa[2..4].copy_from_slice(&port.to_be_bytes());
         if ip == stack::V6_LOOPBACK {
             sa[23] = 1;
+        } else if ip == stack::V6_LINKLOCAL {
+            sa[8..24].copy_from_slice(&stack::link_local6().unwrap_or([0; 16]));
+            sa[24..28].copy_from_slice(&2u32.to_le_bytes()); // scope: eth0
         } else if ip != [0; 4] {
             sa[18] = 0xff;
             sa[19] = 0xff;
@@ -410,12 +437,16 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
     };
     if let Some((ip, _)) = dest {
         let s = sock.lock();
-        if s.v6 && s.opts.flag(41, 26) && ip != stack::V6_LOOPBACK {
+        if s.v6 && s.opts.flag(41, 26) && !stack::is_v6(ip) {
             return ENETUNREACH; // IPV6_V6ONLY: no IPv4-mapped destinations
         }
     }
     let (nonblock, timeout) = {
         let mut s = sock.lock();
+        if s.icmp.is_some() {
+            s.peer = dest;
+            return 0;
+        }
         if !s.stream {
             let _ = s.udp_id();
             s.udp_used = true;
@@ -474,6 +505,48 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
     }
 }
 
+/// The wall clock in nanoseconds.
+fn wall_ns() -> u64 {
+    let (s, ns) = crate::arch::rtc::now();
+    s as u64 * 1_000_000_000 + ns as u64
+}
+
+/// `ioctl(SIOCGSTAMP)` (`struct timeval`) / `SIOCGSTAMPNS` (`struct timespec`): when the
+/// last datagram was received; `ENOENT` before any.
+pub fn stamp_ioctl(sock: &Arc<Mutex<InetSocket>>, cmd: u64, arg: u64) -> i64 {
+    let Some(t) = sock.lock().rx_stamp else { return -2 };
+    let sub = if cmd == 0x8906 { (t % 1_000_000_000) / 1000 } else { t % 1_000_000_000 };
+    let mut b = [0u8; 16];
+    b[0..8].copy_from_slice(&(t / 1_000_000_000).to_le_bytes());
+    b[8..16].copy_from_slice(&sub.to_le_bytes());
+    match copy_out(arg, &b) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// A raw socket's ICMP filter (`ICMP_FILTER` at `SOL_RAW`, `ICMP6_FILTER` at
+/// `IPPROTO_ICMPV6`): whether a received message is blocked.
+fn icmp_filter(s: &InetSocket) -> Option<alloc::boxed::Box<dyn Fn(&[u8]) -> bool>> {
+    if !s.raw {
+        return None;
+    }
+    if s.v6 {
+        let f = s.opts.value(58, 1)?.to_vec();
+        Some(alloc::boxed::Box::new(move |d: &[u8]| {
+            let ty = d.first().copied().unwrap_or(0) as usize;
+            f.get(ty / 8).is_some_and(|b| b & (1 << (ty % 8)) != 0)
+        }))
+    } else {
+        let f = s.opts.value(255, 1)?;
+        let mask = u32::from_le_bytes(f.get(..4)?.try_into().ok()?);
+        Some(alloc::boxed::Box::new(move |d: &[u8]| {
+            let ty = d.get(20).copied().unwrap_or(0) as u32;
+            ty < 32 && mask & (1 << ty) != 0
+        }))
+    }
+}
+
 /// Where a connection to `ip` goes: the unspecified address means this host (`127.0.0.1`,
 /// or `::1` for an IPv6 socket).
 fn connect_target(s: &InetSocket, ip: [u8; 4]) -> [u8; 4] {
@@ -488,7 +561,7 @@ fn connect_target(s: &InetSocket, ip: [u8; 4]) -> [u8; 4] {
 fn families(s: &InetSocket, ip: [u8; 4]) -> (bool, bool) {
     if !s.v6 {
         (true, false)
-    } else if ip == stack::V6_LOOPBACK {
+    } else if stack::is_v6(ip) {
         (false, true)
     } else if ip == [0; 4] {
         (!s.opts.flag(41, 26), true) // [::]: IPv4 too unless IPV6_V6ONLY
@@ -545,6 +618,10 @@ fn hex_addr((ip, port): ([u8; 4], u16)) -> alloc::string::String {
 fn hex_addr6((ip, port): ([u8; 4], u16)) -> alloc::string::String {
     let words: [u32; 4] = if ip == stack::V6_LOOPBACK {
         [0, 0, 0, u32::from_le_bytes([0, 0, 0, 1])]
+    } else if ip == stack::V6_LINKLOCAL {
+        let a = stack::link_local6().unwrap_or([0; 16]);
+        let w = |i: usize| u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
+        [w(0), w(4), w(8), w(12)]
     } else if ip == [0; 4] {
         [0; 4]
     } else {
@@ -601,7 +678,7 @@ pub fn proc_net(file: &str) -> Option<alloc::string::String> {
             }
             for c in stack::tcp_list() {
                 let o = own.get(&c.id);
-                if o.map_or(c.local.0 == stack::V6_LOOPBACK, |o| o.v6) != want6 {
+                if o.map_or(stack::is_v6(c.local.0), |o| o.v6) != want6 {
                     continue;
                 }
                 rows.push((c.local, c.remote, tcp_state_num(c.state), c.tx, c.rx, o.map_or(0, |o| o.uid), o.map_or(0, |o| o.inode)));
@@ -650,6 +727,26 @@ pub fn proc_net(file: &str) -> Option<alloc::string::String> {
                     o.map_or(0, |o| o.inode)
                 );
                 out.push_str(&pad(line, 127));
+            }
+            Some(out)
+        }
+        "dev" => {
+            let mut out = alloc::string::String::from(
+                "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+            );
+            let c = stack::counters();
+            let mut ifaces = alloc::vec![("lo", c[0])];
+            if !isolated && crate::net::e1000::is_present() {
+                ifaces.push(("eth0", c[1]));
+            }
+            if isolated {
+                ifaces[0].1 = ((0, 0), (0, 0));
+            }
+            for (name, ((rb, rp), (tb, tp))) in ifaces {
+                out.push_str(&alloc::format!(
+                    "{:>6}:{:8} {:7} {:4} {:4} {:4} {:5} {:10} {:9} {:8} {:7} {:4} {:4} {:4} {:5} {:7} {:10}\n",
+                    name, rb, rp, 0, 0, 0, 0, 0, 0, tb, tp, 0, 0, 0, 0, 0, 0
+                ));
             }
             Some(out)
         }
@@ -730,6 +827,9 @@ fn accept(sock: &Arc<Mutex<InetSocket>>, addr: u64, addrlen: u64, flags: u64) ->
         uid: current_euid(),
         udp_used: false,
         v6,
+        icmp: None,
+        raw: false,
+        rx_stamp: None,
     };
     let cloexec = flags & SOCK_CLOEXEC as u64 != 0;
     let conn = register(conn);
@@ -761,6 +861,17 @@ fn accept(sock: &Arc<Mutex<InetSocket>>, addr: u64, addrlen: u64, flags: u64) ->
 ///
 /// Number of bytes sent on success, or a negative Linux errno on error.
 fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u8; 4], u16)>) -> i64 {
+    let icmp = {
+        let s = sock.lock();
+        s.icmp.map(|id| (id, dest.or(s.peer)))
+    };
+    if let Some((id, to)) = icmp {
+        let Some((ip, _)) = to else { return EDESTADDRREQ };
+        return match stack::icmp_send(id, ip, data) {
+            Ok(n) => n as i64,
+            Err(e) => e,
+        };
+    }
     let (stream, nonblock, tcp, timeout) = {
         let s = sock.lock();
         (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp, s.opts.snd_timeout())
@@ -837,6 +948,24 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp, s.shut_rd, s.opts.rcv_timeout())
     };
     let peek = flags & MSG_PEEK != 0;
+    let icmp = {
+        let s = sock.lock();
+        s.icmp.map(|id| (id, icmp_filter(&s)))
+    };
+    if let Some((id, filter)) = icmp {
+        let (src, data) = wait_for(id, nonblock, timeout, || loop {
+            match stack::icmp_recv(id, peek) {
+                None => return None,
+                // Raw sockets drop the message types their ICMP filter blocks
+                Some((_, d)) if !peek && filter.as_ref().is_some_and(|f| f(&d)) => continue,
+                Some(m) => return Some(Ok(m)),
+            }
+        })?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        sock.lock().rx_stamp = Some(wall_ns());
+        return Ok((n, Some((src, 0)), data.len() > n));
+    }
     if stream {
         let id = tcp.ok_or(ENOTCONN)?;
         if shut_rd {
@@ -857,6 +986,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
     }
     let id = sock.lock().udp_id()?;
     let (ip, port, data) = wait_for(id, nonblock, timeout, || stack::udp_recv(id, peek).map(Ok))?;
+    sock.lock().rx_stamp = Some(wall_ns());
     let n = data.len().min(buf.len());
     buf[..n].copy_from_slice(&data[..n]);
     Ok((n, Some((ip, port)), data.len() > n))
@@ -971,7 +1101,50 @@ fn recvmsg(sock: &Arc<Mutex<InetSocket>>, msg: u64, flags: u64) -> i64 {
     } else {
         let _ = copy_out(msg + 8, &0u32.to_le_bytes());
     }
-    let _ = copy_out(msg + 40, &0u64.to_le_bytes());
+    // IP_RECVTTL / IPV6_RECVHOPLIMIT on datagram sockets: one IP_TTL / IPV6_HOPLIMIT message
+    let (control, controllen) = (u(32), u(40));
+    let want = {
+        let s = sock.lock();
+        (!s.stream).then_some(()).and_then(|_| {
+            if s.v6 && s.opts.flag(41, 51) {
+                Some((41u32, 52u32))
+            } else if !s.v6 && s.opts.flag(0, 12) {
+                Some((0, 2))
+            } else {
+                None
+            }
+        })
+    };
+    let mut used = 0u64;
+    // SO_TIMESTAMP (struct timeval) / SO_TIMESTAMPNS (struct timespec) first
+    let stamp = {
+        let s = sock.lock();
+        let ns = s.opts.flag(1, 35);
+        if (s.opts.flag(1, 29) || ns) && !s.stream { s.rx_stamp.map(|t| (t, ns)) } else { None }
+    };
+    if let (Some((t, ns)), true) = (stamp, control != 0 && controllen >= 32) {
+        let mut c = [0u8; 32];
+        c[0..8].copy_from_slice(&32u64.to_le_bytes()); // CMSG_LEN(16)
+        c[8..12].copy_from_slice(&1u32.to_le_bytes()); // SOL_SOCKET
+        c[12..16].copy_from_slice(&(if ns { 35u32 } else { 29u32 }).to_le_bytes());
+        c[16..24].copy_from_slice(&(t / 1_000_000_000).to_le_bytes());
+        let sub = if ns { t % 1_000_000_000 } else { (t % 1_000_000_000) / 1000 };
+        c[24..32].copy_from_slice(&sub.to_le_bytes());
+        if copy_out(control, &c).is_ok() {
+            used = 32;
+        }
+    }
+    if let (Some((level, ty)), true) = (want, control != 0 && controllen >= used + 24) {
+        let mut c = [0u8; 24];
+        c[0..8].copy_from_slice(&20u64.to_le_bytes()); // cmsg_len = CMSG_LEN(sizeof(int))
+        c[8..12].copy_from_slice(&level.to_le_bytes());
+        c[12..16].copy_from_slice(&ty.to_le_bytes());
+        c[16..20].copy_from_slice(&64i32.to_le_bytes());
+        if copy_out(control + used, &c).is_ok() {
+            used += 24;
+        }
+    }
+    let _ = copy_out(msg + 40, &used.to_le_bytes());
     let mflags: i32 = if trunc { MSG_TRUNC as i32 } else { 0 };
     let _ = copy_out(msg + 48, &mflags.to_le_bytes());
     n as i64
@@ -1042,10 +1215,22 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             return None;
         }
         let ty = a[1] as u32 & 0xf;
-        let stream = match ty {
-            SOCK_STREAM => true,
-            SOCK_DGRAM => false,
-            _ => return Some(EPROTONOSUPPORT),
+        let proto = a[2] as u32;
+        let icmp_proto = if domain == AF_INET6 { 58 } else { 1 };
+        // (stream, ICMP socket kind: Some(raw))
+        let (stream, icmp) = match ty {
+            SOCK_STREAM if matches!(proto, 0 | 6) => (true, None),
+            SOCK_DGRAM if matches!(proto, 0 | 17) => (false, None),
+            // Ping sockets (net.ipv4.ping_group_range covers every group, as Ubuntu sets it)
+            SOCK_DGRAM if proto == icmp_proto => (false, Some(false)),
+            SOCK_RAW if proto == icmp_proto => {
+                if !crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 13) != 0).unwrap_or(false) {
+                    return Some(EPERM); // CAP_NET_RAW
+                }
+                (false, Some(true))
+            }
+            SOCK_STREAM | SOCK_DGRAM | SOCK_RAW => return Some(EPROTONOSUPPORT),
+            _ => return Some(ESOCKTNOSUPPORT),
         };
         let mut sock = InetSocket {
             stream,
@@ -1062,8 +1247,11 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             uid: current_euid(),
             udp_used: false,
             v6: domain == AF_INET6,
+            icmp: icmp.map(|raw| stack::icmp_open(raw, domain == AF_INET6)),
+            raw: icmp == Some(true),
+            rx_stamp: None,
         };
-        if !stream {
+        if !stream && icmp.is_none() {
             let _ = sock.udp_id();
         }
         let cloexec = a[1] as u32 & SOCK_CLOEXEC != 0;
@@ -1098,7 +1286,21 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             match read_sockaddr(a[1], a[2], v6).map_err(|e| if e == ENETUNREACH { EADDRNOTAVAIL } else { e }) {
                 Ok(Some((ip, port))) => {
                     let mut s = sock.lock();
-                    if s.v6 && s.opts.flag(41, 26) && ip != [0; 4] && ip != stack::V6_LOOPBACK {
+                    if let Some(id) = s.icmp {
+                        // ICMP sockets: an address of ours; a ping socket's "port" is its
+                        // echo identifier
+                        if ip != [0; 4] && !stack::is_local(ip) {
+                            return Some(EADDRNOTAVAIL);
+                        }
+                        if !s.raw && port != 0 {
+                            if let Err(e) = stack::icmp_set_ident(id, port) {
+                                return Some(e);
+                            }
+                        }
+                        s.bound_ip = ip;
+                        return Some(0);
+                    }
+                    if s.v6 && s.opts.flag(41, 26) && ip != [0; 4] && !stack::is_v6(ip) {
                         return Some(EINVAL); // IPV6_V6ONLY: no IPv4-mapped address
                     }
                     if s.stream && super::landlock::check_port(port, super::landlock::BIND_TCP).is_err() {
@@ -1239,7 +1441,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         51 | 52 => {
             let s = sock.lock();
             let me = crate::net::GLOBAL_INTERFACE.lock().ip();
-            let (ip, port) = if num == 51 {
+            let (ip, port) = if num == 51 && s.icmp.is_some() {
+                let id = s.icmp.unwrap();
+                (s.bound_ip, if s.raw { if s.v6 { 58 } else { 1 } } else { stack::icmp_ident(id) })
+            } else if num == 51 {
                 match (s.tcp.and_then(stack::tcp_endpoints), s.udp) {
                     (Some((lp, _, _)), _) => (s.tcp.and_then(stack::tcp_local_ip).unwrap_or(me), lp),
                     (None, Some(id)) => (if s.bound_ip != [0; 4] { s.bound_ip } else { me }, stack::udp_port(id)),
@@ -1273,6 +1478,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             if v6 && a[1] == 41 && a[2] == 26 && (s.bind_id.is_some() || s.tcp.is_some() || s.listener.is_some() || s.udp_used) {
                 return Some(EINVAL); // IPV6_V6ONLY is fixed once bound
             }
+            if s.icmp.is_some() && a[2] == 1 && ((!v6 && a[1] == 255) || (v6 && a[1] == 58)) {
+                // ICMP_FILTER (a u32 mask) / ICMP6_FILTER (256 bits): raw sockets only
+                if !s.raw || val.len() < if v6 { 32 } else { 4 } {
+                    return Some(if s.raw { EINVAL } else { -92 });
+                }
+                s.opts.put(a[1] as u32, 1, &val[..if v6 { 32 } else { 4 }]);
+                return Some(0);
+            }
             s.opts.set(a[1] as u32, a[2] as u32, &val, stream, v6)
         }
         55 => {
@@ -1286,8 +1499,13 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
             let v = {
                 let s = sock.lock();
+                if s.raw && a[2] == 1 && ((!s.v6 && a[1] == 255) || (s.v6 && a[1] == 58)) {
+                    let n = if s.v6 { 32 } else { 4 };
+                    s.opts.value(a[1] as u32, 1).map_or(alloc::vec![0; n], |v| v.to_vec())
+                } else {
                 let state = s.tcp.map(stack::tcp_state);
                 let info = super::sockopt::SockInfo {
+                    kind: if s.raw { 2 } else if s.icmp.is_some() { 1 } else { 0 },
                     v6: s.v6,
                     listening: s.listener.is_some(),
                     stream: s.stream,
@@ -1306,8 +1524,13 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                         Some(stack::TcpState::Closing) => 11,
                     },
                 };
-                s.opts.get(a[1] as u32, a[2] as u32, &info)
+                match s.opts.get(a[1] as u32, a[2] as u32, &info) {
+                    Ok(v) => v,
+                    Err(e) => return Some(e),
+                }
+                }
             };
+            let v: Result<Vec<u8>, i64> = Ok(v);
             match v {
                 Ok(v) => {
                     let n = v.len().min(len as usize);

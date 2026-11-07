@@ -110,6 +110,8 @@ pub struct Options {
 
 /// What `getsockopt` needs to know about the socket itself.
 pub struct SockInfo {
+    /// 0: TCP or UDP, 1: a ping socket, 2: a raw socket.
+    pub kind: u8,
     /// An `AF_INET6` socket.
     pub v6: bool,
     /// The socket listens (`SO_ACCEPTCONN`).
@@ -175,6 +177,16 @@ fn known(level: u32, name: u32, stream: bool, v6: bool) -> bool {
 }
 
 impl Options {
+    /// Stores option bytes as given (options the socket layer validates itself).
+    pub fn put(&mut self, level: u32, name: u32, val: &[u8]) {
+        self.vals.insert((level, name), val.to_vec());
+    }
+
+    /// The bytes of option `name` at `level`, if set.
+    pub fn value(&self, level: u32, name: u32) -> Option<&[u8]> {
+        self.vals.get(&(level, name)).map(|v| v.as_slice())
+    }
+
     /// Whether boolean option `name` at `level` is set.
     pub fn flag(&self, level: u32, name: u32) -> bool {
         self.vals.get(&(level, name)).is_some_and(|v| v.iter().any(|&b| b != 0))
@@ -393,10 +405,15 @@ impl Options {
             return Ok(v.clone());
         }
         Ok(match (level, name) {
-            (SOL_SOCKET, SO_TYPE) => i(if info.stream { 1 } else { 2 }),
+            (SOL_SOCKET, SO_TYPE) => i(if info.kind == 2 { 3 } else if info.stream { 1 } else { 2 }),
             (SOL_SOCKET, SO_ERROR) => i(-info.error as i32),
             (SOL_SOCKET, SO_DOMAIN) => i(if info.v6 { 10 } else { 2 }),
-            (SOL_SOCKET, SO_PROTOCOL) => i(if info.stream { 6 } else { 17 }),
+            (SOL_SOCKET, SO_PROTOCOL) => i(match (info.kind, info.v6, info.stream) {
+                (1 | 2, true, _) => 58,
+                (1 | 2, false, _) => 1,
+                (_, _, true) => 6,
+                _ => 17,
+            }),
             (SOL_SOCKET, SO_ACCEPTCONN) => i(info.listening as i32),
             (SOL_SOCKET, SO_SNDBUF) => i(if info.stream { 16_384 } else { BUF_MAX as i32 }),
             (SOL_SOCKET, SO_RCVBUF) => i(if info.stream { 131_072 } else { BUF_MAX as i32 }),

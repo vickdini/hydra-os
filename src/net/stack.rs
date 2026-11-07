@@ -36,7 +36,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::task::wait::{self, WaitQueue};
@@ -152,6 +152,21 @@ struct TcpConn {
     reuse_addr: bool,
 }
 
+/// An ICMP socket: a ping socket (`SOCK_DGRAM`, echo replies for its identifier) or a raw
+/// one (`SOCK_RAW`, every ICMP message, IPv4 ones with their IP header).
+struct IcmpSock {
+    /// Echo identifier (ping sockets).
+    ident: u16,
+    /// A raw socket.
+    raw: bool,
+    /// ICMPv6 (`::1` only).
+    v6: bool,
+    /// Received messages and their senders.
+    queue: VecDeque<([u8; 4], Vec<u8>)>,
+    /// Woken when a message arrives.
+    wq: Arc<WaitQueue>,
+}
+
 /// A listening TCP port.
 struct Listener {
     /// Address listened on (`0.0.0.0`: any).
@@ -208,6 +223,8 @@ struct Stack {
     binds: BTreeMap<u32, Bind>,
     /// Map of UDP socket handle ID to [`UdpSock`].
     udp: BTreeMap<u32, UdpSock>,
+    /// ICMP sockets (ping and raw) by handle ID.
+    icmp: BTreeMap<u32, IcmpSock>,
     /// Next monotonically increasing socket handle ID.
     next_id: u32,
     /// Next candidate ephemeral port number.
@@ -219,6 +236,7 @@ static STACK: Mutex<Stack> = Mutex::new(Stack {
     tcp: BTreeMap::new(),
     listeners: BTreeMap::new(),
     binds: BTreeMap::new(),
+    icmp: BTreeMap::new(),
     udp: BTreeMap::new(),
     next_id: 1,
     next_port: EPHEMERAL_FIRST,
@@ -290,6 +308,7 @@ pub fn is_up() -> bool {
 /// * `payload` - Packet payload byte slice.
 fn send_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
     if is_local(dst) {
+        count(&LO, payload.len() + 20);
         // Loopback: delivered by the next poll (the network task, woken here)
         let mut q = LOOPBACK.lock();
         if q.len() < 4096 {
@@ -308,23 +327,60 @@ fn send_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
     let _ = iface.send_ipv4(dst, proto, payload);
 }
 
+/// Loopback traffic `[bytes, packets]` for `/proc/net/dev` (sent and received alike; the
+/// network card's counts come from its driver).
+static LO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+fn count(c: &[AtomicU64; 2], bytes: usize) {
+    c[0].fetch_add(bytes as u64, Ordering::Relaxed);
+    c[1].fetch_add(1, Ordering::Relaxed);
+}
+
+/// `((rx bytes, rx packets), (tx bytes, tx packets))` of `lo` and of the network card.
+pub fn counters() -> [((u64, u64), (u64, u64)); 2] {
+    let g = |c: &[AtomicU64; 2]| (c[0].load(Ordering::Relaxed), c[1].load(Ordering::Relaxed));
+    let (prx, ptx, brx, btx) = e1000::metrics();
+    [(g(&LO), g(&LO)), ((brx, prx), (btx, ptx))]
+}
+
 /// Packets sent to ourselves, waiting to be received: `(src, dst, protocol, payload)`.
 static LOOPBACK: Mutex<VecDeque<([u8; 4], [u8; 4], IpProtocol, Vec<u8>)>> = Mutex::new(VecDeque::new());
 
 /// IPv6's loopback address `::1`, carried internally as this IPv4-shaped value (from
 /// `0.0.0.0/8`, which IPv4 sockets never reach); only loopback traffic uses it.
 pub const V6_LOOPBACK: [u8; 4] = [0, 0, 0, 1];
+/// The network card's IPv6 link-local address (`fe80::` from its MAC, as Linux assigns one
+/// to every interface), carried the same way: usable on this host only.
+pub const V6_LINKLOCAL: [u8; 4] = [0, 0, 0, 2];
 
-/// Whether `ip` is one of ours: `127.0.0.0/8`, `::1` or the interface's address.
+/// Whether `ip` is one of the IPv6 addresses above.
+pub fn is_v6(ip: [u8; 4]) -> bool {
+    ip == V6_LOOPBACK || ip == V6_LINKLOCAL
+}
+
+/// The network card's link-local IPv6 address (`fe80::` + modified EUI-64 of the MAC).
+pub fn link_local6() -> Option<[u8; 16]> {
+    if !e1000::is_present() {
+        return None;
+    }
+    let m = e1000::mac_address();
+    Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, m[0] ^ 2, m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5]])
+}
+
+/// Whether `ip` is one of ours: `127.0.0.0/8`, `::1`, the link-local address or the
+/// interface's address.
 pub fn is_local(ip: [u8; 4]) -> bool {
-    ip[0] == 127 || ip == V6_LOOPBACK || (ip != [0, 0, 0, 0] && ip == GLOBAL_INTERFACE.lock().ip())
+    ip[0] == 127
+        || ip == V6_LOOPBACK
+        || (ip == V6_LINKLOCAL && e1000::is_present())
+        || (ip != [0, 0, 0, 0] && ip == GLOBAL_INTERFACE.lock().ip())
 }
 
 /// The source address for packets to `dst`: the loopback address for `127.0.0.0/8`, `::1`
 /// for `::1`.
 fn source_for(dst: [u8; 4]) -> [u8; 4] {
-    if dst == V6_LOOPBACK {
-        V6_LOOPBACK
+    if is_v6(dst) {
+        dst
     } else if dst[0] == 127 {
         [127, 0, 0, 1]
     } else {
@@ -335,7 +391,7 @@ fn source_for(dst: [u8; 4]) -> [u8; 4] {
 /// Whether a socket covering IPv4 address `ip` (`0.0.0.0`: all) and/or IPv6 (`v4`, `v6`)
 /// takes packets addressed to `dst`.
 fn covers(ip: [u8; 4], v4: bool, v6: bool, dst: [u8; 4]) -> bool {
-    if dst == V6_LOOPBACK { v6 } else { v4 && (ip == [0, 0, 0, 0] || ip == dst) }
+    if is_v6(dst) { v6 && (ip == [0, 0, 0, 0] || ip == dst) } else { v4 && (ip == [0, 0, 0, 0] || ip == dst) }
 }
 
 impl Stack {
@@ -726,6 +782,7 @@ pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
         .map(|c| c.wq.clone())
         .or_else(|| stack.udp.get(&id).map(|u| u.wq.clone()))
         .or_else(|| stack.listeners.get(&id).map(|l| l.wq.clone()))
+        .or_else(|| stack.icmp.get(&id).map(|i| i.wq.clone()))
 }
 
 /// Parses and dispatches a single Ethernet frame; returns the wait queue of the socket it affected.
@@ -856,6 +913,50 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) -> V
             if seg.flags & TcpFlags::RST == 0 {
                 drop(stack);
                 send_reset(dst, src, &seg);
+            }
+        }
+        IpProtocol::Icmp => {
+            if payload.len() < 8 {
+                return woken;
+            }
+            let ty = payload[0];
+            let v6 = is_v6(dst);
+            // Echo requests to us are answered by the kernel
+            if (!v6 && ty == 8) || (v6 && ty == 128) {
+                let mut reply = payload.to_vec();
+                reply[0] = if v6 { 129 } else { 0 };
+                reply[2] = 0;
+                reply[3] = 0;
+                let c = super::ipv4::compute_checksum(&reply);
+                reply[2..4].copy_from_slice(&c.to_be_bytes());
+                send_ip(dst, src, IpProtocol::Icmp, &reply);
+            }
+            let reply_type = if v6 { 129 } else { 0 };
+            let ident = u16::from_be_bytes([payload[4], payload[5]]);
+            let mut stack = STACK.lock();
+            for sock in stack.icmp.values_mut() {
+                if sock.v6 != v6 || sock.queue.len() >= 64 {
+                    continue;
+                }
+                if !sock.raw && (ty != reply_type || ident != sock.ident) {
+                    continue;
+                }
+                let data = if sock.raw && !v6 {
+                    // Raw IPv4 sockets read the IP header too
+                    let mut h = alloc::vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 1, 0, 0];
+                    let total = (20 + payload.len()) as u16;
+                    h[2..4].copy_from_slice(&total.to_be_bytes());
+                    h.extend_from_slice(&src);
+                    h.extend_from_slice(&dst);
+                    let c = super::ipv4::compute_checksum(&h);
+                    h[10..12].copy_from_slice(&c.to_be_bytes());
+                    h.extend_from_slice(payload);
+                    h
+                } else {
+                    payload.to_vec()
+                };
+                sock.queue.push_back((src, data));
+                woken.push(sock.wq.clone());
             }
         }
         IpProtocol::Udp => {
@@ -1155,7 +1256,7 @@ pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool, v4: 
             return Err(EADDRINUSE);
         }
     }
-    let conn_overlap = |c: &TcpConn| if c.local_ip == V6_LOOPBACK { v6 } else { v4 && ip4_overlap(c.local_ip) };
+    let conn_overlap = |c: &TcpConn| if is_v6(c.local_ip) { v6 && ip4_overlap(c.local_ip) } else { v4 && ip4_overlap(c.local_ip) };
     if stack.tcp.values().any(|c| c.local_port == port && c.state != TcpState::Closed && conn_overlap(c) && !(reuse_addr && c.reuse_addr)) {
         return Err(EADDRINUSE);
     }
@@ -1298,6 +1399,91 @@ pub fn udp_open(port: u16) -> Result<u32, i64> {
     let id = stack.alloc_id();
     stack.udp.insert(id, UdpSock { local_port: port, queue: VecDeque::new(), wq: WaitQueue::new_shared() });
     Ok(id)
+}
+
+// ----------------------------------------------------------------------
+// ICMP sockets
+// ----------------------------------------------------------------------
+
+/// Opens an ICMP socket: raw (`raw`) or a ping socket, for ICMPv6 (`v6`) or ICMP.
+pub fn icmp_open(raw: bool, v6: bool) -> u32 {
+    let mut stack = STACK.lock();
+    let id = stack.alloc_id();
+    // A free echo identifier, as Linux picks an unused "port" for ping sockets
+    let mut ident = (id as u16).wrapping_mul(40503) | 1;
+    while stack.icmp.values().any(|i| !i.raw && i.ident == ident) {
+        ident = ident.wrapping_add(1);
+    }
+    stack.icmp.insert(id, IcmpSock { ident, raw, v6, queue: VecDeque::new(), wq: WaitQueue::new_shared() });
+    id
+}
+
+/// Echo identifier of ping socket `id`.
+pub fn icmp_ident(id: u32) -> u16 {
+    STACK.lock().icmp.get(&id).map_or(0, |i| i.ident)
+}
+
+/// Gives ping socket `id` echo identifier `ident` (`bind`); `EADDRINUSE` if taken.
+pub fn icmp_set_ident(id: u32, ident: u16) -> Result<(), i64> {
+    let mut stack = STACK.lock();
+    if stack.icmp.iter().any(|(&o, i)| o != id && !i.raw && i.ident == ident) {
+        return Err(EADDRINUSE);
+    }
+    if let Some(i) = stack.icmp.get_mut(&id) {
+        i.ident = ident;
+    }
+    Ok(())
+}
+
+/// Sends ICMP message `msg` from socket `id` to `dst`. A ping socket's message must be an
+/// echo request; its identifier and checksum are filled in.
+pub fn icmp_send(id: u32, dst: [u8; 4], msg: &[u8]) -> Result<usize, i64> {
+    let (raw, v6, ident) = match STACK.lock().icmp.get(&id) {
+        Some(i) => (i.raw, i.v6, i.ident),
+        None => return Err(-9),
+    };
+    if v6 != is_v6(dst) {
+        return Err(ENETUNREACH);
+    }
+    if !is_local(dst) && !is_up() {
+        return Err(ENETUNREACH);
+    }
+    if msg.len() < if raw { 4 } else { 8 } {
+        return Err(-22);
+    }
+    let mut m = msg.to_vec();
+    if !raw {
+        if m[0] != if v6 { 128 } else { 8 } || m[1] != 0 {
+            return Err(-22);
+        }
+        m[4..6].copy_from_slice(&ident.to_be_bytes());
+    }
+    if !raw || v6 {
+        m[2] = 0;
+        m[3] = 0;
+        let c = super::ipv4::compute_checksum(&m);
+        m[2..4].copy_from_slice(&c.to_be_bytes());
+    }
+    send_ip(source_for(dst), dst, IpProtocol::Icmp, &m);
+    poll_without_service();
+    Ok(msg.len())
+}
+
+/// Takes (or with `peek` copies) the next message of ICMP socket `id`.
+pub fn icmp_recv(id: u32, peek: bool) -> Option<([u8; 4], Vec<u8>)> {
+    let mut stack = STACK.lock();
+    let i = stack.icmp.get_mut(&id)?;
+    if peek { i.queue.front().cloned() } else { i.queue.pop_front() }
+}
+
+/// Whether ICMP socket `id` has a message.
+pub fn icmp_readable(id: u32) -> bool {
+    STACK.lock().icmp.get(&id).map_or(false, |i| !i.queue.is_empty())
+}
+
+/// Closes ICMP socket `id`.
+pub fn icmp_close(id: u32) {
+    STACK.lock().icmp.remove(&id);
 }
 
 /// Moves UDP socket `id` to `port` (0: keep its port), as `bind` after an implicit open.

@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -188,6 +189,41 @@ int main(void) {
     ssize_t n = recvfrom(u1, b, sizeof b, 0, (struct sockaddr *)&from, &fl);
     inet_ntop(AF_INET6, &from.sin6_addr, ip, sizeof ip);
     check(n == 5 && fl == sizeof from && !strcmp(ip, "::1") && ntohs(from.sin6_port) == port6(u2), "recvfrom gives the ::1 sender");
+
+    // The interface's link-local address (getifaddrs): a server bound to it, reached locally
+    struct ifaddrs *ifs = NULL, *it;
+    struct sockaddr_in6 ll = {0};
+    int have_lo6 = 0;
+    getifaddrs(&ifs);
+    for (it = ifs; it; it = it->ifa_next) {
+        if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET6) continue;
+        struct sockaddr_in6 *x = (struct sockaddr_in6 *)it->ifa_addr;
+        if (IN6_IS_ADDR_LOOPBACK(&x->sin6_addr)) have_lo6 = 1;
+        if (IN6_IS_ADDR_LINKLOCAL(&x->sin6_addr) && !ll.sin6_family) ll = *x;
+    }
+    if (ifs) freeifaddrs(ifs);
+    check(have_lo6, "getifaddrs lists ::1");
+    if (!ll.sin6_family) {
+        printf("skip link-local (no interface has one)\n");
+    } else {
+        check(ll.sin6_scope_id != 0, "the link-local address has its interface as scope");
+        int ls = socket(AF_INET6, SOCK_STREAM, 0);
+        ll.sin6_port = 0;
+        check(bind(ls, (struct sockaddr *)&ll, sizeof ll) == 0 && listen(ls, 1) == 0, "a server binds the link-local address");
+        struct sockaddr_in6 at;
+        socklen_t al = sizeof at;
+        getsockname(ls, (struct sockaddr *)&at, &al);
+        int lc = socket(AF_INET6, SOCK_STREAM, 0);
+        check(connect(lc, (struct sockaddr *)&at, sizeof at) == 0, "and a local client reaches it");
+        int la = accept(ls, NULL, NULL);
+        struct sockaddr_in6 pa;
+        socklen_t pl6 = sizeof pa;
+        getpeername(la, (struct sockaddr *)&pa, &pl6);
+        check(!memcmp(&pa.sin6_addr, &ll.sin6_addr, 16), "the peer is the link-local address");
+        close(la);
+        close(lc);
+        close(ls);
+    }
 
     // A client resolving "localhost" reaches an IPv4-only server (trying each address)
     int l = socket(AF_INET, SOCK_STREAM, 0);

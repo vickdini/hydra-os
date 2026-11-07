@@ -41,7 +41,8 @@ pub enum PseudoFile {
     ProcSwaps,
     /// `/proc/locks`: the file locks held.
     ProcLocks,
-    /// `/proc/net/{tcp,udp,tcp6,udp6}`: the sockets (index into [`PROC_NET`]).
+    /// `/proc/net/{tcp,udp,tcp6,udp6,dev,unix}`: sockets and interfaces (index into
+    /// [`PROC_NET`]).
     ProcNet(u8),
     /// `/proc/filesystems`: the file system types.
     ProcFilesystems,
@@ -109,7 +110,7 @@ tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,mode=755 0 0
 ";
 
 /// The socket tables under `/proc/net`.
-const PROC_NET: [&str; 4] = ["tcp", "udp", "tcp6", "udp6"];
+const PROC_NET: [&str; 6] = ["tcp", "udp", "tcp6", "udp6", "dev", "unix"];
 
 /// `/proc/net/<table>`, `/proc/self/net/<table>` or `/proc/<pid>/net/<table>` (one network
 /// namespace view per caller, as `/proc/net` links to `self/net`).
@@ -465,7 +466,11 @@ impl PseudoFile {
             PseudoFile::ProcSwaps => read_slice(super::admin::swaps_text().as_bytes(), cursor, buf),
             PseudoFile::ProcLocks => read_slice(super::locks::proc_locks().as_bytes(), cursor, buf),
             PseudoFile::ProcNet(i) => {
-                read_slice(super::inet::proc_net(PROC_NET[*i as usize]).unwrap_or_default().as_bytes(), cursor, buf)
+                let text = match PROC_NET[*i as usize] {
+                    "unix" => super::unix::proc_net_unix(),
+                    t => super::inet::proc_net(t).unwrap_or_default(),
+                };
+                read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
             PseudoFile::ProcCpuinfo => {

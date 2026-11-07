@@ -144,8 +144,33 @@ fn links() -> Vec<Vec<u8>> {
     out
 }
 
+/// `RTM_NEWADDR` bodies for the visible addresses of `family` (0: all): IPv4, and IPv6's
+/// `::1` on `lo` and the link-local address on `eth0`, as Linux has them.
+fn addresses(family: u8) -> Vec<Vec<u8>> {
+    let mut out = if family == 10 { Vec::new() } else { addresses4() };
+    if family == 0 || family == 10 {
+        // ifaddrmsg: AF_INET6, prefix length, IFA_F_PERMANENT, scope (host / link), index
+        let addr6 = |index: u32, ip: [u8; 16], prefix: u8, scope: u8| {
+            let mut b = alloc::vec![10u8, prefix, 0x80, scope];
+            b.extend_from_slice(&index.to_le_bytes());
+            attr(&mut b, 1, &ip); // IFA_ADDRESS
+            attr(&mut b, 8, &0x80u32.to_le_bytes()); // IFA_FLAGS
+            b
+        };
+        let mut lo = [0u8; 16];
+        lo[15] = 1;
+        out.push(addr6(1, lo, 128, 254));
+        if let Some(ll) = crate::net::stack::link_local6() {
+            if ethernet().is_some() {
+                out.push(addr6(2, ll, 64, 253));
+            }
+        }
+    }
+    out
+}
+
 /// `RTM_NEWADDR` bodies for the visible IPv4 addresses.
-fn addresses() -> Vec<Vec<u8>> {
+fn addresses4() -> Vec<Vec<u8>> {
     // ifaddrmsg: family, prefix length, flags, scope, index
     let addr = |index: u32, ip: [u8; 4], prefix: u8, scope: u8, label: &[u8], broadcast: Option<[u8; 4]>| {
         let mut b = alloc::vec![AF_INET, prefix, 0x80, scope];
@@ -212,7 +237,7 @@ impl RouteSocket {
             let mut reply = Vec::new();
             let parts = match ty {
                 RTM_GETLINK if dump => Some((RTM_NEWLINK, links())),
-                RTM_GETADDR if dump => Some((RTM_NEWADDR, addresses())),
+                RTM_GETADDR if dump => Some((RTM_NEWADDR, addresses(data.get(off + 16).copied().unwrap_or(0)))),
                 RTM_GETROUTE if dump => Some((RTM_NEWROUTE, routes())),
                 _ => None,
             };

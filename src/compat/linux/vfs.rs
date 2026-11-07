@@ -2764,6 +2764,11 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             // ioctl: terminal requests on the console; ENOTTY for terminal requests elsewhere
             let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
             match desc {
+                // FIOCLEX / FIONCLEX: close-on-exec, for any descriptor
+                Some(_) if a[1] == 0x5451 || a[1] == 0x5450 => {
+                    crate::task::with_current_fds_mut(|fds| fds.set_cloexec(a[0] as usize, a[1] == 0x5451));
+                    0
+                }
                 Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
                 Some(FileDescriptor::Unix(ref s)) => super::unix::ioctl(s, a[1], a[2]),
                 Some(FileDescriptor::Device(ref d)) => match a[1] {
@@ -2809,6 +2814,8 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                             Err(e) => e,
                         }
                     }
+                    // SIOCGSTAMP / SIOCGSTAMPNS
+                    0x8906 | 0x8907 => super::inet::stamp_ioctl(s, a[1], a[2]),
                     0x541B => {
                         // FIONREAD
                         let n = super::inet::pending_bytes(s) as i32;

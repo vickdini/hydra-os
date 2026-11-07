@@ -224,6 +224,42 @@ pub struct UnixSocket {
 }
 
 static NEXT_INO: AtomicU64 = AtomicU64::new(0x5000_0000);
+/// Every open socket, for `/proc/net/unix`.
+static ALL: Mutex<Vec<Weak<UnixSocket>>> = Mutex::new(Vec::new());
+
+/// `/proc/net/unix`: each socket's reference count, flags (`__SO_ACCEPTCON` when
+/// listening), type, state (1 unconnected or listening, 3 connected), inode and name
+/// (abstract names with a leading `@`).
+pub fn proc_net_unix() -> alloc::string::String {
+    let socks: Vec<Arc<UnixSocket>> = ALL.lock().iter().filter_map(|w| w.upgrade()).collect();
+    let mut out = alloc::string::String::from("Num       RefCount Protocol Flags    Type St Inode Path
+");
+    for s in socks {
+        let (flags, st) = match &*s.state.lock() {
+            State::Listening { .. } => (0x10000u32, 1u8),
+            State::Connected { .. } => (0, 3),
+            State::Unconnected => (0, 1),
+        };
+        let name = match &*s.local.lock() {
+            Some(Addr::Path { shown, .. }) => alloc::format!(" {}", alloc::string::String::from_utf8_lossy(shown)),
+            Some(Addr::Abstract(n)) => alloc::format!(" @{}", alloc::string::String::from_utf8_lossy(n)),
+            None => alloc::string::String::new(),
+        };
+        out.push_str(&alloc::format!(
+            "0000000000000000: {:08X} {:08X} {:08X} {:04X} {:02X} {:5}{}
+",
+            Arc::strong_count(&s) as u32 - 1,
+            0,
+            flags,
+            s.ty,
+            st,
+            s.ino,
+            name
+        ));
+    }
+    out
+}
+
 /// Bound names (filesystem keys and abstract names) to their sockets.
 static NAMES: Mutex<BTreeMap<Vec<u8>, Weak<UnixSocket>>> = Mutex::new(BTreeMap::new());
 
@@ -266,7 +302,7 @@ impl UnixSocket {
     ///
     /// A new [`Arc<UnixSocket>`] instance.
     fn new(ty: u32, nonblock: bool) -> Arc<Self> {
-        Arc::new(Self {
+        let sock = Arc::new(Self {
             ty,
             state: Mutex::new(State::Unconnected),
             local: Mutex::new(None),
@@ -275,7 +311,11 @@ impl UnixSocket {
             shut_rd: AtomicBool::new(false),
             wq: WaitQueue::new_shared(),
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
-        })
+        });
+        let mut all = ALL.lock();
+        all.retain(|w| w.strong_count() > 0);
+        all.push(Arc::downgrade(&sock));
+        sock
     }
 
     /// Sets or clears non-blocking I/O mode on this socket.
