@@ -1,0 +1,165 @@
+\chapter{Input/Output and Driver Isolation}
+\label{chap:io}
+
+The processor and main memory exist to execute algorithms, but a computer that cannot interact with the external world is useless. The **Input/Output (I/O)** subsystem is responsible for communicating with keyboards, mice, storage controllers, network adapters, and graphics displays.
+
+In traditional operating systems, writing device drivers is notoriously treacherous. Device drivers directly program physical registers, configure bus-master DMA transfers across the system memory bus, and handle asynchronous hardware interrupt requests (IRQs). A subtle timing error or pointer slip in a C device driver can overwrite kernel memory or hang the entire machine.
+
+In this chapter, we study the principles of I/O hardware, hardware interrupt dispatching, bus-master DMA, and how Hydra achieves **true Ring~3 driver isolation** without sacrificing bare-metal throughput.
+
+% ==============================================================================
+\section{Principles of I/O Hardware on x86\_64}
+\label{sec:io_hardware}
+% ==============================================================================
+
+Modern PC hardware provides two primary methods for the CPU to communicate with device controller registers:
+\begin{enumerate}
+    \item \textbf{Port-Mapped I/O (PMIO):} A separate 16-bit address space ($0\text{x}0000$ to $0\text{xFFFF}$) accessed exclusively via specialized CPU assembly instructions: \texttt{in} (read from port) and \texttt{out} (write to port). Legacy devices—such as the 8259A PIC, 8254 PIT, 16550 UART serial ports, and IDE/ATA controllers—rely heavily on PMIO.
+    \item \textbf{Memory-Mapped I/O (MMIO):} Device registers are mapped directly into the CPU's physical memory space. Reading or writing to an MMIO address accesses the device controller instead of physical DRAM. Modern PCI Express devices, Intel Gigabit Ethernet controllers (E1000), and GPU framebuffers use MMIO.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+    % CPU
+    \node[draw=hydrablue, fill=white, line width=1.2pt, minimum width=2.5cm, minimum height=1.2cm] (cpu) at (0, 3) {\textbf{x86\_64 CPU}};
+
+    % Bus
+    \draw[line width=3pt, hydragray] (-1, 1.5) -- (11, 1.5);
+    \node[font=\footnotesize\bfseries\color{hydragray}] at (5, 1.8) {System Bus / PCI Express};
+
+    % Devices
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (pic) at (1, 0) {
+        \begin{tabular}{c}
+            \textbf{8259 PIC}\\
+            \tiny Port 0x20/0xA0
+        \end{tabular}
+    };
+    \node[draw=rustred, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (ata) at (4, 0) {
+        \begin{tabular}{c}
+            \textbf{ATA Controller}\\
+            \tiny Bus-Master DMA
+        \end{tabular}
+    };
+    \node[draw=hydragold, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (e1000) at (7, 0) {
+        \begin{tabular}{c}
+            \textbf{Intel E1000 NIC}\\
+            \tiny MMIO + DMA Rings
+        \end{tabular}
+    };
+    \node[draw=black, fill=white, rounded corners, minimum width=2.2cm, minimum height=1cm] (gpu) at (10, 0) {
+        \begin{tabular}{c}
+            \textbf{VGA / GOP}\\
+            \tiny Linear Framebuffer
+        \end{tabular}
+    };
+
+    \draw[<->, >=Stealth, line width=1.5pt] (cpu) -- (0, 1.5);
+    \draw[<->, >=Stealth, line width=1.2pt] (pic) -- (1, 1.5);
+    \draw[<->, >=Stealth, line width=1.2pt] (ata) -- (4, 1.5);
+    \draw[<->, >=Stealth, line width=1.2pt] (e1000) -- (7, 1.5);
+    \draw[<->, >=Stealth, line width=1.2pt] (gpu) -- (10, 1.5);
+\end{tikzpicture}
+\caption{System Interconnects: PMIO, MMIO, and DMA across the PCI Bus.}
+\label{fig:pci_bus}
+\end{figure}
+
+% ==============================================================================
+\section{Direct Memory Access (DMA) and Scatter-Gather}
+\label{sec:dma}
+% ==============================================================================
+
+If the CPU were required to execute an \texttt{in} instruction for every 32-bit word read from a high-speed disk or network card, reading a 10~GB file would consume 100\% of the CPU's cycles.
+
+To free the processor from byte-by-byte data transfer, modern devices use **Direct Memory Access (DMA)**:
+\begin{enumerate}
+    \item The CPU programs the device's DMA controller with the starting physical memory address and the transfer length.
+    \item The CPU issues a command (e.g., "Read 256 sectors from disk") and continues executing other tasks.
+    \item The device controller's internal bus master directly reads or writes data across the motherboard bus into physical RAM without CPU intervention.
+    \item Upon completing the entire transfer, the device raises a hardware interrupt (IRQ) to inform the CPU.
+\end{enumerate}
+
+In Hydra's ATA driver (\texttt{userland/drivers/ata-driver/src/main.rs}), DMA transfers use **Physical Region Descriptor (PRD) tables**, allowing scatter-gather memory streaming directly into physical frames allocated for the OpenZFS pool.
+
+% ==============================================================================
+\section{Microkernel Driver Isolation in Ring~3}
+\label{sec:driver_isolation}
+% ==============================================================================
+
+How can an unprivileged Ring~3 user-space process interact with hardware registers without compromising kernel security?
+
+The x86\_64 architecture provides two hardware features:
+\begin{enumerate}
+    \item \textbf{I/O Privilege Level (IOPL):} Bits 12 and 13 of the \texttt{RFLAGS} register specify the minimum privilege level required to execute \texttt{in}, \texttt{out}, \texttt{cli}, and \texttt{sti}.
+    \item \textbf{I/O Permission Bitmap (IOPB):} Located in the Task State Segment (TSS). The IOPB contains one bit for each of the $65,536$ I/O ports. If a port's bit is \texttt{0}, a Ring~3 process may access that port without faulting.
+\end{enumerate}
+
+Hydra's supervisor selectively enables port access only for authorized driver processes:
+\begin{itemize}
+    \item \texttt{ata\_driver} (Process 2) is granted access only to the Primary/Secondary IDE ports (\texttt{0x1F0}--\texttt{0x1F7}, \texttt{0x3F6}, \texttt{0x170}--\texttt{0x177}) and Bus-Master DMA registers.
+    \item \texttt{display\_server} is granted access to the VGA/Bochs I/O ports.
+    \item All other processes receive a General Protection Fault (\#GP) if they attempt to execute an \texttt{in} or \texttt{out} instruction.
+\end{itemize}
+
+% ==============================================================================
+\section{Hardware Interrupts to IPC Notifications}
+\label{sec:interrupt_dispatch}
+% ==============================================================================
+
+When an I/O device asserts a hardware interrupt (e.g., IRQ~14 for the ATA controller, or IRQ~1 for the PS/2 keyboard), the CPU traps into the Ring~0 microkernel IDT handler (\texttt{src/arch/idt.rs}).
+
+Rather than executing complex driver logic in interrupt context, Hydra converts the interrupt into a lightweight, non-blocking **IPC notification signal**:
+\begin{lstlisting}[language=Rust, caption={Dispatching Hardware Interrupts to Ring 3 Driver Endpoints}]
+pub fn handle_hardware_irq(irq: u8) {
+    // Send End-of-Interrupt (EOI) to 8259 PIC
+    pic::send_eoi(irq);
+
+    // Notify the registered driver process
+    match irq {
+        1 => { // PS/2 Keyboard
+            input::enqueue_scancode(pic::read_port(0x60));
+        }
+        12 => { // PS/2 Mouse
+            input::enqueue_mouse_packet(pic::read_port(0x60));
+        }
+        14 => { // Primary ATA Disk Interrupt
+            ipc::notify_endpoint(EndpointId(0x21), IRQ_SIGNAL_DISK_READY);
+        }
+        11 => { // Intel E1000 Network Interrupt
+            ipc::notify_endpoint(EndpointId(0x22), IRQ_SIGNAL_PACKET_ARRIVED);
+        }
+        _ => {}
+    }
+}
+\end{lstlisting}
+
+This architecture achieves two vital objectives:
+\begin{itemize}
+    \item Interrupt latency in Ring~0 is bounded and microsecond-fast (saving registers, issuing EOI, and unblocking the driver thread).
+    \item The driver executes its deferred processing in Ring~3, where any unexpected fault is safely contained.
+\end{itemize}
+
+% ==============================================================================
+\section{The Graphics Subsystem: DRM, KMS, and Wayland}
+\label{sec:graphics}
+% ==============================================================================
+
+Modern graphical desktop environments require hardware-accelerated composition. Hydra exposes a Linux-compatible **Direct Rendering Manager (DRM)** and **Kernel Mode Setting (KMS)** interface at \texttt{/dev/dri/card0}:
+\begin{itemize}
+    \item \textbf{UEFI Graphics Output Protocol (GOP):} During boot, Hydra configures a linear 32-bit ARGB8888 framebuffer (e.g., $1024\times768$ at 60~Hz).
+    \item \textbf{DRM Dumb Buffers:} Client compositors (such as KWin Wayland) allocate scanout framebuffers using the \texttt{DRM\_IOCTL\_MODE\_CREATE\_DUMB} system call.
+    \item \textbf{Atomic Page Flipping:} Compositors submit complete frames via \texttt{DRM\_IOCTL\_MODE\_PAGE\_FLIP}, ensuring tear-free rendering synchronized to the vertical refresh rate.
+\end{itemize}
+
+% ==============================================================================
+\section{Summary}
+\label{sec:io_summary}
+% ==============================================================================
+
+In this chapter, we explored Hydra's input/output framework:
+\begin{itemize}
+    \item Hardware devices communicate via Port I/O (PMIO), Memory-Mapped I/O (MMIO), and high-throughput Bus-Master DMA.
+    \item The microkernel confines device drivers to isolated Ring~3 processes using the hardware I/O Permission Bitmap (IOPB).
+    \item Hardware interrupts are converted into IPC notification signals, keeping Ring~0 interrupt service routines minimal.
+    \item The graphics subsystem translates UEFI GOP linear buffers into modern DRM/KMS interfaces that power the KWin Wayland compositor.
+\end{itemize}

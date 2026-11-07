@@ -1,0 +1,85 @@
+\chapter{Building, Testing, and Booting Hydra}
+\label{app:building}
+
+This appendix provides a step-by-step practical guide for compiling Hydra from source, packaging bootable UEFI media, and running the operating system under virtualization environments (VirtualBox and QEMU).
+
+% ==============================================================================
+\section{Toolchain Prerequisites}
+\label{sec:toolchain}
+% ==============================================================================
+
+Hydra requires a 64-bit Rust toolchain supporting bare-metal UEFI targets:
+\begin{verbatim}
+# Install the Rust UEFI target
+rustup target add x86_64-unknown-uefi
+
+# Check toolchain version
+rustc --version
+cargo --version
+\end{verbatim}
+
+To build the bootable ISO images and userland C helpers, the host system requires:
+\begin{itemize}
+    \item \textbf{GCC \& Make:} For compiling C helper daemons (\texttt{hydra-logind}).
+    \item \textbf{Mtools (\texttt{mkfs.vfat}, \texttt{mcopy}, \texttt{mmd}):} For populating FAT32 EFI System Partitions.
+    \item \textbf{Xorriso:} For generating El Torito hybrid UEFI ISO images.
+    \item \textbf{QEMU or VirtualBox:} For virtual machine testing and serial log capture.
+\end{itemize}
+
+% ==============================================================================
+\section{Compiling the Microkernel}
+\label{sec:compiling}
+% ==============================================================================
+
+The Hydra microkernel is built in release mode using Cargo:
+\begin{lstlisting}[language=bash, caption={Compiling the Hydra Microkernel}]
+# Build the optimized UEFI binary
+cargo build --release --target x86_64-unknown-uefi
+
+# Copy the binary to the standard UEFI boot path
+cp target/x86_64-unknown-uefi/release/hydra.efi dist/x86_64/bootx64.efi
+cp target/x86_64-unknown-uefi/release/hydra.efi esp/EFI/BOOT/BOOTX64.EFI
+\end{lstlisting}
+
+% ==============================================================================
+\section{Packaging the Bootable ISO}
+\label{sec:packaging_iso}
+% ==============================================================================
+
+Hydra utilizes the root \texttt{Makefile} to generate a 32~MB bootable FAT image and a bootable El Torito ISO:
+\begin{lstlisting}[language=bash, caption={Generating the Bootable Hybrid ISO}]
+make build
+\end{lstlisting}
+
+This target executes the following automated pipeline:
+\begin{enumerate}
+    \item Creates a 32~MiB zeroed disk image at \texttt{dist/x86\_64/hydra.img}.
+    \item Formats it with FAT32 using \texttt{mkfs.vfat}.
+    \item Populates the \texttt{::/EFI/BOOT/BOOTX64.EFI} executable and imports Ring~3 driver ELF binaries from \texttt{esp/bin/}.
+    \item Invokes \texttt{xorriso} to generate \texttt{dist/x86\_64/kernel.iso} with an El Torito EFI boot catalog.
+\end{enumerate}
+
+% ==============================================================================
+\section{Running Hydra in VirtualBox}
+\label{sec:running_vbox}
+% ==============================================================================
+
+On Windows, Hydra includes an automated launch script, \texttt{vbox.bat}:
+\begin{lstlisting}[language=bash, caption={Launching Hydra in VirtualBox}]
+# Compile, package, and launch VirtualBox
+.\vbox.bat
+
+# Launch without rebuilding the kernel
+.\vbox.bat --no-build
+
+# Force resynchronization of the ZFS pool disk from hydrapool.qcow2
+.\vbox.bat --sync
+\end{lstlisting}
+
+The script automatically configures:
+\begin{itemize}
+    \item \textbf{Hardware Profile:} 4~GiB RAM, 2 CPUs, 128~MB VRAM, and UEFI firmware enabled.
+    \item \textbf{Storage Controller:} PIIX4 IDE Controller attaching the ZFS pool disk (\texttt{hydrapool.vdi}) as Primary Master and \texttt{kernel.iso} as Secondary Master.
+    \item \textbf{Network Adapter:} Intel 82540EM Gigabit NIC in NAT mode with \texttt{LinkUpDelay=0}.
+    \item \textbf{Serial Logging:} COM1 mapped to \texttt{scratch\textbackslash vbox\_serial.log} for live kernel diagnostic capture.
+\end{itemize}

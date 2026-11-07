@@ -1,0 +1,86 @@
+\chapter{x86\_64 Hardware Reference}
+\label{app:hardware}
+
+This appendix summarizes the critical x86\_64 machine registers, Model-Specific Registers (MSRs), control registers, and descriptor structures utilized throughout the Hydra microkernel.
+
+% ==============================================================================
+\section{General-Purpose Registers}
+\label{sec:gpr}
+% ==============================================================================
+
+x86\_64 Long Mode provides sixteen 64-bit general-purpose registers:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Register} & \textbf{Standard Purpose} & \textbf{System V ABI Role} \\
+\midrule
+\texttt{RAX} & Accumulator / Arithmetic & Syscall Number / Return Value \\
+\texttt{RBX} & Base Register & Callee-Saved Register \\
+\texttt{RCX} & Counter / Shift count & \texttt{syscall} return \texttt{RIP} overwrite \\
+\texttt{RDX} & Data Register / I/O Port & 3rd Function / Syscall Argument \\
+\texttt{RSI} & Source Index (String ops) & 2nd Function / Syscall Argument \\
+\texttt{RDI} & Destination Index (String ops) & 1st Function / Syscall Argument \\
+\texttt{RBP} & Base / Frame Pointer & Callee-Saved Register \\
+\texttt{RSP} & Stack Pointer & Current Top of Stack \\
+\texttt{R8} & General Purpose 8 & 5th Function / Syscall Argument \\
+\texttt{R9} & General Purpose 9 & 6th Function / Syscall Argument \\
+\texttt{R10} & General Purpose 10 & 4th Syscall Argument (\texttt{RCX} replaced) \\
+\texttt{R11} & General Purpose 11 & \texttt{syscall} return \texttt{RFLAGS} overwrite \\
+\texttt{R12}--\texttt{R15} & General Purpose 12--15 & Callee-Saved Registers \\
+\bottomrule
+\end{tabular}
+\caption{x86\_64 General-Purpose Registers and Syscall Conventions.}
+\label{tab:gpr_abi}
+\end{table}
+
+% ==============================================================================
+\section{Control Registers}
+\label{sec:control_registers}
+% ==============================================================================
+
+\begin{itemize}
+    \item \textbf{\texttt{CR0}:} Controls fundamental processor operation.
+    \begin{itemize}
+        \item Bit 0 (\texttt{PE}): Protected Mode Enable.
+        \item Bit 16 (\texttt{WP}): Write Protect (prevents Ring 0 from writing to read-only user pages).
+        \item Bit 31 (\texttt{PG}): Paging Enable.
+    \end{itemize}
+    \item \textbf{\texttt{CR2}:} Page Fault Linear Address. When a \#PF exception occurs, the CPU automatically writes the faulting virtual address into \texttt{CR2}.
+    \item \textbf{\texttt{CR3}:} Page Directory Base Register (PDBR). Holds the 64-bit physical frame base address of the PML4 page table root.
+    \item \textbf{\texttt{CR4}:} Architecture extensions.
+    \begin{itemize}
+        \item Bit 5 (\texttt{PAE}): Physical Address Extension (must be \texttt{1} in Long Mode).
+        \item Bit 7 (\texttt{PGE}): Page Global Enable (preserves global TLB entries across CR3 reloads).
+        \item Bit 9 (\texttt{OSFXSR}): Operating System Fast FPU/SSE Save/Restore support.
+        \item Bit 10 (\texttt{OSXMMEXCPT}): Unmasked SSE floating-point exception support.
+    \end{itemize}
+\end{itemize}
+
+% ==============================================================================
+\section{Model-Specific Registers (MSRs)}
+\label{sec:msr_table}
+% ==============================================================================
+
+MSRs are read using the \texttt{rdmsr} instruction (with MSR index in \texttt{ECX}, returning 64 bits in \texttt{EDX:EAX}) and written using \texttt{wrmsr}:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{MSR Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+\texttt{0xC0000080} & \texttt{IA32\_EFER} & Extended Feature Enable (Long Mode Enable \texttt{LME}, \texttt{NXE}). \\
+\texttt{0xC0000081} & \texttt{IA32\_STAR} & Legacy Target Address (GDT Segments for \texttt{syscall}/\texttt{sysret}). \\
+\texttt{0xC0000082} & \texttt{IA32\_LSTAR} & Long Mode Target Address (Syscall entry point RIP). \\
+\texttt{0xC0000084} & \texttt{IA32\_FMASK} & Syscall Flag Mask (RFLAGS bits cleared on entry). \\
+\texttt{0xC0000100} & \texttt{IA32\_FS\_BASE} & Base address for \texttt{FS} segment (Thread-Local Storage TLS). \\
+\texttt{0xC0000101} & \texttt{IA32\_GS\_BASE} & Base address for \texttt{GS} segment (Per-CPU data structures). \\
+\texttt{0xC0000102} & \texttt{IA32\_KERNEL\_GS\_BASE} & Swap target for \texttt{swapgs} instruction on entry. \\
+\bottomrule
+\end{tabular}
+\caption{Key x86\_64 Model-Specific Registers.}
+\label{tab:msr_reference}
+\end{table}

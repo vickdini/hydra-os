@@ -1,0 +1,153 @@
+\chapter{Source Code Walkthrough}
+\label{chap:source_tour}
+
+The defining hallmark of Andrew Tanenbaum's \textit{Operating Systems: Design and Implementation} was the complete printed source code of MINIX. Students did not simply study abstract concepts; they examined the exact C structs, function signatures, and assembly stubs that brought the operating system to life.
+
+In this chapter, we provide an annotated guided tour of the **Hydra operating system source tree**. We trace the life of the system from UEFI initialization to Ring~0 takeover, examine the key modules in \texttt{src/}, and dissect the Ring~3 isolated userland drivers in \texttt{userland/}.
+
+% ==============================================================================
+\section{Directory Layout and Crate Organization}
+\label{sec:code_layout}
+% ==============================================================================
+
+Hydra is organized into clean, modular Rust source files structured across two primary tiers: the Ring~0 microkernel core (\texttt{src/}) and the Ring~3 isolated driver servers (\texttt{userland/drivers/}):
+
+\begin{verbatim}
+d:\os
+|-- src/
+|   |-- arch/                 # x86_64 CPU, GDT, IDT, PIC, APIC, MSR syscall stubs
+|   |-- capability/           # Capability-based security tokens and rights tables
+|   |-- compat/linux/         # Linux ABI syscall dispatcher, POSIX VFS, devices
+|   |-- fs/zfs/               # OpenZFS storage engine, uberblocks, space maps, dnodes
+|   |-- ipc/                  # Synchronous rendezvous endpoints, shared memory
+|   |-- memory/               # Physical frame allocator, 4-level PML4 paging, heap
+|   |-- net/                  # Network stack: ARP, IPv4, ICMP, UDP, TCP state machine
+|   |-- task/                 # Task Control Block (TCB), preemptive scheduler, ELF
+|   |-- video/                # UEFI GOP framebuffer and DRM/KMS card0 emulation
+|   +-- main.rs               # UEFI entry point and milestone boot orchestrator
+|-- userland/
+|   |-- drivers/
+|   |   |-- ata-driver/       # Ring 3 IDE/ATA Bus-Master DMA storage server (0x21)
+|   |   |-- zfs-server/       # Ring 3 OpenZFS storage daemon (0x20)
+|   |   |-- e1000-driver/     # Ring 3 Intel 82540EM Gigabit NIC server (0x22)
+|   |   +-- display-server/   # Ring 3 DRM/KMS graphics compositor server (0x23)
+|   +-- hydra-logind/         # D-Bus session and seat management daemon
++-- book/                     # The Hydra: Design and Implementation textbook
+\end{verbatim}
+
+% ==============================================================================
+\section{The Microkernel Entry Point (\texttt{src/main.rs})}
+\label{sec:tour_main}
+% ==============================================================================
+
+Hydra begins execution in \texttt{src/main.rs} via the standard UEFI entry point:
+\begin{lstlisting}[language=Rust, caption={The Hydra Entry Point (\texttt{src/main.rs})}]
+#[no_mangle]
+pub extern "efiapi" fn efi_main(image_handle: Handle, system_table: SystemTable<Boot>) -> Status {
+    // Step 1: Initialize early serial logging (COM1 at 0x3F8)
+    arch::raw_serial::init(0x3F8);
+    kprintln!("[*] Step 1: Hydra Microkernel Initializing...");
+
+    // Step 2: Initialize UEFI Graphics Output Protocol (GOP)
+    let fb_info = video::init_gop(&system_table)?;
+
+    // Step 3: Capture memory map and execute ExitBootServices
+    arch::boot_services::take_hardware_ownership();
+
+    // Step 4: Configure x86_64 GDT, TSS, IDT, and Interrupt Gates
+    arch::gdt::init();
+    arch::idt::init();
+
+    // Step 5: Initialize 4-Level Paging and Frame Allocator
+    memory::init();
+
+    // Step 6: Enable MSR SYSCALL/SYSRET Dispatcher
+    arch::syscall::init_msrs();
+
+    // Step 7: Mount OpenZFS Pool ("hydrapool")
+    fs::zfs::init_pool("hydrapool")?;
+
+    // Step 8: Spawn Ring 3 System Servers
+    supervisor::spawn_server("ata_driver", "/bin/ata_driver.elf", EndpointId(0x21));
+    supervisor::spawn_server("zfs_server", "/bin/zfs_server.elf", EndpointId(0x20));
+    supervisor::spawn_server("net_driver", "/bin/net_driver.elf", EndpointId(0x22));
+    supervisor::spawn_server("display_server", "/bin/display_server.elf", EndpointId(0x23));
+
+    // Step 9: Launch Linux Chroot Environment and KDE Session
+    task::scheduler::start_multitasking();
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{System Call Interception (\texttt{src/compat/linux/mod.rs})}
+\label{sec:tour_syscalls}
+% ==============================================================================
+
+When a user process executes \texttt{syscall}, the assembly entry routine captures the register frame and calls \texttt{linux\_syscall\_dispatcher}:
+\begin{lstlisting}[language=Rust, caption={Linux System Call Multiplexing in Hydra}]
+pub fn linux_syscall_dispatcher(frame: &mut SyscallFrame) -> i64 {
+    let nr = frame.rax;
+    match nr {
+        0 => sys_read(frame.rdi as i32, frame.rsi, frame.rdx as usize),
+        1 => sys_write(frame.rdi as i32, frame.rsi, frame.rdx as usize),
+        2 => sys_open(frame.rdi, frame.rsi as i32, frame.rdx as u32),
+        3 => sys_close(frame.rdi as i32),
+        9 => sys_mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        56 => sys_clone(frame),
+        59 => sys_execve(frame),
+        232 => sys_epoll_wait(frame.rdi as i32, frame.rsi, frame.rdx as i32, frame.r10 as i32),
+        _ => {
+            kprintln!("[linux] unhandled syscall {} -> ENOSYS", nr);
+            -ENOSYS
+        }
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{The Ring~3 Driver Loop: An Example}
+\label{sec:tour_drivers}
+% ==============================================================================
+
+How does a driver server execute in Ring~3? The ATA disk driver (\texttt{userland/drivers/ata-driver/src/main.rs}) demonstrates the standard server event loop:
+\begin{lstlisting}[language=Rust, caption={The Ring 3 Driver Event Loop}]
+fn main() {
+    let endpoint = Endpoint::bind(0x21).expect("Failed to bind ATA endpoint");
+    let mut msg_buffer = [0u8; 1024];
+
+    loop {
+        // Block waiting for client request (synchronous rendezvous)
+        let (client_id, request_type) = endpoint.receive(&mut msg_buffer);
+
+        match request_type {
+            CMD_READ_SECTORS => {
+                let lba = parse_lba(&msg_buffer);
+                let count = parse_count(&msg_buffer);
+                dma_read_sectors(lba, count);
+                endpoint.reply(client_id, STATUS_OK, &[]);
+            }
+            CMD_WRITE_SECTORS => {
+                let lba = parse_lba(&msg_buffer);
+                dma_write_sectors(lba, &msg_buffer);
+                endpoint.reply(client_id, STATUS_OK, &[]);
+            }
+            _ => {
+                endpoint.reply(client_id, STATUS_INVALID_CMD, &[]);
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Summary}
+\label{sec:tour_summary}
+% ==============================================================================
+
+In this chapter, we walked through the living codebase of Hydra:
+\begin{itemize}
+    \item \texttt{src/main.rs} cleanly coordinates the milestone boot sequence from raw UEFI to preemptive multitasking.
+    \item System calls enter through hardware MSRs and demultiplex into strongly typed Rust handler functions.
+    \item Ring~3 isolated driver processes operate on clean request/reply event loops over synchronous IPC endpoints.
+    \item The complete code reflects the vision of Tanenbaum: modular, clean, understandable, and engineered for high reliability.
+\end{itemize}

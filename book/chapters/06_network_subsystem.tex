@@ -1,0 +1,136 @@
+\chapter{The Network Subsystem}
+\label{chap:networking}
+
+When Andrew Tanenbaum authored the original editions of \textit{Operating Systems: Design and Implementation}, local area networks were an emerging novelty, and the MINIX operating system had no built-in TCP/IP networking stack. Today, an operating system without network capabilities is virtually inert. Web browsers, cloud storage synchronization, distributed databases, and package managers rely continuously on low-latency, packet-switched communication.
+
+Integrating a networking stack into a microkernel presents unique architectural challenges:
+\begin{enumerate}
+    \item \textbf{High Packet Throughput:} At Gigabit and 10-Gigabit speeds, hundreds of thousands of network packets cross the Ethernet wire every second. Copying packet bytes through multiple microkernel boundaries destroys performance.
+    \item \textbf{Complex State Machines:} The Transmission Control Protocol (TCP) involves intricate sliding window algorithms, retransmission timers, congestion control, and connection state machines.
+    \item \textbf{POSIX Socket Compatibility:} Applications expect the standard BSD socket API (\texttt{socket}, \texttt{bind}, \texttt{connect}, \texttt{sendto}, \texttt{recvfrom}, \texttt{poll}, and \texttt{epoll}).
+\end{enumerate}
+
+In this chapter, we dissect Hydra's network subsystem: the Intel 82540EM PCI driver, circular DMA descriptor rings, protocol decapsulation, the TCP state machine, DHCP auto-configuration, and socket polling.
+
+% ==============================================================================
+\section{The Intel 82540EM (e1000) Network Controller}
+\label{sec:e1000}
+% ==============================================================================
+
+Hydra targets the industry-standard **Intel 82540EM Gigabit Ethernet Controller** (\texttt{userland/drivers/e1000-driver/src/main.rs}), ubiquitous on physical motherboards and hypervisors (VirtualBox, QEMU, VMware).
+
+The e1000 is a 32/64-bit PCI bus-master device configured via Memory-Mapped I/O (MMIO). During boot, the microkernel PCI scanner locates the card:
+\begin{verbatim}
+[e1000-driver] MAC 08:00:27:41:47:51, link up
+[supervisor] started 'net_driver' (process 4, endpoint 0x22)
+[+] Network Subsystem: Intel E1000 Online (MAC 08:00:27:41:47:51, Link: UP)
+    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15)
+\end{verbatim}
+
+% ==============================================================================
+\section{Circular DMA Descriptor Rings}
+\label{sec:descriptor_rings}
+% ==============================================================================
+
+To transmit and receive packets at line rate without CPU interruption, the e1000 utilizes two circular **DMA Descriptor Rings**:
+\begin{itemize}
+    \item \textbf{Receive Ring (Rx):} Holds descriptors pointing to pre-allocated 2048-byte physical memory frames. When an Ethernet frame arrives on the wire, the card's DMA engine writes the packet directly into the next buffer and advances the head pointer.
+    \item \textbf{Transmit Ring (Tx):} Holds descriptors pointing to outgoing packets. When an application sends data, the driver populates a descriptor, sets the End-of-Packet (\texttt{EOP}) flag, and advances the tail pointer.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+    % Circular ring represented as linked boxes
+    \def\radius{2.8cm}
+    \foreach \i in {0,...,7} {
+        \node[draw=hydrablue, fill=white, rounded corners, minimum size=1.1cm] (desc\i) at ({-\i*45 + 90}:\radius) {\footnotesize \texttt{Desc \i}};
+    }
+    
+    % Center label
+    \node[align=center, font=\sffamily\bfseries\color{hydrablue}] at (0,0) {Circular Rx Ring\\ \footnotesize 128 Descriptors};
+
+    % Arrows connecting circular ring
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc0) to[bend left=20] (desc1);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc1) to[bend left=20] (desc2);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc2) to[bend left=20] (desc3);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc3) to[bend left=20] (desc4);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc4) to[bend left=20] (desc5);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc5) to[bend left=20] (desc6);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc6) to[bend left=20] (desc7);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (desc7) to[bend left=20] (desc0);
+
+    % Pointers
+    \node[above=0.3cm of desc0, font=\bfseries\footnotesize\color{rustred}] {Head (NIC writes here)};
+    \node[right=0.3cm of desc2, font=\bfseries\footnotesize\color{rustkeyword}] {Tail (Driver reaps here)};
+\end{tikzpicture}
+\caption{Circular DMA Descriptor Ring Architecture of the Intel E1000 Controller.}
+\label{fig:e1000_ring}
+\end{figure}
+
+Because the network controller streams packets directly into physical RAM allocated in user-space buffers, **zero memory copies are performed in the microkernel**.
+
+% ==============================================================================
+\section{The Protocol Pipeline}
+\label{sec:protocol_pipeline}
+% ==============================================================================
+
+When an Ethernet frame is harvested from the Rx descriptor ring, it enters the Hydra protocol stack (\texttt{src/net/stack.rs}):
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    \matrix (stack) [matrix of nodes, nodes={draw=hydrablue, minimum width=9cm, minimum height=0.7cm, fill=white, font=\small\sffamily}, column sep=0mm, row sep=1mm] {
+        \textbf{Layer 5: BSD Sockets / POSIX API} (\texttt{epoll}, \texttt{select}, \texttt{poll}) \\
+        \textbf{Layer 4: Transport Protocols} (TCP State Machine, UDP Datagrams) \\
+        \textbf{Layer 3: Internet Protocol (IPv4)} + ICMP Echo + ARP Resolution \\
+        \textbf{Layer 2: Data Link Layer} (Ethernet Frame Framing / CRC32) \\
+        \textbf{Layer 1: Physical Hardware} (Intel 82540EM Gigabit NIC) \\
+    };
+\end{tikzpicture}
+\caption{The Hydra Network Protocol Pipeline.}
+\label{fig:net_pipeline}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Address Resolution Protocol (ARP):} Resolves 32-bit IPv4 addresses to 48-bit Ethernet MAC addresses. Hydra caches dynamic ARP entries and broadcasts ARP queries when resolving gateways.
+    \item \textbf{Internet Protocol (IPv4):} Validates header length, verifies the Internet Header Checksum, decrements Time-to-Live (TTL), and demultiplexes payload by protocol number (\texttt{0x01} for ICMP, \texttt{0x06} for TCP, \texttt{0x11} for UDP).
+    \item \textbf{User Datagram Protocol (UDP):} A connectionless, lightweight datagram service. Hydra eagerly pre-allocates UDP socket wait queues, ensuring that asynchronous DNS responses from \texttt{10.0.2.3} immediately wake sleeping browser threads.
+    \item \textbf{Transmission Control Protocol (TCP):} Implements reliable, ordered, byte-stream communication via sequence numbers, selective acknowledgements (SACK), and connection state tracking (\texttt{CLOSED}, \texttt{LISTEN}, \texttt{SYN\_SENT}, \texttt{ESTABLISHED}, \texttt{FIN\_WAIT}).
+    \item \textbf{Dynamic Host Configuration Protocol (DHCP):} On boot, Hydra broadcasts a \texttt{DHCPDISCOVER} packet. The local DHCP server replies with a \texttt{DHCPOFFER}, assigning an IP address (\texttt{10.0.2.15}), gateway (\texttt{10.0.2.2}), subnet mask (\texttt{255.255.255.0}), and DNS nameservers (\texttt{10.0.2.3}).
+\end{itemize}
+
+% ==============================================================================
+\section{Socket Polling and Asynchronous Wakeups}
+\label{sec:socket_polling}
+% ==============================================================================
+
+Modern graphical web browsers—such as Brave and Chromium—perform hundreds of concurrent asynchronous network requests. They rely heavily on the Linux \texttt{epoll(7)} facility to monitor multiple file descriptors without busy waiting.
+
+Hydra implements high-performance event multiplexing through \texttt{src/compat/linux/inet.rs} and \texttt{src/fs/fd.rs}:
+\begin{lstlisting}[language=Rust, caption={Eager Epoll Registration for Network Sockets}]
+pub fn register_socket_wait_queue(fd: i32, events: u32, waker: Arc<TaskWaker>) {
+    if let Some(sock) = get_socket(fd) {
+        sock.add_waiter(events, waker);
+        // If data is already pending in the ring buffer, wake immediately
+        if sock.has_pending_data() {
+            waker.wake();
+        }
+    }
+}
+\end{lstlisting}
+
+This guarantees that when a DNS packet or TLS handshake packet arrives over the wire, the interrupt handler signals the network daemon, which enqueues the bytes and instantly awakens the browser's I/O event loop thread.
+
+% ==============================================================================
+\section{Summary}
+\label{sec:net_summary}
+% ==============================================================================
+
+In this chapter, we reviewed the networking architecture of Hydra:
+\begin{itemize}
+    \item The Intel 82540EM Gigabit NIC interacts with Ring~3 buffers via zero-copy circular DMA descriptor rings.
+    \item The protocol pipeline cleanly encapsulates ARP resolution, IPv4 routing, ICMP diagnostic echoes, UDP datagrams, and full TCP state tracking.
+    \item DHCP auto-configuration provisions network identity, routing, and DNS resolution seamlessly on boot.
+    \item Asynchronous wait queues and \texttt{epoll} support provide responsive networking for high-concurrency desktop applications.
+\end{itemize}

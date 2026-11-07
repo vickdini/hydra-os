@@ -1,0 +1,175 @@
+\chapter{Processes, Threads, and Scheduling}
+\label{chap:processes}
+
+In any multitasking operating system, the most central abstraction is the \textbf{process}. A process is simply an executing program along with all the state required to run it: its virtual address space, CPU register values, thread stacks, file descriptor tables, IPC channels, and security credentials.
+
+Tanenbaum famously compared a computer running multiple processes to a busy chef baking cakes: the chef (the CPU) switches rapidly between distinct recipes (the programs) and their respective bowls of ingredients (the address spaces). To the outside observer, multiple cakes appear to be rising simultaneously.
+
+In this chapter, we explore how Hydra implements processes, threads, preemptive round-robin scheduling, context switching, and synchronous interprocess communication (IPC).
+
+% ==============================================================================
+\section{The Process Model in Hydra}
+\label{sec:process_model}
+% ==============================================================================
+
+In Hydra, processes and threads are unified under the \textbf{Task Control Block} (\texttt{Task} / \texttt{TCB}) defined in \texttt{src/task/tcb.rs}. Each task embodies:
+\begin{enumerate}
+    \item \textbf{Unique Task Identifier (\texttt{TaskId}):} A 64-bit non-zero integer distinguishing the task.
+    \item \textbf{Execution State (\texttt{TaskState}):}
+    \begin{itemize}
+        \item \texttt{Ready}: Eligible to run on the next scheduling tick.
+        \item \texttt{Running}: Currently actively executing on a CPU core.
+        \item \texttt{Blocked}: Suspended waiting for an event (e.g., waiting for an IPC rendezvous, page fault resolution, or timer expiration).
+        \item \texttt{Zombie}: Terminated execution, awaiting parent task reaping.
+    \end{itemize}
+    \item \textbf{Hardware Execution Context (\texttt{TaskContext}):} The saved general-purpose registers, instruction pointer (\texttt{RIP}), stack pointer (\texttt{RSP}), processor flags (\texttt{RFLAGS}), segment selectors, and FPU/SSE/AVX register state.
+    \item \textbf{Memory Space Root (\texttt{cr3}):} The 64-bit physical base address of the task's 4-level PML4 page table root.
+    \item \textbf{IPC Port and Mailbox:} Channels through which the task exchanges synchronous messages with other system services.
+\end{enumerate}
+
+\begin{lstlisting}[caption={Core Task Representation in Hydra (\texttt{src/task/tcb.rs})}]
+pub struct Task {
+    pub id: TaskId,
+    pub state: TaskState,
+    pub priority: u8,
+    pub cr3: u64,
+    pub context: TaskContext,
+    pub fpu_state: FpuState,
+    pub stack_base: u64,
+    pub stack_size: usize,
+    pub timeslice_remaining: u32,
+    pub total_cpu_time: u64,
+    pub ipc_endpoint: Option<EndpointId>,
+    pub cmdline: Option<Arc<[u8]>>,
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Context Switching on x86\_64}
+\label{sec:context_switch}
+% ==============================================================================
+
+The transition of CPU execution from one task to another is known as a \textbf{context switch}. In x86\_64 Long Mode, this requires saving the current task's machine state and restoring the state of the next task.
+
+When a timer interrupt or system call triggers a context switch, the hardware automatically pushes the task's \texttt{SS}, \texttt{RSP}, \texttt{RFLAGS}, \texttt{CS}, and \texttt{RIP} onto the kernel interrupt stack. The microkernel interrupt service routine (ISR) pushes the remaining 15 general-purpose registers:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+    \matrix (stack) [matrix of nodes, nodes={draw=hydrablue, minimum width=4cm, minimum height=0.6cm, fill=white}, column sep=0mm, row sep=0mm] {
+        \textbf{Interrupt Stack Frame} \\
+        \texttt{SS (Stack Segment)} \\
+        \texttt{RSP (User Stack Pointer)} \\
+        \texttt{RFLAGS (Flags Register)} \\
+        \texttt{CS (Code Segment)} \\
+        \texttt{RIP (Instruction Pointer)} \\
+        \texttt{Error Code / Dummy} \\
+        \texttt{RAX, RBX, RCX, RDX} \\
+        \texttt{RSI, RDI, RBP} \\
+        \texttt{R8, R9, R10, R11} \\
+        \texttt{R12, R13, R14, R15} \\
+    };
+    \node[right=0.5cm of stack-2-1, font=\footnotesize\color{rustkeyword}] {Pushed automatically by CPU on interrupt};
+    \node[right=0.5cm of stack-8-1, font=\footnotesize\color{rustred}] {Pushed by Hydra Assembly Stub (\texttt{src/arch/idt.rs})};
+\end{tikzpicture}
+\caption{The x86\_64 Interrupt Stack Frame during a Context Switch.}
+\label{fig:context_stack}
+\end{figure}
+
+If the incoming task belongs to a different process, the microkernel updates the \texttt{CR3} control register:
+\begin{lstlisting}[language=Rust, caption={Switching Address Spaces in Hydra}]
+unsafe {
+    if current_cr3 != next_task.cr3 {
+        core::arch::asm!(
+            "mov cr3, {}",
+            in(reg) next_task.cr3,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+\end{lstlisting}
+Loading a new value into \texttt{CR3} immediately activates the new task's page directory and flushes non-global entries in the Translation Lookaside Buffer (TLB).
+
+% ==============================================================================
+\section{The Preemptive Scheduler}
+\label{sec:scheduler}
+% ==============================================================================
+
+Hydra implements a **preemptive round-robin scheduler** with priority levels (\texttt{src/task/scheduler.rs}). The system PIT timer is calibrated to fire at 100~Hz (every 10~milliseconds).
+
+Each task is allocated a default timeslice of 50~milliseconds (5 timer ticks). On each interrupt:
+\begin{enumerate}
+    \item The current task's \texttt{timeslice\_remaining} is decremented.
+    \item If the timeslice reaches zero, the scheduler marks the task as \texttt{Ready}, moves it to the tail of the ready queue, selects the next task from the head of the queue, resets its timeslice, and executes a context switch.
+    \item If a task initiates a blocking IPC operation before its timeslice expires, it voluntarily yields the remaining time, and the scheduler dispatches the next ready task immediately.
+\end{enumerate}
+
+\begin{tanenbaumnote}[Interactive Idle Thread]
+Hydra initializes two foundational threads at boot:
+\begin{itemize}
+    \item \textbf{Task 0 (\texttt{shell}):} The interactive Hydra Microkernel Shell.
+    \item \textbf{Task 1 (\texttt{idle}):} A background idle thread running at priority 0. When no worker threads or driver servers are ready, the scheduler dispatches Task~1, which executes the \texttt{hlt} (halt) assembly instruction to place the CPU into a low-power state until the next hardware interrupt arrives.
+\end{itemize}
+\end{tanenbaumnote}
+
+% ==============================================================================
+\section{Interprocess Communication (IPC): The Microkernel Core}
+\label{sec:ipc}
+% ==============================================================================
+
+In a monolithic operating system, subsystems communicate via direct C function calls. In a microkernel, where device drivers, file systems, and network stacks reside in separate user-space address spaces, **Interprocess Communication (IPC)** is the critical mechanism that binds the operating system together.
+
+Hydra provides **synchronous rendezvous IPC endpoints** (\texttt{src/ipc/mod.rs}). A synchronous rendezvous means that sender and receiver must synchronize:
+\begin{itemize}
+    \item If a client sends a message to an endpoint before the server is waiting, the client blocks until the server executes a receive operation.
+    \item If a server listens on an endpoint before a client sends a request, the server blocks until a message arrives.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    \node[draw=rustkeyword, rounded corners, fill=white, minimum width=3cm, minimum height=1.2cm] (client) at (0, 2) {
+        \begin{tabular}{c}
+            \textbf{Client Process}\\
+            \footnotesize (e.g. VFS / App)
+        \end{tabular}
+    };
+    
+    \node[draw=hydrablue, rounded corners, fill=hydralight, minimum width=3.5cm, minimum height=1.6cm] (endpoint) at (5, 2) {
+        \begin{tabular}{c}
+            \textbf{IPC Endpoint}\\
+            \footnotesize \texttt{EndpointId(0x20)}\\
+            \scriptsize Rendezvous Wait Queue
+        \end{tabular}
+    };
+    
+    \node[draw=rustred, rounded corners, fill=white, minimum width=3cm, minimum height=1.2cm] (server) at (10, 2) {
+        \begin{tabular}{c}
+            \textbf{ZFS Server}\\
+            \footnotesize (Ring 3 Server)
+        \end{tabular}
+    };
+
+    \draw[->, >=Stealth, line width=1.5pt, rustkeyword] (client) -- node[above] {\footnotesize \texttt{ipc\_send(0x20)}} (endpoint);
+    \draw[<-, >=Stealth, line width=1.5pt, rustred] (endpoint) -- node[above] {\footnotesize \texttt{ipc\_recv(0x20)}} (server);
+    
+    \draw[<->, >=Stealth, dashed, line width=1pt, hydragray] (client) to[bend right=30] node[below] {\footnotesize Direct Zero-Copy Shared Memory Window} (server);
+\end{tikzpicture}
+\caption{Synchronous IPC Rendezvous in Hydra with Shared Memory Windows.}
+\label{fig:ipc_rendezvous}
+\end{figure}
+
+To avoid copying gigabytes of disk and network data through the microkernel, Hydra marries synchronous rendezvous IPC with **shared memory windows**. When the ZFS client requests disk blocks from the ATA driver server (Endpoint \texttt{0x21}), the metadata is exchanged via lightweight IPC registers, while the raw 512-byte sectors are read directly via DMA into a pre-mapped shared buffer.
+
+% ==============================================================================
+\section{Summary}
+\label{sec:proc_summary}
+% ==============================================================================
+
+This chapter examined the process and scheduling machinery of Hydra:
+\begin{itemize}
+    \item Tasks are represented by \texttt{TaskControlBlock} instances encapsulating general registers, virtual memory roots (\texttt{CR3}), and scheduling state.
+    \item Context switching on x86\_64 cleanly isolates user registers and floating-point context.
+    \item Preemptive round-robin scheduling guarantees responsive multi-tasking across all Ring~3 drivers and user sessions.
+    \item Synchronous IPC rendezvous provides failure-isolated, high-performance messaging between independent system services.
+\end{itemize}

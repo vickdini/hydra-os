@@ -1,0 +1,159 @@
+\chapter{The Linux Binary Compatibility Layer}
+\label{chap:linux_compat}
+
+Historically, experimental and educational microkernels suffered from an insurmountable paradox: while their internal architectures were elegant and mathematically verifiable, they were incapable of running standard desktop software. Writing an operating system from scratch often meant being confined to a rudimentary text console, running a toy text editor and a handful of basic shell utilities.
+
+Porting complex, multi-million-line applications—such as the **KDE Plasma 6** desktop environment, the **KWin Wayland** compositor, the **Brave/Chromium** web browser, Python 3, and Qt 6—by hand is practically impossible.
+
+To bridge this chasm, Hydra introduces a high-performance **Linux Binary Compatibility Subsystem** (\texttt{src/compat/linux/}). Hydra does not run Linux inside a virtual machine or emulation container; instead, it executes unmodified upstream Linux x86\_64 ELF binaries directly on the bare-metal microkernel by emulating the Linux Application Binary Interface (ABI).
+
+In this chapter, we explore how Hydra implements hardware-accelerated system call dispatching, POSIX process and credential emulation, dynamic ELF linking, virtual filesystems (\texttt{/proc}, \texttt{/sys}, \texttt{/dev}), and the Wayland graphical stack.
+
+% ==============================================================================
+\section{Hardware System Call Dispatching: \texttt{SYSCALL} and \texttt{SYSRET}}
+\label{sec:syscall_dispatch}
+% ==============================================================================
+
+On the x86\_64 architecture, user-space applications invoke operating system services using the high-speed \texttt{syscall} instruction rather than legacy software interrupts (such as \texttt{int 0x80}).
+
+During early initialization, Hydra configures the CPU's Model-Specific Registers (MSRs) in \texttt{src/arch/syscall.rs}:
+\begin{itemize}
+    \item \textbf{\texttt{IA32\_STAR} (\texttt{0xC0000081}):} Encodes the 16-bit GDT segment selectors for Ring~0 kernel code/data and Ring~3 user code/data.
+    \item \textbf{\texttt{IA32\_LSTAR} (\texttt{0xC0000082}):} Holds the 64-bit virtual memory entry point for the microkernel system call handler (\texttt{hydra\_syscall\_dispatcher}).
+    \item \textbf{\texttt{IA32\_FMASK} (\texttt{0xC0000084}):} Defines the bitmask of flags cleared in \texttt{RFLAGS} upon entering the kernel (e.g., clearing the Interrupt Flag \texttt{IF} to disable interrupts during register preservation).
+\end{itemize}
+
+When an application invokes \texttt{syscall}:
+\begin{enumerate}
+    \item The CPU stores the user instruction pointer into \texttt{RCX} and the flags into \texttt{R11}.
+    \item The CPU loads the kernel code selector from \texttt{STAR} and jumps to \texttt{LSTAR} in Ring~0.
+    \item The system call number is passed in \texttt{RAX}, and up to six parameters are passed in registers: \texttt{RDI}, \texttt{RSI}, \texttt{RDX}, \texttt{R10}, \texttt{R8}, and \texttt{R9}.
+    \item Hydra saves the user registers, invokes the corresponding handler in \texttt{src/compat/linux/mod.rs}, places the return value into \texttt{RAX}, and returns to user space using the \texttt{sysretq} instruction.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    % User space
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=4cm, minimum height=1.2cm] (app) at (0, 3) {
+        \begin{tabular}{c}
+            \textbf{User Application}\\
+            \footnotesize (e.g. \texttt{brave}, \texttt{kwin}, \texttt{python})\\
+            \scriptsize Executes \texttt{syscall} (\texttt{RAX=0x01}, \texttt{RDI=1})
+        \end{tabular}
+    };
+
+    % Hardware transition
+    \node[draw=hydragold, fill=yellow!15, line width=1pt, minimum width=3.5cm, minimum height=1.0cm] (hw) at (5.5, 3) {
+        \begin{tabular}{c}
+            \textbf{x86\_64 CPU Hardware}\\
+            \scriptsize MSR \texttt{LSTAR} Transition\\
+            \scriptsize Ring 3 $\rightarrow$ Ring 0
+        \end{tabular}
+    };
+
+    % Kernel dispatcher
+    \node[draw=hydrablue, fill=hydralight, rounded corners, minimum width=4cm, minimum height=1.4cm] (dispatch) at (11, 3) {
+        \begin{tabular}{c}
+            \textbf{Hydra Syscall Dispatcher}\\
+            \footnotesize \texttt{src/compat/linux/mod.rs}\\
+            \scriptsize Demux \texttt{RAX}: \texttt{SYS\_write(1, buf, len)}
+        \end{tabular}
+    };
+
+    \draw[->, >=Stealth, line width=1.5pt, rustkeyword] (app) -- (hw);
+    \draw[->, >=Stealth, line width=1.5pt, hydragold] (hw) -- (dispatch);
+    \draw[->, >=Stealth, dashed, line width=1.2pt, rustred] (dispatch) to[bend left=30] node[below] {\footnotesize \texttt{sysretq} (Result in \texttt{RAX})} (app);
+\end{tikzpicture}
+\caption{The x86\_64 \texttt{syscall} / \texttt{sysret} Dispatch Pipeline in Hydra.}
+\label{fig:syscall_pipeline}
+\end{figure}
+
+% ==============================================================================
+\section{POSIX Process and Credential Emulation}
+\label{sec:posix_creds}
+% ==============================================================================
+
+Linux binaries depend on a comprehensive suite of POSIX process semantics:
+\begin{itemize}
+    \item \textbf{Process Hierarchies and IDs:} Real, effective, and saved user and group IDs (\texttt{uid}, \texttt{euid}, \texttt{suid}, \texttt{gid}, \texttt{egid}, \texttt{sgid}). Hydra enforces POSIX permissions when opening files, allowing programs like \texttt{sudo} to elevate privileges cleanly.
+    \item \textbf{Session and Process Group Management:} Terminal job control relies on \texttt{setpgid}, \texttt{setsid}, and controlling terminal assignment.
+    \item \textbf{Process Spawning (\texttt{fork}, \texttt{clone}, and \texttt{execve}):} Hydra supports the Linux \texttt{clone(2)} system call with flags like \texttt{CLONE\_VM}, \texttt{CLONE\_FS}, \texttt{CLONE\_FILES}, and \texttt{CLONE\_THREAD}, powering native pthreads.
+\end{itemize}
+
+% ==============================================================================
+\section{Virtual Filesystems: \texttt{/proc}, \texttt{/sys}, and \texttt{/dev}}
+\label{sec:virtual_filesystems}
+% ==============================================================================
+
+Modern userland runtimes do not interact exclusively with regular disk files; they inspect pseudo-filesystems synthesized in memory:
+\begin{itemize}
+    \item \textbf{\texttt{/proc}:} Provides runtime process inspection. When an application queries \texttt{/proc/self/cmdline}, Hydra synthesizes a null-separated array of program arguments from the task control block. When it checks \texttt{/proc/self/exe}, Hydra resolves the symbolic link to the binary's actual path on the ZFS root.
+    \item \textbf{\texttt{/sys}:} Synthesizes the device model (PCI bus descriptors, display adapter identities, input event nodes) traversed by \texttt{libudev} and \texttt{libdrm}.
+    \item \textbf{\texttt{/dev}:} Houses character device nodes created at boot by \texttt{devices::populate} (\texttt{src/compat/linux/devices.rs}):
+    \begin{itemize}
+        \item \texttt{/dev/null}, \texttt{/dev/zero}, \texttt{/dev/urandom}
+        \item \texttt{/dev/dri/card0} (Direct Rendering Manager card node)
+        \item \texttt{/dev/input/event0} (Keyboard) and \texttt{event1} (Mouse)
+        \item \texttt{/dev/shm} (POSIX Shared Memory with \texttt{01777} permissions)
+    \end{itemize}
+\end{itemize}
+
+% ==============================================================================
+\section{Hosting Modern Desktop Environments (SDDM, KWin, KDE Plasma 6)}
+\label{sec:hosting_plasma}
+% ==============================================================================
+
+The ultimate verification of an operating system's architectural maturity is its ability to host complex, graphical user applications. Hydra boots directly into a complete **KDE Plasma 6** desktop:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+    % Layer 4: Desktop apps
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=11cm, minimum height=0.8cm] (apps) at (5.5, 4.2) {
+        \textbf{Applications:} Brave Web Browser, Konsole Terminal, Dolphin File Manager, Python
+    };
+
+    % Layer 3: Compositor and Display Manager
+    \node[draw=hydrablue, fill=hydralight, rounded corners, minimum width=11cm, minimum height=0.8cm] (gui) at (5.5, 2.8) {
+        \textbf{Wayland Graphics Stack:} SDDM Greeter, KWin Wayland Compositor, PipeWire
+    };
+
+    % Layer 2: System Daemons
+    \node[draw=hydragold, fill=white, rounded corners, minimum width=11cm, minimum height=0.8cm] (daemons) at (5.5, 1.4) {
+        \textbf{System Services:} D-Bus System Bus, \texttt{hydra-logind} (Seat/Session Manager), Polkit
+    };
+
+    % Layer 1: Hydra Microkernel + Linux ABI
+    \node[draw=rustred, fill=rustred!10, line width=1.2pt, rounded corners, minimum width=11cm, minimum height=0.8cm] (core) at (5.5, 0.0) {
+        \textbf{Hydra Microkernel Core:} Linux ABI Dispatcher, OpenZFS Engine, Isolated Ring 3 Drivers
+    };
+
+    \draw[->, >=Stealth, line width=1.2pt] (apps) -- (gui);
+    \draw[->, >=Stealth, line width=1.2pt] (gui) -- (daemons);
+    \draw[->, >=Stealth, line width=1.2pt] (daemons) -- (core);
+\end{tikzpicture}
+\caption{The Full Application Stack Running on Top of Hydra.}
+\label{fig:plasma_stack}
+\end{figure}
+
+\begin{enumerate}
+    \item The boot supervisor invokes \texttt{/usr/libexec/hydra-session --display-manager}.
+    \item \texttt{hydra-session} starts the D-Bus system message bus and spawns the custom \texttt{hydra-logind} daemon (\texttt{userland/hydra-logind/hydra-logind.c}) to register \texttt{seat0}.
+    \item The Simple Desktop Display Manager (SDDM) launches, authenticates user credentials through PAM, and starts the KWin Wayland compositor.
+    \item KWin acquires \texttt{/dev/dri/card0}, opens \texttt{/dev/input/event0} and \texttt{event1}, composites surfaces in software or DRM dumb buffers, and spawns the KDE Plasma shell (\texttt{plasmashell}).
+    \item The user launches the **Brave Browser**, which utilizes POSIX shared memory (\texttt{/dev/shm}), cryptographic NSS databases (\texttt{\textasciitilde/.pki/nssdb}), and asynchronous \texttt{epoll} sockets to browse live websites across the Internet.
+\end{enumerate}
+
+% ==============================================================================
+\section{Summary}
+\label{sec:linux_summary}
+% ==============================================================================
+
+In this chapter, we examined how Hydra reconciles microkernel purity with real-world application utility:
+\begin{itemize}
+    \item Hardware-accelerated \texttt{syscall}/\texttt{sysret} MSR configuration provides microsecond system call dispatching.
+    \item Complete POSIX emulation supports process trees, signals, user credentials, and memory mapping.
+    \item Synthetic virtual filesystems (\texttt{/proc}, \texttt{/sys}, \texttt{/dev}) expose standard device and process state.
+    \item Hydra successfully runs unmodified upstream Linux software, including D-Bus, SDDM, KWin Wayland, KDE Plasma 6, and modern web browsers.
+\end{itemize}

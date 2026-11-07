@@ -1,0 +1,167 @@
+% ==============================================================================
+% Preamble for "Hydra: Design and Implementation"
+% Modernized textbook style inspired by Prentice Hall & Tanenbaum
+% ==============================================================================
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% Geometry & Margins
+\usepackage[
+    paper=letterpaper,
+    top=1.0in,
+    bottom=1.0in,
+    inner=1.1in,
+    outer=0.9in,
+    headheight=14pt,
+    headsep=20pt,
+    footskip=30pt
+]{geometry}
+
+% Math & Symbols
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+
+% Graphics, Colors & Diagrams
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows.meta,positioning,calc,fit,backgrounds,matrix,chains}
+
+% Palette
+\definecolor{hydrablue}{RGB}{18, 52, 86}
+\definecolor{hydragold}{RGB}{212, 143, 24}
+\definecolor{hydragray}{RGB}{60, 64, 67}
+\definecolor{hydralight}{RGB}{245, 247, 250}
+\definecolor{codebg}{RGB}{248, 249, 250}
+\definecolor{codeborder}{RGB}{218, 222, 228}
+\definecolor{rustred}{RGB}{183, 65, 14}
+\definecolor{rustkeyword}{RGB}{14, 110, 184}
+\definecolor{rustcomment}{RGB}{108, 117, 125}
+\definecolor{ruststring}{RGB}{40, 138, 48}
+
+% Headers & Footers
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\bfseries\color{hydrablue}\thepage\quad\textbar\quad\nouppercase{\leftmark}}
+\fancyhead[RO]{\small\bfseries\color{hydrablue}\nouppercase{\rightmark}\quad\textbar\quad\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Section Titles
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily\huge\bfseries\color{hydrablue}}
+  {\Large\textsc{\chaptertitlename\ \thechapter}}
+  {10pt}
+  {\titlerule[1.5pt]\vspace{6pt}\Huge}
+\titlespacing*{\chapter}{0pt}{10pt}{30pt}
+
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{hydrablue}}
+  {\thesection}{1em}{}
+\titlespacing*{\section}{0pt}{18pt plus 4pt minus 2pt}{6pt}
+
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{hydragray}}
+  {\thesubsection}{1em}{}
+\titlespacing*{\subsection}{0pt}{14pt plus 3pt minus 2pt}{4pt}
+
+\titleformat{\subsubsection}
+  {\normalfont\sffamily\normalsize\bfseries\color{hydragray}}
+  {\thesubsubsection}{1em}{}
+
+% Listings & Code
+\usepackage{listings}
+\lstdefinelanguage{Rust}{
+  keywords={as, break, const, continue, crate, else, enum, extern, false, fn, for, if, impl, in, let, loop, match, mod, move, mut, pub, ref, return, self, Self, static, struct, super, trait, true, type, unsafe, use, where, while, async, await, dyn},
+  keywordstyle=\color{rustkeyword}\bfseries,
+  ndkeywords={bool, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, char, str, Option, Result, Some, None, Ok, Err, Vec, String, Box, Arc, Mutex},
+  ndkeywordstyle=\color{rustred}\bfseries,
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{rustcomment}\itshape,
+  stringstyle=\color{ruststring},
+  morestring=[b]",
+  morestring=[b]'
+}
+
+\lstset{
+  language=Rust,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeborder},
+  numbers=left,
+  numberstyle=\tiny\color{hydragray},
+  numbersep=8pt,
+  tabsize=4,
+  showstringspaces=false,
+  captionpos=b,
+  keepspaces=true,
+  xleftmargin=12pt,
+  framexleftmargin=12pt
+}
+
+% Boxes & Notes
+\usepackage[most]{tcolorbox}
+\newtcolorbox{tanenbaumnote}[1][]{
+  colback=hydralight,
+  colframe=hydrablue,
+  fonttitle=\sffamily\bfseries,
+  title={Hydra Implementation Note: #1},
+  arc=3mm,
+  boxrule=1pt,
+  left=10pt,
+  right=10pt,
+  top=8pt,
+  bottom=8pt,
+  enhanced,
+  drop shadow=black!10!white
+}
+
+\newtcolorbox{designprinciple}[1][]{
+  colback=white,
+  colframe=hydragold,
+  fonttitle=\sffamily\bfseries\color{black},
+  colbacktitle=hydragold!30!white,
+  title={Microkernel Design Principle: #1},
+  arc=2mm,
+  boxrule=1pt,
+  left=10pt,
+  right=10pt,
+  top=8pt,
+  bottom=8pt
+}
+
+% Tables, Captions & Lists
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{caption}
+\captionsetup{font={small,sf},labelfont=bf}
+\usepackage{enumitem}
+\setlist{noitemsep,topsep=4pt}
+
+% Table of Contents, Bibliography & Index
+\usepackage{tocloft}
+\usepackage{makeidx}
+\makeindex
+
+% Hyperlinks
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=hydrablue,
+    citecolor=rustkeyword,
+    filecolor=rustred,
+    urlcolor=hydrablue,
+    pdftitle={Hydra: Design and Implementation},
+    pdfauthor={The Hydra OS Team},
+    pdfsubject={Modern Operating Systems Design, Microkernels, and Rust},
+    pdfkeywords={Operating Systems, Microkernel, Rust, ZFS, Linux ABI, x86_64, Tanenbaum}
+}

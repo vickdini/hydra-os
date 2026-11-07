@@ -1,0 +1,55 @@
+\chapter{System Call Reference}
+\label{app:syscalls}
+
+This appendix provides a comprehensive reference table of the primary Linux system calls implemented by Hydra's binary compatibility subsystem (\texttt{src/compat/linux/mod.rs}).
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Number} & \textbf{Name} & \textbf{Registers Used} & \textbf{Description} \\
+\midrule
+0 & \texttt{read} & \texttt{rdi, rsi, rdx} & Read bytes from a file descriptor into user buffer. \\
+1 & \texttt{write} & \texttt{rdi, rsi, rdx} & Write bytes from user buffer to file descriptor. \\
+2 & \texttt{open} & \texttt{rdi, rsi, rdx} & Open file path with flags and creation mode. \\
+3 & \texttt{close} & \texttt{rdi} & Close an open file descriptor. \\
+4 & \texttt{stat} & \texttt{rdi, rsi} & Retrieve file metadata by pathname. \\
+5 & \texttt{fstat} & \texttt{rdi, rsi} & Retrieve file metadata by open file descriptor. \\
+8 & \texttt{lseek} & \texttt{rdi, rsi, rdx} & Reposition file read/write offset. \\
+9 & \texttt{mmap} & \texttt{rdi..r9} & Map files or anonymous memory into address space. \\
+10 & \texttt{mprotect} & \texttt{rdi, rsi, rdx} & Modify access permissions of memory region. \\
+11 & \texttt{munmap} & \texttt{rdi, rsi} & Unmap virtual memory pages. \\
+12 & \texttt{brk} & \texttt{rdi} & Expand or shrink application process heap. \\
+13 & \texttt{rt\_sigaction} & \texttt{rdi..r10} & Examine and change a signal action. \\
+14 & \texttt{rt\_sigprocmask} & \texttt{rdi..r10} & Examine and change blocked signal mask. \\
+16 & \texttt{ioctl} & \texttt{rdi, rsi, rdx} & Device control (DRM, evdev, TTY, termios). \\
+21 & \texttt{access} & \texttt{rdi, rsi} & Check real user's permissions for a file path. \\
+22 & \texttt{pipe} & \texttt{rdi} & Create unidirectional interprocess data channel. \\
+24 & \texttt{sched\_yield} & None & Voluntarily yield remaining CPU timeslice. \\
+39 & \texttt{getpid} & None & Returns caller's task process ID. \\
+41 & \texttt{socket} & \texttt{rdi, rsi, rdx} & Create communication endpoint (\texttt{AF\_INET}, \texttt{AF\_UNIX}). \\
+42 & \texttt{connect} & \texttt{rdi, rsi, rdx} & Initiate connection on a socket. \\
+43 & \texttt{accept} & \texttt{rdi, rsi, rdx} & Accept a connection on a listening socket. \\
+44 & \texttt{sendto} & \texttt{rdi..r9} & Transmit datagram to destination address. \\
+45 & \texttt{recvfrom} & \texttt{rdi..r9} & Receive datagram and source address. \\
+56 & \texttt{clone} & \texttt{frame} & Create child task or thread (\texttt{CLONE\_VM}, \texttt{CLONE\_FS}). \\
+57 & \texttt{fork} & \texttt{frame} & Duplicate calling process with Copy-on-Write pages. \\
+59 & \texttt{execve} & \texttt{rdi, rsi, rdx} & Replace task with new program image. \\
+60 & \texttt{exit} & \texttt{rdi} & Terminate current task with exit status code. \\
+61 & \texttt{wait4} & \texttt{rdi..r10} & Wait for child process state change or termination. \\
+72 & \texttt{fcntl} & \texttt{rdi, rsi, rdx} & Manipulate file descriptor properties (\texttt{O\_NONBLOCK}). \\
+79 & \texttt{getcwd} & \texttt{rdi, rsi} & Retrieve current working directory path string. \\
+80 & \texttt{chdir} & \texttt{rdi} & Change current working directory. \\
+89 & \texttt{readlink} & \texttt{rdi, rsi, rdx} & Read value of a symbolic link. \\
+102 & \texttt{getuid} & None & Returns real user ID of calling task. \\
+104 & \texttt{getgid} & None & Returns real group ID of calling task. \\
+107 & \texttt{geteuid} & None & Returns effective user ID of calling task. \\
+108 & \texttt{getegid} & None & Returns effective group ID of calling task. \\
+232 & \texttt{epoll\_wait} & \texttt{rdi..r10} & Wait for I/O events on an epoll file descriptor. \\
+257 & \texttt{openat} & \texttt{rdi..r10} & Open file path relative to directory descriptor. \\
+\bottomrule
+\end{tabularx}
+\caption{Selected Primary Linux System Calls Supported in Hydra.}
+\label{tab:syscall_reference}
+\end{table}

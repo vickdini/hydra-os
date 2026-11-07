@@ -1,0 +1,159 @@
+\chapter{Memory Management}
+\label{chap:memory}
+
+Memory is the lifeblood of an operating system. While processors have become thousands of times faster over the last forty years, the speed of access to main memory (DRAM) has lagged far behind. To maintain performance, modern CPUs rely on sophisticated hierarchies of L1, L2, and L3 caches backed by hardware-enforced **Virtual Memory**.
+
+Virtual memory provides two indispensable benefits:
+\begin{enumerate}
+    \item \textbf{Process Isolation:} Every process is granted the illusion of owning a private, continuous, multi-terabyte address space. A process cannot inspect, modify, or corrupt the memory of another process or the microkernel, because it cannot even name those physical memory frames.
+    \item \textbf{Dynamic Resource Multiplexing:} Physical memory does not need to be contiguous, nor does it all need to be present simultaneously. Pages can be loaded on demand, shared lazily via Copy-on-Write (CoW), or mapped directly to hardware devices.
+\end{enumerate}
+
+In this chapter, we explore how Hydra implements x86\_64 4-level paging, physical frame allocation, page fault dispatching, and dynamic memory mapping.
+
+% ==============================================================================
+\section{x86\_64 4-Level Paging Architecture}
+\label{sec:paging_arch}
+% ==============================================================================
+
+On the x86\_64 architecture in standard Long Mode, virtual addresses are 64 bits wide, but the hardware translates 48-bit canonical addresses using a 4-level hierarchical page table structure:
+\begin{itemize}
+    \item \textbf{Level 4:} Page Map Level 4 (PML4)
+    \item \textbf{Level 3:} Page Directory Pointer Table (PDPT)
+    \item \textbf{Level 2:} Page Directory (PD)
+    \item \textbf{Level 1:} Page Table (PT)
+\end{itemize}
+
+Every page table at each level consists of exactly 512 entries (\texttt{u64}), occupying exactly one 4096-byte (4~KiB) physical frame ($512 \times 8 = 4096$).
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.82, every node/.style={transform shape}]
+    % Virtual Address decomposition
+    \node[draw=hydrablue, fill=hydralight, font=\small\sffamily, minimum width=13cm, minimum height=0.8cm] (va) at (6.5, 6) {
+        \begin{tabular}{c|c|c|c|c}
+            Sign Extension (16b) & PML4 Index (9b) & PDPT Index (9b) & PD Index (9b) & PT Index (9b) & Offset (12b) \\
+            \texttt{[63:48]} & \texttt{[47:39]} & \texttt{[38:30]} & \texttt{[29:21]} & \texttt{[20:12]} & \texttt{[11:0]}
+        \end{tabular}
+    };
+
+    % Tables
+    \node[draw=rustred, fill=white, minimum width=1.8cm, minimum height=2.5cm, align=center] (pml4) at (1.5, 2.5) {\footnotesize \textbf{PML4}\\ \tiny 512 entries};
+    \node[draw=rustkeyword, fill=white, minimum width=1.8cm, minimum height=2.5cm, align=center] (pdpt) at (4.5, 2.5) {\footnotesize \textbf{PDPT}\\ \tiny 512 entries};
+    \node[draw=hydragold, fill=white, minimum width=1.8cm, minimum height=2.5cm, align=center] (pd) at (7.5, 2.5) {\footnotesize \textbf{PD}\\ \tiny 512 entries};
+    \node[draw=hydragray, fill=white, minimum width=1.8cm, minimum height=2.5cm, align=center] (pt) at (10.5, 2.5) {\footnotesize \textbf{PT}\\ \tiny 512 entries};
+    \node[draw=black, fill=hydralight, line width=1pt, minimum width=2.0cm, minimum height=1.2cm, align=center] (frame) at (13.5, 2.5) {\footnotesize \textbf{Physical}\\\footnotesize \textbf{4 KiB Frame}};
+
+    % CR3
+    \node[draw=black, fill=yellow!20, minimum width=1.8cm, minimum height=0.6cm] (cr3) at (-1.5, 2.5) {\footnotesize \textbf{CR3}};
+
+    \draw[->, >=Stealth, line width=1.2pt] (cr3) -- (pml4);
+    \draw[->, >=Stealth, line width=1.2pt, rustred] (pml4) -- (pdpt);
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (pdpt) -- (pd);
+    \draw[->, >=Stealth, line width=1.2pt, hydragold] (pd) -- (pt);
+    \draw[->, >=Stealth, line width=1.2pt, hydragray] (pt) -- (frame);
+\end{tikzpicture}
+\caption{The x86\_64 4-Level Page Table Translation Walk.}
+\label{fig:page_walk}
+\end{figure}
+
+Each 64-bit Page Table Entry (PTE) contains status flags and the physical frame base address:
+\begin{lstlisting}[language=Rust, caption={Page Table Entry Bitflags in Hydra (\texttt{src/memory/paging.rs})}]
+bitflags::bitflags! {
+    pub struct PageTableFlags: u64 {
+        const PRESENT       = 1 << 0;  // Frame is present in physical memory
+        const WRITABLE      = 1 << 1;  // Read/write permission
+        const USER          = 1 << 2;  // Accessible from Ring 3 userland
+        const WRITE_THROUGH = 1 << 3;  // Caching policy: write-through
+        const NO_CACHE      = 1 << 4;  // Disable CPU caching (e.g. MMIO)
+        const ACCESSED      = 1 << 5;  // Set by CPU when read
+        const DIRTY         = 1 << 6;  // Set by CPU when written
+        const HUGE_PAGE     = 1 << 7;  // 2 MiB / 1 GiB page size
+        const GLOBAL        = 1 << 8;  // Do not flush on CR3 reload
+        const NO_EXECUTE    = 1 << 63; // Execute-Disable (NX) bit
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Physical Frame Allocation: The Bootstrapping Problem}
+\label{sec:frame_alloc}
+% ==============================================================================
+
+Before an operating system can allocate virtual pages, it must track which physical memory frames are free and which are reserved by motherboard hardware, ACPI tables, and video memory.
+
+During early boot, Hydra queries the UEFI firmware for its system memory map:
+\begin{lstlisting}[language=Rust, caption={Capturing Physical Frames from UEFI (\texttt{src/arch/boot_services.rs})}]
+let memory_map = uefi_boot_services.get_memory_map()?;
+for descriptor in memory_map.entries() {
+    if descriptor.ty == MemoryType::CONVENTIONAL {
+        let start_frame = descriptor.phys_start / PAGE_SIZE;
+        let frame_count = descriptor.page_count;
+        frame_allocator.mark_free_range(start_frame, frame_count);
+    }
+}
+\end{lstlisting}
+
+Hydra implements a high-performance **Bitmap Physical Frame Allocator** (\texttt{src/memory/frame.rs}). Each bit in the bitmap corresponds to a single 4096-byte physical frame. A 64-bit integer tracks 64 frames (256~KiB). Allocating a physical frame requires finding the first unset bit using the x86\_64 \texttt{tzcnt} (count trailing zeros) or \texttt{bsf} instruction, achieving $O(1)$ allocation performance.
+
+% ==============================================================================
+\section{Page Fault Handling (\#PF) and Copy-on-Write}
+\label{sec:page_faults}
+% ==============================================================================
+
+When a process attempts to access a virtual address that is not mapped (\texttt{PRESENT} flag unset) or violates access permissions (e.g., writing to a read-only page), the CPU aborts instruction execution and raises a **Page Fault Exception (\#PF, Interrupt 14)**.
+
+The CPU hardware automatically places the offending virtual address into the \textbf{\texttt{CR2}} control register and pushes a 32-bit error code onto the stack:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Bit} & \textbf{Name} & \textbf{Meaning when Set} \\
+\midrule
+0 & \texttt{P (Present)} & Protection violation (page present, but invalid permissions) \\
+1 & \texttt{W/R (Write)} & Fault caused by a memory write \\
+2 & \texttt{U/S (User)} & Fault occurred while executing in Ring 3 \\
+3 & \texttt{RSVD (Reserved)} & Reserved bit violation in page table \\
+4 & \texttt{I/D (Instruction)} & Instruction fetch violation (NX bit violation) \\
+\bottomrule
+\end{tabular}
+\caption{x86\_64 Page Fault Error Code Bits.}
+\label{tab:pf_error_codes}
+\end{table}
+
+\begin{designprinciple}[Copy-on-Write (CoW)]
+When a process forks using POSIX \texttt{fork()}, duplicating gigabytes of physical memory is prohibitively slow. Instead, Hydra points the child process's page tables directly to the parent's physical frames, clearing the \texttt{WRITABLE} bit and setting a custom \texttt{COW} flag in both tables.
+
+When either process subsequently writes to a shared page:
+\begin{enumerate}
+    \item The CPU raises a Page Fault (\#PF) with error code $P=1, W=1$.
+    \item The Hydra fault handler reads \texttt{CR2}, recognizes the \texttt{COW} marker, allocates a single fresh physical frame, copies the 4096 bytes into it, updates the faulting PTE to point to the new frame with \texttt{WRITABLE=1}, and flushes the TLB.
+    \item The faulting instruction retries and completes seamlessly.
+\end{enumerate}
+\end{designprinciple}
+
+% ==============================================================================
+\section{Userland Memory Management: \texttt{mmap} and Shared Memory}
+\label{sec:mmap}
+% ==============================================================================
+
+Modern graphical desktop environments, dynamic libraries, and web browsers make intensive use of the POSIX \texttt{mmap(2)} system call. Hydra provides complete virtual memory mapping through \texttt{src/compat/linux/mm.rs}:
+\begin{itemize}
+    \item \textbf{Anonymous Private Mapping (\texttt{MAP\_PRIVATE | MAP\_ANONYMOUS}):} Allocates zeroed memory for application heaps and thread stacks.
+    \item \textbf{File-Backed Mapping:} Maps file contents from the ZFS pool directly into the task's address space without intermediate copying.
+    \item \textbf{POSIX Shared Memory (\texttt{/dev/shm}):} Maps shared memory frames between processes with world-writable, sticky-bit permissions (\texttt{01777}). This mechanism powers Wayland surface buffers between KWin and GUI clients, as well as Chromium and Brave browser multi-process rendering.
+\end{itemize}
+
+% ==============================================================================
+\section{Summary}
+\label{sec:mem_summary}
+% ==============================================================================
+
+In this chapter, we reviewed the memory management foundation of Hydra:
+\begin{itemize}
+    \item The 4-level x86\_64 paging architecture translates 48-bit canonical virtual addresses into physical frames.
+    \item Physical memory is mapped and managed via a high-speed bitmapped frame allocator initialized directly from the UEFI memory map.
+    \item Page faults (\#PF) drive demand paging and lazy Copy-on-Write page duplication.
+    \item POSIX \texttt{mmap} and shared memory support enable high-performance graphical compositing and large-scale application runtimes.
+\end{itemize}

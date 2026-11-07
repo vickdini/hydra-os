@@ -1,0 +1,181 @@
+\chapter{File Systems and Enterprise Storage: The OpenZFS Deep Dive}
+\label{chap:zfs}
+
+In classical operating systems literature—including Andrew Tanenbaum's dissection of the MINIX file system~\cite{tanenbaum2006operating}—file systems are depicted as static disk structures: a boot block, a superblock, an inode bitmap, a zone bitmap, an array of fixed-size inodes, and data blocks.
+
+While conceptually straightforward, traditional file systems suffer from fatal structural liabilities in production environments:
+\begin{enumerate}
+    \item \textbf{Silent Data Corruption (Bit Rot):} Magnetic decay, bus errors, or cosmic rays can flip bits in storage media. Traditional file systems have no mechanism to detect when a sector read from disk differs from what was originally written.
+    \item \textbf{Destructive In-Place Overwrites:} When writing to an existing file, old data blocks and inode metadata are overwritten directly. An unexpected power failure or system reset mid-write leaves the file system in an inconsistent state, requiring lengthy, error-prone \texttt{fsck} recovery.
+    \item \textbf{Rigid Partition Boundaries:} Physical disks are partitioned into fixed slices. If the \texttt{/usr} partition fills up while \texttt{/home} has 500~GB of empty space, the user must repartition the entire drive.
+\end{enumerate}
+
+To overcome these liabilities, Hydra implements a complete, native **OpenZFS** enterprise storage engine directly within its microkernel hierarchy. In this chapter, we dissect ZFS pools, Copy-on-Write transactions, Merkle tree checksumming, dnodes, and the Ring~3 storage server architecture.
+
+% ==============================================================================
+\section{The ZFS Pooled Storage Architecture}
+\label{sec:zfs_pools}
+% ==============================================================================
+
+ZFS eliminates the concept of traditional disk partitions. Instead, all available physical storage devices (hard drives, NVMe SSDs, or virtual disk images) are aggregated into a single shared storage pool called a \textbf{zpool} (in Hydra, named \texttt{hydrapool}).
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+    % Datasets
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.5cm, minimum height=0.8cm] (ds1) at (0, 4) {\footnotesize \texttt{hydrapool/root} (\texttt{/})};
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.5cm, minimum height=0.8cm] (ds2) at (4, 4) {\footnotesize \texttt{hydrapool/bin} (\texttt{/bin})};
+    \node[draw=rustkeyword, fill=white, rounded corners, minimum width=2.5cm, minimum height=0.8cm] (ds3) at (8, 4) {\footnotesize \texttt{hydrapool/home} (\texttt{/home})};
+
+    % The Pool
+    \draw[fill=hydrablue!10, draw=hydrablue, line width=1.5pt, rounded corners] (-1.5, 1.6) rectangle (9.5, 3.2);
+    \node[font=\bfseries\sffamily\color{hydrablue}] at (4, 2.7) {Shared Storage Pool: \texttt{hydrapool} (16,384 MiB)};
+    \node[font=\footnotesize\color{hydragray}] at (4, 2.0) {Dynamic Space Allocation, Global Free Space, CoW Transactions};
+
+    % Hardware VDEV
+    \node[draw=hydragold, fill=white, rounded corners, line width=1pt, minimum width=6cm, minimum height=0.8cm] (vdev) at (4, 0.4) {
+        \begin{tabular}{c}
+            \textbf{Virtual Device (vdev):} \texttt{ata-0} (\texttt{hydrapool.vdi} / \texttt{hydrapool.qcow2})
+        \end{tabular}
+    };
+
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (ds1) -- (0, 3.2);
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (ds2) -- (4, 3.2);
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (ds3) -- (8, 3.2);
+    \draw[->, >=Stealth, line width=1.2pt, hydrablue] (4, 1.6) -- (vdev);
+\end{tikzpicture}
+\caption{The OpenZFS Pooled Storage Hierarchy in Hydra.}
+\label{fig:zfs_hierarchy}
+\end{figure}
+
+Datasets draw space dynamically from the common pool. There is no artificial partition boundary; if \texttt{hydrapool} has 10~GB of unallocated space, every dataset can draw from that space on demand.
+
+% ==============================================================================
+\section{The Uberblock Ring and Transaction Groups (TXGs)}
+\label{sec:uberblock_ring}
+% ==============================================================================
+
+In ZFS, the root of all trust on the physical disk is the \textbf{Uberblock}. The uberblock identifies the current transaction group number (\texttt{txg}), the physical location of the space maps, and the root dnode pointing to the Master Node Object.
+
+To prevent write failures from corrupting the uberblock, ZFS reserves blocks 1 through 32 of each vdev as an **Uberblock Ring**:
+\begin{equation}
+\text{Uberblock Slot Index} = \text{TXG} \pmod{32}
+\end{equation}
+
+When Hydra boots, the ZFS server scans all 32 slots, validates each slot's checksum, and selects the uberblock with the highest valid \texttt{TXG} number.
+
+\begin{lstlisting}[language=Rust, caption={Scanning the Uberblock Ring in Hydra (\texttt{src/fs/zfs/mod.rs})}]
+let mut best_uberblock: Option<Uberblock> = None;
+for slot in 0..32 {
+    let block_offset = (1 + slot) * BLOCK_SIZE;
+    let raw_bytes = ata_driver.read_block(block_offset)?;
+    if let Ok(ub) = Uberblock::decode(&raw_bytes) {
+        if ub.magic == UBERBLOCK_MAGIC && ub.verify_checksum() {
+            if best_uberblock.as_ref().map_or(true, |best| ub.txg > best.txg) {
+                best_uberblock = Some(ub);
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{Copy-on-Write (CoW) and Merkle Tree Self-Healing}
+\label{sec:cow_merkle}
+% ==============================================================================
+
+ZFS never overwrites existing data blocks in place. When a write occurs:
+\begin{enumerate}
+    \item A new physical block is allocated from the free space bitmap.
+    \item The modified data is written to the new block.
+    \item The parent indirect block is updated to point to the new block, and its own cryptographic checksum (Fletcher-4 or SHA-256) is recalculated.
+    \item This bubbling-up process continues all the way to the top of the tree, culminating in writing a new Uberblock in the next slot of the Uberblock Ring.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+    % Old tree
+    \node[draw=hydragray, fill=white, rounded corners] (ub_old) at (2, 5) {Old Uberblock (TXG $N$)};
+    \node[draw=hydragray, fill=white, rounded corners] (meta_old) at (2, 3.5) {Metadata Block (Checksum $A$)};
+    \node[draw=hydragray, fill=white, rounded corners] (data_old) at (2, 2) {Data Block (Checksum $X$)};
+    \draw[->, >=Stealth, hydragray] (ub_old) -- (meta_old);
+    \draw[->, >=Stealth, hydragray] (meta_old) -- (data_old);
+
+    % New tree
+    \node[draw=rustkeyword, fill=white, line width=1.2pt, rounded corners] (ub_new) at (7.5, 5) {New Uberblock (TXG $N+1$)};
+    \node[draw=rustkeyword, fill=white, line width=1.2pt, rounded corners] (meta_new) at (7.5, 3.5) {New Metadata (Checksum $B$)};
+    \node[draw=rustkeyword, fill=white, line width=1.2pt, rounded corners] (data_new) at (7.5, 2) {New Data Block (Checksum $Y$)};
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (ub_new) -- (meta_new);
+    \draw[->, >=Stealth, line width=1.2pt, rustkeyword] (meta_new) -- (data_new);
+
+    % Arrow indicating transition
+    \draw[->, >=Stealth, dashed, line width=1.5pt, hydragold] (3.6, 5) -- node[above] {\small Atomic Switch} (5.6, 5);
+\end{tikzpicture}
+\caption{Copy-on-Write (CoW) State Transition in ZFS.}
+\label{fig:zfs_cow}
+\end{figure}
+
+Because the new tree is completely written to disk before the new uberblock is committed, **ZFS is crash-consistent by design**. A power outage mid-transaction simply abandons the partially written unreferenced blocks; on reboot, the system safely mounts the previous valid TXG without corruption.
+
+% ==============================================================================
+\section{Dnodes and the ZFS POSIX Layer (ZPL)}
+\label{sec:dnodes}
+% ==============================================================================
+
+In ZFS, every file, directory, and dataset is represented by a **dnode** (the ZFS equivalent of an inode). A standard dnode occupies 512 bytes:
+\begin{lstlisting}[language=Rust, caption={ZFS Dnode Structure in Hydra (\texttt{src/fs/zfs/types.rs})}]
+#[repr(C)]
+pub struct DNodePhys {
+    pub dnode_type: u8,        // DMU object type (e.g., ZPL_FILE, ZPL_DIR)
+    pub indblkshift: u8,       // Indirect block shift
+    pub nlevels: u8,           // Indirection depth (0 = direct blocks)
+    pub nblkptr: u8,           // Number of direct block pointers
+    pub bonus_type: u8,        // Bonus buffer type
+    pub checksum: u8,          // Checksum algorithm (Fletcher-4)
+    pub compress: u8,          // Compression type (LZ4 / ZSTD / Off)
+    pub flags: u8,             // Dnode flags
+    pub data_blk_size_sec: u16,// Data block size in sectors
+    pub max_blkid: u64,        // Highest logical block ID
+    pub blkptr: [BlockPointer; 3], // Direct block pointers
+    pub bonus: [u8; 320],      // Bonus buffer: POSIX mode, UID, GID, size
+}
+\end{lstlisting}
+
+% ==============================================================================
+\section{The Microkernel Storage Server Hierarchy}
+\label{sec:storage_server}
+% ==============================================================================
+
+In accordance with microkernel design principles, Hydra divides the storage subsystem into three strictly segregated layers:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{llll}
+\toprule
+\textbf{Component} & \textbf{Ring Mode} & \textbf{Endpoint} & \textbf{Primary Responsibility} \\
+\midrule
+\texttt{ata\_driver} & Ring 3 Process & \texttt{0x21} & ATA controller registers, Bus-Master DMA, PRD tables \\
+\texttt{zfs\_server} & Ring 3 Process & \texttt{0x20} & TXG management, space maps, dnode walks, Fletcher-4 \\
+\texttt{ZfsClient} / VFS & Kernel / Lib & N/A & Path resolution, file descriptors, POSIX syscall shims \\
+\bottomrule
+\end{tabular}
+\caption{The Three-Tier Storage Server Hierarchy in Hydra.}
+\label{tab:storage_layers}
+\end{table}
+
+When an application calls \texttt{read(fd, buf, count)}, the request passes through \texttt{ZfsClient}, which transmits a structured request over IPC Endpoint \texttt{0x20} to \texttt{zfs\_server}. If the requested dnode block is not cached in RAM, \texttt{zfs\_server} sends an IPC sector read request over Endpoint \texttt{0x21} to \texttt{ata\_driver}, which programs the PCI bus-master DMA controller to stream raw disk sectors into physical memory.
+
+% ==============================================================================
+\section{Summary}
+\label{sec:zfs_summary}
+% ==============================================================================
+
+Hydra’s adoption of OpenZFS represents a qualitative leap over classic educational operating system file systems:
+\begin{itemize}
+    \item Pooled storage unifies physical devices and eliminates static partition boundaries.
+    \item The 32-slot Uberblock Ring and Copy-on-Write transaction model provide mathematical crash-resilience.
+    \item Fletcher-4 checksumming embedded in block pointers guarantees detection and isolation of silent data corruption.
+    \item Separating raw disk I/O (\texttt{ata\_driver}) from file system logic (\texttt{zfs\_server}) maintains the microkernel principle of least privilege.
+\end{itemize}

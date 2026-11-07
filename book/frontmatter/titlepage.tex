@@ -1,0 +1,39 @@
+\begin{titlepage}
+\begin{center}
+    \vspace*{2cm}
+    
+    {\Huge\sffamily\bfseries\color{hydrablue} HYDRA}\\[0.5cm]
+    {\Huge\sffamily\bfseries\color{hydrablue} DESIGN AND IMPLEMENTATION}\\[1.5cm]
+    
+    {\Large\sffamily\color{hydragold}\textbf{A Modern Microkernel Operating System in Rust}}\\[2.5cm]
+    
+    \begin{tikzpicture}
+        % Stylized multi-headed hydra microkernel symbol
+        \node[circle, draw=hydrablue, line width=2pt, fill=hydralight, minimum size=3.2cm] (core) at (0,0) {
+            \begin{tabular}{c}
+                \textbf{\sffamily HYDRA}\\[-2pt]
+                \small\textsc{Ring 0}\\[-2pt]
+                \footnotesize Microkernel
+            \end{tabular}
+        };
+        
+        \node[rectangle, rounded corners, draw=rustred, fill=white, line width=1.2pt, minimum width=2.2cm, minimum height=0.9cm] (zfs) at (-3, 2.2) {\footnotesize ZFS Server};
+        \node[rectangle, rounded corners, draw=rustkeyword, fill=white, line width=1.2pt, minimum width=2.2cm, minimum height=0.9cm] (net) at (3, 2.2) {\footnotesize Net Driver};
+        \node[rectangle, rounded corners, draw=hydragold, fill=white, line width=1.2pt, minimum width=2.2cm, minimum height=0.9cm] (ata) at (-3, -2.2) {\footnotesize ATA Driver};
+        \node[rectangle, rounded corners, draw=hydragray, fill=white, line width=1.2pt, minimum width=2.2cm, minimum height=0.9cm] (disp) at (3, -2.2) {\footnotesize Display Server};
+        \node[rectangle, rounded corners, draw=hydrablue, fill=white, line width=1.2pt, minimum width=2.6cm, minimum height=0.9cm] (posix) at (0, 3.2) {\footnotesize Linux ABI / Plasma};
+
+        \draw[<->, >=Stealth, line width=1.2pt, rustred] (core) -- (zfs);
+        \draw[<->, >=Stealth, line width=1.2pt, rustkeyword] (core) -- (net);
+        \draw[<->, >=Stealth, line width=1.2pt, hydragold] (core) -- (ata);
+        \draw[<->, >=Stealth, line width=1.2pt, hydragray] (core) -- (disp);
+        \draw[<->, >=Stealth, line width=1.2pt, hydrablue] (core) -- (posix);
+    \end{tikzpicture}
+    
+    \vfill
+    
+    {\large\sffamily Inspired by the classic works of \textbf{Andrew S. Tanenbaum}}\\[1.0cm]
+    
+    \textsf{\today}
+\end{center}
+\end{titlepage}

@@ -1,0 +1,37 @@
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+
+In 1987, Andrew S. Tanenbaum published \textit{Operating Systems: Design and Implementation}. Accompanied by MINIX, a teaching operating system written in C for the original IBM PC, the book fundamentally altered computer science education. For the first time, students were not forced to study operating systems purely as abstract mathematical models of queuing networks, nor were they overwhelmed by hundreds of thousands of lines of convoluted industrial code. Instead, they could read a real, running operating system from beginning to end, study every system call, and understand how hardware transitions into software.
+
+However, the computing landscape has transformed radically since the late 1980s:
+\begin{enumerate}
+    \item \textbf{Architectural Modernization:} The 16-bit real-mode x86 processors of MINIX~1 and 32-bit protected-mode x86 of MINIX~3 have been superseded by 64-bit multi-core architectures (x86\_64 Long Mode), UEFI firmware, Advanced Programmable Interrupt Controllers (APIC), PCI Express, and high-performance direct memory access (DMA).
+    \item \textbf{Language Safety:} C remains ubiquitous, yet forty years of empirical evidence shows that over 70\% of critical operating system vulnerabilities stem from memory-safety errors: buffer overflows, use-after-free, double frees, and data races. The advent of \textbf{Rust} proves that bare-metal performance and zero-cost abstractions can coexist with strict, compiler-enforced memory safety and thread safety.
+    \item \textbf{Storage Demands:} Classic file systems (like the MINIX V1/V2 file system or original UNIX FFS) lack data integrity guarantees. Modern production systems demand transactional, Copy-on-Write (CoW) enterprise storage pools with cryptographic Merkle tree verification, such as \textbf{OpenZFS}.
+    \item \textbf{Application Compatibility:} A pure microkernel operating system with an esoteric API often languishes in isolation because porting modern software is prohibitively expensive. To be genuinely useful, a modern microkernel must be capable of hosting modern userland workloads—including dynamic linkers, Wayland display servers, desktop environments (KDE Plasma), and full web browsers (Brave, Chromium)—without compromising its core isolation principles.
+\end{end}
+
+\section*{What is Hydra?}
+
+\textbf{Hydra} is a from-scratch, modern, capability-oriented microkernel operating system written in Rust for the x86\_64 architecture. It borrows its philosophical foundation from Tanenbaum's MINIX: keep the Ring~0 privileged supervisor as small and verifiable as possible, while pushing device drivers, storage engines, network stacks, and display servers out into isolated Ring~3 user-space processes.
+
+At the same time, Hydra introduces several major advancements:
+\begin{itemize}
+    \item \textbf{Pure Rust Microkernel Core:} The Ring~0 kernel is built with safe Rust abstractions wherever possible, isolating unsafe assembly instructions (like context switching and CR3 page table manipulations) behind bulletproof, type-checked boundaries.
+    \item \textbf{Enterprise OpenZFS Storage Engine:} Hydra incorporates a native OpenZFS implementation directly into its storage hierarchy, featuring pooled storage (\texttt{hydrapool}), 64-bit object sets (dnodes), Copy-on-Write transactions, and Fletcher-4 checksumming.
+    \item \textbf{Isolated Ring~3 Drivers:} Hardware device drivers (ATA/IDE bus-master DMA, Intel 82540EM Gigabit NIC, and graphics display servers) run as distinct Ring~3 processes communicating through synchronous IPC endpoints.
+    \item \textbf{Linux Binary Compatibility Subsystem:} Hydra provides an in-kernel Linux ABI layer that intercepts x86\_64 \texttt{syscall} invocations, implements POSIX process and virtual filesystem semantics, and runs unmodified upstream Linux binaries—from GNU coreutils and Python to the SDDM display manager, KWin Wayland compositor, and KDE Plasma 6.
+\end{itemize}
+
+\section*{Structure of the Book}
+
+Following the pedagogical tradition of Tanenbaum, this textbook is structured to take you from foundational principles to concrete, line-by-line implementation:
+
+\begin{itemize}
+    \item \textbf{Part I: Foundations \& Microkernel Architecture} (Chapters 1--3) explores the philosophy of operating systems, microkernel versus monolithic designs, x86\_64 bootstrap, preemptive process scheduling, thread control blocks, IPC rendezvous mechanics, and 4-level PML4 virtual memory management.
+    \item \textbf{Part II: Storage, I/O \& Networking} (Chapters 4--6) examines the design of modern file systems with a complete dissection of Hydra's OpenZFS pool and transaction subsystem, followed by driver isolation principles, bus-master DMA, and the network protocol pipeline.
+    \item \textbf{Part III: Subsystems, Compatibility \& Security} (Chapters 7--9) covers the Linux binary compatibility layer, dynamic ELF loading, the Wayland graphics pipeline, capability-based security, Rust-enforced guarantees, and an annotated walkthrough of the entire Hydra codebase.
+    \item \textbf{Appendices} provide practical guides for compiling Hydra with Cargo, setting up bootable UEFI media in VirtualBox and QEMU, and a complete system call and hardware reference.
+\end{itemize}
+
+This book is intended for undergraduate and graduate computer science students, operating system developers, embedded systems engineers, and curious Rust enthusiasts who want to understand how a modern computer system really works from the hardware up.
