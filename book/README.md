@@ -62,3 +62,4 @@ latexmk -pdf -synctex=1 main.tex
 
 ### Using Overleaf / TeX Live / MiKTeX
 Simply open or upload the `book/` directory to Overleaf or open `main.tex` in TeXstudio / VS Code with LaTeX Workshop. Set `main.tex` as the root document.
+

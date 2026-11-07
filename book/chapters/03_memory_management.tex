@@ -31,7 +31,7 @@ Every page table at each level consists of exactly 512 entries (\texttt{u64}), o
 \begin{tikzpicture}[scale=0.82, every node/.style={transform shape}]
     % Virtual Address decomposition
     \node[draw=hydrablue, fill=hydralight, font=\small\sffamily, minimum width=13cm, minimum height=0.8cm] (va) at (6.5, 6) {
-        \begin{tabular}{c|c|c|c|c}
+        \begin{tabular}{c|c|c|c|c|c}
             Sign Extension (16b) & PML4 Index (9b) & PDPT Index (9b) & PD Index (9b) & PT Index (9b) & Offset (12b) \\
             \texttt{[63:48]} & \texttt{[47:39]} & \texttt{[38:30]} & \texttt{[29:21]} & \texttt{[20:12]} & \texttt{[11:0]}
         \end{tabular}
@@ -83,7 +83,7 @@ bitflags::bitflags! {
 Before an operating system can allocate virtual pages, it must track which physical memory frames are free and which are reserved by motherboard hardware, ACPI tables, and video memory.
 
 During early boot, Hydra queries the UEFI firmware for its system memory map:
-\begin{lstlisting}[language=Rust, caption={Capturing Physical Frames from UEFI (\texttt{src/arch/boot_services.rs})}]
+\begin{lstlisting}[language=Rust, caption={Capturing Physical Frames from UEFI (\texttt{src/arch/boot\_services.rs})}]
 let memory_map = uefi_boot_services.get_memory_map()?;
 for descriptor in memory_map.entries() {
     if descriptor.ty == MemoryType::CONVENTIONAL {
@@ -157,3 +157,4 @@ In this chapter, we reviewed the memory management foundation of Hydra:
     \item Page faults (\#PF) drive demand paging and lazy Copy-on-Write page duplication.
     \item POSIX \texttt{mmap} and shared memory support enable high-performance graphical compositing and large-scale application runtimes.
 \end{itemize}
+

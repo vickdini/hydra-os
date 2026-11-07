@@ -9,7 +9,7 @@ However, the computing landscape has transformed radically since the late 1980s:
     \item \textbf{Language Safety:} C remains ubiquitous, yet forty years of empirical evidence shows that over 70\% of critical operating system vulnerabilities stem from memory-safety errors: buffer overflows, use-after-free, double frees, and data races. The advent of \textbf{Rust} proves that bare-metal performance and zero-cost abstractions can coexist with strict, compiler-enforced memory safety and thread safety.
     \item \textbf{Storage Demands:} Classic file systems (like the MINIX V1/V2 file system or original UNIX FFS) lack data integrity guarantees. Modern production systems demand transactional, Copy-on-Write (CoW) enterprise storage pools with cryptographic Merkle tree verification, such as \textbf{OpenZFS}.
     \item \textbf{Application Compatibility:} A pure microkernel operating system with an esoteric API often languishes in isolation because porting modern software is prohibitively expensive. To be genuinely useful, a modern microkernel must be capable of hosting modern userland workloads—including dynamic linkers, Wayland display servers, desktop environments (KDE Plasma), and full web browsers (Brave, Chromium)—without compromising its core isolation principles.
-\end{end}
+\end{enumerate}
 
 \section*{What is Hydra?}
 
@@ -35,3 +35,4 @@ Following the pedagogical tradition of Tanenbaum, this textbook is structured to
 \end{itemize}
 
 This book is intended for undergraduate and graduate computer science students, operating system developers, embedded systems engineers, and curious Rust enthusiasts who want to understand how a modern computer system really works from the hardware up.
+
