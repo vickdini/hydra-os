@@ -219,6 +219,13 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         if super::landlock::check_at(&abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
             return EACCES;
         }
+        // fanotify: FAN_OPEN_EXEC_PERM (a listener may refuse), FAN_OPEN_EXEC
+        if super::fanotify::active() {
+            let dir = super::fanotify::parent_of_path(&abs_path);
+            if let Err(e) = super::fanotify::on_open(ino, dir, &abs_path, false, true) {
+                return e;
+            }
+        }
         let source = match super::mm::inode_source(ino) {
             Ok(s) => s,
             Err(e) => return e,

@@ -1147,9 +1147,16 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     }
     let keep = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
     // The path as reached (a mapped proc mount shows where it is mounted, as on Linux)
+    // fanotify: permission events, then FAN_OPEN
+    let fan_dir = if super::fanotify::active() && flags & O_PATH == 0 { super::fanotify::parent_of_path(&raw) } else { 0 };
+    if super::fanotify::active() && flags & O_PATH == 0 {
+        super::fanotify::on_open(ino, fan_dir, &raw, ftype == S_IFDIR, false)?;
+    }
     let file = OpenFile::new(ino, keep, raw);
     file.lock().mnt = super::mount::last_mount();
     file.lock().no_truncate = no_truncate;
+    file.lock().fan_dir = fan_dir;
+    file.lock().is_dir = ftype == S_IFDIR;
     install(FileDescriptor::Vnode(file), flags)
 }
 
@@ -1989,6 +1996,11 @@ fn statfs_out(ptr: u64, magic: i64) -> i64 {
     for (i, v) in vals.iter().enumerate() {
         b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
     }
+    if magic == ZFS_SUPER_MAGIC {
+        // f_fsid: the pool's (fanotify reports it in file handle records)
+        b[56..60].copy_from_slice(&super::fanotify::POOL_FSID[0].to_le_bytes());
+        b[60..64].copy_from_slice(&super::fanotify::POOL_FSID[1].to_le_bytes());
+    }
     b[64..72].copy_from_slice(&255i64.to_le_bytes()); // f_namelen
     b[72..80].copy_from_slice(&4096i64.to_le_bytes()); // f_frsize
     match copy_out(ptr, &b) {
@@ -2620,7 +2632,8 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::EventFd(e) => super::eventfd::read(e, buf),
                 FileDescriptor::TimerFd(t) => t.read(buf),
                 FileDescriptor::Inotify(i) => i.read(buf),
-                FileDescriptor::Device(d) => d.read(buf),
+                // Devices whose reads install descriptors (fanotify) have their own read
+                FileDescriptor::Device(d) => d.read_unlocked(buf).unwrap_or_else(|| d.read(buf)),
                 _ => super::tty::read(buf, super::tty::nonblock()),
             }
         } else {

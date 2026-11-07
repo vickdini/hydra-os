@@ -189,6 +189,17 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// `read` outside the descriptor table's lock (a device whose reads install
+    /// descriptors, like fanotify's); `None` to read the usual way.
+    fn read_unlocked(&self, _buf: &mut [u8]) -> Option<i64> {
+        None
+    }
+
+    /// The fanotify group behind this descriptor, if it is one.
+    fn as_fanotify(&self) -> Option<Arc<super::fanotify::Group>> {
+        None
+    }
+
     /// The new mount API's object behind this descriptor, if it is one.
     fn as_mount_obj(&self) -> Option<&super::mount::MountObj> {
         None

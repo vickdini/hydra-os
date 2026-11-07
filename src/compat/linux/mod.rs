@@ -25,6 +25,7 @@ pub mod execve;
 pub mod mm;
 pub mod mount;
 pub mod extra;
+pub mod fanotify;
 pub mod keys;
 pub mod landlock;
 pub mod mqueue;
@@ -146,6 +147,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     match num {
         317 => return seccomp::sys_seccomp(arg0, arg1, arg2),
         101 => return ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
+        // fanotify_init, fanotify_mark, open_by_handle_at
+        300 | 301 => return fanotify::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
+        304 => return fanotify::open_by_handle_at(arg0, arg1, arg2),
         // io_uring_setup, io_uring_enter, io_uring_register
         425..=427 => return io_uring::dispatch(frame, num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // landlock_create_ruleset, landlock_add_rule, landlock_restrict_self

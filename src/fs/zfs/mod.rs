@@ -141,11 +141,12 @@ impl ZfsServer {
             return Err(EIO);
         }
         let events = reply.args[3] as usize;
-        if events > 0 && crate::compat::linux::inotify::active() {
+        if events > 0 && (crate::compat::linux::inotify::active() || crate::compat::linux::fanotify::active()) {
             let mut r = Reader::new(&window[EVENT_OFFSET..EVENT_OFFSET + EVENT_SPACE]);
             for _ in 0..events {
                 let e = r.event();
                 crate::compat::linux::inotify::event(e.ino, e.mask, e.cookie, &e.name);
+                crate::compat::linux::fanotify::fs_event(e.ino, e.mask, &e.name);
             }
         }
         match reply.args[0] as i64 {

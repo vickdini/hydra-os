@@ -70,6 +70,12 @@ pub struct OpenFile {
     pub mnt: usize,
     /// Landlock refused `TRUNCATE` when it was opened (`ftruncate` fails with `EACCES`).
     pub no_truncate: bool,
+    /// Makes no fanotify events (a descriptor fanotify gave its reader).
+    pub nonotify: bool,
+    /// For fanotify: the directory it was opened in (0: unknown).
+    pub fan_dir: u64,
+    /// Whether it is a directory (fanotify reports `FAN_ONDIR`).
+    pub is_dir: bool,
 }
 
 impl OpenFile {
@@ -86,7 +92,14 @@ impl OpenFile {
     /// A reference-counted `Arc<Mutex<OpenFile>>` initialized at byte offset `0`.
     pub fn new(ino: u64, flags: u32, path: String) -> Arc<Mutex<Self>> {
         ZfsClient::open_ref(ino);
-        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0, no_truncate: false }))
+        Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0, no_truncate: false, nonotify: false, fan_dir: 0, is_dir: false }))
+    }
+
+    /// Reports a file event (`FAN_ACCESS`, `FAN_MODIFY`, `FAN_CLOSE_*`) to fanotify.
+    pub fn fan(&self, mask: u64) {
+        if crate::compat::linux::fanotify::active() && !self.nonotify && self.flags & O_PATH == 0 {
+            crate::compat::linux::fanotify::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
+        }
     }
 
     /// Checks whether this open file description permits read operations.
@@ -111,6 +124,7 @@ impl OpenFile {
 impl Drop for OpenFile {
     /// Drops the open file reference, notifying ZFS if write access was enabled and releasing the inode handle.
     fn drop(&mut self) {
+        self.fan(if self.writable() { crate::compat::linux::fanotify::FAN_CLOSE_WRITE } else { crate::compat::linux::fanotify::FAN_CLOSE_NOWRITE });
         if self.writable() {
             ZfsClient::notify_close_write(self.ino);
         }
@@ -329,6 +343,9 @@ impl FileDescriptor {
                 }
                 let n = ZfsClient::read_at(f.ino, f.offset, buf).map_err(|_| "ZFS read error")?;
                 f.offset += n as u64;
+                if n > 0 {
+                    f.fan(crate::compat::linux::fanotify::FAN_ACCESS);
+                }
                 Ok(n)
             }
             FileDescriptor::File { path, cursor, readable, .. } => {
@@ -367,7 +384,11 @@ impl FileDescriptor {
             }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
-                ZfsClient::read_at(ino, offset as u64, buf).map_err(|_| "ZFS read error")
+                let n = ZfsClient::read_at(ino, offset as u64, buf).map_err(|_| "ZFS read error")?;
+                if n > 0 {
+                    file.lock().fan(crate::compat::linux::fanotify::FAN_ACCESS);
+                }
+                Ok(n)
             }
             FileDescriptor::File { path, .. } => read_path_at(path, offset, buf),
             _ => Err("Descriptor is not seekable"),
@@ -399,7 +420,11 @@ impl FileDescriptor {
             }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
-                ZfsClient::write_at(ino, offset as u64, data).map_err(|_| "ZFS write error")
+                let n = ZfsClient::write_at(ino, offset as u64, data).map_err(|_| "ZFS write error")?;
+                if n > 0 {
+                    file.lock().fan(crate::compat::linux::fanotify::FAN_MODIFY);
+                }
+                Ok(n)
             }
             FileDescriptor::File { path, .. } => write_path_at(path, Some(offset), data).map(|(n, _)| n),
             _ => Err("Descriptor is not seekable"),
@@ -485,6 +510,9 @@ impl FileDescriptor {
                 }
                 let n = ZfsClient::write_at(f.ino, f.offset, data).map_err(|_| "ZFS write error")?;
                 f.offset += n as u64;
+                if n > 0 {
+                    f.fan(crate::compat::linux::fanotify::FAN_MODIFY);
+                }
                 Ok(n)
             }
             FileDescriptor::File { path, cursor, writable, append, .. } => {

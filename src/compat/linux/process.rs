@@ -436,7 +436,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             0 | 3 | 5 => 0,
             _ => EINVAL,
         },
-        303 => -95, // name_to_handle_at: EOPNOTSUPP (callers fall back to fdinfo)
+        303 => super::fanotify::name_to_handle_at(a[0], a[1], a[2], a[3], a[4]),
         125 => {
             // capget: root holds every capability, other users none
             let version = match super::vfs::copy_in(a[0], 4) {
