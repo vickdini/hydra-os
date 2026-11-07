@@ -199,7 +199,7 @@ fn snapshot(tgid: Option<u64>, inherit: bool) -> Counts {
 }
 
 fn now_ns() -> u64 {
-    crate::arch::pit::ticks() * TICK_NS
+    crate::arch::pit::now_ns()
 }
 
 /// A counter.

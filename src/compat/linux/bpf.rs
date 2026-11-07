@@ -653,7 +653,7 @@ impl<'a> Run<'a> {
                 m.delete(&key) as u64
             }
             // ktime_get_ns, ktime_get_boot_ns
-            5 | 125 => crate::arch::pit::ticks() * 10_000_000,
+            5 | 125 => crate::arch::pit::now_ns(),
             // trace_printk: nowhere to print
             6 => 0,
             7 => {

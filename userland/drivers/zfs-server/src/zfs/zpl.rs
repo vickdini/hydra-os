@@ -381,6 +381,7 @@ impl ZfsServer {
             ctime: (dn.ctime, dn.ctime_ns),
             generation: dn.generation,
             birth_txg: dn.birth_txg,
+            has_xattr: dn.flags & DNODE_FLAG_XATTR != 0 && dn.mode & S_IFMT != S_IFLNK,
         })
     }
 
@@ -790,8 +791,8 @@ impl ZfsServer {
     ///
     /// # Returns
     /// Number of bytes written on success, or `Err(EFBIG)` / `Err(EISDIR)`.
-    pub fn write(&mut self, ino: u64, offset: u64, data: &[u8]) -> ZplResult<usize> {
-        let dn = self.dnode(ino)?;
+    pub fn write(&mut self, ino: u64, offset: u64, data: &[u8], kill_suid: Option<&[u32]>) -> ZplResult<usize> {
+        let mut dn = self.dnode(ino)?;
         if dn.mode & S_IFMT == S_IFDIR {
             return Err(EISDIR);
         }
@@ -800,6 +801,16 @@ impl ZfsServer {
         }
         if dn.flags & DNODE_FLAG_XATTR != 0 {
             self.kill_caps(ino)?;
+            dn = self.dnode(ino)?;
+        }
+        // A writer without CAP_FSETID drops set-user-ID, and set-group-ID with group execute
+        if let Some(groups) = kill_suid {
+            let kept = (dn.mode & !0o7777) | super::fsproto::suid_killed(dn.mode & 0o7777, dn.gid, groups);
+            if kept != dn.mode {
+                dn.mode = kept;
+                self.dmu.put_dnode(ino, dn);
+                self.notify_file(ino, crate::compat::linux::inotify::IN_ATTRIB);
+            }
         }
         let n = self.dmu.write(ino, offset, data).map_err(io)?;
         self.touch(ino, true, true)?;
@@ -847,6 +858,13 @@ impl ZfsServer {
         if let Some((s, ns)) = set.mtime {
             dn.mtime = s;
             dn.mtime_ns = ns;
+        }
+        // chown: set-user-ID goes, and set-group-ID with group execute
+        if set.kill_suid && dn.mode & S_IFMT != S_IFDIR {
+            dn.mode &= !0o4000;
+            if dn.mode & 0o2010 == 0o2010 {
+                dn.mode &= !0o2000;
+            }
         }
         let t = now();
         dn.ctime = t.0;

@@ -150,9 +150,7 @@ pub fn init() {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn now() -> (u64, u32) {
-    let ticks = crate::arch::pit::ticks();
-    let freq = crate::arch::pit::frequency_hz().max(1);
-    let base = BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + (ticks as i128 * 1_000_000_000) / freq as i128;
+    let base = BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + crate::arch::pit::now_ns() as i128;
     let t = (base + OFFSET_NS.load(Ordering::Relaxed) as i128).max(0);
     ((t / 1_000_000_000) as u64, (t % 1_000_000_000) as u32)
 }

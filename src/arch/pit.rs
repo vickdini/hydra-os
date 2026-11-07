@@ -75,7 +75,53 @@ pub fn init(frequency_hz: u32) {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn on_timer_tick() {
+    // The time stamp counter at this tick, and the long-run cycles per tick (all cycles
+    // since the first tick over the ticks since: bursts of late ticks do not skew it)
+    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    LAST_TICK_TSC.store(now, Ordering::Relaxed);
+    let first = FIRST_TICK_TSC.load(Ordering::Relaxed);
+    let ticks = TICKS.load(Ordering::Relaxed);
+    if first == 0 {
+        FIRST_TICK_TSC.store(now, Ordering::Relaxed);
+        FIRST_TICK.store(ticks, Ordering::Relaxed);
+    } else {
+        let n = ticks - FIRST_TICK.load(Ordering::Relaxed);
+        if n >= 10 && now > first {
+            CYCLES_PER_TICK.store((now - first) / n, Ordering::Relaxed);
+        }
+    }
     TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Time stamp counter value at the last tick.
+static LAST_TICK_TSC: AtomicU64 = AtomicU64::new(0);
+/// Time stamp counter and tick count at the first tick seen.
+static FIRST_TICK_TSC: AtomicU64 = AtomicU64::new(0);
+static FIRST_TICK: AtomicU64 = AtomicU64::new(0);
+/// Measured time stamp counter cycles per tick (0 for the first ten ticks).
+static CYCLES_PER_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since boot, with sub-tick resolution: the tick count plus the time stamp
+/// counter's progress since the last tick, kept below the next tick (so the result never
+/// passes the tick clock that timers use, and never goes backwards).
+pub fn now_ns() -> u64 {
+    let freq = frequency_hz().max(1);
+    let period = 1_000_000_000 / freq;
+    loop {
+        let t1 = TICKS.load(Ordering::Relaxed);
+        let last = LAST_TICK_TSC.load(Ordering::Relaxed);
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        if TICKS.load(Ordering::Relaxed) != t1 {
+            continue; // a tick came in between
+        }
+        let base = t1 * period;
+        let cpt = CYCLES_PER_TICK.load(Ordering::Relaxed);
+        if cpt == 0 || last == 0 || tsc < last {
+            return base;
+        }
+        let sub = ((tsc - last) as u128 * period as u128 / cpt as u128) as u64;
+        return base + sub.min(period - 1);
+    }
 }
 
 /// Checks whether the PIT hardware timer has been activated.

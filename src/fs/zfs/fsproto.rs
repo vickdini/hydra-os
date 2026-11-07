@@ -169,6 +169,8 @@ pub struct Attr {
     pub generation: u64,
     /// Transaction group in which this inode was created.
     pub birth_txg: u64,
+    /// The inode has extended attributes (so possibly an ACL).
+    pub has_xattr: bool,
 }
 
 impl Attr {
@@ -191,6 +193,17 @@ impl Attr {
     }
 }
 
+/// `mode` after a write or truncation by a task lacking `CAP_FSETID` with `groups`:
+/// without set-user-ID, and without set-group-ID if group execute is set or the file's
+/// group `gid` is not one of the writer's (Linux's `setattr_should_drop_sgid`).
+pub fn suid_killed(mode: u32, gid: u32, groups: &[u32]) -> u32 {
+    let mut m = mode & !0o4000;
+    if m & 0o2000 != 0 && (m & 0o010 != 0 || !groups.contains(&gid)) {
+        m &= !0o2000;
+    }
+    m
+}
+
 /// Attribute changes for `setattr`; `None` leaves a field unchanged.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SetAttr {
@@ -206,6 +219,9 @@ pub struct SetAttr {
     pub atime: Option<(i64, u32)>,
     /// Optional updated modification time (seconds, nanoseconds).
     pub mtime: Option<(i64, u32)>,
+    /// Clear set-user-ID, and set-group-ID if group execute is set (non-directories): a
+    /// chown, or a truncation by a caller without `CAP_FSETID`.
+    pub kill_suid: bool,
 }
 
 /// One entry returned by `readdir`.
@@ -349,7 +365,7 @@ impl<'a> Writer<'a> {
     /// `true` if all attributes were written successfully, `false` otherwise.
     pub fn attr(&mut self, a: &Attr) -> bool {
         self.u64(a.ino)
-            && self.u64(a.mode as u64 | (a.nlink as u64) << 32)
+            && self.u64((a.mode | (a.has_xattr as u32) << 31) as u64 | (a.nlink as u64) << 32)
             && self.u64(a.uid as u64 | (a.gid as u64) << 32)
             && self.u64(a.rdev)
             && self.u64(a.size)
@@ -387,7 +403,8 @@ impl<'a> Writer<'a> {
             | (s.gid.is_some() as u64) << 2
             | (s.size.is_some() as u64) << 3
             | (s.atime.is_some() as u64) << 4
-            | (s.mtime.is_some() as u64) << 5;
+            | (s.mtime.is_some() as u64) << 5
+            | (s.kill_suid as u64) << 6;
         self.u64(mask)
             && self.u64(s.mode.unwrap_or(0) as u64)
             && self.u64(s.uid.unwrap_or(0) as u64)
@@ -485,7 +502,8 @@ impl<'a> Reader<'a> {
         let ids = self.u64();
         Attr {
             ino,
-            mode: mode_nlink as u32,
+            mode: mode_nlink as u32 & 0x7fff_ffff,
+            has_xattr: mode_nlink & (1 << 31) != 0,
             nlink: (mode_nlink >> 32) as u32,
             uid: ids as u32,
             gid: (ids >> 32) as u32,
@@ -516,6 +534,7 @@ impl<'a> Reader<'a> {
             size: (mask & 8 != 0).then_some(size),
             atime: (mask & 16 != 0).then_some(atime),
             mtime: (mask & 32 != 0).then_some(mtime),
+            kill_suid: mask & 64 != 0,
         }
     }
 

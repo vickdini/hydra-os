@@ -355,8 +355,10 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
         return Err(EACCES);
     }
     super::landlock::check_dir(dir, super::landlock::MAKE_SOCK)?;
-    let mode = S_IFSOCK | (0o777 & !umask());
-    zfs(|s| s.mknod(dir, &name, mode, 0, c.euid, c.egid))
+    let (perm, plan) = super::acl::create_mode(dir, 0o777, umask(), false);
+    let ino = zfs(|s| s.mknod(dir, &name, S_IFSOCK | perm, 0, c.euid, c.egid))?;
+    super::acl::inherit(ino, plan);
+    Ok(ino)
 }
 
 /// Resolves a user path to (inode, is a directory) for the caller.
@@ -623,6 +625,9 @@ pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
     if uid == 0 {
         // root may read/write anything and execute anything with an x bit (or a directory)
         return want & 1 == 0 || attr.mode & 0o111 != 0 || attr.is_dir();
+    }
+    if let Some(r) = super::acl::check(attr, uid, gid, want) {
+        return r;
     }
     let bits = if attr.uid == uid {
         (attr.mode >> 6) & 7
@@ -1077,9 +1082,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                     return Err(EACCES);
                 }
                 super::landlock::check_dir(parent, super::landlock::MAKE_REG)?;
-                let perm = mode & 0o7777 & !umask();
+                let (perm, plan) = super::acl::create_mode(parent, mode & 0o7777, umask(), false);
                 created = true;
-                crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?
+                let ino = crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?;
+                super::acl::inherit(ino, plan);
+                ino
             }
             Err(e) => return Err(e),
         }
@@ -1248,8 +1255,21 @@ fn xattr_op(ino: u64, k: u64, name_ptr: u64, value: u64, size: u64, flags: u64) 
     if name.len() == ns.len() {
         return EINVAL;
     }
+    // POSIX ACLs (system.posix_acl_access / _default), see acl.rs; other system.* names
+    // are not supported
+    let acl_kind = match &name[..] {
+        n if n == super::acl::ACCESS => Some(false),
+        n if n == super::acl::DEFAULT => Some(true),
+        _ => None,
+    };
+    if ns == b"system." && acl_kind.is_none() {
+        return if write && k == 0 { EOPNOTSUPP } else { ENODATA };
+    }
+    if let (Some(d), 3) = (acl_kind, k) {
+        return super::acl::remove(&attr, d);
+    }
     match ns {
-        b"system." => return if write && k == 0 { EOPNOTSUPP } else { ENODATA },
+        b"system." => {}
         b"trusted." if !cap(21) => return if write { EPERM } else { ENODATA },
         b"user." => {
             let kind = attr.mode & 0o170000;
@@ -1297,6 +1317,9 @@ fn xattr_op(ino: u64, k: u64, name_ptr: u64, value: u64, size: u64, flags: u64) 
                 if !ok || magic & 0x00ff_fffe != 0 {
                     return EINVAL;
                 }
+            }
+            if let Some(d) = acl_kind {
+                return super::acl::set(&attr, d, &data, flags as u32);
             }
             ZfsClient::setxattr(ino, &name, &data, flags as u32).map_or_else(|e| e, |_| 0)
         }
@@ -2142,6 +2165,8 @@ fn chown_set(uid: u64, gid: u64) -> SetAttr {
     SetAttr {
         uid: if uid as u32 == u32::MAX { None } else { Some(uid as u32) },
         gid: if gid as u32 == u32::MAX { None } else { Some(gid as u32) },
+        // Linux clears the set-ID bits of a non-directory on any chown, root's included
+        kill_suid: true,
         ..SetAttr::default()
     }
 }
@@ -3037,14 +3062,18 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let mask = umask();
             with_parent(dirfd, p, true, |dir, name, c| {
                 super::landlock::check_dir(dir, super::landlock::MAKE_DIR)?;
-                zfs(|s| s.mkdir(dir, name, mode as u32 & 0o7777 & !mask, c.euid, c.egid).map(|_| 0))
+                let (perm, plan) = super::acl::create_mode(dir, mode as u32 & 0o7777, mask, true);
+                let ino = zfs(|s| s.mkdir(dir, name, perm, c.euid, c.egid))?;
+                super::acl::inherit(ino, plan);
+                Ok(0)
             })
         }
         NR_MKNOD | NR_MKNODAT => {
             let (dirfd, p, mode, dev) = if num == NR_MKNOD { (AT_FDCWD, a[0], a[1], a[2]) } else { (a[0] as i64, a[1], a[2], a[3]) };
             let mask = umask();
             with_parent(dirfd, p, true, |dir, name, c| {
-                let mode = (mode as u32 & S_IFMT) | (mode as u32 & 0o7777 & !mask);
+                let (perm, plan) = super::acl::create_mode(dir, mode as u32 & 0o7777, mask, false);
+                let mode = (mode as u32 & S_IFMT) | perm;
                 let devnode = matches!(dtype_from_mode(mode), 2 | 6); // DT_CHR, DT_BLK
                 if devnode && c.euid != 0 {
                     return Err(EPERM);
@@ -3054,7 +3083,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     super::bpf::device_check(kind, dev_major(dev), dev_minor(dev), super::bpf::DEV_MKNOD)?;
                 }
                 super::landlock::check_dir(dir, super::landlock::make_right(mode & S_IFMT))?;
-                zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid).map(|_| 0))
+                let ino = zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid))?;
+                super::acl::inherit(ino, plan);
+                Ok(0)
             })
         }
         NR_SYMLINK | NR_SYMLINKAT => {

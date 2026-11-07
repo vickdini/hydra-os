@@ -111,7 +111,7 @@ static SLEEP_DEADLINES: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = sp
 /// `0` if full duration elapsed, or `-ERESTART_RESTARTBLOCK` if interrupted by a signal.
 fn sleep_until(deadline_ns: u64, rem: u64) -> i64 {
     loop {
-        let now = crate::arch::pit::ticks() * 10_000_000;
+        let now = crate::arch::pit::now_ns();
         if now >= deadline_ns {
             return 0;
         }
@@ -233,14 +233,22 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
         229 => {
-            // clock_getres: 10 ms timer resolution
+            // clock_getres: 1 ns for the clocks read with sub-tick resolution (REALTIME,
+            // MONOTONIC, MONOTONIC_RAW, BOOTTIME and their alarm forms); the tick (10 ms)
+            // for the coarse clocks and for CPU time, which is counted in ticks
+            let res: i64 = match a[0] as i32 {
+                0 | 1 | 4 | 7 | 8 | 9 | 11 => 1,
+                2 | 3 | 5 | 6 => 10_000_000,
+                c if c < 0 => 10_000_000, // per-process / per-thread CPU clocks
+                _ => return Some(EINVAL),
+            };
             if a[1] != 0 {
                 if !crate::memory::vm::prefault_current(a[1], 16, true) {
                     return Some(EFAULT);
                 }
                 unsafe {
                     *(a[1] as *mut i64) = 0;
-                    *((a[1] + 8) as *mut i64) = 10_000_000;
+                    *((a[1] + 8) as *mut i64) = res;
                 }
             }
             0
@@ -275,7 +283,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 Some(ns) => ns,
                 None => return Some(EINVAL),
             };
-            let now = crate::arch::pit::ticks() * 10_000_000;
+            let now = crate::arch::pit::now_ns();
             let deadline = if abs {
                 // CLOCK_REALTIME deadlines are converted to the boot clock
                 if num == NR_CLOCK_NANOSLEEP && a[0] == 0 {

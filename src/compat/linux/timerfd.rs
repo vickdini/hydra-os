@@ -49,7 +49,7 @@ pub struct TimerFd {
 ///
 /// Monotonic time in nanoseconds.
 fn now_ns() -> u64 {
-    crate::arch::pit::ticks() * NS_PER_TICK
+    crate::arch::pit::now_ns()
 }
 
 /// Wall-clock time minus the tick clock (to convert `CLOCK_REALTIME` deadlines).

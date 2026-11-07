@@ -237,14 +237,14 @@ impl ZfsServer {
         let group: &[u8] = b"root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:hydra\nsudo:x:27:hydra\nnogroup:x:65534:\nhydra:x:1000:\n";
         for (name, data) in [(&b"passwd"[..], passwd), (&b"group"[..], group)] {
             let ino = self.create(etc, name, 0o644, 0, 0)?;
-            self.write(ino, 0, data)?;
+            self.write(ino, 0, data, None)?;
         }
         let readme: &[u8] = b"Hydra OS Default Filesystem: OpenZFS Architecture\nIntegrated as an independent Microkernel File Server.\nAll blocks are verified via Fletcher-4 checksums!\n";
         let ino = self.create(bin, b"readme.txt", 0o644, 0, 0)?;
-        self.write(ino, 0, readme)?;
+        self.write(ino, 0, readme, None)?;
         let demo: &[u8] = b"#!/bin/sh\n# Hydra OS Shell Automation Script\necho === Running demo.sh ===\nuname -a\npwd\necho Listing files in /bin:\nls\necho OpenZFS pool status:\ndf -h\necho === Finished demo.sh ===\n";
         let ino = self.create(bin, b"demo.sh", 0o755, 0, 0)?;
-        self.write(ino, 0, demo)?;
+        self.write(ino, 0, demo, None)?;
 
         let datasets_obj = self.dmu.alloc_object(S_IFREG | 0o600).map_err(|_| -5i64)?;
         self.dmu.ub.datasets_obj = datasets_obj;

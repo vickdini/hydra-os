@@ -655,7 +655,14 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
         FS_WRITE => {
             let (ino, off) = (r.u64(), r.u64());
             let data = r.bytes();
-            with_server(|s| s.write(ino, off, data)).map(|n| (n as u64, 0))
+            // A writer without CAP_FSETID: its groups (set-ID bits go)
+            let kill: Option<Vec<u32>> = if r.u64() & 1 != 0 {
+                let n = r.u64().min(64);
+                Some((0..n).map(|_| r.u64() as u32).collect())
+            } else {
+                None
+            };
+            with_server(|s| s.write(ino, off, data, kill.as_deref())).map(|n| (n as u64, 0))
         }
         FS_CREATE | FS_MKDIR => {
             let dir = r.u64();

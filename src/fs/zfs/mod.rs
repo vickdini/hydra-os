@@ -116,6 +116,18 @@ pub fn with_server<R>(f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Resul
     f(&mut ZfsServer { root })
 }
 
+/// For a write or truncation by the calling task: its groups (effective, then
+/// supplementary) if it lacks `CAP_FSETID`, so set-ID bits go (`None`: they stay).
+fn kill_suid() -> Option<alloc::vec::Vec<u32>> {
+    let (fsetid, egid) = crate::task::with_current_task_mut(|t| (t.caps.has(1 << 4), t.egid)).unwrap_or((true, 0));
+    if fsetid {
+        return None;
+    }
+    let mut g = alloc::vec![egid];
+    g.extend(crate::compat::linux::proc::supplementary_groups());
+    Some(g)
+}
+
 impl ZfsServer {
     /// Sends request `op` with the parameters `params` writes; returns `(value, reply
     /// bytes)` and hands the operation's inotify events to the kernel's watchers.
@@ -285,7 +297,15 @@ impl ZfsServer {
     /// # Returns
     ///
     /// The updated [`Attr`] record on success, or a negative errno error code on failure.
-    pub fn setattr(&mut self, ino: u64, set: SetAttr) -> Result<Attr, i64> {
+    pub fn setattr(&mut self, ino: u64, mut set: SetAttr) -> Result<Attr, i64> {
+        // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
+        if let (Some(_), None, Some(groups)) = (set.size, set.mode, if set.size.is_some() { kill_suid() } else { None }) {
+            let a = self.getattr(ino)?;
+            let m = super::zfs::fsproto::suid_killed(a.mode & 0o7777, a.gid, &groups);
+            if m != a.mode & 0o7777 && a.mode & 0o170000 != 0o040000 {
+                set.mode = Some(m);
+            }
+        }
         let (_, len) = self.request(FS_SETATTR, |w| {
             w.u64(ino);
             w.setattr(&set);
@@ -336,10 +356,19 @@ impl ZfsServer {
         let mut done = 0;
         while done < data.len() || data.is_empty() {
             let chunk = &data[done..(done + MAX_IO).min(data.len())];
+            let kill = kill_suid();
             let (n, _) = self.request(FS_WRITE, |w| {
                 w.u64(ino);
                 w.u64(offset + done as u64);
                 w.bytes(chunk);
+                // Set-ID bits go for a writer without CAP_FSETID: its groups decide set-group-ID
+                w.u64(kill.is_some() as u64);
+                if let Some(g) = &kill {
+                    w.u64(g.len().min(64) as u64);
+                    for &x in g.iter().take(64) {
+                        w.u64(x as u64);
+                    }
+                }
             })?;
             done += n as usize;
             if (n as usize) < chunk.len() || data.is_empty() {

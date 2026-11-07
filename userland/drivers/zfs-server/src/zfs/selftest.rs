@@ -109,20 +109,20 @@ fn build(s: &mut ZfsServer) -> Result<(), i64> {
     while off < BIG_FILE_BYTES {
         let n = (BIG_FILE_BYTES - off).min(chunk.len());
         let data: Vec<u8> = (off..off + n).map(pattern).collect();
-        s.write(big, off as u64, &data)?;
+        s.write(big, off as u64, &data, None)?;
         off += n;
     }
 
     // Sparse file: data far past the end leaves a hole
     let sparse = s.create(top, b"sparse.bin", 0o600, 0, 0)?;
-    s.write(sparse, 300 * 1024 * 1024, b"tail")?;
+    s.write(sparse, 300 * 1024 * 1024, b"tail", None)?;
 
     // Many directory entries with long names
     let many = s.mkdir(top, b"many", 0o755, 0, 0)?;
     for i in 0..MANY_FILES {
         let name = format!("entry-{:05}-{}", i, "x".repeat(i % 200));
         let ino = s.create(many, name.as_bytes(), 0o644, 0, 0)?;
-        s.write(ino, 0, format!("file {}", i).as_bytes())?;
+        s.write(ino, 0, format!("file {}", i).as_bytes(), None)?;
     }
     // Remove every third entry to exercise tombstones and slot reuse
     for i in (0..MANY_FILES).step_by(3) {
@@ -136,11 +136,11 @@ fn build(s: &mut ZfsServer) -> Result<(), i64> {
     s.symlink(top, b"link-long", long_target.as_bytes(), 0, 0)?;
     s.link(big, top, b"big-hardlink")?;
     let tmp = s.create(top, b"rename-me", 0o644, 0, 0)?;
-    s.write(tmp, 0, b"renamed contents")?;
+    s.write(tmp, 0, b"renamed contents", None)?;
     let sub = s.mkdir(top, b"sub", 0o750, 0, 0)?;
     s.rename(top, b"rename-me", sub, b"renamed")?;
     let trunc = s.create(top, b"truncated", 0o644, 0, 0)?;
-    s.write(trunc, 0, &[0xAB; 10_000])?;
+    s.write(trunc, 0, &[0xAB; 10_000], None)?;
     s.setattr(trunc, SetAttr { size: Some(5000), ..SetAttr::default() })?;
     s.setattr(trunc, SetAttr { size: Some(8192), ..SetAttr::default() })?;
     Ok(())

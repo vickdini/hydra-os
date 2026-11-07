@@ -581,6 +581,12 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
     0
 }
 
+/// The calling process's supplementary groups.
+pub fn supplementary_groups() -> Vec<u32> {
+    let (_, pid) = current_ids();
+    PROCS.lock().get(&pid).map(|p| p.groups.to_vec()).unwrap_or_default()
+}
+
 /// Checks whether `gid` is present in the calling process's supplementary groups.
 ///
 /// # Arguments

@@ -900,7 +900,13 @@ impl ZfsClient {
     ///
     /// * `Ok(Attr)` - Updated inode attributes, or negative Linux errno on failure.
     pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
-        with_server(|s| s.setattr(ino, set))
+        let attr = with_server(|s| s.setattr(ino, set))?;
+        // A chmod updates the access ACL's owner, mask and other entries
+        if let (Some(mode), true) = (set.mode, attr.has_xattr) {
+            crate::compat::linux::acl::on_chmod(&attr, mode);
+            return with_server(|s| s.getattr(ino));
+        }
+        Ok(attr)
     }
 
     /// Reads up to `buf.len()` bytes from inode `ino` starting at `offset`.

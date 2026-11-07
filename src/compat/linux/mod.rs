@@ -4,6 +4,7 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod acl;
 pub mod admin;
 pub mod aio;
 pub mod bpf;
@@ -1705,8 +1706,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     ((ticks / hz) as i64, ((ticks % hz) * (1_000_000_000 / hz)) as i64)
                 }
                 _ => {
-                    let ticks = crate::arch::pit::ticks();
-                    ((ticks / 100) as i64, ((ticks % 100) * 10_000_000) as i64)
+                    let ns = crate::arch::pit::now_ns();
+                    ((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as i64)
                 }
             };
             unsafe {
