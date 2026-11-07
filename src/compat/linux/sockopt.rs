@@ -25,6 +25,18 @@ const SOL_SOCKET: u32 = 1;
 const IPPROTO_IP: u32 = 0;
 const IPPROTO_TCP: u32 = 6;
 const IPPROTO_UDP: u32 = 17;
+const IPPROTO_IPV6: u32 = 41;
+
+// IPPROTO_IPV6
+const IPV6_UNICAST_HOPS: u32 = 16;
+const IPV6_MULTICAST_HOPS: u32 = 18;
+const IPV6_MULTICAST_LOOP: u32 = 19;
+const IPV6_MTU: u32 = 24;
+const IPV6_V6ONLY: u32 = 26;
+/// Boolean `IPPROTO_IPV6` options: `IPV6_RECVERR`, `V6ONLY`, `RECVPKTINFO`, `RECVHOPLIMIT`,
+/// `RECVRTHDR`, `RECVHOPOPTS`, `RECVDSTOPTS`, `RECVTCLASS`, `AUTOFLOWLABEL`, `DONTFRAG`,
+/// `RECVPATHMTU`, `FREEBIND`, `TRANSPARENT`, `RECVORIGDSTADDR`, `MULTICAST_ALL`.
+const IPV6_BOOLS: &[u32] = &[25, IPV6_V6ONLY, 49, 51, 56, 53, 58, 66, 70, 62, 60, 78, 75, 74, 29];
 
 // SOL_SOCKET
 const SO_TYPE: u32 = 3;
@@ -98,6 +110,8 @@ pub struct Options {
 
 /// What `getsockopt` needs to know about the socket itself.
 pub struct SockInfo {
+    /// An `AF_INET6` socket.
+    pub v6: bool,
     /// The socket listens (`SO_ACCEPTCONN`).
     pub listening: bool,
     /// A TCP socket (else UDP).
@@ -149,8 +163,9 @@ fn ns_timeval(ns: u64) -> Vec<u8> {
     b
 }
 
-fn known(level: u32, name: u32, stream: bool) -> bool {
+fn known(level: u32, name: u32, stream: bool, v6: bool) -> bool {
     match level {
+        IPPROTO_IPV6 => v6 && (1..=80).contains(&name),
         SOL_SOCKET => (1..=80).contains(&name),
         IPPROTO_IP => (1..=50).contains(&name),
         IPPROTO_TCP => stream && (1..=40).contains(&name),
@@ -176,8 +191,8 @@ impl Options {
     }
 
     /// `setsockopt(level, name, val)`.
-    pub fn set(&mut self, level: u32, name: u32, val: &[u8], stream: bool) -> i64 {
-        if !known(level, name, stream) {
+    pub fn set(&mut self, level: u32, name: u32, val: &[u8], stream: bool, v6: bool) -> i64 {
+        if !known(level, name, stream, v6) {
             return ENOPROTOOPT;
         }
         let int = || int_of(val);
@@ -312,6 +327,22 @@ impl Options {
                 Ok(v) => ((v != 0) as i32).to_le_bytes().to_vec(),
                 Err(e) => return e,
             },
+            (IPPROTO_IPV6, IPV6_UNICAST_HOPS | IPV6_MULTICAST_HOPS) => match int() {
+                Ok(-1) if val.len() >= 4 => {
+                    self.vals.remove(&(level, name));
+                    return 0;
+                }
+                Ok(v) if val.len() >= 4 && (0..=255).contains(&v) => v.to_le_bytes().to_vec(),
+                _ => return EINVAL,
+            },
+            (IPPROTO_IPV6, IPV6_MTU) => match int() {
+                Ok(v) if val.len() >= 4 && v >= 1280 => v.to_le_bytes().to_vec(),
+                _ => return EINVAL,
+            },
+            (IPPROTO_IPV6, n) if n == IPV6_MULTICAST_LOOP || IPV6_BOOLS.contains(&n) => match int() {
+                Ok(v) if val.len() >= 4 => ((v != 0) as i32).to_le_bytes().to_vec(),
+                _ => return EINVAL,
+            },
             (IPPROTO_TCP, TCP_MAXSEG) => match int() {
                 Ok(v) if val.len() >= 4 && (v == 0 || (88..=65535).contains(&v)) => v.to_le_bytes().to_vec(),
                 Ok(_) | Err(_) => return EINVAL,
@@ -354,7 +385,7 @@ impl Options {
 
     /// `getsockopt(level, name)`: the value's bytes (the caller copies at most `optlen`).
     pub fn get(&self, level: u32, name: u32, info: &SockInfo) -> Result<Vec<u8>, i64> {
-        if !known(level, name, info.stream) {
+        if !known(level, name, info.stream, info.v6) {
             return Err(ENOPROTOOPT);
         }
         let i = |v: i32| v.to_le_bytes().to_vec();
@@ -364,7 +395,7 @@ impl Options {
         Ok(match (level, name) {
             (SOL_SOCKET, SO_TYPE) => i(if info.stream { 1 } else { 2 }),
             (SOL_SOCKET, SO_ERROR) => i(-info.error as i32),
-            (SOL_SOCKET, SO_DOMAIN) => i(2),
+            (SOL_SOCKET, SO_DOMAIN) => i(if info.v6 { 10 } else { 2 }),
             (SOL_SOCKET, SO_PROTOCOL) => i(if info.stream { 6 } else { 17 }),
             (SOL_SOCKET, SO_ACCEPTCONN) => i(info.listening as i32),
             (SOL_SOCKET, SO_SNDBUF) => i(if info.stream { 16_384 } else { BUF_MAX as i32 }),
@@ -377,6 +408,14 @@ impl Options {
             (SOL_SOCKET, SO_PEERCRED) => alloc::vec![0; 12],
             (SOL_SOCKET, SO_PEERNAME) => return Err(ENOTCONN),
             (IPPROTO_IP, IP_TTL) => i(64),
+            (IPPROTO_IPV6, IPV6_UNICAST_HOPS) => i(64),
+            (IPPROTO_IPV6, IPV6_MULTICAST_HOPS | IPV6_MULTICAST_LOOP) => i(1),
+            (IPPROTO_IPV6, IPV6_MTU) => {
+                if !info.connected {
+                    return Err(ENOTCONN);
+                }
+                i(65536)
+            }
             (IPPROTO_IP, IP_MTU_DISCOVER) => i(1),
             (IPPROTO_IP, IP_MTU) => {
                 if !info.connected {

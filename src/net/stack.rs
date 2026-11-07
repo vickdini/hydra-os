@@ -166,6 +166,9 @@ struct Listener {
     wq: Arc<WaitQueue>,
     /// Bound with `SO_REUSEADDR` (passed on to its connections).
     reuse_addr: bool,
+    /// Takes IPv4 connections (to `ip`) and/or IPv6 ones (`::1`).
+    v4: bool,
+    v6: bool,
 }
 
 /// A TCP port reservation made by `bind`.
@@ -180,6 +183,9 @@ struct Bind {
     reuse_port: bool,
     /// The socket listens.
     listening: bool,
+    /// Covers IPv4 (`ip`) and/or IPv6 (a dual-stack `[::]` socket: both).
+    v4: bool,
+    v6: bool,
 }
 
 /// Internal UDP socket state and receive queue.
@@ -305,14 +311,31 @@ fn send_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
 /// Packets sent to ourselves, waiting to be received: `(src, dst, protocol, payload)`.
 static LOOPBACK: Mutex<VecDeque<([u8; 4], [u8; 4], IpProtocol, Vec<u8>)>> = Mutex::new(VecDeque::new());
 
-/// Whether `ip` is one of ours: `127.0.0.0/8` or the interface's address.
+/// IPv6's loopback address `::1`, carried internally as this IPv4-shaped value (from
+/// `0.0.0.0/8`, which IPv4 sockets never reach); only loopback traffic uses it.
+pub const V6_LOOPBACK: [u8; 4] = [0, 0, 0, 1];
+
+/// Whether `ip` is one of ours: `127.0.0.0/8`, `::1` or the interface's address.
 pub fn is_local(ip: [u8; 4]) -> bool {
-    ip[0] == 127 || (ip != [0, 0, 0, 0] && ip == GLOBAL_INTERFACE.lock().ip())
+    ip[0] == 127 || ip == V6_LOOPBACK || (ip != [0, 0, 0, 0] && ip == GLOBAL_INTERFACE.lock().ip())
 }
 
-/// The source address for packets to `dst`: the loopback address for `127.0.0.0/8`.
+/// The source address for packets to `dst`: the loopback address for `127.0.0.0/8`, `::1`
+/// for `::1`.
 fn source_for(dst: [u8; 4]) -> [u8; 4] {
-    if dst[0] == 127 { [127, 0, 0, 1] } else { local_ip() }
+    if dst == V6_LOOPBACK {
+        V6_LOOPBACK
+    } else if dst[0] == 127 {
+        [127, 0, 0, 1]
+    } else {
+        local_ip()
+    }
+}
+
+/// Whether a socket covering IPv4 address `ip` (`0.0.0.0`: all) and/or IPv6 (`v4`, `v6`)
+/// takes packets addressed to `dst`.
+fn covers(ip: [u8; 4], v4: bool, v6: bool, dst: [u8; 4]) -> bool {
+    if dst == V6_LOOPBACK { v6 } else { v4 && (ip == [0, 0, 0, 0] || ip == dst) }
 }
 
 impl Stack {
@@ -790,7 +813,7 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) -> V
                 let listener = stack
                     .listeners
                     .iter()
-                    .find(|(_, l)| l.port == seg.dst_port && (l.ip == [0, 0, 0, 0] || l.ip == dst))
+                    .find(|(_, l)| l.port == seg.dst_port && covers(l.ip, l.v4, l.v6, dst))
                     .map(|(&id, l)| (id, l.backlog, l.reuse_addr));
                 if let Some((lid, backlog, reuse_addr)) = listener {
                     let waiting = stack.tcp.values().filter(|c| c.listener == Some(lid)).count();
@@ -1122,20 +1145,22 @@ pub fn tcp_local_ip(id: u32) -> Option<[u8; 4]> {
 ///
 /// # Returns
 /// The reservation's handle and the port, or `EADDRINUSE`.
-pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool) -> Result<(u32, u16), i64> {
+pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool, v4: bool, v6: bool) -> Result<(u32, u16), i64> {
     let mut stack = STACK.lock();
     let port = if port == 0 { stack.alloc_port() } else { port };
-    let overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
+    let ip4_overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
     for b in stack.binds.values() {
-        if b.port == port && overlap(b.ip) && !(reuse_port && b.reuse_port) && !(reuse_addr && b.reuse_addr && !b.listening) {
+        let overlap = (v4 && b.v4 && ip4_overlap(b.ip)) || (v6 && b.v6);
+        if b.port == port && overlap && !(reuse_port && b.reuse_port) && !(reuse_addr && b.reuse_addr && !b.listening) {
             return Err(EADDRINUSE);
         }
     }
-    if stack.tcp.values().any(|c| c.local_port == port && c.state != TcpState::Closed && overlap(c.local_ip) && !(reuse_addr && c.reuse_addr)) {
+    let conn_overlap = |c: &TcpConn| if c.local_ip == V6_LOOPBACK { v6 } else { v4 && ip4_overlap(c.local_ip) };
+    if stack.tcp.values().any(|c| c.local_port == port && c.state != TcpState::Closed && conn_overlap(c) && !(reuse_addr && c.reuse_addr)) {
         return Err(EADDRINUSE);
     }
     let id = stack.alloc_id();
-    stack.binds.insert(id, Bind { ip, port, reuse_addr, reuse_port, listening: false });
+    stack.binds.insert(id, Bind { ip, port, reuse_addr, reuse_port, listening: false, v4, v6 });
     Ok((id, port))
 }
 
@@ -1150,17 +1175,18 @@ pub fn tcp_unbind(id: u32) {
 /// The listener's handle, or `EADDRINUSE` if another socket listens on the port.
 pub fn tcp_listen(bind: u32, backlog: usize) -> Result<u32, i64> {
     let mut stack = STACK.lock();
-    let (ip, port, reuse_port, reuse_addr) = match stack.binds.get(&bind) {
-        Some(b) => (b.ip, b.port, b.reuse_port, b.reuse_addr),
+    let (ip, port, reuse_port, reuse_addr, v4, v6) = match stack.binds.get(&bind) {
+        Some(b) => (b.ip, b.port, b.reuse_port, b.reuse_addr, b.v4, b.v6),
         None => return Err(-22),
     };
-    let overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
-    if stack.binds.iter().any(|(&i, b)| i != bind && b.listening && b.port == port && overlap(b.ip) && !(reuse_port && b.reuse_port)) {
+    let ip4_overlap = |a: [u8; 4]| a == [0, 0, 0, 0] || ip == [0, 0, 0, 0] || a == ip;
+    let overlap = |b: &Bind| (v4 && b.v4 && ip4_overlap(b.ip)) || (v6 && b.v6);
+    if stack.binds.iter().any(|(&i, b)| i != bind && b.listening && b.port == port && overlap(b) && !(reuse_port && b.reuse_port)) {
         return Err(EADDRINUSE);
     }
     stack.binds.get_mut(&bind).unwrap().listening = true;
     let id = stack.alloc_id();
-    stack.listeners.insert(id, Listener { ip, port, backlog: backlog.max(1), queue: VecDeque::new(), wq: WaitQueue::new_shared(), reuse_addr });
+    stack.listeners.insert(id, Listener { ip, port, backlog: backlog.max(1), queue: VecDeque::new(), wq: WaitQueue::new_shared(), reuse_addr, v4, v6 });
     Ok(id)
 }
 
