@@ -45,6 +45,7 @@ pub mod rtnetlink;
 pub mod seccomp;
 pub mod select;
 pub mod signalfd;
+pub mod sockopt;
 pub mod socket;
 pub mod syscalls;
 pub mod sysv;

@@ -107,6 +107,8 @@ pub struct InetSocket {
     peer: Option<([u8; 4], u16)>,
     /// Whether the read half of the socket has been shut down via `shutdown(SHUT_RD / SHUT_RDWR)`.
     shut_rd: bool,
+    /// Socket options (`setsockopt`).
+    opts: super::sockopt::Options,
 }
 
 impl Drop for InetSocket {
@@ -290,7 +292,12 @@ fn socket_of(fd: u64) -> Option<Arc<Mutex<InetSocket>>> {
 /// # Returns
 ///
 /// Result value produced by `ready()`, or negative Linux errno on error.
-fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
+fn wait_for<T>(id: u32, nonblock: bool, timeout: Option<u64>, mut ready: impl FnMut() -> Option<Result<T, i64>>) -> Result<T, i64> {
+    // SO_RCVTIMEO / SO_SNDTIMEO: a deadline in timer ticks
+    let deadline = timeout.map(|ns| {
+        let hz = crate::arch::pit::frequency_hz().max(1);
+        crate::arch::pit::ticks() + ((ns as u128 * hz as u128).div_ceil(1_000_000_000) as u64).max(1)
+    });
     let mut waits = crate::task::wait::WaitSet::new();
     match stack::wait_queue(id) {
         Some(q) if stack::service_running() => waits.add(crate::task::wait::QueueRef::Shared(q)),
@@ -306,9 +313,13 @@ fn wait_for<T>(id: u32, nonblock: bool, mut ready: impl FnMut() -> Option<Result
             return Err(EAGAIN);
         }
         if super::proc::signal_pending() {
-            return Err(super::proc::ERESTARTSYS);
+            // With a timeout, an interrupted call is not restarted (Linux: EINTR)
+            return Err(if deadline.is_some() { -4 } else { super::proc::ERESTARTSYS });
         }
-        waits.wait(None);
+        if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+            return Err(EAGAIN);
+        }
+        waits.wait(deadline);
     }
 }
 
@@ -328,14 +339,14 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let nonblock = {
+    let (nonblock, timeout) = {
         let mut s = sock.lock();
         if !s.stream {
             let _ = s.udp_id();
             s.peer = dest;
             return 0;
         }
-        s.nonblock
+        (s.nonblock, s.opts.snd_timeout())
     };
     let (ip, port) = match dest {
         Some(d) => d,
@@ -370,15 +381,16 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
             }
         }
     };
-    let r = wait_for(id, false, || match stack::tcp_state(id) {
+    let r = wait_for(id, false, timeout, || match stack::tcp_state(id) {
         stack::TcpState::SynSent => None,
         stack::TcpState::Closed => Some(Err(stack::tcp_take_error(id).unwrap_or(stack::ECONNREFUSED))),
         _ => Some(Ok(())),
     });
     match r {
         Ok(()) => 0,
-        // An interrupted connect keeps going in the background, as on Linux
+        // An interrupted or timed-out connect keeps going in the background, as on Linux
         Err(e) if e == super::proc::ERESTARTSYS => -4,
+        Err(EAGAIN) => EINPROGRESS,
         Err(e) => e,
     }
 }
@@ -396,9 +408,9 @@ fn connect(sock: &Arc<Mutex<InetSocket>>, addr: u64, len: u64) -> i64 {
 ///
 /// Number of bytes sent on success, or a negative Linux errno on error.
 fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u8; 4], u16)>) -> i64 {
-    let (stream, nonblock, tcp) = {
+    let (stream, nonblock, tcp, timeout) = {
         let s = sock.lock();
-        (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp)
+        (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp, s.opts.snd_timeout())
     };
     if stream {
         let id = match tcp {
@@ -407,7 +419,7 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
         };
         let mut sent = 0;
         while sent < data.len() {
-            let r = wait_for(id, nonblock && sent == 0, || match stack::tcp_send(id, &data[sent..]) {
+            let r = wait_for(id, nonblock && sent == 0, timeout, || match stack::tcp_send(id, &data[sent..]) {
                 Ok(0) => None,
                 Ok(n) => Some(Ok(n)),
                 Err(e) => Some(Err(e)),
@@ -463,9 +475,9 @@ fn send(sock: &Arc<Mutex<InetSocket>>, data: &[u8], flags: u64, dest: Option<([u
 /// * `Ok((bytes_copied, source_addr, truncated))` on success.
 /// * `Err(errno)` on network or socket error.
 fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(usize, Option<([u8; 4], u16)>, bool), i64> {
-    let (stream, nonblock, tcp, shut_rd) = {
+    let (stream, nonblock, tcp, shut_rd, timeout) = {
         let s = sock.lock();
-        (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp, s.shut_rd)
+        (s.stream, s.nonblock || flags & MSG_DONTWAIT != 0, s.tcp, s.shut_rd, s.opts.rcv_timeout())
     };
     let peek = flags & MSG_PEEK != 0;
     if stream {
@@ -473,7 +485,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         if shut_rd {
             return Ok((0, None, false));
         }
-        let n = wait_for(id, nonblock, || match stack::tcp_recv(id, buf, peek) {
+        let n = wait_for(id, nonblock, timeout, || match stack::tcp_recv(id, buf, peek) {
             Ok((0, false)) => {
                 if stack::tcp_state(id) == stack::TcpState::Closed {
                     Some(Ok(0))
@@ -487,7 +499,7 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         return Ok((n, None, false));
     }
     let id = sock.lock().udp_id()?;
-    let (ip, port, data) = wait_for(id, nonblock, || stack::udp_recv(id, peek).map(Ok))?;
+    let (ip, port, data) = wait_for(id, nonblock, timeout, || stack::udp_recv(id, peek).map(Ok))?;
     let n = data.len().min(buf.len());
     buf[..n].copy_from_slice(&data[..n]);
     Ok((n, Some((ip, port)), data.len() > n))
@@ -687,6 +699,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             bound_port: 0,
             peer: None,
             shut_rd: false,
+            opts: Default::default(),
         };
         if !stream {
             let _ = sock.udp_id();
@@ -835,29 +848,57 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 Err(e) => e,
             }
         }
-        54 => 0, // setsockopt: options are accepted and ignored
+        54 => {
+            // setsockopt(fd, level, optname, optval, optlen)
+            if (a[4] as i32) < 0 {
+                return Some(EINVAL);
+            }
+            let val = match copy_in(a[3], (a[4] as usize).min(4096)) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let mut s = sock.lock();
+            let stream = s.stream;
+            s.opts.set(a[1] as u32, a[2] as u32, &val, stream)
+        }
         55 => {
-            // getsockopt(fd, level, optname, optval, optlen)
-            let (level, name) = (a[1], a[2]);
-            let value: i32 = match (level, name) {
-                (1, 4) => {
-                    // SO_ERROR
-                    let s = sock.lock();
-                    s.tcp.and_then(stack::tcp_take_error).map_or(0, |e| -e as i32)
-                }
-                (1, 3) => {
-                    if sock.lock().stream {
-                        SOCK_STREAM as i32
-                    } else {
-                        SOCK_DGRAM as i32
+            // getsockopt(fd, level, optname, optval, optlen): at most *optlen bytes
+            let len = match copy_in(a[4], 4) {
+                Ok(b) => i32::from_le_bytes(b[..4].try_into().unwrap()),
+                Err(e) => return Some(e),
+            };
+            if len < 0 {
+                return Some(EINVAL);
+            }
+            let v = {
+                let s = sock.lock();
+                let state = s.tcp.map(stack::tcp_state);
+                let info = super::sockopt::SockInfo {
+                    stream: s.stream,
+                    connected: matches!(state, Some(st) if st != stack::TcpState::SynSent && st != stack::TcpState::Closed) || s.peer.is_some(),
+                    error: if a[1] == 1 && a[2] == 4 { s.tcp.and_then(stack::tcp_take_error).unwrap_or(0) } else { 0 },
+                    tcp_state: match state {
+                        Some(stack::TcpState::Established) => 1,
+                        Some(stack::TcpState::SynSent) => 2,
+                        Some(stack::TcpState::FinWait1) => 4,
+                        Some(stack::TcpState::FinWait2) => 5,
+                        Some(stack::TcpState::TimeWait) => 6,
+                        Some(stack::TcpState::Closed) | None => 7,
+                        Some(stack::TcpState::CloseWait) => 8,
+                        Some(stack::TcpState::LastAck) => 9,
+                        Some(stack::TcpState::Closing) => 11,
+                    },
+                };
+                s.opts.get(a[1] as u32, a[2] as u32, &info)
+            };
+            match v {
+                Ok(v) => {
+                    let n = v.len().min(len as usize);
+                    match copy_out(a[3], &v[..n]).and_then(|_| copy_out(a[4], &(n as u32).to_le_bytes())) {
+                        Ok(()) => 0,
+                        Err(e) => e,
                     }
                 }
-                (1, 7) | (1, 8) => 212_992, // SO_SNDBUF / SO_RCVBUF
-                (1, 39) => AF_INET as i32,  // SO_DOMAIN
-                _ => 0,
-            };
-            match copy_out(a[3], &value.to_le_bytes()).and_then(|_| copy_out(a[4], &4u32.to_le_bytes())) {
-                Ok(()) => 0,
                 Err(e) => e,
             }
         }
