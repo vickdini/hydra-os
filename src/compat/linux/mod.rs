@@ -29,6 +29,8 @@ pub mod mount;
 pub mod extra;
 pub mod fanotify;
 pub mod keys;
+pub mod limits;
+pub mod locks;
 pub mod landlock;
 pub mod mqueue;
 pub mod proc;
@@ -2195,12 +2197,20 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         if let Err(e) = ns::check_fork() {
             return e;
         }
+        if !limits::may_fork() {
+            return -EAGAIN;
+        }
     }
     let child = match crate::task::SCHEDULER.lock().spawn_clone(frame, args) {
         Ok(id) => id.0,
         Err(_) => return -ENOMEM,
     };
     ns::after_clone(child, args[0]);
+    {
+        let (tid, tgid) = proc::current_ids();
+        let thread = args[0] & types::CLONE_THREAD != 0;
+        limits::on_clone(tid, tgid, child, if thread { tgid } else { child }, thread);
+    }
     if ptrace::active() {
         // A traced parent's child may be traced too; the parent reports the event
         let child_tgid = if args[0] & types::CLONE_THREAD != 0 { proc::current_ids().1 } else { child };
@@ -2369,6 +2379,12 @@ pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
 fn write_errno(e: &'static str) -> i64 {
     match e {
         crate::fs::fd::ENOSPC_MSG => -28,
+        crate::fs::fd::EFBIG_MSG => {
+            // Past the file-size limit: SIGXFSZ too
+            let (tid, pid) = proc::current_ids();
+            proc::post_thread(pid, tid, 25);
+            -27
+        }
         // Read-only or O_PATH
         "File not opened for writing" => -EBADF,
         _ => -EIO,

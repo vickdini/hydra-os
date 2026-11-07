@@ -4,11 +4,9 @@
 //! Hydra has no process tree yet (milestone 2), so every process is its own process
 //! group and session leader with PID 1 as its parent.
 
-const ESRCH: i64 = -3;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EPERM: i64 = -1;
-const EACCES: i64 = -13;
 const ENOSYS: i64 = -38;
 
 const NR_GETRLIMIT: u64 = 97;
@@ -43,28 +41,6 @@ const PR_SET_CHILD_SUBREAPER: u64 = 36;
 const PR_SET_NO_NEW_PRIVS: u64 = 38;
 const PR_GET_NO_NEW_PRIVS: u64 = 39;
 const PR_GET_AUXV: u64 = 0x4155_5856;
-
-const RLIM_INFINITY: u64 = u64::MAX;
-const RLIMIT_STACK: u64 = 3;
-const RLIMIT_NOFILE: u64 = 7;
-const RLIMIT_NLIMITS: u64 = 16;
-
-/// Default (soft, hard) limit for a resource, matching a stock Linux login session.
-///
-/// # Arguments
-///
-/// * `resource` - Linux resource identifier (`RLIMIT_*`).
-///
-/// # Returns
-///
-/// `(soft_limit, hard_limit)` tuple for the specified resource.
-fn default_limit(resource: u64) -> (u64, u64) {
-    match resource {
-        RLIMIT_STACK => (8 * 1024 * 1024, RLIM_INFINITY),
-        RLIMIT_NOFILE => (crate::fs::MAX_FDS as u64, crate::fs::MAX_FDS as u64),
-        _ => (RLIM_INFINITY, RLIM_INFINITY),
-    }
-}
 
 /// Writes a 16-byte `(rlim_cur, rlim_max)` pair into user virtual memory.
 ///
@@ -115,15 +91,6 @@ fn copy_out(ptr: u64, data: &[u8]) -> i64 {
     }
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()) };
     0
-}
-
-/// Returns the thread group ID (process ID) of the current task.
-///
-/// # Returns
-///
-/// The current thread group ID (or `1` as fallback).
-fn current_tgid() -> u64 {
-    crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(1)
 }
 
 /// Sleeps until `deadline_ns` on the boot clock, waking early (with `EINTR`) for signals.
@@ -217,8 +184,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_RSEQ => ENOSYS,
         115 => super::proc::sys_getgroups(a[0], a[1]),
         116 => super::proc::sys_setgroups(a[0], a[1]),
-        // flock: a single machine with no other lock holders, so locks always succeed
-        73 => 0,
+        73 => super::locks::flock(a[0], a[1]),
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
         // fadvise64: access-pattern hints (no read-ahead policy to tune)
@@ -324,23 +290,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             };
             sleep_until(deadline, if abs { 0 } else { rem })
         }
-        NR_GETRLIMIT => {
-            if a[0] >= RLIMIT_NLIMITS {
-                EINVAL
-            } else {
-                write_rlimit(a[1], default_limit(a[0]))
-            }
-        }
-        NR_SETRLIMIT => 0,
-        NR_PRLIMIT64 => {
-            if a[0] != 0 && a[0] != current_tgid() {
-                ESRCH
-            } else if a[1] >= RLIMIT_NLIMITS {
-                EINVAL
-            } else {
-                write_rlimit(a[3], default_limit(a[1]))
-            }
-        }
+        NR_GETRLIMIT | NR_SETRLIMIT | NR_PRLIMIT64 => super::limits::rlimit(num, a),
         NR_REBOOT => sys_reboot(a[0] as u32, a[1] as u32, a[2] as u32),
         NR_GETPPID => super::proc::getppid(),
         NR_GETPGRP => super::proc::getpgid(0),
@@ -369,7 +319,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
             }
         }
-        NR_SCHED_SETAFFINITY => 0,
+        NR_SCHED_SETAFFINITY => super::limits::sched_setaffinity(a[0], a[1], a[2]),
         99 => {
             // sysinfo
             let fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
@@ -384,11 +334,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
             copy_out(a[0], &b)
         }
-        // mlock, munlock, mlockall, munlockall, mlock2: nothing is ever swapped out
-        149 | 150 | 151 | 152 | 325 => 0,
-        // ioprio_set / ioprio_get: one I/O queue, priorities are accepted and read back as
-        // "none" (the default class)
-        251 | 252 => 0,
+        // mlock, munlock, mlockall, munlockall, mlock2
+        149 | 150 | 151 | 152 | 325 => super::limits::mlock(num, a),
+        // ioprio_set / ioprio_get
+        251 | 252 => super::limits::ioprio(num, a[0], a[1], a[2]),
         239 => {
             // get_mempolicy: one NUMA node, so always MPOL_DEFAULT
             if a[0] != 0 {
@@ -399,33 +348,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
             0
         }
-        140 => 20, // getpriority: nice 0 (the kernel returns 20 - nice)
-        141 => {
-            // setpriority: raising nice is allowed, lowering it needs CAP_SYS_NICE
-            let nice = a[2] as i64 as i32;
-            if nice < 0 && !crate::task::with_current_task_mut(|t| t.caps.has(1 << 23)).unwrap_or(false) {
-                EACCES
-            } else {
-                0
-            }
-        }
-        142 => 0, // sched_setparam: priorities of normal tasks are ignored
-        143 => copy_out(a[1], &0u32.to_le_bytes()),
-        144 => {
-            // sched_setscheduler: real-time policies need CAP_SYS_NICE
-            match a[1] & !0x4000_0000 {
-                0 | 3 | 5 => 0,
-                1 | 2 => {
-                    if crate::task::with_current_task_mut(|t| t.caps.has(1 << 23)).unwrap_or(false) {
-                        0
-                    } else {
-                        EPERM
-                    }
-                }
-                _ => EINVAL,
-            }
-        }
-        145 => 0, // sched_getscheduler: SCHED_OTHER
+        140 => super::limits::getpriority(a[0], a[1]),
+        141 => super::limits::setpriority(a[0], a[1], a[2]),
+        142 => super::limits::sched_set(a[0], None, a[1]),
+        143 => super::limits::sched_getparam(a[0], a[1]),
+        144 => super::limits::sched_set(a[0], Some(a[1]), a[2]),
+        145 => super::limits::sched_getscheduler(a[0]),
         146 => match a[0] {
             1 | 2 => 99,
             0 | 3 | 5 => 0,

@@ -368,6 +368,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     // The thread and process keyrings do not survive exec
     let (tid, tgid) = super::proc::current_ids();
     super::keys::on_exec(tid, tgid);
+    super::limits::on_exec(tgid);
     super::ptrace::on_exec(tgid, tid);
     super::perf::on_exec(tgid);
     super::admin::note_exec(tgid);

@@ -791,7 +791,7 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
         if flags & AT_EMPTY_PATH == 0 {
             return Err(ENOENT);
         }
-        return fstat_fd(dirfd as i32).ok_or(-EBADF)?;
+        return fstat_fd(dirfd as i32).ok_or(EBADF)?;
     }
     let (base, base_path) = base_dir(dirfd, &path)?;
     let abs = join_path(&base_path, &path);
@@ -2296,6 +2296,7 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
     }
     let fd = fd as usize;
     Some(match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC if arg as usize >= super::limits::nofile() => EINVAL,
         F_DUPFD | F_DUPFD_CLOEXEC => crate::task::with_current_fds_mut(|fds| match fds.dup_from(fd, arg as usize) {
             Ok(n) => {
                 fds.set_cloexec(n, cmd == F_DUPFD_CLOEXEC);
@@ -2447,14 +2448,10 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 }
             }
         }
-        F_GETLK => {
-            // No other process holds locks: report the region as unlocked (l_type = F_UNLCK)
-            match copy_out(arg, &2i16.to_le_bytes()) {
-                Ok(()) => 0,
-                Err(e) => e,
-            }
-        }
-        F_SETLK | F_SETLKW => 0,
+        // Record locks: POSIX (F_GETLK, F_SETLK, F_SETLKW) and open file description ones
+        // (F_OFD_GETLK 36, F_OFD_SETLK 37, F_OFD_SETLKW 38)
+        F_GETLK | F_SETLK | F_SETLKW => super::locks::fcntl(fd as u64, cmd, arg, false),
+        36..=38 => super::locks::fcntl(fd as u64, cmd, arg, true),
         F_GET_SEALS => {
             let m = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
                 Some(FileDescriptor::MemFd { memfd, .. }) => Some(memfd.clone()),
@@ -2462,7 +2459,7 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             });
             match m {
                 Some(memfd) => memfd.lock().seals as i64,
-                None => -EINVAL,
+                None => EINVAL,
             }
         }
         F_ADD_SEALS => {
@@ -2475,13 +2472,13 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                     let mut mem = memfd.lock();
                     const F_SEAL_SEAL: u32 = 0x0001;
                     if mem.seals & F_SEAL_SEAL != 0 && (arg as u32 & !mem.seals) != 0 {
-                        -EPERM
+                        EPERM
                     } else {
                         mem.seals |= arg as u32;
                         0
                     }
                 }
-                None => -EINVAL,
+                None => EINVAL,
             }
         }
         _ => return None,
@@ -2828,7 +2825,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 {
                     super::tty::NOT_A_TTY
                 }
-                None => -EBADF,
+                None => EBADF,
                 _ => return None,
             }
         }
@@ -3071,7 +3068,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
                 r
             }
-            None => -EBADF,
+            None => EBADF,
         },
         NR_UMASK => crate::task::with_current_fds_mut(|fds| {
             let old = fds.umask;
@@ -3079,18 +3076,22 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             old as i64
         }),
 
-        NR_DUP => crate::task::with_current_fds_mut(|fds| fds.dup_from(a[0] as usize, 0).map(|n| n as i64).unwrap_or(-EBADF)),
-        NR_DUP2 => crate::task::with_current_fds_mut(|fds| fds.dup2(a[0] as usize, a[1] as usize).map(|n| n as i64).unwrap_or(-EBADF)),
+        NR_DUP => crate::task::with_current_fds_mut(|fds| match fds.dup_from(a[0] as usize, 0) {
+            Ok(n) => n as i64,
+            Err(e) if e.contains("EMFILE") => EMFILE,
+            Err(_) => EBADF,
+        }),
+        NR_DUP2 => crate::task::with_current_fds_mut(|fds| fds.dup2(a[0] as usize, a[1] as usize).map(|n| n as i64).unwrap_or(EBADF)),
         NR_DUP3 => {
             if a[0] == a[1] {
-                -EINVAL
+                EINVAL
             } else {
                 crate::task::with_current_fds_mut(|fds| match fds.dup2(a[0] as usize, a[1] as usize) {
                     Ok(n) => {
                         fds.set_cloexec(n, a[2] as u32 & O_CLOEXEC != 0);
                         n as i64
                     }
-                    Err(_) => -EBADF,
+                    Err(_) => EBADF,
                 })
             }
         }

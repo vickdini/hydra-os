@@ -1024,6 +1024,7 @@ fn sched_setattr(pid: u64, uattr: u64, flags: u64) -> i64 {
         return EPERM;
     }
     SCHED.lock().insert(tid, attr);
+    apply_priority(tid, &attr);
     0
 }
 
@@ -1064,4 +1065,55 @@ fn sched_getattr(pid: u64, uattr: u64, size: u64, flags: u64) -> i64 {
         Ok(()) => 0,
         Err(e) => e,
     }
+}
+
+/// `(policy, nice, rt priority, reset-on-fork)` of thread `tid`.
+pub(crate) fn sched_of(tid: u64) -> (u32, i32, u32, bool) {
+    let a = SCHED.lock().get(&tid).copied().unwrap_or_default();
+    (a.policy, a.nice, a.priority, a.flags & 1 != 0)
+}
+
+/// Sets thread `tid`'s policy, nice and real-time priority (other attributes stay).
+pub(crate) fn sched_set(tid: u64, policy: u32, nice: i32, priority: u32, reset: bool) {
+    let mut all = SCHED.lock();
+    let a = all.entry(tid).or_default();
+    a.policy = policy;
+    a.nice = nice;
+    a.priority = priority;
+    a.flags = (a.flags & !1) | reset as u64;
+    if a.util_max == 0 {
+        a.util_max = 1024;
+    }
+    let a = *a;
+    drop(all);
+    apply_priority(tid, &a);
+}
+
+/// Steers Hydra's scheduler: the idle policy and nice 10 or more run at low priority.
+fn apply_priority(tid: u64, a: &SchedAttr) {
+    use crate::task::TaskPriority;
+    let p = if a.policy == 5 || (matches!(a.policy, 0 | 3) && a.nice >= 10) { TaskPriority::Low } else { TaskPriority::Normal };
+    crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| {
+        if matches!(t.priority, TaskPriority::Low | TaskPriority::Normal) {
+            t.priority = p;
+        }
+    });
+}
+
+/// A new thread inherits its creator's attributes; with reset-on-fork, a real-time policy
+/// becomes `SCHED_OTHER` and a negative nice 0.
+pub(crate) fn sched_inherit(parent: u64, child: u64) {
+    let Some(mut a) = SCHED.lock().get(&parent).copied() else { return };
+    if a.flags & 1 != 0 {
+        if matches!(a.policy, 1 | 2 | 6) {
+            a.policy = 0;
+            a.priority = 0;
+            a.runtime = 0;
+            a.deadline = 0;
+            a.period = 0;
+        }
+        a.nice = a.nice.max(0);
+        a.flags &= !1;
+    }
+    SCHED.lock().insert(child, a);
 }

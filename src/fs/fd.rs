@@ -124,6 +124,8 @@ impl OpenFile {
 impl Drop for OpenFile {
     /// Drops the open file reference, notifying ZFS if write access was enabled and releasing the inode handle.
     fn drop(&mut self) {
+        // Its flock and open file description locks go with it
+        crate::compat::linux::locks::release_file(self as *const OpenFile as usize);
         self.fan(if self.writable() { crate::compat::linux::fanotify::FAN_CLOSE_WRITE } else { crate::compat::linux::fanotify::FAN_CLOSE_NOWRITE });
         if self.writable() {
             ZfsClient::notify_close_write(self.ino);
@@ -238,6 +240,20 @@ fn read_path_at(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'st
 /// Returns static string error if file resolution, stat, or write fails.
 /// Error message of a write to `/dev/full` (the write calls turn it into `ENOSPC`).
 pub const ENOSPC_MSG: &str = "No space left on device";
+/// Write error: the file-size limit (`RLIMIT_FSIZE`) is reached (`EFBIG`).
+pub const EFBIG_MSG: &str = "File too large";
+
+/// `data` cut to the file-size limit for a write at `offset`, or `EFBIG_MSG` past it.
+fn fsize_cut(data: &[u8], offset: u64) -> Result<&[u8], &'static str> {
+    let limit = crate::compat::linux::limits::fsize();
+    if limit == u64::MAX {
+        return Ok(data);
+    }
+    if offset >= limit {
+        return Err(EFBIG_MSG);
+    }
+    Ok(&data[..data.len().min((limit - offset) as usize)])
+}
 
 fn write_path_at(path: &str, offset: Option<usize>, data: &[u8]) -> Result<(usize, usize), &'static str> {
     if let Some(pseudo) = crate::compat::linux::fs::match_pseudo_path(path) {
@@ -420,6 +436,7 @@ impl FileDescriptor {
             }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
+                let data = fsize_cut(data, offset as u64)?;
                 let n = ZfsClient::write_at(ino, offset as u64, data).map_err(|_| "ZFS write error")?;
                 if n > 0 {
                     file.lock().fan(crate::compat::linux::fanotify::FAN_MODIFY);
@@ -508,6 +525,7 @@ impl FileDescriptor {
                 if f.flags & O_APPEND != 0 {
                     f.offset = ZfsClient::getattr(f.ino).map_err(|_| "ZFS stat error")?.size;
                 }
+                let data = fsize_cut(data, f.offset)?;
                 let n = ZfsClient::write_at(f.ino, f.offset, data).map_err(|_| "ZFS write error")?;
                 f.offset += n as u64;
                 if n > 0 {
@@ -751,7 +769,8 @@ impl FdTable {
     ///
     /// * `Err("Process file descriptor table is full (EMFILE)")` - No free slot exists in `min..MAX_FDS`.
     pub fn alloc_fd_from(&mut self, desc: FileDescriptor, min: usize) -> Result<usize, &'static str> {
-        let free = (min..MAX_FDS).find(|&i| self.fds.get(i).map_or(true, |d| d.is_none()));
+        let limit = crate::compat::linux::limits::nofile();
+        let free = (min..limit).find(|&i| self.fds.get(i).map_or(true, |d| d.is_none()));
         match free {
             Some(i) => {
                 self.ensure(i);
@@ -1000,6 +1019,13 @@ impl FdTable {
     ///
     /// * `Err("File descriptor not open (EBADF)")` - `fd` was out of bounds or not open.
     pub fn close(&mut self, fd: usize) -> Result<(), &'static str> {
+        self.close_as(fd, true)
+    }
+
+    /// Closes `fd`; `by_owner` when the calling process closes it (its POSIX locks on the
+    /// file go), not when a dead process's table is torn down (that process's locks went
+    /// with it, and the caller is someone else).
+    fn close_as(&mut self, fd: usize, by_owner: bool) -> Result<(), &'static str> {
         let desc = match self.fds.get_mut(fd).and_then(|d| d.take()) {
             Some(d) => d,
             None => return Err("File descriptor not open (EBADF)"),
@@ -1015,6 +1041,10 @@ impl FdTable {
             FileDescriptor::Socket(sock) => {
                 let mut s = sock.lock();
                 let _ = s.shutdown(crate::compat::linux::socket::SHUT_RDWR);
+            }
+            FileDescriptor::Vnode(f) if by_owner => {
+                let ino = f.lock().ino;
+                crate::compat::linux::locks::closed(ino);
             }
             _ => {}
         }
@@ -1041,7 +1071,7 @@ impl FdTable {
     /// * `Err("Bad file descriptor (EBADF)")` - `newfd >= MAX_FDS`.
     /// * `Err("Source file descriptor not open (EBADF)")` - `oldfd` is not open.
     pub fn dup2(&mut self, oldfd: usize, newfd: usize) -> Result<usize, &'static str> {
-        if newfd >= MAX_FDS {
+        if newfd >= crate::compat::linux::limits::nofile() {
             return Err("Bad file descriptor (EBADF)");
         }
         let desc = self.get(oldfd).cloned().ok_or("Source file descriptor not open (EBADF)")?;
@@ -1082,7 +1112,7 @@ impl FdTable {
     /// Closes every open descriptor in the table (invoked during process termination).
     pub fn close_all(&mut self) {
         for fd in 0..self.fds.len() {
-            let _ = self.close(fd);
+            let _ = self.close_as(fd, false);
         }
     }
 

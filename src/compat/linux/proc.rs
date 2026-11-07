@@ -426,6 +426,8 @@ pub fn thread_exited(pid: u64, tid: u64) {
     if !now_zombie {
         return;
     }
+    super::locks::process_exited(pid);
+    super::limits::on_exit(pid);
     if super::admin::acct_on() {
         let (start, status) = procs.get(&pid).map_or((0, 0), |p| (p.start_time, p.exit_status.unwrap_or(0)));
         let (ticks, faults) = super::perf::own_ticks(pid);
@@ -1019,6 +1021,11 @@ fn record_sender(pid: u64, tid: Option<u64>, sig: u32, code: i32) {
 /// serve a driver endpoint), which Linux signals never reach.
 fn is_system_service(pid: u64) -> bool {
     crate::task::SCHEDULER.lock().with_process(pid, |t| t.service.is_some()).unwrap_or(false)
+}
+
+/// The live processes of process group `pgid`.
+pub fn group_members(pgid: u64) -> Vec<u64> {
+    PROCS.lock().values().filter(|p| p.pgid == pgid && !p.zombie).map(|p| p.pid).collect()
 }
 
 /// Posts `sig` to every process in process group `pgid`.

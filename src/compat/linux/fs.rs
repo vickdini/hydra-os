@@ -39,6 +39,8 @@ pub enum PseudoFile {
     ProcMeminfo,
     /// `/proc/swaps`: the active swap areas.
     ProcSwaps,
+    /// `/proc/locks`: the file locks held.
+    ProcLocks,
     /// `/proc/filesystems`: the file system types.
     ProcFilesystems,
     /// `/proc/cpuinfo`: reports `x86_64` processor identification and feature flags.
@@ -121,6 +123,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/version" => Some(PseudoFile::ProcVersion),
         "/proc/meminfo" => Some(PseudoFile::ProcMeminfo),
         "/proc/swaps" => Some(PseudoFile::ProcSwaps),
+        "/proc/locks" => Some(PseudoFile::ProcLocks),
         "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
         "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
@@ -196,7 +199,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv" | "maps")
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv" | "maps" | "limits")
             || file.strip_prefix("fdinfo/").is_some_and(numeric)
             || file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| numeric(t) && matches!(f, "status" | "stat" | "comm")))
 }
@@ -262,6 +265,9 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
         let text = mm.lock().maps_text();
         return Some(text.into_bytes());
     }
+    if file == "limits" {
+        return Some(super::limits::limits_text(pid).into_bytes());
+    }
     if file == "auxv" {
         // Another process's auxiliary vector (debuggers find where a program was loaded)
         super::extra::may_access(pid).ok()?;
@@ -316,10 +322,12 @@ Uid:	{}	{}	{}	{}
 Gid:	{}	{}	{}	{}
 NStgid:	{}
 NSpid:	{}
+VmLck:	{} kB
 NoNewPrivs:	{}
 Seccomp:	{}
 ",
-                    name, pid, tid, ppid, tracer, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid, nnp as u8, seccomp_mode
+                    name, pid, tid, ppid, tracer, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid,
+                    super::limits::locked_kib(pid), nnp as u8, seccomp_mode
                 )
                 .into_bytes(),
             )
@@ -333,13 +341,15 @@ Seccomp:	{}
                 .map_or((0, pid, pid, 1, 0, false), |p| (p.ppid, p.pgid, p.sid, p.threads_alive().max(1), p.start_time, p.zombie));
             let comm: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
             let mut text = alloc::format!(
-                "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 {} 0 {}",
+                "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 0 0 0 0 {} {} {} 0 {}",
                 pid,
                 comm,
                 if zombie { 'Z' } else { 'S' },
                 ppid,
                 pgid,
                 sid,
+                20 + super::extra::sched_of(tid).1,
+                super::extra::sched_of(tid).1,
                 threads,
                 start
             );
@@ -430,6 +440,7 @@ impl PseudoFile {
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcSwaps => read_slice(super::admin::swaps_text().as_bytes(), cursor, buf),
+            PseudoFile::ProcLocks => read_slice(super::locks::proc_locks().as_bytes(), cursor, buf),
             PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
             PseudoFile::ProcCpuinfo => {
                 let text = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n";
