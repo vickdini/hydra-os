@@ -31,6 +31,10 @@ if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId;
     dbus-daemon --system || exit 1
 fi
 if ! ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping; then
+    # The first start since boot: no X11 or ICE sockets of an earlier boot's sessions stay
+    # behind (on Linux /tmp starts empty or systemd-tmpfiles clears them), or each desktop
+    # takes the next display number
+    rm -f /tmp/.X11-unix/X* /tmp/.ICE-unix/* /tmp/.X*-lock 2>/dev/null
     # Without a display manager the session exists from the start
     if [ "$dm" = 1 ]; then
         /usr/libexec/hydra-logind $HYDRA_LOGIND_OPTS &

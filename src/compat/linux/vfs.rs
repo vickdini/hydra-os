@@ -3017,11 +3017,66 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     r if r & 0xFF00 == 0x5400 => super::tty::NOT_A_TTY,
                     _ => EINVAL,
                 },
-                Some(FileDescriptor::Vnode(_)) | Some(FileDescriptor::PipeRead(_)) | Some(FileDescriptor::PipeWrite(_))
-                    if a[1] & 0xFF00 == 0x5400 =>
-                {
-                    super::tty::NOT_A_TTY
+                // Pipes and files answer the generic requests (FIONREAD, FIONBIO, FIOASYNC) as
+                // Linux does; other terminal requests are not for them
+                Some(FileDescriptor::PipeRead(ref p)) | Some(FileDescriptor::PipeWrite(ref p)) if a[1] & 0xFF00 == 0x5400 => {
+                    let reader = matches!(desc, Some(FileDescriptor::PipeRead(_)));
+                    match a[1] {
+                        0x541B => {
+                            // FIONREAD: bytes in the pipe
+                            let n = p.lock().available_read() as i32;
+                            copy_out(a[2], &n.to_le_bytes()).map_or_else(|e| e, |_| 0)
+                        }
+                        0x5421 => match copy_in(a[2], 4) {
+                            // FIONBIO
+                            Ok(v) => {
+                                let on = v.iter().any(|&b| b != 0);
+                                let mut pipe = p.lock();
+                                if reader {
+                                    pipe.read_nonblock = on;
+                                } else {
+                                    pipe.write_nonblock = on;
+                                }
+                                0
+                            }
+                            Err(e) => e,
+                        },
+                        0x5452 => 0, // FIOASYNC
+                        _ => super::tty::NOT_A_TTY,
+                    }
                 }
+                Some(FileDescriptor::Vnode(ref f)) if a[1] & 0xFF00 == 0x5400 => match a[1] {
+                    0x541B => {
+                        // FIONREAD: bytes left before the end of a regular file
+                        let (ino, off) = {
+                            let g = f.lock();
+                            (g.ino, g.offset)
+                        };
+                        match ZfsClient::getattr(ino) {
+                            Ok(at) if at.mode & S_IFMT == 0o100000 => {
+                                let n = at.size.saturating_sub(off).min(i32::MAX as u64) as i32;
+                                copy_out(a[2], &n.to_le_bytes()).map_or_else(|e| e, |_| 0)
+                            }
+                            Ok(_) => super::tty::NOT_A_TTY,
+                            Err(e) => e,
+                        }
+                    }
+                    0x5421 => match copy_in(a[2], 4) {
+                        // FIONBIO
+                        Ok(v) => {
+                            let mut g = f.lock();
+                            if v.iter().any(|&b| b != 0) {
+                                g.flags |= O_NONBLOCK;
+                            } else {
+                                g.flags &= !O_NONBLOCK;
+                            }
+                            0
+                        }
+                        Err(e) => e,
+                    },
+                    0x5452 => 0, // FIOASYNC
+                    _ => super::tty::NOT_A_TTY,
+                },
                 None => EBADF,
                 _ => return None,
             }

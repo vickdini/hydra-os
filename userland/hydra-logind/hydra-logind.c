@@ -35,7 +35,11 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/reboot.h>
+#include <ftw.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
@@ -668,7 +672,73 @@ static void place_in_scope(int s, pid_t pid) {
         close(fd);
 }
 
-/* Creates /run/user/<uid> for a user's first session. */
+/* Whether a D-Bus daemon accepts connections at socket `path`. */
+static int bus_alive(const char *path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return 0;
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
+    int ok = connect(fd, (struct sockaddr *)&a, sizeof a) == 0;
+    close(fd);
+    return ok;
+}
+
+static int remove_entry(const char *p, const struct stat *st, int type, struct FTW *f) {
+    (void)st;
+    (void)type;
+    if (f->level > 0 && remove(p) < 0)
+        logmsg("cannot remove %s: %s", p, strerror(errno));
+    return 0;
+}
+
+/* Starts user `uid`'s session bus at <runtime>/bus, as systemd's user dbus.socket does
+ * (pam_systemd then gives sessions DBUS_SESSION_BUS_ADDRESS, so every program of the
+ * user, in or outside the desktop, reaches the same bus). */
+static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
+    char bus[96], addr[128];
+    snprintf(bus, sizeof bus, "%s/bus", runtime);
+    if (bus_alive(bus))
+        return;
+    unlink(bus);
+    snprintf(addr, sizeof addr, "--address=unix:path=%s", bus);
+    struct passwd *pw = getpwuid(uid);
+    pid_t c = fork();
+    if (c == 0) {
+        /* Detached from the login manager: a grandchild runs the daemon */
+        if (fork() != 0)
+            _exit(0);
+        setsid();
+        if (pw)
+            initgroups(pw->pw_name, gid);
+        if (setgid(gid) < 0 || setuid(uid) < 0)
+            _exit(1);
+        setenv("XDG_RUNTIME_DIR", runtime, 1);
+        if (pw) {
+            setenv("HOME", pw->pw_dir, 1);
+            setenv("USER", pw->pw_name, 1);
+            setenv("LOGNAME", pw->pw_name, 1);
+        }
+        int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, 0);
+            dup2(null, 1);
+            dup2(null, 2);
+        }
+        execlp("dbus-daemon", "dbus-daemon", "--session", addr, "--nofork", "--nopidfile", "--syslog-only", (char *)NULL);
+        _exit(127);
+    }
+    if (c > 0)
+        waitpid(c, NULL, 0);
+    /* Sessions look for the socket right after CreateSession returns */
+    for (int i = 0; i < 100 && !bus_alive(bus); i++)
+        usleep(20000);
+    logmsg("user %u's session bus %s", uid, bus_alive(bus) ? "is up" : "did not start");
+}
+
+/* Creates /run/user/<uid> for a user's session and its session bus. A user's first session
+ * starts from an empty directory, as from the tmpfs systemd mounts there (files of an
+ * earlier boot are removed). */
 static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) {
     snprintf(out, len, "/run/user/%u", uid);
     mkdir("/run/user", 0755);
@@ -676,6 +746,14 @@ static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) 
     if (chown(out, uid, gid) < 0)
         logmsg("chown %s: %s", out, strerror(errno));
     chmod(out, 0700);
+    int others = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        others += sessions[i].used && sessions[i].uid == uid;
+    char bus[96];
+    snprintf(bus, sizeof bus, "%s/bus", out);
+    if (others <= 1 && !bus_alive(bus))
+        nftw(out, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
+    start_user_bus(uid, gid, out);
 }
 
 static int add_session(unsigned uid, pid_t leader, const char *service, const char *type, const char *klass, const char *desktop,

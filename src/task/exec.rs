@@ -343,6 +343,9 @@ pub fn load_linux_exec(
     let mut mm = Mm::new().map_err(|e| ElfError::PagingError(e))?;
 
     let interp_path = ElfBinary::parse(&exe.head)?.interp_path().map(String::from);
+    // PT_GNU_STACK with PF_X: the program needs an executable stack (as for GCC nested
+    // functions' trampolines), which Linux gives it
+    let exec_stack = ElfBinary::parse(&exe.head)?.program_headers().any(|ph| ph.p_type == 0x6474_e551 && ph.p_flags & 1 != 0);
     let main = map_elf(&mut mm, &exe, Some(PIE_BASE), exec_path)?;
 
     mm.brk_start = page_up(main.end);
@@ -359,7 +362,8 @@ pub fn load_linux_exec(
 
     // Stack: an 8 MiB demand-paged area just below STACK_TOP
     let stack_base = STACK_TOP - STACK_SIZE;
-    mm.mmap(stack_base, STACK_SIZE, PROT_READ | PROT_WRITE, false, true, false, Backing::Anon)
+    let stack_prot = PROT_READ | PROT_WRITE | if exec_stack { PROT_EXEC } else { 0 };
+    mm.mmap(stack_base, STACK_SIZE, stack_prot, false, true, false, Backing::Anon)
         .map_err(|_| ElfError::AllocationFailed)?;
     mm.set_name(stack_base, stack_base + STACK_SIZE, Some("[stack]"));
 
