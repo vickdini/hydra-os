@@ -2300,6 +2300,32 @@ pub fn force_fault_signal(ctx: &mut ExceptionContext, fpu: *mut FpuState, sig: u
         }
     };
     if !handled {
+        // As Linux's "segfault at ... ip ... sp ... error ..." line in the kernel log
+        let addr = if ctx.vector == 14 { x86_64::registers::control::Cr2::read_raw() } else { 0 };
+        let area = super::mm::current_mm().and_then(|mm| {
+            let mm = mm.try_lock()?;
+            let v = mm.find_vma(ctx.rip)?;
+            Some(alloc::format!("{:#x}-{:#x} prot {} {}", v.start, v.end, v.prot, v.name.as_deref().unwrap_or("")))
+        });
+        let code = unsafe {
+            let mut b = [0u8; 8];
+            if crate::memory::vm::prefault_current(ctx.rip, 8, false) {
+                core::ptr::copy_nonoverlapping(ctx.rip as *const u8, b.as_mut_ptr(), 8);
+            }
+            b
+        };
+        crate::kprintln!(
+            "[linux] pid {} signal {} at {:#x} ip {:#x} sp {:#x} error {:#x} vector {} in [{}] code {:02x?}",
+            pid,
+            sig,
+            addr,
+            ctx.rip,
+            ctx.rsp,
+            ctx.error_code,
+            ctx.vector,
+            area.unwrap_or_default(),
+            code
+        );
         die(sig);
     }
     deliver_on_trap_return(ctx, fpu);

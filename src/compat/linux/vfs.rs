@@ -758,6 +758,12 @@ fn pseudo_stat(abs: &str) -> super::types::LinuxStat {
     if let Some(p) = super::fs::match_pseudo_path(abs) {
         p.stat(&mut st);
     }
+    // The devices served by name have their numbers (glibc reopens a setuid program's
+    // closed standard descriptors on /dev/null or /dev/full and checks them)
+    if let Some((major, minor)) = named_device(abs) {
+        st.st_mode = S_IFCHR | (st.st_mode & 0o7777);
+        st.st_rdev = super::chardev::makedev(major as u64, minor as u64);
+    }
     st
 }
 
