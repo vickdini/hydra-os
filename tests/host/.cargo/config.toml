@@ -1,0 +1,4 @@
+# The repository root's .cargo/config.toml forces x86_64-unknown-uefi for the
+# kernel. These tests run on the build machine, so target the host instead.
+[build]
+target = "host-tuple"

@@ -1,0 +1,23 @@
+[package]
+name = "hydra_hosttests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side unit tests for the hardware-independent parts of the Hydra kernel"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+uefi = "0.41.0"
+# The real x86_64 crate with no-op TLB flushes (see shim/x86_64/src/lib.rs)
+x86_64 = { package = "x86_64_shim", path = "shim/x86_64" }
+patina_lzma_rs = { version = "0.3.2", default-features = false }
+
+[dev-dependencies]
+flate2 = "1"
