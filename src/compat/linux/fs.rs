@@ -685,10 +685,9 @@ pub fn proc_link(path: &str) -> Option<alloc::string::String> {
             let (pid, entry) = path.strip_prefix("/proc/")?.split_once('/')?;
             let pid: u64 = super::ns::pid_from_caller(pid.parse().ok()?);
             match entry {
-                "root" => {
-                    let alive = super::proc::PROCS.lock().get(&pid).map_or(false, |p| !p.zombie);
-                    alive.then(|| alloc::string::String::from("/"))
-                }
+                // Opened and walked through in that process's root (see vfs::resolve);
+                // readlink shows "/" (readlink_at)
+                "root" => None,
                 "exe" => crate::task::SCHEDULER.lock().exe_of(pid),
                 _ => None,
             }

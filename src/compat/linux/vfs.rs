@@ -282,6 +282,20 @@ pub(crate) fn proc_root() -> u64 {
 /// # Errors
 /// Returns negative Linux error code on lookup or permission failure.
 pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+    // Relative to a directory opened through /proc/<pid>/root: in that process's root
+    if let Some(f) = super::mount::take_foreign() {
+        let base_mnt = super::mount::noted_base();
+        return super::mount::resolve_foreign(f, base, base_mnt, path, follow);
+    }
+    // /proc/<pid>/root[/...]: in another process's root and mount namespace (portals
+    // read a Flatpak client's /.flatpak-info this way)
+    if let Some((pid, rest)) = proc_root_path(path) {
+        super::extra::may_access(pid)?;
+        let f = super::mount::process_root(pid).ok_or(ENOENT)?;
+        let rel: &[u8] = if rest.is_empty() { b"." } else { rest };
+        return super::mount::resolve_foreign(f, 0, 0, rel, follow);
+    }
+    super::mount::clear_foreign();
     if base != PSEUDO_DIR_BASE && proc_root() != EMPTY_ROOT {
         // A mount namespace of its own: through its mount table
         if let Some(r) = super::mount::resolve(base, path, follow) {
@@ -295,6 +309,30 @@ pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> 
         EMPTY_ROOT => Err(ENOENT),
         root => ZfsClient::resolve_in(root, base, path, follow),
     }
+}
+
+/// `(pid, rest)` of an absolute path `/proc/<pid>/root[/rest]` naming another process's
+/// root (not the caller's own, which is just its root).
+fn proc_root_path(path: &[u8]) -> Option<(u64, &[u8])> {
+    let p = path.strip_prefix(b"/proc/")?;
+    let slash = p.iter().position(|&b| b == b'/')?;
+    let (who, after) = (&p[..slash], &p[slash + 1..]);
+    if who.is_empty() || !who.iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = after.strip_prefix(b"root")?;
+    if !(rest.is_empty() || rest[0] == b'/') {
+        return None;
+    }
+    let pid = super::ns::pid_from_caller(core::str::from_utf8(who).ok()?.parse().ok()?);
+    if pid == super::proc::current_ids().1 {
+        return None;
+    }
+    let mut rest = rest;
+    while rest.first() == Some(&b'/') {
+        rest = &rest[1..];
+    }
+    Some((pid, rest))
 }
 
 /// Lookup key of a Unix socket path: the process root and the absolute path, so the
@@ -439,6 +477,11 @@ pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
         Some(f) => {
             let f = f.lock();
             super::mount::note_base(f.mnt);
+            if let Some(fr) = f.foreign {
+                if path.first() != Some(&b'/') {
+                    super::mount::note_foreign(fr);
+                }
+            }
             Ok((f.ino, f.path.clone()))
         }
         None => {
@@ -1174,6 +1217,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     }
     let file = OpenFile::new(ino, keep, raw);
     file.lock().mnt = super::mount::last_mount();
+    file.lock().foreign = super::mount::last_foreign();
     file.lock().no_truncate = no_truncate;
     file.lock().fan_dir = fan_dir;
     file.lock().is_dir = ftype == S_IFDIR;
@@ -1535,6 +1579,13 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
         let f = file.lock();
         (f.ino, f.offset)
     };
+    // The /proc directory itself: its processes and files, not what is stored there
+    if file.lock().path.trim_end_matches('/').ends_with("/proc") || file.lock().path == "/proc" {
+        let is_proc = base_dir(AT_FDCWD, b"/proc").and_then(|(b, _)| resolve(b, b"/proc", true)).is_ok_and(|i| i == ino);
+        if is_proc {
+            return getdents64_proc_root(&file, cookie as usize, buf, count);
+        }
+    }
     match ZfsClient::getattr(ino) {
         Ok(a) if a.is_dir() => {}
         Ok(_) => return ENOTDIR,
@@ -1572,6 +1623,57 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
         return e;
     }
     file.lock().offset = next;
+    out.len() as i64
+}
+
+/// `getdents64` of `/proc`: `self`, `thread-self`, the files and directories served
+/// there, and a directory for each process the caller can see. The directory offset is
+/// the entry index.
+fn getdents64_proc_root(file: &alloc::sync::Arc<spin::Mutex<crate::fs::fd::OpenFile>>, cursor: usize, buf: u64, count: usize) -> i64 {
+    let mut entries: Vec<(u64, String, u8)> = alloc::vec![(1, String::from("."), 4), (1, String::from(".."), 4)];
+    entries.push((2, String::from("self"), 10));
+    entries.push((3, String::from("thread-self"), 10));
+    const NAMES: [(&str, u8); 30] = [
+        ("cpuinfo", 8), ("meminfo", 8), ("stat", 8), ("uptime", 8), ("loadavg", 8), ("version", 8), ("filesystems", 8),
+        ("mounts", 10), ("swaps", 8), ("locks", 8), ("keys", 8), ("key-users", 8), ("cmdline", 8), ("devices", 8),
+        ("partitions", 8), ("modules", 8), ("interrupts", 8), ("kmsg", 8), ("vmstat", 8), ("zoneinfo", 8),
+        ("diskstats", 8), ("crypto", 8), ("misc", 8), ("consoles", 8), ("cgroups", 8), ("sys", 4), ("net", 4),
+        ("sysvipc", 4), ("pressure", 4), ("tty", 4),
+    ];
+    for (i, (name, kind)) in NAMES.iter().enumerate() {
+        let path = alloc::format!("/proc/{}", name);
+        let served = if *kind == 4 { super::fs::is_proc_dir(&path) || path_exists(path.as_bytes()) } else { served_by_name(&path) || path_exists(path.as_bytes()) };
+        if served || *name == "net" {
+            entries.push((10 + i as u64, String::from(*name), *kind));
+        }
+    }
+    for pid in super::proc::visible_pids() {
+        entries.push((0x1_0000_0000 + pid, alloc::format!("{}", pid), 4));
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(count);
+    let mut next = cursor;
+    for (idx, (ino, name, dtype)) in entries.iter().enumerate().skip(cursor) {
+        let reclen = (19 + name.len() + 1 + 7) & !7;
+        if out.len() + reclen > count {
+            break;
+        }
+        let start = out.len();
+        out.extend_from_slice(&ino.to_le_bytes());
+        out.extend_from_slice(&((idx + 1) as i64).to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(*dtype);
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        out.resize(start + reclen, 0);
+        next = idx + 1;
+    }
+    if out.is_empty() {
+        return if cursor >= entries.len() { 0 } else { EINVAL };
+    }
+    if let Err(e) = copy_out(buf, &out) {
+        return e;
+    }
+    file.lock().offset = next as u64;
     out.len() as i64
 }
 
@@ -1624,9 +1726,17 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
             for fd_num in open_fds {
                 entries.push((fd_num as u64 + 100, alloc::format!("{}", fd_num), 10));
             }
-        } else {
-            for fd_num in 0..3 {
-                entries.push((fd_num as u64 + 100, alloc::format!("{}", fd_num), 10));
+        } else if super::extra::may_access(target_pid).is_ok() {
+            // Another process's descriptors (lsof, ps): its table, read without holding
+            // the scheduler
+            let fds = crate::task::SCHEDULER.lock().with_process(target_pid, |t| t.fds.clone());
+            if let Some(fds) = fds {
+                let table = fds.lock();
+                for i in 0..crate::fs::MAX_FDS {
+                    if table.get(i).is_some() {
+                        entries.push((i as u64 + 100, alloc::format!("{}", i), 10));
+                    }
+                }
             }
         }
     }
@@ -1911,6 +2021,12 @@ fn readlink_at(dirfd: i64, path_ptr: u64, buf: u64, size: usize) -> i64 {
         if let Some(target) = fd_link(&abs) {
             let n = target.len().min(size);
             copy_out(buf, &target.as_bytes()[..n])?;
+            return Ok(n as i64);
+        }
+        // Another process's root: shown as "/" (opening it goes into that root)
+        if proc_root_path(abs.as_bytes()).is_some_and(|(_, rest)| rest.is_empty()) {
+            let n = 1.min(size);
+            copy_out(buf, &b"/"[..n])?;
             return Ok(n as i64);
         }
         if let Some(target) = super::fs::proc_link(&abs) {

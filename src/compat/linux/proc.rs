@@ -479,6 +479,13 @@ pub fn thread_exited(pid: u64, tid: u64) {
             if ign {
                 procs.remove(&pid);
             } else {
+                // The details go with the signal, as on Linux (the child may be reaped before
+                // the handler runs): CLD_EXITED, CLD_KILLED or CLD_DUMPED, pid, status
+                parent.senders[SIGCHLD as usize] = chld_sender(match status & 0x7f {
+                    0 => (1, pid, (status >> 8) & 0xff),
+                    sig if status & 0x80 != 0 => (3, pid, sig),
+                    sig => (2, pid, sig),
+                });
                 parent.pending |= bit(SIGCHLD);
                 // This runs under the scheduler lock (task exit): wake the parent later
                 crate::task::wait::wake_process_deferred(ppid);
@@ -579,6 +586,28 @@ pub fn sys_setgroups(size: u64, list: u64) -> i64 {
         p.groups = groups;
     }
     0
+}
+
+/// The processes the caller sees in `/proc`, by the IDs it knows them by: those in its PID
+/// namespace (zombies included, as on Linux), or all from the initial namespace.
+pub fn visible_pids() -> Vec<u64> {
+    let (_, me) = current_ids();
+    let procs = PROCS.lock();
+    let init = procs.get(&me).and_then(|p| p.ns.pid_inits.last().copied());
+    let mut out: Vec<u64> = procs
+        .values()
+        .filter(|p| match init {
+            None => true,
+            Some(i) => p.pid == i || p.ns.pid_inits.contains(&i),
+        })
+        .map(|p| p.pid)
+        .collect();
+    drop(procs);
+    for p in out.iter_mut() {
+        *p = super::ns::pid_to_caller(*p);
+    }
+    out.sort_unstable();
+    out
 }
 
 /// The calling process's supplementary groups.
@@ -834,9 +863,12 @@ const SA_NOCLDSTOP: u64 = 1;
 /// # Arguments
 /// * `procs` - Mutable reference to the process map.
 /// * `ppid` - Parent process ID to notify.
-fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64) {
+fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64, info: Option<(i32, u64, i32)>) {
     if let Some(parent) = procs.get_mut(&ppid) {
         if parent.actions[SIGCHLD as usize].flags & SA_NOCLDSTOP == 0 {
+            if let Some(i) = info {
+                parent.senders[SIGCHLD as usize] = chld_sender(i);
+            }
             parent.pending |= bit(SIGCHLD);
             crate::task::wait::wake_process_deferred(ppid);
         }
@@ -887,7 +919,7 @@ pub fn post_process(pid: u64, sig: u32) -> bool {
             _ => return false,
         }
         if let Some(ppid) = resumed_ppid {
-            notify_parent_stop(&mut procs, ppid);
+            notify_parent_stop(&mut procs, ppid, Some((6, pid, SIGCONT as i32))); // CLD_CONTINUED
         }
     }
     if sig == SIGCONT {
@@ -946,7 +978,7 @@ fn stop_current(sig: u32) {
             }
             None => return,
         };
-        notify_parent_stop(&mut procs, ppid);
+        notify_parent_stop(&mut procs, ppid, Some((5, pid, sig as i32))); // CLD_STOPPED
     }
     wait_while_stopped();
 }
@@ -1646,6 +1678,11 @@ pub fn pending_for(pid: u64, mask: u64) -> bool {
     })
 }
 
+/// The `SIGCHLD` record (`si_code`, `si_pid`, `si_status`) for a child's state change.
+fn chld_sender((code, child, status): (i32, u64, i32)) -> SigSender {
+    SigSender { code, pid: child as u32, value: status as u32 as u64, ..Default::default() }
+}
+
 /// Returns `(si_code, child_pid, si_status)` for a `SIGCHLD` received by `parent`, derived
 /// from its children's state (the process table does not queue per-signal details):
 /// an unreaped zombie gives `CLD_EXITED`/`CLD_KILLED`/`CLD_DUMPED`, else a stopped or continued child.
@@ -1769,7 +1806,7 @@ fn inject(sig: u32) {
 /// Tells tracer `pid` that a tracee stopped (`SIGCHLD`, unless it asked not to).
 pub fn notify_tracer(pid: u64) {
     let mut procs = PROCS.lock();
-    notify_parent_stop(&mut procs, pid);
+    notify_parent_stop(&mut procs, pid, None);
 }
 
 /// Whether `SIGKILL` is pending for the calling thread.

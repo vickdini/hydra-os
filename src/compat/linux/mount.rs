@@ -199,6 +199,75 @@ fn table(id: u64) -> Option<Arc<Mutex<MountNs>>> {
     NAMESPACES.lock().get(&id).cloned()
 }
 
+/// Lookups in another process's root (`/proc/<pid>/root`): `(namespace, root, root
+/// mount)` for the current thread's next lookup, and whether its last lookup was one.
+static FOREIGN: Mutex<BTreeMap<u64, (u64, u64, usize)>> = Mutex::new(BTreeMap::new());
+static LAST_FOREIGN: Mutex<BTreeMap<u64, (u64, u64, usize)>> = Mutex::new(BTreeMap::new());
+
+/// The next lookup of this thread starts in another process's root and namespace.
+pub fn note_foreign(f: (u64, u64, usize)) {
+    FOREIGN.lock().insert(tid(), f);
+}
+
+/// The other process's root and namespace this thread's last lookup went through, if any.
+pub fn last_foreign() -> Option<(u64, u64, usize)> {
+    LAST_FOREIGN.lock().get(&tid()).copied()
+}
+
+/// The root directory of process `pid`, its mount and its mount namespace:
+/// `(namespace, root, root mount)` (namespace 0: the initial one).
+pub fn process_root(pid: u64) -> Option<(u64, u64, usize)> {
+    let ns = super::proc::PROCS.lock().get(&pid).filter(|p| !p.zombie).map(|p| p.ns.mnt)?;
+    let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone())?;
+    let (mut root, mut root_mnt) = {
+        let t = fds.lock();
+        (t.root_ino, t.root_mnt)
+    };
+    if ns != 0 {
+        let t = table(ns)?;
+        let t = t.lock();
+        if root == 0 {
+            root = t.get(t.root).map_or(0, |m| m.root);
+        }
+        if root_mnt == 0 {
+            root_mnt = t.root;
+        }
+    }
+    Some((ns, root, root_mnt))
+}
+
+/// Resolves `path` from `base` (on mount `base_mnt`) inside another process's root and
+/// mount namespace `f`.
+pub fn resolve_foreign(f: (u64, u64, usize), base: u64, base_mnt: usize, path: &[u8], follow: bool) -> Result<u64, i64> {
+    let (ns, root, root_mnt) = f;
+    LAST_FOREIGN.lock().insert(tid(), f);
+    if ns == 0 {
+        NOTES.lock().insert(tid(), (0, 0, 0));
+        return ZfsClient::resolve_in(root, base, path, follow);
+    }
+    let list = table(ns).ok_or(-2i64)?.lock().server_list();
+    let base = if base == 0 { root } else { base };
+    let base_mnt = if base_mnt == 0 { root_mnt } else { base_mnt };
+    let (ino, mnt) = crate::fs::zfs::with_server(|s| s.resolve_mnt(root, root_mnt, base, base_mnt, path, follow, &list))?;
+    NOTES.lock().insert(tid(), (0, mnt, ns));
+    Ok(ino)
+}
+
+/// A lookup in this thread's own root and namespace follows: no longer through another's.
+pub fn clear_foreign() {
+    LAST_FOREIGN.lock().remove(&tid());
+}
+
+/// Takes the other process's root a pending lookup starts in (see [`note_foreign`]).
+pub fn take_foreign() -> Option<(u64, u64, usize)> {
+    FOREIGN.lock().remove(&tid())
+}
+
+/// The base mount noted for this thread's next lookup.
+pub fn noted_base() -> usize {
+    NOTES.lock().get(&tid()).map_or(0, |n| n.0)
+}
+
 /// Records the mount a lookup from a directory descriptor (or the working directory)
 /// starts in.
 pub fn note_base(mnt: usize) {
@@ -213,6 +282,8 @@ pub fn last_mount() -> usize {
 /// Forgets a thread's notes (it exited).
 pub fn forget_thread(tid: u64) {
     NOTES.lock().remove(&tid);
+    FOREIGN.lock().remove(&tid);
+    LAST_FOREIGN.lock().remove(&tid);
 }
 
 /// Resolves `path` from `base` through the caller's mount table, if it has one.
