@@ -14,8 +14,10 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 static int fails;
@@ -38,7 +40,8 @@ struct attr_out { uint64_t attr_valid; uint32_t attr_valid_nsec, dummy; struct a
 #define MAXN 64
 struct node { int used, parent; char name[64]; uint32_t mode; char *data; size_t size; };
 static struct node nodes[MAXN]; // node ID = index + 1 (1: the root)
-static int fd;
+static int fd, slow;
+static uint64_t held; // a read of "slow" waits here until INTERRUPT
 
 static int add(int parent, const char *name, uint32_t mode, const char *data) {
     for (int i = 1; i < MAXN; i++)
@@ -178,7 +181,17 @@ static void serve(void) {
             reply(h->unique, 0, out, sizeof out);
             break;
         }
+        case 36: // INTERRUPT: the held read ends with EINTR
+            if (*(uint64_t *)arg == held) {
+                reply(held, -EINTR, 0, 0);
+                held = 0;
+            }
+            break;
         case 15: { // READ
+            if (me == slow) {
+                held = h->unique;
+                break;
+            }
             uint64_t off = *(uint64_t *)(arg + 8);
             uint32_t size = *(uint32_t *)(arg + 16);
             size_t have = off < nodes[me].size ? nodes[me].size - off : 0;
@@ -240,6 +253,8 @@ static void serve(void) {
 
 // ---------------------------------------------------------------- the test
 
+static void on_alarm(int s) {}
+
 static int read_file(const char *p, char *buf, size_t n) {
     int f = open(p, O_RDONLY);
     if (f < 0) return -errno;
@@ -274,6 +289,7 @@ int main(void) {
     add(0, "hello", S_IFREG | 0644, "Hello FUSE\n");
     int d = add(0, "d", S_IFDIR | 0755, NULL);
     add(d, "l", S_IFLNK | 0777, "../hello");
+    slow = add(0, "slow", S_IFREG | 0644, "zzz");
 
     char opts[128];
     snprintf(opts, sizeof opts, "fd=%d,rootmode=40000,user_id=0,group_id=0", fd);
@@ -286,6 +302,8 @@ int main(void) {
 
     struct stat st;
     check(stat(mnt, &st) == 0 && S_ISDIR(st.st_mode) && st.st_dev != tmp.st_dev, "the mount point is the daemon's root (another device)");
+    struct statfs sfs;
+    check(statfs(mnt, &sfs) == 0 && sfs.f_type == 0x65735546 && sfs.f_blocks == 1000 && sfs.f_bfree == 500 && sfs.f_bsize == 4096, "statfs: FUSE, the daemon's figures");
     char buf[256];
     check(read_file("/tmp/fusetest.mnt/hello", buf, sizeof buf) == 11 && !strcmp(buf, "Hello FUSE\n"), "read a file");
     check(stat("/tmp/fusetest.mnt/hello", &st) == 0 && st.st_size == 11 && st.st_ino == 1001, "stat: size and the daemon's inode number");
@@ -329,6 +347,17 @@ int main(void) {
     check(p != MAP_FAILED && !memcmp(p, "Hello FUSE", 10), "mmap");
     if (p != MAP_FAILED) munmap(p, 4096);
     close(f);
+
+    struct sigaction sa = {0};
+    sa.sa_handler = on_alarm; // no SA_RESTART
+    sigaction(SIGALRM, &sa, NULL);
+    f = open("/tmp/fusetest.mnt/slow", O_RDONLY);
+    alarm(1);
+    int r = read(f, buf, 10), e = errno;
+    alarm(0);
+    close(f);
+    if (!(r < 0 && e == EINTR)) printf("     (read: f=%d r=%d errno=%d)\n", f, r, e);
+    check(f >= 0 && r < 0 && e == EINTR, "a signal interrupts a waiting request (INTERRUPT; the daemon answers EINTR)");
 
     FILE *mf = fopen("/proc/mounts", "r");
     int listed = 0;

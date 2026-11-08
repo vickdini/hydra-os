@@ -246,6 +246,33 @@ pub const ENOSPC_MSG: &str = "No space left on device";
 /// Write error: the file-size limit (`RLIMIT_FSIZE`) is reached (`EFBIG`).
 pub const EFBIG_MSG: &str = "File too large";
 
+/// Errors of file I/O that keep their errno through the string-typed descriptor calls (a
+/// FUSE daemon's answers): `(errno, message)`.
+const IO_ERRORS: [(i64, &str); 12] = [
+    (-1, "Operation not permitted"),
+    (-2, "No such file or directory"),
+    (-4, "Interrupted system call"),
+    (-11, "Resource temporarily unavailable"),
+    (-13, "Permission denied"),
+    (-22, "Invalid argument"),
+    (-28, ENOSPC_MSG),
+    (-30, "Read-only file system"),
+    (-95, "Operation not supported"),
+    (-107, "Transport endpoint is not connected"),
+    (-122, "Disk quota exceeded"),
+    (-5, "Input/output error"),
+];
+
+/// The message of an I/O errno (see [`io_errno`]).
+pub fn io_error(e: i64) -> &'static str {
+    IO_ERRORS.iter().find(|x| x.0 == e).map_or("Input/output error", |x| x.1)
+}
+
+/// The errno of an I/O error message from [`io_error`], if it is one.
+pub fn io_errno(m: &str) -> Option<i64> {
+    IO_ERRORS.iter().find(|x| x.1 == m).map(|x| x.0)
+}
+
 /// `data` cut to the file-size limit for a write at `offset`, or `EFBIG_MSG` past it.
 fn fsize_cut(data: &[u8], offset: u64) -> Result<&[u8], &'static str> {
     let limit = crate::compat::linux::limits::fsize();
@@ -360,7 +387,7 @@ impl FileDescriptor {
                 if !f.readable() {
                     return Err("File not opened for reading");
                 }
-                let n = ZfsClient::read_at(f.ino, f.offset, buf).map_err(|_| "ZFS read error")?;
+                let n = ZfsClient::read_at(f.ino, f.offset, buf).map_err(io_error)?;
                 f.offset += n as u64;
                 if n > 0 {
                     f.fan(crate::compat::linux::fanotify::FAN_ACCESS);
@@ -403,7 +430,7 @@ impl FileDescriptor {
             }
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
-                let n = ZfsClient::read_at(ino, offset as u64, buf).map_err(|_| "ZFS read error")?;
+                let n = ZfsClient::read_at(ino, offset as u64, buf).map_err(io_error)?;
                 if n > 0 {
                     file.lock().fan(crate::compat::linux::fanotify::FAN_ACCESS);
                 }
@@ -440,7 +467,7 @@ impl FileDescriptor {
             FileDescriptor::Vnode(file) => {
                 let ino = file.lock().ino;
                 let data = fsize_cut(data, offset as u64)?;
-                let n = ZfsClient::write_at(ino, offset as u64, data).map_err(|_| "ZFS write error")?;
+                let n = ZfsClient::write_at(ino, offset as u64, data).map_err(io_error)?;
                 if n > 0 {
                     file.lock().fan(crate::compat::linux::fanotify::FAN_MODIFY);
                 }
@@ -529,7 +556,7 @@ impl FileDescriptor {
                     f.offset = ZfsClient::getattr(f.ino).map_err(|_| "ZFS stat error")?.size;
                 }
                 let data = fsize_cut(data, f.offset)?;
-                let n = ZfsClient::write_at(f.ino, f.offset, data).map_err(|_| "ZFS write error")?;
+                let n = ZfsClient::write_at(f.ino, f.offset, data).map_err(io_error)?;
                 f.offset += n as u64;
                 if n > 0 {
                     f.fan(crate::compat::linux::fanotify::FAN_MODIFY);

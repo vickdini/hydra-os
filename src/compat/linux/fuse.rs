@@ -74,6 +74,8 @@ const OPENDIR: u32 = 27;
 const READDIR: u32 = 28;
 const RELEASEDIR: u32 = 29;
 const CREATE: u32 = 35;
+const INTERRUPT: u32 = 36;
+const EINTR: i64 = -4;
 
 /// Protocol version offered: 7.14 (libfuse offers splice from it; it splices only what fits
 /// its pipe, and `splice` copies through `read`/`write`).
@@ -244,8 +246,12 @@ impl Conn {
             }
             waits.wait(None);
         };
+        let mut interrupted = false;
         loop {
             waits.register();
+            // Read before taking the connection's lock (they take the process table's)
+            let killed = super::proc::sigkill_pending();
+            let signalled = !interrupted && super::proc::signal_pending();
             {
                 let mut st = self.st.lock();
                 if matches!(st.slots.get(&unique), Some(Slot::Done(..))) {
@@ -255,6 +261,23 @@ impl Conn {
                 if st.aborted {
                     st.slots.remove(&unique);
                     return Err(ENOTCONN);
+                }
+                // A signal: the daemon is told (it may answer EINTR); SIGKILL does not wait
+                if killed {
+                    st.slots.insert(unique, Slot::Discard);
+                    st.queue.retain(|m| u64::from_le_bytes(m[8..16].try_into().unwrap()) != unique);
+                    return Err(EINTR);
+                }
+                if signalled {
+                    interrupted = true;
+                    // Still queued: taken back; else the daemon gets INTERRUPT
+                    let before = st.queue.len();
+                    st.queue.retain(|m| u64::from_le_bytes(m[8..16].try_into().unwrap()) != unique);
+                    if st.queue.len() != before {
+                        st.slots.remove(&unique);
+                        return Err(EINTR);
+                    }
+                    self.push(&mut st, INTERRUPT, 0, &[&unique.to_le_bytes()], Slot::Discard);
                 }
             }
             waits.wait(None);
@@ -1060,11 +1083,36 @@ pub fn removexattr(ino: u64, name: &[u8]) -> Result<(), i64> {
     c.call(REMOVEXATTR, n, &[&cstr(name)]).map(|_| ()).map_err(xattr_err)
 }
 
-/// `(blocks, free blocks, files)` of the file system `ino` is in.
-pub fn statfs(ino: u64) -> Result<(u64, u64, u64, u32), i64> {
+/// The file system `ino` is in as `statfs` reports it (`struct statfs`, 120 bytes); a
+/// daemon without `statfs` gets Linux's defaults.
+pub fn statfs(ino: u64) -> Result<[u8; 120], i64> {
     let (c, n) = target(ino)?;
-    let r = c.call(STATFS, n, &[])?;
-    Ok((u64_at(&r, 0), u64_at(&r, 8), u64_at(&r, 24), u32_at(&r, 40)))
+    let r = match c.call(STATFS, n, &[]) {
+        Ok(r) => r,
+        Err(ENOSYS) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let bsize = match u32_at(&r, 40) {
+        0 => 512,
+        b => b,
+    };
+    let namelen = match u32_at(&r, 44) {
+        0 => 255,
+        n => n,
+    };
+    let frsize = match u32_at(&r, 48) {
+        0 => bsize,
+        f => f,
+    };
+    let vals: [u64; 7] = [0x6573_5546, bsize as u64, u64_at(&r, 0), u64_at(&r, 8), u64_at(&r, 16), u64_at(&r, 24), u64_at(&r, 32)];
+    let mut b = [0u8; 120];
+    for (i, v) in vals.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    b[56..60].copy_from_slice(&(dev(ino) as u32).to_le_bytes()); // f_fsid
+    b[64..72].copy_from_slice(&(namelen as u64).to_le_bytes());
+    b[72..80].copy_from_slice(&(frsize as u64).to_le_bytes());
+    Ok(b)
 }
 
 /// A descriptor opened `ino`.

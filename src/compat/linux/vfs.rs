@@ -3463,6 +3463,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_STATFS => match user_path(a[0]).and_then(|p| base_dir(AT_FDCWD, &p).map(|(b, base)| (b, join_path(&base, &p), p))) {
             Ok((b, abs, p)) => {
                 let mut magic = fs_magic(&abs);
+                // A FUSE file system: its daemon's figures
+                if magic == ZFS_SUPER_MAGIC {
+                    if let Ok(ino) = resolve(b, &p, true).ok().filter(|i| super::fuse::is_fuse(*i)).ok_or(0) {
+                        return Some(match super::fuse::statfs(ino) {
+                            Ok(st) => copy_out(a[1], &st).map_or_else(|e| e, |_| 0),
+                            Err(e) => e,
+                        });
+                    }
+                }
                 // A tmpfs mount (mount namespaces)
                 if magic == ZFS_SUPER_MAGIC && resolve(b, &p, true).is_ok() && super::mount::last_is_tmpfs() {
                     magic = 0x0102_1994;
@@ -3475,7 +3484,16 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
             let magic = match desc {
                 Some(FileDescriptor::Pty(_)) => DEVPTS_SUPER_MAGIC,
-                Some(FileDescriptor::Vnode(f)) => fs_magic(&f.lock().path),
+                Some(FileDescriptor::Vnode(f)) => {
+                    let ino = f.lock().ino;
+                    if super::fuse::is_fuse(ino) {
+                        return Some(match super::fuse::statfs(ino) {
+                            Ok(st) => copy_out(a[1], &st).map_or_else(|e| e, |_| 0),
+                            Err(e) => e,
+                        });
+                    }
+                    fs_magic(&f.lock().path)
+                }
                 Some(FileDescriptor::File { path, .. }) => fs_magic(&path),
                 Some(_) => ZFS_SUPER_MAGIC,
                 None => return Some(EBADF),

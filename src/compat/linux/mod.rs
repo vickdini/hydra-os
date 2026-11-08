@@ -311,14 +311,18 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             dispatch_wayland_events();
 
             let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
+            let read_errno = |e: &'static str| match e {
+                // Write-only or O_PATH
+                "File not opened for reading" => -EBADF,
+                e => crate::fs::fd::io_errno(e).unwrap_or(-EIO),
+            };
+            // Files outside the descriptor table's lock (a FUSE daemon may take a while)
+            if let Some(mut desc) = vnode_desc(fd) {
+                return desc.read(slice).map_or_else(read_errno, |n| n as i64);
+            }
             crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
-                    match desc.read(slice) {
-                        Ok(n) => n as i64,
-                        // Write-only or O_PATH
-                        Err("File not opened for reading") => -EBADF,
-                        Err(_) => -EIO,
-                    }
+                    desc.read(slice).map_or_else(read_errno, |n| n as i64)
                 } else {
                     -EBADF
                 }
@@ -341,6 +345,10 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             }
 
             let slice = unsafe { core::slice::from_raw_parts(ptr, count) };
+            // Files outside the descriptor table's lock (a FUSE daemon may take a while)
+            if let Some(mut desc) = vnode_desc(fd) {
+                return desc.write(slice).map_or_else(write_errno, |n| n as i64);
+            }
             let res = crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
                     match desc.write(slice) {
@@ -713,18 +721,24 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     return r;
                 }
             }
-            crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
-                Some(desc) => {
-                    let res = if is_read {
-                        desc.pread(unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, count) }, offset)
-                    } else {
-                        desc.pwrite(unsafe { core::slice::from_raw_parts(arg1 as *const u8, count) }, offset)
-                    };
-                    match res {
-                        Ok(n) => n as i64,
-                        Err(_) => -ESPIPE,
-                    }
+            let io = |desc: &mut crate::fs::FileDescriptor| {
+                let res = if is_read {
+                    desc.pread(unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, count) }, offset)
+                } else {
+                    desc.pwrite(unsafe { core::slice::from_raw_parts(arg1 as *const u8, count) }, offset)
+                };
+                match res {
+                    Ok(n) => n as i64,
+                    Err(crate::fs::fd::EFBIG_MSG) => write_errno(crate::fs::fd::EFBIG_MSG),
+                    Err(e) => crate::fs::fd::io_errno(e).unwrap_or(-ESPIPE),
                 }
+            };
+            // Files outside the descriptor table's lock
+            if let Some(mut desc) = vnode_desc(fd) {
+                return io(&mut desc);
+            }
+            crate::task::with_current_fds_mut(|fds| match fds.get_mut(fd) {
+                Some(desc) => io(desc),
                 None => -EBADF,
             })
         }
@@ -2382,7 +2396,19 @@ pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
 }
 
 /// The errno of a failed descriptor write (`ENOSPC` for `/dev/full`, otherwise `EIO`).
+/// Descriptor `fd` if it is an open file in a file system (sharing its open file with the
+/// table: I/O through it moves the same offset).
+fn vnode_desc(fd: usize) -> Option<crate::fs::FileDescriptor> {
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+        Some(d @ crate::fs::FileDescriptor::Vnode(_)) => Some(d.clone()),
+        _ => None,
+    })
+}
+
 fn write_errno(e: &'static str) -> i64 {
+    if let Some(n) = crate::fs::fd::io_errno(e) {
+        return n;
+    }
     match e {
         crate::fs::fd::ENOSPC_MSG => -28,
         crate::fs::fd::EFBIG_MSG => {
