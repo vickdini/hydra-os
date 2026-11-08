@@ -133,6 +133,36 @@ pub fn get_selectors() -> &'static Selectors {
 /// Invoked during [`crate::arch::boot_services::take_hardware_ownership`] immediately after `ExitBootServices`.
 pub fn load_and_switch() {
     GDT.0.load();
+    reload_segments(&GDT.1);
+}
+
+/// The TSS of each application processor (index: CPU), for its kernel stack pointer.
+pub static AP_TSS: [core::sync::atomic::AtomicPtr<TaskStateSegment>; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; crate::arch::smp::MAX_CPUS];
+
+/// Gives application processor `cpu` a GDT and TSS of its own (the same selectors as the
+/// boot processor's, its own double-fault and privilege stacks) and loads them.
+pub fn load_for_ap(cpu: usize) {
+    let tss: &'static mut TaskStateSegment = alloc::boxed::Box::leak(alloc::boxed::Box::new(TaskStateSegment::new()));
+    let df: &'static mut [u8] = alloc::vec![0u8; STACK_SIZE].leak();
+    let ps: &'static mut [u8] = alloc::vec![0u8; STACK_SIZE].leak();
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::from_ptr(df.as_ptr()) + STACK_SIZE as u64;
+    tss.privilege_stack_table[0] = VirtAddr::from_ptr(ps.as_ptr()) + STACK_SIZE as u64;
+    AP_TSS[cpu].store(tss as *mut TaskStateSegment, core::sync::atomic::Ordering::Release);
+    let gdt: &'static mut GlobalDescriptorTable = alloc::boxed::Box::leak(alloc::boxed::Box::new(GlobalDescriptorTable::new()));
+    let kernel_code_selector = gdt.append(Descriptor::kernel_code_segment());
+    let kernel_data_selector = gdt.append(Descriptor::kernel_data_segment());
+    let user_data_selector = gdt.append(Descriptor::user_data_segment());
+    let user_code_selector = gdt.append(Descriptor::user_code_segment());
+    let tss_selector = gdt.append(Descriptor::tss_segment(unsafe { &*(tss as *const TaskStateSegment) }));
+    let sel = Selectors { kernel_code_selector, kernel_data_selector, user_data_selector, user_code_selector, tss_selector };
+    let gdt: &'static GlobalDescriptorTable = gdt;
+    gdt.load();
+    reload_segments(&sel);
+}
+
+/// Reloads CS, the data segments and TR with the selectors of a freshly loaded GDT.
+fn reload_segments(s: &Selectors) {
     unsafe {
         // Far return to reload CS with kernel code selector (0x08)
         core::arch::asm!(
@@ -141,12 +171,12 @@ pub fn load_and_switch() {
             "push {tmp}",
             "retfq",
             "2:",
-            sel = in(reg) u64::from(GDT.1.kernel_code_selector.0),
+            sel = in(reg) u64::from(s.kernel_code_selector.0),
             tmp = out(reg) _,
             options(preserves_flags),
         );
         // Reload data and stack segment selectors
-        let data_sel = GDT.1.kernel_data_selector.0;
+        let data_sel = s.kernel_data_selector.0;
         core::arch::asm!(
             "mov ds, {sel:x}",
             "mov es, {sel:x}",
@@ -157,6 +187,6 @@ pub fn load_and_switch() {
             options(preserves_flags),
         );
         // Load Task Register (TR) with TSS selector
-        x86_64::instructions::tables::load_tss(GDT.1.tss_selector);
+        x86_64::instructions::tables::load_tss(s.tss_selector);
     }
 }

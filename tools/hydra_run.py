@@ -97,6 +97,7 @@ def read_log(path):
 def main():
     sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
+    ap.add_argument("--smp", type=int, default=1, help="number of CPUs")
     ap.add_argument("--mem", default="4G")
     ap.add_argument("--accel", default="whpx", choices=["whpx", "tcg"], help="whpx: Windows hardware virtualization; tcg: software emulation")
     ap.add_argument("--wait", type=float, default=60)
@@ -134,7 +135,7 @@ def main():
         *firmware,
         "-cdrom", os.path.join(ROOT, "dist", "x86_64", "kernel.iso"),
         "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
-        "-boot", "d", "-m", a.mem, "-vga", "std", "-display", "none",
+        "-boot", "d", "-m", a.mem, "-smp", str(a.smp), "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",
         "-no-reboot",

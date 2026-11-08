@@ -330,6 +330,11 @@ pub fn init() {
     drop(idt);
 }
 
+/// Loads the shared IDT on the calling CPU (an application processor starting).
+pub fn load_on_this_cpu() {
+    IDT.lock().load();
+}
+
 /// Enables the TSS Interrupt Stack Table (IST 1) for Double Fault (#DF) exceptions.
 pub fn enable_double_fault_ist() {
     let mut idt = IDT.lock();

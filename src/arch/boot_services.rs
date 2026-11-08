@@ -106,6 +106,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     enable_standalone_video(true);
     set_hardware_mode(true);
 
+    // 2b. The processors (ACPI MADT) and the start-up pages for the others
+    crate::arch::smp::discover();
+
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     let entries_count = memory_map.entries().count();
@@ -176,6 +179,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
 
     // 9. Enable CPU hardware interrupts (sti) after banner rendering completes
     x86_64::instructions::interrupts::enable();
+    // 9b. The other processors come online (and wait)
+    crate::arch::smp::start_aps();
     // Driver programs run from here on (the takeover lock is released first: they run
     // while their registration is awaited)
     drop(done);
