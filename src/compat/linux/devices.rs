@@ -246,19 +246,24 @@ impl Tree {
     ///
     /// `Ok(())` on success, or a negative Linux errno on error.
     fn node(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32) -> Result<(), i64> {
+        self.node_mode(s, path, rdev, gid, 0o660)
+    }
+
+    /// [`Self::node`] with permissions `perm`.
+    fn node_mode(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32, perm: u32) -> Result<(), i64> {
         self.at = String::from(path);
         let (parent, name) = split(path);
         let dir = self.dir(s, parent)?;
         if let Some(i) = self.existing(s, dir, name, S_IFCHR)? {
             let a = s.getattr(i)?;
             // A boot starts with root owning every node (the seat daemon hands some out)
-            if a.rdev == rdev && a.uid == 0 && a.gid == gid && a.mode & 0o777 == 0o660 {
+            if a.rdev == rdev && a.uid == 0 && a.gid == gid && a.mode & 0o777 == perm {
                 return Ok(());
             }
             s.unlink(dir, name.as_bytes())?;
         }
         self.changed = true;
-        s.mknod(dir, name.as_bytes(), S_IFCHR | 0o660, rdev, 0, gid)?;
+        s.mknod(dir, name.as_bytes(), S_IFCHR | perm, rdev, 0, gid)?;
         Ok(())
     }
 }
@@ -437,6 +442,10 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     t.link(s, "/sys/class/drm/card0", &alloc::format!("../../devices/pci0000:00/{}/drm/card0", v.slot))?;
     t.link(s, "/sys/dev/char/226:0", &alloc::format!("../../devices/pci0000:00/{}/drm/card0", v.slot))?;
     t.node(s, "/dev/dri/card0", super::chardev::makedev(226, 0), video)?;
+    // FUSE: anyone may open it (fusermount3 mounts for users); fusermount3 reads the
+    // mount table as /etc/mtab
+    t.node_mode(s, "/dev/fuse", super::fuse::RDEV, 0, 0o666)?;
+    t.link(s, "/etc/mtab", "../proc/self/mounts")?;
     let path_tag: String = v.slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();
     t.link(s, &alloc::format!("/dev/dri/by-path/pci-{}-card", v.slot), "../card0")?;
     t.file(

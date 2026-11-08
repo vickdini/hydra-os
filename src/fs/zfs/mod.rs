@@ -128,6 +128,8 @@ fn kill_suid() -> Option<alloc::vec::Vec<u32>> {
     Some(g)
 }
 
+use crate::compat::linux::fuse;
+
 impl ZfsServer {
     /// Sends request `op` with the parameters `params` writes; returns `(value, reply
     /// bytes)` and hands the operation's inotify events to the kernel's watchers.
@@ -198,6 +200,9 @@ impl ZfsServer {
     ///
     /// The target object ID on success, or a negative errno error code on failure.
     pub fn lookup(&mut self, dir: u64, name: &[u8]) -> Result<u64, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::lookup(dir, name);
+        }
         self.request(FS_LOOKUP, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -220,6 +225,11 @@ impl ZfsServer {
     pub fn resolve_in(&mut self, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
         if path.len() > 4096 {
             return Err(ENAMETOOLONG);
+        }
+        // Through the initial namespace's FUSE mounts
+        if fuse::ns0_any() || fuse::is_fuse(base) || fuse::is_fuse(root) {
+            let list = fuse::ns0_list();
+            return self.resolve_mnt(root, fuse::ns0_mnt_of(root), base, fuse::ns0_mnt_of(base), path, follow_last, &list).map(|r| r.0);
         }
         self.request(FS_RESOLVE, |w| {
             w.u64(root);
@@ -256,7 +266,57 @@ impl ZfsServer {
         if path.len() > 4096 {
             return Err(ENAMETOOLONG);
         }
-        self.request(FS_RESOLVE_MNT, |w| {
+        if path.is_empty() {
+            return Err(ENOENT);
+        }
+        // The file server walks the pool; a FUSE file system's part is walked here, and
+        // the walk goes back and forth at mount points
+        let follow = follow_last || path.ends_with(b"/");
+        let (mut cur, mut mnt) = if path[0] == b'/' { (root, root_mnt) } else { (base, base_mnt) };
+        let mut rest = path.to_vec();
+        let mut links = 0u32;
+        for _ in 0..64 {
+            let stopped = if fuse::is_fuse(cur) {
+                match fuse::walk(cur, mnt, &rest, follow, mounts, root, root_mnt, &mut links)? {
+                    fuse::Walk::Done(i, m) => return self.trailing_dir(path, (i, m)),
+                    fuse::Walk::Out(i, m, r) => (i, m, r),
+                }
+            } else {
+                match self.resolve_mnt_raw(root, root_mnt, cur, mnt, &rest, follow, mounts)? {
+                    (i, m, None) => return Ok((i, m)),
+                    (i, m, Some(r)) => (i, m, r),
+                }
+            };
+            (cur, mnt, rest) = stopped;
+            if rest.is_empty() {
+                return self.trailing_dir(path, (cur, mnt));
+            }
+        }
+        Err(ELOOP)
+    }
+
+    /// `found`, or `ENOTDIR` if `path` ends with a slash and it is not a directory.
+    fn trailing_dir(&mut self, path: &[u8], found: (u64, usize)) -> Result<(u64, usize), i64> {
+        if path.ends_with(b"/") && !self.getattr(found.0)?.is_dir() {
+            return Err(ENOTDIR);
+        }
+        Ok(found)
+    }
+
+    /// One [`FS_RESOLVE_MNT`] request: `(object, mount, None)`, or a FUSE mount's root, the
+    /// mount and the rest of the path when the walk entered one.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_mnt_raw(
+        &mut self,
+        root: u64,
+        root_mnt: usize,
+        base: u64,
+        base_mnt: usize,
+        path: &[u8],
+        follow_last: bool,
+        mounts: &[(u64, u64, usize)],
+    ) -> Result<(u64, usize, Option<Vec<u8>>), i64> {
+        let (v, len) = self.request(FS_RESOLVE_MNT, |w| {
             w.u64(root);
             w.u64(root_mnt as u64);
             w.u64(base);
@@ -269,8 +329,16 @@ impl ZfsServer {
                 w.u64(m.1);
                 w.u64(m.2 as u64);
             }
-        })
-        .map(|r| (r.0 & ((1u64 << MNT_SHIFT) - 1), (r.0 >> MNT_SHIFT) as usize))
+        })?;
+        let mnt = (v >> MNT_SHIFT) as usize;
+        if len > 0 {
+            let mut r = Reader::new(self.reply(len));
+            let _ = r.u64();
+            let rest = r.bytes().to_vec();
+            let root = mounts.get(mnt.wrapping_sub(1)).map(|m| m.1).ok_or(EIO)?;
+            return Ok((root, mnt, Some(rest)));
+        }
+        Ok((v & ((1u64 << MNT_SHIFT) - 1), mnt, None))
     }
 
     /// Attributes of `ino`.
@@ -282,6 +350,9 @@ impl ZfsServer {
     ///
     /// The object's [`Attr`] record on success, or a negative errno error code on failure.
     pub fn getattr(&mut self, ino: u64) -> Result<Attr, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::getattr(ino);
+        }
         let (_, len) = self.request(FS_GETATTR, |w| {
             w.u64(ino);
         })?;
@@ -298,6 +369,9 @@ impl ZfsServer {
     ///
     /// The updated [`Attr`] record on success, or a negative errno error code on failure.
     pub fn setattr(&mut self, ino: u64, mut set: SetAttr) -> Result<Attr, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::setattr(ino, set);
+        }
         // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
         if let (Some(_), None, Some(groups)) = (set.size, set.mode, if set.size.is_some() { kill_suid() } else { None }) {
             let a = self.getattr(ino)?;
@@ -324,6 +398,9 @@ impl ZfsServer {
     ///
     /// The number of bytes actually read on success, or a negative errno error code on failure.
     pub fn read(&mut self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::read(ino, offset, buf);
+        }
         let mut done = 0;
         while done < buf.len() {
             let want = (buf.len() - done).min(MAX_IO);
@@ -353,6 +430,9 @@ impl ZfsServer {
     ///
     /// The number of bytes actually written on success, or a negative errno error code on failure.
     pub fn write(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::write(ino, offset, data);
+        }
         let mut done = 0;
         while done < data.len() || data.is_empty() {
             let chunk = &data[done..(done + MAX_IO).min(data.len())];
@@ -391,6 +471,9 @@ impl ZfsServer {
     ///
     /// The newly created object ID on success, or a negative errno error code on failure.
     pub fn create(&mut self, dir: u64, name: &[u8], perm: u32, uid: u32, gid: u32) -> Result<u64, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::create(dir, name, perm);
+        }
         self.request(FS_CREATE, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -415,6 +498,9 @@ impl ZfsServer {
     ///
     /// The newly created object ID on success, or a negative errno error code on failure.
     pub fn mknod(&mut self, dir: u64, name: &[u8], mode: u32, rdev: u64, uid: u32, gid: u32) -> Result<u64, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::mknod(dir, name, mode, rdev);
+        }
         self.request(FS_MKNOD, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -439,6 +525,9 @@ impl ZfsServer {
     ///
     /// The newly created directory object ID on success, or a negative errno error code on failure.
     pub fn mkdir(&mut self, dir: u64, name: &[u8], perm: u32, uid: u32, gid: u32) -> Result<u64, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::mkdir(dir, name, perm);
+        }
         self.request(FS_MKDIR, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -462,6 +551,9 @@ impl ZfsServer {
     ///
     /// The newly created symlink object ID on success, or a negative errno error code on failure.
     pub fn symlink(&mut self, dir: u64, name: &[u8], target: &[u8], uid: u32, gid: u32) -> Result<u64, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::symlink(dir, name, target);
+        }
         self.request(FS_SYMLINK, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -474,6 +566,9 @@ impl ZfsServer {
 
     /// Extended attribute `name` of `ino`.
     pub fn getxattr(&mut self, ino: u64, name: &[u8]) -> Result<Vec<u8>, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::getxattr(ino, name);
+        }
         let (_, got) = self.request(FS_GETXATTR, |w| {
             w.u64(ino);
             w.bytes(name);
@@ -483,6 +578,9 @@ impl ZfsServer {
 
     /// Sets extended attribute `name` of `ino` (`flags`: `XATTR_CREATE`, `XATTR_REPLACE`).
     pub fn setxattr(&mut self, ino: u64, name: &[u8], value: &[u8], flags: u32) -> Result<(), i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::setxattr(ino, name, value, flags);
+        }
         self.request(FS_SETXATTR, |w| {
             w.u64(ino);
             w.bytes(name);
@@ -494,6 +592,9 @@ impl ZfsServer {
 
     /// `ino`'s extended attribute names, each NUL-terminated.
     pub fn listxattr(&mut self, ino: u64) -> Result<Vec<u8>, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::listxattr(ino);
+        }
         let (_, got) = self.request(FS_LISTXATTR, |w| {
             w.u64(ino);
         })?;
@@ -502,6 +603,9 @@ impl ZfsServer {
 
     /// Removes extended attribute `name` of `ino`.
     pub fn removexattr(&mut self, ino: u64, name: &[u8]) -> Result<(), i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::removexattr(ino, name);
+        }
         self.request(FS_REMOVEXATTR, |w| {
             w.u64(ino);
             w.bytes(name);
@@ -518,6 +622,9 @@ impl ZfsServer {
     ///
     /// A byte vector of the target path on success, or a negative errno error code on failure.
     pub fn readlink(&mut self, ino: u64) -> Result<Vec<u8>, i64> {
+        if fuse::is_fuse(ino) {
+            return fuse::readlink(ino);
+        }
         let (n, _) = self.request(FS_READLINK, |w| {
             w.u64(ino);
         })?;
@@ -535,6 +642,9 @@ impl ZfsServer {
     ///
     /// `Ok(())` on success, or a negative errno error code on failure.
     pub fn link(&mut self, ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
+        if fuse::is_fuse(ino) || fuse::is_fuse(dir) {
+            return fuse::link(ino, dir, name);
+        }
         self.request(FS_LINK, |w| {
             w.u64(ino);
             w.u64(dir);
@@ -553,6 +663,9 @@ impl ZfsServer {
     ///
     /// `Ok(())` on success, or a negative errno error code on failure.
     pub fn unlink(&mut self, dir: u64, name: &[u8]) -> Result<(), i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::unlink(dir, name);
+        }
         self.request(FS_UNLINK, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -570,6 +683,9 @@ impl ZfsServer {
     ///
     /// `Ok(())` on success, or a negative errno error code on failure.
     pub fn rmdir(&mut self, dir: u64, name: &[u8]) -> Result<(), i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::rmdir(dir, name);
+        }
         self.request(FS_RMDIR, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -589,6 +705,9 @@ impl ZfsServer {
     ///
     /// `Ok(())` on success, or a negative errno error code on failure.
     pub fn rename(&mut self, sdir: u64, sname: &[u8], ddir: u64, dname: &[u8]) -> Result<(), i64> {
+        if fuse::is_fuse(sdir) || fuse::is_fuse(ddir) {
+            return fuse::rename(sdir, sname, ddir, dname);
+        }
         self.request(FS_RENAME, |w| {
             w.u64(sdir);
             w.bytes(sname);
@@ -609,6 +728,9 @@ impl ZfsServer {
     ///
     /// A vector of [`ReaddirEntry`] items on success, or a negative errno error code on failure.
     pub fn readdir(&mut self, dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i64> {
+        if fuse::is_fuse(dir) {
+            return fuse::readdir(dir, cookie, max);
+        }
         let (count, len) = self.request(FS_READDIR, |w| {
             w.u64(dir);
             w.u64(cookie);
@@ -638,6 +760,9 @@ impl ZfsServer {
     /// # Arguments
     /// * `ino` - Inode object ID being opened.
     pub fn open_ref(&mut self, ino: u64) {
+        if fuse::is_fuse(ino) {
+            return fuse::open_ref(ino);
+        }
         let _ = self.request(FS_OPEN_REF, |w| {
             w.u64(ino);
         });
@@ -648,6 +773,9 @@ impl ZfsServer {
     /// # Arguments
     /// * `ino` - Inode object ID being released.
     pub fn release(&mut self, ino: u64) {
+        if fuse::is_fuse(ino) {
+            return fuse::release(ino);
+        }
         let _ = self.request(FS_RELEASE, |w| {
             w.u64(ino);
         });
@@ -659,6 +787,9 @@ impl ZfsServer {
     /// * `ino` - Inode object ID.
     /// * `mask` - Inotify event bitmask.
     pub fn notify_file(&mut self, ino: u64, mask: u32) {
+        if fuse::is_fuse(ino) {
+            return;
+        }
         let _ = self.request(FS_NOTIFY, |w| {
             w.u64(ino);
             w.u64(mask as u64);

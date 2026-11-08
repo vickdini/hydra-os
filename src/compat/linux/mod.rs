@@ -17,6 +17,7 @@ pub mod netlink;
 pub mod ns;
 pub mod eventfd;
 pub mod fs;
+pub mod fuse;
 pub mod itimer;
 pub mod inotify;
 pub mod io_uring;

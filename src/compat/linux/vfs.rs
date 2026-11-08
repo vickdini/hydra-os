@@ -697,6 +697,10 @@ fn fill_stat(attr: &Attr) -> super::types::LinuxStat {
     let mut st = super::types::LinuxStat::default();
     st.st_dev = ZFS_DEV;
     st.st_ino = attr.ino;
+    if super::fuse::is_fuse(attr.ino) {
+        st.st_dev = super::fuse::dev(attr.ino);
+        st.st_ino = super::fuse::user_ino(attr.ino);
+    }
     st.st_nlink = attr.nlink as u64;
     st.st_mode = attr.mode;
     st.st_uid = attr.uid;
@@ -874,8 +878,45 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
         st.st_nlink = 1;
         return Ok(st);
     }
-    let ino = resolve(base, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let ino = match resolve(base, &path, follow) {
+        Err(ENOENT) if follow => match pseudo_via_link(&abs) {
+            Some(p) => return Ok(pseudo_stat(&p)),
+            None => return Err(ENOENT),
+        },
+        r => r?,
+    };
     Ok(fill_stat(&ZfsClient::getattr(ino)?))
+}
+
+/// Where a path leads through symbolic links in the pool when that is a file Hydra serves by
+/// name (`/etc/mtab` -> `../proc/self/mounts`): the file server cannot follow them there.
+fn pseudo_via_link(abs: &str) -> Option<String> {
+    let mut cur = normalize_path(abs);
+    for _ in 0..8 {
+        let comps: Vec<String> = cur.split('/').filter(|c| !c.is_empty()).map(String::from).collect();
+        let mut prefix = String::new();
+        let mut next = None;
+        for (i, c) in comps.iter().enumerate() {
+            prefix.push('/');
+            prefix.push_str(c);
+            let ino = resolve(0, prefix.as_bytes(), false).ok()?;
+            if ZfsClient::getattr(ino).ok()?.mode & S_IFMT != S_IFLNK {
+                continue;
+            }
+            let target = String::from_utf8_lossy(&ZfsClient::readlink(ino).ok()?).into_owned();
+            let dir = prefix.rsplit_once('/').map_or("", |p| p.0);
+            let base = if target.starts_with('/') { target } else { alloc::format!("{}/{}", dir, target) };
+            let rest = comps[i + 1..].join("/");
+            next = Some(normalize_path(&if rest.is_empty() { base } else { alloc::format!("{}/{}", base, rest) }));
+            break;
+        }
+        cur = next?;
+        if is_pseudo(&cur) {
+            return Some(cur);
+        }
+    }
+    None
 }
 
 /// Stat of an open descriptor, or `None` if the descriptor is not a file this layer owns.
@@ -1134,7 +1175,13 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             Err(e) => return Err(e),
         }
     } else {
-        resolve(base, path, follow)?
+        match resolve(base, path, follow) {
+            Err(ENOENT) if follow => match pseudo_via_link(&abs) {
+                Some(p) => return open_path(AT_FDCWD, p.as_bytes(), flags, mode),
+                None => return Err(ENOENT),
+            },
+            r => r?,
+        }
     };
 
     let attr = ZfsClient::getattr(ino)?;
@@ -1861,10 +1908,19 @@ fn access_at(dirfd: i64, path_ptr: u64, mode: u32, flags: u64) -> i64 {
     };
     let r: Result<(), i64> = (|| {
         let (base, base_path) = base_dir(dirfd, &path)?;
-        if is_pseudo(&join_path(&base_path, &path)) {
+        let abs = join_path(&base_path, &path);
+        if is_pseudo(&abs) {
             return Ok(());
         }
-        let ino = resolve(base, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
+        let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+        // /proc/self/fd/N: the open file it links to (portals check an O_PATH descriptor's
+        // file this way)
+        let magic = if follow { magic_fd_target(&abs) } else { None };
+        let ino = match magic {
+            Some((ino, _, _)) => ino,
+            None if follow && own_fd_number(&abs).is_some() => return Ok(()),
+            None => resolve(base, &path, follow)?,
+        };
         if mode & 7 == 0 {
             return Ok(());
         }
@@ -2492,6 +2548,20 @@ fn dir_path(ino: u64) -> Result<String, i64> {
     let mut names: Vec<Vec<u8>> = Vec::new();
     let mut cur = ino;
     while cur != root {
+        // A FUSE file: its name is known; a FUSE mount's root is its mount point's
+        if super::fuse::is_fuse(cur) {
+            if let Some(mp) = super::fuse::ns0_mountpoint(cur) {
+                cur = mp;
+                continue;
+            }
+            let (parent, name) = super::fuse::name_of(cur).ok_or(ENOENT)?;
+            names.push(name);
+            cur = parent;
+            if names.len() > 256 {
+                return Err(ELOOP);
+            }
+            continue;
+        }
         let parent = resolve(cur, b"..", true)?;
         let mut cookie = 2;
         let mut found = None;
@@ -3007,6 +3077,18 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
         }
     };
     let reading = num == 0 || num == 19;
+    // A device gets a gathered writev as one write (a FUSE reply: header and data)
+    if num == 20 && matches!(desc, FileDescriptor::Device(_)) && iov.len() > 1 {
+        let mut all = Vec::new();
+        for &(ptr, len) in &iov {
+            match copy_in(ptr, len as usize) {
+                Ok(b) => all.extend_from_slice(&b),
+                Err(e) => return Some(e),
+            }
+        }
+        let FileDescriptor::Device(d) = &desc else { unreachable!() };
+        return Some(d.write(&all));
+    }
     let mut total = 0i64;
     for (ptr, len) in iov {
         if !prefault_current(ptr, len, reading) {

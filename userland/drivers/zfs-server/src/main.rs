@@ -153,8 +153,12 @@ pub mod fs {
         /// wins), and `..` from a mounted tree's root leaves the mount. `root_mnt` and
         /// `base_mnt` are the mounts the root and the starting directory lie in (0 = none).
         ///
+        /// A mounted root with bit 62 set is a FUSE file system's (the kernel serves it): the
+        /// walk stops on entering it and returns the rest of the path.
+        ///
         /// # Returns
-        /// The object ID and the mount it lies in.
+        /// The object ID and the mount it lies in, and the rest of the path if the walk
+        /// stopped at a FUSE mount.
         #[allow(clippy::too_many_arguments)]
         pub fn resolve_mnt(
             s: &mut ZfsServer,
@@ -165,7 +169,7 @@ pub mod fs {
             path: &[u8],
             follow_last: bool,
             mounts: &[(u64, u64, usize)],
-        ) -> Result<(u64, usize), i64> {
+        ) -> Result<(u64, usize, Option<Vec<u8>>), i64> {
             if path.is_empty() {
                 return Err(ENOENT);
             }
@@ -223,13 +227,24 @@ pub mod fs {
                     return Err(ENOTDIR);
                 }
                 let (n, m) = enter(next, mnt);
+                if n >> 62 == 1 {
+                    // A FUSE mount: the kernel walks the rest
+                    let mut rest = Vec::new();
+                    for c in pending.iter().rev() {
+                        if !rest.is_empty() {
+                            rest.push(b'/');
+                        }
+                        rest.extend_from_slice(c);
+                    }
+                    return Ok((n, m, Some(rest)));
+                }
                 cur = n;
                 mnt = m;
             }
             if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
                 return Err(ENOTDIR);
             }
-            Ok((cur, mnt))
+            Ok((cur, mnt, None))
         }
 
         /// Resolves the parent directory of `path` and returns it with the last component.
@@ -629,8 +644,15 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
             let n = (r.u64() as usize).min(1024);
             let mounts: Vec<(u64, u64, usize)> = (0..n).map(|_| (r.u64(), r.u64(), r.u64() as usize)).collect();
             with_server(|s| {
-                fs::client::resolve_mnt(s, root, root_mnt, base, base_mnt, &path, follow, &mounts)
-                    .map(|(ino, mnt)| (ino | ((mnt as u64) << MNT_SHIFT), 0))
+                fs::client::resolve_mnt(s, root, root_mnt, base, base_mnt, &path, follow, &mounts).map(|(ino, mnt, rest)| match rest {
+                    // Stopped at FUSE mount `mnt`: its index and the rest of the path
+                    Some(rest) => {
+                        w.u64(mnt as u64);
+                        w.bytes(&rest);
+                        ((mnt as u64) << MNT_SHIFT, w.len())
+                    }
+                    None => (ino | ((mnt as u64) << MNT_SHIFT), 0),
+                })
             })
         }
         FS_GETATTR => {

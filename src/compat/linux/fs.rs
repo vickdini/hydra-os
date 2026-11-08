@@ -97,7 +97,7 @@ const MOUNTINFO: &str = "2069 1 8:1 / / rw,relatime shared:1 - zfs hydrapool/roo
 /// What `/proc/self/mountinfo` shows the caller (its mount namespace's table, or Hydra's
 /// fixed layout).
 pub fn mountinfo_text() -> alloc::string::String {
-    super::mount::mountinfo(super::proc::current_ids().1).unwrap_or_else(|| alloc::string::String::from(MOUNTINFO))
+    super::mount::mountinfo(super::proc::current_ids().1).unwrap_or_else(|| alloc::format!("{}{}", MOUNTINFO, super::fuse::ns0_mountinfo_text()))
 }
 
 const MOUNTS: &str = "hydrapool/root / zfs rw,relatime,xattr 0 0
@@ -484,11 +484,11 @@ impl PseudoFile {
             // A mount namespace of its own lists its own table
             PseudoFile::ProcMountinfo => match super::mount::mountinfo(super::proc::current_ids().1) {
                 Some(t) => read_slice(t.as_bytes(), cursor, buf),
-                None => read_slice(MOUNTINFO.as_bytes(), cursor, buf),
+                None => read_slice(alloc::format!("{}{}", MOUNTINFO, super::fuse::ns0_mountinfo_text()).as_bytes(), cursor, buf),
             },
             PseudoFile::ProcMounts => match super::mount::mounts(super::proc::current_ids().1) {
                 Some(t) => read_slice(t.as_bytes(), cursor, buf),
-                None => read_slice(MOUNTS.as_bytes(), cursor, buf),
+                None => read_slice(alloc::format!("{}{}", MOUNTS, super::fuse::ns0_mounts_text()).as_bytes(), cursor, buf),
             },
             PseudoFile::ProcPidFile(_) => 0,
             PseudoFile::ProcOom(rest) => match pid_and_file(rest).and_then(|(pid, f)| super::proc::oom_file_text(pid, f)) {

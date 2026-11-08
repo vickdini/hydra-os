@@ -419,6 +419,22 @@ fn initial_table(root: u64) -> MountNs {
             serves: serves_of(fstype).map(String::from),
         });
     }
+    // The initial namespace's FUSE mounts
+    for m in super::fuse::ns0_snapshot() {
+        ns.push(Mount {
+            id: new_id(),
+            parent: 1,
+            mountpoint: m.mountpoint,
+            root: m.conn.root(),
+            kind: Kind::Tree { tmpfs: None },
+            flags: MS_NOSUID | MS_NODEV | MS_RELATIME,
+            propagation: MS_SHARED,
+            fstype: m.fstype,
+            source: m.source,
+            path: m.path,
+            serves: None,
+        });
+    }
     ns
 }
 
@@ -709,8 +725,57 @@ fn admin_ns() -> Result<Arc<Mutex<MountNs>>, i64> {
     table(id).ok_or(EINVAL)
 }
 
+/// `mount(2)` of a FUSE file system (`fuse`, `fuse.<name>`; `fusermount3` mounts them for
+/// users), in any namespace: `None` for other types.
+fn fuse_mount(source: u64, target: u64, fstype: u64, flags: u64, data: u64) -> Option<i64> {
+    let fs = String::from_utf8_lossy(&super::vfs::user_path(fstype).ok()?).into_owned();
+    if !super::fuse::is_fuse_type(&fs) || flags & (MS_REMOUNT | MS_BIND | MS_MOVE) != 0 {
+        return None;
+    }
+    if !crate::task::with_current_task_mut(|t| t.caps.effective & CAP_SYS_ADMIN != 0).unwrap_or(false) {
+        return Some(EPERM);
+    }
+    let (tpath, tino, tmnt) = match locate(target, true) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    if !ZfsClient::getattr(tino).map(|a| a.is_dir()).unwrap_or(false) {
+        return Some(ENOTDIR);
+    }
+    let data = if data != 0 { super::vfs::user_path(data).ok().map(|d| String::from_utf8_lossy(&d).into_owned()) } else { None };
+    let Some(data) = data else { return Some(EINVAL) };
+    let source = super::vfs::user_path(source).ok().map(|s| String::from_utf8_lossy(&s).into_owned()).unwrap_or_else(|| fs.clone());
+    let id = current_ns_id();
+    let root = match super::fuse::mount(&tpath, tino, &fs, &source, flags, &data, id == 0) {
+        Ok(r) => r,
+        Err(e) => return Some(e),
+    };
+    if id != 0 {
+        let Some(ns) = table(id) else { return Some(EINVAL) };
+        ns.lock().push(Mount {
+            id: new_id(),
+            parent: tmnt,
+            mountpoint: tino,
+            root,
+            kind: Kind::Tree { tmpfs: None },
+            flags: flags & PER_MOUNT,
+            propagation: 0,
+            fstype: fs,
+            source,
+            path: tpath,
+            serves: None,
+        });
+    }
+    Some(0)
+}
+
 /// `mount(2)`.
 fn mount(source: u64, target: u64, fstype: u64, flags: u64, data: u64) -> i64 {
+    if fstype != 0 {
+        if let Some(r) = fuse_mount(source, target, fstype, flags, data) {
+            return r;
+        }
+    }
     let ns = match admin_ns() {
         Ok(n) => n,
         Err(e) => return e,
@@ -906,6 +971,14 @@ fn mount_core(ns: &Arc<Mutex<MountNs>>, src: Option<(i64, Vec<u8>)>, target: (St
 
 /// `umount2(2)`.
 fn umount2(target: u64, flags: u64) -> i64 {
+    // A FUSE mount of the initial namespace (fusermount3 -u)
+    if current_ns_id() == 0 && crate::task::with_current_task_mut(|t| t.caps.effective & CAP_SYS_ADMIN != 0).unwrap_or(false) {
+        if let Ok((_, ino, _)) = locate(target, flags & UMOUNT_NOFOLLOW == 0) {
+            if super::fuse::is_fuse(ino) && super::fuse::ns0_remove(ino) {
+                return 0;
+            }
+        }
+    }
     let ns = match admin_ns() {
         Ok(n) => n,
         Err(e) => return e,

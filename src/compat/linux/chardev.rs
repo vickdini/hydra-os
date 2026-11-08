@@ -205,6 +205,11 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// The FUSE connection behind this descriptor (an open `/dev/fuse`), if it is one.
+    fn as_fuse(&self) -> Option<Arc<super::fuse::Conn>> {
+        None
+    }
+
     /// The fanotify group behind this descriptor, if it is one.
     fn as_fanotify(&self) -> Option<Arc<super::fanotify::Group>> {
         None
@@ -243,6 +248,7 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
         226 => Some(super::drm::open(minor, nonblock)),
         13 => Some(super::evdev::open(minor, nonblock)),
         1 if minor == 11 => Some(super::admin::kmsg_open(flags)),
+        10 if minor == 229 => Some(super::fuse::open(flags)),
         _ => None,
     }
 }
