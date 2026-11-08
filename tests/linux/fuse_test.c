@@ -40,7 +40,8 @@ struct attr_out { uint64_t attr_valid; uint32_t attr_valid_nsec, dummy; struct a
 #define MAXN 64
 struct node { int used, parent; char name[64]; uint32_t mode; char *data; size_t size; };
 static struct node nodes[MAXN]; // node ID = index + 1 (1: the root)
-static int fd, slow;
+static int fd, slow, cachy, count;
+static int getattrs; // GETATTR requests for "cachy" (whose attributes stay valid 10 s)
 static uint64_t held; // a read of "slow" waits here until INTERRUPT
 
 static int add(int parent, const char *name, uint32_t mode, const char *data) {
@@ -82,6 +83,7 @@ static void reply(uint64_t unique, int err, const void *body, size_t n) {
 static void reply_entry(uint64_t unique, int i) {
     struct entry_out e = {0};
     e.nodeid = i + 1;
+    if (i == cachy) e.attr_valid = 10;
     fill(i, &e.attr);
     reply(unique, 0, &e, sizeof e);
 }
@@ -110,6 +112,10 @@ static void serve(void) {
         case 2: case 42: break; // FORGET, BATCH_FORGET: no reply
         case 3: { // GETATTR
             struct attr_out a = {0};
+            if (me == cachy) {
+                getattrs++;
+                a.attr_valid = 10;
+            }
             fill(me, &a.attr);
             reply(h->unique, 0, &a, sizeof a);
             break;
@@ -190,6 +196,13 @@ static void serve(void) {
         case 15: { // READ
             if (me == slow) {
                 held = h->unique;
+                break;
+            }
+            if (me == count) {
+                char n[17];
+                snprintf(n, sizeof n, "%-15d", getattrs); // its fixed size: 16
+                n[15] = ' ';
+                reply(h->unique, 0, n, 16);
                 break;
             }
             uint64_t off = *(uint64_t *)(arg + 8);
@@ -290,6 +303,8 @@ int main(void) {
     int d = add(0, "d", S_IFDIR | 0755, NULL);
     add(d, "l", S_IFLNK | 0777, "../hello");
     slow = add(0, "slow", S_IFREG | 0644, "zzz");
+    cachy = add(0, "cachy", S_IFREG | 0644, "12");
+    count = add(0, "count", S_IFREG | 0444, "0123456789abcdef");
 
     char opts[128];
     snprintf(opts, sizeof opts, "fd=%d,rootmode=40000,user_id=0,group_id=0", fd);
@@ -347,6 +362,15 @@ int main(void) {
     check(p != MAP_FAILED && !memcmp(p, "Hello FUSE", 10), "mmap");
     if (p != MAP_FAILED) munmap(p, 4096);
     close(f);
+
+    // Attributes the daemon says stay valid are kept: stat does not ask it each time
+    for (int i = 0; i < 50; i++) stat("/tmp/fusetest.mnt/cachy", &st);
+    check(read_file("/tmp/fusetest.mnt/count", buf, sizeof buf) > 0 && atoi(buf) <= 2, "attributes kept while valid (stat asks the daemon at most twice in 50)");
+    f = open("/tmp/fusetest.mnt/cachy", O_WRONLY | O_APPEND);
+    check(f >= 0 && write(f, "345", 3) == 3, "write to it");
+    close(f);
+    check(stat("/tmp/fusetest.mnt/cachy", &st) == 0 && st.st_size == 5, "a write updates the kept size");
+    check(truncate("/tmp/fusetest.mnt/cachy", 1) == 0 && stat("/tmp/fusetest.mnt/cachy", &st) == 0 && st.st_size == 1, "and so does truncate");
 
     struct sigaction sa = {0};
     sa.sa_handler = on_alarm; // no SA_RESTART

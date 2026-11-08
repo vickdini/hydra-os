@@ -120,6 +120,8 @@ struct Node {
     user_ino: u64,
     /// The name it was last looked up by.
     name: Vec<u8>,
+    /// Its attributes while the daemon says they stay valid (until the time, in ns).
+    cached: Option<(Attr, u64)>,
 }
 
 /// The daemon's file handles of one open inode.
@@ -185,7 +187,10 @@ impl Conn {
                 aborted: false,
                 max_write: 4096,
                 // Index 0 unused, 1 the root (node ID 1)
-                nodes: alloc::vec![Node { nodeid: 0, parent: 0, user_ino: 0, name: Vec::new() }, Node { nodeid: 1, parent: 1, user_ino: 1, name: Vec::new() }],
+                nodes: alloc::vec![
+                    Node { nodeid: 0, parent: 0, user_ino: 0, name: Vec::new(), cached: None },
+                    Node { nodeid: 1, parent: 1, user_ino: 1, name: Vec::new(), cached: None },
+                ],
                 by_nodeid: BTreeMap::from([(1, 1)]),
                 handles: BTreeMap::new(),
             }),
@@ -330,9 +335,38 @@ impl Conn {
             return l;
         }
         let l = st.nodes.len() as u64;
-        st.nodes.push(Node { nodeid, parent, user_ino, name: name.to_vec() });
+        st.nodes.push(Node { nodeid, parent, user_ino, name: name.to_vec(), cached: None });
         st.by_nodeid.insert(nodeid, l);
         l
+    }
+
+    /// Keeps `attr` of local node `local` for `secs` s and `nsecs` ns (the daemon's
+    /// `attr_valid`; 0: not at all).
+    fn cache(&self, local: u64, attr: Attr, secs: u64, nsecs: u32) {
+        let mut st = self.st.lock();
+        let Some(n) = st.nodes.get_mut(local as usize) else { return };
+        let valid = secs.min(3600) * 1_000_000_000 + nsecs as u64;
+        n.cached = (valid > 0).then(|| (attr, crate::arch::pit::now_ns() + valid));
+    }
+
+    /// The kept attributes of local node `local`, if still valid.
+    fn cached(&self, local: u64) -> Option<Attr> {
+        let st = self.st.lock();
+        let (a, until) = st.nodes.get(local as usize)?.cached?;
+        (crate::arch::pit::now_ns() < until).then_some(a)
+    }
+
+    /// Forgets the kept attributes of local node `local`, or of every node.
+    fn uncache(&self, local: Option<u64>) {
+        let mut st = self.st.lock();
+        match local {
+            Some(l) => {
+                if let Some(n) = st.nodes.get_mut(l as usize) {
+                    n.cached = None;
+                }
+            }
+            None => st.nodes.iter_mut().for_each(|n| n.cached = None),
+        }
     }
 
     /// Whether the caller may use the file system: its owner, or anyone with `allow_other`.
@@ -407,9 +441,17 @@ impl FuseDev {
         if len != data.len() {
             return EINVAL;
         }
-        // A notification (its code in the error field; cache invalidation...): nothing is
-        // cached
+        // A notification (its code in the error field): cache invalidation
         if unique == 0 {
+            // FUSE_NOTIFY_INVAL_INODE: that node's attributes; others: all (conservative)
+            let node = (err == 2).then(|| u64_at(&data[OUT_HEADER..], 0));
+            let c = &self.conn;
+            let local = node.and_then(|n| c.st.lock().by_nodeid.get(&n).copied());
+            match (node, local) {
+                (Some(_), Some(l)) => c.uncache(Some(l)),
+                (Some(_), None) => {}
+                _ => c.uncache(None),
+            }
             return len as i64;
         }
         if err > 0 || err < -4095 {
@@ -771,7 +813,9 @@ fn entry(c: &Conn, dir: u64, name: &[u8], r: &[u8]) -> Result<(u64, Attr), i64> 
     let a = &r[40..];
     let l = c.intern(nodeid, split(dir).1, u64_at(a, 0), name);
     let ino = make(c.id, l);
-    Ok((ino, attr_of(ino, a)))
+    let attr = attr_of(ino, a);
+    c.cache(l, attr, u64_at(r, 24), u32_at(r, 36));
+    Ok((ino, attr))
 }
 
 /// Looks `name` up in FUSE directory `dir`: the inode and its attributes.
@@ -796,14 +840,20 @@ pub fn lookup(dir: u64, name: &[u8]) -> Result<u64, i64> {
 /// Attributes of FUSE inode `ino`.
 pub fn getattr(ino: u64) -> Result<Attr, i64> {
     let (c, n) = target(ino)?;
+    let l = split(ino).1;
+    if let Some(a) = c.cached(l) {
+        return Ok(a);
+    }
     let r = c.call(GETATTR, n, &[&[0u8; 16]])?;
     if r.len() < 16 + 88 {
         return Err(EIO);
     }
-    if let Some(node) = c.st.lock().nodes.get_mut(split(ino).1 as usize) {
+    if let Some(node) = c.st.lock().nodes.get_mut(l as usize) {
         node.user_ino = u64_at(&r, 16);
     }
-    Ok(attr_of(ino, &r[16..]))
+    let attr = attr_of(ino, &r[16..]);
+    c.cache(l, attr, u64_at(&r, 0), u32_at(&r, 8));
+    Ok(attr)
 }
 
 /// Changes attributes of FUSE inode `ino`; returns the new ones.
@@ -851,11 +901,14 @@ pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
     a.extend_from_slice(&uid.unwrap_or(0).to_le_bytes());
     a.extend_from_slice(&gid.unwrap_or(0).to_le_bytes());
     a.extend_from_slice(&0u32.to_le_bytes());
+    c.uncache(Some(split(ino).1));
     let r = c.call(SETATTR, n, &[&a])?;
     if r.len() < 16 + 88 {
         return getattr(ino);
     }
-    Ok(attr_of(ino, &r[16..]))
+    let attr = attr_of(ino, &r[16..]);
+    c.cache(split(ino).1, attr, u64_at(&r, 0), u32_at(&r, 8));
+    Ok(attr)
 }
 
 /// Target of FUSE symbolic link `ino`.
@@ -941,6 +994,8 @@ pub fn read(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
 /// Writes `data` to `ino` at `offset`.
 pub fn write(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
     let (c, n) = target(ino)?;
+    // Size and times change (forgotten again when done: a stat meanwhile kept the old)
+    let _fresh = Fresh(&c, Some(split(ino).1));
     let fh = handle(&c, ino, n, Want::Write)?;
     let max = c.st.lock().max_write as usize;
     let mut done = 0;
@@ -983,6 +1038,7 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
 /// `mknod` when it has none.
 pub fn create(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     // O_CREAT | O_EXCL | O_RDWR
     let a = le(&[0o302, (S_IFREG | (perm & 0o7777)) as u64, 0, 0], &[4, 4, 4, 4]);
     match c.call(CREATE, n, &[&a, &cstr(name)]) {
@@ -1002,6 +1058,7 @@ pub fn create(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
 /// A node made in `dir`.
 pub fn mknod(dir: u64, name: &[u8], mode: u32, rdev: u64) -> Result<u64, i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     let a = le(&[mode as u64, rdev & 0xFFFF_FFFF, 0, 0], &[4, 4, 4, 4]);
     let r = c.call(MKNOD, n, &[&a, &cstr(name)])?;
     entry(&c, dir, name, &r).map(|e| e.0)
@@ -1010,6 +1067,7 @@ pub fn mknod(dir: u64, name: &[u8], mode: u32, rdev: u64) -> Result<u64, i64> {
 /// A directory made in `dir`.
 pub fn mkdir(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     let a = le(&[(perm & 0o7777) as u64, 0], &[4, 4]);
     let r = c.call(MKDIR, n, &[&a, &cstr(name)])?;
     entry(&c, dir, name, &r).map(|e| e.0)
@@ -1018,6 +1076,7 @@ pub fn mkdir(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
 /// A symbolic link made in `dir`.
 pub fn symlink(dir: u64, name: &[u8], to: &[u8]) -> Result<u64, i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     let r = c.call(SYMLINK, n, &[&cstr(name), &cstr(to)])?;
     entry(&c, dir, name, &r).map(|e| e.0)
 }
@@ -1028,6 +1087,7 @@ pub fn link(ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
         return Err(EXDEV);
     }
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     let old = c.nodeid(split(ino).1)?;
     let r = c.call(LINK, n, &[&old.to_le_bytes(), &cstr(name)])?;
     entry(&c, dir, name, &r).map(|_| ())
@@ -1036,12 +1096,14 @@ pub fn link(ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
 /// Removes `name` from `dir`.
 pub fn unlink(dir: u64, name: &[u8]) -> Result<(), i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     c.call(UNLINK, n, &[&cstr(name)]).map(|_| ())
 }
 
 /// Removes directory `name` from `dir`.
 pub fn rmdir(dir: u64, name: &[u8]) -> Result<(), i64> {
     let (c, n) = target(dir)?;
+    let _fresh = Fresh(&c, None);
     c.call(RMDIR, n, &[&cstr(name)]).map(|_| ())
 }
 
@@ -1051,8 +1113,19 @@ pub fn rename(sdir: u64, sname: &[u8], ddir: u64, dname: &[u8]) -> Result<(), i6
         return Err(EXDEV);
     }
     let (c, n) = target(sdir)?;
+    let _fresh = Fresh(&c, None);
     let nd = c.nodeid(split(ddir).1)?;
     c.call(RENAME, n, &[&nd.to_le_bytes(), &cstr(sname), &cstr(dname)]).map(|_| ())
+}
+
+/// Forgets kept attributes when dropped (after an operation that changes them): of one
+/// node, or of every node (names created, removed or moved change directories and links).
+struct Fresh<'a>(&'a Conn, Option<u64>);
+
+impl Drop for Fresh<'_> {
+    fn drop(&mut self) {
+        self.0.uncache(self.1);
+    }
 }
 
 fn xattr_err(e: i64) -> i64 {

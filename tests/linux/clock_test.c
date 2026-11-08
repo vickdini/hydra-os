@@ -142,7 +142,8 @@ int main(void) {
     nanosleep(&two, NULL);
     long long slept = ns(CLOCK_MONOTONIC) - a;
     printf("     nanosleep(2 ms) took %.3f ms\n", slept / 1e6);
-    check(slept >= 2000000 && slept < 100000000, "nanosleep(2 ms) sleeps at least 2 ms");
+    check(slept >= 2000000, "nanosleep(2 ms) sleeps at least 2 ms");
+    check(slept < 100000000, "nanosleep(2 ms) returns within 100 ms");
     // Short timeouts end close to their deadline, not at the next 10 ms tick
     sigset_t blk;
     sigemptyset(&blk);
