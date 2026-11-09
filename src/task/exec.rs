@@ -366,6 +366,8 @@ pub fn load_linux_exec(
     mm.mmap(stack_base, STACK_SIZE, stack_prot, false, true, false, Backing::Anon)
         .map_err(|_| ElfError::AllocationFailed)?;
     mm.set_name(stack_base, stack_base + STACK_SIZE, Some("[stack]"));
+    // The vDSO (clock_gettime and the like in user mode)
+    let vdso = crate::arch::vdso::map(&mut mm);
 
     // --- Strings area at the top of the stack ---
     let mut strings: Vec<u8> = Vec::new();
@@ -416,6 +418,8 @@ pub fn load_linux_exec(
         (AT_HWCAP2, 0),
         (AT_EXECFN, addr_of(execfn_off)),
         (AT_PLATFORM, addr_of(platform_off)),
+        // (an AT_IGNORE entry when there is no vDSO)
+        if let Some(v) = vdso { (crate::compat::linux::types::AT_SYSINFO_EHDR, v) } else { (1, 0) },
         (AT_NULL, 0),
     ];
     for (key, val) in auxv {

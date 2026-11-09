@@ -34,7 +34,25 @@ const PIT_COMMAND_PORT: u16 = 0x43;
 // Square Wave Mode 3, Channel 0, lobyte/hibyte, 16-bit binary
 const PIT_CMD_CHANNEL0_SQUARE_WAVE: u8 = 0x36;
 
+/// Timer interrupts so far (they measure the time stamp counter's rate).
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// The clock's anchor, read consistently: `(nanoseconds since boot, their 32-bit fraction,
+/// time stamp counter value there, nanoseconds per cycle in 32.32 fixed point (0: not
+/// measured yet))`. The vDSO computes [`now_ns`] from it in user mode.
+pub fn clock_state() -> (u64, u64, u64, u64) {
+    loop {
+        let s = CLOCK_SEQ.load(Ordering::Acquire);
+        if s & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let v = (BASE_NS.load(Ordering::Relaxed), BASE_FRAC.load(Ordering::Relaxed), BASE_TSC.load(Ordering::Relaxed), MULT.load(Ordering::Relaxed));
+        if CLOCK_SEQ.load(Ordering::Acquire) == s {
+            return v;
+        }
+    }
+}
+
 /// Nanoseconds per tick.
 pub fn tick_ns() -> u64 {
     1_000_000_000 / frequency_hz().max(1)
@@ -82,50 +100,74 @@ pub fn on_timer_tick() {
     // The time stamp counter at this tick, and the long-run cycles per tick (all cycles
     // since the first tick over the ticks since: bursts of late ticks do not skew it)
     let now = unsafe { core::arch::x86_64::_rdtsc() };
-    LAST_TICK_TSC.store(now, Ordering::Relaxed);
     let first = FIRST_TICK_TSC.load(Ordering::Relaxed);
-    let ticks = TICKS.load(Ordering::Relaxed);
+    let ticks = TICKS.load(Ordering::Relaxed) + 1;
+    TICKS.store(ticks, Ordering::Relaxed);
+    let mut cpt = 0;
     if first == 0 {
         FIRST_TICK_TSC.store(now, Ordering::Relaxed);
         FIRST_TICK.store(ticks, Ordering::Relaxed);
     } else {
         let n = ticks - FIRST_TICK.load(Ordering::Relaxed);
         if n >= 10 && now > first {
-            CYCLES_PER_TICK.store((now - first) / n, Ordering::Relaxed);
+            cpt = (now - first) / n;
         }
     }
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    // The clock goes on from its anchor along the time stamp counter (a late tick does not
+    // hold it back); until the counter's rate is known, it counts ticks
+    let period = tick_ns();
+    let seq = CLOCK_SEQ.load(Ordering::Relaxed);
+    CLOCK_SEQ.store(seq | 1, Ordering::Release);
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let mult = MULT.load(Ordering::Relaxed);
+    if mult == 0 {
+        BASE_NS.store(ticks * period, Ordering::Relaxed);
+        BASE_FRAC.store(0, Ordering::Relaxed);
+    } else {
+        let delta = now.saturating_sub(BASE_TSC.load(Ordering::Relaxed));
+        let total = delta as u128 * mult as u128 + BASE_FRAC.load(Ordering::Relaxed) as u128;
+        BASE_NS.fetch_add((total >> 32) as u64, Ordering::Relaxed);
+        BASE_FRAC.store(total as u32 as u64, Ordering::Relaxed);
+    }
+    BASE_TSC.store(now, Ordering::Relaxed);
+    if cpt != 0 {
+        // Nanoseconds per cycle, as a 32.32 fixed-point number: the new rate counts from here
+        MULT.store((((period as u128) << 32) / cpt as u128) as u64, Ordering::Relaxed);
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
+    CLOCK_SEQ.store((seq | 1) + 1, Ordering::Release);
+    // The vDSO's copy of the clock
+    crate::arch::vdso::publish();
 }
 
+/// The clock's anchor: nanoseconds since boot (`BASE_NS` and a 32-bit fraction
+/// `BASE_FRAC`) at time stamp counter value `BASE_TSC`, and the nanoseconds per cycle
+/// (`MULT`, 32.32 fixed point; 0 until measured), consistent while `CLOCK_SEQ` is even and
+/// unchanged.
+static CLOCK_SEQ: AtomicU64 = AtomicU64::new(0);
+static BASE_NS: AtomicU64 = AtomicU64::new(0);
+static BASE_FRAC: AtomicU64 = AtomicU64::new(0);
+static BASE_TSC: AtomicU64 = AtomicU64::new(0);
+static MULT: AtomicU64 = AtomicU64::new(0);
+
 /// Time stamp counter value at the last tick.
-static LAST_TICK_TSC: AtomicU64 = AtomicU64::new(0);
 /// Time stamp counter and tick count at the first tick seen.
 static FIRST_TICK_TSC: AtomicU64 = AtomicU64::new(0);
 static FIRST_TICK: AtomicU64 = AtomicU64::new(0);
 /// Measured time stamp counter cycles per tick (0 for the first ten ticks).
-static CYCLES_PER_TICK: AtomicU64 = AtomicU64::new(0);
 
-/// Nanoseconds since boot, with sub-tick resolution: the tick count plus the time stamp
-/// counter's progress since the last tick, kept below the next tick (so the result never
-/// passes the tick clock that timers use, and never goes backwards).
+/// Nanoseconds since boot, with sub-tick resolution: the time stamp counter's progress
+/// since the clock's anchor (moved on at every tick, along the same line, so it never goes
+/// backwards). Ticks are derived from it ([`ticks`]), so timeouts in ticks and this clock
+/// agree; the vDSO computes it the same way in user mode.
 pub fn now_ns() -> u64 {
-    let freq = frequency_hz().max(1);
-    let period = 1_000_000_000 / freq;
-    loop {
-        let t1 = TICKS.load(Ordering::Relaxed);
-        let last = LAST_TICK_TSC.load(Ordering::Relaxed);
-        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-        if TICKS.load(Ordering::Relaxed) != t1 {
-            continue; // a tick came in between
-        }
-        let base = t1 * period;
-        let cpt = CYCLES_PER_TICK.load(Ordering::Relaxed);
-        if cpt == 0 || last == 0 || tsc < last {
-            return base;
-        }
-        let sub = ((tsc - last) as u128 * period as u128 / cpt as u128) as u64;
-        return base + sub.min(period - 1);
+    let (base, frac, base_tsc, mult) = clock_state();
+    if mult == 0 {
+        return base;
     }
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let total = tsc.saturating_sub(base_tsc) as u128 * mult as u128 + frac as u128;
+    base + (total >> 32) as u64
 }
 
 /// Checks whether the PIT hardware timer has been activated.
@@ -164,7 +206,8 @@ pub fn frequency_hz() -> u64 {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
+    // From the clock: timeouts in ticks and CLOCK_MONOTONIC never disagree
+    now_ns() / tick_ns()
 }
 
 /// Computes the system uptime in milliseconds based on elapsed timer ticks.

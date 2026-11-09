@@ -6,6 +6,9 @@
 // Build: gcc -O1 -w -o clock clock_test.c
 #define _GNU_SOURCE
 #include <errno.h>
+#include <sys/auxv.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <sys/time.h>
 #include <time.h>
@@ -137,6 +140,23 @@ int main(void) {
     check(clock_getres(CLOCK_MONOTONIC_COARSE, &r) == 0 && r.tv_nsec > 1, "the coarse clock reports the tick");
     errno = 0;
     check(clock_getres(42, &r) == -1 && errno == EINVAL, "an unknown clock: EINVAL");
+    // The vDSO (clock_gettime without entering the kernel) agrees with the system call
+    check(getauxval(AT_SYSINFO_EHDR) != 0, "a vDSO is mapped (AT_SYSINFO_EHDR)");
+    int agree = 1;
+    for (int i = 0; i < 2000; i++) {
+        struct timespec a, b, c;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &b);
+        clock_gettime(CLOCK_MONOTONIC, &c);
+        long long na = a.tv_sec * 1000000000LL + a.tv_nsec, nb = b.tv_sec * 1000000000LL + b.tv_nsec, nc = c.tv_sec * 1000000000LL + c.tv_nsec;
+        if (!(na <= nb && nb <= nc)) agree = 0;
+    }
+    check(agree, "the vDSO's CLOCK_MONOTONIC and the system call's never disagree");
+    struct timespec rv, rs;
+    clock_gettime(CLOCK_REALTIME, &rv);
+    syscall(SYS_clock_gettime, CLOCK_REALTIME, &rs);
+    long long d = (rs.tv_sec - rv.tv_sec) * 1000000000LL + (rs.tv_nsec - rv.tv_nsec);
+    check(d >= 0 && d < 50000000, "and CLOCK_REALTIME agrees too");
     long long a = ns(CLOCK_MONOTONIC);
     struct timespec two = {0, 2000000};
     nanosleep(&two, NULL);

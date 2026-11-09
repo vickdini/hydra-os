@@ -55,4 +55,5 @@ pub mod rtc;
 pub mod smp;
 /// Fast `x86_64` MSR-based `syscall`/`sysretq` entry stub and kernel system call dispatcher.
 pub mod syscall;
+pub mod vdso;
 

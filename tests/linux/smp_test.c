@@ -60,6 +60,21 @@ static double run_threads(int threads, unsigned long n) {
     return now() - t0;
 }
 
+// `clock_gettime` called 100000 times by each of `threads` threads at once: nanoseconds
+// of wall time per call (in each thread)
+static void *clock_work(void *x) {
+    struct timespec t;
+    for (int i = 0; i < 100000; i++) clock_gettime(CLOCK_MONOTONIC, &t);
+    return NULL;
+}
+static double run_clock(int threads) {
+    pthread_t t[8];
+    double t0 = now();
+    for (int i = 0; i < threads; i++) pthread_create(&t[i], NULL, clock_work, NULL);
+    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
+    return (now() - t0) / 100000 * 1e9;
+}
+
 // A thread reading a page until it faults
 static volatile char *page;
 static volatile int reading, faulted;
@@ -109,6 +124,33 @@ int main(void) {
     while (!faulted && now() - t0 < 2) usleep(1000);
     check(faulted, "a page protected while another thread reads it faults there");
     if (faulted) pthread_join(r, NULL);
+
+    // Measurements (no pass/fail): wakeups across processes, and a cheap system call on
+    // every CPU at once
+    int ab[2], ba[2];
+    pipe(ab);
+    pipe(ba);
+    int rounds = 2000;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        for (int i = 0; i < rounds; i++) {
+            read(ab[0], &b, 1);
+            write(ba[1], &b, 1);
+        }
+        _exit(0);
+    }
+    char b = 'x';
+    double p0 = now();
+    for (int i = 0; i < rounds; i++) {
+        write(ab[1], &b, 1);
+        read(ba[0], &b, 1);
+    }
+    double pp = now() - p0;
+    waitpid(c, NULL, 0);
+    printf("     pipe ping-pong: %.1f us per round trip\n", pp / rounds * 1e6);
+    double g1 = run_clock(1), gk = run_clock(k);
+    printf("     clock_gettime: %.0f ns per call on 1 thread, %.0f ns per call on %d at once\n", g1, gk, k);
     printf(fails ? "SMP TEST FAILED (%d)\n" : "SMP TEST PASSED\n", fails);
     return fails != 0;
 }

@@ -155,6 +155,12 @@ pub fn now() -> (u64, u32) {
     ((t / 1_000_000_000) as u64, (t % 1_000_000_000) as u32)
 }
 
+/// Nanoseconds of the wall clock at boot (the CMOS clock's epoch, plus what
+/// `settimeofday` adjusted): the wall clock is this plus [`crate::arch::pit::now_ns`].
+pub fn wall_base_ns() -> i64 {
+    (BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + OFFSET_NS.load(Ordering::Relaxed) as i128) as i64
+}
+
 /// Nanoseconds the wall clock was set off the CMOS clock (`settimeofday`, `clock_settime`).
 static OFFSET_NS: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
 
@@ -166,4 +172,5 @@ pub fn set_now(secs: u64, nanos: u32) {
     let base = BOOT_EPOCH.load(Ordering::Relaxed) as i128 * 1_000_000_000 + (ticks as i128 * 1_000_000_000) / freq as i128;
     let want = secs as i128 * 1_000_000_000 + nanos as i128;
     OFFSET_NS.store((want - base) as i64, Ordering::Relaxed);
+    crate::arch::vdso::publish();
 }
