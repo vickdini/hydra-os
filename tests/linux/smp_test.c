@@ -9,6 +9,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -73,6 +74,34 @@ static double run_clock(int threads) {
     for (int i = 0; i < threads; i++) pthread_create(&t[i], NULL, clock_work, NULL);
     for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
     return (now() - t0) / 100000 * 1e9;
+}
+
+// A cheap system call that takes the kernel lock (getppid), 50000 times in each of
+// `threads` threads at once: nanoseconds of wall time per call
+static void *ppid_work(void *x) {
+    for (int i = 0; i < 50000; i++) getppid();
+    return NULL;
+}
+static double run_ppid(int threads) {
+    pthread_t t[8];
+    double t0 = now();
+    for (int i = 0; i < threads; i++) pthread_create(&t[i], NULL, ppid_work, NULL);
+    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
+    return (now() - t0) / 50000 * 1e9;
+}
+
+// stat of a file (a request to the file server), 2000 times in each of `procs` processes
+// at once: microseconds of wall time per call
+static double run_stat(int procs) {
+    double t0 = now();
+    for (int i = 0; i < procs; i++)
+        if (fork() == 0) {
+            struct stat st;
+            for (int k = 0; k < 2000; k++) stat("/etc/passwd", &st);
+            _exit(0);
+        }
+    for (int i = 0; i < procs; i++) wait(NULL);
+    return (now() - t0) / 2000 * 1e6;
 }
 
 // A thread reading a page until it faults
@@ -151,6 +180,10 @@ int main(void) {
     printf("     pipe ping-pong: %.1f us per round trip\n", pp / rounds * 1e6);
     double g1 = run_clock(1), gk = run_clock(k);
     printf("     clock_gettime: %.0f ns per call on 1 thread, %.0f ns per call on %d at once\n", g1, gk, k);
+    double q1 = run_ppid(1), qk = run_ppid(k);
+    printf("     getppid: %.0f ns per call on 1 thread, %.0f ns per call on %d at once\n", q1, qk, k);
+    double s1 = run_stat(1), sk = run_stat(k);
+    printf("     stat: %.1f us per call in 1 process, %.1f us per call in %d at once\n", s1, sk, k);
     printf(fails ? "SMP TEST FAILED (%d)\n" : "SMP TEST PASSED\n", fails);
     return fails != 0;
 }

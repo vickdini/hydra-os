@@ -134,6 +134,128 @@ fn kill_suid() -> Option<alloc::vec::Vec<u32>> {
 
 use crate::compat::linux::fuse;
 
+/// Attributes of pool objects, so `stat` and permission checks need no request to the file
+/// server. Every change to an object goes through this client, which forgets what it
+/// changes: the cache never differs from the pool.
+static ATTRS: spin::Mutex<alloc::collections::BTreeMap<u64, Attr>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Most objects kept (the cache starts over when full).
+const ATTRS_MAX: usize = 16384;
+
+/// Counts forgettings: a reply asked for before one is not kept (it may be older than the
+/// change that caused it).
+static ATTR_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn attr_gen() -> u64 {
+    ATTR_GEN.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The cached attributes of `ino`.
+fn cached_attr(ino: u64) -> Option<Attr> {
+    x86_64::instructions::interrupts::without_interrupts(|| ATTRS.lock().get(&ino).copied())
+}
+
+/// Keeps the attributes of `ino` read by a request made at generation `gen` (unless
+/// something was forgotten since).
+fn cache_attr(ino: u64, a: Attr, gen: u64) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = ATTRS.lock();
+        if attr_gen() != gen {
+            return;
+        }
+        if c.len() >= ATTRS_MAX {
+            c.clear();
+        }
+        c.insert(ino, a);
+    })
+}
+
+/// Forgets the attributes of `ino` (it changed).
+fn forget_attr(ino: u64) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = ATTRS.lock();
+        ATTR_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        c.remove(&ino);
+    });
+}
+
+/// Forgets every object's attributes (a change whose objects are not all known here: a
+/// name removed or moved changes the link count of the object it named).
+pub fn forget_all_attrs() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = ATTRS.lock();
+        ATTR_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        c.clear();
+    });
+}
+
+/// What a name lookup or path walk found: the object (and mount), the rest of the path at a
+/// FUSE mount, or ENOENT/ENOTDIR.
+type Found = Result<(u64, usize, Option<Vec<u8>>), i64>;
+
+/// Results of lookups and path walks, keyed by the whole request (kind, directories,
+/// mounts, path): a `stat` or `open` of a known path needs no request to the file server.
+/// Any change to a name (creating, removing, linking, renaming) forgets them all.
+static NAMES: spin::Mutex<alloc::collections::BTreeMap<Vec<u8>, Found>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Most results kept (the cache starts over when full).
+const NAMES_MAX: usize = 8192;
+static NAMES_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn names_gen() -> u64 {
+    NAMES_GEN.load(core::sync::atomic::Ordering::Acquire)
+}
+
+fn cached_name(key: &[u8]) -> Option<Found> {
+    x86_64::instructions::interrupts::without_interrupts(|| NAMES.lock().get(key).cloned())
+}
+
+/// Keeps a result asked for at generation `gen` (unless a name changed since; errors other
+/// than ENOENT/ENOTDIR are not kept).
+fn cache_name(key: Vec<u8>, found: &Found, gen: u64) {
+    if matches!(found, Err(e) if *e != ENOENT && *e != ENOTDIR) {
+        return;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = NAMES.lock();
+        if names_gen() != gen {
+            return;
+        }
+        if c.len() >= NAMES_MAX {
+            c.clear();
+        }
+        c.insert(key, found.clone());
+    })
+}
+
+/// Forgets every lookup's result (a name changed).
+pub fn forget_names() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = NAMES.lock();
+        NAMES_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        c.clear();
+    });
+}
+
+/// The key of a lookup: its kind, numbers and bytes.
+fn name_key(kind: u8, nums: &[u64], bytes: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + nums.len() * 8 + bytes.len());
+    k.push(kind);
+    for n in nums {
+        k.extend_from_slice(&n.to_le_bytes());
+    }
+    k.extend_from_slice(bytes);
+    k
+}
+
+/// Forgets the attributes of an object when dropped: at the end of a change to it, after
+/// the request (a lookup racing with the change may have kept the old ones).
+struct Changed(u64);
+
+impl Drop for Changed {
+    fn drop(&mut self) {
+        forget_attr(self.0);
+    }
+}
+
 impl ZfsServer {
     /// Sends request `op` with the parameters `params` writes; returns `(value, reply
     /// bytes)` and hands the operation's inotify events to the kernel's watchers.
@@ -213,11 +335,18 @@ impl ZfsServer {
             self.window = None;
             return fuse::lookup(dir, name);
         }
-        self.request(FS_LOOKUP, |w| {
+        let key = name_key(0, &[dir], name);
+        if let Some(f) = cached_name(&key) {
+            return f.map(|f| f.0);
+        }
+        let gen = names_gen();
+        let r = self.request(FS_LOOKUP, |w| {
             w.u64(dir);
             w.bytes(name);
         })
-        .map(|r| r.0)
+        .map(|r| (r.0, 0, None));
+        cache_name(key, &r, gen);
+        r.map(|f| f.0)
     }
 
     /// Resolves `path` inside `root` relative to `base` (symbolic links expanded), in one
@@ -241,13 +370,21 @@ impl ZfsServer {
             let list = fuse::ns0_list();
             return self.resolve_mnt(root, fuse::ns0_mnt_of(root), base, fuse::ns0_mnt_of(base), path, follow_last, &list).map(|r| r.0);
         }
-        self.request(FS_RESOLVE, |w| {
-            w.u64(root);
-            w.u64(base);
-            w.u64(follow_last as u64);
-            w.bytes(path);
-        })
-        .map(|r| r.0)
+        let key = name_key(1, &[root, base, follow_last as u64], path);
+        if let Some(f) = cached_name(&key) {
+            return f.map(|f| f.0);
+        }
+        let gen = names_gen();
+        let r = self
+            .request(FS_RESOLVE, |w| {
+                w.u64(root);
+                w.u64(base);
+                w.u64(follow_last as u64);
+                w.bytes(path);
+            })
+            .map(|r| (r.0, 0, None));
+        cache_name(key, &r, gen);
+        r.map(|f| f.0)
     }
 
     /// Resolves `path` through a mount table (see [`FS_RESOLVE_MNT`]).
@@ -327,6 +464,32 @@ impl ZfsServer {
         follow_last: bool,
         mounts: &[(u64, u64, usize)],
     ) -> Result<(u64, usize, Option<Vec<u8>>), i64> {
+        let mut nums = alloc::vec![root, root_mnt as u64, base, base_mnt as u64, follow_last as u64, mounts.len() as u64];
+        for m in mounts {
+            nums.extend_from_slice(&[m.0, m.1, m.2 as u64]);
+        }
+        let key = name_key(2, &nums, path);
+        if let Some(f) = cached_name(&key) {
+            return f;
+        }
+        let gen = names_gen();
+        let r = self.resolve_mnt_request(root, root_mnt, base, base_mnt, path, follow_last, mounts);
+        cache_name(key, &r, gen);
+        r
+    }
+
+    /// The request of [`Self::resolve_mnt_raw`].
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_mnt_request(
+        &mut self,
+        root: u64,
+        root_mnt: usize,
+        base: u64,
+        base_mnt: usize,
+        path: &[u8],
+        follow_last: bool,
+        mounts: &[(u64, u64, usize)],
+    ) -> Result<(u64, usize, Option<Vec<u8>>), i64> {
         let (v, len) = self.request(FS_RESOLVE_MNT, |w| {
             w.u64(root);
             w.u64(root_mnt as u64);
@@ -365,10 +528,16 @@ impl ZfsServer {
             self.window = None;
             return fuse::getattr(ino);
         }
+        if let Some(a) = cached_attr(ino) {
+            return Ok(a);
+        }
+        let gen = attr_gen();
         let (_, len) = self.request(FS_GETATTR, |w| {
             w.u64(ino);
         })?;
-        Ok(Reader::new(self.reply(len)).attr())
+        let a = Reader::new(self.reply(len)).attr();
+        cache_attr(ino, a, gen);
+        Ok(a)
     }
 
     /// Changes attributes of `ino`; returns the new ones.
@@ -393,11 +562,15 @@ impl ZfsServer {
                 set.mode = Some(m);
             }
         }
+        let changed = Changed(ino);
         let (_, len) = self.request(FS_SETATTR, |w| {
             w.u64(ino);
             w.setattr(&set);
         })?;
-        Ok(Reader::new(self.reply(len)).attr())
+        let a = Reader::new(self.reply(len)).attr();
+        drop(changed);
+        cache_attr(ino, a, attr_gen());
+        Ok(a)
     }
 
     /// Reads from `ino` at `offset` into `buf`; returns the bytes read.
@@ -448,6 +621,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::write(ino, offset, data);
         }
+        let _changed = Changed(ino);
         let mut done = 0;
         while done < data.len() || data.is_empty() {
             let chunk = &data[done..(done + MAX_IO).min(data.len())];
@@ -490,14 +664,20 @@ impl ZfsServer {
             self.window = None;
             return fuse::create(dir, name, perm);
         }
-        self.request(FS_CREATE, |w| {
+        let r = self.request(FS_CREATE, |w| {
             w.u64(dir);
             w.bytes(name);
             w.u64(perm as u64);
             w.u64(uid as u64);
             w.u64(gid as u64);
         })
-        .map(|r| r.0)
+        .map(|r| {
+            forget_attr(r.0);
+            r.0
+        });
+        forget_attr(dir);
+        forget_names();
+        r
     }
 
     /// Creates a device node, FIFO or socket `name` in `dir`.
@@ -518,7 +698,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::mknod(dir, name, mode, rdev);
         }
-        self.request(FS_MKNOD, |w| {
+        let r = self.request(FS_MKNOD, |w| {
             w.u64(dir);
             w.bytes(name);
             w.u64(mode as u64);
@@ -526,7 +706,13 @@ impl ZfsServer {
             w.u64(uid as u64);
             w.u64(gid as u64);
         })
-        .map(|r| r.0)
+        .map(|r| {
+            forget_attr(r.0);
+            r.0
+        });
+        forget_attr(dir);
+        forget_names();
+        r
     }
 
     /// Creates directory `name` in `dir`.
@@ -546,14 +732,20 @@ impl ZfsServer {
             self.window = None;
             return fuse::mkdir(dir, name, perm);
         }
-        self.request(FS_MKDIR, |w| {
+        let r = self.request(FS_MKDIR, |w| {
             w.u64(dir);
             w.bytes(name);
             w.u64(perm as u64);
             w.u64(uid as u64);
             w.u64(gid as u64);
         })
-        .map(|r| r.0)
+        .map(|r| {
+            forget_attr(r.0);
+            r.0
+        });
+        forget_attr(dir);
+        forget_names();
+        r
     }
 
     /// Creates symbolic link `name` in `dir` pointing at `target`.
@@ -573,14 +765,20 @@ impl ZfsServer {
             self.window = None;
             return fuse::symlink(dir, name, target);
         }
-        self.request(FS_SYMLINK, |w| {
+        let r = self.request(FS_SYMLINK, |w| {
             w.u64(dir);
             w.bytes(name);
             w.bytes(target);
             w.u64(uid as u64);
             w.u64(gid as u64);
         })
-        .map(|r| r.0)
+        .map(|r| {
+            forget_attr(r.0);
+            r.0
+        });
+        forget_attr(dir);
+        forget_names();
+        r
     }
 
     /// Extended attribute `name` of `ino`.
@@ -602,6 +800,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::setxattr(ino, name, value, flags);
         }
+        let _changed = Changed(ino);
         self.request(FS_SETXATTR, |w| {
             w.u64(ino);
             w.bytes(name);
@@ -629,6 +828,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::removexattr(ino, name);
         }
+        let _changed = Changed(ino);
         self.request(FS_REMOVEXATTR, |w| {
             w.u64(ino);
             w.bytes(name);
@@ -670,12 +870,15 @@ impl ZfsServer {
             self.window = None;
             return fuse::link(ino, dir, name);
         }
-        self.request(FS_LINK, |w| {
+        let r = self.request(FS_LINK, |w| {
             w.u64(ino);
             w.u64(dir);
             w.bytes(name);
         })
-        .map(|_| ())
+        .map(|_| ());
+        forget_all_attrs();
+        forget_names();
+        r
     }
 
     /// Removes `name` (not a directory) from `dir`.
@@ -692,11 +895,14 @@ impl ZfsServer {
             self.window = None;
             return fuse::unlink(dir, name);
         }
-        self.request(FS_UNLINK, |w| {
+        let r = self.request(FS_UNLINK, |w| {
             w.u64(dir);
             w.bytes(name);
         })
-        .map(|_| ())
+        .map(|_| ());
+        forget_all_attrs();
+        forget_names();
+        r
     }
 
     /// Removes empty directory `name` from `dir`.
@@ -713,11 +919,14 @@ impl ZfsServer {
             self.window = None;
             return fuse::rmdir(dir, name);
         }
-        self.request(FS_RMDIR, |w| {
+        let r = self.request(FS_RMDIR, |w| {
             w.u64(dir);
             w.bytes(name);
         })
-        .map(|_| ())
+        .map(|_| ());
+        forget_all_attrs();
+        forget_names();
+        r
     }
 
     /// Renames `sdir/sname` to `ddir/dname`.
@@ -736,13 +945,16 @@ impl ZfsServer {
             self.window = None;
             return fuse::rename(sdir, sname, ddir, dname);
         }
-        self.request(FS_RENAME, |w| {
+        let r = self.request(FS_RENAME, |w| {
             w.u64(sdir);
             w.bytes(sname);
             w.u64(ddir);
             w.bytes(dname);
         })
-        .map(|_| ())
+        .map(|_| ());
+        forget_all_attrs();
+        forget_names();
+        r
     }
 
     /// Up to `max` entries of `dir` from `cookie` on.
@@ -856,11 +1068,13 @@ impl ZfsServer {
     ///
     /// The transaction group number of the snapshot on success, or a negative errno error code on failure.
     pub fn snapshot(&mut self, dataset_index: usize, snap_name: &str) -> Result<u64, i64> {
-        self.request(FS_SNAPSHOT, |w| {
+        let r = self.request(FS_SNAPSHOT, |w| {
             w.u64(dataset_index as u64);
             w.bytes(snap_name.as_bytes());
         })
-        .map(|r| r.0)
+        .map(|r| r.0);
+        forget_names();
+        r
     }
 
     /// `(total bytes, allocated bytes, free bytes, committed txg, open txg)`.
@@ -919,10 +1133,13 @@ impl ZfsServer {
     ///
     /// `Ok(())` on success, or a negative errno error code on failure.
     pub fn diagnostic(&mut self, op: u32, path: &str, repair: bool) -> Result<(), i64> {
-        self.request(op, |w| {
+        let r = self.request(op, |w| {
             w.bytes(path.as_bytes());
             w.u64(repair as u64);
         })
-        .map(|_| ())
+        .map(|_| ());
+        forget_all_attrs();
+        forget_names();
+        r
     }
 }
