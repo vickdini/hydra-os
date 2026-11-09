@@ -258,6 +258,70 @@ fn send_ipi_now(apic: u32, vector: u32) {
     }
 }
 
+/// CPUs halted in their idle loop (a bit per CPU), until an interrupt.
+static HALTED: AtomicU64 = AtomicU64::new(0);
+/// Counts tasks made runnable: an idle CPU polls it briefly before halting.
+static RUNNABLE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// How long an idle CPU polls for work before halting: waking a halted virtual CPU costs
+/// tens of microseconds, longer than most waits between a wakeup and the next.
+const IDLE_POLL_NS: u64 = 50_000;
+
+/// Polls for a task made runnable (by another CPU, or an interrupt) for a short while,
+/// with interrupts enabled and without the kernel lock.
+///
+/// # Returns
+/// Whether one was.
+pub fn idle_poll() -> bool {
+    let gen = RUNNABLE_GEN.load(Ordering::Acquire);
+    let end = super::pit::now_ns() + IDLE_POLL_NS;
+    while super::pit::now_ns() < end {
+        if RUNNABLE_GEN.load(Ordering::Acquire) != gen || crate::task::wait::wakes_pending() {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+/// Notes that this CPU halts in its idle loop now (until an interrupt).
+pub fn idle_halting() {
+    HALTED.fetch_or(1 << super::percpu::cpu(), Ordering::AcqRel);
+}
+
+/// Notes that this CPU's idle halt ended.
+///
+/// # Returns
+/// Whether another CPU woke it for a task made runnable ([`kick_idle`]).
+pub fn idle_halt_ended() -> bool {
+    let bit = 1 << super::percpu::cpu();
+    HALTED.fetch_and(!bit, Ordering::AcqRel) & bit == 0
+}
+
+/// A task became runnable: wakes one halted idle CPU (another than this one) to run it at
+/// once rather than at its next timer tick (a device interrupt, which only the boot
+/// processor takes, wakes a driver another CPU must run).
+pub fn kick_idle() {
+    RUNNABLE_GEN.fetch_add(1, Ordering::AcqRel);
+    let me = 1u64 << super::percpu::cpu();
+    loop {
+        let halted = HALTED.load(Ordering::Acquire) & !me;
+        if halted == 0 {
+            return;
+        }
+        let c = halted.trailing_zeros() as usize;
+        // Its bit is cleared by whoever wakes it: one IPI per halt (the TLB vector's
+        // handler does nothing more when no flush is pending)
+        if HALTED.fetch_and(!(1 << c), Ordering::AcqRel) & (1 << c) != 0 {
+            let apic = CPU_APIC[c].load(Ordering::Acquire);
+            if apic != u32::MAX {
+                x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
+            }
+            return;
+        }
+    }
+}
+
 /// Number of CPUs online.
 pub fn online() -> usize {
     ONLINE.load(Ordering::Acquire)

@@ -242,6 +242,9 @@ struct Disk {
     lba48: bool,
     dma: Option<BusMaster>,
     dma_failures: u32,
+    /// The channel's interrupt line, when this driver receives it: a DMA transfer then
+    /// waits for the completion interrupt instead of polling the status register.
+    irq: Option<u8>,
 }
 
 impl Disk {
@@ -285,7 +288,7 @@ impl Disk {
         } else {
             id[60] as u64 | (id[61] as u64) << 16
         };
-        (sectors != 0).then_some(Self { ports, model, sectors, lba48, dma: None, dma_failures: 0 })
+        (sectors != 0).then_some(Self { ports, model, sectors, lba48, dma: None, dma_failures: 0, irq: None })
     }
 
     /// Returns the drive model string trimmed of trailing spaces.
@@ -342,6 +345,8 @@ impl Disk {
             (true, false) => CMD_WRITE_DMA,
             (true, true) => CMD_WRITE_DMA_EXT,
         };
+        // The completion interrupt, when waited for (nIEN clear)
+        outb(self.ports.ctrl, if self.irq.is_some() { 0x00 } else { 0x02 });
         outb(self.ports.io + 7, cmd);
         outb(bm.base + BM_COMMAND, direction | BM_CMD_START);
         let mut d = Deadline::new();
@@ -356,9 +361,19 @@ impl Disk {
             if d.expired() {
                 break Err("DMA transfer timed out");
             }
-            core::hint::spin_loop();
+            match self.irq {
+                // Up to 20 ms, then the status is checked again (an interrupt counted
+                // for an earlier transfer returns at once)
+                Some(irq) => {
+                    let _ = sys::irq_wait(irq, 2);
+                }
+                None => core::hint::spin_loop(),
+            }
         };
         outb(bm.base + BM_COMMAND, 0);
+        if self.irq.is_some() {
+            outb(self.ports.ctrl, 0x02); // interrupts off again (port I/O polls)
+        }
         let status = self.ports.wait_not_busy()?;
         outb(bm.base + BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
         result?;
@@ -538,6 +553,11 @@ fn main(args: &[&str]) {
         return;
     };
     disk.dma = arg(args, "bm").and_then(|bm| BusMaster::new(bm as u16));
+    // The channel's interrupt (14: primary, 15: secondary) for DMA completions
+    let irq = if io == 0x170 { 15 } else { 14 };
+    if disk.dma.is_some() && sys::irq_register(irq).is_ok() {
+        disk.irq = Some(irq);
+    }
     let mut server = match Server::register(ENDPOINT_BLOCK_DEV) {
         Ok(s) => s,
         Err(e) => {
@@ -550,7 +570,11 @@ fn main(args: &[&str]) {
         disk.model_str(),
         disk.sectors * SECTOR as u64 / (1024 * 1024),
         if disk.lba48 { 48 } else { 28 },
-        if disk.dma.is_some() { "bus-master DMA" } else { "port I/O" }
+        match (disk.dma.is_some(), disk.irq.is_some()) {
+            (true, true) => "bus-master DMA, interrupt-driven",
+            (true, false) => "bus-master DMA, polled",
+            _ => "port I/O",
+        }
     );
     let blocks = disk.sectors / SECTORS_PER_BLOCK;
     server.serve(|srv, msg| match msg.label as u32 {

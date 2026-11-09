@@ -1586,6 +1586,7 @@ impl Scheduler {
                 TaskState::Dead => {}
                 TaskState::Blocked | TaskState::Sleeping { .. } if task.event_wait => {
                     task.state = TaskState::Ready;
+                    crate::arch::smp::kick_idle();
                     task.event_wait = false;
                     task.woken = true;
                 }
@@ -1694,6 +1695,7 @@ impl Scheduler {
         for task in self.tasks.iter_mut() {
             if task.id == id && task.state == TaskState::Blocked {
                 task.state = TaskState::Ready;
+                crate::arch::smp::kick_idle();
                 task.woken = true;
                 return true;
             }
@@ -2113,6 +2115,15 @@ pub(crate) fn idle_task_entry() {
             // Halt until the next interrupt, unless one already woke a task: checking with
             // interrupts disabled and re-enabling them atomically with `hlt` closes the gap
             // in which a wakeup could be missed until the next timer tick
+            // A short poll first (without the kernel lock): a task made runnable meanwhile
+            // runs at once, without halting and being woken again
+            crate::arch::smp::bkl_exit();
+            let work = crate::arch::smp::idle_poll();
+            crate::arch::smp::bkl_enter_idle();
+            if work {
+                crate::task::yield_now();
+                continue;
+            }
             x86_64::instructions::interrupts::disable();
             if crate::task::wait::wakes_pending() {
                 x86_64::instructions::interrupts::enable();
@@ -2120,8 +2131,14 @@ pub(crate) fn idle_task_entry() {
             } else {
                 // Halted without the kernel lock; the interrupt that ends it takes it
                 crate::arch::smp::bkl_exit();
+                crate::arch::smp::idle_halting();
                 crate::task::preemptible(x86_64::instructions::interrupts::enable_and_hlt);
+                let kicked = crate::arch::smp::idle_halt_ended();
                 crate::arch::smp::bkl_enter_idle();
+                if kicked {
+                    // Another CPU made a task runnable: run it now
+                    crate::task::yield_now();
+                }
             }
         } else {
             core::hint::spin_loop();

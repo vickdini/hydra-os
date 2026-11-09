@@ -238,6 +238,18 @@ def main():
                     if m:
                         r = qmp.cmd("human-monitor-command", {"command-line": f"x /256gx 0x{m.group(1)}"})
                         out.write("$ stack\n" + str(r.get("return", r)) + "\n")
+                    # The other CPUs: registers and stack of each
+                    if a.smp > 1:
+                        r = qmp.cmd("human-monitor-command", {"command-line": "info registers -a"})
+                        allregs = str(r.get("return", r))
+                        for c, regs in enumerate(re.split(r"\n(?=CPU#\d)", allregs)):
+                            if c == 0:
+                                continue
+                            out.write(f"$ cpu {c}\n" + regs + "\n")
+                            m = re.search(r"RSP=([0-9a-f]+)", regs)
+                            if m:
+                                r = qmp.cmd("human-monitor-command", {"command-line": f"x /256gx 0x{m.group(1)}"})
+                                out.write(f"$ stack {c}\n" + str(r.get("return", r)) + "\n")
                 print(f"[hydra_run] log stalled for {a.stall_dump} s: CPU state saved to scratch/hydra_stall.txt")
             # --until is a regular expression (alternatives with |; `\|` also accepted). The
             # shell echoes typed commands, so their text is removed first: otherwise a

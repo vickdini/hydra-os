@@ -168,6 +168,7 @@ impl WaitQueue {
         });
         if any {
             flush();
+            crate::arch::smp::kick_idle();
         }
     }
 }
