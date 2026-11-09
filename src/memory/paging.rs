@@ -337,7 +337,7 @@ impl AddressSpace {
         }
 
         p1_entry.set_addr(frame.start_address(), flags | PageTableFlags::PRESENT);
-        x86_64::instructions::tlb::flush(page.start_address());
+        crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
         Ok(())
     }
 
@@ -391,7 +391,7 @@ impl AddressSpace {
 
         let frame = PhysFrame::containing_address(p1_entry.addr());
         p1_entry.set_unused();
-        x86_64::instructions::tlb::flush(page.start_address());
+        crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
         Ok(frame)
     }
 
@@ -440,7 +440,7 @@ impl AddressSpace {
 
         let phys = p1_entry.addr();
         p1_entry.set_addr(phys, flags | PageTableFlags::PRESENT);
-        x86_64::instructions::tlb::flush(page.start_address());
+        crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
         Ok(())
     }
 
@@ -495,7 +495,7 @@ impl AddressSpace {
             }
             p3_entry.set_flags(p3_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
             if p3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-                x86_64::instructions::tlb::flush(page.start_address());
+                crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
                 continue;
             }
 
@@ -506,7 +506,7 @@ impl AddressSpace {
             }
             p2_entry.set_flags(p2_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
             if p2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-                x86_64::instructions::tlb::flush(page.start_address());
+                crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
                 continue;
             }
 
@@ -516,7 +516,7 @@ impl AddressSpace {
                 continue;
             }
             p1_entry.set_flags(p1_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
-            x86_64::instructions::tlb::flush(page.start_address());
+            crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
         }
 
         // Re-enable CR0.WP (bit 16) to restore supervisor write protection

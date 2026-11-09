@@ -194,20 +194,14 @@ pub struct SyscallFrame {
     pub rsp: u64,
 }
 
-/// The kernel stack pointer of the currently active task.
-///
-/// `asm_syscall_entry` switches RSP to this address immediately upon entering Ring 0.
-#[no_mangle]
-pub static mut CURRENT_KERNEL_RSP: u64 = 0;
+/// System calls each CPU has started (the kernel watchdog: a CPU entering new calls is not
+/// stuck in one).
+pub static SYSCALL_ENTRIES: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
 
-/// Temporary scratch space for preserving user RSP before kernel stack switch.
-#[no_mangle]
-static mut USER_RSP_SCRATCH: u64 = 0;
-
-/// User FPU state saved by the syscall entry stub for the syscall in progress. Valid until
-/// the current syscall yields the CPU; `clone` reads it to give the child the parent's state.
-pub static SYSCALL_FPU: core::sync::atomic::AtomicPtr<crate::arch::idt::FpuState> =
-    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+/// User FPU state saved by the syscall entry stub for the syscall in progress (per CPU).
+/// Valid until the current syscall yields the CPU; `clone` reads it to give the child the
+/// parent's state.
+pub static SYSCALL_FPU: crate::arch::percpu::PerCpuPtr<crate::arch::idt::FpuState> = crate::arch::percpu::PerCpuPtr::new();
 
 /// Updates the active task's kernel stack pointer for syscall stack switching.
 ///
@@ -222,9 +216,7 @@ pub static SYSCALL_FPU: core::sync::atomic::AtomicPtr<crate::arch::idt::FpuState
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn set_kernel_rsp(rsp: u64) {
-    unsafe {
-        CURRENT_KERNEL_RSP = rsp;
-    }
+    crate::arch::percpu::set_kernel_rsp(rsp);
 }
 
 /// Reads a 64-bit Model-Specific Register (MSR).
@@ -372,6 +364,17 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 /// * `fpu` - Raw pointer to the saved userland FPU/SSE state buffer.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
+    // The kernel runs on one CPU at a time (see arch::smp): held until the return to user
+    // mode (the syscall may block and resume on another CPU, which holds it then)
+    crate::arch::smp::bkl_enter();
+    SYSCALL_ENTRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::task::scheduler::wait_out_handoff();
+    dispatch(frame, fpu);
+    crate::arch::smp::bkl_exit();
+}
+
+/// [`hydra_syscall_dispatcher`] under the kernel lock.
+fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
 
     // Release what exited processes held: no locks are held at syscall entry, except while
@@ -845,12 +848,14 @@ global_asm!(
         // RFLAGS.IF is cleared by FMASK
         // RSP is currently the User RSP
 
-        // 1. Preserve User RSP and switch to Task Kernel Stack
-        mov [rip + USER_RSP_SCRATCH], rsp
-        mov rsp, [rip + CURRENT_KERNEL_RSP]
+        // 1. The kernel's GS base (per-CPU data: arch::percpu); preserve User RSP and
+        // switch to the task's kernel stack
+        swapgs
+        mov gs:[24], rsp
+        mov rsp, gs:[16]
 
         // 2. Build SyscallFrame on kernel stack
-        push qword ptr [rip + USER_RSP_SCRATCH] // User RSP
+        push qword ptr gs:[24]                  // User RSP
         push r11                                // User RFLAGS
         push rcx                                // User RIP
         push rbx
@@ -905,7 +910,8 @@ global_asm!(
         pop r11                                 // Restore User RFLAGS into R11 for sysretq
         pop rsp                                 // Restore User RSP directly
 
-        // 5. Return to unprivileged Ring 3
+        // 5. Return to unprivileged Ring 3 (with its GS base)
+        swapgs
         sysretq
     "#
 );

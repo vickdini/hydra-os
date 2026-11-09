@@ -395,9 +395,17 @@ pub fn sched_setaffinity(pid: u64, size: u64, mask: u64) -> i64 {
     if size == 0 {
         return EINVAL;
     }
-    match copy_in(mask, 1) {
-        Ok(b) if b[0] & 1 != 0 => 0,
-        Ok(_) => EINVAL,
+    // Any mask with an online CPU (tasks are not pinned: they run where the scheduler puts
+    // them)
+    let n = crate::arch::smp::online().min(64);
+    let online: u64 = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    let len = (size as usize).min(8);
+    match copy_in(mask, len) {
+        Ok(b) => {
+            let mut m = [0u8; 8];
+            m[..len].copy_from_slice(&b);
+            if u64::from_le_bytes(m) & online != 0 { 0 } else { EINVAL }
+        }
         Err(e) => e,
     }
 }

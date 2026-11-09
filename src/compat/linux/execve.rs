@@ -380,6 +380,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         );
         crate::arch::syscall::wrmsr(0xC000_0100, 0);
     }
+    // This CPU has the new address space loaded (no other CPU may run it meanwhile)
+    crate::task::SCHEDULER.lock().note_loaded_cr3(cr3);
     crate::memory::vm::set_current_mm(Some(&new_mm));
     // Close-on-exec descriptors close outside the scheduler lock: releasing a file is a
     // request to the file server

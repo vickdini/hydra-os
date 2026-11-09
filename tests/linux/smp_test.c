@@ -1,0 +1,114 @@
+// Several CPUs: CPU-bound processes, and threads of one process, run in parallel (four
+// take about as long as one when four CPUs are online); nproc/sched_getaffinity report the
+// CPUs; a mapping another thread is reading on another CPU stops working at once when it
+// is protected (TLB shootdown). With one CPU it reports and skips the timing checks.
+// Build: gcc -O1 -w -pthread -o smp smp_test.c
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static int fails;
+static void check(int ok, const char *what) {
+    printf("%s %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) fails++;
+}
+
+static double now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static volatile unsigned long sink;
+static void work(unsigned long n) {
+    unsigned long x = 1;
+    for (unsigned long i = 0; i < n; i++) x = x * 6364136223846793005UL + 1442695040888963407UL;
+    sink = x;
+}
+
+// Runs `procs` processes each doing `n` iterations; returns the wall time
+static double run(int procs, unsigned long n) {
+    double t0 = now();
+    for (int i = 0; i < procs; i++)
+        if (fork() == 0) {
+            work(n);
+            _exit(0);
+        }
+    for (int i = 0; i < procs; i++) wait(NULL);
+    return now() - t0;
+}
+
+static void *thread_work(void *n) {
+    work((unsigned long)n);
+    return NULL;
+}
+
+// Runs `threads` threads of this process each doing `n` iterations; returns the wall time
+static double run_threads(int threads, unsigned long n) {
+    pthread_t t[8];
+    double t0 = now();
+    for (int i = 0; i < threads; i++) pthread_create(&t[i], NULL, thread_work, (void *)n);
+    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
+    return now() - t0;
+}
+
+// A thread reading a page until it faults
+static volatile char *page;
+static volatile int reading, faulted;
+static sigjmp_buf out;
+static void on_segv(int s) { siglongjmp(out, 1); }
+static void *reader(void *x) {
+    if (sigsetjmp(out, 1)) {
+        faulted = 1;
+        return NULL;
+    }
+    reading = 1;
+    for (;;) (void)page[0];
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int aff = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : -1;
+    printf("     %ld CPUs online, affinity %d\n", n, aff);
+    check(n >= 1 && aff == n, "sysconf and sched_getaffinity agree");
+    // About half a second of work for one process
+    unsigned long iters = 1000000;
+    while (run(1, iters) < 0.25) iters *= 2;
+    double one = run(1, iters);
+    int k = n > 4 ? 4 : (int)n;
+    double many = run(k, iters);
+    printf("     1 process: %.3f s; %d at once: %.3f s (speedup %.2f)\n", one, k, many, k * one / many);
+    if (k > 1) check(many < one * k * 0.75, "processes run in parallel");
+    double tmany = run_threads(k, iters);
+    printf("     %d threads at once: %.3f s (speedup %.2f)\n", k, tmany, k * one / tmany);
+    if (k > 1) check(tmany < one * k * 0.75, "threads of one process run in parallel");
+
+    // Protecting a page another thread keeps reading (on another CPU) takes effect at once
+    page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    page[0] = 1;
+    struct sigaction sa = {0};
+    sa.sa_handler = on_segv;
+    sigaction(SIGSEGV, &sa, NULL);
+    pthread_t r;
+    pthread_create(&r, NULL, reader, NULL);
+    while (!reading) sched_yield();
+    usleep(50000);
+    mprotect((void *)page, 4096, PROT_NONE);
+    double t0 = now();
+    while (!faulted && now() - t0 < 2) usleep(1000);
+    check(faulted, "a page protected while another thread reads it faults there");
+    if (faulted) pthread_join(r, NULL);
+    printf(fails ? "SMP TEST FAILED (%d)\n" : "SMP TEST PASSED\n", fails);
+    return fails != 0;
+}

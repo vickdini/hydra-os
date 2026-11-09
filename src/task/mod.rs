@@ -46,19 +46,19 @@ pub use supervisor::{
 pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRegisters, TaskState};
 
 /// Number of kernel wait points currently active (see `preemptible`).
-pub static PREEMPT_POINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub static PREEMPT_POINTS: crate::arch::percpu::PerCpuU32 = crate::arch::percpu::PerCpuU32::new();
 
 /// Linux system call the running task is executing (`u64::MAX` when none), for
 /// [`scheduler::Scheduler::dump_tasks`].
-pub static CURRENT_SYSCALL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+pub static CURRENT_SYSCALL: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(u64::MAX);
 /// First two arguments of [`CURRENT_SYSCALL`] (for the task dump).
-pub static CURRENT_SYSCALL_ARGS: [core::sync::atomic::AtomicU64; 2] =
-    [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+pub static CURRENT_SYSCALL_ARGS: [crate::arch::percpu::PerCpuU64; 2] =
+    [crate::arch::percpu::PerCpuU64::new(0), crate::arch::percpu::PerCpuU64::new(0)];
 
 /// Kernel stack `[bottom, top)` of the running task (bottom 0: unknown, such as the boot
 /// thread's firmware stack).
-pub static CURRENT_KSTACK: [core::sync::atomic::AtomicU64; 2] =
-    [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+pub static CURRENT_KSTACK: [crate::arch::percpu::PerCpuU64; 2] =
+    [crate::arch::percpu::PerCpuU64::new(0), crate::arch::percpu::PerCpuU64::new(0)];
 
 /// Whether `addr` (a trap frame) lies on the running task's own kernel stack.
 ///

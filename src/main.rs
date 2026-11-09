@@ -138,6 +138,9 @@ fn panic(_info: &PanicInfo) -> ! {
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
+    // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
+    arch::percpu::init_this_cpu(0);
+    arch::smp::bkl_enter();
 
     console::clear_screen();
     console::set_color(Color::LightCyan, Color::Black);

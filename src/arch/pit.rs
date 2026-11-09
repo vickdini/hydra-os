@@ -220,9 +220,18 @@ pub fn sleep_ticks(count: u64) {
         return;
     }
     let target = ticks().saturating_add(count);
+    // At a preemption point (no locks held) the kernel lock is let go while halted: other
+    // CPUs run kernel code meanwhile (the console shell waits for keys this way)
+    let release = crate::task::is_active() && crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::Relaxed) > 0;
     while ticks() < target {
         if x86_64::instructions::interrupts::are_enabled() {
+            if release {
+                crate::arch::smp::bkl_exit();
+            }
             x86_64::instructions::hlt();
+            if release {
+                crate::arch::smp::bkl_enter_idle();
+            }
         } else {
             core::hint::spin_loop();
         }

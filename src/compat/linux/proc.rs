@@ -2314,9 +2314,12 @@ pub fn force_fault_signal(ctx: &mut ExceptionContext, fpu: *mut FpuState, sig: u
             }
             b
         };
+        let exe = crate::task::SCHEDULER.try_lock().and_then(|s| s.exe_of(pid)).unwrap_or_default();
         crate::kprintln!(
-            "[linux] pid {} signal {} at {:#x} ip {:#x} sp {:#x} error {:#x} vector {} in [{}] code {:02x?}",
+            "[linux] pid {} ({}) cpu {} signal {} at {:#x} ip {:#x} sp {:#x} error {:#x} vector {} in [{}] code {:02x?}",
             pid,
+            exe,
+            crate::arch::percpu::cpu(),
             sig,
             addr,
             ctx.rip,
@@ -2411,6 +2414,10 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
 /// - `fpu` must contain a valid 64-byte-aligned 512-byte `FXRSTOR64` image with reserved `MXCSR` bits cleared.
 pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
     let regs = *regs;
+    // Back to user mode: interrupts stay off until iretq, the kernel lock is released and
+    // the user GS base swapped in (as on every return to user mode)
+    x86_64::instructions::interrupts::disable();
+    crate::arch::smp::bkl_exit();
     core::arch::asm!(
         "fxrstor64 [{fpu}]",
         "push 0x1b",          // SS
@@ -2433,6 +2440,7 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
         "mov rdx, [rax + 12*8]",
         "mov rcx, [rax + 14*8]",
         "mov rax, [rax + 13*8]",
+        "swapgs",
         "iretq",
         // The pointer must sit in the register loaded last: any other could be overwritten
         // by the loads before it is done with

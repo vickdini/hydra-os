@@ -41,6 +41,7 @@ pub mod keyboard;
 pub mod mouse;
 /// Peripheral Component Interconnect (PCI) bus enumeration and configuration space access.
 pub mod pci;
+pub mod percpu;
 /// Dual 8259 Programmable Interrupt Controller (PIC) initialization and IRQ masking.
 pub mod pic;
 /// 8254 Programmable Interval Timer (PIT) driver and system uptime accounting.

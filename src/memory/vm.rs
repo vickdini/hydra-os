@@ -47,7 +47,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB};
@@ -196,7 +196,7 @@ pub struct Mm {
 
 /// The address space of the task currently running on the CPU (null for kernel tasks).
 /// Points into an `Arc<Mutex<Mm>>` kept alive by the running task.
-pub static CURRENT_MM: AtomicPtr<Mutex<Mm>> = AtomicPtr::new(core::ptr::null_mut());
+pub static CURRENT_MM: crate::arch::percpu::PerCpuPtr<Mutex<Mm>> = crate::arch::percpu::PerCpuPtr::new();
 
 /// Address spaces of exited tasks, released later from a context where no locks are held.
 /// Fixed-size so the scheduler can park an address space here without allocating.
@@ -324,13 +324,15 @@ fn pte_holds_frame(entry: &PageTableEntry) -> bool {
     entry.flags().intersects(PageTableFlags::PRESENT | PTE_HELD)
 }
 
-/// Invalidates the TLB entry for virtual address `addr`.
+/// Invalidates the TLB entry for virtual address `addr` of the address space with root
+/// `pml4`, on every CPU that has it loaded (threads of a process run on several CPUs).
 ///
 /// # Arguments
 ///
+/// * `pml4` - Physical address of the address space's root table.
 /// * `addr` - Virtual address whose cached translation must be flushed.
-fn flush(addr: u64) {
-    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(addr));
+fn flush(pml4: PhysAddr, addr: u64) {
+    crate::arch::smp::shootdown(Some(pml4.as_u64()), Some(addr));
 }
 
 impl Mm {
@@ -409,8 +411,9 @@ impl Mm {
                 addr += PAGE_SIZE;
             }
         }
-        // Parent PTEs lost their write bit: drop stale TLB entries
-        x86_64::instructions::tlb::flush_all();
+        // Parent PTEs lost their write bit: drop stale TLB entries (its other threads'
+        // CPUs too)
+        crate::arch::smp::shootdown(Some(self.pml4.as_u64()), None);
         Ok(child)
     }
 
@@ -548,7 +551,7 @@ impl Mm {
                     if pte_holds_frame(entry) {
                         let frame = PhysFrame::containing_address(entry.addr());
                         entry.set_unused();
-                        flush(addr);
+                        flush(self.pml4, addr);
                         frame_ref_dec(frame);
                     }
                     addr += PAGE_SIZE;
@@ -710,7 +713,7 @@ impl Mm {
                         // Private pages shared with others stay read-only until a write copies them
                         let exclusive = shared || frame_refcount(frame) == 1;
                         entry.set_addr(frame.start_address(), pte_flags_for(prot, exclusive));
-                        flush(addr);
+                        flush(self.pml4, addr);
                     }
                 }
                 addr += PAGE_SIZE;
@@ -1005,10 +1008,10 @@ impl Mm {
                 if pte_holds_frame(src) {
                     let (addr, flags) = (src.addr(), src.flags());
                     src.set_unused();
-                    flush(old + offset);
+                    flush(self.pml4, old + offset);
                     let dst = self.pte(dest + offset, true).ok_or(-ENOMEM)?;
                     dst.set_addr(addr, flags);
-                    flush(dest + offset);
+                    flush(self.pml4, dest + offset);
                 }
             }
             offset += PAGE_SIZE;
@@ -1079,7 +1082,7 @@ impl Mm {
                 entry.set_addr(copy.start_address(), pte_flags_for(vma.prot, true));
                 frame_ref_dec(frame);
             }
-            flush(page);
+            flush(self.pml4, page);
             return Ok(());
         }
 
@@ -1111,7 +1114,7 @@ impl Mm {
                 }
             }
         }
-        flush(page);
+        flush(self.pml4, page);
         Ok(())
     }
 
@@ -1193,7 +1196,7 @@ impl Mm {
                 }
                 entry.set_addr(copy.start_address(), pte_flags_for(vma.prot, false));
                 frame_ref_dec(frame);
-                flush(page);
+                flush(self.pml4, page);
                 copy
             };
             unsafe {

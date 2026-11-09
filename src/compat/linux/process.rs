@@ -316,12 +316,13 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_TKILL => super::proc::sys_tkill(super::ns::pid_from_caller(a[0] as u32 as u64), a[1]),
         NR_TGKILL => super::proc::sys_tgkill(super::ns::pid_from_caller(a[0] as u32 as u64), super::ns::pid_from_caller(a[1] as u32 as u64), a[2]),
         NR_SCHED_GETAFFINITY => {
-            // One CPU: report a mask with only CPU 0 set, sized as the kernel's cpumask (8 bytes)
+            // Every CPU online, in a mask sized as the kernel's cpumask (8 bytes)
             if (a[1] as usize) < 8 {
                 EINVAL
             } else {
-                let mut mask = alloc::vec![0u8; 8];
-                mask[0] = 1;
+                let n = crate::arch::smp::online().min(64);
+                let bits: u64 = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+                let mask = bits.to_le_bytes().to_vec();
                 match copy_out(a[2], &mask) {
                     0 => 8,
                     e => e,

@@ -48,6 +48,8 @@ pub enum PseudoFile {
     ProcFilesystems,
     /// `/proc/cpuinfo`: reports `x86_64` processor identification and feature flags.
     ProcCpuinfo,
+    /// `/sys/devices/system/cpu/{online,possible,present}`: the CPUs ("0-3").
+    CpuRange,
     /// `/proc/self/maps`: reports the virtual memory regions of the calling process.
     ProcSelfMaps,
     /// `/proc/self/auxv`: exposes the raw ELF auxiliary vector of the calling process.
@@ -151,6 +153,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
         "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
+        "/sys/devices/system/cpu/online" | "/sys/devices/system/cpu/possible" | "/sys/devices/system/cpu/present" => Some(PseudoFile::CpuRange),
         "/proc/self/maps" => Some(PseudoFile::ProcSelfMaps),
         "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
         "/proc/self/mountinfo" | "/proc/thread-self/mountinfo" => Some(PseudoFile::ProcMountinfo),
@@ -474,7 +477,19 @@ impl PseudoFile {
             }
             PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
             PseudoFile::ProcCpuinfo => {
-                let text = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n";
+                // One entry per CPU online
+                let n = crate::arch::smp::online();
+                let mut text = alloc::string::String::new();
+                for i in 0..n {
+                    text.push_str(&alloc::format!(
+                        "processor\t: {i}\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 1\nmodel name\t: x86_64 Hydra Virtual CPU\nphysical id\t: 0\nsiblings\t: {n}\ncore id\t\t: {i}\ncpu cores\t: {n}\napicid\t\t: {i}\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx lm\n\n"
+                    ));
+                }
+                read_slice(text.as_bytes(), cursor, buf)
+            }
+            PseudoFile::CpuRange => {
+                let n = crate::arch::smp::online();
+                let text = if n > 1 { alloc::format!("0-{}\n", n - 1) } else { alloc::string::String::from("0\n") };
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcSelfAuxv => {

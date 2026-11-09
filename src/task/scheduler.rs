@@ -136,8 +136,13 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 pub struct Scheduler {
     /// Table of all registered tasks (active, sleeping, blocked, and dead).
     tasks: Vec<Task>,
-    /// Index into `tasks` of the currently executing task.
-    current_index: usize,
+    /// Index into `tasks` of the task each CPU runs.
+    cur: [usize; crate::arch::smp::MAX_CPUS],
+    /// The page table root each CPU has loaded (0: unknown): an address space runs on one
+    /// CPU at a time, and is never freed while a CPU has it loaded.
+    loaded_cr3: [u64; crate::arch::smp::MAX_CPUS],
+    /// Each CPU's idle task, which runs only there.
+    idle_of: [Option<TaskId>; crate::arch::smp::MAX_CPUS],
     /// Monotonically increasing counter for assigning new `TaskId`s.
     next_id: u64,
     /// Default timeslice in timer ticks assigned when a task is scheduled.
@@ -174,6 +179,48 @@ pub fn handoff_active() -> bool {
     HANDOFF_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Lets the kernel entry of the calling CPU's task (a system call, a fault in user mode)
+/// proceed only outside other tasks' driver calls. A driver call's caller may hold kernel
+/// locks while its server runs: with one CPU nothing else runs meanwhile; with several,
+/// a task on another CPU entering the kernel then waits (without the kernel lock, so the
+/// server can reply) until the call is over. The call's server and caller go on.
+pub fn wait_out_handoff() {
+    // Also while another task holds a service window: its call's reply is still to be
+    // read out of it (with one CPU the caller always runs first after a call)
+    if !handoff_active() && !crate::ipc::service::window_held_by_other(u64::MAX) {
+        return;
+    }
+    let me = SCHEDULER.lock().current_task_id().0;
+    // Whether this task must wait (`None`: not known now, the scheduler lock is busy)
+    let blocked = || -> Option<bool> {
+        if !handoff_active() && !crate::ipc::service::window_held_by_other(me) {
+            return Some(false);
+        }
+        // (with interrupts off while the scheduler lock is held: see service::holders)
+        let in_call = x86_64::instructions::interrupts::without_interrupts(|| {
+            SCHEDULER.try_lock().map(|s| s.handoffs.iter().flatten().any(|h| h.server == me || h.caller == me))
+        })?;
+        Some(!in_call && !crate::ipc::service::holds_window(me) && (handoff_active() || crate::ipc::service::window_held_by_other(me)))
+    };
+    while blocked().unwrap_or(true) {
+        // Waiting with interrupts on (the boot processor serves the devices the call may
+        // wait for) as a preemption point (the CPU may run other work meanwhile)
+        crate::arch::smp::bkl_exit();
+        super::preemptible(|| {
+            x86_64::instructions::interrupts::enable();
+            while blocked().unwrap_or(true) {
+                // Resumed here after a switch, the CPU holds the lock: not while waiting
+                crate::arch::smp::bkl_exit();
+                for _ in 0..64 {
+                    core::hint::spin_loop();
+                }
+            }
+            x86_64::instructions::interrupts::disable();
+        });
+        crate::arch::smp::bkl_enter();
+    }
+}
+
 /// A driver call in progress ([`crate::ipc::service::call`]): `caller` waits while only
 /// `server` runs, as an in-kernel driver would have run in the caller's place. Callers may
 /// hold kernel locks; no other task runs until the reply, so none can contend for them.
@@ -192,7 +239,9 @@ impl Scheduler {
     pub const fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            current_index: 0,
+            cur: [0; crate::arch::smp::MAX_CPUS],
+            loaded_cr3: [0; crate::arch::smp::MAX_CPUS],
+            idle_of: [None; crate::arch::smp::MAX_CPUS],
             next_id: 1,
             default_timeslice: DEFAULT_TIMESLICE_TICKS,
             initialized: false,
@@ -219,10 +268,10 @@ impl Scheduler {
     ///
     /// `Some(FdTable)` if this was the last thread referencing the table, `None` otherwise.
     pub fn take_current_fds_if_last(&mut self) -> Option<crate::fs::FdTable> {
-        if !self.initialized || self.current_index >= self.tasks.len() {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return None;
         }
-        let task = &mut self.tasks[self.current_index];
+        let task = &mut self.tasks[self.cur[crate::arch::percpu::cpu()]];
         if alloc::sync::Arc::strong_count(&task.fds) != 1 {
             return None;
         }
@@ -311,11 +360,14 @@ impl Scheduler {
         // Register the active main thread as Task 0
         let main_task = Task::new_main(TaskId(0), "shell", current_cr3);
         self.tasks.push(main_task);
-        self.current_index = 0;
+        self.cur[crate::arch::percpu::cpu()] = 0;
         self.initialized = true;
 
-        // Spawn background Idle task (Task 1) with lowest priority
-        self.spawn_internal("idle", idle_task_entry, TaskPriority::Idle, current_cr3);
+        // Spawn background Idle task (Task 1) with lowest priority: the boot processor's
+        let idle = self.spawn_internal("idle", idle_task_entry, TaskPriority::Idle, current_cr3);
+        self.idle_of[0] = Some(idle);
+        self.loaded_cr3[0] = current_cr3;
+        crate::arch::smp::LOADED_CR3[0].store(current_cr3, core::sync::atomic::Ordering::Release);
     }
 
     /// Updates the CR3 root paging address for the primary main task and background kernel tasks.
@@ -325,6 +377,8 @@ impl Scheduler {
     /// * `cr3` - Physical CR3 base register address.
     pub fn update_main_cr3(&mut self, cr3: u64) {
         self.kernel_cr3 = cr3;
+        self.loaded_cr3[crate::arch::percpu::cpu()] = cr3;
+        crate::arch::smp::LOADED_CR3[crate::arch::percpu::cpu()].store(cr3, core::sync::atomic::Ordering::Release);
         for task in &mut self.tasks {
             task.regs.cr3 = cr3;
         }
@@ -375,10 +429,10 @@ impl Scheduler {
     ///
     /// The new thread's [`TaskId`], or `None` without a current task.
     pub fn spawn_process_worker(&mut self, name: &'static str, entry_fn: fn()) -> Option<TaskId> {
-        if !self.initialized || self.current_index >= self.tasks.len() {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return None;
         }
-        let cur = &self.tasks[self.current_index];
+        let cur = &self.tasks[self.cur[crate::arch::percpu::cpu()]];
         let cr3 = cur.regs.cr3;
         let (tgid, fds, mm, personality) = (cur.tgid, cur.fds.clone(), cur.mm.clone(), cur.personality);
         let ids = (cur.uid, cur.gid, cur.euid, cur.egid, cur.suid, cur.sgid);
@@ -890,11 +944,11 @@ impl Scheduler {
         const CLONE_VM: u64 = 0x100;
         let [flags, child_stack, ptid, ctid, newtls] = args;
 
-        if !self.initialized || self.current_index >= self.tasks.len() {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return Err("Scheduler not initialized");
         }
 
-        let curr_idx = self.current_index;
+        let curr_idx = self.cur[crate::arch::percpu::cpu()];
         let parent = &self.tasks[curr_idx];
         let parent_cr3 = parent.regs.cr3;
         let parent_fs_base = parent.fs_base;
@@ -1052,8 +1106,8 @@ impl Scheduler {
     ///
     /// * `ctx` - CPU interrupt frame registers.
     pub fn schedule_now(&mut self, ctx: &mut ExceptionContext) {
-        if self.initialized && self.current_index < self.tasks.len() {
-            self.tasks[self.current_index].timeslice_remaining = 0;
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].timeslice_remaining = 0;
         }
         self.schedule(ctx);
     }
@@ -1088,6 +1142,14 @@ impl Scheduler {
             if server_alive && current_ticks < h.deadline {
                 break;
             }
+            // A driver call that ran out of time (QEMU's `nmi` monitor command dumps the
+            // tasks when more is needed)
+            crate::console::serial_write(&alloc::format!(
+                "[handoff] expired: server {} caller {} (cpu {})\n",
+                h.server,
+                h.caller,
+                crate::arch::percpu::cpu()
+            ));
             if let Some(i) = self.handoffs.iter().rposition(|x| x.is_some()) {
                 self.handoffs[i] = None;
             }
@@ -1096,10 +1158,14 @@ impl Scheduler {
         }
         let handoff_server = self.handoff_top().map(|h| h.server);
 
-        let mut curr_idx = self.current_index;
+        let mut curr_idx = self.cur[crate::arch::percpu::cpu()];
         let curr_task = &mut self.tasks[curr_idx];
-        curr_task.ticks_run += 1;
-        crate::compat::linux::perf::tick(curr_task.tgid);
+        // This tick, and those skipped since while another CPU held the kernel lock
+        let missed = crate::arch::smp::SKIPPED_TICKS.swap(0, core::sync::atomic::Ordering::Relaxed);
+        curr_task.ticks_run += 1 + missed;
+        for _ in 0..=missed {
+            crate::compat::linux::perf::tick(curr_task.tgid);
+        }
 
         // 2. Check if current task still has timeslice and is eligible to continue. A task
         // woken by an event (input, a socket, a futex; not a timed sleep, which polling
@@ -1140,10 +1206,15 @@ impl Scheduler {
         // whose page tables are still loaded), then move the dead tasks themselves out of
         // the table (their kernel stacks are freed by `reap_dead_tasks`). Parking never
         // allocates or frees: this runs in the timer interrupt.
+        let me = crate::arch::percpu::cpu();
         let mut idx = self.tasks.len();
         while idx > 0 {
             idx -= 1;
-            if idx == curr_idx || self.tasks[idx].state != TaskState::Dead {
+            // Not a task some CPU still runs, nor an address space another CPU has loaded
+            if idx == curr_idx || self.running_anywhere(idx) || self.tasks[idx].state != TaskState::Dead {
+                continue;
+            }
+            if self.tasks[idx].mm.is_some() && self.loaded_elsewhere(self.tasks[idx].regs.cr3, me) {
                 continue;
             }
             if let Some(mm) = self.tasks[idx].mm.take() {
@@ -1165,8 +1236,14 @@ impl Scheduler {
             if curr_idx == last {
                 curr_idx = idx; // the current task moved into the freed position
             }
+            // So did another CPU's
+            for c in self.cur.iter_mut() {
+                if *c == last {
+                    *c = idx;
+                }
+            }
         }
-        self.current_index = curr_idx;
+        self.cur[crate::arch::percpu::cpu()] = curr_idx;
 
         // 4. Select the next Ready task in round-robin fashion
         let num_tasks = self.tasks.len();
@@ -1174,13 +1251,13 @@ impl Scheduler {
 
         // The caller of a driver call that just ended runs first
         if let Some(caller) = self.resume_first.take() {
-            next_idx = self.tasks.iter().position(|t| t.id.0 == caller && t.state == TaskState::Ready);
+            next_idx = (0..num_tasks).find(|&i| self.tasks[i].id.0 == caller && self.can_run(i, me));
         }
         // During a driver call only its server runs, or the idle task while the server
         // waits for its device
         if let (Some(server), None) = (handoff_server, next_idx) {
-            let server_idx = self.tasks.iter().position(|t| t.id.0 == server && t.state == TaskState::Ready);
-            let idle_idx = self.tasks.iter().position(|t| t.priority == TaskPriority::Idle && t.state == TaskState::Ready);
+            let server_idx = (0..num_tasks).find(|&i| self.tasks[i].id.0 == server && self.can_run(i, me));
+            let idle_idx = (0..num_tasks).find(|&i| self.tasks[i].priority == TaskPriority::Idle && self.can_run(i, me));
             next_idx = server_idx.or(idle_idx);
         }
 
@@ -1191,7 +1268,7 @@ impl Scheduler {
                 break;
             }
             let idx = (curr_idx + offset) % num_tasks;
-            if self.tasks[idx].state == TaskState::Ready && self.tasks[idx].priority >= TaskPriority::High {
+            if self.can_run(idx, me) && self.tasks[idx].priority >= TaskPriority::High {
                 next_idx = Some(idx);
                 break;
             }
@@ -1202,7 +1279,7 @@ impl Scheduler {
             next_idx = (0..num_tasks)
                 .filter(|&i| {
                     let t = &self.tasks[i];
-                    t.state == TaskState::Ready && t.priority > TaskPriority::Idle && t.passed_over >= STARVATION_LIMIT
+                    self.can_run(i, me) && t.priority > TaskPriority::Idle && t.passed_over >= STARVATION_LIMIT
                 })
                 .max_by_key(|&i| self.tasks[i].passed_over);
         }
@@ -1219,7 +1296,7 @@ impl Scheduler {
                     1 => t.preempted,
                     _ => true,
                 };
-                if t.state == TaskState::Ready && t.priority > TaskPriority::Idle && eligible {
+                if self.can_run(idx, me) && t.priority > TaskPriority::Idle && eligible {
                     next_idx = Some(idx);
                 }
             }
@@ -1229,7 +1306,7 @@ impl Scheduler {
         if next_idx.is_none() && handoff_server.is_none() {
             for offset in 1..=num_tasks {
                 let idx = (curr_idx + offset) % num_tasks;
-                if self.tasks[idx].state == TaskState::Ready {
+                if self.can_run(idx, me) {
                     next_idx = Some(idx);
                     break;
                 }
@@ -1251,7 +1328,7 @@ impl Scheduler {
             return;
         }
         crate::compat::linux::perf::switched(self.tasks[curr_idx].tgid);
-        self.current_index = next_idx;
+        self.cur[crate::arch::percpu::cpu()] = next_idx;
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
         self.tasks[curr_idx].preempt_depth =
@@ -1296,7 +1373,10 @@ impl Scheduler {
         next_task.regs.restore_to_context(ctx);
 
         // 6. Switch address space if the target task has a custom CR3 root
+        let me = crate::arch::percpu::cpu();
         if next_task.regs.cr3 != 0 && next_task.regs.cr3 != current_cr3 {
+            self.loaded_cr3[me] = next_task.regs.cr3;
+            crate::arch::smp::LOADED_CR3[me].store(next_task.regs.cr3, core::sync::atomic::Ordering::Release);
             unsafe {
                 Cr3::write(
                     x86_64::structures::paging::PhysFrame::containing_address(
@@ -1308,24 +1388,89 @@ impl Scheduler {
         }
     }
 
+    /// Whether task `idx` may run on CPU `me` now: ready, not another CPU's idle task, and
+    /// its address space not loaded on another CPU (one CPU per address space).
+    fn can_run(&self, idx: usize, me: usize) -> bool {
+        let t = &self.tasks[idx];
+        if t.state != TaskState::Ready {
+            return false;
+        }
+        if let Some(c) = self.idle_of.iter().position(|i| *i == Some(t.id)) {
+            if c != me {
+                return false;
+            }
+        } else if t.id.0 == 0 && me != 0 {
+            // The console shell runs on the boot processor: it waits for keys and ticks with
+            // `hlt`, for that CPU's interrupts
+            return false;
+        } else if t.regs.cs & 3 == 0
+            && !self.handoffs.iter().flatten().any(|h| h.server == t.id.0 || h.caller == t.id.0)
+            && crate::ipc::service::window_held_by_other(t.id.0)
+        {
+            // Kernel code resumes only outside other tasks' driver calls, until their
+            // callers have read the replies (it may use the same window or the locks those
+            // callers hold), except the calls' own servers and callers; with one CPU the
+            // caller always runs first after a call
+            return false;
+        }
+        // Threads of one process run on several CPUs at once (TLB shootdowns keep them
+        // coherent: arch::smp::shootdown)
+        let _ = me;
+        true
+    }
+
+    /// Whether a CPU other than `me` has the user page table root `cr3` loaded.
+    fn loaded_elsewhere(&self, cr3: u64, me: usize) -> bool {
+        if cr3 == 0 || cr3 == self.kernel_cr3 {
+            return false;
+        }
+        (0..crate::arch::smp::MAX_CPUS).any(|c| c != me && self.idle_of[c].is_some() && self.loaded_cr3[c] == cr3)
+    }
+
+    /// Whether task `idx` is the one some CPU runs.
+    fn running_anywhere(&self, idx: usize) -> bool {
+        (0..crate::arch::smp::MAX_CPUS).any(|c| self.idle_of[c].is_some() && self.cur[c] == idx)
+    }
+
+    /// Records that the calling CPU loaded page table root `cr3` (outside a task switch, as
+    /// `execve` does).
+    pub fn note_loaded_cr3(&mut self, cr3: u64) {
+        self.loaded_cr3[crate::arch::percpu::cpu()] = cr3;
+        crate::arch::smp::LOADED_CR3[crate::arch::percpu::cpu()].store(cr3, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Registers CPU `cpu` (an application processor starting): the code running on it
+    /// becomes its idle task, its current task.
+    pub fn add_cpu(&mut self, cpu: usize) {
+        let id = TaskId(self.next_id);
+        self.next_id += 1;
+        let mut t = Task::new_main(id, "idle", self.kernel_cr3);
+        t.priority = TaskPriority::Idle;
+        self.tasks.push(t);
+        self.cur[cpu] = self.tasks.len() - 1;
+        self.loaded_cr3[cpu] = self.kernel_cr3;
+        crate::arch::smp::LOADED_CR3[cpu].store(self.kernel_cr3, core::sync::atomic::Ordering::Release);
+        self.idle_of[cpu] = Some(id);
+    }
+
     /// Marks the currently running task as sleeping until `wake_tick`.
     ///
     /// # Arguments
     ///
     /// * `wake_tick` - Target PIT timer tick when the task becomes runnable.
     pub fn sleep_current(&mut self, wake_tick: u64) {
-        if self.initialized && self.current_index < self.tasks.len() {
-            self.tasks[self.current_index].state = TaskState::Sleeping { wake_tick };
-            self.tasks[self.current_index].wake_ns = 0;
-            self.tasks[self.current_index].timeslice_remaining = 0;
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].state = TaskState::Sleeping { wake_tick };
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].wake_ns = 0;
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].timeslice_remaining = 0;
         }
     }
 
     /// Puts the current task to sleep until `deadline_ns` (woken between ticks).
     pub fn sleep_current_ns(&mut self, deadline_ns: u64) {
-        if self.initialized && self.current_index < self.tasks.len() {
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
             let wake_tick = deadline_ns.div_ceil(crate::arch::pit::tick_ns());
-            let task = &mut self.tasks[self.current_index];
+            let task = &mut self.tasks[self.cur[crate::arch::percpu::cpu()]];
             task.state = TaskState::Sleeping { wake_tick };
             task.wake_ns = deadline_ns;
             task.timeslice_remaining = 0;
@@ -1489,10 +1634,10 @@ impl Scheduler {
     /// `true` if task entered sleep state, `false` if wake arrived previously.
     pub fn event_wait_current(&mut self, deadline: Option<u64>) -> bool {
         self.apply_wakes();
-        if !self.initialized || self.current_index >= self.tasks.len() {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return false;
         }
-        let task = &mut self.tasks[self.current_index];
+        let task = &mut self.tasks[self.cur[crate::arch::percpu::cpu()]];
         if task.wake_pending {
             task.wake_pending = false;
             return false;
@@ -1514,7 +1659,7 @@ impl Scheduler {
             return false;
         }
         if let Some(d) = deadline_ns {
-            self.tasks[self.current_index].wake_ns = d;
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].wake_ns = d;
             super::HR_EARLIEST.fetch_min(d, core::sync::atomic::Ordering::Relaxed);
         }
         true
@@ -1526,8 +1671,8 @@ impl Scheduler {
     ///
     /// The [`TaskId`] of the blocked task.
     pub fn block_current(&mut self) -> TaskId {
-        if self.initialized && self.current_index < self.tasks.len() {
-            let task = &mut self.tasks[self.current_index];
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            let task = &mut self.tasks[self.cur[crate::arch::percpu::cpu()]];
             task.state = TaskState::Blocked;
             task.timeslice_remaining = 0;
             task.id
@@ -1567,6 +1712,8 @@ impl Scheduler {
         if self.tasks[idx].state == TaskState::Dead {
             return;
         }
+        // Service windows it held (it may end in the middle of a driver call)
+        crate::ipc::service::release_windows(self.tasks[idx].id.0);
         self.tasks[idx].state = TaskState::Dead;
         self.tasks[idx].timeslice_remaining = 0;
 
@@ -1604,18 +1751,18 @@ impl Scheduler {
 
     /// Marks the currently running task as Dead and zeroes its timeslice.
     pub fn terminate_current(&mut self) {
-        if self.initialized && self.current_index < self.tasks.len() {
-            self.retire_task(self.current_index);
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            self.retire_task(self.cur[crate::arch::percpu::cpu()]);
         }
     }
 
     /// Marks every other thread sharing the current task's thread group as Dead.
     pub fn terminate_current_group(&mut self) {
-        if !self.initialized || self.current_index >= self.tasks.len() {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return;
         }
-        let tgid = self.tasks[self.current_index].tgid;
-        let me = self.tasks[self.current_index].id;
+        let tgid = self.tasks[self.cur[crate::arch::percpu::cpu()]].tgid;
+        let me = self.tasks[self.cur[crate::arch::percpu::cpu()]].id;
         for idx in 0..self.tasks.len() {
             if self.tasks[idx].tgid == tgid && self.tasks[idx].id != me {
                 self.retire_task(idx);
@@ -1678,8 +1825,8 @@ impl Scheduler {
     ///
     /// Active [`TaskId`].
     pub fn current_task_id(&self) -> TaskId {
-        if self.initialized && self.current_index < self.tasks.len() {
-            self.tasks[self.current_index].id
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].id
         } else {
             TaskId(0)
         }
@@ -1691,8 +1838,8 @@ impl Scheduler {
     ///
     /// Current [`super::tcb::TaskPersonality`].
     pub fn current_personality(&self) -> super::tcb::TaskPersonality {
-        if self.initialized && self.current_index < self.tasks.len() {
-            self.tasks[self.current_index].personality
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            self.tasks[self.cur[crate::arch::percpu::cpu()]].personality
         } else {
             super::tcb::TaskPersonality::Hydra
         }
@@ -1711,8 +1858,8 @@ impl Scheduler {
     where
         F: FnOnce(&mut Task) -> R,
     {
-        if self.initialized && self.current_index < self.tasks.len() {
-            Some(f(&mut self.tasks[self.current_index]))
+        if self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len() {
+            Some(f(&mut self.tasks[self.cur[crate::arch::percpu::cpu()]]))
         } else {
             None
         }
@@ -1724,7 +1871,7 @@ impl Scheduler {
     ///
     /// `Some(SharedFdTable)` cloned from current task, or `None` if uninitialized.
     pub fn current_fds(&self) -> Option<crate::fs::SharedFdTable> {
-        (self.initialized && self.current_index < self.tasks.len()).then(|| self.tasks[self.current_index].fds.clone())
+        (self.initialized && self.cur[crate::arch::percpu::cpu()] < self.tasks.len()).then(|| self.tasks[self.cur[crate::arch::percpu::cpu()]].fds.clone())
     }
 
     /// Returns true if a task with the given ID exists and is active (not Dead).
@@ -1778,12 +1925,26 @@ impl Scheduler {
             let _ = core::fmt::Write::write_fmt(&mut b, format_args!("[handoff] resume first {}\n", r));
             crate::console::serial_write(b.as_str());
         }
+        for c in 0..crate::arch::smp::MAX_CPUS {
+            if self.idle_of[c].is_some() {
+                let t = &self.tasks[self.cur[c]];
+                let rip = crate::arch::idt::NMI_AT[c][0].load(core::sync::atomic::Ordering::Relaxed);
+                let cs = crate::arch::idt::NMI_AT[c][1].load(core::sync::atomic::Ordering::Relaxed);
+                crate::console::serial_write(&alloc::format!(
+                    "[cpu] {} runs task {} ({}) cr3 {:#x}; at the NMI: rip {:#x} cs {:#x}\n",
+                    c, t.id.0, t.name, self.loaded_cr3[c], rip, cs
+                ));
+            }
+        }
+        for (e, t) in crate::ipc::service::window_holders() {
+            crate::console::serial_write(&alloc::format!("[window] endpoint {:#x} held by task {}\n", e, t));
+        }
         crate::console::serial_write("[tasks] id state tgid syscall rip ticks exe\n");
         for (i, task) in self.tasks.iter().enumerate() {
             if task.state == TaskState::Dead {
                 continue;
             }
-            let (nr, args) = if i == self.current_index {
+            let (nr, args) = if i == self.cur[crate::arch::percpu::cpu()] {
                 (
                     super::CURRENT_SYSCALL.load(core::sync::atomic::Ordering::Relaxed),
                     [0, 1].map(|k| super::CURRENT_SYSCALL_ARGS[k].load(core::sync::atomic::Ordering::Relaxed)),
@@ -1921,7 +2082,7 @@ extern "C" fn task_trampoline(entry_fn_addr: usize) -> ! {
 }
 
 /// Background idle loop executing CPU halts to conserve energy when all tasks are idle.
-fn idle_task_entry() {
+pub(crate) fn idle_task_entry() {
     loop {
         // A precise sleep ends before the next tick: the timer only interrupts at ticks, so
         // wait for it here (spinning on the time stamp counter, interrupts enabled) and wake
@@ -1930,9 +2091,15 @@ fn idle_task_entry() {
         if due != u64::MAX && x86_64::instructions::interrupts::are_enabled() {
             let tick = crate::arch::pit::ticks();
             if due < (tick + 1) * crate::arch::pit::tick_ns() {
+                // Without the kernel lock: other CPUs run kernel code meanwhile (an interrupt
+                // here takes it again)
+                crate::arch::smp::bkl_exit();
                 while crate::arch::pit::now_ns() < due && crate::arch::pit::ticks() == tick && !crate::task::wait::wakes_pending() {
+                    // An interrupt meanwhile took the lock: not while spinning
+                    crate::arch::smp::bkl_exit();
                     core::hint::spin_loop();
                 }
+                crate::arch::smp::bkl_enter_idle();
                 if crate::arch::pit::now_ns() >= due {
                     let woke = crate::task::SCHEDULER.try_lock().is_some_and(|mut s| s.hr_wake());
                     if woke {
@@ -1951,7 +2118,10 @@ fn idle_task_entry() {
                 x86_64::instructions::interrupts::enable();
                 crate::task::yield_now();
             } else {
+                // Halted without the kernel lock; the interrupt that ends it takes it
+                crate::arch::smp::bkl_exit();
                 crate::task::preemptible(x86_64::instructions::interrupts::enable_and_hlt);
+                crate::arch::smp::bkl_enter_idle();
             }
         } else {
             core::hint::spin_loop();

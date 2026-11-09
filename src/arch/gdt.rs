@@ -114,8 +114,15 @@ pub fn init() {
 ///
 /// * `stack_top` - Top virtual address (highest address, 16-byte aligned) of the task's kernel stack.
 pub fn set_privilege_stack(stack_top: VirtAddr) {
+    // The calling CPU's TSS
+    let cpu = crate::arch::percpu::cpu();
+    let ap = if cpu == 0 { core::ptr::null_mut() } else { AP_TSS[cpu].load(core::sync::atomic::Ordering::Acquire) };
     unsafe {
-        TSS.privilege_stack_table[0] = stack_top;
+        if ap.is_null() {
+            TSS.privilege_stack_table[0] = stack_top;
+        } else {
+            (*ap).privilege_stack_table[0] = stack_top;
+        }
     }
 }
 
@@ -134,6 +141,8 @@ pub fn get_selectors() -> &'static Selectors {
 pub fn load_and_switch() {
     GDT.0.load();
     reload_segments(&GDT.1);
+    // Loading GS reset its base: the boot processor's per-CPU data again
+    crate::arch::percpu::init_this_cpu(0);
 }
 
 /// The TSS of each application processor (index: CPU), for its kernel stack pointer.
@@ -159,6 +168,7 @@ pub fn load_for_ap(cpu: usize) {
     let gdt: &'static GlobalDescriptorTable = gdt;
     gdt.load();
     reload_segments(&sel);
+    crate::arch::percpu::init_this_cpu(cpu);
 }
 
 /// Reloads CS, the data segments and TR with the selectors of a freshly loaded GDT.

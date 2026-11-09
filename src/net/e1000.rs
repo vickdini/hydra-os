@@ -147,6 +147,7 @@ pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
     if frame.is_empty() || frame.len() > MAX_FRAME {
         return Err("Packet exceeds max transmission buffer size (2048 bytes)");
     }
+    let _window = service::hold_window(ENDPOINT_NET_DEV);
     let window = service::window(ENDPOINT_NET_DEV).ok_or("the network driver is not running")?;
     window[..frame.len()].copy_from_slice(frame);
     request(MSG_NET_TRANSMIT, [frame.len() as u64, 0, 0, 0])?;
@@ -168,6 +169,7 @@ pub fn receive_frame(out_buf: &mut [u8]) -> Option<usize> {
         return None;
     }
     if RX_QUEUE.lock().is_empty() {
+        let _window = service::hold_window(ENDPOINT_NET_DEV);
         let count = request(MSG_NET_RECEIVE, [0; 4]).ok()?.args[1] as usize;
         RECV_CALLS.fetch_add(1, Ordering::Relaxed);
         RECV_FRAMES.fetch_add(count as u64, Ordering::Relaxed);

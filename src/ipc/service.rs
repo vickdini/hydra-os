@@ -385,6 +385,106 @@ pub fn window(endpoint: u32) -> Option<&'static mut [u8]> {
     Some(unsafe { w.bytes() })
 }
 
+/// Tasks using a service's window, by endpoint: `(task, depth)` (a task may nest uses).
+static WINDOW_HOLDERS: Mutex<alloc::collections::BTreeMap<u32, (u64, u32)>> = Mutex::new(alloc::collections::BTreeMap::new());
+/// Windows held (a lock-free check for [`window_held_by_other`]).
+static WINDOWS_HELD: AtomicU32 = AtomicU32::new(0);
+
+/// Runs `f` on the window holders with interrupts off: the lock is taken where interrupts
+/// may be on (waiting loops), and an interrupt handler waiting for the kernel lock while
+/// this CPU held it would stall the kernel lock's holder, which may want it too.
+fn holders<R>(f: impl FnOnce(&mut alloc::collections::BTreeMap<u32, (u64, u32)>) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| f(&mut WINDOW_HOLDERS.lock()))
+}
+
+/// A task's use of a service's window, from writing a request into it until it has read
+/// the reply out of it; released when dropped.
+pub struct WindowGuard {
+    endpoint: u32,
+}
+
+/// Takes `endpoint`'s window for the calling task until the guard is dropped (nested uses
+/// by the same task are fine). With one CPU the window is always free here: during a call
+/// only its server runs, and the caller runs first when it ends. With several, another
+/// task's call (or its reading of the reply) may be in progress: wait for it, without the
+/// kernel lock.
+pub fn hold_window(endpoint: u32) -> WindowGuard {
+    let me = crate::task::SCHEDULER.lock().current_task_id().0;
+    loop {
+        let taken = holders(|h| match h.get_mut(&endpoint) {
+            None => {
+                h.insert(endpoint, (me, 1));
+                WINDOWS_HELD.fetch_add(1, Ordering::AcqRel);
+                true
+            }
+            Some((t, d)) if *t == me => {
+                *d += 1;
+                true
+            }
+            Some(_) => false,
+        });
+        if taken {
+            return WindowGuard { endpoint };
+        }
+        crate::arch::smp::bkl_exit();
+        crate::task::preemptible(|| {
+            let was = x86_64::instructions::interrupts::are_enabled();
+            x86_64::instructions::interrupts::enable();
+            while holders(|h| h.contains_key(&endpoint)) {
+                crate::arch::smp::bkl_exit();
+                core::hint::spin_loop();
+            }
+            if !was {
+                x86_64::instructions::interrupts::disable();
+            }
+        });
+        crate::arch::smp::bkl_enter();
+    }
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        holders(|h| {
+            if let Some((_, d)) = h.get_mut(&self.endpoint) {
+                *d -= 1;
+                if *d == 0 {
+                    h.remove(&self.endpoint);
+                    WINDOWS_HELD.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+        })
+    }
+}
+
+/// Whether a task other than `task` holds a service window (its call, or its reading of
+/// the reply, is in progress).
+pub fn window_held_by_other(task: u64) -> bool {
+    WINDOWS_HELD.load(Ordering::Acquire) > 0 && holders(|h| h.values().any(|(t, _)| *t != task))
+}
+
+/// Releases the service windows task `id` holds (it ended in the middle of a call: it never
+/// resumes to drop its guards).
+pub fn release_windows(id: u64) {
+    holders(|h| {
+        let before = h.len();
+        h.retain(|_, (t, _)| *t != id);
+        let gone = before - h.len();
+        if gone > 0 {
+            WINDOWS_HELD.fetch_sub(gone as u32, Ordering::AcqRel);
+        }
+    })
+}
+
+/// The tasks holding service windows, as `(endpoint, task)`, for diagnostics.
+pub fn window_holders() -> alloc::vec::Vec<(u32, u64)> {
+    holders(|h| h.iter().map(|(e, (t, _))| (*e, *t)).collect())
+}
+
+/// Whether `task` holds a service window.
+pub fn holds_window(task: u64) -> bool {
+    WINDOWS_HELD.load(Ordering::Acquire) > 0 && holders(|h| h.values().any(|(t, _)| *t == task))
+}
+
 /// Sets the physical address ranges `(base, length)` the server of `endpoint` is permitted to map.
 ///
 /// # Arguments
@@ -528,6 +628,7 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
     let seq = {
         let mut slot = svc.slot.lock();
         if slot.request.is_some() {
+            crate::kprintln!("[service] call to {:#x} by task {}: busy (cpu {})", endpoint, crate::task::SCHEDULER.lock().current_task_id().0, crate::arch::percpu::cpu());
             return Err(EBUSY);
         }
         slot.seq += 1;
@@ -541,6 +642,7 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
     let handed = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().begin_handoff(server, deadline));
     if !handed {
         svc.slot.lock().request = None;
+        crate::kprintln!("[service] call to {:#x}: no handoff slot", endpoint);
         return Err(EBUSY);
     }
     crate::task::yield_now();
@@ -550,6 +652,15 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
         _ => {
             // No answer: abandon the call (a late reply is ignored)
             slot.request = None;
+            drop(slot);
+            crate::kprintln!(
+                "[service] call to {:#x} by task {}: no reply (cpu {}, tick {} deadline {})",
+                endpoint,
+                crate::task::SCHEDULER.lock().current_task_id().0,
+                crate::arch::percpu::cpu(),
+                crate::arch::pit::ticks(),
+                deadline
+            );
             Err(ETIMEDOUT)
         }
     }

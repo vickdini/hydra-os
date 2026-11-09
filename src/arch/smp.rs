@@ -46,6 +46,217 @@ const LAPIC_SVR: u64 = 0xF0;
 const LAPIC_ESR: u64 = 0x280;
 const LAPIC_ICR_LOW: u64 = 0x300;
 const LAPIC_ICR_HIGH: u64 = 0x310;
+const LAPIC_EOI: u64 = 0xB0;
+const LAPIC_LINT0: u64 = 0x350;
+const LAPIC_LINT1: u64 = 0x360;
+const LAPIC_LVT_TIMER: u64 = 0x320;
+const LAPIC_TIMER_INIT: u64 = 0x380;
+const LAPIC_TIMER_CUR: u64 = 0x390;
+const LAPIC_TIMER_DIV: u64 = 0x3E0;
+
+/// Acknowledges the interrupt the calling CPU's local APIC delivered.
+pub fn lapic_eoi() {
+    lapic_write(LAPIC_EOI, 0);
+}
+
+/// Starts the calling CPU's local APIC timer at the PIT's rate (its scheduling tick),
+/// measured against the clock.
+fn start_lapic_timer() {
+    lapic_write(LAPIC_TIMER_DIV, 0x3); // divide by 16
+    lapic_write(LAPIC_LVT_TIMER, 1 << 16); // masked while measuring
+    lapic_write(LAPIC_TIMER_INIT, u32::MAX);
+    let start = crate::arch::pit::now_ns();
+    let span = 20_000_000;
+    while crate::arch::pit::now_ns() < start + span {
+        serve_tlb();
+        core::hint::spin_loop();
+    }
+    let counted = u32::MAX - lapic_read(LAPIC_TIMER_CUR);
+    let per_tick = (counted as u64 * crate::arch::pit::tick_ns() / span).max(1000) as u32;
+    // Periodic, vector LAPIC_TIMER_VECTOR
+    lapic_write(LAPIC_LVT_TIMER, (1 << 17) | crate::arch::idt::LAPIC_TIMER_VECTOR as u32);
+    lapic_write(LAPIC_TIMER_INIT, per_tick);
+}
+
+// ----------------------------------------------------------------------
+// The kernel lock
+// ----------------------------------------------------------------------
+//
+// Kernel code runs on one CPU at a time: a CPU holds the lock while it executes kernel
+// code (system calls, interrupts, kernel tasks) and releases it when it returns to user
+// mode or waits idle. User code runs on all CPUs at once. A fair ticket lock, owned by a
+// CPU rather than a task: a task blocked in the kernel resumes under whichever CPU picks it
+// up, which holds the lock then.
+
+static BKL_NEXT: AtomicU32 = AtomicU32::new(0);
+static BKL_SERVING: AtomicU32 = AtomicU32::new(0);
+static BKL_OWNER: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Takes the kernel lock for the calling CPU (nothing if it holds it).
+pub fn bkl_enter() {
+    // With interrupts off: an interrupt in between would take a ticket of its own
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let me = super::percpu::cpu();
+        if BKL_OWNER.load(Ordering::Acquire) == me {
+            return;
+        }
+        let ticket = BKL_NEXT.fetch_add(1, Ordering::Relaxed);
+        while BKL_SERVING.load(Ordering::Acquire) != ticket {
+            // The holder may be waiting for this CPU to flush its TLB
+            serve_tlb();
+            core::hint::spin_loop();
+        }
+        BKL_OWNER.store(me, Ordering::Release);
+    })
+}
+
+/// Takes the kernel lock for the calling CPU if it is free (or already this CPU's).
+///
+/// # Returns
+/// Whether the calling CPU holds it now.
+pub fn bkl_try_enter() -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let me = super::percpu::cpu();
+        if BKL_OWNER.load(Ordering::Acquire) == me {
+            return true;
+        }
+        let t = BKL_SERVING.load(Ordering::Acquire);
+        if BKL_NEXT.compare_exchange(t, t.wrapping_add(1), Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            BKL_OWNER.store(me, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Takes the kernel lock with interrupts enabled while waiting for it (the idle task: its
+/// CPU keeps taking interrupts, the boot processor's clock ticks).
+pub fn bkl_enter_idle() {
+    while !bkl_try_enter() {
+        x86_64::instructions::interrupts::enable();
+        core::hint::spin_loop();
+    }
+}
+
+/// Timer ticks each CPU skipped because another CPU held the kernel lock: the running
+/// task's CPU time, credited at the next tick that gets it (no task switch happens in
+/// between, so the task is the same).
+pub static SKIPPED_TICKS: super::percpu::PerCpuU64 = super::percpu::PerCpuU64::new(0);
+
+/// Releases the kernel lock if the calling CPU holds it.
+pub fn bkl_exit() {
+    // With interrupts off: one between giving up ownership and passing the turn on would
+    // wait for a turn that never comes
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if BKL_OWNER.load(Ordering::Acquire) == super::percpu::cpu() {
+            BKL_OWNER.store(usize::MAX, Ordering::Release);
+            BKL_SERVING.fetch_add(1, Ordering::Release);
+        }
+    })
+}
+
+/// Whether the calling CPU holds the kernel lock.
+pub fn bkl_held() -> bool {
+    BKL_OWNER.load(Ordering::Acquire) == super::percpu::cpu()
+}
+
+// ----------------------------------------------------------------------
+// TLB shootdowns
+// ----------------------------------------------------------------------
+//
+// Threads of one process run on several CPUs at once, each caching translations of the
+// same page tables. When a mapping goes away or loses permissions, every CPU that has
+// those tables loaded flushes before the change counts as done (a freed page could be
+// reused while another CPU still reaches it). The other CPUs get an inter-processor
+// interrupt; one waiting with interrupts off (for the kernel lock) serves the request
+// from its wait loop.
+
+/// Vector of the TLB flush request interrupt.
+pub const TLB_VECTOR: u64 = 0x42;
+
+/// The page table root each CPU has loaded (0: none recorded).
+pub static LOADED_CR3: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Flush requests made to each CPU, and those it has served.
+static TLB_WANT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static TLB_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// CPUs able to serve flush requests (their IDT is loaded).
+static LIVE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+/// Records the page table root the calling CPU loaded.
+pub fn note_cr3(cr3: u64) {
+    LOADED_CR3[super::percpu::cpu()].store(cr3, Ordering::Release);
+}
+
+/// Flushes the calling CPU's whole TLB (global entries too).
+fn flush_everything() {
+    use x86_64::registers::control::{Cr3, Cr4, Cr4Flags};
+    let cr4 = Cr4::read();
+    if cr4.contains(Cr4Flags::PAGE_GLOBAL) {
+        unsafe {
+            Cr4::write(cr4 - Cr4Flags::PAGE_GLOBAL);
+            Cr4::write(cr4);
+        }
+    } else {
+        let (frame, flags) = Cr3::read();
+        unsafe { Cr3::write(frame, flags) };
+    }
+}
+
+/// Serves the calling CPU's pending flush requests.
+pub fn serve_tlb() {
+    let me = super::percpu::cpu();
+    let want = TLB_WANT[me].load(Ordering::Acquire);
+    if TLB_DONE[me].load(Ordering::Relaxed) != want {
+        flush_everything();
+        TLB_DONE[me].store(want, Ordering::Release);
+    }
+}
+
+/// Flushes the translation of `addr` (everything: `None`) on the calling CPU, and makes
+/// every other CPU that has page table root `cr3` loaded (`None`: every CPU) flush too,
+/// waiting until they have.
+pub fn shootdown(cr3: Option<u64>, addr: Option<u64>) {
+    match addr {
+        Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
+        None => flush_everything(),
+    }
+    if ONLINE.load(Ordering::Acquire) <= 1 {
+        return;
+    }
+    let me = super::percpu::cpu();
+    let mut wait = [0u64; MAX_CPUS];
+    for c in 0..MAX_CPUS {
+        if c == me || !LIVE[c].load(Ordering::Acquire) {
+            continue;
+        }
+        if cr3.map_or(true, |r| LOADED_CR3[c].load(Ordering::Acquire) == r) {
+            wait[c] = TLB_WANT[c].fetch_add(1, Ordering::AcqRel) + 1;
+            send_ipi_now(CPU_APIC[c].load(Ordering::Relaxed), TLB_VECTOR as u32);
+        }
+    }
+    for c in 0..MAX_CPUS {
+        if wait[c] != 0 {
+            while TLB_DONE[c].load(Ordering::Acquire) < wait[c] {
+                serve_tlb();
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
+/// Sends fixed interrupt `vector` to local APIC `apic` (no waiting on the clock: callers
+/// may hold the kernel lock with interrupts off).
+fn send_ipi_now(apic: u32, vector: u32) {
+    lapic_write(LAPIC_ICR_HIGH, apic << 24);
+    lapic_write(LAPIC_ICR_LOW, 0x4000 | vector);
+    for _ in 0..100_000 {
+        if lapic_read(LAPIC_ICR_LOW) & (1 << 12) == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
 
 /// Number of CPUs online.
 pub fn online() -> usize {
@@ -310,6 +521,7 @@ pub fn start_aps() {
     }
     let me = apic_id();
     CPU_APIC[0].store(me, Ordering::Relaxed);
+    LIVE[0].store(true, Ordering::Release);
     let cr0 = x86_64::registers::control::Cr0::read_raw();
     let cr4 = x86_64::registers::control::Cr4::read_raw();
     BSP_CR0.store(cr0, Ordering::Relaxed);
@@ -377,13 +589,27 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     }
     crate::arch::gdt::load_for_ap(cpu);
     crate::arch::idt::load_on_this_cpu();
+    // From here on it serves TLB flush requests (from its wait loops, then interrupts)
+    LIVE[cpu].store(true, Ordering::Release);
     crate::arch::syscall::init();
     // Local APIC on, spurious interrupts to vector 0xFF
     lapic_write(LAPIC_SVR, 0x1FF);
+    // The legacy PIC's interrupts are the boot processor's alone: they reach every CPU
+    // whose LINT0 takes external interrupts (and only one gets the vector, the others a
+    // spurious IRQ 7 or 15), so LINT0 and LINT1 are masked here
+    lapic_write(LAPIC_LINT0, 1 << 16);
+    lapic_write(LAPIC_LINT1, 1 << 16);
+    // Its tick
+    start_lapic_timer();
+    // It runs tasks: the code running here becomes its idle task
+    bkl_enter();
+    crate::task::SCHEDULER.lock().add_cpu(cpu);
     ONLINE.fetch_add(1, Ordering::AcqRel);
     crate::kprintln!("[smp] CPU {} online (APIC id {})", cpu, apic_id());
+    bkl_exit();
+    x86_64::instructions::interrupts::enable();
+    crate::task::scheduler::idle_task_entry();
     loop {
-        x86_64::instructions::interrupts::disable();
         x86_64::instructions::hlt();
     }
 }

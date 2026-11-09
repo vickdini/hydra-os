@@ -26,7 +26,7 @@
 //! - Concurrency: Handlers execute with interrupts disabled or managed via reentrancy safeguards.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 use uefi::proto::console::text::Color;
 use x86_64::registers::control::Cr2;
@@ -240,6 +240,8 @@ extern "C" {
     fn asm_irq_46();
     fn asm_irq_47();
     fn asm_yield();
+    fn asm_lapic_timer();
+    fn asm_tlb_ipi();
 }
 
 /// Initializes Hydra's IDT, installs all exception handlers, and loads the IDT.
@@ -324,6 +326,10 @@ pub fn init() {
 
     // Vector 0x81: voluntary reschedule (`task::yield_now`), kernel only
     idt.entries[YIELD_VECTOR as usize].set_handler_addr(asm_yield as *const () as usize, kernel_cs);
+    // Vector 0x40: an application processor's local APIC timer
+    idt.entries[LAPIC_TIMER_VECTOR as usize].set_handler_addr(asm_lapic_timer as *const () as usize, kernel_cs);
+    // Vector 0x42: a TLB flush request from another CPU
+    idt.entries[crate::arch::smp::TLB_VECTOR as usize].set_handler_addr(asm_tlb_ipi as *const () as usize, kernel_cs);
 
     // Load IDT into CPU
     idt.load();
@@ -354,6 +360,10 @@ pub fn reload_with_kernel_cs(cs: u16) {
     idt.load();
 }
 
+/// Where each CPU was when the last NMI arrived (`rip`, `cs`), for the task dump.
+pub static NMI_AT: [[core::sync::atomic::AtomicU64; 2]; crate::arch::smp::MAX_CPUS] =
+    [const { [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)] }; crate::arch::smp::MAX_CPUS];
+
 /// Central Rust exception dispatcher called by assembly trampolines.
 ///
 /// # Arguments
@@ -361,6 +371,51 @@ pub fn reload_with_kernel_cs(cs: u16) {
 /// * `fpu` - Pointer to the saved FXSAVE64 register area.
 #[no_mangle]
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
+    // An NMI (QEMU's `nmi` monitor command, on every CPU): note where this CPU was and ask
+    // for a task dump (at the next tick); nothing else, it may arrive anywhere
+    // A TLB flush request: served without the kernel lock (its sender holds it)
+    if ctx.vector == crate::arch::smp::TLB_VECTOR {
+        crate::arch::smp::serve_tlb();
+        crate::arch::smp::lapic_eoi();
+        return;
+    }
+    if ctx.vector == 2 {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        NMI_AT[cpu][0].store(ctx.rip, Ordering::Relaxed);
+        NMI_AT[cpu][1].store(ctx.cs, Ordering::Relaxed);
+        crate::arch::keyboard::TASK_DUMP_REQUESTED.store(true, Ordering::Relaxed);
+        return;
+    }
+    // The PIT tick counts before the kernel lock is taken: code holding it on another CPU
+    // may be waiting for time to pass
+    if ctx.vector == 32 {
+        crate::arch::pit::on_timer_tick();
+        crate::arch::pic::send_eoi(0);
+    }
+    // The kernel runs on one CPU at a time (see arch::smp); kept when returning to kernel
+    // code (this CPU then runs it), released when returning to user mode. A timer tick
+    // never waits for it: when another CPU holds it, this tick schedules nothing (waiting
+    // would stop the clock that code holding it may be waiting on)
+    if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
+        if !crate::arch::smp::bkl_try_enter() {
+            crate::arch::smp::SKIPPED_TICKS.fetch_add(1, Ordering::Relaxed);
+            if ctx.vector == LAPIC_TIMER_VECTOR {
+                crate::arch::smp::lapic_eoi();
+            }
+            return;
+        }
+    } else {
+        crate::arch::smp::bkl_enter();
+    }
+    // A fault in user mode is handled outside other tasks' driver calls (it may take the
+    // locks their callers hold); interrupts go on
+    if (ctx.cs & 3) == 3 && ctx.vector < 32 {
+        // The task may wait, and resume on another CPU: the faulting address (CR2) is
+        // taken now and put back for the handler
+        let cr2 = x86_64::registers::control::Cr2::read_raw();
+        crate::task::scheduler::wait_out_handoff();
+        unsafe { core::arch::asm!("mov cr2, {}", in(reg) cr2, options(nostack, preserves_flags)) };
+    }
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
     dispatch_exception(ctx);
     // Returning to user mode: run any pending signal handlers first
@@ -374,6 +429,9 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         }
     }
     CURRENT_TRAP_FPU.store(prev_fpu, Ordering::Release);
+    if (ctx.cs & 3) == 3 {
+        crate::arch::smp::bkl_exit();
+    }
 }
 
 /// 512-byte `FXSAVE64` area holding x87, MMX and SSE register state.
@@ -398,9 +456,12 @@ impl FpuState {
 /// Software interrupt vector used by `task::yield_now` for voluntary rescheduling.
 pub const YIELD_VECTOR: u64 = 0x81;
 
+/// Vector of the application processors' local APIC timers (their scheduling tick).
+pub const LAPIC_TIMER_VECTOR: u64 = 0x40;
+
 /// FPU save area of the innermost trap frame being handled. The scheduler swaps task FPU
 /// state through it; the trap stub restores from it before `iretq`.
-pub static CURRENT_TRAP_FPU: AtomicPtr<FpuState> = AtomicPtr::new(core::ptr::null_mut());
+pub static CURRENT_TRAP_FPU: crate::arch::percpu::PerCpuPtr<FpuState> = crate::arch::percpu::PerCpuPtr::new();
 
 /// Consecutive timer ticks spent in kernel code outside a wait point.
 static KERNEL_BUSY_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -412,7 +473,12 @@ static KERNEL_BUSY_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 /// * `ctx` - Interrupted CPU register context.
 /// * `at_preempt_point` - Whether execution is at an explicit preemptible wait point.
 fn kernel_watchdog(ctx: &ExceptionContext, at_preempt_point: bool) {
-    if at_preempt_point {
+    // A new system call since the last tick: not stuck in one (with several CPUs a tick
+    // often lands right after waiting for the kernel lock at a call's entry)
+    static LAST_ENTRIES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let entries = crate::arch::syscall::SYSCALL_ENTRIES.load(Ordering::Relaxed);
+    let new_call = LAST_ENTRIES.swap(entries, Ordering::Relaxed) != entries;
+    if at_preempt_point || new_call {
         KERNEL_BUSY_TICKS.store(0, Ordering::Relaxed);
         return;
     }
@@ -708,9 +774,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             panic_halt();
         }
         32 => {
-            // Vector 32 = IRQ 0: 8254 PIT Timer Tick
-            crate::arch::pit::on_timer_tick();
-            crate::arch::pic::send_eoi(0);
+            // Vector 32 = IRQ 0: 8254 PIT Timer Tick (counted and acknowledged on entry)
 
             // Preemptive Multitasking Round-Robin Scheduling: only user mode and kernel
             // wait points are preempted (see `task::preemptible`)
@@ -729,11 +793,30 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 }
             }
         }
-        YIELD_VECTOR => {
-            // Voluntary yield: the caller holds no locks, so switching is always safe
-            if crate::task::is_active() {
+        LAPIC_TIMER_VECTOR => {
+            // An application processor's tick: its tasks' timeslices (the time base and
+            // the sleepers' wakeups are the boot processor's PIT)
+            crate::arch::smp::lapic_eoi();
+            let at_preempt_point = (ctx.cs & 3) == 3
+                || crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::SeqCst) > 0;
+            if at_preempt_point && crate::task::is_active() {
                 if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                    sched.schedule_now(ctx);
+                    sched.schedule(ctx);
+                }
+            }
+        }
+        YIELD_VECTOR => {
+            // Voluntary yield: the caller holds no locks, so switching is always safe. It
+            // must switch (the caller may have just blocked itself): another CPU may hold
+            // the scheduler lock for a moment, so wait for it rather than give up
+            if crate::task::is_active() {
+                loop {
+                    if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                        sched.schedule_now(ctx);
+                        break;
+                    }
+                    crate::arch::smp::serve_tlb();
+                    core::hint::spin_loop();
                 }
             }
         }
@@ -893,8 +976,16 @@ global_asm!(
     TRAP_NO_ERRCODE asm_irq_46, 46
     TRAP_NO_ERRCODE asm_irq_47, 47
     TRAP_NO_ERRCODE asm_yield, 0x81
+    TRAP_NO_ERRCODE asm_lapic_timer, 0x40
+    TRAP_NO_ERRCODE asm_tlb_ipi, 0x42
 
     common_trap_handler:
+        // From user mode: the kernel's GS base (per-CPU data). [rsp+24] is the CS pushed
+        // by the CPU (below it: rip, error code, vector)
+        test qword ptr [rsp + 24], 3
+        jz 1f
+        swapgs
+    1:
         // Save General-Purpose Registers (matches ExceptionContext layout)
         push rax
         push rcx
@@ -952,6 +1043,11 @@ global_asm!(
         // Clean up vector number and error code
         add rsp, 16
 
+        // To user mode (the frame may be another task's now): its GS base
+        test qword ptr [rsp + 8], 3
+        jz 2f
+        swapgs
+    2:
         // Return from interrupt
         iretq
     "#
