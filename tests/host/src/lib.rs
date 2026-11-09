@@ -29,10 +29,22 @@ macro_rules! println {
     }};
 }
 
+/// *stub* Kernel log output; discarded on the host.
+#[macro_export]
+macro_rules! kprintln {
+    ($($arg:tt)*) => {{
+        let _ = format_args!($($arg)*);
+    }};
+}
+
 pub mod arch {
     /// *stub*
     pub mod pit {
-        pub use crate::fake::{frequency_hz, sleep_ms, ticks};
+        pub use crate::fake::{frequency_hz, now_ns, sleep_ms, ticks, uptime_ms};
+    }
+    /// *stub* Deterministic bytes instead of RDRAND.
+    pub mod random {
+        pub use crate::fake::random_fill as fill;
     }
     /// *stub* The kernel indexes per-CPU slots by `gs:[8]`, which a host
     /// process cannot use; the host behaves as a single CPU.
@@ -46,6 +58,28 @@ pub mod arch {
     /// *stub*
     pub mod syscall {
         pub use crate::fake::rdmsr;
+
+        /// The saved user registers at syscall entry (same fields and order as the kernel).
+        #[repr(C)]
+        #[derive(Default, Clone, Debug)]
+        pub struct SyscallFrame {
+            pub r9: u64,
+            pub r8: u64,
+            pub r10: u64,
+            pub rdx: u64,
+            pub rsi: u64,
+            pub rdi: u64,
+            pub rax: u64,
+            pub r15: u64,
+            pub r14: u64,
+            pub r13: u64,
+            pub r12: u64,
+            pub rbp: u64,
+            pub rbx: u64,
+            pub rip: u64,
+            pub rflags: u64,
+            pub rsp: u64,
+        }
     }
 }
 
@@ -57,14 +91,39 @@ pub mod compress;
 
 pub mod compat {
     pub mod linux {
+        #[path = "../../../../../src/compat/linux/bpf.rs"]
+        pub mod bpf;
+        #[path = "../../../../../src/compat/linux/epoll.rs"]
+        pub mod epoll;
+
+        /// *stub* The two items bpf.rs reads from the kernel's pseudo-file module.
+        pub mod fs {
+            pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+            pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
+                (rest == "self/comm").then(|| b"hydra-test\n".to_vec())
+            }
+        }
         #[path = "../../../../../src/compat/linux/eventfd.rs"]
         pub mod eventfd;
+        #[path = "../../../../../src/compat/linux/keys.rs"]
+        pub mod keys;
+        #[path = "../../../../../src/compat/linux/landlock.rs"]
+        pub mod landlock;
         #[path = "../../../../../src/compat/linux/memfd.rs"]
         pub mod memfd;
         #[path = "../../../../../src/compat/linux/mm.rs"]
         pub mod mm;
+        #[path = "../../../../../src/compat/linux/mqueue.rs"]
+        pub mod mqueue;
+        #[path = "../../../../../src/compat/linux/seccomp.rs"]
+        pub mod seccomp;
         #[path = "../../../../../src/compat/linux/sockopt.rs"]
         pub mod sockopt;
+
+        /// *stub*
+        pub mod ptrace {
+            pub use crate::fake::seccomp_stop;
+        }
         #[path = "../../../../../src/compat/linux/sysv.rs"]
         pub mod sysv;
         #[path = "../../../../../src/compat/linux/types.rs"]
@@ -100,14 +159,42 @@ pub mod compat {
                 }
                 fn set_nonblock(&self, on: bool);
                 fn nonblock(&self) -> bool;
+                fn stat(&self) -> crate::compat::linux::types::LinuxStat {
+                    crate::compat::linux::types::LinuxStat::default()
+                }
+                fn deliver_notification(&self, _data: &[u8]) -> bool {
+                    false
+                }
+                fn as_mqueue(&self) -> Option<&crate::compat::linux::mqueue::MqHandle> {
+                    None
+                }
+                fn as_landlock(&self) -> Option<&crate::compat::linux::landlock::Ruleset> {
+                    None
+                }
+                fn as_bpf(&self) -> Option<crate::compat::linux::bpf::Obj> {
+                    None
+                }
             }
         }
 
         /// *stub*
         pub mod proc {
-            pub use crate::fake::{current_ids, Process, PROCS};
+            pub use crate::fake::{current_ids, die_by_signal, force_seccomp_sigsys, Process, PROCS};
             pub fn sigkill_pending() -> bool {
                 crate::fake::SIGKILL_PENDING.get()
+            }
+            /// Verbatim from the kernel.
+            pub fn in_supplementary_groups(gid: u32) -> bool {
+                let (_, pid) = current_ids();
+                PROCS.lock().get(&pid).map_or(false, |p| p.groups.contains(&gid))
+            }
+            pub fn process_exists(pid: u64) -> bool {
+                PROCS.lock().contains_key(&pid)
+            }
+            /// Records the signal in `fake::POSTED` instead of delivering it.
+            pub fn post_with_info(pid: u64, sig: u32, code: i32, spid: u32, suid: u32, value: u64) -> bool {
+                crate::fake::POSTED.with_borrow_mut(|v| v.push((pid, sig, code, spid, suid, value)));
+                process_exists(pid)
             }
             pub const ERESTARTSYS: i64 = -512;
             pub fn signal_pending() -> bool {
@@ -136,6 +223,53 @@ pub mod compat {
                 }
                 unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()) };
                 Ok(())
+            }
+            /// Verbatim from the kernel.
+            pub(crate) fn user_cstr(ptr: u64) -> Result<alloc::vec::Vec<u8>, i64> {
+                if ptr == 0 {
+                    return Err(EFAULT);
+                }
+                let mut out = alloc::vec::Vec::new();
+                let mut addr = ptr;
+                loop {
+                    let page_end = (addr | 0xFFF) + 1;
+                    if !crate::memory::vm::prefault_current(addr, page_end - addr, false) {
+                        return Err(EFAULT);
+                    }
+                    while addr < page_end {
+                        let b = unsafe { *(addr as *const u8) };
+                        if b == 0 {
+                            return Ok(out);
+                        }
+                        out.push(b);
+                        if out.len() >= 4096 {
+                            return Err(-36); // ENAMETOOLONG
+                        }
+                        addr += 1;
+                    }
+                }
+            }
+            /// Verbatim from the kernel.
+            pub(crate) fn user_path(ptr: u64) -> Result<alloc::vec::Vec<u8>, i64> {
+                let p = user_cstr(ptr)?;
+                if p.is_empty() {
+                    return Err(-2); // ENOENT
+                }
+                Ok(p)
+            }
+            /// Path lookup goes straight to the (fake) ZFS client; the real one
+            /// also handles mount namespaces and /proc/<pid>/root.
+            pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+                crate::fake::ZfsClient::resolve(base, path, follow)
+            }
+            /// Plain path join (the real one also maps proc/devpts mounts).
+            pub(crate) fn join_path(base: &str, path: &[u8]) -> alloc::string::String {
+                let p = alloc::string::String::from_utf8_lossy(path);
+                if p.starts_with('/') {
+                    p.into_owned()
+                } else {
+                    alloc::format!("{}/{}", base.trim_end_matches('/'), p)
+                }
             }
             pub(crate) fn copy_in(ptr: u64, len: usize) -> Result<alloc::vec::Vec<u8>, i64> {
                 if ptr == 0 || !crate::memory::vm::prefault_current(ptr, len as u64, false) {
@@ -267,7 +401,7 @@ pub mod task {
     /// *stub*
     pub use crate::fake::wait;
     /// *stub*
-    pub use crate::fake::{with_current_fds_mut, with_current_task_mut};
+    pub use crate::fake::{with_current_fds_mut, with_current_task_mut, TaskId, SCHEDULER};
 }
 
 pub mod video {

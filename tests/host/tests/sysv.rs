@@ -226,7 +226,7 @@ fn supplementary_groups_count() {
     let pid = setup();
     let id = shmget(0x56, P, IPC_CREAT | 0o640);
     fake::CREDS.set((2000, 2000));
-    fake::PROCS.lock().insert(pid, fake::Process { groups: vec![5, 1000] });
+    fake::PROCS.lock().insert(pid, fake::Process { groups: vec![5, 1000], ..Default::default() });
     assert_eq!(shmget(0x56, P, 0o400), id);
     fake::PROCS.lock().remove(&pid);
     fake::CREDS.set((1000, 1000));

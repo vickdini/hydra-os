@@ -60,12 +60,19 @@ pub fn reset() {
     SIGKILL_PENDING.set(false);
     TASK_MM.with_borrow_mut(|m| *m = None);
     CREDS.set((0, 0));
+    UID.set(0);
+    POSTED.with_borrow_mut(|v| v.clear());
     IDS.set((1, 1));
     TICKS.set(1_000);
     INODES.with_borrow_mut(|m| m.clear());
     INODE_PATHS.with_borrow_mut(|m| m.clear());
     INODE_REFS.with_borrow_mut(|m| m.clear());
     INODE_READ_FAILS.set(false);
+    TREE.with_borrow_mut(|t| t.clear());
+    SECCOMP.set(Default::default());
+    SIBLINGS.with_borrow_mut(|v| v.clear());
+    SIGSYS.with_borrow_mut(|v| v.clear());
+    TRACER.with_borrow_mut(|t| *t = None);
 }
 
 // ------------------------------------------------------------------- tasks
@@ -86,10 +93,37 @@ impl Caps {
 /// The parts of the kernel's `Task` the code under test reads.
 pub struct Task {
     pub caps: Caps,
+    pub uid: u32,
+    pub gid: u32,
     pub euid: u32,
     pub egid: u32,
     /// Address space of the current task (see [`TASK_MM`]).
     pub mm: Option<Arc<spin::Mutex<crate::memory::vm::Mm>>>,
+    /// seccomp / no_new_privs / Landlock state (see [`SECCOMP`]).
+    pub seccomp: crate::compat::linux::seccomp::State,
+    pub id: TaskId,
+    pub tgid: u64,
+}
+
+/// Thread id, as in the kernel's `task::TaskId`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskId(pub u64);
+
+impl Task {
+    /// Another thread of the current process, for [`SIBLINGS`].
+    pub fn sibling(tid: u64) -> Task {
+        Task {
+            caps: Caps { effective: 0, in_userns: false },
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            mm: None,
+            seccomp: Default::default(),
+            id: TaskId(tid),
+            tgid: IDS.get().1,
+        }
+    }
 }
 
 thread_local! {
@@ -97,6 +131,10 @@ thread_local! {
     pub static IN_USERNS: Cell<bool> = const { Cell::new(false) };
     /// What `proc::sigkill_pending()` reports.
     pub static SIGKILL_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Real uid of the current task.
+    pub static UID: Cell<u32> = const { Cell::new(0) };
+    /// Signals posted through `proc::post_with_info`: (pid, sig, code, sender pid, sender uid, value).
+    pub static POSTED: RefCell<Vec<(u64, u32, i32, u32, u32, u64)>> = const { RefCell::new(Vec::new()) };
     /// (euid, egid) of the current task.
     pub static CREDS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     /// (tid, tgid) of the current task, as `proc::current_ids()` reports it.
@@ -114,22 +152,89 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
     let effective = CAPS.get()?;
     let mm = TASK_MM.with_borrow(|m| m.clone());
     let (euid, egid) = CREDS.get();
-    let mut t = Task { caps: Caps { effective, in_userns: IN_USERNS.get() }, euid, egid, mm };
+    let (tid, tgid) = IDS.get();
+    let seccomp = SECCOMP.take();
+    let mut t = Task {
+        caps: Caps { effective, in_userns: IN_USERNS.get() },
+        uid: UID.get(),
+        gid: egid,
+        euid,
+        egid,
+        mm,
+        seccomp,
+        id: TaskId(tid),
+        tgid,
+    };
     let r = f(&mut t);
     CAPS.set(Some(t.caps.effective));
+    SECCOMP.set(t.seccomp);
     Some(r)
+}
+
+thread_local! {
+    /// The current task's seccomp/Landlock state; persists across calls.
+    pub static SECCOMP: RefCell<crate::compat::linux::seccomp::State> = RefCell::new(Default::default());
+    /// Other threads of the current process (seen through `task::SCHEDULER`).
+    pub static SIBLINGS: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
+    /// SIGSYS deliveries from seccomp RET_TRAP: (syscall nr, ip, data).
+    pub static SIGSYS: RefCell<Vec<(i32, u64, i32)>> = const { RefCell::new(Vec::new()) };
+    /// A ptrace tracer for seccomp RET_TRACE stops; `None` = not traced.
+    pub static TRACER: RefCell<Option<Box<dyn FnMut(&mut crate::arch::syscall::SyscallFrame, u16) -> Result<(), i64>>>> =
+        RefCell::new(None);
+}
+
+/// Stand-in for `task::SCHEDULER`: its tasks are the current one plus [`SIBLINGS`].
+pub struct Scheduler;
+
+pub static SCHEDULER: Scheduler = Scheduler;
+
+pub struct SchedulerGuard;
+
+impl Scheduler {
+    pub fn lock(&self) -> SchedulerGuard {
+        SchedulerGuard
+    }
+}
+
+impl SchedulerGuard {
+    pub fn for_each_task_mut(&mut self, mut f: impl FnMut(&mut Task)) {
+        with_current_task_mut(|t| f(t));
+        SIBLINGS.with_borrow_mut(|v| v.iter_mut().for_each(|t| f(t)));
+    }
+    pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
+        if tgid == IDS.get().1 {
+            with_current_task_mut(|t| f(t))
+        } else {
+            None
+        }
+    }
+}
+
+/// `proc::die_by_signal`: the task would be killed. Reported as a panic
+/// with the message "killed by signal N", which tests catch.
+pub fn die_by_signal(sig: u32) -> ! {
+    panic!("killed by signal {sig}")
+}
+
+pub fn force_seccomp_sigsys(nr: i32, ip: u64, errno: i32) {
+    SIGSYS.with_borrow_mut(|v| v.push((nr, ip, errno)));
+}
+
+pub fn seccomp_stop(frame: &mut crate::arch::syscall::SyscallFrame, data: u16) -> Option<Result<(), i64>> {
+    TRACER.with_borrow_mut(|t| t.as_mut().map(|f| f(frame, data)))
 }
 
 /// Minimal fd table: hands out increasing numbers up to `limit`.
 pub struct Fds {
     pub next: usize,
     pub limit: usize,
+    pub umask: u32,
     pub open: BTreeMap<usize, (crate::fs::FileDescriptor, bool)>,
 }
 
 impl Default for Fds {
     fn default() -> Self {
-        Self { next: 3, limit: 1024, open: BTreeMap::new() }
+        Self { next: 3, limit: 1024, umask: 0o022, open: BTreeMap::new() }
     }
 }
 
@@ -152,6 +257,31 @@ impl Fds {
 
     pub fn get(&self, fd: usize) -> Option<&crate::fs::FileDescriptor> {
         self.open.get(&fd).map(|e| &e.0)
+    }
+
+    /// Readiness (EPOLL* bits) of a descriptor, from the real objects behind
+    /// it: eventfd and devices report their own state; regular files are
+    /// always readable and writable, as on Linux.
+    pub fn readiness(&self, desc: &crate::fs::FileDescriptor) -> u32 {
+        use crate::fs::FileDescriptor::*;
+        match desc {
+            EventFd(e) => e.lock().poll_events(),
+            Device(d) => d.poll_events(),
+            File { .. } | Vnode(_) | MemFd { .. } => 0x1 | 0x4,
+        }
+    }
+
+    pub fn add_wait_queues_for(&self, desc: &crate::fs::FileDescriptor, waits: &mut wait::WaitSet) {
+        match desc {
+            crate::fs::FileDescriptor::EventFd(e) => waits.add(wait::QueueRef::Shared(e.lock().wq.clone())),
+            crate::fs::FileDescriptor::Device(d) => d.add_wait_queues(waits),
+            _ => {}
+        }
+    }
+
+    /// Test helper: close a descriptor (drop it from the table).
+    pub fn close(&mut self, fd: usize) {
+        self.open.remove(&fd);
     }
 
     /// Test helper: install `d` at a specific descriptor number.
@@ -279,6 +409,9 @@ impl ZfsClient {
     // Inode-level calls, backed by INODES / INODE_PATHS / INODE_REFS.
 
     pub fn getattr(ino: u64) -> Result<crate::fs::zfs::fsproto::Attr, i64> {
+        if let Some(mode) = TREE.with_borrow(|t| t.get(&ino).map(|n| n.mode())) {
+            return Ok(crate::fs::zfs::fsproto::Attr { ino, mode, ..Default::default() });
+        }
         INODES.with_borrow(|m| {
             let d = m.get(&ino).ok_or(-2i64)?;
             Ok(crate::fs::zfs::fsproto::Attr { ino, size: d.len() as u64, mode: 0o100644, ..Default::default() })
@@ -307,9 +440,22 @@ impl ZfsClient {
         let _ = INODE_REFS.try_with(|m| *m.borrow_mut().entry(ino).or_insert(0) -= 1);
     }
 
-    pub fn resolve(_base: u64, path: &[u8], _follow: bool) -> Result<u64, i64> {
+    /// Path lookup: in the fake tree (see [`mkdir_p`]) when one exists,
+    /// otherwise in [`INODE_PATHS`].
+    pub fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+        if TREE.with_borrow(|t| !t.is_empty()) {
+            return tree_resolve(base, path, follow);
+        }
         let path = String::from_utf8_lossy(path).into_owned();
         INODE_PATHS.with_borrow(|m| m.get(&path).copied().ok_or(-2))
+    }
+
+    pub fn readlink(ino: u64) -> Result<Vec<u8>, i64> {
+        TREE.with_borrow(|t| match t.get(&ino).map(|n| &n.kind) {
+            Some(NodeKind::Symlink(target)) => Ok(target.as_bytes().to_vec()),
+            Some(_) => Err(-22),
+            None => Err(-2),
+        })
     }
 }
 
@@ -470,8 +616,12 @@ pub fn current_ids() -> (u64, u64) {
 }
 
 /// The parts of the kernel's `Process` the code under test reads.
+#[derive(Default)]
 pub struct Process {
+    pub ppid: u64,
     pub groups: Vec<u32>,
+    /// cgroup path below the cgroup root, as in the kernel.
+    pub cgroup: Option<Arc<str>>,
 }
 
 /// Process table (shared by all test threads, like the kernel's). Key by
@@ -484,6 +634,24 @@ pub fn ticks() -> u64 {
 
 pub fn frequency_hz() -> u64 {
     1000
+}
+
+/// Nanoseconds since boot, from the tick counter.
+pub fn now_ns() -> u64 {
+    TICKS.get() * 1_000_000
+}
+
+/// Deterministic "random" bytes (a counter), so tests are repeatable.
+pub fn random_fill(buf: &mut [u8]) {
+    static NEXT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(1);
+    for b in buf {
+        *b = NEXT.fetch_add(37, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Milliseconds since boot: the tick counter (the fake PIT runs at 1 kHz).
+pub fn uptime_ms() -> u64 {
+    TICKS.get()
 }
 
 /// RTC time: a fixed instant (2026-01-01T00:00:00Z).
@@ -509,4 +677,131 @@ impl<T> PerCpuPtr<T> {
     pub fn swap(&self, v: *mut T, o: core::sync::atomic::Ordering) -> *mut T {
         self.0.swap(v, o)
     }
+}
+
+// ------------------------------------------------------- fake directory tree
+
+/// A node of the fake directory tree used by path-walking code (Landlock).
+pub enum NodeKind {
+    Dir(BTreeMap<String, u64>),
+    File,
+    Symlink(String),
+}
+
+pub struct Node {
+    pub parent: u64,
+    pub kind: NodeKind,
+}
+
+impl Node {
+    fn mode(&self) -> u32 {
+        match self.kind {
+            NodeKind::Dir(_) => 0o040755,
+            NodeKind::File => 0o100644,
+            NodeKind::Symlink(_) => 0o120777,
+        }
+    }
+}
+
+/// Inode of the fake tree's root directory.
+pub const ROOT: u64 = 1;
+
+/// Same limit as the kernel's `fs::client::SYMLOOP_MAX`.
+const SYMLOOP_MAX: usize = 40;
+
+thread_local! {
+    pub static TREE: RefCell<BTreeMap<u64, Node>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn ensure_root(t: &mut BTreeMap<u64, Node>) {
+    if t.is_empty() {
+        t.insert(ROOT, Node { parent: ROOT, kind: NodeKind::Dir(BTreeMap::new()) });
+    }
+}
+
+fn tree_add(parent: u64, name: &str, kind: NodeKind) -> u64 {
+    TREE.with_borrow_mut(|t| {
+        ensure_root(t);
+        if let Some(NodeKind::Dir(children)) = t.get(&parent).map(|n| &n.kind) {
+            if let Some(&existing) = children.get(name) {
+                return existing;
+            }
+        }
+        let ino = 100_000 + t.len() as u64;
+        t.insert(ino, Node { parent, kind });
+        if let Some(Node { kind: NodeKind::Dir(children), .. }) = t.get_mut(&parent) {
+            children.insert(name.to_string(), ino);
+        }
+        ino
+    })
+}
+
+/// Create a directory (and its parents) in the fake tree; returns its inode.
+pub fn mkdir_p(path: &str) -> u64 {
+    TREE.with_borrow_mut(ensure_root);
+    let mut cur = ROOT;
+    for comp in path.split('/').filter(|c| !c.is_empty()) {
+        cur = tree_add(cur, comp, NodeKind::Dir(BTreeMap::new()));
+    }
+    cur
+}
+
+fn parent_and_name(path: &str) -> (u64, String) {
+    let path = path.trim_end_matches('/');
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    (mkdir_p(dir), name.to_string())
+}
+
+/// Create a regular file (and parent directories); returns its inode.
+pub fn mkfile(path: &str) -> u64 {
+    let (dir, name) = parent_and_name(path);
+    tree_add(dir, &name, NodeKind::File)
+}
+
+/// Create a symlink at `path` pointing to `target`; returns its inode.
+pub fn mklink(path: &str, target: &str) -> u64 {
+    let (dir, name) = parent_and_name(path);
+    tree_add(dir, &name, NodeKind::Symlink(target.to_string()))
+}
+
+/// Walk `path` from `base` (0 or an absolute path: the root), following
+/// symlinks in the middle always and at the end if `follow`, at most
+/// SYMLOOP_MAX in total, like the kernel's `resolve_at`.
+fn tree_resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> {
+    let path = String::from_utf8_lossy(path).into_owned();
+    let mut cur = if path.starts_with('/') || base == 0 { ROOT } else { base };
+    let mut todo: std::collections::VecDeque<String> =
+        path.split('/').filter(|c| !c.is_empty()).map(String::from).collect();
+    let mut links = 0;
+    TREE.with_borrow(|t| {
+        while let Some(comp) = todo.pop_front() {
+            let node = t.get(&cur).ok_or(-2i64)?;
+            let NodeKind::Dir(children) = &node.kind else { return Err(-20) };
+            if comp == "." {
+                continue;
+            }
+            if comp == ".." {
+                cur = node.parent;
+                continue;
+            }
+            let next = *children.get(&comp).ok_or(-2i64)?;
+            if let NodeKind::Symlink(target) = &t[&next].kind {
+                if !todo.is_empty() || follow {
+                    links += 1;
+                    if links > SYMLOOP_MAX {
+                        return Err(-40);
+                    }
+                    if target.starts_with('/') {
+                        cur = ROOT;
+                    }
+                    for c in target.split('/').filter(|c| !c.is_empty()).rev() {
+                        todo.push_front(c.to_string());
+                    }
+                    continue;
+                }
+            }
+            cur = next;
+        }
+        Ok(cur)
+    })
 }
