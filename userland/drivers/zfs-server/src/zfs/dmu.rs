@@ -485,7 +485,16 @@ impl Dmu {
             return Ok(());
         }
         if level > 0 {
-            let entries = read_indirect(self.spa.read_bp(&bp)?);
+            // An unreadable (damaged) indirect block: the blocks below it cannot be found,
+            // so they stay allocated (leaked, as ZFS does) rather than the commit failing
+            let entries = match self.spa.read_bp(&bp) {
+                Ok(frame) => read_indirect(frame),
+                Err(e) => {
+                    crate::println!("[zfs] freeing an object: indirect block {} unreadable ({}); the blocks below it are leaked", bp.block, e);
+                    self.free_bp(&bp);
+                    return Ok(());
+                }
+            };
             for e in entries.iter() {
                 self.free_subtree(*e, level - 1)?;
             }
