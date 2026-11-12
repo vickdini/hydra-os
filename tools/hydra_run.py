@@ -94,6 +94,22 @@ def read_log(path):
         return ""
 
 
+def running_qemus():
+    """The running QEMU processes: `(pid, command line)`."""
+    ps = ("Get-CimInstance Win32_Process -Filter \"name='qemu-system-x86_64.exe'\" | "
+          "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    found = []
+    for line in out.splitlines():
+        pid, _, cmd = line.partition("	")
+        if pid.strip().isdigit():
+            found.append((int(pid), cmd))
+    return found
+
+
 def main():
     sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
@@ -110,10 +126,26 @@ def main():
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
     ap.add_argument("--stall-dump", type=float, default=0, help="save CPU state when the log stops growing for this many seconds")
-    ap.add_argument("--no-cancel", action="store_true", help="let the boot countdowns run out (bare metal, then the desktop autostart)")
+    ap.add_argument("--no-cancel", action="store_true", help="boot into the desktop (otherwise QEMU's fw_cfg asks the kernel for the Hydra shell)")
+    ap.add_argument("--cd", default="virtio", choices=["virtio", "ide"], help="how the boot ISO is attached: virtio-scsi (fast firmware reads) or the IDE CD-ROM")
+    ap.add_argument("--kill-stale", action="store_true", help="first stop headless QEMUs left by earlier runs (never a VM with a window)")
     ap.add_argument("--login", default="hydra:hydra", help="user:password for the console login after the countdown ('' to skip)")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
+
+    # One VM at a time: two QEMUs on the same pool image (or one on an overlay while the
+    # pool changes underneath) corrupt it, and QEMU on Windows does not prevent it
+    others = running_qemus()
+    if a.kill_stale:
+        for pid, cmd in others:
+            if "-display none" in cmd:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        time.sleep(1.0)
+        others = running_qemus()
+    if others:
+        for pid, cmd in others:
+            print(f"[hydra_run] another QEMU is running (pid {pid}{', headless' if '-display none' in cmd else ', with a window'}): not starting a second VM on the pool")
+        sys.exit(3)
 
     if os.path.exists(a.log):
         os.remove(a.log)
@@ -133,13 +165,23 @@ def main():
     args = [
         QEMU,
         *firmware,
-        "-cdrom", os.path.join(ROOT, "dist", "x86_64", "kernel.iso"),
         "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
-        "-boot", "d", "-m", a.mem, "-smp", str(a.smp), "-vga", "std", "-display", "none",
+        "-m", a.mem, "-smp", str(a.smp), "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",
         "-no-reboot",
     ]
+    iso = os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
+    if a.cd == "virtio":
+        # The firmware reads the boot volume (the kernel and the files staged for the pool)
+        # by DMA instead of the IDE CD-ROM's port I/O; Hydra needs no driver for it
+        args += ["-device", "virtio-scsi-pci,id=scsi0", "-drive", f"file={iso},if=none,id=bootcd,media=cdrom,format=raw",
+                 "-device", "scsi-cd,drive=bootcd,bootindex=0"]
+    else:
+        args += ["-cdrom", iso, "-boot", "d"]
+    if not a.no_cancel:
+        # The kernel stays in the Hydra shell instead of starting the desktop
+        args += ["-fw_cfg", "name=opt/hydra/boot,string=shell"]
     # e.g. HYDRA_QEMU_EXTRA="-d cpu_reset -D D:/os/scratch/qemu_dbg.log"
     args += os.environ.get("HYDRA_QEMU_EXTRA", "").split()
     if a.extra_disk:
@@ -147,15 +189,12 @@ def main():
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
         qmp = Qmp(proc)
-        # Wait for the boot countdown (to bare-metal mode in older kernels, to the Plasma
-        # autostart since the kernel takes over the hardware at boot); a key cancels it
+        # Wait for the end of the kernel's boot: the desktop starting, or the Hydra shell
+        # (asked for through fw_cfg above)
         deadline = time.time() + a.boot_wait
-        while time.time() < deadline and not any(t in read_log(a.log) for t in ("Transitioning to bare-metal", "Starting KDE Plasma in")):
+        while time.time() < deadline and not any(t in read_log(a.log) for t in ("Starting KDE Plasma", "[*] Hydra shell (")):
             time.sleep(0.5)
         time.sleep(1.0)
-        if not a.no_cancel:
-            qmp.type(" ")  # cancel auto takeover countdown (and with it the desktop autostart)
-        time.sleep(2.0)
         def wait_for(text, since, timeout):
             end = time.time() + timeout
             while time.time() < end:

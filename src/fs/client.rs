@@ -1122,9 +1122,14 @@ impl ZfsClient {
         files
     }
 
-    /// Imports files read by [`Self::read_boot_files`] into the pool. Skips files that
-    /// already exist with identical contents, and commits the pool if at least one file was
-    /// imported or updated.
+    /// Imports files read by [`Self::read_boot_files`] into the pool, and commits the pool
+    /// if any changed.
+    ///
+    /// A file is skipped when it is unchanged: [`BOOT_MANIFEST`] records, for each file
+    /// imported, a hash of its boot copy and the size and modification time of its pool copy;
+    /// when both still match, nothing is read back from the pool (a boot with nothing new
+    /// only hashes the boot data). Otherwise the pool copy is compared with the boot copy
+    /// and rewritten if it differs.
     ///
     /// # Arguments
     ///
@@ -1134,15 +1139,33 @@ impl ZfsClient {
     ///
     /// The number of newly imported or updated files written into ZFS.
     pub fn import_boot_files(files: Vec<BootFile>) -> usize {
+        let old = read_boot_manifest();
+        let mut manifest = alloc::string::String::new();
         let mut imported_count = 0;
         for f in files.iter() {
             let (fat_path, zfs_path, data) = (f.boot_path.as_str(), f.pool_path.as_str(), f.data.as_slice());
+            let hash = fnv1a(data);
+            let record = |manifest: &mut alloc::string::String| {
+                if let Some((size, sec, nsec)) = pool_meta(zfs_path) {
+                    manifest.push_str(&alloc::format!("{:016x} {} {} {} {}
+", hash, size, sec, nsec, zfs_path));
+                }
+            };
 
-            // Skip files already imported with identical contents
+            // Unchanged since the last import: the same boot copy, an untouched pool copy
+            if let Some(&(h, size, sec, nsec)) = old.get(zfs_path) {
+                if h == hash && size == data.len() as u64 && pool_meta(zfs_path) == Some((size, sec, nsec)) {
+                    record(&mut manifest);
+                    continue;
+                }
+            }
+
+            // Already imported with identical contents
             if let Ok(st) = Self::file_stat(zfs_path) {
                 if st.size == data.len() as u64 {
                     let mut existing = alloc::vec![0u8; data.len()];
                     if Self::read_file_by_path(zfs_path, &mut existing).is_ok() && existing == data {
+                        record(&mut manifest);
                         continue;
                     }
                 }
@@ -1159,17 +1182,67 @@ impl ZfsClient {
                     s.setattr(ino, SetAttr { mode: Some(mode), ..SetAttr::default() })?;
                     Ok(())
                 });
+                record(&mut manifest);
                 imported_count += 1;
                 crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
                 crate::println!("[+] Imported '{}' from boot media into ZFS '{}' ({} bytes)", fat_path, zfs_path, data.len());
             }
         }
 
-        if imported_count > 0 {
+        let manifest_changed = Self::file_stat(BOOT_MANIFEST).map_or(true, |st| st.size != manifest.len() as u64)
+            || {
+                let mut cur = alloc::vec![0u8; manifest.len()];
+                Self::read_file_by_path(BOOT_MANIFEST, &mut cur).map_or(true, |n| n != manifest.len() || cur != manifest.as_bytes())
+            };
+        if manifest_changed {
+            let _ = Self::write_file_by_path_batch(BOOT_MANIFEST, manifest.as_bytes());
+        }
+        if imported_count > 0 || manifest_changed {
             let _ = Self::sync();
         }
         imported_count
     }
+}
+
+/// What [`ZfsClient::import_boot_files`] imported: per line, the boot copy's hash (FNV-1a,
+/// hex), then the pool copy's size, modification time (seconds, nanoseconds) and path.
+pub const BOOT_MANIFEST: &str = "/etc/hydra-boot.manifest";
+
+/// 64-bit FNV-1a hash of `data`.
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Size and modification time of the pool file `path` (from the attribute cache when known).
+fn pool_meta(path: &str) -> Option<(u64, i64, u32)> {
+    with_server(|s| {
+        let root = s.root_obj();
+        let ino = resolve_at(s, root, path.as_bytes(), true)?;
+        let a = s.getattr(ino)?;
+        Ok((a.size, a.mtime.0, a.mtime.1))
+    })
+    .ok()
+}
+
+/// The entries of [`BOOT_MANIFEST`]: path -> (hash, size, mtime seconds, nanoseconds).
+fn read_boot_manifest() -> alloc::collections::BTreeMap<alloc::string::String, (u64, u64, i64, u32)> {
+    let mut map = alloc::collections::BTreeMap::new();
+    let Ok(st) = ZfsClient::file_stat(BOOT_MANIFEST) else { return map };
+    let mut buf = alloc::vec![0u8; st.size as usize];
+    let Ok(n) = ZfsClient::read_file_by_path(BOOT_MANIFEST, &mut buf) else { return map };
+    for line in core::str::from_utf8(&buf[..n]).unwrap_or("").lines() {
+        let mut w = line.splitn(5, ' ');
+        let (Some(h), Some(size), Some(sec), Some(nsec), Some(path)) = (w.next(), w.next(), w.next(), w.next(), w.next()) else { continue };
+        if let (Ok(h), Ok(size), Ok(sec), Ok(nsec)) = (u64::from_str_radix(h, 16), size.parse(), sec.parse(), nsec.parse()) {
+            map.insert(alloc::string::String::from(path), (h, size, sec, nsec));
+        }
+    }
+    map
 }
 
 /// A file from the boot volume, read before the hardware takeover for import into the pool.

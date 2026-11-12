@@ -316,8 +316,10 @@ fn auto_exitboot_countdown(state: &mut ShellState) {
     }
 }
 
-/// After the bare-metal transition, waits 3 seconds for a key press and otherwise starts
-/// the KDE desktop (`linux plasma`). Any key cancels and leaves the Hydra shell.
+/// After the bare-metal transition, starts the KDE desktop (`linux plasma`) at once, unless
+/// a key is already waiting (pressed during boot) or QEMU's `opt/hydra/boot` fw_cfg value is
+/// `shell` (test harnesses): then the Hydra shell stays. The shell is also reachable from the
+/// desktop on the first virtual terminal (Ctrl+Alt+F1).
 ///
 /// # Arguments
 /// * `state` - Mutable reference to the shell session state.
@@ -325,29 +327,15 @@ fn auto_plasma_countdown(state: &mut ShellState) {
     if !crate::arch::boot_services::is_hardware_takeover_complete() {
         return; // the user stayed under UEFI Boot Services
     }
-    set_color(Color::LightCyan, Color::Black);
-    crate::print!("[*] Starting KDE Plasma in 3 seconds (press any key for the Hydra shell): ");
-    let mut cancelled = false;
-    'countdown: for remaining in (1..=3).rev() {
-        set_color(Color::Yellow, Color::Black);
-        crate::print!("{}... ", remaining);
-        for _ in 0..20 {
-            if crate::console::read_key().is_some() {
-                cancelled = true;
-                break 'countdown;
-            }
-            crate::console::stall(core::time::Duration::from_millis(50));
-        }
-    }
-    if cancelled {
-        set_color(Color::LightRed, Color::Black);
-        crate::println!("CANCELLED");
+    let key = crate::console::read_key().is_some();
+    let asked = crate::arch::fwcfg::read_file("opt/hydra/boot").is_some_and(|v| v.starts_with(b"shell"));
+    if key || asked {
+        set_color(Color::LightCyan, Color::Black);
+        crate::println!("[*] Hydra shell (the desktop was not started; type 'linux plasma' to start it)");
         set_color(Color::White, Color::Black);
-        crate::println!("    Type 'linux plasma' to start the desktop later.
-");
     } else {
-        set_color(Color::LightGreen, Color::Black);
-        crate::println!("NOW");
+        set_color(Color::LightCyan, Color::Black);
+        crate::println!("[*] Starting KDE Plasma (the Hydra shell is on Ctrl+Alt+F1)");
         set_color(Color::White, Color::Black);
         execute_command("linux plasma", state);
     }

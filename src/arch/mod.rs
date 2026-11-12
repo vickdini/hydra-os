@@ -31,6 +31,8 @@ pub mod boot_services;
 /// `x86_64` control register (`CR0`, `CR2`, `CR3`, `CR4`) state inspection.
 pub mod cpu;
 pub mod debugregs;
+/// QEMU firmware configuration values (`-fw_cfg`): the boot mode test harnesses choose.
+pub mod fwcfg;
 /// 64-bit Global Descriptor Table (GDT) and Task State Segment (TSS) management.
 pub mod gdt;
 /// 256-entry Interrupt Descriptor Table (IDT), CPU exception handlers, and IRQ trampolines.
