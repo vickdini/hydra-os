@@ -296,6 +296,12 @@ pub struct Task {
     pub personality: TaskPersonality,
     /// Thread-local storage base address loaded into `IA32_FS_BASE` (`0xC000_0100`).
     pub fs_base: u64,
+    /// User segment state: `ds`/`es`/`fs`/`gs` selectors, GS base and `set_thread_area`
+    /// descriptors (saved and loaded at a context switch by [`crate::arch::segments`]).
+    pub segs: crate::arch::segments::UserSegs,
+    /// The process's Local Descriptor Table (`modify_ldt`), shared by the tasks sharing
+    /// its address space; `None` until it makes one.
+    pub ldt: Option<crate::arch::segments::SharedLdt>,
     /// Debug registers a debugger set (`[dr0, dr1, dr2, dr3, -, -, dr6, dr7]`), loaded
     /// when the task runs; not inherited, cleared by `execve`.
     pub debugregs: [u64; 8],
@@ -402,6 +408,8 @@ impl Task {
             mode: PrivilegeMode::Kernel,
             personality: TaskPersonality::Hydra,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,

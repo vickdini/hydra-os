@@ -17,7 +17,7 @@ use hydra_hosttests::compat::linux::mm::*;
 use hydra_hosttests::fake;
 use hydra_hosttests::fs::FileDescriptor;
 use hydra_hosttests::memory::frame_allocator::{frame_refcount, FRAME_ALLOCATOR};
-use hydra_hosttests::memory::vm::{MappedObject, Mm, BufferObject, PAGE_SIZE, PROT_READ, PROT_WRITE, USER_SPACE_START};
+use hydra_hosttests::memory::vm::{MappedObject, Mm, BufferObject, LOW_USER_END, LOW_USER_START, PAGE_SIZE, PROT_READ, PROT_WRITE, USER_SPACE_START};
 use spin::Mutex;
 
 const P: u64 = PAGE_SIZE;
@@ -80,6 +80,27 @@ fn anonymous_mappings() {
         assert!(mm.lock().find_vma(s as u64).unwrap().shared);
         assert_eq!(sys_mmap(mm, A, P, RW, ANON_PRIVATE | MAP_FIXED, -1, 0), A as i64);
         assert_eq!(sys_mmap(mm, A, P, RW, ANON_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0), -17, "EEXIST");
+    });
+}
+
+#[test]
+fn map_32bit_places_mappings_in_the_low_window() {
+    // Below 2 GiB: Hydra's low user window [64 KiB, 1 GiB) (Linux uses [1 GiB, 2 GiB),
+    // which is kernel space here); a free hint is used first
+    const LO: u64 = LOW_USER_START;
+    const HI: u64 = LOW_USER_END;
+    with_mm(|mm| {
+        let a = sys_mmap(mm, 0, 4 * P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0) as u64;
+        assert!(a >= LO && a + 4 * P <= HI, "{a:#x} outside the window");
+        let b = sys_mmap(mm, 0, P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0) as u64;
+        assert!(b >= LO && b + P <= HI && (b + P <= a || b >= a + 4 * P), "second mapping overlaps or escapes");
+        assert_eq!(sys_mmap(mm, A, P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0), A as i64, "free hint taken as is");
+        // A taken hint falls back to the window, not to the top of the address space
+        let c = sys_mmap(mm, A, P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0) as u64;
+        assert!(c >= LO && c + P <= HI, "{c:#x}");
+        // The window full: ENOMEM rather than a high address
+        assert_eq!(sys_mmap(mm, LO, HI - LO, RW, ANON_PRIVATE | MAP_FIXED, -1, 0), LO as i64);
+        assert_eq!(sys_mmap(mm, 0, P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0), ENOMEM);
     });
 }
 

@@ -211,6 +211,7 @@ extern "C" {
     fn asm_trap_overflow();
     fn asm_trap_bound_range();
     fn asm_trap_invalid_opcode();
+    fn asm_int80();
     fn asm_trap_device_not_avail();
     fn asm_trap_double_fault();
     fn asm_trap_invalid_tss();
@@ -324,6 +325,11 @@ pub fn init() {
         idt.entries[32 + i].set_handler_addr(handler, kernel_cs);
     }
 
+    // Vector 0x80: `int $0x80` from user mode (Linux's 32-bit system call entry; see
+    // compat::linux::ldt::int80)
+    idt.entries[INT80_VECTOR as usize]
+        .set_handler_addr(asm_int80 as *const () as usize, kernel_cs)
+        .set_dpl(3);
     // Vector 0x81: voluntary reschedule (`task::yield_now`), kernel only
     idt.entries[YIELD_VECTOR as usize].set_handler_addr(asm_yield as *const () as usize, kernel_cs);
     // Vector 0x40: an application processor's local APIC timer
@@ -415,7 +421,7 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     }
     // A fault in user mode is handled outside other tasks' driver calls (it may take the
     // locks their callers hold); interrupts go on
-    if (ctx.cs & 3) == 3 && ctx.vector < 32 {
+    if (ctx.cs & 3) == 3 && (ctx.vector < 32 || ctx.vector == INT80_VECTOR) {
         // The task may wait, and resume on another CPU: the faulting address (CR2) is
         // taken now and put back for the handler
         let cr2 = x86_64::registers::control::Cr2::read_raw();
@@ -472,6 +478,8 @@ impl FpuState {
 
 /// Software interrupt vector used by `task::yield_now` for voluntary rescheduling.
 pub const YIELD_VECTOR: u64 = 0x81;
+/// `int $0x80`: Linux's 32-bit system call gate (DPL 3).
+pub const INT80_VECTOR: u64 = 0x80;
 
 /// Vector of the application processors' local APIC timers (their scheduling tick).
 pub const LAPIC_TIMER_VECTOR: u64 = 0x40;
@@ -559,6 +567,11 @@ fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
 /// * `ctx` - CPU exception register context.
 fn dispatch_exception(ctx: &mut ExceptionContext) {
     match ctx.vector {
+        INT80_VECTOR if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
+            ctx.rax = crate::compat::linux::ldt::int80(ctx.rax, ctx.rbx) as u64;
+            // The call may have deleted the descriptor the caller's ss names
+            crate::arch::segments::sanitize_frame(&mut ctx.cs, &mut ctx.ss, &mut ctx.rip);
+        }
         1 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
             // #DB - a single step (trap flag) or a debugger's hardware breakpoint or
             // watchpoint: SIGTRAP. DR6 says which (kept for the debugger's PEEKUSER).
@@ -994,6 +1007,7 @@ global_asm!(
     TRAP_NO_ERRCODE asm_irq_46, 46
     TRAP_NO_ERRCODE asm_irq_47, 47
     TRAP_NO_ERRCODE asm_yield, 0x81
+    TRAP_NO_ERRCODE asm_int80, 0x80
     TRAP_NO_ERRCODE asm_lapic_timer, 0x40
     TRAP_NO_ERRCODE asm_tlb_ipi, 0x42
 

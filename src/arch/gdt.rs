@@ -235,15 +235,18 @@ fn reload_segments(s: &Selectors) {
             tmp = out(reg) _,
             options(preserves_flags),
         );
-        // Reload data and stack segment selectors
+        // Stack segment: kernel data. DS, ES, FS and GS hold null (64-bit code ignores
+        // them): what a user thread finds there before loading its own, and what the
+        // context switch saves for it (arch::segments)
         let data_sel = s.kernel_data_selector.0;
         core::arch::asm!(
-            "mov ds, {sel:x}",
-            "mov es, {sel:x}",
-            "mov fs, {sel:x}",
-            "mov gs, {sel:x}",
             "mov ss, {sel:x}",
+            "mov ds, {null:x}",
+            "mov es, {null:x}",
+            "mov fs, {null:x}",
+            "mov gs, {null:x}",
             sel = in(reg) data_sel,
+            null = in(reg) 0u16,
             options(preserves_flags),
         );
         // Load Task Register (TR) with TSS selector

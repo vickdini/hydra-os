@@ -330,6 +330,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     let cr3 = new_mm.lock().cr3();
     let exe: Arc<str> = Arc::from(abs_path.as_str());
     let cmdline = crate::task::Task::join_cmdline(argv.iter().map(|a| a.as_slice()));
+    // The old program's LDT, dropped once the scheduler lock is released
+    let mut old_ldt = None;
     let old_mm = {
         let mut sched = crate::task::SCHEDULER.lock();
         sched.terminate_current_group();
@@ -338,6 +340,10 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             t.exe = Some(exe);
             t.cmdline = Some(cmdline);
             t.fs_base = 0;
+            t.segs = Default::default();
+            // In the CPU too: null selectors and bases, no TLS descriptors, no LDT
+            x86_64::instructions::interrupts::without_interrupts(crate::arch::segments::reset_current);
+            old_ldt = t.ldt.take();
             // A set-ID program runs with the file's owner (group) as its effective and
             // saved id; capabilities follow the new effective user
             if !via_script {

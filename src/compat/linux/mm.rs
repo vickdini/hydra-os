@@ -32,6 +32,8 @@ pub const MAP_FIXED: u64 = 0x10;
 pub const MAP_ANONYMOUS: u64 = 0x20;
 /// Linux `mmap` flag: place at address but fail if already occupied.
 pub const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
+/// Linux `MAP_32BIT`: place the mapping in the low 2 GiB.
+pub const MAP_32BIT: u64 = 0x40;
 
 /// Linux `mremap` flag: allow the kernel to relocate the mapping if needed.
 pub const MREMAP_MAYMOVE: u64 = 1;
@@ -225,6 +227,22 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         None
     };
     let mut m = mm.lock();
+    // MAP_32BIT: below 2 GiB, unless the hint is free (Linux tries the hint first). JITs
+    // and Wine put what 32-bit code reaches here. Linux's window is [1 GiB, 2 GiB); Hydra's
+    // low user window ends at 1 GiB (above it, the kernel maps physical memory), so it
+    // is [LOW_USER_START, LOW_USER_END) here.
+    let mut addr = addr;
+    if flags & MAP_32BIT != 0 && !fixed && !noreplace {
+        let hint = addr & !(PAGE_SIZE - 1);
+        let len_up = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let hint_free = hint != 0 && crate::memory::vm::is_user_range(hint, len_up) && !m.overlaps(hint, hint + len_up);
+        if !hint_free {
+            match m.find_free_in(len, crate::memory::vm::LOW_USER_START, crate::memory::vm::LOW_USER_END) {
+                Some(a) => addr = a,
+                None => return -ENOMEM,
+            }
+        }
+    }
     match m.mmap(addr, len, prot as u32, shared, fixed, noreplace, backing) {
         Ok(a) => {
             if name.is_some() {

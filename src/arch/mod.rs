@@ -56,6 +56,8 @@ pub mod random;
 pub mod raw_serial;
 /// MC146818 CMOS Real-Time Clock (RTC) wall-clock epoch initialization.
 pub mod rtc;
+/// User segment state (selectors, TLS descriptors, LDT) put in the CPU at a context switch.
+pub mod segments;
 pub mod smp;
 /// Fast `x86_64` MSR-based `syscall`/`sysretq` entry stub and kernel system call dispatcher.
 pub mod syscall;

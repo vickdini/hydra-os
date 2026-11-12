@@ -2055,7 +2055,7 @@ pub fn force_seccomp_sigsys(nr: i32, ip: u64, errno: i32) {
 ///
 /// # Returns
 /// `true` on successful frame creation, `false` if stack memory could not be written.
-fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, old_mask: u64) -> bool {
+fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, old_mask: u64, cs: u16) -> bool {
     let (tid, pid) = current_ids();
     let alt = PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).copied()).unwrap_or_default();
     let on_alt = alt.alt_size != 0 && regs.rsp > alt.alt_sp && regs.rsp <= alt.alt_sp + alt.alt_size;
@@ -2088,7 +2088,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     for (i, v) in gprs.iter().enumerate() {
         put(&mut f, mc + i * 8, *v);
     }
-    f[mc + 144..mc + 146].copy_from_slice(&crate::arch::gdt::USER_CS.to_le_bytes()); // cs
+    f[mc + 144..mc + 146].copy_from_slice(&cs.to_le_bytes()); // cs: 0x23 when 32-bit code was interrupted
     f[mc + 150..mc + 152].copy_from_slice(&crate::arch::gdt::USER_DS.to_le_bytes()); // ss
     put(&mut f, mc + 160, 0); // err
     put(&mut f, mc + 168, 0); // trapno
@@ -2207,7 +2207,7 @@ pub fn deliver_on_syscall_return(frame: &mut SyscallFrame, fpu: *mut FpuState, o
                 rflags: frame.rflags,
             };
             let fpu_ref = unsafe { &*fpu };
-            if !build_frame(&mut regs, fpu_ref, sig, &act, old_mask) {
+            if !build_frame(&mut regs, fpu_ref, sig, &act, old_mask, crate::arch::gdt::USER_CS) {
                 die(SIGSEGV);
             }
             frame.rip = regs.rip;
@@ -2281,9 +2281,12 @@ pub fn deliver_on_trap_return(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
                 rflags: ctx.rflags,
             };
             let fpu_ref = unsafe { &*fpu };
-            if !build_frame(&mut regs, fpu_ref, sig, &act, old_mask) {
+            if !build_frame(&mut regs, fpu_ref, sig, &act, old_mask, ctx.cs as u16) {
                 die(SIGSEGV);
             }
+            // The handler runs as 64-bit code, whatever was interrupted
+            ctx.cs = crate::arch::gdt::USER_CS as u64;
+            ctx.ss = crate::arch::gdt::USER_DS as u64;
             ctx.rip = regs.rip;
             ctx.rsp = regs.rsp;
             ctx.rdi = regs.rdi;
@@ -2398,6 +2401,13 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
     };
     let fp_addr = get(mc + 192);
     let mask = get(296);
+    // Back to 32-bit code if that is what the signal interrupted; any other code segment
+    // means 64-bit (Hydra's are the only ones a thread can run in)
+    let cs = if u16::from_le_bytes([raw[mc + 144], raw[mc + 145]]) == crate::arch::gdt::USER32_CS {
+        crate::arch::gdt::USER32_CS
+    } else {
+        crate::arch::gdt::USER_CS
+    };
 
     let (tid, pid) = current_ids();
     if let Some(t) = PROCS.lock().get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) {
@@ -2418,7 +2428,13 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
     if regs.rip >= crate::memory::vm::USER_SPACE_END || regs.rsp >= crate::memory::vm::USER_SPACE_END {
         die(SIGSEGV);
     }
-    unsafe { return_to_user(&regs, &fpu) }
+    if cs == crate::arch::gdt::USER32_CS {
+        // 32-bit code only has 32-bit pointers (iretq would fault on a larger RIP); after
+        // the tracer's stop, which may have changed them
+        regs.rip &= 0xFFFF_FFFF;
+        regs.rsp &= 0xFFFF_FFFF;
+    }
+    unsafe { return_to_user(&regs, &fpu, cs) }
 }
 
 /// Returns to user mode with every register (including `rcx`/`r11`) taken from `regs`
@@ -2428,6 +2444,7 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
 /// # Arguments
 /// * `regs` - Complete user-mode register state to restore.
 /// * `fpu` - Floating-point state image to restore.
+/// * `cs` - Code segment: [`crate::arch::gdt::USER_CS`] or [`crate::arch::gdt::USER32_CS`].
 ///
 /// # Returns
 /// Does not return (`!`).
@@ -2436,7 +2453,7 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
 /// - `regs.rip` and `regs.rsp` must point to valid user-space addresses mapped in the active page table.
 /// - `regs.rflags` must have `IF` (`0x200`) set and privileged flags masked properly for Ring 3 execution.
 /// - `fpu` must contain a valid 64-byte-aligned 512-byte `FXRSTOR64` image with reserved `MXCSR` bits cleared.
-pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
+pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState, cs: u16) -> ! {
     let regs = *regs;
     // Back to user mode: interrupts stay off until iretq, the kernel lock is released and
     // the user GS base swapped in (as on every return to user mode)
@@ -2447,7 +2464,7 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
         "push 0x2b",          // SS (gdt::USER_DS)
         "push qword ptr [rax + 15*8]", // RSP
         "push qword ptr [rax + 17*8]", // RFLAGS
-        "push 0x33",          // CS (gdt::USER_CS)
+        "push {cs}",          // CS (gdt::USER_CS or USER32_CS)
         "push qword ptr [rax + 16*8]", // RIP
         "mov r8,  [rax + 0*8]",
         "mov r9,  [rax + 1*8]",
@@ -2469,6 +2486,7 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
         // The pointer must sit in the register loaded last: any other could be overwritten
         // by the loads before it is done with
         fpu = in(reg) fpu as *const FpuState,
+        cs = in(reg) cs as u64,
         in("rax") &regs as *const UserRegs,
         options(noreturn)
     );

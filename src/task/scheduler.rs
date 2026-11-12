@@ -519,6 +519,8 @@ impl Scheduler {
             mode: PrivilegeMode::Kernel,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
@@ -624,6 +626,8 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
@@ -715,6 +719,8 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Hydra,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
@@ -809,6 +815,8 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: image.initial_brk,
             clear_child_tid: 0,
@@ -909,6 +917,8 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: 0,
+            segs: Default::default(),
+            ldt: None,
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
@@ -1044,6 +1054,22 @@ impl Scheduler {
         } else {
             unsafe { crate::arch::syscall::rdmsr(0xC000_0100) }
         };
+        // Segment state: the parent's live selectors and GS base, its TLS descriptors
+        // (CLONE_SETTLS sets the FS base, so fs becomes null); the LDT is shared with an
+        // address space, and a forked process gets the same (immutable) table
+        let mut child_segs = self.tasks[curr_idx].segs;
+        crate::arch::segments::save(&mut child_segs);
+        if flags & CLONE_SETTLS != 0 {
+            child_segs.fs = 0;
+        }
+        let child_ldt = self.tasks[curr_idx].ldt.as_ref().and_then(|h| {
+            if flags & CLONE_VM != 0 {
+                Some(h.clone())
+            } else {
+                let cur = x86_64::instructions::interrupts::without_interrupts(|| h.lock().clone());
+                cur.map(|l| alloc::sync::Arc::new(spin::Mutex::new(Some(l))))
+            }
+        });
 
         let child_tgid = if flags & CLONE_THREAD != 0 { parent_tgid } else { child_id.0 as u64 };
 
@@ -1081,6 +1107,8 @@ impl Scheduler {
             mode: PrivilegeMode::User,
             personality: super::tcb::TaskPersonality::Linux,
             fs_base: child_fs_base,
+            segs: child_segs,
+            ldt: child_ldt,
             debugregs: [0; 8],
             brk: parent_brk,
             clear_child_tid,
@@ -1227,6 +1255,9 @@ impl Scheduler {
         let saved_cr3 = if curr_task.mm.is_none() && self.kernel_cr3 != 0 { self.kernel_cr3 } else { current_cr3 };
         curr_task.regs.save_from_context(ctx, saved_cr3);
         curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
+        if curr_task.mode == PrivilegeMode::User {
+            crate::arch::segments::save(&mut curr_task.segs);
+        }
         if curr_task.state == TaskState::Running {
             curr_task.state = TaskState::Ready;
         }
@@ -1394,15 +1425,24 @@ impl Scheduler {
         super::CURRENT_KSTACK[1].store(kernel_top, core::sync::atomic::Ordering::Release);
         crate::arch::syscall::set_kernel_rsp(kernel_top);
 
-        // 4c. Switch FS_BASE MSR for incoming task
-        unsafe {
-            crate::arch::syscall::wrmsr(0xC000_0100, next_task.fs_base);
+        // 4c. Its segment state: FS base, and for a user task its selectors, GS base,
+        // TLS descriptors and LDT
+        if next_task.mode == PrivilegeMode::User {
+            crate::arch::segments::load(&next_task.segs, next_task.fs_base, next_task.ldt.as_ref());
+        } else {
+            unsafe {
+                crate::arch::syscall::wrmsr(0xC000_0100, next_task.fs_base);
+            }
         }
         // 4d. Its hardware breakpoints and watchpoints (debuggers)
         crate::arch::debugregs::switch_to(&next_task.debugregs);
 
         // 5. Restore registers into the ExceptionContext frame for iretq execution
         next_task.regs.restore_to_context(ctx);
+        if ctx.cs & 3 == 3 {
+            // Its stack segment may name a descriptor deleted meanwhile: iretq must not fault
+            crate::arch::segments::sanitize_frame(&mut ctx.cs, &mut ctx.ss, &mut ctx.rip);
+        }
 
         // 6. Switch address space if the target task has a custom CR3 root
         let me = crate::arch::percpu::cpu();

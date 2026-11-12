@@ -97,8 +97,8 @@ const REGS_SIZE: usize = 27 * 8;
 /// `sizeof(struct user)` and where its debug registers sit.
 const USER_SIZE: u64 = 912;
 const USER_DEBUGREG: u64 = 848;
-/// User code and stack selectors as Linux reports them for 64-bit programs (debuggers
-/// tell 64-bit from 32-bit tracees by `cs`), whatever Hydra's own are.
+/// User code and stack selectors of 64-bit programs (debuggers tell 64-bit from 32-bit
+/// tracees by `cs`): the same as Linux's (`arch::gdt`).
 const USER_CS: u64 = 0x33;
 const USER_SS: u64 = 0x2b;
 /// Flags a tracer may change: CF PF AF ZF SF TF DF OF NT RF AC.

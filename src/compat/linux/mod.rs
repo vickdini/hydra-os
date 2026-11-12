@@ -34,6 +34,8 @@ pub mod keys;
 pub mod limits;
 pub mod locks;
 pub mod landlock;
+/// Segment calls for 32-bit code: set_thread_area, get_thread_area, modify_ldt, arch_prctl.
+pub mod ldt;
 pub mod mqueue;
 pub mod proc;
 pub mod pidfd;
@@ -307,6 +309,10 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         206..=210 | 333 => return aio::dispatch(frame, num),
         // openat2, epoll_pwait2, pidfd_getfd, process_madvise, process_mrelease
         437 | 441 | 438 | 440 | 448 => return recent::dispatch(frame, num),
+        // modify_ldt; set_thread_area and get_thread_area exist only in the 32-bit table
+        // (int $0x80, see ldt::int80), as on Linux
+        154 => return ldt::sys_modify_ldt(arg0, arg1, arg2),
+        205 | 211 => return -ENOSYS,
         // futex_waitv, futex_wake, futex_wait, futex_requeue
         449 => return futex::sys_futex_waitv(arg0, arg1, arg2, arg3, arg4),
         454 => return futex::sys_futex_wake(arg0, arg1, arg2, arg3),
@@ -1760,38 +1766,11 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 
         SYS_ARCH_PRCTL => {
             // sys_arch_prctl(code: int, addr: unsigned long)
-            let code = arg0;
-            let addr = arg1;
-
             {
                 let mut stats = LINUX_STATS.lock();
                 stats.arch_prctl_calls += 1;
             }
-
-            match code {
-                ARCH_SET_FS => {
-                    // Update current task control block and hardware MSR
-                    crate::task::with_current_task_mut(|t| {
-                        t.fs_base = addr;
-                    });
-                    unsafe {
-                        crate::arch::syscall::wrmsr(0xC000_0100, addr);
-                    }
-                    0
-                }
-                ARCH_GET_FS => {
-                    let fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
-                    if arg1 != 0 {
-                        unsafe {
-                            *(arg1 as *mut u64) = fs_base;
-                        }
-                        0
-                    } else {
-                        -EFAULT
-                    }
-                }
-                _ => -EINVAL,
-            }
+            ldt::sys_arch_prctl(arg0, arg1)
         }
 
         SYS_FUTEX => {

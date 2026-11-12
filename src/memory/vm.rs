@@ -453,7 +453,7 @@ impl Mm {
     /// # Returns
     ///
     /// `true` if an active area intersects `[start, end)`, `false` otherwise.
-    fn overlaps(&self, start: u64, end: u64) -> bool {
+    pub(crate) fn overlaps(&self, start: u64, end: u64) -> bool {
         if let Some((_, v)) = self.vmas.range(..end).next_back() {
             return v.end > start;
         }
@@ -469,6 +469,30 @@ impl Mm {
     /// # Returns
     ///
     /// `Some(u64)` base virtual address if an unallocated hole is found, `None` if address space is full.
+    /// The highest free, page-aligned range of `len` bytes within `[lo, hi)` (for
+    /// `MAP_32BIT`).
+    ///
+    /// # Returns
+    /// Its start, or `None` when no gap that large exists in the window.
+    pub fn find_free_in(&self, len: u64, lo: u64, hi: u64) -> Option<u64> {
+        let len = page_up(len);
+        let mut top = hi;
+        for (_, v) in self.vmas.range(..hi).rev() {
+            if v.end <= top && top - v.end >= len && top - len >= lo {
+                return Some(top - len);
+            }
+            top = top.min(v.start);
+            if top < lo.saturating_add(len) {
+                return None;
+            }
+        }
+        if top >= lo.saturating_add(len) {
+            Some(top - len)
+        } else {
+            None
+        }
+    }
+
     fn find_free(&self, len: u64) -> Option<u64> {
         let mut top = MMAP_TOP;
         for (_, v) in self.vmas.range(..MMAP_TOP).rev() {
