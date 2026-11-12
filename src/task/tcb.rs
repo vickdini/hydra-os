@@ -368,6 +368,11 @@ pub struct Task {
     pub event_wait: bool,
     /// A wakeup arrived while the task was not (yet) waiting: its next wait returns at once.
     pub wake_pending: bool,
+    /// Retired (exited or killed; its resources released): it never returns to user mode.
+    /// Retired while in a system call, it may still wait and be woken to finish the call
+    /// (as a killed Linux thread does), so its state may leave `Dead` until it leaves the
+    /// CPU for good ([`crate::task::leave_retired`]).
+    pub retired: bool,
     /// Became ready by a wakeup (not by using up its timeslice): runs ahead of busy tasks
     /// until it is next scheduled.
     pub woken: bool,
@@ -445,6 +450,7 @@ impl Task {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         }
     }

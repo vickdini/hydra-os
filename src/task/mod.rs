@@ -72,6 +72,7 @@ pub fn current_retired() -> bool {
 /// Leaves the CPU for good from a system call: the current task was retired (its
 /// resources are already released). As the end of [`exit`].
 pub fn leave_retired() -> ! {
+    SCHEDULER.lock().bury_current();
     yield_now();
     loop {
         if x86_64::instructions::interrupts::are_enabled() {

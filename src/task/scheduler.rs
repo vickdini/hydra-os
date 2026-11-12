@@ -556,6 +556,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -663,6 +664,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -756,6 +758,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -852,6 +855,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         };
 
@@ -961,6 +965,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
         });
         crate::compat::linux::proc::register_process(id.0, 0, id.0, None);
@@ -988,6 +993,12 @@ impl Scheduler {
 
         let curr_idx = self.cur[crate::arch::percpu::cpu()];
         let parent = &self.tasks[curr_idx];
+        // Retired during the call (another thread's exit_group): no new thread may join a
+        // process being torn down, it would run with none of its state (Linux fails such a
+        // clone too; the caller never returns to user mode)
+        if parent.retired {
+            return Err("caller exiting");
+        }
         let parent_cr3 = parent.regs.cr3;
         let parent_fs_base = parent.fs_base;
         let parent_tgid = parent.tgid;
@@ -1144,6 +1155,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             wake_pending: false,
+            retired: false,
             fpu: alloc::boxed::Box::new(child_fpu),
         };
 
@@ -1373,7 +1385,21 @@ impl Scheduler {
             }
         }
 
-        let next_idx = next_idx.unwrap_or(curr_idx);
+        // Nothing else may run (during another task's driver call kernel-mode tasks wait,
+        // this CPU's idle task too): the current task goes on, unless it died; a dead one
+        // would return to user mode in a process being torn down (an exit_group retires the
+        // other threads while they run), so the idle task runs instead, which only halts
+        let next_idx = match next_idx {
+            Some(i) => i,
+            None if self.tasks[curr_idx].state == TaskState::Dead => {
+                let idle = self.idle_of[me].and_then(|id| (0..num_tasks).find(|&i| self.tasks[i].id == id));
+                match idle {
+                    Some(i) if self.tasks[i].state == TaskState::Ready => i,
+                    _ => curr_idx,
+                }
+            }
+            None => curr_idx,
+        };
         for (i, t) in self.tasks.iter_mut().enumerate() {
             if i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle {
                 t.passed_over = t.passed_over.saturating_add(1);
@@ -1391,7 +1417,7 @@ impl Scheduler {
         // The outgoing task's time up to now
         self.charge(curr_idx, ctx);
         self.cur[crate::arch::percpu::cpu()] = next_idx;
-        super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(false, core::sync::atomic::Ordering::Release);
+        super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(self.tasks[next_idx].retired, core::sync::atomic::Ordering::Release);
         super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
@@ -1893,23 +1919,40 @@ impl Scheduler {
         if self.tasks[idx].state == TaskState::Dead {
             return;
         }
+        if self.tasks[idx].retired {
+            // Retired before (another thread's exit_group): when it is the current task
+            // retiring itself (exiting too), it dies now; its resources are released already
+            if self.cur[crate::arch::percpu::cpu()] == idx {
+                self.tasks[idx].state = TaskState::Dead;
+                self.tasks[idx].timeslice_remaining = 0;
+            }
+            return;
+        }
+        self.tasks[idx].retired = true;
         // Service windows it held (it may end in the middle of a driver call)
         crate::ipc::service::release_windows(self.tasks[idx].id.0);
         // Its ID may be reused, its children get a new parent: cached identities go
         crate::compat::linux::ident_changed();
-        self.tasks[idx].state = TaskState::Dead;
-        self.tasks[idx].timeslice_remaining = 0;
         // Running on a CPU: it must stop running user code now, as Linux's exit_group
         // stops every other thread at once, not at the end of its timeslice (meanwhile it
         // would act in a process being torn down: no descriptors, no signal state)
         let me = crate::arch::percpu::cpu();
+        let mut elsewhere = false;
         for c in 0..crate::arch::smp::MAX_CPUS {
             if self.idle_of[c].is_some() && self.cur[c] == idx {
                 super::CURRENT_RETIRED[c].store(true, core::sync::atomic::Ordering::Release);
                 if c != me {
                     crate::arch::smp::kick_cpu(c);
+                    elsewhere = true;
                 }
             }
+        }
+        // Running on another CPU, maybe in the middle of a system call, it stays runnable
+        // until it leaves the kernel, where it dies ([`super::leave_retired`]): stopped in
+        // the middle, it would keep what the call holds (locks, a driver call's window)
+        if !elsewhere {
+            self.tasks[idx].state = TaskState::Dead;
+            self.tasks[idx].timeslice_remaining = 0;
         }
 
         // The clear-tid word lives in the task's own address space: only write it when
@@ -1940,6 +1983,18 @@ impl Scheduler {
             }
             let t = &self.tasks[idx];
             crate::compat::linux::proc::thread_exited(t.tgid, t.id.0, t.ticks_run, t.ticks_sys);
+        }
+    }
+
+    /// A retired current task, back from finishing its system call, dies again (its
+    /// resources were released when it was retired).
+    pub fn bury_current(&mut self) {
+        let cpu = crate::arch::percpu::cpu();
+        if let Some(t) = self.tasks.get_mut(self.cur[cpu]) {
+            if t.retired {
+                t.state = TaskState::Dead;
+                t.timeslice_remaining = 0;
+            }
         }
     }
 

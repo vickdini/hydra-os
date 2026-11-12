@@ -3,6 +3,7 @@
  * used to mark them dead but let those running on another CPU go on until their next
  * scheduling point, in a process already torn down (descriptors closed: EBADF; signal
  * state gone: abort() fell through to `hlt`), which made Wine's services crash on exit.
+ * A thread created by a clone that raced with the exit_group must not survive either.
  * Build: gcc -O1 -w -pthread exitgroup_test.c -o exitgroup_test.elf */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -45,6 +46,23 @@ static void *writer(void *p) {
     return NULL;
 }
 
+/* Threads created while another thread calls exit_group: none may join the dying process */
+static void *shortlived(void *p) {
+    for (int i = 0; i < 50; i++) {
+        if (write(devnull, "x", 1) < 0 && errno == EBADF) sh->saw_ebadf = 1;
+    }
+    return NULL;
+}
+
+static void *spawner(void *p) {
+    __sync_fetch_and_add(&sh->started, 1);
+    for (;;) {
+        pthread_t c;
+        if (pthread_create(&c, NULL, shortlived, NULL) == 0) pthread_join(c, NULL);
+    }
+    return NULL;
+}
+
 static void sleep_ms(int ms) {
     struct timespec ts = {0, ms * 1000000L};
     nanosleep(&ts, NULL);
@@ -61,7 +79,8 @@ int main(void) {
             pthread_t t;
             pthread_create(&t, NULL, spinner, NULL);
             pthread_create(&t, NULL, writer, NULL);
-            while (sh->started < 2) sched_yield();
+            pthread_create(&t, NULL, spawner, NULL);
+            while (sh->started < 3) sched_yield();
             sleep_ms(5);
             _exit(0); /* exit_group */
         }

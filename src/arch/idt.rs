@@ -446,10 +446,12 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         }
     }
     // A task retired while it ran here never returns to user mode: switch away (as the
-    // yield vector does; the scheduler does not pick a dead task again)
-    if (ctx.cs & 3) == 3 && crate::task::current_retired() && crate::task::is_active() {
+    // yield vector does; the scheduler does not pick a dead task again), nor does the one
+    // switched to if it was retired too
+    while (ctx.cs & 3) == 3 && crate::task::current_retired() && crate::task::is_active() {
         loop {
             if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                sched.bury_current();
                 sched.schedule_now(ctx);
                 break;
             }
