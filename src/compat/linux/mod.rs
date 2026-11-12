@@ -104,6 +104,43 @@ pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats 
     unknown_calls: 0,
 });
 
+/// Answers, without the kernel lock, the system calls that only read the caller's own
+/// identity (`getpid`, `gettid`, `getppid`, `getuid`, `getgid`, `geteuid`, `getegid`): many
+/// threads call them at once, and the lock would make each wait for the others' whole system
+/// calls. They take the scheduler's and the process table's locks briefly instead.
+///
+/// Called at system call entry with interrupts off. Pending signals are delivered at the
+/// next trap or system call (within a tick).
+///
+/// # Returns
+/// The result, or `None` when the call must take the normal path: another call, a Hydra
+/// (non-Linux) task, a task with a seccomp filter or a tracer, or system call tracing on.
+pub fn fast_syscall(nr: u64) -> Option<i64> {
+    const GETPPID: u64 = 110;
+    if !matches!(nr, SYS_GETPID | SYS_GETTID | GETPPID | SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID) {
+        return None;
+    }
+    if TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    // This task's seccomp filter and tracer (other tasks' do not matter)
+    let (linux, filtered, tgid, tid, ids) = crate::task::with_current_task_mut(|t| {
+        (t.personality == crate::task::TaskPersonality::Linux, t.seccomp.mode != 0, t.tgid, t.id.0, [t.uid, t.gid, t.euid, t.egid])
+    })?;
+    if !linux || filtered || ptrace::is_traced(tid) {
+        return None;
+    }
+    Some(match nr {
+        SYS_GETPID => ns::pid_to_caller(tgid) as i64,
+        SYS_GETTID => ns::pid_to_caller(tid) as i64,
+        GETPPID => proc::getppid(),
+        SYS_GETUID => ns::id_for_caller(ids[0], false) as i64,
+        SYS_GETGID => ns::id_for_caller(ids[1], true) as i64,
+        SYS_GETEUID => ns::id_for_caller(ids[2], false) as i64,
+        _ => ns::id_for_caller(ids[3], true) as i64,
+    })
+}
+
 /// High-level Linux system call dispatcher called by the hardware SYSCALL trampoline
 /// when the active task personality is set to Linux.
 ///

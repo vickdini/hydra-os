@@ -158,13 +158,17 @@ int main(void) {
     // /proc/stat: the CPUs, and idle time while sleeping
     long long t0, i0, t1, i1;
     int cpus = 0;
+    double w0 = now();
     int ok = proc_stat(&t0, &i0, &cpus) == 0;
     sleep(1);
     ok = ok && proc_stat(&t1, &i1, &cpus) == 0;
+    double wall = now() - w0;
     long online = sysconf(_SC_NPROCESSORS_ONLN);
-    printf("     /proc/stat: %d CPUs, %lld of %lld ticks idle over 1 s\n", cpus, i1 - i0, t1 - t0);
+    // The ticks of every CPU over the wall time measured (the sleep may run long)
+    double expect = wall * hz * online;
+    printf("     /proc/stat: %d CPUs, %lld of %lld ticks idle over %.2f s (%.0f expected)\n", cpus, i1 - i0, t1 - t0, wall, expect);
     check(ok && cpus == online, "/proc/stat has a line per CPU");
-    check(ok && t1 - t0 >= (long long)(0.8 * hz * online) && t1 - t0 <= (long long)(1.3 * hz * online), "/proc/stat advances by CPUs x seconds");
+    check(ok && t1 - t0 >= (long long)(0.8 * expect) && t1 - t0 <= (long long)(1.2 * expect + online), "/proc/stat advances by CPUs x seconds");
     check(ok && i1 - i0 >= (long long)(0.5 * hz), "/proc/stat counts idle time");
 
     // /proc/uptime and /proc/loadavg
