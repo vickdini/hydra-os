@@ -215,8 +215,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         },
         // getcpu(cpu*, node*, cache): one CPU, one node
         309 => {
-            for p in [a[0], a[1]] {
-                if p != 0 && copy_out(p, &0u32.to_le_bytes()).is_err() {
+            // getcpu(cpu, node): the CPU running the caller (one NUMA node)
+            let cpu = crate::arch::percpu::cpu() as u32;
+            for (p, v) in [(a[0], cpu), (a[1], 0u32)] {
+                if p != 0 && copy_out(p, &v.to_le_bytes()).is_err() {
                     return Some(EFAULT);
                 }
             }

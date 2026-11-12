@@ -49,8 +49,12 @@ static double run(int procs, unsigned long n) {
     return now() - t0;
 }
 
+// The CPU each thread of run_threads reported at its end (sched_getcpu)
+static int thread_cpu_seen[8];
+static int thread_slot;
 static void *thread_work(void *n) {
     work((unsigned long)n);
+    thread_cpu_seen[__atomic_fetch_add(&thread_slot, 1, __ATOMIC_RELAXED) & 7] = sched_getcpu();
     return NULL;
 }
 
@@ -168,6 +172,17 @@ int main(void) {
     double tmany = run_threads(k, iters);
     printf("     %d threads at once: %.3f s (speedup %.2f)\n", k, tmany, k * one / tmany);
     if (k > 1) check(tmany < one * k * 0.75, "threads of one process run in parallel");
+    // sched_getcpu: each thread's CPU, below the CPU count; several CPUs when threads ran in
+    // parallel
+    int distinct = 0, valid = 1;
+    for (int i = 0; i < k; i++) {
+        int c = thread_cpu_seen[i], seen = 0;
+        if (c < 0 || c >= n) valid = 0;
+        for (int j = 0; j < i; j++) seen |= thread_cpu_seen[j] == c;
+        distinct += !seen;
+    }
+    printf("     sched_getcpu: %d threads on %d distinct CPUs\n", k, distinct);
+    check(valid && (k == 1 || distinct > 1), "sched_getcpu reports the CPU a thread runs on");
 
     // Protecting a page another thread keeps reading (on another CPU) takes effect at once
     page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

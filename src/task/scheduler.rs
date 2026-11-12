@@ -300,6 +300,11 @@ impl Scheduler {
     /// # Returns
     ///
     /// `Some(Handoff)` of the active handoff level, or `None` if normal scheduling applies.
+    /// Whether the server of the driver call in progress is ready to run (not running).
+    pub fn handoff_server_ready(&self) -> bool {
+        self.handoff_top().is_some_and(|h| self.tasks.iter().any(|t| t.id.0 == h.server && t.state == TaskState::Ready))
+    }
+
     fn handoff_top(&self) -> Option<Handoff> {
         self.handoffs.iter().rev().find_map(|h| *h)
     }
@@ -379,6 +384,7 @@ impl Scheduler {
         self.cur[crate::arch::percpu::cpu()] = 0;
         super::CURRENT_TID.store(0, core::sync::atomic::Ordering::Release);
         self.initialized = true;
+        super::STARTED.store(true, core::sync::atomic::Ordering::Release);
 
         // Spawn background Idle task (Task 1) with lowest priority: the boot processor's
         let idle = self.spawn_internal("idle", idle_task_entry, TaskPriority::Idle, current_cr3);
@@ -1182,13 +1188,19 @@ impl Scheduler {
         let handoff_server = self.handoff_top().map(|h| h.server);
 
         let mut curr_idx = self.cur[crate::arch::percpu::cpu()];
+        let server_ready = self.handoff_server_ready();
         let curr_task = &mut self.tasks[curr_idx];
 
         // 2. Check if current task still has timeslice and is eligible to continue. A task
         // woken by an event (input, a socket, a futex; not a timed sleep, which polling
         // loops use) preempts it: interactive work waits at most one tick instead of a
         // full timeslice per busy task ahead of it.
-        let may_continue = handoff_server.map_or(true, |s| s == curr_task.id.0) && self.resume_first.is_none();
+        // During a driver call: its server keeps running, and so does a Linux program in user
+        // mode unless the server is ready (it runs first, here)
+        let may_continue = handoff_server.map_or(true, |s| {
+            s == curr_task.id.0 || (ctx.cs & 3 == 3 && curr_task.personality == super::tcb::TaskPersonality::Linux && !server_ready)
+        })
+            && self.resume_first.is_none();
         if curr_task.state == TaskState::Running && curr_task.timeslice_remaining > 1 && may_continue {
             curr_task.timeslice_remaining -= 1;
             if handoff_server.is_some() {
@@ -1270,12 +1282,10 @@ impl Scheduler {
         if let Some(caller) = self.resume_first.take() {
             next_idx = (0..num_tasks).find(|&i| self.tasks[i].id.0 == caller && self.can_run(i, me));
         }
-        // During a driver call only its server runs, or the idle task while the server
-        // waits for its device
+        // During a driver call its server runs first; otherwise tasks in user mode (they hold
+        // no kernel locks; kernel-mode ones wait, see `can_run`), or the idle task
         if let (Some(server), None) = (handoff_server, next_idx) {
-            let server_idx = (0..num_tasks).find(|&i| self.tasks[i].id.0 == server && self.can_run(i, me));
-            let idle_idx = (0..num_tasks).find(|&i| self.tasks[i].priority == TaskPriority::Idle && self.can_run(i, me));
-            next_idx = server_idx.or(idle_idx);
+            next_idx = (0..num_tasks).find(|&i| self.tasks[i].id.0 == server && self.can_run(i, me));
         }
 
         // First pass: high-priority service tasks (the network task) run as soon as they
@@ -1319,8 +1329,10 @@ impl Scheduler {
             }
         }
 
-        // Second pass: If no standard task is ready, allow Idle task (priority 0)
-        if next_idx.is_none() && handoff_server.is_none() {
+        // Second pass: If no standard task is ready, allow Idle task (priority 0); also
+        // during a driver call (`can_run` keeps out what must not run then), so the current
+        // task does not simply go on below
+        if next_idx.is_none() {
             for offset in 1..=num_tasks {
                 let idx = (curr_idx + offset) % num_tasks;
                 if self.can_run(idx, me) {
@@ -1423,14 +1435,17 @@ impl Scheduler {
             // The console shell runs on the boot processor: it waits for keys and ticks with
             // `hlt`, for that CPU's interrupts
             return false;
-        } else if t.regs.cs & 3 == 0
-            && !self.handoffs.iter().flatten().any(|h| h.server == t.id.0 || h.caller == t.id.0)
-            && crate::ipc::service::window_held_by_other(t.id.0)
+        } else if !self.handoffs.iter().flatten().any(|h| h.server == t.id.0 || h.caller == t.id.0)
+            && ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
+                || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
         {
             // Kernel code resumes only outside other tasks' driver calls, until their
             // callers have read the replies (it may use the same window or the locks those
             // callers hold), except the calls' own servers and callers; with one CPU the
-            // caller always runs first after a call
+            // caller always runs first after a call. Linux programs in user mode hold no
+            // kernel locks and make no driver calls without entering the kernel: they run
+            // meanwhile (entering it, they wait: `wait_out_handoff`); Hydra's driver and
+            // service tasks do not (their calls rely on the server running alone)
             return false;
         }
         // Threads of one process run on several CPUs at once (TLB shootdowns keep them

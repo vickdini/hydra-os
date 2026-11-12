@@ -424,6 +424,17 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     }
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
     dispatch_exception(ctx);
+    // A device interrupt that made a driver call's server ready (its device answered): run
+    // it now rather than at the next tick, when this CPU was running a program in user mode
+    // (with one CPU, every disk request would otherwise wait for a tick)
+    if (ctx.cs & 3) == 3 && ctx.vector > 32 && ctx.vector < 48 && crate::task::is_active_hint() {
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.apply_wakes();
+            if sched.handoff_server_ready() {
+                sched.schedule_now(ctx);
+            }
+        }
+    }
     // Returning to user mode: run any pending signal handlers first
     if (ctx.cs & 3) == 3 && crate::task::is_active() {
         crate::compat::linux::tty::pump();

@@ -48,6 +48,14 @@ pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRe
 /// Number of kernel wait points currently active (see `preemptible`).
 pub static PREEMPT_POINTS: crate::arch::percpu::PerCpuU32 = crate::arch::percpu::PerCpuU32::new();
 
+/// Whether the scheduler has started (without its lock; see [`is_active`]).
+pub fn is_active_hint() -> bool {
+    STARTED.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Set once the scheduler runs tasks.
+pub static STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// The ID of the task each CPU runs (read without the scheduler lock by the system call
 /// fast path; 0 before the scheduler starts).
 pub static CURRENT_TID: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
