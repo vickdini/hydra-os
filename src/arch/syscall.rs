@@ -379,6 +379,11 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 /// * `fpu` - Raw pointer to the saved userland FPU/SSE state buffer.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
+    // A task retired while it ran here (another thread's exit_group) makes no more calls
+    if crate::task::current_retired() {
+        crate::arch::smp::bkl_enter();
+        crate::task::leave_retired();
+    }
     // Calls that only read the caller's identity, and private futex wakes, run without
     // the kernel lock
     if let Some(r) = crate::compat::linux::fast_syscall(frame) {
@@ -399,6 +404,10 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     dispatch(frame, fpu);
     if crate::compat::linux::changes_identity(nr) {
         crate::compat::linux::ident_changed();
+    }
+    // Retired during the call: no return to user mode
+    if crate::task::current_retired() {
+        crate::task::leave_retired();
     }
     crate::arch::smp::bkl_exit();
 }

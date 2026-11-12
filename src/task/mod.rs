@@ -56,6 +56,32 @@ pub fn is_active_hint() -> bool {
 /// Set once the scheduler runs tasks.
 pub static STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Per CPU: the task it runs was retired while running there (another thread of its
+/// process called `exit_group` or exec, or it was killed). It must not run user code
+/// again: it leaves the CPU at its next system call entry or exit, or return from an
+/// interrupt ([`leave_retired`]). Cleared at every switch.
+pub static CURRENT_RETIRED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+
+/// Whether this CPU's current task was retired (see [`CURRENT_RETIRED`]).
+#[inline]
+pub fn current_retired() -> bool {
+    CURRENT_RETIRED[crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1)].load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Leaves the CPU for good from a system call: the current task was retired (its
+/// resources are already released). As the end of [`exit`].
+pub fn leave_retired() -> ! {
+    yield_now();
+    loop {
+        if x86_64::instructions::interrupts::are_enabled() {
+            x86_64::instructions::hlt();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// The ID of the task each CPU runs (read without the scheduler lock by the system call
 /// fast path; 0 before the scheduler starts).
 pub static CURRENT_TID: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);

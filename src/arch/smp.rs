@@ -318,6 +318,18 @@ pub fn kick_idle() {
     }
 }
 
+/// Interrupts CPU `cpu` (the TLB vector, whose handler does nothing when no flush is
+/// pending): it enters the kernel at once, e.g. to leave a task retired meanwhile.
+pub fn kick_cpu(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let apic = CPU_APIC[cpu].load(Ordering::Acquire);
+    if apic != u32::MAX {
+        x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
+    }
+}
+
 /// Number of CPUs online.
 pub fn online() -> usize {
     ONLINE.load(Ordering::Acquire)

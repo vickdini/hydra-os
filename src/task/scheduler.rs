@@ -1391,6 +1391,7 @@ impl Scheduler {
         // The outgoing task's time up to now
         self.charge(curr_idx, ctx);
         self.cur[crate::arch::percpu::cpu()] = next_idx;
+        super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(false, core::sync::atomic::Ordering::Release);
         super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
@@ -1898,6 +1899,18 @@ impl Scheduler {
         crate::compat::linux::ident_changed();
         self.tasks[idx].state = TaskState::Dead;
         self.tasks[idx].timeslice_remaining = 0;
+        // Running on a CPU: it must stop running user code now, as Linux's exit_group
+        // stops every other thread at once, not at the end of its timeslice (meanwhile it
+        // would act in a process being torn down: no descriptors, no signal state)
+        let me = crate::arch::percpu::cpu();
+        for c in 0..crate::arch::smp::MAX_CPUS {
+            if self.idle_of[c].is_some() && self.cur[c] == idx {
+                super::CURRENT_RETIRED[c].store(true, core::sync::atomic::Ordering::Release);
+                if c != me {
+                    crate::arch::smp::kick_cpu(c);
+                }
+            }
+        }
 
         // The clear-tid word lives in the task's own address space: only write it when
         // that address space is the one currently loaded

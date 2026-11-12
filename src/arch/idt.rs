@@ -383,7 +383,11 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     if ctx.vector == crate::arch::smp::TLB_VECTOR {
         crate::arch::smp::serve_tlb();
         crate::arch::smp::lapic_eoi();
-        return;
+        // A kick for a task retired while running here in user mode: on to the full path,
+        // which switches away from it (below)
+        if !((ctx.cs & 3) == 3 && crate::task::current_retired()) {
+            return;
+        }
     }
     if ctx.vector == 2 {
         let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
@@ -439,6 +443,18 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
             if sched.handoff_server_ready() {
                 sched.schedule_now(ctx);
             }
+        }
+    }
+    // A task retired while it ran here never returns to user mode: switch away (as the
+    // yield vector does; the scheduler does not pick a dead task again)
+    if (ctx.cs & 3) == 3 && crate::task::current_retired() && crate::task::is_active() {
+        loop {
+            if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                sched.schedule_now(ctx);
+                break;
+            }
+            crate::arch::smp::serve_tlb();
+            core::hint::spin_loop();
         }
     }
     // Returning to user mode: run any pending signal handlers first
