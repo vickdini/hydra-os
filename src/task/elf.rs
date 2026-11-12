@@ -19,7 +19,7 @@
 //! 2. Copies file payload data (`p_filesz`).
 //! 3. Zeroes any uninitialized data sections (`.bss`, where `p_memsz > p_filesz`).
 //! 4. Configures page table mappings with `USER_ACCESSIBLE` protection flags.
-//! 5. Prepares a dedicated user stack and Ring 3 segment selectors (`CS = 0x20 | 3`, `SS = 0x18 | 3`).
+//! 5. Prepares a dedicated user stack and Ring 3 segment selectors (`CS = 0x33`, `SS = 0x2b`).
 //!
 //! ## Key Types & Interfaces
 //!
@@ -32,7 +32,7 @@
 //! ## Hardware & Dependency Context
 //!
 //! - CPU Privilege Level: Transitions from Ring 0 (Kernel) to Ring 3 (Userland) via `iretq`.
-//! - Segment Selectors: Kernel CS `0x08`, Kernel SS `0x10`, User CS `0x23` (RPL 3), User SS `0x1B` (RPL 3).
+//! - Segment Selectors: Kernel CS `0x08`, Kernel SS `0x10`, User CS `0x33` (RPL 3), User SS `0x2b` (RPL 3), 32-bit user CS `0x23`.
 //! - Page Tables: 4-Level x86_64 Paging (PML4 -> PDPT -> PD -> PT) with `USER_ACCESSIBLE` bit 2 set.
 //! - Concurrency: Thread-safe memory allocation via `FRAME_ALLOCATOR` and `spin::Mutex`.
 //!

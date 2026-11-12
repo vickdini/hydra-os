@@ -141,7 +141,7 @@ pub struct TaskRegisters {
     pub rflags: u64,
     /// Stack pointer `RSP`.
     pub rsp: u64,
-    /// Stack segment selector `SS` (`0x10` for Ring 0, `0x1B` for Ring 3).
+    /// Stack segment selector `SS` (`0x10` for Ring 0, `0x2b` for Ring 3).
     pub ss: u64,
     /// Control Register 3 (`CR3`) physical address of the task's root `PML4` page table.
     pub cr3: u64,

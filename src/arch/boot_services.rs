@@ -49,7 +49,7 @@ pub struct HardwareTakeoverStats {
     pub gdt_code_selector: u16,
     /// Loaded kernel data/stack segment selector (`DS`/`SS`, typically `0x10`).
     pub gdt_data_selector: u16,
-    /// Loaded Task State Segment selector (`TR`, typically `0x28`).
+    /// Loaded Task State Segment selector (`TR`, `0x40`).
     pub tss_selector: u16,
     /// Physical address of the active 4-level PML4 root page table in `CR3`.
     pub active_cr3_pml4: u64,
@@ -76,7 +76,7 @@ pub fn is_hardware_takeover_complete() -> bool {
 /// 2. Enables standalone hardware mode for console I/O and PS/2 keyboard.
 /// 3. Calls `uefi::boot::exit_boot_services` to terminate UEFI firmware control.
 /// 4. Loads Hydra's 64-bit GDT into `GDTR` and reloads `CS` (`0x08`), `DS`/`ES`/`FS`/`GS`/`SS` (`0x10`).
-/// 5. Loads Hydra's TSS into `TR` (`0x28`) and enables IST 1 on IDT Double Fault.
+/// 5. Loads Hydra's TSS into `TR` (`0x40`) and enables IST 1 on IDT Double Fault.
 /// 6. Switches CPU `CR3` to Hydra's autonomous 4-level PML4 paging table.
 /// 7. Updates IDT entries with Hydra's kernel code selector, initializes PIC/PIT/RTC/PS2/SYSCALL, and enables interrupts.
 ///

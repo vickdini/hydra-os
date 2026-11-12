@@ -564,8 +564,8 @@ impl Scheduler {
     /// Spawns an unprivileged Ring 3 User Mode task.
     ///
     /// Allocates both a kernel stack (for TSS RSP0 and hardware SYSCALL)
-    /// and a user stack (for userland RSP). Configures user code (0x23) and
-    /// user data (0x1B) segment selectors with RPL=3.
+    /// and a user stack (for userland RSP). Configures user code (0x33) and
+    /// user data (0x2b) segment selectors with RPL=3.
     ///
     /// # Arguments
     ///
@@ -611,8 +611,8 @@ impl Scheduler {
         let mut regs = TaskRegisters::empty();
         regs.rip = fn_ptr;
         regs.rsp = initial_user_rsp;
-        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
-        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
+        regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.rflags = 0x202; // IF=1: Interrupts enabled
         regs.cr3 = current_cr3;
 
@@ -670,7 +670,7 @@ impl Scheduler {
     ///
     /// Parses the ELF64 headers and segments, allocates and maps loadable segments
     /// with `USER_ACCESSIBLE` page table flags, initializes user stack, sets up
-    /// Ring 3 execution selectors (`CS = 0x23`, `SS = 0x1B`, `RFLAGS = 0x202`),
+    /// Ring 3 execution selectors (`CS = 0x33`, `SS = 0x2b`, `RFLAGS = 0x202`),
     /// and enqueues the task in the scheduler's ready queue.
     ///
     /// # Arguments
@@ -702,8 +702,8 @@ impl Scheduler {
         let mut regs = TaskRegisters::empty();
         regs.rip = image.entry_point;
         regs.rsp = image.initial_user_rsp;
-        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
-        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
+        regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.rflags = 0x202; // IF=1: Interrupts enabled
         regs.cr3 = current_cr3;
 
@@ -796,8 +796,8 @@ impl Scheduler {
         let mut regs = TaskRegisters::empty();
         regs.rip = image.entry_point;
         regs.rsp = image.initial_user_rsp;
-        regs.cs = 0x20 | 3;  // User Code Segment (0x23, RPL 3)
-        regs.ss = 0x18 | 3;  // User Data Segment (0x1B, RPL 3)
+        regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
+        regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.rflags = 0x202; // IF=1: Interrupts enabled
         regs.cr3 = current_cr3;
 
@@ -896,8 +896,8 @@ impl Scheduler {
         let mut regs = TaskRegisters::empty();
         regs.rip = image.entry;
         regs.rsp = image.rsp;
-        regs.cs = 0x20 | 3;
-        regs.ss = 0x18 | 3;
+        regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
+        regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.rflags = 0x202;
         regs.cr3 = mm.lock().cr3();
 
@@ -1033,8 +1033,8 @@ impl Scheduler {
         regs.r13 = frame.r13;
         regs.r14 = frame.r14;
         regs.r15 = frame.r15;
-        regs.cs = 0x20 | 3;
-        regs.ss = 0x18 | 3;
+        regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
+        regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.cr3 = parent_cr3;
 
         // The parent's live FS base is in the MSR, not yet saved in its task

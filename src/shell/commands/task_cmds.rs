@@ -223,7 +223,7 @@ impl Command for SpawnCommand {
                     "[+] Spawned Ring 3 User Mode process #{} ('user_demo').",
                     id.0
                 );
-                println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B)");
+                println!("    Privilege: Unprivileged Ring 3 (CS=0x33, SS=0x2b)");
                 if bg_mode {
                     println!("    Running in background. Type 'ps' to observe execution.");
                 } else {

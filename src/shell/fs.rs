@@ -20,7 +20,7 @@
 //! - `list_directory` / `print_file`: Inspects directories and text files on the UEFI FAT volume.
 //!
 //! ## Hardware & Dependency Context
-//! - CPU Privilege Level: Ring 0 (spawns Ring 3 ELF tasks with `CS=0x23`, `SS=0x1B`)
+//! - CPU Privilege Level: Ring 0 (spawns Ring 3 ELF tasks with `CS=0x33`, `SS=0x2b`)
 //! - Hardware Interaction: UEFI `SimpleFileSystem` / `LoadedImage` protocols (pre-`ExitBootServices`) and ZFS IPC client
 //! - Concurrency: Synchronous execution on the calling shell thread; supports background task spawning via `--bg` or `&`
 
@@ -452,7 +452,7 @@ pub fn search_and_execute(command_name: &str, args: &[&str], state: &mut ShellSt
                                     pid.0,
                                     leaked_name
                                 );
-                                println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B, RFLAGS=0x202)");
+                                println!("    Privilege: Unprivileged Ring 3 (CS=0x33, SS=0x2b, RFLAGS=0x202)");
                                 let bg = args.iter().any(|&a| a == "--bg" && a == "-b" || a == "&");
                                 if bg {
                                     println!("    Running in background. Type 'ps' to inspect execution.");

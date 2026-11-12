@@ -36,6 +36,10 @@ pub const IA32_EFER: u32 = 0xC000_0080;
 pub const IA32_STAR: u32 = 0xC000_0081;
 /// Long Mode System Call Target Instruction Pointer (RIP) MSR.
 pub const IA32_LSTAR: u32 = 0xC000_0082;
+/// IA32_CSTAR MSR address: `SYSCALL` target from 32-bit compatibility mode (AMD CPUs only).
+pub const IA32_CSTAR: u32 = 0xC000_0083;
+/// IA32_SYSENTER_CS MSR address: 0 makes `SYSENTER` fault (#GP) in user mode.
+pub const IA32_SYSENTER_CS: u32 = 0x174;
 /// System Call RFLAGS Mask Register (clears IF, TF, etc. on syscall entry).
 pub const IA32_FMASK: u32 = 0xC000_0084;
 
@@ -294,8 +298,9 @@ pub fn init() {
 
         // 2. Configure STAR:
         // Bits [47:32] = 0x0008 (Kernel CS). Kernel SS is automatically CS + 8 = 0x0010.
-        // Bits [63:48] = 0x0013 (User CS/SS base). sysretq loads SS = 0x1B (0x13+8), CS = 0x23 (0x13+16).
-        let star: u64 = (0x0013u64 << 48) | (0x0008u64 << 32);
+        // Bits [63:48] = 0x0023 (user base, Linux's layout). sysretq loads SS = 0x2b (0x23+8)
+        // and the 64-bit CS = 0x33 (0x23+16); 0x23 itself is the 32-bit user code segment.
+        let star: u64 = ((crate::arch::gdt::USER32_CS as u64) << 48) | ((crate::arch::gdt::KERNEL_CS as u64) << 32);
         wrmsr(IA32_STAR, star);
 
         // 3. Configure LSTAR with the entry point address
@@ -303,6 +308,16 @@ pub fn init() {
             fn asm_syscall_entry();
         }
         wrmsr(IA32_LSTAR, asm_syscall_entry as *const () as usize as u64);
+
+        // 3b. Hydra has no 32-bit system call interface (32-bit code, as Wine's, calls
+        // into 64-bit code instead). A SYSCALL from 32-bit code (AMD) returns -ENOSYS
+        // as on Linux without IA32 emulation; Intel CPUs raise #UD for it. SYSENTER
+        // faults: its code segment is null.
+        extern "C" {
+            fn asm_syscall32_ignore();
+        }
+        wrmsr(IA32_CSTAR, asm_syscall32_ignore as *const () as usize as u64);
+        wrmsr(IA32_SYSENTER_CS, 0);
 
         // 4. Configure FMASK:
         // Mask Interrupt Flag (IF: 0x200), Trap Flag (TF: 0x100), Direction Flag (DF: 0x400),
@@ -928,5 +943,12 @@ global_asm!(
         // 5. Return to unprivileged Ring 3 (with its GS base)
         swapgs
         sysretq
+
+    // SYSCALL from 32-bit compatibility mode (IA32_CSTAR): -ENOSYS straight back, on the
+    // caller's stack with interrupts off (FMASK), as Linux's entry_SYSCALL32_ignore
+    .global asm_syscall32_ignore
+    asm_syscall32_ignore:
+        mov eax, -38
+        sysret
     "#
 );

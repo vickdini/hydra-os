@@ -222,7 +222,7 @@ impl Command for ElfCommand {
                     pid.0,
                     leaked_name
                 );
-                println!("    Privilege: Unprivileged Ring 3 (CS=0x23, SS=0x1B, RFLAGS=0x202)");
+                println!("    Privilege: Unprivileged Ring 3 (CS=0x33, SS=0x2b, RFLAGS=0x202)");
 
                 if bg_mode {
                     println!("    Running in background. Type 'ps' to inspect execution.");

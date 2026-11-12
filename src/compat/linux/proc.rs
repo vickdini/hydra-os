@@ -2088,8 +2088,8 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     for (i, v) in gprs.iter().enumerate() {
         put(&mut f, mc + i * 8, *v);
     }
-    f[mc + 144..mc + 146].copy_from_slice(&0x23u16.to_le_bytes()); // cs
-    f[mc + 150..mc + 152].copy_from_slice(&0x1bu16.to_le_bytes()); // ss
+    f[mc + 144..mc + 146].copy_from_slice(&crate::arch::gdt::USER_CS.to_le_bytes()); // cs
+    f[mc + 150..mc + 152].copy_from_slice(&crate::arch::gdt::USER_DS.to_le_bytes()); // ss
     put(&mut f, mc + 160, 0); // err
     put(&mut f, mc + 168, 0); // trapno
     put(&mut f, mc + 176, old_mask);
@@ -2444,10 +2444,10 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState) -> ! {
     crate::arch::smp::bkl_exit();
     core::arch::asm!(
         "fxrstor64 [{fpu}]",
-        "push 0x1b",          // SS
+        "push 0x2b",          // SS (gdt::USER_DS)
         "push qword ptr [rax + 15*8]", // RSP
         "push qword ptr [rax + 17*8]", // RFLAGS
-        "push 0x23",          // CS
+        "push 0x33",          // CS (gdt::USER_CS)
         "push qword ptr [rax + 16*8]", // RIP
         "mov r8,  [rax + 0*8]",
         "mov r9,  [rax + 1*8]",
