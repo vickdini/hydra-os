@@ -364,8 +364,9 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 /// * `fpu` - Raw pointer to the saved userland FPU/SSE state buffer.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
-    // Calls that only read the caller's identity run without the kernel lock
-    if let Some(r) = crate::compat::linux::fast_syscall(frame.rax) {
+    // Calls that only read the caller's identity, and private futex wakes, run without
+    // the kernel lock
+    if let Some(r) = crate::compat::linux::fast_syscall(frame) {
         frame.rax = r as u64;
         // A timer tick that arrived meanwhile (interrupts are off here) is taken now, in
         // kernel mode, so its time counts as the call's (system time) rather than the

@@ -105,9 +105,10 @@ pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats 
 });
 
 /// Answers, without the kernel lock, the system calls that only read the caller's own
-/// identity (`getpid`, `gettid`, `getppid`, `getuid`, `getgid`, `geteuid`, `getegid`): many
-/// threads call them at once, and the lock would make each wait for the others' whole system
-/// calls. They take the scheduler's and the process table's locks briefly instead.
+/// identity (`getpid`, `gettid`, `getppid`, `getuid`, `getgid`, `geteuid`, `getegid`) and
+/// private futex wakes: many threads call them at once, and the lock would make each wait for
+/// the others' whole system calls. Identities come from a per-CPU cache (no lock); a wake
+/// takes the futex queue's lock, and the scheduler's when it wakes a waiter.
 ///
 /// Called at system call entry with interrupts off. Pending signals are delivered at the
 /// next trap or system call (within a tick).
@@ -115,8 +116,10 @@ pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats 
 /// # Returns
 /// The result, or `None` when the call must take the normal path: another call, a Hydra
 /// (non-Linux) task, a task with a seccomp filter or a tracer, or system call tracing on.
-pub fn fast_syscall(nr: u64) -> Option<i64> {
+pub fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
     const GETPPID: u64 = 110;
+    const FUTEX: u64 = 202;
+    let nr = frame.rax;
     let slot = match nr {
         SYS_GETPID => 2,
         SYS_GETTID => 3,
@@ -125,11 +128,28 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
         SYS_GETGID => 6,
         SYS_GETEUID => 7,
         SYS_GETEGID => 8,
+        // Only a private wake; anything else about futexes takes the normal path
+        FUTEX if futex::fast_wake_op(frame.rsi as i32, frame.r9 as u32) => 9,
         _ => return None,
     };
     if TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
         return None;
     }
+    let answers = ident_answers()?;
+    if nr == FUTEX {
+        return Some(futex::fast_wake(answers[9 - 2], frame.rdi, frame.rdx as u32, frame.rsi as i32, frame.r9 as u32));
+    }
+    Some(answers[slot - 2] as i64)
+}
+
+/// The calling task's answers to the identity calls and its address space (getpid,
+/// gettid, getppid, getuid, getgid, geteuid, getegid, futex space), from this CPU's cache
+/// when nothing changed since it was filled (no lock), otherwise computed and cached.
+///
+/// # Returns
+/// `None` for a task the fast path does not serve (a Hydra task, or one with a seccomp
+/// filter or a tracer).
+fn ident_answers() -> Option<[u64; 8]> {
     use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
     let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
     let cache = &IDENT_CACHE[cpu];
@@ -137,11 +157,22 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
     let tid = crate::task::CURRENT_TID.load(Acquire);
     // This CPU's answers for the task it runs, if nothing changed since (no lock at all)
     if tid != 0 && cache[1].load(Relaxed) == tid && cache[0].load(Acquire) == epoch {
-        return Some(cache[slot].load(Relaxed) as i64);
+        let mut a = [0u64; 8];
+        for (k, v) in a.iter_mut().enumerate() {
+            *v = cache[2 + k].load(Relaxed);
+        }
+        return Some(a);
     }
     // This task's seccomp filter and tracer (other tasks' do not matter)
-    let (linux, filtered, tgid, tid, ids) = crate::task::with_current_task_mut(|t| {
-        (t.personality == crate::task::TaskPersonality::Linux, t.seccomp.mode != 0, t.tgid, t.id.0, [t.uid, t.gid, t.euid, t.egid])
+    let (linux, filtered, tgid, tid, ids, space) = crate::task::with_current_task_mut(|t| {
+        (
+            t.personality == crate::task::TaskPersonality::Linux,
+            t.seccomp.mode != 0,
+            t.tgid,
+            t.id.0,
+            [t.uid, t.gid, t.euid, t.egid],
+            t.mm.as_ref().map_or(t.tgid, |m| alloc::sync::Arc::as_ptr(m) as u64),
+        )
     })?;
     if !linux || filtered || ptrace::is_traced(tid) {
         return None;
@@ -154,6 +185,7 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
         ns::id_for_caller(ids[1], true) as u64,
         ns::id_for_caller(ids[2], false) as u64,
         ns::id_for_caller(ids[3], true) as u64,
+        space,
     ];
     // Kept under the epoch read before they were computed: a change meanwhile makes them
     // stale at once (only this CPU writes its cache, with interrupts off)
@@ -163,7 +195,7 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
     }
     cache[1].store(tid, Relaxed);
     cache[0].store(epoch, Release);
-    Some(answers[slot - 2] as i64)
+    Some(answers)
 }
 
 /// Bumped by whatever can change what the identity system calls answer (credentials,
@@ -172,9 +204,9 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
 static IDENT_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 /// Per CPU: the epoch and task of the cached answers, then getpid, gettid, getppid, getuid,
-/// getgid, geteuid and getegid.
-static IDENT_CACHE: [[core::sync::atomic::AtomicU64; 9]; crate::arch::smp::MAX_CPUS] =
-    [const { [const { core::sync::atomic::AtomicU64::new(0) }; 9] }; crate::arch::smp::MAX_CPUS];
+/// getgid, geteuid, getegid and the futex address space.
+static IDENT_CACHE: [[core::sync::atomic::AtomicU64; 10]; crate::arch::smp::MAX_CPUS] =
+    [const { [const { core::sync::atomic::AtomicU64::new(0) }; 10] }; crate::arch::smp::MAX_CPUS];
 
 /// Something that the identity system calls answer may have changed (see [`IDENT_EPOCH`]).
 pub fn ident_changed() {

@@ -15,6 +15,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 
 static int fails;
 static void check(int ok, const char *what) {
@@ -104,6 +106,35 @@ static double run_stat(int procs) {
     return (now() - t0) / 2000 * 1e6;
 }
 
+// A private futex wake with no waiter (what an uncontended unlock costs), 50000 times in
+// each of `threads` threads at once: nanoseconds of wall time per call
+static void *wake_work(void *x) {
+    int word = 0;
+    for (int i = 0; i < 50000; i++) syscall(SYS_futex, &word, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    return NULL;
+}
+static double run_wake(int threads) {
+    pthread_t t[8];
+    double t0 = now();
+    for (int i = 0; i < threads; i++) pthread_create(&t[i], NULL, wake_work, NULL);
+    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
+    return (now() - t0) / 50000 * 1e9;
+}
+
+// Two threads handing a turn back and forth through a futex (wait until woken): every
+// wake must reach its waiter, or the exchange stops
+static int turn;
+static const int PONG_ROUNDS = 2000;
+static void pass_turn(int mine, int theirs) {
+    while (__atomic_load_n(&turn, __ATOMIC_ACQUIRE) != mine) syscall(SYS_futex, &turn, FUTEX_WAIT_PRIVATE, theirs, NULL, NULL, 0);
+    __atomic_store_n(&turn, theirs, __ATOMIC_RELEASE);
+    syscall(SYS_futex, &turn, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+}
+static void *pong(void *x) {
+    for (int i = 0; i < PONG_ROUNDS; i++) pass_turn(1, 0);
+    return NULL;
+}
+
 // A thread reading a page until it faults
 static volatile char *page;
 static volatile int reading, faulted;
@@ -184,6 +215,16 @@ int main(void) {
     printf("     getppid: %.0f ns per call on 1 thread, %.0f ns per call on %d at once\n", q1, qk, k);
     double s1 = run_stat(1), sk = run_stat(k);
     printf("     stat: %.1f us per call in 1 process, %.1f us per call in %d at once\n", s1, sk, k);
+    double w1 = run_wake(1), wk = run_wake(k);
+    printf("     futex wake: %.0f ns per call on 1 thread, %.0f ns per call on %d at once\n", w1, wk, k);
+    turn = 0;
+    pthread_t pt;
+    double f0 = now();
+    pthread_create(&pt, NULL, pong, NULL);
+    for (int i = 0; i < PONG_ROUNDS; i++) pass_turn(0, 1);
+    pthread_join(pt, NULL);
+    printf("     futex ping-pong: %.1f us per round trip\n", (now() - f0) / PONG_ROUNDS * 1e6);
+    check(1, "futex wait and wake between threads");
     printf(fails ? "SMP TEST FAILED (%d)\n" : "SMP TEST PASSED\n", fails);
     return fails != 0;
 }

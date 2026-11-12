@@ -573,6 +573,29 @@ fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
     })
 }
 
+/// Whether futex operation `op` (with `val3`) is a private wake the system call fast path
+/// serves (`FUTEX_WAKE`, or `FUTEX_WAKE_BITSET` with a nonzero mask, private).
+pub fn fast_wake_op(op: i32, val3: u32) -> bool {
+    let cmd = op & FUTEX_CMD_MASK;
+    op & FUTEX_PRIVATE_FLAG != 0 && (cmd == FUTEX_WAKE || (cmd == FUTEX_WAKE_BITSET && val3 != 0))
+}
+
+/// A private futex wake without the kernel lock (see [`fast_wake_op`]): it touches no user
+/// memory, only the futex queue and, for the waiters it wakes, the scheduler.
+///
+/// # Arguments
+/// * `space` - The caller's address space (as [`key_of`] computes it).
+/// * `uaddr`, `val`, `op`, `val3` - The `futex` arguments.
+///
+/// # Returns
+/// The number of waiters woken.
+pub fn fast_wake(space: u64, uaddr: u64, val: u32, op: i32, val3: u32) -> i64 {
+    let bitset = if op & FUTEX_CMD_MASK == FUTEX_WAKE { FUTEX_BITSET_MATCH_ANY } else { val3 };
+    let ids = GLOBAL_FUTEX.lock().wake_task_ids(FutexKey { space, uaddr }, val as usize, bitset);
+    wake_ids(&ids);
+    ids.len() as i64
+}
+
 /// Top-level system call dispatcher for `sys_futex` (`SYSCALL 202`).
 ///
 /// # Arguments
