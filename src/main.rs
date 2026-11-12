@@ -137,8 +137,10 @@ fn panic(_info: &PanicInfo) -> ! {
 /// Returns [`Status::SUCCESS`] if the shell ever terminates normally (in practice, the kernel runs until poweroff).
 #[entry]
 fn main() -> Status {
+    arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
     // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
+    arch::boottime::mark("banner");
     arch::percpu::init_this_cpu(0);
     arch::smp::bkl_enter();
 
@@ -151,6 +153,7 @@ fn main() -> Status {
 
     // 1. GDT & TSS Setup
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("GDT, IDT");
     println!("[*] Step 1: Initializing GDT, TSS & Ring 3 Segments...");
     arch::gdt::init();
     console::set_color(Color::LightGreen, Color::Black);
@@ -179,6 +182,7 @@ fn main() -> Status {
 
     // 3. Memory Subsystem: UEFI Memory Map & Physical Frame Allocator
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("memory map, frame allocator");
     println!("\n[*] Step 2: Discovering Memory & Initializing Frame Allocator...");
     memory::frame_allocator::init_memory_from_uefi();
 
@@ -208,6 +212,7 @@ fn main() -> Status {
 
     // 3b. Dynamic Kernel Heap Allocator Setup
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("heap");
     println!("\n[*] Step 2b: Initializing Dynamic Kernel Heap Allocator...");
     match memory::heap::init() {
         Ok(stats) => {
@@ -237,6 +242,7 @@ fn main() -> Status {
 
     // 4. Virtual Memory: 4-Level Paging (PML4) & Autonomous Kernel Address Space
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("paging");
     println!("\n[*] Step 3: Initializing Autonomous 4-Level Paging (PML4)...");
     let active_space = memory::paging::AddressSpace::active();
     let sample_virt = VirtAddr::new(main as *const () as usize as u64);
@@ -309,6 +315,7 @@ fn main() -> Status {
 
     // 4b. Hardware Display Discovery: UEFI Graphics Output Protocol (GOP)
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("framebuffer console");
     println!("\n[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...");
     match video::init_gop() {
         Ok(info) => {
@@ -343,6 +350,7 @@ fn main() -> Status {
 
     // 5. Capability-Based Security Model
     console::set_color(Color::Yellow, Color::Black);
+    arch::boottime::mark("capabilities, IPC test");
     println!("\n[*] Step 4: Initializing Task Capability Space...");
 
     let mut cap_table = CapabilityTable::new();
@@ -400,6 +408,7 @@ fn main() -> Status {
 [*] Step 6: Initializing Devices & Reading the Boot Volume...");
     crate::arch::rtc::init();
     crate::arch::mouse::init();
+    arch::boottime::mark("reading the boot files");
     let boot_files = fs::ZfsClient::read_boot_files();
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] Boot volume: {} files staged for the pool", boot_files.len());
@@ -408,6 +417,7 @@ fn main() -> Status {
     console::set_color(Color::Yellow, Color::Black);
     println!("
 [*] Step 7: Initializing Multitasking Scheduler...");
+    arch::boottime::mark("scheduler");
     let active_cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
     task::init(active_cr3);
     console::set_color(Color::LightGreen, Color::Black);
@@ -417,10 +427,12 @@ fn main() -> Status {
     println!("    - Round-Robin Timeslice : {} ms (100 Hz timer tick preemption)",
         task::scheduler::DEFAULT_TIMESLICE_TICKS * 10
     );
+    arch::boottime::mark("supervisor");
     task::supervisor_init();
 
     // 9. Hardware takeover: the kernel leaves the firmware behind and the driver programs
     //    (the disk driver among them) start in Ring 3
+    arch::boottime::mark("hardware takeover (CPUs, drivers, network)");
     if let Err(e) = crate::arch::boot_services::take_hardware_ownership() {
         console::set_color(Color::LightRed, Color::Black);
         println!("[!] Hardware takeover failed: {}", e);
@@ -429,7 +441,9 @@ fn main() -> Status {
     // 10. ZFS file server, on the disk driver
     console::set_color(Color::Yellow, Color::Black);
     println!("[*] Step 8: Initializing the ZFS File Server...");
+    arch::boottime::mark("ZFS file server");
     fs::init_server();
+    arch::boottime::mark("importing the boot files");
     fs::ZfsClient::import_boot_files(boot_files);
     console::set_color(Color::LightGreen, Color::Black);
     println!(
@@ -454,5 +468,7 @@ fn main() -> Status {
     println!("============================================================");
 
     // Hand over execution to the interactive microkernel shell
+    arch::boottime::mark("shell");
+    arch::boottime::report();
     shell::run();
 }

@@ -1139,16 +1139,19 @@ impl ZfsClient {
     ///
     /// The number of newly imported or updated files written into ZFS.
     pub fn import_boot_files(files: Vec<BootFile>) -> usize {
+        crate::arch::boottime::mark("import: reading the manifest");
         let old = read_boot_manifest();
+        crate::arch::boottime::mark("import: checking the files");
         let mut manifest = alloc::string::String::new();
         let mut imported_count = 0;
+        // Files skipped by the manifest, and by reading the pool copy back
+        let (mut unchanged, mut compared) = (0, 0);
         for f in files.iter() {
             let (fat_path, zfs_path, data) = (f.boot_path.as_str(), f.pool_path.as_str(), f.data.as_slice());
             let hash = fnv1a(data);
             let record = |manifest: &mut alloc::string::String| {
                 if let Some((size, sec, nsec)) = pool_meta(zfs_path) {
-                    manifest.push_str(&alloc::format!("{:016x} {} {} {} {}
-", hash, size, sec, nsec, zfs_path));
+                    manifest.push_str(&alloc::format!("{:016x} {} {} {} {}\n", hash, size, sec, nsec, zfs_path));
                 }
             };
 
@@ -1156,6 +1159,7 @@ impl ZfsClient {
             if let Some(&(h, size, sec, nsec)) = old.get(zfs_path) {
                 if h == hash && size == data.len() as u64 && pool_meta(zfs_path) == Some((size, sec, nsec)) {
                     record(&mut manifest);
+                    unchanged += 1;
                     continue;
                 }
             }
@@ -1166,6 +1170,7 @@ impl ZfsClient {
                     let mut existing = alloc::vec![0u8; data.len()];
                     if Self::read_file_by_path(zfs_path, &mut existing).is_ok() && existing == data {
                         record(&mut manifest);
+                        compared += 1;
                         continue;
                     }
                 }
@@ -1189,6 +1194,7 @@ impl ZfsClient {
             }
         }
 
+        crate::arch::boottime::mark("import: comparing the manifest");
         let manifest_changed = Self::file_stat(BOOT_MANIFEST).map_or(true, |st| st.size != manifest.len() as u64)
             || {
                 let mut cur = alloc::vec![0u8; manifest.len()];
@@ -1197,9 +1203,14 @@ impl ZfsClient {
         if manifest_changed {
             let _ = Self::write_file_by_path_batch(BOOT_MANIFEST, manifest.as_bytes());
         }
+        crate::arch::boottime::mark("import: sync");
         if imported_count > 0 || manifest_changed {
             let _ = Self::sync();
         }
+        crate::kprintln!(
+            "[boot] boot files: {} unchanged, {} compared with the pool, {} imported ({} manifest entries before)",
+            unchanged, compared, imported_count, old.len()
+        );
         imported_count
     }
 }

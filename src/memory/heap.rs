@@ -304,8 +304,9 @@ pub fn init() -> Result<HeapStats, &'static str> {
     let start_ptr = heap_start_ptr.ok_or("Failed to allocate contiguous memory pages for kernel heap")?;
 
     unsafe {
-        // Zero-initialize heap memory to ensure clean initial state
-        core::ptr::write_bytes(start_ptr, 0, size);
+        // Not zeroed: allocations that must be zero are zeroed by `alloc_zeroed` (freed memory
+        // is reused as is anyway), and touching all of it took seconds in a virtual machine
+        // (the host backs each page at its first write)
         // Initialize the linked-list allocator
         HEAP_ALLOCATOR.lock().init(start_ptr, size);
     }

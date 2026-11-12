@@ -380,11 +380,19 @@ Seccomp:	{}
             let cpu = super::proc::cpu_times(pid);
             let ct = super::proc::to_clock_ticks;
             let cpu = (ct(cpu.0), ct(cpu.1), ct(cpu.2), ct(cpu.3));
+            // R: a thread running or ready to run; S: all of them waiting
+            let state = if zombie {
+                'Z'
+            } else if crate::task::SCHEDULER.lock().process_runnable(pid) {
+                'R'
+            } else {
+                'S'
+            };
             let mut text = alloc::format!(
                 "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 {} {} {} {} {} {} {} 0 {}",
                 pid,
                 comm,
-                if zombie { 'Z' } else { 'S' },
+                state,
                 ppid,
                 pgid,
                 sid,
@@ -498,8 +506,7 @@ impl PseudoFile {
                 let up = crate::arch::pit::now_ns() / 10_000_000; // hundredths of a second
                 let n = crate::arch::smp::online().max(1);
                 let idle: u64 = (0..n).map(|c| super::proc::to_clock_ticks(cpu_ticks(c)[crate::task::scheduler::CPU_IDLE])).sum();
-                let text = alloc::format!("{}.{:02} {}.{:02}
-", up / 100, up % 100, idle / 100, idle % 100);
+                let text = alloc::format!("{}.{:02} {}.{:02}\n", up / 100, up % 100, idle / 100, idle % 100);
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcLoadavg => {
@@ -507,8 +514,7 @@ impl PseudoFile {
                 let f = |v: u64| alloc::format!("{}.{:02}", v >> 11, ((v & 2047) * 100) >> 11);
                 let (running, total) = crate::task::SCHEDULER.lock().task_counts();
                 let last = super::proc::PROCS.lock().keys().next_back().copied().unwrap_or(0);
-                let text = alloc::format!("{} {} {} {}/{} {}
-", f(l(0)), f(l(1)), f(l(2)), running, total, last);
+                let text = alloc::format!("{} {} {} {}/{} {}\n", f(l(0)), f(l(1)), f(l(2)), running, total, last);
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcCpuinfo => {
@@ -758,8 +764,7 @@ fn proc_stat_text() -> alloc::string::String {
     let n = crate::arch::smp::online().max(1);
     let ct = super::proc::to_clock_ticks;
     let per: alloc::vec::Vec<[u64; 3]> = (0..n).map(|c| cpu_ticks(c).map(ct)).collect();
-    let line = |name: &str, t: [u64; 3]| alloc::format!("{} {} 0 {} {} 0 0 0 0 0 0
-", name, t[0], t[1], t[2]);
+    let line = |name: &str, t: [u64; 3]| alloc::format!("{} {} 0 {} {} 0 0 0 0 0 0\n", name, t[0], t[1], t[2]);
     let total = per.iter().fold([0u64; 3], |a, t| [a[0] + t[0], a[1] + t[1], a[2] + t[2]]);
     let mut text = line("cpu ", total);
     for (i, t) in per.iter().enumerate() {
@@ -769,13 +774,7 @@ fn proc_stat_text() -> alloc::string::String {
     let (running, _) = crate::task::SCHEDULER.lock().task_counts();
     let procs = super::proc::PROCS.lock().len();
     text.push_str(&alloc::format!(
-        "intr 0
-ctxt 0
-btime {}
-processes {}
-procs_running {}
-procs_blocked 0
-",
+        "intr 0\nctxt 0\nbtime {}\nprocesses {}\nprocs_running {}\nprocs_blocked 0\n",
         boot, procs, running.max(1)
     ));
     text

@@ -1645,6 +1645,11 @@ impl Scheduler {
         CPU_TIMES[cpu.min(crate::arch::smp::MAX_CPUS - 1)][kind].fetch_add(n, core::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether a thread of process `tgid` is running on a CPU or ready to (`R` in `/proc`).
+    pub fn process_runnable(&self, tgid: u64) -> bool {
+        self.tasks.iter().any(|t| t.tgid == tgid && matches!(t.state, TaskState::Running | TaskState::Ready))
+    }
+
     /// CPU time of the live threads of process `tgid`: `(ticks run, of which in the kernel)`.
     pub fn process_cpu(&self, tgid: u64) -> (u64, u64) {
         self.tasks
@@ -2207,12 +2212,15 @@ pub(crate) fn idle_task_entry() {
         // it on time rather than at the tick
         let due = super::HR_EARLIEST.load(core::sync::atomic::Ordering::Relaxed);
         if due != u64::MAX && x86_64::instructions::interrupts::are_enabled() {
-            let tick = crate::arch::pit::ticks();
-            if due < (tick + 1) * crate::arch::pit::tick_ns() {
+            // Due within one tick period: the next timer interrupt may come after it (the
+            // interrupts' phase is not the clock's tick boundaries)
+            let now = crate::arch::pit::now_ns();
+            let period = crate::arch::pit::tick_ns();
+            if due < now + period {
                 // Without the kernel lock: other CPUs run kernel code meanwhile (an interrupt
                 // here takes it again)
                 crate::arch::smp::bkl_exit();
-                while crate::arch::pit::now_ns() < due && crate::arch::pit::ticks() == tick && !crate::task::wait::wakes_pending() {
+                while crate::arch::pit::now_ns() < due && crate::arch::pit::now_ns() < now + period && !crate::task::wait::wakes_pending() {
                     // An interrupt meanwhile took the lock: not while spinning
                     crate::arch::smp::bkl_exit();
                     core::hint::spin_loop();

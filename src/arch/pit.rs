@@ -85,7 +85,62 @@ pub fn init(frequency_hz: u32) {
     }
 
     FREQUENCY.store(freq as u64, Ordering::SeqCst);
+    // The time stamp counter's rate, measured now rather than from the ticks (which a
+    // virtual machine may deliver late or merge: the clock would run slow)
+    let mult = calibrate_tsc();
+    if mult != 0 {
+        let seq = CLOCK_SEQ.load(Ordering::Relaxed);
+        CLOCK_SEQ.store(seq | 1, Ordering::Release);
+        core::sync::atomic::fence(Ordering::SeqCst);
+        BASE_TSC.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
+        MULT.store(mult, Ordering::Relaxed);
+        CALIBRATED.store(true, Ordering::Relaxed);
+        core::sync::atomic::fence(Ordering::SeqCst);
+        CLOCK_SEQ.store((seq | 1) + 1, Ordering::Release);
+    }
     TIMER_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// The time stamp counter's rate was measured by [`calibrate_tsc`] (the ticks then do not
+/// change it).
+static CALIBRATED: AtomicBool = AtomicBool::new(false);
+
+/// Measures the time stamp counter against the PIT's channel 2, polled (no interrupts, so
+/// none can be lost): the cycles of a 50 ms countdown, as Linux calibrates it.
+///
+/// # Returns
+/// Nanoseconds per cycle, 32.32 fixed point; 0 if the countdown never ended.
+fn calibrate_tsc() -> u64 {
+    // 50 ms of the PIT's 1.193182 MHz input
+    let latch: u32 = PIT_BASE_FREQUENCY_HZ / 20;
+    let mut gate = Port::<u8>::new(0x61);
+    let (t0, t1, done) = unsafe {
+        let saved = gate.read();
+        // Channel 2's gate on, the speaker off
+        gate.write((saved & !0x02) | 0x01);
+        // Channel 2, low then high byte, mode 0 (interrupt on terminal count: OUT rises at 0)
+        Port::<u8>::new(PIT_COMMAND_PORT).write(0xB0);
+        Port::<u8>::new(0x42).write(latch as u8);
+        Port::<u8>::new(0x42).write((latch >> 8) as u8);
+        let t0 = core::arch::x86_64::_rdtsc();
+        let mut spins = 0u64;
+        let mut done = true;
+        while gate.read() & 0x20 == 0 {
+            spins += 1;
+            if spins > 50_000_000 {
+                done = false;
+                break;
+            }
+        }
+        let t1 = core::arch::x86_64::_rdtsc();
+        gate.write(saved);
+        (t0, t1, done)
+    };
+    if !done || t1 <= t0 {
+        return 0;
+    }
+    let ns = latch as u128 * 1_000_000_000 / PIT_BASE_FREQUENCY_HZ as u128;
+    ((ns << 32) / (t1 - t0) as u128) as u64
 }
 
 /// Increments the monotonic tick counter.
@@ -130,7 +185,7 @@ pub fn on_timer_tick() {
         BASE_FRAC.store(total as u32 as u64, Ordering::Relaxed);
     }
     BASE_TSC.store(now, Ordering::Relaxed);
-    if cpt != 0 {
+    if cpt != 0 && !CALIBRATED.load(Ordering::Relaxed) {
         // Nanoseconds per cycle, as a 32.32 fixed-point number: the new rate counts from here
         MULT.store((((period as u128) << 32) / cpt as u128) as u64, Ordering::Relaxed);
     }
