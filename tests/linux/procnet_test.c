@@ -1,6 +1,7 @@
 // /proc/net/tcp and /proc/net/udp: a listener, both ends of a loopback connection and a
 // bound UDP socket appear with the right addresses, states, uid and inode (the number in
-// /proc/self/fd/N -> socket:[N]); tcp6/udp6 exist; /proc/self/net/tcp is the same table.
+// /proc/self/fd/N -> socket:[N]); tcp6/udp6 exist; /proc/self/net/tcp is the same table;
+// route, ipv6_route, if_inet6, snmp, snmp6 and arp have Linux's formats.
 // Build: gcc -O1 -w -o procnet procnet_test.c
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -56,6 +57,71 @@ static int find(const char *file, int lport, int rport, unsigned *uid, unsigned 
     }
     fclose(f);
     return st;
+}
+
+// Lines of `file` (at most 64), each without its newline; returns the count
+static int lines_of(const char *file, char out[][512]) {
+    FILE *f = fopen(file, "r");
+    if (!f) return -1;
+    int n = 0;
+    while (n < 64 && fgets(out[n], 512, f)) {
+        out[n][strcspn(out[n], "\n")] = 0;
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static int words(const char *s) {
+    int n = 0, in = 0;
+    for (; *s; s++) {
+        if (*s == ' ' || *s == '\t') in = 0;
+        else if (!in) { in = 1; n++; }
+    }
+    return n;
+}
+
+// The routing tables tools read instead of netlink (Wine's network driver among them)
+static void routing_tables(void) {
+    static char l[64][512];
+    int n = lines_of("/proc/net/route", l);
+    check(n >= 1 && !strncmp(l[0], "Iface\tDestination\tGateway", 25), "/proc/net/route has Linux's header");
+    int rows = 0, bad = 0;
+    for (int i = 1; i < n; i++) {
+        char dev[32];
+        unsigned dst, gw, flags, mask;
+        if (sscanf(l[i], "%31s %x %x %x %*d %*d %*d %x", dev, &dst, &gw, &flags, &mask) != 5) { bad++; continue; }
+        rows++;
+        if (!(flags & 1) || (dst & ~mask)) bad++;           /* RTF_UP; destination within its mask */
+        if (dst == 0 && mask == 0 && (!(flags & 2) || !gw)) bad++; /* default route: RTF_GATEWAY and a gateway */
+    }
+    check(bad == 0, "/proc/net/route rows parse (up, destination within mask, default via a gateway)");
+    n = lines_of("/proc/net/if_inet6", l);
+    int lo = 0;
+    for (int i = 0; i < n; i++) {
+        if (!strncmp(l[i], "00000000000000000000000000000001 01 80 10 80", 44) && strstr(l[i], " lo")) lo = 1;
+    }
+    check(lo, "/proc/net/if_inet6 lists ::1 on lo (index 1, /128, host scope)");
+    n = lines_of("/proc/net/ipv6_route", l);
+    int lo6 = 0, ok6 = n >= 0;
+    for (int i = 0; i < n; i++) {
+        if (words(l[i]) != 10) ok6 = 0;
+        if (!strncmp(l[i], "00000000000000000000000000000001 80 ", 36) && strstr(l[i], " lo")) lo6 = 1;
+    }
+    check(ok6 && lo6, "/proc/net/ipv6_route rows have 10 fields, ::1/128 on lo among them");
+    n = lines_of("/proc/net/snmp", l);
+    int ip = 0, icmp = 0;
+    for (int i = 0; i + 1 < n; i++) {
+        if (!strncmp(l[i], "Ip: Forwarding", 14) && !strncmp(l[i + 1], "Ip: ", 4) && words(l[i]) == words(l[i + 1])) ip = 1;
+        if (!strncmp(l[i], "Icmp: InMsgs", 12) && !strncmp(l[i + 1], "Icmp: ", 6) && words(l[i]) == words(l[i + 1])) icmp = 1;
+    }
+    check(ip && icmp, "/proc/net/snmp has Ip: and Icmp: header and value lines of equal length");
+    n = lines_of("/proc/net/snmp6", l);
+    int recv = 0;
+    for (int i = 0; i < n; i++) if (!strncmp(l[i], "Ip6InReceives", 13)) recv = 1;
+    check(recv, "/proc/net/snmp6 has Ip6InReceives");
+    n = lines_of("/proc/net/arp", l);
+    check(n >= 1 && !strncmp(l[0], "IP address       HW type     Flags       HW address", 51), "/proc/net/arp has Linux's header");
 }
 
 int main(void) {
@@ -117,6 +183,7 @@ int main(void) {
     close(l);
     usleep(50000);
     check(find("/proc/net/tcp", port, 0, &uid, &ino, &lip) != 0x0A, "a closed listener is gone");
+    routing_tables();
     printf(fails ? "PROCNET TEST FAILED (%d)\n" : "PROCNET TEST PASSED\n", fails);
     return fails != 0;
 }

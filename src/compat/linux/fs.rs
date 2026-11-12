@@ -117,8 +117,8 @@ devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0
 tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,mode=755 0 0
 ";
 
-/// The socket tables under `/proc/net`.
-const PROC_NET: [&str; 6] = ["tcp", "udp", "tcp6", "udp6", "dev", "unix"];
+/// The socket, interface and routing tables under `/proc/net`.
+const PROC_NET: [&str; 12] = ["tcp", "udp", "tcp6", "udp6", "dev", "unix", "route", "ipv6_route", "if_inet6", "arp", "snmp", "snmp6"];
 
 /// `/proc/net/<table>`, `/proc/self/net/<table>` or `/proc/<pid>/net/<table>` (one network
 /// namespace view per caller, as `/proc/net` links to `self/net`).
@@ -158,6 +158,10 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         p if proc_net_index(p).is_some() => proc_net_index(p).map(PseudoFile::ProcNet),
         "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
         "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
+        "/proc/sys/net/ipv4/conf/default/forwarding" | "/proc/sys/net/ipv6/conf/default/forwarding" | "/proc/sys/net/ipv4/ip_forward" => {
+            Some(PseudoFile::ProcStatic(b"0\n"))
+        }
+        "/proc/sys/net/ipv4/ip_default_ttl" | "/proc/sys/net/ipv6/conf/default/hop_limit" => Some(PseudoFile::ProcStatic(b"64\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
         "/proc/stat" => Some(PseudoFile::ProcStat),
         "/proc/uptime" => Some(PseudoFile::ProcUptime),
@@ -496,7 +500,7 @@ impl PseudoFile {
             PseudoFile::ProcNet(i) => {
                 let text = match PROC_NET[*i as usize] {
                     "unix" => super::unix::proc_net_unix(),
-                    t => super::inet::proc_net(t).unwrap_or_default(),
+                    t => super::inet::proc_net(t).or_else(|| super::rtnetlink::proc_net_text(t)).unwrap_or_default(),
                 };
                 read_slice(text.as_bytes(), cursor, buf)
             }

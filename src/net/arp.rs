@@ -246,6 +246,11 @@ impl ArpCache {
         }
         None
     }
+
+    /// The resolved `(ip, mac)` mappings (for `/proc/net/arp`).
+    pub fn entries(&self) -> alloc::vec::Vec<([u8; 4], [u8; 6])> {
+        self.entries.iter().flatten().map(|e| (e.ip, e.mac)).collect()
+    }
 }
 
 /// Global spinlock-protected ARP cache table.
