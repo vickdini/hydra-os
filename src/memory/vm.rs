@@ -25,9 +25,14 @@
 //! ## Address Space Layout
 //!
 //! ```text
-//! 0x0000_0000_0000 .. 0x0080_0000_0000   PML4[0]: kernel identity map (shared, supervisor),
-//!     0x0001_0000 .. 0x4000_0000           except its first GiB: private user space for
-//!                                          executables linked at fixed addresses (0x400000)
+//! 0x0000_0000_0000 .. 0x0080_0000_0000   PML4[0]: 1 GiB slots, each the process's or the
+//!                                          kernel's (identity map, shared, supervisor):
+//!     0x0001_0000 .. 0x4000_0000           slot 0: always the process's (0x400000 executables)
+//!     0x4000_0000 .. 0x8000_0000           slot 1: the process's unless kernel memory is there
+//!                                          (32-bit code, Wine's 0x7ffe0000, MAP_32BIT)
+//!     0x8000_0000 .. 0x1_0000_0000         slots 2-3: the kernel's (its image, firmware, devices)
+//!     0x1_0000_0000 ..                     the process's but where the kernel heap, firmware
+//!                                          or device memory is (see KERNEL_LOW_SLOTS)
 //! 0x0080_0000_0000 .. 0x8000_0000_0000   PML4[1..256]: private user space
 //!     0x5555_5555_4000                   PIE executable load base
 //!     brk heap                           grows up after the executable
@@ -68,6 +73,53 @@ pub const LOW_USER_START: u64 = 0x1_0000;
 pub const LOW_USER_END: u64 = 0x4000_0000;
 /// One past the highest user virtual address (end of the canonical lower half).
 pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+
+/// The 1 GiB slots of the first 512 GiB (PML4 entry 0) the kernel keeps in every address
+/// space (bit `i`: `[i GiB, i+1 GiB)`): where it runs and what it reaches at its physical
+/// address (its image, heap and boot stack, firmware and ACPI tables, device memory). The
+/// others belong to the process. Slot 0 is always the process's. Until
+/// [`init_low_layout`] runs (and in host tests): all slots but 0, the original layout.
+static KERNEL_LOW_SLOTS: [core::sync::atomic::AtomicU64; 8] = [
+    core::sync::atomic::AtomicU64::new(!1),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+    core::sync::atomic::AtomicU64::new(!0),
+];
+
+/// Whether 1 GiB slot `i` of the first 512 GiB is the kernel's in every address space.
+pub fn kernel_low_slot(i: usize) -> bool {
+    i < 512 && KERNEL_LOW_SLOTS[i / 64].load(Ordering::Relaxed) >> (i % 64) & 1 == 1
+}
+
+/// Sets which low slots are the kernel's: those overlapping any of `ranges` (physical =
+/// identity-mapped `[start, end)`), never slot 0. Called once at the hardware takeover,
+/// before the first process.
+pub fn init_low_layout(ranges: &[(u64, u64)]) {
+    let mut bits = [0u64; 8];
+    for &(start, end) in ranges {
+        if end <= start || start >= USER_SPACE_START {
+            continue;
+        }
+        let first = (start >> 30) as usize;
+        let last = ((end.min(USER_SPACE_START) - 1) >> 30) as usize;
+        for i in first.max(1)..=last {
+            bits[i / 64] |= 1 << (i % 64);
+        }
+    }
+    for (slot, b) in KERNEL_LOW_SLOTS.iter().zip(bits) {
+        slot.store(b, Ordering::SeqCst);
+    }
+}
+
+/// End of the low user window: the first slot the kernel keeps, at most 2 GiB (what
+/// `MAP_32BIT` and 32-bit code get). 1 GiB in the original layout.
+pub fn low_user_end() -> u64 {
+    (1..2).find(|&i| kernel_low_slot(i)).unwrap_or(2) as u64 * 0x4000_0000
+}
 /// Load base for position-independent executables (matches Linux `ELF_ET_DYN_BASE`).
 pub const PIE_BASE: u64 = 0x0000_5555_5555_4000;
 /// Top of the main thread stack (one guard page below the end of user space).
@@ -269,7 +321,17 @@ pub fn is_user_range(start: u64, len: u64) -> bool {
         Some(e) => e,
         None => return false,
     };
-    (start >= USER_SPACE_START && end <= USER_SPACE_END) || (start >= LOW_USER_START && end <= LOW_USER_END)
+    if start < LOW_USER_START || end > USER_SPACE_END {
+        return false;
+    }
+    // Below the main user area: no slot the kernel keeps
+    if start < USER_SPACE_START {
+        let last = ((end.min(USER_SPACE_START) - 1) >> 30) as usize;
+        if ((start >> 30) as usize..=last).any(kernel_low_slot) {
+            return false;
+        }
+    }
+    true
 }
 
 /// True if `addr` is a user address (low window or main user area).
@@ -282,7 +344,8 @@ pub fn is_user_range(start: u64, len: u64) -> bool {
 ///
 /// `true` if `addr` resides within the valid user virtual memory windows.
 fn is_user_addr(addr: u64) -> bool {
-    (USER_SPACE_START..USER_SPACE_END).contains(&addr) || (LOW_USER_START..LOW_USER_END).contains(&addr)
+    (USER_SPACE_START..USER_SPACE_END).contains(&addr)
+        || ((LOW_USER_START..USER_SPACE_START).contains(&addr) && !kernel_low_slot((addr >> 30) as usize))
 }
 
 /// Computes the hardware [`PageTableFlags`] for a user page with VMA protection `prot`.
@@ -1291,15 +1354,18 @@ impl Mm {
 impl Drop for Mm {
     /// Tears down the address space, decrementing reference counts on mapped frames and freeing page tables.
     fn drop(&mut self) {
-        // Owned: the user half, and in PML4[0] the private PDPT with the low window (its
-        // other entries are the kernel's shared identity map). The kernel half is shared.
+        // Owned: the user half, and in PML4[0] the private PDPT with the low slots that are
+        // the process's (the others are the kernel's shared identity map, see
+        // KERNEL_LOW_SLOTS). The kernel half is shared.
         let pml4 = table_at(self.pml4);
         if pml4[0].flags().contains(PageTableFlags::PRESENT) {
             let pdpt_phys = pml4[0].addr();
             let pdpt = table_at(pdpt_phys);
-            if pdpt[0].flags().contains(PageTableFlags::PRESENT) {
-                Self::free_tables(pdpt[0].addr(), 2);
-                pdpt[0].set_unused();
+            for i in 0..512 {
+                if !kernel_low_slot(i) && pdpt[i].flags().contains(PageTableFlags::PRESENT) {
+                    Self::free_tables(pdpt[i].addr(), 2);
+                    pdpt[i].set_unused();
+                }
             }
             pml4[0].set_unused();
             frame_ref_dec(PhysFrame::containing_address(pdpt_phys));

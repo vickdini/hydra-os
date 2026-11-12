@@ -279,6 +279,28 @@ pub fn init() -> Result<HeapStats, &'static str> {
     let usable = FRAME_ALLOCATOR.lock().total_usable_memory() as usize;
     let mut size = HEAP_SIZE.min((usable / 2).max(MIN_HEAP_SIZE));
     let mut heap_start_ptr: Option<*mut u8> = None;
+
+    // Strategy 0: above 4 GiB, else above 2 GiB, down to half the size. The kernel reaches
+    // the heap at its physical address, so the heap's GiB stays out of every program's
+    // address space: below 2 GiB, it would take what 32-bit programs and Wine need
+    // (vm::init_low_layout)
+    let preferred = size;
+    while heap_start_ptr.is_none() && size >= (preferred / 2).max(MIN_HEAP_SIZE) {
+        let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        for floor in [4u64 << 30, 2u64 << 30] {
+            if let Some(frame) = alloc.allocate_contiguous_high(page_count, floor) {
+                heap_start_ptr = Some(frame.start_address().as_u64() as *mut u8);
+                break;
+            }
+        }
+        if heap_start_ptr.is_none() {
+            size = size / 4 * 3;
+        }
+    }
+    if heap_start_ptr.is_none() {
+        size = preferred;
+    }
     while heap_start_ptr.is_none() && size >= MIN_HEAP_SIZE {
         let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
@@ -329,6 +351,12 @@ pub fn init() -> Result<HeapStats, &'static str> {
 /// *Guaranteed to never panic under normal execution.*
 pub fn is_initialized() -> bool {
     HEAP_INITIALIZED.load(Ordering::SeqCst)
+}
+
+/// The heap's physical (and identity-mapped virtual) range `[start, end)`.
+pub fn range() -> (u64, u64) {
+    let start = HEAP_START_ADDR.load(Ordering::SeqCst);
+    (start, start + HEAP_TOTAL_SIZE.load(Ordering::SeqCst) as u64)
 }
 
 /// Computes real-time utilization metrics for the dynamic kernel heap.

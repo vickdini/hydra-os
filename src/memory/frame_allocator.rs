@@ -324,6 +324,38 @@ impl PhysicalMemoryManager {
         None
     }
 
+    /// Takes `count` physically contiguous frames from the top of the highest region that
+    /// has them at or above `min_addr` (the kernel heap: above the addresses programs need).
+    ///
+    /// # Returns
+    ///
+    /// The first frame, or `None` when no region has such a block.
+    pub fn allocate_contiguous_high(&mut self, count: usize, min_addr: u64) -> Option<PhysFrame<Size4KiB>> {
+        let bytes = count as u64 * PAGE_SIZE;
+        let mut best: Option<(usize, u64)> = None;
+        for i in self.current_region_idx..self.region_count {
+            let Some(r) = self.regions[i] else { continue };
+            // What the bump allocator has not handed out yet: [free_start, end)
+            let used = if i == self.current_region_idx { self.next_page_in_region } else { 0 };
+            let free_start = r.start.as_u64() + used * PAGE_SIZE;
+            let end = r.start.as_u64() + r.page_count * PAGE_SIZE;
+            if end < bytes || end - bytes < free_start.max(min_addr) {
+                continue;
+            }
+            let start = end - bytes;
+            if best.map_or(true, |(_, b)| start > b) {
+                best = Some((i, start));
+            }
+        }
+        let (i, start) = best?;
+        // Taken from the top of the region: the bump allocator never reaches it
+        if let Some(r) = self.regions[i].as_mut() {
+            r.page_count -= count as u64;
+        }
+        self.allocated_frames_count += count as u64;
+        Some(PhysFrame::containing_address(PhysAddr::new(start)))
+    }
+
     /// Allocates a contiguous block of physical frames (e.g. for the kernel heap or DMA buffers).
     ///
     /// # Arguments

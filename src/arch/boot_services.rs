@@ -113,6 +113,36 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     let entries_count = memory_map.entries().count();
 
+    // 3a. Which GiB slots of the low 512 GiB the kernel keeps in every address space: all
+    // it reaches at physical addresses (anything but free RAM in the final memory map:
+    // its image, firmware data, ACPI, devices; its heap and boot stack), and always
+    // [2 GiB, 4 GiB) (image, PCI hole, APICs). Programs get the rest.
+    {
+        let mut ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        for d in memory_map.entries() {
+            if d.ty != uefi::boot::MemoryType::CONVENTIONAL {
+                ranges.push((d.phys_start, d.phys_start + d.page_count * 4096));
+            }
+        }
+        ranges.push(crate::memory::heap::range());
+        ranges.push((2 << 30, 4 << 30));
+        let sp: u64;
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
+        ranges.push((sp & !0xFFFF, (sp | 0xFFFF) + 1));
+        if let Some(info) = crate::video::get_video_info() {
+            let fb = info.base_ptr as u64;
+            ranges.push((fb, fb + 1));
+        }
+        crate::memory::vm::init_low_layout(&ranges);
+        let kept: alloc::vec::Vec<usize> = (1..512).filter(|&i| crate::memory::vm::kernel_low_slot(i)).collect();
+        crate::kprintln!(
+            "[vm] programs' low window [0x10000, {:#x}); kernel keeps GiB slots {:?} (heap at {:#x})",
+            crate::memory::vm::low_user_end(),
+            kept,
+            crate::memory::heap::range().0
+        );
+    }
+
     // 3b. Task switches and syscalls save x87/SSE state with FXSAVE only. Disable XSAVE
     // so user code (glibc's CPU feature detection) never enables AVX registers that would
     // not be preserved.

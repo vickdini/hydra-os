@@ -229,15 +229,14 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
     let mut m = mm.lock();
     // MAP_32BIT: below 2 GiB, unless the hint is free (Linux tries the hint first). JITs
     // and Wine put what 32-bit code reaches here. Linux's window is [1 GiB, 2 GiB); Hydra's
-    // low user window ends at 1 GiB (above it, the kernel maps physical memory), so it
-    // is [LOW_USER_START, LOW_USER_END) here.
+    // is its low user window [LOW_USER_START, vm::low_user_end()).
     let mut addr = addr;
     if flags & MAP_32BIT != 0 && !fixed && !noreplace {
         let hint = addr & !(PAGE_SIZE - 1);
         let len_up = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let hint_free = hint != 0 && crate::memory::vm::is_user_range(hint, len_up) && !m.overlaps(hint, hint + len_up);
         if !hint_free {
-            match m.find_free_in(len, crate::memory::vm::LOW_USER_START, crate::memory::vm::LOW_USER_END) {
+            match m.find_free_in(len, crate::memory::vm::LOW_USER_START, crate::memory::vm::low_user_end()) {
                 Some(a) => addr = a,
                 None => return -ENOMEM,
             }
