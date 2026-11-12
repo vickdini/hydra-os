@@ -728,7 +728,7 @@ fn mem_read(tgid: u64, addr: u64, len: usize) -> Result<Vec<u8>, i64> {
         let n = ((4096 - (a & 4095)) as usize).min(len - out.len());
         m.prefault(a, n as u64, false).map_err(|_| EIO)?;
         let phys = m.translate(a).ok_or(EIO)?.as_u64();
-        out.extend_from_slice(unsafe { core::slice::from_raw_parts(phys as *const u8, n) });
+        out.extend_from_slice(unsafe { core::slice::from_raw_parts(crate::memory::frame_allocator::phys_to_virt(phys) as *const u8, n) });
         a += n as u64;
     }
     Ok(out)
@@ -874,7 +874,7 @@ impl ProcMem {
             } else {
                 match m.prefault(a, n as u64, false).ok().and_then(|_| m.translate(a)) {
                     Some(phys) => {
-                        buf[done..done + n].copy_from_slice(unsafe { core::slice::from_raw_parts(phys.as_u64() as *const u8, n) });
+                        buf[done..done + n].copy_from_slice(unsafe { core::slice::from_raw_parts(crate::memory::frame_allocator::phys_to_virt(phys.as_u64()) as *const u8, n) });
                         true
                     }
                     None => false,

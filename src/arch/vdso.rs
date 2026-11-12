@@ -58,7 +58,7 @@ fn pages() -> Option<Arc<Pages>> {
                 frames.push(crate::memory::frame_allocator::alloc_user_frame()?);
             }
             for (i, f) in frames.iter().enumerate() {
-                let p = f.start_address().as_u64() as *mut u8;
+                let p = crate::memory::frame_allocator::phys_to_virt(f.start_address().as_u64());
                 unsafe {
                     core::ptr::write_bytes(p, 0, PAGE as usize);
                     if i > 0 {
@@ -68,7 +68,7 @@ fn pages() -> Option<Arc<Pages>> {
                     }
                 }
             }
-            VVAR.store(frames[0].start_address().as_u64() as *mut Vvar, Ordering::Release);
+            VVAR.store(crate::memory::frame_allocator::phys_to_virt(frames[0].start_address().as_u64()) as *mut Vvar, Ordering::Release);
             publish();
             Some(Arc::new(Pages { frames }))
         })

@@ -109,7 +109,7 @@ impl MemFd {
                 let off = size % PAGE_SIZE as usize;
                 unsafe {
                     core::ptr::write_bytes(
-                        (frame.start_address().as_u64() as *mut u8).add(off),
+                        (crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64())).add(off),
                         0,
                         PAGE_SIZE as usize - off,
                     );
@@ -157,7 +157,7 @@ impl MemFd {
             match self.page(pos / PAGE_SIZE as usize) {
                 Some(frame) => unsafe {
                     core::ptr::copy_nonoverlapping(
-                        (frame.start_address().as_u64() as *const u8).add(in_page),
+                        (crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()) as *const u8).add(in_page),
                         dst[done..].as_mut_ptr(),
                         n,
                     );
@@ -190,7 +190,7 @@ impl MemFd {
                 Some(frame) => unsafe {
                     core::ptr::copy_nonoverlapping(
                         src[done..].as_ptr(),
-                        (frame.start_address().as_u64() as *mut u8).add(in_page),
+                        (crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64())).add(in_page),
                         n,
                     );
                 },

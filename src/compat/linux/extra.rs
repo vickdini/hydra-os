@@ -775,8 +775,8 @@ fn remote_copy(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, data: Option<&
     let mut m = mm.lock();
     m.prefault(addr, n, data.is_some()).ok()?;
     let phys = m.translate(addr)?.as_u64();
-    // Physical memory is identity-mapped in the kernel
-    let ptr = phys as *mut u8;
+    // Through the kernel's direct map of physical memory
+    let ptr = crate::memory::frame_allocator::phys_to_virt(phys);
     unsafe {
         match data {
             Some(d) => {

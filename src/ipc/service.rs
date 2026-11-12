@@ -138,11 +138,11 @@ impl ContiguousFrames {
             fa.adopt(PhysFrame::containing_address(PhysAddr::new(base + i * 4096)));
         }
         drop(fa);
-        unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 4096) as usize) };
+        unsafe { core::ptr::write_bytes(crate::memory::frame_allocator::phys_to_virt(base), 0, (pages * 4096) as usize) };
         Some(Arc::new(Self { base, pages }))
     }
 
-    /// Accesses the contiguous memory as a mutable byte slice from the kernel's identity mapping.
+    /// Accesses the contiguous memory as a mutable byte slice through the kernel's direct map.
     ///
     /// # Returns
     ///
@@ -157,7 +157,7 @@ impl ContiguousFrames {
     ///
     /// *Guaranteed to never panic under normal execution.*
     pub unsafe fn bytes(&self) -> &'static mut [u8] {
-        core::slice::from_raw_parts_mut(self.base as *mut u8, (self.pages * 4096) as usize)
+        core::slice::from_raw_parts_mut(crate::memory::frame_allocator::phys_to_virt(self.base), (self.pages * 4096) as usize)
     }
 }
 

@@ -221,7 +221,7 @@ impl RingMem {
     /// Kernel address of byte `off` of the ring area (never straddles a page for the
     /// aligned fields read here).
     fn at(&self, off: usize) -> *mut u8 {
-        (self.rings[off / 4096].start_address().as_u64() + (off % 4096) as u64) as *mut u8
+        crate::memory::frame_allocator::phys_to_virt(self.rings[off / 4096].start_address().as_u64() + (off % 4096) as u64)
     }
 
     fn get(&self, off: usize) -> u32 {
@@ -235,7 +235,7 @@ impl RingMem {
 
     fn sqe(&self, idx: u32) -> [u8; 64] {
         let off = idx as usize * 64;
-        let p = (self.sqes[off / 4096].start_address().as_u64() + (off % 4096) as u64) as *const [u8; 64];
+        let p = crate::memory::frame_allocator::phys_to_virt(self.sqes[off / 4096].start_address().as_u64() + (off % 4096) as u64) as *const [u8; 64];
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         unsafe { core::ptr::read_volatile(p) }
     }

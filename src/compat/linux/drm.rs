@@ -125,7 +125,7 @@ impl Bo {
             let in_page = (off % PAGE_SIZE) as usize;
             let n = (PAGE_SIZE as usize - in_page).min(len - done);
             unsafe {
-                let src = (self.frames[page].start_address().as_u64() as *const u8).add(in_page);
+                let src = (crate::memory::frame_allocator::phys_to_virt(self.frames[page].start_address().as_u64()) as *const u8).add(in_page);
                 core::ptr::copy_nonoverlapping(src, dst.add(done), n);
             }
             done += n;

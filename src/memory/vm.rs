@@ -207,7 +207,7 @@ static RETIRED_MMS: Mutex<[Option<Arc<Mutex<Mm>>>; 64]> = Mutex::new([const { No
 /// # Returns
 ///
 /// `true` if CPU execute-disable bit 11 is enabled in EFER; `false` otherwise.
-fn nx_enabled() -> bool {
+pub(crate) fn nx_enabled() -> bool {
     let efer = unsafe { crate::arch::syscall::rdmsr(0xC000_0080) };
     efer & (1 << 11) != 0
 }
@@ -223,7 +223,7 @@ fn nx_enabled() -> bool {
 /// Mutable reference to the `PageTable`.
 #[inline]
 fn table_at<'a>(phys: PhysAddr) -> &'a mut PageTable {
-    unsafe { &mut *(phys.as_u64() as *mut PageTable) }
+    unsafe { &mut *(crate::memory::frame_allocator::phys_to_virt(phys.as_u64()) as *mut PageTable) }
 }
 
 /// Rounds `addr` down to the nearest 4 KiB page boundary.
@@ -900,7 +900,7 @@ impl Mm {
         self.handle_fault(addr, false, false).map_err(|_| -12)?;
         if let Some(d) = data {
             let phys = self.translate(page_down(addr)).ok_or(-14i64)?;
-            unsafe { core::ptr::copy_nonoverlapping(d.as_ptr(), phys.as_u64() as *mut u8, (PAGE_SIZE as usize).min(d.len())) };
+            unsafe { core::ptr::copy_nonoverlapping(d.as_ptr(), crate::memory::frame_allocator::phys_to_virt(phys.as_u64()), (PAGE_SIZE as usize).min(d.len())) };
         }
         Ok(())
     }
@@ -1098,8 +1098,8 @@ impl Mm {
                 let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        frame.start_address().as_u64() as *const u8,
-                        copy.start_address().as_u64() as *mut u8,
+                        crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()) as *const u8,
+                        crate::memory::frame_allocator::phys_to_virt(copy.start_address().as_u64()),
                         PAGE_SIZE as usize,
                     );
                 }
@@ -1125,8 +1125,8 @@ impl Mm {
                     let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
                     unsafe {
                         core::ptr::copy_nonoverlapping(
-                            source.start_address().as_u64() as *const u8,
-                            copy.start_address().as_u64() as *mut u8,
+                            crate::memory::frame_allocator::phys_to_virt(source.start_address().as_u64()) as *const u8,
+                            crate::memory::frame_allocator::phys_to_virt(copy.start_address().as_u64()),
                             PAGE_SIZE as usize,
                         );
                     }
@@ -1171,7 +1171,7 @@ impl Mm {
             }
             let phys = self.translate(va).ok_or(FaultError::Segv)?;
             unsafe {
-                core::ptr::copy_nonoverlapping(data[done..].as_ptr(), phys.as_u64() as *mut u8, n);
+                core::ptr::copy_nonoverlapping(data[done..].as_ptr(), crate::memory::frame_allocator::phys_to_virt(phys.as_u64()), n);
             }
             done += n;
         }
@@ -1216,7 +1216,7 @@ impl Mm {
             } else {
                 let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
                 unsafe {
-                    core::ptr::copy_nonoverlapping(frame.start_address().as_u64() as *const u8, copy.start_address().as_u64() as *mut u8, PAGE_SIZE as usize);
+                    core::ptr::copy_nonoverlapping(crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()) as *const u8, crate::memory::frame_allocator::phys_to_virt(copy.start_address().as_u64()), PAGE_SIZE as usize);
                 }
                 entry.set_addr(copy.start_address(), pte_flags_for(vma.prot, false));
                 frame_ref_dec(frame);
@@ -1224,7 +1224,7 @@ impl Mm {
                 copy
             };
             unsafe {
-                core::ptr::copy_nonoverlapping(data[done..].as_ptr(), (target.start_address().as_u64() + (va & (PAGE_SIZE - 1))) as *mut u8, n);
+                core::ptr::copy_nonoverlapping(data[done..].as_ptr(), crate::memory::frame_allocator::phys_to_virt(target.start_address().as_u64() + (va & (PAGE_SIZE - 1))), n);
             }
             done += n;
         }
@@ -1582,7 +1582,7 @@ impl MappedObject for BufferObject {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.data[offset..].as_ptr(),
-                frame.start_address().as_u64() as *mut u8,
+                crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()),
                 n,
             );
         }

@@ -137,6 +137,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     }
     let cr3_frame = Cr3::read().0.start_address().as_u64();
     crate::task::update_cr3(cr3_frame);
+    // Hydra's tables hold the direct map of physical memory: use it from now on
+    crate::memory::frame_allocator::enable_direct_map();
 
     // 7. Initialize and remap legacy 8259 dual-PIC (Master: IRQ 0..7 -> 32..39, Slave: IRQ 8..15 -> 40..47)
     crate::arch::pic::init();

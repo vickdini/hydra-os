@@ -65,7 +65,7 @@ impl MappedObject for InodeObject {
             return None;
         }
         let frame = alloc_user_frame()?;
-        let buf = unsafe { core::slice::from_raw_parts_mut(frame.start_address().as_u64() as *mut u8, PAGE_SIZE as usize) };
+        let buf = unsafe { core::slice::from_raw_parts_mut(crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()), PAGE_SIZE as usize) };
         if ZfsClient::read_at(self.ino, pgoff * PAGE_SIZE, buf).is_err() {
             frame_ref_dec(frame);
             return None;

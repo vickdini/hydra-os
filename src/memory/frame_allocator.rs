@@ -75,8 +75,9 @@ pub struct PhysicalMemoryManager {
     free_list_head: u64,
     /// Number of frames currently linked in the intrusive free list.
     free_list_len: u64,
-    /// Pointer to the base of the 16-bit per-frame reference count table in identity-mapped RAM.
-    refcounts: *mut u16,
+    /// Physical address of the 16-bit per-frame reference count table (0: none yet),
+    /// reached through [`phys_to_virt`].
+    refcounts: u64,
     /// Total number of frame entries covered by the `refcounts` array.
     refcount_entries: u64,
 }
@@ -99,7 +100,7 @@ impl PhysicalMemoryManager {
             allocated_frames_count: 0,
             free_list_head: 0,
             free_list_len: 0,
-            refcounts: core::ptr::null_mut(),
+            refcounts: 0,
             refcount_entries: 0,
         }
     }
@@ -128,11 +129,11 @@ impl PhysicalMemoryManager {
         let entries = max_end / PAGE_SIZE;
         let table_pages = ((entries * 2 + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
         if let Some(frame) = self.allocate_contiguous_frames(table_pages) {
-            let ptr = frame.start_address().as_u64() as *mut u16;
+            let pa = frame.start_address().as_u64();
             unsafe {
-                core::ptr::write_bytes(ptr as *mut u8, 0, table_pages * PAGE_SIZE as usize);
+                core::ptr::write_bytes(phys_to_virt(pa), 0, table_pages * PAGE_SIZE as usize);
             }
-            self.refcounts = ptr;
+            self.refcounts = pa;
             self.refcount_entries = entries;
         }
     }
@@ -148,10 +149,10 @@ impl PhysicalMemoryManager {
     /// `Some(*mut u16)` pointing to the array slot if within bounds; `None` otherwise.
     fn refcount_slot(&self, frame: PhysFrame<Size4KiB>) -> Option<*mut u16> {
         let idx = frame.start_address().as_u64() / PAGE_SIZE;
-        if self.refcounts.is_null() || idx >= self.refcount_entries {
+        if self.refcounts == 0 || idx >= self.refcount_entries {
             None
         } else {
-            Some(unsafe { self.refcounts.add(idx as usize) })
+            Some(unsafe { (phys_to_virt(self.refcounts) as *mut u16).add(idx as usize) })
         }
     }
 
@@ -228,7 +229,7 @@ impl PhysicalMemoryManager {
     fn push_free(&mut self, frame: PhysFrame<Size4KiB>) {
         let addr = frame.start_address().as_u64();
         unsafe {
-            *(addr as *mut u64) = self.free_list_head;
+            *(phys_to_virt(addr) as *mut u64) = self.free_list_head;
         }
         self.free_list_head = addr;
         self.free_list_len += 1;
@@ -243,9 +244,14 @@ impl PhysicalMemoryManager {
     pub fn allocate_zeroed_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         let frame = self.allocate_frame()?;
         unsafe {
-            core::ptr::write_bytes(frame.start_address().as_u64() as *mut u8, 0, PAGE_SIZE as usize);
+            core::ptr::write_bytes(phys_to_virt(frame.start_address().as_u64()), 0, PAGE_SIZE as usize);
         }
         Some(frame)
+    }
+
+    /// One past the highest physical address of usable RAM (0 before any region).
+    pub fn max_phys_end(&self) -> u64 {
+        self.regions.iter().flatten().map(|r| r.start.as_u64() + r.page_count * PAGE_SIZE).max().unwrap_or(0)
     }
 
     /// Returns the total usable physical memory registered in bytes.
@@ -298,7 +304,7 @@ impl PhysicalMemoryManager {
     fn allocate_frame_raw(&mut self) -> Option<PhysFrame<Size4KiB>> {
         if self.free_list_head != 0 {
             let addr = self.free_list_head;
-            self.free_list_head = unsafe { *(addr as *const u64) };
+            self.free_list_head = unsafe { *(phys_to_virt(addr) as *const u64) };
             self.free_list_len -= 1;
             self.allocated_frames_count += 1;
             return Some(PhysFrame::containing_address(PhysAddr::new(addr)));
@@ -355,6 +361,30 @@ unsafe impl FrameAllocator<Size4KiB> for PhysicalMemoryManager {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.allocate_frame()
     }
+}
+
+/// Base of the kernel's direct map of physical memory: once [`enable_direct_map`] ran,
+/// physical address `p` is at virtual `DIRECT_MAP_BASE + p` in every address space
+/// (PML4 entry 256 and up, kernel-only). Built by `paging::AddressSpace::create_kernel_space`.
+pub const DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// What [`phys_to_virt`] adds: 0 while the firmware's identity-mapped tables are loaded,
+/// [`DIRECT_MAP_BASE`] once Hydra's own are.
+static DIRECT_MAP_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The kernel virtual address of physical address `pa`: in the direct map once it is
+/// enabled, the identity address before. Every access to memory known by its physical
+/// address (page tables, frames, page cache, DMA buffers) goes through this, so it works
+/// in any address space, whatever user mappings occupy the low addresses.
+#[inline]
+pub fn phys_to_virt(pa: u64) -> *mut u8 {
+    pa.wrapping_add(DIRECT_MAP_OFFSET.load(core::sync::atomic::Ordering::Relaxed)) as *mut u8
+}
+
+/// Switches [`phys_to_virt`] to the direct map. Called once Hydra's page tables, which
+/// contain it, are loaded, before the other processors start.
+pub fn enable_direct_map() {
+    DIRECT_MAP_OFFSET.store(DIRECT_MAP_BASE, core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Global spinlock-protected physical memory manager instance.

@@ -127,7 +127,7 @@ impl AddressSpace {
     /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
     /// that is identity-mapped in the active address space.
     pub unsafe fn table_at<'a>(&self, phys: PhysAddr) -> &'a PageTable {
-        let ptr = phys.as_u64() as *const PageTable;
+        let ptr = super::frame_allocator::phys_to_virt(phys.as_u64()) as *const PageTable;
         &*ptr
     }
 
@@ -147,7 +147,7 @@ impl AddressSpace {
     /// `phys` must be a valid, 4 KiB-aligned physical address of an initialized [`PageTable`]
     /// that is identity-mapped and writable in the active address space, with exclusive access.
     pub unsafe fn table_at_mut<'a>(&self, phys: PhysAddr) -> &'a mut PageTable {
-        let ptr = phys.as_u64() as *mut PageTable;
+        let ptr = super::frame_allocator::phys_to_virt(phys.as_u64()) as *mut PageTable;
         &mut *ptr
     }
 
@@ -629,6 +629,33 @@ impl AddressSpace {
             if active_pml4[i].flags().contains(PageTableFlags::PRESENT) {
                 new_pml4[i] = active_pml4[i].clone();
             }
+        }
+
+        // The direct map of physical memory at DIRECT_MAP_BASE (PML4 entry 256 and up),
+        // 2 MiB pages, kernel-only, never executable: all RAM, and at least the first
+        // 4 GiB (where firmware and device memory sit). Every address space shares it.
+        let top = allocator.max_phys_end().max(4 << 30);
+        let gib = ((top + (1 << 30) - 1) >> 30) as usize;
+        let base_idx = ((super::frame_allocator::DIRECT_MAP_BASE >> 39) & 511) as usize;
+        let nx = if crate::memory::vm::nx_enabled() { PageTableFlags::NO_EXECUTE } else { PageTableFlags::empty() };
+        let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        for g in 0..gib {
+            let (p4i, p3i) = (base_idx + g / 512, g % 512);
+            if p4i >= 512 {
+                break;
+            }
+            if !new_pml4[p4i].flags().contains(PageTableFlags::PRESENT) {
+                let f = allocator.allocate_zeroed_frame().ok_or("Out of memory: direct map PDPT")?;
+                new_pml4[p4i].set_addr(f.start_address(), table_flags);
+            }
+            let pdpt = unsafe { active_space.table_at_mut(new_pml4[p4i].addr()) };
+            let pd_frame = allocator.allocate_zeroed_frame().ok_or("Out of memory: direct map PD")?;
+            let pd = unsafe { active_space.table_at_mut(pd_frame.start_address()) };
+            for (i, e) in pd.iter_mut().enumerate() {
+                let pa = ((g as u64) << 30) + ((i as u64) << 21);
+                e.set_addr(PhysAddr::new(pa), table_flags | PageTableFlags::HUGE_PAGE | nx);
+            }
+            pdpt[p3i].set_addr(pd_frame.start_address(), table_flags);
         }
 
         Ok(Self {
