@@ -138,11 +138,15 @@ pub fn update_cr3(cr3: u64) {
 
 /// Returns true if multitasking is initialized.
 ///
+/// Lock-free: interrupt handlers call it, and the code they interrupt may hold the
+/// scheduler lock (on one CPU, a timer tick waiting for that lock never got it). Set
+/// together with the scheduler's `initialized` flag and never cleared.
+///
 /// # Returns
 ///
 /// `true` if multitasking scheduler is active and initialized.
 pub fn is_active() -> bool {
-    SCHEDULER.lock().is_initialized()
+    STARTED.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Spawns a new background kernel task (Ring 0).
