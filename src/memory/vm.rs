@@ -719,8 +719,21 @@ impl Mm {
         }
         let len = page_up(len);
         let start = if fixed || noreplace {
-            if addr & (PAGE_SIZE - 1) != 0 || !is_user_range(addr, len) {
+            if addr & (PAGE_SIZE - 1) != 0 {
                 return Err(-EINVAL);
+            }
+            if !is_user_range(addr, len) {
+                // Within user addresses but over a slot the kernel keeps: to the program
+                // that range is occupied (EEXIST, which address-space scanners such as
+                // Wine's skip quietly; ENOMEM for MAP_FIXED, which cannot replace it)
+                let in_user_span = addr >= LOW_USER_START && addr.checked_add(len).map_or(false, |e| e <= USER_SPACE_END);
+                return Err(if !in_user_span {
+                    -EINVAL
+                } else if noreplace {
+                    -EEXIST
+                } else {
+                    -ENOMEM
+                });
             }
             if self.overlaps(addr, addr + len) {
                 if noreplace {

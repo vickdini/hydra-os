@@ -105,6 +105,23 @@ fn map_32bit_places_mappings_in_the_low_window() {
 }
 
 #[test]
+fn fixed_maps_over_kernel_slots_look_occupied() {
+    // In the host tests' layout every low slot but the first GiB is the kernel's
+    const KERNEL_SLOT: u64 = 0x4000_0000;
+    with_mm(|mm| {
+        assert_eq!(sys_mmap(mm, KERNEL_SLOT, P, RW, ANON_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0), -17, "EEXIST: taken");
+        assert_eq!(sys_mmap(mm, KERNEL_SLOT, P, RW, ANON_PRIVATE | MAP_FIXED, -1, 0), ENOMEM, "MAP_FIXED cannot replace it");
+        // Straddling the end of the program's window into the kernel's slot: the same
+        assert_eq!(sys_mmap(mm, KERNEL_SLOT - P, 2 * P, RW, ANON_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0), -17);
+        // Not user addresses at all: EINVAL as before
+        assert_eq!(sys_mmap(mm, 0xFFFF_8000_0000_0000, P, RW, ANON_PRIVATE | MAP_FIXED, -1, 0), EINVAL);
+        // A hint there is just ignored
+        let a = sys_mmap(mm, KERNEL_SLOT, P, RW, ANON_PRIVATE, -1, 0);
+        assert!(a > 0 && a as u64 != KERNEL_SLOT);
+    });
+}
+
+#[test]
 fn fd_minus_one_without_map_anonymous_is_anonymous() {
     // What Linux does too: a private mapping of fd -1 is treated as anonymous.
     with_mm(|mm| {
