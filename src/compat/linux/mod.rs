@@ -117,11 +117,27 @@ pub static LINUX_STATS: Mutex<LinuxSyscallStats> = Mutex::new(LinuxSyscallStats 
 /// (non-Linux) task, a task with a seccomp filter or a tracer, or system call tracing on.
 pub fn fast_syscall(nr: u64) -> Option<i64> {
     const GETPPID: u64 = 110;
-    if !matches!(nr, SYS_GETPID | SYS_GETTID | GETPPID | SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID) {
-        return None;
-    }
+    let slot = match nr {
+        SYS_GETPID => 2,
+        SYS_GETTID => 3,
+        GETPPID => 4,
+        SYS_GETUID => 5,
+        SYS_GETGID => 6,
+        SYS_GETEUID => 7,
+        SYS_GETEGID => 8,
+        _ => return None,
+    };
     if TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
         return None;
+    }
+    use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    let cache = &IDENT_CACHE[cpu];
+    let epoch = IDENT_EPOCH.load(Acquire);
+    let tid = crate::task::CURRENT_TID.load(Acquire);
+    // This CPU's answers for the task it runs, if nothing changed since (no lock at all)
+    if tid != 0 && cache[1].load(Relaxed) == tid && cache[0].load(Acquire) == epoch {
+        return Some(cache[slot].load(Relaxed) as i64);
     }
     // This task's seccomp filter and tracer (other tasks' do not matter)
     let (linux, filtered, tgid, tid, ids) = crate::task::with_current_task_mut(|t| {
@@ -130,15 +146,45 @@ pub fn fast_syscall(nr: u64) -> Option<i64> {
     if !linux || filtered || ptrace::is_traced(tid) {
         return None;
     }
-    Some(match nr {
-        SYS_GETPID => ns::pid_to_caller(tgid) as i64,
-        SYS_GETTID => ns::pid_to_caller(tid) as i64,
-        GETPPID => proc::getppid(),
-        SYS_GETUID => ns::id_for_caller(ids[0], false) as i64,
-        SYS_GETGID => ns::id_for_caller(ids[1], true) as i64,
-        SYS_GETEUID => ns::id_for_caller(ids[2], false) as i64,
-        _ => ns::id_for_caller(ids[3], true) as i64,
-    })
+    let answers = [
+        ns::pid_to_caller(tgid),
+        ns::pid_to_caller(tid),
+        proc::getppid() as u64,
+        ns::id_for_caller(ids[0], false) as u64,
+        ns::id_for_caller(ids[1], true) as u64,
+        ns::id_for_caller(ids[2], false) as u64,
+        ns::id_for_caller(ids[3], true) as u64,
+    ];
+    // Kept under the epoch read before they were computed: a change meanwhile makes them
+    // stale at once (only this CPU writes its cache, with interrupts off)
+    cache[0].store(0, Release);
+    for (k, v) in answers.iter().enumerate() {
+        cache[2 + k].store(*v, Relaxed);
+    }
+    cache[1].store(tid, Relaxed);
+    cache[0].store(epoch, Release);
+    Some(answers[slot - 2] as i64)
+}
+
+/// Bumped by whatever can change what the identity system calls answer (credentials,
+/// namespaces, execve, seccomp, ptrace, a task's exit, a new parent): the per-CPU cached
+/// answers of [`fast_syscall`] are then stale. Starts at 1 (0 marks an empty cache).
+static IDENT_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Per CPU: the epoch and task of the cached answers, then getpid, gettid, getppid, getuid,
+/// getgid, geteuid and getegid.
+static IDENT_CACHE: [[core::sync::atomic::AtomicU64; 9]; crate::arch::smp::MAX_CPUS] =
+    [const { [const { core::sync::atomic::AtomicU64::new(0) }; 9] }; crate::arch::smp::MAX_CPUS];
+
+/// Something that the identity system calls answer may have changed (see [`IDENT_EPOCH`]).
+pub fn ident_changed() {
+    IDENT_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+}
+
+/// Whether system call `nr` may change what the identity calls answer: the set*id family,
+/// setgroups, capset, execve(at), prctl, seccomp, ptrace, unshare and setns.
+pub fn changes_identity(nr: u64) -> bool {
+    matches!(nr, 59 | 322 | 101 | 105 | 106 | 113 | 114 | 116 | 117 | 119 | 122 | 123 | 126 | 157 | 272 | 308 | 317)
 }
 
 /// High-level Linux system call dispatcher called by the hardware SYSCALL trampoline

@@ -379,7 +379,11 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     crate::arch::smp::bkl_enter();
     SYSCALL_ENTRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::task::scheduler::wait_out_handoff();
+    let nr = frame.rax;
     dispatch(frame, fpu);
+    if crate::compat::linux::changes_identity(nr) {
+        crate::compat::linux::ident_changed();
+    }
     crate::arch::smp::bkl_exit();
 }
 

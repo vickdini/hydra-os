@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/times.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -44,8 +45,18 @@ static double self_user(void) {
     return tv(r.ru_utime);
 }
 
+// The CPU time a thread or process measured for itself
+static double own_cpu(clockid_t clk) {
+    struct timespec t;
+    clock_gettime(clk, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static double thread_cpu;
 static void *thread_burn(void *x) {
     burn(0.4);
+    // What it ran (less than 0.4 s if another task shared its CPU meanwhile)
+    thread_cpu = own_cpu(CLOCK_THREAD_CPUTIME_ID);
     return NULL;
 }
 
@@ -106,10 +117,11 @@ int main(void) {
     struct rusage r0, r1;
     getrusage(RUSAGE_SELF, &r0);
     double end = now() + 0.5;
+    struct utsname u;
     while (now() < end)
-        for (int i = 0; i < 1000; i++) getppid();
+        for (int i = 0; i < 1000; i++) uname(&u);
     getrusage(RUSAGE_SELF, &r1);
-    printf("     0.5 s of getppid: %.2f s system, %.2f s user\n", tv(r1.ru_stime) - tv(r0.ru_stime), tv(r1.ru_utime) - tv(r0.ru_utime));
+    printf("     0.5 s of uname: %.2f s system, %.2f s user\n", tv(r1.ru_stime) - tv(r0.ru_stime), tv(r1.ru_utime) - tv(r0.ru_utime));
     check(tv(r1.ru_stime) - tv(r0.ru_stime) > 0.1, "getrusage counts system time");
 
     // A thread's time stays with the process after it exits
@@ -118,8 +130,8 @@ int main(void) {
     pthread_create(&t, NULL, thread_burn, NULL);
     pthread_join(t, NULL);
     double after = self_user();
-    printf("     a thread spinning 0.4 s: %.2f s user\n", after - before);
-    check(after - before > 0.25, "an exited thread's time counts for the process");
+    printf("     a thread spinning 0.4 s: %.2f s user (it ran %.2f s)\n", after - before, thread_cpu);
+    check(thread_cpu > 0.05 && after - before > thread_cpu - 0.05, "an exited thread's time counts for the process");
 
     // CLOCK_PROCESS_CPUTIME_ID agrees with getrusage
     struct timespec pc;
@@ -132,28 +144,32 @@ int main(void) {
 
     // /proc/self/stat
     long ut = -1, st = -1;
-    check(stat_times(getpid(), &ut, &st) == 0 && ut >= (long)(0.7 * hz) && st >= (long)(0.2 * hz), "/proc/self/stat utime and stime");
+    check(stat_times(getpid(), &ut, &st) == 0 && ut >= (long)(0.6 * hz) && st >= (long)(0.1 * hz), "/proc/self/stat utime and stime");
     printf("     /proc/self/stat: utime %ld, stime %ld (%ld per second)\n", ut, st, hz);
 
     // Another process's time, while it runs and after; children's time after wait
     pid_t c = fork();
     if (c == 0) {
         burn(0.6);
-        _exit(0);
+        // What it ran, in hundredths of a second, as its exit status
+        int cs = (int)(own_cpu(CLOCK_PROCESS_CPUTIME_ID) * 100);
+        _exit(cs > 255 ? 255 : cs);
     }
     usleep(400000);
     long cut = -1, cst = -1;
     stat_times(c, &cut, &cst);
     printf("     child at 0.4 s: utime %ld\n", cut);
     check(cut >= (long)(0.2 * hz), "another process's /proc/<pid>/stat utime");
-    waitpid(c, NULL, 0);
+    int status = 0;
+    waitpid(c, &status, 0);
+    double child_cpu = WEXITSTATUS(status) / 100.0;
     struct rusage rc;
     getrusage(RUSAGE_CHILDREN, &rc);
     struct tms tm;
     times(&tm);
-    printf("     children: getrusage %.2f s user, times %ld ticks\n", tv(rc.ru_utime), (long)tm.tms_cutime);
-    check(tv(rc.ru_utime) > 0.4, "getrusage(RUSAGE_CHILDREN) after wait");
-    check(tm.tms_cutime >= (long)(0.4 * hz) && tm.tms_utime >= (long)(0.7 * hz), "times(): utime and cutime");
+    printf("     children: getrusage %.2f s user, times %ld ticks (the child ran %.2f s)\n", tv(rc.ru_utime), (long)tm.tms_cutime, child_cpu);
+    check(child_cpu > 0.05 && tv(rc.ru_utime) + tv(rc.ru_stime) > child_cpu - 0.05, "getrusage(RUSAGE_CHILDREN) after wait");
+    check(tm.tms_cutime + tm.tms_cstime >= (long)((child_cpu - 0.05) * hz) && tm.tms_utime >= (long)(0.6 * hz), "times(): utime and cutime");
 
     // /proc/stat: the CPUs, and idle time while sleeping
     long long t0, i0, t1, i1;

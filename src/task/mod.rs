@@ -48,6 +48,10 @@ pub use tcb::{PrivilegeMode, Task, TaskId, TaskPersonality, TaskPriority, TaskRe
 /// Number of kernel wait points currently active (see `preemptible`).
 pub static PREEMPT_POINTS: crate::arch::percpu::PerCpuU32 = crate::arch::percpu::PerCpuU32::new();
 
+/// The ID of the task each CPU runs (read without the scheduler lock by the system call
+/// fast path; 0 before the scheduler starts).
+pub static CURRENT_TID: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+
 /// Linux system call the running task is executing (`u64::MAX` when none), for
 /// [`scheduler::Scheduler::dump_tasks`].
 pub static CURRENT_SYSCALL: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(u64::MAX);

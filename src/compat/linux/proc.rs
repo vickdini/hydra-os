@@ -494,6 +494,7 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64) {
             procs.remove(&c);
         } else if let Some(child) = procs.get_mut(&c) {
             child.ppid = 1;
+            super::ident_changed();
         }
     }
     match procs.get_mut(&ppid) {

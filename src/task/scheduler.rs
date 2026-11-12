@@ -377,6 +377,7 @@ impl Scheduler {
         let main_task = Task::new_main(TaskId(0), "shell", current_cr3);
         self.tasks.push(main_task);
         self.cur[crate::arch::percpu::cpu()] = 0;
+        super::CURRENT_TID.store(0, core::sync::atomic::Ordering::Release);
         self.initialized = true;
 
         // Spawn background Idle task (Task 1) with lowest priority: the boot processor's
@@ -1347,6 +1348,7 @@ impl Scheduler {
         // The outgoing task's time up to now
         self.charge(curr_idx, ctx);
         self.cur[crate::arch::percpu::cpu()] = next_idx;
+        super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
         self.tasks[curr_idx].preempt_depth =
@@ -1466,6 +1468,7 @@ impl Scheduler {
         t.priority = TaskPriority::Idle;
         self.tasks.push(t);
         self.cur[cpu] = self.tasks.len() - 1;
+        super::CURRENT_TID.on(cpu).store(id.0, core::sync::atomic::Ordering::Release);
         self.loaded_cr3[cpu] = self.kernel_cr3;
         crate::arch::smp::LOADED_CR3[cpu].store(self.kernel_cr3, core::sync::atomic::Ordering::Release);
         self.idle_of[cpu] = Some(id);
@@ -1836,6 +1839,8 @@ impl Scheduler {
         }
         // Service windows it held (it may end in the middle of a driver call)
         crate::ipc::service::release_windows(self.tasks[idx].id.0);
+        // Its ID may be reused, its children get a new parent: cached identities go
+        crate::compat::linux::ident_changed();
         self.tasks[idx].state = TaskState::Dead;
         self.tasks[idx].timeslice_remaining = 0;
 
@@ -2119,6 +2124,7 @@ impl Scheduler {
     /// * `uid` - New real/effective user ID.
     /// * `gid` - New real/effective group ID.
     pub fn set_task_credentials(&mut self, id: TaskId, uid: u32, gid: u32) {
+        crate::compat::linux::ident_changed();
         for task in &mut self.tasks {
             if task.id == id {
                 task.uid = uid;

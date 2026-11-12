@@ -610,6 +610,8 @@ pub fn write_file(rest: &str, buf: &[u8]) -> i64 {
         return EPERM;
     }
     *slot = Some(IdMap { inner, outer, count });
+    // getuid and the others answer through the map now (their cached answers are stale)
+    super::ident_changed();
     buf.len() as i64
 }
 
