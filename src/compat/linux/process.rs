@@ -218,18 +218,29 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
             crate::task::wait::wait(None);
         },
-        // getrusage(who, struct rusage *): CPU time from the scheduler's tick accounting
-        // (user and system time are not told apart); other fields stay zero
+        // getrusage(who, struct rusage *): user and system time (RUSAGE_SELF: the process,
+        // RUSAGE_THREAD: this thread, RUSAGE_CHILDREN: the children waited for); the other
+        // fields stay zero
         98 => {
             let who = a[0] as i32;
             if !(-1..=1).contains(&who) {
                 EINVAL
             } else {
-                let ticks = if who == -1 { 0 } else { crate::task::with_current_task_mut(|t| t.ticks_run).unwrap_or(0) };
-                let us = ticks * 1_000_000 / crate::arch::pit::frequency_hz().max(1);
+                let (user, sys) = match who {
+                    1 => crate::task::with_current_task_mut(|t| (t.ticks_run - t.ticks_sys.min(t.ticks_run), t.ticks_sys)).unwrap_or((0, 0)),
+                    _ => {
+                        let (_, pid) = super::proc::current_ids();
+                        let c = super::proc::cpu_times(pid);
+                        if who == 0 { (c.0, c.1) } else { (c.2, c.3) }
+                    }
+                };
+                let hz = crate::arch::pit::frequency_hz().max(1);
                 let mut ru = [0u8; 144];
-                ru[0..8].copy_from_slice(&(us / 1_000_000).to_le_bytes());
-                ru[8..16].copy_from_slice(&(us % 1_000_000).to_le_bytes());
+                for (i, ticks) in [user, sys].into_iter().enumerate() {
+                    let us = ticks * 1_000_000 / hz;
+                    ru[i * 16..i * 16 + 8].copy_from_slice(&(us / 1_000_000).to_le_bytes());
+                    ru[i * 16 + 8..i * 16 + 16].copy_from_slice(&(us % 1_000_000).to_le_bytes());
+                }
                 copy_out(a[1], &ru)
             }
         }

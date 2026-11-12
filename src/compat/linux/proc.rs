@@ -260,6 +260,10 @@ pub struct Process {
     /// When the process started, in clock ticks (`USER_HZ`, 100 per second) since boot
     /// (`/proc/<pid>/stat`; polkit tells processes apart by pid and start time).
     pub start_time: u64,
+    /// CPU time of its exited threads: `(ticks run, of which in the kernel)`.
+    pub dead_ticks: (u64, u64),
+    /// CPU time of its children it waited for (and theirs, recursively), likewise.
+    pub child_ticks: (u64, u64),
     /// Namespaces the process is in.
     pub ns: super::ns::Ns,
     /// `/proc/<pid>/oom_score_adj` (-1000..=1000). Hydra has no OOM killer: it is kept
@@ -342,6 +346,8 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             cgroup,
             senders: [SigSender::default(); NSIG + 1],
             start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
+            dead_ticks: (0, 0),
+            child_ticks: (0, 0),
             ns,
             oom_score_adj,
             personality,
@@ -388,6 +394,20 @@ pub fn set_exit_status(pid: u64, status: i32) {
     }
 }
 
+/// CPU time of process `pid`, in timer ticks: `(user, system, children's user, children's
+/// system)`. Its live threads, those that exited, and the children it waited for.
+pub fn cpu_times(pid: u64) -> (u64, u64, u64, u64) {
+    let (run, sys) = crate::task::SCHEDULER.lock().process_cpu(pid);
+    let (dead, child) = PROCS.lock().get(&pid).map_or(((0, 0), (0, 0)), |p| (p.dead_ticks, p.child_ticks));
+    let (run, sys) = (run + dead.0, sys + dead.1);
+    (run - sys.min(run), sys, child.0 - child.1.min(child.0), child.1)
+}
+
+/// Timer ticks in clock ticks (`USER_HZ`, 100 per second), the unit of `times` and `/proc`.
+pub fn to_clock_ticks(ticks: u64) -> u64 {
+    ticks * 100 / crate::arch::pit::frequency_hz().max(1)
+}
+
 /// Called by the scheduler when thread `tid` of process `pid` dies. When the last thread
 /// is gone the process becomes a zombie, its children are re-parented, and its parent
 /// receives `SIGCHLD` (or the zombie is discarded if no Linux parent will wait for it).
@@ -395,12 +415,15 @@ pub fn set_exit_status(pid: u64, status: i32) {
 /// # Arguments
 /// * `pid` - Process ID of the exiting thread.
 /// * `tid` - Thread ID that exited.
-pub fn thread_exited(pid: u64, tid: u64) {
+/// * `run`, `sys` - The thread's CPU time (ticks, and those in the kernel), kept by the process.
+pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64) {
     super::mount::forget_thread(tid);
     let mut procs = PROCS.lock();
     let (ppid, now_zombie) = match procs.get_mut(&pid) {
         Some(p) => {
             p.threads.remove(&tid);
+            p.dead_ticks.0 += run;
+            p.dead_ticks.1 += sys;
             if p.threads.is_empty() && !p.zombie {
                 p.zombie = true;
                 p.vfork_released = true;
@@ -2541,7 +2564,13 @@ fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
         if !keep {
             match kind {
                 0 => {
-                    procs.remove(&pid);
+                    // Its CPU time (and its waited-for children's) counts for the waiter
+                    if let Some(c) = procs.remove(&pid) {
+                        if let Some(p) = procs.get_mut(&me) {
+                            p.child_ticks.0 += c.dead_ticks.0 + c.child_ticks.0;
+                            p.child_ticks.1 += c.dead_ticks.1 + c.child_ticks.1;
+                        }
+                    }
                 }
                 1 => procs.get_mut(&pid).unwrap().stop_reported = true,
                 _ => procs.get_mut(&pid).unwrap().continued = false,

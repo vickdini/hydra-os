@@ -41,10 +41,13 @@ fn to_clock_ticks(ticks: u64) -> u64 {
 /// times of waited-for children (reported as 0).
 fn times(buf: u64) -> i64 {
     if buf != 0 {
+        // tms_utime, tms_stime, tms_cutime, tms_cstime
         let (_, pid) = super::proc::current_ids();
-        let cpu = to_clock_ticks(crate::task::SCHEDULER.lock().process_ticks(pid));
+        let c = super::proc::cpu_times(pid);
         let mut tms = [0u8; 32];
-        tms[0..8].copy_from_slice(&cpu.to_le_bytes());
+        for (i, v) in [c.0, c.1, c.2, c.3].into_iter().enumerate() {
+            tms[i * 8..i * 8 + 8].copy_from_slice(&to_clock_ticks(v).to_le_bytes());
+        }
         if copy_out(buf, &tms).is_err() {
             return EFAULT;
         }

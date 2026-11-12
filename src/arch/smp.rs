@@ -139,10 +139,6 @@ pub fn bkl_enter_idle() {
     }
 }
 
-/// Timer ticks each CPU skipped because another CPU held the kernel lock: the running
-/// task's CPU time, credited at the next tick that gets it (no task switch happens in
-/// between, so the task is the same).
-pub static SKIPPED_TICKS: super::percpu::PerCpuU64 = super::percpu::PerCpuU64::new(0);
 
 /// Releases the kernel lock if the calling CPU holds it.
 pub fn bkl_exit() {

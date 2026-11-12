@@ -333,6 +333,8 @@ pub struct Task {
     pub interp_image: Option<Box<[u8]>>, // Backing segment buffer for dynamic linker (PT_INTERP)
     /// Cumulative number of PIT timer ticks this task has executed.
     pub ticks_run: u64,
+    /// Of those, ticks that interrupted it in kernel mode (system time).
+    pub ticks_sys: u64,
     /// Remaining PIT timer ticks in the current scheduling quantum.
     pub timeslice_remaining: u32,
     /// Per-task capability table governing object access rights.
@@ -418,6 +420,7 @@ impl Task {
             user_image: None,
             interp_image: None,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: 5,
             cspace: Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default().into_shared(),

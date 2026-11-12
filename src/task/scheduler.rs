@@ -132,6 +132,22 @@ pub fn load_linux_image(
 /// Global preemptive round-robin scheduler instance.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
+/// Kinds of CPU time per CPU in [`CPU_TIMES`].
+pub const CPU_USER: usize = 0;
+/// Kernel mode (system calls, faults, kernel tasks).
+pub const CPU_SYSTEM: usize = 1;
+/// The idle task.
+pub const CPU_IDLE: usize = 2;
+/// Timer ticks each CPU spent in user mode, kernel mode and idle (for `/proc/stat`).
+pub static CPU_TIMES: [[core::sync::atomic::AtomicU64; 3]; crate::arch::smp::MAX_CPUS] =
+    [const { [const { core::sync::atomic::AtomicU64::new(0) }; 3] }; crate::arch::smp::MAX_CPUS];
+/// Load averages over 1, 5 and 15 minutes, 11-bit fixed point (for `/proc/loadavg`).
+pub static LOAD_AVG: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+/// The tick each CPU last accounted (see [`Scheduler::account_tick`]).
+static LAST_ACCOUNTED: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// Ticks since the load averages were last updated.
+static LOAD_COUNTDOWN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Preemptive Round-Robin Multitasking Scheduler.
 pub struct Scheduler {
     /// Table of all registered tasks (active, sleeping, blocked, and dead).
@@ -514,6 +530,7 @@ impl Scheduler {
             user_image: None,
             interp_image: None,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default().into_shared(),
@@ -618,6 +635,7 @@ impl Scheduler {
             user_image: None,
             interp_image: None,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default().into_shared(),
@@ -708,6 +726,7 @@ impl Scheduler {
             user_image: image.allocated_image,
             interp_image: image.interp_image,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default().into_shared(),
@@ -801,6 +820,7 @@ impl Scheduler {
             user_image: image.allocated_image,
             interp_image: image.interp_image,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: crate::fs::FdTable::new_default().into_shared(),
@@ -900,6 +920,7 @@ impl Scheduler {
             user_image: None,
             interp_image: None,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: {
@@ -1071,6 +1092,7 @@ impl Scheduler {
             user_image: None,
             interp_image: None,
             ticks_run: 0,
+            ticks_sys: 0,
             timeslice_remaining: self.default_timeslice,
             cspace: alloc::boxed::Box::new(CapabilityTable::new()),
             fds: parent_fds,
@@ -1160,12 +1182,6 @@ impl Scheduler {
 
         let mut curr_idx = self.cur[crate::arch::percpu::cpu()];
         let curr_task = &mut self.tasks[curr_idx];
-        // This tick, and those skipped since while another CPU held the kernel lock
-        let missed = crate::arch::smp::SKIPPED_TICKS.swap(0, core::sync::atomic::Ordering::Relaxed);
-        curr_task.ticks_run += 1 + missed;
-        for _ in 0..=missed {
-            crate::compat::linux::perf::tick(curr_task.tgid);
-        }
 
         // 2. Check if current task still has timeslice and is eligible to continue. A task
         // woken by an event (input, a socket, a futex; not a timed sleep, which polling
@@ -1328,6 +1344,8 @@ impl Scheduler {
             return;
         }
         crate::compat::linux::perf::switched(self.tasks[curr_idx].tgid);
+        // The outgoing task's time up to now
+        self.charge(curr_idx, ctx);
         self.cur[crate::arch::percpu::cpu()] = next_idx;
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
@@ -1574,6 +1592,103 @@ impl Scheduler {
         self.tasks.iter().filter(|t| t.tgid == tgid && t.state != TaskState::Dead).map(|t| t.ticks_run).sum()
     }
 
+    /// Counts a timer tick (and those skipped since) as CPU time of the task running on
+    /// this CPU: user or system time by the mode the tick interrupted, and the CPU's user,
+    /// system or idle time. Called at every tick, whether or not it reschedules.
+    ///
+    /// # Arguments
+    /// * `ctx` - The interrupted context.
+    pub fn account_tick(&mut self, ctx: &ExceptionContext) {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
+            return;
+        }
+        self.charge(self.cur[crate::arch::percpu::cpu()], ctx);
+        if crate::arch::percpu::cpu() == 0 {
+            self.update_load();
+        }
+    }
+
+    /// Charges the time since this CPU's last accounting to task `idx`, which has run on it
+    /// since (at timer ticks, and when it is switched out: a tick that found the scheduler
+    /// lock busy loses nothing).
+    ///
+    /// # Arguments
+    /// * `idx` - The task.
+    /// * `ctx` - Its interrupted context: kernel or user mode.
+    fn charge(&mut self, idx: usize, ctx: &ExceptionContext) {
+        // Whole ticks elapsed by the clock (not the interrupts counted: some are skipped or
+        // merged while interrupts are off)
+        let now = crate::arch::pit::ticks();
+        let last = LAST_ACCOUNTED.swap(now, core::sync::atomic::Ordering::Relaxed);
+        let n = if last == 0 { 1 } else { now.saturating_sub(last) };
+        if n == 0 {
+            return;
+        }
+        let kernel = ctx.cs & 3 == 0;
+        let cpu = crate::arch::percpu::cpu();
+        // Kernel code at a wait point (`task::preemptible`: sleeping, polling a device,
+        // waiting for a driver) is waiting, not running: the CPU's idle time, not the task's
+        let waiting = kernel && super::PREEMPT_POINTS.load(core::sync::atomic::Ordering::Relaxed) > 0;
+        if !waiting {
+            let t = &mut self.tasks[idx];
+            t.ticks_run += n;
+            if kernel {
+                t.ticks_sys += n;
+            }
+            let tgid = t.tgid;
+            for _ in 0..n {
+                crate::compat::linux::perf::tick(tgid);
+            }
+        }
+        let idle = waiting || self.idle_of[cpu] == Some(self.tasks[idx].id);
+        let kind = if idle { CPU_IDLE } else if kernel { CPU_SYSTEM } else { CPU_USER };
+        CPU_TIMES[cpu.min(crate::arch::smp::MAX_CPUS - 1)][kind].fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// CPU time of the live threads of process `tgid`: `(ticks run, of which in the kernel)`.
+    pub fn process_cpu(&self, tgid: u64) -> (u64, u64) {
+        self.tasks
+            .iter()
+            .filter(|t| t.tgid == tgid && t.state != TaskState::Dead)
+            .fold((0, 0), |a, t| (a.0 + t.ticks_run, a.1 + t.ticks_sys))
+    }
+
+    /// Updates the load averages every 5 seconds (on the boot processor's ticks), as Linux
+    /// does: exponentially decaying averages of the tasks running or ready to run.
+    fn update_load(&mut self) {
+        let hz = crate::arch::pit::frequency_hz().max(1);
+        let n = LOAD_COUNTDOWN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+        if n < 5 * hz {
+            return;
+        }
+        LOAD_COUNTDOWN.store(0, core::sync::atomic::Ordering::Relaxed);
+        let active = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| matches!(t.state, TaskState::Running | TaskState::Ready) && !self.idle_of.contains(&Some(self.tasks[*i].id)))
+            .count() as u64;
+        // Linux's fixed point (11 bits) and decay factors for 1, 5 and 15 minutes
+        const FSHIFT: u32 = 11;
+        const EXP: [u64; 3] = [1884, 2014, 2037];
+        for (l, e) in LOAD_AVG.iter().zip(EXP) {
+            let old = l.load(core::sync::atomic::Ordering::Relaxed);
+            let new = (old * e + (active << FSHIFT) * ((1 << FSHIFT) - e)) >> FSHIFT;
+            l.store(new, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Tasks running or ready to run now, and all tasks alive (for `/proc/loadavg`).
+    pub fn task_counts(&self) -> (usize, usize) {
+        let running = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| matches!(t.state, TaskState::Running | TaskState::Ready) && !self.idle_of.contains(&Some(self.tasks[*i].id)))
+            .count();
+        (running, self.tasks.iter().filter(|t| t.state != TaskState::Dead).count())
+    }
+
     /// Wakes task `id` from an event wait; a task that is not waiting yet, or is blocked for
     /// another reason (a futex, a driver call), keeps the wakeup for its next wait.
     ///
@@ -1747,7 +1862,8 @@ impl Scheduler {
                 let t = &self.tasks[idx];
                 crate::compat::linux::admin::note_task(t.tgid, t.uid, t.gid, t.exe_path());
             }
-            crate::compat::linux::proc::thread_exited(self.tasks[idx].tgid, self.tasks[idx].id.0);
+            let t = &self.tasks[idx];
+            crate::compat::linux::proc::thread_exited(t.tgid, t.id.0, t.ticks_run, t.ticks_sys);
         }
     }
 

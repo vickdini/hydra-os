@@ -1713,7 +1713,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 2 | 3 => {
                     let ticks = if arg0 == 2 {
                         let (_, pid) = proc::current_ids();
-                        crate::task::SCHEDULER.lock().process_ticks(pid)
+                        let c = proc::cpu_times(pid);
+                        c.0 + c.1
                     } else {
                         crate::task::with_current_task_mut(|t| t.ticks_run).unwrap_or(0)
                     };

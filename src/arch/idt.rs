@@ -392,13 +392,19 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         crate::arch::pit::on_timer_tick();
         crate::arch::pic::send_eoi(0);
     }
+    // CPU time, at every tick: before the kernel lock, which another CPU may hold (the
+    // scheduler lock is only tried; a tick finding it busy is counted by the next)
+    if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.account_tick(ctx);
+        }
+    }
     // The kernel runs on one CPU at a time (see arch::smp); kept when returning to kernel
     // code (this CPU then runs it), released when returning to user mode. A timer tick
     // never waits for it: when another CPU holds it, this tick schedules nothing (waiting
     // would stop the clock that code holding it may be waiting on)
     if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
         if !crate::arch::smp::bkl_try_enter() {
-            crate::arch::smp::SKIPPED_TICKS.fetch_add(1, Ordering::Relaxed);
             if ctx.vector == LAPIC_TIMER_VECTOR {
                 crate::arch::smp::lapic_eoi();
             }
@@ -775,6 +781,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         }
         32 => {
             // Vector 32 = IRQ 0: 8254 PIT Timer Tick (counted and acknowledged on entry)
+
 
             // Preemptive Multitasking Round-Robin Scheduling: only user mode and kernel
             // wait points are preempted (see `task::preemptible`)

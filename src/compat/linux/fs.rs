@@ -50,6 +50,12 @@ pub enum PseudoFile {
     ProcCpuinfo,
     /// `/sys/devices/system/cpu/{online,possible,present}`: the CPUs ("0-3").
     CpuRange,
+    /// `/proc/stat`: CPU time per CPU (user, system, idle), boot time, process counts.
+    ProcStat,
+    /// `/proc/uptime`: seconds since boot, and idle seconds summed over the CPUs.
+    ProcUptime,
+    /// `/proc/loadavg`: load averages, running and total tasks, the last process ID.
+    ProcLoadavg,
     /// `/proc/self/maps`: reports the virtual memory regions of the calling process.
     ProcSelfMaps,
     /// `/proc/self/auxv`: exposes the raw ELF auxiliary vector of the calling process.
@@ -153,6 +159,9 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/filesystems" => Some(PseudoFile::ProcFilesystems),
         "/proc/sys/kernel/dmesg_restrict" => Some(PseudoFile::ProcStatic(b"1\n")),
         "/proc/cpuinfo" => Some(PseudoFile::ProcCpuinfo),
+        "/proc/stat" => Some(PseudoFile::ProcStat),
+        "/proc/uptime" => Some(PseudoFile::ProcUptime),
+        "/proc/loadavg" => Some(PseudoFile::ProcLoadavg),
         "/sys/devices/system/cpu/online" | "/sys/devices/system/cpu/possible" | "/sys/devices/system/cpu/present" => Some(PseudoFile::CpuRange),
         "/proc/self/maps" => Some(PseudoFile::ProcSelfMaps),
         "/proc/self/auxv" => Some(PseudoFile::ProcSelfAuxv),
@@ -360,21 +369,29 @@ Seccomp:	{}
             )
         }
         "stat" => {
-            // The 52 fields of proc(5); those Hydra does not keep (fault counts, CPU
-            // times, memory addresses) are 0
+            // The 52 fields of proc(5); those Hydra does not keep (fault counts, memory
+            // addresses) are 0
             let (ppid, pgid, sid, threads, start, zombie) = super::proc::PROCS
                 .lock()
                 .get(&pid)
                 .map_or((0, pid, pid, 1, 0, false), |p| (p.ppid, p.pgid, p.sid, p.threads_alive().max(1), p.start_time, p.zombie));
             let comm: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
+            // CPU time (user, system, waited-for children's), in clock ticks
+            let cpu = super::proc::cpu_times(pid);
+            let ct = super::proc::to_clock_ticks;
+            let cpu = (ct(cpu.0), ct(cpu.1), ct(cpu.2), ct(cpu.3));
             let mut text = alloc::format!(
-                "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 0 0 0 0 {} {} {} 0 {}",
+                "{} ({}) {} {} {} {} 0 -1 4194304 0 0 0 0 {} {} {} {} {} {} {} 0 {}",
                 pid,
                 comm,
                 if zombie { 'Z' } else { 'S' },
                 ppid,
                 pgid,
                 sid,
+                cpu.0,
+                cpu.1,
+                cpu.2,
+                cpu.3,
                 20 + super::extra::sched_of(tid).1,
                 super::extra::sched_of(tid).1,
                 threads,
@@ -476,6 +493,24 @@ impl PseudoFile {
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcFilesystems => read_slice(super::admin::filesystems_text().as_bytes(), cursor, buf),
+            PseudoFile::ProcStat => read_slice(proc_stat_text().as_bytes(), cursor, buf),
+            PseudoFile::ProcUptime => {
+                let up = crate::arch::pit::now_ns() / 10_000_000; // hundredths of a second
+                let n = crate::arch::smp::online().max(1);
+                let idle: u64 = (0..n).map(|c| super::proc::to_clock_ticks(cpu_ticks(c)[crate::task::scheduler::CPU_IDLE])).sum();
+                let text = alloc::format!("{}.{:02} {}.{:02}
+", up / 100, up % 100, idle / 100, idle % 100);
+                read_slice(text.as_bytes(), cursor, buf)
+            }
+            PseudoFile::ProcLoadavg => {
+                let l = |i: usize| crate::task::scheduler::LOAD_AVG[i].load(core::sync::atomic::Ordering::Relaxed);
+                let f = |v: u64| alloc::format!("{}.{:02}", v >> 11, ((v & 2047) * 100) >> 11);
+                let (running, total) = crate::task::SCHEDULER.lock().task_counts();
+                let last = super::proc::PROCS.lock().keys().next_back().copied().unwrap_or(0);
+                let text = alloc::format!("{} {} {} {}/{} {}
+", f(l(0)), f(l(1)), f(l(2)), running, total, last);
+                read_slice(text.as_bytes(), cursor, buf)
+            }
             PseudoFile::ProcCpuinfo => {
                 // One entry per CPU online
                 let n = crate::arch::smp::online();
@@ -710,3 +745,38 @@ pub fn proc_link(path: &str) -> Option<alloc::string::String> {
     }
 }
 
+/// The timer ticks CPU `cpu` spent in user mode, kernel mode and idle.
+fn cpu_ticks(cpu: usize) -> [u64; 3] {
+    let t = &crate::task::scheduler::CPU_TIMES[cpu.min(crate::arch::smp::MAX_CPUS - 1)];
+    [0, 1, 2].map(|k| t[k].load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// The text of `/proc/stat`: per CPU (and summed) user, nice, system, idle, iowait, irq,
+/// softirq, steal, guest and guest_nice times in clock ticks; then the boot time and the
+/// process counts (as `top`, `vmstat` and system monitors read them).
+fn proc_stat_text() -> alloc::string::String {
+    let n = crate::arch::smp::online().max(1);
+    let ct = super::proc::to_clock_ticks;
+    let per: alloc::vec::Vec<[u64; 3]> = (0..n).map(|c| cpu_ticks(c).map(ct)).collect();
+    let line = |name: &str, t: [u64; 3]| alloc::format!("{} {} 0 {} {} 0 0 0 0 0 0
+", name, t[0], t[1], t[2]);
+    let total = per.iter().fold([0u64; 3], |a, t| [a[0] + t[0], a[1] + t[1], a[2] + t[2]]);
+    let mut text = line("cpu ", total);
+    for (i, t) in per.iter().enumerate() {
+        text.push_str(&line(&alloc::format!("cpu{}", i), *t));
+    }
+    let boot = crate::arch::rtc::now().0.saturating_sub(crate::arch::pit::now_ns() / 1_000_000_000);
+    let (running, _) = crate::task::SCHEDULER.lock().task_counts();
+    let procs = super::proc::PROCS.lock().len();
+    text.push_str(&alloc::format!(
+        "intr 0
+ctxt 0
+btime {}
+processes {}
+procs_running {}
+procs_blocked 0
+",
+        boot, procs, running.max(1)
+    ));
+    text
+}
