@@ -6,8 +6,8 @@
 //! ## Architectural Role & Design Rationale
 //! In uncontended cases, userspace locks acquire and release atomically without entering the
 //! kernel. When contention occurs, threads invoke `sys_futex` to atomically verify that the
-//! 32-bit lock word at `uaddr` still holds the expected value `val` before enqueuing on
-//! [`GLOBAL_FUTEX`] and sleeping via [`crate::task::wait::wait`].
+//! 32-bit lock word at `uaddr` still holds the expected value `val` before enqueuing on its
+//! bucket of [`FUTEX_QUEUES`] and sleeping via [`crate::task::wait::wait`].
 //!
 //! A private futex (`FUTEX_PRIVATE_FLAG`, or any futex in private memory) is keyed by its
 //! virtual address within an address space, so unrelated processes using the same virtual
@@ -18,7 +18,8 @@
 //! ## Key Types & Interfaces
 //! - [`FutexKey`]: Composite `(space, uaddr)` identifier distinguishing private and shared futexes.
 //! - [`FutexWaiter`]: Wait queue entry associating a sleeping `TaskId` with a [`FutexKey`] and bitset.
-//! - [`FutexQueue`] / [`GLOBAL_FUTEX`]: Global spinlock-protected wait list for blocked threads.
+//! - [`FutexQueue`] / [`FUTEX_QUEUES`]: Wait lists for blocked threads, one spinlock per hash
+//!   bucket of futex keys (threads using different futexes rarely contend).
 //! - [`dispatch_futex()`]: Top-level `sys_futex` system call multiplexer.
 //!
 //! ## Hardware & Dependency Context
@@ -26,7 +27,8 @@
 //! - Hardware Interaction: Reads PIT tick counter and CMOS RTC for relative/absolute timeouts;
 //!   queries page tables via [`crate::memory::vm`] to resolve shared physical addresses.
 //! - Concurrency: Atomicity between the 32-bit word check and sleep enqueueing is guaranteed by
-//!   holding [`GLOBAL_FUTEX`].
+//!   holding the futex's bucket lock (both buckets, lower index first, for the operations on
+//!   two futexes; all of them for `futex_waitv`).
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -90,7 +92,7 @@ const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
 /// Unique kernel identifier for a futex word: `(address_space_id, address)`.
 ///
 /// # Concurrency & Thread Safety
-/// Value type compared under [`GLOBAL_FUTEX`] to match wakers with sleeping threads.
+/// Value type compared under its bucket lock to match wakers with sleeping threads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FutexKey {
     /// Address-space token (pointer to `Mm`, thread-group ID, or [`PHYSICAL`] for shared pages).
@@ -117,7 +119,7 @@ pub struct FutexWaiter {
 /// Global futex wait queue managing all threads currently blocked on `sys_futex`.
 ///
 /// # Concurrency & Thread Safety
-/// Guarded by the [`GLOBAL_FUTEX`] spinlock. To prevent lost wakeups, [`wait`] reads the
+/// Guarded by its bucket's spinlock in [`FUTEX_QUEUES`]. To prevent lost wakeups, [`wait`] reads the
 /// userland futex word while holding this lock before inserting the [`FutexWaiter`].
 pub struct FutexQueue {
     /// Ordered list of active futex waiters (FIFO wake order).
@@ -153,55 +155,106 @@ impl FutexQueue {
         ids
     }
 
-    /// Moves up to `max` waiters from `from` to `to` without waking them (`FUTEX_REQUEUE`).
-    ///
-    /// # Arguments
-    ///
-    /// * `from` - Source futex key.
-    /// * `to` - Destination futex key.
-    /// * `max` - Maximum number of waiters to requeue.
-    ///
-    /// # Returns
-    /// Number of waiters whose key was updated to `to`.
-    fn requeue(&mut self, from: FutexKey, to: FutexKey, max: usize) -> usize {
-        let mut n = 0;
-        for w in self.waiters.iter_mut() {
-            if n >= max {
-                break;
-            }
-            if w.key == from {
-                w.key = to;
-                n += 1;
+    /// Takes out up to `max` waiters on `from` (requeued: they go to another key's bucket).
+    fn take(&mut self, from: FutexKey, max: usize) -> Vec<FutexWaiter> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.waiters.len() && out.len() < max {
+            if self.waiters[i].key == from {
+                out.push(self.waiters.remove(i));
+            } else {
+                i += 1;
             }
         }
-        n
+        out
     }
 
-    /// Returns `true` if `task` is still present in the wait queue (not yet woken).
-    ///
-    /// # Arguments
-    ///
-    /// * `task` - Task ID to check.
-    ///
-    /// # Returns
-    ///
-    /// `true` if `task` is still queued; `false` otherwise.
-    fn is_waiting(&self, task: TaskId) -> bool {
-        self.waiters.iter().any(|w| w.task_id == task)
+    /// Whether `task` waits on `key`.
+    fn is_waiting(&self, task: TaskId, key: FutexKey) -> bool {
+        self.waiters.iter().any(|w| w.task_id == task && w.key == key)
     }
 
-    /// Removes all waiter entries belonging to `task` (used on timeout or signal interruption).
-    ///
-    /// # Arguments
-    ///
-    /// * `task` - Task ID whose waiter entries should be removed.
-    fn remove(&mut self, task: TaskId) {
-        self.waiters.retain(|w| w.task_id != task);
+    /// Removes `task`'s wait on `key`.
+    fn remove(&mut self, task: TaskId, key: FutexKey) {
+        self.waiters.retain(|w| !(w.task_id == task && w.key == key));
     }
 }
 
-/// Global spinlock-protected futex queue shared across all Linux processes and threads.
-pub static GLOBAL_FUTEX: Mutex<FutexQueue> = Mutex::new(FutexQueue::new());
+/// Number of futex queue buckets.
+const BUCKETS: usize = 64;
+
+/// The futex wait queues: a bucket per hash of the key, each with its own lock, so threads
+/// waiting on and waking different futexes do not contend.
+pub static FUTEX_QUEUES: [Mutex<FutexQueue>; BUCKETS] = [const { Mutex::new(FutexQueue::new()) }; BUCKETS];
+
+/// The bucket index of `key`.
+fn bucket_index(key: &FutexKey) -> usize {
+    let h = key.space.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (key.uaddr >> 2).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    (h >> 58) as usize % BUCKETS
+}
+
+/// The bucket of `key`.
+fn bucket(key: &FutexKey) -> &'static Mutex<FutexQueue> {
+    &FUTEX_QUEUES[bucket_index(key)]
+}
+
+/// Locks the buckets of two keys, the lower index first (one lock when they share it).
+fn lock_two(a: &FutexKey, b: &FutexKey) -> (spin::MutexGuard<'static, FutexQueue>, Option<spin::MutexGuard<'static, FutexQueue>>) {
+    let (i, j) = (bucket_index(a), bucket_index(b));
+    if i == j {
+        (FUTEX_QUEUES[i].lock(), None)
+    } else if i < j {
+        let first = FUTEX_QUEUES[i].lock();
+        (first, Some(FUTEX_QUEUES[j].lock()))
+    } else {
+        let second = FUTEX_QUEUES[j].lock();
+        (FUTEX_QUEUES[i].lock(), Some(second))
+    }
+}
+
+/// Wakes up to `max` waiters on `key` whose bitset matches (for wakes from outside a futex
+/// call, such as a thread's exit clearing its `clear_child_tid` word).
+///
+/// # Returns
+/// The woken tasks, for the caller to make runnable.
+pub fn wake_key(key: FutexKey, max: usize, bitset: u32) -> Vec<TaskId> {
+    bucket(&key).lock().wake_task_ids(key, max, bitset)
+}
+
+/// Waiters moved to another futex by a requeue: (task, the key it waited on, the key it
+/// waits on now). A waiter looks its entry up after waking; without requeues (glibc's
+/// condition variables do not use them) the table stays empty and unlocked.
+static REQUEUED: Mutex<Vec<(TaskId, FutexKey, FutexKey)>> = Mutex::new(Vec::new());
+/// Entries in [`REQUEUED`].
+static REQUEUED_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The key `task` waits on now, having started on `orig`.
+fn current_key(task: TaskId, orig: FutexKey) -> FutexKey {
+    if REQUEUED_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return orig;
+    }
+    REQUEUED.lock().iter().find(|e| e.0 == task && e.1 == orig).map_or(orig, |e| e.2)
+}
+
+/// Notes that `task`, waiting on `from`, now waits on `to`.
+fn note_requeue(task: TaskId, from: FutexKey, to: FutexKey) {
+    let mut r = REQUEUED.lock();
+    match r.iter_mut().find(|e| e.0 == task && e.2 == from) {
+        Some(e) => e.2 = to,
+        None => r.push((task, from, to)),
+    }
+    REQUEUED_COUNT.store(r.len(), core::sync::atomic::Ordering::Release);
+}
+
+/// Forgets `task`'s requeue from `orig` (its wait ended).
+fn forget_requeue(task: TaskId, orig: FutexKey) {
+    if REQUEUED_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
+    let mut r = REQUEUED.lock();
+    r.retain(|e| !(e.0 == task && e.1 == orig));
+    REQUEUED_COUNT.store(r.len(), core::sync::atomic::Ordering::Release);
+}
 
 /// Returns the identity of the calling task's address space (shared by threads of a process
 /// and by a `vfork` child).
@@ -364,8 +417,8 @@ fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool)
     let key = key_for(uaddr, private);
     let me = crate::task::SCHEDULER.lock().current_task_id();
     {
-        let mut fq = GLOBAL_FUTEX.lock();
-        // Checking the value and queueing happen under the queue lock, so a waker that
+        let mut fq = bucket(&key).lock();
+        // Checking the value and queueing happen under the bucket lock, so a waker that
         // changes the value first and then wakes cannot be missed
         match read_word(uaddr) {
             Ok(v) if v == val => {}
@@ -376,17 +429,26 @@ fn wait(uaddr: u64, val: u32, bitset: u32, deadline: Option<u64>, private: bool)
     }
     loop {
         crate::task::wait::wait_ns(deadline);
-        let mut fq = GLOBAL_FUTEX.lock();
-        if !fq.is_waiting(me) {
+        // (a requeue may have moved the wait to another futex, and bucket)
+        let now = current_key(me, key);
+        let mut fq = bucket(&now).lock();
+        if !fq.is_waiting(me, now) {
+            drop(fq);
+            forget_requeue(me, key);
             return 0; // woken
         }
-        if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
-            fq.remove(me);
-            return ETIMEDOUT;
-        }
-        if super::proc::signal_pending() {
-            fq.remove(me);
-            return if deadline.is_some() { EINTR } else { super::proc::ERESTARTSYS };
+        let end = if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
+            Some(ETIMEDOUT)
+        } else if super::proc::signal_pending() {
+            Some(if deadline.is_some() { EINTR } else { super::proc::ERESTARTSYS })
+        } else {
+            None
+        };
+        if let Some(e) = end {
+            fq.remove(me, now);
+            drop(fq);
+            forget_requeue(me, key);
+            return e;
         }
         // Spurious wakeup: keep waiting
     }
@@ -435,7 +497,7 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
     let me = crate::task::SCHEDULER.lock().current_task_id();
     loop {
         {
-            let mut fq = GLOBAL_FUTEX.lock();
+            let mut fq = bucket(&key).lock();
             let v = match read_word(uaddr) {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -449,18 +511,18 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
                 let new = tid | died | if others { FUTEX_WAITERS } else { 0 };
                 match user_cmpxchg(uaddr, v, new) {
                     Ok(found) if found == v => {
-                        fq.remove(me);
+                        fq.remove(me, key);
                         return 0;
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        fq.remove(me);
+                        fq.remove(me, key);
                         return e;
                     }
                 }
             }
             if owner == tid {
-                fq.remove(me);
+                fq.remove(me, key);
                 return EDEADLK;
             }
             if try_only {
@@ -473,17 +535,17 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
                     Err(e) => return e,
                 }
             }
-            if !fq.is_waiting(me) {
+            if !fq.is_waiting(me, key) {
                 fq.waiters.push(FutexWaiter { key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
             }
         }
         crate::task::wait::wait_ns(deadline);
         if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
-            GLOBAL_FUTEX.lock().remove(me);
+            bucket(&key).lock().remove(me, key);
             return ETIMEDOUT;
         }
         if super::proc::signal_pending() {
-            GLOBAL_FUTEX.lock().remove(me);
+            bucket(&key).lock().remove(me, key);
             return super::proc::ERESTARTSYS;
         }
     }
@@ -505,7 +567,7 @@ fn unlock_pi(uaddr: u64, private: bool) -> i64 {
     let (tid, _) = super::proc::current_ids();
     let tid = tid as u32 & FUTEX_TID_MASK;
     let ids = {
-        let mut fq = GLOBAL_FUTEX.lock();
+        let mut fq = bucket(&key).lock();
         loop {
             let v = match read_word(uaddr) {
                 Ok(v) => v,
@@ -591,7 +653,7 @@ pub fn fast_wake_op(op: i32, val3: u32) -> bool {
 /// The number of waiters woken.
 pub fn fast_wake(space: u64, uaddr: u64, val: u32, op: i32, val3: u32) -> i64 {
     let bitset = if op & FUTEX_CMD_MASK == FUTEX_WAKE { FUTEX_BITSET_MATCH_ANY } else { val3 };
-    let ids = GLOBAL_FUTEX.lock().wake_task_ids(FutexKey { space, uaddr }, val as usize, bitset);
+    let ids = wake_key(FutexKey { space, uaddr }, val as usize, bitset);
     wake_ids(&ids);
     ids.len() as i64
 }
@@ -631,14 +693,14 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
             if bitset == 0 {
                 return EINVAL;
             }
-            let ids = GLOBAL_FUTEX.lock().wake_task_ids(key_of(uaddr), val as usize, bitset);
+            let ids = wake_key(key_of(uaddr), val as usize, bitset);
             wake_ids(&ids);
             ids.len() as i64
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             // `timeout` carries the maximum number of waiters to requeue
             let (from, to) = (key_of(uaddr), key_of(uaddr2));
-            let mut fq = GLOBAL_FUTEX.lock();
+            let (mut a, mut b) = lock_two(&from, &to);
             if cmd == FUTEX_CMP_REQUEUE {
                 match read_word(uaddr) {
                     Ok(v) if v == val3 => {}
@@ -646,24 +708,42 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
                     Err(e) => return e,
                 }
             }
-            let ids = fq.wake_task_ids(from, val as usize, FUTEX_BITSET_MATCH_ANY);
-            let moved = fq.requeue(from, to, timeout as u32 as usize);
-            drop(fq);
+            // Both buckets are held: `a` is `from`'s, `b` is `to`'s (none when they share one)
+            let ids = a.wake_task_ids(from, val as usize, FUTEX_BITSET_MATCH_ANY);
+            let moving = if from == to { Vec::new() } else { a.take(from, timeout as u32 as usize) };
+            let moved = moving.len();
+            let to_q = match b.as_mut() {
+                Some(q) => q,
+                None => &mut a,
+            };
+            for w in moving {
+                note_requeue(w.task_id, from, to);
+                to_q.waiters.push(FutexWaiter { key: to, ..w });
+            }
+            drop(b);
+            drop(a);
             wake_ids(&ids);
             (ids.len() + if cmd == FUTEX_CMP_REQUEUE { moved } else { 0 }) as i64
         }
         FUTEX_WAKE_OP => {
-            let mut fq = GLOBAL_FUTEX.lock();
+            let (k1, k2) = (key_of(uaddr), key_of(uaddr2));
+            let (mut a, mut b) = lock_two(&k1, &k2);
             let fire = match wake_op_apply(uaddr2, val3) {
                 Ok(f) => f,
                 Err(e) => return e,
             };
-            let mut ids = fq.wake_task_ids(key_of(uaddr), val as usize, FUTEX_BITSET_MATCH_ANY);
+            // `a` is k1's bucket, `b` k2's (none when they share one)
+            let mut ids = a.wake_task_ids(k1, val as usize, FUTEX_BITSET_MATCH_ANY);
             if fire {
                 // `timeout` carries the number of waiters to wake on uaddr2
-                ids.extend(fq.wake_task_ids(key_of(uaddr2), timeout as u32 as usize, FUTEX_BITSET_MATCH_ANY));
+                let q2 = match b.as_mut() {
+                    Some(q) => q,
+                    None => &mut a,
+                };
+                ids.extend(q2.wake_task_ids(k2, timeout as u32 as usize, FUTEX_BITSET_MATCH_ANY));
             }
-            drop(fq);
+            drop(b);
+            drop(a);
             wake_ids(&ids);
             ids.len() as i64
         }
@@ -747,8 +827,12 @@ pub fn sys_futex_waitv(waiters: u64, nr: u64, flags: u64, timeout: u64, clockid:
     }
     let me = crate::task::SCHEDULER.lock().current_task_id();
     {
-        // All values are checked and all waiters queued under the queue lock
-        let mut fq = GLOBAL_FUTEX.lock();
+        // All values are checked and all waiters queued with every involved bucket locked
+        // (in index order)
+        let mut idx: Vec<usize> = entries.iter().map(|(k, _, _)| bucket_index(k)).collect();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut held: Vec<(usize, spin::MutexGuard<'static, FutexQueue>)> = idx.iter().map(|&i| (i, FUTEX_QUEUES[i].lock())).collect();
         for (_, uaddr, val) in &entries {
             match read_word(*uaddr) {
                 Ok(v) if v == *val => {}
@@ -757,25 +841,36 @@ pub fn sys_futex_waitv(waiters: u64, nr: u64, flags: u64, timeout: u64, clockid:
             }
         }
         for (key, _, _) in &entries {
-            fq.waiters.push(FutexWaiter { key: *key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
+            let i = bucket_index(key);
+            if let Some((_, q)) = held.iter_mut().find(|(j, _)| *j == i) {
+                q.waiters.push(FutexWaiter { key: *key, task_id: me, bitset: FUTEX_BITSET_MATCH_ANY });
+            }
         }
     }
+    // Ends the wait: every entry still queued goes, and the requeue notes with it
+    let finish = |result: i64| -> i64 {
+        for (key, _, _) in &entries {
+            let now = current_key(me, *key);
+            bucket(&now).lock().remove(me, now);
+            forget_requeue(me, *key);
+        }
+        result
+    };
     loop {
         crate::task::wait::wait_ns(deadline);
-        let mut fq = GLOBAL_FUTEX.lock();
         // A waker removes the entry it wakes: the first missing one is the answer
-        let woken = entries.iter().position(|(key, _, _)| !fq.waiters.iter().any(|w| w.task_id == me && w.key == *key));
+        let woken = entries.iter().position(|(key, _, _)| {
+            let now = current_key(me, *key);
+            !bucket(&now).lock().is_waiting(me, now)
+        });
         if let Some(i) = woken {
-            fq.remove(me);
-            return i as i64;
+            return finish(i as i64);
         }
         if deadline.map_or(false, |d| crate::arch::pit::now_ns() >= d) {
-            fq.remove(me);
-            return ETIMEDOUT;
+            return finish(ETIMEDOUT);
         }
         if super::proc::signal_pending() {
-            fq.remove(me);
-            return super::proc::ERESTARTSYS;
+            return finish(super::proc::ERESTARTSYS);
         }
     }
 }

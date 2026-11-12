@@ -1868,9 +1868,7 @@ impl Scheduler {
                 unsafe { *(clear_child_tid as *mut i32) = 0 };
             }
             let key = crate::compat::linux::futex::key_for_task(&self.tasks[idx], clear_child_tid);
-            let mut fq = crate::compat::linux::futex::GLOBAL_FUTEX.lock();
-            let ids = fq.wake_task_ids(key, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
-            drop(fq);
+            let ids = crate::compat::linux::futex::wake_key(key, 1, crate::compat::linux::futex::FUTEX_BITSET_MATCH_ANY);
             for id in ids {
                 self.wake_task(id.0);
             }
