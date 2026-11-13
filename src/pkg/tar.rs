@@ -162,11 +162,20 @@ impl<'a> TarArchive<'a> {
                 continue;
             }
 
-            // Normalize path: strip leading "./", ".", or "/"
-            let clean_path = raw_name
-                .trim_start_matches('.')
-                .trim_start_matches('/')
-                .trim_end_matches('/');
+            // Normalize path: strip whole leading "./" and "/" components (as GNU tar does;
+            // a hidden file's own dot stays), and a lone "." (the archive root)
+            let mut clean_path = raw_name;
+            loop {
+                if let Some(rest) = clean_path.strip_prefix("./") {
+                    clean_path = rest;
+                } else if let Some(rest) = clean_path.strip_prefix('/') {
+                    clean_path = rest;
+                } else {
+                    break;
+                }
+            }
+            let clean_path = clean_path.trim_end_matches('/');
+            let clean_path = if clean_path == "." { "" } else { clean_path };
 
             if !clean_path.is_empty() {
                 // Form absolute path for ZFS: e.g. "/usr/bin/busybox"

@@ -104,8 +104,6 @@ fn hidden_files_under_dot_slash_keep_their_dot() {
 }
 
 #[test]
-#[ignore = "BUG: trim_start_matches('.') strips the dot of a hidden file named without a ./ \
-            prefix (as `tar -cf x.tar .bashrc` writes it), installing it as /bashrc (src/pkg/tar.rs)"]
 fn hidden_files_without_prefix_keep_their_dot() {
     fake::reset();
     let data = tar(&[file(".bashrc", b"alias ll='ls -l'\n"), dir(".config/")]);
