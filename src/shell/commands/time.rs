@@ -28,7 +28,7 @@ impl Command for TimeCommand {
     }
 
     fn execute(&self, _args: &[&str], _state: &mut ShellState) {
-        match uefi::runtime::get_time() {
+        match crate::memory::paging::with_kernel_tables(uefi::runtime::get_time) {
             Ok(t) => {
                 set_color(Color::LightGreen, Color::Black);
                 println!("UEFI Hardware RTC: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",

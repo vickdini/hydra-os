@@ -59,6 +59,33 @@ pub fn init_kernel_space(allocator: &mut PhysicalMemoryManager) -> Result<PhysAd
     Ok(pml4)
 }
 
+/// Physical address of the kernel's own top-level table (set when it is loaded at
+/// takeover; 0 before): its low half is the firmware's identity map, all of it.
+pub static KERNEL_PML4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Loads the kernel's own page tables on this CPU (no way back: for calls into the
+/// firmware's runtime services, which reach its memory at identity addresses that a
+/// program's address space does not map).
+pub fn load_kernel_tables_for_good() {
+    let pml4 = KERNEL_PML4.load(core::sync::atomic::Ordering::SeqCst);
+    if pml4 != 0 {
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags)) };
+    }
+}
+
+/// Runs `f` with the kernel's own page tables loaded (see [`load_kernel_tables_for_good`]),
+/// then puts back the ones loaded before, interrupts off meanwhile.
+pub fn with_kernel_tables<R>(f: impl FnOnce() -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let before: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) before, options(nomem, nostack, preserves_flags)) };
+        load_kernel_tables_for_good();
+        let r = f();
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) before, options(nostack, preserves_flags)) };
+        r
+    })
+}
+
 /// Represents an x86_64 4-level (PML4) virtual address space.
 pub struct AddressSpace {
     /// Physical address of the 4 KiB-aligned root Page Map Level 4 (`PML4`) table.
@@ -506,6 +533,9 @@ impl AddressSpace {
             }
             p2_entry.set_flags(p2_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
             if p2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                // A 2 MiB page of the direct map (the heap): programs of the shared address
+                // space run code from it, as from the identity-mapped heap before
+                p2_entry.set_flags(p2_entry.flags() - PageTableFlags::NO_EXECUTE);
                 crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
                 continue;
             }
@@ -635,8 +665,9 @@ impl AddressSpace {
         // 2 MiB pages, kernel-only, never executable: all RAM, and at least the first
         // 4 GiB (where firmware and device memory sit). Every address space shares it.
         let top = allocator.max_phys_end().max(4 << 30);
-        let gib = ((top + (1 << 30) - 1) >> 30) as usize;
         let base_idx = ((super::frame_allocator::DIRECT_MAP_BASE >> 39) & 511) as usize;
+        // Built already with the boot tables (arch::relocate), copied above
+        let gib = if new_pml4[base_idx].flags().contains(PageTableFlags::PRESENT) { 0 } else { ((top + (1 << 30) - 1) >> 30) as usize };
         let nx = if crate::memory::vm::nx_enabled() { PageTableFlags::NO_EXECUTE } else { PageTableFlags::empty() };
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         for g in 0..gib {

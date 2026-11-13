@@ -137,6 +137,14 @@ fn panic(_info: &PanicInfo) -> ! {
 /// Returns [`Status::SUCCESS`] if the shell ever terminates normally (in practice, the kernel runs until poweroff).
 #[entry]
 fn main() -> Status {
+    // First of all, before anything stores a pointer: the image moves to the higher half
+    // (out of the low addresses programs need, wherever the firmware loaded it)
+    arch::relocate::go_high(boot);
+    boot()
+}
+
+/// The kernel's boot sequence, in the higher half (see [`arch::relocate`]).
+fn boot() -> ! {
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
     // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
@@ -182,6 +190,11 @@ fn main() -> Status {
 
     // 3. Memory Subsystem: UEFI Memory Map & Physical Frame Allocator
     console::set_color(Color::Yellow, Color::Black);
+    // The heap in the higher half comes from the firmware's free memory, before the frame
+    // allocator takes what is left (memory::heap::init_direct)
+    if arch::relocate::image_phys().is_some() {
+        let _ = memory::heap::init();
+    }
     arch::boottime::mark("memory map, frame allocator");
     println!("\n[*] Step 2: Discovering Memory & Initializing Frame Allocator...");
     memory::frame_allocator::init_memory_from_uefi();

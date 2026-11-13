@@ -431,10 +431,12 @@ pub fn init_memory_from_uefi() {
         for desc in memory_map.entries() {
             // Conventional memory is free memory available for operating system allocation
             if desc.ty == uefi::boot::MemoryType::CONVENTIONAL {
-                // Memory below the low user window's end is never handed out: each process
-                // maps its own pages at those addresses (non-PIE executables live there), so
-                // the kernel could not reach such frames through the identity map
-                let floor = crate::memory::vm::LOW_USER_END;
+                // Memory below the low user window's end is never handed out when the kernel
+                // reaches frames at identity addresses: each process maps its own pages
+                // there (non-PIE executables live there). In the higher half (arch::relocate) every frame is reached through the
+                // direct map: only the first MiB stays out (frame 0, the start-up page and
+                // the legacy BIOS area)
+                let floor = if crate::arch::relocate::image_phys().is_some() { 0x10_0000 } else { crate::memory::vm::LOW_USER_END };
                 let end = desc.phys_start + desc.page_count * PAGE_SIZE;
                 if end > floor {
                     let start = desc.phys_start.max(floor);

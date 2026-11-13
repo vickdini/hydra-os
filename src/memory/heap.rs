@@ -275,6 +275,12 @@ pub fn init() -> Result<HeapStats, &'static str> {
         return Ok(stats());
     }
 
+    // In the higher half (arch::relocate) the heap is the firmware's memory, wherever it
+    // is, reached through the direct map: in every address space, out of programs' way
+    if crate::arch::relocate::image_phys().is_some() {
+        return init_direct();
+    }
+
     // Use at most half of usable RAM, halving down to the minimum if no region fits
     let usable = FRAME_ALLOCATOR.lock().total_usable_memory() as usize;
     let mut size = HEAP_SIZE.min((usable / 2).max(MIN_HEAP_SIZE));
@@ -351,6 +357,44 @@ pub fn init() -> Result<HeapStats, &'static str> {
 /// *Guaranteed to never panic under normal execution.*
 pub fn is_initialized() -> bool {
     HEAP_INITIALIZED.load(Ordering::SeqCst)
+}
+
+/// The heap in the direct map: pages from the firmware (boot loader data, which the frame
+/// allocator, harvesting free memory afterwards, never hands out), at most half of free
+/// RAM, halving down to [`MIN_HEAP_SIZE`] until a contiguous range is found.
+fn init_direct() -> Result<HeapStats, &'static str> {
+    use uefi::mem::memory_map::MemoryMap;
+    let free = uefi::boot::memory_map(MemoryType::LOADER_DATA)
+        .map(|m| m.entries().filter(|d| d.ty == MemoryType::CONVENTIONAL).map(|d| d.page_count * PAGE_SIZE).sum::<u64>())
+        .unwrap_or(0) as usize;
+    let mut size = HEAP_SIZE.min((free / 2).max(MIN_HEAP_SIZE));
+    let phys = loop {
+        let pages = size.div_ceil(PAGE_SIZE as usize);
+        if let Ok(p) = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages) {
+            break p.as_ptr() as u64;
+        }
+        if size / 2 < MIN_HEAP_SIZE {
+            return Err("Failed to allocate contiguous memory pages for kernel heap");
+        }
+        size /= 2;
+    };
+    let start_ptr = super::frame_allocator::phys_to_virt(phys);
+    unsafe {
+        HEAP_ALLOCATOR.lock().init(start_ptr, size);
+    }
+    HEAP_START_ADDR.store(start_ptr as u64, Ordering::SeqCst);
+    HEAP_PHYS.store(phys, Ordering::SeqCst);
+    HEAP_TOTAL_SIZE.store(size, Ordering::SeqCst);
+    HEAP_INITIALIZED.store(true, Ordering::SeqCst);
+    Ok(stats())
+}
+
+/// Physical address of a heap in the direct map (0: the heap is at its identity address).
+static HEAP_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the heap is reached through the direct map (not at identity addresses).
+pub fn in_direct_map() -> bool {
+    HEAP_PHYS.load(Ordering::Relaxed) != 0
 }
 
 /// The heap's physical (and identity-mapped virtual) range `[start, end)`.

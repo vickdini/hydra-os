@@ -1111,7 +1111,7 @@ impl ZfsClient {
             let mut file_buf = alloc::vec![0u8; file_size];
             let mut total_read = 0;
             while total_read < file_buf.len() {
-                match file.read(&mut file_buf[total_read..]) {
+                match crate::shell::fs::fw_read(&mut file, &mut file_buf[total_read..]) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => total_read += n,
                 }

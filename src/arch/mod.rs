@@ -54,6 +54,8 @@ pub mod power;
 /// Kernel CSPRNG (ChaCha20) for /dev/urandom and getrandom(2).
 pub mod random;
 pub mod raw_serial;
+/// The kernel image moved to the higher half at entry.
+pub mod relocate;
 /// MC146818 CMOS Real-Time Clock (RTC) wall-clock epoch initialization.
 pub mod rtc;
 /// User segment state (selectors, TLS descriptors, LDT) put in the CPU at a context switch.

@@ -118,13 +118,22 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     // its image, firmware data, ACPI, devices; its heap and boot stack), and always
     // [2 GiB, 4 GiB) (image, PCI hole, APICs). Programs get the rest.
     {
+        // In the higher half (arch::relocate) the image, its stack, the heap and the page
+        // tables are reached at high addresses, and the firmware's own memory (runtime
+        // services, ACPI tables, reserved RAM) only with the kernel's tables loaded
+        // (power::firmware_call): below 2 GiB, the low window, only device memory counts
+        let high = crate::arch::relocate::image_phys().is_some();
         let mut ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
         for d in memory_map.entries() {
-            if d.ty != uefi::boot::MemoryType::CONVENTIONAL {
+            use uefi::boot::MemoryType as T;
+            let device = matches!(d.ty, T::MMIO | T::MMIO_PORT_SPACE);
+            if d.ty != T::CONVENTIONAL && !(high && !device && d.phys_start < (2 << 30)) {
                 ranges.push((d.phys_start, d.phys_start + d.page_count * 4096));
             }
         }
-        ranges.push(crate::memory::heap::range());
+        if !crate::memory::heap::in_direct_map() {
+            ranges.push(crate::memory::heap::range());
+        }
         ranges.push((2 << 30, 4 << 30));
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
@@ -136,10 +145,12 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         crate::memory::vm::init_low_layout(&ranges);
         let kept: alloc::vec::Vec<usize> = (1..512).filter(|&i| crate::memory::vm::kernel_low_slot(i)).collect();
         crate::kprintln!(
-            "[vm] programs' low window [0x10000, {:#x}); kernel keeps GiB slots {:?} (heap at {:#x})",
+            "[vm] programs' low window [0x10000, {:#x}); kernel keeps GiB slots {:?} (heap at {:#x}, image at {:#x} -> {:#x})",
             crate::memory::vm::low_user_end(),
             kept,
-            crate::memory::heap::range().0
+            crate::memory::heap::range().0,
+            crate::arch::relocate::image_phys().map_or(0, |i| i.0),
+            crate::arch::relocate::KERNEL_BASE
         );
     }
 
@@ -167,6 +178,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     }
     let cr3_frame = Cr3::read().0.start_address().as_u64();
     crate::task::update_cr3(cr3_frame);
+    crate::memory::paging::KERNEL_PML4.store(cr3_frame, core::sync::atomic::Ordering::SeqCst);
     // Hydra's tables hold the direct map of physical memory: use it from now on
     crate::memory::frame_allocator::enable_direct_map();
 

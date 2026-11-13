@@ -47,7 +47,9 @@ pub fn power_off() -> ! {
         pb2.write(0x00);
     }
 
-    // 6. UEFI Runtime Services Shutdown
+    // 6. UEFI Runtime Services Shutdown (with the kernel's tables: the firmware's memory
+    // is not mapped in a program's address space)
+    crate::memory::paging::load_kernel_tables_for_good();
     uefi::runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None);
 }
 
@@ -67,6 +69,7 @@ pub fn reboot() -> ! {
         pcf9.write(0x06);
     }
 
-    // 3. Fallback to UEFI cold reset
+    // 3. Fallback to UEFI cold reset (see power_off)
+    crate::memory::paging::load_kernel_tables_for_good();
     uefi::runtime::reset(ResetType::COLD, Status::SUCCESS, None);
 }

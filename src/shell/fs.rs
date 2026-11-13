@@ -98,6 +98,34 @@ pub fn open_root_volume() -> Result<Directory, &'static str> {
         .map_err(|_| "Failed to open root volume directory")
 }
 
+/// Firmware buffer for [`fw_read`] (identity address; 0 until first used).
+static FW_BOUNCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Size of [`FW_BOUNCE`].
+const FW_BOUNCE_SIZE: usize = 256 * 1024;
+
+/// Reads from a firmware file into `buf`, as `file.read`. A buffer of the kernel's (in the
+/// higher half: heap, stack, statics) is filled through one at an identity address: the
+/// firmware's disk drivers may have the device write straight into the caller's buffer,
+/// taking its address for a physical one.
+///
+/// # Returns
+/// The bytes read (0 at the end of the file), or `Err` on an I/O error.
+pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8]) -> Result<usize, ()> {
+    if (buf.as_ptr() as u64) < 0x8000_0000_0000_0000 {
+        return file.read(buf).map_err(|_| ());
+    }
+    let mut bounce = FW_BOUNCE.load(core::sync::atomic::Ordering::Relaxed);
+    if bounce == 0 {
+        bounce = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, FW_BOUNCE_SIZE / 4096).map_err(|_| ())?.as_ptr() as u64;
+        FW_BOUNCE.store(bounce, core::sync::atomic::Ordering::Relaxed);
+    }
+    let n = buf.len().min(FW_BOUNCE_SIZE);
+    let tmp = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, n) };
+    let got = file.read(tmp).map_err(|_| ())?;
+    buf[..got].copy_from_slice(&tmp[..got]);
+    Ok(got)
+}
+
 /// Largest file `read_media_file` will load into memory (1 GiB, used for root filesystem archives).
 const MAX_MEDIA_FILE: usize = 1024 * 1024 * 1024;
 
@@ -148,7 +176,7 @@ pub fn read_media_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> 
         let mut buf = alloc::vec![0u8; size];
         let mut total = 0;
         while total < size {
-            match file.read(&mut buf[total..]) {
+            match fw_read(&mut file, &mut buf[total..]) {
                 Ok(0) => break,
                 Ok(n) => total += n,
                 Err(_) => return Err("I/O error reading media file"),
@@ -197,7 +225,7 @@ pub fn read_boot_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     let mut buf = alloc::vec![0u8; file_size];
     let mut total_read = 0;
     while total_read < file_size {
-        match file.read(&mut buf[total_read..]) {
+        match fw_read(&mut file, &mut buf[total_read..]) {
             Ok(0) => break,
             Ok(n) => total_read += n,
             Err(_) => return Err("I/O error reading boot file"),
@@ -752,7 +780,7 @@ pub fn print_file(path: &str) {
     set_color(Color::White, Color::Black);
 
     loop {
-        match file.read(&mut buf) {
+        match fw_read(&mut file, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if let Ok(text) = str::from_utf8(&buf[..n]) {
