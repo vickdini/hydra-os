@@ -311,7 +311,10 @@ pub fn parse_dhcp_reply(buf: &[u8], expected_xid: u32) -> Option<(u8, DhcpLease)
             break;
         }
         let opt_len = buf[offset + 1] as usize;
-        let opt_data = &buf[offset + 2..offset + 2 + opt_len];
+        // An option that claims more bytes than the packet holds ends the list
+        let Some(opt_data) = buf.get(offset + 2..offset + 2 + opt_len) else {
+            break;
+        };
 
         match opt_code {
             OPTION_MSG_TYPE => {

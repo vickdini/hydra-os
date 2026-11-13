@@ -516,8 +516,6 @@ fn dhcp_parse_stops_at_dangling_option_code() {
 }
 
 #[test]
-#[ignore = "BUG: an option whose length runs past the end of the packet panics with an \
-            out-of-bounds slice; a malicious DHCP server can crash the kernel (src/net/dhcp.rs)"]
 fn dhcp_parse_survives_truncated_option() {
     let opts = [53, 1, DHCP_MSG_OFFER, 6, 200, 8, 8];
     let r = std::panic::catch_unwind(|| parse_dhcp_reply(&dhcp_reply(2, XID, IP_A, &opts), XID));
