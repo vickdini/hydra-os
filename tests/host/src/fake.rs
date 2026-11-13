@@ -97,6 +97,8 @@ pub struct Task {
     pub gid: u32,
     pub euid: u32,
     pub egid: u32,
+    pub suid: u32,
+    pub sgid: u32,
     /// Address space of the current task (see [`TASK_MM`]).
     pub mm: Option<Arc<spin::Mutex<crate::memory::vm::Mm>>>,
     /// seccomp / no_new_privs / Landlock state (see [`SECCOMP`]).
@@ -118,6 +120,8 @@ impl Task {
             gid: 0,
             euid: 0,
             egid: 0,
+            suid: 0,
+            sgid: 0,
             mm: None,
             seccomp: Default::default(),
             id: TaskId(tid),
@@ -160,6 +164,8 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         gid: egid,
         euid,
         egid,
+        suid: euid,
+        sgid: egid,
         mm,
         seccomp,
         id: TaskId(tid),
@@ -205,7 +211,8 @@ impl SchedulerGuard {
         if tgid == IDS.get().1 {
             with_current_task_mut(|t| f(t))
         } else {
-            None
+            // Another process: a task with that tgid placed in SIBLINGS
+            SIBLINGS.with_borrow(|v| v.iter().find(|t| t.tgid == tgid).map(f))
         }
     }
 }

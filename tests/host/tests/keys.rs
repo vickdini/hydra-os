@@ -494,3 +494,23 @@ fn session_to_parent_needs_a_real_parent() {
     keyctl(JOIN_SESSION, 0, 0, 0, 0);
     assert_eq!(keyctl(18, 0, 0, 0, 0), EPERM, "parent is init (ppid 1)");
 }
+
+#[test]
+fn session_to_parent_needs_the_parents_credentials_to_match() {
+    // Linux's keyctl_session_to_parent: the parent's real, effective and saved ids must all
+    // be the caller's effective ones (finding 30)
+    for (who, other, want) in [("the same user", None, 0), ("another user", Some((99, 99, 99)), EPERM), ("set-uid", Some((0, 0, 99)), EPERM)] {
+        let (me, _p) = setup();
+        let parent = me as u64 + 100_000;
+        let mut p = fake::Task::sibling(parent);
+        let (uid, euid, suid) = match other {
+            None => (me, me, me),
+            Some((u, e, s)) => (if u == 0 { me } else { u }, if e == 0 { me } else { e }, s),
+        };
+        (p.tgid, p.uid, p.euid, p.suid, p.gid, p.egid, p.sgid) = (parent, uid, euid, suid, me, me, me);
+        fake::SIBLINGS.with_borrow_mut(|v| v.push(p));
+        let (_, _child) = become_process(me as u64 + 200_000, me, parent);
+        keyctl(JOIN_SESSION, 0, 0, 0, 0);
+        assert_eq!(keyctl(18, 0, 0, 0, 0), want, "parent running as {who}");
+    }
+}

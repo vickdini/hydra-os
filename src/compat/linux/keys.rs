@@ -938,9 +938,26 @@ fn keyctl_inner(op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<i64, i64>
             if ppid <= 1 {
                 return Err(EPERM);
             }
+            // As Linux's keyctl_session_to_parent: the parent must run as exactly the caller
+            // (real, effective and saved ids all the caller's effective ones: not another
+            // user, not set-id), or a process could plant keys in another user's session
+            let same_creds = crate::task::SCHEDULER
+                .lock()
+                .with_process(ppid, |p| {
+                    [p.uid, p.euid, p.suid].iter().all(|&u| u == c.uid) && [p.gid, p.egid, p.sgid].iter().all(|&g| g == c.gid)
+                })
+                .unwrap_or(false);
+            if !same_creds {
+                return Err(EPERM);
+            }
             let mut ks = KEYS.lock();
             let s = ks.lookup(&c, SESSION, false)?;
             ks.check(&c, s, LINK)?;
+            // Both the new session keyring and the one it replaces must be the caller's
+            let owned_by_caller = |k: Option<&Key>| k.map_or(true, |k| k.uid == c.uid);
+            if !owned_by_caller(ks.keys.get(&s)) || !owned_by_caller(ks.session.get(&ppid).and_then(|o| ks.keys.get(o))) {
+                return Err(EPERM);
+            }
             ks.session.insert(ppid, s);
             Ok(0)
         }
