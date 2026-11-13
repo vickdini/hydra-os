@@ -169,9 +169,12 @@ fn error_messages_are_distinct() {
 fn load_elf_pie_lays_out_segments() {
     fake::reset();
     let img = load_elf(&pie().bytes).unwrap();
-    let mem = image(&img);
-    let base = mem.as_ptr() as u64;
-    assert_eq!(mem.len(), 0x5000, "span of all PT_LOAD segments, page-rounded");
+    // The image starts a page-aligned stretch into its buffer: find it from the entry point
+    let buf = image(&img);
+    let base = img.entry_point - 0x100;
+    let start = (base - buf.as_ptr() as u64) as usize;
+    assert!(buf.len() >= start + 0x5000, "span of all PT_LOAD segments, page-rounded, fits the buffer");
+    let mem = &buf[start..start + 0x5000];
     assert_eq!(&mem[0..4], b"\x7fELF", "headers are part of the first segment");
     assert_eq!(&mem[0x100..0x104], b"CODE");
     assert_eq!(&mem[0x3000..0x3004], b"DATA");
@@ -196,9 +199,6 @@ fn load_elf_sets_up_aligned_stacks() {
 }
 
 #[test]
-#[ignore = "BUG: load_elf places PIE images at the heap buffer's address without page-aligning \
-            it (load_linux_elf does), so segment alignment (p_align) is not honoured \
-            (src/task/elf.rs, load_elf)"]
 fn load_elf_pie_base_is_page_aligned() {
     fake::reset();
     let img = load_elf(&pie().bytes).unwrap();

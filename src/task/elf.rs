@@ -509,12 +509,16 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
         let total_span = (max_vaddr.saturating_sub(min_vaddr)) as usize;
         let aligned_span = (total_span + 4095) & !4095;
 
-        // Allocate a dedicated zero-initialized backing buffer for all segments
-        let mut seg_buffer = alloc::vec![0u8; aligned_span].into_boxed_slice();
-        let base_virt = seg_buffer.as_ptr() as u64;
+        // Allocate a dedicated zero-initialized backing buffer for all segments, placed so
+        // every address keeps its offset within the page (as a PIE loaded by Linux: what
+        // relies on p_align, such as aligned data or TLS, finds it aligned)
+        let mut seg_buffer = alloc::vec![0u8; aligned_span + 2 * 4096].into_boxed_slice();
+        let raw_ptr = seg_buffer.as_ptr() as usize;
+        let align_pad = ((4096 - (raw_ptr & 4095)) & 4095) + (min_vaddr & 4095) as usize;
+        let base_virt = (raw_ptr + align_pad) as u64;
 
         for ph in &load_segments {
-            let seg_offset = (ph.p_vaddr - min_vaddr) as usize;
+            let seg_offset = align_pad + (ph.p_vaddr - min_vaddr) as usize;
             let filesz = ph.p_filesz as usize;
             let memsz = ph.p_memsz as usize;
 
@@ -536,7 +540,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
         // Mark the segment buffer memory region as USER_ACCESSIBLE
         crate::memory::paging::make_user_accessible(
             VirtAddr::new(base_virt),
-            seg_buffer.len(),
+            aligned_span,
         )
         .map_err(|e| ElfError::PagingError(e))?;
 
