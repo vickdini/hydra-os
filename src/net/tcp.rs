@@ -86,7 +86,8 @@ impl<'a> TcpPacket<'a> {
         let flags = buf[13];
         let window_size = ((buf[14] as u16) << 8) | (buf[15] as u16);
 
-        if buf.len() < data_offset {
+        // A header is at least 5 words (Linux drops such segments in tcp_v4_rcv)
+        if data_offset < 20 || buf.len() < data_offset {
             return None;
         }
 

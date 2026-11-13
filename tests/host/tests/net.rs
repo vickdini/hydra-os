@@ -401,8 +401,6 @@ fn tcp_parse_skips_options() {
 }
 
 #[test]
-#[ignore = "BUG: parse accepts a data offset below 5 words, so the header is returned as payload \
-            (src/net/tcp.rs)"]
 fn tcp_parse_rejects_data_offset_below_minimum() {
     let mut buf = [0u8; 24];
     buf[12] = 0x00;
