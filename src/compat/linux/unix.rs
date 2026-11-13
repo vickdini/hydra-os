@@ -67,6 +67,7 @@ const EOPNOTSUPP: i64 = -95;
 const EADDRINUSE: i64 = -98;
 const EISCONN: i64 = -106;
 const ENOTCONN: i64 = -107;
+const ETOOMANYREFS: i64 = -109;
 const ECONNREFUSED: i64 = -111;
 
 /// Bytes a direction buffers before writers wait (Linux's default `wmem`).
@@ -354,6 +355,19 @@ impl UnixSocket {
     /// # Returns
     ///
     /// `Some((pair, side_index))` if connected, or `None`.
+    /// Whether Unix sockets wait in this socket's receive queue (or, listening, in a pending
+    /// connection's), sent and not yet received.
+    fn holds_unix_in_flight(&self) -> bool {
+        let in_queue = |pair: &Pair, side: usize| {
+            pair.q[side].lock().segs.iter().any(|s| s.fds.iter().any(|d| matches!(d, FileDescriptor::Unix(_))))
+        };
+        match &*self.state.lock() {
+            State::Connected { pair, side, .. } => in_queue(pair, *side),
+            State::Listening { pending, .. } => pending.iter().any(|p| p.pair().is_some_and(|(pair, side)| in_queue(&pair, side))),
+            State::Unconnected => false,
+        }
+    }
+
     fn pair(&self) -> Option<(Arc<Pair>, usize)> {
         match &*self.state.lock() {
             State::Connected { pair, side, .. } => Some((pair.clone(), *side)),
@@ -451,6 +465,13 @@ impl UnixSocket {
     /// Number of bytes queued on success, or a negative Linux errno on error.
     fn send(&self, data: &[u8], fds: Vec<FileDescriptor>, flags: u64) -> i64 {
         let mut fds = InFlight(fds);
+        // A Unix socket in flight is kept alive by the queue holding it; sockets in flight
+        // in each other's queues would keep each other alive forever (Linux collects such
+        // cycles with unix_gc). Closing any cycle means sending a socket whose own queue
+        // already holds one, so that is refused, with the error Linux's in-flight limits give
+        if fds.0.iter().any(|d| matches!(d, FileDescriptor::Unix(s) if s.holds_unix_in_flight())) {
+            return ETOOMANYREFS;
+        }
         let (pair, side) = match self.pair() {
             Some(p) => p,
             None => return ENOTCONN,
