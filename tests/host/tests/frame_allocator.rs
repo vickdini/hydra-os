@@ -111,9 +111,6 @@ fn contiguous_allocation_moves_to_a_region_that_fits() {
 }
 
 #[test]
-#[ignore = "BUG: a contiguous request that fits in no remaining region advances the region cursor \
-            past the end, after which allocate_frame returns None although free pages remain \
-            (src/memory/frame_allocator.rs, allocate_contiguous_frames)"]
 fn failed_contiguous_request_does_not_exhaust_the_allocator() {
     let mut m = PhysicalMemoryManager::new();
     m.add_region(PhysAddr::new(GIB), 10);
@@ -123,8 +120,6 @@ fn failed_contiguous_request_does_not_exhaust_the_allocator() {
 }
 
 #[test]
-#[ignore = "BUG: when a contiguous request skips a region, that region's remaining pages are \
-            never handed out again (src/memory/frame_allocator.rs, allocate_contiguous_frames)"]
 fn skipped_region_remainder_is_still_allocatable() {
     let mut m = PhysicalMemoryManager::new();
     m.add_region(PhysAddr::new(GIB), 4);

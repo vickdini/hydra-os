@@ -367,18 +367,25 @@ impl PhysicalMemoryManager {
     /// The starting [`PhysFrame`] of the contiguous block, or `None` if no region has sufficient space.
     pub fn allocate_contiguous_frames(&mut self, count: usize) -> Option<PhysFrame<Size4KiB>> {
         let count_u64 = count as u64;
-        while self.current_region_idx < self.region_count {
-            if let Some(region) = self.regions[self.current_region_idx] {
-                let remaining = region.page_count.saturating_sub(self.next_page_in_region);
-                if remaining >= count_u64 {
-                    let frame_addr = region.start + (self.next_page_in_region * PAGE_SIZE);
-                    self.next_page_in_region += count_u64;
-                    self.allocated_frames_count += count_u64;
-                    return Some(PhysFrame::containing_address(frame_addr));
-                }
+        // The bump cursor stays where it is: a region that is too small keeps its pages for
+        // single frames, and a request nothing can serve changes nothing
+        for i in self.current_region_idx..self.region_count {
+            let Some(region) = self.regions[i].as_mut() else { continue };
+            let used = if i == self.current_region_idx { self.next_page_in_region } else { 0 };
+            if region.page_count.saturating_sub(used) < count_u64 {
+                continue;
             }
-            self.current_region_idx += 1;
-            self.next_page_in_region = 0;
+            let frame_addr = region.start + used * PAGE_SIZE;
+            if i == self.current_region_idx {
+                self.next_page_in_region += count_u64;
+            } else {
+                // A region the cursor has not reached: taken from its start, so the
+                // region begins after the block
+                region.start += count_u64 * PAGE_SIZE;
+                region.page_count -= count_u64;
+            }
+            self.allocated_frames_count += count_u64;
+            return Some(PhysFrame::containing_address(frame_addr));
         }
         None
     }
