@@ -23,6 +23,7 @@
 //!   [`crate::memory::frame_allocator`].
 //! - Concurrency: Protected by [`spin::Mutex`] and implements `MappedObject` for demand paging.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -49,8 +50,9 @@ pub const MFD_ALLOW_SEALING: u32 = 0x0002;
 pub struct MemFd {
     /// Diagnostic name passed to `memfd_create` (visible in `/proc/self/fd/`).
     pub name: String,
-    /// Sparse array of 4 KiB physical frames backing each page offset of the file.
-    pages: Vec<Option<PhysFrame<Size4KiB>>>,
+    /// The 4 KiB frames of the pages written so far, by page index: sparse, as Linux's
+    /// shmem, so a large size costs nothing until its pages are touched.
+    pages: BTreeMap<usize, PhysFrame<Size4KiB>>,
     /// Logical file size in bytes (set by `ftruncate` or extending writes).
     size: usize,
     /// Current sequential read/write offset for legacy descriptor I/O.
@@ -70,7 +72,7 @@ impl MemFd {
     pub fn new(name: &str) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             name: String::from(name),
-            pages: Vec::new(),
+            pages: BTreeMap::new(),
             size: 0,
             cursor: 0,
             seals: 0,
@@ -96,16 +98,12 @@ impl MemFd {
     /// * `size` - New logical length of the memory object in bytes.
     pub fn truncate(&mut self, size: usize) {
         let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
-        if page_count < self.pages.len() {
-            for frame in self.pages.drain(page_count..).flatten() {
-                frame_ref_dec(frame);
-            }
-        } else {
-            self.pages.resize(page_count, None);
+        for (_, frame) in self.pages.split_off(&page_count) {
+            frame_ref_dec(frame);
         }
         // Zero the tail of a partially truncated last page
         if size < self.size && size % PAGE_SIZE as usize != 0 {
-            if let Some(Some(frame)) = self.pages.last() {
+            if let Some(frame) = self.pages.get(&(page_count - 1)) {
                 let off = size % PAGE_SIZE as usize;
                 unsafe {
                     core::ptr::write_bytes(
@@ -129,11 +127,15 @@ impl MemFd {
     ///
     /// Physical 4KiB frame allocated for the requested page index, or `None` if out of bounds or out of memory.
     fn page(&mut self, index: usize) -> Option<PhysFrame<Size4KiB>> {
-        let slot = self.pages.get_mut(index)?;
-        if slot.is_none() {
-            *slot = Some(alloc_user_frame()?);
+        if index >= self.size.div_ceil(PAGE_SIZE as usize) {
+            return None;
         }
-        *slot
+        if let Some(&frame) = self.pages.get(&index) {
+            return Some(frame);
+        }
+        let frame = alloc_user_frame()?;
+        self.pages.insert(index, frame);
+        Some(frame)
     }
 
     /// Copies bytes starting at byte `offset` into `dst` without modifying `self.cursor`.
@@ -252,7 +254,7 @@ impl MappedObject for Mutex<MemFd> {
 
 impl Drop for MemFd {
     fn drop(&mut self) {
-        for frame in self.pages.drain(..).flatten() {
+        for (_, frame) in core::mem::take(&mut self.pages) {
             frame_ref_dec(frame);
         }
     }

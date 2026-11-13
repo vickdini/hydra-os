@@ -175,11 +175,6 @@ fn growing_does_not_allocate_pages() {
 }
 
 #[test]
-#[ignore = "BUG: MemFd keeps one Vec slot (16 bytes) per page of logical size, so ftruncate, \
-            pwrite or fallocate to a large size makes the kernel allocate heap in proportion \
-            (16 GiB -> 64 MiB, 1 TiB -> 4 GiB). SYS_FTRUNCATE passes the user length straight to \
-            truncate, so any process can exhaust the kernel heap and halt the kernel \
-            (src/compat/linux/memfd.rs, truncate)"]
 fn sparse_size_does_not_cost_heap() {
     isolated(|| {
         let m = MemFd::new("x");
