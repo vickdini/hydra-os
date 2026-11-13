@@ -298,6 +298,12 @@ impl<'a> ElfBinary<'a> {
             return Err(ElfError::UnsupportedMachine);
         }
 
+        // Program headers are read as Elf64_Phdr: any other entry size is refused, as
+        // Linux's load_elf_phdrs does (ENOEXEC)
+        if header.e_phentsize as usize != core::mem::size_of::<Elf64ProgramHeader>() {
+            return Err(ElfError::ProgramHeaderOutOfBounds);
+        }
+
         // Validate executable or dynamic PIE type
         if header.e_type != ET_EXEC && header.e_type != ET_DYN {
             return Err(ElfError::UnsupportedType);

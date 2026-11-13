@@ -91,8 +91,6 @@ fn parse_checks_program_header_table_bounds() {
 }
 
 #[test]
-#[ignore = "BUG: parse accepts any e_phentsize; Linux rejects anything but sizeof(Elf64_Phdr)=56. \
-            With a smaller value the iterator reads overlapping, misaligned headers (src/task/elf.rs)"]
 fn parse_rejects_wrong_phentsize() {
     let b = pie().put(54, &32u16.to_le_bytes()).bytes;
     assert!(ElfBinary::parse(&b).is_err());
