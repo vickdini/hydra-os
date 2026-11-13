@@ -1151,8 +1151,20 @@ impl Mm {
     ///
     /// * `start` - Inclusive start virtual address.
     /// * `end` - Exclusive end virtual address.
+    ///
+    /// Only this address space's own mappings are touched: the page tables also lead to
+    /// the kernel's (shared by every process), which must never be zapped.
     pub fn discard(&mut self, start: u64, end: u64) {
-        self.zap_range(page_down(start), page_up(end));
+        let (start, end) = (page_down(start), page_up(end.min(USER_SPACE_END)));
+        let ranges: Vec<(u64, u64)> = self
+            .vmas
+            .range(..end)
+            .map(|(_, v)| (v.start.max(start), v.end.min(end)))
+            .filter(|(s, e)| s < e)
+            .collect();
+        for (s, e) in ranges {
+            self.zap_range(s, e);
+        }
     }
 
     /// Resolves a page fault at `addr`. `write`/`exec` describe the faulting access.

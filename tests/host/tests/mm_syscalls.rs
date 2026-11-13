@@ -363,11 +363,19 @@ fn madvise_dontneed_drops_pages() {
 }
 
 #[test]
-#[ignore = "BUG (security): sys_madvise never checks that the range is user memory, and \
-            Mm::discard walks whatever tables the address leads to. Every process's PML4 shares \
-            the kernel half, so madvise(kernel_addr, len, MADV_DONTNEED) from any process clears \
-            kernel page-table entries and frees kernel frames \
-            (src/compat/linux/mm.rs, sys_madvise; src/memory/vm.rs, discard)"]
+fn madvise_range_checks_follow_linux() {
+    with_mm(|mm| {
+        sys_mmap(mm, A, P, RW, ANON_PRIVATE | MAP_FIXED, -1, 0);
+        mm.lock().write_bytes(A, b"data").unwrap();
+        assert_eq!(sys_madvise(mm, A, 0, MADV_DONTNEED), 0, "an empty range does nothing");
+        assert_eq!(peek(mm, A, 4), b"data");
+        assert_eq!(sys_madvise(mm, A, u64::MAX - 10, MADV_DONTNEED), EINVAL, "a range that wraps");
+        assert_eq!(sys_madvise(mm, A, 2 * P, MADV_DONTNEED), ENOMEM, "the second page is not mapped");
+        assert_eq!(peek(mm, A, 4), [0; 4], "the mapped part was still discarded");
+    });
+}
+
+#[test]
 fn madvise_cannot_touch_kernel_memory() {
     let _g = common::serial();
     common::global_frames();

@@ -383,11 +383,28 @@ pub fn sys_mremap(mm: &Mutex<Mm>, old: u64, old_len: u64, new_len: u64, flags: u
 ///
 /// `0` on success, or a negative Linux errno on error.
 pub fn sys_madvise(mm: &Mutex<Mm>, addr: u64, len: u64, advice: u64) -> i64 {
+    // As Linux: the length rounds up to pages; a range that wraps is EINVAL, an empty one
+    // does nothing, and one with unmapped parts (kernel addresses have no mappings at all)
+    // is ENOMEM after the advice applies to the mapped parts.
     if addr & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;
     }
+    let Some(end) = len.checked_add(PAGE_SIZE - 1).map(|l| l & !(PAGE_SIZE - 1)).and_then(|l| addr.checked_add(l)) else {
+        return -EINVAL;
+    };
+    if end == addr {
+        return 0;
+    }
+    let mut m = mm.lock();
     if advice == MADV_DONTNEED || advice == MADV_FREE {
-        mm.lock().discard(addr, addr + len);
+        m.discard(addr, end);
+    }
+    let mut cursor = addr;
+    while cursor < end {
+        match m.find_vma(cursor) {
+            Some(v) => cursor = v.end,
+            None => return -ENOMEM,
+        }
     }
     0
 }
