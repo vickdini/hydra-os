@@ -39,8 +39,6 @@ fn parse_u64_rejects_bad_input() {
 }
 
 #[test]
-#[ignore = "BUG: parse_u64 checks for the 0x prefix before trimming, so \" 0x10\" is parsed as \
-            decimal and rejected while \" 16\" is accepted (src/shell/command.rs)"]
 fn parse_u64_trims_before_detecting_hex() {
     assert_eq!(parse_u64(" 0x10"), Some(16));
 }

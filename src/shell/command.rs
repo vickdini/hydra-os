@@ -123,11 +123,12 @@ pub fn parse_hex(s: &str) -> Option<u64> {
 ///
 /// - *Guaranteed to never panic under normal execution.*
 pub fn parse_u64(s: &str) -> Option<u64> {
+    // Trimmed first, so " 0x10" is hex like " 16" is decimal
+    let s = s.trim();
     if s.starts_with("0x") || s.starts_with("0X") {
         parse_hex(s)
     } else {
         let mut val: u64 = 0;
-        let s = s.trim();
         if s.is_empty() {
             return None;
         }
