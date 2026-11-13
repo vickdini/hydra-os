@@ -102,6 +102,7 @@ const ENXIO: i64 = -6;
 const ERANGE: i64 = -34;
 const ELOOP: i64 = -40;
 const EOPNOTSUPP: i64 = -95;
+const EFBIG: i64 = -27;
 
 // open flags
 const O_CREAT: u32 = 0o100;
@@ -3413,10 +3414,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             } else if mode & !1 != 0 {
                 EOPNOTSUPP
             } else {
-                let end = (offset + len) as usize;
+                // offset + len past the largest off_t is EFBIG, as Linux
+                let Some(end) = offset.checked_add(len) else { return Some(EFBIG) };
+                let end = end as usize;
                 let mut m = m.lock();
                 if mode & 1 == 0 && m.size() < end {
-                    m.truncate(end);
+                    if let Err(e) = m.truncate(end) {
+                        return Some(e);
+                    }
                 }
                 0
             }

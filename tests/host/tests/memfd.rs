@@ -142,7 +142,7 @@ fn truncate_shrinks_and_frees_pages() {
         let mut m = m.lock();
         m.write_at(0, &vec![1u8; 4 * P]);
         let before = frames_used();
-        m.truncate(P + 1);
+        m.truncate(P + 1).unwrap();
         assert_eq!(m.size(), P + 1);
         assert_eq!(frames_used(), before - 2 * PAGE_SIZE, "pages past the new end are freed");
     });
@@ -155,8 +155,8 @@ fn shrink_then_grow_reads_zeros_not_old_data() {
         let m = MemFd::new("x");
         let mut m = m.lock();
         m.write_at(0, &vec![b'A'; 2 * P]);
-        m.truncate(100);
-        m.truncate(2 * P);
+        m.truncate(100).unwrap();
+        m.truncate(2 * P).unwrap();
         let all = read_all(&mut m);
         assert!(all[..100].iter().all(|&b| b == b'A'));
         assert!(all[100..].iter().all(|&b| b == 0), "old data resurfaced after truncate");
@@ -168,7 +168,7 @@ fn growing_does_not_allocate_pages() {
     isolated(|| {
         let m = MemFd::new("x");
         let before = frames_used();
-        m.lock().truncate(100 * P);
+        m.lock().truncate(100 * P).unwrap();
         assert_eq!(m.lock().size(), 100 * P);
         assert_eq!(frames_used(), before, "growing is sparse");
     });
@@ -179,16 +179,13 @@ fn sparse_size_does_not_cost_heap() {
     isolated(|| {
         let m = MemFd::new("x");
         let heap = HEAP.load(Ordering::Relaxed);
-        m.lock().truncate(16 << 30);
+        m.lock().truncate(16 << 30).unwrap();
         let grew = HEAP.load(Ordering::Relaxed) - heap;
         assert!(grew < 1 << 20, "a sparse 16 GiB memfd took {} MiB of kernel heap", grew >> 20);
     });
 }
 
 #[test]
-#[ignore = "BUG: truncate computes (size + PAGE_SIZE - 1) unchecked; ftruncate(fd, -1) wraps the \
-            page count to 0, frees every page and records size = usize::MAX, after which writes \
-            silently do nothing (src/compat/linux/memfd.rs, truncate)"]
 fn absurd_sizes_are_refused_without_losing_data() {
     isolated(|| {
         let m = MemFd::new("x");
@@ -197,6 +194,8 @@ fn absurd_sizes_are_refused_without_losing_data() {
         let mut buf = [0u8; 7];
         let n = m.lock().read_at(0, &mut buf);
         assert!(r.is_ok() && n == 7 && &buf == b"keep me", "data lost after truncate(usize::MAX)");
+        assert_eq!(r.unwrap(), Err(-27), "EFBIG, as Linux past MAX_LFS_FILESIZE");
+        assert_eq!(m.lock().write_at(usize::MAX - 2, b"abc"), 0, "a write ending past the largest size writes nothing");
     });
 }
 
@@ -209,7 +208,7 @@ fn absurd_sizes_are_refused_without_losing_data() {
 fn reading_holes_does_not_allocate() {
     isolated(|| {
         let m = MemFd::new("x");
-        m.lock().truncate(50 * P);
+        m.lock().truncate(50 * P).unwrap();
         let before = frames_used();
         let mut buf = vec![0u8; 50 * P];
         assert_eq!(m.lock().read_at(0, &mut buf), 50 * P);
@@ -246,7 +245,7 @@ fn mapped_object_pages_stop_at_end_of_file() {
 fn shared_mapping_and_file_io_see_the_same_bytes() {
     isolated(|| {
         let m = MemFd::new("shm");
-        m.lock().truncate(2 * P);
+        m.lock().truncate(2 * P).unwrap();
         let mut mm = Mm::new().unwrap();
         let a = USER_SPACE_START + 0x100_0000;
         let obj: std::sync::Arc<dyn MappedObject> = m.clone();

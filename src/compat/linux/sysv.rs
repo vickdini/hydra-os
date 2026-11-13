@@ -308,7 +308,7 @@ fn shmget(key: i32, size: u64, flags: u64) -> i64 {
             let ipc = &mut *ipc;
             let Some((id, seq)) = new_id(&ipc.shm, &mut ipc.next_seq, SHMMNI) else { return ENOSPC };
             let mem = MemFd::new("SYSV");
-            mem.lock().truncate(size as usize);
+            let _ = mem.lock().truncate(size as usize); // size <= SHMMAX
             let shm = Shm { perm: new_perm(key, flags, seq, &who), size, mem, atime: 0, dtime: 0, ctime: now(), cpid: pid as u32, lpid: 0, nattch: 0, removed: false };
             ipc.shm.insert(id, (ns, shm));
             id as i64

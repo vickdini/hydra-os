@@ -33,6 +33,11 @@ use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec};
 use crate::memory::vm::{MappedObject, PAGE_SIZE};
 
+/// The largest size a memfd can have: Linux's `MAX_LFS_FILESIZE` (the largest `off_t`).
+pub const MAX_SIZE: usize = i64::MAX as usize;
+/// File too large (`EFBIG`).
+const EFBIG: i64 = 27;
+
 /// `memfd_create` flag: set close-on-exec (`FD_CLOEXEC`) on the new file descriptor.
 pub const MFD_CLOEXEC: u32 = 0x0001;
 /// `memfd_create` flag: allow file sealing operations (`F_ADD_SEALS`) on this descriptor.
@@ -96,7 +101,13 @@ impl MemFd {
     ///
     /// # Arguments
     /// * `size` - New logical length of the memory object in bytes.
-    pub fn truncate(&mut self, size: usize) {
+    ///
+    /// # Errors
+    /// `-EFBIG` above [`MAX_SIZE`] (Linux's `MAX_LFS_FILESIZE`), changing nothing.
+    pub fn truncate(&mut self, size: usize) -> Result<(), i64> {
+        if size > MAX_SIZE {
+            return Err(-EFBIG);
+        }
         let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
         for (_, frame) in self.pages.split_off(&page_count) {
             frame_ref_dec(frame);
@@ -115,6 +126,7 @@ impl MemFd {
             }
         }
         self.size = size;
+        Ok(())
     }
 
     /// Returns the physical frame for page `index`, lazily allocating a zeroed user frame on first access.
@@ -180,8 +192,15 @@ impl MemFd {
     /// # Returns
     /// Number of bytes written from `src`.
     pub fn write_at(&mut self, offset: usize, src: &[u8]) -> usize {
-        if offset + src.len() > self.size {
-            self.truncate(offset + src.len());
+        // A write that would end past the largest size writes nothing (Linux: EFBIG)
+        match offset.checked_add(src.len()) {
+            Some(end) if end > self.size => {
+                if self.truncate(end).is_err() {
+                    return 0;
+                }
+            }
+            Some(_) => {}
+            None => return 0,
         }
         let mut done = 0;
         while done < src.len() {
@@ -239,7 +258,7 @@ impl MemFd {
     /// `Some(Vec<PhysFrame>)` on success, or `None` if physical frame allocation fails.
     pub fn frames_for(&mut self, length: usize) -> Option<Vec<PhysFrame<Size4KiB>>> {
         if self.size < length {
-            self.truncate(length);
+            self.truncate(length).ok()?;
         }
         let count = (length + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
         (0..count).map(|i| self.page(i)).collect()

@@ -1499,11 +1499,14 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         SYS_FTRUNCATE => {
             // sys_ftruncate(fd: int, length: off_t)
             let fd = arg0 as usize;
+            // A negative off_t is EINVAL, as Linux
+            if (arg1 as i64) < 0 {
+                return -EINVAL;
+            }
             let length = arg1 as usize;
             let res = crate::task::with_current_fds_mut(|fds| {
                 if let Some(crate::fs::FileDescriptor::MemFd { memfd, .. }) = fds.get(fd) {
-                    memfd.lock().truncate(length);
-                    Ok(0)
+                    memfd.lock().truncate(length).map(|()| 0)
                 } else if let Some(crate::fs::FileDescriptor::File { .. }) = fds.get(fd) {
                     Ok(0)
                 } else {
