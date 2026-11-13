@@ -210,19 +210,29 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>, name: &str) -> R
     if segs.is_empty() {
         return Err(ElfError::NoLoadableSegments);
     }
+    // Segments must fit the file, and their ends round up to a page without wrapping
+    // (where they land is mmap's to check: outside user space, it fails)
+    for ph in &segs {
+        ph.check_load(src.len)?;
+        if ph.p_vaddr + ph.p_memsz > !(PAGE_SIZE - 1) {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
+    }
     let min_vaddr = page_down(segs.iter().map(|p| p.p_vaddr).min().unwrap());
     let max_vaddr = page_up(segs.iter().map(|p| p.p_vaddr + p.p_memsz).max().unwrap());
 
+    // A PIE's bias wraps as on Linux (load_bias = base - vaddr): what counts is where the
+    // segments land, which mmap checks
     let bias = if elf.is_pie() {
         match pie_base {
-            Some(base) => base - min_vaddr,
+            Some(base) => base.wrapping_sub(min_vaddr),
             None => {
                 // Reserve the whole span so segments land contiguously, then map over it
                 let span = max_vaddr - min_vaddr;
                 let base = mm
                     .mmap(0, span, 0, false, false, false, Backing::Anon)
                     .map_err(|_| ElfError::AllocationFailed)?;
-                base - min_vaddr
+                base.wrapping_sub(min_vaddr)
             }
         }
     } else {
@@ -236,7 +246,7 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>, name: &str) -> R
             return Err(ElfError::SegmentOutOfBounds);
         }
         let prot = segment_prot(ph);
-        let seg_start = bias + ph.p_vaddr;
+        let seg_start = bias.wrapping_add(ph.p_vaddr);
         let map_start = page_down(seg_start);
         let file_end = seg_start + ph.p_filesz;
         let mem_end = page_up(seg_start + ph.p_memsz);
@@ -277,22 +287,22 @@ fn map_elf(mm: &mut Mm, src: &ElfSource, pie_base: Option<u64>, name: &str) -> R
     let mut phdr = 0;
     for ph in elf.program_headers() {
         if ph.p_type == PT_PHDR {
-            phdr = bias + ph.p_vaddr;
+            phdr = bias.wrapping_add(ph.p_vaddr);
         }
     }
     if phdr == 0 {
         for ph in &segs {
             if header.e_phoff >= ph.p_offset && header.e_phoff < ph.p_offset + ph.p_filesz {
-                phdr = bias + ph.p_vaddr + (header.e_phoff - ph.p_offset);
+                phdr = bias.wrapping_add(ph.p_vaddr + (header.e_phoff - ph.p_offset));
             }
         }
     }
 
     Ok(MappedElf {
         bias,
-        entry: bias + header.e_entry,
+        entry: bias.wrapping_add(header.e_entry),
         phdr,
-        end: bias + max_vaddr,
+        end: bias.wrapping_add(max_vaddr),
     })
 }
 

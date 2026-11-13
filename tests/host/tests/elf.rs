@@ -219,8 +219,6 @@ fn load_elf_validates_segments() {
 }
 
 #[test]
-#[ignore = "BUG: a PT_LOAD with p_filesz > p_memsz (rejected by Linux) makes load_elf copy past \
-            the image buffer and panic (src/task/elf.rs)"]
 fn load_elf_rejects_filesz_larger_than_memsz() {
     fake::reset();
     let bad = Elf::new(ET_DYN, 0, &[load(0, 0, 0x2000, 0x1000)], 0x2000);

@@ -264,9 +264,6 @@ fn malformed_executables() {
 }
 
 #[test]
-#[ignore = "BUG: map_elf computes p_vaddr + p_memsz and PIE_BASE - min_vaddr unchecked; a \
-            crafted PT_LOAD near 2^64 overflows. Debug kernels panic; release kernels accept the \
-            file and map it at a wrapped bias instead of rejecting it (src/task/exec.rs, map_elf)"]
 fn crafted_huge_vaddr_fails_cleanly() {
     isolated(|| {
         let exe = Elf::new(ET_DYN, 0, &[load(0, u64::MAX - 0x100, 0x100, 0x1000)], 0x200);
@@ -276,8 +273,6 @@ fn crafted_huge_vaddr_fails_cleanly() {
 }
 
 #[test]
-#[ignore = "BUG (low): map_elf accepts p_filesz > p_memsz, which Linux rejects with EINVAL, and \
-            maps the extra file pages past the segment's declared size (src/task/exec.rs, map_elf)"]
 fn segment_with_filesz_above_memsz_is_rejected() {
     // Linux: p_filesz > p_memsz is -EINVAL.
     isolated(|| {

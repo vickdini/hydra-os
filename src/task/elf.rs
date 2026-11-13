@@ -172,6 +172,24 @@ pub struct Elf64ProgramHeader {
     pub p_align: u64,
 }
 
+impl Elf64ProgramHeader {
+    /// Checks a `PT_LOAD` segment before anything is copied or mapped for it, as Linux does:
+    /// its file bytes must lie within the file (`file_len` bytes), it may not hold more file
+    /// bytes than memory (`p_filesz > p_memsz` is `EINVAL` on Linux), and its memory range
+    /// may not wrap around the address space.
+    ///
+    /// # Errors
+    ///
+    /// [`ElfError::SegmentOutOfBounds`] if any of these fails.
+    pub fn check_load(&self, file_len: u64) -> Result<(), ElfError> {
+        let in_file = self.p_offset.checked_add(self.p_filesz).is_some_and(|end| end <= file_len);
+        if !in_file || self.p_filesz > self.p_memsz || self.p_vaddr.checked_add(self.p_memsz).is_none() {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
+        Ok(())
+    }
+}
+
 /// Errors that can occur during ELF parsing, validation, and segment mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
@@ -467,11 +485,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<ElfProcessImage, ElfError> {
             max_vaddr = seg_end;
         }
 
-        // Validate file offset bounds
-        let file_end = ph.p_offset.saturating_add(ph.p_filesz);
-        if file_end > elf_data.len() as u64 {
-            return Err(ElfError::SegmentOutOfBounds);
-        }
+        ph.check_load(elf_data.len() as u64)?;
     }
 
     // Allocate 16 KiB privileged Kernel Stack (used for TSS RSP0 and hardware SYSCALL transitions)
@@ -617,10 +631,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
         if seg_end > max_vaddr {
             max_vaddr = seg_end;
         }
-        let file_end = ph.p_offset.saturating_add(ph.p_filesz);
-        if file_end > elf_data.len() as u64 {
-            return Err(ElfError::SegmentOutOfBounds);
-        }
+        ph.check_load(elf_data.len() as u64)?;
     }
 
     // Allocate 16 KiB Kernel Stack
@@ -766,6 +777,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
             let mut i_min_vaddr = u64::MAX;
             let mut i_max_vaddr = 0u64;
             for ph in &interp_segs {
+                ph.check_load(interp_bytes.len() as u64)?;
                 if ph.p_vaddr < i_min_vaddr {
                     i_min_vaddr = ph.p_vaddr;
                 }
