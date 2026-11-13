@@ -762,23 +762,16 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         }
 
         SYS_IOCTL => {
-            // sys_ioctl(fd: int, request: unsigned long, arg: void*)
-            let fd = arg0 as usize;
-            let request = arg1;
-            // TIOCGWINSZ (0x5413): Terminal Window Size query
-            if request == 0x5413 && arg2 != 0 {
-                let winsize_ptr = arg2 as *mut u16;
-                unsafe {
-                    *winsize_ptr = 25;       // rows
-                    *winsize_ptr.add(1) = 80; // cols
-                    *winsize_ptr.add(2) = 0;  // xpixel
-                    *winsize_ptr.add(3) = 0;  // ypixel
-                }
-                0
-            } else if fd <= 2 {
-                0 // Success for terminal FDs
-            } else {
-                -ENOTTY
+            // sys_ioctl(fd, request, arg) on a descriptor no handler above claimed (the
+            // terminals, sockets, devices and files have theirs, and a descriptor that is
+            // not open is EBADF there). Linux: FIONBIO and FIOASYNC are generic file
+            // requests and succeed; anything else is not for this file (ENOTTY), on fds
+            // 0-2 too: a redirected stdin/stdout is no terminal (isatty false). The user
+            // pointer is never touched (this used to write a window size to it unchecked,
+            // a kernel write to any address)
+            match arg1 {
+                0x5421 | 0x5452 => 0, // FIONBIO, FIOASYNC
+                _ => -ENOTTY,
             }
         }
 
