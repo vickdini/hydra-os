@@ -3467,9 +3467,28 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
         }
 
-        NR_FSYNC | NR_FDATASYNC | NR_SYNC | NR_SYNCFS => {
+        // Linux: sync() always succeeds; fsync/fdatasync need an open descriptor (EBADF)
+        // whose file has an fsync method (pipes, sockets, event and terminal files have
+        // none: EINVAL) and report a failed write-back (EIO); syncfs takes any open one
+        NR_SYNC => {
             let _ = ZfsClient::sync();
             0
+        }
+        NR_FSYNC | NR_FDATASYNC | NR_SYNCFS => {
+            let desc = if (a[0] as i32) < 0 {
+                None
+            } else {
+                crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned())
+            };
+            let Some(desc) = desc else { return Some(EBADF) };
+            let syncable = matches!(desc, FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. } | FileDescriptor::File { .. });
+            if num != NR_SYNCFS && !syncable {
+                return Some(EINVAL);
+            }
+            match ZfsClient::sync() {
+                Ok(()) => 0,
+                Err(_) => -5, // EIO
+            }
         }
         NR_STATFS => match user_path(a[0]).and_then(|p| base_dir(AT_FDCWD, &p).map(|(b, base)| (b, join_path(&base, &p), p))) {
             Ok((b, abs, p)) => {
