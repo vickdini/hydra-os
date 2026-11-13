@@ -12,7 +12,7 @@ mod common;
 use common::elf::*;
 use hydra_hosttests::compat::linux::types::{
     AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_EXECFN, AT_GID, AT_HWCAP, AT_NULL, AT_PAGESZ, AT_PHDR,
-    AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_RANDOM, AT_SECURE, AT_UID,
+    AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_RANDOM, AT_SECURE, AT_SYSINFO_EHDR, AT_UID,
 };
 use hydra_hosttests::fake;
 use hydra_hosttests::memory::frame_allocator::FRAME_ALLOCATOR;
@@ -35,9 +35,17 @@ fn isolated(f: impl FnOnce()) {
     let _g = common::serial();
     common::global_frames();
     fake::reset();
+    warm_vdso();
     let before = used();
     f();
     assert_eq!(used(), before, "frames leaked by this exec");
+}
+
+/// The vDSO's pages are made once, on first use, and kept for good (as at
+/// boot): make them before measuring, so no test is blamed for them.
+fn warm_vdso() {
+    let mut mm = Mm::new().unwrap();
+    let _ = hydra_hosttests::arch::vdso::map(&mut mm);
 }
 
 fn src(bytes: Vec<u8>) -> ElfSource {
@@ -472,5 +480,69 @@ fn program_headers_beyond_the_64k_head_are_not_seen() {
         exe[32..40].copy_from_slice(&66_000u64.to_le_bytes());
         let r = load_linux_exec(src(exe), "/x", &[], &[], USER, &no_files);
         assert_eq!(r.err(), Some(ElfError::ProgramHeaderOutOfBounds));
+    });
+}
+
+// ------------------------------------------------------------------ vDSO
+
+#[test]
+fn the_vdso_is_mapped_and_announced_in_the_auxiliary_vector() {
+    isolated(|| {
+        let mut img = exec(static_pie().bytes, &["app"], &[]);
+        let vdso = aux(&stack(&mut img), AT_SYSINFO_EHDR);
+        assert!(vdso >= USER_SPACE_START && vdso < MMAP_TOP, "{vdso:#x}");
+        let code = img.mm.find_vma(vdso).unwrap();
+        assert_eq!((code.prot, code.shared, code.name.as_deref()), (PROT_READ | PROT_EXEC, true, Some("[vdso]")));
+        let vvar = img.mm.find_vma(vdso - P).unwrap();
+        assert_eq!((vvar.prot, vvar.name.as_deref()), (PROT_READ, Some("[vvar]")), "the data page just below");
+        img.mm.prefault(vdso, P, false).unwrap();
+        assert_eq!(peek(&mut img.mm, vdso, 4), b"\x7fELF", "AT_SYSINFO_EHDR points at the vDSO's ELF header");
+    });
+}
+
+#[test]
+fn the_vvar_page_carries_the_clock() {
+    isolated(|| {
+        let mut img = exec(static_pie().bytes, &["app"], &[]);
+        let vdso = aux(&stack(&mut img), AT_SYSINFO_EHDR);
+        img.mm.prefault(vdso - P, P, false).unwrap();
+        let vvar = peek(&mut img.mm, vdso - P, 48);
+        let word = |i: usize| u64::from_le_bytes(vvar[i * 8..i * 8 + 8].try_into().unwrap());
+        assert_eq!(word(0) % 2, 0, "sequence count even: not in the middle of an update");
+        assert_eq!(word(5) as i64, 1_767_225_600 * 1_000_000_000, "wall_ns: the clock's boot time");
+    });
+}
+
+#[test]
+fn every_process_shares_one_copy_of_the_vdso() {
+    isolated(|| {
+        let mut a = exec(static_pie().bytes, &["a"], &[]);
+        let mut b = exec(static_pie().bytes, &["b"], &[]);
+        let (va, vb) = (aux(&stack(&mut a), AT_SYSINFO_EHDR), aux(&stack(&mut b), AT_SYSINFO_EHDR));
+        a.mm.prefault(va, P, false).unwrap();
+        b.mm.prefault(vb, P, false).unwrap();
+        assert_eq!(a.mm.translate(va), b.mm.translate(vb), "same physical page");
+    });
+}
+
+#[test]
+#[ignore = "BUG (security): the vDSO is mapped MAP_SHARED, and mprotect may add PROT_WRITE to \
+            shared mappings, so one process can rewrite the vDSO code (and the [vvar] clock page) \
+            that every process on the system runs, root's included. Linux maps the vDSO \
+            privately (a write gets a private copy) and refuses PROT_WRITE on [vvar] \
+            (src/arch/vdso.rs, map; src/memory/vm.rs, Mm::mprotect)"]
+fn one_process_cannot_change_another_processs_vdso() {
+    isolated(|| {
+        let mut a = exec(static_pie().bytes, &["attacker"], &[]);
+        let mut b = exec(static_pie().bytes, &["victim"], &[]);
+        let (va, vb) = (aux(&stack(&mut a), AT_SYSINFO_EHDR), aux(&stack(&mut b), AT_SYSINFO_EHDR));
+        b.mm.prefault(vb, P, false).unwrap();
+        let original = peek(&mut b.mm, vb + 0x100, 4);
+        let patched = a.mm.mprotect(va, P, PROT_READ | PROT_WRITE | PROT_EXEC).is_ok() && a.mm.write_bytes(va + 0x100, &[0xCC; 4]).is_ok();
+        let seen = peek(&mut b.mm, vb + 0x100, 4);
+        if patched {
+            let _ = a.mm.write_bytes(va + 0x100, &original); // undo, for the other tests in this binary
+        }
+        assert_eq!(seen, original, "the attacker's write reached the victim's vDSO code");
     });
 }

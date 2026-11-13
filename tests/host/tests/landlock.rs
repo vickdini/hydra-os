@@ -59,7 +59,7 @@ fn restrict(ruleset: i64) -> i64 {
 /// Open `path` (an O_PATH-style vnode descriptor) at fd `fd`.
 fn open_at(fd: usize, path: &str) -> i32 {
     let ino = fake::ZfsClient::resolve(0, path.as_bytes(), true).expect("path exists");
-    let v = fake::Vnode { ino, path: path.into(), readable: true };
+    let v = fake::Vnode { ino, path: path.into(), readable: true, writable: false };
     fake::FDS.with_borrow_mut(|f| f.install(fd, FileDescriptor::Vnode(Arc::new(spin::Mutex::new(v)))));
     fd as i32
 }

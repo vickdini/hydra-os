@@ -535,3 +535,15 @@ fn dhcp_discover_is_accepted_by_parser_after_server_rewrite() {
     let (t, lease) = parse_dhcp_reply(&reply, XID).unwrap();
     assert_eq!((t, lease.ip), (DHCP_MSG_DISCOVER, IP_A));
 }
+
+#[test]
+fn arp_cache_lists_its_entries() {
+    let mut cache = ArpCache::new();
+    assert!(cache.entries().is_empty());
+    cache.insert(IP_A, MAC_A);
+    cache.insert(IP_B, MAC_B);
+    cache.insert(IP_A, MAC_B); // updated in place, not added twice
+    let mut e = cache.entries();
+    e.sort();
+    assert_eq!(e, vec![(IP_B, MAC_B), (IP_A, MAC_B)], "for /proc/net/arp");
+}

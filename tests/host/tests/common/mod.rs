@@ -100,3 +100,24 @@ mod os {
         unsafe { munmap(base as _, size as usize) };
     }
 }
+
+/// Gives programs a different low address-space layout (see
+/// `vm::init_low_layout`) until dropped, then restores the default, in
+/// which only the first GiB is the program's. The layout is global, so
+/// hold `serial()` while one is active, and keep the guard alive until every
+/// `Mm` made under it has been dropped (`Mm::drop` reads the layout).
+pub struct LowLayout;
+
+impl LowLayout {
+    /// The kernel keeps the 1 GiB slots that `ranges` touch.
+    pub fn kernel_at(ranges: &[(u64, u64)]) -> LowLayout {
+        hydra_hosttests::memory::vm::init_low_layout(ranges);
+        LowLayout
+    }
+}
+
+impl Drop for LowLayout {
+    fn drop(&mut self) {
+        hydra_hosttests::memory::vm::init_low_layout(&[(GIB, hydra_hosttests::memory::vm::USER_SPACE_START)]);
+    }
+}

@@ -10,7 +10,7 @@
 //! Tests that only check the bump-allocation arithmetic use made-up
 //! addresses and never dereference them.
 
-use hydra_hosttests::memory::frame_allocator::{PhysicalMemoryManager, PAGE_SIZE};
+use hydra_hosttests::memory::frame_allocator::{phys_to_virt, PhysicalMemoryManager, DIRECT_MAP_BASE, PAGE_SIZE};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
@@ -290,4 +290,46 @@ fn exhausting_memory_returns_none_and_freeing_recovers() {
     m.ref_dec(all[17]);
     assert_eq!(m.allocate_frame(), Some(all[17]));
     assert!(m.allocate_frame().is_none());
+}
+
+// ------------------------------------------------- high runs and direct map
+
+#[test]
+fn contiguous_high_takes_the_top_of_the_highest_region() {
+    let mut m = PhysicalMemoryManager::new();
+    m.add_region(PhysAddr::new(GIB), 10);
+    m.add_region(PhysAddr::new(2 * GIB), 10);
+    assert_eq!(m.max_phys_end(), 2 * GIB + 10 * PAGE_SIZE);
+    let run = m.allocate_contiguous_high(3, 0).unwrap();
+    assert_eq!(addr(run), 2 * GIB + 7 * PAGE_SIZE);
+    assert_eq!(m.allocated_memory(), 3 * PAGE_SIZE);
+    let rest: Vec<u64> = std::iter::from_fn(|| m.allocate_frame()).map(addr).collect();
+    assert_eq!(rest.len(), 17, "the bump allocator never reaches the pages taken from the top");
+    assert!(rest.iter().all(|&a| a < 2 * GIB + 7 * PAGE_SIZE));
+}
+
+#[test]
+fn contiguous_high_respects_min_addr_and_pages_already_handed_out() {
+    let mut m = PhysicalMemoryManager::new();
+    m.add_region(PhysAddr::new(GIB), 10);
+    m.add_region(PhysAddr::new(2 * GIB), 4);
+    assert_eq!(m.allocate_contiguous_high(5, 0).map(addr), Some(GIB + 5 * PAGE_SIZE), "only the first region is big enough");
+    assert_eq!(m.allocate_contiguous_high(1, 3 * GIB), None, "nothing at or above min_addr");
+    assert_eq!(m.allocate_contiguous_high(4, 2 * GIB).map(addr), Some(2 * GIB));
+
+    let mut n = PhysicalMemoryManager::new();
+    n.add_region(PhysAddr::new(GIB), 4);
+    for _ in 0..3 {
+        n.allocate_frame().unwrap();
+    }
+    assert_eq!(n.allocate_contiguous_high(2, 0), None, "one page left");
+    assert_eq!(n.allocate_contiguous_high(1, 0).map(addr), Some(GIB + 3 * PAGE_SIZE));
+    assert_eq!(n.allocate_frame(), None);
+}
+
+#[test]
+fn physical_addresses_are_identity_until_the_direct_map_is_enabled() {
+    // The tests never enable it: the kernel does at boot, once it runs in the higher half
+    assert_eq!(phys_to_virt(0x1234_5000) as u64, 0x1234_5000);
+    assert_eq!(DIRECT_MAP_BASE, 0xFFFF_8000_0000_0000, "PML4 slot 256, as on Linux");
 }

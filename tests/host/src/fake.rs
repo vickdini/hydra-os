@@ -295,11 +295,15 @@ pub struct Vnode {
     pub ino: u64,
     pub path: String,
     pub readable: bool,
+    pub writable: bool,
 }
 
 impl Vnode {
     pub fn readable(&self) -> bool {
         self.readable
+    }
+    pub fn writable(&self) -> bool {
+        self.writable
     }
 }
 
@@ -652,6 +656,17 @@ pub fn random_fill(buf: &mut [u8]) {
 /// Milliseconds since boot: the tick counter (the fake PIT runs at 1 kHz).
 pub fn uptime_ms() -> u64 {
     TICKS.get()
+}
+
+/// `pit::clock_state`: (base_ns, base_frac, base_tsc, mult) for the vDSO,
+/// derived from the tick counter.
+pub fn clock_state() -> (u64, u64, u64, u64) {
+    (TICKS.get() * 1_000_000, 0, 0, 0)
+}
+
+/// `rtc::wall_base_ns`: wall-clock nanoseconds at boot (the fixed RTC instant).
+pub fn wall_base_ns() -> i64 {
+    1_767_225_600 * 1_000_000_000
 }
 
 /// RTC time: a fixed instant (2026-01-01T00:00:00Z).

@@ -88,6 +88,7 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 
 #[test]
 fn user_range_boundaries() {
+    let _g = common::serial(); // the low layout is global; layout tests change it
     assert!(is_user_range(USER_SPACE_START, P));
     assert!(!is_user_range(USER_SPACE_START - P, P));
     assert!(is_user_range(USER_SPACE_END - P, P));
@@ -726,5 +727,79 @@ fn set_name_splits_and_relabels() {
         assert_eq!(names, vec![None, Some("[anon:jit]".into()), None]);
         mm.set_name(A + P, A + 2 * P, None);
         assert_eq!(mm.vmas().count(), 1, "unnamed again: merges back");
+    });
+}
+
+// --------------------------------------------------- low address-space slots
+
+const GIB: u64 = common::GIB;
+
+#[test]
+fn by_default_programs_get_only_the_first_gib_below_the_main_area() {
+    let _g = common::serial();
+    assert!(!kernel_low_slot(0));
+    assert!((1..512).all(kernel_low_slot));
+    assert!(!kernel_low_slot(512), "past the low area");
+    assert_eq!(low_user_end(), LOW_USER_END);
+}
+
+#[test]
+fn the_layout_gives_programs_the_slots_the_kernel_does_not_use() {
+    let _g = common::serial();
+    // The kernel image, firmware and devices between 2 and 5 GiB, as on a typical PC
+    let _l = common::LowLayout::kernel_at(&[(2 * GIB, 5 * GIB)]);
+    assert!(!kernel_low_slot(1) && kernel_low_slot(2) && kernel_low_slot(4) && !kernel_low_slot(5));
+    assert_eq!(low_user_end(), 2 * GIB, "the first 2 GiB");
+    assert!(is_user_range(GIB, GIB), "slot 1");
+    assert!(!is_user_range(2 * GIB - P, 2 * P), "running into a kernel slot");
+    assert!(!is_user_range(3 * GIB, P), "inside one");
+    assert!(is_user_range(5 * GIB, 100 * GIB), "above the kernel's slots");
+    assert!(is_user_range(USER_SPACE_START - P, 2 * P), "from the low area into the main user area");
+}
+
+#[test]
+fn slot_0_is_never_the_kernels_and_ranges_outside_the_low_area_are_ignored() {
+    let _g = common::serial();
+    let _l = common::LowLayout::kernel_at(&[(0, 0x1000), (USER_SPACE_START, USER_SPACE_START + GIB), (7 * GIB, 7 * GIB)]);
+    assert!(!kernel_low_slot(0), "slot 0 always belongs to programs (0x400000 executables)");
+    assert!((1..512).all(|i| !kernel_low_slot(i)), "empty or out-of-area ranges mark nothing");
+    assert_eq!(low_user_end(), 2 * GIB, "the MAP_32BIT window still ends at 2 GiB");
+}
+
+#[test]
+fn mappings_in_freed_low_slots_work_and_their_tables_are_released() {
+    let _g = common::serial();
+    common::global_frames();
+    fake::reset();
+    let _l = common::LowLayout::kernel_at(&[(2 * GIB, 5 * GIB)]);
+    let before = used();
+    {
+        let mut mm = Mm::new().unwrap();
+        assert_eq!(mm.mmap(GIB + P, P, RW, false, true, false, Backing::Anon), Ok(GIB + P), "slot 1");
+        assert_eq!(mm.mmap(6 * GIB, P, RW, false, true, false, Backing::Anon), Ok(6 * GIB), "slot 6");
+        mm.write_bytes(GIB + P, b"slot one").unwrap();
+        mm.write_bytes(6 * GIB, b"slot six").unwrap();
+        assert_eq!(read(&mut mm, GIB + P, 8), b"slot one");
+        assert_eq!(read(&mut mm, 6 * GIB, 8), b"slot six");
+        assert_eq!(mm.mmap(3 * GIB, P, RW, false, false, true, Backing::Anon), Err(EEXIST), "a kernel slot looks taken");
+        assert_eq!(mm.mmap(3 * GIB, P, RW, false, true, false, Backing::Anon), Err(ENOMEM), "and MAP_FIXED cannot replace it");
+    }
+    assert_eq!(used(), before, "page tables built in the program's low slots are freed with it");
+}
+
+#[test]
+fn find_free_in_searches_a_window_top_down() {
+    with_mm(|mm| {
+        let (lo, hi) = (A, A + 16 * P);
+        assert_eq!(mm.find_free_in(P, lo, hi), Some(hi - P));
+        anon(mm, hi - 2 * P, 2 * P, RW);
+        assert_eq!(mm.find_free_in(2 * P, lo, hi), Some(hi - 4 * P), "below the area at the top");
+        assert_eq!(mm.find_free_in(100, lo, hi), Some(hi - 3 * P), "the length rounds up to a page");
+        anon(mm, lo, 13 * P, RW);
+        assert_eq!(mm.find_free_in(P, lo, hi), Some(lo + 13 * P), "the one free page");
+        assert_eq!(mm.find_free_in(2 * P, lo, hi), None, "no gap big enough");
+        anon(mm, hi, P, RW);
+        anon(mm, lo - P, P, RW);
+        assert_eq!(mm.find_free_in(P, lo, hi), Some(lo + 13 * P), "areas outside the window change nothing");
     });
 }

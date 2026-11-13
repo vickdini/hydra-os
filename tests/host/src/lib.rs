@@ -40,7 +40,7 @@ macro_rules! kprintln {
 pub mod arch {
     /// *stub*
     pub mod pit {
-        pub use crate::fake::{frequency_hz, now_ns, sleep_ms, ticks, uptime_ms};
+        pub use crate::fake::{clock_state, frequency_hz, now_ns, sleep_ms, ticks, uptime_ms};
     }
     /// *stub* Deterministic bytes instead of RDRAND.
     pub mod random {
@@ -51,10 +51,30 @@ pub mod arch {
     pub mod percpu {
         pub use crate::fake::PerCpuPtr;
     }
+    /// *stub* TLB shootdown on a single CPU: the local flush only (the kernel's
+    /// `smp::shootdown` returns after it when one CPU is online). Flushes go to
+    /// the counting shim in `shim/x86_64`.
+    pub mod smp {
+        pub fn shootdown(_cr3: Option<u64>, addr: Option<u64>) {
+            match addr {
+                Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
+                None => x86_64::instructions::tlb::flush_all(),
+            }
+        }
+    }
     /// *stub*
     pub mod rtc {
-        pub use crate::fake::rtc_now as now;
+        pub use crate::fake::{rtc_now as now, wall_base_ns};
     }
+    /// *stub* The kernel's move to the higher half happens at boot; on the host
+    /// it never did.
+    pub mod relocate {
+        pub fn image_phys() -> Option<(u64, u64)> {
+            None
+        }
+    }
+    #[path = "../../../../src/arch/vdso.rs"]
+    pub mod vdso;
     /// *stub*
     pub mod syscall {
         pub use crate::fake::rdmsr;

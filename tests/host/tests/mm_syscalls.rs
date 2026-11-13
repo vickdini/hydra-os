@@ -162,7 +162,7 @@ fn mapping_a_zfs_file() {
         let ino = 9001;
         let content: Vec<u8> = (0..P as usize + 100).map(|i| i as u8).collect();
         fake::INODES.with_borrow_mut(|m| m.insert(ino, content.clone()));
-        let vnode = Arc::new(Mutex::new(fake::Vnode { ino, path: "/usr/lib/libz.so".into(), readable: true }));
+        let vnode = Arc::new(Mutex::new(fake::Vnode { ino, path: "/usr/lib/libz.so".into(), readable: true, writable: false }));
         install(5, FileDescriptor::Vnode(vnode));
         let a = sys_mmap(mm, 0, 2 * P, PROT_READ as u64, MAP_PRIVATE, 5, 0) as u64;
         assert_eq!(peek(mm, a + P, 100), &content[P as usize..], "page cache filled from ZFS");
@@ -175,7 +175,7 @@ fn mapping_a_zfs_file() {
 fn write_only_files_cannot_be_mapped() {
     with_mm(|mm| {
         fake::INODES.with_borrow_mut(|m| m.insert(9002, vec![0; 10]));
-        let vnode = Arc::new(Mutex::new(fake::Vnode { ino: 9002, path: "/tmp/w".into(), readable: false }));
+        let vnode = Arc::new(Mutex::new(fake::Vnode { ino: 9002, path: "/tmp/w".into(), readable: false, writable: true }));
         install(5, FileDescriptor::Vnode(vnode));
         assert_eq!(sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 5, 0), EACCES);
         install(6, FileDescriptor::File { path: "/tmp/w".into(), readable: false });
@@ -409,5 +409,75 @@ fn mincore_reports_mapped_pages() {
         assert_eq!(vec, [1, 1, 1]);
         assert_eq!(sys_mincore(mm, A + 1, P, vec.as_mut_ptr() as u64), EINVAL);
         assert_eq!(sys_mincore(mm, A, 4 * P, vec.as_mut_ptr() as u64), ENOMEM, "last page unmapped");
+    });
+}
+
+#[test]
+fn map_32bit_uses_the_first_2_gib_when_the_kernel_leaves_slot_1() {
+    let _g = common::serial();
+    common::global_frames();
+    fake::reset();
+    let _l = common::LowLayout::kernel_at(&[(2 << 30, 5 << 30)]);
+    let before = used();
+    {
+        let mm = Mutex::new(Mm::new().unwrap());
+        let a = sys_mmap(&mm, 0, P, RW, ANON_PRIVATE | MAP_32BIT, -1, 0) as u64;
+        assert_eq!(a, (2 << 30) - P, "the top of the [64 KiB, 2 GiB) window");
+        mm.lock().write_bytes(a, b"x").unwrap();
+    }
+    assert_eq!(used(), before);
+}
+
+/// A root-owned file opened read-only at fd 5; returns its inode.
+fn read_only_binary(ino: u64) -> u64 {
+    fake::INODES.with_borrow_mut(|m| m.insert(ino, b"\x7fELF root-owned code".to_vec()));
+    let v = fake::Vnode { ino, path: "/usr/bin/sudo".into(), readable: true, writable: false };
+    install(5, FileDescriptor::Vnode(Arc::new(Mutex::new(v))));
+    ino
+}
+
+#[test]
+fn read_only_files_map_privately_or_shared_read_only() {
+    with_mm(|mm| {
+        read_only_binary(9300);
+        assert!(sys_mmap(mm, 0, P, RW, MAP_PRIVATE, 5, 0) > 0, "private writable copy");
+        assert!(sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 5, 0) > 0, "shared read-only");
+    });
+}
+
+#[test]
+#[ignore = "BUG (security): mmap(MAP_SHARED, PROT_WRITE) only checks that the descriptor is \
+            readable. A read-only descriptor then writes into the file's shared page cache, which \
+            execve maps for every process that runs the file: any user who can read a root-owned \
+            binary can change the code root runs. Linux returns EACCES \
+            (src/compat/linux/mm.rs, fd_object / sys_mmap)"]
+fn shared_writable_mappings_need_a_writable_descriptor() {
+    with_mm(|mm| {
+        let ino = read_only_binary(9301);
+        let r = sys_mmap(mm, 0, P, RW, MAP_SHARED, 5, 0);
+        if r > 0 {
+            mm.lock().write_bytes(r as u64, b"PWNED").unwrap();
+            let page = inode_object(ino).get_page(0).unwrap(); // the cache execve maps from
+            let now = unsafe { std::slice::from_raw_parts(page.start_address().as_u64() as *const u8, 5) };
+            panic!(
+                "MAP_SHARED|PROT_WRITE on an O_RDONLY descriptor succeeded; the cached /usr/bin/sudo now starts with {:?}",
+                String::from_utf8_lossy(now)
+            );
+        }
+        assert_eq!(r, EACCES);
+    });
+}
+
+#[test]
+#[ignore = "BUG (security): mprotect can add PROT_WRITE to any shared mapping (vm.rs has no \
+            VM_MAYWRITE): a read-only shared mapping of a file opened O_RDONLY becomes writable, \
+            with the same effect as the mmap hole above. Linux returns EACCES \
+            (src/memory/vm.rs, Mm::mprotect)"]
+fn mprotect_cannot_make_a_read_only_shared_file_mapping_writable() {
+    with_mm(|mm| {
+        read_only_binary(9302);
+        let a = sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 5, 0);
+        assert!(a > 0);
+        assert_eq!(sys_mprotect(mm, a as u64, P, RW), EACCES);
     });
 }
