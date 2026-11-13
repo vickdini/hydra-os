@@ -456,10 +456,6 @@ fn reading_the_descriptor_gives_the_status_line() {
 // ------------------------------------------------------------------ bugs
 
 #[test]
-#[ignore = "BUG: mq_timedsend copies the whole message into the kernel (copy_in of `len` bytes, \
-            faulting in the user pages) before checking len against mq_msgsize, so a process can \
-            make the kernel allocate any amount of memory with one call; Linux checks the size \
-            first (src/compat/linux/mqueue.rs, mq_timedsend)"]
 fn oversized_send_is_rejected_before_copying() {
     setup();
     let fd = open("big", O_RDWR | O_CREAT);

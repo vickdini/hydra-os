@@ -339,6 +339,10 @@ fn mq_timedsend(fd: u64, msg: u64, len: u64, prio: u64, timeout: u64) -> i64 {
     if prio >= MQ_PRIO_MAX {
         return EINVAL;
     }
+    // Before copying anything, as Linux: a queue's message size never changes
+    if len > h.q.lock().msgsize {
+        return EMSGSIZE;
+    }
     let data = match copy_in(msg, len as usize) {
         Ok(d) => d,
         Err(e) => return e,
