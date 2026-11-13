@@ -1125,6 +1125,11 @@ impl Mm {
                 if d & (PAGE_SIZE - 1) != 0 || !is_user_range(d, new_len) {
                     return Err(-EINVAL);
                 }
+                // A destination overlapping the source is EINVAL, as Linux: unmapping it
+                // first would destroy what is being moved
+                if d < old + old_len && old < d + new_len {
+                    return Err(-EINVAL);
+                }
                 self.unmap(d, d + new_len);
                 d
             }

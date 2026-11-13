@@ -489,9 +489,6 @@ fn mremap_argument_checks() {
 }
 
 #[test]
-#[ignore = "BUG: mremap with MREMAP_FIXED onto a destination that overlaps the source unmaps \
-            part of the source before moving it, losing data; Linux returns EINVAL \
-            (src/memory/vm.rs, mremap)"]
 fn mremap_rejects_overlapping_fixed_destination() {
     with_mm(|mm| {
         anon(mm, A, 4 * P, RW);
