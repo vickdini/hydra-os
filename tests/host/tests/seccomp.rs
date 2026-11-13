@@ -570,10 +570,6 @@ fn tsync_applies_the_filter_to_every_thread() {
 }
 
 #[test]
-#[ignore = "BUG (low): SECCOMP_FILTER_FLAG_TSYNC overwrites every sibling thread's filter chain \
-            with the caller's, dropping filters a sibling installed itself; Linux refuses (returns \
-            the sibling's tid) unless each sibling's chain is an ancestor of the caller's \
-            (src/compat/linux/seccomp.rs, set_filter)"]
 fn tsync_never_removes_a_siblings_own_filters() {
     fresh();
     // The sibling sandboxed itself with a filter the caller does not have.

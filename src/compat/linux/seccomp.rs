@@ -77,6 +77,7 @@ const EACCES: i64 = -13;
 const ENOMEM: i64 = -12;
 const ENOSYS: i64 = -38;
 const EOPNOTSUPP: i64 = -95;
+const ESRCH: i64 = -3;
 
 /// Set once any task installs a filter, so tasks never filtered skip the lookup.
 static ANY_FILTER: AtomicBool = AtomicBool::new(false);
@@ -404,6 +405,20 @@ fn may_filter() -> bool {
     crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.effective & (1 << 21) != 0).unwrap_or(false)
 }
 
+/// Whether chain `ancestor` is `chain` or one it was built on (no chain is an ancestor of
+/// every chain), as Linux's `is_ancestor`.
+fn is_ancestor(ancestor: &Option<Arc<Filter>>, chain: &Option<Arc<Filter>>) -> bool {
+    let Some(a) = ancestor else { return true };
+    let mut c = chain;
+    while let Some(f) = c {
+        if Arc::ptr_eq(f, a) {
+            return true;
+        }
+        c = &f.prev;
+    }
+    false
+}
+
 /// Installs a filter (`SECCOMP_SET_MODE_FILTER`).
 fn set_filter(flags: u64, uargs: u64) -> i64 {
     if flags & !(FLAG_TSYNC | FLAG_LOG | FLAG_SPEC_ALLOW | FLAG_TSYNC_ESRCH) != 0 {
@@ -417,6 +432,30 @@ fn set_filter(flags: u64, uargs: u64) -> i64 {
         Err(e) => return e,
     };
     let log = flags & FLAG_LOG != 0;
+    if flags & FLAG_TSYNC != 0 {
+        // As Linux's seccomp_can_sync_threads, before anything changes: every other thread
+        // must be unfiltered or run an ancestor of the caller's chain, so syncing only adds
+        // filters. Otherwise the first thread that does not is named (or ESRCH).
+        let Some((mine, tgid, me)) = crate::task::with_current_task_mut(|t| (t.seccomp.filter.clone(), t.tgid, t.id.0 as u64)) else {
+            return EINVAL;
+        };
+        let mut blocker = None;
+        crate::task::SCHEDULER.lock().for_each_task_mut(|t| {
+            if blocker.is_none() && t.tgid == tgid && t.id.0 as u64 != me {
+                let ok = match t.seccomp.mode {
+                    0 => true,
+                    2 => is_ancestor(&t.seccomp.filter, &mine),
+                    _ => false,
+                };
+                if !ok {
+                    blocker = Some(t.id.0 as i64);
+                }
+            }
+        });
+        if let Some(tid) = blocker {
+            return if flags & FLAG_TSYNC_ESRCH != 0 { ESRCH } else { tid };
+        }
+    }
     let installed = crate::task::with_current_task_mut(|t| {
         if t.seccomp.mode == 1 {
             return Err(EINVAL);
@@ -438,8 +477,8 @@ fn set_filter(flags: u64, uargs: u64) -> i64 {
     };
     ANY_FILTER.store(true, Ordering::Relaxed);
     if flags & FLAG_TSYNC != 0 {
-        // Every other thread gets the caller's chain. Their chains are always ancestors of
-        // the caller's here (threads that install filters do so before spawning others).
+        // Every other thread gets the caller's chain: their own chains are ancestors of it
+        // (checked above), so no filter of theirs is dropped.
         let mut sched = crate::task::SCHEDULER.lock();
         sched.for_each_task_mut(|t| {
             if t.tgid == tgid && t.id.0 as u64 != me {
