@@ -325,6 +325,9 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     };
 
     // ---- Point of no return ----
+    // Robust mutexes the old image holds are released as at exit (Linux's
+    // futex_exec_release), while it is still mapped
+    super::futex::exit_robust_list_current();
     let (_, pid) = super::proc::current_ids();
     let new_mm = Arc::new(Mutex::new(image.mm));
     let cr3 = new_mm.lock().cr3();
@@ -370,6 +373,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
                 }
             }
             t.clear_child_tid = 0;
+            t.robust_list = 0;
             // The new image gets a descriptor table of its own (as Linux's unshare_files)
             if alloc::sync::Arc::strong_count(&t.fds) > 1 {
                 let copy = t.fds.lock().fork_copy();

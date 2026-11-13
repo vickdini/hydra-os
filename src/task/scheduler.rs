@@ -524,6 +524,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid: 0,
             gid: 0,
@@ -632,6 +633,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid: 0,
             gid: 0,
@@ -726,6 +728,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid: 0,
             gid: 0,
@@ -823,6 +826,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: image.initial_brk,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid,
             gid,
@@ -926,6 +930,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid,
             gid,
@@ -1123,6 +1128,7 @@ impl Scheduler {
             debugregs: [0; 8],
             brk: parent_brk,
             clear_child_tid,
+            robust_list: 0,
             tgid: child_tgid,
             uid: parent_uid,
             gid: parent_gid,
@@ -1955,11 +1961,22 @@ impl Scheduler {
             self.tasks[idx].timeslice_remaining = 0;
         }
 
-        // The clear-tid word lives in the task's own address space: only write it when
-        // that address space is the one currently loaded
+        // The clear-tid word and the robust list live in the task's own address space:
+        // only touch them when that address space is the one currently loaded
         let clear_child_tid = self.tasks[idx].clear_child_tid;
         let active_cr3 = Cr3::read().0.start_address().as_u64();
-        if clear_child_tid != 0 && self.tasks[idx].regs.cr3 == active_cr3 {
+        let own_space = self.tasks[idx].regs.cr3 == active_cr3;
+        // Robust mutexes it still holds are marked OWNER_DIED first (as Linux, before the
+        // clear-tid wake), so their next locker gets EOWNERDEAD
+        let robust = self.tasks[idx].robust_list;
+        if robust != 0 && own_space {
+            let space = crate::compat::linux::futex::key_for_task(&self.tasks[idx], 0).space;
+            let tid = self.tasks[idx].id.0 as u32 & 0x3FFF_FFFF;
+            for id in crate::compat::linux::futex::exit_robust_list(robust, tid, space) {
+                self.wake_task(id.0);
+            }
+        }
+        if clear_child_tid != 0 && own_space {
             if crate::memory::vm::prefault_current(clear_child_tid, 4, true) {
                 unsafe { *(clear_child_tid as *mut i32) = 0 };
             }

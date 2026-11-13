@@ -79,6 +79,7 @@ const ENOSYS: i64 = -38;
 const ETIMEDOUT: i64 = -110;
 const EPERM: i64 = -1;
 const EDEADLK: i64 = -35;
+const ESRCH: i64 = -3;
 
 /// `FUTEX_LOCK_PI2`: `FUTEX_LOCK_PI` with a `CLOCK_MONOTONIC` timeout by default.
 const FUTEX_LOCK_PI2: i32 = 13;
@@ -505,12 +506,16 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
                 Err(e) => return e,
             };
             let owner = v & FUTEX_TID_MASK;
-            // Taking a free lock, or one whose owner died: keep the waiters bit for the others
-            let dead_owner = owner != 0 && !crate::task::is_task_alive(TaskId(owner as u64));
-            if owner == 0 || dead_owner {
+            // An owner that does not exist: Linux answers ESRCH (a robust mutex's dying owner
+            // released it through its robust list, see exit_robust_list)
+            if owner != 0 && owner != tid && !crate::task::is_task_alive(TaskId(owner as u64)) {
+                fq.remove(me, key);
+                return ESRCH;
+            }
+            // Taking a free lock: keep the waiters bit for the others, and OWNER_DIED
+            if owner == 0 {
                 let others = fq.waiters.iter().any(|w| w.key == key && w.task_id != me);
-                let died = if dead_owner { FUTEX_OWNER_DIED } else { v & FUTEX_OWNER_DIED };
-                let new = tid | died | if others { FUTEX_WAITERS } else { 0 };
+                let new = tid | (v & FUTEX_OWNER_DIED) | if others { FUTEX_WAITERS } else { 0 };
                 match user_cmpxchg(uaddr, v, new) {
                     Ok(found) if found == v => {
                         fq.remove(me, key);
@@ -550,6 +555,111 @@ fn lock_pi(uaddr: u64, deadline: Option<u64>, private: bool, try_only: bool) -> 
             bucket(&key).lock().remove(me, key);
             return super::proc::ERESTARTSYS;
         }
+    }
+}
+
+/// Most entries of a robust list walked (Linux's `ROBUST_LIST_LIMIT`): a corrupted or
+/// circular list cannot keep an exiting thread in the kernel.
+const ROBUST_LIST_LIMIT: usize = 2048;
+
+/// Reads a user pointer-sized word.
+fn read_u64(uaddr: u64) -> Option<u64> {
+    if !crate::memory::vm::prefault_current(uaddr, 8, false) {
+        return None;
+    }
+    Some(unsafe { core::ptr::read_unaligned(uaddr as *const u64) })
+}
+
+/// A robust-list pointer: the entry's address and its PI flag (bit 0).
+fn robust_entry(uaddr: u64) -> Option<(u64, bool)> {
+    read_u64(uaddr).map(|v| (v & !1, v & 1 != 0))
+}
+
+/// Linux's `handle_futex_death`: a mutex at `uaddr` still owned by the dying thread `tid`
+/// is marked `FUTEX_OWNER_DIED` (keeping `FUTEX_WAITERS`) and one waiter is woken; the
+/// pending entry of a non-PI mutex that was already released only gets the wake.
+///
+/// # Returns
+/// `false` if the word cannot be read or written (the walk stops, as on Linux).
+fn futex_death(uaddr: u64, tid: u32, space: u64, pi: bool, pending: bool, woken: &mut Vec<TaskId>) -> bool {
+    if uaddr & 3 != 0 {
+        return false;
+    }
+    // The waiters of a shared mapping wait on its physical address
+    let key = match crate::memory::vm::shared_phys_current(uaddr) {
+        Some(phys) => FutexKey { space: PHYSICAL, uaddr: phys },
+        None => FutexKey { space, uaddr },
+    };
+    let uval = loop {
+        let uval = match read_word(uaddr) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        if pending && !pi && uval == 0 {
+            // Released, but the thread died before it could wake the next one
+            woken.extend(wake_key(key, 1, FUTEX_BITSET_MATCH_ANY));
+            return true;
+        }
+        if uval & FUTEX_TID_MASK != tid {
+            return true;
+        }
+        let mval = (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+        match user_cmpxchg(uaddr, uval, mval) {
+            Ok(found) if found == uval => break uval,
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    };
+    // (Linux wakes PI waiters through the lock's kernel state; here they wait on the key)
+    if uval & FUTEX_WAITERS != 0 {
+        woken.extend(wake_key(key, 1, FUTEX_BITSET_MATCH_ANY));
+    }
+    true
+}
+
+/// Linux's `exit_robust_list`: when thread `tid` exits or calls `execve`, every robust
+/// mutex on its list (`set_robust_list` head `head`, in the loaded address space `space`)
+/// that it still owns is marked `FUTEX_OWNER_DIED`, so the next locker gets `EOWNERDEAD`.
+/// The `list_op_pending` entry (a lock or unlock in progress) is handled last. At most
+/// [`ROBUST_LIST_LIMIT`] entries are walked.
+///
+/// Takes no scheduler lock (the caller may hold it): the tasks to wake are returned.
+pub fn exit_robust_list(head: u64, tid: u32, space: u64) -> Vec<TaskId> {
+    let mut woken = Vec::new();
+    if head == 0 {
+        return woken;
+    }
+    let (Some((mut entry, mut pi)), Some(offset), Some((pending, pending_pi))) =
+        (robust_entry(head), read_u64(head + 8), robust_entry(head + 16))
+    else {
+        return woken;
+    };
+    let mut limit = ROBUST_LIST_LIMIT;
+    while entry != head {
+        // The next pointer is read first: the mutex may be freed once released
+        let next = robust_entry(entry);
+        if entry != pending && !futex_death(entry.wrapping_add(offset), tid, space, pi, false, &mut woken) {
+            return woken;
+        }
+        let Some((n, npi)) = next else { return woken };
+        (entry, pi) = (n, npi);
+        limit -= 1;
+        if limit == 0 {
+            break;
+        }
+    }
+    if pending != 0 {
+        futex_death(pending.wrapping_add(offset), tid, space, pending_pi, true, &mut woken);
+    }
+    woken
+}
+
+/// [`exit_robust_list`] for the calling thread (at `execve`), waking the waiters itself.
+pub fn exit_robust_list_current() {
+    let Some((head, tid)) = crate::task::with_current_task_mut(|t| (t.robust_list, t.id.0)) else { return };
+    if head != 0 {
+        let ids = exit_robust_list(head, tid as u32 & FUTEX_TID_MASK, current_space());
+        wake_ids(&ids);
     }
 }
 

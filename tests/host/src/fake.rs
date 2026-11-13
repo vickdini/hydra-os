@@ -105,6 +105,8 @@ pub struct Task {
     pub seccomp: crate::compat::linux::seccomp::State,
     pub id: TaskId,
     pub tgid: u64,
+    /// `set_robust_list` head (not tracked on the host).
+    pub robust_list: u64,
 }
 
 /// Thread id, as in the kernel's `task::TaskId`.
@@ -126,6 +128,7 @@ impl Task {
             seccomp: Default::default(),
             id: TaskId(tid),
             tgid: IDS.get().1,
+            robust_list: 0,
         }
     }
 }
@@ -170,6 +173,7 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         seccomp,
         id: TaskId(tid),
         tgid,
+        robust_list: 0,
     };
     let r = f(&mut t);
     CAPS.set(Some(t.caps.effective));

@@ -309,6 +309,9 @@ pub struct Task {
     pub brk: u64,
     /// User-space address cleared and futex-woken upon thread exit (`CLONE_CHILD_CLEARTID`).
     pub clear_child_tid: u64,
+    /// Head of the thread's robust futex list (`set_robust_list`), walked when it exits or
+    /// calls `execve`; 0 for none. Not inherited: glibc registers it in each new thread.
+    pub robust_list: u64,
     /// Thread group ID (`PID` in POSIX terms; shared by threads created with `CLONE_THREAD`).
     pub tgid: u64,
     /// Real user ID.
@@ -418,6 +421,7 @@ impl Task {
             debugregs: [0; 8],
             brk: 0,
             clear_child_tid: 0,
+            robust_list: 0,
             tgid: id.0 as u64,
             uid: 0,
             gid: 0,

@@ -28,12 +28,6 @@ static long futex(void *uaddr, int op, uint32_t val, uintptr_t timeout, void *ua
     return r < 0 ? -errno : r;
 }
 
-// A check for a known, documented bug: reported, but not counted as a failure
-static void known(long got, long want, const char *what, const char *bug) {
-    printf("%s %s: want %ld, got %ld\n", got == want ? "ok  " : "KNOWN", what, want, got);
-    if (got != want) printf("      (%s)\n", bug);
-}
-
 // A live thread that owns nothing, whose tid stands for "someone else"
 static volatile int helper_tid, helper_stop;
 
@@ -163,8 +157,7 @@ int main(void) {
     helper_stop = 1;
     pthread_join(h, NULL);
     a[1] = 0x3ffffff0; // no such task
-    known(futex(&a[1], FUTEX_LOCK_PI_PRIVATE, 0, 0, NULL, 0), -ESRCH, "LOCK_PI on a lock whose owner does not exist",
-          "bug 42: robust lists are not walked at thread exit; Hydra takes the lock over instead");
+    expect(futex(&a[1], FUTEX_LOCK_PI_PRIVATE, 0, 0, NULL, 0), -ESRCH, "LOCK_PI on a lock whose owner does not exist");
     a[1] = FUTEX_OWNER_DIED; // owner died and the lock was released by the robust list
     expect(futex(&a[1], FUTEX_LOCK_PI_PRIVATE, 0, 0, NULL, 0), 0, "LOCK_PI on a free lock marked OWNER_DIED");
     expect(a[1], tid | FUTEX_OWNER_DIED, "OWNER_DIED is kept for the new owner");

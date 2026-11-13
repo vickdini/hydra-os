@@ -178,7 +178,6 @@ fn a_pi_lock_held_by_a_live_task_is_not_taken() {
 /// Linux refuses a lock whose owner never existed or exited without the robust-list
 /// cleanup (ESRCH); only a word the robust list released (owner 0, OWNER_DIED) is free.
 #[test]
-#[ignore = "BUG 42: robust lists are not walked at thread exit, so a dead owner's PI lock is taken over (OWNER_DIED) instead of ESRCH"]
 fn a_pi_lock_whose_owner_does_not_exist_is_esrch() {
     let w = word(0x3fff_fff0);
     assert_eq!(dispatch_futex(addr(&w), FUTEX_LOCK_PI | P, 0, 0, 0, 0), ESRCH);
@@ -203,4 +202,114 @@ fn the_fast_wake_path_checks_like_the_slow_one() {
     let w = word(0);
     assert_eq!(fast_wake(1, addr(&w) + 1, 1, FUTEX_WAKE | P, 0), EINVAL);
     assert_eq!(fast_wake(1, addr(&w), 1, FUTEX_WAKE | P, 0), 0);
+}
+
+// ---------------------------------------------------------------- robust lists (bug 42)
+
+use hydra_hosttests::compat::linux::futex::exit_robust_list;
+
+const WAITERS: u32 = 0x8000_0000;
+
+/// A robust mutex as glibc lays it out: the list link, then (at `futex_offset`) the word.
+#[repr(C, align(8))]
+struct RobustMutex {
+    next: u64,
+    word: AtomicU32,
+}
+
+/// `struct robust_list_head`.
+#[repr(C, align(8))]
+struct Head {
+    next: u64,
+    futex_offset: i64,
+    pending: u64,
+}
+
+/// A head and `n` mutexes linked in a circle back to the head (as glibc keeps them).
+fn robust_list(words: &[u32]) -> (Box<Head>, Vec<Box<RobustMutex>>) {
+    let mut head = Box::new(Head { next: 0, futex_offset: 8, pending: 0 });
+    let ms: Vec<Box<RobustMutex>> = words.iter().map(|&w| Box::new(RobustMutex { next: 0, word: AtomicU32::new(w) })).collect();
+    let head_addr = &*head as *const Head as u64;
+    let addrs: Vec<u64> = ms.iter().map(|m| &**m as *const RobustMutex as u64).collect();
+    head.next = addrs.first().copied().unwrap_or(head_addr);
+    for (i, m) in ms.iter().enumerate() {
+        let next = addrs.get(i + 1).copied().unwrap_or(head_addr);
+        unsafe { (*(&**m as *const RobustMutex as *mut RobustMutex)).next = next };
+    }
+    (head, ms)
+}
+
+fn space() -> u64 {
+    fake::IDS.get().1 // the fake task has no Mm: futexes are keyed by tgid
+}
+
+#[test]
+fn a_dying_owner_marks_its_robust_mutexes_owner_died() {
+    let me = 0x7500u32;
+    // Held by the dying thread (one with waiters), held by someone else, free
+    let (head, ms) = robust_list(&[me, me | WAITERS, 0x7501, 0]);
+    let woken = exit_robust_list(&*head as *const Head as u64, me, space());
+    let w = |i: usize| ms[i].word.load(Ordering::SeqCst);
+    assert_eq!(w(0), OWNER_DIED, "owner cleared, OWNER_DIED set");
+    assert_eq!(w(1), OWNER_DIED | WAITERS, "the waiters bit stays");
+    assert_eq!(w(2), 0x7501, "another thread's mutex is left alone");
+    assert_eq!(w(3), 0, "a free one too");
+    assert!(woken.is_empty(), "nobody was queued");
+}
+
+#[test]
+fn a_waiter_is_woken_when_the_owner_dies() {
+    let me = 0x7510u32;
+    let (head, ms) = robust_list(&[me | WAITERS]);
+    // A waiter on the mutex word (its own thread, same process)
+    let word: &'static AtomicU32 = unsafe { &*(&ms[0].word as *const AtomicU32) };
+    let (tx, rx) = mpsc::channel();
+    let target = addr(word);
+    let val = word.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        fake::IDS.set((0x7511, 1));
+        fake::SPIN_WAITS.set(true);
+        let _ = tx.send(dispatch_futex(target, FUTEX_WAIT | P, val, 0, 0, 0));
+    });
+    settle();
+    let woken = exit_robust_list(&*head as *const Head as u64, me, 1);
+    assert_eq!(woken.len(), 1, "one waiter woken");
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(0));
+    assert_eq!(word.load(Ordering::SeqCst), OWNER_DIED | WAITERS);
+}
+
+/// `list_op_pending`: a mutex being locked or unlocked when the thread died. Still owned:
+/// marked like the others; already released (word 0, non-PI): only the wake happens.
+#[test]
+fn the_pending_entry_is_handled_last() {
+    let me = 0x7520u32;
+    let (mut head, _ms) = robust_list(&[]);
+    let pending = Box::new(RobustMutex { next: 0, word: AtomicU32::new(me) });
+    head.pending = &*pending as *const RobustMutex as u64;
+    exit_robust_list(&*head as *const Head as u64, me, space());
+    assert_eq!(pending.word.load(Ordering::SeqCst), OWNER_DIED, "a pending mutex it still owned");
+    let released = Box::new(RobustMutex { next: 0, word: AtomicU32::new(0) });
+    head.pending = &*released as *const RobustMutex as u64;
+    exit_robust_list(&*head as *const Head as u64, me, space());
+    assert_eq!(released.word.load(Ordering::SeqCst), 0, "a released one stays free");
+}
+
+/// A list that never comes back to its head stops after 2048 entries (Linux's
+/// ROBUST_LIST_LIMIT) instead of keeping the exiting thread in the kernel.
+#[test]
+fn a_circular_robust_list_does_not_hang_the_exit() {
+    let me = 0x7530u32;
+    let (head, ms) = robust_list(&[me, me]);
+    // The second entry points back to the first, not to the head
+    let first = &*ms[0] as *const RobustMutex as u64;
+    unsafe { (*(&*ms[1] as *const RobustMutex as *mut RobustMutex)).next = first };
+    let (tx, rx) = mpsc::channel();
+    let h = &*head as *const Head as u64;
+    let s = space();
+    std::thread::spawn(move || {
+        let _ = tx.send(exit_robust_list(h, me, s).len());
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok(), "the walk ends");
+    assert_eq!(ms[0].word.load(Ordering::SeqCst), OWNER_DIED);
+    assert_eq!(ms[1].word.load(Ordering::SeqCst), OWNER_DIED);
 }

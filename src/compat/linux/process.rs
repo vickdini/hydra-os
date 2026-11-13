@@ -42,30 +42,6 @@ const PR_SET_NO_NEW_PRIVS: u64 = 38;
 const PR_GET_NO_NEW_PRIVS: u64 = 39;
 const PR_GET_AUXV: u64 = 0x4155_5856;
 
-/// Writes a 16-byte `(rlim_cur, rlim_max)` pair into user virtual memory.
-///
-/// # Arguments
-///
-/// * `ptr` - User virtual pointer to `struct rlimit` (or `0` to ignore).
-/// * `limit` - `(soft, hard)` limit values to write.
-///
-/// # Returns
-///
-/// `0` on success, or `-EFAULT` if user memory cannot be prefaulted.
-fn write_rlimit(ptr: u64, limit: (u64, u64)) -> i64 {
-    if ptr == 0 {
-        return 0;
-    }
-    if !crate::memory::vm::prefault_current(ptr, 16, true) {
-        return EFAULT;
-    }
-    unsafe {
-        *(ptr as *mut u64) = limit.0;
-        *((ptr + 8) as *mut u64) = limit.1;
-    }
-    0
-}
-
 /// The calling process's auxiliary vector.
 ///
 /// # Returns
@@ -152,6 +128,45 @@ fn read_timespec_ns(ptr: u64) -> Option<u64> {
     Some(s as u64 * 1_000_000_000 + ns as u64)
 }
 
+/// `sizeof(struct robust_list_head)`: the only length `set_robust_list` accepts.
+const ROBUST_HEAD_LEN: u64 = 24;
+
+/// `get_robust_list(pid, head_ptr, len_ptr)`: the robust list head thread `pid` (0: the
+/// caller) registered. Linux needs ptrace read access to another thread (EPERM): the same
+/// process, `CAP_SYS_PTRACE`, or a target whose real, effective and saved ids are all the
+/// caller's real ids.
+fn get_robust_list(pid: i32, head_ptr: u64, len_ptr: u64) -> i64 {
+    const ESRCH: i64 = -3;
+    const CAP_SYS_PTRACE: u64 = 1 << 19;
+    let me = crate::task::with_current_task_mut(|t| (t.id, t.tgid, t.uid, t.gid, t.caps.has(CAP_SYS_PTRACE)));
+    let Some((my_id, my_tgid, my_uid, my_gid, ptrace_cap)) = me else { return ESRCH };
+    let head = if pid == 0 {
+        crate::task::with_current_task_mut(|t| t.robust_list).unwrap_or(0)
+    } else if pid < 0 {
+        return ESRCH;
+    } else {
+        let id = crate::task::TaskId(super::ns::pid_from_caller(pid as u64));
+        let found = crate::task::SCHEDULER.lock().with_task_mut(id, |t| {
+            let same_ids = [t.uid, t.euid, t.suid] == [my_uid; 3] && [t.gid, t.egid, t.sgid] == [my_gid; 3];
+            (t.robust_list, t.tgid == my_tgid || id == my_id || ptrace_cap || same_ids)
+        });
+        match found {
+            None => return ESRCH,
+            Some((_, false)) => return EPERM,
+            Some((h, true)) => h,
+        }
+    };
+    if len_ptr == 0 || !crate::memory::vm::prefault_current(len_ptr, 8, true) {
+        return EFAULT;
+    }
+    unsafe { core::ptr::write_unaligned(len_ptr as *mut u64, ROBUST_HEAD_LEN) };
+    if head_ptr == 0 || !crate::memory::vm::prefault_current(head_ptr, 8, true) {
+        return EFAULT;
+    }
+    unsafe { core::ptr::write_unaligned(head_ptr as *mut u64, head) };
+    0
+}
+
 /// Handles process-attribute system calls; `None` if `num` is not one of them.
 ///
 /// # Arguments
@@ -166,22 +181,15 @@ fn read_timespec_ns(ptr: u64) -> Option<u64> {
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     Some(match num {
         NR_SET_ROBUST_LIST => {
-            // The list is only consulted when a thread dies holding a robust mutex
-            if a[1] != 24 {
+            // Walked when the thread exits or calls execve (futex::exit_robust_list)
+            if a[1] != ROBUST_HEAD_LEN {
                 EINVAL
             } else {
+                crate::task::with_current_task_mut(|t| t.robust_list = a[0]);
                 0
             }
         }
-        NR_GET_ROBUST_LIST => {
-            if a[1] != 0 {
-                let _ = write_rlimit(a[1], (0, 0));
-            }
-            if a[2] != 0 && crate::memory::vm::prefault_current(a[2], 8, true) {
-                unsafe { *(a[2] as *mut u64) = 24 };
-            }
-            0
-        }
+        NR_GET_ROBUST_LIST => get_robust_list(a[0] as i32, a[1], a[2]),
         NR_RSEQ => ENOSYS,
         115 => super::proc::sys_getgroups(a[0], a[1]),
         116 => super::proc::sys_setgroups(a[0], a[1]),
