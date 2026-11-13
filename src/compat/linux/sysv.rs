@@ -555,11 +555,14 @@ fn semop(id: i32, sops: u64, nsops: u64, timeout: u64) -> i64 {
     let (pid, who, ns) = caller();
     let alters = ops.iter().any(|o| o.1 != 0);
     let mut counted: Option<(usize, bool)> = None;
+    let mut seen = false;
     let result = loop {
         CHANGED.register();
         let mut guard = IPC.lock();
         let ipc = &mut *guard;
-        let Some((n, set)) = ipc.sem.get_mut(&id) else { break EIDRM };
+        // Missing from the start: no such id (EINVAL); gone since: removed while waiting
+        let Some((n, set)) = ipc.sem.get_mut(&id) else { break if seen { EIDRM } else { EINVAL } };
+        seen = true;
         if *n != ns {
             break EINVAL;
         }
@@ -855,10 +858,12 @@ fn msgsnd(id: i32, msgp: u64, size: u64, flags: u64) -> i64 {
         return EINVAL;
     }
     let (pid, who, ns) = caller();
+    let mut seen = false;
     let r = loop {
         CHANGED.register();
         let mut ipc = IPC.lock();
-        let Some((n, q)) = ipc.msg.get_mut(&id) else { break EIDRM };
+        let Some((n, q)) = ipc.msg.get_mut(&id) else { break if seen { EIDRM } else { EINVAL } };
+        seen = true;
         if *n != ns {
             break EINVAL;
         }
@@ -915,10 +920,12 @@ fn msgrcv(id: i32, msgp: u64, size: u64, msgtyp: i64, flags: u64) -> i64 {
         return EINVAL;
     }
     let (pid, who, ns) = caller();
+    let mut seen = false;
     let r = loop {
         CHANGED.register();
         let mut ipc = IPC.lock();
-        let Some((n, q)) = ipc.msg.get_mut(&id) else { break Err(EIDRM) };
+        let Some((n, q)) = ipc.msg.get_mut(&id) else { break Err(if seen { EIDRM } else { EINVAL }) };
+        seen = true;
         if *n != ns {
             break Err(EINVAL);
         }

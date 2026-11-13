@@ -528,9 +528,6 @@ fn getall_setall_and_permissions() {
 }
 
 #[test]
-#[ignore = "BUG (low): semop/msgsnd/msgrcv on an id that never existed return EIDRM; Linux \
-            returns EINVAL and keeps EIDRM for objects removed while the caller waited \
-            (src/compat/linux/sysv.rs, semop/msgsnd/msgrcv)"]
 fn unknown_ids_are_einval() {
     setup();
     assert_eq!(semop(0x7ff0_1234, &[(0, 1, 0)]), EINVAL);
