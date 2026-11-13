@@ -119,6 +119,11 @@ pub fn build_dns_query(
         if label.len() > 63 {
             return Err("DNS label exceeds 63 characters");
         }
+        // RFC 1035: at most 255 bytes encoded, the final zero included (which also keeps
+        // the query well inside the 512-byte buffer)
+        if offset - 12 + 1 + label.len() + 1 > 255 {
+            return Err("DNS name exceeds 255 bytes");
+        }
         out_buf[offset] = label.len() as u8;
         offset += 1;
         out_buf[offset..offset + label.len()].copy_from_slice(label.as_bytes());

@@ -69,13 +69,15 @@ fn query_needs_a_512_byte_buffer() {
 }
 
 #[test]
-#[ignore = "BUG: build_dns_query never checks the total name length (max 253), so many 63-byte \
-            labels write past the 512-byte buffer and panic (src/net/dns.rs)"]
 fn query_rejects_names_longer_than_253_bytes() {
     let label = "a".repeat(63);
     let name = vec![label.as_str(); 9].join("."); // 575 bytes
     let r = std::panic::catch_unwind(|| build_dns_query(&name, 1, &mut [0u8; 512]));
     assert!(matches!(r, Ok(Err(_))), "expected an error, got {:?}", r.map(|x| x.is_ok()));
+    let a63 = "a".repeat(63);
+    let at_limit = format!("{a63}.{a63}.{a63}.{}", "a".repeat(61)); // 253 characters, 255 encoded
+    assert!(build_dns_query(&at_limit, 1, &mut [0u8; 512]).is_ok(), "the longest legal name");
+    assert!(build_dns_query(&format!("{at_limit}a"), 1, &mut [0u8; 512]).is_err(), "one byte more");
 }
 
 // -------------------------------------------------------------- response
