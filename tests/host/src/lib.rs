@@ -314,7 +314,7 @@ pub mod fs {
         EventFd(alloc::sync::Arc<spin::Mutex<crate::compat::linux::eventfd::EventFd>>),
         MemFd { memfd: alloc::sync::Arc<spin::Mutex<crate::compat::linux::memfd::MemFd>>, flags: u32 },
         Vnode(alloc::sync::Arc<spin::Mutex<crate::fake::Vnode>>),
-        File { path: alloc::string::String, readable: bool },
+        File { path: alloc::string::String, readable: bool, writable: bool },
         Device(alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>),
     }
 

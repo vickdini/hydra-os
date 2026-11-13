@@ -82,9 +82,13 @@ fn pages() -> Option<Arc<Pages>> {
 pub fn map(mm: &mut Mm) -> Option<u64> {
     let p = pages()?;
     let code = (p.frames.len() as u64 - 1) * PAGE;
-    // A place for both, the [vvar] page first
+    // A place for both, the [vvar] page first. Every process shares its frames: it stays
+    // shared (the clock updates reach everyone) and can never be made writable. The code
+    // is private, as on Linux: a write (a debugger's breakpoint) makes the process its own
+    // copy and never reaches the others.
     let base = mm.mmap(0, PAGE + code, PROT_READ, true, false, false, Backing::Object { obj: p.clone(), pgoff: 0 }).ok()?;
-    mm.mmap(base + PAGE, code, PROT_READ | PROT_EXEC, true, true, false, Backing::Object { obj: p, pgoff: 1 }).ok()?;
+    mm.mmap(base + PAGE, code, PROT_READ | PROT_EXEC, false, true, false, Backing::Object { obj: p, pgoff: 1 }).ok()?;
+    mm.deny_write(base, base + PAGE);
     mm.set_name(base, base + PAGE, Some("[vvar]"));
     mm.set_name(base + PAGE, base + PAGE + code, Some("[vdso]"));
     Some(base + PAGE)

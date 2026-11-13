@@ -14,6 +14,7 @@ use crate::fs::ZfsClient;
 use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec};
 use crate::memory::vm::{Backing, MappedObject, Mm, PAGE_SIZE};
 
+const EPERM: i64 = 1;
 const EBADF: i64 = 9;
 const ENOMEM: i64 = 12;
 const EACCES: i64 = 13;
@@ -147,32 +148,48 @@ pub fn current_mm() -> Option<Arc<Mutex<Mm>>> {
 ///
 /// # Returns
 ///
-/// * `Ok(Arc<dyn MappedObject>)` backing the file descriptor.
+/// * `Ok((obj, write_err))`: the object backing the descriptor, and what a shared mapping
+///   of it gets for asking to write: 0 if it may (Linux's `VM_MAYWRITE`), `-EACCES` if the
+///   descriptor was not opened for writing, `-EPERM` for a memfd sealed against writes.
 /// * `Err(-EBADF)` if descriptor is invalid.
 /// * `Err(-EACCES)` if descriptor is not readable.
 /// * `Err(-ENODEV)` if underlying resource does not support memory mapping.
-fn fd_object(fd: usize) -> Result<Arc<dyn MappedObject>, i64> {
+fn fd_object(fd: usize) -> Result<(Arc<dyn MappedObject>, i64), i64> {
+    const O_ACCMODE: u32 = 0o3;
+    const O_RDONLY: u32 = 0o0;
+    const F_SEAL_WRITE: u32 = 0x0008;
+    const F_SEAL_FUTURE_WRITE: u32 = 0x0010;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned()).ok_or(-EBADF)?;
     match desc {
-        crate::fs::FileDescriptor::MemFd { memfd, .. } => Ok(memfd),
+        crate::fs::FileDescriptor::MemFd { memfd, flags } => {
+            let err = if flags & O_ACCMODE == O_RDONLY {
+                -EACCES
+            } else if memfd.lock().seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
+                -EPERM
+            } else {
+                0
+            };
+            Ok((memfd, err))
+        }
         crate::fs::FileDescriptor::Vnode(f) => {
-            let (ino, readable) = {
+            let (ino, readable, writable) = {
                 let f = f.lock();
-                (f.ino, f.readable())
+                (f.ino, f.readable(), f.writable())
             };
             if !readable {
                 return Err(-EACCES);
             }
-            Ok(inode_object(ino))
+            Ok((inode_object(ino), if writable { 0 } else { -EACCES }))
         }
-        crate::fs::FileDescriptor::File { path, readable, .. } => {
+        crate::fs::FileDescriptor::File { path, readable, writable, .. } => {
             if !readable {
                 return Err(-EACCES);
             }
             let ino = ZfsClient::resolve(0, path.as_bytes(), true).map_err(|_| -ENODEV)?;
-            Ok(inode_object(ino))
+            Ok((inode_object(ino), if writable { 0 } else { -EACCES }))
         }
-        crate::fs::FileDescriptor::Device(d) => d.mmap_object(),
+        // A device's mmap_object decides for itself what may be mapped
+        crate::fs::FileDescriptor::Device(d) => Ok((d.mmap_object()?, 0)),
         _ => Err(-ENODEV),
     }
 }
@@ -202,6 +219,7 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         MAP_PRIVATE => false,
         _ => return -EINVAL,
     };
+    let mut may_write = true;
     let backing = if flags & MAP_ANONYMOUS != 0 || fd == -1 {
         Backing::Anon
     } else {
@@ -209,7 +227,18 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
             return -EBADF;
         }
         match fd_object(fd as usize) {
-            Ok(obj) => Backing::Object { obj, pgoff: offset / PAGE_SIZE },
+            Ok((obj, write_err)) => {
+                // A shared mapping writes the file itself, so as Linux: only through a
+                // descriptor that may write it, now (EACCES/EPERM) or after mprotect
+                // (no VM_MAYWRITE). A private mapping writes its own copies.
+                if shared && write_err != 0 {
+                    if prot & crate::memory::vm::PROT_WRITE as u64 != 0 {
+                        return write_err;
+                    }
+                    may_write = false;
+                }
+                Backing::Object { obj, pgoff: offset / PAGE_SIZE }
+            }
             Err(e) => return e,
         }
     };
@@ -246,6 +275,9 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         Ok(a) => {
             if name.is_some() {
                 m.set_name(a, a + len, name.as_deref());
+            }
+            if !may_write {
+                m.deny_write(a, a + len);
             }
             a as i64
         }

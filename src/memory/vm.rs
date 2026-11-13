@@ -138,6 +138,8 @@ pub const PROT_EXEC: u32 = 0x4;
 
 /// Out of memory (`ENOMEM`).
 const ENOMEM: i64 = 12;
+/// Permission denied (`EACCES`).
+const EACCES: i64 = 13;
 /// Bad address (`EFAULT`).
 const EFAULT: i64 = 14;
 /// File or mapping already exists (`EEXIST`).
@@ -197,6 +199,10 @@ pub struct Vma {
     pub name: Option<Arc<str>>,
     /// The userfaultfd its missing pages are reported to (0: none).
     pub uffd: u64,
+    /// Whether `mprotect` may add `PROT_WRITE` (Linux's `VM_MAYWRITE`). Off for shared
+    /// mappings of descriptors that cannot write the file, and for pages such as `[vvar]`
+    /// that every process shares.
+    pub may_write: bool,
 }
 
 impl Vma {
@@ -760,6 +766,7 @@ impl Mm {
                 backing,
                 name: None,
                 uffd: 0,
+                may_write: true,
             },
         );
         self.merge_around(start);
@@ -787,10 +794,11 @@ impl Mm {
             return Err(-EINVAL);
         }
         let end = start + page_up(len);
-        // Every page of the range must be mapped
+        // Every page of the range must be mapped, and may be made writable if asked (EACCES)
         let mut cursor = start;
         while cursor < end {
             match self.find_vma(cursor) {
+                Some(v) if prot & PROT_WRITE != 0 && !v.may_write => return Err(-EACCES),
                 Some(v) => cursor = v.end,
                 None => return Err(-ENOMEM),
             }
@@ -853,6 +861,7 @@ impl Mm {
                     backing: Backing::Anon,
                     name: Some(Arc::from("[heap]")),
                     uffd: 0,
+                    may_write: true,
                 },
             );
             self.merge_around(old_top);
@@ -875,7 +884,7 @@ impl Mm {
     ///
     /// `true` if both VMAs have identical permissions and contiguous backing and can merge, `false` otherwise.
     fn can_merge(lower: &Vma, upper: &Vma) -> bool {
-        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared || lower.name != upper.name || lower.uffd != upper.uffd {
+        if lower.end != upper.start || lower.prot != upper.prot || lower.shared != upper.shared || lower.name != upper.name || lower.uffd != upper.uffd || lower.may_write != upper.may_write {
             return false;
         }
         match (&lower.backing, &upper.backing) {
@@ -891,6 +900,18 @@ impl Mm {
     /// `/proc/<pid>/maps`.
     pub fn set_name(&mut self, start: u64, end: u64, name: Option<&str>) {
         let name: Option<Arc<str>> = name.map(Arc::from);
+        self.modify(start, end, |v| v.name = name.clone());
+    }
+
+    /// Forbids `mprotect` from ever making `[start, end)` writable (clears Linux's
+    /// `VM_MAYWRITE`), splitting the mappings that reach outside it.
+    pub fn deny_write(&mut self, start: u64, end: u64) {
+        self.modify(start, end, |v| v.may_write = false);
+    }
+
+    /// Applies `f` to the mappings in `[start, end)`, splitting those that reach outside
+    /// it, then merges what became alike.
+    fn modify(&mut self, start: u64, end: u64, f: impl Fn(&mut Vma)) {
         let keys: Vec<u64> = self.vmas.range(..end).filter(|(_, v)| v.end > start).map(|(k, _)| *k).collect();
         for k in keys {
             let Some(mut v) = self.vmas.remove(&k) else { continue };
@@ -903,7 +924,7 @@ impl Mm {
                 let upper = v.split_off(end);
                 self.vmas.insert(upper.start, upper);
             }
-            v.name = name.clone();
+            f(&mut v);
             let at = v.start;
             self.vmas.insert(at, v);
             self.merge_around(at);

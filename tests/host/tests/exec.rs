@@ -492,9 +492,9 @@ fn the_vdso_is_mapped_and_announced_in_the_auxiliary_vector() {
         let vdso = aux(&stack(&mut img), AT_SYSINFO_EHDR);
         assert!(vdso >= USER_SPACE_START && vdso < MMAP_TOP, "{vdso:#x}");
         let code = img.mm.find_vma(vdso).unwrap();
-        assert_eq!((code.prot, code.shared, code.name.as_deref()), (PROT_READ | PROT_EXEC, true, Some("[vdso]")));
+        assert_eq!((code.prot, code.shared, code.name.as_deref()), (PROT_READ | PROT_EXEC, false, Some("[vdso]")), "private, as Linux's r-xp");
         let vvar = img.mm.find_vma(vdso - P).unwrap();
-        assert_eq!((vvar.prot, vvar.name.as_deref()), (PROT_READ, Some("[vvar]")), "the data page just below");
+        assert_eq!((vvar.prot, vvar.shared, vvar.may_write, vvar.name.as_deref()), (PROT_READ, true, false, Some("[vvar]")), "the data page just below, shared and never writable");
         img.mm.prefault(vdso, P, false).unwrap();
         assert_eq!(peek(&mut img.mm, vdso, 4), b"\x7fELF", "AT_SYSINFO_EHDR points at the vDSO's ELF header");
     });
@@ -526,11 +526,6 @@ fn every_process_shares_one_copy_of_the_vdso() {
 }
 
 #[test]
-#[ignore = "BUG (security): the vDSO is mapped MAP_SHARED, and mprotect may add PROT_WRITE to \
-            shared mappings, so one process can rewrite the vDSO code (and the [vvar] clock page) \
-            that every process on the system runs, root's included. Linux maps the vDSO \
-            privately (a write gets a private copy) and refuses PROT_WRITE on [vvar] \
-            (src/arch/vdso.rs, map; src/memory/vm.rs, Mm::mprotect)"]
 fn one_process_cannot_change_another_processs_vdso() {
     isolated(|| {
         let mut a = exec(static_pie().bytes, &["attacker"], &[]);

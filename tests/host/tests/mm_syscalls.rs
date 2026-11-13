@@ -178,7 +178,7 @@ fn write_only_files_cannot_be_mapped() {
         let vnode = Arc::new(Mutex::new(fake::Vnode { ino: 9002, path: "/tmp/w".into(), readable: false, writable: true }));
         install(5, FileDescriptor::Vnode(vnode));
         assert_eq!(sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 5, 0), EACCES);
-        install(6, FileDescriptor::File { path: "/tmp/w".into(), readable: false });
+        install(6, FileDescriptor::File { path: "/tmp/w".into(), readable: false, writable: false });
         assert_eq!(sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 6, 0), EACCES);
     });
 }
@@ -188,10 +188,10 @@ fn path_based_file_descriptors_resolve_their_inode() {
     with_mm(|mm| {
         fake::INODES.with_borrow_mut(|m| m.insert(9003, b"legacy".to_vec()));
         fake::INODE_PATHS.with_borrow_mut(|m| m.insert("/etc/motd".into(), 9003));
-        install(6, FileDescriptor::File { path: "/etc/motd".into(), readable: true });
+        install(6, FileDescriptor::File { path: "/etc/motd".into(), readable: true, writable: false });
         let a = sys_mmap(mm, 0, P, PROT_READ as u64, MAP_PRIVATE, 6, 0) as u64;
         assert_eq!(peek(mm, a, 6), b"legacy");
-        install(7, FileDescriptor::File { path: "/gone".into(), readable: true });
+        install(7, FileDescriptor::File { path: "/gone".into(), readable: true, writable: false });
         assert_eq!(sys_mmap(mm, 0, P, PROT_READ as u64, MAP_PRIVATE, 7, 0), ENODEV);
     });
 }
@@ -446,11 +446,6 @@ fn read_only_files_map_privately_or_shared_read_only() {
 }
 
 #[test]
-#[ignore = "BUG (security): mmap(MAP_SHARED, PROT_WRITE) only checks that the descriptor is \
-            readable. A read-only descriptor then writes into the file's shared page cache, which \
-            execve maps for every process that runs the file: any user who can read a root-owned \
-            binary can change the code root runs. Linux returns EACCES \
-            (src/compat/linux/mm.rs, fd_object / sys_mmap)"]
 fn shared_writable_mappings_need_a_writable_descriptor() {
     with_mm(|mm| {
         let ino = read_only_binary(9301);
@@ -469,10 +464,6 @@ fn shared_writable_mappings_need_a_writable_descriptor() {
 }
 
 #[test]
-#[ignore = "BUG (security): mprotect can add PROT_WRITE to any shared mapping (vm.rs has no \
-            VM_MAYWRITE): a read-only shared mapping of a file opened O_RDONLY becomes writable, \
-            with the same effect as the mmap hole above. Linux returns EACCES \
-            (src/memory/vm.rs, Mm::mprotect)"]
 fn mprotect_cannot_make_a_read_only_shared_file_mapping_writable() {
     with_mm(|mm| {
         read_only_binary(9302);

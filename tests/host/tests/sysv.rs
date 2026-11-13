@@ -305,6 +305,19 @@ fn shmat_checks_permissions_and_needs_an_address_space() {
 }
 
 #[test]
+fn read_only_attach_cannot_be_made_writable() {
+    with_shm(|_, mm| {
+        let id = shmget(IPC_PRIVATE, P, 0o400);
+        let ro = shmat(id, 0, SHM_RDONLY);
+        assert!(ro > 0);
+        let r = mm.lock().mprotect(ro as u64, P, PROT_READ | PROT_WRITE);
+        assert_eq!(r, Err(EACCES), "a segment the caller may only read became writable");
+        shmdt(ro as u64);
+        shmctl(id, IPC_RMID, 0);
+    });
+}
+
+#[test]
 fn rmid_waits_for_the_last_detach() {
     with_shm(|_, _| {
         let id = shmget(0x88, P, IPC_CREAT | 0o600);

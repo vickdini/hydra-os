@@ -339,9 +339,19 @@ fn shmat(id: i32, addr: u64, flags: u64) -> i64 {
     let obj: Arc<dyn MappedObject> = mem;
     let fixed = addr != 0;
     let noreplace = fixed && flags & SHM_REMAP == 0;
-    let at = match mm.lock().mmap(addr, size, prot, true, fixed, noreplace, Backing::Object { obj, pgoff: 0 }) {
-        Ok(a) => a,
-        Err(e) => return if e == -17 { EINVAL } else { e },
+    let at = {
+        let mut m = mm.lock();
+        match m.mmap(addr, size, prot, true, fixed, noreplace, Backing::Object { obj, pgoff: 0 }) {
+            Ok(a) => {
+                // Read permission was all that was checked: mprotect may not add write
+                // (Linux: no VM_MAYWRITE, EACCES)
+                if flags & SHM_RDONLY != 0 {
+                    m.deny_write(a, a + size);
+                }
+                a
+            }
+            Err(e) => return if e == -17 { EINVAL } else { e },
+        }
     };
     let mut ipc = IPC.lock();
     match ipc.shm.get_mut(&id) {

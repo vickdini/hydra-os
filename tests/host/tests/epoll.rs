@@ -28,7 +28,7 @@ fn eventfd(fd: usize, counter: u64) -> std::sync::Arc<spin::Mutex<EventFd>> {
 }
 
 fn file(fd: usize) {
-    fake::FDS.with_borrow_mut(|f| f.install(fd, FileDescriptor::File { path: "/etc/hosts".into(), readable: true }));
+    fake::FDS.with_borrow_mut(|f| f.install(fd, FileDescriptor::File { path: "/etc/hosts".into(), readable: true, writable: false }));
 }
 
 /// (events, data) pairs, as epoll_wait would return them.

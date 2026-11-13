@@ -525,7 +525,7 @@ fn device_policy(prog: &[I]) -> i64 {
     let pid = fake::IDS.get().1;
     let cg = format!("/test-{pid}");
     fake::PROCS.lock().insert(pid, fake::Process { cgroup: Some(Arc::from(cg.as_str())), ..Default::default() });
-    fake::FDS.with_borrow_mut(|f| f.install(40, FileDescriptor::File { path: format!("/sys/fs/cgroup{cg}"), readable: true }));
+    fake::FDS.with_borrow_mut(|f| f.install(40, FileDescriptor::File { path: format!("/sys/fs/cgroup{cg}"), readable: true, writable: false }));
     let pfd = load_kind(CGROUP_DEVICE, prog);
     assert!(pfd >= 0);
     let mut a = [0u8; 32];
