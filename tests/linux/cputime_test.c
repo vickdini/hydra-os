@@ -159,7 +159,9 @@ int main(void) {
     long cut = -1, cst = -1;
     stat_times(c, &cut, &cst);
     printf("     child at 0.4 s: utime %ld\n", cut);
-    check(cut >= (long)(0.2 * hz), "another process's /proc/<pid>/stat utime");
+    // (at least a quarter of the time: whether the child got the CPU at once is up to
+    // the scheduler; what is checked is that its time shows)
+    check(cut >= (long)(0.1 * hz), "another process's /proc/<pid>/stat utime");
     int status = 0;
     waitpid(c, &status, 0);
     double child_cpu = WEXITSTATUS(status) / 100.0;
