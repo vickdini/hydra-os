@@ -108,6 +108,8 @@ const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
 
 /// `sigaltstack` flag indicating the thread is currently executing on the alternate stack.
+const ENOMEM: i64 = -12;
+const EAGAIN: i64 = -11;
 const SS_ONSTACK: u32 = 1;
 /// `sigaltstack` flag to disable the alternate signal stack.
 const SS_DISABLE: u32 = 2;
@@ -233,6 +235,10 @@ pub struct Process {
     pub actions: [SigAction; NSIG + 1],
     /// Bitmask of pending signals directed at the process as a whole.
     pub pending: u64,
+    /// Further instances of real-time signals already pending (Linux queues each one with
+    /// its own siginfo): `(thread it was sent to, or None for the process, signal,
+    /// sender)`, oldest first. The first instance is the pending bit and sender slot.
+    rt_queue: alloc::collections::VecDeque<(Option<u64>, u32, SigSender)>,
     /// Per-thread signal state keyed by thread ID (`tid`).
     threads: BTreeMap<u64, ThreadSig>,
     /// Exit status in `wait` encoding, set by `exit_group` or a fatal signal.
@@ -260,6 +266,9 @@ pub struct Process {
     /// When the process started, in clock ticks (`USER_HZ`, 100 per second) since boot
     /// (`/proc/<pid>/stat`; polkit tells processes apart by pid and start time).
     pub start_time: u64,
+    /// Real and saved uid of its last thread to exit: a zombie's credentials, which
+    /// signal permission checks still look at (Linux keeps a zombie's cred).
+    pub exit_cred: (u32, u32),
     /// CPU time of its exited threads: `(ticks run, of which in the kernel)`.
     pub dead_ticks: (u64, u64),
     /// CPU time of its children it waited for (and theirs, recursively), likewise.
@@ -334,6 +343,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             sid,
             actions,
             pending: 0,
+            rt_queue: alloc::collections::VecDeque::new(),
             threads,
             exit_status: None,
             zombie: false,
@@ -346,6 +356,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             cgroup,
             senders: [SigSender::default(); NSIG + 1],
             start_time: crate::arch::pit::ticks() * 100 / crate::arch::pit::frequency_hz().max(1),
+            exit_cred: (0, 0),
             dead_ticks: (0, 0),
             child_ticks: (0, 0),
             ns,
@@ -416,12 +427,14 @@ pub fn to_clock_ticks(ticks: u64) -> u64 {
 /// * `pid` - Process ID of the exiting thread.
 /// * `tid` - Thread ID that exited.
 /// * `run`, `sys` - The thread's CPU time (ticks, and those in the kernel), kept by the process.
-pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64) {
+/// * `cred` - The thread's real and saved uid (a zombie's, for signal permission checks).
+pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     super::mount::forget_thread(tid);
     let mut procs = PROCS.lock();
     let (ppid, now_zombie) = match procs.get_mut(&pid) {
         Some(p) => {
             p.threads.remove(&tid);
+            p.exit_cred = cred;
             p.dead_ticks.0 += run;
             p.dead_ticks.1 += sys;
             if p.threads.is_empty() && !p.zombie {
@@ -497,12 +510,15 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64) {
             super::ident_changed();
         }
     }
+    // SA_NOCLDWAIT: the parent gets SIGCHLD but no zombie (Linux's autoreap)
+    let mut autoreap = false;
     match procs.get_mut(&ppid) {
         Some(parent) if !parent.zombie => {
             let ign = parent.actions[SIGCHLD as usize].handler == SIG_IGN;
             if ign {
                 procs.remove(&pid);
             } else {
+                autoreap = parent.actions[SIGCHLD as usize].flags & SA_NOCLDWAIT != 0;
                 // The details go with the signal, as on Linux (the child may be reaped before
                 // the handler runs): CLD_EXITED, CLD_KILLED or CLD_DUMPED, pid, status
                 parent.senders[SIGCHLD as usize] = chld_sender(match status & 0x7f {
@@ -520,6 +536,9 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64) {
         _ => {
             procs.remove(&pid);
         }
+    }
+    if autoreap {
+        procs.remove(&pid);
     }
 }
 
@@ -717,6 +736,10 @@ pub fn getsid(target: u64) -> i64 {
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
 pub fn setpgid(target: u64, pgid: u64) -> i64 {
+    // Linux: a negative group id is EINVAL
+    if (pgid as i32) < 0 {
+        return EINVAL;
+    }
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
     let pgid = if pgid == 0 { target } else { pgid };
@@ -881,6 +904,8 @@ fn is_stop_signal(sig: u32) -> bool {
 const STOP_MASK: u64 = (1 << (SIGSTOP - 1)) | (1 << (SIGTSTP - 1)) | (1 << (SIGTTIN - 1)) | (1 << (SIGTTOU - 1));
 /// `sigaction` flag for `SIGCHLD`: do not generate `SIGCHLD` when children stop or continue.
 const SA_NOCLDSTOP: u64 = 1;
+/// `SA_NOCLDWAIT`: children that exit do not become zombies.
+const SA_NOCLDWAIT: u64 = 2;
 
 /// Tells the parent of `child` about a job-control state change (unless it asked not to be).
 ///
@@ -1050,6 +1075,67 @@ pub fn post_thread(pid: u64, tid: u64, sig: u32) -> bool {
     true
 }
 
+/// First real-time signal number (the kernel's `SIGRTMIN`): these are queued, one entry
+/// per send, instead of merging into one pending signal.
+const SIGRTMIN: u32 = 32;
+/// Most queued real-time signal instances per process (in place of `RLIMIT_SIGPENDING`).
+const RT_QUEUE_MAX: usize = 4096;
+
+/// Records `sender` as the origin of `sig` sent to process `p` (or its thread `tid`). A
+/// real-time signal that is already pending queues it as a further instance.
+///
+/// # Returns
+/// `false` if a real-time instance was dropped because the queue is full.
+fn set_sender(p: &mut Process, tid: Option<u64>, sig: u32, sender: SigSender) -> bool {
+    let pending = match tid {
+        Some(t) => p.threads.get(&t).is_some_and(|t| t.pending & bit(sig) != 0),
+        None => p.pending & bit(sig) != 0,
+    };
+    if sig >= SIGRTMIN && pending {
+        if p.rt_queue.len() >= RT_QUEUE_MAX {
+            return false;
+        }
+        p.rt_queue.push_back((tid, sig, sender));
+        return true;
+    }
+    match tid {
+        Some(t) => {
+            if let Some(t) = p.threads.get_mut(&t) {
+                t.senders[sig as usize] = sender;
+            }
+        }
+        None => p.senders[sig as usize] = sender,
+    }
+    true
+}
+
+/// Takes the sender of `sig` being delivered to thread `tid` of process `p` (the thread's
+/// own record first, then the process's), and moves the next queued instance of a
+/// real-time signal into its place, pending again.
+fn take_sender(p: &mut Process, tid: u64, sig: u32) -> SigSender {
+    let own = p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize]));
+    let (sender, slot) = match own {
+        Some(s) if s.pid != 0 || s.code != 0 => (s, Some(tid)),
+        _ => (core::mem::take(&mut p.senders[sig as usize]), None),
+    };
+    if let Some(i) = p.rt_queue.iter().position(|&(t, s, _)| s == sig && t == slot) {
+        let (_, _, next) = p.rt_queue.remove(i).unwrap_or_default();
+        match slot {
+            Some(t) => {
+                if let Some(t) = p.threads.get_mut(&t) {
+                    t.senders[sig as usize] = next;
+                    t.pending |= bit(sig);
+                }
+            }
+            None => {
+                p.senders[sig as usize] = next;
+                p.pending |= bit(sig);
+            }
+        }
+    }
+    sender
+}
+
 /// Records the calling process as the sender of `sig` to process `pid`, or to its thread
 /// `tid` (`Some`), with `code`, for the `siginfo` its handler receives. glibc's handler for
 /// the signal it uses to apply `setuid` to every thread ignores a signal not sent by its
@@ -1068,14 +1154,7 @@ fn record_sender(pid: u64, tid: Option<u64>, sig: u32, code: i32) {
     let uid = crate::task::with_current_task_mut(|t| t.uid).unwrap_or(0);
     let sender = SigSender { code, pid: me as u32, uid, ..Default::default() };
     if let Some(p) = PROCS.lock().get_mut(&pid) {
-        match tid {
-            Some(tid) => {
-                if let Some(t) = p.threads.get_mut(&tid) {
-                    t.senders[sig as usize] = sender;
-                }
-            }
-            None => p.senders[sig as usize] = sender,
-        }
+        set_sender(p, tid, sig, sender);
     }
 }
 
@@ -1120,32 +1199,107 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
     }
     let sig = sig as u32;
     let (_, me) = current_ids();
+    let caller = Caller::current();
+    // One process: it may be a zombie (signalling one succeeds and does nothing)
+    if pid > 0 {
+        let t = pid as u64;
+        // The system's driver processes are not Linux processes to signal (as kernel
+        // threads are not on Linux)
+        if is_system_service(t) {
+            return EPERM;
+        }
+        if !process_exists(t) {
+            return ESRCH;
+        }
+        if !caller.may_signal(t, sig) {
+            return EPERM;
+        }
+        record_sender(t, None, sig, SI_USER);
+        post_process(t, sig);
+        return 0;
+    }
     let targets: Vec<u64> = {
         let procs = PROCS.lock();
         match pid {
-            p if p > 0 => alloc::vec![p as u64],
             0 => {
                 let pgid = procs.get(&me).map_or(me, |p| p.pgid);
                 procs.values().filter(|p| p.pgid == pgid && !p.zombie).map(|p| p.pid).collect()
             }
-            -1 => procs.keys().copied().filter(|&p| p != me).collect(),
+            // Every process but init and the caller (kill(2))
+            -1 => procs.keys().copied().filter(|&p| p != me && p > 1).collect(),
             p => procs.values().filter(|q| q.pgid == (-p) as u64 && !q.zombie).map(|q| q.pid).collect(),
         }
     };
-    // The system's driver processes are not Linux processes to signal (as kernel threads
-    // are not on Linux): kill(-1) passes over them, and signalling one is refused
+    // kill(-1) passes over the driver processes
     let targets: Vec<u64> = targets.into_iter().filter(|&t| !is_system_service(t)).collect();
-    if pid > 0 && targets.is_empty() && is_system_service(pid as u64) {
-        return EPERM;
+    if targets.is_empty() {
+        return ESRCH;
     }
+    // Linux: a group succeeds if one member got the signal (else the last error);
+    // kill(-1) succeeds once there was any process to try, even if each refused
+    let mut delivered = false;
+    let mut last = ESRCH;
     for &t in &targets {
+        if !caller.may_signal(t, sig) {
+            last = EPERM;
+            continue;
+        }
         record_sender(t, None, sig, SI_USER);
+        if post_process(t, sig) {
+            delivered = true;
+        } else {
+            last = ESRCH;
+        }
     }
-    let n = targets.iter().filter(|&&t| post_process(t, sig)).count();
-    if n == 0 {
-        ESRCH
-    } else {
+    if delivered || pid == -1 {
         0
+    } else {
+        last
+    }
+}
+
+/// Whether the calling process may send `sig` to process `target` (see
+/// [`Caller::may_signal`]).
+pub fn may_signal(target: u64, sig: u32) -> bool {
+    Caller::current().may_signal(target, sig)
+}
+
+/// The calling process, as Linux's signal permission check sees it.
+struct Caller {
+    tgid: u64,
+    uid: u32,
+    euid: u32,
+    cap_kill: bool,
+}
+
+impl Caller {
+    fn current() -> Self {
+        const CAP_KILL: u64 = 1 << 5;
+        crate::task::with_current_task_mut(|t| Caller { tgid: t.tgid, uid: t.uid, euid: t.euid, cap_kill: t.caps.has(CAP_KILL) })
+            .unwrap_or(Caller { tgid: 0, uid: 0, euid: 0, cap_kill: true })
+    }
+
+    /// Linux's `check_kill_permission`: a process may signal its own thread group; a
+    /// process whose real or saved uid is the caller's real or effective uid; any process
+    /// with `CAP_KILL`; and, with `SIGCONT`, any process of its session. Signal 0 is
+    /// checked too.
+    fn may_signal(&self, target: u64, sig: u32) -> bool {
+        if target == self.tgid || self.cap_kill {
+            return true;
+        }
+        // A zombie keeps the credentials of its last thread
+        let cred = crate::task::SCHEDULER.lock().with_process(target, |t| (t.uid, t.suid));
+        let Some((uid, suid)) = cred.or_else(|| PROCS.lock().get(&target).map(|p| p.exit_cred)) else {
+            return true; // gone: the caller reports ESRCH
+        };
+        if [self.uid, self.euid].iter().any(|&u| u == uid || u == suid) {
+            return true;
+        }
+        sig == SIGCONT && {
+            let procs = PROCS.lock();
+            let sid = |p: u64| procs.get(&p).map(|p| p.sid);
+            sid(self.tgid).is_some() && sid(self.tgid) == sid(target)
+        }
     }
 }
 
@@ -1159,10 +1313,18 @@ pub fn sys_kill(pid: i64, sig: u64) -> i64 {
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
 pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
-    if sig as usize > NSIG {
+    // Linux: thread and thread group ids must be positive
+    if sig as usize > NSIG || pid as i32 <= 0 || tid as i32 <= 0 {
         return EINVAL;
     }
     if is_system_service(pid) {
+        return EPERM;
+    }
+    let exists = PROCS.lock().get(&pid).is_some_and(|p| p.threads.contains_key(&tid));
+    if !exists {
+        return ESRCH;
+    }
+    if !Caller::current().may_signal(pid, sig as u32) {
         return EPERM;
     }
     record_sender(pid, Some(tid), sig as u32, SI_TKILL);
@@ -1182,6 +1344,9 @@ pub fn sys_tgkill(pid: u64, tid: u64, sig: u64) -> i64 {
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
 pub fn sys_tkill(tid: u64, sig: u64) -> i64 {
+    if tid as i32 <= 0 {
+        return EINVAL;
+    }
     let pid = PROCS.lock().values().find(|p| p.threads.contains_key(&tid)).map(|p| p.pid);
     match pid {
         Some(pid) => sys_tgkill(pid, tid, sig),
@@ -1264,8 +1429,9 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
         if let Some(a) = new {
             p.actions[sig as usize] = a;
             if a.handler == SIG_IGN || (a.handler == SIG_DFL && default_ignored(sig)) {
-                // Setting a signal to ignored discards it if pending
+                // Setting a signal to ignored discards it if pending, every queued instance
                 p.pending &= !bit(sig);
+                p.rt_queue.retain(|&(_, s, _)| s != sig);
                 for t in p.threads.values_mut() {
                     t.pending &= !bit(sig);
                 }
@@ -1336,10 +1502,11 @@ pub fn sys_rt_sigprocmask(how: u64, set: u64, oset: u64, size: u64) -> i64 {
 /// # Arguments
 /// * `ss` - User pointer to new `stack_t`, or `0`.
 /// * `old` - User pointer to store previous `stack_t`, or `0`.
+/// * `user_rsp` - The caller's stack pointer (whether it runs on the alternate stack).
 ///
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
-pub fn sys_sigaltstack(ss: u64, old: u64) -> i64 {
+pub fn sys_sigaltstack(ss: u64, old: u64, user_rsp: u64) -> i64 {
     let (tid, pid) = current_ids();
     let mut procs = PROCS.lock();
     let t = match procs.get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) {
@@ -1347,10 +1514,12 @@ pub fn sys_sigaltstack(ss: u64, old: u64) -> i64 {
         None => return EINVAL,
     };
     drop(procs);
+    // Running on the alternate stack now (a handler calls sigaltstack)
+    let on_alt = t.alt_size != 0 && user_rsp > t.alt_sp && user_rsp <= t.alt_sp + t.alt_size;
     if old != 0 {
         let mut b = [0u8; 24];
         b[0..8].copy_from_slice(&t.alt_sp.to_le_bytes());
-        let flags = if t.alt_size == 0 { SS_DISABLE } else { t.alt_flags };
+        let flags = if on_alt { SS_ONSTACK } else if t.alt_size == 0 { SS_DISABLE } else { t.alt_flags };
         b[8..12].copy_from_slice(&flags.to_le_bytes());
         b[16..24].copy_from_slice(&t.alt_size.to_le_bytes());
         if !write_bytes(old, &b) {
@@ -1363,6 +1532,19 @@ pub fn sys_sigaltstack(ss: u64, old: u64) -> i64 {
             None => return EFAULT,
         };
         let flags = flags as u32;
+        // Linux: only SS_DISABLE (and SS_AUTODISARM) may be set; a stack below
+        // MINSIGSTKSZ is ENOMEM; the stack in use cannot be changed (EPERM)
+        const SS_AUTODISARM: u32 = 1 << 31;
+        const MINSIGSTKSZ: u64 = 2048;
+        if flags & !(SS_DISABLE | SS_AUTODISARM) != 0 {
+            return EINVAL;
+        }
+        if flags & SS_DISABLE == 0 && size < MINSIGSTKSZ {
+            return ENOMEM;
+        }
+        if on_alt {
+            return EPERM;
+        }
         let mut procs = PROCS.lock();
         if let Some(t) = procs.get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) {
             if flags & SS_DISABLE != 0 {
@@ -1469,19 +1651,9 @@ pub fn sys_rt_sigtimedwait(set_ptr: u64, info_ptr: u64, ts_ptr: u64, size: u64) 
         None
     };
     loop {
-        if let Some(sig) = take_signal(mask) {
+        if let Some(sender) = take_signal_info(mask) {
+            let sig = sender.signo;
             if info_ptr != 0 {
-                let (tid, pid) = current_ids();
-                let sender = {
-                    let mut procs = PROCS.lock();
-                    procs
-                        .get_mut(&pid)
-                        .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
-                            Some(s) if s.pid != 0 => s,
-                            _ => core::mem::take(&mut p.senders[sig as usize]),
-                        })
-                        .unwrap_or_default()
-                };
                 let mut info = [0u8; 128];
                 info[0..4].copy_from_slice(&(sig as i32).to_le_bytes());
                 info[8..12].copy_from_slice(&sender.code.to_le_bytes());
@@ -1578,18 +1750,17 @@ pub fn sys_rt_sigqueueinfo(pid: u64, tid: Option<u64>, sig: u64, info_ptr: u64) 
     if !process_exists(pid) || is_system_service(pid) {
         return ESRCH;
     }
+    if !Caller::current().may_signal(pid, sig as u32) {
+        return EPERM;
+    }
     if sig == 0 {
         return 0;
     }
     let sender = SigSender { code, pid: raw[2] as u32, uid: (raw[2] >> 32) as u32, value: raw[3], ..Default::default() };
     if let Some(p) = PROCS.lock().get_mut(&pid) {
-        match tid {
-            Some(t) => {
-                if let Some(t) = p.threads.get_mut(&t) {
-                    t.senders[sig as usize] = sender;
-                }
-            }
-            None => p.senders[sig as usize] = sender,
+        // Linux: a real-time signal beyond the queue limit is EAGAIN
+        if !set_sender(p, tid, sig as u32, sender) {
+            return EAGAIN;
         }
     }
     let posted = match tid {
@@ -1632,14 +1803,7 @@ pub fn post_timer_signal(pid: u64, tid: Option<u64>, sig: u32, timer: i32, overr
     // si_timerid and si_overrun sit where si_pid and si_uid do for other signals
     let sender = SigSender { code: super::ptimer::SI_TIMER, pid: timer as u32, uid: overrun, value, ..Default::default() };
     if let Some(p) = PROCS.lock().get_mut(&pid) {
-        match tid {
-            Some(t) => {
-                if let Some(t) = p.threads.get_mut(&t) {
-                    t.senders[sig as usize] = sender;
-                }
-            }
-            None => p.senders[sig as usize] = sender,
-        }
+        set_sender(p, tid, sig, sender);
     }
     match tid {
         Some(t) => post_thread(pid, t, sig),
@@ -1655,7 +1819,7 @@ pub fn post_timer_signal(pid: u64, tid: Option<u64>, sig: u32, timer: i32, overr
 /// `false` if the process no longer exists.
 pub fn post_with_info(pid: u64, sig: u32, code: i32, spid: u32, suid: u32, value: u64) -> bool {
     if let Some(p) = PROCS.lock().get_mut(&pid) {
-        p.senders[sig as usize] = SigSender { code, pid: spid, uid: suid, value, ..Default::default() };
+        set_sender(p, None, sig, SigSender { code, pid: spid, uid: suid, value, ..Default::default() });
     }
     post_process(pid, sig)
 }
@@ -1750,21 +1914,44 @@ pub fn sigchld_details(parent: u64) -> (i32, u64, i32) {
 /// # Returns
 /// `Some(signal_number)` if a pending signal was found and dequeued, or `None`.
 pub fn take_signal(mask: u64) -> Option<u32> {
+    take_signal_info(mask).map(|i| i.signo)
+}
+
+/// What `siginfo` reports about a signal taken with [`take_signal_info`].
+#[derive(Clone, Copy, Default)]
+pub struct TakenSignal {
+    /// The signal number.
+    pub signo: u32,
+    /// `si_code`.
+    pub code: i32,
+    /// `si_pid` (`si_timerid` for a POSIX timer).
+    pub pid: u32,
+    /// `si_uid` (`si_overrun` for a POSIX timer).
+    pub uid: u32,
+    /// `si_value`.
+    pub value: u64,
+}
+
+/// [`take_signal`], with the signal's sender (for `signalfd`): taking a real-time
+/// signal makes its next queued instance pending.
+pub fn take_signal_info(mask: u64) -> Option<TakenSignal> {
     let (tid, pid) = current_ids();
     let mut procs = PROCS.lock();
     let p = procs.get_mut(&pid)?;
     let t = p.threads.entry(tid).or_default();
-    if t.pending & mask != 0 {
+    let sig = if t.pending & mask != 0 {
         let sig = (t.pending & mask).trailing_zeros() + 1;
         t.pending &= !bit(sig);
-        return Some(sig);
-    }
-    if p.pending & mask != 0 {
+        sig
+    } else if p.pending & mask != 0 {
         let sig = (p.pending & mask).trailing_zeros() + 1;
         p.pending &= !bit(sig);
-        return Some(sig);
-    }
-    None
+        sig
+    } else {
+        return None;
+    };
+    let s = take_sender(p, tid, sig);
+    Some(TakenSignal { signo: sig, code: s.code, pid: s.pid, uid: s.uid, value: s.value })
 }
 
 /// Whether `sig` is one the CPU raises (its `siginfo` carries `si_addr`).
@@ -2097,17 +2284,8 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     // uc_sigmask
     put(&mut f, 8 + 296, old_mask);
     // siginfo: si_signo, si_errno, si_code, then si_pid and si_uid (for kill/tkill/tgkill)
-    let sender = {
-        let mut procs = PROCS.lock();
-        // The thread's own record (tgkill) first, then the process's (kill)
-        procs
-            .get_mut(&pid)
-            .map(|p| match p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize])) {
-                Some(s) if s.pid != 0 || s.code != 0 => s,
-                _ => core::mem::take(&mut p.senders[sig as usize]),
-            })
-            .unwrap_or_default()
-    };
+    // The thread's own record (tgkill) first, then the process's (kill)
+    let sender = PROCS.lock().get_mut(&pid).map(|p| take_sender(p, tid, sig)).unwrap_or_default();
     f[312..316].copy_from_slice(&(sig as i32).to_le_bytes());
     f[320..324].copy_from_slice(&sender.code.to_le_bytes());
     f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
@@ -2433,6 +2611,24 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
         // the tracer's stop, which may have changed them
         regs.rip &= 0xFFFF_FFFF;
         regs.rsp &= 0xFFFF_FFFF;
+    }
+    // Linux leaves sigreturn through the usual exit path: a signal deliverable now (under
+    // the restored mask, a further queued real-time instance, or one sent during the
+    // handler) is delivered before user code resumes. (A traced thread gets it at its next
+    // system call or trap: its stops need that entry's frame.)
+    let mut cs = cs;
+    if signal_pending() && !super::ptrace::is_traced(tid) {
+        match dequeue() {
+            Action::Handler(sig, act, old_mask) => {
+                if !build_frame(&mut regs, &fpu, sig, &act, old_mask, cs) {
+                    die(SIGSEGV);
+                }
+                cs = crate::arch::gdt::USER_CS; // the handler runs as 64-bit code
+            }
+            Action::Terminate(sig) => die(sig),
+            Action::Stop(sig) => stop_current(sig),
+            Action::Trace(..) | Action::None => {}
+        }
     }
     unsafe { return_to_user(&regs, &fpu, cs) }
 }

@@ -2429,7 +2429,7 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
         127 => proc::sys_rt_sigpending(a[0], a[1]),
         128 => proc::sys_rt_sigtimedwait(a[0], a[1], a[2], a[3]),
         130 => proc::sys_rt_sigsuspend(a[0], a[1]),
-        131 => proc::sys_sigaltstack(a[0], a[1]),
+        131 => proc::sys_sigaltstack(a[0], a[1], frame.rsp),
         61 => {
             let pid = a[0] as i32 as i64;
             let pid = if pid > 0 { ns::pid_from_caller(pid as u64) as i64 } else { pid };

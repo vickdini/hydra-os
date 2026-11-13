@@ -10,6 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::task::wait::WaitQueue;
 
 const ESRCH: i64 = -3;
+const EPERM: i64 = -1;
 const EBADF: i64 = -9;
 const EINVAL: i64 = -22;
 const EMFILE: i64 = -24;
@@ -142,6 +143,10 @@ pub fn sys_pidfd_send_signal(fd: u64, sig: u64, _info: u64, flags: u64) -> i64 {
     };
     if super::proc::has_exited(pid) {
         return ESRCH;
+    }
+    // Linux: the same permission check as kill(2)
+    if !super::proc::may_signal(pid, sig as u32) {
+        return EPERM;
     }
     if sig == 0 {
         return 0;

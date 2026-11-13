@@ -6,8 +6,9 @@
 //! `poll`/`select`/`epoll` while such a signal is pending. Posting a signal wakes the
 //! process's waits, so no wait queue of its own is needed.
 //!
-//! `ssi_signo` is filled in, plus `ssi_code`, `ssi_pid` and `ssi_status` for `SIGCHLD`
-//! (derived from the children's state: the process table does not record senders).
+//! `ssi_signo`, `ssi_code`, `ssi_pid`, `ssi_uid` and the `sigqueue` value (`ssi_int`,
+//! `ssi_ptr`) are filled in; for `SIGCHLD`, `ssi_code`, `ssi_pid` and `ssi_status` come
+//! from the children's state. Each queued instance of a real-time signal is one record.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -78,11 +79,18 @@ impl SignalFd {
         loop {
             let mut n = 0;
             while n + SIGINFO_SIZE <= buf.len() {
-                match super::proc::take_signal(self.mask.load(Ordering::Relaxed)) {
-                    Some(sig) => {
+                match super::proc::take_signal_info(self.mask.load(Ordering::Relaxed)) {
+                    Some(info) => {
+                        let sig = info.signo;
                         let rec = &mut buf[n..n + SIGINFO_SIZE];
                         rec.fill(0);
                         rec[0..4].copy_from_slice(&sig.to_le_bytes()); // ssi_signo
+                        // The sender, as Linux's signalfd_siginfo reports it
+                        rec[8..12].copy_from_slice(&info.code.to_le_bytes()); // ssi_code
+                        rec[12..16].copy_from_slice(&info.pid.to_le_bytes()); // ssi_pid
+                        rec[16..20].copy_from_slice(&info.uid.to_le_bytes()); // ssi_uid
+                        rec[44..48].copy_from_slice(&(info.value as u32).to_le_bytes()); // ssi_int
+                        rec[48..56].copy_from_slice(&info.value.to_le_bytes()); // ssi_ptr
                         if sig == super::proc::SIGCHLD {
                             // Programs check ssi_code before reaping (util-linux script)
                             let (code, pid, status) = super::proc::sigchld_details(self.owner);

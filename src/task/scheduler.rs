@@ -1999,7 +1999,7 @@ impl Scheduler {
                 crate::compat::linux::admin::note_task(t.tgid, t.uid, t.gid, t.exe_path());
             }
             let t = &self.tasks[idx];
-            crate::compat::linux::proc::thread_exited(t.tgid, t.id.0, t.ticks_run, t.ticks_sys);
+            crate::compat::linux::proc::thread_exited(t.tgid, t.id.0, t.ticks_run, t.ticks_sys, (t.uid, t.suid));
         }
     }
 
