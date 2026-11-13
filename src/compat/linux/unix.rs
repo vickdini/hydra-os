@@ -350,11 +350,6 @@ impl UnixSocket {
         self.ino
     }
 
-    /// Returns the underlying connected pair and side index, if connected.
-    ///
-    /// # Returns
-    ///
-    /// `Some((pair, side_index))` if connected, or `None`.
     /// Whether Unix sockets wait in this socket's receive queue (or, listening, in a pending
     /// connection's), sent and not yet received.
     fn holds_unix_in_flight(&self) -> bool {
@@ -368,6 +363,11 @@ impl UnixSocket {
         }
     }
 
+    /// Returns the underlying connected pair and side index, if connected.
+    ///
+    /// # Returns
+    ///
+    /// `Some((pair, side_index))` if connected, or `None`.
     fn pair(&self) -> Option<(Arc<Pair>, usize)> {
         match &*self.state.lock() {
             State::Connected { pair, side, .. } => Some((pair.clone(), *side)),

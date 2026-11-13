@@ -177,7 +177,7 @@ fn closing_a_descriptor_removes_its_watch() {
     eventfd(10, 0);
     let ep = EpollInstance::new();
     ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 0xDEAD)).unwrap();
-    fake::FDS.with_borrow_mut(|f| f.close(10));
+    fake::FDS.with_borrow_mut(|f| f.close(10)).unwrap();
     assert!(collect(&ep, 8).is_empty(), "closed fd still reported: {:?}", collect(&ep, 8));
     eventfd(10, 1); // the number is reused by an unrelated, readable eventfd
     assert!(collect(&ep, 8).is_empty(), "new file reported under the old watch: {:?}", collect(&ep, 8));

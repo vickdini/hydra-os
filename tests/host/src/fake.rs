@@ -275,6 +275,8 @@ impl Fds {
             EventFd(e) => e.lock().poll_events(),
             Device(d) => d.poll_events(),
             File { .. } | Vnode(_) | MemFd { .. } => 0x1 | 0x4,
+            Unix(s) => s.poll_events(),
+            PipeRead(_) | PipeWrite(_) => 0,
         }
     }
 
@@ -282,13 +284,15 @@ impl Fds {
         match desc {
             crate::fs::FileDescriptor::EventFd(e) => waits.add(wait::QueueRef::Shared(e.lock().wq.clone())),
             crate::fs::FileDescriptor::Device(d) => d.add_wait_queues(waits),
+            crate::fs::FileDescriptor::Unix(s) => s.add_wait_queues(waits),
             _ => {}
         }
     }
 
-    /// Test helper: close a descriptor (drop it from the table).
-    pub fn close(&mut self, fd: usize) {
-        self.open.remove(&fd);
+    /// Closes a descriptor (drops it from the table), as the kernel's: an error if it
+    /// was not open.
+    pub fn close(&mut self, fd: usize) -> Result<(), &'static str> {
+        self.open.remove(&fd).map(|_| ()).ok_or("Bad file descriptor")
     }
 
     /// Test helper: install `d` at a specific descriptor number.

@@ -151,6 +151,16 @@ pub mod compat {
 
         #[path = "../../../../../src/compat/linux/userfaultfd.rs"]
         pub mod userfaultfd;
+        #[path = "../../../../../src/compat/linux/unix.rs"]
+        pub mod unix;
+
+        /// *stub* Only `install`, the call `SO_PEERPIDFD` makes.
+        pub mod pidfd {
+            /// Not supported on the host: no `PidFd` descriptor variant.
+            pub fn install(_pid: u64, _nonblock: bool) -> i64 {
+                -38 // ENOSYS
+            }
+        }
 
         /// *stub* The kernel's `CharDevice` trait, cut down to the methods the
         /// code under test calls or implements. The real `chardev.rs` pulls in
@@ -220,6 +230,12 @@ pub mod compat {
             pub fn signal_pending() -> bool {
                 crate::fake::SIGNAL_PENDING.get()
             }
+            pub const SIGPIPE: u32 = 13;
+            /// Records the signal in `fake::POSTED` (with code 0) instead of delivering it.
+            pub fn post_thread(pid: u64, _tid: u64, sig: u32) -> bool {
+                crate::fake::POSTED.with_borrow_mut(|v| v.push((pid, sig, 0, 0, 0, 0)));
+                process_exists(pid)
+            }
         }
 
         /// *stub*
@@ -237,6 +253,34 @@ pub mod compat {
         /// kernel's: with no current `Mm`, user pointers are host pointers.
         pub mod vfs {
             const EFAULT: i64 = -14;
+
+            /// *mirror* of the kernel's credential snapshot.
+            pub(crate) struct Creds {
+                pub uid: u32,
+                pub gid: u32,
+                pub euid: u32,
+                pub egid: u32,
+            }
+            /// The current fake task's ids (root when there is none), as the kernel's.
+            pub(crate) fn creds() -> Creds {
+                crate::task::with_current_task_mut(|t| Creds { uid: t.uid, gid: t.gid, euid: t.euid, egid: t.egid })
+                    .unwrap_or(Creds { uid: 0, gid: 0, euid: 0, egid: 0 })
+            }
+            /// Socket names in the file system are not supported on the host: binding or
+            /// connecting to a path fails as if the directory were missing.
+            pub(crate) fn socket_key(_path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
+                Err(-2) // ENOENT
+            }
+            /// Verbatim from the kernel.
+            pub(crate) fn socket_ino_key(ino: u64) -> alloc::vec::Vec<u8> {
+                alloc::format!("ino:{}", ino).into_bytes()
+            }
+            pub(crate) fn make_socket_node(_path: &[u8]) -> Result<u64, i64> {
+                Err(-2) // ENOENT
+            }
+            pub(crate) fn path_exists(_path: &[u8]) -> bool {
+                false
+            }
             pub(crate) fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
                 if ptr == 0 || !crate::memory::vm::prefault_current(ptr, data.len() as u64, true) {
                     return Err(EFAULT);
@@ -316,6 +360,9 @@ pub mod fs {
         Vnode(alloc::sync::Arc<spin::Mutex<crate::fake::Vnode>>),
         File { path: alloc::string::String, readable: bool, writable: bool },
         Device(alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>),
+        PipeRead(alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
+        PipeWrite(alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
+        Unix(alloc::sync::Arc<crate::compat::linux::unix::UnixSocket>),
     }
 
     impl FileDescriptor {
@@ -330,6 +377,8 @@ pub mod fs {
                 FileDescriptor::Vnode(a) => of(a),
                 FileDescriptor::File { path, .. } => path.as_ptr() as usize,
                 FileDescriptor::Device(a) => of(a),
+                FileDescriptor::PipeRead(a) | FileDescriptor::PipeWrite(a) => of(a),
+                FileDescriptor::Unix(a) => of(a),
             }
         }
     }
@@ -337,10 +386,33 @@ pub mod fs {
     /// *stub*
     pub mod client {
         pub use crate::fake::{FileStat, ZfsClient};
+        /// *stub* (never called: `with_server` fails first)
+        pub fn resolve_parent_in(
+            _s: &mut crate::fs::zfs::ZfsServer,
+            _root: u64,
+            _base: u64,
+            _path: &[u8],
+        ) -> Result<(u64, alloc::vec::Vec<u8>), i64> {
+            Err(-5)
+        }
     }
     pub use client::ZfsClient;
 
     pub mod zfs {
+        /// *stub* No pool on the host: the server is never reached.
+        pub struct ZfsServer;
+        impl ZfsServer {
+            pub fn unlink(&mut self, _dir: u64, _name: &[u8]) -> Result<(), i64> {
+                Err(-5)
+            }
+            pub fn mknod(&mut self, _dir: u64, _name: &[u8], _mode: u32, _rdev: u64, _uid: u32, _gid: u32) -> Result<u64, i64> {
+                Err(-5)
+            }
+        }
+        /// *stub* Fails with `EIO`, as the kernel's does before the pool is mounted.
+        pub fn with_server<R>(_f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
+            Err(-5)
+        }
         #[path = "../../../../../src/fs/zfs/fsproto.rs"]
         pub mod fsproto;
         #[path = "../../../../../src/fs/zfs/types.rs"]
