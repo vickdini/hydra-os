@@ -345,10 +345,13 @@ fn lexical_chain(abs: &str) -> Vec<u64> {
 }
 
 /// File `ino`, reached by absolute path `abs` (process view), and the directories above it.
-/// A followed symbolic link is chased to where the file really sits.
+/// A followed symbolic link is chased to where the file really sits, as far as the path
+/// walker goes (`SYMLOOP_MAX` links). Past that the walker gave up (`ELOOP`), and only the
+/// file's own rules count: never the rights of the directory of the last link reached.
 fn file_chain(abs: &str, ino: u64, follow: bool) -> Vec<u64> {
+    const SYMLOOP_MAX: usize = 40;
     let mut abs = String::from(abs);
-    for _ in 0..8 {
+    for hop in 0..=SYMLOOP_MAX {
         let (dir, name) = split(&abs);
         let d = match super::vfs::resolve(0, dir.as_bytes(), true) {
             Ok(d) => d,
@@ -358,6 +361,9 @@ fn file_chain(abs: &str, ino: u64, follow: bool) -> Vec<u64> {
             if let Ok(i) = super::vfs::resolve(d, name.as_bytes(), false) {
                 if i != ino {
                     if let Ok(t) = ZfsClient::readlink(i) {
+                        if hop == SYMLOOP_MAX {
+                            return vec![ino];
+                        }
                         abs = super::vfs::join_path(dir, &t);
                         continue;
                     }

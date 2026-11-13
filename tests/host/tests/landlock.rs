@@ -260,11 +260,6 @@ fn a_chain_of_eight_symlinks_is_followed_to_the_target() {
 }
 
 #[test]
-#[ignore = "BUG (security): Landlock's file_chain follows at most 8 symlinks, while the kernel's \
-            path walker follows up to 40 (SYMLOOP_MAX). With 9+ links the check falls back to the \
-            directory of the last link it reached instead of the target's, so a sandboxed process \
-            can open files outside the directories it was granted \
-            (src/compat/linux/landlock.rs, file_chain)"]
 fn a_chain_of_nine_symlinks_cannot_escape_the_sandbox() {
     setup();
     for i in 1..9 {
@@ -275,6 +270,19 @@ fn a_chain_of_nine_symlinks_cannot_escape_the_sandbox() {
     let target = ino("/A/l1");
     assert_eq!(target, ino("/B/secret"), "the kernel opens /B/secret through the chain");
     assert_eq!(check_at("/A/l1", target, false, true, READ_FILE), Err(EACCES), "Landlock allowed /B/secret");
+}
+
+#[test]
+fn a_chain_past_symloop_max_is_refused() {
+    // The walker stops at 40 links (ELOOP); whatever the check is asked about then, it must
+    // not take the rights of the directory holding the last link it reached.
+    setup();
+    for i in 1..=41 {
+        fake::mklink(&format!("/A/l{i}"), &format!("l{}", i + 1));
+    }
+    fake::mklink("/A/l42", "/B/secret");
+    sandbox_read_a();
+    assert_eq!(check_at("/A/l1", ino("/B/secret"), false, true, READ_FILE), Err(EACCES));
 }
 
 // ----------------------------------------------------- rename and link
