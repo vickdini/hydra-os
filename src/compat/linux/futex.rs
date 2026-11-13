@@ -82,6 +82,8 @@ const EDEADLK: i64 = -35;
 
 /// `FUTEX_LOCK_PI2`: `FUTEX_LOCK_PI` with a `CLOCK_MONOTONIC` timeout by default.
 const FUTEX_LOCK_PI2: i32 = 13;
+/// `FUTEX_WAIT_REQUEUE_PI` (not implemented: ENOSYS), named for the clock-flag check.
+const FUTEX_WAIT_REQUEUE_PI: i32 = 11;
 /// PI futex word: other threads wait in the kernel (the owner must unlock through it).
 const FUTEX_WAITERS: u32 = 0x8000_0000;
 /// PI futex word: the previous owner died holding the lock.
@@ -607,10 +609,13 @@ fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
     }
     let op = (encoded >> 28) & 0xf;
     let cmp = (encoded >> 24) & 0xf;
-    let mut oparg = (encoded >> 12) & 0xfff;
-    let cmparg = encoded & 0xfff;
+    // Linux: oparg and cmparg are signed 12-bit values, and a shift count outside 0..=31
+    // is taken modulo 32 (FUTEX_OP_OPARG_SHIFT)
+    let sign12 = |v: u32| ((v as i32) << 20) >> 20;
+    let mut oparg = sign12((encoded >> 12) & 0xfff) as u32;
+    let cmparg = sign12(encoded & 0xfff);
     if op & 8 != 0 {
-        oparg = 1u32.checked_shl(oparg).unwrap_or(0); // FUTEX_OP_OPARG_SHIFT
+        oparg = 1u32 << (oparg & 31);
     }
     let p = uaddr2 as *mut u32;
     let old = unsafe { core::ptr::read_volatile(p) };
@@ -623,7 +628,7 @@ fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
         _ => return Err(ENOSYS),
     };
     unsafe { core::ptr::write_volatile(p, new) };
-    let (o, c) = (old as i32, cmparg as i32);
+    let (o, c) = (old as i32, cmparg);
     Ok(match cmp {
         0 => o == c,
         1 => o != c,
@@ -639,7 +644,8 @@ fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
 /// serves (`FUTEX_WAKE`, or `FUTEX_WAKE_BITSET` with a nonzero mask, private).
 pub fn fast_wake_op(op: i32, val3: u32) -> bool {
     let cmd = op & FUTEX_CMD_MASK;
-    op & FUTEX_PRIVATE_FLAG != 0 && (cmd == FUTEX_WAKE || (cmd == FUTEX_WAKE_BITSET && val3 != 0))
+    // (with FUTEX_CLOCK_REALTIME the slow path answers ENOSYS)
+    op & FUTEX_PRIVATE_FLAG != 0 && op & FUTEX_CLOCK_REALTIME == 0 && (cmd == FUTEX_WAKE || (cmd == FUTEX_WAKE_BITSET && val3 != 0))
 }
 
 /// A private futex wake without the kernel lock (see [`fast_wake_op`]): it touches no user
@@ -652,6 +658,9 @@ pub fn fast_wake_op(op: i32, val3: u32) -> bool {
 /// # Returns
 /// The number of waiters woken.
 pub fn fast_wake(space: u64, uaddr: u64, val: u32, op: i32, val3: u32) -> i64 {
+    if uaddr & 3 != 0 {
+        return EINVAL; // as dispatch_futex
+    }
     let bitset = if op & FUTEX_CMD_MASK == FUTEX_WAKE { FUTEX_BITSET_MATCH_ANY } else { val3 };
     let ids = wake_key(FutexKey { space, uaddr }, val as usize, bitset);
     wake_ids(&ids);
@@ -679,6 +688,20 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
     let realtime = op & FUTEX_CLOCK_REALTIME != 0;
     let private = op & FUTEX_PRIVATE_FLAG != 0;
     let key_of = |addr: u64| key_for(addr, private);
+    // Linux: FUTEX_CLOCK_REALTIME only on the commands with an absolute timeout on a
+    // chosen clock; futex words are 32-bit aligned (EINVAL), the second one too
+    if realtime && !matches!(cmd, FUTEX_WAIT_BITSET | FUTEX_WAIT_REQUEUE_PI | FUTEX_LOCK_PI2) {
+        return ENOSYS;
+    }
+    let known = matches!(
+        cmd,
+        FUTEX_WAIT | FUTEX_WAIT_BITSET | FUTEX_WAKE | FUTEX_WAKE_BITSET | FUTEX_REQUEUE | FUTEX_CMP_REQUEUE | FUTEX_WAKE_OP
+            | FUTEX_LOCK_PI | FUTEX_LOCK_PI2 | FUTEX_TRYLOCK_PI | FUTEX_UNLOCK_PI
+    );
+    let two_words = matches!(cmd, FUTEX_REQUEUE | FUTEX_CMP_REQUEUE | FUTEX_WAKE_OP);
+    if known && (uaddr & 3 != 0 || (two_words && uaddr2 & 3 != 0)) {
+        return EINVAL;
+    }
     match cmd {
         FUTEX_WAIT => match deadline_ns(timeout, true, false) {
             Ok(d) => wait(uaddr, val, FUTEX_BITSET_MATCH_ANY, d, private),
@@ -698,7 +721,11 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
             ids.len() as i64
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
-            // `timeout` carries the maximum number of waiters to requeue
+            // `timeout` carries the maximum number of waiters to requeue; both counts are
+            // ints on Linux and must not be negative
+            if (val as i32) < 0 || (timeout as u32 as i32) < 0 {
+                return EINVAL;
+            }
             let (from, to) = (key_of(uaddr), key_of(uaddr2));
             let (mut a, mut b) = lock_two(&from, &to);
             if cmd == FUTEX_CMP_REQUEUE {
@@ -723,7 +750,8 @@ pub fn dispatch_futex(uaddr: u64, op: i32, val: u32, timeout: u64, uaddr2: u64, 
             drop(b);
             drop(a);
             wake_ids(&ids);
-            (ids.len() + if cmd == FUTEX_CMP_REQUEUE { moved } else { 0 }) as i64
+            // Linux returns the waiters woken plus those requeued, for both commands
+            (ids.len() + moved) as i64
         }
         FUTEX_WAKE_OP => {
             let (k1, k2) = (key_of(uaddr), key_of(uaddr2));

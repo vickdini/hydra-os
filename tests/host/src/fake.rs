@@ -207,6 +207,15 @@ impl SchedulerGuard {
         with_current_task_mut(|t| f(t));
         SIBLINGS.with_borrow_mut(|v| v.iter_mut().for_each(|t| f(t)));
     }
+    /// The current task (`IDS`' tid).
+    pub fn current_task_id(&self) -> TaskId {
+        TaskId(IDS.get().0)
+    }
+    /// Records the wake in [`WOKEN`] (the waiter, on another test thread, notices its
+    /// queue entry is gone).
+    pub fn wake_task(&mut self, id: u64) {
+        WOKEN.with_borrow_mut(|v| v.push(id));
+    }
     pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
         if tgid == IDS.get().1 {
             with_current_task_mut(|t| f(t))
@@ -215,6 +224,19 @@ impl SchedulerGuard {
             SIBLINGS.with_borrow(|v| v.iter().find(|t| t.tgid == tgid).map(f))
         }
     }
+}
+
+thread_local! {
+    /// Tasks woken through `SCHEDULER.lock().wake_task`.
+    pub static WOKEN: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Whether `wait::wait_ns(None)` spins (another test thread will end the wait)
+    /// instead of reporting that it would block.
+    pub static SPIN_WAITS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `task::is_task_alive`: the current task and its [`SIBLINGS`] are alive.
+pub fn is_task_alive(id: TaskId) -> bool {
+    id.0 == IDS.get().0 || SIBLINGS.with_borrow(|v| v.iter().any(|t| t.id == id))
 }
 
 /// `proc::die_by_signal`: the task would be killed. Reported as a panic
@@ -372,6 +394,18 @@ pub mod wait {
         /// panic that tests can catch and assert on.
         pub fn wait(&self, _deadline: Option<u64>) {
             panic!("{}", WOULD_BLOCK);
+        }
+    }
+
+    /// Sleeps until the boot-clock deadline `deadline` (ns) or a wake. On the host: with a
+    /// deadline the fake clock jumps to it (the wait times out at once); without one it
+    /// yields if [`SPIN_WAITS`] is set (another thread ends the wait) and otherwise
+    /// reports that it would block.
+    pub fn wait_ns(deadline: Option<u64>) {
+        match deadline {
+            Some(d) => TICKS.set(TICKS.get().max(d.div_ceil(1_000_000))),
+            None if SPIN_WAITS.get() => std::thread::yield_now(),
+            None => panic!("{}", WOULD_BLOCK),
         }
     }
 
@@ -652,6 +686,11 @@ pub fn frequency_hz() -> u64 {
 }
 
 /// Nanoseconds since boot, from the tick counter.
+/// Nanoseconds per timer tick (the fake clock runs at 1000 Hz).
+pub fn tick_ns() -> u64 {
+    1_000_000
+}
+
 pub fn now_ns() -> u64 {
     TICKS.get() * 1_000_000
 }

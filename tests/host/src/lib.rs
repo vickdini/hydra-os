@@ -40,7 +40,7 @@ macro_rules! kprintln {
 pub mod arch {
     /// *stub*
     pub mod pit {
-        pub use crate::fake::{clock_state, frequency_hz, now_ns, sleep_ms, ticks, uptime_ms};
+        pub use crate::fake::{clock_state, frequency_hz, now_ns, sleep_ms, tick_ns, ticks, uptime_ms};
     }
     /// *stub* Deterministic bytes instead of RDRAND.
     pub mod random {
@@ -153,6 +153,8 @@ pub mod compat {
         pub mod userfaultfd;
         #[path = "../../../../../src/compat/linux/unix.rs"]
         pub mod unix;
+        #[path = "../../../../../src/compat/linux/futex.rs"]
+        pub mod futex;
 
         /// *stub* Only `install`, the call `SO_PEERPIDFD` makes.
         pub mod pidfd {
@@ -509,7 +511,7 @@ pub mod task {
     /// *stub*
     pub use crate::fake::wait;
     /// *stub*
-    pub use crate::fake::{with_current_fds_mut, with_current_task_mut, TaskId, SCHEDULER};
+    pub use crate::fake::{is_task_alive, with_current_fds_mut, with_current_task_mut, Task, TaskId, SCHEDULER};
 }
 
 pub mod video {
