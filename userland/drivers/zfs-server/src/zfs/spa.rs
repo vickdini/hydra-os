@@ -42,7 +42,7 @@ pub const BLOCK: u64 = ZFS_BLOCK_SIZE as u64;
 const SECTOR: u64 = 512;
 /// Largest number of consecutive blocks gathered into one disk request (one disk driver
 /// window).
-const MAX_RUN: usize = crate::ipc::service::WINDOW_PAGES as usize;
+pub(crate) const MAX_RUN: usize = crate::ipc::service::WINDOW_PAGES as usize;
 /// Size of the RAM-backed pool used when no ATA disk is present.
 const RAM_POOL_BYTES: u64 = 64 * 1024 * 1024;
 /// Default cap on cached blocks (128 MiB of frames).
@@ -639,6 +639,41 @@ impl Spa {
         }
         self.cache.put(bp.block, &data);
         self.cache.get(bp.block).ok_or("ZFS: out of memory for block cache")
+    }
+
+    /// Reads the blocks of `bps` that are not cached yet, consecutive ones in one disk
+    /// request (up to a driver window), and caches each whose checksum matches. A block
+    /// that fails is left out: [`Self::read_bp`] reads it again and reports the error.
+    ///
+    /// # Arguments
+    /// * `bps` - Block pointers about to be read.
+    pub fn prefetch(&mut self, bps: &[BlockPointer]) {
+        let mut want: Vec<&BlockPointer> = bps.iter().filter(|bp| !bp.is_hole() && !self.cache.map.contains_key(&bp.block)).collect();
+        if want.len() < 2 {
+            return; // one block: read_bp reads it as cheaply
+        }
+        want.sort_unstable_by_key(|bp| bp.block);
+        want.dedup_by_key(|bp| bp.block);
+        let mut buf: Vec<u8> = alloc::vec![0u8; ZFS_BLOCK_SIZE * MAX_RUN];
+        let mut i = 0;
+        while i < want.len() {
+            let start = want[i].block;
+            let mut n = 1;
+            while i + n < want.len() && want[i + n].block == start + n as u64 && n < MAX_RUN {
+                n += 1;
+            }
+            let run = &mut buf[..n * ZFS_BLOCK_SIZE];
+            if self.vdev.read(start, run).is_ok() {
+                self.cache.misses += n as u64;
+                for (k, bp) in want[i..i + n].iter().enumerate() {
+                    let data: &[u8; ZFS_BLOCK_SIZE] = run[k * ZFS_BLOCK_SIZE..(k + 1) * ZFS_BLOCK_SIZE].try_into().unwrap();
+                    if Fletcher4::compute(&data[..bp.lsize as usize]) == bp.checksum {
+                        self.cache.put(bp.block, data);
+                    }
+                }
+            }
+            i += n;
+        }
     }
 
     /// Writes a batch of freshly allocated blocks, coalescing consecutive block numbers

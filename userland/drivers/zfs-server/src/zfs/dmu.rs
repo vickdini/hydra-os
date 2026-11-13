@@ -88,7 +88,14 @@ pub struct Dmu {
     dirty_data: BTreeMap<(u64, u64), PhysFrame<Size4KiB>>,
     truncated: BTreeMap<u64, u64>,
     freed_trees: Vec<DnodePhys>,
+    /// The last file read: `(object, the block after its end)`, to recognize sequential
+    /// reading (read further ahead then).
+    last_read: (u64, u64),
 }
+
+/// Blocks read ahead of a read that does not continue the previous one (a cluster: the
+/// neighbours of a page a program maps are likely needed soon).
+const READ_CLUSTER: u64 = 8;
 
 impl Dmu {
     /// Wraps an opened or freshly created pool.
@@ -108,6 +115,7 @@ impl Dmu {
             dirty_dnodes: BTreeSet::new(),
             dirty_data: BTreeMap::new(),
             truncated: BTreeMap::new(),
+            last_read: (0, 0),
             freed_trees: Vec::new(),
         }
     }
@@ -316,6 +324,36 @@ impl Dmu {
         Ok(())
     }
 
+    /// Brings the blocks of a read of `len` bytes at `offset`, and some after it, into the
+    /// block cache with as few disk requests as possible ([`Spa::prefetch`]): one block
+    /// at a time, each a request to the disk driver, reading ran at a few MB/s. Ahead of
+    /// the read: a window when it continues the previous read of the object (sequential
+    /// reading), a small cluster otherwise.
+    fn prefetch(&mut self, obj: u64, dn: &DnodePhys, offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        let first = offset / BLOCK;
+        let end = (offset + len).div_ceil(BLOCK);
+        let ahead = if self.last_read == (obj, first) { super::spa::MAX_RUN as u64 } else { READ_CLUSTER };
+        let last_block = dn.size.div_ceil(BLOCK);
+        let stop = (end + ahead).min(last_block).max(end);
+        self.last_read = (obj, end);
+        let cut = self.truncated.get(&obj).copied();
+        let mut bps = Vec::new();
+        for blkid in first..stop {
+            if self.dirty_data.contains_key(&(obj, blkid)) || cut.map_or(false, |t| blkid >= t) {
+                continue;
+            }
+            match self.lookup_bp(dn, blkid) {
+                Ok(bp) if !bp.is_hole() => bps.push(bp),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        self.spa.prefetch(&bps);
+    }
+
     /// Reads up to `buf.len()` bytes at `offset`, bounded by the object size.
     ///
     /// # Arguments
@@ -334,6 +372,7 @@ impl Dmu {
             return Ok(0);
         }
         let total = (buf.len() as u64).min(dn.size - offset) as usize;
+        self.prefetch(obj, &dn, offset, total as u64);
         let mut block = [0u8; ZFS_BLOCK_SIZE];
         let mut done = 0;
         while done < total {
