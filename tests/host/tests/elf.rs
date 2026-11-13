@@ -359,9 +359,6 @@ fn linux_pie_image_is_page_aligned_and_at_phdr_points_at_headers() {
 }
 
 #[test]
-#[ignore = "BUG: for fixed-address (ET_EXEC) binaries load_linux_elf passes the file offset \
-            e_phoff as AT_PHDR instead of the headers' virtual address, so libc finds no \
-            PT_TLS/PT_DYNAMIC (src/task/elf.rs, load_linux_elf)"]
 fn linux_exec_at_phdr_is_a_virtual_address() {
     fake::reset();
     let arena = Arena::new(1);

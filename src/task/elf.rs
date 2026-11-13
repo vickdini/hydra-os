@@ -355,6 +355,19 @@ impl<'a> ElfBinary<'a> {
         }
     }
 
+    /// The virtual address the program headers are loaded at (before any load bias), for
+    /// `AT_PHDR`, as Linux finds it: `PT_PHDR`'s address if present, otherwise through the
+    /// `PT_LOAD` segment whose file bytes hold them. `None` if no segment loads them.
+    pub fn phdr_vaddr(&self) -> Option<u64> {
+        let phoff = self.header.e_phoff;
+        if let Some(ph) = self.program_headers().find(|ph| ph.p_type == PT_PHDR) {
+            return Some(ph.p_vaddr);
+        }
+        self.program_headers()
+            .find(|ph| ph.p_type == PT_LOAD && ph.p_offset <= phoff && phoff - ph.p_offset < ph.p_filesz)
+            .map(|ph| ph.p_vaddr.wrapping_add(phoff - ph.p_offset))
+    }
+
     /// Collects and returns all loadable (`PT_LOAD`) program headers.
     ///
     /// # Returns
@@ -686,7 +699,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
         .map_err(|e| ElfError::PagingError(e))?;
 
         let entry_point = base_virt + (elf.header.e_entry - min_vaddr);
-        let phdr_addr = base_virt + (elf.header.e_phoff - min_vaddr);
+        let phdr_addr = base_virt.wrapping_add(elf.phdr_vaddr().unwrap_or(elf.header.e_phoff).wrapping_sub(min_vaddr));
         (entry_point, base_virt + aligned_span as u64, Some(seg_buffer), phdr_addr)
     } else {
         for ph in &load_segments {
@@ -715,7 +728,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
                 }
             }
         }
-        let phdr_addr = elf.header.e_phoff;
+        let phdr_addr = elf.phdr_vaddr().unwrap_or(elf.header.e_phoff);
         (elf.header.e_entry, (max_vaddr + 4095) & !4095, None, phdr_addr)
     };
 
