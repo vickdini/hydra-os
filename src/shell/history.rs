@@ -79,7 +79,11 @@ impl History {
 
         let idx = self.count % MAX_HISTORY;
         let bytes = trimmed.as_bytes();
-        let len = bytes.len().min(MAX_CMD_LEN);
+        // Cut at a character boundary, so the entry stays valid UTF-8
+        let mut len = bytes.len().min(MAX_CMD_LEN);
+        while !trimmed.is_char_boundary(len) {
+            len -= 1;
+        }
 
         self.entries[idx][..len].copy_from_slice(&bytes[..len]);
         self.lengths[idx] = len;

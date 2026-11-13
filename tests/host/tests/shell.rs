@@ -140,8 +140,6 @@ fn history_keeps_utf8() {
 }
 
 #[test]
-#[ignore = "BUG: truncating at MAX_CMD_LEN bytes can split a multi-byte character; the entry \
-            then fails UTF-8 validation and becomes unreadable (src/shell/history.rs)"]
 fn history_truncation_respects_char_boundaries() {
     let cmd = format!("{}é", "a".repeat(MAX_CMD_LEN - 1)); // 'é' straddles the limit
     let h = history_of(&[&cmd]);
