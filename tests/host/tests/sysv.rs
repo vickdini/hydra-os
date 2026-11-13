@@ -599,9 +599,6 @@ fn send_validation_and_full_queue() {
 }
 
 #[test]
-#[ignore = "BUG: msgsnd limits a queue only by bytes, so zero-length messages are unlimited. Each \
-            still costs kernel heap, so any process can exhaust it; Linux also counts messages \
-            against msg_qbytes (src/compat/linux/sysv.rs, msgsnd)"]
 fn zero_length_messages_are_limited() {
     setup();
     let id = msgget(IPC_PRIVATE, 0o600);

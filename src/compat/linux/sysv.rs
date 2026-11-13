@@ -865,7 +865,9 @@ fn msgsnd(id: i32, msgp: u64, size: u64, flags: u64) -> i64 {
         if !allowed(&q.perm, &who, 2) {
             break EACCES;
         }
-        if q.bytes + size <= q.qbytes {
+        // As Linux's msgsnd, msg_qbytes also bounds the number of messages: an empty one
+        // still costs kernel memory
+        if q.bytes + size <= q.qbytes && q.msgs.len() as u64 + 1 <= q.qbytes {
             q.msgs.push_back((mtype, raw[8..].to_vec()));
             q.bytes += size;
             q.stime = now();
