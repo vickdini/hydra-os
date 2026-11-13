@@ -132,7 +132,8 @@ impl<'a> EthernetFrame<'a> {
         out_buf: &mut [u8],
     ) -> Result<usize, &'static str> {
         let total_len = 14 + payload.len();
-        if out_buf.len() < total_len {
+        // The frame is padded to the 60-byte minimum, so the buffer must hold that much
+        if out_buf.len() < total_len.max(60) {
             return Err("Destination buffer too small for Ethernet frame serialization");
         }
 
@@ -147,7 +148,7 @@ impl<'a> EthernetFrame<'a> {
 
         // Ethernet frames must be at least 60 bytes before FCS/CRC
         let final_len = total_len.max(60);
-        if final_len > total_len && out_buf.len() >= final_len {
+        if final_len > total_len {
             out_buf[total_len..final_len].fill(0);
         }
 

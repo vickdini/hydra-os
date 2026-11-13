@@ -81,12 +81,15 @@ fn ethernet_serialize_rejects_small_buffer() {
 }
 
 #[test]
-#[ignore = "BUG: serialize returns 60 for a short frame even when out_buf is smaller than 60, \
-            so the caller's &out_buf[..len] slice panics (src/net/ethernet.rs)"]
 fn ethernet_short_frame_length_never_exceeds_buffer() {
     let mut buf = [0u8; 20];
-    let n = EthernetFrame::serialize(MAC_A, MAC_B, EtherType::Arp, &[1, 2], &mut buf).unwrap();
-    assert!(n <= buf.len(), "returned length {n} exceeds the {}-byte buffer", buf.len());
+    // Too small for the padded 60-byte frame: an error, or at least a length that fits
+    if let Ok(n) = EthernetFrame::serialize(MAC_A, MAC_B, EtherType::Arp, &[1, 2], &mut buf) {
+        assert!(n <= buf.len(), "returned length {n} exceeds the {}-byte buffer", buf.len());
+    }
+    let mut full = [0xFFu8; 60];
+    assert_eq!(EthernetFrame::serialize(MAC_A, MAC_B, EtherType::Arp, &[1, 2], &mut full), Ok(60));
+    assert!(full[16..].iter().all(|&b| b == 0), "padded with zeroes");
 }
 
 #[test]
