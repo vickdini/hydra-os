@@ -417,6 +417,8 @@ fn mincore_reports_mapped_pages() {
         assert_eq!(vec, [1, 1, 1]);
         assert_eq!(sys_mincore(mm, A + 1, P, vec.as_mut_ptr() as u64), EINVAL);
         assert_eq!(sys_mincore(mm, A, 4 * P, vec.as_mut_ptr() as u64), ENOMEM, "last page unmapped");
+        assert_eq!(sys_mincore(mm, A, u64::MAX - 10, vec.as_mut_ptr() as u64), ENOMEM, "a range that wraps");
+        assert_eq!(sys_mincore(mm, 0xffff_8000_0000_0000, P, vec.as_mut_ptr() as u64), ENOMEM, "kernel addresses");
     });
 }
 

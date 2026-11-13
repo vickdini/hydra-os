@@ -214,6 +214,10 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
     if len == 0 || offset & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;
     }
+    // Larger than the address space (Linux: ENOMEM); the sums below must not wrap
+    if len > crate::memory::vm::USER_SPACE_END {
+        return -ENOMEM;
+    }
     let shared = match flags & MAP_SHARED_VALIDATE {
         MAP_SHARED | MAP_SHARED_VALIDATE => true,
         MAP_PRIVATE => false,
@@ -424,6 +428,10 @@ pub fn sys_madvise(mm: &Mutex<Mm>, addr: u64, len: u64, advice: u64) -> i64 {
 pub fn sys_mincore(mm: &Mutex<Mm>, addr: u64, len: u64, vec: u64) -> i64 {
     if addr & (PAGE_SIZE - 1) != 0 {
         return -EINVAL;
+    }
+    // Outside the user address space (Linux: ENOMEM); the sums below must not wrap
+    if !crate::memory::vm::is_user_range(addr, len.max(1)) {
+        return -ENOMEM;
     }
     let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
     {

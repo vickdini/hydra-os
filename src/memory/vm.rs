@@ -723,6 +723,10 @@ impl Mm {
         if len == 0 {
             return Err(-EINVAL);
         }
+        // Larger than the address space (Linux: ENOMEM), and rounding up must not wrap
+        if len > USER_SPACE_END {
+            return Err(-ENOMEM);
+        }
         let len = page_up(len);
         let start = if fixed || noreplace {
             if addr & (PAGE_SIZE - 1) != 0 {
@@ -793,7 +797,11 @@ impl Mm {
         if start & (PAGE_SIZE - 1) != 0 {
             return Err(-EINVAL);
         }
-        let end = start + page_up(len);
+        if len == 0 {
+            return Ok(());
+        }
+        // As Linux: a range that wraps is ENOMEM
+        let end = len.checked_add(PAGE_SIZE - 1).and_then(|l| start.checked_add(l & !(PAGE_SIZE - 1))).ok_or(-ENOMEM)?;
         // Every page of the range must be mapped, and may be made writable if asked (EACCES)
         let mut cursor = start;
         while cursor < end {
@@ -1082,8 +1090,13 @@ impl Mm {
     /// - `-EFAULT`: Source mapping not found or spans across boundaries.
     /// - `-ENOMEM`: Cannot expand in place and `may_move` is false, or no free space.
     pub fn mremap(&mut self, old: u64, old_len: u64, new_len: u64, may_move: bool, fixed_to: Option<u64>) -> Result<u64, i64> {
-        if old & (PAGE_SIZE - 1) != 0 || new_len == 0 {
+        if old & (PAGE_SIZE - 1) != 0 || new_len == 0 || new_len > USER_SPACE_END {
             return Err(-EINVAL);
+        }
+        // An old range longer than any mapping reaches past its area (Linux: EFAULT); the
+        // checks keep the sums below from wrapping
+        if old_len > USER_SPACE_END {
+            return Err(-EFAULT);
         }
         let old_len = page_up(old_len);
         let new_len = page_up(new_len);

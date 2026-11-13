@@ -184,10 +184,6 @@ fn find_vma_boundaries() {
 }
 
 #[test]
-#[ignore = "BUG: Mm::mmap computes page_up(len) unchecked; a user mmap() with a length near \
-            2^64 wraps to 0, inserts a zero-length area that merge_around merges with itself, and \
-            an unwrap panics (release builds too) instead of ENOMEM. sys_mmap only rejects \
-            len == 0 (src/memory/vm.rs, mmap)"]
 fn mmap_huge_length_fails_cleanly() {
     with_mm(|mm| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -388,9 +384,6 @@ fn mprotect_argument_checks() {
 }
 
 #[test]
-#[ignore = "BUG: mprotect computes start + page_up(len) unchecked; a user length near 2^64 wraps \
-            the end below start and BTreeMap::range panics (in release builds too), so any process \
-            can crash the kernel. sys_mprotect passes len through (src/memory/vm.rs, mprotect)"]
 fn mprotect_huge_length_fails_cleanly() {
     with_mm(|mm| {
         anon(mm, A, P, RW);
@@ -510,9 +503,6 @@ fn mremap_rejects_overlapping_fixed_destination() {
 }
 
 #[test]
-#[ignore = "BUG: mremap adds old + old_len unchecked; a huge old_len wraps and the following \
-            unmap/BTreeMap::range call panics instead of returning EFAULT \
-            (src/memory/vm.rs, mremap)"]
 fn mremap_huge_old_length_fails_cleanly() {
     with_mm(|mm| {
         anon(mm, A, P, RW);
