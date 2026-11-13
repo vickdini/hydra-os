@@ -50,15 +50,67 @@ pub mod arch {
     /// process cannot use; the host behaves as a single CPU.
     pub mod percpu {
         pub use crate::fake::PerCpuPtr;
+        /// The host behaves as CPU 0.
+        pub fn cpu() -> usize {
+            0
+        }
     }
     /// *stub* TLB shootdown on a single CPU: the local flush only (the kernel's
     /// `smp::shootdown` returns after it when one CPU is online). Flushes go to
     /// the counting shim in `shim/x86_64`.
     pub mod smp {
+        /// *stub* No kernel lock on the host.
+        pub fn bkl_exit() {}
         pub fn shootdown(_cr3: Option<u64>, addr: Option<u64>) {
             match addr {
                 Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
                 None => x86_64::instructions::tlb::flush_all(),
+            }
+        }
+    }
+    /// *stub* The kernel's user code and data selectors.
+    pub mod gdt {
+        pub const USER_CS: u16 = 0x2b;
+        pub const USER32_CS: u16 = 0x23;
+        pub const USER_DS: u16 = 0x1b;
+    }
+    /// *mirror* of the kernel's exception frame and FXSAVE area (the signal code builds
+    /// and reads them; nothing traps on the host).
+    pub mod idt {
+        #[repr(C)]
+        pub struct ExceptionContext {
+            pub r15: u64,
+            pub r14: u64,
+            pub r13: u64,
+            pub r12: u64,
+            pub rbp: u64,
+            pub rbx: u64,
+            pub r11: u64,
+            pub r10: u64,
+            pub r9: u64,
+            pub r8: u64,
+            pub rdi: u64,
+            pub rsi: u64,
+            pub rdx: u64,
+            pub rcx: u64,
+            pub rax: u64,
+            pub vector: u64,
+            pub error_code: u64,
+            pub rip: u64,
+            pub cs: u64,
+            pub rflags: u64,
+            pub rsp: u64,
+            pub ss: u64,
+        }
+        #[repr(C, align(16))]
+        #[derive(Clone)]
+        pub struct FpuState(pub [u8; 512]);
+        impl FpuState {
+            pub fn new() -> Self {
+                let mut area = [0u8; 512];
+                area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
+                area[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+                Self(area)
             }
         }
     }
@@ -142,6 +194,32 @@ pub mod compat {
 
         /// *stub*
         pub mod ptrace {
+            //! *stub* Nothing is traced on the host: every hook is a no-op.
+            pub fn is_traced(_tid: u64) -> bool {
+                false
+            }
+            pub fn interrupt_pending() -> bool {
+                false
+            }
+            pub fn interrupt_stop<F>(_frame: &mut F, _fpu: *mut crate::arch::idt::FpuState, _orig: u64) {}
+            pub fn signal_stop<F>(_frame: &mut F, _fpu: *mut crate::arch::idt::FpuState, _orig: u64, _sig: u32, _info: &[u8; 128]) -> u32 {
+                0
+            }
+            pub fn group_stop<F>(_frame: &mut F, _fpu: *mut crate::arch::idt::FpuState, _orig: u64, _sig: u32) {}
+            pub fn sigreturn_exit<F>(_frame: &mut F, _fpu: *mut crate::arch::idt::FpuState) {}
+            pub fn on_sigcont(_tgid: u64) {}
+            pub fn on_thread_exit(_tgid: u64, _tid: u64, _status: i32, _parent: u64) -> Option<u64> {
+                None
+            }
+            pub fn on_tracer_exit(_pid: u64) -> alloc::vec::Vec<(u64, u64)> {
+                alloc::vec::Vec::new()
+            }
+            pub fn wait_report(_me: u64, _sel: i64, _keep: bool) -> Option<(u64, i32)> {
+                None
+            }
+            pub fn has_tracee(_me: u64, _sel: i64) -> bool {
+                false
+            }
             pub use crate::fake::seccomp_stop;
         }
         #[path = "../../../../../src/compat/linux/sysv.rs"]
@@ -155,9 +233,68 @@ pub mod compat {
         pub mod unix;
         #[path = "../../../../../src/compat/linux/futex.rs"]
         pub mod futex;
+        /// *stub* System call tracing switch (`linux trace`).
+        pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        /// *stub* Identity caches of the system call fast path (none on the host).
+        pub fn ident_changed() {}
+
+        /// *stub* Per-process hooks the process table calls at exit; nothing to forget on
+        /// the host.
+        pub mod ptimer {
+            pub const SI_TIMER: i32 = -2;
+            pub fn forget_process(_pid: u64) {}
+        }
+        /// *stub*
+        pub mod misc {
+            pub fn forget_process(_pid: u64) {}
+        }
+        /// *stub*
+        pub mod aio {
+            pub fn forget_process(_pid: u64) {}
+        }
+        /// *stub*
+        pub mod locks {
+            pub fn process_exited(_pid: u64) {}
+        }
+        /// *stub*
+        pub mod limits {
+            pub fn on_exit(_pid: u64) {}
+        }
+        /// *stub* No process accounting on the host.
+        pub mod admin {
+            pub fn acct_on() -> bool {
+                false
+            }
+            pub fn on_exit(_pid: u64, _ppid: u64, _start: u64, _status: i32, _cpu_ticks: u64, _faults: u64) {}
+        }
+        /// *stub* No perf events on the host.
+        pub mod perf {
+            pub fn own_ticks(_tgid: u64) -> (u64, u64) {
+                (0, 0)
+            }
+            pub fn active() -> bool {
+                false
+            }
+            pub fn exited(_pid: u64, _ancestors: &[u64]) {}
+        }
+        /// *stub*
+        pub mod mount {
+            pub fn forget_thread(_tid: u64) {}
+        }
+
+        /// The real signal and process-table code. (`proc` below stays a stub: the other
+        /// modules' tests record the signals they send through it.)
+        #[path = "../../../../../src/compat/linux/proc.rs"]
+        pub mod proc_real;
 
         /// *stub* Only `install`, the call `SO_PEERPIDFD` makes.
         pub mod pidfd {
+            /// *stub* Woken when a process exits (waits never sleep on the host).
+            pub static EXIT_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
+            /// *stub* No pidfd descriptors on the host.
+            pub fn pid_of(_fd: u64) -> Result<u64, i64> {
+                Err(-9) // EBADF
+            }
             /// Not supported on the host: no `PidFd` descriptor variant.
             pub fn install(_pid: u64, _nonblock: bool) -> i64 {
                 -38 // ENOSYS
@@ -242,6 +379,21 @@ pub mod compat {
 
         /// *stub*
         pub mod ns {
+            /// *stub* A process's namespaces: only the PID namespace chain the process
+            /// table reads (always the initial namespace on the host).
+            #[derive(Clone, Default)]
+            pub struct Ns {
+                pub pid_inits: alloc::vec::Vec<u64>,
+            }
+            impl Ns {
+                pub fn for_child(&self, _child: u64) -> Ns {
+                    self.clone()
+                }
+            }
+            /// No PID namespaces on the host.
+            pub fn pid_from_caller(id: u64) -> u64 {
+                id
+            }
             pub fn ipc_ns() -> u64 {
                 crate::fake::IPC_NS.get()
             }
@@ -510,6 +662,18 @@ pub mod task {
     }
     /// *stub*
     pub use crate::fake::wait;
+    /// *stub*
+    pub mod tcb {
+        pub use crate::fake::Caps;
+    }
+    /// *stub* The fake clock moves instead (nothing sleeps on the host).
+    pub fn sleep_ticks(ticks: u64) {
+        crate::fake::TICKS.set(crate::fake::TICKS.get() + ticks);
+    }
+    /// *stub* A thread group's exit ends the test with a panic it can catch.
+    pub fn exit_group() -> ! {
+        panic!("exit_group")
+    }
     /// *stub*
     pub use crate::fake::{is_task_alive, with_current_fds_mut, with_current_task_mut, Task, TaskId, SCHEDULER};
 }

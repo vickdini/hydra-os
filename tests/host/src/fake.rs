@@ -85,6 +85,7 @@ pub struct Caps {
 }
 
 impl Caps {
+    pub const SETGID: u64 = 1 << 6;
     pub fn has(&self, mask: u64) -> bool {
         self.effective & mask == mask
     }
@@ -107,6 +108,10 @@ pub struct Task {
     pub tgid: u64,
     /// `set_robust_list` head (not tracked on the host).
     pub robust_list: u64,
+    /// The driver service a system process serves (`None`: an ordinary process).
+    pub service: Option<u32>,
+    /// Debug registers (`ptrace` `PTRACE_PEEKUSER`).
+    pub debugregs: [u64; 8],
 }
 
 /// Thread id, as in the kernel's `task::TaskId`.
@@ -129,6 +134,8 @@ impl Task {
             id: TaskId(tid),
             tgid: IDS.get().1,
             robust_list: 0,
+            service: None,
+            debugregs: [0; 8],
         }
     }
 }
@@ -174,6 +181,8 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         id: TaskId(tid),
         tgid,
         robust_list: 0,
+        service: None,
+        debugregs: [0; 8],
     };
     let r = f(&mut t);
     CAPS.set(Some(t.caps.effective));
@@ -204,12 +213,25 @@ impl Scheduler {
     pub fn lock(&self) -> SchedulerGuard {
         SchedulerGuard
     }
+    pub fn try_lock(&self) -> Option<SchedulerGuard> {
+        Some(SchedulerGuard)
+    }
 }
 
 impl SchedulerGuard {
     pub fn for_each_task_mut(&mut self, mut f: impl FnMut(&mut Task)) {
         with_current_task_mut(|t| f(t));
         SIBLINGS.with_borrow_mut(|v| v.iter_mut().for_each(|t| f(t)));
+    }
+    /// CPU time of process `tgid`'s live threads (none tracked on the host).
+    pub fn process_cpu(&self, _tgid: u64) -> (u64, u64) {
+        (0, 0)
+    }
+    /// Lets the threads of `tgid` blocked in a stop run again (nothing blocks on the host).
+    pub fn unblock_group(&mut self, _tgid: u64) {}
+    /// The executable of process `pid` (none on the host).
+    pub fn exe_of(&self, _pid: u64) -> Option<alloc::string::String> {
+        None
     }
     /// The current task (`IDS`' tid).
     pub fn current_task_id(&self) -> TaskId {
@@ -411,6 +433,11 @@ pub mod wait {
             None if SPIN_WAITS.get() => std::thread::yield_now(),
             None => panic!("{}", WOULD_BLOCK),
         }
+    }
+
+    /// Wakes process `tgid` once the scheduler lock is released (counted on the host).
+    pub fn wake_process_deferred(_tgid: u64) {
+        WAKES.set(WAKES.get() + 1);
     }
 
     /// Free-function form of [`WaitSet::wait`]: also reports blocking as a panic.
