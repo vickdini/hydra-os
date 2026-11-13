@@ -510,11 +510,13 @@ fn sys_reboot(magic: u32, magic2: u32, cmd: u32) -> i64 {
     const CMD_POWER_OFF: u32 = 0x4321_fedc;
     const CMD_CAD_ON: u32 = 0x89ab_cdef;
     const CMD_CAD_OFF: u32 = 0;
-    if magic != MAGIC1 || !MAGIC2.contains(&magic2) {
-        return -22; // EINVAL
-    }
+    // Linux checks the capability first: without it the answer is EPERM whatever the
+    // arguments
     if !crate::task::with_current_task_mut(|t| t.caps.has(crate::task::tcb::Caps::SYS_BOOT)).unwrap_or(false) {
         return -1; // EPERM
+    }
+    if magic != MAGIC1 || !MAGIC2.contains(&magic2) {
+        return -22; // EINVAL
     }
     match cmd {
         CMD_POWER_OFF | CMD_HALT => crate::arch::power::power_off(),
