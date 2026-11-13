@@ -437,9 +437,6 @@ fn per_user_quota() {
 }
 
 #[test]
-#[ignore = "BUG: updating a key (add_key on an existing description, or KEYCTL_UPDATE) replaces \
-            its payload without the quota check new keys get, so a user can hold ~32 KiB per \
-            key instead of 20 KB in total (src/compat/linux/keys.rs, add_key and keyctl UPDATE)"]
 fn updates_count_against_the_quota() {
     let (_, _p) = setup();
     let ring = add("keyring", "q", b"", PROCESS);

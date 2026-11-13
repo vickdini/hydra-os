@@ -208,6 +208,20 @@ impl Keys {
         n < max_n && bytes + extra <= max_b
     }
 
+    /// Whether key `serial`'s payload may become `new_len` bytes: growth is charged to its
+    /// owner's byte quota, as Linux's `key_payload_reserve` (EDQUOT otherwise).
+    fn payload_fits(&self, serial: i32, new_len: usize) -> bool {
+        let Some(k) = self.keys.get(&serial) else { return false };
+        match new_len.checked_sub(k.payload.len()) {
+            None | Some(0) => true,
+            Some(grow) => {
+                let bytes: usize = self.keys.values().filter(|o| o.uid == k.uid).map(|o| o.size()).sum();
+                let max_b = if k.uid == 0 { MAX_BYTES_ROOT } else { MAX_BYTES_USER };
+                bytes + grow <= max_b
+            }
+        }
+    }
+
     fn new_keyring(&mut self, desc: String, uid: u32, gid: u32, perm: u32) -> i32 {
         self.alloc(Key::new(Type::Keyring, desc, uid, gid, perm))
     }
@@ -623,6 +637,9 @@ fn add_key(type_ptr: u64, desc_ptr: u64, payload_ptr: u64, plen: u64, ring_id: i
             ks.keys[&ring].ring.iter().copied().find(|s| ks.keys.get(s).map_or(false, |k| k.ktype == ktype && k.desc == desc));
         if let Some(e) = existing {
             if ks.keys[&e].usable(now()).is_ok() && ks.check(&c, e, WRITE).is_ok() {
+                if !ks.payload_fits(e, payload.len()) {
+                    return EDQUOT;
+                }
                 ks.keys.get_mut(&e).unwrap().payload = payload;
                 return e as i64;
             }
@@ -740,14 +757,17 @@ fn keyctl_inner(op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<i64, i64>
             let payload = if a4 > 0 { copy_in(a3, a4 as usize)? } else { Vec::new() };
             let mut ks = KEYS.lock();
             let s = ks.get(&c, id, false, WRITE)?;
-            let k = ks.keys.get_mut(&s).unwrap();
+            let k = &ks.keys[&s];
             if k.ktype == Type::Keyring {
                 return Err(EOPNOTSUPP);
             }
             if payload.len() > k.ktype.max_payload() || (payload.is_empty() && k.ktype != Type::User) {
                 return Err(EINVAL);
             }
-            k.payload = payload;
+            if !ks.payload_fits(s, payload.len()) {
+                return Err(EDQUOT);
+            }
+            ks.keys.get_mut(&s).unwrap().payload = payload;
             Ok(0)
         }
         // KEYCTL_REVOKE
