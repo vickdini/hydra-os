@@ -709,6 +709,20 @@ static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
         if (fork() != 0)
             _exit(0);
         setsid();
+        /* In the user's slice, where systemd runs it (user@UID.service): programs the bus
+         * starts inherit the group, and polkit gives a process outside any session the
+         * user's graphical session only when its group is under user-UID.slice (without
+         * it, plasma-shutdown's PowerOff waited forever for a password) */
+        char group[160], self[16];
+        snprintf(group, sizeof group, "/sys/fs/cgroup/user.slice/user-%u.slice/user@%u.service/app.slice/dbus.service/cgroup.procs",
+                 uid, uid);
+        int len = snprintf(self, sizeof self, "%d\n", (int)getpid());
+        int g = open(group, O_WRONLY | O_CLOEXEC);
+        if (g >= 0) {
+            if (write(g, self, len) != len)
+                logmsg("cannot move the session bus into %s", group);
+            close(g);
+        }
         if (pw)
             initgroups(pw->pw_name, gid);
         if (setgid(gid) < 0 || setuid(uid) < 0)
