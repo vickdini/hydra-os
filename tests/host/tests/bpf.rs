@@ -378,9 +378,6 @@ fn test_run_input_limits() {
 }
 
 #[test]
-#[ignore = "BUG: BPF_PROG_TEST_RUN ignores data_size_out (the caller's buffer size) and copies the \
-            whole packet to data_out, writing past the caller's buffer; Linux copies at most \
-            data_size_out bytes and returns ENOSPC (src/compat/linux/bpf.rs, sys_bpf PROG_TEST_RUN)"]
 fn test_run_respects_the_output_buffer_size() {
     setup();
     let fd = load(&[mov(0, 0), EXIT]);

@@ -1132,13 +1132,23 @@ pub fn sys_bpf(cmd: u64, attr: u64, size: u64) -> i64 {
             out[4..8].copy_from_slice(&(ret as u32).to_le_bytes());
             out[12..16].copy_from_slice(&(pkt.len() as u32).to_le_bytes());
             out[36..40].copy_from_slice(&1u32.to_le_bytes()); // duration (ns)
-            if data_out != 0 && copy_out(data_out, &pkt[..pkt.len().min(u(12).max(pkt.len() as u32) as usize)]).is_err() {
+            // As Linux's bpf_test_finish: at most data_size_out bytes (0: not given, as older
+            // callers pass), and ENOSPC when the packet did not fit, still reporting its
+            // full size
+            let room = u(12) as usize;
+            let fits = room == 0 || pkt.len() <= room;
+            let copy = if fits { pkt.len() } else { room };
+            if data_out != 0 && copy_out(data_out, &pkt[..copy]).is_err() {
                 return EFAULT;
             }
             if copy_out(attr, &out[..size as usize]).is_err() {
                 return EFAULT;
             }
-            0
+            if fits {
+                0
+            } else {
+                ENOSPC
+            }
         }
         // PROG_GET_NEXT_ID, MAP_GET_NEXT_ID, LINK_GET_NEXT_ID
         11 | 12 | 31 => {
