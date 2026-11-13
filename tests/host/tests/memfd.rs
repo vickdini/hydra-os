@@ -202,9 +202,6 @@ fn absurd_sizes_are_refused_without_losing_data() {
 // ------------------------------------------------------- page handling
 
 #[test]
-#[ignore = "BUG (low): reading a hole allocates a physical page for it (read_at goes through \
-            page(), which allocates on demand); Linux reads holes as zeros without allocating \
-            (src/compat/linux/memfd.rs, read_at)"]
 fn reading_holes_does_not_allocate() {
     isolated(|| {
         let m = MemFd::new("x");

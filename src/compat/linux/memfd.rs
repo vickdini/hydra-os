@@ -168,7 +168,8 @@ impl MemFd {
             let pos = offset + done;
             let in_page = pos % PAGE_SIZE as usize;
             let n = (PAGE_SIZE as usize - in_page).min(total - done);
-            match self.page(pos / PAGE_SIZE as usize) {
+            // A hole reads as zeroes without getting a page, as Linux's shmem
+            match self.pages.get(&(pos / PAGE_SIZE as usize)).copied() {
                 Some(frame) => unsafe {
                     core::ptr::copy_nonoverlapping(
                         (crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()) as *const u8).add(in_page),
