@@ -481,10 +481,6 @@ fn recursion_depth_is_limited() {
 }
 
 #[test]
-#[ignore = "BUG: bpf-to-bpf calls push a new stack on every call and never pop it; on return r10 is \
-            recomputed from the call depth, which is the wrong stack once earlier calls have \
-            returned. A function then reads another call's stack, and loops of calls grow kernel \
-            heap by 512 bytes per call (src/compat/linux/bpf.rs, Run::exec)"]
 fn a_function_keeps_its_stack_across_nested_calls() {
     setup();
     let prog = [

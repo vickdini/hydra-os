@@ -847,6 +847,9 @@ impl<'a> Run<'a> {
                             Some((ret, saved)) => {
                                 r[6..10].copy_from_slice(&saved);
                                 pc = ret;
+                                // The callee's stack goes with it: stacks and frames pair
+                                // up, so the caller's own stack is at its depth again
+                                self.stacks.pop();
                                 let depth = frames.len() as u64;
                                 r[10] = ptr(R_STACK, depth, STACK as u64);
                                 continue;
