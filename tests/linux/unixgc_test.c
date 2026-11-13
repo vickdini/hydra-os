@@ -79,6 +79,13 @@ int main(void) {
     // The crossed case: a into b's queue, then b into a's queue; close both. Repeated, it
     // used to keep every pair alive.
     int before = live_sockets();
+    // The count must see sockets at all, or "none left" below proves nothing
+    int probe[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, probe);
+    int open_now = live_sockets();
+    check(open_now >= before + 2, "/proc/net/unix lists an open pair");
+    close(probe[0]);
+    close(probe[1]);
     int refused = 0;
     for (int i = 0; i < 2000; i++) {
         int p[2];
