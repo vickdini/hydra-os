@@ -363,7 +363,7 @@ impl<'a> ElfBinary<'a> {
                 let start = ph.p_offset as usize;
                 let filesz = ph.p_filesz as usize;
                 if start < self.data.len() {
-                    let end = (start + filesz).min(self.data.len());
+                    let end = start.saturating_add(filesz).min(self.data.len());
                     let slice = &self.data[start..end];
                     let len = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
                     if let Ok(s) = core::str::from_utf8(&slice[..len]) {

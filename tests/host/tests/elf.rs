@@ -140,8 +140,6 @@ fn interp_path_out_of_file_is_none() {
 }
 
 #[test]
-#[ignore = "BUG: interp_path computes p_offset + p_filesz unchecked; a crafted p_filesz overflows \
-            and the slice panics, so any binary can crash the loader (src/task/elf.rs)"]
 fn interp_path_survives_huge_filesz() {
     let b = Elf::new(ET_DYN, 0, &[Ph { flags: 4, ty: PT_INTERP, offset: 0x100, vaddr: 0, filesz: u64::MAX - 0x80, memsz: 0 }], 0x200)
         .bytes;
