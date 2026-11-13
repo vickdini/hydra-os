@@ -108,6 +108,10 @@ pub struct EpollWatch {
     pub data: u64,
     /// An edge-triggered watch on an always-ready file already reported its readiness.
     pub reported: bool,
+    /// The open file it watches ([`FileDescriptor::object_id`]; 0: not known yet, taken
+    /// from the descriptor at the next wait). Linux watches a file, not a number: once
+    /// `fd` is closed or names another file, the watch is gone.
+    pub file: usize,
 }
 
 /// Represents an active in-kernel `epoll` instance backing `FileDescriptor::Epoll`.
@@ -162,6 +166,7 @@ impl EpollInstance {
                     events: ev.events,
                     data: ev.data,
                     reported: false,
+                    file: 0,
                 });
                 Ok(())
             }
@@ -181,6 +186,14 @@ impl EpollInstance {
                 Ok(())
             }
             _ => Err(-EINVAL),
+        }
+    }
+
+    /// Records which open file the watch on `fd` is for (`epoll_ctl` passes it right after
+    /// `EPOLL_CTL_ADD`, looked up before taking this instance's lock).
+    pub fn set_file(&mut self, fd: i32, file: usize) {
+        if let Some(w) = self.watches.get_mut(&fd) {
+            w.file = file;
         }
     }
 }
@@ -210,8 +223,9 @@ pub fn epoll_wait_set(epoll: &Arc<Mutex<EpollInstance>>) -> crate::task::wait::W
 /// collects up to `maxevents` ready events.
 ///
 /// If a watched descriptor has [`EPOLLONESHOT`] set and fires, its event mask is disarmed
-/// to `EPOLLONESHOT` until explicitly re-enabled via [`EPOLL_CTL_MOD`]. If a watched
-/// descriptor has been closed, `EPOLLHUP | EPOLLERR` is synthesized.
+/// to `EPOLLONESHOT` until explicitly re-enabled via [`EPOLL_CTL_MOD`]. A watch whose
+/// descriptor was closed, or now names another file, is removed without an event (Linux
+/// drops a watch when its file is closed).
 ///
 /// # Arguments
 /// * `epoll` - Shared reference to the [`EpollInstance`] to inspect.
@@ -231,15 +245,27 @@ pub fn epoll_collect_ready(
 
     let mut fired_oneshot = Vec::new();
     let mut fired_edge = Vec::new();
+    // Watches whose file is gone (dropped), and ones learning their file (bound)
+    let mut gone = Vec::new();
+    let mut bound = Vec::new();
     crate::task::with_current_fds_mut(|fds| {
         for watch in watches {
+            let desc = fds.get(watch.fd as usize);
+            let id = desc.map(|d| d.object_id());
+            if id.is_none() || (watch.file != 0 && id != Some(watch.file)) {
+                gone.push((watch.fd, watch.file));
+                continue;
+            }
+            if watch.file == 0 {
+                bound.push((watch.fd, id.unwrap()));
+            }
             if ready.len() >= maxevents {
                 break;
             }
             if watch.events == EPOLLONESHOT {
                 continue; // a one-shot watch that already fired: disabled until EPOLL_CTL_MOD
             }
-            if let Some(desc) = fds.get(watch.fd as usize) {
+            if let Some(desc) = desc {
                 // Files are always ready, so an edge-triggered watch on one fires once (as on
                 // Linux); other descriptors stay level-triggered
                 let always_ready = matches!(desc, FileDescriptor::File { .. } | FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. });
@@ -260,15 +286,23 @@ pub fn epoll_collect_ready(
                         fired_oneshot.push(watch.fd);
                     }
                 }
-            } else {
-                // FD closed while being monitored -> report EPOLLHUP | EPOLLERR
-                ready.push(LinuxEpollEvent {
-                    events: EPOLLHUP | EPOLLERR,
-                    data: watch.data,
-                });
             }
         }
     });
+    if !gone.is_empty() || !bound.is_empty() {
+        let mut ep = epoll.lock();
+        for (fd, file) in gone {
+            // Unless epoll_ctl replaced it meanwhile
+            if ep.watches.get(&fd).is_some_and(|w| w.file == file) {
+                ep.watches.remove(&fd);
+            }
+        }
+        for (fd, file) in bound {
+            if let Some(w) = ep.watches.get_mut(&fd).filter(|w| w.file == 0) {
+                w.file = file;
+            }
+        }
+    }
     if !fired_edge.is_empty() {
         let mut ep = epoll.lock();
         for fd in fired_edge {

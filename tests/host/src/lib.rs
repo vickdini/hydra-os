@@ -318,6 +318,22 @@ pub mod fs {
         Device(alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>),
     }
 
+    impl FileDescriptor {
+        /// *mirror* of the kernel's `FileDescriptor::object_id` for these variants.
+        pub fn object_id(&self) -> usize {
+            fn of<T: ?Sized>(a: &alloc::sync::Arc<T>) -> usize {
+                alloc::sync::Arc::as_ptr(a) as *const u8 as usize
+            }
+            match self {
+                FileDescriptor::EventFd(a) => of(a),
+                FileDescriptor::MemFd { memfd, .. } => of(memfd),
+                FileDescriptor::Vnode(a) => of(a),
+                FileDescriptor::File { path, .. } => path.as_ptr() as usize,
+                FileDescriptor::Device(a) => of(a),
+            }
+        }
+    }
+
     /// *stub*
     pub mod client {
         pub use crate::fake::{FileStat, ZfsClient};

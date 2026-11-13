@@ -2017,22 +2017,29 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 None
             };
 
-            let epoll_arc = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Epoll(ep)) = fds.get(epfd) {
-                    Some(ep.clone())
-                } else {
-                    None
-                }
+            // The target's open file, looked up before the instance is locked: a watch is
+            // for that file (and an fd that is not open is EBADF, as Linux)
+            let (epoll_arc, file) = crate::task::with_current_fds_mut(|fds| {
+                let ep = match fds.get(epfd) {
+                    Some(crate::fs::FileDescriptor::Epoll(ep)) => Some(ep.clone()),
+                    _ => None,
+                };
+                (ep, fds.get(target_fd as usize).map(|d| d.object_id()))
             });
 
-            let epoll_arc = match epoll_arc {
-                Some(ep) => ep,
-                None => return -EBADF,
+            let (epoll_arc, file) = match (epoll_arc, file) {
+                (Some(ep), Some(f)) => (ep, f),
+                _ => return -EBADF,
             };
 
-            let res = epoll_arc.lock().ctl(op, target_fd, ev);
-            match res {
-                Ok(()) => 0,
+            let mut ep = epoll_arc.lock();
+            match ep.ctl(op, target_fd, ev) {
+                Ok(()) => {
+                    if op == EPOLL_CTL_ADD {
+                        ep.set_file(target_fd, file);
+                    }
+                    0
+                }
                 Err(e) => e,
             }
         }

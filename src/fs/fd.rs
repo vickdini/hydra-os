@@ -302,6 +302,38 @@ fn write_path_at(path: &str, offset: Option<usize>, data: &[u8]) -> Result<(usiz
 }
 
 impl FileDescriptor {
+    /// Identifies the open file behind this descriptor (never 0): equal for descriptors that
+    /// share it (`dup`), different once the number names another file. epoll keys its
+    /// watches by it, as Linux keys them by `struct file`.
+    pub fn object_id(&self) -> usize {
+        fn of<T: ?Sized>(a: &Arc<T>) -> usize {
+            Arc::as_ptr(a) as *const u8 as usize
+        }
+        match self {
+            FileDescriptor::ConsoleIn => 1,
+            FileDescriptor::ConsoleOut => 2,
+            FileDescriptor::ConsoleErr => 3,
+            FileDescriptor::PipeRead(a) => of(a),
+            // The two ends share one buffer: the low bit (Arcs are aligned) tells them apart
+            FileDescriptor::PipeWrite(a) => of(a) | 1,
+            FileDescriptor::Socket(a) => of(a),
+            FileDescriptor::Epoll(a) => of(a),
+            FileDescriptor::EventFd(a) => of(a),
+            FileDescriptor::MemFd { memfd, .. } => of(memfd),
+            FileDescriptor::Vnode(a) => of(a),
+            FileDescriptor::Inet(a) => of(a),
+            FileDescriptor::Pty(a) => of(a),
+            FileDescriptor::SignalFd(a) => of(a),
+            FileDescriptor::Unix(a) => of(a),
+            FileDescriptor::TimerFd(a) => of(a),
+            FileDescriptor::Inotify(a) => of(a),
+            FileDescriptor::PidFd(a) => of(a),
+            FileDescriptor::Device(a) => of(a),
+            // Held by value: its path buffer stays put while the descriptor is open
+            FileDescriptor::File { path, .. } => path.as_ptr() as usize,
+        }
+    }
+
     /// Reads up to `buf.len()` bytes from the descriptor and advances its stream cursor if applicable.
     ///
     /// # Arguments

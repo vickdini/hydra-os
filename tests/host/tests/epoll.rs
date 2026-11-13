@@ -172,12 +172,6 @@ fn wait_set_covers_watched_descriptors() {
 }
 
 #[test]
-#[ignore = "BUG: closing a watched descriptor does not remove it from epoll interest lists \
-            (watches are keyed by fd number only). The closed fd is then reported as \
-            EPOLLHUP|EPOLLERR on every wait, forever, and if the number is reused the old watch \
-            reports the new file's events with the old `data` (often a freed pointer in \
-            libuv/tokio). Linux drops the watch when the file is closed \
-            (src/compat/linux/epoll.rs, epoll_collect_ready; no cleanup on close in fs/fd.rs)"]
 fn closing_a_descriptor_removes_its_watch() {
     fake::reset();
     eventfd(10, 0);
