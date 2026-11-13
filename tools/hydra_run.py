@@ -63,8 +63,12 @@ class Qmp:
         payload = {"execute": name}
         if args:
             payload["arguments"] = args
-        self.proc.stdin.write(json.dumps(payload).encode() + b"\r\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(json.dumps(payload).encode() + b"\r\n")
+            self.proc.stdin.flush()
+        except OSError:
+            # QEMU has exited (the guest powered off or restarted)
+            return {"error": "QEMU has exited"}
         return self._read_reply()
 
     def key(self, ch):
@@ -215,6 +219,11 @@ def main():
         prompts_seen = 0
         typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%"]
         for i, c in enumerate(a.commands):
+            if proc.poll() is not None:
+                # Powered off or restarted (-no-reboot): nothing left to type into, and
+                # writing to QEMU's closed pipe would raise
+                print(f"[hydra_run] QEMU exited before command {i + 1} of {len(a.commands)}: the rest are skipped")
+                break
             no_wait = c.startswith("@")  # "@cmd": type without waiting for a prompt
             if no_wait:
                 c = c[1:]
