@@ -103,6 +103,12 @@ fn driver_window() -> Result<&'static mut [u8], &'static str> {
     service::window(ENDPOINT_BLOCK_DEV).ok_or("ZFS: the disk driver is not running")
 }
 
+/// How long a disk request may take (60 s, Linux's limit for a cache flush; the generic
+/// 5 s call timeout failed commits whenever the host took longer to flush its file). The
+/// driver's own waits give up after 30 s each; the kernel's calls to this server wait
+/// 120 s, so the layers time out from the bottom up.
+const DISK_TIMEOUT_TICKS: u64 = 6000;
+
 /// Sends a request to the disk driver; returns its reply or an error message.
 ///
 /// # Arguments
@@ -113,7 +119,7 @@ fn driver_window() -> Result<&'static mut [u8], &'static str> {
 /// # Returns
 /// IPC response message on success, or an error string on failure.
 fn driver_request(label: u32, args: [u64; 4], what: &'static str) -> Result<crate::ipc::Message, &'static str> {
-    match service::call(ENDPOINT_BLOCK_DEV, crate::ipc::Message::with_args(label, args), service::CALL_TIMEOUT_TICKS) {
+    match service::call(ENDPOINT_BLOCK_DEV, crate::ipc::Message::with_args(label, args), DISK_TIMEOUT_TICKS) {
         Ok(r) if r.label == MSG_BLOCK_REPLY && (r.args[0] as i64) >= 0 => Ok(r),
         Ok(_) => Err(what),
         Err(_) => Err("ZFS: the disk driver did not answer"),
