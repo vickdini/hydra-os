@@ -268,14 +268,18 @@ impl Drop for UnixSocket {
         let state = core::mem::replace(&mut *self.state.lock(), State::Unconnected);
         match state {
             State::Connected { pair, side, .. } => {
-                {
+                // Undelivered descriptors are closed, but only once the queue's lock is
+                // released: the last reference to the peer may be among them, and its own
+                // Drop locks this queue (a socket sent over itself)
+                let undelivered = {
                     let mut mine = pair.q[side].lock();
                     mine.read_closed = true;
-                    mine.segs.clear(); // undelivered descriptors are closed
                     mine.bytes = 0;
-                }
+                    core::mem::take(&mut mine.segs)
+                };
                 pair.q[1 - side].lock().write_closed = true;
                 pair.wq.wake_all();
+                drop(undelivered);
             }
             State::Listening { pending, .. } => drop(pending), // refuses the queued connections
             State::Unconnected => {}
