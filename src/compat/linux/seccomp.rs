@@ -1,5 +1,5 @@
 //! Secure computing (`seccomp`) for the Linux personality: strict mode and classic-BPF
-//! syscall filters, as Chromium's and Brave's sandbox installs them.
+//! syscall filters, as the Chromium and Firefox sandboxes install them.
 //!
 //! - **State**: every task carries a [`State`] — the `no_new_privs` bit, the mode, and the
 //!   head of a chain of filters. Children inherit it on `clone`/`fork`, `execve` keeps it,

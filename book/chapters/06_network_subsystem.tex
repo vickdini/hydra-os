@@ -7,7 +7,7 @@ Integrating an enterprise-grade networking stack into a microkernel presents dem
 \begin{enumerate}
     \item \textbf{Line-Rate Throughput:} At Gigabit and 10-Gigabit speeds, over one million packets can cross the physical wire every second. Copying packet payloads through multiple kernel memory boundaries exhausts memory bus bandwidth and destroys cache locality.
     \item \textbf{Complex Protocol State Machines:} The Transmission Control Protocol (TCP) requires sophisticated sliding window flow control, retransmission timers, congestion control algorithms, and multi-state lifecycle management.
-    \item \textbf{POSIX Socket Compatibility:} Modern application workloads (including web browsers like Brave and graphical environments like KDE Plasma) demand complete compatibility with the BSD Socket API and non-blocking event multiplexing via \texttt{epoll}.
+    \item \textbf{POSIX Socket Compatibility:} Modern application workloads (including web browsers like Firefox and graphical environments like KDE Plasma) demand complete compatibility with the BSD Socket API and non-blocking event multiplexing via \texttt{epoll}.
 \end{enumerate}
 
 In this chapter, we dissect the layered network architecture, examine the physical operation of the Intel 82540EM Gigabit Ethernet controller, explore circular DMA descriptor rings, walk through the protocol pipeline (ARP, IPv4, ICMP, UDP, TCP, and DHCP), and analyze how Hydra powers high-concurrency desktop networking in an isolated Ring~3 driver process.
@@ -167,7 +167,7 @@ UDP is a connectionless, lightweight transport protocol. Each UDP datagram conta
 
 In Hydra, UDP powers domain name resolution:
 \begin{itemize}
-    \item When a user types a URL (e.g., \texttt{msn.com} or \texttt{google.com}) into the Brave web browser, the browser issues a standard DNS query to the nameserver (\texttt{10.0.2.3}) on UDP Port 53.
+    \item When a user types a URL (e.g., \texttt{msn.com} or \texttt{google.com}) into the Firefox web browser, the browser issues a standard DNS query to the nameserver (\texttt{10.0.2.3}) on UDP Port 53.
     \item Hydra transmits the datagram, records the query transaction ID, and suspends the calling thread on a socket wait queue.
     \item When the DNS response packet arrives over the wire, Hydra's socket demultiplexer matches the port, extracts the IP address record, and immediately awakens the browser thread.
 \end{itemize}
@@ -221,7 +221,7 @@ Hydra commits these values to its internal routing table and automatically popul
 \label{sec:epoll_deep}
 % ==============================================================================
 
-High-performance applications (such as the Brave web browser, Python asynchronous servers, and desktop compositors) manage hundreds of concurrent network connections simultaneously.
+High-performance applications (such as the Firefox web browser, Python asynchronous servers, and desktop compositors) manage hundreds of concurrent network connections simultaneously.
 
 \subsection{The Inefficiency of \texttt{select()} and \texttt{poll()}}
 Historically, UNIX systems utilized \texttt{select()} and \texttt{poll()}:
@@ -339,7 +339,7 @@ pub fn parse_dns_response(buf: &[u8], tx_id: u16) -> Option<[u8; 4]> {
 \end{lstlisting}
 
 \subsection{DNS Troubleshooting in Complex Browser Workloads}
-When running full modern desktop web browsers (such as Brave), DNS failures typically manifest as \texttt{DNS\_PROBE\_POSSIBLE} or \texttt{ERR\_NAME\_NOT\_RESOLVED}. In a microkernel architecture, diagnosing these issues requires verifying:
+When running full modern desktop web browsers (such as Firefox), DNS failures typically manifest as a ``Hmm. We're having trouble finding that site.'' page (\texttt{NS\_ERROR\_UNKNOWN\_HOST}). In a microkernel architecture, diagnosing these issues requires verifying:
 \begin{enumerate}
     \item \textbf{DHCP Option 6 Propagation:} That the DHCP client correctly extracted the DNS server address (e.g., \texttt{10.0.2.3} under QEMU or VirtualBox NAT) and updated \texttt{/etc/resolv.conf}.
     \item \textbf{Ephemeral UDP Port Binding:} That outbound packets with source port \texttt{53535} are correctly translated by the hypervisor NAT table.

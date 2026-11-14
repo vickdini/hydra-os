@@ -509,7 +509,7 @@ pub fn sys_futex(
 \label{sec:code_drm_annotated}
 % ==============================================================================
 
-Modern graphical desktop components (such as KWin Wayland, Mesa 3D, and the Brave web browser) communicate with the graphics card via the Direct Rendering Manager character device (\texttt{/dev/dri/card0}).
+Modern graphical desktop components (such as KWin Wayland, Mesa 3D, and the Firefox web browser) communicate with the graphics card via the Direct Rendering Manager character device (\texttt{/dev/dri/card0}).
 
 Hydra's Linux compatibility layer intercepts ioctl commands sent to \texttt{/dev/dri/card0} in \texttt{src/compat/linux/drm.rs}, synthesizing hardware capabilities and redirecting surface updates to the display server:
 

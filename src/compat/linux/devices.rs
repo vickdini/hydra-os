@@ -716,33 +716,49 @@ MaximumUid=60000
         0o755,
     )?;
 
-    // Brave: its own launcher (/opt/brave.com/brave/brave-browser), on Wayland, with
-    // Chromium's sandbox (user, PID and network namespaces, seccomp-bpf). It uses Ubuntu's
-    // NSS like on any Ubuntu system: no private copies, no LD_LIBRARY_PATH
-    let brave_wrapper = b"#!/bin/sh\n# Written by Hydra\nexec /opt/brave.com/brave/brave-browser --ozone-platform=wayland \"$@\"\n";
-    if lookup_path(s, t.root, "/opt/brave.com/brave/brave-browser").is_some() {
-        for path in ["/usr/bin/brave-browser", "/usr/bin/brave-browser-stable", "/usr/bin/brave"] {
-            let _ = t.file_bytes(s, path, brave_wrapper, 0o755);
-        }
+    // Firefox (Mozilla's APT repo, /usr/lib/firefox): native Wayland and its own sandbox need
+    // no wrapper. Policies turn off what a fresh profile shows first (an onboarding dialog
+    // over a gray backdrop on the whole window, the default-browser question) and the
+    // built-in updater (apt updates it). Written once: an administrator's later edits stay
+    if lookup_path(s, t.root, "/usr/lib/firefox/firefox").is_some() && lookup_path(s, t.root, "/etc/firefox/policies/policies.json").is_none() {
+        t.file(
+            s,
+            "/etc/firefox/policies/policies.json",
+            r#"{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "UserMessaging": {
+      "SkipOnboarding": true,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "MoreFromMozilla": false,
+      "FirefoxLabs": false
     }
-    // Older Hydra versions put NSS copies (of mixed versions, which NSS rejects with
-    // SEC_ERROR_PKCS11_GENERAL_ERROR) next to Brave and wrappers in /usr/local/bin
-    if let Some(dir) = lookup_path(s, t.root, "/opt/brave.com/brave") {
-        for name in [
-            "libfreebl3.so", "libfreeblpriv3.so", "libfreebl3.chk", "libfreeblpriv3.chk", "libsoftokn3.so", "libsoftokn3.chk",
-            "libnssdbm3.so", "libnssdbm3.chk", "libnssckbi.so", "libnss3.so", "libnssutil3.so", "libnspr4.so", "libplc4.so",
-            "libplds4.so", "libsmime3.so", "libssl3.so",
-        ] {
-            if s.lookup(dir, name.as_bytes()).is_ok() {
-                let _ = s.unlink(dir, name.as_bytes());
-                t.changed = true;
-            }
-        }
+  }
+}
+"#,
+        )?;
     }
-    if let Some(dir) = lookup_path(s, t.root, "/usr/local/bin") {
-        for name in ["brave-browser", "brave"] {
-            if s.lookup(dir, name.as_bytes()).is_ok() {
-                let _ = s.unlink(dir, name.as_bytes());
+
+    // Older Hydra versions started Brave through wrappers of their own in /usr/bin and
+    // /usr/local/bin; once Brave is gone (apt purge leaves the ones that replaced its
+    // links), remove those that are still Hydra's
+    if lookup_path(s, t.root, "/opt/brave.com/brave/brave-browser").is_none() {
+        for dir_path in ["/usr/bin", "/usr/local/bin"] {
+            let Some(dir) = lookup_path(s, t.root, dir_path) else { continue };
+            for name in ["brave-browser", "brave-browser-stable", "brave"] {
+                let Ok(ino) = s.lookup(dir, name.as_bytes()) else { continue };
+                let mut head = [0u8; 28];
+                let n = s.read(ino, 0, &mut head).unwrap_or(0);
+                if head[..n].windows(18).any(|w| w == b"# Written by Hydra") {
+                    let _ = s.unlink(dir, name.as_bytes());
+                    t.changed = true;
+                }
             }
         }
     }

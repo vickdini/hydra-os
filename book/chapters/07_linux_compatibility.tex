@@ -3,7 +3,7 @@
 
 Historically, experimental and educational microkernels suffered from an insurmountable paradox: while their internal architectures were elegant, modular, and mathematically verifiable, they were incapable of executing standard desktop software. Authoring an operating system from scratch often meant being confined to a rudimentary text console, running a toy text editor and a handful of basic shell utilities.
 
-Porting complex, multi-million-line applications---such as the **KDE Plasma 6** desktop environment, the **KWin Wayland** compositor, the **Brave/Chromium** web browser, Python 3, and Qt 6---by hand is an engineering impossibility for a small research or academic team.
+Porting complex, multi-million-line applications---such as the **KDE Plasma 6** desktop environment, the **KWin Wayland** compositor, the **Firefox** web browser, Python 3, and Qt 6---by hand is an engineering impossibility for a small research or academic team.
 
 To bridge this chasm, Hydra introduces a high-performance **Linux Binary Compatibility Subsystem** (\texttt{src/compat/linux/}). Hydra does not run Linux inside a virtual machine or container; instead, it executes unmodified upstream Linux x86\_64 ELF binaries directly on the bare-metal microkernel by providing an in-kernel emulation of the Linux Application Binary Interface (ABI).
 
@@ -70,7 +70,7 @@ When an application invokes \texttt{syscall}, the processor and kernel adhere to
     \node[draw=rustkeyword, fill=white, rounded corners, minimum width=4cm, minimum height=1.2cm] (app) at (0, 3) {
         \begin{tabular}{c}
             \textbf{User Application}\\
-            \footnotesize (e.g. \texttt{brave}, \texttt{kwin}, \texttt{python})\\
+            \footnotesize (e.g. \texttt{firefox}, \texttt{kwin}, \texttt{python})\\
             \scriptsize Executes \texttt{syscall} (\texttt{RAX=0x01}, \texttt{RDI=1})
         \end{tabular}
     };
@@ -181,7 +181,7 @@ The ultimate verification of an operating system's architectural completeness is
 \begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
     % Layer 4: Desktop apps
     \node[draw=rustkeyword, fill=white, rounded corners, minimum width=11cm, minimum height=0.8cm] (apps) at (5.5, 4.2) {
-        \textbf{Applications:} Brave Web Browser, Konsole Terminal, Dolphin File Manager, Python
+        \textbf{Applications:} Firefox Web Browser, Konsole Terminal, Dolphin File Manager, Python
     };
 
     % Layer 3: Compositor and Display Manager
@@ -213,22 +213,26 @@ The graphical bootstrap pipeline proceeds through five orchestrated phases:
     \item \textbf{Session and Seat Management (\texttt{hydra-logind}):} Modern desktop environments require an active seat manager. Hydra launches \texttt{hydra-logind} (\texttt{userland/hydra-logind/}), which connects to D-Bus, implements the \texttt{org.freedesktop.login1} interface, registers \texttt{seat0}, and activates the graphical virtual terminal.
     \item \textbf{Display Manager (SDDM):} The Simple Desktop Display Manager starts, loads its configuration from \texttt{/usr/share/sddm/themes/breeze/theme.conf}, initializes PAM authentication, and displays the graphical login greeter.
     \item \textbf{The KWin Wayland Compositor:} Upon user authentication, SDDM spawns \texttt{kwin\_wayland}. KWin opens \texttt{/dev/dri/card0}, initializes DRM dumb framebuffers, creates the Wayland display socket (\texttt{/run/user/1000/wayland-0}), and launches \texttt{plasmashell}.
-    \item \textbf{Full Application Execution:} Applications (such as Konsole, Dolphin, and Brave) connect to the Wayland socket, submit drawing surfaces via shared memory (\texttt{/dev/shm}), and receive input events from \texttt{/dev/input/event0} and \texttt{event1}.
+    \item \textbf{Full Application Execution:} Applications (such as Konsole, Dolphin, and Firefox) connect to the Wayland socket, submit drawing surfaces via shared memory (\texttt{/dev/shm}), and receive input events from \texttt{/dev/input/event0} and \texttt{event1}.
 \end{enumerate}
 
 % ==============================================================================
-\section{Hosting Modern Web Browsers: Brave and Chromium}
-\label{sec:hosting_brave}
+\section{Hosting a Modern Web Browser: Firefox}
+\label{sec:hosting_browser}
 % ==============================================================================
 
 A modern web browser is effectively an operating system in its own right, incorporating JavaScript JIT compilers, WebAssembly runtimes, multithreaded rendering engines, hardware video decoders, and sandboxed security containers.
 
-To host the **Brave Browser** successfully on Hydra, three critical kernel facilities are provided:
+Hydra runs Mozilla's unmodified Firefox build from Mozilla's own APT repository (\texttt{packages.mozilla.org}), installed into the Ubuntu root with \texttt{apt}. It draws through Wayland directly and needs no wrapper or command-line flag. The kernel facilities it depends on are:
 \begin{enumerate}
-    \item \textbf{POSIX Shared Memory (\texttt{/dev/shm}):} Chromium architectures partition tasks across independent processes: the main Browser process, sandboxed Renderer processes, and the GPU process. High-speed rendering occurs by rendering pixel buffers into shared memory frames created via \texttt{memfd\_create()} or \texttt{shm\_open()} on \texttt{/dev/shm}.
-    \item \textbf{Cryptographic NSS Databases:} Browsers maintain cryptographic certificates and security keys in an on-disk database (\texttt{sql:\textasciitilde/.pki/nssdb}). Hydra provides complete POSIX file locking (\texttt{fcntl} record locking via \texttt{F\_SETLK} and \texttt{F\_GETLK}) to ensure atomic SQLite3 database transactions without corruption.
-    \item \textbf{Asynchronous Epoll Networking:} The browser performs concurrent DNS lookups and TLS handshakes over non-blocking sockets, multiplexed through Hydra's $O(1)$ \texttt{epoll} implementation.
+    \item \textbf{Canonical program paths (\texttt{/proc/self/exe}):} \texttt{/usr/bin/firefox} is a symbolic link to \texttt{/usr/lib/firefox/firefox}, a small launcher that starts \texttt{firefox-bin} from the directory \texttt{/proc/self/exe} names. As on Linux, \texttt{execve} therefore records the program's path with every symbolic link resolved.
+    \item \textbf{Process sandboxing:} Web content, media decoding and networking run in separate processes confined with seccomp-bpf filters, user, PID and network namespaces, and a \texttt{chroot}. Filtered system calls raise \texttt{SIGSYS}; the sandboxed process forwards file access to its parent over a Unix socket that passes file descriptors back.
+    \item \textbf{POSIX shared memory:} The processes exchange rendered frames and IPC buffers through \texttt{memfd\_create()} and \texttt{/dev/shm} mappings.
+    \item \textbf{SQLite profile databases:} Bookmarks, history and the certificate store (Firefox bundles its own NSS) are SQLite databases, which rely on POSIX record locking (\texttt{fcntl} \texttt{F\_SETLK}/\texttt{F\_GETLK}).
+    \item \textbf{Asynchronous epoll networking:} DNS lookups and TLS handshakes run over non-blocking sockets multiplexed through Hydra's $O(1)$ \texttt{epoll} implementation.
 \end{enumerate}
+
+Hydra writes \texttt{/etc/firefox/policies/policies.json} once when Firefox is installed: it turns off the built-in updater (\texttt{apt} updates Firefox), telemetry, and the questions a new profile asks first.
 
 % ==============================================================================
 \section{Summary}

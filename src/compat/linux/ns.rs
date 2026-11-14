@@ -1,4 +1,4 @@
-//! Namespaces for the Linux personality, as far as Chromium's and Brave's sandbox uses them.
+//! Namespaces for the Linux personality, as far as the Chromium and Firefox sandboxes use them.
 //!
 //! - **User namespaces**: `clone`/`unshare` with `CLONE_NEWUSER` give the process a new
 //!   namespace with every capability *inside* it ([`crate::task::tcb::Caps::in_userns`]):

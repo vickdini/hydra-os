@@ -1,4 +1,4 @@
-// Checks for the interfaces Brave's logs showed missing: rt_sigtimedwait, oom_score_adj,
+// Checks for interfaces browser sandboxes need that Brave's logs first showed missing: rt_sigtimedwait,
 // per-thread /proc status with NSpid, Yama ptrace_scope, and NETLINK_ROUTE (getifaddrs).
 #define _GNU_SOURCE
 #include <arpa/inet.h>

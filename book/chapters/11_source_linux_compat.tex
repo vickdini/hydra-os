@@ -1,7 +1,7 @@
 \chapter{The Linux ABI and Desktop Services: Annotated Source Code}
 \label{chap:source_linux_compat}
 
-In this chapter, we explore the annotated source code of Hydra's **Linux Binary Compatibility Subsystem** and system services. This subsystem allows unmodified upstream 64-bit Linux binaries---from GNU Coreutils and Python to the SDDM greeter, KWin Wayland compositor, and Brave web browser---to execute directly on the bare-metal microkernel with native performance.
+In this chapter, we explore the annotated source code of Hydra's **Linux Binary Compatibility Subsystem** and system services. This subsystem allows unmodified upstream 64-bit Linux binaries---from GNU Coreutils and Python to the SDDM greeter, KWin Wayland compositor, and Firefox web browser---to execute directly on the bare-metal microkernel with native performance.
 
 We examine the system call dispatcher, the synthetic \texttt{/proc} filesystem engine, the $O(1)$ \texttt{epoll} event multiplexer, BSD socket wait queues, and the C implementation of \texttt{hydra-logind}.
 
@@ -150,7 +150,7 @@ pub fn generate_proc_meminfo() -> alloc::string::String {
 \label{sec:code_epoll_engine}
 % ==============================================================================
 
-Modern web browsers like Brave depend on non-blocking $O(1)$ event notifications:
+Modern web browsers like Firefox depend on non-blocking $O(1)$ event notifications:
 
 \begin{lstlisting}[language=Rust, caption={High-Performance Epoll Implementation (\texttt{src/compat/linux/epoll.rs})}]
 pub struct EpollInstance {

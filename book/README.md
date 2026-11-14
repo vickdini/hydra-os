@@ -13,7 +13,7 @@ This repository holds the complete LaTeX source for the textbook **"Hydra: Desig
 2. **64-bit Microkernel Architecture (x86_64 Long Mode & UEFI):** Preemptive scheduling, task control blocks, and high-performance synchronous rendezvous IPC.
 3. **Enterprise OpenZFS Storage Engine:** Pool-based storage (`hydrapool`), 32-slot Uberblock Ring, Merkle-tree integrity checks (Fletcher-4), and crash-consistent Copy-on-Write (CoW) transactions.
 4. **Ring 3 Isolated Driver Architecture:** Hardware drivers (ATA DMA, Intel 82540EM Gigabit NIC, DRM/KMS Display Server) running as unprivileged user-space processes.
-5. **Full Linux Binary Compatibility Subsystem:** Hardware `SYSCALL`/`SYSRET` dispatching, POSIX credentials, virtual filesystems (`/proc`, `/sys`, `/dev`), and the ability to run **SDDM, KWin Wayland, KDE Plasma 6, and the Brave Web Browser** unmodified on bare metal.
+5. **Full Linux Binary Compatibility Subsystem:** Hardware `SYSCALL`/`SYSRET` dispatching, POSIX credentials, virtual filesystems (`/proc`, `/sys`, `/dev`), and the ability to run **SDDM, KWin Wayland, KDE Plasma 6, and the Firefox Web Browser** unmodified on bare metal.
 
 ---
 
