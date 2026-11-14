@@ -34,6 +34,59 @@ use crate::arch::syscall::SyscallFrame;
 use crate::fs::zfs::types::{S_IFMT, S_IFREG};
 use crate::fs::ZfsClient;
 
+/// The absolute path `abs` with every symlink in it resolved and `.`/`..` removed, as
+/// Linux shows a program's path in `/proc/<pid>/exe` (`/usr/bin/firefox`, a link to
+/// `../lib/firefox/firefox`, runs as `/usr/lib/firefox/firefox`).
+///
+/// # Returns
+/// `None` when `abs` has no symlink in it, or when the walk does not end at `ino` (the file
+/// being run): the lexical path is kept then.
+fn real_path(abs: &str, ino: u64) -> Option<String> {
+    if !abs.starts_with('/') || super::vfs::served_by_name(abs) {
+        return None;
+    }
+    let root = resolve(0, b"/", true).ok()?;
+    // Components still to walk, the last one on top
+    let mut todo: Vec<Vec<u8>> = abs.split('/').rev().filter(|c| !c.is_empty()).map(|c| c.as_bytes().to_vec()).collect();
+    // The canonical path so far, with the inode of each component
+    let mut out: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut links = 0;
+    while let Some(c) = todo.pop() {
+        match c.as_slice() {
+            b"." => continue,
+            b".." => {
+                out.pop();
+                continue;
+            }
+            _ => {}
+        }
+        let dir = out.last().map_or(root, |&(_, i)| i);
+        let next = resolve(dir, &c, false).ok()?;
+        if ZfsClient::getattr(next).ok()?.mode & S_IFMT == super::types::S_IFLNK {
+            links += 1;
+            if links > 40 {
+                return None;
+            }
+            let target = ZfsClient::readlink(next).ok()?;
+            if target.first() == Some(&b'/') {
+                out.clear();
+            }
+            todo.extend(target.split(|&b| b == b'/').rev().filter(|c| !c.is_empty()).map(|c| c.to_vec()));
+            continue;
+        }
+        out.push((c, next));
+    }
+    if links == 0 || out.last().map(|&(_, i)| i) != Some(ino) {
+        return None;
+    }
+    let mut p = String::new();
+    for (name, _) in &out {
+        p.push('/');
+        p.push_str(&String::from_utf8_lossy(name));
+    }
+    Some(p)
+}
+
 /// Negative errno for file or interpreter not found.
 const ENOENT: i64 = -2;
 /// Negative errno for argument and environment list exceeding [`ARG_MAX`].
@@ -206,10 +259,16 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
                 abs_path = target.clone();
                 path = target.into_bytes();
             }
-            match resolve(base, &path, follow) {
+            let ino = match resolve(base, &path, follow) {
                 Ok(i) => i,
                 Err(e) => return e,
+            };
+            // Linux's /proc/self/exe names the file itself, every symlink resolved: Firefox's
+            // launcher execs firefox-bin from the directory /proc/self/exe names
+            if let Some(real) = real_path(&abs_path, ino) {
+                abs_path = real;
             }
+            ino
         };
         let attr = match ZfsClient::getattr(ino) {
             Ok(a) => a,
