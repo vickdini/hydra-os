@@ -542,6 +542,12 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     }
 }
 
+/// Whether process `pid` is the init of its PID namespace (`clone(CLONE_PARENT)` is
+/// refused there, as on Linux: init's siblings would have no reaper in the namespace).
+pub fn is_pid_ns_init(pid: u64) -> bool {
+    PROCS.lock().get(&pid).map_or(false, |p| p.ns.pid_inits.last() == Some(&pid))
+}
+
 /// Reaps a zombie started from the Hydra shell, returning its `wait` status.
 ///
 /// # Arguments

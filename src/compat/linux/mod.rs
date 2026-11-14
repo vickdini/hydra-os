@@ -2360,9 +2360,15 @@ const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 /// Child thread/process ID on success, or a negative Linux errno on error.
 fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>) -> i64 {
     const CLONE_VFORK: u64 = 0x4000;
+    const CLONE_PARENT: u64 = 0x8000;
     args[0] &= !CLONE_PIDFD;
     if let Err(e) = ns::check_clone(args[0]) {
         return e;
+    }
+    // CLONE_PARENT (spawn_clone makes our parent the child's): refused to a PID namespace's init and to init
+    let sibling = args[0] & (CLONE_PARENT | types::CLONE_THREAD) == CLONE_PARENT;
+    if sibling && (proc::current_ids().1 == 1 || proc::is_pid_ns_init(proc::current_ids().1)) {
+        return -EINVAL;
     }
     if args[0] & types::CLONE_THREAD == 0 {
         if let Err(e) = ns::check_fork() {

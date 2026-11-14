@@ -186,7 +186,7 @@ void _start(void) {
     print_str("'\n");
     print_str("[+] PASS: socketpair bidirectional IPC verified.\n\n");
 
-    // Test 2: Server socket bind & listen on /run/user/1000/wayland-0
+    // Test 2: Server socket bind & listen on a private abstract name
     print_str("[2] Initializing Wayland server socket...\n");
     int srv_fd = sys_socket(AF_UNIX, SOCK_STREAM, 0);
     if (srv_fd < 0) {
@@ -196,17 +196,21 @@ void _start(void) {
         sys_exit(4);
     }
 
+    // An abstract name (leading NUL): private to this test and needs no cleanup. The real
+    // /run/user/1000/wayland-0 belongs to the running compositor, so binding it fails
+    // with EADDRINUSE whenever KDE is up.
     struct sockaddr_un srv_addr;
     srv_addr.sun_family = AF_UNIX;
-    const char *w_path = "/run/user/1000/wayland-0";
+    const char *w_path = "hydra-socktest-wayland-0";
+    srv_addr.sun_path[0] = 0;
     int p_idx = 0;
     while (w_path[p_idx]) {
-        srv_addr.sun_path[p_idx] = w_path[p_idx];
+        srv_addr.sun_path[1 + p_idx] = w_path[p_idx];
         p_idx++;
     }
-    srv_addr.sun_path[p_idx] = 0;
+    unsigned int srv_len = 2 + 1 + p_idx; // sun_family + NUL + name
 
-    r = sys_bind(srv_fd, &srv_addr, sizeof(srv_addr));
+    r = sys_bind(srv_fd, &srv_addr, srv_len);
     if (r < 0) {
         print_str("[-] FAIL: sys_bind returned ");
         print_num(r);
@@ -221,10 +225,10 @@ void _start(void) {
         print_str("\n");
         sys_exit(6);
     }
-    print_str("[+] PASS: Server bound and listening on /run/user/1000/wayland-0\n\n");
+    print_str("[+] PASS: Server bound and listening on @hydra-socktest-wayland-0\n\n");
 
-    // Test 3: Client connect to /run/user/1000/wayland-0 and exchange Wayland handshake
-    print_str("[3] Connecting Wayland client to /run/user/1000/wayland-0...\n");
+    // Test 3: Client connect to the server and exchange a Wayland-style handshake
+    print_str("[3] Connecting Wayland client to @hydra-socktest-wayland-0...\n");
     int cli_fd = sys_socket(AF_UNIX, SOCK_STREAM, 0);
     if (cli_fd < 0) {
         print_str("[-] FAIL: client sys_socket returned ");
@@ -233,7 +237,7 @@ void _start(void) {
         sys_exit(7);
     }
 
-    r = sys_connect(cli_fd, &srv_addr, sizeof(srv_addr));
+    r = sys_connect(cli_fd, &srv_addr, srv_len);
     if (r < 0) {
         print_str("[-] FAIL: sys_connect returned ");
         print_num(r);
@@ -288,12 +292,13 @@ void _start(void) {
     struct sockaddr_un check_addr;
     unsigned int check_len = sizeof(check_addr);
     r = sys_getsockname(srv_fd, &check_addr, &check_len);
-    if (r < 0 || check_addr.sun_family != AF_UNIX) {
+    if (r < 0 || check_addr.sun_family != AF_UNIX || check_len != srv_len || check_addr.sun_path[0] != 0
+        || str_cmp(check_addr.sun_path + 1, w_path, p_idx) != 0) {
         print_str("[-] FAIL: sys_getsockname error\n");
         sys_exit(12);
     }
-    print_str("    -> Socket address: '");
-    print_str(check_addr.sun_path);
+    print_str("    -> Socket address: '@");
+    print_str(w_path);
     print_str("'\n");
     print_str("[+] PASS: getsockname verified!\n\n");
 

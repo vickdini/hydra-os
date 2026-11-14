@@ -1169,7 +1169,10 @@ impl Scheduler {
         if child_tgid == parent_tgid {
             crate::compat::linux::proc::register_thread(child_tgid, child_id.0, parent_tid);
         } else {
-            crate::compat::linux::proc::register_process(child_tgid, parent_tgid, child_id.0, Some(parent_tgid));
+            // CLONE_PARENT: the child is our sibling (set before it can run and exit)
+            const CLONE_PARENT: u64 = 0x8000;
+            let ppid = if flags & CLONE_PARENT != 0 { crate::compat::linux::proc::parent_of(parent_tgid) } else { parent_tgid };
+            crate::compat::linux::proc::register_process(child_tgid, ppid, child_id.0, Some(parent_tgid));
         }
         Ok(child_id)
     }
