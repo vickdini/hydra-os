@@ -239,7 +239,7 @@ fn is_proc_pid_file(rest: &str) -> bool {
     let Some((who, file)) = rest.split_once('/') else { return false };
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (who == "self" || who == "thread-self" || numeric(who))
-        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "cgroup" | "auxv" | "maps" | "limits")
+        && (matches!(file, "cmdline" | "comm" | "status" | "stat" | "statm" | "cgroup" | "auxv" | "maps" | "limits")
             || file.strip_prefix("fdinfo/").is_some_and(numeric)
             || file.strip_prefix("task/").and_then(|r| r.split_once('/')).is_some_and(|(t, f)| numeric(t) && matches!(f, "status" | "stat" | "comm")))
 }
@@ -350,6 +350,24 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
                 t => super::ns::pid_to_caller(t),
             };
             let name: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
+            // Memory use (Wine's tasklist, ps and top read it); peaks are not kept: the current values
+            let (vm, anon, file) = crate::task::SCHEDULER
+                .lock()
+                .with_process(pid, |t| t.mm.clone())
+                .flatten()
+                .map_or((0, 0, 0), |mm| mm.lock().memory_usage());
+            let kib = |pages: u64| pages * 4;
+            let mem = alloc::format!(
+                "VmPeak:	{} kB
+VmSize:	{} kB
+VmHWM:	{} kB
+VmRSS:	{} kB
+RssAnon:	{} kB
+RssFile:	{} kB
+VmSwap:	0 kB
+",
+                vm / 1024, vm / 1024, kib(anon + file), kib(anon + file), kib(anon), kib(file)
+            );
             Some(
                 alloc::format!(
                     "Name:	{}
@@ -363,11 +381,11 @@ Gid:	{}	{}	{}	{}
 NStgid:	{}
 NSpid:	{}
 VmLck:	{} kB
-NoNewPrivs:	{}
+{}NoNewPrivs:	{}
 Seccomp:	{}
 ",
                     name, pid, tid, ppid, tracer, ids[0], ids[1], ids[2], ids[1], ids[3], ids[4], ids[5], ids[4], nstgid, nspid,
-                    super::limits::locked_kib(pid), nnp as u8, seccomp_mode
+                    super::limits::locked_kib(pid), mem, nnp as u8, seccomp_mode
                 )
                 .into_bytes(),
             )
@@ -409,11 +427,29 @@ Seccomp:	{}
                 threads,
                 start
             );
-            for _ in 23..=52 {
+            // vsize (bytes) and rss (pages)
+            let (vm, anon, file) = crate::task::SCHEDULER
+                .lock()
+                .with_process(pid, |t| t.mm.clone())
+                .flatten()
+                .map_or((0, 0, 0), |mm| mm.lock().memory_usage());
+            text.push_str(&alloc::format!(" {} {}", vm, anon + file));
+            for _ in 25..=52 {
                 text.push_str(" 0");
             }
             text.push('\n');
             Some(text.into_bytes())
+        }
+        "statm" => {
+            // In pages: size resident shared text lib data dt (shared: the file pages;
+            // text and data are not told apart, data is the private resident part)
+            let (vm, anon, file) = crate::task::SCHEDULER
+                .lock()
+                .with_process(pid, |t| t.mm.clone())
+                .flatten()
+                .map_or((0, 0, 0), |mm| mm.lock().memory_usage());
+            Some(alloc::format!("{} {} {} 0 0 {} 0
+", vm / 4096, anon + file, file, anon).into_bytes())
         }
         "cmdline" => Some(cmdline.map(|c| c.to_vec()).unwrap_or_default()),
         "comm" => {

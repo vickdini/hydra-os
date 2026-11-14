@@ -1841,7 +1841,7 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
     if dir.is_empty() {
         // /proc/<pid>: the entries Hydra provides (directories, then files and links)
         for (i, (name, kind)) in [
-            ("fd", 4u8), ("task", 4), ("ns", 4), ("cmdline", 8), ("comm", 8), ("status", 8), ("stat", 8), ("cgroup", 8),
+            ("fd", 4u8), ("task", 4), ("ns", 4), ("cmdline", 8), ("comm", 8), ("status", 8), ("stat", 8), ("statm", 8), ("cgroup", 8),
             ("mountinfo", 8), ("mounts", 8), ("maps", 8), ("auxv", 8), ("uid_map", 8), ("gid_map", 8), ("setgroups", 8),
             ("exe", 10), ("cwd", 10), ("root", 10),
         ]

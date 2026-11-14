@@ -790,3 +790,21 @@ fn find_free_in_searches_a_window_top_down() {
         assert_eq!(mm.find_free_in(P, lo, hi), Some(lo + 13 * P), "areas outside the window change nothing");
     });
 }
+
+#[test]
+fn memory_usage_counts_mapped_bytes_and_resident_pages() {
+    with_mm(|mm| {
+        assert_eq!(mm.memory_usage(), (0, 0, 0));
+        let a = anon(mm, A, 3 * P, RW);
+        assert_eq!(mm.memory_usage(), (3 * P, 0, 0), "mapped, nothing resident yet");
+        mm.handle_fault(a, true, false).unwrap();
+        mm.handle_fault(a + 2 * P, false, false).unwrap();
+        assert_eq!(mm.memory_usage(), (3 * P, 2, 0), "two pages touched");
+        // A huge reservation far away costs nothing to walk and adds only its size
+        let far = anon(mm, A + 0x80_0000_0000, 0x40_0000_0000, 0);
+        assert_eq!(mm.memory_usage(), (3 * P + 0x40_0000_0000, 2, 0));
+        mm.unmap(far, far + 0x40_0000_0000);
+        mm.unmap(a, a + 3 * P);
+        assert_eq!(mm.memory_usage(), (0, 0, 0));
+    });
+}

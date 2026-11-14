@@ -166,6 +166,20 @@ pub trait MappedObject: Send + Sync {
     ///
     /// `Some(PhysFrame)` containing the backing frame; `None` if offset exceeds object length.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>>;
+
+    /// Whether shared mappings must report each page's first write ([`Self::page_written`]):
+    /// their pages are then mapped read-only until written. Files do (written pages go back
+    /// to the file); memory-only objects need not.
+    fn tracks_writes(&self) -> bool {
+        false
+    }
+
+    /// Page `pgoff` is about to be written through a shared mapping.
+    fn page_written(&self, _pgoff: u64) {}
+
+    /// Writes the pages written through shared mappings back to where they came from
+    /// (`msync`; files also do it when the last mapping goes).
+    fn sync(&self) {}
 }
 
 /// What a `Vma`'s pages are populated from.
@@ -282,6 +296,29 @@ pub(crate) fn nx_enabled() -> bool {
 #[inline]
 fn table_at<'a>(phys: PhysAddr) -> &'a mut PageTable {
     unsafe { &mut *(crate::memory::frame_allocator::phys_to_virt(phys.as_u64()) as *mut PageTable) }
+}
+
+/// Calls `f` for each page-table entry holding a frame in `[start, end)`, under the table at
+/// `table` (`level` 4 for the PML4, covering addresses from `base`); missing tables are
+/// skipped whole.
+fn count_frames(table: PhysAddr, level: u32, base: u64, start: u64, end: u64, f: &mut impl FnMut(&PageTableEntry)) {
+    let span = 1u64 << (12 + 9 * (level - 1));
+    let t = table_at(table);
+    let first = (start.saturating_sub(base) / span) as usize;
+    for i in first..512 {
+        let lo = base + i as u64 * span;
+        if lo >= end {
+            break;
+        }
+        let e = &t[i];
+        if level == 1 {
+            if pte_holds_frame(e) {
+                f(e);
+            }
+        } else if e.flags().contains(PageTableFlags::PRESENT) {
+            count_frames(e.addr(), level - 1, lo, start.max(lo), end, f);
+        }
+    }
 }
 
 /// Rounds `addr` down to the nearest 4 KiB page boundary.
@@ -501,6 +538,29 @@ impl Mm {
             .next_back()
             .map(|(_, v)| v)
             .filter(|v| addr < v.end)
+    }
+
+    /// Memory use for `/proc/<pid>/status` and `statm`: bytes mapped, and resident pages
+    /// that are the process's own (anonymous memory and private copies) and file pages.
+    pub fn memory_usage(&self) -> (u64, u64, u64) {
+        let (mut size, mut anon, mut file) = (0, 0, 0);
+        for v in self.vmas.values() {
+            size += v.end - v.start;
+            let (mut own, mut obj) = (0, 0);
+            count_frames(self.pml4, 4, 0, v.start, v.end, &mut |e| {
+                // A private file mapping's written pages are copies: the process's own
+                let copy = !v.shared && e.flags().contains(PageTableFlags::WRITABLE);
+                if matches!(v.backing, Backing::Anon) || copy { own += 1 } else { obj += 1 }
+            });
+            anon += own;
+            file += obj;
+        }
+        (size, anon, file)
+    }
+
+    /// Start of the first area above `addr`, if any.
+    pub fn next_vma_start(&self, addr: u64) -> Option<u64> {
+        self.vmas.range(addr + 1..).next().map(|(&k, _)| k)
     }
 
     /// Iterates over all areas in address order.
@@ -815,10 +875,10 @@ impl Mm {
         self.split_at(end);
         let keys: Vec<u64> = self.vmas.range(start..end).map(|(&k, _)| k).collect();
         for k in keys {
-            let shared = {
+            let (shared, tracks) = {
                 let v = self.vmas.get_mut(&k).unwrap();
                 v.prot = prot;
-                v.shared
+                (v.shared, v.shared && matches!(&v.backing, Backing::Object { obj, .. } if obj.tracks_writes()))
             };
             let vend = self.vmas[&k].end;
             let mut addr = k;
@@ -827,7 +887,12 @@ impl Mm {
                     if pte_holds_frame(entry) {
                         let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
                         // Private pages shared with others stay read-only until a write copies them
-                        let exclusive = shared || frame_refcount(frame) == 1;
+                        // and a file's shared pages stay read-only until written (their writes are recorded)
+                        let exclusive = if tracks {
+                            entry.flags().contains(PageTableFlags::WRITABLE)
+                        } else {
+                            shared || frame_refcount(frame) == 1
+                        };
                         entry.set_addr(frame.start_address(), pte_flags_for(prot, exclusive));
                         flush(self.pml4, addr);
                     }
@@ -920,6 +985,8 @@ impl Mm {
     /// Applies `f` to the mappings in `[start, end)`, splitting those that reach outside
     /// it, then merges what became alike.
     fn modify(&mut self, start: u64, end: u64, f: impl Fn(&mut Vma)) {
+        // Mappings split only at page boundaries
+        let (start, end) = (page_down(start), page_up(end));
         let keys: Vec<u64> = self.vmas.range(..end).filter(|(_, v)| v.end > start).map(|(k, _)| *k).collect();
         for k in keys {
             let Some(mut v) = self.vmas.remove(&k) else { continue };
@@ -1219,6 +1286,9 @@ impl Mm {
                 let writable = entry.flags().contains(PageTableFlags::WRITABLE);
                 entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, writable));
             } else if vma.shared || frame_refcount(frame) == 1 {
+                if let (true, Backing::Object { obj, pgoff }) = (vma.shared, &vma.backing) {
+                    obj.page_written(pgoff + (page - vma.start) / PAGE_SIZE);
+                }
                 entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, true));
             } else {
                 // Copy-on-write: take a private copy of a shared page
@@ -1247,7 +1317,12 @@ impl Mm {
                 let source = obj.get_page(index).ok_or(FaultError::Bus)?;
                 if vma.shared {
                     frame_ref_inc(source);
-                    entry.set_addr(source.start_address(), pte_flags_for(vma.prot, true));
+                    // A file's page stays read-only until written, so the write is known
+                    let tracks = obj.tracks_writes();
+                    if write && tracks {
+                        obj.page_written(index);
+                    }
+                    entry.set_addr(source.start_address(), pte_flags_for(vma.prot, write || !tracks));
                 } else if write {
                     let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
                     unsafe {

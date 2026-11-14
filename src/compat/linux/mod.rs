@@ -457,7 +457,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 SYS_MREMAP => mm::sys_mremap(&mm, arg0, arg1, arg2, arg3, arg4),
                 SYS_MADVISE => mm::sys_madvise(&mm, arg0, arg1, arg2),
                 SYS_MINCORE => mm::sys_mincore(&mm, arg0, arg1, arg2),
-                _ => 0, // msync: no write-back of shared file mappings yet
+                _ => mm::sys_msync(&mm, arg0, arg1, arg2),
             };
         }
     }

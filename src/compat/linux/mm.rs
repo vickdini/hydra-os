@@ -5,7 +5,7 @@
 //! Tasks without one (legacy binaries linked into the kernel identity map) keep the
 //! heap-backed fallbacks in [`super::dispatch_linux_syscall`].
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
@@ -51,9 +51,45 @@ pub const MADV_FREE: u64 = 8;
 static INODE_OBJECTS: Mutex<BTreeMap<u64, Weak<InodeObject>>> = Mutex::new(BTreeMap::new());
 
 /// A mapped ZFS file: pages are read from the pool on first fault and kept while mapped.
+/// Pages written through shared mappings go back to the file on `msync` and when the last
+/// mapping goes (Wine passes data between mappings of one section this way).
 pub struct InodeObject {
     ino: u64,
     pages: Mutex<BTreeMap<u64, PhysFrame<Size4KiB>>>,
+    /// Pages written through a shared mapping. They stay in the set after a write-back:
+    /// their mappings stay writable, so later writes are not seen and each `msync` (and the
+    /// last unmap) writes them again.
+    dirty: Mutex<BTreeSet<u64>>,
+}
+
+impl InodeObject {
+    /// Writes the dirty pages back to the file, up to its current size (a mapping never
+    /// grows the file; the tail of the last page past the end stays out of it).
+    fn write_back(&self) {
+        let dirty: alloc::vec::Vec<u64> = self.dirty.lock().iter().copied().collect();
+        if dirty.is_empty() {
+            return;
+        }
+        let Ok(attr) = ZfsClient::getattr(self.ino) else { return };
+        let mut buf = alloc::vec![0u8; PAGE_SIZE as usize];
+        for p in dirty {
+            let off = p * PAGE_SIZE;
+            if off >= attr.size {
+                continue;
+            }
+            let Some(frame) = self.pages.lock().get(&p).copied() else { continue };
+            let n = (attr.size - off).min(PAGE_SIZE) as usize;
+            // Copied out first: the page stays mapped and may change while it is written
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()) as *const u8,
+                    buf.as_mut_ptr(),
+                    n,
+                );
+            }
+            let _ = ZfsClient::write_at(self.ino, off, &buf[..n]);
+        }
+    }
 }
 
 /// Pages a mapped file reads from the pool at once when one is missing: the aligned window
@@ -125,10 +161,23 @@ impl MappedObject for InodeObject {
         }
         wanted
     }
+
+    fn tracks_writes(&self) -> bool {
+        true
+    }
+
+    fn page_written(&self, pgoff: u64) {
+        self.dirty.lock().insert(pgoff);
+    }
+
+    fn sync(&self) {
+        self.write_back();
+    }
 }
 
 impl Drop for InodeObject {
     fn drop(&mut self) {
+        self.write_back();
         for (_, f) in self.pages.lock().iter() {
             frame_ref_dec(*f);
         }
@@ -152,7 +201,7 @@ pub fn inode_object(ino: u64) -> Arc<InodeObject> {
     }
     // A mapping keeps the inode alive after unlink, like an open descriptor
     ZfsClient::open_ref(ino);
-    let obj = Arc::new(InodeObject { ino, pages: Mutex::new(BTreeMap::new()) });
+    let obj = Arc::new(InodeObject { ino, pages: Mutex::new(BTreeMap::new()), dirty: Mutex::new(BTreeSet::new()) });
     map.retain(|_, w| w.strong_count() > 0);
     map.insert(ino, Arc::downgrade(&obj));
     obj
@@ -323,11 +372,15 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
     }
     match m.mmap(addr, len, prot as u32, shared, fixed, noreplace, backing) {
         Ok(a) => {
+            // The mapping covers whole pages: naming only `len` bytes would split it in the
+            // middle of a page (Wine maps files by their exact size), and the part after
+            // the split would start at an address no page starts at
+            let end = a + ((len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1));
             if name.is_some() {
-                m.set_name(a, a + len, name.as_deref());
+                m.set_name(a, end, name.as_deref());
             }
             if !may_write {
-                m.deny_write(a, a + len);
+                m.deny_write(a, end);
             }
             a as i64
         }
@@ -457,6 +510,57 @@ pub fn sys_madvise(mm: &Mutex<Mm>, addr: u64, len: u64, advice: u64) -> i64 {
         }
     }
     0
+}
+
+/// Linux `msync` (syscall 26): writes the pages written through shared file mappings in
+/// `[addr, addr + len)` back to their files. `MS_ASYNC` does it now too.
+///
+/// # Returns
+///
+/// `0`, `-EINVAL` for an unaligned address or bad flags, `-ENOMEM` if part of the range
+/// is unmapped (after syncing the mapped parts), as Linux.
+pub fn sys_msync(mm: &Mutex<Mm>, addr: u64, len: u64, flags: u64) -> i64 {
+    const MS_ASYNC: u64 = 1;
+    const MS_INVALIDATE: u64 = 2;
+    const MS_SYNC: u64 = 4;
+    if addr & (PAGE_SIZE - 1) != 0 || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0 || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC) {
+        return -EINVAL;
+    }
+    let Some(end) = len.checked_add(PAGE_SIZE - 1).map(|l| l & !(PAGE_SIZE - 1)).and_then(|l| addr.checked_add(l)) else {
+        return -ENOMEM;
+    };
+    // The objects are collected first: writing back talks to the file server, which must
+    // not happen under the address-space lock (its replies fault pages in)
+    let mut objs: alloc::vec::Vec<Arc<dyn MappedObject>> = alloc::vec::Vec::new();
+    let mut hole = false;
+    {
+        let m = mm.lock();
+        let mut cursor = addr;
+        while cursor < end {
+            match m.find_vma(cursor) {
+                Some(v) => {
+                    if let (true, Backing::Object { obj, .. }) = (v.shared, &v.backing) {
+                        if !objs.iter().any(|o| core::ptr::addr_eq(Arc::as_ptr(o), Arc::as_ptr(obj))) {
+                            objs.push(obj.clone());
+                        }
+                    }
+                    cursor = v.end;
+                }
+                None => {
+                    hole = true;
+                    // Skip to the next mapping
+                    match m.next_vma_start(cursor) {
+                        Some(n) if n < end => cursor = n,
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+    for o in objs {
+        o.sync();
+    }
+    if hole { -ENOMEM } else { 0 }
 }
 
 /// `mincore`: reports every page of a mapped range as resident.

@@ -171,6 +171,93 @@ fn mapping_a_zfs_file() {
     });
 }
 
+/// Writes `data` at `addr` as a program would: a write fault, then the store.
+fn poke(mm: &Mutex<Mm>, addr: u64, data: &[u8]) {
+    let mut m = mm.lock();
+    m.prefault(addr, data.len() as u64, true).unwrap();
+    for (i, b) in data.iter().enumerate() {
+        unsafe { *(m.translate(addr + i as u64).unwrap().as_u64() as *mut u8) = *b };
+    }
+}
+
+/// A writable file of `len` bytes (`i as u8` at offset i) on descriptor 5.
+fn writable_file(ino: u64, len: usize) -> Vec<u8> {
+    let content: Vec<u8> = (0..len).map(|i| i as u8).collect();
+    fake::INODES.with_borrow_mut(|m| m.insert(ino, content.clone()));
+    let vnode = Arc::new(Mutex::new(fake::Vnode { ino, path: "/tmp/section".into(), readable: true, writable: true }));
+    install(5, FileDescriptor::Vnode(vnode));
+    content
+}
+
+#[test]
+fn a_mapping_of_a_partial_last_page_stays_one_page_aligned_area() {
+    with_mm(|mm| {
+        writable_file(9201, 2 * P as usize + 14);
+        let a = sys_mmap(mm, 0, 2 * P + 14, RW, MAP_PRIVATE, 5, 0) as u64;
+        let m = mm.lock();
+        let v = m.find_vma(a + 2 * P + 0x200).expect("the tail of the last page is mapped");
+        assert_eq!((v.start, v.end), (a, a + 3 * P), "one area over whole pages, not split at the file's end");
+    });
+}
+
+#[test]
+fn shared_file_mappings_write_their_written_pages_back() {
+    with_mm(|mm| {
+        let ino = 9202;
+        let size = 3 * P as usize + 100;
+        let mut want = writable_file(ino, size);
+        let a = sys_mmap(mm, 0, size as u64, RW, MAP_SHARED, 5, 0) as u64;
+        poke(mm, a + 5, b"WINE");                     // page 0 written
+        let _ = peek(mm, a + P, 8);                    // page 1 only read
+        poke(mm, a + 3 * P + 90, b"0123456789AB");     // across the end of the file
+        // Someone writes page 1 with write() meanwhile: an unwritten page must not undo it
+        fake::INODES.with_borrow_mut(|m| m.get_mut(&ino).unwrap()[P as usize] = 0xEE);
+        want[P as usize] = 0xEE;
+        assert_eq!(sys_munmap(mm, a, size as u64), 0);
+        want[5..9].copy_from_slice(b"WINE");
+        want[3 * P as usize + 90..size].copy_from_slice(b"0123456789");
+        let got = fake::INODES.with_borrow(|m| m[&ino].clone());
+        assert_eq!(got.len(), size, "the file does not grow");
+        assert!(got == want, "written pages went back, the page only read did not");
+    });
+}
+
+#[test]
+fn msync_writes_back_while_mapped_and_checks_its_arguments() {
+    with_mm(|mm| {
+        let ino = 9203;
+        writable_file(ino, 2 * P as usize);
+        let a = sys_mmap(mm, 0, 2 * P, RW, MAP_SHARED, 5, 0) as u64;
+        poke(mm, a + P + 1, b"sync");
+        assert_eq!(sys_msync(mm, a + 1, P, 4), EINVAL, "unaligned address");
+        assert_eq!(sys_msync(mm, a, P, 1 | 4), EINVAL, "MS_ASYNC with MS_SYNC");
+        assert_eq!(sys_msync(mm, a, P, 8), EINVAL, "unknown flag");
+        assert_eq!(sys_msync(mm, a, 2 * P, 4), 0);
+        assert_eq!(fake::INODES.with_borrow(|m| m[&ino][P as usize + 1..P as usize + 5].to_vec()), b"sync");
+        assert_eq!(sys_msync(mm, a, 4 * P, 4), ENOMEM, "part of the range is unmapped");
+        // Written again after the sync, through the mapping that stayed writable, and a
+        // page written for the first time: both go back at munmap
+        poke(mm, a + P + 1, b"SYNC");
+        poke(mm, a, b"x");
+        sys_munmap(mm, a, 2 * P);
+        assert_eq!(fake::INODES.with_borrow(|m| m[&ino][0]), b'x');
+        assert_eq!(fake::INODES.with_borrow(|m| m[&ino][P as usize + 1..P as usize + 5].to_vec()), b"SYNC");
+    });
+}
+
+#[test]
+fn private_file_mappings_never_write_the_file() {
+    with_mm(|mm| {
+        let ino = 9204;
+        let want = writable_file(ino, P as usize);
+        let a = sys_mmap(mm, 0, P, RW, MAP_PRIVATE, 5, 0) as u64;
+        poke(mm, a, b"private");
+        assert_eq!(sys_msync(mm, a, P, 4), 0);
+        sys_munmap(mm, a, P);
+        assert!(fake::INODES.with_borrow(|m| m[&ino] == want));
+    });
+}
+
 #[test]
 fn write_only_files_cannot_be_mapped() {
     with_mm(|mm| {

@@ -516,6 +516,18 @@ impl ZfsClient {
         })
     }
 
+    pub fn write_at(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
+        INODES.with_borrow_mut(|m| {
+            let d = m.get_mut(&ino).ok_or(-2i64)?;
+            let end = offset as usize + data.len();
+            if d.len() < end {
+                d.resize(end, 0);
+            }
+            d[offset as usize..end].copy_from_slice(data);
+            Ok(data.len())
+        })
+    }
+
     pub fn open_ref(ino: u64) {
         INODE_REFS.with_borrow_mut(|m| *m.entry(ino).or_insert(0) += 1);
     }
