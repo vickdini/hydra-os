@@ -160,7 +160,11 @@ fn e1000_grants() -> Vec<(u64, u64)> {
 ///
 /// An empty argument vector wrapped in `Some`.
 fn zfs_args() -> Option<Vec<String>> {
-    Some(Vec::new())
+    // The block cache: an eighth of the RAM, between 128 MiB and 512 MiB (the server's
+    // heap is 1 GiB). 128 MiB held less than Firefox maps at every start
+    let ram = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().total_usable_memory();
+    let blocks = (ram / 8 / 4096).clamp(32 * 1024, 128 * 1024);
+    Some(alloc::vec![alloc::format!("cache_blocks={}", blocks)])
 }
 
 /// No device memory (port I/O and its own DMA buffers only).

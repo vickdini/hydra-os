@@ -41,6 +41,7 @@ pub mod proc;
 pub mod pidfd;
 pub mod perf;
 pub mod pty;
+pub mod prof;
 pub mod ptrace;
 pub mod recent;
 pub mod process;
@@ -245,11 +246,59 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         stats.total_calls += 1;
     }
 
+    let t0 = prof::start();
     if let seccomp::Verdict::Return(r) = seccomp::check(frame) {
+        prof::syscall(num, t0);
         return r;
     }
     let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
-    dispatch_checked(frame)
+    let r = dispatch_checked(frame);
+    prof::syscall(num, t0);
+    if t0 != 0 && (num == SYS_POLL || num == SYS_PPOLL) {
+        slow_poll(arg0, arg1, t0, r);
+    }
+    r
+}
+
+/// Logs a `poll`/`ppoll` that blocked for longer than half a second while profiling: the
+/// program, how long, and each descriptor it waited on (as `/proc/self/fd` shows it, with
+/// the peer process of a Unix socket). Fixed multi-second waits are usually a service
+/// that never answers.
+///
+/// # Arguments
+/// * `fds_ptr`, `nfds` - The call's `struct pollfd` array (still the caller's memory).
+/// * `t0` - Start time from [`prof::start`].
+/// * `ret` - The call's result.
+fn slow_poll(fds_ptr: u64, nfds: u64, t0: u64, ret: i64) {
+    if t0 == 0 {
+        return;
+    }
+    let ms = crate::arch::pit::now_ns().saturating_sub(t0) / 1_000_000;
+    if ms < 500 {
+        return;
+    }
+    let exe = crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())).unwrap_or_default();
+    let (_, pid) = proc::current_ids();
+    let tid = crate::task::CURRENT_TID.load(core::sync::atomic::Ordering::Relaxed);
+    crate::kprintln!("[prof] slow poll: pid {} tid {} {} {} fds, waited {} ms -> {}", pid, tid, exe, nfds, ms, ret);
+    if fds_ptr == 0 {
+        return;
+    }
+    for i in 0..nfds.min(8) {
+        // struct pollfd { int fd; short events; short revents; }
+        let p = (fds_ptr + i * 8) as *const i32;
+        let fd = unsafe { core::ptr::read_unaligned(p) };
+        let ev = unsafe { core::ptr::read_unaligned((p as *const i16).add(2)) };
+        if fd < 0 {
+            continue;
+        }
+        let link = vfs::fd_link(&alloc::format!("/proc/self/fd/{}", fd)).unwrap_or_default();
+        let peer = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+            Some(crate::fs::FileDescriptor::Unix(s)) => s.peer_cred().map(|(p, _, _)| p),
+            _ => None,
+        });
+        crate::kprintln!("[prof]   fd {} events {:#x} {} peer {:?}", fd, ev, link, peer);
+    }
 }
 
 /// Runs a system call that seccomp has already allowed. Calls made by the kernel on a

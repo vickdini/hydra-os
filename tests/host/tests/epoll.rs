@@ -1,6 +1,6 @@
 //! Tests for epoll's interest list and readiness collection
 //! (`src/compat/linux/epoll.rs`): EPOLL_CTL_ADD/MOD/DEL, level-triggered
-//! reporting, EPOLLONESHOT, EPOLLET on regular files, maxevents, and what
+//! reporting, EPOLLONESHOT, EPOLLET on regular files and eventfds, maxevents, and what
 //! happens when a watched descriptor is closed.
 //!
 //! Readiness comes from real kernel objects (eventfd counters, message
@@ -147,14 +147,52 @@ fn edge_triggered_regular_files_fire_once() {
 }
 
 #[test]
-fn edge_triggered_other_descriptors_behave_level_triggered() {
-    // Documented approximation in epoll.rs: EPOLLET is only emulated for regular files.
-    // Programs that read until EAGAIN (the usual EPOLLET pattern) are unaffected; they
-    // just may be woken again while data remains.
+fn edge_triggered_eventfd_reports_once_per_wakeup() {
+    // An eventfd that keeps a value is not reported again until it is written or read
+    // (a wakeup of its queue): level-triggered, Firefox's event loops never slept
+    fake::reset();
+    let e = eventfd(10, 1);
+    let ep = EpollInstance::new();
+    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
+    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)]);
+    assert!(collect(&ep, 8).is_empty(), "still readable, but no new edge");
+    e.lock().wq.wake_all(); // a write
+    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)], "a wakeup is a new edge");
+    assert!(collect(&ep, 8).is_empty());
+}
+
+#[test]
+fn edge_triggered_eventfd_needs_readiness_too() {
+    // A wakeup while the eventfd is empty reports nothing; the edge is not used up
+    fake::reset();
+    let e = eventfd(10, 0);
+    let ep = EpollInstance::new();
+    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
+    assert!(collect(&ep, 8).is_empty());
+    e.lock().counter = 3;
+    e.lock().wq.wake_all();
+    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)]);
+}
+
+#[test]
+fn edge_triggered_eventfd_is_rearmed_by_ctl_mod() {
+    // EPOLL_CTL_MOD re-arms the watch: a ready eventfd is reported again (Linux)
     fake::reset();
     eventfd(10, 1);
     let ep = EpollInstance::new();
     ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
+    assert_eq!(collect(&ep, 8).len(), 1);
+    assert!(collect(&ep, 8).is_empty());
+    ep.lock().ctl(EPOLL_CTL_MOD, 10, ev(EPOLLIN | EPOLLET, 2)).unwrap();
+    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 2)]);
+}
+
+#[test]
+fn level_triggered_eventfd_reports_every_time() {
+    fake::reset();
+    eventfd(10, 1);
+    let ep = EpollInstance::new();
+    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 1)).unwrap();
     assert_eq!(collect(&ep, 8).len(), 1);
     assert_eq!(collect(&ep, 8).len(), 1);
 }

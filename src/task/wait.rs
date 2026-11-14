@@ -114,12 +114,21 @@ fn flush() {
 pub struct WaitQueue {
     /// Interrupt-safe spinlock-protected list of waiting task IDs.
     waiters: Mutex<Vec<u64>>,
+    /// How many times [`wake_all`](Self::wake_all) ran, waiters or not: the owner's state
+    /// changes as an edge-triggered `epoll` watch sees them (Linux reports such a watch
+    /// again after each wakeup of its file).
+    wakes: core::sync::atomic::AtomicU64,
 }
 
 impl WaitQueue {
     /// Creates an empty `WaitQueue`.
     pub const fn new() -> Self {
-        Self { waiters: Mutex::new(Vec::new()) }
+        Self { waiters: Mutex::new(Vec::new()), wakes: core::sync::atomic::AtomicU64::new(0) }
+    }
+
+    /// How many times [`wake_all`](Self::wake_all) has run.
+    pub fn wakes(&self) -> u64 {
+        self.wakes.load(core::sync::atomic::Ordering::Acquire)
     }
 
     /// Creates a new `WaitQueue` wrapped in an [`Arc`].
@@ -158,6 +167,7 @@ impl WaitQueue {
 
     /// Wakes every registered task. Never allocates or blocks; safe in interrupt handlers.
     pub fn wake_all(&self) {
+        self.wakes.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         let any = x86_64::instructions::interrupts::without_interrupts(|| {
             let mut w = self.waiters.lock();
             let any = !w.is_empty();

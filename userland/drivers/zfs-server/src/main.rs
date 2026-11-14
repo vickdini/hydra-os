@@ -896,7 +896,13 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
 ///
 /// # Arguments
 /// * `_args` - Command-line argument strings.
-fn main(_args: &[&str]) {
+fn main(args: &[&str]) {
+    // cache_blocks=N: the block cache's size, which the kernel sets from the RAM
+    for a in args {
+        if let Some(n) = a.strip_prefix("cache_blocks=").and_then(|n| n.parse().ok()) {
+            zfs::spa::set_cache_blocks(n);
+        }
+    }
     if let Err(e) = zfs_init() {
         hydra_rt::println!("[zfs-server] {}", e);
         return;

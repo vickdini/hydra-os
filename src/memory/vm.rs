@@ -1492,7 +1492,23 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
     }
     let mm = unsafe { &*ptr };
     match mm.try_lock() {
-        Some(mut guard) => Some(guard.handle_fault(addr, write, exec)),
+        Some(mut guard) => {
+            let t0 = crate::compat::linux::prof::start();
+            // For the profile: whether the page was there already (copy-on-write, upgrade)
+            let present = t0 != 0 && guard.pte(page_down(addr), false).map_or(false, |e| pte_holds_frame(e));
+            let r = guard.handle_fault(addr, write, exec);
+            if t0 != 0 {
+                use crate::compat::linux::prof::{FAULT_ANON, FAULT_FAILED, FAULT_OBJECT, FAULT_PRESENT};
+                let kind = match (&r, guard.find_vma(addr).map(|v| matches!(v.backing, Backing::Anon))) {
+                    (Err(_), _) => FAULT_FAILED,
+                    _ if present => FAULT_PRESENT,
+                    (_, Some(true)) => FAULT_ANON,
+                    _ => FAULT_OBJECT,
+                };
+                crate::compat::linux::prof::fault(kind, t0);
+            }
+            Some(r)
+        }
         None => panic!("page fault at {:#x} while the faulting process's Mm is locked", addr),
     }
 }

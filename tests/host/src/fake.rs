@@ -390,6 +390,11 @@ pub mod wait {
         }
         pub fn register(&self) {}
         pub fn unregister(&self) {}
+        /// *stub* Wakeups of every queue (the kernel counts each queue's own): an
+        /// edge-triggered watch may report more often here, never less.
+        pub fn wakes(&self) -> u64 {
+            WAKES.get() as u64
+        }
         pub fn wake_all(&self) {
             WAKES.set(WAKES.get() + 1);
         }

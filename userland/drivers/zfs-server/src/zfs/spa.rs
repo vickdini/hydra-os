@@ -45,8 +45,20 @@ const SECTOR: u64 = 512;
 pub(crate) const MAX_RUN: usize = crate::ipc::service::WINDOW_PAGES as usize;
 /// Size of the RAM-backed pool used when no ATA disk is present.
 const RAM_POOL_BYTES: u64 = 64 * 1024 * 1024;
-/// Default cap on cached blocks (128 MiB of frames).
+/// Default cap on cached blocks (128 MiB of frames), and the least the kernel may set.
 const CACHE_BLOCKS: usize = 32 * 1024;
+/// Cap on cached blocks of pools opened from now on ([`set_cache_blocks`]).
+static CACHE_CAP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(CACHE_BLOCKS);
+
+/// Sets how many blocks the block cache of pools opened from now on may hold (at least
+/// [`CACHE_BLOCKS`]). The kernel sizes it from the RAM: Firefox alone maps 150 MB of
+/// libraries at every start, more than 128 MiB, so an LRU cache that size kept nothing.
+///
+/// # Arguments
+/// * `blocks` - Cache capacity in 4 KiB blocks.
+pub fn set_cache_blocks(blocks: usize) {
+    CACHE_CAP.store(blocks.max(CACHE_BLOCKS), core::sync::atomic::Ordering::Relaxed);
+}
 
 /// Returns the 4 KiB contents of a frame through the identity map.
 ///
@@ -416,7 +428,7 @@ impl Spa {
         Self {
             vdev,
             label,
-            cache: BlockCache::new(CACHE_BLOCKS),
+            cache: BlockCache::new(CACHE_CAP.load(core::sync::atomic::Ordering::Relaxed)),
             bitmap: alloc::vec![0u64; words],
             dirty_bitmap_blocks: BTreeMap::new(),
             pending_free: Vec::new(),

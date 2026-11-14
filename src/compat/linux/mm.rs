@@ -56,28 +56,74 @@ pub struct InodeObject {
     pages: Mutex<BTreeMap<u64, PhysFrame<Size4KiB>>>,
 }
 
+/// Pages a mapped file reads from the pool at once when one is missing: the aligned window
+/// around it (Linux reads ahead too). Each read is a request to the file server, which
+/// costs far more than the extra pages: page by page, mapping Firefox's libraries took
+/// 20,000 requests.
+const READ_AHEAD_PAGES: u64 = 16;
+
 impl MappedObject for InodeObject {
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         if let Some(&f) = self.pages.lock().get(&pgoff) {
             return Some(f);
         }
         let size = ZfsClient::getattr(self.ino).ok()?.size;
-        if pgoff * PAGE_SIZE >= (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1) {
+        let file_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        if pgoff >= file_pages {
             return None;
         }
-        let frame = alloc_user_frame()?;
-        let buf = unsafe { core::slice::from_raw_parts_mut(crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()), PAGE_SIZE as usize) };
-        if ZfsClient::read_at(self.ino, pgoff * PAGE_SIZE, buf).is_err() {
-            frame_ref_dec(frame);
-            return None;
-        }
+        // The aligned window around `pgoff`, trimmed of cached pages at its start, ending
+        // before the first cached page after `pgoff` or at the end of the file. Cached
+        // pages inside it are read again but kept as they are
+        let window = pgoff - pgoff % READ_AHEAD_PAGES;
+        let (first, end) = {
+            let pages = self.pages.lock();
+            let mut first = window;
+            while first < pgoff && pages.contains_key(&first) {
+                first += 1;
+            }
+            let mut end = pgoff + 1;
+            while end < (window + READ_AHEAD_PAGES).min(file_pages) && !pages.contains_key(&end) {
+                end += 1;
+            }
+            (first, end)
+        };
+        let mut buf = alloc::vec![0u8; ((end - first) * PAGE_SIZE) as usize];
+        let t0 = super::prof::start();
+        let read = ZfsClient::read_at(self.ino, first * PAGE_SIZE, &mut buf);
+        super::prof::fault(super::prof::FILE_READ, t0);
+        read.ok()?;
         let mut pages = self.pages.lock();
-        if let Some(&existing) = pages.get(&pgoff) {
-            frame_ref_dec(frame);
-            return Some(existing);
+        let mut wanted = None;
+        for p in first..end {
+            if let Some(&existing) = pages.get(&p) {
+                // Another CPU read it meanwhile: keep that one
+                if p == pgoff {
+                    wanted = Some(existing);
+                }
+                continue;
+            }
+            let Some(frame) = alloc_user_frame() else {
+                // Out of memory: the page asked for is all that matters
+                if p == pgoff {
+                    return None;
+                }
+                continue;
+            };
+            let off = ((p - first) * PAGE_SIZE) as usize;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf[off..].as_ptr(),
+                    crate::memory::frame_allocator::phys_to_virt(frame.start_address().as_u64()),
+                    PAGE_SIZE as usize,
+                );
+            }
+            pages.insert(p, frame);
+            if p == pgoff {
+                wanted = Some(frame);
+            }
         }
-        pages.insert(pgoff, frame);
-        Some(frame)
+        wanted
     }
 }
 

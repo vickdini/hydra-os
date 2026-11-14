@@ -208,6 +208,24 @@ impl Command for LinuxCommand {
                 println!("[+] Linux syscall tracing {}", if on { "enabled" } else { "disabled" });
             }
 
+            "prof" => {
+                // linux prof on | off | reset | show [N]: kernel time per system call and page fault kind
+                use crate::compat::linux::prof;
+                match args.get(1).copied().unwrap_or("show") {
+                    "on" => {
+                        prof::reset();
+                        prof::ON.store(true, core::sync::atomic::Ordering::Relaxed);
+                        println!("[+] Linux profile reset and started");
+                    }
+                    "off" => {
+                        prof::ON.store(false, core::sync::atomic::Ordering::Relaxed);
+                        println!("[+] Linux profile stopped");
+                    }
+                    "reset" => prof::reset(),
+                    _ => prof::show(args.get(2).and_then(|n| n.parse().ok()).unwrap_or(25)),
+                }
+            }
+
             "wayland" => {
                 // linux wayland [root]: start the compositor for clients in a Linux root
                 let root = args.get(1).copied().unwrap_or("/ubuntu");

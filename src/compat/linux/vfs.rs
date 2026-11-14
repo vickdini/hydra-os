@@ -2115,7 +2115,7 @@ fn own_fd_number(abs: &str) -> Option<i32> {
 ///
 /// # Returns
 /// Link destination string if descriptor is valid, or `None`.
-fn fd_link(abs: &str) -> Option<String> {
+pub(crate) fn fd_link(abs: &str) -> Option<String> {
     let rest = abs.strip_prefix("/proc/")?;
     let (who, fd) = rest.split_once("/fd/")?;
     let (_, pid) = super::proc::current_ids();

@@ -93,6 +93,9 @@ pub struct LinuxPollFd {
     pub revents: i16,
 }
 
+/// [`EpollWatch::seen`] of a watch that has not reported yet.
+pub const NOT_SEEN: u64 = u64::MAX;
+
 /// Internal kernel entry representing a single file descriptor registered in an [`EpollInstance`].
 ///
 /// # Lifecycle
@@ -108,6 +111,11 @@ pub struct EpollWatch {
     pub data: u64,
     /// An edge-triggered watch on an always-ready file already reported its readiness.
     pub reported: bool,
+    /// For an edge-triggered watch on an eventfd: its wait queue's wakeup count when the
+    /// watch last reported ([`NOT_SEEN`] before that). It reports again only after another
+    /// wakeup, not whenever the eventfd holds a value: Firefox's event loops spun at
+    /// 9,000 `epoll_wait` calls a second on level-triggered eventfds.
+    pub seen: u64,
     /// The open file it watches ([`FileDescriptor::object_id`]; 0: not known yet, taken
     /// from the descriptor at the next wait). Linux watches a file, not a number: once
     /// `fd` is closed or names another file, the watch is gone.
@@ -166,6 +174,7 @@ impl EpollInstance {
                     events: ev.events,
                     data: ev.data,
                     reported: false,
+                    seen: NOT_SEEN,
                     file: 0,
                 });
                 Ok(())
@@ -183,6 +192,8 @@ impl EpollInstance {
                 entry.events = ev.events;
                 entry.data = ev.data;
                 entry.reported = false;
+                // Linux re-arms the watch: a ready file is reported again
+                entry.seen = NOT_SEEN;
                 Ok(())
             }
             _ => Err(-EINVAL),
@@ -245,6 +256,8 @@ pub fn epoll_collect_ready(
 
     let mut fired_oneshot = Vec::new();
     let mut fired_edge = Vec::new();
+    // Edge-triggered eventfd watches that reported, with the wakeup count they saw
+    let mut seen_now: Vec<(i32, u64)> = Vec::new();
     // Watches whose file is gone (dropped), and ones learning their file (bound)
     let mut gone = Vec::new();
     let mut bound = Vec::new();
@@ -267,7 +280,8 @@ pub fn epoll_collect_ready(
             }
             if let Some(desc) = desc {
                 // Files are always ready, so an edge-triggered watch on one fires once (as on
-                // Linux); other descriptors stay level-triggered
+                // Linux); eventfds are edge-triggered below; other descriptors stay
+                // level-triggered (more wakeups than Linux, never fewer)
                 let always_ready = matches!(desc, FileDescriptor::File { .. } | FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. });
                 if watch.events & EPOLLET != 0 && always_ready {
                     if watch.reported {
@@ -275,9 +289,22 @@ pub fn epoll_collect_ready(
                     }
                     fired_edge.push(watch.fd);
                 }
+                // An edge-triggered eventfd: only after a wakeup since the last report. The
+                // count is read before the readiness, so a change between the two reports
+                // once more rather than never
+                let wakes = match desc {
+                    FileDescriptor::EventFd(e) if watch.events & EPOLLET != 0 => Some(e.lock().wq.wakes()),
+                    _ => None,
+                };
+                if wakes.is_some_and(|w| w == watch.seen) {
+                    continue;
+                }
                 let current_ev = fds.readiness(desc);
                 let matched = current_ev & (watch.events | EPOLLERR | EPOLLHUP);
                 if matched != 0 {
+                    if let Some(w) = wakes {
+                        seen_now.push((watch.fd, w));
+                    }
                     ready.push(LinuxEpollEvent {
                         events: matched,
                         data: watch.data,
@@ -308,6 +335,14 @@ pub fn epoll_collect_ready(
         for fd in fired_edge {
             if let Some(w) = ep.watches.get_mut(&fd) {
                 w.reported = true;
+            }
+        }
+    }
+    if !seen_now.is_empty() {
+        let mut ep = epoll.lock();
+        for (fd, wakes) in seen_now {
+            if let Some(w) = ep.watches.get_mut(&fd) {
+                w.seen = wakes;
             }
         }
     }

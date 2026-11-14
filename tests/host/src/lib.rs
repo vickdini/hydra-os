@@ -187,6 +187,8 @@ pub mod compat {
         pub mod mm;
         #[path = "../../../../../src/compat/linux/mqueue.rs"]
         pub mod mqueue;
+        #[path = "../../../../../src/compat/linux/prof.rs"]
+        pub mod prof;
         #[path = "../../../../../src/compat/linux/seccomp.rs"]
         pub mod seccomp;
         #[path = "../../../../../src/compat/linux/sockopt.rs"]
