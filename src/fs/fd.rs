@@ -248,8 +248,9 @@ pub const EFBIG_MSG: &str = "File too large";
 
 /// Errors of file I/O that keep their errno through the string-typed descriptor calls (a
 /// FUSE daemon's answers): `(errno, message)`.
-const IO_ERRORS: [(i64, &str); 12] = [
+const IO_ERRORS: [(i64, &str); 13] = [
     (-1, "Operation not permitted"),
+    (-9, EBADF_MSG),
     (-2, "No such file or directory"),
     (-4, "Interrupted system call"),
     (-11, "Resource temporarily unavailable"),
@@ -274,6 +275,9 @@ pub fn io_errno(m: &str) -> Option<i64> {
 }
 
 /// `data` cut to the file-size limit for a write at `offset`, or `EFBIG_MSG` past it.
+/// A read from a descriptor not open for reading, or a write to one not open for writing.
+pub const EBADF_MSG: &str = "Bad file descriptor";
+
 fn fsize_cut(data: &[u8], offset: u64) -> Result<&[u8], &'static str> {
     let limit = crate::compat::linux::limits::fsize();
     if limit == u64::MAX {
@@ -456,18 +460,27 @@ impl FileDescriptor {
         match self {
             FileDescriptor::MemFd { memfd, flags } => {
                 if *flags & 3 == 1 {
-                    return Err("File not opened for reading");
+                    return Err(EBADF_MSG);
                 }
                 Ok(memfd.lock().read_at(offset, buf))
             }
             FileDescriptor::Vnode(file) => {
-                let ino = file.lock().ino;
+                // The access mode of the descriptor, as for read(): a write-only one cannot
+                // read the file
+                let (ino, readable) = {
+                    let f = file.lock();
+                    (f.ino, f.readable())
+                };
+                if !readable {
+                    return Err(EBADF_MSG);
+                }
                 let n = ZfsClient::read_at(ino, offset as u64, buf).map_err(io_error)?;
                 if n > 0 {
                     file.lock().fan(crate::compat::linux::fanotify::FAN_ACCESS);
                 }
                 Ok(n)
             }
+            FileDescriptor::File { readable: false, .. } => Err(EBADF_MSG),
             FileDescriptor::File { path, .. } => read_path_at(path, offset, buf),
             _ => Err("Descriptor is not seekable"),
         }
@@ -492,12 +505,22 @@ impl FileDescriptor {
         match self {
             FileDescriptor::MemFd { memfd, flags } => {
                 if *flags & 3 == 0 {
-                    return Err("File not opened for writing");
+                    return Err(EBADF_MSG);
                 }
                 Ok(memfd.lock().write_at(offset, data))
             }
             FileDescriptor::Vnode(file) => {
-                let ino = file.lock().ino;
+                // A read-only descriptor cannot write the file (it was checked against the
+                // file's permissions only for reading)
+                let (ino, writable, append) = {
+                    let f = file.lock();
+                    (f.ino, f.writable(), f.flags & O_APPEND != 0)
+                };
+                if !writable {
+                    return Err(EBADF_MSG);
+                }
+                // Linux: with O_APPEND, pwrite appends whatever the offset says
+                let offset = if append { ZfsClient::getattr(ino).map(|a| a.size as usize).map_err(io_error)? } else { offset };
                 let data = fsize_cut(data, offset as u64)?;
                 let n = ZfsClient::write_at(ino, offset as u64, data).map_err(io_error)?;
                 if n > 0 {
@@ -505,6 +528,7 @@ impl FileDescriptor {
                 }
                 Ok(n)
             }
+            FileDescriptor::File { writable: false, .. } => Err(EBADF_MSG),
             FileDescriptor::File { path, .. } => write_path_at(path, Some(offset), data).map(|(n, _)| n),
             _ => Err("Descriptor is not seekable"),
         }

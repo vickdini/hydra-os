@@ -188,7 +188,48 @@ pub(crate) fn user_path(ptr: u64) -> Result<Vec<u8>, i64> {
     if p.is_empty() {
         return Err(ENOENT);
     }
+    // Linux: a path component longer than NAME_MAX (255) is ENAMETOOLONG
+    if p.split(|&b| b == b'/').any(|c| c.len() > 255) {
+        return Err(-36);
+    }
     Ok(p)
+}
+
+/// Linux's `check_sticky`: in a sticky directory (mode 01000, as `/tmp`), only the entry's
+/// owner, the directory's owner or root may remove or rename the entry.
+///
+/// # Returns
+/// `true` if the caller (effective uid `euid`) may not remove `entry` from `dir`.
+fn sticky_denied(dir: u64, entry: u64, euid: u32) -> Result<bool, i64> {
+    if euid == 0 {
+        return Ok(false);
+    }
+    let d = ZfsClient::getattr(dir)?;
+    if d.mode & 0o1000 == 0 || d.uid == euid {
+        return Ok(false);
+    }
+    Ok(ZfsClient::getattr(entry)?.uid != euid)
+}
+
+/// Where `O_CREAT` creates the file named by `path`: Linux follows a dangling symlink in the
+/// last component and creates its target (unless `O_EXCL` or `O_NOFOLLOW`: `follow` false),
+/// through at most 40 links.
+fn creation_target(base: u64, path: &[u8], follow: bool) -> Result<(u64, Vec<u8>), i64> {
+    let (mut base, mut path) = (base, path.to_vec());
+    if !follow {
+        return Ok((base, path));
+    }
+    for _ in 0..40 {
+        let link = match resolve(base, &path, false) {
+            Ok(ino) if ZfsClient::getattr(ino)?.mode & S_IFMT == S_IFLNK => ino,
+            _ => return Ok((base, path)),
+        };
+        let target = crate::fs::zfs::with_server(|s| s.readlink(link))?;
+        let (dir, _) = resolve_parent(base, &path)?;
+        base = if target.first() == Some(&b'/') { 0 } else { dir };
+        path = target;
+    }
+    Err(ELOOP)
 }
 
 /// Copies `data` to user memory at `ptr`.
@@ -1155,7 +1196,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     // (creat(path, 0444) returns a writable descriptor)
     let mut created = false;
     let ino = if flags & O_CREAT != 0 {
-        match resolve(base, path, follow) {
+        // O_EXCL never follows the last component: a symlink there (even dangling) exists
+        let follow_last = follow && flags & O_EXCL == 0;
+        match resolve(base, path, follow_last) {
             Ok(ino) => {
                 if flags & O_EXCL != 0 {
                     return Err(EEXIST);
@@ -1163,7 +1206,12 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 ino
             }
             Err(ENOENT) => {
-                let (parent, name) = resolve_parent(base, path)?;
+                // A trailing slash names a directory, which O_CREAT does not make
+                if path.last() == Some(&b'/') {
+                    return Err(EISDIR);
+                }
+                let (cbase, cpath) = creation_target(base, path, follow_last)?;
+                let (parent, name) = resolve_parent(cbase, &cpath)?;
                 let ro = super::mount::check_write();
                 if ro != 0 {
                     return Err(ro);
@@ -2196,6 +2244,17 @@ fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 
         for d in [sdir, ddir] {
             if !may_access(&ZfsClient::getattr(d)?, c.euid, c.egid, 3) {
                 return Err(EACCES);
+            }
+        }
+        // The sticky bit protects the entry moved away and the one it would replace
+        if let Ok(src) = zfs(|s| s.lookup(sdir, &sname)) {
+            if sticky_denied(sdir, src, c.euid)? {
+                return Err(EPERM);
+            }
+        }
+        if let Ok(dst) = zfs(|s| s.lookup(ddir, &dname)) {
+            if sticky_denied(ddir, dst, c.euid)? {
+                return Err(EPERM);
             }
         }
         if super::landlock::active() {
@@ -3367,9 +3426,14 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 NR_RMDIR => (AT_FDCWD, a[0], true),
                 _ => (a[0] as i64, a[1], a[2] & AT_REMOVEDIR != 0),
             };
-            with_parent(dirfd, p, false, |dir, name, _| {
+            with_parent(dirfd, p, false, |dir, name, c| {
                 let right = if rmdir { super::landlock::REMOVE_DIR } else { super::landlock::REMOVE_FILE };
                 super::landlock::check_dir(dir, right)?;
+                if let Ok(victim) = zfs(|s| s.lookup(dir, name)) {
+                    if sticky_denied(dir, victim, c.euid)? {
+                        return Err(EPERM);
+                    }
+                }
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))
             })
         }
@@ -3401,6 +3465,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_UTIMENSAT => utimens(a[0] as i64, a[1], a[2], a[3]),
 
         NR_TRUNCATE if super::landlock::active() && landlock_path(AT_FDCWD, a[0], super::landlock::TRUNCATE) != 0 => EACCES,
+        NR_TRUNCATE if (a[1] as i64) < 0 => EINVAL,
         NR_TRUNCATE => setattr_at(AT_FDCWD, a[0], true, false, SetAttr { size: Some(a[1]), ..SetAttr::default() }, |at, c| may_access(at, c.euid, c.egid, 2)),
         285 if matches!(crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned()), Some(FileDescriptor::MemFd { .. })) => {
             // fallocate on a memfd: pages are allocated when touched; only the size grows

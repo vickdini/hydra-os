@@ -814,6 +814,10 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let count = arg2 as usize;
             let offset = arg3 as usize;
             let is_read = num == SYS_PREAD64;
+            // Linux: a negative offset is EINVAL
+            if (arg3 as i64) < 0 {
+                return -EINVAL;
+            }
             if count == 0 {
                 return 0;
             }
