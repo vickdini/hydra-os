@@ -200,6 +200,11 @@ static NAMES: spin::Mutex<alloc::collections::BTreeMap<Vec<u8>, Found>> = spin::
 const NAMES_MAX: usize = 8192;
 static NAMES_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// For each cached path walk (same key as [`NAMES`]), the directories it went through that
+/// not everyone may search: the caller's search permission is checked on those each time
+/// (the result itself does not depend on who asked).
+static SEARCH_DIRS: spin::Mutex<alloc::collections::BTreeMap<Vec<u8>, Vec<u64>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
 fn names_gen() -> u64 {
     NAMES_GEN.load(core::sync::atomic::Ordering::Acquire)
 }
@@ -221,9 +226,28 @@ fn cache_name(key: Vec<u8>, found: &Found, gen: u64) {
         }
         if c.len() >= NAMES_MAX {
             c.clear();
+            SEARCH_DIRS.lock().clear();
         }
         c.insert(key, found.clone());
     })
+}
+
+/// Keeps the directories a cached walk went through (see [`SEARCH_DIRS`]).
+fn cache_search_dirs(key: Vec<u8>, dirs: Vec<u64>, gen: u64) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if names_gen() != gen {
+            return;
+        }
+        let mut c = SEARCH_DIRS.lock();
+        if c.len() >= NAMES_MAX {
+            c.clear();
+        }
+        c.insert(key, dirs);
+    })
+}
+
+fn cached_search_dirs(key: &[u8]) -> Vec<u64> {
+    x86_64::instructions::interrupts::without_interrupts(|| SEARCH_DIRS.lock().get(key).cloned().unwrap_or_default())
 }
 
 /// Forgets every lookup's result (a name changed).
@@ -232,6 +256,7 @@ pub fn forget_names() {
         let mut c = NAMES.lock();
         NAMES_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         c.clear();
+        SEARCH_DIRS.lock().clear();
     });
 }
 
@@ -362,29 +387,47 @@ impl ZfsServer {
     ///
     /// The resolved object ID on success, or a negative errno error code on failure.
     pub fn resolve_in(&mut self, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+        self.resolve_in_dirs(root, base, path, follow_last).map(|r| r.0)
+    }
+
+    /// [`Self::resolve_in`], with the directories the walk went through that not everyone
+    /// may search (all three `x` bits set): a Linux system call checks the caller's search
+    /// permission on them.
+    pub fn resolve_in_dirs(&mut self, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<(u64, Vec<u64>), i64> {
         if path.len() > 4096 {
             return Err(ENAMETOOLONG);
         }
-        // Through the initial namespace's FUSE mounts
+        // Through the initial namespace's FUSE mounts (not checked: see resolve_mnt)
         if fuse::ns0_any() || fuse::is_fuse(base) || fuse::is_fuse(root) {
             let list = fuse::ns0_list();
-            return self.resolve_mnt(root, fuse::ns0_mnt_of(root), base, fuse::ns0_mnt_of(base), path, follow_last, &list).map(|r| r.0);
+            return self.resolve_mnt(root, fuse::ns0_mnt_of(root), base, fuse::ns0_mnt_of(base), path, follow_last, &list).map(|r| (r.0, Vec::new()));
         }
         let key = name_key(1, &[root, base, follow_last as u64], path);
         if let Some(f) = cached_name(&key) {
-            return f.map(|f| f.0);
+            return f.map(|f| (f.0, cached_search_dirs(&key)));
         }
         let gen = names_gen();
-        let r = self
-            .request(FS_RESOLVE, |w| {
-                w.u64(root);
-                w.u64(base);
-                w.u64(follow_last as u64);
-                w.bytes(path);
-            })
-            .map(|r| (r.0, 0, None));
-        cache_name(key, &r, gen);
-        r.map(|f| f.0)
+        let r = self.request(FS_RESOLVE, |w| {
+            w.u64(root);
+            w.u64(base);
+            w.u64(follow_last as u64);
+            w.bytes(path);
+        });
+        let r = r.map(|(ino, len)| {
+            let mut dirs = Vec::new();
+            if len > 0 {
+                let mut rd = Reader::new(self.reply(len));
+                let n = rd.u64().min(256);
+                dirs = (0..n).map(|_| rd.u64()).collect();
+            }
+            (ino, dirs)
+        });
+        let found: Found = r.as_ref().map(|(ino, _)| (*ino, 0, None)).map_err(|e| *e);
+        cache_name(key.clone(), &found, gen);
+        if let Ok((_, dirs)) = &r {
+            cache_search_dirs(key, dirs.clone(), gen);
+        }
+        r
     }
 
     /// Resolves `path` through a mount table (see [`FS_RESOLVE_MNT`]).

@@ -349,8 +349,31 @@ pub(crate) fn resolve(base: u64, path: &[u8], follow: bool) -> Result<u64, i64> 
         // An open directory can still be reopened ("."), but nothing reached from it
         EMPTY_ROOT if base != 0 && base != EMPTY_ROOT && matches!(path, b"." | b"./") => Ok(base),
         EMPTY_ROOT => Err(ENOENT),
-        root => ZfsClient::resolve_in(root, base, path, follow),
+        root => {
+            let (ino, dirs) = ZfsClient::resolve_in_dirs(root, base, path, follow)?;
+            may_search(&dirs)?;
+            Ok(ino)
+        }
     }
+}
+
+/// Linux: every directory a path walk goes through needs search (`x`) permission for the
+/// caller. `dirs` are those of a walk that not everyone may search (the file server lists
+/// them); root passes (`CAP_DAC_READ_SEARCH`).
+fn may_search(dirs: &[u64]) -> Result<(), i64> {
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    let c = creds();
+    if c.euid == 0 {
+        return Ok(());
+    }
+    for &d in dirs {
+        if !may_access(&ZfsClient::getattr(d)?, c.euid, c.egid, 1) {
+            return Err(EACCES);
+        }
+    }
+    Ok(())
 }
 
 /// `(pid, rest)` of an absolute path `/proc/<pid>/root[/rest]` naming another process's
@@ -490,7 +513,28 @@ fn resolve_parent(base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
     match proc_root() {
         _ if base == PSEUDO_DIR_BASE => Err(ENOENT),
         EMPTY_ROOT => Err(ENOENT),
-        root => ZfsClient::resolve_parent_in(root, base, path),
+        root => {
+            let (parent, name) = ZfsClient::resolve_parent_in(root, base, path)?;
+            // Search permission on the way to the parent and on the parent itself (the
+            // last name is looked up in it)
+            let (_, mut dirs) = ZfsClient::resolve_in_dirs(root, base, parent_path(path), true)?;
+            dirs.push(parent);
+            may_search(&dirs)?;
+            Ok((parent, name))
+        }
+    }
+}
+
+/// The directory part of `path` (`.` for a single name, `/` for one at the root).
+fn parent_path(path: &[u8]) -> &[u8] {
+    let mut end = path.len();
+    while end > 1 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    match path[..end].iter().rposition(|&b| b == b'/') {
+        Some(0) => b"/",
+        Some(i) => &path[..i],
+        None => b".",
     }
 }
 

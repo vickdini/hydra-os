@@ -76,6 +76,11 @@ static int chown_own(void) {
 }
 static int access_private(void) { return err(access(P("private"), R_OK)); }
 static int search_noexec_dir(void) { return err(open(P("noexec/file"), O_RDONLY)); }
+static int create_below_noexec(void) { return err(open(P("noexec/sub/new"), O_WRONLY | O_CREAT, 0644)); }
+static int stat_below_noexec(void) {
+    struct stat st;
+    return err(stat(P("noexec/sub"), &st));
+}
 
 int main(void) {
     if (geteuid() != 0) {
@@ -234,6 +239,8 @@ int main(void) {
     put(P("sticky/roots"), "r");
     mkdir(P("noexec"), 0744);
     put(P("noexec/file"), "f");
+    mkdir(P("noexec/sub"), 0755);
+    chmod(P("noexec/sub"), 0777);
     chmod(base, 0755);
     check(as_nobody(open_private) == EACCES, "another user's 0600 file: EACCES");
     check(as_nobody(write_readonly) == EACCES, "writing a 0644 file of root's: EACCES");
@@ -243,11 +250,9 @@ int main(void) {
     check(as_nobody(chmod_others) == EPERM, "chmod of another user's file: EPERM");
     check(as_nobody(chown_own) == EPERM, "giving one's file to root: EPERM");
     check(as_nobody(access_private) == EACCES, "access(R_OK) of another user's 0600 file: EACCES");
-    {
-        // Known Hydra bug 50 (the ZFS server's path walk does not know the caller): reported, not counted
-        int r = as_nobody(search_noexec_dir);
-        printf("%s a file in a directory without search (x) permission: EACCES (got %d)\n", r == EACCES ? "ok  " : "KNOWN", r);
-    }
+    check(as_nobody(search_noexec_dir) == EACCES, "a file in a directory without search (x) permission: EACCES");
+    check(as_nobody(create_below_noexec) == EACCES, "creating below a directory without search permission: EACCES");
+    check(as_nobody(stat_below_noexec) == EACCES, "stat through a directory without search permission: EACCES");
     // root: the setgid bit is cleared when a non-member chowns... (root passes everything)
     expect_err(access(P("private"), R_OK | W_OK), 0, "root may read and write any file");
     chmod(P("ro"), 0644);

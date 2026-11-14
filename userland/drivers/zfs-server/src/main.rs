@@ -106,6 +106,19 @@ pub mod fs {
         /// # Errors
         /// Returns negative Linux error code on resolution failure.
         pub fn resolve_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
+            resolve_in_dirs(s, root, base, path, follow_last, &mut Vec::new())
+        }
+
+        /// Whether directory `dir` is searchable by everyone (all three `x` bits: Linux
+        /// applies only the owner's bits to the owner, and the group's to members).
+        fn searchable_by_all(s: &mut ZfsServer, dir: u64) -> bool {
+            s.getattr(dir).map_or(false, |a| a.mode & 0o111 == 0o111)
+        }
+
+        /// [`resolve_in`], also collecting in `dirs` each directory looked up into that is
+        /// not searchable by everyone: the kernel checks the caller's search (`x`)
+        /// permission on those (it knows the caller, its groups and the ACLs).
+        pub fn resolve_in_dirs(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool, dirs: &mut Vec<u64>) -> Result<u64, i64> {
             if path.is_empty() {
                 return Err(ENOENT);
             }
@@ -114,11 +127,20 @@ pub mod fs {
             let mut pending: Vec<Vec<u8>> = components(path);
             pending.reverse();
             let mut links = 0;
+            let note = |s: &mut ZfsServer, dir: u64, dirs: &mut Vec<u64>| {
+                if !dirs.contains(&dir) && !searchable_by_all(s, dir) {
+                    dirs.push(dir);
+                }
+            };
             while let Some(comp) = pending.pop() {
                 if comp == b".." {
+                    if cur != root {
+                        note(s, cur, dirs);
+                    }
                     cur = if cur == root { root } else { s.lookup(cur, b"..")? };
                     continue;
                 }
+                note(s, cur, dirs);
                 let next = s.lookup(cur, &comp)?;
                 let is_last = pending.is_empty();
                 let attr = s.getattr(next)?;
@@ -636,7 +658,15 @@ fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
         FS_RESOLVE => {
             let (root, base, follow) = (r.u64(), r.u64(), r.u64() != 0);
             let path = r.bytes();
-            with_server(|s| fs::client::resolve_in(s, root, base, path, follow).map(|i| (i, 0)))
+            // Reply: the directories walked through that not everyone may search
+            let mut dirs = Vec::new();
+            with_server(|s| fs::client::resolve_in_dirs(s, root, base, path, follow, &mut dirs)).map(|i| {
+                w.u64(dirs.len() as u64);
+                for d in &dirs {
+                    w.u64(*d);
+                }
+                (i, w.len())
+            })
         }
         FS_RESOLVE_MNT => {
             let (root, root_mnt, base, base_mnt, follow) = (r.u64(), r.u64() as usize, r.u64(), r.u64() as usize, r.u64() != 0);

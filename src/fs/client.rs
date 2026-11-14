@@ -831,6 +831,19 @@ impl ZfsClient {
         })
     }
 
+    /// [`Self::resolve_in`], with the directories walked through that not everyone may
+    /// search (see `ZfsServer::resolve_in_dirs`).
+    pub fn resolve_in_dirs(root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<(u64, Vec<u64>), i64> {
+        if path.is_empty() {
+            return Err(zpl::ENOENT);
+        }
+        with_server(|s| {
+            let root = if root == 0 { s.root_obj() } else { root };
+            let base = if base == 0 { root } else { base };
+            s.resolve_in_dirs(root, base, path, follow_last)
+        })
+    }
+
     /// Resolves the parent directory inode and final component name of `path` within jail root `root`.
     ///
     /// # Arguments
