@@ -15,9 +15,15 @@ import subprocess
 import sys
 import time
 
-QEMU = r"C:\Program Files\qemu\qemu-system-x86_64.exe"
-OVMF = r"C:\Program Files\qemu\share\edk2-x86_64-code.fd"
-OVMF_VARS = r"C:\Program Files\qemu\share\edk2-i386-vars.fd"
+if os.name == "nt":
+    QEMU = r"C:\Program Files\qemu\qemu-system-x86_64.exe"
+    OVMF = r"C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+    OVMF_VARS = r"C:\Program Files\qemu\share\edk2-i386-vars.fd"
+else:
+    # Linux (Ubuntu's qemu-system-x86 and ovmf packages), e.g. inside WSL with KVM
+    QEMU = "qemu-system-x86_64"
+    OVMF = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+    OVMF_VARS = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SHIFTED = {
@@ -100,6 +106,14 @@ def read_log(path):
 
 def running_qemus():
     """The running QEMU processes: `(pid, command line)`."""
+    if os.name != "nt":
+        out = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
+        found = []
+        for line in out.splitlines():
+            pid, _, cmd = line.strip().partition(" ")
+            if pid.isdigit() and os.path.basename(cmd.split(" ")[0]) == "qemu-system-x86_64":
+                found.append((int(pid), cmd))
+        return found
     ps = ("Get-CimInstance Win32_Process -Filter \"name='qemu-system-x86_64.exe'\" | "
           "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
     try:
@@ -119,7 +133,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smp", type=int, default=1, help="number of CPUs")
     ap.add_argument("--mem", default="4G")
-    ap.add_argument("--accel", default="whpx", choices=["whpx", "tcg"], help="whpx: Windows hardware virtualization; tcg: software emulation")
+    ap.add_argument("--accel", default="whpx" if os.name == "nt" else "kvm", choices=["whpx", "kvm", "tcg"],
+                    help="whpx: Windows hardware virtualization; kvm: Linux's (also inside WSL2); tcg: software emulation")
     ap.add_argument("--wait", type=float, default=60)
     ap.add_argument("--until", default=None)
     ap.add_argument("--log", default=os.path.join(ROOT, "scratch", "qemu_run.log"))
@@ -143,7 +158,10 @@ def main():
     if a.kill_stale:
         for pid, cmd in others:
             if "-display none" in cmd:
-                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+                else:
+                    subprocess.run(["kill", "-9", str(pid)], capture_output=True)
         time.sleep(1.0)
         others = running_qemus()
     if others:
@@ -164,6 +182,8 @@ def main():
                     with open(part, "rb") as f:
                         out.write(f.read())
         firmware = ["-accel", "whpx,kernel-irqchip=off", "-bios", fw]
+    elif a.accel == "kvm":
+        firmware = ["-accel", "kvm", "-cpu", "host", "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}"]
     else:
         firmware = ["-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}"]
     args = [
