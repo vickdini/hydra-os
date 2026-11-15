@@ -43,6 +43,8 @@ pub mod idt;
 pub mod keyboard;
 /// 8042 PS/2 auxiliary pointing device (mouse) 3-byte packet driver.
 pub mod mouse;
+/// VMware's absolute pointer behind QEMU's PS/2 mouse (the guest pointer follows the host's).
+pub mod vmmouse;
 /// Peripheral Component Interconnect (PCI) bus enumeration and configuration space access.
 pub mod pci;
 pub mod percpu;

@@ -237,7 +237,7 @@ def main():
                 wait_for("Logged in as", mark, 30)
         start = len(read_log(a.log))
         prompts_seen = 0
-        typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%"]
+        typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%?"]
         for i, c in enumerate(a.commands):
             if proc.poll() is not None:
                 # Powered off or restarted (-no-reboot): nothing left to type into, and
@@ -261,6 +261,12 @@ def main():
             if c.startswith("!"):
                 # "!info registers": QEMU monitor command, output printed to stderr
                 r = qmp.cmd("human-monitor-command", {"command-line": c[1:]})
+                sys.stderr.write(str(r.get("return", r)) + "\n")
+                continue
+            if c.startswith("?"):
+                # '?{"execute": "input-send-event", "arguments": {...}}': a QMP command
+                req = json.loads(c[1:])
+                r = qmp.cmd(req["execute"], req.get("arguments", {}))
                 sys.stderr.write(str(r.get("return", r)) + "\n")
                 continue
             if c.startswith("%"):

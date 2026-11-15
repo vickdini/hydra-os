@@ -1,6 +1,7 @@
-//! # evdev input devices (`/dev/input/event0`, `/dev/input/event1`)
+//! # evdev input devices (`/dev/input/event0`, `event1`, `event2`)
 //!
-//! The PS/2 keyboard (minor 64) and mouse (minor 65) as Linux event devices, the interface
+//! The PS/2 keyboard (minor 64) and mouse (minor 65), and the absolute pointer behind the
+//! mouse under QEMU (minor 66, [`crate::arch::vmmouse`]) as Linux event devices, the interface
 //! libinput reads. Each open file has its own queue of `struct input_event` records
 //! (24 bytes: monotonic `timeval`, type, code, value), filled while a DRM client shows a
 //! picture ([`set_routing`]); otherwise the keyboard belongs to the console or Hydra's
@@ -34,12 +35,15 @@ const ENOSYS: i64 = -38;
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const EV_ABS: u16 = 0x03;
 const EV_MSC: u16 = 0x04;
 const EV_LED: u16 = 0x11;
 const EV_REP: u16 = 0x14;
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 const MSC_SCAN: u16 = 4;
+const ABS_X: u16 = 0;
+const ABS_Y: u16 = 1;
 const REL_X: u16 = 0;
 const REL_Y: u16 = 1;
 const REL_WHEEL: u16 = 8;
@@ -80,6 +84,8 @@ enum Raw {
     /// Relative motion (x right, y down), wheel clicks (positive = away from the user)
     /// and button bits (left, right, middle).
     Mouse(i16, i16, i8, u8),
+    /// The absolute pointer: x, y (0..=0xFFFF), wheel, buttons.
+    Abs(u16, u16, i8, u8),
 }
 
 /// Raw input from the interrupt handlers: a fixed ring, locked only with interrupts off.
@@ -135,6 +141,15 @@ pub fn push_mouse(dx: i32, dy: i32, wheel: i32, buttons: u8) {
     push_raw(Raw::Mouse(dx as i16, dy as i16, wheel as i8, buttons));
 }
 
+/// Queues an absolute pointer report (from the IRQ 12 handler): position 0..=0xFFFF on
+/// both axes, wheel clicks, buttons (bit 0 left, 1 right, 2 middle).
+pub fn push_abs(x: u16, y: u16, wheel: i8, buttons: u8) {
+    push_raw(Raw::Abs(x, y, wheel, buttons));
+}
+
+/// Number of event devices (keyboard, relative mouse, absolute pointer).
+const DEVICES: usize = 3;
+
 /// Checks whether any raw input events are currently queued in the ring buffer.
 ///
 /// # Returns
@@ -149,12 +164,16 @@ struct Translator {
     e0: bool,
     keys: [u8; 96],
     buttons: u8,
+    /// The absolute pointer's buttons and last position (for EVIOCGKEY / EVIOCGABS).
+    abs_buttons: u8,
+    abs_pos: (u16, u16),
 }
 
-static STATE: Mutex<Translator> = Mutex::new(Translator { e0: false, keys: [0; 96], buttons: 0 });
+static STATE: Mutex<Translator> =
+    Mutex::new(Translator { e0: false, keys: [0; 96], buttons: 0, abs_buttons: 0, abs_pos: (0x8000, 0x8000) });
 
-/// Open files of the keyboard (`[0]`) and mouse (`[1]`).
-static CLIENTS: Mutex<[Vec<Weak<EvdevFile>>; 2]> = Mutex::new([Vec::new(), Vec::new()]);
+/// Open files of the keyboard (`[0]`), mouse (`[1]`) and absolute pointer (`[2]`).
+static CLIENTS: Mutex<[Vec<Weak<EvdevFile>>; DEVICES]> = Mutex::new([Vec::new(), Vec::new(), Vec::new()]);
 
 /// Formats a 24-byte Linux `input_event` struct.
 ///
@@ -184,7 +203,7 @@ fn event(t: u64, ty: u16, code: u16, value: i32) -> [u8; 24] {
 pub fn release_held_keys() {
     pump();
     let t = crate::arch::pit::ticks();
-    let mut per_dev: [Vec<[u8; 24]>; 2] = [Vec::new(), Vec::new()];
+    let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
     {
         let mut st = STATE.lock();
         for code in 0..st.keys.len() * 8 {
@@ -199,6 +218,12 @@ pub fn release_held_keys() {
             }
         }
         st.buttons = 0;
+        for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+            if st.abs_buttons & (1 << i) != 0 {
+                per_dev[2].push(event(t, EV_KEY, *code, 0));
+            }
+        }
+        st.abs_buttons = 0;
         st.e0 = false;
     }
     for q in per_dev.iter_mut().filter(|q| !q.is_empty()) {
@@ -222,7 +247,7 @@ fn pump() {
         }
         out
     });
-    let mut per_dev: [Vec<[u8; 24]>; 2] = [Vec::new(), Vec::new()];
+    let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
     {
         let mut st = STATE.lock();
         for (r, t) in raw {
@@ -278,6 +303,28 @@ fn pump() {
                         q.push(event(t, EV_SYN, SYN_REPORT, 0));
                     }
                 }
+                Raw::Abs(x, y, wheel, buttons) => {
+                    let q = &mut per_dev[2];
+                    if (x, y) != st.abs_pos {
+                        q.push(event(t, EV_ABS, ABS_X, x as i32));
+                        q.push(event(t, EV_ABS, ABS_Y, y as i32));
+                        st.abs_pos = (x, y);
+                    }
+                    for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+                        let bit = 1u8 << i;
+                        if (buttons ^ st.abs_buttons) & bit != 0 {
+                            q.push(event(t, EV_KEY, *code, (buttons & bit != 0) as i32));
+                        }
+                    }
+                    st.abs_buttons = buttons;
+                    if wheel != 0 {
+                        q.push(event(t, EV_REL, REL_WHEEL, wheel as i32));
+                        q.push(event(t, EV_REL, REL_WHEEL_HI_RES, wheel as i32 * 120));
+                    }
+                    if !q.is_empty() && q.last().map_or(false, |e| e[16..18] != [0, 0]) {
+                        q.push(event(t, EV_SYN, SYN_REPORT, 0));
+                    }
+                }
             }
         }
     }
@@ -289,7 +336,7 @@ fn pump() {
 /// # Arguments
 ///
 /// * `per_dev` - Array containing batches of formatted events for keyboard (`[0]`) and mouse (`[1]`).
-fn deliver(per_dev: &[Vec<[u8; 24]>; 2]) {
+fn deliver(per_dev: &[Vec<[u8; 24]>; DEVICES]) {
     let mut clients = CLIENTS.lock();
     for (dev, events) in per_dev.iter().enumerate() {
         clients[dev].retain(|w| w.strong_count() > 0);
@@ -333,6 +380,7 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
     let dev = match minor {
         64 => 0,
         65 => 1,
+        66 => 2,
         _ => return Err(ENXIO),
     };
     pump(); // input from before the open is not this file's
@@ -348,10 +396,17 @@ struct Info {
     id: [u16; 4],
 }
 
-const INFO: [Info; 2] = [
+const INFO: [Info; DEVICES] = [
     Info { name: "AT Translated Set 2 keyboard", phys: "isa0060/serio0/input0", id: [0x11, 0x1, 0x1, 0xab41] },
     Info { name: "ImPS/2 Generic Wheel Mouse", phys: "isa0060/serio1/input0", id: [0x11, 0x2, 0x1, 0] },
+    // As Linux's vmmouse driver names it (BUS_I8042, vendor 2, product PSMOUSE_VMMOUSE)
+    Info { name: "VirtualPS/2 VMware VMMouse", phys: "isa0060/serio1/input1", id: [0x11, 0x2, 0x13, 0] },
 ];
+
+/// Number of event devices to list: the absolute pointer only where the hypervisor offers it.
+pub fn device_count() -> usize {
+    if crate::arch::vmmouse::present() { DEVICES } else { DEVICES - 1 }
+}
 
 /// Device names and identities for sysfs ([`super::devices`]).
 ///
@@ -402,6 +457,10 @@ pub fn capabilities(dev: usize, ty: u16) -> Vec<u8> {
     match (dev, ty) {
         (0, 0) => [EV_SYN, EV_KEY, EV_MSC, EV_LED, EV_REP].iter().for_each(|&t| set_bit(&mut m, t as usize)),
         (1, 0) => [EV_SYN, EV_KEY, EV_REL].iter().for_each(|&t| set_bit(&mut m, t as usize)),
+        (2, 0) => [EV_SYN, EV_KEY, EV_REL, EV_ABS].iter().for_each(|&t| set_bit(&mut m, t as usize)),
+        (2, EV_KEY) => [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().for_each(|&k| set_bit(&mut m, k as usize)),
+        (2, EV_REL) => [REL_WHEEL, REL_WHEEL_HI_RES].iter().for_each(|&c| set_bit(&mut m, c as usize)),
+        (2, EV_ABS) => [ABS_X, ABS_Y].iter().for_each(|&c| set_bit(&mut m, c as usize)),
         (0, EV_KEY) => {
             (1..=88).chain(96..=111).chain(125..=127).for_each(|k| set_bit(&mut m, k));
         }
@@ -528,8 +587,9 @@ impl CharDevice for EvdevFile {
                 if self.dev == 0 {
                     keys = st.keys;
                 } else {
+                    let held = if self.dev == 2 { st.abs_buttons } else { st.buttons };
                     for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
-                        if st.buttons & (1 << i) != 0 {
+                        if held & (1 << i) != 0 {
                             set_bit(&mut keys, *code as usize);
                         }
                     }
@@ -539,7 +599,17 @@ impl CharDevice for EvdevFile {
             }
             0x19 | 0x1a | 0x1b => self.put(arg, size, &[0u8; 8]), // LED / sound / switch state
             0x20..=0x3f => self.put(arg, size, &capabilities(self.dev, nr - 0x20)),
-            0x40..=0x7f => EINVAL, // EVIOCGABS: no absolute axes
+            0x40 | 0x41 if self.dev == 2 => {
+                // EVIOCGABS(ABS_X / ABS_Y): struct input_absinfo { value, minimum, maximum,
+                // fuzz, flat, resolution }
+                let (x, y) = STATE.lock().abs_pos;
+                let value = if nr == 0x40 { x } else { y } as i32;
+                let mut b = [0u8; 24];
+                b[0..4].copy_from_slice(&value.to_le_bytes());
+                b[8..12].copy_from_slice(&(crate::arch::vmmouse::MAX as i32).to_le_bytes());
+                self.put(arg, size, &b).min(0)
+            }
+            0x40..=0x7f => EINVAL, // EVIOCGABS: no other absolute axes
             0x80 | 0x81 => EINVAL, // force feedback upload / erase
             0x84 => self.put(arg, 4, &0u32.to_le_bytes()).min(0), // EVIOCGEFFECTS
             0x90 => 0, // EVIOCGRAB

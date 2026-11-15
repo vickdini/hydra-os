@@ -457,13 +457,15 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
         ),
     )?;
 
-    // ---- Input: the i8042 keyboard (event0) and mouse (event1) ----
+    // ---- Input: the i8042 keyboard (event0) and mouse (event1), and under QEMU the
+    // absolute pointer behind the mouse (event2, on the mouse's port as on Linux) ----
     t.file(s, "/sys/devices/platform/uevent", "")?;
     t.file(s, "/sys/devices/platform/i8042/uevent", "DRIVER=i8042\nMODALIAS=platform:i8042\n")?;
     t.link(s, "/sys/devices/platform/i8042/subsystem", "../../../bus/platform")?;
-    for dev in 0..2usize {
+    for dev in 0..super::evdev::device_count() {
         let (name, phys, id) = super::evdev::device_info(dev);
-        let serio = alloc::format!("/sys/devices/platform/i8042/serio{}", dev);
+        let port = dev.min(1);
+        let serio = alloc::format!("/sys/devices/platform/i8042/serio{}", port);
         let input_dir = alloc::format!("{}/input/input{}", serio, dev);
         let event_dir = alloc::format!("{}/event{}", input_dir, dev);
         let minor = 64 + dev as u64;
@@ -509,7 +511,7 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
         t.file(s, &alloc::format!("{}/dev", event_dir), &alloc::format!("13:{}\n", minor))?;
         t.link(s, &alloc::format!("{}/subsystem", event_dir), "../../../../../../../class/input")?;
         t.link(s, &alloc::format!("{}/device", event_dir), &alloc::format!("../../input{}", dev))?;
-        let rel = alloc::format!("../../devices/platform/i8042/serio{}/input/input{}", dev, dev);
+        let rel = alloc::format!("../../devices/platform/i8042/serio{}/input/input{}", port, dev);
         t.link(s, &alloc::format!("/sys/class/input/input{}", dev), &rel)?;
         t.link(s, &alloc::format!("/sys/class/input/event{}", dev), &alloc::format!("{}/event{}", rel, dev))?;
         t.link(s, &alloc::format!("/sys/dev/char/13:{}", minor), &alloc::format!("{}/event{}", rel, dev))?;
@@ -520,10 +522,12 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
             &alloc::format!("/run/udev/data/c13:{}", minor),
             &alloc::format!(
                 "I:{}\nE:ID_INPUT=1\n{}E:ID_BUS=i8042\nE:ID_SERIAL=noserial\nE:ID_PATH=platform-i8042-serio-{}\nE:ID_PATH_TAG=platform-i8042-serio-{}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\nV:1\n",
-                usec, class, dev, dev
+                usec, class, port, port
             ),
         )?;
-        t.link(s, &alloc::format!("/dev/input/by-path/platform-i8042-serio-{}-event-{}", dev, if dev == 0 { "kbd" } else { "mouse" }), &alloc::format!("../event{}", dev))?;
+        if dev < 2 {
+            t.link(s, &alloc::format!("/dev/input/by-path/platform-i8042-serio-{}-event-{}", dev, if dev == 0 { "kbd" } else { "mouse" }), &alloc::format!("../event{}", dev))?;
+        }
     }
     t.dir(s, "/sys/bus/serio/devices")?;
     t.dir(s, "/sys/bus/platform/devices")?;

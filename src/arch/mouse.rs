@@ -549,7 +549,14 @@ pub fn enable_irq() {
         mouse.packet_len = if wheel { 4 } else { 3 };
         mouse.irq_mode = true;
         mouse.packet_idx = 0;
-        crate::kprintln!("[mouse] {} packets{}", mouse.packet_len, if wheel { " (wheel enabled)" } else { "" });
+        // Under QEMU: VMware's absolute pointer, so the guest pointer follows the host's
+        let absolute = x86_64::instructions::interrupts::without_interrupts(super::vmmouse::enable);
+        crate::kprintln!(
+            "[mouse] {} packets{}{}",
+            mouse.packet_len,
+            if wheel { " (wheel enabled)" } else { "" },
+            if absolute { ", absolute (vmmouse)" } else { "" }
+        );
     }
     crate::arch::pic::unmask_irq(2);
     crate::arch::pic::unmask_irq(12);
@@ -572,6 +579,63 @@ pub fn on_mouse_irq() {
         None => return,
     };
     let (w, h) = mouse.screen;
+    if super::vmmouse::active() {
+        // The packet only says that absolute reports are queued: read those instead
+        if mouse.feed(byte, w, h).is_none() {
+            return;
+        }
+        let mut reports = [None; 8];
+        let mut n = 0;
+        super::vmmouse::drain(|r| {
+            if n == reports.len() {
+                reports.rotate_left(1);
+                n -= 1;
+            }
+            reports[n] = Some(r);
+            n += 1;
+        });
+        for r in reports.iter().flatten() {
+            let x = r.x as usize * w.saturating_sub(1) / super::vmmouse::MAX as usize;
+            let y = r.y as usize * h.saturating_sub(1) / super::vmmouse::MAX as usize;
+            let left = r.buttons & 1 != 0;
+            let right = r.buttons & 2 != 0;
+            let prev = mouse.state;
+            mouse.state = MouseState { x, y, left_button: left, right_button: right, middle_button: r.buttons & 4 != 0 };
+            // Hydra's own compositor reads positions and presses from the pending event
+            let ev = MouseEvent {
+                state: mouse.state,
+                delta_x: x as i32 - prev.x as i32,
+                delta_y: y as i32 - prev.y as i32,
+                left_pressed: left && !prev.left_button,
+                right_pressed: right && !prev.right_button,
+                wheel: r.wheel as i32,
+            };
+            let merged = match mouse.pending.take() {
+                Some(p) => MouseEvent {
+                    left_pressed: p.left_pressed || ev.left_pressed,
+                    right_pressed: p.right_pressed || ev.right_pressed,
+                    delta_x: p.delta_x + ev.delta_x,
+                    delta_y: p.delta_y + ev.delta_y,
+                    wheel: p.wheel + ev.wheel,
+                    ..ev
+                },
+                None => ev,
+            };
+            mouse.pending = Some(merged);
+        }
+        drop(mouse);
+        static FIRST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+        for r in reports.iter().flatten() {
+            if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+                crate::kprintln!("[mouse] first absolute report: {}, {} (of {})", r.x, r.y, super::vmmouse::MAX);
+            }
+            crate::compat::linux::evdev::push_abs(r.x, r.y, r.wheel, r.buttons);
+        }
+        if n > 0 {
+            crate::wayland::INPUT_WQ.wake_all();
+        }
+        return;
+    }
     if let Some(ev) = mouse.feed(byte, w, h) {
         // Merge with an event not yet polled so presses are not lost
         let merged = match mouse.pending.take() {
