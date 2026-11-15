@@ -9,7 +9,8 @@
 # Setting up the build root in WSL (as root: wsl -u root -e bash):
 #   1. debootstrap 1.0.142 or later (older ones fail on 26.04's merged /usr): fetch
 #      debootstrap_*_all.deb from the 26.04 archive, dpkg-deb -x it to /tmp/dbs, then
-#      DEBOOTSTRAP_DIR=/tmp/dbs/usr/share/debootstrap /tmp/dbs/usr/sbin/debootstrap #        --variant=minbase resolute /opt/u2604 http://archive.ubuntu.com/ubuntu
+#      DEBOOTSTRAP_DIR=/tmp/dbs/usr/share/debootstrap /tmp/dbs/usr/sbin/debootstrap \
+#        --variant=minbase resolute /opt/u2604 http://archive.ubuntu.com/ubuntu
 #   2. Add universe to /opt/u2604/etc/apt/sources.list; bind-mount /proc /sys /dev /dev/pts.
 #   3. apt-get install the build dependencies inside it (apt-get build-dep wine fails on a
 #      unicode-cldr-core version pin): gcc make flex bison gettext pkgconf
@@ -21,6 +22,10 @@
 #   4. Copy this script to /opt/u2604/root/ and run: chroot /opt/u2604 /root/build-wine.sh
 # Strip afterwards (strip for bin/ and *-unix, {i686,x86_64}-w64-mingw32-strip for the
 # Windows DLLs) before packing: 1.6 GB unstripped, 500 MB stripped, 70 MB packed.
+#
+# Wine Mono (Wine's .NET Framework) goes into the package as a shared install, in
+# share/wine/mono, where wineboot finds it: .NET programs then work without a download or a
+# question. Its version is the one this Wine release asks for (dlls/appwiz.cpl/addons.c).
 set -e
 cd /root
 [ -f wine-11.0.tar.xz ] || curl -s -O https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz
@@ -32,6 +37,12 @@ cd build
 grep -E "configure: (WARNING|error)" ../configure.log | cut -c1-160 || true
 make -j12 > ../make.log 2>&1
 make install DESTDIR=/root/stage > ../install.log 2>&1
+cd /root
+MONO=wine-mono-10.4.1
+[ -f $MONO-x86.tar.xz ] || curl -s -O https://dl.winehq.org/wine/wine-mono/10.4.1/$MONO-x86.tar.xz
+echo "a16606ef0724202e6a6848ece6e0cbba64d11e2f11aefe744af1d93c6d9f99bb  $MONO-x86.tar.xz" | sha256sum -c
+mkdir -p stage/opt/wine/share/wine/mono
+tar xf $MONO-x86.tar.xz -C stage/opt/wine/share/wine/mono
 cd /root/stage
 tar cJf /root/wine-11.0-hydra-wow64.tar.xz opt
 ls -l /root/wine-11.0-hydra-wow64.tar.xz

@@ -750,47 +750,59 @@ MaximumUid=60000
     }
 
     // Windows programs (Wine in /opt/wine, tools/build-wine.sh): each user's Windows
-    // environment (the Wine prefix, ~3 minutes to create) is prepared in the background at
+    // environment (the Wine prefix, ~4 minutes to create) is prepared in the background at
     // their first login, with a notification when it starts and when it is ready, so the
     // first double-clicked program does not wait for it. The setup runs without a display
     // (an unset WAYLAND_DISPLAY means wayland-0, the desktop: a name that does not exist):
     // Wine's own "configuration is being updated" window would sit on the desktop for minutes.
-    // Wine Mono and Gecko are not offered during it (download dialogs at a first login); a
-    // program that needs them asks
+    // Wine Mono (the .NET Framework) is part of Hydra's Wine package (share/wine/mono): it
+    // is added to the prefix after it is announced ready (~1 minute more), and to prefixes
+    // made before the package had it. Without it a .NET program exits with no message at
+    // all: Wine only offers Mono while a prefix is created. Gecko (Internet Explorer's
+    // engine) is not offered: a download dialog at a first login
     if lookup_path(s, t.root, "/opt/wine/bin/wine").is_some() {
         t.dir(s, "/usr/local/libexec")?;
         t.file_bytes(
             s,
             "/usr/local/libexec/hydra-wine-setup",
             br#"#!/bin/sh
-# Written by Hydra: prepares the user's Windows environment (Wine prefix) at first login
+# Written by Hydra: prepares the user's Windows environment (Wine prefix) at first login, and
+# adds Wine Mono (.NET programs) from Wine's shared copy when the prefix does not have it
 P="${WINEPREFIX:-$HOME/.wine}"
-[ -f "$P/system.reg" ] && exit 0
+M=$(ls -d /opt/wine/share/wine/mono/wine-mono-* 2>/dev/null | tail -n 1)
+has_mono() { grep -q '"DisplayName"="Wine Mono Windows Support"' "$P/system.reg" 2>/dev/null; }
+[ -f "$P/system.reg" ] && { [ -z "$M" ] || has_mono; } && exit 0
 mkdir -p "$HOME/.cache"
 LOCK="$HOME/.cache/hydra-wine-setup.lock"
 mkdir "$LOCK" 2>/dev/null || exit 0
 trap 'rmdir "$LOCK"' EXIT
 notify() {
-    gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
-        --method org.freedesktop.Notifications.Notify "Windows Programs" 0 "wine" "$1" "$2" "[]" "{}" 15000 >/dev/null 2>&1
+    gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications         --method org.freedesktop.Notifications.Notify "Windows Programs" 0 "application-x-ms-dos-executable" "$1" "$2" "[]" "{}" 15000 >/dev/null 2>&1
 }
-sleep 20
-notify "Preparing Windows support" "Windows programs will be ready in a few minutes. You can keep working."
-if env -u DISPLAY WAYLAND_DISPLAY=hydra-no-display WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" nice -n 10 /opt/wine/bin/wineboot -i >/dev/null 2>&1 \
-    && /opt/wine/bin/wineserver -w; then
+# Wine without a window, and without the questions about Mono and Gecko
+quiet() {
+    o="$1"
+    shift
+    env -u DISPLAY WAYLAND_DISPLAY=hydra-no-display WINEDEBUG=-all WINEDLLOVERRIDES="$o" nice -n 10 "$@" >/dev/null 2>&1         && /opt/wine/bin/wineserver -w
+}
+if [ ! -f "$P/system.reg" ]; then
+    sleep 20
+    notify "Preparing Windows support" "Windows programs will be ready in a few minutes. You can keep working."
+    if ! quiet "mscoree,mshtml=" /opt/wine/bin/wineboot -i; then
+        notify "Windows support could not be prepared" "It will be tried again at your next login."
+        rm -rf "$P"
+        exit 1
+    fi
     # The desktop portal asks which program opens a file until one was chosen 3 times in a
     # row: record the Windows Program Loader as chosen (a host app's id is empty)
-    for t in application/vnd.microsoft.portable-executable application/x-ms-dos-executable \
-        application/x-msdownload application/x-msi application/x-ms-shortcut; do
-        gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
-            --object-path /org/freedesktop/impl/portal/PermissionStore \
-            --method org.freedesktop.impl.portal.PermissionStore.SetPermission \
-            desktop-used-apps true "$t" "" "['wine', '3', '3']" >/dev/null 2>&1
+    for t in application/vnd.microsoft.portable-executable application/x-ms-dos-executable         application/x-msdownload application/x-msi application/x-ms-shortcut; do
+        gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore             --object-path /org/freedesktop/impl/portal/PermissionStore             --method org.freedesktop.impl.portal.PermissionStore.SetPermission             desktop-used-apps true "$t" "" "['wine', '3', '3']" >/dev/null 2>&1
     done
     notify "Windows support is ready" "Open a Windows program (.exe or .msi) with a double-click."
-else
-    notify "Windows support could not be prepared" "It will be tried again at your next login."
-    rm -rf "$P"
+fi
+# Wine Mono: Wine's own installer for it, the package Wine runs for a shared copy
+if [ -n "$M" ] && ! has_mono; then
+    quiet "mshtml=" /opt/wine/bin/wine msiexec /i "Z:$M/support/winemono-support.msi" /qn
 fi
 "#,
             0o755,
