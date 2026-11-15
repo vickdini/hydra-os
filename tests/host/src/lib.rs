@@ -104,14 +104,28 @@ pub mod arch {
         }
         #[repr(C, align(16))]
         #[derive(Clone)]
-        pub struct FpuState(pub [u8; 512]);
+        #[repr(C, align(64))]
+        pub struct FpuState(pub [u8; 1024]);
         impl FpuState {
             pub fn new() -> Self {
-                let mut area = [0u8; 512];
+                let mut area = [0u8; 1024];
                 area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
                 area[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
                 Self(area)
             }
+            pub fn legacy_written(&mut self) {
+                self.0[512] |= 0b011;
+            }
+        }
+        /// *stub* The host has no XSAVE in use (FXSAVE-format signal frames).
+        pub fn use_xsave() -> bool {
+            false
+        }
+        pub fn xsave_size() -> usize {
+            512
+        }
+        pub fn xcr0() -> u64 {
+            0
         }
     }
     /// *stub*

@@ -378,7 +378,8 @@ fn stop<F: UserFrame>(frame: &mut F, fpu: *mut FpuState, orig: u64, status: i32,
         t.regs = regs;
         t.regs_dirty = false;
         if !fpu.is_null() {
-            t.fpu = unsafe { (*fpu).0 };
+            let saved = unsafe { &*fpu };
+            t.fpu.copy_from_slice(&saved.0[..512]);
         }
         t.fpu_dirty = false;
         t.op = op;
@@ -410,7 +411,9 @@ fn stop<F: UserFrame>(frame: &mut F, fpu: *mut FpuState, orig: u64, status: i32,
                 t.listening = false;
                 let regs = t.regs_dirty.then_some(t.regs);
                 if t.fpu_dirty && !fpu.is_null() {
-                    unsafe { (*fpu).0 = t.fpu };
+                    let area = unsafe { &mut *fpu };
+                    area.0[..512].copy_from_slice(&t.fpu);
+                    area.legacy_written();
                 }
                 if r.detach {
                     tr.remove(&tid);

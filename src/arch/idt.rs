@@ -476,22 +476,103 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     // resume that task there at once, overwriting the frame before this CPU's iretq
 }
 
-/// 512-byte `FXSAVE64` area holding x87, MMX and SSE register state.
-#[repr(C, align(16))]
+/// A thread's x87/SSE/AVX state: an `XSAVE` area in the standard format (the 512-byte
+/// `FXSAVE` image, the 64-byte XSAVE header, then the AVX upper halves at 576), saved and
+/// restored with `XSAVE64`/`XRSTOR64` where the CPU has XSAVE ([`use_xsave`]), otherwise
+/// with `FXSAVE64`/`FXRSTOR64` (only the first 512 bytes).
+#[repr(C, align(64))]
 #[derive(Clone)]
-pub struct FpuState(pub [u8; 512]);
+pub struct FpuState(pub [u8; FPU_AREA]);
+
+/// Bytes of an [`FpuState`] (x87, SSE and AVX need 832; AVX-512 is not enabled).
+pub const FPU_AREA: usize = 1024;
+/// XSAVE header: `XSTATE_BV`, the components the area holds (bit 0 x87, 1 SSE, 2 AVX).
+const XSTATE_BV: usize = 512;
+
+/// XSAVE is used (set at boot by [`enable_xsave`] on every CPU): 1, else 0. Read by the
+/// trap and system call entries.
+#[export_name = "hydra_use_xsave"]
+static USE_XSAVE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// The state components enabled in XCR0 (x87 | SSE, and AVX where the CPU has it).
+static XCR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Bytes of the XSAVE area for [`XCR0`] (CPUID 0Dh), 512 without XSAVE.
+static XSAVE_SIZE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(512);
+
+/// Whether FPU state is saved with XSAVE.
+pub fn use_xsave() -> bool {
+    USE_XSAVE.load(Ordering::Relaxed) != 0
+}
+
+/// The enabled XSAVE components (XCR0), 0 without XSAVE.
+pub fn xcr0() -> u64 {
+    XCR0.load(Ordering::Relaxed)
+}
+
+/// Bytes of the state an XSAVE writes (the signal frame's FPU area), 512 without XSAVE.
+pub fn xsave_size() -> usize {
+    XSAVE_SIZE.load(Ordering::Relaxed) as usize
+}
+
+/// Turns on XSAVE and the AVX registers on the calling CPU (CR4.OSXSAVE, XCR0 = x87 | SSE
+/// | AVX), when the CPU has them: Windows programs use AVX after only checking that the
+/// CPU has it, which faults (invalid opcode) while the OS leaves it off. The boot
+/// processor decides; application processors repeat its choice. Without XSAVE (older
+/// CPUs, some emulated ones) FXSAVE stays in use.
+pub fn enable_xsave(boot_processor: bool) {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    let id1 = core::arch::x86_64::__cpuid(1);
+    let has_xsave = id1.ecx & (1 << 26) != 0;
+    let has_avx = id1.ecx & (1 << 28) != 0;
+    if boot_processor {
+        if !has_xsave {
+            return;
+        }
+        unsafe { Cr4::update(|f| f.insert(Cr4Flags::OSXSAVE)) };
+        let mut mask = 0b011u64;
+        if has_avx {
+            xsetbv(0b111);
+            // The area for these components must fit an FpuState
+            let size = core::arch::x86_64::__cpuid_count(0xD, 0).ebx;
+            if size as usize <= FPU_AREA {
+                mask = 0b111;
+            }
+        }
+        xsetbv(mask);
+        let size = core::arch::x86_64::__cpuid_count(0xD, 0).ebx;
+        XCR0.store(mask, Ordering::Relaxed);
+        XSAVE_SIZE.store(size, Ordering::Relaxed);
+        USE_XSAVE.store(1, Ordering::Release);
+    } else if use_xsave() && has_xsave {
+        unsafe { Cr4::update(|f| f.insert(Cr4Flags::OSXSAVE)) };
+        xsetbv(xcr0());
+    }
+}
+
+/// Sets XCR0 (the enabled XSAVE components) on the calling CPU (CR4.OSXSAVE must be set).
+fn xsetbv(mask: u64) {
+    unsafe {
+        core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") mask as u32, in("edx") (mask >> 32) as u32, options(nostack, preserves_flags));
+    }
+}
 
 impl FpuState {
-    /// Power-on state: all exceptions masked (FCW = 0x037F, MXCSR = 0x1F80).
+    /// Power-on state: all exceptions masked (FCW = 0x037F, MXCSR = 0x1F80), no AVX state
+    /// (XSTATE_BV 0: XRSTOR loads the components' initial values, MXCSR from the area).
     ///
     /// # Returns
     ///
     /// A new initialized [`FpuState`] instance.
     pub fn new() -> Self {
-        let mut area = [0u8; 512];
+        let mut area = [0u8; FPU_AREA];
         area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
         area[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
         Self(area)
+    }
+
+    /// Marks the 512-byte FXSAVE image as holding the x87 and SSE state (after code wrote
+    /// it, a signal frame or a debugger): XRSTOR then loads it rather than initial values.
+    pub fn legacy_written(&mut self) {
+        self.0[XSTATE_BV] |= 0b011;
     }
 }
 
@@ -1054,12 +1135,43 @@ global_asm!(
         push r14
         push r15
 
-        // Save the interrupted x87/SSE state below the frame. RBP (already saved in the
-        // context) keeps the context pointer across the call.
+        // Save the interrupted x87/SSE/AVX state below the frame (an FpuState: XSAVE with
+        // every enabled component, or FXSAVE without XSAVE). RBP (already saved in the
+        // context) keeps the context pointer across the call; RAX/RDX are saved too.
         mov rbp, rsp
-        sub rsp, 512
-        and rsp, -16
+        sub rsp, 1024
+        and rsp, -64
+        test byte ptr [rip + hydra_use_xsave], 1
+        jz 5f
+        // The XSAVE header first (stack leftovers here): XSAVE writes only the XSTATE_BV bits
+        // of the components it saves and nothing else of the header, and XRSTOR faults on
+        // any other bit set there
+        mov qword ptr [rsp + 512], 0
+        mov qword ptr [rsp + 520], 0
+        mov qword ptr [rsp + 528], 0
+        mov qword ptr [rsp + 536], 0
+        mov qword ptr [rsp + 544], 0
+        mov qword ptr [rsp + 552], 0
+        mov qword ptr [rsp + 560], 0
+        mov qword ptr [rsp + 568], 0
+        mov eax, -1
+        mov edx, -1
+        xsave64 [rsp]
+        jmp 6f
+    5:
         fxsave64 [rsp]
+        // A valid XSAVE header (x87 and SSE held, nothing else) after the FXSAVE image: the
+        // state may be restored with XRSTOR once XSAVE is on (a task switched out early in
+        // boot), which faults on a header of stack leftovers
+        mov qword ptr [rsp + 512], 3
+        mov qword ptr [rsp + 520], 0
+        mov qword ptr [rsp + 528], 0
+        mov qword ptr [rsp + 536], 0
+        mov qword ptr [rsp + 544], 0
+        mov qword ptr [rsp + 552], 0
+        mov qword ptr [rsp + 560], 0
+        mov qword ptr [rsp + 568], 0
+    6:
 
         // Arg 1 = ExceptionContext, Arg 2 = FPU save area (Win64: RCX/RDX, SysV: RDI/RSI)
         mov rcx, rbp
@@ -1073,8 +1185,17 @@ global_asm!(
         cli
         add rsp, 32
 
-        // Restore the FPU state (possibly swapped in by the scheduler)
+        // Restore the FPU state (possibly swapped in by the scheduler); RAX/RDX are popped
+        // below
+        test byte ptr [rip + hydra_use_xsave], 1
+        jz 7f
+        mov eax, -1
+        mov edx, -1
+        xrstor64 [rsp]
+        jmp 8f
+    7:
         fxrstor64 [rsp]
+    8:
         mov rsp, rbp
 
         // Restore General-Purpose Registers

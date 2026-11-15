@@ -911,12 +911,43 @@ global_asm!(
         push r8                                 // Arg 4
         push r9                                 // Arg 5
 
-        // 3. Save user x87/SSE state (Linux preserves it across syscalls; kernel code uses SSE).
-        // RBP (already saved in the frame) keeps the frame pointer across the call.
+        // 3. Save user x87/SSE/AVX state (Linux preserves it across syscalls; kernel code
+        // uses SSE): an FpuState, by XSAVE or (without it) FXSAVE. RBP (already saved in the
+        // frame) keeps the frame pointer across the call; RAX/RDX are in the frame.
         mov rbp, rsp
-        sub rsp, 512
-        and rsp, -16
+        sub rsp, 1024
+        and rsp, -64
+        test byte ptr [rip + hydra_use_xsave], 1
+        jz 5f
+        // The XSAVE header first (stack leftovers here): XSAVE writes only the XSTATE_BV bits
+        // of the components it saves and nothing else of the header, and XRSTOR faults on
+        // any other bit set there
+        mov qword ptr [rsp + 512], 0
+        mov qword ptr [rsp + 520], 0
+        mov qword ptr [rsp + 528], 0
+        mov qword ptr [rsp + 536], 0
+        mov qword ptr [rsp + 544], 0
+        mov qword ptr [rsp + 552], 0
+        mov qword ptr [rsp + 560], 0
+        mov qword ptr [rsp + 568], 0
+        mov eax, -1
+        mov edx, -1
+        xsave64 [rsp]
+        jmp 6f
+    5:
         fxsave64 [rsp]
+        // A valid XSAVE header (x87 and SSE held, nothing else) after the FXSAVE image: the
+        // state may be restored with XRSTOR once XSAVE is on (a task switched out early in
+        // boot), which faults on a header of stack leftovers
+        mov qword ptr [rsp + 512], 3
+        mov qword ptr [rsp + 520], 0
+        mov qword ptr [rsp + 528], 0
+        mov qword ptr [rsp + 536], 0
+        mov qword ptr [rsp + 544], 0
+        mov qword ptr [rsp + 552], 0
+        mov qword ptr [rsp + 560], 0
+        mov qword ptr [rsp + 568], 0
+    6:
 
         // 4. Call Rust dispatcher: Arg 1 = SyscallFrame, Arg 2 = FPU area (Win64 + SysV)
         mov rcx, rbp
@@ -928,7 +959,15 @@ global_asm!(
         cli                                     // no interrupts while user state is restored
         add rsp, 32
 
+        test byte ptr [rip + hydra_use_xsave], 1
+        jz 7f
+        mov eax, -1
+        mov edx, -1
+        xrstor64 [rsp]
+        jmp 8f
+    7:
         fxrstor64 [rsp]
+    8:
         mov rsp, rbp
 
         // 5. Restore registers (dispatcher updated rax with return value)

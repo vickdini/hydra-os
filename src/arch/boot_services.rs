@@ -154,13 +154,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         );
     }
 
-    // 3b. Task switches and syscalls save x87/SSE state with FXSAVE only. Disable XSAVE
-    // so user code (glibc's CPU feature detection) never enables AVX registers that would
-    // not be preserved.
-    unsafe {
-        use x86_64::registers::control::{Cr4, Cr4Flags};
-        Cr4::update(|flags| flags.remove(Cr4Flags::OSXSAVE));
-    }
+    // 3b. XSAVE and the AVX registers where the CPU has them (task switches, system calls
+    // and signals then save and restore them); otherwise FXSAVE and no AVX
+    crate::arch::idt::enable_xsave(true);
 
     // 4. Load Hydra's GDT and reload segments
     crate::arch::gdt::load_and_switch();

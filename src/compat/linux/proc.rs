@@ -212,6 +212,11 @@ struct SigSender {
     errno: i32,
     /// `si_value` of a signal queued with `rt_sigqueueinfo` (`sigqueue`).
     value: u64,
+    /// A fault's CPU exception: the vector, its error code and (page faults) CR2, for the
+    /// signal frame's `trapno`, `err` and `cr2` (Wine tells exceptions apart by them).
+    trapno: u64,
+    err: u64,
+    cr2: u64,
 }
 
 /// `si_code` of a signal sent by `kill`.
@@ -1985,7 +1990,8 @@ fn fault_sender(ctx: &ExceptionContext, sig: u32) -> SigSender {
         (SIGFPE, 0) => (1, ctx.rip),
         _ => (0x80, 0),
     };
-    SigSender { code, call_addr: addr, ..SigSender::default() }
+    let cr2 = if ctx.vector == 14 { x86_64::registers::control::Cr2::read_raw() } else { 0 };
+    SigSender { code, call_addr: addr, trapno: ctx.vector, err: ctx.error_code, cr2, ..SigSender::default() }
 }
 
 /// `siginfo` for `sig` from `s`, as a handler (or a tracer's `PTRACE_GETSIGINFO`) sees it.
@@ -2258,8 +2264,22 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
         regs.rsp - 128 // skip the red zone
     };
 
-    // FXSAVE area, then the frame: pretcode (8) + ucontext (304) + siginfo (128)
-    sp = (sp - 512) & !63;
+    // The FPU area (Linux's fpstate), then the frame: pretcode (8) + ucontext (304) +
+    // siginfo (128). With XSAVE the area is the XSAVE image, its software-reserved bytes
+    // (464..512) saying so and FP_XSTATE_MAGIC2 after it, as Linux writes it: the handler
+    // may use AVX, and sigreturn restores the interrupted code's AVX registers from it.
+    // Without XSAVE it is the 512-byte FXSAVE image.
+    let xstate = crate::arch::idt::use_xsave();
+    let xsize = if xstate { crate::arch::idt::xsave_size() } else { 512 };
+    let mut fp = alloc::vec::Vec::from(&fpu.0[..xsize]);
+    if xstate {
+        fp[464..468].copy_from_slice(&FP_XSTATE_MAGIC1.to_le_bytes());
+        fp[468..472].copy_from_slice(&((xsize + 4) as u32).to_le_bytes()); // extended_size
+        fp[472..480].copy_from_slice(&crate::arch::idt::xcr0().to_le_bytes()); // xfeatures
+        fp[480..484].copy_from_slice(&(xsize as u32).to_le_bytes()); // xstate_size
+        fp.extend_from_slice(&FP_XSTATE_MAGIC2.to_le_bytes());
+    }
+    sp = (sp - fp.len() as u64) & !63;
     let fp_addr = sp;
     let frame = ((sp - 440) & !15) - 8;
     let uc = frame + 8;
@@ -2268,6 +2288,8 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     let mut f = [0u8; 440];
     let put = |f: &mut [u8; 440], off: usize, v: u64| f[off..off + 8].copy_from_slice(&v.to_le_bytes());
     put(&mut f, 0, act.restorer);
+    // uc_flags: the FPU area holds XSAVE state
+    put(&mut f, 8, if xstate { UC_FP_XSTATE } else { 0 });
     // ucontext: uc_flags, uc_link, uc_stack
     put(&mut f, 8 + 16, alt.alt_sp);
     f[8 + 24..8 + 28].copy_from_slice(&(if on_alt { SS_ONSTACK } else if alt.alt_size == 0 { SS_DISABLE } else { 0 }).to_le_bytes());
@@ -2283,15 +2305,18 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     }
     f[mc + 144..mc + 146].copy_from_slice(&cs.to_le_bytes()); // cs: 0x23 when 32-bit code was interrupted
     f[mc + 150..mc + 152].copy_from_slice(&crate::arch::gdt::USER_DS.to_le_bytes()); // ss
-    put(&mut f, mc + 160, 0); // err
-    put(&mut f, mc + 168, 0); // trapno
-    put(&mut f, mc + 176, old_mask);
-    put(&mut f, mc + 192, fp_addr);
+    // Linux's sigcontext after the segment registers: err, trapno, oldmask, cr2, fpstate
+    // (glibc's mcontext_t: gregs[REG_ERR..REG_CR2], then fpregs)
+    put(&mut f, mc + 168, old_mask);
+    put(&mut f, mc + 184, fp_addr);
     // uc_sigmask
     put(&mut f, 8 + 296, old_mask);
     // siginfo: si_signo, si_errno, si_code, then si_pid and si_uid (for kill/tkill/tgkill)
     // The thread's own record (tgkill) first, then the process's (kill)
     let sender = PROCS.lock().get_mut(&pid).map(|p| take_sender(p, tid, sig)).unwrap_or_default();
+    put(&mut f, mc + 152, sender.err);
+    put(&mut f, mc + 160, sender.trapno);
+    put(&mut f, mc + 176, sender.cr2);
     f[312..316].copy_from_slice(&(sig as i32).to_le_bytes());
     f[320..324].copy_from_slice(&sender.code.to_le_bytes());
     f[328..332].copy_from_slice(&sender.pid.to_le_bytes());
@@ -2308,7 +2333,7 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
         f[340..344].copy_from_slice(&super::seccomp::AUDIT_ARCH_X86_64.to_le_bytes());
     }
 
-    if !write_bytes(fp_addr, &fpu.0) || !write_bytes(frame, &f) {
+    if !write_bytes(fp_addr, &fp) || !write_bytes(frame, &f) {
         return false;
     }
 
@@ -2320,6 +2345,39 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     regs.rax = 0;
     regs.rflags &= !0x400; // clear DF
     true
+}
+
+/// `fpstate` software-reserved bytes: the area is XSAVE state (Linux's FP_XSTATE_MAGIC1).
+const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+/// After the XSAVE state in a signal frame (Linux's FP_XSTATE_MAGIC2).
+const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
+/// `uc_flags`: the frame's FPU area holds XSAVE state.
+const UC_FP_XSTATE: u64 = 1;
+
+/// Takes the extended (AVX) state from a signal frame's FPU area at `fp_addr` into `fpu`
+/// (its first 512 bytes already copied), when the area says it holds XSAVE state (magic 1 in
+/// the software-reserved bytes, magic 2 after the state) and XSAVE is in use. The header is
+/// made valid for XRSTOR (only enabled components; compaction and reserved bytes 0): a
+/// handler may have written anything there, and XRSTOR would fault in the kernel.
+fn restore_xstate(fpu: &mut FpuState, fp_addr: u64) {
+    if !crate::arch::idt::use_xsave() {
+        return;
+    }
+    let word = |b: &[u8], off: usize| u32::from_le_bytes(b[off..off + 4].try_into().unwrap());
+    let size = crate::arch::idt::xsave_size();
+    let (magic1, extended, xstate_size) = (word(&fpu.0, 464), word(&fpu.0, 468) as usize, word(&fpu.0, 480) as usize);
+    if magic1 != FP_XSTATE_MAGIC1 || xstate_size != size || extended != size + 4 || !prefault_current(fp_addr, extended as u64, false) {
+        return;
+    }
+    let mut ext = alloc::vec![0u8; extended - 512];
+    unsafe { core::ptr::copy_nonoverlapping((fp_addr + 512) as *const u8, ext.as_mut_ptr(), ext.len()) };
+    if word(&ext, size - 512) != FP_XSTATE_MAGIC2 {
+        return;
+    }
+    fpu.0[512..size].copy_from_slice(&ext[..size - 512]);
+    let bv = u64::from_le_bytes(fpu.0[512..520].try_into().unwrap()) & crate::arch::idt::xcr0();
+    fpu.0[512..520].copy_from_slice(&bv.to_le_bytes());
+    fpu.0[520..576].fill(0);
 }
 
 /// Delivers pending signals before returning from a system call. `orig_nr` is the system
@@ -2583,7 +2641,7 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
         // User code may only change the arithmetic flags, DF, TF... keep IF set
         rflags: (g(17) & 0x0000_0000_0025_4DD5) | 0x202,
     };
-    let fp_addr = get(mc + 192);
+    let fp_addr = get(mc + 184);
     let mask = get(296);
     // Back to 32-bit code if that is what the signal interrupted; any other code segment
     // means 64-bit (Hydra's are the only ones a thread can run in)
@@ -2604,6 +2662,8 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
         // Keep MXCSR's reserved bits clear or FXRSTOR faults
         let mxcsr = u32::from_le_bytes(fpu.0[24..28].try_into().unwrap()) & 0xFFFF;
         fpu.0[24..28].copy_from_slice(&mxcsr.to_le_bytes());
+        fpu.legacy_written();
+        restore_xstate(&mut fpu, fp_addr);
     }
     // A tracer's exit stop for rt_sigreturn (it does not return through the dispatcher)
     if super::ptrace::is_traced(current_ids().0) {
@@ -2661,12 +2721,24 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState, cs: u16) -> ! {
     // the user GS base swapped in (as on every return to user mode)
     x86_64::instructions::interrupts::disable();
     crate::arch::smp::bkl_exit();
+    let xsave = crate::arch::idt::use_xsave() as u64;
     core::arch::asm!(
-        "fxrstor64 [{fpu}]",
+        // The FPU state first: XRSTOR takes its component mask in EDX:EAX, so the register
+        // set's pointer arrives in RCX and moves to RAX after
+        "test r8, 1",
+        "jz 2f",
+        "mov eax, -1",
+        "mov edx, -1",
+        "xrstor64 [rsi]",
+        "jmp 3f",
+        "2:",
+        "fxrstor64 [rsi]",
+        "3:",
+        "mov rax, rcx",
         "push 0x2b",          // SS (gdt::USER_DS)
         "push qword ptr [rax + 15*8]", // RSP
         "push qword ptr [rax + 17*8]", // RFLAGS
-        "push {cs}",          // CS (gdt::USER_CS or USER32_CS)
+        "push rdi",           // CS (gdt::USER_CS or USER32_CS)
         "push qword ptr [rax + 16*8]", // RIP
         "mov r8,  [rax + 0*8]",
         "mov r9,  [rax + 1*8]",
@@ -2685,11 +2757,12 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState, cs: u16) -> ! {
         "mov rax, [rax + 13*8]",
         "swapgs",
         "iretq",
-        // The pointer must sit in the register loaded last: any other could be overwritten
-        // by the loads before it is done with
-        fpu = in(reg) fpu as *const FpuState,
-        cs = in(reg) cs as u64,
-        in("rax") &regs as *const UserRegs,
+        // The pointer must sit in the register loaded last (RAX): any other could be
+        // overwritten by the loads before it is done with
+        in("r8") xsave,
+        in("rdi") cs as u64,
+        in("rsi") fpu as *const FpuState,
+        in("rcx") &regs as *const UserRegs,
         options(noreturn)
     );
 }

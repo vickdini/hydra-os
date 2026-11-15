@@ -661,6 +661,8 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     let cpu = cpu as usize;
     unsafe {
         x86_64::registers::control::Cr4::write_raw(BSP_CR4.load(Ordering::Relaxed));
+        // XCR0 is per CPU: the AVX registers as on the boot processor
+        crate::arch::idt::enable_xsave(false);
         x86_64::registers::control::Cr0::write_raw(BSP_CR0.load(Ordering::Relaxed));
     }
     crate::arch::gdt::load_for_ap(cpu);
