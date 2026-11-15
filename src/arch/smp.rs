@@ -89,7 +89,11 @@ fn start_lapic_timer() {
 // up, which holds the lock then.
 
 static BKL_NEXT: AtomicU32 = AtomicU32::new(0);
+// Named for the trap epilogue (arch::idt), which releases the lock in assembly after leaving
+// the task's stack
+#[export_name = "hydra_bkl_serving"]
 static BKL_SERVING: AtomicU32 = AtomicU32::new(0);
+#[export_name = "hydra_bkl_owner"]
 static BKL_OWNER: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Takes the kernel lock for the calling CPU (nothing if it holds it).

@@ -25,9 +25,29 @@ pub struct PerCpu {
     pub kernel_rsp: u64,
     /// The user stack pointer while `syscall` switches stacks (gs:[24]).
     pub user_rsp: u64,
+    /// RAX while a trap's return to user mode moves its `iretq` frame (gs:[32]).
+    pub exit_scratch: u64,
+    /// Stack below [`Self::exit_frame`]: an NMI arriving during the last instructions of a
+    /// return to user mode pushes its frame here.
+    pub exit_stack: [u64; EXIT_STACK_WORDS],
+    /// The `iretq` frame (RIP, CS, RFLAGS, RSP, SS) of a trap returning to user mode, moved
+    /// off the task's kernel stack before the kernel lock is released: another CPU may
+    /// resume that task, on that stack, as soon as it gets the lock (gs:[EXIT_FRAME]).
+    pub exit_frame: [u64; 5],
 }
 
-static mut PERCPU: [PerCpu; MAX_CPUS] = [const { PerCpu { self_ptr: 0, cpu: 0, kernel_rsp: 0, user_rsp: 0 } }; MAX_CPUS];
+/// Words of [`PerCpu::exit_stack`] (16 KiB).
+pub const EXIT_STACK_WORDS: usize = 2048;
+/// Offset of [`PerCpu::exit_scratch`] (used by the trap epilogue in `arch::idt`).
+pub const EXIT_SCRATCH: usize = 32;
+/// Offset of [`PerCpu::exit_frame`] (used by the trap epilogue in `arch::idt`).
+pub const EXIT_FRAME: usize = 40 + 8 * EXIT_STACK_WORDS;
+const _: () = assert!(core::mem::offset_of!(PerCpu, exit_scratch) == EXIT_SCRATCH);
+const _: () = assert!(core::mem::offset_of!(PerCpu, exit_frame) == EXIT_FRAME);
+
+static mut PERCPU: [PerCpu; MAX_CPUS] = [const {
+    PerCpu { self_ptr: 0, cpu: 0, kernel_rsp: 0, user_rsp: 0, exit_scratch: 0, exit_stack: [0; EXIT_STACK_WORDS], exit_frame: [0; 5] }
+}; MAX_CPUS];
 
 const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;

@@ -470,9 +470,10 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         }
     }
     CURRENT_TRAP_FPU.store(prev_fpu, Ordering::Release);
-    if (ctx.cs & 3) == 3 {
-        crate::arch::smp::bkl_exit();
-    }
+    // Returning to user mode releases the kernel lock, but only in the epilogue
+    // (common_trap_handler), once the frame is off this task's kernel stack: after a task
+    // switch the frame is on the previous task's stack, and another CPU taking the lock may
+    // resume that task there at once, overwriting the frame before this CPU's iretq
 }
 
 /// 512-byte `FXSAVE64` area holding x87, MMX and SSE register state.
@@ -1067,6 +1068,9 @@ global_asm!(
         mov rsi, rsp
         sub rsp, 32
         call hydra_exception_handler
+        // No interrupts from here to iretq: the end of a return to user mode runs on this
+        // CPU's own small stack (arch::percpu), where a task switch must not happen
+        cli
         add rsp, 32
 
         // Restore the FPU state (possibly swapped in by the scheduler)
@@ -1093,12 +1097,38 @@ global_asm!(
         // Clean up vector number and error code
         add rsp, 16
 
-        // To user mode (the frame may be another task's now): its GS base
+        // To kernel mode: this CPU keeps the kernel lock (it goes on running kernel code)
         test qword ptr [rsp + 8], 3
-        jz 2f
-        swapgs
-    2:
-        // Return from interrupt
+        jnz 3f
         iretq
-    "#
+    3:
+        // To user mode. The frame may be on another task's kernel stack (the one switched
+        // away from), which another CPU may resume as soon as the kernel lock is free:
+        // move the iretq frame into this CPU's block (arch::percpu) first, then release the
+        // lock if this CPU holds it, then iretq from there with the user's GS base
+        mov gs:[{scratch}], rax
+        mov rax, [rsp]
+        mov gs:[{frame}], rax
+        mov rax, [rsp + 8]
+        mov gs:[{frame} + 8], rax
+        mov rax, [rsp + 16]
+        mov gs:[{frame} + 16], rax
+        mov rax, [rsp + 24]
+        mov gs:[{frame} + 24], rax
+        mov rax, [rsp + 32]
+        mov gs:[{frame} + 32], rax
+        mov rsp, gs:[0]
+        add rsp, {frame}
+        mov rax, gs:[8]
+        cmp rax, qword ptr [rip + hydra_bkl_owner]
+        jne 4f
+        mov qword ptr [rip + hydra_bkl_owner], -1
+        lock inc dword ptr [rip + hydra_bkl_serving]
+    4:
+        mov rax, gs:[{scratch}]
+        swapgs
+        iretq
+    "#,
+    scratch = const crate::arch::percpu::EXIT_SCRATCH,
+    frame = const crate::arch::percpu::EXIT_FRAME,
 );

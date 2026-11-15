@@ -104,6 +104,70 @@ def read_log(path):
         return ""
 
 
+def pointer(qmp, spec, screen):
+    """Pointer step `spec` ("click X Y", "dclick X Y", "rclick X Y", "move X Y"): an absolute
+    move to pixel (X, Y) of a `screen` = (width, height) display, then the button presses, each
+    sent alone (QEMU delivers a batch's final state only) with short pauses between."""
+    action, x, y = spec.split()
+    w, h = screen
+    ax = round(int(x) * 0x7FFF / max(w - 1, 1))
+    ay = round(int(y) * 0x7FFF / max(h - 1, 1))
+    qmp.cmd("input-send-event", {"events": [{"type": "abs", "data": {"axis": "x", "value": ax}},
+                                            {"type": "abs", "data": {"axis": "y", "value": ay}}]})
+    time.sleep(0.15)
+    button = "right" if action == "rclick" else "left"
+    for _ in range({"move": 0, "click": 1, "rclick": 1, "dclick": 2}[action]):
+        for down in (True, False):
+            qmp.cmd("input-send-event", {"events": [{"type": "btn", "data": {"down": down, "button": button}}]})
+            time.sleep(0.08)
+
+
+def control_loop(qmp, proc, a):
+    """Control mode (--control DIR): runs the steps of each `DIR/*.cmd` file (oldest name
+    first; one step per line, as on the command line), writes what monitor and QMP steps
+    return to `<name>.out`, renames the file `<name>.done`, until a `quit` step, QEMU's exit
+    or --wait seconds without a new file."""
+    os.makedirs(a.control, exist_ok=True)
+    idle_since = time.time()
+    while proc.poll() is None and time.time() - idle_since < a.wait:
+        files = sorted(f for f in os.listdir(a.control) if f.endswith(".cmd"))
+        if not files:
+            time.sleep(0.2)
+            continue
+        path = os.path.join(a.control, files[0])
+        steps = [l.rstrip("\r\n") for l in open(path, encoding="utf-8") if l.strip()]
+        out = []
+        for c in steps:
+            if c == "quit":
+                os.replace(path, path[:-4] + ".done")
+                qmp.cmd("quit")
+                return
+            if c.startswith("~"):
+                time.sleep(float(c[1:]))
+            elif c.startswith("!"):
+                r = qmp.cmd("human-monitor-command", {"command-line": c[1:]})
+                out.append(str(r.get("return", r)))
+            elif c.startswith("?"):
+                req = json.loads(c[1:])
+                r = qmp.cmd(req["execute"], req.get("arguments", {}))
+                out.append(str(r.get("return", r)))
+            elif c.startswith(">"):
+                pointer(qmp, c[1:], a.screen)
+            elif c.startswith("%"):
+                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": k} for k in c[1:].split("-")]})
+            elif len(c) == 2 and c[0] == "^" and c[1].isalpha():
+                qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": c[1].lower()}]})
+            elif c.startswith("@"):
+                qmp.type(c[1:])  # text without Enter
+            else:
+                qmp.type(c + "\n")
+            time.sleep(0.1)
+        with open(path[:-4] + ".out", "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+        os.replace(path, path[:-4] + ".done")
+        idle_since = time.time()
+
+
 def running_qemus():
     """The running QEMU processes: `(pid, command line)`."""
     if os.name != "nt":
@@ -149,8 +213,11 @@ def main():
     ap.add_argument("--cd", default="virtio", choices=["virtio", "ide"], help="how the boot ISO is attached: virtio-scsi (fast firmware reads) or the IDE CD-ROM")
     ap.add_argument("--kill-stale", action="store_true", help="first stop headless QEMUs left by earlier runs (never a VM with a window)")
     ap.add_argument("--login", default="hydra:hydra", help="user:password for the console login after the countdown ('' to skip)")
+    ap.add_argument("--control", default=None, help="after the commands, take more steps from DIR/*.cmd files until 'quit' (see control_loop)")
+    ap.add_argument("--screen", default="1280x800", help="guest screen size for pointer steps (>click X Y)")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
+    a.screen = tuple(int(v) for v in a.screen.lower().split("x"))
 
     # One VM at a time: two QEMUs on the same pool image (or one on an overlay while the
     # pool changes underneath) corrupt it, and QEMU on Windows does not prevent it
@@ -237,7 +304,7 @@ def main():
                 wait_for("Logged in as", mark, 30)
         start = len(read_log(a.log))
         prompts_seen = 0
-        typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%?"]
+        typed = [c.lstrip("@") for c in a.commands if c and c[0] not in "~!%?>"]
         for i, c in enumerate(a.commands):
             if proc.poll() is not None:
                 # Powered off or restarted (-no-reboot): nothing left to type into, and
@@ -269,6 +336,11 @@ def main():
                 r = qmp.cmd(req["execute"], req.get("arguments", {}))
                 sys.stderr.write(str(r.get("return", r)) + "\n")
                 continue
+            if c.startswith(">"):
+                # ">click 640 400", ">dclick X Y", ">rclick X Y", ">move X Y": the pointer, in
+                # screen pixels (needs Hydra's absolute pointer, i.e. KVM's vmmouse)
+                pointer(qmp, c[1:], a.screen)
+                continue
             if c.startswith("%"):
                 # "%f12", "%esc": a single named key (QEMU qcode)
                 qmp.cmd("send-key", {"keys": [{"type": "qcode", "data": c[1:]}]})
@@ -291,6 +363,9 @@ def main():
             else:
                 qmp.type(c + "\n")
             time.sleep(a.gap)
+        if a.control:
+            control_loop(qmp, proc, a)
+            return
         deadline = time.time() + a.wait
         last_len, last_change, dumped = -1, time.time(), False
         while time.time() < deadline:
