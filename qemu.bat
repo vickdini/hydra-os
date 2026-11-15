@@ -46,5 +46,7 @@ if not defined HYDRA_SMP set HYDRA_SMP=4
 
 rem The boot ISO is on virtio-scsi: the firmware reads the kernel and the boot files by DMA
 rem (several times faster than the IDE CD-ROM); Hydra needs it only until it takes over
+echo [!] Note: since 2026-11-15 the main pool is the copy inside WSL, used by qemu-kvm.bat (faster, KVM).
+echo     This window uses the backup, dist\x86_64\hydrapool.qcow2: changes made here are not in the main pool.
 echo [*] Launching Hydra in QEMU (Display ON, Storage Disk attached, Intel E1000 NIC)...
 start "" "C:\Program Files\qemu\qemu-system-x86_64.exe" %FIRMWARE% -drive file="%~dp0dist\x86_64\hydrapool.qcow2",format=qcow2,index=0,media=disk -netdev user,id=net0 -device e1000,netdev=net0 -device virtio-scsi-pci,id=scsi0 -drive file="%~dp0dist\x86_64\kernel.iso",if=none,id=bootcd,media=cdrom,format=raw -device scsi-cd,drive=bootcd,bootindex=0 -m 4G -smp %HYDRA_SMP% -vga std -display gtk %*

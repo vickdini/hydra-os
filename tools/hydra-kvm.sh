@@ -25,12 +25,19 @@ mountpoint -q $R/mnt/wslg || mount --bind /mnt/wslg $R/mnt/wslg
 mountpoint -q $R/tmp/.X11-unix || mount --bind /tmp/.X11-unix $R/tmp/.X11-unix
 [ -f $R$POOL ] || { echo "[!] No pool at $R$POOL"; exit 1; }
 echo "[*] Launching Hydra with KVM (pool $POOL inside WSL)..."
+# The mouse: Hydra has a PS/2 mouse, which reports movements, not positions. QEMU's window
+# computes them by moving the host pointer back after each event, which Wayland (WSLg's native
+# protocol) does not allow: the window runs on WSLg's X server instead (GDK_BACKEND=x11), and
+# Hydra's screen stays 1:1 (zoom-to-fit=off: a stretched picture scales every movement).
+# HYDRA_GDK_BACKEND=wayland and HYDRA_ZOOM=on bring back the old behaviour.
+export HYDRA_GDK_BACKEND="${HYDRA_GDK_BACKEND:-x11}" HYDRA_ZOOM="${HYDRA_ZOOM:-off}"
 exec chroot $R /bin/bash -c '
 export DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir PULSE_SERVER=/mnt/wslg/PulseServer
+export GDK_BACKEND="$HYDRA_GDK_BACKEND"
 exec qemu-system-x86_64 -accel kvm -cpu host -m 4G -smp "${HYDRA_SMP:-4}" \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive file='"$POOL"',format=qcow2,if=ide,index=0,media=disk \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -device virtio-scsi-pci,id=scsi0 -drive file=/mnt/d/os/dist/x86_64/kernel.iso,if=none,id=bootcd,media=cdrom,format=raw \
     -device scsi-cd,drive=bootcd,bootindex=0 \
-    -vga std -display gtk -name Hydra "$@"' qemu "$@"
+    -vga std -display gtk,zoom-to-fit="$HYDRA_ZOOM" -name Hydra "$@"' qemu "$@"
