@@ -115,6 +115,27 @@ fn check_name(name: &[u8]) -> ZplResult<()> {
     Ok(())
 }
 
+/// Names objects were last seen under (`ino` -> directory, name), for change notifications
+/// on a file, which name it in its directory: scanning the directory for it cost about a
+/// millisecond per write in a busy directory, and unpacking many files into one directory
+/// grew with the square of their number. A hit is checked with one lookup, so a stale entry
+/// (after a rename or unlink) only costs a scan.
+static NAMES: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, Vec<u8>)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Most names kept (the cache starts over when full).
+const NAMES_MAX: usize = 65_536;
+
+/// Remembers that directory `dir` holds `ino` as `name`.
+fn remember_name(ino: u64, dir: u64, name: &[u8]) {
+    if name.is_empty() || name == b"." || name == b".." {
+        return;
+    }
+    let mut names = NAMES.lock();
+    if names.len() >= NAMES_MAX {
+        names.clear();
+    }
+    names.insert(ino, (dir, name.to_vec()));
+}
+
 impl ZfsServer {
     /// Reports a change of `ino` to inotify: to the inode's own watches and, under its
     /// name, to its directory's watches.
@@ -150,11 +171,18 @@ impl ZfsServer {
     /// # Returns
     /// `Some(Vec<u8>)` containing the entry name if found, or `None`.
     fn name_in(&mut self, dir: u64, ino: u64) -> Option<Vec<u8>> {
+        let known = NAMES.lock().get(&ino).filter(|(d, _)| *d == dir).map(|(_, n)| n.clone());
+        if let Some(name) = known {
+            if matches!(self.zap.lookup(&mut self.dmu, dir, &name), Ok(Some((i, _))) if i == ino) {
+                return Some(name);
+            }
+        }
         let mut pos = 0;
         loop {
             let batch = self.zap.readdir(&mut self.dmu, dir, pos, 64).ok()?;
             let last = batch.last()?.next_pos;
             if let Some(e) = batch.into_iter().find(|e| e.ino == ino) {
+                remember_name(ino, dir, &e.name);
                 return Some(e.name);
             }
             pos = last;
@@ -399,7 +427,10 @@ impl ZfsServer {
             b"" | b"." => Ok(dir),
             b".." => Ok(if dn.parent != 0 { dn.parent } else { dir }),
             _ => match self.zap.lookup(&mut self.dmu, dir, name).map_err(io)? {
-                Some((ino, _)) => Ok(ino),
+                Some((ino, _)) => {
+                    remember_name(ino, dir, name);
+                    Ok(ino)
+                }
                 None => Err(ENOENT),
             },
         }
@@ -444,6 +475,7 @@ impl ZfsServer {
         dn.ctime_ns = t.1;
         self.dmu.put_dnode(ino, dn);
         self.zap.insert(&mut self.dmu, dir, name, ino, dtype_from_mode(mode)).map_err(io)?;
+        remember_name(ino, dir, name);
         self.touch(dir, true, true)?;
         self.notify_entry(dir, crate::compat::linux::inotify::IN_CREATE, 0, name, mode & S_IFMT == S_IFDIR);
         self.maybe_sync();
@@ -576,6 +608,7 @@ impl ZfsServer {
             return Err(EEXIST);
         }
         self.zap.insert(&mut self.dmu, dir, name, ino, dtype_from_mode(dn.mode)).map_err(io)?;
+        remember_name(ino, dir, name);
         dn.nlink += 1;
         let t = now();
         dn.ctime = t.0;

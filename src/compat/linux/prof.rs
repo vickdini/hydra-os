@@ -38,6 +38,27 @@ const FAULT_NAMES: [&str; FAULT_KINDS] =
 static FAULTS: [AtomicU64; FAULT_KINDS] = [const { AtomicU64::new(0) }; FAULT_KINDS];
 static FAULT_NANOS: [AtomicU64; FAULT_KINDS] = [const { AtomicU64::new(0) }; FAULT_KINDS];
 
+/// File-server requests by operation (`FS_*` code minus 0x3100): count and round-trip time.
+const FS_OPS: usize = 64;
+static FS_CALLS: [AtomicU64; FS_OPS] = [const { AtomicU64::new(0) }; FS_OPS];
+static FS_NANOS: [AtomicU64; FS_OPS] = [const { AtomicU64::new(0) }; FS_OPS];
+const FS_NAMES: [&str; 0x24] = [
+    "?", "root", "lookup", "resolve", "getattr", "setattr", "read", "write", "create", "mknod", "mkdir", "symlink",
+    "readlink", "link", "unlink", "rmdir", "rename", "readdir", "statfs", "open_ref", "release", "notify", "sync",
+    "sync_if_dirty", "snapshot", "pool_status", "object_info", "datasets", "selftest", "verify", "fsck",
+    "resolve_mnt", "getxattr", "setxattr", "listxattr", "removexattr",
+];
+
+/// Records a file-server request `op` (an `FS_*` code) started at `t0` (from [`start`]).
+#[inline]
+pub fn fs_request(op: u32, t0: u64) {
+    let i = op.wrapping_sub(0x3100) as usize;
+    if t0 != 0 && i < FS_OPS {
+        FS_CALLS[i].fetch_add(1, Relaxed);
+        FS_NANOS[i].fetch_add(crate::arch::pit::now_ns().saturating_sub(t0), Relaxed);
+    }
+}
+
 /// Start time for a hook, or 0 when profiling is off.
 #[inline]
 pub fn start() -> u64 {
@@ -72,6 +93,10 @@ pub fn reset() {
         FAULTS[i].store(0, Relaxed);
         FAULT_NANOS[i].store(0, Relaxed);
     }
+    for i in 0..FS_OPS {
+        FS_CALLS[i].store(0, Relaxed);
+        FS_NANOS[i].store(0, Relaxed);
+    }
 }
 
 /// Prints the page faults by kind and the `top` system calls by total time.
@@ -81,6 +106,14 @@ pub fn show(top: usize) {
         let n = FAULTS[k].load(Relaxed);
         let ns = FAULT_NANOS[k].load(Relaxed);
         crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {}", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, FAULT_NAMES[k]);
+    }
+    crate::println!("[prof] file-server requests (round trip, from the kernel):");
+    for i in 0..FS_OPS {
+        let n = FS_CALLS[i].load(Relaxed);
+        if n > 0 {
+            let ns = FS_NANOS[i].load(Relaxed);
+            crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {}", n, ns / 1_000_000, ns / n / 1000, FS_NAMES.get(i).copied().unwrap_or("?"));
+        }
     }
     let mut rows: alloc::vec::Vec<(u64, u64, usize)> =
         (0..NR_MAX).map(|i| (NANOS[i].load(Relaxed), CALLS[i].load(Relaxed), i)).filter(|r| r.1 > 0).collect();

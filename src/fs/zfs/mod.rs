@@ -306,7 +306,10 @@ impl ZfsServer {
             }
         };
         params(&mut Writer::new(&mut window[..EVENT_OFFSET]));
-        let reply = service::call(ENDPOINT_ZFS_SERVER, Message::with_args(op, [0; 4]), TIMEOUT_TICKS).map_err(|_| EIO)?;
+        let t0 = crate::compat::linux::prof::start();
+        let reply = service::call(ENDPOINT_ZFS_SERVER, Message::with_args(op, [0; 4]), TIMEOUT_TICKS).map_err(|_| EIO);
+        crate::compat::linux::prof::fs_request(op, t0);
+        let reply = reply?;
         if reply.label != FS_REPLY {
             return Err(EIO);
         }
