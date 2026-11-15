@@ -745,6 +745,85 @@ MaximumUid=60000
         )?;
     }
 
+    // Windows programs (Wine in /opt/wine, tools/build-wine.sh): each user's Windows
+    // environment (the Wine prefix, ~3 minutes to create) is prepared in the background at
+    // their first login, with a notification when it starts and when it is ready, so the
+    // first double-clicked program does not wait for it. The setup runs without a display
+    // (an unset WAYLAND_DISPLAY means wayland-0, the desktop: a name that does not exist):
+    // Wine's own "configuration is being updated" window would sit on the desktop for minutes.
+    // Wine Mono and Gecko are not offered during it (download dialogs at a first login); a
+    // program that needs them asks
+    if lookup_path(s, t.root, "/opt/wine/bin/wine").is_some() {
+        t.dir(s, "/usr/local/libexec")?;
+        t.file_bytes(
+            s,
+            "/usr/local/libexec/hydra-wine-setup",
+            br#"#!/bin/sh
+# Written by Hydra: prepares the user's Windows environment (Wine prefix) at first login
+P="${WINEPREFIX:-$HOME/.wine}"
+[ -f "$P/system.reg" ] && exit 0
+mkdir -p "$HOME/.cache"
+LOCK="$HOME/.cache/hydra-wine-setup.lock"
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK"' EXIT
+notify() {
+    gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify "Windows Programs" 0 "wine" "$1" "$2" "[]" "{}" 15000 >/dev/null 2>&1
+}
+sleep 20
+notify "Preparing Windows support" "Windows programs will be ready in a few minutes. You can keep working."
+if env -u DISPLAY WAYLAND_DISPLAY=hydra-no-display WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" nice -n 10 /opt/wine/bin/wineboot -i >/dev/null 2>&1 \
+    && /opt/wine/bin/wineserver -w; then
+    # The desktop portal asks which program opens a file until one was chosen 3 times in a
+    # row: record the Windows Program Loader as chosen (a host app's id is empty)
+    for t in application/vnd.microsoft.portable-executable application/x-ms-dos-executable \
+        application/x-msdownload application/x-msi application/x-ms-shortcut; do
+        gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
+            --object-path /org/freedesktop/impl/portal/PermissionStore \
+            --method org.freedesktop.impl.portal.PermissionStore.SetPermission \
+            desktop-used-apps true "$t" "" "['wine', '3', '3']" >/dev/null 2>&1
+    done
+    notify "Windows support is ready" "Open a Windows program (.exe or .msi) with a double-click."
+else
+    notify "Windows support could not be prepared" "It will be tried again at your next login."
+    rm -rf "$P"
+fi
+"#,
+            0o755,
+        )?;
+        // Windows programs open with Wine from the file manager (Icon: KDE's own, Wine's
+        // icon is not installed)
+        t.file(
+            s,
+            "/usr/share/applications/wine.desktop",
+            "[Desktop Entry]
+# Written by Hydra: Windows programs open with Wine
+Type=Application
+Name=Windows Program Loader
+Comment=Runs Windows programs
+Exec=/opt/wine/bin/wine start /unix %f
+MimeType=application/vnd.microsoft.portable-executable;application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/x-ms-shortcut;
+Icon=application-x-ms-dos-executable
+NoDisplay=true
+Terminal=false
+Categories=System;Emulator;
+",
+        )?;
+        t.file(
+            s,
+            "/etc/xdg/autostart/hydra-wine-setup.desktop",
+            "[Desktop Entry]
+# Written by Hydra: prepares Windows support at a user's first login
+Type=Application
+Name=Windows support setup
+Exec=/usr/local/libexec/hydra-wine-setup
+TryExec=/opt/wine/bin/wine
+NoDisplay=true
+X-KDE-autostart-phase=2
+",
+        )?;
+    }
+
     // Older Hydra versions started Brave through wrappers of their own in /usr/bin and
     // /usr/local/bin; once Brave is gone (apt purge leaves the ones that replaced its
     // links), remove those that are still Hydra's
