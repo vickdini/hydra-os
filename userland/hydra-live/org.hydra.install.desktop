@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Install Hydra
+GenericName=Hydra Setup
+Comment=Install Hydra on this computer
+Keywords=install;setup;installer;hydra;
+Exec=/usr/bin/hydra-install
+Icon=system-software-install
+Terminal=false
+Categories=System;

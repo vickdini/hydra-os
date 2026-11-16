@@ -1,0 +1,4 @@
+#!/bin/sh
+# Written by Hydra: stands in for the installer until this version of Hydra has it (the
+# installer replaces this file).
+exec kdialog --title "Install Hydra" --sorry "The installer is not part of this version of Hydra yet."

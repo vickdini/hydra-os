@@ -26,6 +26,11 @@ if [ -e "$f" ] && [ "$(id -u)" = 0 ]; then
 fi
 
 if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
+    # This computer's identity, made at its first boot (systemd-machine-id-setup's job
+    # elsewhere): the install image and the live stick come without one
+    if [ "$(id -u)" = 0 ] && ! [ -s /etc/machine-id ]; then
+        systemd-machine-id-setup >/dev/null 2>&1 || dbus-uuidgen --ensure=/etc/machine-id
+    fi
     # The system users and groups packages ask for in sysusers.d (systemd-sysusers.service
     # runs before the bus elsewhere); the bus' rules name some of them
     if [ "$(id -u)" = 0 ] && [ -x /usr/bin/systemd-sysusers ]; then
@@ -83,6 +88,11 @@ if [ "$(id -u)" = 0 ] && [ -x "$helper" ] && ! [ -d /usr/lib/python3/dist-packag
 fi
 
 if [ "$dm" = 1 ]; then
+    # The live session's user and desktop, when Hydra runs from its USB stick (nothing
+    # happens otherwise)
+    if [ "$(id -u)" = 0 ] && [ -x /usr/local/libexec/hydra-live-setup ]; then
+        /usr/local/libexec/hydra-live-setup
+    fi
     unset WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
     exec sddm $HYDRA_SDDM_OPTS
 fi

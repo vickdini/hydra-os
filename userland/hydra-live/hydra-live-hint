@@ -1,0 +1,13 @@
+#!/bin/sh
+# Written by Hydra: in the live session ("try Hydra" from its USB stick), tells the person at
+# the desktop what this is, with a button to start the installer. Autostarted for every user;
+# does nothing outside the live session.
+[ -e /run/hydra/live ] || exit 0
+# After the desktop has settled (the notification would otherwise come while it still builds)
+sleep 10
+answer=$(notify-send --app-name=Hydra --icon=drive-removable-media --urgency=critical --wait \
+    --action=install="Install Hydra" \
+    "You are trying Hydra" \
+    "Nothing you do here is saved to this computer. To keep Hydra, double-click \"Install Hydra\" on the desktop.")
+[ "$answer" = install ] && exec /usr/bin/hydra-install
+exit 0

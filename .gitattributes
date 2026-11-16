@@ -4,3 +4,4 @@ userland/hydra-logind/hydra-session text eol=lf
 userland/hydra-wine/* text eol=lf
 userland/hydra-desktop/** text eol=lf
 userland/hydra-apps/* text eol=lf
+userland/hydra-live/* text eol=lf

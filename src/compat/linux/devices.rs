@@ -1063,6 +1063,77 @@ u! malcontent-webd - \"Parental controls web filter daemon\"
         }
     }
     access_control_files(t, s)?;
+    live_session_files(t, s)?;
+    Ok(())
+}
+
+// ---- Group F: the live session (Hydra from its USB stick, `super::live`) ----
+/// Files of the live session that exist only while it runs (removed at a boot that is not
+/// one, so an installed system or a stick booted without its flag never has them).
+const LIVE_ONLY: [&str; 6] = [
+    "/run/hydra/live",
+    "/etc/sddm.conf.d/zz-hydra-live.conf",
+    "/etc/sudoers.d/hydra-live",
+    "/etc/polkit-1/rules.d/49-hydra-live.rules",
+    "/usr/share/applications/org.hydra.install.desktop",
+    "/etc/xdg/autostart/hydra-live-hint.desktop",
+];
+
+/// The live session: `/run/hydra/live` tells programs (the installer, the desktop) that this
+/// is one; the login screen logs the user `live` in by itself (hydra-live-setup, run by
+/// hydra-session before the login screen, creates that user and its desktop); `live` may
+/// administer without a password (sudo, polkit: the installer); "Install Hydra" in the start
+/// menu and on the desktop starts the installer (`/usr/bin/hydra-install`, Group G's; a
+/// placeholder until a pool has it); a notification says that nothing is saved to the
+/// computer (userland/hydra-live).
+fn live_session_files(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
+    if !super::live::is_live() {
+        for path in LIVE_ONLY {
+            let (parent, name) = split(path);
+            if let (Some(dir), Some(_)) = (lookup_path(s, t.root, parent), lookup_path(s, t.root, path)) {
+                s.unlink(dir, name.as_bytes())?;
+                t.changed = true;
+            }
+        }
+        return Ok(());
+    }
+    t.file(s, "/run/hydra/live", "1
+")?;
+    t.dir(s, "/usr/local/libexec")?;
+    t.file_bytes(s, "/usr/local/libexec/hydra-live-setup", include_bytes!("../../../userland/hydra-live/hydra-live-setup"), 0o755)?;
+    t.file_bytes(s, "/usr/local/libexec/hydra-live-hint", include_bytes!("../../../userland/hydra-live/hydra-live-hint"), 0o755)?;
+    t.file(s, "/etc/xdg/autostart/hydra-live-hint.desktop", include_str!("../../../userland/hydra-live/hydra-live-hint.desktop"))?;
+    t.file(s, "/usr/share/applications/org.hydra.install.desktop", include_str!("../../../userland/hydra-live/org.hydra.install.desktop"))?;
+    if lookup_path(s, t.root, "/usr/bin/hydra-install").is_none() {
+        t.file_bytes(s, "/usr/bin/hydra-install", include_bytes!("../../../userland/hydra-live/hydra-install-placeholder"), 0o755)?;
+    }
+    t.dir(s, "/etc/sddm.conf.d")?;
+    t.file(
+        s,
+        "/etc/sddm.conf.d/zz-hydra-live.conf",
+        "# Written by Hydra: the live session logs in by itself (removed outside it)
+[Autologin]
+User=live
+Session=plasma.desktop
+Relogin=false
+",
+    )?;
+    t.dir(s, "/etc/sudoers.d")?;
+    t.file_bytes(s, "/etc/sudoers.d/hydra-live", b"# Written by Hydra: the live session's user administers without a password
+live ALL=(ALL) NOPASSWD: ALL
+", 0o440)?;
+    t.dir(s, "/etc/polkit-1/rules.d")?;
+    t.file(
+        s,
+        "/etc/polkit-1/rules.d/49-hydra-live.rules",
+        "// Written by Hydra: the live session's user administers without a password (removed outside it)
+polkit.addRule(function(action, subject) {
+    if (subject.user == \"live\") {
+        return polkit.Result.YES;
+    }
+});
+",
+    )?;
     Ok(())
 }
 

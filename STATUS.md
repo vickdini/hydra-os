@@ -1,6 +1,6 @@
-TOOLKIT (Group B, stable): Python 3 + PyQt6 with Qt Widgets (packages python3-pyqt6, from Ubuntu universe). Reason: PySide6 pulls libshiboken6 -> libclang1-21 (+LLVM); PyQt6 is ~17 MB with no compiler libs; Qt Widgets get KDE's Breeze style, so windows look like other KDE apps; no QML/Kirigami needed. Hydra installs python3-pyqt6 itself if missing (hydra-session at boot, or Hydra Apps' first start via pkexec).
-Now: running the full regression suite on the final image, then the report.
-Works (verified in VM with screenshots): Hydra Apps (pinned on the taskbar, found by "store" in Start); Windows programs Notepad++, 7-Zip, SumatraPDF, WinMerge, PuTTY install (SHA-256 checked, silent) and start; LibreOffice, VLC, GIMP (apt) and Thunderbird (Mozilla archive) install through the polkit password dialog and start; uninstall of VLC (apt), Thunderbird and Notepad++ (Windows uninstaller); cancel of the password dialog reported in plain words.
-Works: Win+E/D/I/R/L/Up/Down/Left for a new user; welcome window at first login; no "Unknown username" warnings (systemd-sysusers at boot).
-Known: lock screen works but its greeter needs ~20 s to appear (~60 s first time) and freezes while dpkg writes a lot (unlocks afterwards).
-Commits: 6d798f3, 9d703b9, 88063ff (branch g2-apps).
+# Group F - Image & live USB (branch i-live)
+Current step: writing the image tools; the WSL Linux machine has not answered for ~35 minutes (all groups wait for it)
+Works so far:
+- Pool packer tool (tools/build-image/hydra-pool-pack.c): copies only the live data of a pool into a new compact pool image, checks every block. First run on a copy of the main pool: it found ONE damaged block in the main pool (block 922603), so it refused to pack; finding which file it is when WSL answers again
+- Live session code written (kernel builds): \hydra\live flag on the boot volume -> user "live" logged in by itself, "Install Hydra" on the desktop and in the Start menu, "You are trying Hydra" notice. Not tested yet
+Next: when WSL answers: find the damaged file, run the cleaning script in a throwaway VM
