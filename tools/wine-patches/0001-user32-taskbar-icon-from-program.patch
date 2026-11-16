@@ -1,0 +1,47 @@
+--- a/dlls/user32/user_main.c
++++ b/dlls/user32/user_main.c
+@@ -89,11 +89,42 @@
+     return STATUS_INVALID_PARAMETER;
+ }
+ 
++/* Hydra: the first icon group of the process's executable, as the Windows shell picks it
++ * (NULL when it has none) */
++static BOOL CALLBACK first_icon_group( HMODULE module, const WCHAR *type, WCHAR *name, LONG_PTR param )
++{
++    WCHAR **ret = (WCHAR **)param;
++    if (IS_INTRESOURCE( name )) *ret = name;
++    else if ((*ret = HeapAlloc( GetProcessHeap(), 0, (lstrlenW( name ) + 1) * sizeof(WCHAR) )))
++        lstrcpyW( *ret, name );
++    return FALSE;
++}
++
++static const WCHAR *exe_icon_name(void)
++{
++    static const WCHAR *name;
++    static BOOL done;
++    WCHAR *found = NULL;
++
++    if (done) return name;
++    EnumResourceNamesW( GetModuleHandleW( NULL ), (const WCHAR *)RT_GROUP_ICON, first_icon_group, (LONG_PTR)&found );
++    name = found;
++    done = TRUE;
++    return name;
++}
++
+ static NTSTATUS WINAPI User32LoadImage( void *args, ULONG size )
+ {
+     const struct load_image_params *params = args;
+-    HANDLE ret = LoadImageW( params->hinst, params->name, params->type,
+-                             params->dx, params->dy, params->flags );
++    HANDLE ret = 0;
++
++    /* Hydra: a window without an icon of its own shows its program's (in the taskbar and
++     * its title bar), as on Windows, not Wine's logo */
++    if (!params->hinst && params->type == IMAGE_ICON && params->name == (const WCHAR *)IDI_WINLOGO && exe_icon_name())
++        ret = LoadImageW( GetModuleHandleW( NULL ), exe_icon_name(), IMAGE_ICON,
++                          params->dx, params->dy, params->flags );
++    if (!ret) ret = LoadImageW( params->hinst, params->name, params->type,
++                                params->dx, params->dy, params->flags );
+     if (!ret) return STATUS_NO_MEMORY;
+     return NtCallbackReturn( &ret, sizeof(ret), STATUS_SUCCESS );
+ }

@@ -19,7 +19,8 @@
 #      libasound2-dev libdbus-1-dev libudev-dev libusb-1.0-0-dev libsdl2-dev libcups2-dev
 #      libunwind-dev libgl-dev libegl-dev libx11-dev (and the other X11 -dev packages),
 #      libgstreamer-plugins-base1.0-dev libkrb5-dev libpcap0.8-dev libpcsclite-dev libssl-dev
-#   4. Copy this script to /opt/u2604/root/ and run: chroot /opt/u2604 /root/build-wine.sh
+#   4. Copy this script and tools/wine-patches/ to /opt/u2604/root/ and run:
+#      chroot /opt/u2604 /root/build-wine.sh
 # Strip afterwards (strip for bin/ and *-unix, {i686,x86_64}-w64-mingw32-strip for the
 # Windows DLLs) before packing: 1.6 GB unstripped, 500 MB stripped, 70 MB packed.
 #
@@ -31,6 +32,11 @@ cd /root
 [ -f wine-11.0.tar.xz ] || curl -s -O https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz
 rm -rf wine-11.0 build stage
 tar xf wine-11.0.tar.xz
+# Hydra's changes to Wine (tools/wine-patches), in order
+for p in /root/wine-patches/*.patch; do
+  [ -e "$p" ] || continue
+  patch -d wine-11.0 -p1 < "$p" || { echo "PATCH FAILED: $p"; exit 1; }
+done
 mkdir build
 cd build
 ../wine-11.0/configure --prefix=/opt/wine --enable-archs=i386,x86_64 --disable-tests > ../configure.log 2>&1
