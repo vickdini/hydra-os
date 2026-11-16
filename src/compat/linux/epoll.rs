@@ -133,6 +133,12 @@ pub struct EpollWatch {
 pub struct EpollInstance {
     /// Map from target file descriptor number to its active [`EpollWatch`] configuration.
     pub watches: BTreeMap<i32, EpollWatch>,
+    /// Woken when the interest list changes: a thread already waiting must start watching
+    /// what another thread added (PipeWire's data thread waits, without a timeout, while
+    /// its main thread adds a client's eventfd).
+    pub changed: Arc<crate::task::wait::WaitQueue>,
+    /// Incremented by every change of the interest list.
+    pub generation: u64,
 }
 
 impl EpollInstance {
@@ -143,6 +149,8 @@ impl EpollInstance {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             watches: BTreeMap::new(),
+            changed: crate::task::wait::WaitQueue::new_shared(),
+            generation: 0,
         }))
     }
 
@@ -163,6 +171,15 @@ impl EpollInstance {
     /// * `-ENOENT` - `op` is [`EPOLL_CTL_MOD`] or [`EPOLL_CTL_DEL`] and `fd` is not registered.
     /// * `-EINVAL` - `op` is unrecognized, or `event` is `None` for `ADD`/`MOD`.
     pub fn ctl(&mut self, op: i32, fd: i32, event: Option<LinuxEpollEvent>) -> Result<(), i64> {
+        let r = self.ctl_inner(op, fd, event);
+        if r.is_ok() {
+            self.generation += 1;
+            self.changed.wake_all();
+        }
+        r
+    }
+
+    fn ctl_inner(&mut self, op: i32, fd: i32, event: Option<LinuxEpollEvent>) -> Result<(), i64> {
         match op {
             EPOLL_CTL_ADD => {
                 if self.watches.contains_key(&fd) {
@@ -218,8 +235,12 @@ impl EpollInstance {
 /// # Returns
 /// A populated [`WaitSet`](crate::task::wait::WaitSet) ready for registration before sleeping.
 pub fn epoll_wait_set(epoll: &Arc<Mutex<EpollInstance>>) -> crate::task::wait::WaitSet {
-    let fds_watched: Vec<i32> = epoll.lock().watches.values().map(|w| w.fd).collect();
+    let (fds_watched, changed): (Vec<i32>, _) = {
+        let e = epoll.lock();
+        (e.watches.values().map(|w| w.fd).collect(), e.changed.clone())
+    };
     let mut waits = crate::task::wait::WaitSet::new();
+    waits.add(crate::task::wait::QueueRef::Shared(changed));
     crate::task::with_current_fds_mut(|fds| {
         for fd in fds_watched {
             if let Some(desc) = fds.get(fd as usize) {

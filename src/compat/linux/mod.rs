@@ -2122,9 +2122,16 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             };
 
             let deadline = if timeout_ms < 0 { None } else { Some(crate::arch::pit::now_ns() + timeout_ms as u64 * 1_000_000) };
-            let waits = epoll_wait_set(&epoll_arc);
+            let mut generation = epoll_arc.lock().generation;
+            let mut waits = epoll_wait_set(&epoll_arc);
 
             loop {
+                // Another thread changed the interest list: watch what it added
+                let now_gen = epoll_arc.lock().generation;
+                if now_gen != generation {
+                    generation = now_gen;
+                    waits = epoll_wait_set(&epoll_arc);
+                }
                 waits.register();
                 let ready = epoll_collect_ready(&epoll_arc, maxevents as usize);
                 if !ready.is_empty() {

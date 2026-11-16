@@ -123,7 +123,7 @@ const MAX_LEAD: u64 = 2560;
 /// Woken whenever the stream positions advance or a stream changes state.
 static SND_WQ: WaitQueue = WaitQueue::new();
 /// Logs PCM ioctls (other than the frequent position ones) and failures.
-static TRACE: AtomicBool = AtomicBool::new(true);
+static TRACE: AtomicBool = AtomicBool::new(false);
 static SYNC_TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Wakes the position task when a stream starts.
 static TASK_WQ: WaitQueue = WaitQueue::new();
@@ -1550,7 +1550,11 @@ impl PcmFile {
             put_u64(&mut b, 80, s.avail_min);
         }
         if TRACE.load(Ordering::Relaxed) && SYNC_TRACED.fetch_add(1, Ordering::Relaxed) < 40 {
-            crate::kprintln!("[snd] pcm{} sync_ptr flags {} -> state {} hw {} appl {} avail_min {}", self.dir, flags, get_u32(&b, 8), get_u64(&b, 16), get_u64(&b, 72), get_u64(&b, 80));
+            let (dma, t) = {
+                let st = self.stream();
+                (st.dma_frames, (crate::arch::pit::now_ns().saturating_sub(st.trigger_ns)) / 1000)
+            };
+            crate::kprintln!("[snd] pcm{} sync_ptr flags {} -> state {} hw {} appl {} dma {} t {} us", self.dir, flags, get_u32(&b, 8), get_u64(&b, 16), get_u64(&b, 72), dma, t);
         }
         // An underrun found by this update is reported by the state
         SND_WQ.wake_all();
