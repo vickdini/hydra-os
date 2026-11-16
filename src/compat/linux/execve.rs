@@ -275,7 +275,16 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             Err(e) => return e,
         };
         if attr.mode & S_IFMT != S_IFREG || !may_access(&attr, c.euid, c.egid, 1) || attr.mode & 0o111 == 0 {
+            super::abac::note_path(ino, &abs_path);
             return EACCES;
+        }
+        // App control (access policies): may this user run this program?
+        {
+            let dir = abs_path.rsplit_once('/').map(|(d, _)| if d.is_empty() { String::from("/") } else { String::from(d) });
+            let mut parent = || dir.as_ref().and_then(|d| resolve(0, d.as_bytes(), true).ok()).and_then(|i| ZfsClient::getattr(i).ok());
+            if !super::abac::exec_check(&abs_path, &attr, &mut parent) {
+                return EACCES;
+            }
         }
         if super::landlock::check_at(&abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
             return EACCES;

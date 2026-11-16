@@ -1135,6 +1135,8 @@ pub fn populate(root: &str) -> Result<(), &'static str> {
         crate::kprintln!("[devices] writing the device tree into {} failed at {}: errno {}", root, tree.at, -e);
         return Err("could not write the device tree");
     }
+    // Access policies (Group D): the saved policy is enforced from the first setup on
+    super::abac::boot_load(root);
     // No sync of its own: the changes are visible at once, and the background commit
     // writes them (most boots only give the device nodes back to root, which took a
     // second's sync before the login screen could start)

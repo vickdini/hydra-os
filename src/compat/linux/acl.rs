@@ -267,14 +267,18 @@ pub fn on_chmod(attr: &Attr, mode: u32) {
 pub struct Inherit {
     access: Option<Vec<Entry>>,
     default: Option<Vec<u8>>,
+    /// The directory's access-control labels (`security.hydra.labels`, see abac.rs): new
+    /// files and folders get their folder's labels.
+    labels: Option<Vec<u8>>,
 }
 
 /// The permission bits for a new inode requested with `perm` in directory `dir`: with a
 /// default ACL, `perm` limited by it (no umask) and what the inode inherits
 /// (`posix_acl_create`); without one, `perm` minus `umask`.
 pub fn create_mode(dir: u64, perm: u32, umask: u32, is_dir: bool) -> (u32, Option<Inherit>) {
-    let plain = (perm & !umask, None);
-    let Ok(dattr) = ZfsClient::getattr(dir) else { return plain };
+    let Ok(dattr) = ZfsClient::getattr(dir) else { return (perm & !umask, None) };
+    let labels = super::abac::inherited_labels(&dattr);
+    let plain = (perm & !umask, labels.clone().map(|l| Inherit { access: None, default: None, labels: Some(l) }));
     let Some(def) = load(&dattr, true) else { return plain };
     let mut e = (*def).clone();
     let mut mode = perm;
@@ -303,7 +307,7 @@ pub fn create_mode(dir: u64, perm: u32, umask: u32, is_dir: bool) -> (u32, Optio
         e[i].perm &= ((mode >> 3) & 7) as u16;
         mode = (mode & !0o70) | (e[i].perm as u32) << 3;
     }
-    let plan = Inherit { access: not_equiv.then_some(e), default: is_dir.then(|| encode(&def)) };
+    let plan = Inherit { access: not_equiv.then_some(e), default: is_dir.then(|| encode(&def)), labels };
     (mode, Some(plan))
 }
 
@@ -315,5 +319,8 @@ pub fn inherit(ino: u64, plan: Option<Inherit>) {
     }
     if let Some(d) = p.default {
         let _ = ZfsClient::setxattr(ino, DEFAULT, &d, 0);
+    }
+    if let Some(l) = p.labels {
+        let _ = ZfsClient::setxattr(ino, super::abac::LABELS, &l, 0);
     }
 }
