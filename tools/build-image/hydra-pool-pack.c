@@ -1,7 +1,7 @@
 /*
  * hydra-pool-pack: copies a Hydra pool image into a new, compact pool image.
  *
- *   hydra-pool-pack [--size BYTES | --headroom BYTES] [--keep-guid] IN.raw OUT.raw
+ *   hydra-pool-pack [--size BYTES | --headroom BYTES] [--keep-guid] [--drop-object N]... IN.raw OUT.raw
  *
  * Only the blocks the newest uberblock can reach are copied (the dnode array, every live
  * object's indirect and data blocks), one after another from the start of the data area.
@@ -12,6 +12,8 @@
  *
  * The new pool is BYTES long (--size), or as long as its data plus --headroom (default
  * 1 GiB), rounded up to a MiB. It gets a new pool GUID unless --keep-guid.
+ * --drop-object N (repeatable) leaves object N out, freed, if it has damaged blocks: for an
+ * object no directory names any more (an orphan; otherwise a damaged pool is refused).
  * The on-disk format is the one of src/fs/zfs/types.rs (label "HYDRAZF2", version 2).
  *
  * Build: gcc -O2 -Wall -o hydra-pool-pack hydra-pool-pack.c
@@ -121,6 +123,9 @@ static void wr(uint64_t block, const void *buf) {
 
 /* Reads the block `bp` points to into buf, checking it. Returns 0 on failure. */
 static uint64_t cur_obj, cur_blkid;
+static uint64_t drop[16];      /* --drop-object: objects left out (orphans no directory names) */
+static int ndrop;
+static uint64_t free_head;     /* head of the free object list of the new uberblock */
 static int read_bp(const blkptr *bp, uint8_t *buf) {
     if (bp->block >= in_blocks || bp->lsize == 0 || bp->lsize > BLOCK) {
         fprintf(stderr, "bad block pointer: block %" PRIu64 " lsize %u\n", bp->block, bp->lsize);
@@ -173,6 +178,32 @@ static void relocate(blkptr *bp, int level, int is_meta, uint64_t blkid) {
         for (unsigned i = 0; i < BLOCK / DNODE_SIZE; i++)
             if (d[i].obj_type != 0 || d[i].bp[0].block || d[i].bp[1].block || d[i].bp[2].block) {
                 cur_obj = blkid * (BLOCK / DNODE_SIZE) + i;
+                int dropped = 0;
+                for (int k = 0; k < ndrop; k++) dropped |= drop[k] == cur_obj;
+                if (dropped && !writing) {
+                    /* Only an object that really is damaged is left out */
+                    uint64_t before = bad;
+                    relocate_dnode(&d[i], 0);
+                    if (bad == before) {
+                        fprintf(stderr, "object %" PRIu64 " (--drop-object) is not damaged: not leaving it out\n", cur_obj);
+                        exit(1);
+                    }
+                    bad = before;
+                    continue;
+                }
+                if (dropped) {
+                    /* Freed as the kernel frees an object: an empty dnode on the free list */
+                    uint64_t gen = d[i].generation;
+                    memset(&d[i], 0, sizeof d[i]);
+                    d[i].nlevels = 1;
+                    d[i].generation = gen;
+                    d[i].next_free = free_head;
+                    if (writing) {
+                        free_head = cur_obj;
+                        fprintf(stderr, "object %" PRIu64 " left out (--drop-object)\n", cur_obj);
+                    }
+                    continue;
+                }
                 uint64_t before = bad;
                 relocate_dnode(&d[i], 0);
                 if (bad != before)
@@ -210,10 +241,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--size") && i + 1 < argc) size = parse_size(argv[++i]);
         else if (!strcmp(argv[i], "--headroom") && i + 1 < argc) headroom = parse_size(argv[++i]);
         else if (!strcmp(argv[i], "--keep-guid")) keep_guid = 1;
+        else if (!strcmp(argv[i], "--drop-object") && i + 1 < argc && ndrop < 16) drop[ndrop++] = strtoull(argv[++i], 0, 10);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
     if (argc - i != 2) {
-        fprintf(stderr, "usage: hydra-pool-pack [--size BYTES | --headroom BYTES] [--keep-guid] IN.raw OUT.raw\n");
+        fprintf(stderr, "usage: hydra-pool-pack [--size BYTES | --headroom BYTES] [--keep-guid] [--drop-object N]... IN.raw OUT.raw\n");
         return 2;
     }
     in_fd = open(argv[i], O_RDONLY);
@@ -290,6 +322,7 @@ int main(int argc, char **argv) {
     shared = 0;
     meta = ub.meta;
     cur_obj = 0;
+    free_head = ub.free_obj_head;
     relocate_dnode(&meta, 1);
     if (bad) die("the input changed while packing");
     uint64_t used = next_new;
@@ -311,6 +344,7 @@ int main(int argc, char **argv) {
     ub.meta = meta;
     ub.allocated_blocks = used;
     ub.snapshot_txg = 0;
+    ub.free_obj_head = free_head;
     ub.checksum = fl4(&ub, offsetof(uberblock, checksum));
     memcpy(buf, &ub, sizeof ub);
     wr(nl.ub_start + ub.txg % UB_RING, buf);

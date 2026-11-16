@@ -33,10 +33,17 @@ POOL=/root/pool/hydrapool.qcow2
 WORK=${WORK:-/root/pool/f-work}
 OUT=${OUT:-/root/pool/f-out}
 PORT=${PORT:-8731}
+# Damaged objects no directory names any more, left out of the image (hydra-pool-pack refuses
+# a pool with damaged blocks otherwise; it leaves an object out only when it is damaged).
+# 81915: a folder of the login screen's runtime files (uid 101) the main pool lost on
+# 2026-11-09, unlinked by `zfs fsck repair` then but still allocated
+DROP_OBJECTS=${DROP_OBJECTS-81915}
 HEADROOM_CLEAN=${HEADROOM_CLEAN:-2G}   # free space in the install image's pool (it grows on boot)
 HEADROOM_LIVE=${HEADROOM_LIVE:-1536M}  # free space in the stick's pool for the live session
 ESP_MIB=${ESP_MIB:-512}
 STEPS=${*:-snapshot clean pack verify live stick}
+DROPS=""
+for o in $DROP_OBJECTS; do DROPS="$DROPS --drop-object $o"; done
 
 say() { echo "[build-image] $*"; }
 die() { echo "[build-image] ERROR: $*" >&2; exit 1; }
@@ -137,7 +144,7 @@ for step in $STEPS; do
     pack)
         pack_tool
         heavy "set -e; cd '$OUT'; rm -f pool.img pool.img.zst
-                '$WORK/hydra-pool-pack' --headroom $HEADROOM_CLEAN '$WORK/clean.raw' pool.img > '$WORK/pack-clean.txt'"
+                '$WORK/hydra-pool-pack' $DROPS --headroom $HEADROOM_CLEAN '$WORK/clean.raw' pool.img > '$WORK/pack-clean.txt'"
         cat "$R$WORK/pack-clean.txt"
         say "compressing (zstd)"
         heavy "set -e; cd '$OUT'
@@ -152,7 +159,7 @@ for step in $STEPS; do
                   echo \"sha256=\$(cut -d' ' -f1 pool.img.sha256)\"
                   echo \"zst_sha256=\$(sha256sum pool.img.zst | cut -d' ' -f1)\"
                   echo \"built=\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-                  echo \"source=$(git -C "$TREE" rev-parse --short HEAD 2>/dev/null || echo unknown)\"
+                  echo \"source=${SOURCE:-$(git -C "$TREE" rev-parse --short HEAD 2>/dev/null || echo unknown)}\"
                 } > pool.conf"
         cat "$R$OUT/pool.conf"
         # The installed system's EFI partition (without the live flag)
@@ -180,7 +187,7 @@ for step in $STEPS; do
         # The clean pool again, with room for the install set and the live session
         head=$(( zst + $(stat -c %s "$R$OUT/esp.tar") + $(numfmt --from=iec "$HEADROOM_LIVE") ))
         heavy "set -e; cd '$WORK'; rm -f live.raw live.qcow2
-                ./hydra-pool-pack --headroom $head clean.raw live.raw > pack-live.txt
+                ./hydra-pool-pack $DROPS --headroom $head clean.raw live.raw > pack-live.txt
                 qemu-img create -q -f qcow2 -F raw -b $WORK/live.raw live.qcow2"
         cat "$R$WORK/pack-live.txt"
         serve "$OUT"
