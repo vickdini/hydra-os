@@ -1,0 +1,8 @@
+[package]
+name = "ahci-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra AHCI SATA disk driver (MMIO, command list DMA, MSI or polled completion)"
+
+[dependencies]
+hydra-rt = { workspace = true }

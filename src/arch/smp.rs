@@ -54,6 +54,18 @@ const LAPIC_TIMER_INIT: u64 = 0x380;
 const LAPIC_TIMER_CUR: u64 = 0x390;
 const LAPIC_TIMER_DIV: u64 = 0x3E0;
 
+/// Local APIC ID of the boot processor (set by [`discover`], which runs on it).
+static BSP_APIC: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Local APIC ID of the boot processor: where device interrupts sent as messages (MSI)
+/// go, as the legacy PIC's do.
+pub fn boot_apic_id() -> u32 {
+    match BSP_APIC.load(Ordering::Relaxed) {
+        u32::MAX => 0,
+        id => id,
+    }
+}
+
 /// Acknowledges the interrupt the calling CPU's local APIC delivered.
 pub fn lapic_eoi() {
     lapic_write(LAPIC_EOI, 0);
@@ -376,6 +388,8 @@ unsafe fn rd64(p: u64) -> u64 {
 /// Reads the processors from the ACPI MADT and reserves the start-up pages. Called before
 /// `ExitBootServices`.
 pub fn discover() {
+    // The default register address until the MADT says otherwise (it practically never does)
+    BSP_APIC.store(apic_id(), Ordering::Relaxed);
     let rsdp = uefi::system::with_config_table(|t| {
         t.iter()
             .find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID)
@@ -436,6 +450,7 @@ pub fn discover() {
             Err(_) => crate::kprintln!("[smp] no memory below 1 MiB for the start-up code: one CPU"),
         }
     }
+    BSP_APIC.store(apic_id(), Ordering::Relaxed);
     crate::kprintln!("[smp] {} CPU(s) in the MADT, local APIC at {:#x}", ids.len(), LAPIC_BASE.load(Ordering::Relaxed));
     *APIC_IDS.lock() = ids;
 }

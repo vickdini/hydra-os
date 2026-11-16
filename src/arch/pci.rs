@@ -395,3 +395,195 @@ pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     }
     None
 }
+
+/// Physical address of memory BAR `index` (0..=5), with the upper half of a 64-bit BAR
+/// (UEFI firmware may place those above 4 GiB, as on an xHCI controller); 0 for an I/O
+/// BAR or one the firmware left unassigned.
+///
+/// # Arguments
+///
+/// * `dev` - The device.
+/// * `index` - BAR number.
+///
+/// # Returns
+///
+/// The BAR's physical base address, or 0.
+pub fn bar_address(dev: &PciDevice, index: u8) -> u64 {
+    if index > 5 {
+        return 0;
+    }
+    let off = PCI_REG_BAR0 + index * 4;
+    let lo = pci_read_u32(dev.bus, dev.device, dev.function, off);
+    if lo & 1 != 0 {
+        return 0;
+    }
+    let mut addr = (lo & !0xF) as u64;
+    // Type 2 (bits 1..2): 64-bit, the next BAR holds the upper half
+    if (lo >> 1) & 3 == 2 && index < 5 {
+        addr |= (pci_read_u32(dev.bus, dev.device, dev.function, off + 4) as u64) << 32;
+    }
+    addr
+}
+
+/// Size of memory BAR `index` in bytes (0 for an I/O or unassigned BAR), found the
+/// standard way: all ones written to it, the address bits that stay zero give the size.
+/// Memory decoding is off meanwhile, so call it before the device's driver runs.
+///
+/// # Arguments
+///
+/// * `dev` - The device.
+/// * `index` - BAR number.
+///
+/// # Returns
+///
+/// The size in bytes, or 0.
+pub fn bar_size(dev: &PciDevice, index: u8) -> u64 {
+    if index > 5 || bar_address(dev, index) == 0 {
+        return 0;
+    }
+    let (b, d, f) = (dev.bus, dev.device, dev.function);
+    let off = PCI_REG_BAR0 + index * 4;
+    let lo = pci_read_u32(b, d, f, off);
+    let is64 = (lo >> 1) & 3 == 2 && index < 5;
+    let cmd = pci_read_u16(b, d, f, PCI_REG_COMMAND);
+    pci_write_u16(b, d, f, PCI_REG_COMMAND, cmd & !PCI_CMD_MEMORY_SPACE);
+    pci_write_u32(b, d, f, off, 0xFFFF_FFFF);
+    let mut mask = (pci_read_u32(b, d, f, off) & !0xF) as u64;
+    pci_write_u32(b, d, f, off, lo);
+    if is64 {
+        let hi = pci_read_u32(b, d, f, off + 4);
+        pci_write_u32(b, d, f, off + 4, 0xFFFF_FFFF);
+        mask |= (pci_read_u32(b, d, f, off + 4) as u64) << 32;
+        pci_write_u32(b, d, f, off + 4, hi);
+    } else {
+        mask |= 0xFFFF_FFFF_0000_0000;
+    }
+    pci_write_u16(b, d, f, PCI_REG_COMMAND, cmd);
+    if mask == 0xFFFF_FFFF_0000_0000 {
+        return 0;
+    }
+    (!mask).wrapping_add(1)
+}
+
+/// Offset of the device's capability `id` in configuration space (0x05: MSI, 0x11:
+/// MSI-X, 0x10: PCI Express, 0x01: power management).
+///
+/// # Arguments
+///
+/// * `dev` - The device.
+/// * `id` - Capability ID.
+///
+/// # Returns
+///
+/// `Some(offset)` if the device lists the capability.
+pub fn find_capability(dev: &PciDevice, id: u8) -> Option<u8> {
+    // Status bit 4: the device has a capability list
+    if pci_read_u16(dev.bus, dev.device, dev.function, PCI_REG_STATUS) & 0x10 == 0 {
+        return None;
+    }
+    let mut ptr = pci_read_u8(dev.bus, dev.device, dev.function, 0x34) & 0xFC;
+    // Bounded: a broken list must not loop forever
+    for _ in 0..48 {
+        if ptr < 0x40 {
+            return None;
+        }
+        if pci_read_u8(dev.bus, dev.device, dev.function, ptr) == id {
+            return Some(ptr);
+        }
+        ptr = pci_read_u8(dev.bus, dev.device, dev.function, ptr + 1) & 0xFC;
+    }
+    None
+}
+
+/// Makes the device signal its interrupt as a message (MSI) carrying `vector` to the
+/// local APIC `apic_id`, and turns its legacy INTx line off. Messages need no routing
+/// through the PIC or an I/O APIC (which Hydra does not program), are never shared with
+/// another device, and work the same on every chipset.
+///
+/// # Arguments
+///
+/// * `dev` - The device.
+/// * `apic_id` - Local APIC ID of the CPU that takes the interrupt.
+/// * `vector` - IDT vector of the interrupt.
+///
+/// # Returns
+///
+/// `true` if the device has the MSI capability and it is now enabled.
+pub fn enable_msi(dev: &PciDevice, apic_id: u32, vector: u8) -> bool {
+    let Some(cap) = find_capability(dev, 0x05) else { return false };
+    let (b, d, f) = (dev.bus, dev.device, dev.function);
+    // A device with MSI-X too uses MSI-X when that is enabled (firmware may have left it so)
+    if let Some(x) = find_capability(dev, 0x11) {
+        let ctrl = pci_read_u16(b, d, f, x + 2);
+        pci_write_u16(b, d, f, x + 2, ctrl & !0x8000);
+    }
+    let ctrl = pci_read_u16(b, d, f, cap + 2);
+    let is64 = ctrl & (1 << 7) != 0;
+    let per_vector_mask = ctrl & (1 << 8) != 0;
+    // Off while it is reprogrammed
+    pci_write_u16(b, d, f, cap + 2, ctrl & !1);
+    // Address: the local APIC message range, physical destination mode
+    pci_write_u32(b, d, f, cap + 4, 0xFEE0_0000 | ((apic_id & 0xFF) << 12));
+    let data = if is64 {
+        pci_write_u32(b, d, f, cap + 8, 0);
+        cap + 12
+    } else {
+        cap + 8
+    };
+    // Data: fixed delivery, edge triggered
+    pci_write_u16(b, d, f, data, vector as u16);
+    if per_vector_mask {
+        pci_write_u32(b, d, f, if is64 { cap + 16 } else { cap + 12 }, 0);
+    }
+    // One message (multiple message enable 0), enabled
+    pci_write_u16(b, d, f, cap + 2, (ctrl & !(7 << 4)) | 1);
+    // INTx disable (command bit 10): the line must not fire too
+    let cmd = pci_read_u16(b, d, f, PCI_REG_COMMAND);
+    pci_write_u16(b, d, f, PCI_REG_COMMAND, cmd | 0x400);
+    true
+}
+
+/// Every function on the PCI bus whose class and subclass match (all of them, where
+/// [`find_class`] returns the first).
+///
+/// # Arguments
+///
+/// * `class` - Base class code.
+/// * `subclass` - Subclass code.
+///
+/// # Returns
+///
+/// The matching devices in bus order.
+pub fn find_all_class(class: u8, subclass: u8) -> alloc::vec::Vec<PciDevice> {
+    let mut found = alloc::vec::Vec::new();
+    for bus in 0..=31 {
+        for device in 0..32 {
+            if matches!(pci_read_u16(bus, device, 0, PCI_REG_VENDOR_ID), 0xFFFF | 0x0000) {
+                continue;
+            }
+            let functions = if pci_read_u8(bus, device, 0, PCI_REG_HEADER_TYPE) & 0x80 != 0 { 8 } else { 1 };
+            for function in 0..functions {
+                let v = pci_read_u16(bus, device, function, PCI_REG_VENDOR_ID);
+                if v == 0xFFFF || v == 0x0000 {
+                    continue;
+                }
+                if pci_read_u8(bus, device, function, PCI_REG_CLASS) == class
+                    && pci_read_u8(bus, device, function, PCI_REG_SUBCLASS) == subclass
+                {
+                    found.push(PciDevice {
+                        bus,
+                        device,
+                        function,
+                        vendor_id: v,
+                        device_id: pci_read_u16(bus, device, function, PCI_REG_DEVICE_ID),
+                        class_id: class,
+                        subclass_id: subclass,
+                        bar0: pci_read_u32(bus, device, function, PCI_REG_BAR0),
+                        irq_line: pci_read_u8(bus, device, function, PCI_REG_INTERRUPT_LINE),
+                    });
+                }
+            }
+        }
+    }
+    found
+}

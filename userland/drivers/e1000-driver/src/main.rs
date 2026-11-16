@@ -1,13 +1,21 @@
 //! # Hydra e1000 network driver
 //!
-//! Drives an Intel 82540EM (e1000) network adapter from Ring 3, in an address space of its
-//! own: its registers are the device memory the supervisor granted (PCI `BAR0`), its
-//! descriptor rings and packet buffers DMA memory it allocates. The kernel enumerates PCI
-//! (enabling bus mastering) and starts it with `bar0=<phys> irq=<line>`.
+//! Drives an Intel gigabit network adapter of the e1000 families from Ring 3, in an
+//! address space of its own: its registers are the device memory the supervisor granted
+//! (PCI `BAR0`), its descriptor rings and packet buffers DMA memory it allocates. The
+//! kernel enumerates PCI (enabling bus mastering) and starts it with
+//! `bar0=<phys> irq=<line> model=<family>`, the family being
+//! - `82540`: the 8254x (QEMU's `e1000`, an 82540EM);
+//! - `82574`: the 82574L (QEMU's `e1000e`);
+//! - `pch`: the PHYs built into Intel chipsets' MAC (I217, I218, I219: "PCH LAN"), such as
+//!   the I218-V of a Haswell NUC.
+//! All three take the legacy descriptor formats and the same queue registers; they differ
+//! in reset and in how the link comes up (see [`Nic::init`]).
 //!
 //! The driver only answers requests. When the adapter interrupts, the kernel masks the line
-//! and wakes its network task, which asks for the received frames; the driver acknowledges
-//! the interrupt causes and unmasks the line then.
+//! (or, for a message-signalled interrupt, just counts it) and wakes its network task,
+//! which asks for the received frames; the driver acknowledges the interrupt causes and
+//! unmasks the line then.
 //!
 //! Requests on [`ENDPOINT_NET_DEV`] (frames travel through the service window):
 //! - `MSG_NET_TRANSMIT [len]`: send the frame at the start of the window;
@@ -30,6 +38,10 @@ hydra_rt::entry!(main);
 
 const REG_CTRL: usize = 0x0000;
 const REG_STATUS: usize = 0x0008;
+const REG_CTRL_EXT: usize = 0x0018;
+const REG_MDIC: usize = 0x0020;
+const REG_FEXTNVM3: usize = 0x003C;
+const REG_EXTCNF_CTRL: usize = 0x0F00;
 const REG_ICR: usize = 0x00C0;
 const REG_IMS: usize = 0x00D0;
 const REG_IMC: usize = 0x00D8;
@@ -57,7 +69,23 @@ const CTRL_SPEED_1000: u32 = 2 << 8;
 const CTRL_FRCSPD: u32 = 1 << 11;
 const CTRL_FRCDPX: u32 = 1 << 12;
 const CTRL_RST: u32 = 1 << 26;
+const CTRL_LANPHYPC_OVERRIDE: u32 = 1 << 16;
+const CTRL_LANPHYPC_VALUE: u32 = 1 << 17;
+const CTRL_PHY_RST: u32 = 1 << 31;
+const CTRL_EXT_LPCD: u32 = 1 << 2;
+const CTRL_EXT_DRV_LOAD: u32 = 1 << 28;
 const STATUS_LU: u32 = 1 << 1;
+const STATUS_LAN_INIT_DONE: u32 = 1 << 9;
+const EXTCNF_SWFLAG: u32 = 1 << 5;
+const MDIC_READ: u32 = 2 << 26;
+const MDIC_WRITE: u32 = 1 << 26;
+const MDIC_READY: u32 = 1 << 28;
+const MDIC_ERROR: u32 = 1 << 30;
+/// PHY control register (IEEE 802.3 clause 22 register 0) and its bits.
+const PHY_BMCR: u32 = 0;
+const BMCR_POWER_DOWN: u16 = 1 << 11;
+const BMCR_ANEG_ENABLE: u16 = 1 << 12;
+const BMCR_ANEG_RESTART: u16 = 1 << 9;
 const RCTL_EN: u32 = 1 << 1;
 const RCTL_SBP: u32 = 1 << 2;
 const RCTL_UPE: u32 = 1 << 3;
@@ -71,6 +99,8 @@ const INT_LSC: u32 = 1 << 2;
 const INT_RXDMT0: u32 = 1 << 4;
 const INT_RXO: u32 = 1 << 6;
 const INT_RXT0: u32 = 1 << 7;
+/// The causes the network task is woken for.
+const INT_CAUSES: u32 = INT_RXT0 | INT_RXO | INT_RXDMT0 | INT_LSC;
 
 const NUM_TX: usize = 32;
 const NUM_RX: usize = 256;
@@ -97,7 +127,35 @@ struct Desc {
     special: u16,
 }
 
+/// Adapter family (see the module documentation).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Model {
+    I82540,
+    I82574,
+    Pch,
+}
+
+impl Model {
+    /// The PHY's address on the adapter's MDIO bus.
+    fn phy_addr(self) -> u32 {
+        match self {
+            Model::Pch => 2,
+            _ => 1,
+        }
+    }
+
+    /// Name for the log.
+    fn name(self) -> &'static str {
+        match self {
+            Model::I82540 => "82540EM",
+            Model::I82574 => "82574L",
+            Model::Pch => "PCH LAN (I217/I218/I219)",
+        }
+    }
+}
+
 struct Nic {
+    model: Model,
     regs: *mut u8,
     /// DMA memory: RX descriptors, TX descriptors, RX buffers, TX buffers.
     mem: *mut u8,
@@ -157,17 +215,154 @@ impl Nic {
         unsafe { self.mem.add(TX_DESC_OFF + i * 16) as *mut Desc }
     }
 
-    /// Resets the adapter and sets up both rings.
-    fn init(&mut self) {
-        self.write(REG_IMC, 0xFFFF_FFFF);
-        self.write(REG_CTRL, self.read(REG_CTRL) | CTRL_RST);
-        for _ in 0..100_000 {
-            if self.read(REG_CTRL) & CTRL_RST == 0 {
+    /// Waits up to `ms` milliseconds for `(read(reg) & mask) == want`.
+    fn wait_reg(&self, reg: usize, mask: u32, want: u32, ms: u64) -> bool {
+        let end = sys::uptime_ticks() + ms.div_ceil(10) + 1;
+        loop {
+            if self.read(reg) & mask == want {
+                return true;
+            }
+            if sys::uptime_ticks() >= end {
+                return false;
+            }
+            sys::sleep_ms(1);
+        }
+    }
+
+    /// Takes the software semaphore that PCH adapters share with the chipset's management
+    /// firmware for the PHY and the reset (up to 1 s, as Linux allows).
+    fn acquire_swflag(&self) -> bool {
+        if self.model != Model::Pch {
+            return true;
+        }
+        if !self.wait_reg(REG_EXTCNF_CTRL, EXTCNF_SWFLAG, 0, 1000) {
+            println!("[e1000-driver] the PHY semaphore stays taken by the firmware");
+            return false;
+        }
+        self.write(REG_EXTCNF_CTRL, self.read(REG_EXTCNF_CTRL) | EXTCNF_SWFLAG);
+        if !self.wait_reg(REG_EXTCNF_CTRL, EXTCNF_SWFLAG, EXTCNF_SWFLAG, 100) {
+            println!("[e1000-driver] the PHY semaphore cannot be taken");
+            return false;
+        }
+        true
+    }
+
+    /// Gives the semaphore of [`Nic::acquire_swflag`] back.
+    fn release_swflag(&self) {
+        if self.model == Model::Pch {
+            self.write(REG_EXTCNF_CTRL, self.read(REG_EXTCNF_CTRL) & !EXTCNF_SWFLAG);
+        }
+    }
+
+    /// One MDIO access to PHY register `reg` (a read when `write` is `None`).
+    fn mdic(&self, reg: u32, write: Option<u16>) -> Option<u16> {
+        if !self.acquire_swflag() {
+            return None;
+        }
+        let op = match write {
+            Some(v) => MDIC_WRITE | v as u32,
+            None => MDIC_READ,
+        };
+        self.write(REG_MDIC, op | (reg & 0x1F) << 16 | self.model.phy_addr() << 21);
+        let mut result = None;
+        // MDIO runs at about 2.5 MHz: an access takes some 50 microseconds; allow 100 ms
+        let end = sys::uptime_ticks() + 11;
+        loop {
+            let m = self.read(REG_MDIC);
+            if m & MDIC_READY != 0 {
+                if m & MDIC_ERROR == 0 {
+                    result = Some(m as u16);
+                }
+                break;
+            }
+            if sys::uptime_ticks() >= end {
                 break;
             }
             core::hint::spin_loop();
         }
+        self.release_swflag();
+        result
+    }
+
+    /// Wakes a PCH PHY that the firmware or a previous operating system left in its
+    /// ultra-low-power state, where it does not answer on MDIO: toggles the LANPHYPC pin
+    /// (as Linux's `e1000_toggle_lanphypc_pch_lpt`), which power-cycles the PHY.
+    fn toggle_lanphypc(&self) {
+        // The PHY configuration counter: 50 ms after the power cycle
+        let f = self.read(REG_FEXTNVM3);
+        self.write(REG_FEXTNVM3, (f & !7) | 0x1);
+        let ctrl = self.read(REG_CTRL);
+        self.write(REG_CTRL, (ctrl | CTRL_LANPHYPC_OVERRIDE) & !CTRL_LANPHYPC_VALUE);
+        self.read(REG_STATUS);
+        sys::sleep_ms(1);
+        self.write(REG_CTRL, self.read(REG_CTRL) & !CTRL_LANPHYPC_OVERRIDE);
+        self.read(REG_STATUS);
+        // The adapter reports the PHY's configuration done
+        if !self.wait_reg(REG_CTRL_EXT, CTRL_EXT_LPCD, CTRL_EXT_LPCD, 100) {
+            println!("[e1000-driver] the PHY did not report its configuration done after a power cycle");
+        }
+        sys::sleep_ms(30);
+    }
+
+    /// Makes sure the PHY is powered and negotiating (82574 and PCH: the MAC follows the
+    /// speed and duplex the PHY negotiated).
+    fn phy_up(&self) {
+        let mut bmcr = self.mdic(PHY_BMCR, None);
+        if self.model == Model::Pch && matches!(bmcr, None | Some(0xFFFF)) {
+            println!("[e1000-driver] the PHY does not answer; power-cycling it");
+            self.toggle_lanphypc();
+            bmcr = self.mdic(PHY_BMCR, None);
+        }
+        match bmcr {
+            Some(b) if b != 0xFFFF => {
+                if b & BMCR_POWER_DOWN != 0 || b & BMCR_ANEG_ENABLE == 0 {
+                    let v = (b & !BMCR_POWER_DOWN) | BMCR_ANEG_ENABLE | BMCR_ANEG_RESTART;
+                    let _ = self.mdic(PHY_BMCR, Some(v));
+                }
+            }
+            _ => println!("[e1000-driver] cannot reach the PHY; the link may stay down"),
+        }
+    }
+
+    /// Resets the MAC. On 82574 and PCH adapters the receive and transmit units are
+    /// stopped and drained first, and PCH ones reset under the firmware semaphore and
+    /// then reload their configuration from the NVM.
+    fn reset(&self) {
         self.write(REG_IMC, 0xFFFF_FFFF);
+        if self.model != Model::I82540 {
+            self.write(REG_RCTL, 0);
+            self.write(REG_TCTL, TCTL_PSP);
+            self.read(REG_STATUS);
+            sys::sleep_ms(10);
+        }
+        let mut ctrl = self.read(REG_CTRL) | CTRL_RST;
+        if self.model == Model::Pch {
+            // The semaphore is released by the reset itself
+            self.acquire_swflag();
+            ctrl &= !CTRL_PHY_RST;
+        }
+        self.write(REG_CTRL, ctrl);
+        if self.model != Model::I82540 {
+            // Reading registers while the reset runs can hang PCH adapters
+            sys::sleep_ms(20);
+        }
+        if !self.wait_reg(REG_CTRL, CTRL_RST, 0, 1000) {
+            println!("[e1000-driver] the adapter did not finish its reset");
+        }
+        if self.model == Model::Pch && !self.wait_reg(REG_STATUS, STATUS_LAN_INIT_DONE, STATUS_LAN_INIT_DONE, 150) {
+            println!("[e1000-driver] the adapter did not report its NVM configuration loaded");
+        }
+        self.write(REG_IMC, 0xFFFF_FFFF);
+        self.read(REG_ICR);
+        if self.model != Model::I82540 {
+            // Tells the management firmware an operating system driver runs the adapter
+            self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | CTRL_EXT_DRV_LOAD);
+        }
+    }
+
+    /// Resets the adapter and sets up both rings.
+    fn init(&mut self) {
+        self.reset();
         let (ral, rah) = (self.read(REG_RAL0), self.read(REG_RAH0));
         self.mac = [ral as u8, (ral >> 8) as u8, (ral >> 16) as u8, (ral >> 24) as u8, rah as u8, (rah >> 8) as u8];
 
@@ -214,15 +409,21 @@ impl Nic {
         self.write(REG_RDT, (NUM_RX - 1) as u32);
         self.write(REG_RCTL, RCTL_EN | RCTL_SBP | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
 
-        let ctrl = (self.read(REG_CTRL) & !CTRL_RST)
-            | CTRL_SLU
-            | CTRL_ASDE
-            | CTRL_FD
-            | CTRL_SPEED_1000
-            | CTRL_FRCSPD
-            | CTRL_FRCDPX;
+        let ctrl = self.read(REG_CTRL) & !CTRL_RST;
+        let ctrl = if self.model == Model::I82540 {
+            ctrl | CTRL_SLU | CTRL_ASDE | CTRL_FD | CTRL_SPEED_1000 | CTRL_FRCSPD | CTRL_FRCDPX
+        } else {
+            // The MAC takes speed and duplex from the PHY's negotiation
+            (ctrl | CTRL_SLU) & !(CTRL_FRCSPD | CTRL_FRCDPX)
+        };
         self.write(REG_CTRL, ctrl);
+        if self.model != Model::I82540 {
+            self.phy_up();
+        }
         self.read(REG_ICR);
+
+        // Negotiation on a real link takes 2 to 3 s; the network stack retries DHCP, so
+        // only a short wait here
 
         for _ in 0..100 {
             if self.link_up() {
@@ -253,7 +454,7 @@ impl Nic {
         self.irq = Some(irq);
         self.write(REG_RDTR, 0); // an interrupt per frame
         self.read(REG_ICR);
-        self.write(REG_IMS, INT_RXT0 | INT_RXO | INT_RXDMT0 | INT_LSC);
+        self.write(REG_IMS, INT_CAUSES);
     }
 
     /// Transmits an Ethernet frame via DMA.
@@ -306,7 +507,13 @@ impl Nic {
     /// # Returns
     /// Count of complete frames stored.
     fn receive(&mut self, out: &mut [u8]) -> usize {
-        self.read(REG_ICR); // acknowledge: the adapter stops asserting the line
+        // Acknowledge: the adapter stops asserting the line. Reading clears the causes on
+        // the 8254x; the 82574 and PCH adapters clear on read only in some interrupt
+        // modes, so the causes read are also written back (write 1 to clear)
+        let icr = self.read(REG_ICR);
+        if self.model != Model::I82540 && icr != 0 {
+            self.write(REG_ICR, icr);
+        }
         let (mut count, mut at) = (0, 0);
         loop {
             let d = self.rx_desc(self.rx_cur);
@@ -384,7 +591,12 @@ fn main(args: &[&str]) {
             return;
         }
     };
-    let mut nic = Nic { regs, mem, mem_phys, mac: [0; 6], tx_cur: 0, rx_cur: 0, irq: None };
+    let model = match args.iter().find_map(|a| a.strip_prefix("model=")) {
+        Some("82574") => Model::I82574,
+        Some("pch") => Model::Pch,
+        _ => Model::I82540,
+    };
+    let mut nic = Nic { model, regs, mem, mem_phys, mac: [0; 6], tx_cur: 0, rx_cur: 0, irq: None };
     nic.init();
     if let Some(irq) = arg(args, "irq") {
         nic.enable_interrupts(irq as u8);
@@ -398,9 +610,15 @@ fn main(args: &[&str]) {
     };
     let m = nic.mac;
     println!(
-        "[e1000-driver] MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",
+        "[e1000-driver] {}: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}, {}",
+        nic.model.name(),
         m[0], m[1], m[2], m[3], m[4], m[5],
-        if nic.link_up() { "up" } else { "down" }
+        if nic.link_up() { "up" } else { "down" },
+        match nic.irq {
+            Some(i) if i >= 16 => "MSI interrupt",
+            Some(_) => "interrupt line",
+            None => "polled",
+        }
     );
     server.serve(|srv, msg| match msg.label as u32 {
         MSG_NET_TRANSMIT => {

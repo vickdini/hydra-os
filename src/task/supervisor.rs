@@ -37,6 +37,8 @@ use crate::task::{is_task_alive, kill, TaskId};
 
 /// The ATA disk driver program.
 static ATA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/ata-driver"));
+/// The AHCI (SATA) disk driver program.
+static AHCI_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/ahci-driver"));
 /// The ZFS file server program.
 static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/zfs-server"));
 /// The e1000 network driver program.
@@ -111,13 +113,67 @@ impl ServiceDescriptor {
     }
 }
 
+/// The first AHCI SATA adapter (PCI class 01:06, programming interface 01) and its
+/// register window (`ABAR`, BAR 5).
+///
+/// # Returns
+///
+/// `Some((device, abar))`, or `None` if there is no AHCI adapter with its window assigned.
+fn ahci_adapter() -> Option<(crate::arch::pci::PciDevice, u64)> {
+    use crate::arch::pci;
+    pci::find_all_class(0x01, 0x06).into_iter().find_map(|dev| {
+        if pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09) != 0x01 {
+            return None; // a vendor-specific SATA interface, not AHCI
+        }
+        let abar = pci::bar_address(&dev, 5);
+        (abar != 0).then_some((dev, abar))
+    })
+}
+
+/// AHCI driver: the adapter's register window and, when the adapter can signal it as a
+/// message, its interrupt line (bus mastering and MSI are set up here). Not started
+/// without an adapter; the driver exits if no disk is attached to it, and the IDE driver
+/// is started instead.
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` with `abar=<phys>` and maybe `irq=<line>`, or `None`.
+fn ahci_args() -> Option<Vec<String>> {
+    let (dev, abar) = ahci_adapter()?;
+    crate::arch::pci::enable_bus_mastering(&dev);
+    let mut args = alloc::vec![alloc::format!("abar={:#x}", abar)];
+    match service::msi_line(&dev) {
+        Some(line) => args.push(alloc::format!("irq={}", line)),
+        None => crate::kprintln!("[supervisor] AHCI adapter {:02x}:{:02x}.{}: no MSI; its driver polls", dev.bus, dev.device, dev.function),
+    }
+    Some(args)
+}
+
+/// AHCI driver: the pages holding its register window (on Intel adapters the window is
+/// 2 KiB aligned, so it need not start a page).
+///
+/// # Returns
+///
+/// The granted `(base, length)` range, if there is an adapter.
+fn ahci_grants() -> Vec<(u64, u64)> {
+    ahci_adapter().map_or_else(Vec::new, |(_, abar)| {
+        let start = abar & !0xFFF;
+        let end = (abar + 0x1100 + 0xFFF) & !0xFFF;
+        alloc::vec![(start, end - start)]
+    })
+}
+
 /// ATA driver: the primary channel's ports and, if the PCI IDE controller can bus-master,
-/// its DMA registers (bus mastering is enabled here). It exits if there is no disk.
+/// its DMA registers (bus mastering is enabled here). It exits if there is no disk. Not
+/// started when the AHCI driver already serves the disk endpoint.
 ///
 /// # Returns
 ///
 /// `Some(Vec<String>)` containing configuration flags (`"io=..."`, `"bm=..."`), or `None` if device absent.
 fn ata_args() -> Option<Vec<String>> {
+    if service::is_online(ENDPOINT_BLOCK_DEV) {
+        return None;
+    }
     let mut args = alloc::vec![String::from("io=0x1f0"), String::from("ctrl=0x3f6")];
     if let Some(dev) = crate::arch::pci::find_class(0x01, 0x01) {
         let prog_if = crate::arch::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
@@ -130,16 +186,19 @@ fn ata_args() -> Option<Vec<String>> {
     Some(args)
 }
 
-/// e1000 driver: the adapter's register window and interrupt line. Not started without
-/// an adapter.
+/// e1000 driver: the adapter's register window, family and interrupt: a message-signalled
+/// one (MSI) where the adapter has it (82574, PCH), else its legacy line as the firmware
+/// routed it. Not started without an adapter.
 ///
 /// # Returns
 ///
-/// `Some(Vec<String>)` containing base address and IRQ line flags, or `None` if no adapter found.
+/// `Some(Vec<String>)` containing base address, model and IRQ flags, or `None` if no adapter found.
 fn e1000_args() -> Option<Vec<String>> {
-    let (bar0, irq) = crate::net::e1000::find_adapter()?;
-    let mut args = alloc::vec![alloc::format!("bar0={:#x}", bar0)];
-    if irq != 0 && irq < 16 && irq != 2 {
+    let a = crate::net::e1000::find_adapter()?;
+    let mut args = alloc::vec![alloc::format!("bar0={:#x}", a.bar0), alloc::format!("model={}", a.model)];
+    let msi = if a.model == "82540" { None } else { service::msi_line(&a.dev) };
+    let irq = msi.unwrap_or(a.dev.irq_line);
+    if msi.is_some() || (irq != 0 && irq < 16 && irq != 2) {
         args.push(alloc::format!("irq={}", irq));
     }
     Some(args)
@@ -151,7 +210,7 @@ fn e1000_args() -> Option<Vec<String>> {
 ///
 /// A vector of physical memory ranges `(base, length)` granted to the network driver.
 fn e1000_grants() -> Vec<(u64, u64)> {
-    crate::net::e1000::find_adapter().map_or_else(Vec::new, |(bar0, _)| alloc::vec![(bar0, 128 * 1024)])
+    crate::net::e1000::find_adapter().map_or_else(Vec::new, |a| alloc::vec![(a.bar0, 128 * 1024)])
 }
 
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
@@ -368,7 +427,9 @@ pub static SUPERVISOR: Mutex<Supervisor> = Mutex::new(Supervisor::new());
 pub fn supervisor_init() {
     let mut sup = SUPERVISOR.lock();
     if sup.services.is_empty() {
-        // The disk first: everything else may need files
+        // The disk first: everything else may need files. An AHCI adapter with a disk
+        // takes the disk endpoint; the IDE driver starts only if it did not
+        sup.services.push(ServiceDescriptor::new("ahci_driver", ENDPOINT_BLOCK_DEV, AHCI_DRIVER_ELF, ahci_args, ahci_grants));
         sup.services.push(ServiceDescriptor::new("ata_driver", ENDPOINT_BLOCK_DEV, ATA_DRIVER_ELF, ata_args, no_grants));
         // The file server imports the pool through the disk driver
         sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
@@ -418,6 +479,13 @@ pub fn start_all() {
             Ok((name, endpoint, id)) => {
                 if await_registration(endpoint, id) {
                     crate::kprintln!("[supervisor] started '{}' (process {}, endpoint {:#x})", name, id.0, endpoint);
+                } else if !is_task_alive(id) {
+                    // It found no device (a disk adapter without a disk): not restarted,
+                    // and another service may take the endpoint
+                    let mut sup = SUPERVISOR.lock();
+                    sup.retire(idx);
+                    sup.services[idx].state = ServiceState::Stopped;
+                    crate::kprintln!("[supervisor] '{}' (process {}) exited without registering: no device", name, id.0);
                 } else {
                     crate::kprintln!("[supervisor] '{}' (process {}) did not register", name, id.0);
                 }
@@ -444,7 +512,9 @@ pub fn revive(endpoint: u32) -> bool {
             Some(s) => s,
             None => return false, // the supervisor itself is restarting it
         };
-        let Some(idx) = sup.services.iter().position(|s| s.endpoint_id == endpoint) else { return false };
+        // Several services may offer an endpoint (the AHCI and IDE disk drivers): the one
+        // that was started
+        let Some(idx) = sup.services.iter().position(|s| s.endpoint_id == endpoint && s.state != ServiceState::Stopped) else { return false };
         if sup.services[idx].state == ServiceState::Faulted || sup.services[idx].state == ServiceState::Stopped {
             return false;
         }

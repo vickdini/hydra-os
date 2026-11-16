@@ -208,6 +208,12 @@ def main():
     ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
     ap.add_argument("--extra-disk", default=None)
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
+    ap.add_argument("--disk-bus", default="ide", choices=["ide", "ahci"],
+                    help="how the pool disk is attached: the IDE controller (ata-driver) or an AHCI SATA adapter (ahci-driver)")
+    ap.add_argument("--nic", default="e1000", choices=["e1000", "e1000e", "none"], help="network adapter model")
+    ap.add_argument("--usb", action="store_true", help="add an xHCI controller with a USB keyboard and tablet")
+    ap.add_argument("--shared-host", action="store_true",
+                    help="only refuse to start when another QEMU uses the same disk image (other VMs on other images may run)")
     ap.add_argument("--stall-dump", type=float, default=0, help="save CPU state when the log stops growing for this many seconds")
     ap.add_argument("--no-cancel", action="store_true", help="boot into the desktop (otherwise QEMU's fw_cfg asks the kernel for the Hydra shell)")
     ap.add_argument("--cd", default="virtio", choices=["virtio", "ide"], help="how the boot ISO is attached: virtio-scsi (fast firmware reads) or the IDE CD-ROM")
@@ -221,7 +227,14 @@ def main():
 
     # One VM at a time: two QEMUs on the same pool image (or one on an overlay while the
     # pool changes underneath) corrupt it, and QEMU on Windows does not prevent it
-    others = running_qemus()
+    def conflicting():
+        found = running_qemus()
+        if a.shared_host:
+            # Several VMs on separate overlay images may run side by side; only one on
+            # the same image corrupts it
+            found = [(pid, cmd) for pid, cmd in found if f"file={a.disk}," in cmd]
+        return found
+    others = conflicting()
     if a.kill_stale:
         for pid, cmd in others:
             if "-display none" in cmd:
@@ -230,7 +243,7 @@ def main():
                 else:
                     subprocess.run(["kill", "-9", str(pid)], capture_output=True)
         time.sleep(1.0)
-        others = running_qemus()
+        others = conflicting()
     if others:
         for pid, cmd in others:
             print(f"[hydra_run] another QEMU is running (pid {pid}{', headless' if '-display none' in cmd else ', with a window'}): not starting a second VM on the pool")
@@ -256,12 +269,25 @@ def main():
     args = [
         QEMU,
         *firmware,
-        "-drive", f"file={a.disk},format={'qcow2' if a.disk.endswith('.qcow2') else 'raw'},if=ide,index=0,media=disk",
         "-m", a.mem, "-smp", str(a.smp), "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",
         "-no-reboot",
     ]
+    disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
+    if a.disk_bus == "ahci":
+        # An ICH9 AHCI adapter (as on real Intel chipsets) with the pool disk on port 0
+        args += ["-device", "ahci,id=ahci", "-drive", f"file={a.disk},format={disk_format},if=none,id=pooldisk",
+                 "-device", "ide-hd,drive=pooldisk,bus=ahci.0"]
+    else:
+        args += ["-drive", f"file={a.disk},format={disk_format},if=ide,index=0,media=disk"]
+    if a.nic == "none":
+        args += ["-nic", "none"]
+    elif a.nic != "e1000":
+        # QEMU's default for the pc machine is an e1000 with user networking
+        args += ["-nic", f"user,model={a.nic}"]
+    if a.usb:
+        args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
     iso = os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
     if a.cd == "virtio":
         # The firmware reads the boot volume (the kernel and the files staged for the pool)
