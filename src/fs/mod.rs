@@ -22,6 +22,7 @@
 //! - Concurrency: Requests to the file server run it in the caller's place; descriptors are shared `Arc<Mutex<...>>`.
 
 pub mod client;
+pub mod firstboot; // Group G: installer first-boot settings
 pub mod fd;
 pub mod pipe;
 pub mod zfs;

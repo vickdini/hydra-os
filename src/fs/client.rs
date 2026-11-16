@@ -1113,6 +1113,9 @@ impl ZfsClient {
             }
         }
 
+        // Group G: the installer's first-boot settings (\hydra\setup.conf), read and deleted here
+        super::firstboot::read_from_boot_volume(&mut root);
+
         let mut path_u16 = [0u16; 128];
 
         for (fat_path, zfs_path) in candidate_files.iter() {

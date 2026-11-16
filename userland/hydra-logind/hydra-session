@@ -25,6 +25,17 @@ if [ -e "$f" ] && [ "$(id -u)" = 0 ]; then
     dpkg-divert --quiet --local --rename --divert "$f.hydra-disabled" --add "$f"
 fi
 
+# ---- Group G (installer): the first start of a newly installed computer applies the
+# settings given in the installer (account, computer name, time zone, keyboard, language)
+# before the login screen shows; and the computer name is set at every start ----
+if [ "$(id -u)" = 0 ]; then
+    if [ -f /etc/hydra/setup.conf ] && [ -x /usr/libexec/hydra-firstboot ]; then
+        /usr/libexec/hydra-firstboot /etc/hydra/setup.conf
+    fi
+    [ -s /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null
+fi
+# ---- end Group G ----
+
 if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
     # The system users and groups packages ask for in sysusers.d (systemd-sysusers.service
     # runs before the bus elsewhere); the bus' rules name some of them

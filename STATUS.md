@@ -1,6 +1,5 @@
-TOOLKIT (Group B, stable): Python 3 + PyQt6 with Qt Widgets (packages python3-pyqt6, from Ubuntu universe). Reason: PySide6 pulls libshiboken6 -> libclang1-21 (+LLVM); PyQt6 is ~17 MB with no compiler libs; Qt Widgets get KDE's Breeze style, so windows look like other KDE apps; no QML/Kirigami needed. Hydra installs python3-pyqt6 itself if missing (hydra-session at boot, or Hydra Apps' first start via pkexec).
-Now: running the full regression suite on the final image, then the report.
-Works (verified in VM with screenshots): Hydra Apps (pinned on the taskbar, found by "store" in Start); Windows programs Notepad++, 7-Zip, SumatraPDF, WinMerge, PuTTY install (SHA-256 checked, silent) and start; LibreOffice, VLC, GIMP (apt) and Thunderbird (Mozilla archive) install through the polkit password dialog and start; uninstall of VLC (apt), Thunderbird and Notepad++ (Windows uninstaller); cancel of the password dialog reported in plain words.
-Works: Win+E/D/I/R/L/Up/Down/Left for a new user; welcome window at first login; no "Unknown username" warnings (systemd-sysusers at boot).
-Known: lock screen works but its greeter needs ~20 s to appear (~60 s first time) and freezes while dpkg writes a lot (unlocks afterwards).
-Commits: 6d798f3, 9d703b9, 88063ff (branch g2-apps).
+# Group G - Installer app & first boot (branch i-setup)
+Current step: decided the installer framework; writing the installer window and its root helper
+Works so far:
+- Decision: our own installer window in Python + PyQt6 (like Hydra Apps), NOT Calamares. Why: Calamares is in Ubuntu 26.04 (3.3.14) but its disk page needs KPMcore + libparted + udev, which see only "known" Linux filesystems and real block devices; Hydra's pool partition is neither, and the installer must never mount the target. Its install modules (unpackfs, bootloader, users) all work by mounting the new system and changing files inside it, which our design forbids (settings are applied at first boot instead). It would also pull in about 30 extra libraries (Qt Quick/QML, KF6 parts, yaml-cpp, os-prober). Our own window is about the same amount of work as taming Calamares and does exactly the 7 Windows-Setup-like steps.
+Next: installer window + helper, tested on a disk image file in the WSL chroot

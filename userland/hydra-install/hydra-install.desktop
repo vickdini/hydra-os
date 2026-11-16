@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Install Hydra
+GenericName=Install Hydra on this computer
+Comment=Install Hydra on a disk of this computer
+Exec=/usr/bin/hydra-install
+Icon=/usr/share/hydra-install/hydra-logo.png
+Terminal=false
+Categories=System;
+Keywords=install;setup;installer;

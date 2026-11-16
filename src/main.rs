@@ -462,6 +462,7 @@ fn boot() -> ! {
     fs::init_server();
     arch::boottime::mark("importing the boot files");
     fs::ZfsClient::import_boot_files(boot_files);
+    fs::firstboot::import_into_pool(); // Group G: installer first-boot settings
     console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[+] ZFS File Server Online (Endpoint #{:#x}):",
