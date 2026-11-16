@@ -227,7 +227,8 @@ impl Command for LinuxCommand {
                         Some("show") => prof::sample_show(args.get(3).and_then(|n| n.parse().ok()).unwrap_or(40)),
                         Some("stop") | None => prof::sample_start(0, false),
                         Some(name) => {
-                            let id = crate::task::SCHEDULER.lock().task_named(name).map(|t| t.0);
+                            // *: every task
+                            let id = if name == "*" { Some(u64::MAX) } else { crate::task::SCHEDULER.lock().task_named(name).map(|t| t.0) };
                             match id {
                                 Some(id) => {
                                     prof::sample_start(id, args.get(3).copied() == Some("all"));

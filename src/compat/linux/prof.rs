@@ -73,7 +73,8 @@ static SAMPLE_RIP: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES]
 #[inline]
 pub fn sample(task: u64, rip: u64, cs: u64) {
     let want = SAMPLE_TASK.load(Relaxed);
-    if want != 0 && want == task && (cs & 3 == 3 || SAMPLE_KERNEL.load(Relaxed)) {
+    // u64::MAX: every task
+    if want != 0 && (want == task || want == u64::MAX) && (cs & 3 == 3 || SAMPLE_KERNEL.load(Relaxed)) {
         let i = SAMPLE_AT.fetch_add(1, Relaxed) as usize % SAMPLES;
         SAMPLE_RIP[i].store(rip, Relaxed);
     }
