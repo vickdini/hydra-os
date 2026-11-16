@@ -516,6 +516,11 @@ impl ZfsClient {
         })
     }
 
+    /// The file server's read, past the kernel's page cache (here the same).
+    pub fn read_uncached(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+        Self::read_at(ino, offset, buf)
+    }
+
     pub fn write_at(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
         INODES.with_borrow_mut(|m| {
             let d = m.get_mut(&ino).ok_or(-2i64)?;

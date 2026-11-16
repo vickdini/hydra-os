@@ -621,6 +621,10 @@ impl ZfsServer {
         let a = Reader::new(self.reply(len)).attr();
         drop(changed);
         cache_attr(ino, a, attr_gen());
+        // The page cache: pages past a new size go
+        if let Some(size) = set.size {
+            crate::compat::linux::mm::cache_truncated(ino, size);
+        }
         Ok(a)
     }
 
@@ -674,10 +678,11 @@ impl ZfsServer {
         }
         let _changed = Changed(ino);
         let mut done = 0;
+        let mut failed = None;
         while done < data.len() || data.is_empty() {
             let chunk = &data[done..(done + MAX_IO).min(data.len())];
             let kill = kill_suid();
-            let (n, _) = self.request(FS_WRITE, |w| {
+            let sent = self.request(FS_WRITE, |w| {
                 w.u64(ino);
                 w.u64(offset + done as u64);
                 w.bytes(chunk);
@@ -689,13 +694,25 @@ impl ZfsServer {
                         w.u64(x as u64);
                     }
                 }
-            })?;
+            });
+            let n = match sent {
+                Ok((n, _)) => n,
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            };
             done += n as usize;
             if (n as usize) < chunk.len() || data.is_empty() {
                 break;
             }
         }
-        Ok(done)
+        // The page cache takes what reached the file, even when a later part failed
+        crate::compat::linux::mm::cache_written(ino, offset, &data[..done]);
+        match failed {
+            Some(e) if done == 0 => Err(e),
+            _ => Ok(done),
+        }
     }
 
     /// Creates regular file `name` in `dir`.
@@ -946,6 +963,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::unlink(dir, name);
         }
+        let gone = self.lookup(dir, name).ok();
         let r = self.request(FS_UNLINK, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -953,6 +971,10 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        // The page cache no longer keeps the file (and its space) alive
+        if let (Ok(()), Some(ino)) = (&r, gone) {
+            crate::compat::linux::mm::cache_forget(ino);
+        }
         r
     }
 
@@ -996,6 +1018,8 @@ impl ZfsServer {
             self.window = None;
             return fuse::rename(sdir, sname, ddir, dname);
         }
+        // A file the rename replaces
+        let replaced = self.lookup(ddir, dname).ok();
         let r = self.request(FS_RENAME, |w| {
             w.u64(sdir);
             w.bytes(sname);
@@ -1005,6 +1029,9 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        if let (Ok(()), Some(ino)) = (&r, replaced) {
+            crate::compat::linux::mm::cache_forget(ino);
+        }
         r
     }
 

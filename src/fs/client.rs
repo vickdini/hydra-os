@@ -639,6 +639,8 @@ impl ZfsClient {
     ///
     /// Returns a static error string if the disk write or flush fails.
     pub fn sync() -> Result<(), &'static str> {
+        // What shared mappings wrote to cached files first
+        crate::compat::linux::mm::cache_flush();
         with_server(|s| s.sync().map(|_| ())).map_err(errno_str)
     }
 
@@ -933,7 +935,18 @@ impl ZfsClient {
     /// # Returns
     ///
     /// * `Ok(usize)` - Number of bytes read, or negative Linux errno on failure.
+    ///
+    /// Through the kernel's page cache ([`crate::compat::linux::mm::cached_read`]), which
+    /// keeps recently used files' pages (FUSE files are their daemon's).
     pub fn read_at(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+        if ino & (1 << 62) != 0 {
+            return Self::read_uncached(ino, offset, buf);
+        }
+        crate::compat::linux::mm::cached_read(ino, offset, buf)
+    }
+
+    /// Reads from the file server itself, past the page cache (which fills itself this way).
+    pub fn read_uncached(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
         with_server(|s| s.read(ino, offset, buf))
     }
 

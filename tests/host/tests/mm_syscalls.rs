@@ -45,6 +45,8 @@ fn with_mm(f: impl FnOnce(&Mutex<Mm>)) {
         f(&mm);
         fake::FDS.with_borrow_mut(|f| f.open.clear()); // drop descriptors before the pool check
     }
+    // The page cache keeps files after their last mapping: let go of them before the count
+    cache_drop_all();
     assert_eq!(used(), before, "frames leaked");
 }
 
@@ -353,7 +355,9 @@ fn inode_objects_are_shared_and_release_the_inode() {
         assert_eq!(b.get_page(2), Some(p), "cached");
         assert!(a.get_page(3).is_none(), "past EOF");
         drop((a, b));
-        assert_eq!(fake::INODE_REFS.with_borrow(|r| r[&ino]), 0, "released with the last mapping");
+        assert_eq!(fake::INODE_REFS.with_borrow(|r| r[&ino]), 1, "the page cache keeps a file after its last mapping");
+        cache_drop_all();
+        assert_eq!(fake::INODE_REFS.with_borrow(|r| r[&ino]), 0, "released when the cache lets go");
     });
 }
 
@@ -567,5 +571,74 @@ fn mprotect_cannot_make_a_read_only_shared_file_mapping_writable() {
         let a = sys_mmap(mm, 0, P, PROT_READ as u64, MAP_SHARED, 5, 0);
         assert!(a > 0);
         assert_eq!(sys_mprotect(mm, a as u64, P, RW), EACCES);
+    });
+}
+
+// ------------------------------------------------------------ page cache for read()
+
+#[test]
+fn reads_go_through_the_page_cache_and_see_writes() {
+    with_mm(|_| {
+        let ino = 9300;
+        let content: Vec<u8> = (0..3 * P as usize + 50).map(|i| (i % 251) as u8).collect();
+        fake::INODES.with_borrow_mut(|m| m.insert(ino, content.clone()));
+        let mut buf = vec![0u8; 3 * P as usize + 100];
+        assert_eq!(cached_read(ino, 0, &mut buf).unwrap(), content.len(), "stops at the end of the file");
+        assert_eq!(&buf[..content.len()], &content[..]);
+        // The file server's copy changes behind the cache: the cache still answers
+        fake::INODES.with_borrow_mut(|m| m.get_mut(&ino).unwrap()[10] = 0xEE);
+        let mut b = [0u8; 4];
+        cached_read(ino, 9, &mut b).unwrap();
+        assert_eq!(b[1], content[10], "served from the cache");
+        // A write through the kernel tells the cache, across a page boundary
+        let data = [1u8, 2, 3, 4, 5, 6];
+        fake::INODES.with_borrow_mut(|m| m.get_mut(&ino).unwrap()[P as usize - 3..P as usize + 3].copy_from_slice(&data));
+        cache_written(ino, P - 3, &data);
+        cache_written(ino, 10, &[0xEE]);
+        let mut b = [0u8; 6];
+        cached_read(ino, P - 3, &mut b).unwrap();
+        assert_eq!(b, data, "a write is seen across pages");
+        let mut b = [0u8; 1];
+        cached_read(ino, 10, &mut b).unwrap();
+        assert_eq!(b[0], 0xEE);
+        assert_eq!(cached_read(ino, content.len() as u64, &mut b).unwrap(), 0, "at the end: nothing");
+    });
+}
+
+#[test]
+fn truncation_drops_cached_pages_and_zeroes_the_tail() {
+    with_mm(|_| {
+        let ino = 9301;
+        fake::INODES.with_borrow_mut(|m| m.insert(ino, vec![7u8; 3 * P as usize]));
+        let mut buf = vec![0u8; 3 * P as usize];
+        cached_read(ino, 0, &mut buf).unwrap();
+        // Truncated to 100 bytes, then extended again with zeros (as ftruncate does)
+        fake::INODES.with_borrow_mut(|m| {
+            let d = m.get_mut(&ino).unwrap();
+            d.truncate(100);
+            d.resize(2 * P as usize, 0);
+        });
+        cache_truncated(ino, 100);
+        cache_truncated(ino, 2 * P);
+        let mut b = vec![0xFFu8; 2 * P as usize];
+        assert_eq!(cached_read(ino, 0, &mut b).unwrap(), 2 * P as usize);
+        assert!(b[..100].iter().all(|&x| x == 7), "the start stays");
+        assert!(b[100..].iter().all(|&x| x == 0), "past the old end: zeros, not the old data");
+    });
+}
+
+#[test]
+fn a_forgotten_file_is_released_and_read_afresh() {
+    with_mm(|_| {
+        let ino = 9302;
+        fake::INODES.with_borrow_mut(|m| m.insert(ino, vec![1u8; 100]));
+        let mut b = [0u8; 4];
+        cached_read(ino, 0, &mut b).unwrap();
+        assert_eq!(fake::INODE_REFS.with_borrow(|r| r[&ino]), 1, "the cache keeps the file");
+        cache_forget(ino);
+        assert_eq!(fake::INODE_REFS.with_borrow(|r| r[&ino]), 0, "unlinked: let go");
+        fake::INODES.with_borrow_mut(|m| m.insert(ino, vec![2u8; 100]));
+        cached_read(ino, 0, &mut b).unwrap();
+        assert_eq!(b, [2; 4], "a new file under the same number is read afresh");
     });
 }
