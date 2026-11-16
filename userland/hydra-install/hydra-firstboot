@@ -162,6 +162,16 @@ say "machine id $(cat /etc/machine-id)"
 mkdir -p /var/lib/hydra
 echo "$id" > /var/lib/hydra/setup-done
 shred -u "$conf" 2>/dev/null || rm -f "$conf"
+# The kernel's other copy (Group E) and, should the kernel not have managed to delete it at
+# boot, the file on the EFI partition of this computer's disk
+rm -f /run/hydra/setup.conf
+disk=$(cat /run/hydra/boot-disk 2>/dev/null)
+if [ -n "$disk" ] && command -v mdel >/dev/null 2>&1; then
+    case "$disk" in *[0-9]) esp="/dev/${disk}p1" ;; *) esp="/dev/${disk}1" ;; esac
+    if [ -b "$esp" ] && MTOOLS_SKIP_CHECK=1 mdir -i "$esp" ::/hydra/setup.conf >/dev/null 2>&1; then
+        MTOOLS_SKIP_CHECK=1 mdel -i "$esp" ::/hydra/setup.conf >&3 2>&1 && say "removed setup.conf from $esp"
+    fi
+fi
 sync
 if [ "$ok" = 1 ]; then say "first start finished"; else say "first start finished WITH ERRORS (see above)"; fi
 exit 0

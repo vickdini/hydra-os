@@ -113,13 +113,46 @@ def image_paths():
     return os.path.join(SOURCE, "pool.img"), os.path.join(SOURCE, "esp")
 
 
-def needed_bytes():
-    img, _ = image_paths()
+def read_conf(path):
+    out = {}
     try:
-        size = os.stat(img).st_size
+        with open(path) as f:
+            for line in f:
+                k, sep, v = line.strip().partition("=")
+                if sep and not k.startswith("#"):
+                    out[k.strip()] = v.strip()
     except OSError:
-        return None
-    return POOL_START + size + GPT_TAIL
+        pass
+    return out
+
+
+def image_info():
+    """The clean pool image the live system carries (Group F, /opt/hydra-install): a dict with
+    kind ("raw" or "zst"), path, size (bytes of the raw image) and sha256 (of the raw image, or
+    None), or None when there is none. pool.img.zst + pool.conf is what F ships; a plain pool.img
+    (sparse file) also works."""
+    raw, zst = os.path.join(SOURCE, "pool.img"), os.path.join(SOURCE, "pool.img.zst")
+    want = None
+    try:
+        with open(os.path.join(SOURCE, "pool.img.sha256")) as f:
+            want = f.read().split()[0].lower()
+    except (OSError, IndexError):
+        pass
+    if os.path.isfile(raw):
+        return {"kind": "raw", "path": raw, "size": os.stat(raw).st_size, "sha256": want}
+    if os.path.isfile(zst):
+        conf = read_conf(os.path.join(SOURCE, "pool.conf"))
+        try:
+            size = int(conf.get("image_bytes", ""))
+        except ValueError:
+            return None
+        return {"kind": "zst", "path": zst, "size": size, "sha256": (conf.get("sha256") or want or "").lower() or None}
+    return None
+
+
+def needed_bytes():
+    info = image_info()
+    return POOL_START + info["size"] + GPT_TAIL if info else None
 
 
 def device_size(path):
@@ -164,6 +197,14 @@ def list_disks():
         devs = json.loads(r.stdout).get("blockdevices", []) if r.returncode == 0 else []
     except (OSError, ValueError):
         devs = []
+    # The disk the running system's pool is on (Group E writes its name at boot), and whether
+    # this is the live system
+    try:
+        with open("/run/hydra/boot-disk") as f:
+            boot_disk = f.read().strip()
+    except OSError:
+        boot_disk = ""
+    live = os.path.exists("/run/hydra/live")
     if os.environ.get("HYDRA_INSTALL_ONLY_TEST_DISKS") == "1":
         devs = []   # tests on a build machine: never offer its real disks
     for d in devs:
@@ -174,8 +215,11 @@ def list_disks():
         model = " ".join(x for x in [(d.get("vendor") or "").strip(), (d.get("model") or "").strip()] if x) or "Disk"
         e = {"path": path, "size": size, "model": model, "transport": d.get("tran") or "",
              "removable": bool(d.get("rm")), "usable": True, "why": ""}
-        if d.get("ro") in (True, 1, "1"):
-            e.update(usable=False, why="This is the disk Hydra is running from right now.")
+        if os.path.basename(path) == boot_disk:
+            e.update(usable=False, why="This is the Hydra installation stick." if live else
+                     "This is the disk Hydra is running from right now.")
+        elif d.get("ro") in (True, 1, "1"):
+            e.update(usable=False, why="This disk is write-protected.")
         elif is_live_medium(path):
             e.update(usable=False, why="This is the Hydra installation stick.")
         elif need and size < need:
@@ -278,17 +322,32 @@ def open_direct(path):
         return os.open(path, os.O_RDONLY), False
 
 
-def write_pool(disk, img, part_start, lo, hi):
-    """Writes IMG at PART_START of DISK, skipping all-zero blocks outside the label zones.
-    Returns (list of written block offsets, digest of what was written)."""
-    size = os.stat(img).st_size
-    src = os.open(img, os.O_RDONLY)
+def write_pool(disk, info, part_start, lo, hi):
+    """Writes the image INFO (image_info) at PART_START of DISK, skipping all-zero blocks outside
+    the label zones. Returns (list of written block offsets, digest of what was written)."""
+    size = info["size"]
+    want = info["sha256"]
+    proc = None
+    if info["kind"] == "zst":
+        proc = subprocess.Popen(["zstd", "-dc", "-q", info["path"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                bufsize=0)
+        src = proc.stdout
+
+        def read(n, off):
+            parts, got = [], 0
+            while got < n:
+                b = src.read(n - got)
+                if not b:
+                    break
+                parts.append(b)
+                got += len(b)
+            return b"".join(parts)
+    else:
+        fd = os.open(info["path"], os.O_RDONLY)
+
+        def read(n, off):
+            return os.pread(fd, n, off)
     dst = os.open(disk, os.O_WRONLY)
-    want = None
-    sha_path = img + ".sha256"
-    if os.path.exists(sha_path):
-        with open(sha_path) as f:
-            want = f.read().split()[0].lower()
     whole = hashlib.sha256() if want else None
     written = hashlib.sha256()
     blocks = []
@@ -298,9 +357,9 @@ def write_pool(disk, img, part_start, lo, hi):
     try:
         while off < size:
             n = min(BLOCK, size - off)
-            buf = os.pread(src, n, off)
+            buf = read(n, off)
             if len(buf) != n:
-                fail("The installation image could not be read (it ends early).")
+                fail("The installation image could not be read (it ends early). Please write the stick again.")
             if whole:
                 whole.update(buf)
             in_labels = off < LABEL_ZONE or off >= size - LABEL_ZONE
@@ -318,13 +377,22 @@ def write_pool(disk, img, part_start, lo, hi):
                 left = (size - off) / rate if rate > 0 else 0
                 progress(lo + (hi - lo) * off / size, "%s of %s%s" % (human(off), human(size),
                          ", about %d min left" % max(1, round(left / 60)) if el > 5 and left > 60 else ""))
+        if proc and proc.stdout.read(1):
+            fail("The installation image is longer than recorded. Please write the stick again.")
         os.fsync(dst)
     finally:
-        os.close(src)
         os.close(dst)
+        if proc:
+            proc.stdout.close()
+            proc.wait()
+            if proc.returncode not in (0, None) and off < size:
+                log("zstd: %s" % proc.stderr.read().decode(errors="replace"))
+        else:
+            os.close(fd)
     if whole and whole.hexdigest() != want:
         fail("The installation image on this stick is damaged (its checksum does not match). "
              "Please write the stick again.")
+    log("image written: %d bytes, %d blocks with data, sha256 %s" % (size, len(blocks), "checked" if want else "not recorded"))
     return blocks, written.hexdigest()
 
 
@@ -414,7 +482,8 @@ def boot_entry(disk):
 def install(req):
     disk = req.get("disk", "")
     setup = setup_conf(req.get("setup") or {})
-    img, esp_src = image_paths()
+    _, esp_src = image_paths()
+    info = image_info()
 
     step(1, "Checking the disk and the installation files")
     progress(0)
@@ -425,8 +494,10 @@ def install(req):
         fail(disks[disk]["why"])
     if os.path.isfile(disk) and disk not in test_disks():
         fail("%s is not a disk." % disk)
-    if not os.path.isfile(img):
-        fail("The installation image (%s) is missing on this system." % img)
+    if not info:
+        fail("The installation image (%s/pool.img.zst) is missing on this system." % SOURCE)
+    if info["kind"] == "zst" and not shutil.which("zstd"):
+        fail("The program zstd, needed to unpack the installation image, is missing on this system.")
     kernel = os.path.join(esp_src, "EFI", "BOOT", "BOOTX64.EFI")
     if not os.path.isfile(kernel):
         fail("The Hydra start-up files (%s) are missing on this system." % kernel)
@@ -434,7 +505,7 @@ def install(req):
     if busy:
         fail("A part of this disk is in use (%s). Please close what uses it and try again." % ", ".join(busy))
     disk_size = device_size(disk)
-    img_size = os.stat(img).st_size
+    img_size = info["size"]
     if POOL_START + img_size + GPT_TAIL > disk_size:
         fail("The disk is too small: Hydra needs at least %s." % human(POOL_START + img_size + GPT_TAIL))
     log("install to %s (%d bytes), image %d bytes" % (disk, disk_size, img_size))
@@ -473,7 +544,7 @@ def install(req):
     progress(3)
 
     step(4, "Copying Hydra to the disk")
-    blocks, digest = write_pool(disk, img, POOL_START, 3, 85)
+    blocks, digest = write_pool(disk, info, POOL_START, 3, 85)
 
     step(5, "Copying the start-up files")
     esp_copy(esp, esp_src)

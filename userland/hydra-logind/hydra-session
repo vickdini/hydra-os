@@ -29,9 +29,12 @@ fi
 # settings given in the installer (account, computer name, time zone, keyboard, language)
 # before the login screen shows; and the computer name is set at every start ----
 if [ "$(id -u)" = 0 ]; then
-    if [ -f /etc/hydra/setup.conf ] && [ -x /usr/libexec/hydra-firstboot ]; then
-        /usr/libexec/hydra-firstboot /etc/hydra/setup.conf
-    fi
+    for f in /etc/hydra/setup.conf /run/hydra/setup.conf; do
+        # the kernel's copies of \hydra\setup.conf (applied once; the second is then removed)
+        if [ -f "$f" ] && [ -x /usr/libexec/hydra-firstboot ]; then
+            /usr/libexec/hydra-firstboot "$f"
+        fi
+    done
     [ -s /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null
 fi
 # ---- end Group G ----
