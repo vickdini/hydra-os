@@ -196,7 +196,10 @@ impl Xhci {
     /// identification and capacity.
     pub(crate) fn setup_storage(&mut self, di: usize, dd: &[u8; 18], m: MsdIf, config_value: u8) -> Result<(), &'static str> {
         let slot = self.devices[di].slot;
-        let Some(disk) = self.disks.iter().position(|&s| s == 0) else { return Err("too many USB disks") };
+        // A free number, the ones after the last given first: a stick plugged in after another
+        // was pulled does not take over its number (and the kernel's name for it) at once
+        let last = self.disk_generation as usize;
+        let Some(disk) = (0..MAX_DISKS).map(|k| (last + k) % MAX_DISKS).find(|&d| self.disks[d] == 0) else { return Err("too many USB disks") };
         let rings = Dma::alloc(2)?;
         let cmd = Dma::alloc(1)?;
         let buf = Dma::alloc(DATA_PAGES)?;
