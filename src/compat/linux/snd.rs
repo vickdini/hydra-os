@@ -117,9 +117,6 @@ const POLLERR: u32 = 0x8;
 const POLLRDNORM: u32 = 0x40;
 const POLLWRNORM: u32 = 0x100;
 
-/// Furthest the controller's fetching may run ahead of what is counted as played (frames).
-const MAX_LEAD: u64 = 2560;
-
 /// Woken whenever the stream positions advance or a stream changes state.
 static SND_WQ: WaitQueue = WaitQueue::new();
 /// Logs PCM ioctls (other than the frequent position ones) and failures.
@@ -1139,9 +1136,6 @@ struct Stream {
     played: u64,
     /// `hw_ptr` at the start.
     start_hw: u64,
-    /// Frames added to the clock's count when the controller ran further ahead than
-    /// [`MAX_LEAD`] (its clock is a little faster than ours).
-    clock_adj: u64,
     avail_max: u64,
     trigger_ns: u64,
     tstamp_ns: u64,
@@ -1171,7 +1165,6 @@ impl Stream {
             dma_frames: 0,
             played: 0,
             start_hw: 0,
-            clock_adj: 0,
             avail_max: 0,
             trigger_ns: 0,
             tstamp_ns: 0,
@@ -1262,20 +1255,13 @@ fn update(dir: usize, s: &mut Stream) -> Action {
         s.dma_frames += delta;
         s.last_pos = pos;
     }
-    // The controller's position says what it fetched, which may be well ahead of what
-    // was heard: QEMU's codec fetches 8 KiB (2048 frames) the moment a stream starts.
-    // Played is what the clock says, but never more than fetched, and never more than
-    // MAX_LEAD behind it
+    // What the controller fetched counts as played. (QEMU's codec fetches 8 KiB, 2048
+    // frames, the moment a stream starts and stays about that far ahead; holding the
+    // pointer back to the clock instead made PipeWire's writes land behind the
+    // controller: gaps of silence. With the true position it keeps enough queued.)
     let now = crate::arch::pit::now_ns();
-    let lead = MAX_LEAD.min(hw.buffer_size / 2);
-    let mut clock = ((now.saturating_sub(s.trigger_ns)) as u128 * hw.rate as u128 / 1_000_000_000) as u64 + s.clock_adj;
-    if s.dma_frames > clock + lead {
-        s.clock_adj += s.dma_frames - lead - clock;
-        clock = s.dma_frames - lead;
-    }
-    let played = s.dma_frames.min(clock).max(s.played);
     if s.state == ST_RUNNING || s.state == ST_DRAINING {
-        s.played = played;
+        s.played = s.dma_frames;
         s.hw_ptr = (s.start_hw + s.played) % s.boundary.max(1);
     }
     s.tstamp_ns = now;
@@ -1617,7 +1603,6 @@ impl PcmFile {
         s.last_pos = 0;
         s.dma_frames = 0;
         s.played = 0;
-        s.clock_adj = 0;
         s.start_hw = s.hw_ptr;
         s.trigger_ns = crate::arch::pit::now_ns();
         s.tstamp_ns = s.trigger_ns;
