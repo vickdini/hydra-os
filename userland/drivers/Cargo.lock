@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hda-driver"
+version = "0.1.0"
+dependencies = [
+ "hydra-rt",
+]
+
+[[package]]
 name = "hydra-rt"
 version = "0.1.0"
 dependencies = [

@@ -29,6 +29,13 @@ echo "[*] Launching Hydra with KVM (pool $POOL inside WSL)..."
 # passes the host pointer's position 1:1 and needs no special settings. HYDRA_GDK_BACKEND
 # (wayland, x11) and HYDRA_ZOOM (on, off) override GTK's choices if needed.
 export HYDRA_GDK_BACKEND="${HYDRA_GDK_BACKEND:-}" HYDRA_ZOOM="${HYDRA_ZOOM:-on}"
+# Sound: an Intel HD Audio card whose output plays on Windows through WSLg's PulseAudio
+# server (HYDRA_SOUND=off leaves the card out)
+HYDRA_AUDIO=""
+if [ "${HYDRA_SOUND:-on}" != off ] && [ -e $R/usr/lib/x86_64-linux-gnu/qemu/audio-pa.so ] && [ -S /mnt/wslg/PulseServer ]; then
+    HYDRA_AUDIO="-audiodev pa,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0"
+fi
+export HYDRA_AUDIO
 exec chroot $R /bin/bash -c '
 export DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir PULSE_SERVER=/mnt/wslg/PulseServer
 [ -n "$HYDRA_GDK_BACKEND" ] && export GDK_BACKEND="$HYDRA_GDK_BACKEND"
@@ -38,4 +45,4 @@ exec qemu-system-x86_64 -accel kvm -cpu host -m 4G -smp "${HYDRA_SMP:-4}" \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -device virtio-scsi-pci,id=scsi0 -drive file=/mnt/d/os/dist/x86_64/kernel.iso,if=none,id=bootcd,media=cdrom,format=raw \
     -device scsi-cd,drive=bootcd,bootindex=0 \
-    -vga std -display gtk,zoom-to-fit="$HYDRA_ZOOM" -name Hydra "$@"' qemu "$@"
+    -vga std -display gtk,zoom-to-fit="$HYDRA_ZOOM" -name Hydra $HYDRA_AUDIO "$@"' qemu "$@"

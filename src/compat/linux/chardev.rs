@@ -105,6 +105,12 @@ pub trait CharDevice: Send + Sync {
         Err(ENODEV)
     }
 
+    /// The object backing an `mmap` at page offset `pgoff`, for devices whose offsets
+    /// name different objects (ALSA PCM: the ring at 0, status records further up).
+    fn mmap_object_at(&self, _pgoff: u64) -> Result<Arc<dyn MappedObject>, i64> {
+        self.mmap_object()
+    }
+
     /// Sets non-blocking I/O mode on the device.
     ///
     /// # Arguments
@@ -247,6 +253,7 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     match major {
         226 => Some(super::drm::open(minor, nonblock)),
         13 => Some(super::evdev::open(minor, nonblock)),
+        116 => Some(super::snd::open(minor, nonblock)),
         1 if minor == 11 => Some(super::admin::kmsg_open(flags)),
         10 if minor == 229 => Some(super::fuse::open(flags)),
         _ => None,

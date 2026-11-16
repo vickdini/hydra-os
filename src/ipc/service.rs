@@ -307,12 +307,13 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 5] = [
+static SERVICES: [Service; 6] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
     Service::new(ENDPOINT_DISPLAY_DEV),
     Service::new(crate::ipc::protocol::ENDPOINT_INPUT_DEV),
+    Service::new(crate::ipc::protocol::ENDPOINT_SOUND_DEV),
 ];
 
 /// Resolves the static `Service` descriptor corresponding to `endpoint`.

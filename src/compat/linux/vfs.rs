@@ -1795,12 +1795,12 @@ fn getdents64_proc_root(file: &alloc::sync::Arc<spin::Mutex<crate::fs::fd::OpenF
     let mut entries: Vec<(u64, String, u8)> = alloc::vec![(1, String::from("."), 4), (1, String::from(".."), 4)];
     entries.push((2, String::from("self"), 10));
     entries.push((3, String::from("thread-self"), 10));
-    const NAMES: [(&str, u8); 30] = [
+    const NAMES: [(&str, u8); 31] = [
         ("cpuinfo", 8), ("meminfo", 8), ("stat", 8), ("uptime", 8), ("loadavg", 8), ("version", 8), ("filesystems", 8),
         ("mounts", 10), ("swaps", 8), ("locks", 8), ("keys", 8), ("key-users", 8), ("cmdline", 8), ("devices", 8),
         ("partitions", 8), ("modules", 8), ("interrupts", 8), ("kmsg", 8), ("vmstat", 8), ("zoneinfo", 8),
         ("diskstats", 8), ("crypto", 8), ("misc", 8), ("consoles", 8), ("cgroups", 8), ("sys", 4), ("net", 4),
-        ("sysvipc", 4), ("pressure", 4), ("tty", 4),
+        ("sysvipc", 4), ("pressure", 4), ("tty", 4), ("asound", 4),
     ];
     for (i, (name, kind)) in NAMES.iter().enumerate() {
         let path = alloc::format!("/proc/{}", name);
