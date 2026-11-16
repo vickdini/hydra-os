@@ -250,6 +250,9 @@ impl Xhci {
             s.generation = generation;
         }
         self.disks[disk] = slot;
+        // Some sticks answer SCSI commands only a moment after being configured (Linux
+        // waits a second before its first one)
+        sys::sleep_ms(100);
         self.identify(di)?;
         self.probe_medium(di, 3000);
         let s = self.msd(di);
@@ -500,7 +503,10 @@ impl Xhci {
                     n = got;
                     break;
                 }
-                Err(e) => println!("[usb-driver] {}: INQUIRY failed: {}", self.loc(di), e),
+                Err(e) => {
+                    println!("[usb-driver] {}: INQUIRY failed: {}", self.loc(di), e);
+                    sys::sleep_ms(500);
+                }
             }
         }
         if n < 32 {
