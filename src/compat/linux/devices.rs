@@ -1163,19 +1163,38 @@ fn sound_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64) -> Result<(), i64> {
         return Ok(());
     };
     let capture = super::snd::has_dir(1);
-    // PipeWire's realtime module asks RTKit for realtime threads over D-Bus; Hydra has no
-    // working RTKit, and the call blocks the audio thread for D-Bus's 25 s timeout (no
-    // sound until then). Its condition property turns the module off
-    for conf in ["pipewire", "client", "pipewire-pulse"] {
-        t.file(
-            s,
-            &alloc::format!("/etc/pipewire/{}.conf.d/50-hydra-no-rtkit.conf", conf),
-            "# Written by Hydra: no RTKit (realtime scheduling) on this system
-context.properties = {
+    // PipeWire's settings for Hydra:
+    // - no realtime module: it asks RTKit for realtime threads over D-Bus; Hydra has no
+    //   working RTKit, and the call blocked the audio thread for D-Bus's 25 s timeout;
+    // - cycles of at least 1024 frames (21 ms), for the server and for PulseAudio clients
+    //   (Wine, Firefox): shorter ones underran under load (gaps of silence in Wine's sound)
+    for (conf, extra) in [
+        ("pipewire", "    default.clock.min-quantum = 1024
+"),
+        ("client", ""),
+        ("pipewire-pulse", ""),
+    ] {
+        let mut text = alloc::format!("# Written by Hydra (see src/compat/linux/devices.rs, sound_tree)
+context.properties = {{
     module.rt = false
+{}}}
+", extra);
+        if conf == "pipewire-pulse" {
+            text.push_str("pulse.properties = {
+    pulse.min.req = 1024/48000
+    pulse.min.frag = 1024/48000
+    pulse.min.quantum = 1024/48000
 }
-",
-        )?;
+");
+        }
+        t.file(s, &alloc::format!("/etc/pipewire/{}.conf.d/50-hydra-sound.conf", conf), &text)?;
+        // The name of an earlier version of this file
+        if let Some(dir) = lookup_path(s, t.root, &alloc::format!("/etc/pipewire/{}.conf.d", conf)) {
+            if s.lookup(dir, b"50-hydra-no-rtkit.conf").is_ok() {
+                let _ = s.unlink(dir, b"50-hydra-no-rtkit.conf");
+                t.changed = true;
+            }
+        }
     }
     let pci = alloc::format!("/sys/devices/pci0000:00/{}", slot);
     let (sub_vendor, sub_device) = (subsys as u16, (subsys >> 16) as u16);
