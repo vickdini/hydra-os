@@ -117,8 +117,14 @@ const POLLERR: u32 = 0x8;
 const POLLRDNORM: u32 = 0x40;
 const POLLWRNORM: u32 = 0x100;
 
+/// Furthest the controller's fetching may run ahead of what is counted as played (frames).
+const MAX_LEAD: u64 = 2560;
+
 /// Woken whenever the stream positions advance or a stream changes state.
 static SND_WQ: WaitQueue = WaitQueue::new();
+/// Logs PCM ioctls (other than the frequent position ones) and failures.
+static TRACE: AtomicBool = AtomicBool::new(true);
+static SYNC_TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Wakes the position task when a stream starts.
 static TASK_WQ: WaitQueue = WaitQueue::new();
 
@@ -279,6 +285,7 @@ fn apply_volume(dir: usize) {
     };
     let Some(gain) = gain else { return };
     let mute = (on[0] == 0) as u64 | ((on[1] == 0) as u64) << 1;
+    crate::kprintln!("[snd] {} volume {}/{}{}", if dir == 0 { "playback" } else { "capture" }, gain[0], gain[1], if mute != 0 { " muted" } else { "" });
     let _ = service::call(ENDPOINT_SOUND_DEV, Message::with_args(MSG_SND_VOLUME, [dir as u64, gain[0] as u64, gain[1] as u64, mute]), service::CALL_TIMEOUT_TICKS);
 }
 
@@ -1126,6 +1133,15 @@ struct Stream {
     appl_ptr: u64,
     /// Position in the ring (frames) at the last update.
     last_pos: u64,
+    /// Frames the controller has fetched since the start (from its position).
+    dma_frames: u64,
+    /// Frames counted as played since the start (what `hw_ptr` advanced by).
+    played: u64,
+    /// `hw_ptr` at the start.
+    start_hw: u64,
+    /// Frames added to the clock's count when the controller ran further ahead than
+    /// [`MAX_LEAD`] (its clock is a little faster than ours).
+    clock_adj: u64,
     avail_max: u64,
     trigger_ns: u64,
     tstamp_ns: u64,
@@ -1152,6 +1168,10 @@ impl Stream {
             hw_ptr: 0,
             appl_ptr: 0,
             last_pos: 0,
+            dma_frames: 0,
+            played: 0,
+            start_hw: 0,
+            clock_adj: 0,
             avail_max: 0,
             trigger_ns: 0,
             tstamp_ns: 0,
@@ -1217,6 +1237,8 @@ fn reset_position(slot: usize) {
 /// detects underruns and the end of draining.
 fn update(dir: usize, s: &mut Stream) -> Action {
     if !s.active() {
+        // Timestamps say when the status was taken, running or not
+        s.tstamp_ns = crate::arch::pit::now_ns();
         return Action::None;
     }
     let Some(hw) = s.hw else { return Action::None };
@@ -1237,10 +1259,26 @@ fn update(dir: usize, s: &mut Stream) -> Action {
                 }
             }
         }
-        s.hw_ptr = (s.hw_ptr + delta) % s.boundary.max(1);
+        s.dma_frames += delta;
         s.last_pos = pos;
     }
-    s.tstamp_ns = crate::arch::pit::now_ns();
+    // The controller's position says what it fetched, which may be well ahead of what
+    // was heard: QEMU's codec fetches 8 KiB (2048 frames) the moment a stream starts.
+    // Played is what the clock says, but never more than fetched, and never more than
+    // MAX_LEAD behind it
+    let now = crate::arch::pit::now_ns();
+    let lead = MAX_LEAD.min(hw.buffer_size / 2);
+    let mut clock = ((now.saturating_sub(s.trigger_ns)) as u128 * hw.rate as u128 / 1_000_000_000) as u64 + s.clock_adj;
+    if s.dma_frames > clock + lead {
+        s.clock_adj += s.dma_frames - lead - clock;
+        clock = s.dma_frames - lead;
+    }
+    let played = s.dma_frames.min(clock).max(s.played);
+    if s.state == ST_RUNNING || s.state == ST_DRAINING {
+        s.played = played;
+        s.hw_ptr = (s.start_hw + s.played) % s.boundary.max(1);
+    }
+    s.tstamp_ns = now;
     let avail = s.avail(dir);
     s.avail_max = s.avail_max.max(avail);
     if s.state == ST_DRAINING && dir == 0 && avail >= hw.buffer_size {
@@ -1511,6 +1549,9 @@ impl PcmFile {
             put_u64(&mut b, 72, s.appl_ptr);
             put_u64(&mut b, 80, s.avail_min);
         }
+        if TRACE.load(Ordering::Relaxed) && SYNC_TRACED.fetch_add(1, Ordering::Relaxed) < 40 {
+            crate::kprintln!("[snd] pcm{} sync_ptr flags {} -> state {} hw {} appl {} avail_min {}", self.dir, flags, get_u32(&b, 8), get_u64(&b, 16), get_u64(&b, 72), get_u64(&b, 80));
+        }
         // An underrun found by this update is reported by the state
         SND_WQ.wake_all();
         match copy_out(arg, &b) {
@@ -1539,6 +1580,7 @@ impl PcmFile {
             unsafe { r.bytes()[..(hw.buffer_size * hw.frame_bytes) as usize].fill(0) };
         }
         reset_position(slot);
+        SYNC_TRACED.store(0, Ordering::Relaxed);
         let mut s = self.stream();
         s.slot = slot;
         s.programmed = true;
@@ -1569,6 +1611,10 @@ impl PcmFile {
         let mut s = self.stream();
         s.state = ST_RUNNING;
         s.last_pos = 0;
+        s.dma_frames = 0;
+        s.played = 0;
+        s.clock_adj = 0;
+        s.start_hw = s.hw_ptr;
         s.trigger_ns = crate::arch::pit::now_ns();
         s.tstamp_ns = s.trigger_ns;
         drop(s);
@@ -1788,6 +1834,7 @@ impl CharDevice for PcmFile {
     }
 
     fn ioctl(&self, cmd: u64, arg: u64) -> i64 {
+        let r = (|| -> i64 {
         let Some(card) = CARD.lock().clone() else { return ENODEV };
         match cmd as u32 {
             0x8004_4100 => write_int(arg, 0x0002_000F), // PVERSION 2.0.15
@@ -1913,6 +1960,12 @@ impl CharDevice for PcmFile {
             0x4004_4160 | 0x0000_4161 => ENOTTY,  // LINK / UNLINK
             _ => ENOTTY,
         }
+        })();
+        if TRACE.load(Ordering::Relaxed) && (r < 0 && r != EAGAIN || !matches!(cmd as u32, 0xC088_4123 | 0x0000_4122 | 0x8008_4121 | 0x4018_4150 | 0x8018_4151 | 0x8098_4120 | 0xC098_4124)) {
+            let st = self.stream().state;
+            crate::kprintln!("[snd] pcm{} ioctl {:#x} -> {} (state {})", self.dir, cmd, r, st);
+        }
+        r
     }
 
     fn poll_events(&self) -> u32 {

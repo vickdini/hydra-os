@@ -1163,6 +1163,20 @@ fn sound_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64) -> Result<(), i64> {
         return Ok(());
     };
     let capture = super::snd::has_dir(1);
+    // PipeWire's realtime module asks RTKit for realtime threads over D-Bus; Hydra has no
+    // working RTKit, and the call blocks the audio thread for D-Bus's 25 s timeout (no
+    // sound until then). Its condition property turns the module off
+    for conf in ["pipewire", "client", "pipewire-pulse"] {
+        t.file(
+            s,
+            &alloc::format!("/etc/pipewire/{}.conf.d/50-hydra-no-rtkit.conf", conf),
+            "# Written by Hydra: no RTKit (realtime scheduling) on this system
+context.properties = {
+    module.rt = false
+}
+",
+        )?;
+    }
     let pci = alloc::format!("/sys/devices/pci0000:00/{}", slot);
     let (sub_vendor, sub_device) = (subsys as u16, (subsys >> 16) as u16);
     t.file(
