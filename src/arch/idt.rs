@@ -243,6 +243,22 @@ extern "C" {
     fn asm_yield();
     fn asm_lapic_timer();
     fn asm_tlb_ipi();
+    fn asm_msi_0();
+    fn asm_msi_1();
+    fn asm_msi_2();
+    fn asm_msi_3();
+    fn asm_msi_4();
+    fn asm_msi_5();
+    fn asm_msi_6();
+    fn asm_msi_7();
+    fn asm_msi_8();
+    fn asm_msi_9();
+    fn asm_msi_10();
+    fn asm_msi_11();
+    fn asm_msi_12();
+    fn asm_msi_13();
+    fn asm_msi_14();
+    fn asm_msi_15();
 }
 
 /// Initializes Hydra's IDT, installs all exception handlers, and loads the IDT.
@@ -336,6 +352,30 @@ pub fn init() {
     idt.entries[LAPIC_TIMER_VECTOR as usize].set_handler_addr(asm_lapic_timer as *const () as usize, kernel_cs);
     // Vector 0x42: a TLB flush request from another CPU
     idt.entries[crate::arch::smp::TLB_VECTOR as usize].set_handler_addr(asm_tlb_ipi as *const () as usize, kernel_cs);
+
+    // Vectors 0x50..=0x5F: message-signalled interrupts of devices whose drivers run in
+    // Ring 3 (see crate::ipc::service::msi_line)
+    let msi_handlers = [
+        asm_msi_0 as *const () as usize,
+        asm_msi_1 as *const () as usize,
+        asm_msi_2 as *const () as usize,
+        asm_msi_3 as *const () as usize,
+        asm_msi_4 as *const () as usize,
+        asm_msi_5 as *const () as usize,
+        asm_msi_6 as *const () as usize,
+        asm_msi_7 as *const () as usize,
+        asm_msi_8 as *const () as usize,
+        asm_msi_9 as *const () as usize,
+        asm_msi_10 as *const () as usize,
+        asm_msi_11 as *const () as usize,
+        asm_msi_12 as *const () as usize,
+        asm_msi_13 as *const () as usize,
+        asm_msi_14 as *const () as usize,
+        asm_msi_15 as *const () as usize,
+    ];
+    for (i, &handler) in msi_handlers.iter().enumerate() {
+        idt.entries[MSI_VECTOR_BASE as usize + i].set_handler_addr(handler, kernel_cs);
+    }
 
     // Load IDT into CPU
     idt.load();
@@ -437,7 +477,8 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     // A device interrupt that made a driver call's server ready (its device answered): run
     // it now rather than at the next tick, when this CPU was running a program in user mode
     // (with one CPU, every disk request would otherwise wait for a tick)
-    if (ctx.cs & 3) == 3 && ctx.vector > 32 && ctx.vector < 48 && crate::task::is_active_hint() {
+    let device_irq = (ctx.vector > 32 && ctx.vector < 48) || (MSI_VECTOR_BASE..MSI_VECTOR_BASE + 16).contains(&ctx.vector);
+    if (ctx.cs & 3) == 3 && device_irq && crate::task::is_active_hint() {
         if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
             sched.apply_wakes();
             if sched.handoff_server_ready() {
@@ -583,6 +624,9 @@ pub const INT80_VECTOR: u64 = 0x80;
 
 /// Vector of the application processors' local APIC timers (their scheduling tick).
 pub const LAPIC_TIMER_VECTOR: u64 = 0x40;
+/// First of the 16 vectors of message-signalled device interrupts (MSI lines 16..32 of
+/// [`crate::ipc::service`], delivered by the local APIC: acknowledged with its EOI).
+pub const MSI_VECTOR_BASE: u64 = 0x50;
 
 /// FPU save area of the innermost trap frame being handled. The scheduler swaps task FPU
 /// state through it; the trap stub restores from it before `iretq`.
@@ -979,6 +1023,21 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 }
             }
         }
+        v if (MSI_VECTOR_BASE..MSI_VECTOR_BASE + 16).contains(&v) => {
+            // A device's message-signalled interrupt: its driver's line, as above, but
+            // acknowledged at the local APIC (nothing to mask: the driver's next wait
+            // finds the count)
+            let irq = crate::ipc::service::MSI_FIRST_LINE + (v - MSI_VECTOR_BASE) as u8;
+            let driver = crate::ipc::service::irq_raised(irq);
+            crate::arch::smp::lapic_eoi();
+            let at_preempt_point = (ctx.cs & 3) == 3
+                || crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::SeqCst) > 0;
+            if driver && at_preempt_point && crate::task::is_active() && !crate::task::scheduler::handoff_active() {
+                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.schedule_now(ctx);
+                }
+            }
+        }
         20..=31 | 48..=255 => {
             // Spurious or unhandled interrupt / trap - return cleanly
         }
@@ -1111,6 +1170,22 @@ global_asm!(
     TRAP_NO_ERRCODE asm_int80, 0x80
     TRAP_NO_ERRCODE asm_lapic_timer, 0x40
     TRAP_NO_ERRCODE asm_tlb_ipi, 0x42
+    TRAP_NO_ERRCODE asm_msi_0, 0x50
+    TRAP_NO_ERRCODE asm_msi_1, 0x51
+    TRAP_NO_ERRCODE asm_msi_2, 0x52
+    TRAP_NO_ERRCODE asm_msi_3, 0x53
+    TRAP_NO_ERRCODE asm_msi_4, 0x54
+    TRAP_NO_ERRCODE asm_msi_5, 0x55
+    TRAP_NO_ERRCODE asm_msi_6, 0x56
+    TRAP_NO_ERRCODE asm_msi_7, 0x57
+    TRAP_NO_ERRCODE asm_msi_8, 0x58
+    TRAP_NO_ERRCODE asm_msi_9, 0x59
+    TRAP_NO_ERRCODE asm_msi_10, 0x5a
+    TRAP_NO_ERRCODE asm_msi_11, 0x5b
+    TRAP_NO_ERRCODE asm_msi_12, 0x5c
+    TRAP_NO_ERRCODE asm_msi_13, 0x5d
+    TRAP_NO_ERRCODE asm_msi_14, 0x5e
+    TRAP_NO_ERRCODE asm_msi_15, 0x5f
 
     common_trap_handler:
         // From user mode: the kernel's GS base (per-CPU data). [rsp+24] is the CS pushed

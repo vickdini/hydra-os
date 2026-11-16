@@ -27,6 +27,9 @@ use hydra_rt::protocol::{
 };
 use hydra_rt::{println, sys, Message, Server, WINDOW_SIZE};
 
+#[path = "../../ahci-driver/src/iostat.rs"]
+mod iostat;
+
 hydra_rt::entry!(main);
 
 const SECTOR: usize = 512;
@@ -609,6 +612,7 @@ fn main(args: &[&str]) {
         }
     );
     let blocks = disk.sectors / SECTORS_PER_BLOCK;
+    let mut stats = iostat::IoStats::new("ata-driver");
     server.serve(|srv, msg| match msg.label as u32 {
         MSG_BLOCK_READ | MSG_BLOCK_WRITE => {
             let (block, count, offset) = (msg.args[0], msg.args[1] as usize, msg.args[2] as usize);
@@ -616,7 +620,10 @@ fn main(args: &[&str]) {
                 return reply(EINVAL, 0);
             }
             let write = msg.label as u32 == MSG_BLOCK_WRITE;
-            match disk.blocks(block, count, &mut srv.window()[offset..], write) {
+            let t = stats.start();
+            let result = disk.blocks(block, count, &mut srv.window()[offset..], write);
+            stats.done(t, (count * BLOCK) as u64, write);
+            match result {
                 Ok(()) => reply(0, count as u64),
                 Err(e) => {
                     println!("[ata-driver] {} of {} blocks at {} failed: {}", if write { "write" } else { "read" }, count, block, e);

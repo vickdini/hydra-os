@@ -307,11 +307,12 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 4] = [
+static SERVICES: [Service; 5] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
     Service::new(ENDPOINT_DISPLAY_DEV),
+    Service::new(crate::ipc::protocol::ENDPOINT_INPUT_DEV),
 ];
 
 /// Resolves the static `Service` descriptor corresponding to `endpoint`.
@@ -911,17 +912,92 @@ pub fn iopl_allowed() -> Result<(), i64> {
 // Interrupts
 // ----------------------------------------------------------------------
 
-/// Task owning each legacy IRQ line (0: the kernel).
-static IRQ_OWNER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+/// Interrupt lines a driver can own: the legacy PIC's 0..16, then message-signalled
+/// interrupts (MSI) from [`MSI_FIRST_LINE`] on, one per PCI function (see [`msi_line`]).
+const IRQ_LINES: usize = 32;
+/// The first MSI line; MSI line `n` arrives on IDT vector `MSI_VECTOR_BASE + n - 16`.
+pub const MSI_FIRST_LINE: u8 = 16;
+
+/// Task owning each line (0: the kernel).
+static IRQ_OWNER: [AtomicU64; IRQ_LINES] = [const { AtomicU64::new(0) }; IRQ_LINES];
 /// Interrupts raised since the owner last waited.
-static IRQ_PENDING: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+static IRQ_PENDING: [AtomicU32; IRQ_LINES] = [const { AtomicU32::new(0) }; IRQ_LINES];
 /// Owner waiting for its interrupt.
-static IRQ_WQ: [WaitQueue; 16] = [const { WaitQueue::new() }; 16];
+static IRQ_WQ: [WaitQueue; IRQ_LINES] = [const { WaitQueue::new() }; IRQ_LINES];
 /// Interrupts delivered to drivers since boot, per line (`service status`).
-static IRQ_COUNT: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static IRQ_COUNT: [AtomicU64; IRQ_LINES] = [const { AtomicU64::new(0) }; IRQ_LINES];
 
 /// Client wakes per line (diagnostics).
-static IRQ_NOTIFIED: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static IRQ_NOTIFIED: [AtomicU64; IRQ_LINES] = [const { AtomicU64::new(0) }; IRQ_LINES];
+
+/// The PCI function each MSI line belongs to (`bus << 16 | device << 8 | function`, plus
+/// one; 0: free). A restarted driver gets the same line for its device.
+static MSI_DEVICE: [AtomicU32; IRQ_LINES - MSI_FIRST_LINE as usize] = [const { AtomicU32::new(0) }; IRQ_LINES - MSI_FIRST_LINE as usize];
+
+/// Masks a line while its driver works: a PIC line is masked at the controller; an MSI
+/// line needs nothing (messages are edge events, counted in [`IRQ_PENDING`] until the
+/// driver waits again).
+fn mask_line(irq: u8) {
+    if irq < MSI_FIRST_LINE {
+        crate::arch::pic::mask_irq(irq);
+    }
+}
+
+/// Unmasks a line (see [`mask_line`]).
+fn unmask_line(irq: u8) {
+    if irq < MSI_FIRST_LINE {
+        crate::arch::pic::unmask_irq(irq);
+    }
+}
+
+/// Gives PCI function `dev` an MSI line and programs the device to signal it to the boot
+/// processor; the supervisor passes the line to the device's driver, which registers it
+/// like a legacy one ([`irq_register`]). The same device always gets the same line.
+///
+/// # Arguments
+///
+/// * `dev` - The PCI function.
+///
+/// # Returns
+///
+/// `Some(line)`, or `None` if the device has no MSI capability or the lines are used up.
+pub fn msi_line(dev: &crate::arch::pci::PciDevice) -> Option<u8> {
+    let key = ((dev.bus as u32) << 16 | (dev.device as u32) << 8 | dev.function as u32) + 1;
+    let idx = MSI_DEVICE.iter().position(|d| d.load(Ordering::Acquire) == key).or_else(|| {
+        MSI_DEVICE.iter().position(|d| d.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire).is_ok())
+    })?;
+    let vector = crate::arch::idt::MSI_VECTOR_BASE + idx as u64;
+    if !crate::arch::pci::enable_msi(dev, crate::arch::smp::boot_apic_id(), vector as u8) {
+        MSI_DEVICE[idx].store(0, Ordering::Release);
+        return None;
+    }
+    Some(MSI_FIRST_LINE + idx as u8)
+}
+
+/// As [`msi_line`], for a device that offers only MSI-X (QEMU's `qemu-xhci`): the device's
+/// MSI-X is enabled and its line allocated; its driver writes vector 0 of the table
+/// (it maps the BAR holding it) with the message address and data returned here.
+///
+/// # Arguments
+///
+/// * `dev` - The PCI function.
+///
+/// # Returns
+///
+/// `Some((line, table physical address, message address, message data))`.
+pub fn msix_line(dev: &crate::arch::pci::PciDevice) -> Option<(u8, u64, u32, u32)> {
+    let key = ((dev.bus as u32) << 16 | (dev.device as u32) << 8 | dev.function as u32) + 1;
+    let idx = MSI_DEVICE.iter().position(|d| d.load(Ordering::Acquire) == key).or_else(|| {
+        MSI_DEVICE.iter().position(|d| d.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire).is_ok())
+    })?;
+    let Some(table) = crate::arch::pci::enable_msix(dev) else {
+        MSI_DEVICE[idx].store(0, Ordering::Release);
+        return None;
+    };
+    let vector = crate::arch::idt::MSI_VECTOR_BASE as u32 + idx as u32;
+    let addr = 0xFEE0_0000 | (crate::arch::smp::boot_apic_id() & 0xFF) << 12;
+    Some((MSI_FIRST_LINE + idx as u8, table, addr, vector))
+}
 
 /// Queries diagnostics for all hardware IRQ lines currently owned by userland drivers.
 ///
@@ -934,11 +1010,11 @@ static IRQ_NOTIFIED: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// *Guaranteed to never panic under normal execution.*
 pub fn irq_stats() -> Vec<(u8, u64, u64, u64, u32, bool)> {
     let imr = unsafe { (x86_64::instructions::port::Port::<u8>::new(0x21).read() as u16) | (x86_64::instructions::port::Port::<u8>::new(0xA1).read() as u16) << 8 };
-    (0..16)
+    (0..IRQ_LINES)
         .filter_map(|i| {
             let owner = IRQ_OWNER[i].load(Ordering::Acquire);
             (owner != 0).then(|| {
-                (i as u8, owner, IRQ_COUNT[i].load(Ordering::Relaxed), IRQ_NOTIFIED[i].load(Ordering::Relaxed), IRQ_PENDING[i].load(Ordering::Relaxed), imr & (1 << i) != 0)
+                (i as u8, owner, IRQ_COUNT[i].load(Ordering::Relaxed), IRQ_NOTIFIED[i].load(Ordering::Relaxed), IRQ_PENDING[i].load(Ordering::Relaxed), i < 16 && imr & (1 << i) != 0)
             })
         })
         .collect()
@@ -946,7 +1022,7 @@ pub fn irq_stats() -> Vec<(u8, u64, u64, u64, u32, bool)> {
 
 /// Endpoint of the service whose driver owns each line (its client is woken too, see
 /// [`notify_on_irq`]).
-static IRQ_SERVICE: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+static IRQ_SERVICE: [AtomicU32; IRQ_LINES] = [const { AtomicU32::new(0) }; IRQ_LINES];
 
 /// Registers a legacy IRQ interrupt line to the calling driver daemon and unmasks it in the PIC.
 ///
@@ -968,8 +1044,12 @@ static IRQ_SERVICE: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 /// *Guaranteed to never panic under normal execution.*
 pub fn irq_register(irq: u64) -> Result<(), i64> {
     crate::task::current_service().ok_or(EPERM)?;
-    // The timer, the keyboard, the cascade and the mouse stay with the kernel
-    if irq >= 16 || matches!(irq, 0 | 1 | 2 | 12) {
+    // The timer, the keyboard, the cascade and the mouse stay with the kernel; an MSI
+    // line must have been given to a device first
+    if irq >= IRQ_LINES as u64 || matches!(irq, 0 | 1 | 2 | 12) {
+        return Err(EINVAL);
+    }
+    if irq >= MSI_FIRST_LINE as u64 && MSI_DEVICE[(irq - MSI_FIRST_LINE as u64) as usize].load(Ordering::Acquire) == 0 {
         return Err(EINVAL);
     }
     let endpoint = crate::task::current_service().ok_or(EPERM)?;
@@ -977,8 +1057,8 @@ pub fn irq_register(irq: u64) -> Result<(), i64> {
     IRQ_PENDING[irq as usize].store(0, Ordering::Release);
     IRQ_SERVICE[irq as usize].store(endpoint, Ordering::Release);
     IRQ_OWNER[irq as usize].store(me, Ordering::Release);
-    crate::arch::pic::unmask_irq(irq as u8);
-    if irq >= 8 {
+    unmask_line(irq as u8);
+    if (8..16).contains(&irq) {
         crate::arch::pic::unmask_irq(2); // the cascade to the second controller
     }
     Ok(())
@@ -1005,7 +1085,7 @@ pub fn irq_raised(irq: u8) -> bool {
     if owner == 0 {
         return false;
     }
-    crate::arch::pic::mask_irq(irq);
+    mask_line(irq);
     IRQ_COUNT[irq as usize].fetch_add(1, Ordering::Relaxed);
     IRQ_PENDING[irq as usize].fetch_add(1, Ordering::AcqRel);
     IRQ_WQ[irq as usize].wake_all();
@@ -1036,11 +1116,11 @@ pub fn irq_raised(irq: u8) -> bool {
 /// *Guaranteed to never panic under normal execution.*
 pub fn irq_ack(irq: u64) -> Result<u32, i64> {
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
-    if irq >= 16 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
+    if irq >= IRQ_LINES as u64 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
         return Err(EPERM);
     }
     let n = IRQ_PENDING[irq as usize].swap(0, Ordering::AcqRel);
-    crate::arch::pic::unmask_irq(irq as u8);
+    unmask_line(irq as u8);
     Ok(n)
 }
 
@@ -1065,11 +1145,11 @@ pub fn irq_ack(irq: u64) -> Result<u32, i64> {
 /// *Guaranteed to never panic under normal execution.*
 pub fn irq_wait(irq: u64, timeout_ticks: u64) -> Result<u32, i64> {
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
-    if irq >= 16 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
+    if irq >= IRQ_LINES as u64 || IRQ_OWNER[irq as usize].load(Ordering::Acquire) != me {
         return Err(EPERM);
     }
     let deadline = (timeout_ticks != 0).then(|| crate::arch::pit::ticks() + timeout_ticks);
-    crate::arch::pic::unmask_irq(irq as u8);
+    unmask_line(irq as u8);
     loop {
         IRQ_WQ[irq as usize].register();
         let n = IRQ_PENDING[irq as usize].swap(0, Ordering::AcqRel);
@@ -1101,7 +1181,7 @@ pub fn irq_wait(irq: u64, timeout_ticks: u64) -> Result<u32, i64> {
 pub fn release_irqs(id: u64) {
     for (irq, owner) in IRQ_OWNER.iter().enumerate() {
         if owner.compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-            crate::arch::pic::mask_irq(irq as u8);
+            mask_line(irq as u8);
             IRQ_SERVICE[irq].store(0, Ordering::Release);
         }
     }
