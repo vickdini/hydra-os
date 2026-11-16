@@ -18,7 +18,8 @@
 #   ERROR <what went wrong, in plain words>   DONE
 # Testing on disk image FILES (no real disk needed): HYDRA_INSTALL_TEST_DISKS=/a.img:/b.img adds
 # those files to the list and allows them as targets (root only reads it from the environment of
-# the caller when it is run directly, never through pkexec, which clears the environment).
+# the caller when it is run directly, never through pkexec, which clears the environment);
+# HYDRA_INSTALL_ONLY_TEST_DISKS=1 hides the real disks (tests on a build machine).
 import hashlib
 import json
 import mmap
@@ -163,6 +164,8 @@ def list_disks():
         devs = json.loads(r.stdout).get("blockdevices", []) if r.returncode == 0 else []
     except (OSError, ValueError):
         devs = []
+    if os.environ.get("HYDRA_INSTALL_ONLY_TEST_DISKS") == "1":
+        devs = []   # tests on a build machine: never offer its real disks
     for d in devs:
         if d.get("type") != "disk" or str(d.get("name", "")).startswith(("loop", "zram", "ram", "sr")):
             continue
@@ -332,13 +335,20 @@ def verify_pool(disk, part_start, blocks, digest, lo, hi):
     total = sum(n for _, n in blocks) or 1
     done = 0
     buf = mmap.mmap(-1, BLOCK)
+    plain = None
     try:
         for i, (off, n) in enumerate(blocks):
+            data = None
             if direct and n % 4096 == 0:
-                got = os.preadv(fd, [memoryview(buf)[:n]], part_start + off)
-                data = buf[:got]
-            else:
-                data = os.pread(fd, n, part_start + off)
+                try:
+                    got = os.preadv(fd, [memoryview(buf)[:n]], part_start + off)
+                    data = buf[:got]
+                except OSError:
+                    direct = False
+            if data is None:
+                if plain is None:
+                    plain = os.open(disk, os.O_RDONLY)
+                data = os.pread(plain, n, part_start + off)
             if len(data) != n:
                 fail("The new disk could not be read back.")
             h.update(off.to_bytes(8, "little"))
@@ -349,6 +359,8 @@ def verify_pool(disk, part_start, blocks, digest, lo, hi):
     finally:
         buf.close()
         os.close(fd)
+        if plain is not None:
+            os.close(plain)
     log("verify: %s read back%s, %s written" % (h.hexdigest(), " (direct)" if direct else "", digest))
     if h.hexdigest() != digest:
         fail("What was read back from the disk differs from what was written. The disk may be faulty.")
@@ -366,8 +378,15 @@ def esp_copy(img_spec, src_dir):
 
 
 def esp_read(img_spec, path):
-    r = subprocess.run(["mtype", "-i", img_spec, path], capture_output=True, env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
-    return r.stdout if r.returncode == 0 else None
+    """The contents of PATH on the FAT file system IMG_SPEC, or None when it is not there."""
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f")
+        r = subprocess.run(["mcopy", "-n", "-i", img_spec, path, out], capture_output=True,
+                           env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+        if r.returncode != 0 or not os.path.exists(out):
+            return None
+        with open(out, "rb") as f:
+            return f.read()
 
 
 def boot_entry(disk):

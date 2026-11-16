@@ -28,6 +28,13 @@ user=$(get user_name); full=$(get full_name); hash=$(get password_hash)
 host=$(get hostname); tz=$(get timezone); kb=$(get keyboard_layout); kbv=$(get keyboard_variant)
 lang=$(get language); id=$(get install_id)
 ok=1
+# The same settings again (a boot medium the kernel could not delete them from, e.g. a CD):
+# applied once only
+if [ -n "$id" ] && [ "$(cat /var/lib/hydra/setup-done 2>/dev/null)" = "$id" ]; then
+    say "settings $id were applied before: removed, nothing changed"
+    rm -f "$conf"
+    exit 0
+fi
 
 # ---- The user account ----
 case "$user" in

@@ -575,6 +575,7 @@ class SummaryPage(Page):
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(18)
         self.grid.setVerticalSpacing(8)
+        self.grid.setColumnStretch(1, 1)
         self.box.addLayout(self.grid)
         self.box.addSpacing(10)
         self.warn = QLabel()
@@ -666,12 +667,13 @@ class DonePage(Page):
                           "in with your user name <b>%s</b> and your password." % self.wiz.account.user.text())
         self.note.setText("<br>".join(notes))
 
-    def failure(self, error, log):
+    def failure(self, error, log, touched=True):
         self.ok = False
         self.head.setText("Hydra could not be installed")
-        self.text.setText("<span style='color:#d4382c'><b>%s</b></span><br><br>The disk you chose may now be "
-                          "partly erased, but nothing else on this computer was changed. You can try again, or "
-                          "choose another disk." % error.replace("<", "&lt;"))
+        after = ("The disk you chose may now be partly erased, but nothing else on this computer was changed."
+                 if touched else "Nothing was changed on the disk.")
+        self.text.setText("<span style='color:#d4382c'><b>%s</b></span><br><br>%s You can try again, or "
+                          "choose another disk." % (error.replace("<", "&lt;"), after))
         self.note.setText("The full report is in /var/log/hydra-install.log.")
         self.details.setPlainText(log)
         self.details.setVisible(bool(log.strip()))
@@ -902,7 +904,7 @@ class Wizard(QMainWindow):
                 else:
                     self.error = "The installation stopped unexpectedly (code %s)." % code
             self.progress.set_step(int(self.progress_step()), failed=True)
-            self.done.failure(self.error, (self.out + err).strip())
+            self.done.failure(self.error, (self.out + err).strip(), touched=self.progress_step() >= 2)
         self.show_page(7)
 
     def progress_step(self):
