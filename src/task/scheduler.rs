@@ -1437,8 +1437,10 @@ impl Scheduler {
             return;
         }
         crate::compat::linux::perf::switched(self.tasks[curr_idx].tgid);
-        // The outgoing task's time up to now
-        self.charge(curr_idx, ctx);
+        // CPU time is charged at timer ticks only (to the task and mode each one
+        // interrupts), as Linux samples it. Charging the time since the last tick here too
+        // put every tick that a switch crossed first in system time (the switch runs in the
+        // kernel): with frequent switches nearly all user time showed as system time
         self.cur[crate::arch::percpu::cpu()] = next_idx;
         super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(self.tasks[next_idx].retired, core::sync::atomic::Ordering::Release);
         super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
@@ -1720,9 +1722,9 @@ impl Scheduler {
         }
     }
 
-    /// Charges the time since this CPU's last accounting to task `idx`, which has run on it
-    /// since (at timer ticks, and when it is switched out: a tick that found the scheduler
-    /// lock busy loses nothing).
+    /// Charges the time since this CPU's last accounting to task `idx`, which the timer
+    /// tick interrupted (a tick that found the scheduler lock busy loses nothing: the next
+    /// one charges both).
     ///
     /// # Arguments
     /// * `idx` - The task.
