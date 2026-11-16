@@ -169,3 +169,24 @@ with one, an unlabelled file costs one more flag test.
   (path block, allow list), EVALUATE, unload.
 * `tests/host/tests/abac.rs`: the pure evaluator (15 tests, including the compiler's
   output for every feature).
+
+## Verified (2026-11-16, KVM, overlay of the main pool)
+
+* Kernel suite with `abac` (32 checks) all rc=0; host tests 650/0.
+* fslat, baseline kernel vs this one (medians of 4-6 runs): equal without a policy and with
+  a policy whose files have no labels; in a labelled folder 99.99 % of checks come from
+  the decision cache.
+* KDE: Family & accounts and Hydra Access Center start from KRunner; saving asks for the
+  administrator password (polkit dialog with Hydra's message) and applies at once.
+  A child's blocked app (Firefox) fails with "execve: Permission denied"; a folder of
+  another department cannot be opened in Dolphin ("Could not enter folder"); Dolphin's
+  *Access control → Effective access…* opens the Access Center on the file; changing the
+  child's hours ends the running session within 30 s and the sign-in is then refused;
+  polkit refuses software installs to a standard user when an administrative rule says
+  so (pkcheck: "Not authorized"), other tasks still ask for the password; classification
+  dialog, audit log and compliance report work.
+
+Known limits: the first password dialog of a session can take 25-45 s to appear on the VM;
+the child web filter (Firefox AutoConfig) was written but not tried in a browser; SDDM
+shows only "Login failed" when sign-in hours refuse a sign-in; programs started by an
+interpreter or by `ld.so` directly are not separately checked by app control.
