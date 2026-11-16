@@ -1,0 +1,71 @@
+#!/bin/sh
+# Written by Hydra: opens a Windows program, installer (.exe, .msi) or shortcut (.lnk) with
+# Wine, the way a double-click does on Windows. Wine itself says nothing when a program cannot
+# start (it writes the reason to a terminal nobody sees): this reads Wine's messages and turns
+# the common failures into a notification, with a button where Hydra can fix the cause.
+. /usr/local/libexec/hydra-wine-common
+f="$1"
+name=$(program_name "$f")
+if [ ! -e "$f" ]; then
+    notify "$name could not be opened" "The file is no longer there. It may have been moved or deleted." dialog-error
+    exit 1
+fi
+# A Windows program starts with "MZ"; for anything else Wine's own message is "Invalid handle"
+case "$f" in
+*.[eE][xX][eE]|*.[cC][oO][mM]|*.[sS][cC][rR])
+    if [ "$(head -c 2 "$f")" != "MZ" ]; then
+        notify "$name is not a Windows program" \
+            "The file is damaged, was not downloaded completely, or is something else with a .exe name." dialog-error
+        exit 1
+    fi
+    ;;
+esac
+wait_for_setup "$name" || exit 1
+log="$CACHE/$(basename "$f").log"
+# start /wait: the program's own exit, not start's; .msi and .lnk go through the shell as
+# they do on Windows
+WINEDEBUG="${WINEDEBUG:-fixme-all}" "$WINE" start /wait /unix "$f" > "$log" 2>&1
+rc=$?
+# An installer may have added start-menu entries
+add_uninstall_actions
+
+# Wine's message for a library that is missing: "err:module:import_dll Library MSVCP140.dll
+# (which is needed by L"C:\\...") not found", or one that lacks a function the program uses
+# (Wine's own stand-ins for Microsoft's libraries do not have all of them): "Loading library
+# MSVCP140.dll (which is needed by ...) failed"
+dll=$(sed -n -e 's/.*import_dll Library \([^ ]*\) (which is needed by.*/\1/p' \
+    -e 's/.*import_dll Loading library \([^ ]*\) (which is needed by.*/\1/p' "$log" | head -n 1)
+if [ -n "$dll" ]; then
+    lower=$(echo "$dll" | tr 'A-Z' 'a-z')
+    case "$lower" in
+    msvcp1[0-4]*|msvcr1[0-2]*|vcruntime1*|concrt140*|vcomp1[0-4]*|mfc1[0-4]*|vccorlib140*)
+        if ask "Visual C++ needed" \
+            "$name needs Microsoft Visual C++ ($dll is missing), a free part of Windows. Download and install it now? It takes a few minutes."; then
+            /usr/local/libexec/hydra-wine-runtime vcrun && exec "$0" "$f"
+        fi
+        ;;
+    *)
+        notify "$name could not start" \
+            "It needs $dll, a part of Windows that Hydra does not have. Programs sometimes come with an extra installer for such parts." dialog-error
+        ;;
+    esac
+    exit 1
+fi
+# Not a Windows program at all, or one for another kind of computer
+if grep -q -i -e 'Bad EXE format' -e 'not a valid win32' -e 'not a valid application' -e 'ERROR_BAD_EXE_FORMAT' "$log"; then
+    notify "$name is not a program Hydra can run" \
+        "The file is damaged or was made for another kind of computer (for example ARM or very old 16-bit Windows)." dialog-error
+    exit 1
+fi
+# Programs that need a Windows driver (copy protection, anti-cheat, hardware tools)
+if grep -q -e 'err:ntoskrnl' -e 'err:winedevice' -e 'err:service:.*\.sys' "$log"; then
+    notify "$name may not work on Hydra" \
+        "It tried to install a Windows driver. Drivers cannot run on Hydra, so parts of it (copy protection, hardware access) will not work." dialog-warning
+    exit 1
+fi
+# The file could not be opened as a program at all
+if grep -q -e 'wine: failed to open' -e 'wine: could not load' -e 'File not found' "$log"; then
+    notify "$name could not start" "Windows could not open this file. The details are in $log." dialog-error
+    exit 1
+fi
+exit $rc

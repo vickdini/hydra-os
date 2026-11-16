@@ -1,0 +1,74 @@
+#!/bin/sh
+# Written by Hydra: "Uninstall" in the right-click menu of a Windows program's start-menu entry.
+#   hydra-wine-uninstall ENTRY.desktop
+# Finds the program's entry in Windows' list of installed programs (the registry's Uninstall
+# keys: the one whose uninstaller, folder or icon lies in the folder the menu entry starts the
+# program in) and runs its own uninstaller, as Settings > Apps does on Windows. When no entry
+# matches, Windows' "Add or remove programs" list opens so the person can pick it there.
+. /usr/local/libexec/hydra-wine-common
+d="$1"
+name=$(sed -n 's/^Name=//p' "$d" | head -n 1)
+dir=$(sed -n 's/^Path=//p' "$d" | head -n 1)
+wait_for_setup "The uninstaller" || exit 1
+
+# The folder as Windows names it, lower case and with forward slashes (the registry values
+# are compared the same way): /home/u/.wine/drive_c/Program Files/X -> c:/program files/x
+win=
+case "$dir" in
+"$P/drive_c/"*) win="c:/${dir#"$P/drive_c/"}" ;;
+"$P/dosdevices/"?:/*) win="${dir#"$P/dosdevices/"}" ;;
+esac
+win=$(printf '%s' "$win" | tr 'A-Z' 'a-z' | sed 's#/*$##')
+
+key=
+if [ -n "$win" ]; then
+    # Prints the name of the first Uninstall key with a value naming a file in that folder (or
+    # the folder itself); 64-bit programs' keys come first in the file, then 32-bit ones
+    # (Wow6432Node). Each run of backslashes becomes one slash first (tr): the file doubles
+    # them, and awks disagree on backslashes in patterns
+    key=$(tr -s '\\' '/' < "$P/system.reg" | DIR="$win" awk '
+        { l = $0 }
+        l ~ /^\[/ {
+            k = ""
+            if (match(l, /^\[Software\/(Wow6432Node\/)?Microsoft\/Windows\/CurrentVersion\/Uninstall\//)) {
+                k = substr(l, RLENGTH + 1)
+                sub(/\] [0-9]+$/, "", k)
+                sub(/\]$/, "", k)
+            }
+            next
+        }
+        k != "" && l ~ /^"(UninstallString|InstallLocation|DisplayIcon|QuietUninstallString)"=/ {
+            v = tolower(l)
+            if (index(v, ENVIRON["DIR"] "/") || index(v, ENVIRON["DIR"] "\"")) { print k; exit }
+        }')
+fi
+
+if [ -z "$key" ]; then
+    notify "Choose the program to uninstall" "Hydra could not tell which installed program \"$name\" belongs to. Pick it in the list."
+    exec "$WINE" uninstaller
+fi
+"$WINE" uninstaller --remove "$key" > "$CACHE/uninstall.log" 2>&1
+
+# The program's uninstaller often keeps running after Wine's returns (it copies itself to a
+# temporary folder first). Once the key is gone, start-menu entries whose Windows shortcut
+# went with it are removed too (Wine's own clean-up); give up after half an hour
+n=0
+while [ $n -lt 360 ]; do
+    grep -q -F "Uninstall\\\\$key]" "$P/system.reg" || break
+    sleep 5
+    n=$((n + 1))
+done
+# Uninstallers remove the key before they finish (Notepad++'s then asks whether to keep the
+# settings): the message waits for them, for up to 10 minutes. They run from a copy in a
+# temporary folder (NSIS: Un_A.exe or Au_.exe, others uninstall.exe, unins000.exe)
+n=0
+while [ $n -lt 300 ] && ps -eo args= | grep -i -q -e 'un_a\.exe' -e 'au_\.exe' -e 'uninst[a-z0-9]*\.exe' -e 'unins[0-9]*\.exe'; do
+    sleep 2
+    n=$((n + 1))
+done
+WINEDEBUG=-all "$WINE" winemenubuilder -r > /dev/null 2>&1
+kbuildsycoca6 > /dev/null 2>&1
+if grep -q -F "Uninstall\\\\$key]" "$P/system.reg"; then
+    exit 1
+fi
+notify "$name was uninstalled" "It has been removed from this computer." edit-delete

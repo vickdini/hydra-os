@@ -1,0 +1,51 @@
+#!/bin/sh
+# Written by Hydra: installs an optional part of Windows that programs often need, into the
+# user's Windows environment, with notifications instead of a terminal.
+#   hydra-wine-runtime vcrun     Microsoft Visual C++ 2015-2022 runtime (32- and 64-bit)
+# Microsoft's redistributable terms allow giving it out but Hydra does not ship it: it is
+# downloaded from Microsoft when someone asks for it.
+. /usr/local/libexec/hydra-wine-common
+case "$1" in
+vcrun)
+    title="Visual C++ runtime"
+    files="vc_redist.x86.exe vc_redist.x64.exe"
+    base="https://aka.ms/vs/17/release"
+    args="/install /quiet /norestart"
+    # Wine has stand-ins of its own for these libraries and prefers them: Microsoft's, once
+    # installed, must come first (what winetricks' vcrun2022 does)
+    native="concrt140 msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids vcamp140 vccorlib140 vcomp140 vcruntime140 vcruntime140_1"
+    ;;
+*)
+    notify "Unknown Windows component" "Hydra does not know how to install \"$1\"." dialog-error
+    exit 2
+    ;;
+esac
+wait_for_setup "The $title" || exit 1
+LOCK="$CACHE/runtime-$1.lock"
+mkdir "$LOCK" 2>/dev/null || { notify "$title" "It is already being installed."; exit 1; }
+trap 'rmdir "$LOCK"' EXIT
+notify "Installing the $title" "It is downloaded from Microsoft and installed. This takes a few minutes; you can keep working."
+for x in $files; do
+    out="$CACHE/$x"
+    rm -f "$out"
+    # A Windows program starts with "MZ": anything else (an error page) is not run
+    if ! wget -q -O "$out" "$base/$x" || [ "$(head -c 2 "$out")" != "MZ" ]; then
+        rm -f "$out"
+        notify "The $title could not be downloaded" "Check the internet connection and try again." dialog-error
+        exit 1
+    fi
+    # 3010: installed, Windows would want a restart (Wine does not); 1638: a newer version is
+    # already there (exit codes are seen modulo 256: 194 and 102)
+    WINEDEBUG=-all "$WINE" "$out" $args > "$CACHE/$x.log" 2>&1
+    rc=$?
+    rm -f "$out"
+    if [ $rc -ne 0 ] && [ $rc -ne 194 ] && [ $rc -ne 102 ]; then
+        notify "The $title could not be installed" "The installer stopped with error $rc." dialog-error
+        exit 1
+    fi
+done
+for dll in $native; do
+    WINEDEBUG=-all "$WINE" reg add 'HKCU\Software\Wine\DllOverrides' /v "$dll" /d native,builtin /f > /dev/null 2>&1
+done
+notify "The $title is installed" "Windows programs that need it can be started now."
+exit 0
