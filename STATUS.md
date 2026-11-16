@@ -1,7 +1,8 @@
 # Group F - Image & live USB (branch i-live)
-Current step: running the cleaning step in a throwaway copy of the main pool (VM)
+Current step: second full run of the image build (cleaning, packing, checking) followed by the live stick's system
 Works so far:
-- Pool packer tool (tools/build-image/hydra-pool-pack.c): copies only the live data of a pool into a new compact pool image, checks every block. Run on a copy of the main pool: it found ONE damaged block in the main pool: a runtime folder of the login screen (owner sddm, uid 101, probably /run/user/101; nothing personal). The build now repairs/removes it in the throwaway copy first
-- Live session code written (kernel builds): \hydra\live flag on the boot volume -> user "live" logged in by itself, "Install Hydra" on the desktop and in the Start menu, "You are trying Hydra" notice. Not tested yet
-- Interface for the installer (Group G) written in LAYOUT.md: /opt/hydra-install/pool.img.zst + esp/
-Next: pack + compress the clean image, check it contains nothing personal
+- Clean install image built from a throwaway copy of the main pool (first run): 5.3 GiB pool (3.3 GiB of data, 2 GiB free), 951 MiB compressed with zstd. Verified by booting it in a VM: no accounts hydra/vick, empty /home, no passwords, no machine-id, no SSH keys, logs, journal, apt lists, network connections, histories, Wine prefixes or browser profiles; installer tools (zstd, sgdisk, sfdisk, mkfs.vfat, mcopy, efibootmgr) present
+- Found and fixed: Wine Mono files were still owned by the old user number 1000 (the second run gives them to root)
+- The main pool has ONE damaged object: an orphaned runtime folder of the login screen from 2026-11-09 (nothing personal, no directory names it); the image leaves it out
+- Live session code written (kernel builds); interface for the installer (Group G) in LAYOUT.md
+Next: put the install image into the live stick's system, take screenshots of the live desktop

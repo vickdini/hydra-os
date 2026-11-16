@@ -72,6 +72,11 @@ rm -rf /var/lib/sudo/lectured/* /var/lib/sudo/ts/* 2>/dev/null
 # 8. Temporary files (the X11/ICE socket directories come back at boot)
 rm -rf /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]* /run/user/* 2>/dev/null
 
+# 9. Files of the system still owned by a removed person's number (e.g. Wine Mono, unpacked
+#    from an archive as uid 1000): root's now, or the first account made later would own them
+find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o     \( -uid +999 -a -uid -60000 \) -exec chown -h root {} + 2>/dev/null
+find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o     \( -gid +999 -a -gid -60000 \) -exec chgrp -h root {} + 2>/dev/null
+
 # Check
 left=$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd)
 homes=$(ls -A /home)
