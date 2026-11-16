@@ -1145,6 +1145,12 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     let raw = join_path_raw(&base_path, path);
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
+    // UEFI variables (efivarfs)
+    if flags & O_PATH == 0 {
+        if let Some(dev) = super::efivars::open(&abs, flags) {
+            return install(FileDescriptor::Device(dev?), flags);
+        }
+    }
     // Device control for the devices Hydra serves by name
     if flags & O_PATH == 0 {
         if let Some((major, minor)) = named_device(&abs) {
@@ -2556,6 +2562,8 @@ fn fs_magic(abs: &str) -> i64 {
         DEVPTS_SUPER_MAGIC
     } else if under("/proc") {
         0x9fa0 // PROC_SUPER_MAGIC
+    } else if under(super::efivars::DIR) {
+        super::efivars::EFIVARFS_MAGIC
     } else if under(super::fs::CGROUP_ROOT) {
         0x6367_7270 // CGROUP2_SUPER_MAGIC (libsystemd refuses a hierarchy without it)
     } else if under("/sys") {
@@ -3510,6 +3518,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     // Access policies: deleting needs the delete right on the file
                     if super::abac::active() && !super::abac::check_delete(&ZfsClient::getattr(victim)?) {
                         return Err(EACCES);
+                    }
+                }
+                // A UEFI variable's file: the variable goes first
+                if !rmdir {
+                    if let Some(r) = super::efivars::unlink(dir, name) {
+                        r?;
+                        let r = zfs(|s| s.unlink(dir, name).map(|_| 0));
+                        super::efivars::refresh();
+                        return r;
                     }
                 }
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))

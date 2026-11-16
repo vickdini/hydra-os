@@ -1278,10 +1278,12 @@ pub fn populate(root: &str) -> Result<(), &'static str> {
     let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
     *LINUX_ROOT.lock() = Some(String::from(root));
     let facts = block_facts();
+    let efivars = super::efivars::snapshot();
     if let Err(e) = crate::fs::zfs::with_server(|s| {
         populate_tree(&mut tree, s)?;
         block_tree(&mut tree, s, 1_000_000, &facts)?;
-        boot_flag_files(&mut tree, s, &facts)
+        boot_flag_files(&mut tree, s, &facts)?;
+        efivars_tree(&mut tree, s, efivars.as_deref())
     }) {
         crate::kprintln!("[devices] writing the device tree into {} failed at {}: errno {}", root, tree.at, -e);
         return Err("could not write the device tree");
@@ -1782,6 +1784,32 @@ fn boot_flag_files(t: &mut Tree, s: &mut ZfsServer, facts: &[(crate::fs::blockde
         }
     }
     Ok(())
+}
+
+/// `/sys/firmware/efi`: the firmware's bitness and the variables as efivarfs files (see
+/// [`super::efivars`]); stale variable files are removed.
+fn efivars_tree(t: &mut Tree, s: &mut ZfsServer, vars: Option<&[(String, Vec<u8>)]>) -> Result<(), i64> {
+    t.file(s, "/sys/firmware/efi/fw_platform_size", "64
+")?;
+    let Some(vars) = vars else { return Ok(()) };
+    let dir = t.dir(s, super::efivars::DIR)?;
+    super::efivars::DIR_INO.store(dir, core::sync::atomic::Ordering::Relaxed);
+    remove_stale(t, s, super::efivars::DIR, &|n| !vars.iter().any(|(v, _)| v == n))?;
+    for (name, content) in vars {
+        t.file_bytes(s, &alloc::format!("{}/{}", super::efivars::DIR, name), content, 0o644)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the UEFI variable files (after a variable changed).
+pub fn refresh_efivars() {
+    let Some(root) = LINUX_ROOT.lock().clone() else { return };
+    let Ok(root_ino) = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true) else { return };
+    let vars = super::efivars::snapshot();
+    let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
+    if let Err(e) = crate::fs::zfs::with_server(|s| efivars_tree(&mut tree, s, vars.as_deref())) {
+        crate::kprintln!("[devices] rewriting the UEFI variables failed at {}: errno {}", tree.at, -e);
+    }
 }
 
 /// Rewrites the block devices in the Linux root (after `BLKRRPART`/`BLKPG` changed a

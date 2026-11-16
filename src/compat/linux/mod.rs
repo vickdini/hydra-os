@@ -14,6 +14,7 @@ pub mod bpf;
 pub mod chardev;
 pub mod devices;
 pub mod drm;
+pub mod efivars;
 pub mod epoll;
 pub mod evdev;
 pub mod netlink;
