@@ -452,7 +452,9 @@ impl Drop for WindowGuard {
                     WINDOWS_HELD.fetch_sub(1, Ordering::AcqRel);
                 }
             }
-        })
+        });
+        // Kernel-mode tasks held back while the window was in use may run now
+        crate::task::scheduler::call_ended();
     }
 }
 

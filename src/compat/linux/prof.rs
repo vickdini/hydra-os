@@ -107,6 +107,154 @@ pub fn sample_show(top: usize) {
     }
 }
 
+/// Calls and faults at least this long (milliseconds; 0: none) are recorded one by one while
+/// profiling, with the time since boot, so waits can be lined up with a program's own
+/// timestamped trace (`linux prof waits <ms>`, then `linux prof waits show`). They go to a
+/// ring in memory, not the console: printing each one would itself stall the programs.
+pub static SLOW_MS: AtomicU64 = AtomicU64::new(0);
+
+/// One recorded slow call or fault.
+#[derive(Clone, Copy)]
+struct Slow {
+    t0: u64,
+    ns: u64,
+    pid: u64,
+    tid: u64,
+    /// The system call (`u64::MAX`: a page fault).
+    nr: u64,
+    args: [u64; 3],
+    ret: i64,
+    exe: [u8; 24],
+}
+
+const SLOW_MAX: usize = 32768;
+static SLOWS: spin::Mutex<alloc::vec::Vec<Slow>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+/// Records system call `nr` (`u64::MAX`: a page fault) returning `r` if it took at least [`SLOW_MS`].
+pub fn slow(nr: u64, r: i64, a0: u64, a1: u64, a2: u64, t0: u64) {
+    let lim = SLOW_MS.load(Relaxed);
+    if t0 == 0 || lim == 0 {
+        return;
+    }
+    let ns = crate::arch::pit::now_ns().saturating_sub(t0);
+    if ns < lim * 1_000_000 {
+        return;
+    }
+    let (tid, pid) = super::proc::current_ids();
+    // The end of the command line (Wine's programs all run as wine-preloader: their last
+    // argument tells them apart)
+    let mut exe = [0u8; 24];
+    let mm = crate::task::with_current_task_mut(|t| t.mm.clone()).flatten();
+    if let Some((start, end)) = mm.and_then(|m| m.try_lock().map(|g| (g.args.0, g.args.1))) {
+        if start != 0 && end > start {
+            let end = end - 1;
+            let from = start.max(end.saturating_sub(24));
+            let n = (end - from) as usize;
+            unsafe { core::ptr::copy_nonoverlapping(from as *const u8, exe.as_mut_ptr(), n) };
+            for b in exe[..n].iter_mut() {
+                if *b == 0 {
+                    *b = b' ';
+                }
+            }
+        }
+    }
+    // A sleep: the time asked for (instead of the pointer)
+    let a2 = match nr {
+        230 if a2 != 0 => unsafe { core::ptr::read_unaligned(a2 as *const u64) * 1_000_000_000 + core::ptr::read_unaligned((a2 + 8) as *const u64) },
+        _ => a2,
+    };
+    let a0 = match nr {
+        35 if a0 != 0 => unsafe { core::ptr::read_unaligned(a0 as *const u64) * 1_000_000_000 + core::ptr::read_unaligned((a0 + 8) as *const u64) },
+        _ => a0,
+    };
+    let mut v = SLOWS.lock();
+    if v.len() < SLOW_MAX {
+        v.push(Slow { t0, ns, pid, tid, nr, args: [a0, a1, a2], ret: r, exe });
+    }
+}
+
+/// Prints the recorded slow calls and faults in start order and forgets them.
+pub fn slow_show() {
+    let mut v = core::mem::take(&mut *SLOWS.lock());
+    v.sort_unstable_by_key(|s| s.t0);
+    crate::println!("[wait] {} slow calls", v.len());
+    for s in v {
+        let ms = s.t0 / 1_000_000;
+        let len = s.exe.iter().position(|&b| b == 0).unwrap_or(24);
+        let exe = core::str::from_utf8(&s.exe[..len]).unwrap_or("?").trim();
+        if s.nr == u64::MAX {
+            crate::println!("[wait] {}.{:03} +{}.{:01}ms {}/{} {} fault {:#x} kind {}", ms / 1000, ms % 1000, s.ns / 1_000_000,
+                s.ns / 100_000 % 10, s.pid, s.tid, exe, s.args[0], s.args[1]);
+        } else {
+            crate::println!("[wait] {}.{:03} +{}.{:01}ms {}/{} {} nr {} ({:#x}, {:#x}, {:#x}) -> {}", ms / 1000, ms % 1000,
+                s.ns / 1_000_000, s.ns / 100_000 % 10, s.pid, s.tid, exe, s.nr, s.args[0], s.args[1], s.args[2], s.ret);
+        }
+    }
+}
+
+/// Wakeup latency while profiling: from a wait queue's wakeup to the scheduler marking the
+/// task ready (`PENDING`), and from ready to running on a CPU (`RUN`), as histograms.
+const WAKE_SLOTS: usize = 4096;
+static WAKE_REQ: [AtomicU64; WAKE_SLOTS] = [const { AtomicU64::new(0) }; WAKE_SLOTS];
+static READY_AT: [AtomicU64; WAKE_SLOTS] = [const { AtomicU64::new(0) }; WAKE_SLOTS];
+const LAT_BOUNDS_US: [u64; 6] = [10, 50, 200, 1000, 5000, 20000];
+static LAT_PENDING: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static LAT_RUN: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+fn lat_add(h: &[AtomicU64; 7], ns: u64) {
+    let us = ns / 1000;
+    let i = LAT_BOUNDS_US.iter().position(|&b| us < b).unwrap_or(6);
+    h[i].fetch_add(1, Relaxed);
+}
+
+/// A wait queue woke task `id` (its wakeup waits for the scheduler).
+#[inline]
+pub fn wake_requested(id: u64) {
+    if ON.load(Relaxed) {
+        let _ = WAKE_REQ[id as usize % WAKE_SLOTS].compare_exchange(0, crate::arch::pit::now_ns().max(1), Relaxed, Relaxed);
+    }
+}
+
+/// The scheduler made task `id` ready to run.
+#[inline]
+pub fn wake_applied(id: u64) {
+    if ON.load(Relaxed) {
+        let now = crate::arch::pit::now_ns().max(1);
+        let t = WAKE_REQ[id as usize % WAKE_SLOTS].swap(0, Relaxed);
+        if t != 0 {
+            lat_add(&LAT_PENDING, now.saturating_sub(t));
+        }
+        READY_AT[id as usize % WAKE_SLOTS].store(now, Relaxed);
+    }
+}
+
+/// A wakeup of task `id` found it not waiting (it keeps it for its next wait).
+#[inline]
+pub fn wake_dropped(id: u64) {
+    if ON.load(Relaxed) {
+        WAKE_REQ[id as usize % WAKE_SLOTS].store(0, Relaxed);
+    }
+}
+
+/// Task `id` was switched in on a CPU.
+#[inline]
+pub fn switched_in(id: u64) {
+    if ON.load(Relaxed) {
+        let t = READY_AT[id as usize % WAKE_SLOTS].swap(0, Relaxed);
+        if t != 0 {
+            lat_add(&LAT_RUN, crate::arch::pit::now_ns().saturating_sub(t));
+        }
+    }
+}
+
+fn lat_show(name: &str, h: &[AtomicU64; 7]) {
+    let v: alloc::vec::Vec<u64> = h.iter().map(|c| c.load(Relaxed)).collect();
+    crate::println!(
+        "[prof] {}: <10us {} <50us {} <200us {} <1ms {} <5ms {} <20ms {} more {}",
+        name, v[0], v[1], v[2], v[3], v[4], v[5], v[6]
+    );
+}
+
 /// Start time for a hook, or 0 when profiling is off.
 #[inline]
 pub fn start() -> u64 {
@@ -145,6 +293,10 @@ pub fn reset() {
         FS_CALLS[i].store(0, Relaxed);
         FS_NANOS[i].store(0, Relaxed);
     }
+    for i in 0..7 {
+        LAT_PENDING[i].store(0, Relaxed);
+        LAT_RUN[i].store(0, Relaxed);
+    }
 }
 
 /// Prints the page faults by kind and the `top` system calls by total time.
@@ -155,6 +307,8 @@ pub fn show(top: usize) {
         let ns = FAULT_NANOS[k].load(Relaxed);
         crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {}", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, FAULT_NAMES[k]);
     }
+    lat_show("wakeup -> ready", &LAT_PENDING);
+    lat_show("ready -> running", &LAT_RUN);
     crate::println!("[prof] file-server requests (round trip, from the kernel):");
     for i in 0..FS_OPS {
         let n = FS_CALLS[i].load(Relaxed);

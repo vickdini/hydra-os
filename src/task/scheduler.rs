@@ -181,6 +181,18 @@ pub struct Scheduler {
 /// Nesting limit of driver calls (kernel -> file server -> disk driver needs 2).
 const MAX_HANDOFFS: usize = 8;
 
+/// A ready task was passed over because a driver call (or the reading of its reply) was in
+/// progress: when it ends, an idle CPU is woken to run it ([`call_ended`]), not left
+/// halted until its next timer tick.
+static CALL_DEFERRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A driver call ended, or its caller read the reply: tasks it held back may run now.
+pub fn call_ended() {
+    if CALL_DEFERRED.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        crate::arch::smp::kick_idle();
+    }
+}
+
 /// Whether a driver call is in progress (mirrors [`Scheduler::handoffs`] for lock-free
 /// checks): its caller may hold kernel locks.
 static HANDOFF_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -347,6 +359,7 @@ impl Scheduler {
                     self.handoffs[i] = None;
                     self.note_handoffs();
                     self.resume_caller(h.caller);
+                    call_ended();
                 }
             }
         }
@@ -1414,6 +1427,7 @@ impl Scheduler {
                 t.passed_over = t.passed_over.saturating_add(1);
             }
         }
+        crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
         self.tasks[next_idx].passed_over = 0;
@@ -1522,6 +1536,7 @@ impl Scheduler {
             // kernel locks and make no driver calls without entering the kernel: they run
             // meanwhile (entering it, they wait: `wait_out_handoff`); Hydra's driver and
             // service tasks do not (their calls rely on the server running alone)
+            CALL_DEFERRED.store(true, core::sync::atomic::Ordering::Relaxed);
             return false;
         }
         // Threads of one process run on several CPUs at once (TLB shootdowns keep them
@@ -1608,6 +1623,7 @@ impl Scheduler {
                 continue;
             }
             if now >= task.wake_ns {
+                crate::compat::linux::prof::wake_applied(task.id.0);
                 task.state = TaskState::Ready;
                 task.event_wait = false;
                 task.woken = true;
@@ -1801,6 +1817,7 @@ impl Scheduler {
             match task.state {
                 TaskState::Dead => {}
                 TaskState::Blocked | TaskState::Sleeping { .. } if task.event_wait => {
+                    crate::compat::linux::prof::wake_applied(id);
                     task.state = TaskState::Ready;
                     crate::arch::smp::kick_idle();
                     task.event_wait = false;
@@ -1809,7 +1826,10 @@ impl Scheduler {
                 // Blocked for another reason (a futex, a driver call it is making): not
                 // disturbed, but the wakeup is kept for its next wait, as for a running task
                 // (an interrupt can wake a task while it waits for its driver's reply)
-                _ => task.wake_pending = true,
+                _ => {
+                    crate::compat::linux::prof::wake_dropped(id);
+                    task.wake_pending = true
+                }
             }
         }
     }
@@ -2395,6 +2415,7 @@ pub(crate) fn idle_task_entry() {
             // in which a wakeup could be missed until the next timer tick
             // A short poll first (without the kernel lock): a task made runnable meanwhile
             // runs at once, without halting and being woken again
+            let gen = crate::arch::smp::runnable_gen();
             crate::arch::smp::bkl_exit();
             let work = crate::arch::smp::idle_poll();
             crate::arch::smp::bkl_enter_idle();
@@ -2403,13 +2424,12 @@ pub(crate) fn idle_task_entry() {
                 continue;
             }
             x86_64::instructions::interrupts::disable();
-            if crate::task::wait::wakes_pending() {
+            if !crate::arch::smp::idle_halting(gen) {
                 x86_64::instructions::interrupts::enable();
                 crate::task::yield_now();
             } else {
                 // Halted without the kernel lock; the interrupt that ends it takes it
                 crate::arch::smp::bkl_exit();
-                crate::arch::smp::idle_halting();
                 crate::task::preemptible(x86_64::instructions::interrupts::enable_and_hlt);
                 let kicked = crate::arch::smp::idle_halt_ended();
                 crate::arch::smp::bkl_enter_idle();

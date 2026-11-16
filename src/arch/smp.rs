@@ -284,9 +284,30 @@ pub fn idle_poll() -> bool {
     false
 }
 
-/// Notes that this CPU halts in its idle loop now (until an interrupt).
-pub fn idle_halting() {
-    HALTED.fetch_or(1 << super::percpu::cpu(), Ordering::AcqRel);
+/// The count of tasks made runnable so far ([`idle_halting`] compares it).
+pub fn runnable_gen() -> u64 {
+    RUNNABLE_GEN.load(Ordering::Acquire)
+}
+
+/// Notes that this CPU is about to halt in its idle loop (until an interrupt), with
+/// interrupts disabled, unless work arrived: a wakeup waiting for the scheduler, or a task
+/// made runnable since [`runnable_gen`] returned `gen`.
+///
+/// The CPU is marked halted first and the work checked after: a waker that queued work
+/// before the mark is seen here, and one after it sees the mark and sends the interrupt
+/// (held until `sti; hlt`, which it then ends). Checking first left a window in which
+/// [`kick_idle`] skipped this CPU and the work waited for the next timer tick.
+///
+/// # Returns
+/// Whether to halt now (`false`: work arrived, the mark is undone).
+pub fn idle_halting(gen: u64) -> bool {
+    let bit = 1 << super::percpu::cpu();
+    HALTED.fetch_or(bit, Ordering::SeqCst);
+    if RUNNABLE_GEN.load(Ordering::SeqCst) != gen || crate::task::wait::wakes_pending() {
+        HALTED.fetch_and(!bit, Ordering::SeqCst);
+        return false;
+    }
+    true
 }
 
 /// Notes that this CPU's idle halt ended.
@@ -302,10 +323,10 @@ pub fn idle_halt_ended() -> bool {
 /// once rather than at its next timer tick (a device interrupt, which only the boot
 /// processor takes, wakes a driver another CPU must run).
 pub fn kick_idle() {
-    RUNNABLE_GEN.fetch_add(1, Ordering::AcqRel);
+    RUNNABLE_GEN.fetch_add(1, Ordering::SeqCst);
     let me = 1u64 << super::percpu::cpu();
     loop {
-        let halted = HALTED.load(Ordering::Acquire) & !me;
+        let halted = HALTED.load(Ordering::SeqCst) & !me;
         if halted == 0 {
             return;
         }

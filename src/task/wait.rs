@@ -50,6 +50,7 @@ static OVERFLOW: AtomicBool = AtomicBool::new(false);
 ///
 /// * `id` - 64-bit task ID (or task ID bitwise-ORed with `PROCESS_WAKE`).
 fn defer_wake(id: u64) {
+    crate::compat::linux::prof::wake_requested(id);
     for slot in PENDING.iter() {
         if slot.compare_exchange(0, id + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             return;
