@@ -1,0 +1,4 @@
+# Written by Hydra: File Explorer defaults for every user (a user's own settings override them):
+# a new window starts fresh in the home folder rather than with the last session's tabs
+[General]
+RememberOpenedTabs=false

@@ -1,3 +1,5 @@
 userland/hydra-logind/hydra-session text eol=lf
 *.sh text eol=lf
 *.patch text eol=lf
+userland/hydra-wine/* text eol=lf
+userland/hydra-desktop/** text eol=lf

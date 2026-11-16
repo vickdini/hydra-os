@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Hydra"
+            }
+        ],
+        "Category": "",
+        "Description": "Breeze with a taskbar laid out as on Windows: start button and programs in the middle, notifications and clock on the right",
+        "Id": "org.hydra.windows.desktop",
+        "License": "GPLv2+",
+        "Name": "Hydra (Windows layout)"
+    },
+    "Keywords": "Desktop;Workspace;Appearance;Look and Feel;Windows;Taskbar;",
+    "X-Plasma-APIVersion": "2"
+}

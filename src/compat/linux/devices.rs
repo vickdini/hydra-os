@@ -207,6 +207,34 @@ impl Tree {
         Ok(())
     }
 
+    /// Writes a default that administrators may edit (a file in /etc): only when it is missing
+    /// or still exactly one of Hydra's earlier versions of it, so their own edits stay.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Active ZFS server reference.
+    /// * `path` - Target file path.
+    /// * `content` - Hydra's current version.
+    /// * `earlier` - Hydra's earlier versions, replaced by the current one.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or a negative Linux errno on error.
+    fn default_file(&mut self, s: &mut ZfsServer, path: &str, content: &str, earlier: &[&str]) -> Result<(), i64> {
+        if let Some(ino) = lookup_path(s, self.root, path) {
+            let size = s.getattr(ino)?.size as usize;
+            if !earlier.iter().any(|e| e.len() == size) {
+                return Ok(());
+            }
+            let mut cur = alloc::vec![0u8; size];
+            let n = s.read(ino, 0, &mut cur)?;
+            if !earlier.iter().any(|e| e.as_bytes() == &cur[..n]) {
+                return Ok(());
+            }
+        }
+        self.file(s, path, content)
+    }
+
     /// Creates or updates a symbolic link pointing to `target`.
     ///
     /// # Arguments
@@ -790,66 +818,37 @@ MaximumUid=60000
         }
     }
 
-    // Windows programs (Wine in /opt/wine, tools/build-wine.sh): each user's Windows
-    // environment (the Wine prefix, ~4 minutes to create) is prepared in the background at
-    // their first login, with a notification when it starts and when it is ready, so the
-    // first double-clicked program does not wait for it. The setup runs without a display
-    // (an unset WAYLAND_DISPLAY means wayland-0, the desktop: a name that does not exist):
-    // Wine's own "configuration is being updated" window would sit on the desktop for minutes.
-    // Wine Mono (the .NET Framework) is part of Hydra's Wine package (share/wine/mono): it
-    // is added to the prefix after it is announced ready (~1 minute more), and to prefixes
-    // made before the package had it. Without it a .NET program exits with no message at
-    // all: Wine only offers Mono while a prefix is created. Gecko (Internet Explorer's
-    // engine) is not offered: a download dialog at a first login
+    // Windows programs (Wine in /opt/wine, tools/build-wine.sh), with helpers that keep a
+    // terminal out of it (userland/hydra-wine; each says what it does at its top):
+    // - hydra-wine-setup prepares each user's Windows environment (the Wine prefix, ~4 minutes
+    //   to create) in the background at their first login, with a notification when it starts
+    //   and when it is ready, so the first double-clicked program does not wait for it. It
+    //   runs without a display (an unset WAYLAND_DISPLAY means wayland-0, the desktop: a name
+    //   that does not exist): Wine's own "configuration is being updated" window would sit on
+    //   the desktop for minutes. Wine Mono (the .NET Framework, part of Hydra's Wine package in
+    //   share/wine/mono) is added after the prefix is announced ready (~1 minute more), and to
+    //   prefixes made before the package had it: without it a .NET program exits with no
+    //   message at all. Gecko (Internet Explorer's engine) is not offered: a download dialog at
+    //   a first login. It also turns off Wine's WM_TAKE_FOCUS focus model in each prefix (a
+    //   program still starting lost what was typed into its window, see the script)
+    // - hydra-wine-run opens a double-clicked .exe/.msi/.lnk and turns Wine's terminal
+    //   messages about a failed start into notifications (a missing Visual C++ runtime comes
+    //   with an Install button: hydra-wine-runtime)
+    // - hydra-wine-uninstall is the "Uninstall" of a Windows program's right-click menu in
+    //   the start menu (the run and setup helpers add it to the entries Wine writes)
     if lookup_path(s, t.root, "/opt/wine/bin/wine").is_some() {
         t.dir(s, "/usr/local/libexec")?;
-        t.file_bytes(
-            s,
-            "/usr/local/libexec/hydra-wine-setup",
-            br#"#!/bin/sh
-# Written by Hydra: prepares the user's Windows environment (Wine prefix) at first login, and
-# adds Wine Mono (.NET programs) from Wine's shared copy when the prefix does not have it
-P="${WINEPREFIX:-$HOME/.wine}"
-M=$(ls -d /opt/wine/share/wine/mono/wine-mono-* 2>/dev/null | tail -n 1)
-has_mono() { grep -q '"DisplayName"="Wine Mono Windows Support"' "$P/system.reg" 2>/dev/null; }
-[ -f "$P/system.reg" ] && { [ -z "$M" ] || has_mono; } && exit 0
-mkdir -p "$HOME/.cache"
-LOCK="$HOME/.cache/hydra-wine-setup.lock"
-mkdir "$LOCK" 2>/dev/null || exit 0
-trap 'rmdir "$LOCK"' EXIT
-notify() {
-    gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications         --method org.freedesktop.Notifications.Notify "Windows Programs" 0 "application-x-ms-dos-executable" "$1" "$2" "[]" "{}" 15000 >/dev/null 2>&1
-}
-# Wine without a window, and without the questions about Mono and Gecko
-quiet() {
-    o="$1"
-    shift
-    env -u DISPLAY WAYLAND_DISPLAY=hydra-no-display WINEDEBUG=-all WINEDLLOVERRIDES="$o" nice -n 10 "$@" >/dev/null 2>&1         && /opt/wine/bin/wineserver -w
-}
-if [ ! -f "$P/system.reg" ]; then
-    sleep 20
-    notify "Preparing Windows support" "Windows programs will be ready in a few minutes. You can keep working."
-    if ! quiet "mscoree,mshtml=" /opt/wine/bin/wineboot -i; then
-        notify "Windows support could not be prepared" "It will be tried again at your next login."
-        rm -rf "$P"
-        exit 1
-    fi
-    # The desktop portal asks which program opens a file until one was chosen 3 times in a
-    # row: record the Windows Program Loader as chosen (a host app's id is empty)
-    for t in application/vnd.microsoft.portable-executable application/x-ms-dos-executable         application/x-msdownload application/x-msi application/x-ms-shortcut; do
-        gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore             --object-path /org/freedesktop/impl/portal/PermissionStore             --method org.freedesktop.impl.portal.PermissionStore.SetPermission             desktop-used-apps true "$t" "" "['wine', '3', '3']" >/dev/null 2>&1
-    done
-    notify "Windows support is ready" "Open a Windows program (.exe or .msi) with a double-click."
-fi
-# Wine Mono: Wine's own installer for it, the package Wine runs for a shared copy
-if [ -n "$M" ] && ! has_mono; then
-    quiet "mshtml=" /opt/wine/bin/wine msiexec /i "Z:$M/support/winemono-support.msi" /qn
-fi
-"#,
-            0o755,
-        )?;
-        // Windows programs open with Wine from the file manager (Icon: KDE's own, Wine's
-        // icon is not installed)
+        t.file(s, "/usr/local/libexec/hydra-wine-common", include_str!("../../../userland/hydra-wine/hydra-wine-common"))?;
+        for (name, script) in [
+            ("hydra-wine-setup", include_bytes!("../../../userland/hydra-wine/hydra-wine-setup").as_slice()),
+            ("hydra-wine-run", include_bytes!("../../../userland/hydra-wine/hydra-wine-run").as_slice()),
+            ("hydra-wine-uninstall", include_bytes!("../../../userland/hydra-wine/hydra-wine-uninstall").as_slice()),
+            ("hydra-wine-runtime", include_bytes!("../../../userland/hydra-wine/hydra-wine-runtime").as_slice()),
+        ] {
+            t.file_bytes(s, &alloc::format!("/usr/local/libexec/{}", name), script, 0o755)?;
+        }
+        // Windows programs open with Wine from the file manager and the browser (Icon: KDE's
+        // own, Wine's icon is not installed)
         t.file(
             s,
             "/usr/share/applications/wine.desktop",
@@ -858,12 +857,48 @@ fi
 Type=Application
 Name=Windows Program Loader
 Comment=Runs Windows programs
-Exec=/opt/wine/bin/wine start /unix %f
+Exec=/usr/local/libexec/hydra-wine-run %f
 MimeType=application/vnd.microsoft.portable-executable;application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/x-ms-shortcut;
 Icon=application-x-ms-dos-executable
 NoDisplay=true
 Terminal=false
 Categories=System;Emulator;
+",
+        )?;
+        // Windows' "Add or remove programs" (Wine's list of installed Windows programs, each
+        // removed with its own uninstaller), found in the start menu under the name Windows
+        // users search for
+        t.file(
+            s,
+            "/usr/share/applications/hydra-windows-programs.desktop",
+            "[Desktop Entry]
+# Written by Hydra: the list of installed Windows programs, to uninstall or change them
+Type=Application
+Name=Add or Remove Windows Programs
+GenericName=Installed Windows programs
+Comment=Uninstall or change programs installed for Windows
+Keywords=uninstall;remove;programs;apps;features;windows;wine;
+Exec=/opt/wine/bin/wine uninstaller
+Icon=preferences-system
+Terminal=false
+Categories=Settings;System;
+",
+        )?;
+        // Optional parts of Windows, one click each (downloaded from Microsoft on demand)
+        t.file(
+            s,
+            "/usr/share/applications/hydra-wine-vcrun.desktop",
+            "[Desktop Entry]
+# Written by Hydra: installs Microsoft's Visual C++ runtime for Windows programs
+Type=Application
+Name=Install Visual C++ Runtime
+GenericName=Windows component
+Comment=Microsoft Visual C++ 2015-2022, needed by many Windows programs
+Keywords=vcredist;vc_redist;msvcp140;vcruntime140;visual c++;runtime;windows;wine;
+Exec=/usr/local/libexec/hydra-wine-runtime vcrun
+Icon=application-x-ms-dos-executable
+Terminal=false
+Categories=Settings;System;
 ",
         )?;
         t.file(
@@ -879,6 +914,44 @@ NoDisplay=true
 X-KDE-autostart-phase=2
 ",
         )?;
+    }
+
+    // The desktop as Windows users know it (userland/hydra-desktop): a global theme whose
+    // layout puts the taskbar's start button and programs in the middle, made the default for
+    // users who have not chosen one, plus Windows' shortcuts and File Explorer habits. Users
+    // with a desktop of their own keep it: Plasma reads the layout only for a first login
+    if lookup_path(s, t.root, "/usr/bin/plasmashell").is_some() {
+        const LNF: &str = "/usr/share/plasma/look-and-feel/org.hydra.windows.desktop";
+        t.file(s, &alloc::format!("{}/metadata.json", LNF), include_str!("../../../userland/hydra-desktop/look-and-feel/metadata.json"))?;
+        t.file(s, &alloc::format!("{}/contents/defaults", LNF), include_str!("../../../userland/hydra-desktop/look-and-feel/contents/defaults"))?;
+        t.file(
+            s,
+            &alloc::format!("{}/contents/layouts/org.kde.plasma.desktop-layout.js", LNF),
+            include_str!("../../../userland/hydra-desktop/look-and-feel/contents/layouts/org.kde.plasma.desktop-layout.js"),
+        )?;
+        for (name, content) in [
+            ("kdeglobals", include_str!("../../../userland/hydra-desktop/xdg/kdeglobals")),
+            ("dolphinrc", include_str!("../../../userland/hydra-desktop/xdg/dolphinrc")),
+        ] {
+            t.default_file(s, &alloc::format!("/etc/xdg/{}", name), content, &[])?;
+        }
+        // The names Windows users search the start menu for, and Windows' Ctrl+Shift+Esc for
+        // the Task Manager (Plasma already has Win+E files, Win+D desktop, Win+L lock, Win+I
+        // settings, Win+Shift+S screenshot, Win+V clipboard, Win+arrows to snap): copies of
+        // KDE's entries in /usr/local/share/applications, which comes first in XDG_DATA_DIRS,
+        // made again from KDE's at every boot so updates reach them. The shortcut daemon reads
+        // a launcher's shortcuts from share/kglobalaccel, not from /etc/xdg
+        for (id, generic, keywords, shortcuts) in [
+            ("org.kde.dolphin.desktop", Some("File Explorer"), "File Explorer;Explorer;This PC;My Computer;", None),
+            ("org.kde.plasma-systemmonitor.desktop", Some("Task Manager"), "Task Manager;taskmgr;End Task;", Some("Meta+Esc,Ctrl+Shift+Esc")),
+            ("systemsettings.desktop", None, "Control Panel;Settings;", None),
+            ("org.kde.discover.desktop", Some("App Store"), "Store;App Store;Microsoft Store;", None),
+        ] {
+            windows_alias(t, s, id, generic, keywords, shortcuts)?;
+            if shortcuts.is_some() && lookup_path(s, t.root, &alloc::format!("/usr/local/share/applications/{}", id)).is_some() {
+                t.link(s, &alloc::format!("/usr/local/share/kglobalaccel/{}", id), &alloc::format!("/usr/local/share/applications/{}", id))?;
+            }
+        }
     }
 
     // Older Hydra versions started Brave through wrappers of their own in /usr/bin and
@@ -923,6 +996,107 @@ X-KDE-autostart-phase=2
         }
     }
     Ok(())
+}
+
+/// The marker line of the menu entries [`windows_alias`] writes.
+const ALIAS_MARK: &str = "# Written by Hydra from /usr/share/applications";
+
+/// KDE's menu entry `orig` with Windows' names added: `generic` replaces its generic name (the
+/// grey line under the name in the start menu), `keywords` are added to what search finds it
+/// by, and `shortcuts` replaces its global shortcuts. Only the main group changes (actions
+/// have their own names and shortcuts); localised names stay as they are.
+fn alias_entry(orig: &str, generic: Option<&str>, keywords: &str, shortcuts: Option<&str>) -> String {
+    let mut out = String::new();
+    let (mut in_main, mut seen_kw, mut seen_sc) = (false, false, false);
+    // What the main group still lacks, added where it ends
+    let finish = |out: &mut String, seen_kw: bool, seen_sc: bool| {
+        if !seen_kw {
+            out.push_str(&alloc::format!("Keywords={}\n", keywords));
+        }
+        if let (false, Some(sc)) = (seen_sc, shortcuts) {
+            out.push_str(&alloc::format!("X-KDE-Shortcuts={}\n", sc));
+        }
+    };
+    for line in orig.lines() {
+        if line.starts_with('[') {
+            if in_main {
+                finish(&mut out, seen_kw, seen_sc);
+                out.push('\n');
+            }
+            in_main = line == "[Desktop Entry]";
+            out.push_str(line);
+            out.push('\n');
+            if in_main {
+                out.push_str(ALIAS_MARK);
+                out.push_str(": Windows' names added\n");
+            }
+            continue;
+        }
+        if in_main && line.is_empty() {
+            continue;
+        }
+        if in_main {
+            if let (Some(g), true) = (generic, line.starts_with("GenericName=")) {
+                out.push_str(&alloc::format!("GenericName={}\n", g));
+                continue;
+            }
+            if let Some(kw) = line.strip_prefix("Keywords=") {
+                seen_kw = true;
+                let sep = if kw.is_empty() || kw.ends_with(';') { "" } else { ";" };
+                out.push_str(&alloc::format!("Keywords={}{}{}\n", kw, sep, keywords));
+                continue;
+            }
+            if let (Some(sc), true) = (shortcuts, line.starts_with("X-KDE-Shortcuts=")) {
+                seen_sc = true;
+                out.push_str(&alloc::format!("X-KDE-Shortcuts={}\n", sc));
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if in_main {
+        finish(&mut out, seen_kw, seen_sc);
+    }
+    out
+}
+
+/// Writes /usr/local/share/applications/`id`, KDE's menu entry `id` with Windows' names (see
+/// [`alias_entry`]), unless an administrator replaced Hydra's copy with their own (no marker);
+/// Hydra's copy goes when KDE's entry does.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or a negative Linux errno on error.
+fn windows_alias(t: &mut Tree, s: &mut ZfsServer, id: &str, generic: Option<&str>, keywords: &str, shortcuts: Option<&str>) -> Result<(), i64> {
+    let path = alloc::format!("/usr/local/share/applications/{}", id);
+    let ours = match lookup_path(s, t.root, &path) {
+        None => true,
+        Some(ino) => {
+            let mut head = [0u8; 80];
+            let n = s.read(ino, 0, &mut head)?;
+            head[..n].windows(ALIAS_MARK.len()).any(|w| w == ALIAS_MARK.as_bytes())
+        }
+    };
+    if !ours {
+        return Ok(());
+    }
+    let orig = lookup_path(s, t.root, &alloc::format!("/usr/share/applications/{}", id)).and_then(|ino| {
+        let size = s.getattr(ino).ok()?.size as usize;
+        let mut buf = alloc::vec![0u8; size];
+        let n = s.read(ino, 0, &mut buf).ok()?;
+        buf.truncate(n);
+        Some(buf)
+    });
+    let Some(orig) = orig else {
+        if let (Some(dir), Some(_)) = (lookup_path(s, t.root, "/usr/local/share/applications"), lookup_path(s, t.root, &path)) {
+            s.unlink(dir, id.as_bytes())?;
+            t.changed = true;
+        }
+        return Ok(());
+    };
+    let Ok(orig) = core::str::from_utf8(&orig) else { return Ok(()) };
+    t.file(s, &path, &alias_entry(orig, generic, keywords, shortcuts))
 }
 
 /// Contents of a file imported from the boot volume into the pool's `/bin`.

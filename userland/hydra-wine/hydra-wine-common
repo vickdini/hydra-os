@@ -1,0 +1,79 @@
+# Written by Hydra: shared by the Windows-program helpers in /usr/local/libexec (sourced, not run)
+# Every message is a desktop notification: the helpers run from the menu, the file manager and
+# the browser, never in a terminal, so nothing they print would be seen.
+WINE=/opt/wine/bin/wine
+P="${WINEPREFIX:-$HOME/.wine}"
+export WINEPREFIX="$P"
+CACHE="$HOME/.cache/hydra-wine"
+mkdir -p "$CACHE"
+
+# notify TITLE BODY [ICON]: a notification that stays a while in the history
+notify() {
+    gdbus call --session --timeout 5 --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify "Windows Programs" 0 "${3:-application-x-ms-dos-executable}" \
+        "$1" "$2" "[]" "{}" 15000 >/dev/null 2>&1
+}
+
+# ask TITLE QUESTION: a Yes/No question in a window; succeeds on Yes. A notification cannot
+# carry the buttons: Plasma drops a notification's buttons once the program that sent it is
+# gone, and the desktop has no dialog tool of its own installed (kdialog), so the question is a
+# Windows message box (Wine's script host), the kind of window Windows users expect anyway
+ask() {
+    vbs="$CACHE/ask.vbs"
+    # VBScript doubles the quotes inside a string; 4 + 32: Yes and No buttons, question icon
+    t=$(printf '%s' "$1" | sed 's/"/""/g')
+    q=$(printf '%s' "$2" | sed 's/"/""/g')
+    printf 'WScript.Quit MsgBox("%s", 4 + 32, "%s")\r\n' "$q" "$t" > "$vbs"
+    WINEDEBUG=-all "$WINE" wscript.exe //nologo "Z:$(printf '%s' "$vbs" | tr / '\\')" > /dev/null 2>&1
+    # 6: Yes
+    [ $? -eq 6 ]
+}
+
+# The program name a person would recognise: the file name without its folder and extension
+program_name() {
+    b=$(basename "$1")
+    echo "${b%.*}"
+}
+
+# Waits while Windows support is being prepared (the first login's setup); fails when it is
+# not ready after 20 minutes
+wait_for_setup() {
+    [ -f "$P/system.reg" ] && [ ! -d "$HOME/.cache/hydra-wine-setup.lock" ] && return 0
+    notify "Windows support is still being prepared" "$1 will start as soon as it is ready."
+    n=0
+    while [ $n -lt 400 ]; do
+        sleep 3
+        [ -f "$P/system.reg" ] && [ ! -d "$HOME/.cache/hydra-wine-setup.lock" ] && return 0
+        n=$((n + 1))
+    done
+    notify "Windows support is not ready" "Please try again in a few minutes." dialog-error
+    return 1
+}
+
+# Gives each start-menu entry of a Windows program a right-click "Uninstall" (Wine writes the
+# entries when a program is installed; an entry it writes again loses the action, so this runs
+# after every installer and at login)
+add_uninstall_actions() {
+    changed=$(find "$HOME/.local/share/applications/wine" -name '*.desktop' 2>/dev/null | while IFS= read -r f; do
+        grep -q '^Actions=' "$f" && continue
+        # The entry's own path, written out: the start menu leaves an action's %k empty. A
+        # path the Exec line would need escapes for gets none (the list of programs opens)
+        case "$f" in
+        *[\"\`\$\\]*) arg= ;;
+        *) arg=" \"$f\"" ;;
+        esac
+        printf '%s\n' 'Actions=HydraUninstall;' '' '[Desktop Action HydraUninstall]' 'Name=Uninstall' \
+            'Icon=edit-delete' "Exec=/usr/local/libexec/hydra-wine-uninstall$arg" >> "$f"
+        echo "$f"
+    done)
+    # Wine files the programs under a start-menu folder named "Wine": Windows users look for
+    # their programs, not for the name of the software that runs them
+    d="$HOME/.local/share/desktop-directories/wine-wine.directory"
+    if grep -q '^Name=Wine$' "$d" 2>/dev/null; then
+        sed -i 's/^Name=Wine$/Name=Windows Programs/' "$d"
+        changed=yes
+    fi
+    # The start menu reads a cache of the entries, which does not notice an entry growing
+    [ -n "$changed" ] && kbuildsycoca6 > /dev/null 2>&1
+    return 0
+}

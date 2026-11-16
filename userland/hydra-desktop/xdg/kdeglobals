@@ -1,0 +1,4 @@
+# Written by Hydra: defaults for every user (a user's own settings override them). The global
+# theme brings the Windows-style taskbar (/usr/share/plasma/look-and-feel/org.hydra.windows.desktop)
+[KDE]
+LookAndFeelPackage=org.hydra.windows.desktop
