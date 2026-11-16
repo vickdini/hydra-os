@@ -146,6 +146,7 @@ fn ahci_args() -> Option<Vec<String>> {
     let (dev, abar) = ahci_adapter()?;
     crate::arch::pci::enable_bus_mastering(&dev);
     let mut args = alloc::vec![alloc::format!("abar={:#x}", abar)];
+    args.extend(crate::arch::bootdisk::driver_arg());
     match service::msi_line(&dev) {
         Some(line) => args.push(alloc::format!("irq={}", line)),
         None => crate::kprintln!("[supervisor] AHCI adapter {:02x}:{:02x}.{}: no MSI; its driver polls", dev.bus, dev.device, dev.function),
@@ -179,6 +180,7 @@ fn ata_args() -> Option<Vec<String>> {
         return None;
     }
     let mut args = alloc::vec![String::from("io=0x1f0"), String::from("ctrl=0x3f6")];
+    args.extend(crate::arch::bootdisk::driver_arg());
     if let Some(dev) = crate::arch::pci::find_class(0x01, 0x01) {
         let prog_if = crate::arch::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
         let bar4 = crate::arch::pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x20);
@@ -343,7 +345,11 @@ fn zfs_args() -> Option<Vec<String>> {
     // heap is 1 GiB). 128 MiB held less than Firefox maps at every start
     let ram = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().total_usable_memory();
     let blocks = (ram / 8 / 4096).clamp(32 * 1024, 128 * 1024);
-    Some(alloc::vec![alloc::format!("cache_blocks={}", blocks)])
+    let mut args = alloc::vec![alloc::format!("cache_blocks={}", blocks)];
+    if let Some(id) = crate::arch::bootdisk::new_guid_id() {
+        args.push(alloc::format!("new_guid={:x}", id));
+    }
+    Some(args)
 }
 
 /// No device memory (port I/O and its own DMA buffers only).

@@ -166,6 +166,7 @@ impl Deadline {
 }
 
 /// The adapter's register window.
+#[derive(Clone, Copy)]
 struct Hba {
     regs: *mut u8,
 }
@@ -674,21 +675,41 @@ fn arg(args: &[&str], key: &str) -> Option<u64> {
     }
 }
 
-/// The first implemented port (or `wanted`) with an ATA disk on an established link.
-fn find_disk_port(hba: &Hba, wanted: Option<usize>) -> Option<usize> {
+/// The implemented ports (or only `wanted`) with an ATA disk on an established link.
+fn find_disk_ports(hba: &Hba, wanted: Option<usize>) -> alloc::vec::Vec<usize> {
     let pi = hba.read(HBA_PI);
-    (0..32).filter(|&p| pi & (1 << p) != 0 && wanted.map_or(true, |w| w == p)).find(|&p| {
-        let ssts = hba.port_read(p, PX_SSTS);
-        let (det, ipm) = (ssts & 0xF, (ssts >> 8) & 0xF);
-        let sig = hba.port_read(p, PX_SIG);
-        println!("[ahci-driver] port {}: SSTS={:#x} SIG={:#x}", p, ssts, sig);
-        // DET 3: device present and communicating; IPM 1: active (2 and 6 are partial
-        // and slumber power states, which a command wakes up)
-        det == 3 && matches!(ipm, 1 | 2 | 6) && sig == SIG_ATA
-    })
+    (0..32)
+        .filter(|&p| pi & (1 << p) != 0 && wanted.map_or(true, |w| w == p))
+        .filter(|&p| {
+            let ssts = hba.port_read(p, PX_SSTS);
+            let (det, ipm) = (ssts & 0xF, (ssts >> 8) & 0xF);
+            let sig = hba.port_read(p, PX_SIG);
+            println!("[ahci-driver] port {}: SSTS={:#x} SIG={:#x}", p, ssts, sig);
+            // DET 3: device present and communicating; IPM 1: active (2 and 6 are partial
+            // and slumber power states, which a command wakes up)
+            det == 3 && matches!(ipm, 1 | 2 | 6) && sig == SIG_ATA
+        })
+        .collect()
 }
 
-/// Driver entry point: takes over the adapter, finds the disk, and serves block requests.
+/// The driver's disks, for the unit logic shared with the other block drivers.
+struct Set(alloc::vec::Vec<Disk>);
+
+impl hydra_rt::blockunits::DiskSet for Set {
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+    fn blocks(&self, disk: usize) -> u64 {
+        self.0[disk].sectors / self.0[disk].sectors_per_block()
+    }
+    fn read(&mut self, disk: usize, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let count = buf.len() / BLOCK;
+        self.0[disk].blocks(block, count, buf, false)
+    }
+}
+
+/// Driver entry point: takes over the adapter, finds the disks, and serves block requests
+/// (units: see `hydra_rt::blockunits`).
 fn main(args: &[&str]) {
     let Some(abar) = arg(args, "abar") else {
         println!("[ahci-driver] no adapter given (abar=...)");
@@ -720,53 +741,74 @@ fn main(args: &[&str]) {
     );
     // Firmware may leave a port's link still negotiating: give the links a moment
     let wanted = arg(args, "port").map(|p| p as usize);
-    let mut port = find_disk_port(&hba, wanted);
-    if port.is_none() {
+    let mut ports = find_disk_ports(&hba, wanted);
+    if ports.is_empty() {
         sys::sleep_ms(200);
-        port = find_disk_port(&hba, wanted);
+        ports = find_disk_ports(&hba, wanted);
     }
-    let Some(port) = port else {
+    if ports.is_empty() {
         println!("[ahci-driver] no SATA disk on the adapter");
-        return;
-    };
-    let (mem, mem_phys) = match sys::dma_alloc(DMA_LEN) {
-        Ok(m) => m,
-        Err(e) => {
-            println!("[ahci-driver] no DMA memory: error {}", e);
-            return;
-        }
-    };
-    if cap & CAP_S64A == 0 && mem_phys + DMA_LEN as u64 > 0x1_0000_0000 {
-        println!("[ahci-driver] the adapter reaches only 32-bit addresses and the DMA memory is above 4 GiB");
         return;
     }
     let irq = arg(args, "irq").map(|i| i as u8).filter(|&i| sys::irq_register(i).is_ok());
-    let mut disk = Disk {
-        hba,
-        port,
-        irq,
-        can_clo: cap & CAP_SCLO != 0,
-        mem,
-        mem_phys,
-        model: [b' '; 40],
-        sectors: 0,
-        sector_size: 512,
-        lba48: false,
-        write_cache: false,
-        recoveries: 0,
-        ncq_slots: 0,
-    };
-    if let Err(e) = disk.start() {
-        println!("[ahci-driver] port {}: {}", port, e);
+    let mut disks = alloc::vec::Vec::new();
+    for port in ports {
+        let (mem, mem_phys) = match sys::dma_alloc(DMA_LEN) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("[ahci-driver] no DMA memory: error {}", e);
+                break;
+            }
+        };
+        if cap & CAP_S64A == 0 && mem_phys + DMA_LEN as u64 > 0x1_0000_0000 {
+            println!("[ahci-driver] the adapter reaches only 32-bit addresses and the DMA memory is above 4 GiB");
+            break;
+        }
+        let mut disk = Disk {
+            hba,
+            port,
+            irq,
+            can_clo: cap & CAP_SCLO != 0,
+            mem,
+            mem_phys,
+            model: [b' '; 40],
+            sectors: 0,
+            sector_size: 512,
+            lba48: false,
+            write_cache: false,
+            recoveries: 0,
+            ncq_slots: 0,
+        };
+        if let Err(e) = disk.start() {
+            println!("[ahci-driver] port {}: {}", port, e);
+            continue;
+        }
+        if disk.irq.is_some() {
+            disk.hba.write(HBA_GHC, disk.hba.read(HBA_GHC) | GHC_IE);
+        }
+        if let Err(e) = disk.identify() {
+            println!("[ahci-driver] port {}: IDENTIFY failed: {}", port, e);
+            continue;
+        }
+        println!(
+            "[ahci-driver] port {} (disk {}): '{}': {} MiB, {}-byte sectors, LBA{}, write cache {}, NCQ {}, {}",
+            port,
+            disks.len(),
+            disk.model_str(),
+            disk.sectors * disk.sector_size as u64 / (1024 * 1024),
+            disk.sector_size,
+            if disk.lba48 { 48 } else { 28 },
+            if disk.write_cache { "on" } else { "off" },
+            disk.ncq_slots,
+            if disk.irq.is_some() { "MSI interrupt" } else { "polled" }
+        );
+        disks.push(disk);
+    }
+    if disks.is_empty() {
         return;
     }
-    if disk.irq.is_some() {
-        disk.hba.write(HBA_GHC, disk.hba.read(HBA_GHC) | GHC_IE);
-    }
-    if let Err(e) = disk.identify() {
-        println!("[ahci-driver] port {}: IDENTIFY failed: {}", port, e);
-        return;
-    }
+    let mut set = Set(disks);
+    let units = hydra_rt::blockunits::Units::choose(args, &mut set, "ahci-driver");
     let mut server = match Server::register(ENDPOINT_BLOCK_DEV) {
         Ok(s) => s,
         Err(e) => {
@@ -774,33 +816,25 @@ fn main(args: &[&str]) {
             return;
         }
     };
-    println!(
-        "[ahci-driver] port {}: '{}': {} MiB, {}-byte sectors, LBA{}, write cache {}, NCQ {}, {}",
-        port,
-        disk.model_str(),
-        disk.sectors * disk.sector_size as u64 / (1024 * 1024),
-        disk.sector_size,
-        if disk.lba48 { 48 } else { 28 },
-        if disk.write_cache { "on" } else { "off" },
-        disk.ncq_slots,
-        if disk.irq.is_some() { "MSI interrupt" } else { "polled" }
-    );
-    let blocks = disk.sectors / disk.sectors_per_block();
     let mut stats = iostat::IoStats::new("ahci-driver");
     server.serve(|srv, msg| match msg.label as u32 {
         MSG_BLOCK_READ | MSG_BLOCK_WRITE => {
             let (block, count, offset) = (msg.args[0], msg.args[1] as usize, msg.args[2] as usize);
-            if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > WINDOW_SIZE || block + count as u64 > blocks {
+            let write = msg.label as u32 == MSG_BLOCK_WRITE;
+            if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > WINDOW_SIZE {
                 return reply(EINVAL, 0);
             }
-            let write = msg.label as u32 == MSG_BLOCK_WRITE;
+            let (d, at) = match units.map(msg.args[3], block, count as u64, write, &set) {
+                Ok(m) => m,
+                Err(e) => return reply(e, 0),
+            };
             let t = stats.start();
-            let result = disk.blocks(block, count, &mut srv.window()[offset..], write);
+            let result = set.0[d].blocks(at, count, &mut srv.window()[offset..], write);
             stats.done(t, (count * BLOCK) as u64, write);
             match result {
                 Ok(()) => reply(0, count as u64),
                 Err(e) => {
-                    println!("[ahci-driver] {} of {} blocks at {} failed: {}", if write { "write" } else { "read" }, count, block, e);
+                    println!("[ahci-driver] {} of {} blocks at {} (disk {}) failed: {}", if write { "write" } else { "read" }, count, at, d, e);
                     reply(EIO, 0)
                 }
             }
@@ -813,19 +847,27 @@ fn main(args: &[&str]) {
             let window = srv.window();
             let mut runs = [[0u64; 3]; BLOCK_READV_MAX];
             let mut total = 0u64;
+            let mut disk = 0;
             for (i, r) in runs[..n].iter_mut().enumerate() {
                 for (k, v) in r.iter_mut().enumerate() {
                     let at = BLOCK_READV_TABLE + (i * 3 + k) * 8;
                     *v = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
                 }
                 let (block, count, offset) = (r[0], r[1] as usize, r[2] as usize);
-                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE || block + count as u64 > blocks {
+                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE {
                     return reply(EINVAL, 0);
+                }
+                match units.map(msg.args[1], block, count as u64, false, &set) {
+                    Ok((d, at)) => {
+                        disk = d;
+                        r[0] = at;
+                    }
+                    Err(e) => return reply(e, 0),
                 }
                 total += count as u64;
             }
             let t = stats.start();
-            let result = disk.readv(&runs[..n], window);
+            let result = set.0[disk].readv(&runs[..n], window);
             stats.done(t, total * BLOCK as u64, false);
             match result {
                 Ok(()) => reply(0, total),
@@ -835,16 +877,30 @@ fn main(args: &[&str]) {
                 }
             }
         }
-        MSG_BLOCK_FLUSH => match disk.flush() {
-            Ok(()) => reply(0, 0),
-            Err(e) => {
-                println!("[ahci-driver] cache flush failed: {}", e);
-                reply(EIO, 0)
+        MSG_BLOCK_FLUSH => {
+            let d = match units.disk_of(msg.args[3], &set) {
+                Ok(d) => d,
+                Err(e) => return reply(e, 0),
+            };
+            match set.0[d].flush() {
+                Ok(()) => reply(0, 0),
+                Err(e) => {
+                    println!("[ahci-driver] cache flush failed: {}", e);
+                    reply(EIO, 0)
+                }
             }
-        },
+        }
         MSG_BLOCK_GET_SIZE => {
-            srv.window()[..40].copy_from_slice(&disk.model);
-            Message::new(MSG_BLOCK_REPLY as u64, [0, blocks, disk.lba48 as u64, 1])
+            let unit = msg.args[3];
+            let d = match units.disk_of(unit, &set) {
+                Ok(d) => d,
+                Err(e) => return reply(e, 0),
+            };
+            let blocks = units.blocks_of(unit, &set);
+            let w = srv.window();
+            w[..40].copy_from_slice(&set.0[d].model);
+            units.describe(unit, w, set.0[d].sector_size as u32, false);
+            Message::new(MSG_BLOCK_REPLY as u64, [0, blocks, set.0[d].lba48 as u64, 1])
         }
         _ => reply(-38, 0),
     })

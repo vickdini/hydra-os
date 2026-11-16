@@ -21,9 +21,11 @@
 //! - Hardware Interaction: None: the ZFS file server and the disk driver are Ring 3 programs.
 //! - Concurrency: Requests to the file server run it in the caller's place; descriptors are shared `Arc<Mutex<...>>`.
 
+pub mod blockdev;
 pub mod client;
 pub mod firstboot; // Group G: installer first-boot settings
 pub mod fd;
+pub mod gpt;
 pub mod pipe;
 pub mod zfs;
 

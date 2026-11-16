@@ -279,10 +279,20 @@ impl Tree {
 
     /// [`Self::node`] with permissions `perm`.
     fn node_mode(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32, perm: u32) -> Result<(), i64> {
+        self.node_kind(s, path, rdev, gid, perm, S_IFCHR)
+    }
+
+    /// A block device node (`S_IFBLK`), mode 0660.
+    fn block_node(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32) -> Result<(), i64> {
+        self.node_kind(s, path, rdev, gid, 0o660, 0o060000)
+    }
+
+    /// A device node of type `kind` (`S_IFCHR` or `S_IFBLK`).
+    fn node_kind(&mut self, s: &mut ZfsServer, path: &str, rdev: u64, gid: u32, perm: u32, kind: u32) -> Result<(), i64> {
         self.at = String::from(path);
         let (parent, name) = split(path);
         let dir = self.dir(s, parent)?;
-        if let Some(i) = self.existing(s, dir, name, S_IFCHR)? {
+        if let Some(i) = self.existing(s, dir, name, kind)? {
             let a = s.getattr(i)?;
             // A boot starts with root owning every node (the seat daemon hands some out)
             if a.rdev == rdev && a.uid == 0 && a.gid == gid && a.mode & 0o777 == perm {
@@ -291,7 +301,7 @@ impl Tree {
             s.unlink(dir, name.as_bytes())?;
         }
         self.changed = true;
-        s.mknod(dir, name.as_bytes(), S_IFCHR | perm, rdev, 0, gid)?;
+        s.mknod(dir, name.as_bytes(), kind | perm, rdev, 0, gid)?;
         Ok(())
     }
 }
@@ -1296,7 +1306,15 @@ fn boot_binary(s: &mut ZfsServer, path: &str) -> Option<Vec<u8>> {
 pub fn populate(root: &str) -> Result<(), &'static str> {
     let root_ino = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true).map_err(|_| "no such root directory")?;
     let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
-    if let Err(e) = crate::fs::zfs::with_server(|s| populate_tree(&mut tree, s)) {
+    *LINUX_ROOT.lock() = Some(String::from(root));
+    let facts = block_facts();
+    let efivars = super::efivars::snapshot();
+    if let Err(e) = crate::fs::zfs::with_server(|s| {
+        populate_tree(&mut tree, s)?;
+        block_tree(&mut tree, s, 1_000_000, &facts)?;
+        boot_flag_files(&mut tree, s, &facts)?;
+        efivars_tree(&mut tree, s, efivars.as_deref())
+    }) {
         crate::kprintln!("[devices] writing the device tree into {} failed at {}: errno {}", root, tree.at, -e);
         return Err("could not write the device tree");
     }
@@ -1438,4 +1456,401 @@ context.properties = {{
         }
     }
     Ok(())
+}
+
+// ----------------------------------------------------------------------
+// Block devices: /dev/sdX, their sysfs devices and udev records
+// ----------------------------------------------------------------------
+
+/// The root the device tree was last written into (for [`refresh_block_tree`]).
+static LINUX_ROOT: spin::Mutex<Option<String>> = spin::Mutex::new(None);
+
+/// A file system found at the start of a partition (what `blkid` would report).
+#[derive(Clone)]
+struct FsInfo {
+    ty: &'static str,
+    version: &'static str,
+    uuid: String,
+    label: String,
+}
+
+/// Recognizes a FAT file system from its boot sector.
+fn probe_fs(sector: &[u8]) -> Option<FsInfo> {
+    if sector.len() < 512 || sector[510] != 0x55 || sector[511] != 0xAA {
+        return None;
+    }
+    let text = |a: usize, n: usize| String::from(core::str::from_utf8(&sector[a..a + n]).unwrap_or("").trim_end());
+    let (version, id_at, label_at) = if &sector[82..87] == b"FAT32" {
+        ("FAT32", 0x43, 0x47)
+    } else if &sector[54..59] == b"FAT16" {
+        ("FAT16", 0x27, 0x2B)
+    } else if &sector[54..59] == b"FAT12" {
+        ("FAT12", 0x27, 0x2B)
+    } else {
+        return None;
+    };
+    let id = u32::from_le_bytes(sector[id_at..id_at + 4].try_into().unwrap());
+    let mut label = text(label_at, 11);
+    if label == "NO NAME" {
+        label.clear();
+    }
+    Some(FsInfo { ty: "vfat", version, uuid: alloc::format!("{:04X}-{:04X}", id >> 16, id & 0xFFFF), label })
+}
+
+/// The disks and what is on their partitions (read before the tree is written: the disk
+/// reads must not happen inside a file server session).
+fn block_facts() -> Vec<(crate::fs::blockdev::Disk, Vec<Option<FsInfo>>)> {
+    let disks = crate::fs::blockdev::disks();
+    disks
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let fs = d
+                .parts
+                .iter()
+                .map(|p| {
+                    if d.touches_pool(p.start, p.start + p.len) {
+                        return Some(FsInfo { ty: "zfs_member", version: "5000", uuid: String::new(), label: String::from("hydrapool") });
+                    }
+                    let mut sector = [0u8; 512];
+                    match crate::fs::blockdev::read_at(i, p.start, &mut sector) {
+                        Ok(512) => probe_fs(&sector),
+                        _ => None,
+                    }
+                })
+                .collect();
+            (d, fs)
+        })
+        .collect()
+}
+
+/// PCI slot of the disk controller (the sysfs parent of the disks).
+fn disk_controller_slot() -> String {
+    use crate::arch::pci;
+    pci::find_class(0x01, 0x06)
+        .or_else(|| pci::find_class(0x01, 0x01))
+        .map_or_else(|| String::from("0000:00:01.1"), |d| alloc::format!("0000:{:02x}:{:02x}.{}", d.bus, d.device, d.function))
+}
+
+/// `name` with characters udev does not keep in `ID_MODEL`/`ID_SERIAL` replaced by `_`.
+fn udev_safe(name: &str) -> String {
+    name.trim().chars().map(|c| if c.is_ascii_alphanumeric() || "-._".contains(c) { c } else { '_' }).collect()
+}
+
+/// Removes `name` in directory `dir`, a directory with everything below it included.
+fn remove_all(t: &mut Tree, s: &mut ZfsServer, dir: u64, name: &str) -> Result<(), i64> {
+    let ino = match s.lookup(dir, name.as_bytes()) {
+        Ok(i) => i,
+        Err(ENOENT) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    t.changed = true;
+    if s.getattr(ino)?.mode & S_IFMT != 0o040000 {
+        return s.unlink(dir, name.as_bytes());
+    }
+    loop {
+        let entries = s.readdir(ino, 0, 64)?;
+        let names: Vec<Vec<u8>> = entries.into_iter().map(|e| e.name).filter(|n| n != b"." && n != b"..").collect();
+        if names.is_empty() {
+            break;
+        }
+        for n in names {
+            remove_all(t, s, ino, core::str::from_utf8(&n).unwrap_or(""))?;
+        }
+    }
+    s.rmdir(dir, name.as_bytes())
+}
+
+/// Removes the entries of directory `path` that `stale` picks.
+fn remove_stale(t: &mut Tree, s: &mut ZfsServer, path: &str, stale: &dyn Fn(&str) -> bool) -> Result<(), i64> {
+    let Some(dir) = lookup_path(s, t.root, path) else { return Ok(()) };
+    let mut gone = Vec::new();
+    let mut cookie = 0;
+    loop {
+        let entries = s.readdir(dir, cookie, 64)?;
+        if entries.is_empty() {
+            break;
+        }
+        for e in &entries {
+            let n = String::from_utf8_lossy(&e.name).into_owned();
+            if n != "." && n != ".." && stale(&n) {
+                gone.push(n);
+            }
+        }
+        cookie = entries.last().unwrap().next_cookie;
+    }
+    for n in gone {
+        remove_all(t, s, dir, &n)?;
+    }
+    Ok(())
+}
+
+/// Writes the block devices: for disk `i` named `sdX` the SCSI device
+/// `/sys/devices/pci0000:00/<controller>/ata<i+1>/host<i>/target<i>:0:0/<i>:0:0:0` with
+/// `block/sdX` (and `block/sdX/sdXN` for its partitions) below it, the `/sys/block`,
+/// `/sys/class/block` and `/sys/dev/block` links, the `/dev` nodes (group `disk`) and the
+/// udev records `/run/udev/data/b8:<minor>`. What a previous boot or partition table
+/// left that no longer exists is removed.
+fn block_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64, facts: &[(crate::fs::blockdev::Disk, Vec<Option<FsInfo>>)]) -> Result<(), i64> {
+    let disk_gid = group_id(s, t.root, "disk", 6);
+    let slot = disk_controller_slot();
+    let ctrl = alloc::format!("/sys/devices/pci0000:00/{}", slot);
+    let names: Vec<String> = facts.iter().map(|(d, _)| d.name.clone()).collect();
+    let mut nodes: Vec<String> = Vec::new();
+    for (d, _) in facts {
+        nodes.push(d.name.clone());
+        for p in &d.parts {
+            nodes.push(alloc::format!("{}{}", d.name, p.number));
+        }
+    }
+    let minors: Vec<String> = facts.iter().enumerate().flat_map(|(i, (d, _))| {
+        core::iter::once(alloc::format!("8:{}", i * 16)).chain(d.parts.iter().map(move |p| alloc::format!("8:{}", i * 16 + p.number as usize)))
+    }).collect();
+    // What no longer exists
+    let is_sd = |n: &str| n.len() >= 3 && n.starts_with("sd") && n.as_bytes()[2].is_ascii_lowercase();
+    remove_stale(t, s, "/dev", &|n| is_sd(n) && !nodes.iter().any(|x| x == n))?;
+    remove_stale(t, s, "/sys/block", &|n| !names.iter().any(|x| x == n))?;
+    remove_stale(t, s, "/sys/class/block", &|n| !nodes.iter().any(|x| x == n))?;
+    remove_stale(t, s, "/sys/dev/block", &|n| n.starts_with("8:") && !minors.iter().any(|x| x == n))?;
+    remove_stale(t, s, "/run/udev/data", &|n| n.starts_with("b8:") && !minors.iter().any(|x| &x[..] == &n[1..]))?;
+    remove_stale(t, s, &ctrl, &|n| n.starts_with("ata") && n[3..].parse::<usize>().map_or(false, |k| k == 0 || k > facts.len()))?;
+
+    if !facts.is_empty() {
+        t.file(s, &alloc::format!("{}/uevent", ctrl), "DRIVER=ahci\n")?;
+        t.link(s, &alloc::format!("{}/subsystem", ctrl), "../../../bus/pci")?;
+    }
+    t.dir(s, "/sys/class/block")?;
+    t.dir(s, "/sys/dev/block")?;
+    for (i, (d, fs)) in facts.iter().enumerate() {
+        let ata = alloc::format!("{}/ata{}", ctrl, i + 1);
+        let host = alloc::format!("{}/host{}", ata, i);
+        let target = alloc::format!("{}/target{}:0:0", host, i);
+        let dev = alloc::format!("{}/{}:0:0:0", target, i);
+        let blk = alloc::format!("{}/block/{}", dev, d.name);
+        let rel = &blk["/sys/".len()..];
+        t.file(s, &alloc::format!("{}/uevent", ata), "")?;
+        t.file(s, &alloc::format!("{}/uevent", host), "DEVTYPE=scsi_host\n")?;
+        t.file(s, &alloc::format!("{}/uevent", target), "DEVTYPE=scsi_target\n")?;
+        t.file(s, &alloc::format!("{}/uevent", dev), "DEVTYPE=scsi_device\nDRIVER=sd\nMODALIAS=scsi:t-0x00\n")?;
+        t.link(s, &alloc::format!("{}/subsystem", dev), "../../../../../../../bus/scsi")?;
+        let model = if d.model.is_empty() { "Disk" } else { &d.model };
+        for (f, v) in [
+            ("model", alloc::format!("{}\n", model)),
+            ("vendor", String::from("ATA     \n")),
+            ("rev", String::from("1.0\n")),
+            ("type", String::from("0\n")),
+            ("state", String::from("running\n")),
+            ("device_blocked", String::from("0\n")),
+            ("queue_depth", String::from("32\n")),
+        ] {
+            t.file(s, &alloc::format!("{}/{}", dev, f), &v)?;
+        }
+        let minor = i * 16;
+        let sectors = d.bytes / 512;
+        let ssz = d.sector_size;
+        t.file(s, &alloc::format!("{}/uevent", blk), &alloc::format!("MAJOR=8\nMINOR={}\nDEVNAME={}\nDEVTYPE=disk\nDISKSEQ={}\n", minor, d.name, i + 1))?;
+        for (f, v) in [
+            ("dev", alloc::format!("8:{}\n", minor)),
+            ("size", alloc::format!("{}\n", sectors)),
+            ("ro", String::from("0\n")),
+            ("removable", alloc::format!("{}\n", d.removable as u8)),
+            ("range", String::from("16\n")),
+            ("ext_range", String::from("256\n")),
+            ("capability", String::from("0\n")),
+            ("hidden", String::from("0\n")),
+            ("alignment_offset", String::from("0\n")),
+            ("discard_alignment", String::from("0\n")),
+            ("diskseq", alloc::format!("{}\n", i + 1)),
+            ("events", String::from("\n")),
+            ("events_async", String::from("\n")),
+            ("events_poll_msecs", String::from("-1\n")),
+            ("stat", String::from("       0        0        0        0        0        0        0        0        0        0        0        0        0        0        0        0        0\n")),
+            ("inflight", String::from("       0        0\n")),
+            ("queue/logical_block_size", alloc::format!("{}\n", ssz)),
+            ("queue/physical_block_size", alloc::format!("{}\n", ssz.max(4096))),
+            ("queue/hw_sector_size", alloc::format!("{}\n", ssz)),
+            ("queue/minimum_io_size", alloc::format!("{}\n", ssz.max(4096))),
+            ("queue/optimal_io_size", String::from("0\n")),
+            ("queue/rotational", String::from("0\n")),
+            ("queue/read_ahead_kb", String::from("128\n")),
+            ("queue/max_sectors_kb", String::from("256\n")),
+            ("queue/max_hw_sectors_kb", String::from("256\n")),
+            ("queue/discard_granularity", String::from("0\n")),
+            ("queue/discard_max_bytes", String::from("0\n")),
+            ("queue/discard_zeroes_data", String::from("0\n")),
+            ("queue/zoned", String::from("none\n")),
+            ("queue/nr_requests", String::from("64\n")),
+            ("queue/scheduler", String::from("[none]\n")),
+            ("queue/add_random", String::from("0\n")),
+            ("queue/dax", String::from("0\n")),
+            ("queue/write_cache", String::from("write back\n")),
+        ] {
+            t.file(s, &alloc::format!("{}/{}", blk, f), &v)?;
+        }
+        let up = "../".repeat(rel.split('/').count());
+        t.link(s, &alloc::format!("{}/subsystem", blk), &alloc::format!("{}class/block", up))?;
+        t.link(s, &alloc::format!("{}/device", blk), &alloc::format!("../../../{}:0:0:0", i))?;
+        t.link(s, &alloc::format!("/sys/block/{}", d.name), &alloc::format!("../{}", rel))?;
+        t.link(s, &alloc::format!("/sys/class/block/{}", d.name), &alloc::format!("../../{}", rel))?;
+        t.link(s, &alloc::format!("/sys/dev/block/8:{}", minor), &alloc::format!("../../{}", rel))?;
+        t.block_node(s, &alloc::format!("/dev/{}", d.name), super::blockdev::rdev(i, 0), disk_gid)?;
+        // Partitions of the table no longer there
+        let parts: Vec<String> = d.parts.iter().map(|p| alloc::format!("{}{}", d.name, p.number)).collect();
+        remove_stale(t, s, &blk, &|n| is_sd(n) && !parts.iter().any(|x| x == n))?;
+        let ignore = if d.pool.is_some() { "E:UDISKS_IGNORE=1\nE:UDISKS_SYSTEM=1\n" } else { "" };
+        let id_model = udev_safe(model);
+        let path_id = alloc::format!("pci-{}-ata-{}", slot, i + 1);
+        let mut rec = alloc::format!(
+            "I:{}\nE:ID_ATA=1\nE:ID_TYPE=disk\nE:ID_BUS=ata\nE:ID_MODEL={}\nE:ID_SERIAL={}_HYDRA{}\nE:ID_SERIAL_SHORT=HYDRA{}\nE:ID_PATH={}\nE:ID_PATH_TAG={}\n{}",
+            usec,
+            id_model,
+            id_model,
+            i,
+            i,
+            path_id,
+            path_id.replace([':', '.'], "_"),
+            ignore
+        );
+        if let Some((kind, guid)) = d.table {
+            match kind {
+                crate::fs::gpt::Kind::Gpt => rec.push_str(&alloc::format!("E:ID_PART_TABLE_TYPE=gpt\nE:ID_PART_TABLE_UUID={}\n", crate::fs::gpt::guid_string(&guid))),
+                crate::fs::gpt::Kind::Mbr => rec.push_str(&alloc::format!(
+                    "E:ID_PART_TABLE_TYPE=dos\nE:ID_PART_TABLE_UUID={:08x}\n",
+                    u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]])
+                )),
+            }
+        }
+        rec.push_str("G:systemd\nQ:systemd\nV:1\n");
+        t.file(s, &alloc::format!("/run/udev/data/b8:{}", minor), &rec)?;
+
+        for (p, fs) in d.parts.iter().zip(fs.iter()) {
+            let pname = alloc::format!("{}{}", d.name, p.number);
+            let pdir = alloc::format!("{}/{}", blk, pname);
+            let prel = &pdir["/sys/".len()..];
+            let pminor = minor + p.number as usize;
+            let label = p.entry.as_ref().map_or(String::new(), |e| e.name.clone());
+            let mut ue = alloc::format!("MAJOR=8\nMINOR={}\nDEVNAME={}\nDEVTYPE=partition\nDISKSEQ={}\nPARTN={}\n", pminor, pname, i + 1, p.number);
+            if !label.is_empty() {
+                ue.push_str(&alloc::format!("PARTNAME={}\n", label));
+            }
+            t.file(s, &alloc::format!("{}/uevent", pdir), &ue)?;
+            for (f, v) in [
+                ("dev", alloc::format!("8:{}\n", pminor)),
+                ("partition", alloc::format!("{}\n", p.number)),
+                ("start", alloc::format!("{}\n", p.start / 512)),
+                ("size", alloc::format!("{}\n", p.len / 512)),
+                ("ro", String::from("0\n")),
+                ("alignment_offset", String::from("0\n")),
+                ("discard_alignment", String::from("0\n")),
+                ("stat", String::from("       0        0        0        0        0        0        0        0        0        0        0        0        0        0        0        0        0\n")),
+                ("inflight", String::from("       0        0\n")),
+            ] {
+                t.file(s, &alloc::format!("{}/{}", pdir, f), &v)?;
+            }
+            t.link(s, &alloc::format!("{}/subsystem", pdir), &alloc::format!("../{}class/block", up))?;
+            t.link(s, &alloc::format!("/sys/class/block/{}", pname), &alloc::format!("../../{}", prel))?;
+            t.link(s, &alloc::format!("/sys/dev/block/8:{}", pminor), &alloc::format!("../../{}", prel))?;
+            t.block_node(s, &alloc::format!("/dev/{}", pname), super::blockdev::rdev(i, p.number), disk_gid)?;
+            let mut rec = alloc::format!("I:{}\nE:ID_PATH={}-part{}\n{}", usec, path_id, p.number, ignore);
+            if let (Some(e), Some((kind, _))) = (&p.entry, d.table) {
+                if kind == crate::fs::gpt::Kind::Gpt {
+                    rec.push_str(&alloc::format!(
+                        "E:ID_PART_ENTRY_SCHEME=gpt\nE:ID_PART_ENTRY_UUID={}\nE:ID_PART_ENTRY_TYPE={}\n",
+                        crate::fs::gpt::guid_string(&e.part_guid),
+                        crate::fs::gpt::guid_string(&e.type_guid)
+                    ));
+                    if !e.name.is_empty() {
+                        rec.push_str(&alloc::format!("E:ID_PART_ENTRY_NAME={}\n", udev_safe(&e.name)));
+                    }
+                } else {
+                    rec.push_str(&alloc::format!("E:ID_PART_ENTRY_SCHEME=dos\nE:ID_PART_ENTRY_TYPE=0x{:x}\n", e.mbr_type));
+                }
+            }
+            rec.push_str(&alloc::format!(
+                "E:ID_PART_ENTRY_NUMBER={}\nE:ID_PART_ENTRY_OFFSET={}\nE:ID_PART_ENTRY_SIZE={}\nE:ID_PART_ENTRY_DISK=8:{}\n",
+                p.number,
+                p.start / 512,
+                p.len / 512,
+                minor
+            ));
+            if let Some(f) = fs {
+                rec.push_str(&alloc::format!("E:ID_FS_TYPE={}\nE:ID_FS_USAGE=filesystem\nE:ID_FS_VERSION={}\n", f.ty, f.version));
+                if !f.uuid.is_empty() {
+                    rec.push_str(&alloc::format!("E:ID_FS_UUID={}\nE:ID_FS_UUID_ENC={}\n", f.uuid, f.uuid));
+                }
+                if !f.label.is_empty() {
+                    rec.push_str(&alloc::format!("E:ID_FS_LABEL={}\nE:ID_FS_LABEL_ENC={}\n", udev_safe(&f.label), f.label));
+                }
+            }
+            rec.push_str("G:systemd\nQ:systemd\nV:1\n");
+            t.file(s, &alloc::format!("/run/udev/data/b8:{}", pminor), &rec)?;
+        }
+    }
+    Ok(())
+}
+
+/// `/run/hydra/live` (the live session), `/run/hydra/setup.conf` (first-boot settings,
+/// readable by root only) and `/run/hydra/boot-disk` (the disk holding the pool, e.g.
+/// `sda`): from the boot volume, see [`crate::arch::bootdisk`]. Absent when not so.
+fn boot_flag_files(t: &mut Tree, s: &mut ZfsServer, facts: &[(crate::fs::blockdev::Disk, Vec<Option<FsInfo>>)]) -> Result<(), i64> {
+    let info = crate::arch::bootdisk::info();
+    let boot_disk = facts.iter().find(|(d, _)| d.pool.is_some()).map(|(d, _)| alloc::format!("{}
+", d.name));
+    let wanted: [(&str, Option<Vec<u8>>, u32); 3] = [
+        ("live", info.live.then(|| b"1
+".to_vec()), 0o644),
+        ("setup.conf", info.setup_conf.clone(), 0o600),
+        ("boot-disk", boot_disk.map(|n| n.into_bytes()), 0o644),
+    ];
+    for (name, content, perm) in wanted {
+        let path = alloc::format!("/run/hydra/{}", name);
+        match content {
+            Some(c) => t.file_bytes(s, &path, &c, perm)?,
+            None => {
+                if let Some(dir) = lookup_path(s, t.root, "/run/hydra") {
+                    remove_all(t, s, dir, name)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `/sys/firmware/efi`: the firmware's bitness and the variables as efivarfs files (see
+/// [`super::efivars`]); stale variable files are removed.
+fn efivars_tree(t: &mut Tree, s: &mut ZfsServer, vars: Option<&[(String, Vec<u8>)]>) -> Result<(), i64> {
+    t.file(s, "/sys/firmware/efi/fw_platform_size", "64
+")?;
+    let Some(vars) = vars else { return Ok(()) };
+    let dir = t.dir(s, super::efivars::DIR)?;
+    super::efivars::DIR_INO.store(dir, core::sync::atomic::Ordering::Relaxed);
+    remove_stale(t, s, super::efivars::DIR, &|n| !vars.iter().any(|(v, _)| v == n))?;
+    for (name, content) in vars {
+        t.file_bytes(s, &alloc::format!("{}/{}", super::efivars::DIR, name), content, 0o644)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the UEFI variable files (after a variable changed).
+pub fn refresh_efivars() {
+    let Some(root) = LINUX_ROOT.lock().clone() else { return };
+    let Ok(root_ino) = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true) else { return };
+    let vars = super::efivars::snapshot();
+    let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
+    if let Err(e) = crate::fs::zfs::with_server(|s| efivars_tree(&mut tree, s, vars.as_deref())) {
+        crate::kprintln!("[devices] rewriting the UEFI variables failed at {}: errno {}", tree.at, -e);
+    }
+}
+
+/// Rewrites the block devices in the Linux root (after `BLKRRPART`/`BLKPG` changed a
+/// partition list).
+pub fn refresh_block_tree() {
+    let Some(root) = LINUX_ROOT.lock().clone() else { return };
+    let Ok(root_ino) = crate::fs::ZfsClient::resolve(0, root.as_bytes(), true) else { return };
+    let facts = block_facts();
+    let mut tree = Tree { root: root_ino, changed: false, at: String::new() };
+    let usec = crate::arch::pit::ticks() * 10_000;
+    if let Err(e) = crate::fs::zfs::with_server(|s| block_tree(&mut tree, s, usec, &facts)) {
+        crate::kprintln!("[devices] rewriting the block devices failed at {}: errno {}", tree.at, -e);
+    }
 }

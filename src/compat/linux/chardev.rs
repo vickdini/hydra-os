@@ -201,6 +201,11 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
+    /// `fsync`/`fdatasync` of a device that has them (block devices); `None`: none.
+    fn fsync(&self) -> Option<i64> {
+        None
+    }
+
     /// The bpf object behind this descriptor, if it is one.
     fn as_bpf(&self) -> Option<super::bpf::Obj> {
         None

@@ -426,6 +426,7 @@ fn boot() -> ! {
     crate::arch::rtc::init();
     crate::arch::mouse::init();
     arch::boottime::mark("reading the boot files");
+    arch::bootdisk::detect();
     let boot_files = fs::ZfsClient::read_boot_files();
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] Boot volume: {} files staged for the pool", boot_files.len());
@@ -463,6 +464,8 @@ fn boot() -> ! {
     arch::boottime::mark("importing the boot files");
     fs::ZfsClient::import_boot_files(boot_files);
     fs::firstboot::import_into_pool(); // Group G: installer first-boot settings
+    arch::boottime::mark("disks");
+    fs::blockdev::scan();
     console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[+] ZFS File Server Online (Endpoint #{:#x}):",
