@@ -61,6 +61,10 @@ fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
             inout("eax") MAGIC => eax,
             inout("ecx") cmd => ecx,
             inout("edx") PORT as u32 => edx,
+            // QEMU's vmmouse writes all six backdoor registers back (as 32-bit values, so
+            // the upper halves of RSI and RDI are lost too)
+            out("rsi") _,
+            out("rdi") _,
             options(nostack),
         );
     }
