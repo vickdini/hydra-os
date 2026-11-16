@@ -696,7 +696,10 @@ static int remove_entry(const char *p, const struct stat *st, int type, struct F
 /* Starts user `uid`'s session bus at <runtime>/bus, as systemd's user dbus.socket does
  * (pam_systemd then gives sessions DBUS_SESSION_BUS_ADDRESS, so every program of the
  * user, in or outside the desktop, reaches the same bus). */
-static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
+struct session;
+static void attach_access(const struct session *se, pid_t leader);
+
+static void start_user_bus(const struct session *se, unsigned uid, unsigned gid, const char *runtime) {
     char bus[96], addr[128];
     snprintf(bus, sizeof bus, "%s/bus", runtime);
     if (bus_alive(bus))
@@ -724,6 +727,9 @@ static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
                 logmsg("cannot move the session bus into %s", group);
             close(g);
         }
+        /* The user's access attributes: apps the bus starts are the user's too */
+        if (se)
+            attach_access(se, getpid());
         if (pw)
             initgroups(pw->pw_name, gid);
         if (setgid(gid) < 0 || setuid(uid) < 0)
@@ -754,7 +760,7 @@ static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
 /* Creates /run/user/<uid> for a user's session and its session bus. A user's first session
  * starts from an empty directory, as from the tmpfs systemd mounts there (files of an
  * earlier boot are removed). */
-static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) {
+static void make_runtime_dir(const struct session *se, unsigned uid, unsigned gid, char *out, size_t len) {
     snprintf(out, len, "/run/user/%u", uid);
     mkdir("/run/user", 0755);
     mkdir(out, 0700);
@@ -768,7 +774,7 @@ static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) 
     snprintf(bus, sizeof bus, "%s/bus", out);
     if (others <= 1 && !bus_alive(bus))
         nftw(out, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
-    start_user_bus(uid, gid, out);
+    start_user_bus(se, uid, gid, out);
 }
 
 /* ---------- access control (Hydra ABAC, see src/compat/linux/abac.rs) ---------- */
@@ -852,7 +858,7 @@ static void drain_access_audit(void) {
     /* Administrators (sudo group) read it */
     struct group *g = getgrnam("sudo");
     if (g)
-        fchown(fd, 0, g->gr_gid);
+        if (fchown(fd, 0, g->gr_gid) < 0) {}
     if (write(fd, buf, (size_t)n) < 0) {}
     close(fd);
 }
@@ -1265,7 +1271,7 @@ static DBusMessage *create_session(DBusMessage *m) {
         return error(m, DBUS_ERROR_LIMITS_EXCEEDED, "too many sessions");
     struct session *se = &sessions[s];
     char runtime[64];
-    make_runtime_dir(se->uid, se->gid, runtime, sizeof runtime);
+    make_runtime_dir(se, se->uid, se->gid, runtime, sizeof runtime);
     int p[2];
     if (pipe2(p, O_CLOEXEC) < 0) {
         remove_session(s);
@@ -1934,7 +1940,7 @@ int main(int argc, char **argv) {
         int s = add_session((unsigned)initial_uid, 0, "hydra", "wayland", "user", "KDE", "seat0", 2, "tty2", "", 0, "", "");
         char runtime[64];
         if (s >= 0)
-            make_runtime_dir(sessions[s].uid, sessions[s].gid, runtime, sizeof runtime);
+            make_runtime_dir(&sessions[s], sessions[s].uid, sessions[s].gid, runtime, sizeof runtime);
     }
     logmsg("seat0 ready on %s", BUS_NAME);
 

@@ -1,6 +1,7 @@
 """Widgets shared by Family & accounts and Hydra Access Center (PyQt6, Qt Widgets: the
 toolkit the Hydra apps use, so they look like the rest of KDE)."""
 import json
+import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -31,17 +32,44 @@ def error(parent, text):
 
 
 def helper(parent, args, stdin_text=None):
-    """Runs the root helper (an administrator password may be asked). None on failure."""
-    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    """Runs the root helper (an administrator password may be asked). Its output, or None
+    on failure. The window stays responsive (and disabled) while polkit asks."""
+    from PyQt6.QtCore import QEventLoop, QProcess
+    cmd = ["pkexec", core.HELPER] + list(args)
+    if os.geteuid() == 0:
+        cmd = [core.HELPER] + list(args)
+    win = parent.window() if parent is not None else None
+    proc = QProcess()
+    loop = QEventLoop()
+    proc.finished.connect(loop.quit)
+    proc.errorOccurred.connect(lambda _e: loop.quit())
+    if win is not None:
+        win.setEnabled(False)
+    QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
     try:
-        return core.run_helper(args, stdin_text)
-    except PermissionError:
-        error(parent, "The change was not made: an administrator's password is needed.")
-    except Exception as e:  # noqa: BLE001 - shown to the user
-        error(parent, "The change was not made:\n\n%s" % e)
+        proc.start(cmd[0], cmd[1:])
+        if not proc.waitForStarted(10000):
+            error(parent, "The change was not made: cannot start %s." % cmd[0])
+            return None
+        if stdin_text:
+            proc.write(stdin_text.encode())
+        proc.closeWriteChannel()
+        if proc.state() != QProcess.ProcessState.NotRunning:
+            loop.exec()
+        out = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        err = bytes(proc.readAllStandardError()).decode(errors="replace")
+        rc = proc.exitCode() if proc.exitStatus() == QProcess.ExitStatus.NormalExit else -1
     finally:
         QApplication.restoreOverrideCursor()
-    return None
+        if win is not None:
+            win.setEnabled(True)
+    if rc in (126, 127):
+        error(parent, "The change was not made: an administrator's password is needed.")
+        return None
+    if rc != 0:
+        error(parent, "The change was not made:\n\n%s" % ((err or out).strip() or "the helper failed"))
+        return None
+    return out
 
 
 def save_config(parent, cfg):
