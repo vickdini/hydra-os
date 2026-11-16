@@ -1,0 +1,201 @@
+#!/usr/bin/python3
+# Written by Hydra: the welcome window for people coming from Windows: where the Start menu,
+# Windows programs, Hydra Apps and Settings are, and Windows' keyboard shortcuts on Hydra.
+#   hydra-welcome                 show it ("Welcome to Hydra" in the start menu)
+#   hydra-welcome --first-login   show it once per user (/etc/xdg/autostart/hydra-welcome.desktop)
+# Shown once: hydra-desktoprc [Welcome] Shown=1 in the user's settings.
+import os
+import subprocess
+import sys
+
+first = "--first-login" in sys.argv[1:]
+
+
+def shown():
+    r = subprocess.run(["kreadconfig6", "--file", "hydra-desktoprc", "--group", "Welcome", "--key", "Shown"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() == "1"
+
+
+def mark_shown():
+    subprocess.run(["kwriteconfig6", "--file", "hydra-desktoprc", "--group", "Welcome", "--key", "Shown", "1"],
+                   capture_output=True)
+
+
+if first and shown():
+    sys.exit(0)
+try:
+    from PyQt6.QtCore import QSize, Qt
+    from PyQt6.QtGui import QIcon
+    from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                                 QScrollArea, QVBoxLayout, QWidget)
+except ImportError:
+    # Hydra installs PyQt6 at boot (hydra-apps-helper ensure-base); without it yet, the
+    # welcome waits for the next login rather than asking for a password now
+    sys.exit(0)
+
+SHORTCUTS = [
+    ("Win", "Open the Start menu (then just type to search)"),
+    ("Win + E", "File Explorer (your files and folders)"),
+    ("Win + I", "Settings"),
+    ("Win + D", "Show the desktop"),
+    ("Win + L", "Lock the computer"),
+    ("Win + R", "Run a program or command by name"),
+    ("Win + ← / →", "Snap a window to the left or right half"),
+    ("Win + ↑ / ↓", "Maximize / minimize a window"),
+    ("Alt + Tab", "Switch between windows"),
+    ("Win + Shift + S", "Take a screenshot"),
+    ("Win + V", "Clipboard history"),
+    ("Ctrl + Shift + Esc", "Task Manager"),
+]
+
+
+def launch(*argv):
+    subprocess.Popen(list(argv), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+class Welcome(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Welcome to Hydra")
+        self.setWindowIcon(QIcon.fromTheme("help-about"))
+        self.resize(860, 720)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(32, 24, 32, 16)
+        lay.setSpacing(14)
+        title = QLabel("Welcome to Hydra")
+        f = title.font()
+        f.setPointSizeF(f.pointSizeF() * 2)
+        f.setBold(True)
+        title.setFont(f)
+        lay.addWidget(title)
+        intro = QLabel("If you are coming from Windows, most things are where you expect them. "
+                       "Here is where to find the rest.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        tiles = QGridLayout()
+        tiles.setSpacing(12)
+        items = [
+            (["start-here-kde", "start-here", "application-menu"], "Start menu",
+             "The Start button is the first icon on the taskbar at the bottom of the screen. Click it or press the "
+             "Windows key, then type to find any program, setting or file.", None),
+            (["wine", "application-x-ms-dos-executable"], "Windows programs",
+             "Double-click a Windows program or installer (.exe or .msi) and it runs. Installed Windows programs are in "
+             "the Start menu under “Windows Programs”; right-click one there to uninstall it.", None),
+            (["system-software-install"], "Hydra Apps",
+             "Get programs with one click, like the Microsoft Store: LibreOffice for Word and Excel files, VLC, GIMP, "
+             "Thunderbird, Notepad++, 7-Zip and more.", ("Open Hydra Apps", ["/usr/local/libexec/hydra-apps"])),
+            (["preferences-system", "systemsettings"], "Settings",
+             "Like Windows Settings and the Control Panel: display, network, sound, users, appearance and more.",
+             ("Open Settings", ["systemsettings"])),
+            (["system-file-manager", "folder"], "Your files",
+             "File Explorer opens your home folder with Documents, Downloads, Pictures, Music and Videos.",
+             ("Open File Explorer", ["dolphin"])),
+            (["preferences-desktop-theme-global", "preferences-desktop-theme"], "Make it yours",
+             "Prefer a different look? Settings › Appearance has other themes, colours and wallpapers.", None),
+        ]
+        for i, (icons, name, text, action) in enumerate(items):
+            tiles.addWidget(self.tile(icons, name, text, action), i // 2, i % 2)
+        lay.addLayout(tiles)
+
+        sc_title = QLabel("Keyboard shortcuts")
+        f = sc_title.font()
+        f.setPointSizeF(f.pointSizeF() * 1.3)
+        f.setBold(True)
+        sc_title.setFont(f)
+        lay.addSpacing(6)
+        lay.addWidget(sc_title)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(6)
+        half = (len(SHORTCUTS) + 1) // 2
+        for i, (keys, what) in enumerate(SHORTCUTS):
+            k = QLabel(keys)
+            k.setObjectName("key")
+            k.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            w = QLabel(what)
+            w.setWordWrap(True)
+            col = 0 if i < half else 2
+            grid.addWidget(k, i % half, col)
+            grid.addWidget(w, i % half, col + 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
+        lay.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        foot = QFrame()
+        foot.setObjectName("foot")
+        fl = QHBoxLayout(foot)
+        fl.setContentsMargins(32, 10, 32, 12)
+        hint = QLabel("You can open this window again from the Start menu: “Welcome to Hydra”.")
+        hint.setObjectName("dim")
+        hint.setWordWrap(True)
+        fl.addWidget(hint, 1)
+        ok = QPushButton(QIcon.fromTheme("dialog-ok"), "Get started")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        fl.addWidget(ok)
+        outer.addWidget(foot)
+
+    def tile(self, icons, name, text, action):
+        t = QFrame()
+        t.setObjectName("tile")
+        l = QHBoxLayout(t)
+        l.setContentsMargins(14, 12, 14, 12)
+        l.setSpacing(12)
+        ic = QLabel()
+        icon = next((QIcon.fromTheme(n) for n in icons if QIcon.hasThemeIcon(n)), QIcon.fromTheme("help-about"))
+        ic.setPixmap(icon.pixmap(QSize(40, 40)))
+        ic.setAlignment(Qt.AlignmentFlag.AlignTop)
+        l.addWidget(ic)
+        c = QVBoxLayout()
+        c.setSpacing(4)
+        n = QLabel(name)
+        f = n.font()
+        f.setBold(True)
+        n.setFont(f)
+        c.addWidget(n)
+        d = QLabel(text)
+        d.setWordWrap(True)
+        c.addWidget(d)
+        if action:
+            b = QPushButton(action[0])
+            b.clicked.connect(lambda _=False, argv=action[1]: launch(*argv))
+            c.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        c.addStretch(1)
+        l.addLayout(c, 1)
+        return t
+
+
+STYLE = """
+QFrame#tile { background: palette(base); border: 1px solid palette(midlight); border-radius: 8px; }
+QLabel#key { background: palette(base); border: 1px solid palette(mid); border-radius: 4px; padding: 2px 8px; font-weight: bold; }
+QFrame#foot { border-top: 1px solid palette(midlight); }
+QLabel#dim { color: palette(placeholder-text); }
+"""
+
+
+def main():
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("hydra-welcome")
+    app.setDesktopFileName("org.hydra.welcome")
+    app.setStyleSheet(STYLE)
+    w = Welcome()
+    w.show()
+    # Shown once at the first login, also if the window is closed some other way
+    mark_shown()
+    app.exec()
+
+
+if __name__ == "__main__":
+    main()

@@ -26,6 +26,11 @@ if [ -e "$f" ] && [ "$(id -u)" = 0 ]; then
 fi
 
 if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
+    # The system users and groups packages ask for in sysusers.d (systemd-sysusers.service
+    # runs before the bus elsewhere); the bus' rules name some of them
+    if [ "$(id -u)" = 0 ] && [ -x /usr/bin/systemd-sysusers ]; then
+        systemd-sysusers >/dev/null 2>&1
+    fi
     rm -f /run/dbus/system_bus_socket /run/dbus/pid
     mkdir -p /run/dbus
     dbus-daemon --system || exit 1
@@ -61,6 +66,13 @@ fi
 if [ -e /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service ]; then
     dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus \
         org.freedesktop.DBus.StartServiceByName string:org.freedesktop.PolicyKit1 uint32:0 >/dev/null 2>&1 &
+fi
+
+# Hydra Apps and the welcome window are written with PyQt6: installed in the background
+# when missing (a minute after boot, when the network is up; nothing if it is there)
+helper=/usr/local/libexec/hydra-apps-helper
+if [ "$(id -u)" = 0 ] && [ -x "$helper" ] && ! [ -d /usr/lib/python3/dist-packages/PyQt6 ]; then
+    (sleep 60; nice "$helper" ensure-base) >/dev/null 2>&1 < /dev/null &
 fi
 
 if [ "$dm" = 1 ]; then

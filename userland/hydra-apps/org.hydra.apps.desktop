@@ -1,0 +1,12 @@
+[Desktop Entry]
+# Written by Hydra: Hydra Apps, the place to get programs
+Type=Application
+Name=Hydra Apps
+GenericName=App Store
+Comment=Get programs for your computer: Windows programs and Linux apps
+Keywords=store;app store;microsoft store;software;install;programs;apps;download;uninstall;
+Exec=/usr/local/libexec/hydra-apps
+Icon=system-software-install
+Terminal=false
+Categories=System;PackageManager;
+StartupWMClass=hydra-apps

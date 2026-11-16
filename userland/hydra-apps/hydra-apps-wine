@@ -1,0 +1,44 @@
+#!/bin/sh
+# Written by Hydra: installs a Windows program for Hydra Apps, as the user (Wine keeps each
+# user's Windows programs in their own Windows environment, ~/.wine).
+#   hydra-apps-wine install NAME INSTALLER [SWITCHES...]
+# Runs the publisher's installer with its switches for an installation without questions
+# (an .msi through Windows' msiexec), waits for Wine to write the start-menu entries, and
+# files them under "Windows Programs" with their right-click "Uninstall" (as hydra-wine-run
+# does after an installer). Reports to Hydra Apps on standard output:
+#   PROGRESS <0-100> <text>     ERROR <text>
+. /usr/local/libexec/hydra-wine-common
+[ "$1" = install ] || { echo "ERROR usage: hydra-apps-wine install NAME INSTALLER [SWITCHES...]"; exit 2; }
+name=$2
+f=$3
+shift 3
+if ! [ -f "$P/system.reg" ] || [ -d "$HOME/.cache/hydra-wine-setup.lock" ]; then
+    echo "PROGRESS 50 Windows support is being prepared (only the first time, a few minutes)…"
+fi
+if ! wait_for_setup "$name"; then
+    echo "ERROR Windows support is not ready yet. Please try again in a few minutes."
+    exit 3
+fi
+echo "PROGRESS 60 Installing $name…"
+log="$CACHE/install-$(basename "$f").log"
+case "$f" in
+*.[mM][sS][iI])
+    WINEDEBUG="${WINEDEBUG:--all}" "$WINE" msiexec /i "Z:$f" "$@" > "$log" 2>&1
+    ;;
+*)
+    WINEDEBUG="${WINEDEBUG:--all}" "$WINE" start /wait /unix "$f" "$@" > "$log" 2>&1
+    ;;
+esac
+rc=$?
+echo "PROGRESS 90 Adding $name to the start menu…"
+# Wine writes the start-menu entries in the background (winemenubuilder), often after the
+# installer has gone
+sleep 3
+n=0
+while [ $n -lt 60 ] && pgrep -u "$(id -u)" -f winemenubuilder > /dev/null; do
+    sleep 1
+    n=$((n + 1))
+done
+add_uninstall_actions
+echo "PROGRESS 95 Checking the installation…"
+exit $rc
