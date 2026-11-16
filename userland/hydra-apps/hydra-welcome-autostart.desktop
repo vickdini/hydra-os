@@ -1,0 +1,9 @@
+[Desktop Entry]
+# Written by Hydra: the welcome window at a user's first login
+Type=Application
+Name=Welcome to Hydra
+Exec=/usr/local/libexec/hydra-welcome --first-login
+TryExec=/usr/local/libexec/hydra-welcome
+NoDisplay=true
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=2

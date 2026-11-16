@@ -1,0 +1,11 @@
+[Desktop Entry]
+# Written by Hydra: the welcome window for people coming from Windows
+Type=Application
+Name=Welcome to Hydra
+GenericName=Getting started
+Comment=Where things are on Hydra, and Windows' keyboard shortcuts
+Keywords=welcome;help;getting started;tips;tour;shortcuts;keyboard;windows;start;
+Exec=/usr/local/libexec/hydra-welcome
+Icon=help-about
+Terminal=false
+Categories=System;Documentation;

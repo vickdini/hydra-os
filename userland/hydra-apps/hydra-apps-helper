@@ -1,0 +1,314 @@
+#!/usr/bin/python3 -I
+# Written by Hydra: the part of Hydra Apps that installs programs for everyone on the computer.
+# It runs as root through polkit (pkexec, with the administrator's password; the action is
+# org.hydra.apps.manage in /usr/share/polkit-1/actions/org.hydra.apps.policy) and only
+# installs or removes what Hydra's catalogue lists:
+#   hydra-apps-helper install ID    apt packages or a publisher's archive (catalogue kinds apt, tarball)
+#   hydra-apps-helper remove ID
+#   hydra-apps-helper ensure-base   (at boot) the parts Hydra Apps itself needs: PyQt6
+# It reports to Hydra Apps on standard output, one line each:
+#   PROGRESS <0-100> <what is happening>     ERROR <what went wrong, in plain words>
+# apt runs without questions (DEBIAN_FRONTEND=noninteractive) and without the "recommended"
+# extras (--no-install-recommends): they pull in snapd and systemd services, which cannot run
+# on Hydra.
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+CATALOGUE = "/usr/local/share/hydra-apps/catalogue.json"
+CACHE = "/var/cache/hydra-apps"
+LOG = "/var/log/hydra-apps.log"
+# What Hydra Apps and the welcome window are written with
+BASE_PACKAGES = ["python3-pyqt6"]
+
+
+def say(kind, *parts):
+    print(kind, *parts, flush=True)
+
+
+_last = [None]
+
+
+def progress(pct, text):
+    line = (int(max(0, min(100, pct))), text)
+    if line != _last[0]:
+        _last[0] = line
+        say("PROGRESS", *line)
+
+
+def log(text):
+    try:
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip("\n") + "\n")
+    except OSError:
+        pass
+
+
+def fail(text, code=1):
+    log("ERROR " + text)
+    say("ERROR", text)
+    sys.exit(code)
+
+
+def apt_env():
+    env = dict(os.environ)
+    env.update(DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8", LANG="C.UTF-8",
+               PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    return env
+
+
+APT_OPTS = ["-y", "-q", "--no-install-recommends", "-o", "Dpkg::Use-Pty=0", "-o", "DPkg::Lock::Timeout=900",
+            "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold"]
+
+
+def run_apt(args, lo, hi, label):
+    """apt-get ARGS with its progress (APT::Status-Fd) turned into PROGRESS lines from LO to HI
+    percent: downloading takes the first half, unpacking and setting up the second. Returns
+    (exit status, apt's output)."""
+    r, w = os.pipe()
+    cmd = ["apt-get", "-o", "APT::Status-Fd=%d" % w] + args
+    log("RUN " + " ".join(cmd))
+    out = open(os.path.join(CACHE, "apt.log"), "w+")
+    p = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         pass_fds=(w,), env=apt_env())
+    os.close(w)
+    span = hi - lo
+    with os.fdopen(r) as status:
+        for line in status:
+            f = line.rstrip("\n").split(":", 3)
+            if len(f) < 4:
+                continue
+            try:
+                pct = float(f[2])
+            except ValueError:
+                continue
+            if f[0] == "dlstatus":
+                progress(lo + span * pct / 200, "Downloading %s…" % label)
+            elif f[0] == "pmstatus":
+                progress(lo + span / 2 + span * pct / 200, ("Installing %s…" if "remove" not in args
+                                                             else "Removing %s…") % label)
+    rc = p.wait()
+    out.seek(0)
+    text = out.read()
+    out.close()
+    log(text[-4000:])
+    return rc, text
+
+
+def apt_problem(text):
+    """apt's failure in plain words."""
+    if re.search(r"Temporary failure resolving|Could not resolve|Failed to fetch|Network is unreachable|Connection timed out", text):
+        return "The programs could not be downloaded. Please check that the computer is connected to the internet and try again."
+    if "Could not get lock" in text or "Unable to acquire the dpkg frontend lock" in text:
+        return "Another installation or update is still running. Please try again when it has finished."
+    if "No space left on device" in text:
+        return "There is not enough free disk space."
+    if "Unable to locate package" in text or "has no installation candidate" in text:
+        return "Ubuntu's software list does not have this program at the moment."
+    m = re.findall(r"^E: (.*)$", text, re.M)
+    return "The installation failed: " + (m[-1] if m else "see /var/log/hydra-apps.log for details") + "."
+
+
+def lists_age():
+    d = "/var/lib/apt/lists"
+    try:
+        newest = max(os.path.getmtime(os.path.join(d, f)) for f in os.listdir(d) if f.endswith("Packages") or f.endswith("InRelease"))
+    except ValueError:
+        return 1e9
+    return time.time() - newest
+
+
+def apt_ready():
+    """Finishes an installation that was interrupted (power loss) before starting a new one."""
+    if subprocess.run(["dpkg", "--audit"], capture_output=True, text=True, env=apt_env()).stdout.strip():
+        progress(1, "Finishing an earlier installation…")
+        subprocess.run(["dpkg", "--configure", "-a"], stdin=subprocess.DEVNULL, capture_output=True, env=apt_env())
+
+
+def apt_update(lo, hi):
+    progress(lo, "Getting the latest list of programs…")
+    rc, text = run_apt(["update", "-q"], lo, hi, "the list of programs")
+    return rc
+
+
+def installed(pkg):
+    r = subprocess.run(["dpkg-query", "-W", "-f=${db:Status-Status}", pkg], capture_output=True, text=True)
+    return r.stdout.strip() == "installed"
+
+
+def apt_install(packages, label):
+    apt_ready()
+    pos = 2
+    if lists_age() > 12 * 3600:
+        apt_update(2, 10)
+        pos = 10
+    rc, text = run_apt(["install"] + APT_OPTS + packages, pos, 100, label)
+    if rc != 0 and re.search(r"Unable to locate|404\s+Not Found|has no installation candidate|Failed to fetch", text) and pos == 2:
+        # The list was out of date: fetch it and try once more
+        apt_update(2, 10)
+        rc, text = run_apt(["install"] + APT_OPTS + packages, 10, 100, label)
+    if rc != 0:
+        fail(apt_problem(text))
+
+
+def autoremovable():
+    r = subprocess.run(["apt-get", "-s", "autoremove"], capture_output=True, text=True, env=apt_env())
+    return set(re.findall(r"^Remv (\S+)", r.stdout, re.M))
+
+
+def apt_remove(packages, label):
+    apt_ready()
+    before = autoremovable()
+    present = [p for p in packages if installed(p)]
+    if present:
+        rc, text = run_apt(["remove"] + APT_OPTS + present, 0, 70, label)
+        if rc != 0:
+            fail(apt_problem(text).replace("installation", "removal"))
+    # What only this program needed; packages other programs left behind stay
+    extra = sorted(autoremovable() - before)
+    if extra:
+        rc, text = run_apt(["remove"] + APT_OPTS + extra, 70, 100, label)
+        if rc != 0:
+            log("leftover removal failed: " + text[-1000:])
+
+
+def download(url, sha256, dest, lo, hi, label):
+    """Downloads URL to DEST with progress from LO to HI, and checks its SHA-256."""
+    tmp = dest + ".part"
+    h = hashlib.sha256()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Hydra-Apps/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            last = 0
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                if time.time() - last > 0.5:
+                    last = time.time()
+                    if total:
+                        progress(lo + (hi - lo) * got / total, "Downloading %s… %d of %d MB" % (label, got >> 20, total >> 20))
+                    else:
+                        progress(lo, "Downloading %s… %d MB" % (label, got >> 20))
+    except Exception as e:
+        log("download %s: %r" % (url, e))
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        fail("%s could not be downloaded. Please check that the computer is connected to the internet and try again." % label)
+    if h.hexdigest() != sha256:
+        os.unlink(tmp)
+        fail("The downloaded file is not the one Hydra expected (it may have been damaged or changed). Nothing was installed.")
+    os.replace(tmp, dest)
+
+
+def tarball_install(app):
+    label = app["name"]
+    os.makedirs(CACHE, exist_ok=True)
+    archive = os.path.join(CACHE, os.path.basename(app["url"]))
+    download(app["url"], app["sha256"], archive, 0, 80, label)
+    progress(82, "Installing %s…" % label)
+    target = os.path.join("/opt", app["dir"])
+    new = target + ".hydra-new"
+    shutil.rmtree(new, ignore_errors=True)
+    os.makedirs(new)
+    try:
+        with tarfile.open(archive) as t:
+            t.extractall(new, filter="data")
+    except Exception as e:
+        shutil.rmtree(new, ignore_errors=True)
+        fail("%s could not be unpacked: %s" % (label, e))
+    # The archive holds one folder (thunderbird/): that folder becomes /opt/<dir>
+    inner = os.listdir(new)
+    src = os.path.join(new, inner[0]) if len(inner) == 1 and os.path.isdir(os.path.join(new, inner[0])) else new
+    old = target + ".hydra-old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.exists(target):
+        os.rename(target, old)
+    os.rename(src, target)
+    shutil.rmtree(new, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
+    os.unlink(archive)
+    binary = os.path.join(target, app["binary"])
+    os.makedirs("/usr/local/bin", exist_ok=True)
+    link = os.path.join("/usr/local/bin", app["binary"])
+    if os.path.lexists(link):
+        os.unlink(link)
+    os.symlink(binary, link)
+    icon = os.path.join(target, app.get("desktop_icon", "")) if app.get("desktop_icon") else app["icon"][0]
+    os.makedirs("/usr/local/share/applications", exist_ok=True)
+    with open(os.path.join("/usr/local/share/applications", app["desktop"]), "w") as f:
+        f.write("[Desktop Entry]\n# Written by Hydra Apps\nType=Application\nName=%s\nGenericName=%s\nComment=%s\n"
+                "Exec=%s %%u\nIcon=%s\nTerminal=false\nCategories=%s;\nMimeType=%s\nKeywords=%s\nStartupWMClass=%s\n"
+                % (app["name"], app.get("generic", ""), app["summary"], binary, icon,
+                   {"Internet": "Network;Email", "Office": "Office"}.get(app["category"], "Utility"),
+                   app.get("mime", ""), app.get("keywords", ""), app["binary"]))
+    progress(100, "%s is installed." % label)
+
+
+def tarball_remove(app):
+    progress(10, "Removing %s…" % app["name"])
+    target = os.path.join("/opt", app["dir"])
+    link = os.path.join("/usr/local/bin", app["binary"])
+    if os.path.islink(link) and os.readlink(link).startswith(target + "/"):
+        os.unlink(link)
+    desktop = os.path.join("/usr/local/share/applications", app["desktop"])
+    if os.path.exists(desktop):
+        os.unlink(desktop)
+    shutil.rmtree(target, ignore_errors=True)
+    progress(100, "%s was removed." % app["name"])
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("This must run as the administrator.")
+    if len(sys.argv) < 2:
+        fail("usage: hydra-apps-helper install|remove ID | ensure-base")
+    os.makedirs(CACHE, exist_ok=True)
+    cmd = sys.argv[1]
+    if cmd == "ensure-base":
+        # At boot (hydra-session, in the background): Hydra Apps' own parts, when missing
+        missing = [p for p in BASE_PACKAGES if not installed(p)]
+        if missing:
+            log("ensure-base: installing " + " ".join(missing))
+            apt_install(missing, "Hydra Apps")
+        return
+    if cmd not in ("install", "remove") or len(sys.argv) != 3:
+        fail("usage: hydra-apps-helper install|remove ID | ensure-base")
+    with open(CATALOGUE) as f:
+        apps = {a["id"]: a for a in json.load(f)["apps"]}
+    app = apps.get(sys.argv[2])
+    if app is None or app["kind"] not in ("apt", "tarball"):
+        fail("Hydra Apps does not know this program.")
+    log("%s %s" % (cmd, app["id"]))
+    if app["kind"] == "apt":
+        if cmd == "install":
+            apt_install(app["packages"], app["name"])
+            if not installed(app["check"]):
+                fail("%s could not be installed." % app["name"])
+            progress(100, "%s is installed." % app["name"])
+        else:
+            apt_remove(app["packages"], app["name"])
+            progress(100, "%s was removed." % app["name"])
+    elif cmd == "install":
+        tarball_install(app)
+    else:
+        tarball_remove(app)
+    # The start menu's cache is the user's: Hydra Apps renews it after this
+
+
+if __name__ == "__main__":
+    main()

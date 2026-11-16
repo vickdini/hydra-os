@@ -18,9 +18,9 @@ start.writeConfig("applicationsDisplay", 1)
 
 var tasks = panel.addWidget("org.kde.plasma.icontasks")
 tasks.currentConfigGroup = ["General"]
-// Pinned like Windows' taskbar: File Explorer, the browser, the store and Settings
+// Pinned like Windows' taskbar: File Explorer, the browser, the store (Hydra Apps) and Settings
 tasks.writeConfig("launchers", ["applications:org.kde.dolphin.desktop", "preferred://browser",
-                                "applications:org.kde.discover.desktop", "applications:systemsettings.desktop"])
+                                "applications:org.hydra.apps.desktop", "applications:systemsettings.desktop"])
 
 panel.addWidget("org.kde.plasma.panelspacer")
 

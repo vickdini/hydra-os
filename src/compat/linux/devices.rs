@@ -948,13 +948,77 @@ X-KDE-autostart-phase=2
             ("org.kde.dolphin.desktop", Some("File Explorer"), "File Explorer;Explorer;This PC;My Computer;", None),
             ("org.kde.plasma-systemmonitor.desktop", Some("Task Manager"), "Task Manager;taskmgr;End Task;", Some("Meta+Esc,Ctrl+Shift+Esc")),
             ("systemsettings.desktop", None, "Control Panel;Settings;", None),
-            ("org.kde.discover.desktop", Some("App Store"), "Store;App Store;Microsoft Store;", None),
         ] {
             windows_alias(t, s, id, generic, keywords, shortcuts)?;
             if shortcuts.is_some() && lookup_path(s, t.root, &alloc::format!("/usr/local/share/applications/{}", id)).is_some() {
                 t.link(s, &alloc::format!("/usr/local/share/kglobalaccel/{}", id), &alloc::format!("/usr/local/share/applications/{}", id))?;
             }
         }
+        // ---- Group B: Windows' shortcuts ----
+        // Win+Up maximize, Win+Down minimize, Win+R Run: written into each user's shortcuts
+        // once, before the desktop starts (the shortcut daemon keeps no system-wide defaults
+        // for them; the script explains)
+        t.file(
+            s,
+            "/etc/xdg/plasma-workspace/env/hydra-windows-shortcuts.sh",
+            include_str!("../../../userland/hydra-desktop/env/hydra-windows-shortcuts.sh"),
+        )?;
+        // Discover had Windows' "App Store" names; Hydra Apps has them now (Discover cannot
+        // install Ubuntu's packages on Hydra): Hydra's copy of Discover's entry goes
+        if let (Some(dir), Some(ino)) = (
+            lookup_path(s, t.root, "/usr/local/share/applications"),
+            lookup_path(s, t.root, "/usr/local/share/applications/org.kde.discover.desktop"),
+        ) {
+            let mut head = [0u8; 80];
+            let n = s.read(ino, 0, &mut head)?;
+            if head[..n].windows(ALIAS_MARK.len()).any(|w| w == ALIAS_MARK.as_bytes()) {
+                s.unlink(dir, b"org.kde.discover.desktop")?;
+                t.changed = true;
+            }
+        }
+    }
+
+    // ---- Group B: Hydra Apps and the welcome window ----
+    // Hydra Apps (userland/hydra-apps), the place to get programs like the Microsoft Store:
+    // Windows programs from their publishers (checked against a recorded SHA-256, installed
+    // with Wine for the user) and Linux apps (installed for everyone by a root helper started
+    // through polkit). Written in Python with PyQt6, which hydra-session installs at boot when
+    // it is missing (hydra-apps-helper ensure-base). Also the welcome window for people coming
+    // from Windows, shown once at a user's first login (hydra-welcome)
+    if lookup_path(s, t.root, "/usr/bin/python3").is_some() {
+        t.dir(s, "/usr/local/libexec")?;
+        for (name, script) in [
+            ("hydra-apps", include_bytes!("../../../userland/hydra-apps/hydra-apps").as_slice()),
+            ("hydra-apps-helper", include_bytes!("../../../userland/hydra-apps/hydra-apps-helper").as_slice()),
+            ("hydra-apps-wine", include_bytes!("../../../userland/hydra-apps/hydra-apps-wine").as_slice()),
+            ("hydra-welcome", include_bytes!("../../../userland/hydra-apps/hydra-welcome").as_slice()),
+        ] {
+            t.file_bytes(s, &alloc::format!("/usr/local/libexec/{}", name), script, 0o755)?;
+        }
+        t.file(s, "/usr/local/share/hydra-apps/catalogue.json", include_str!("../../../userland/hydra-apps/catalogue.json"))?;
+        t.file(s, "/usr/share/polkit-1/actions/org.hydra.apps.policy", include_str!("../../../userland/hydra-apps/org.hydra.apps.policy"))?;
+        t.file(s, "/usr/share/applications/org.hydra.apps.desktop", include_str!("../../../userland/hydra-apps/org.hydra.apps.desktop"))?;
+        t.file(s, "/usr/share/applications/org.hydra.welcome.desktop", include_str!("../../../userland/hydra-apps/org.hydra.welcome.desktop"))?;
+        t.file(s, "/etc/xdg/autostart/hydra-welcome.desktop", include_str!("../../../userland/hydra-apps/hydra-welcome-autostart.desktop"))?;
+    }
+
+    // ---- Group B: system users ----
+    // hydra-session runs systemd-sysusers at boot (as systemd does elsewhere), which creates
+    // the system users and groups /usr/lib/sysusers.d and /etc/sysusers.d ask for. Some have
+    // no entry there: libmalcontent-common ships D-Bus rules for the users of malcontent's
+    // daemons, whose package (malcontent) is not installed, and the system bus warned at every
+    // start that they are unknown
+    if lookup_path(s, t.root, "/usr/share/dbus-1/system.d/org.freedesktop.MalcontentTimer1.conf").is_some() {
+        t.file(
+            s,
+            "/etc/sysusers.d/hydra-malcontent.conf",
+            "# Written by Hydra: the users of malcontent's daemons, named in the D-Bus rules of
+# libmalcontent-common (the malcontent package would create them; existing users are kept)
+u! malcontent-timerd - \"Parental controls screen time daemon\"
+u! malcontent-timer-ext-agent - \"Parental controls screen time extension agent\"
+u! malcontent-webd - \"Parental controls web filter daemon\"
+",
+        )?;
     }
 
     // Older Hydra versions started Brave through wrappers of their own in /usr/bin and

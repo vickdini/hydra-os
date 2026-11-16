@@ -1,0 +1,820 @@
+#!/usr/bin/python3
+# Written by Hydra: Hydra Apps, the place to get programs (like the Microsoft Store).
+#   hydra-apps [--installed] [--install ID] [--remove ID] [--quit-when-done]
+# The programs are listed in /usr/local/share/hydra-apps/catalogue.json (see its comment).
+# - Windows programs are installed for the user, with Wine: the publisher's installer is
+#   downloaded over HTTPS, checked against the SHA-256 checksum the catalogue records, and run
+#   with its switches for an installation without questions (hydra-apps-wine); its start-menu
+#   entry lands in "Windows Programs". Uninstall goes through hydra-wine-uninstall, the one
+#   the start menu's right-click "Uninstall" uses.
+# - Linux programs (Ubuntu packages, or a publisher's archive) are installed for everyone by
+#   hydra-apps-helper, run as root through polkit (pkexec asks for an administrator's password).
+# Every step is shown in the window in plain words; nothing needs a terminal.
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+
+LIBEXEC = "/usr/local/libexec"
+CATALOGUE = os.environ.get("HYDRA_APPS_CATALOGUE", "/usr/local/share/hydra-apps/catalogue.json")
+WINE = "/opt/wine/bin/wine"
+HOME = os.path.expanduser("~")
+PREFIX = os.environ.get("WINEPREFIX", os.path.join(HOME, ".wine"))
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "hydra-apps")
+WINE_MENU = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local", "share")), "applications", "wine")
+
+
+def notify(title, body, icon="system-software-install"):
+    subprocess.run(["gdbus", "call", "--session", "--timeout", "5", "--dest", "org.freedesktop.Notifications",
+                    "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.Notify",
+                    "Hydra Apps", "0", icon, title, body, "[]", "{}", "15000"], capture_output=True)
+
+
+try:
+    from PyQt6.QtCore import QEvent, QObject, QProcess, QSize, Qt, QThread, QTimer, pyqtSignal
+    from PyQt6.QtGui import QFont, QIcon, QPalette
+    from PyQt6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                                 QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+                                 QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
+except ImportError:
+    # Hydra installs PyQt6 at boot when it is missing (hydra-apps-helper ensure-base); if that
+    # has not happened yet (no internet at the time), it is installed now
+    if os.environ.get("HYDRA_APPS_BOOTSTRAP"):
+        notify("Hydra Apps could not start", "A part it needs (PyQt6) could not be installed. Please check the internet connection.", "dialog-error")
+        sys.exit(1)
+    notify("Setting up Hydra Apps", "Hydra Apps needs one more part (about 20 MB). This takes a minute, only the first time.")
+    r = subprocess.run(["pkexec", os.path.join(LIBEXEC, "hydra-apps-helper"), "ensure-base"], capture_output=True, text=True)
+    if r.returncode != 0:
+        err = [l[6:] for l in r.stdout.splitlines() if l.startswith("ERROR ")]
+        notify("Hydra Apps could not be set up", err[-1] if err else "The administrator's password is needed the first time.", "dialog-error")
+        sys.exit(1)
+    os.environ["HYDRA_APPS_BOOTSTRAP"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+# ---------------------------------------------------------------------------------------------
+# What is installed
+
+
+def load_catalogue():
+    with open(CATALOGUE, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("categories", []), data["apps"]
+
+
+def windows_installed_names():
+    """DisplayName of every program in Windows' list of installed programs (the Uninstall keys
+    of the machine's and the user's registry)."""
+    names = []
+    for reg in ("system.reg", "user.reg"):
+        try:
+            with open(os.path.join(PREFIX, reg), encoding="utf-8", errors="replace") as f:
+                section = False
+                for line in f:
+                    if line.startswith("["):
+                        section = "\\\\Uninstall\\\\" in line
+                    elif section and line.startswith('"DisplayName"="'):
+                        names.append(line.rstrip("\n")[15:-1])
+        except OSError:
+            pass
+    return names
+
+
+def apt_status(packages):
+    if not packages:
+        return {}
+    r = subprocess.run(["dpkg-query", "-W", "-f=${Package} ${db:Status-Status}\n"] + packages, capture_output=True, text=True)
+    return {l.split()[0]: l.split()[1] for l in r.stdout.splitlines() if len(l.split()) == 2}
+
+
+def find_desktop(name):
+    for d in (os.path.join(HOME, ".local/share/applications"), "/usr/local/share/applications", "/usr/share/applications"):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def wine_unix_path(win):
+    """C:\\Program Files\\X\\x.exe -> <prefix>/drive_c/Program Files/X/x.exe"""
+    if len(win) > 2 and win[1] == ":":
+        return os.path.join(PREFIX, "drive_c" if win[0].lower() == "c" else "dosdevices/" + win[0].lower() + ":",
+                            win[3:].replace("\\", "/"))
+    return None
+
+
+def desktop_value(path, key):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    return line[len(key) + 1:].rstrip("\n")
+    except OSError:
+        pass
+    return None
+
+
+def wine_menu_entries():
+    found = []
+    for root, _, files in os.walk(WINE_MENU):
+        found += [os.path.join(root, f) for f in files if f.endswith(".desktop")]
+    return found
+
+
+def windows_menu_entry(app):
+    """The start-menu entry of a Windows program: the one named like it (or like its main
+    shortcut), else one that starts a program in its folder."""
+    wanted = {app["name"].lower(), app.get("menu_name", app["name"]).lower()}
+    folder = os.path.dirname(wine_unix_path(app["exe"]) or "") if app.get("exe") else ""
+    by_path = None
+    for e in sorted(wine_menu_entries()):
+        if "uninstall" in os.path.basename(e).lower():
+            continue
+        n = (desktop_value(e, "Name") or "").lower()
+        if n in wanted:
+            return e
+        if folder and (desktop_value(e, "Path") or "") == folder and by_path is None:
+            by_path = e
+    return by_path
+
+
+def make_menu_entry(app):
+    """A start-menu entry for a Windows program whose installer made none (in the "Windows
+    Programs" folder, like the ones Wine writes)."""
+    exe = app.get("exe")
+    unix = wine_unix_path(exe) if exe else None
+    if not unix or not os.path.exists(unix):
+        return None
+    d = os.path.join(WINE_MENU, "Programs")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, re.sub(r"[^A-Za-z0-9 +._-]", "", app["name"]) + ".desktop")
+    # The Exec line's quoting: each backslash of the Windows path is written four times
+    arg = exe.replace("\\", "\\\\\\\\")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[Desktop Entry]\n# Written by Hydra Apps\nType=Application\nName=%s\nComment=%s\n"
+                "Exec=env WINEPREFIX=\"%s\" %s \"%s\"\nPath=%s\nIcon=%s\nTerminal=false\nCategories=Wine;\n"
+                % (app["name"], app["summary"], PREFIX, WINE, arg, os.path.dirname(unix), app["icon"][0]))
+    return path
+
+
+def theme_icon(names):
+    for n in names:
+        if QIcon.hasThemeIcon(n):
+            return QIcon.fromTheme(n)
+    return QIcon.fromTheme("application-x-executable")
+
+
+# ---------------------------------------------------------------------------------------------
+# Work in the background
+
+
+class Download(QThread):
+    """Downloads an installer into the cache and checks its SHA-256."""
+    progress = pyqtSignal(int, int)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, url, sha256, dest):
+        super().__init__()
+        self.url, self.sha256, self.dest = url, sha256, dest
+        self.cancelled = False
+
+    def run(self):
+        if os.path.exists(self.dest):
+            h = hashlib.sha256()
+            with open(self.dest, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            if h.hexdigest() == self.sha256:
+                self.done.emit(True, "")
+                return
+        tmp = self.dest + ".part"
+        h = hashlib.sha256()
+        try:
+            req = urllib.request.Request(self.url, headers={"User-Agent": "Hydra-Apps/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                got = 0
+                while not self.cancelled:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    got += len(chunk)
+                    self.progress.emit(got, total)
+        except Exception as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            self.done.emit(False, "The installer could not be downloaded. Please check that the computer is connected to the internet and try again.\n(%s)" % e)
+            return
+        if self.cancelled:
+            os.unlink(tmp)
+            self.done.emit(False, "Cancelled. Nothing was installed.")
+            return
+        if h.hexdigest() != self.sha256:
+            os.unlink(tmp)
+            self.done.emit(False, "The downloaded installer is not the one Hydra expected: it may have been damaged or changed on the publisher's site. For your safety it was not run, and nothing was installed.")
+            return
+        os.replace(tmp, self.dest)
+        self.done.emit(True, "")
+
+
+class Job(QObject):
+    """Installs or removes one program; reports progress (percent, text) and the end (success,
+    message)."""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, app, action):
+        super().__init__()
+        self.app, self.action = app, action
+        self.proc = None
+        self.dl = None
+        self.err = ""
+        self.buf = b""
+
+    def start(self):
+        a = self.app
+        if a["kind"] == "windows":
+            if self.action == "install":
+                os.makedirs(CACHE, exist_ok=True)
+                self.installer = os.path.join(CACHE, os.path.basename(a["url"]))
+                self.progress.emit(0, "Downloading %s…" % a["name"])
+                self.dl = Download(a["url"], a["sha256"], self.installer)
+                self.dl.progress.connect(self._dl_progress)
+                self.dl.done.connect(self._dl_done)
+                self.dl.start()
+            else:
+                self._uninstall_windows()
+        else:
+            self.progress.emit(0, "Waiting for the administrator's password…")
+            self._run("pkexec", [os.path.join(LIBEXEC, "hydra-apps-helper"), self.action, a["id"]])
+
+    def cancel(self):
+        if self.dl:
+            self.dl.cancelled = True
+
+    def _dl_progress(self, got, total):
+        if total:
+            self.progress.emit(int(50 * got / total), "Downloading %s… %d of %d MB" % (self.app["name"], got >> 20, max(1, total >> 20)))
+        else:
+            self.progress.emit(0, "Downloading %s… %d MB" % (self.app["name"], got >> 20))
+
+    def _dl_done(self, ok, msg):
+        if not ok:
+            self.finished.emit(False, msg)
+            return
+        self.progress.emit(50, "Download checked. Starting the installer…")
+        self._run(os.path.join(LIBEXEC, "hydra-apps-wine"), ["install", self.app["name"], self.installer] + self.app.get("silent", []))
+
+    def _uninstall_windows(self):
+        a = self.app
+        entry = windows_menu_entry(a)
+        if not entry:
+            # hydra-wine-uninstall finds the program by the entry's folder and name: one made
+            # for it, in a folder named after the program's name in Windows' list
+            d = os.path.join(CACHE, "uninstall", a["registry"])
+            os.makedirs(d, exist_ok=True)
+            entry = os.path.join(d, "entry.desktop")
+            unix = wine_unix_path(a.get("exe", "")) or ""
+            with open(entry, "w", encoding="utf-8") as f:
+                f.write("[Desktop Entry]\nType=Application\nName=%s\nPath=%s\n" % (a["registry"], os.path.dirname(unix)))
+        self.progress.emit(30, "Uninstalling %s… If its uninstaller asks something, answer in its window." % a["name"])
+        self._run(os.path.join(LIBEXEC, "hydra-wine-uninstall"), [entry])
+
+    def _run(self, prog, args):
+        self.proc = QProcess(self)
+        self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.proc.readyReadStandardOutput.connect(self._read)
+        self.proc.finished.connect(self._ended)
+        self.proc.errorOccurred.connect(self._error)
+        self.proc.start(prog, args)
+
+    def _error(self, e):
+        if e == QProcess.ProcessError.FailedToStart:
+            self.finished.emit(False, "A part of Hydra Apps is missing (%s)." % self.proc.program())
+
+    def _read(self):
+        self.buf += bytes(self.proc.readAllStandardOutput())
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            line = line.decode("utf-8", "replace").strip()
+            if line.startswith("PROGRESS "):
+                parts = line.split(" ", 2)
+                try:
+                    self.progress.emit(int(parts[1]), parts[2] if len(parts) > 2 else "")
+                except ValueError:
+                    pass
+            elif line.startswith("ERROR "):
+                self.err = line[6:]
+
+    def _ended(self, code, status):
+        a = self.app
+        prog = os.path.basename(self.proc.program())
+        if prog == "pkexec" and code in (126, 127) and not self.err:
+            self.finished.emit(False, "The administrator's password was not given, so nothing was changed.")
+            return
+        if a["kind"] == "windows" and self.action == "install":
+            self._windows_installed(code)
+            return
+        if a["kind"] == "windows":
+            gone = not any(n.lower().startswith(a["registry"].lower()) for n in windows_installed_names())
+            self.finished.emit(gone, "%s was uninstalled." % a["name"] if gone else
+                               "%s is still installed: its uninstaller did not finish." % a["name"])
+            return
+        if code != 0:
+            self.finished.emit(False, self.err or "Something went wrong (code %d). Details are in /var/log/hydra-apps.log." % code)
+            return
+        # The start menu's list of programs
+        subprocess.Popen(["kbuildsycoca6"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.action == "install":
+            self.finished.emit(True, "%s is installed. You find it in the start menu, or open it here." % a["name"])
+        else:
+            self.finished.emit(True, "%s was removed." % a["name"])
+
+    def _windows_installed(self, code, tries=0):
+        a = self.app
+        if not any(n.lower().startswith(a["registry"].lower()) for n in windows_installed_names()):
+            # Wine writes its registry to disk every 30 seconds: give it the time
+            if tries < 16:
+                self.progress.emit(97, "Finishing…")
+                QTimer.singleShot(3000, lambda: self._windows_installed(code, tries + 1))
+                return
+            self.finished.emit(False, self.err or "The installer of %s ended without installing it (code %d). Details are in %s."
+                               % (a["name"], code, os.path.join(HOME, ".cache/hydra-wine")))
+            return
+        if not windows_menu_entry(a):
+            make_menu_entry(a)
+            subprocess.run(["/bin/sh", "-c",
+                            ". %s/hydra-wine-common; add_uninstall_actions; kbuildsycoca6 >/dev/null 2>&1" % LIBEXEC],
+                           capture_output=True)
+        self.finished.emit(True, "%s is installed. You find it in the start menu under Windows Programs, or open it here." % a["name"])
+
+
+# ---------------------------------------------------------------------------------------------
+# The window
+
+
+class Card(QFrame):
+    """One program in the list: icon, name, one line about it, and its button."""
+    clicked = pyqtSignal(dict)
+
+    def __init__(self, app, window):
+        super().__init__()
+        self.app, self.window = app, window
+        self.setObjectName("card")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(118)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(14)
+        icon = QLabel()
+        icon.setPixmap(theme_icon(app["icon"]).pixmap(QSize(56, 56)))
+        icon.setAlignment(Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(icon)
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        name = QLabel(app["name"])
+        f = name.font()
+        f.setPointSizeF(f.pointSizeF() * 1.15)
+        f.setBold(True)
+        name.setFont(f)
+        col.addWidget(name)
+        kind = QLabel(window.kind_text(app))
+        kind.setObjectName("dim")
+        col.addWidget(kind)
+        summary = QLabel(app["summary"])
+        summary.setWordWrap(True)
+        summary.setMinimumWidth(60)
+        name.setMinimumWidth(60)
+        col.addWidget(summary)
+        col.addStretch(1)
+        lay.addLayout(col, 1)
+        self.button = QPushButton()
+        self.button.setMinimumWidth(96)
+        self.button.clicked.connect(lambda: window.primary_action(app))
+        lay.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.app)
+
+
+class Details(QWidget):
+    """A program's page: what it is, Install / Open / Uninstall, and the progress."""
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.app = None
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 16, 24, 16)
+        back = QPushButton(QIcon.fromTheme("go-previous"), "Back")
+        back.setFlat(True)
+        back.clicked.connect(window.show_list)
+        outer.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        head = QHBoxLayout()
+        head.setSpacing(20)
+        self.icon = QLabel()
+        head.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
+        col = QVBoxLayout()
+        self.name = QLabel()
+        f = self.name.font()
+        f.setPointSizeF(f.pointSizeF() * 1.8)
+        f.setBold(True)
+        self.name.setFont(f)
+        col.addWidget(self.name)
+        self.sub = QLabel()
+        self.sub.setObjectName("dim")
+        col.addWidget(self.sub)
+        buttons = QHBoxLayout()
+        self.install = QPushButton(QIcon.fromTheme("download"), "Install")
+        self.open = QPushButton(QIcon.fromTheme("media-playback-start"), "Open")
+        self.remove = QPushButton(QIcon.fromTheme("edit-delete"), "Uninstall")
+        self.cancel = QPushButton("Cancel")
+        for b in (self.install, self.open, self.remove, self.cancel):
+            b.setMinimumWidth(110)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        self.install.clicked.connect(lambda: window.start_job(self.app, "install"))
+        self.open.clicked.connect(lambda: window.open_app(self.app))
+        self.remove.clicked.connect(lambda: window.confirm_remove(self.app))
+        self.cancel.clicked.connect(window.cancel_job)
+        col.addSpacing(8)
+        col.addLayout(buttons)
+        head.addLayout(col, 1)
+        outer.addLayout(head)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        outer.addWidget(self.bar)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+        outer.addSpacing(12)
+        self.desc = QLabel()
+        self.desc.setWordWrap(True)
+        self.desc.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.desc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self.desc)
+        self.facts = QLabel()
+        self.facts.setObjectName("dim")
+        self.facts.setWordWrap(True)
+        outer.addWidget(self.facts)
+        outer.addStretch(1)
+
+    def show_app(self, app):
+        self.app = app
+        self.icon.setPixmap(theme_icon(app["icon"]).pixmap(QSize(96, 96)))
+        self.name.setText(app["name"])
+        self.sub.setText("%s · %s" % (app.get("publisher", ""), app["category"]))
+        self.desc.setText(app["description"])
+        how = {"windows": "A Windows program. It is installed for you (your user account) and runs with Hydra's Windows support. "
+                          "The installer comes straight from the publisher's website and is checked before it runs.",
+               "apt": "A Linux app from Ubuntu, installed for everyone on this computer. It needs an administrator's password.",
+               "tarball": "A Linux app from the publisher's website, installed for everyone on this computer. It needs an administrator's password."}
+        self.facts.setText("%s\nDownload size: about %d MB." % (how[app["kind"]], app.get("size_mb", 0)))
+        self.refresh()
+
+    def refresh(self):
+        if not self.app:
+            return
+        w = self.window
+        busy = w.job is not None
+        mine = busy and w.job.app is self.app
+        inst = w.is_installed(self.app)
+        usable = w.available(self.app)
+        self.install.setVisible(not inst and not mine)
+        self.install.setEnabled(not busy and usable)
+        self.open.setVisible(inst)
+        self.open.setEnabled(not mine)
+        self.remove.setVisible(inst)
+        self.remove.setEnabled(not busy)
+        self.cancel.setVisible(mine and w.job.dl is not None and w.job.proc is None)
+        self.bar.setVisible(mine)
+        if mine:
+            self.bar.setValue(w.job_pct)
+            self.status.setText(w.job_text)
+        elif self.app["id"] in w.results:
+            self.status.setText(w.results[self.app["id"]])
+        elif not usable:
+            self.status.setText("Windows support (Wine) is not installed on this computer.")
+        elif busy:
+            self.status.setText("Please wait until %s is finished." % w.job.app["name"])
+        else:
+            self.status.setText("Installed." if inst else "")
+
+
+class Window(QMainWindow):
+    def __init__(self, opts):
+        super().__init__()
+        self.opts = opts
+        self.categories, self.apps = load_catalogue()
+        self.job = None
+        self.job_pct, self.job_text = 0, ""
+        self.results = {}
+        self.state = {}
+        self.setWindowTitle("Hydra Apps")
+        self.setWindowIcon(QIcon.fromTheme("system-software-install"))
+        self.resize(1040, 700)
+        central = QWidget()
+        self.setCentralWidget(central)
+        main = QHBoxLayout(central)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        # The list of sections on the left, as in the Microsoft Store
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        self.nav.setFixedWidth(210)
+        self.nav.setIconSize(QSize(22, 22))
+        self.nav.setFrameShape(QFrame.Shape.NoFrame)
+        sections = [("All apps", "go-home"), ("Installed", "checkmark")] + [(c, {
+            "Office": "applications-office", "Internet": "applications-internet", "Photos & Graphics": "applications-graphics",
+            "Music & Video": "applications-multimedia", "Utilities": "applications-utilities",
+            "Developer": "applications-development"}.get(c, "applications-other")) for c in self.categories]
+        for text, icon in sections:
+            it = QListWidgetItem(QIcon.fromTheme(icon), text)
+            it.setSizeHint(QSize(200, 38))
+            self.nav.addItem(it)
+        self.nav.currentRowChanged.connect(lambda _: self.show_list())
+        main.addWidget(self.nav)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        main.addLayout(right, 1)
+        top = QHBoxLayout()
+        top.setContentsMargins(24, 16, 24, 8)
+        self.title = QLabel()
+        f = self.title.font()
+        f.setPointSizeF(f.pointSizeF() * 1.6)
+        f.setBold(True)
+        self.title.setFont(f)
+        top.addWidget(self.title, 1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search apps")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(260)
+        self.search.addAction(QIcon.fromTheme("search"), QLineEdit.ActionPosition.LeadingPosition)
+        self.search.textChanged.connect(lambda _: self.show_list())
+        top.addWidget(self.search)
+        right.addLayout(top)
+
+        self.pages = QStackedWidget()
+        right.addWidget(self.pages, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.listw = QWidget()
+        self.listlay = QVBoxLayout(self.listw)
+        self.listlay.setContentsMargins(24, 4, 24, 24)
+        self.intro = QLabel()
+        self.intro.setWordWrap(True)
+        self.intro.setMinimumWidth(100)
+        self.intro.setObjectName("dim")
+        self.listlay.addWidget(self.intro)
+        self.grid = QGridLayout()
+        self.grid.setSpacing(12)
+        self.listlay.addLayout(self.grid)
+        self.listlay.addStretch(1)
+        scroll.setWidget(self.listw)
+        self.pages.addWidget(scroll)
+        self.details = Details(self)
+        self.pages.addWidget(self.details)
+
+        # A line at the bottom while something is being installed
+        self.footer = QFrame()
+        self.footer.setObjectName("footer")
+        fl = QHBoxLayout(self.footer)
+        fl.setContentsMargins(24, 8, 24, 8)
+        self.footer_text = QLabel()
+        fl.addWidget(self.footer_text, 1)
+        self.footer_bar = QProgressBar()
+        self.footer_bar.setRange(0, 100)
+        self.footer_bar.setFixedWidth(220)
+        fl.addWidget(self.footer_bar)
+        self.footer.hide()
+        right.addWidget(self.footer)
+
+        self.scroll = scroll
+        scroll.viewport().installEventFilter(self)
+        self.cards = []
+        self.refresh_state()
+        self.nav.setCurrentRow(1 if opts.get("installed") else 0)
+        # The state changes outside the window too (start-menu "Uninstall", the terminal)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start(5000)
+        if opts.get("install") or opts.get("remove"):
+            app = self.by_id(opts.get("install") or opts.get("remove"))
+            if app:
+                self.show_details(app)
+                QTimer.singleShot(500, lambda: self.start_job(app, "install" if opts.get("install") else "remove"))
+
+    def eventFilter(self, obj, e):
+        # The list is as wide as its view: cards wrap their text rather than run off the side
+        if obj is self.scroll.viewport() and e.type() == QEvent.Type.Resize:
+            self.listw.setMaximumWidth(e.size().width())
+        return False
+
+    def by_id(self, i):
+        return next((a for a in self.apps if a["id"] == i), None)
+
+    def kind_text(self, app):
+        return {"windows": "Windows program", "apt": "Linux app", "tarball": "Linux app"}[app["kind"]] + " · " + app["category"]
+
+    def available(self, app):
+        return app["kind"] != "windows" or os.path.exists(WINE)
+
+    def is_installed(self, app):
+        return self.state.get(app["id"], False)
+
+    def refresh_state(self):
+        apt = apt_status([a["check"] for a in self.apps if a["kind"] == "apt"])
+        wn = [n.lower() for n in windows_installed_names()]
+        st = {}
+        for a in self.apps:
+            if a["kind"] == "apt":
+                st[a["id"]] = apt.get(a["check"]) == "installed"
+            elif a["kind"] == "tarball":
+                st[a["id"]] = os.path.exists(os.path.join("/opt", a["dir"], a["binary"]))
+            else:
+                st[a["id"]] = any(n.startswith(a["registry"].lower()) for n in wn)
+        changed = st != self.state
+        self.state = st
+        return changed
+
+    def poll(self):
+        if self.job is None and self.refresh_state():
+            self.update_cards()
+            self.details.refresh()
+
+    def show_list(self):
+        self.pages.setCurrentIndex(0)
+        row = self.nav.currentRow()
+        text = self.search.text().strip().lower()
+        if row == 0:
+            self.title.setText("All apps")
+            self.intro.setText("Programs you may know from Windows, and free Linux apps for everyday needs. Windows programs "
+                               "are installed for you and run with Hydra's Windows support; Linux apps are installed for "
+                               "everyone on this computer and need an administrator's password.")
+        elif row == 1:
+            self.title.setText("Installed")
+            self.intro.setText("Programs from Hydra Apps on this computer. Windows programs you installed yourself are in "
+                               "the start menu under Windows Programs (right-click one to uninstall it).")
+        else:
+            self.title.setText(self.categories[row - 2])
+            self.intro.setText("")
+        shown = []
+        for a in self.apps:
+            if row == 1 and not self.is_installed(a):
+                continue
+            if row >= 2 and a["category"] != self.categories[row - 2]:
+                continue
+            if text and text not in (a["name"] + " " + a["summary"] + " " + a["category"] + " " + a.get("publisher", "")).lower():
+                continue
+            shown.append(a)
+        for c in self.cards:
+            c.setParent(None)
+            c.deleteLater()
+        self.cards = []
+        for i, a in enumerate(shown):
+            c = Card(a, self)
+            c.clicked.connect(self.show_details)
+            self.grid.addWidget(c, i // 2, i % 2)
+            self.cards.append(c)
+        if not shown:
+            empty = QLabel("Nothing installed from Hydra Apps yet." if row == 1 and not text else "No app matches your search.")
+            empty.setObjectName("dim")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setMinimumHeight(120)
+            self.grid.addWidget(empty, 0, 0, 1, 2)
+            self.cards.append(empty)
+        self.update_cards()
+
+    def update_cards(self):
+        for c in self.cards:
+            if not isinstance(c, Card):
+                continue
+            a = c.app
+            if self.job and self.job.app is a:
+                c.button.setText("%d %%" % self.job_pct)
+                c.button.setEnabled(False)
+            elif self.is_installed(a):
+                c.button.setText("Open")
+                c.button.setEnabled(True)
+            else:
+                c.button.setText("Install" if self.available(a) else "Unavailable")
+                c.button.setEnabled(self.job is None and self.available(a))
+
+    def show_details(self, app):
+        self.details.show_app(app)
+        self.pages.setCurrentIndex(1)
+
+    def primary_action(self, app):
+        if self.is_installed(app):
+            self.open_app(app)
+        else:
+            self.show_details(app)
+            self.start_job(app, "install")
+
+    def open_app(self, app):
+        if app["kind"] == "windows":
+            entry = windows_menu_entry(app)
+            if entry:
+                subprocess.Popen(["kioclient", "exec", entry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen([WINE, app["exe"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        else:
+            entry = find_desktop(app["desktop"])
+            if entry:
+                subprocess.Popen(["kioclient", "exec", entry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def confirm_remove(self, app):
+        extra = (" It is removed for everyone on this computer." if app["kind"] != "windows" else
+                 " Its own uninstaller may ask whether to keep your settings.")
+        r = QMessageBox.question(self, "Uninstall %s?" % app["name"], "Uninstall %s?%s" % (app["name"], extra))
+        if r == QMessageBox.StandardButton.Yes:
+            self.start_job(app, "remove")
+
+    def start_job(self, app, action):
+        if self.job is not None or not self.available(app):
+            return
+        self.results.pop(app["id"], None)
+        self.job = Job(app, action)
+        self.job.progress.connect(self.job_progress)
+        self.job.finished.connect(self.job_finished)
+        self.job_pct, self.job_text = 0, ("Installing %s…" if action == "install" else "Uninstalling %s…") % app["name"]
+        self.footer.show()
+        self.job_progress(0, self.job_text)
+        self.job.start()
+
+    def cancel_job(self):
+        if self.job:
+            self.job.cancel()
+
+    def job_progress(self, pct, text):
+        self.job_pct, self.job_text = pct, text or self.job_text
+        self.footer_text.setText(self.job_text)
+        self.footer_bar.setValue(pct)
+        self.update_cards()
+        self.details.refresh()
+
+    def job_finished(self, ok, msg):
+        app = self.job.app
+        self.job.deleteLater()
+        self.job = None
+        self.footer.hide()
+        self.results[app["id"]] = msg
+        self.refresh_state()
+        self.show_list() if self.pages.currentIndex() == 0 else self.update_cards()
+        self.details.refresh()
+        print("HYDRA_APPS_RESULT", app["id"], "ok" if ok else "failed", msg, flush=True)
+        if not ok:
+            QMessageBox.warning(self, "%s" % app["name"], msg) if not self.opts.get("quit") else None
+        elif not self.isActiveWindow():
+            notify(msg.split(".")[0] + ".", "", "dialog-ok")
+        if self.opts.get("quit"):
+            QApplication.instance().exit(0 if ok else 1)
+
+
+STYLE = """
+QFrame#card { background: palette(base); border: 1px solid palette(midlight); border-radius: 8px; }
+QFrame#card:hover { border: 1px solid palette(highlight); }
+QListWidget#nav { background: palette(window); padding-top: 12px; }
+QListWidget#nav::item { border-radius: 6px; margin: 1px 8px; padding-left: 6px; color: palette(text); }
+QListWidget#nav::item:selected { background: palette(highlight); color: palette(highlighted-text); }
+QFrame#footer { border-top: 1px solid palette(midlight); }
+QLabel#dim { color: palette(placeholder-text); }
+"""
+
+
+def main():
+    opts = {}
+    args = sys.argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--installed":
+            opts["installed"] = True
+        elif a in ("--install", "--remove") and args:
+            opts[a[2:]] = args.pop(0)
+        elif a == "--quit-when-done":
+            opts["quit"] = True
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("hydra-apps")
+    app.setApplicationDisplayName("Hydra Apps")
+    app.setDesktopFileName("org.hydra.apps")
+    app.setStyleSheet(STYLE)
+    w = Window(opts)
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
