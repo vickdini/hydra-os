@@ -56,6 +56,17 @@ pub struct BlockFile {
     read: bool,
     write: bool,
     nonblock: core::sync::atomic::AtomicBool,
+    /// Written to: when the last descriptor closes, udev's records are written again (a
+    /// new file system shows, as udev's `watch` rule does it on Linux).
+    dirty: core::sync::atomic::AtomicBool,
+}
+
+impl Drop for BlockFile {
+    fn drop(&mut self) {
+        if self.dirty.load(core::sync::atomic::Ordering::Relaxed) {
+            super::devices::refresh_block_tree();
+        }
+    }
 }
 
 /// Opens block device `rdev`; `None` if it is not one of ours.
@@ -84,6 +95,7 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
         read: acc != 1,
         write: acc != 0,
         nonblock: core::sync::atomic::AtomicBool::new(flags & 0o4000 != 0),
+        dirty: core::sync::atomic::AtomicBool::new(false),
     })))
 }
 
@@ -119,7 +131,10 @@ impl BlockFile {
             return EINVAL;
         }
         match blockdev::zero_range(self.disk, self.start + off, len) {
-            Ok(()) => 0,
+            Ok(()) => {
+                self.dirty.store(true, core::sync::atomic::Ordering::Relaxed);
+                0
+            }
             Err(e) => e,
         }
     }
@@ -199,7 +214,10 @@ impl CharDevice for BlockFile {
         }
         let n = (data.len() as u64).min(self.len - offset) as usize;
         Some(match blockdev::write_at(self.disk, self.start + offset, &data[..n]) {
-            Ok(n) => n as i64,
+            Ok(n) => {
+                self.dirty.store(true, core::sync::atomic::Ordering::Relaxed);
+                n as i64
+            }
             Err(e) => e,
         })
     }

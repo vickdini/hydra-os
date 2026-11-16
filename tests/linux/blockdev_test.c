@@ -1,4 +1,5 @@
 // Linux block devices (/dev/sdX): partitioning, formatting and raw I/O on a second disk,
+#define _GNU_SOURCE
 // and the pool's disk refusing writes. Needs a blank second disk (the suite attaches one);
 // without one it only checks the pool disk and passes.
 //
@@ -95,7 +96,7 @@ int main(void) {
         printf(fails ? "blockdev: FAILED (%d)\n" : "blockdev: PASSED\n", fails);
         return fails ? 1 : 0;
     }
-    char dev[32], p[128];
+    char dev[32], p[1024];
     snprintf(dev, sizeof dev, "/dev/%s", disk);
     snprintf(p, sizeof p, "/sys/block/%s/size", disk);
     long long sectors = sys_num(p);
