@@ -13,8 +13,12 @@ has_focus() { grep -q '"UseTakeFocus"="N"' "$P/user.reg" 2>/dev/null; }
 add_uninstall_actions
 [ -f "$P/system.reg" ] && { [ -z "$M" ] || has_mono; } && has_focus && exit 0
 LOCK="$HOME/.cache/hydra-wine-setup.lock"
+# One setup at a time; a lock left behind by a computer switched off during the setup (its
+# process is gone) is removed by setup_busy
+setup_busy && exit 0
 mkdir "$LOCK" 2>/dev/null || exit 0
-trap 'rmdir "$LOCK"' EXIT
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 # Wine without a window, and without the questions about Mono and Gecko
 quiet() {
     o="$1"

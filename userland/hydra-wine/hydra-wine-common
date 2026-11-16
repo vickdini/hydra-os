@@ -35,15 +35,26 @@ program_name() {
     echo "${b%.*}"
 }
 
+# Whether the first login's setup (hydra-wine-setup) is still at work: its lock folder, while
+# the setup runs (a lock left by a computer switched off during the setup does not count)
+setup_busy() {
+    l="$HOME/.cache/hydra-wine-setup.lock"
+    [ -d "$l" ] || return 1
+    pid=$(cat "$l/pid" 2>/dev/null)
+    [ -n "$pid" ] && grep -q -a hydra-wine-setup "/proc/$pid/cmdline" 2>/dev/null && return 0
+    rm -rf "$l"
+    return 1
+}
+
 # Waits while Windows support is being prepared (the first login's setup); fails when it is
 # not ready after 20 minutes
 wait_for_setup() {
-    [ -f "$P/system.reg" ] && [ ! -d "$HOME/.cache/hydra-wine-setup.lock" ] && return 0
+    [ -f "$P/system.reg" ] && ! setup_busy && return 0
     notify "Windows support is still being prepared" "$1 will start as soon as it is ready."
     n=0
     while [ $n -lt 400 ]; do
         sleep 3
-        [ -f "$P/system.reg" ] && [ ! -d "$HOME/.cache/hydra-wine-setup.lock" ] && return 0
+        [ -f "$P/system.reg" ] && ! setup_busy && return 0
         n=$((n + 1))
     done
     notify "Windows support is not ready" "Please try again in a few minutes." dialog-error
