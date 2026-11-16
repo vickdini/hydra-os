@@ -21,9 +21,9 @@ home=$(getent passwd "$user" | cut -d: -f6)
 [ -n "$home" ] || exit 1
 if [ ! -e "$home/.config/hydra-live-prepared" ]; then
     mkdir -p "$home/Desktop" "$home/.config/autostart"
-    if [ -e /usr/share/applications/org.hydra.install.desktop ]; then
-        cp /usr/share/applications/org.hydra.install.desktop "$home/Desktop/"
-        chmod 755 "$home/Desktop/org.hydra.install.desktop"
+    if [ -e /usr/share/applications/hydra-install.desktop ]; then
+        cp /usr/share/applications/hydra-install.desktop "$home/Desktop/"
+        chmod 755 "$home/Desktop/hydra-install.desktop"
     fi
     printf '[Welcome]\nShown=1\n' > "$home/.config/hydra-desktoprc"
     printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > "$home/.config/kscreenlockerrc"

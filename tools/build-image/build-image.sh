@@ -1,0 +1,222 @@
+#!/bin/bash
+# Builds Hydra's clean install image and the live USB stick image from the main pool.
+#
+#   wsl -d Ubuntu-20.04 -u root -e bash /mnt/d/os-f/tools/build-image/build-image.sh [STEP...]
+#
+# Steps (all, in this order, when none are named):
+#   snapshot  copy the main pool (/root/pool/hydrapool.qcow2 in the QEMU root /opt/u2604) into
+#             work/base.qcow2 through a throwaway overlay; the main pool is only read
+#   clean     boot a throwaway copy of it, run clean-inside.sh in it (removes people's accounts,
+#             homes and everything personal, see that script), power off -> work/clean.raw
+#   pack      hydra-pool-pack: only the live blocks of work/clean.raw, in a compact pool with a
+#             new GUID -> out/pool.img, compressed with zstd -> out/pool.img.zst, its SHA-256
+#             -> out/pool.img.sha256, sizes -> out/pool.conf; the installed system's EFI
+#             partition files -> out/esp.tar (the install set, see LAYOUT.md section F)
+#   verify    boot a copy of out/pool.img as a live session and list what is in it
+#             (accounts, homes, logs...) -> out/verify-clean.txt
+#   live      the live pool: the clean pool packed again with room for the install set,
+#             booted as a live session that fetches it into /opt/hydra-install/ -> work/live.raw
+#   stick     out/hydra-live.img: GPT disk image, EFI partition (kernel, boot files, \hydra\live)
+#             + Hydra pool partition (work/live.raw)
+#
+# Needs: the kernel and boot files built in the tree (cargo build --release, make build), the
+# QEMU root /opt/u2604 (qemu, OVMF, python3, zstd) and, in WSL itself, gcc, sfdisk, mtools,
+# dosfstools, xorriso. Work files: /opt/u2604/root/pool/f-work, results: /opt/u2604/root/pool/f-out
+# (WORK, OUT override; paths as seen inside /opt/u2604). TREE: the source tree (default: the
+# one this script is in). PORT: the web server the VMs fetch from (default 8731).
+set -euo pipefail
+R=/opt/u2604
+HERE=$(cd "$(dirname "$0")" && pwd)
+TREE=${TREE:-$(cd "$HERE/../.." && pwd)}
+CTREE=${TREE#$R}                       # the tree as seen inside the chroot (/mnt/d/...)
+POOL=/root/pool/hydrapool.qcow2
+WORK=${WORK:-/root/pool/f-work}
+OUT=${OUT:-/root/pool/f-out}
+PORT=${PORT:-8731}
+HEADROOM_CLEAN=${HEADROOM_CLEAN:-2G}   # free space in the install image's pool (it grows on boot)
+HEADROOM_LIVE=${HEADROOM_LIVE:-1536M}  # free space in the stick's pool for the live session
+ESP_MIB=${ESP_MIB:-512}
+STEPS=${*:-snapshot clean pack verify live stick}
+
+say() { echo "[build-image] $*"; }
+die() { echo "[build-image] ERROR: $*" >&2; exit 1; }
+inroot() { chroot $R /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root HYDRA_ISO="${HYDRA_ISO:-}" /bin/bash -c "$1"; }
+
+# The QEMU root's mounts (WSL drops them when it idles)
+mountpoint -q $R/proc || mount -t proc proc $R/proc
+for m in sys dev dev/pts; do mountpoint -q $R/$m || mount --bind /$m $R/$m; done
+mkdir -p $R/mnt/d
+mountpoint -q $R/mnt/d || mount --bind /mnt/d $R/mnt/d
+mkdir -p $R$WORK $R$OUT
+
+# A web server for the VMs (they reach the host at 10.0.2.2), serving directory $1
+serve() {
+    stop_serving
+    inroot "cd '$1' && (setsid python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1 &)"
+    sleep 1
+}
+stop_serving() { pkill -f "http.server $PORT" 2>/dev/null || true; }
+trap stop_serving EXIT
+
+# Boots disk $1 with the harness; $2 = log file name, $3 = --until regex, $4 = seconds, rest =
+# harness arguments and commands
+vm() {
+    local disk=$1 log=$2 until=$3 wait=$4
+    shift 4
+    if pgrep -f "file=$disk," >/dev/null; then die "a VM already uses $disk"; fi
+    local q=""
+    for a in "$@"; do q="$q '${a//\'/\'\\\'\'}'"; done
+    inroot "cd '$CTREE' && python3 tools/hydra_run.py --accel kvm --shared-host --smp 4 --disk '$disk' --wait $wait --until '$until' --log '$OUT/$log' $q" >/dev/null || true
+    tr -d '\000' < "$R$OUT/$log" > "$R$OUT/$log.txt"
+}
+
+# The boot ISO with \hydra\live on its boot volume: the live session without the stick
+live_iso() {
+    local dist=$TREE/dist/x86_64 t=$R$WORK/liveiso
+    [ -f "$dist/hydra.img" ] || die "no $dist/hydra.img: run make build"
+    rm -rf "$t" && mkdir -p "$t/root/EFI/BOOT" "$t/root/bin"
+    cp "$dist/hydra.img" "$t/root/efiboot.img"
+    : > "$t/live"
+    mmd -i "$t/root/efiboot.img" ::/hydra
+    mcopy -i "$t/root/efiboot.img" "$t/live" ::/hydra/live
+    cp "$dist/bootx64.efi" "$t/root/EFI/BOOT/BOOTX64.EFI"
+    cp -r "$TREE"/esp/bin/* "$t/root/bin/"
+    xorriso -as mkisofs -quiet -V HYDRALIVE -e efiboot.img -no-emul-boot -isohybrid-gpt-basdat -o "$R$WORK/hydra-live-test.iso" "$t/root"
+    rm -rf "$t"
+    export HYDRA_ISO=$WORK/hydra-live-test.iso
+}
+
+pack_tool() {
+    gcc -O2 -Wall -o "$R$WORK/hydra-pool-pack" "$HERE/hydra-pool-pack.c"
+}
+
+conf_get() { sed -n "s/^$1=//p" "$R$OUT/pool.conf"; }
+
+# The files of an EFI partition into directory $1: the kernel (fallback path and Hydra's own
+# boot entry path) and the boot files it imports into the pool
+esp_tree() {
+    local d=$1 dist=$TREE/dist/x86_64
+    [ -f "$dist/bootx64.efi" ] || die "no $dist/bootx64.efi: run make build"
+    rm -rf "$d" && mkdir -p "$d/EFI/BOOT" "$d/EFI/hydra" "$d/bin"
+    cp "$dist/bootx64.efi" "$d/EFI/BOOT/BOOTX64.EFI"
+    cp "$dist/bootx64.efi" "$d/EFI/hydra/hydra.efi"
+    cp -r "$TREE"/esp/bin/* "$d/bin/"
+    [ -f "$TREE/esp/readme.txt" ] && cp "$TREE/esp/readme.txt" "$d/README.TXT"
+    return 0
+}
+
+for step in $STEPS; do
+    say "=== $step"
+    case $step in
+    snapshot)
+        if pgrep -f "file=$POOL" >/dev/null; then die "the main pool is in use by a VM: try again when it is off"; fi
+        inroot "set -e; cd '$WORK'; rm -f snap.qcow2 base.qcow2
+                qemu-img create -q -f qcow2 -F qcow2 -b $POOL snap.qcow2
+                qemu-img convert -O qcow2 snap.qcow2 base.qcow2
+                rm -f snap.qcow2"
+        say "copied the main pool to $WORK/base.qcow2"
+        ;;
+    clean)
+        inroot "set -e; cd '$WORK'; rm -f clean.qcow2 clean.raw; qemu-img create -q -f qcow2 -F qcow2 -b $WORK/base.qcow2 clean.qcow2"
+        serve "$CTREE/tools/build-image"
+        vm "$WORK/clean.qcow2" clean.log "Powering off" 1500 --login hydra:hydra \
+            "linux chroot /ubuntu /usr/bin/bash -c \"echo hydra | sudo -S bash -c 'curl -s http://10.0.2.2:$PORT/clean-inside.sh -o /tmp/c.sh; bash /tmp/c.sh'\""
+        stop_serving
+        grep -q "^CLEAN-OK" "$R$OUT/clean.log.txt" || die "cleaning failed (see $OUT/clean.log.txt)"
+        grep -a "^\[clean\]" "$R$OUT/clean.log.txt" || true
+        inroot "set -e; cd '$WORK'; qemu-img convert -O raw clean.qcow2 clean.raw; rm -f clean.qcow2"
+        ;;
+    pack)
+        pack_tool
+        inroot "set -e; cd '$OUT'; rm -f pool.img pool.img.zst
+                '$WORK/hydra-pool-pack' --headroom $HEADROOM_CLEAN '$WORK/clean.raw' pool.img > '$WORK/pack-clean.txt'"
+        cat "$R$WORK/pack-clean.txt"
+        say "compressing (zstd)"
+        inroot "set -e; cd '$OUT'
+                zstd -q -T0 -12 -o pool.img.zst pool.img
+                sha256sum pool.img > pool.img.sha256
+                {
+                  echo '# Hydra install image (tools/build-image/build-image.sh); see LAYOUT.md, section F'
+                  echo 'format=hydra-pool-raw+zstd'
+                  echo \"image_bytes=\$(stat -c %s pool.img)\"
+                  sed -n 's/^used_bytes=/data_bytes=/p; s/^pool_guid=/pool_guid=/p' '$WORK/pack-clean.txt'
+                  echo \"zst_bytes=\$(stat -c %s pool.img.zst)\"
+                  echo \"sha256=\$(cut -d' ' -f1 pool.img.sha256)\"
+                  echo \"zst_sha256=\$(sha256sum pool.img.zst | cut -d' ' -f1)\"
+                  echo \"built=\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+                  echo \"source=$(git -C "$TREE" rev-parse --short HEAD 2>/dev/null || echo unknown)\"
+                } > pool.conf"
+        cat "$R$OUT/pool.conf"
+        # The installed system's EFI partition (without the live flag)
+        esp_tree "$R$WORK/esptree"
+        tar -C "$R$WORK/esptree" -cf "$R$OUT/esp.tar" .
+        rm -rf "$R$WORK/esptree"
+        ;;
+    verify)
+        live_iso
+        inroot "set -e; cd '$WORK'; rm -f verify.qcow2; qemu-img create -q -f qcow2 -F raw -b $OUT/pool.img verify.qcow2"
+        serve "$CTREE/tools/build-image"
+        vm "$WORK/verify.qcow2" verify.log "\nVERIFY-DONE" 600 --login "" \
+            "linux chroot /ubuntu /usr/bin/bash -c \"curl -s http://10.0.2.2:$PORT/verify-inside.sh -o /tmp/v.sh; bash /tmp/v.sh\""
+        stop_serving
+        sed -n '/^VERIFY-BEGIN/,/^VERIFY-DONE/p' "$R$OUT/verify.log.txt" > "$R$OUT/verify-clean.txt"
+        cat "$R$OUT/verify-clean.txt"
+        inroot "rm -f '$WORK/verify.qcow2'"
+        grep -q "^VERIFY-DONE" "$R$OUT/verify-clean.txt" || die "verification did not finish"
+        ;;
+    live)
+        live_iso
+        pack_tool
+        zst=$(conf_get zst_bytes)
+        [ -n "$zst" ] && [ -f "$R$OUT/esp.tar" ] || die "no install set: run the pack step"
+        # The clean pool again, with room for the install set and the live session
+        head=$(( zst + $(stat -c %s "$R$OUT/esp.tar") + $(numfmt --from=iec "$HEADROOM_LIVE") ))
+        inroot "set -e; cd '$WORK'; rm -f live.raw live.qcow2
+                ./hydra-pool-pack --headroom $head clean.raw live.raw > pack-live.txt
+                qemu-img create -q -f qcow2 -F raw -b $WORK/live.raw live.qcow2"
+        cat "$R$WORK/pack-live.txt"
+        serve "$OUT"
+        cp "$HERE/live-inside.sh" "$R$OUT/live-inside.sh"
+        vm "$WORK/live.qcow2" live.log "Powering off" 2400 --login "" \
+            "linux chroot /ubuntu /usr/bin/bash -c \"curl -s http://10.0.2.2:$PORT/live-inside.sh -o /tmp/l.sh; PORT=$PORT bash /tmp/l.sh\""
+        stop_serving
+        rm -f "$R$OUT/live-inside.sh"
+        grep -q "^LIVE-OK" "$R$OUT/live.log.txt" || die "the live pool did not get the install image (see $OUT/live.log.txt)"
+        inroot "set -e; cd '$WORK'; qemu-img commit -q live.qcow2; rm -f live.qcow2"
+        ;;
+    stick)
+        L=$R$WORK/live.raw
+        [ -f "$L" ] || die "no live pool: run the live step"
+        dist=$TREE/dist/x86_64
+        pool_bytes=$(stat -c %s "$L")
+        esp_bytes=$((ESP_MIB << 20))
+        total=$(( (1 << 20) + esp_bytes + pool_bytes + (1 << 20) ))
+        S=$R$OUT/hydra-live.img
+        rm -f "$S" "$R$WORK/esp.img"
+        truncate -s "$total" "$S"
+        # GPT: 1 = EFI system partition, 2 = Hydra pool (type GUID in LAYOUT.md)
+        sfdisk --quiet --label gpt "$S" <<EOF
+label: gpt
+start=2048, size=$((esp_bytes / 512)), type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI"
+start=$((2048 + esp_bytes / 512)), size=$((pool_bytes / 512)), type=7685A0B8-DF41-47EB-AF4F-02CE6FB01879, name="Hydra"
+EOF
+        # The EFI partition: the kernel at the fallback path and Hydra's own, the boot files the
+        # kernel imports, and the live flag
+        E=$R$WORK/esp.img
+        mkfs.vfat -F 32 -n HYDRA-LIVE -C "$E" $((esp_bytes / 1024)) >/dev/null
+        esp_tree "$R$WORK/esptree"
+        mkdir -p "$R$WORK/esptree/hydra"
+        printf 'Hydra live session: this file makes Hydra start as "try Hydra" from this stick.\r\n' > "$R$WORK/esptree/hydra/live"
+        mcopy -s -i "$E" "$R$WORK"/esptree/* ::/
+        rm -rf "$R$WORK/esptree"
+        dd if="$E" of="$S" bs=1M seek=1 conv=notrunc,sparse status=none
+        dd if="$L" of="$S" bs=1M seek=$((1 + ESP_MIB)) conv=notrunc,sparse status=none
+        rm -f "$E"
+        sfdisk --list "$S"
+        (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
+        say "stick image: $OUT/hydra-live.img ($(numfmt --to=iec "$total")), $(cat "$R$OUT/hydra-live.img.sha256")"
+        ;;
+    *) die "unknown step $step" ;;
+    esac
+done
+say "done: $STEPS"

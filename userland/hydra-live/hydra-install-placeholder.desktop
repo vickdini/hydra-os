@@ -1,4 +1,5 @@
 [Desktop Entry]
+# Written by Hydra: stands in for the installer's own entry until this version of Hydra has it
 Type=Application
 Name=Install Hydra
 GenericName=Hydra Setup

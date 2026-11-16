@@ -288,7 +288,8 @@ def main():
         args += ["-nic", f"user,model={a.nic}"]
     if a.usb:
         args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
-    iso = os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
+    # HYDRA_ISO: another boot ISO (e.g. the live-session test ISO of tools/build-image)
+    iso = os.environ.get("HYDRA_ISO") or os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
     if a.cd == "virtio":
         # The firmware reads the boot volume (the kernel and the files staged for the pool)
         # by DMA instead of the IDE CD-ROM's port I/O; Hydra needs no driver for it
