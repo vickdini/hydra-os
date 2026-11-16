@@ -250,6 +250,37 @@ fn cached_search_dirs(key: &[u8]) -> Vec<u64> {
     x86_64::instructions::interrupts::without_interrupts(|| SEARCH_DIRS.lock().get(key).cloned().unwrap_or_default())
 }
 
+/// Open references to pool objects (descriptors, mappings, the page cache) beyond what
+/// the file server was told: it hears of the first and the last ([`ZfsServer::open_ref`]).
+static OPEN_REFS: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Targets of symbolic links, so a path through one (Wine's `dosdevices/c:`, at every file
+/// a Windows program opens) needs no request to the file server. A link's target never
+/// changes; its object number is only reused after a name is removed, which forgets them
+/// all with the lookups ([`forget_names`]).
+static LINKS: spin::Mutex<alloc::collections::BTreeMap<u64, Vec<u8>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Most targets kept (the cache starts over when full).
+const LINKS_MAX: usize = 4096;
+
+fn cached_link(ino: u64) -> Option<Vec<u8>> {
+    x86_64::instructions::interrupts::without_interrupts(|| LINKS.lock().get(&ino).cloned())
+}
+
+/// Keeps the target of `ino` read by a request made at generation `gen` (unless a name
+/// changed since).
+fn cache_link(ino: u64, target: &[u8], gen: u64) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut c = LINKS.lock();
+        if names_gen() != gen {
+            return;
+        }
+        if c.len() >= LINKS_MAX {
+            c.clear();
+        }
+        c.insert(ino, target.to_vec());
+    })
+}
+
 /// Forgets every lookup's result (a name changed).
 pub fn forget_names() {
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -257,6 +288,7 @@ pub fn forget_names() {
         NAMES_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         c.clear();
         SEARCH_DIRS.lock().clear();
+        LINKS.lock().clear();
     });
 }
 
@@ -292,12 +324,18 @@ impl ZfsServer {
     /// # Returns
     ///
     /// A tuple `(value, reply_len)` on success, or a negative errno error code on failure.
-    fn request(&mut self, op: u32, params: impl FnOnce(&mut Writer)) -> Result<(u64, usize), i64> {
-        // The request and its reply pass through the server's window: this task's until
-        // the client is done (or turns to a FUSE file system)
+    /// Takes the server's window for this task until the client is done (no other task's
+    /// request or reply can pass meanwhile).
+    fn take_window(&mut self) {
         if self.window.is_none() {
             self.window = Some(service::hold_window(ENDPOINT_ZFS_SERVER));
         }
+    }
+
+    fn request(&mut self, op: u32, params: impl FnOnce(&mut Writer)) -> Result<(u64, usize), i64> {
+        // The request and its reply pass through the server's window: this task's until
+        // the client is done (or turns to a FUSE file system)
+        self.take_window();
         let window = match service::window(ENDPOINT_ZFS_SERVER) {
             Some(w) => w,
             None => {
@@ -917,10 +955,16 @@ impl ZfsServer {
             self.window = None;
             return fuse::readlink(ino);
         }
+        if let Some(t) = cached_link(ino) {
+            return Ok(t);
+        }
+        let gen = names_gen();
         let (n, _) = self.request(FS_READLINK, |w| {
             w.u64(ino);
         })?;
-        Ok(self.reply(n as usize).to_vec())
+        let target = self.reply(n as usize).to_vec();
+        cache_link(ino, &target, gen);
+        Ok(target)
     }
 
     /// Adds hard link `name` in `dir` to `ino`.
@@ -1083,9 +1127,23 @@ impl ZfsServer {
             self.window = None;
             return fuse::open_ref(ino);
         }
-        let _ = self.request(FS_OPEN_REF, |w| {
-            w.u64(ino);
+        // Only the first reference is the server's business (it keeps an unlinked object
+        // until the last goes): the kernel counts the others. The window is taken first, so
+        // the count and the request change together for every task (each open and close
+        // was a request: ~15,000 for a Wine start; the page cache keeps a reference on
+        // each file it holds, so reopening those costs nothing)
+        self.take_window();
+        let first = x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut c = OPEN_REFS.lock();
+            let n = c.entry(ino).or_insert(0);
+            *n += 1;
+            *n == 1
         });
+        if first {
+            let _ = self.request(FS_OPEN_REF, |w| {
+                w.u64(ino);
+            });
+        }
     }
 
     /// A descriptor on `ino` was closed.
@@ -1097,9 +1155,27 @@ impl ZfsServer {
             self.window = None;
             return fuse::release(ino);
         }
-        let _ = self.request(FS_RELEASE, |w| {
-            w.u64(ino);
+        self.take_window();
+        let last = x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut c = OPEN_REFS.lock();
+            match c.get_mut(&ino) {
+                Some(n) if *n > 1 => {
+                    *n -= 1;
+                    false
+                }
+                Some(_) => {
+                    c.remove(&ino);
+                    true
+                }
+                // Not counted here (cannot happen): the server's count decides
+                None => true,
+            }
         });
+        if last {
+            let _ = self.request(FS_RELEASE, |w| {
+                w.u64(ino);
+            });
+        }
     }
 
     /// Reports inotify event `mask` for `ino` (and its directory).
