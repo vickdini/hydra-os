@@ -462,6 +462,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             .unwrap_or(EPERM)
         }
         NR_PRCTL => match a[0] {
+            super::abac::PR_HYDRA_ACCESS => super::abac::prctl(a),
             PR_GET_AUXV => {
                 let auxv = current_auxv();
                 let n = auxv.len().min(a[2] as usize);

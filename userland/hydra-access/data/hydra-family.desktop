@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Family & accounts
+GenericName=Accounts, screen time and parental controls
+Comment=Add accounts, choose administrators, and set screen time, apps and websites for children
+Exec=hydra-family
+Icon=system-users
+Categories=Qt;KDE;Settings;System;
+Keywords=accounts;users;family;parental;child;screen time;password;administrator;

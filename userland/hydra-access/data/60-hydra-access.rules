@@ -1,0 +1,17 @@
+// Hydra access control: administrative tasks follow the access rules ("Administrative
+// actions" in Hydra Access Center). hydra-access-check prints "no" when a rule refuses the
+// user the task; polkit then refuses it without asking for a password.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "root")
+        return polkit.Result.NOT_HANDLED;
+    try {
+        var out = polkit.spawn(["/usr/libexec/hydra-access-check", "polkit", action.id, subject.user]);
+        if (out.trim() == "no") {
+            polkit.log("hydra-access: " + action.id + " refused for " + subject.user);
+            return polkit.Result.NO;
+        }
+    } catch (e) {
+        polkit.log("hydra-access: check failed: " + e);
+    }
+    return polkit.Result.NOT_HANDLED;
+});

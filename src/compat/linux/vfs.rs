@@ -755,17 +755,21 @@ pub(crate) fn may_access(attr: &Attr, uid: u32, gid: u32, want: u32) -> bool {
         // root may read/write anything and execute anything with an x bit (or a directory)
         return want & 1 == 0 || attr.mode & 0o111 != 0 || attr.is_dir();
     }
-    if let Some(r) = super::acl::check(attr, uid, gid, want) {
-        return r;
-    }
-    let bits = if attr.uid == uid {
-        (attr.mode >> 6) & 7
-    } else if attr.gid == gid || super::proc::in_supplementary_groups(attr.gid) {
-        (attr.mode >> 3) & 7
-    } else {
-        attr.mode & 7
+    let unix = match super::acl::check(attr, uid, gid, want) {
+        Some(r) => r,
+        None => {
+            let bits = if attr.uid == uid {
+                (attr.mode >> 6) & 7
+            } else if attr.gid == gid || super::proc::in_supplementary_groups(attr.gid) {
+                (attr.mode >> 3) & 7
+            } else {
+                attr.mode & 7
+            };
+            bits & want == want
+        }
     };
-    bits & want == want
+    // Access policies (abac.rs) may only take away what the mode bits and ACLs allow
+    unix && super::abac::check(attr, want)
 }
 
 // ----------------------------------------------------------------------
@@ -1308,8 +1312,10 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             _ => 6,
         };
         if !may_access(&attr, c.euid, c.egid, if wants_write { want | 2 } else { want }) {
+            super::abac::note_path(ino, &raw);
             return Err(EACCES);
         }
+        super::abac::note_path(ino, &raw);
     }
     let mut no_truncate = false;
     if flags & O_PATH == 0 {
@@ -1483,7 +1489,13 @@ fn xattr_op(ino: u64, k: u64, name_ptr: u64, value: u64, size: u64, flags: u64) 
             Ok(v) => out(&v[..v.len().min(65536)]),
             Err(e) => e,
         },
-        3 => ZfsClient::removexattr(ino, &name).map_or_else(|e| e, |_| 0),
+        3 => {
+            let r = ZfsClient::removexattr(ino, &name).map_or_else(|e| e, |_| 0);
+            if &name[..] == super::abac::LABELS {
+                super::abac::labels_changed();
+            }
+            r
+        }
         _ => {
             if flags & !3 != 0 {
                 return EINVAL;
@@ -1511,7 +1523,11 @@ fn xattr_op(ino: u64, k: u64, name_ptr: u64, value: u64, size: u64, flags: u64) 
             if let Some(d) = acl_kind {
                 return super::acl::set(&attr, d, &data, flags as u32);
             }
-            ZfsClient::setxattr(ino, &name, &data, flags as u32).map_or_else(|e| e, |_| 0)
+            let r = ZfsClient::setxattr(ino, &name, &data, flags as u32).map_or_else(|e| e, |_| 0);
+            if &name[..] == super::abac::LABELS {
+                super::abac::labels_changed();
+            }
+            r
         }
     }
 }
@@ -2294,6 +2310,15 @@ fn rename_at(olddir: i64, oldp: u64, newdir: i64, newp: u64, flags: u64) -> i64 
         if let Ok(src) = zfs(|s| s.lookup(sdir, &sname)) {
             if sticky_denied(sdir, src, c.euid)? {
                 return Err(EPERM);
+            }
+            // Access policies: moving a file away from its folder needs the delete right
+            if super::abac::active() && sdir != ddir && !super::abac::check_delete(&ZfsClient::getattr(src)?) {
+                return Err(EACCES);
+            }
+        }
+        if let Ok(dst) = zfs(|s| s.lookup(ddir, &dname)) {
+            if super::abac::active() && !super::abac::check_delete(&ZfsClient::getattr(dst)?) {
+                return Err(EACCES);
             }
         }
         if let Ok(dst) = zfs(|s| s.lookup(ddir, &dname)) {
@@ -3476,6 +3501,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 if let Ok(victim) = zfs(|s| s.lookup(dir, name)) {
                     if sticky_denied(dir, victim, c.euid)? {
                         return Err(EPERM);
+                    }
+                    // Access policies: deleting needs the delete right on the file
+                    if super::abac::active() && !super::abac::check_delete(&ZfsClient::getattr(victim)?) {
+                        return Err(EACCES);
                     }
                 }
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))

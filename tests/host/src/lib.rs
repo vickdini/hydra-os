@@ -179,6 +179,15 @@ pub mod compress;
 
 pub mod compat {
     pub mod linux {
+        #[path = "../../../../../src/compat/linux/abac_core.rs"]
+        pub mod abac_core;
+        /// *stub* The kernel glue of the access-control engine: what proc.rs calls.
+        pub mod abac {
+            /// *stub* No console login on the host.
+            pub fn console_subject() -> u32 {
+                0
+            }
+        }
         #[path = "../../../../../src/compat/linux/bpf.rs"]
         pub mod bpf;
         #[path = "../../../../../src/compat/linux/epoll.rs"]

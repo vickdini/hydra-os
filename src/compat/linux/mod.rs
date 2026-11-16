@@ -4,6 +4,8 @@
 //! allowing unmodified standard binaries (e.g. musl, BusyBox, Qt6/KDE runtimes)
 //! to execute natively on Hydra Microkernel.
 
+pub mod abac;
+pub mod abac_core;
 pub mod acl;
 pub mod admin;
 pub mod aio;

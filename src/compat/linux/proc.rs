@@ -309,6 +309,9 @@ pub struct Process {
     /// `/proc/<pid>/oom_score_adj` (-1000..=1000). Hydra has no OOM killer: it is kept
     /// for the programs that set and read it.
     pub oom_score_adj: i32,
+    /// Access-control subject (attribute set index in abac.rs; 0 none): set for a login
+    /// session by root, inherited by every child, kept across `execve`.
+    pub abac: u32,
     /// Execution domain (`personality(2)`); inherited by children and kept across `execve`.
     pub personality: u32,
     /// Process sharing this one's root and working directory (`clone` with `CLONE_FS`
@@ -358,11 +361,12 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
     let (pgid, sid, actions, mask, groups, cgroup, ns, oom_score_adj) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {
             let mask = parent.threads.values().next().map(|t| t.mask).unwrap_or(0);
-            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid), (parent.oom_score_adj, parent.personality))
+            (parent.pgid, parent.sid, parent.actions, mask, parent.groups.clone(), parent.cgroup.clone(), parent.ns.for_child(pid), (parent.oom_score_adj, parent.personality, parent.abac))
         }
-        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default(), (0, 0)),
+        // Started by the kernel (the console shell): the console login's subject
+        None => (pid, pid, [SigAction::default(); NSIG + 1], 0, Vec::new(), None, super::ns::Ns::default(), (0, 0, super::abac::console_subject())),
     };
-    let (oom_score_adj, personality) = oom_score_adj;
+    let (oom_score_adj, personality, abac) = oom_score_adj;
     let mut threads = BTreeMap::new();
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
     procs.insert(
@@ -392,6 +396,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             child_ticks: (0, 0),
             ns,
             oom_score_adj,
+            abac,
             personality,
             fs_peer: 0,
         }),
@@ -694,6 +699,16 @@ pub fn visible_pids() -> Vec<u64> {
 pub fn supplementary_groups() -> Vec<u32> {
     let (_, pid) = current_ids();
     PROCS.lock().get(&pid).map(|p| p.groups.to_vec()).unwrap_or_default()
+}
+
+/// The access-control subject of process `pid` (0: none).
+pub fn abac_subject(pid: u64) -> u32 {
+    PROCS.lock().get(&pid).map_or(0, |p| p.abac)
+}
+
+/// Sets process `pid`'s access-control subject; `false` if there is no such process.
+pub fn set_abac_subject(pid: u64, subject: u32) -> bool {
+    PROCS.lock().get_mut(&pid).filter(|p| !p.zombie).map(|p| p.abac = subject).is_some()
 }
 
 /// Checks whether `gid` is present in the calling process's supplementary groups.

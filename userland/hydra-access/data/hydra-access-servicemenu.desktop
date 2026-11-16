@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/octet-stream;inode/directory;
+Actions=hydraClassify;hydraEffective;
+X-KDE-Submenu=Access control
+
+[Desktop Action hydraClassify]
+Name=Classification…
+Icon=tag
+Exec=hydra-access-center --classify %f
+
+[Desktop Action hydraEffective]
+Name=Effective access…
+Icon=preferences-system-privacy
+Exec=hydra-access-center --effective %f

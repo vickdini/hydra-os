@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/reboot.h>
 #include <ftw.h>
 #include <sys/socket.h>
@@ -695,7 +696,10 @@ static int remove_entry(const char *p, const struct stat *st, int type, struct F
 /* Starts user `uid`'s session bus at <runtime>/bus, as systemd's user dbus.socket does
  * (pam_systemd then gives sessions DBUS_SESSION_BUS_ADDRESS, so every program of the
  * user, in or outside the desktop, reaches the same bus). */
-static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
+struct session;
+static void attach_access(const struct session *se, pid_t leader);
+
+static void start_user_bus(const struct session *se, unsigned uid, unsigned gid, const char *runtime) {
     char bus[96], addr[128];
     snprintf(bus, sizeof bus, "%s/bus", runtime);
     if (bus_alive(bus))
@@ -723,6 +727,9 @@ static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
                 logmsg("cannot move the session bus into %s", group);
             close(g);
         }
+        /* The user's access attributes: apps the bus starts are the user's too */
+        if (se)
+            attach_access(se, getpid());
         if (pw)
             initgroups(pw->pw_name, gid);
         if (setgid(gid) < 0 || setuid(uid) < 0)
@@ -753,7 +760,7 @@ static void start_user_bus(unsigned uid, unsigned gid, const char *runtime) {
 /* Creates /run/user/<uid> for a user's session and its session bus. A user's first session
  * starts from an empty directory, as from the tmpfs systemd mounts there (files of an
  * earlier boot are removed). */
-static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) {
+static void make_runtime_dir(const struct session *se, unsigned uid, unsigned gid, char *out, size_t len) {
     snprintf(out, len, "/run/user/%u", uid);
     mkdir("/run/user", 0755);
     mkdir(out, 0700);
@@ -767,7 +774,93 @@ static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) 
     snprintf(bus, sizeof bus, "%s/bus", out);
     if (others <= 1 && !bus_alive(bus))
         nftw(out, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
-    start_user_bus(uid, gid, out);
+    start_user_bus(se, uid, gid, out);
+}
+
+/* ---------- access control (Hydra ABAC, see src/compat/linux/abac.rs) ---------- */
+
+#define PR_HYDRA_ACCESS 0x48594401
+#define ACCESS_SET_SUBJECT 2
+#define ACCESS_EVALUATE 5
+#define SUBJECTS_DIR "/etc/hydra/access/subjects/"
+
+/* The attributes of `se`'s user, as the kernel takes them (key=value lines): who it is
+ * (name, uid, groups), the session (class, local or remote), then what the administrator
+ * set (/etc/hydra/access/subjects/<user>, written by hydra-access). */
+static int session_attrs(const struct session *se, char *buf, size_t len) {
+    int n = snprintf(buf, len, "name=%s\nuid=%u\nsession.class=%s\nsession.remote=%d\n", se->user, se->uid, se->klass, se->remote ? 1 : 0);
+    gid_t groups[64];
+    int ng = 64;
+    if (getgrouplist(se->user, se->gid, groups, &ng) > 0 && ng > 0) {
+        n += snprintf(buf + n, len - n, "groups=");
+        for (int i = 0; i < ng && n < (int)len - 64; i++) {
+            struct group *g = getgrgid(groups[i]);
+            if (g)
+                n += snprintf(buf + n, len - n, "%s%s", i ? "," : "", g->gr_name);
+        }
+        n += snprintf(buf + n, len - n, "\n");
+    }
+    char path[300];
+    snprintf(path, sizeof path, SUBJECTS_DIR "%s", se->user);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        size_t r = fread(buf + n, 1, len - n - 1, f);
+        n += (int)r;
+        fclose(f);
+    }
+    buf[n] = 0;
+    return n;
+}
+
+/* Gives the session leader (and so every process of the session) its user's attributes. */
+static void attach_access(const struct session *se, pid_t leader) {
+    if (leader <= 1)
+        return;
+    char buf[8192];
+    int n = session_attrs(se, buf, sizeof buf);
+    if (prctl(PR_HYDRA_ACCESS, ACCESS_SET_SUBJECT, (unsigned long)leader, (unsigned long)buf, (unsigned long)n) < 0)
+        logmsg("session %s: cannot set access attributes: %s", se->id, strerror(errno));
+}
+
+/* Whether the access policy lets `se`'s user keep a session now (the "session" action:
+ * Family screen time, Enterprise sign-in hours). 1 yes, 0 no. */
+static int session_allowed(const struct session *se) {
+    char q[9000], out[512];
+    int n = session_attrs(se, q, sizeof q - 64);
+    n += snprintf(q + n, sizeof q - n, "\n--\naction=session\ncategory=session\n");
+    long r = prctl(PR_HYDRA_ACCESS, ACCESS_EVALUATE, (unsigned long)q, (unsigned long)n | (unsigned long)(sizeof out - 1) << 32, (unsigned long)out);
+    if (r <= 0)
+        return 1; /* no policy */
+    out[r] = 0;
+    /* enforced=<actions> ...: `x` = may use the computer */
+    const char *e = strstr(out, "enforced=");
+    const char *sp = e ? strchr(e, ' ') : NULL;
+    if (!e || !sp)
+        return 1;
+    for (const char *c = e + 9; c < sp; c++)
+        if (*c == 'x')
+            return 1;
+    return 0;
+}
+
+/* Moves the kernel's access audit records (denials, staged-rule differences) to
+ * /var/log/hydra/access.log, where Hydra Access Center reads them. */
+#define ACCESS_READ_AUDIT 4
+static void drain_access_audit(void) {
+    static char buf[65536];
+    long n = prctl(PR_HYDRA_ACCESS, ACCESS_READ_AUDIT, 0UL, (unsigned long)buf, (unsigned long)sizeof buf);
+    if (n <= 0)
+        return;
+    mkdir("/var/log/hydra", 0755);
+    int fd = open("/var/log/hydra/access.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
+    if (fd < 0)
+        return;
+    /* Administrators (sudo group) read it */
+    struct group *g = getgrnam("sudo");
+    if (g)
+        if (fchown(fd, 0, g->gr_gid) < 0) {}
+    if (write(fd, buf, (size_t)n) < 0) {}
+    close(fd);
 }
 
 static int add_session(unsigned uid, pid_t leader, const char *service, const char *type, const char *klass, const char *desktop,
@@ -822,6 +915,7 @@ static int add_session(unsigned uid, pid_t leader, const char *service, const ch
     }
     logmsg("session %s for %s (uid %u, %s, %s, vt %u)", se->id, se->user, uid, se->klass, se->type, se->vtnr);
     place_in_scope(s, leader);
+    attach_access(se, leader);
     save_state();
     /* A new graphical session takes the display, as a VT switch to it would */
     if (se->on_seat && (!strcmp(se->klass, "user") || !strcmp(se->klass, "greeter")))
@@ -1177,7 +1271,7 @@ static DBusMessage *create_session(DBusMessage *m) {
         return error(m, DBUS_ERROR_LIMITS_EXCEEDED, "too many sessions");
     struct session *se = &sessions[s];
     char runtime[64];
-    make_runtime_dir(se->uid, se->gid, runtime, sizeof runtime);
+    make_runtime_dir(se, se->uid, se->gid, runtime, sizeof runtime);
     int p[2];
     if (pipe2(p, O_CLOEXEC) < 0) {
         remove_session(s);
@@ -1846,7 +1940,7 @@ int main(int argc, char **argv) {
         int s = add_session((unsigned)initial_uid, 0, "hydra", "wayland", "user", "KDE", "seat0", 2, "tty2", "", 0, "", "");
         char runtime[64];
         if (s >= 0)
-            make_runtime_dir(sessions[s].uid, sessions[s].gid, runtime, sizeof runtime);
+            make_runtime_dir(&sessions[s], sessions[s].uid, sessions[s].gid, runtime, sizeof runtime);
     }
     logmsg("seat0 ready on %s", BUS_NAME);
 
@@ -1869,8 +1963,21 @@ int main(int argc, char **argv) {
                 p[n].events = POLLIN;
                 owner[n++] = i;
             }
-        if (poll(p, n, -1) < 0 && errno != EINTR)
+        /* Every 30 s: sessions outside their allowed hours end */
+        if (poll(p, n, 30000) < 0 && errno != EINTR)
             break;
+        static time_t last_check;
+        time_t t = time(NULL);
+        if (t - last_check >= 30) {
+            last_check = t;
+            drain_access_audit();
+            for (int i = 0; i < MAX_SESSIONS; i++)
+                if (sessions[i].used && strcmp(sessions[i].klass, "user") == 0 && !session_allowed(&sessions[i])) {
+                    logmsg("session %s of %s: outside its allowed hours, ending it", sessions[i].id, sessions[i].user);
+                    if (sessions[i].leader > 1)
+                        kill(sessions[i].leader, SIGTERM);
+                }
+        }
         for (int k = 1; k < n; k++) {
             if (!p[k].revents)
                 continue;

@@ -995,6 +995,74 @@ X-KDE-autostart-phase=2
             }
         }
     }
+    access_control_files(t, s)?;
+    Ok(())
+}
+
+// ---- Group D: access control (ABAC) apps and their system files ----
+
+/// Files of Hydra's access control apps (userland/hydra-access): Family & accounts, Hydra
+/// Access Center, their root helper and polkit action, the polkit rule that lets access
+/// rules decide administrative tasks, the Dolphin menu, and the sign-in hours check in
+/// SDDM's PAM stack (src/compat/linux/abac.rs is the kernel side).
+fn access_control_files(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
+    const PY: [(&str, &str); 7] = [
+        ("__init__.py", include_str!("../../../userland/hydra-access/hydra_access/__init__.py")),
+        ("core.py", include_str!("../../../userland/hydra-access/hydra_access/core.py")),
+        ("helper.py", include_str!("../../../userland/hydra-access/hydra_access/helper.py")),
+        ("webfilter.py", include_str!("../../../userland/hydra-access/hydra_access/webfilter.py")),
+        ("ui_common.py", include_str!("../../../userland/hydra-access/hydra_access/ui_common.py")),
+        ("family.py", include_str!("../../../userland/hydra-access/hydra_access/family.py")),
+        ("center.py", include_str!("../../../userland/hydra-access/hydra_access/center.py")),
+    ];
+    for (name, text) in PY {
+        t.file(s, &alloc::format!("/usr/lib/hydra-access/hydra_access/{}", name), text)?;
+    }
+    t.file_bytes(s, "/usr/bin/hydra-family", include_bytes!("../../../userland/hydra-access/data/hydra-family"), 0o755)?;
+    t.file_bytes(s, "/usr/bin/hydra-access-center", include_bytes!("../../../userland/hydra-access/data/hydra-access-center"), 0o755)?;
+    t.file_bytes(s, "/usr/libexec/hydra-access-helper", include_bytes!("../../../userland/hydra-access/data/hydra-access-helper"), 0o755)?;
+    t.file(s, "/usr/share/applications/hydra-family.desktop", include_str!("../../../userland/hydra-access/data/hydra-family.desktop"))?;
+    t.file(s, "/usr/share/applications/hydra-access-center.desktop", include_str!("../../../userland/hydra-access/data/hydra-access-center.desktop"))?;
+    t.file_bytes(s, "/usr/share/kio/servicemenus/hydra-access.desktop", include_bytes!("../../../userland/hydra-access/data/hydra-access-servicemenu.desktop"), 0o755)?;
+    t.file(s, "/usr/share/polkit-1/actions/org.hydra.access.policy", include_str!("../../../userland/hydra-access/data/org.hydra.access.policy"))?;
+    t.file(s, "/etc/polkit-1/rules.d/60-hydra-access.rules", include_str!("../../../userland/hydra-access/data/60-hydra-access.rules"))?;
+    t.dir(s, "/etc/hydra/access/subjects")?;
+    let have_check = match boot_binary(s, "/bin/hydra-access-check.elf") {
+        Some(bin) => {
+            t.file_bytes(s, "/usr/libexec/hydra-access-check", &bin, 0o755)?;
+            true
+        }
+        None => lookup_path(s, t.root, "/usr/libexec/hydra-access-check").is_some(),
+    };
+    // Sign-in hours (Family screen time, Enterprise): SDDM asks the access policy before a
+    // session starts (pam_exec; the check allows everything while no policy says otherwise)
+    const PAM_LINE: &str = "account required pam_exec.so quiet /usr/libexec/hydra-access-check login";
+    if have_check {
+        if let Some(ino) = lookup_path(s, t.root, "/etc/pam.d/sddm") {
+            let size = s.getattr(ino)?.size as usize;
+            let mut cur = alloc::vec![0u8; size];
+            let n = s.read(ino, 0, &mut cur)?;
+            cur.truncate(n);
+            if let Ok(text) = core::str::from_utf8(&cur) {
+                if !text.contains("hydra-access-check") {
+                    let mut out = String::new();
+                    let mut done = false;
+                    for line in text.lines() {
+                        out.push_str(line);
+                        out.push('\n');
+                        if !done && line.trim_start().starts_with("@include common-account") {
+                            out.push_str(PAM_LINE);
+                            out.push('\n');
+                            done = true;
+                        }
+                    }
+                    if done {
+                        t.file_bytes(s, "/etc/pam.d/sddm", out.as_bytes(), 0o644)?;
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1135,6 +1203,8 @@ pub fn populate(root: &str) -> Result<(), &'static str> {
         crate::kprintln!("[devices] writing the device tree into {} failed at {}: errno {}", root, tree.at, -e);
         return Err("could not write the device tree");
     }
+    // Access policies (Group D): the saved policy is enforced from the first setup on
+    super::abac::boot_load(root);
     // No sync of its own: the changes are visible at once, and the background commit
     // writes them (most boots only give the device nodes back to root, which took a
     // second's sync before the login screen could start)

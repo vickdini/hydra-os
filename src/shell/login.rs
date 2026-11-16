@@ -204,6 +204,7 @@ pub fn sudo_remember() {
 /// * `state` - Mutable reference to the shell session state.
 pub fn login(state: &mut ShellState) {
     SUDO_TICK.store(0, core::sync::atomic::Ordering::Relaxed);
+    crate::compat::linux::abac::console_login(None);
     if !available() {
         set_color(Color::Yellow, Color::Black);
         crate::println!("[!] No installed system with accounts in {}: the console is not protected.", SYSTEM_ROOT);
@@ -221,6 +222,9 @@ pub fn login(state: &mut ShellState) {
         match account(&name) {
             Some(acct) if ok && acct.admin => {
                 state.set_user(&acct.name, acct.uid, acct.gid);
+                // The user's access-control attributes go with the programs the shell starts
+                let attrs = system_file(&alloc::format!("/etc/hydra/access/subjects/{}", acct.name));
+                crate::compat::linux::abac::console_login(attrs.as_deref());
                 set_color(Color::LightGreen, Color::Black);
                 crate::println!("[+] Logged in as '{}' (UID {}).\n", acct.name, acct.uid);
                 set_color(Color::White, Color::Black);
