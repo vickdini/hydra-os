@@ -32,7 +32,10 @@ use spin::Mutex;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 use super::types::{Fletcher4, Uberblock, VdevLabel, BlockPointer, UBERBLOCK_RING, ZFS_BLOCK_SIZE};
-use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_REPLY, MSG_BLOCK_WRITE};
+use crate::ipc::protocol::{
+    BLOCK_READV_MAX, BLOCK_READV_TABLE, ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_READV,
+    MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
+};
 use crate::ipc::service;
 use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec, FRAME_ALLOCATOR};
 
@@ -140,6 +143,10 @@ fn driver_request(label: u32, args: [u64; 4], what: &'static str) -> Result<crat
     }
 }
 
+/// The disk driver serves vectored reads (`MSG_BLOCK_READV`); cleared when it answers
+/// one with `ENOSYS` (an older driver).
+static READV_OK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// The block device under the pool.
 pub struct Vdev {
     backend: Backend,
@@ -232,6 +239,79 @@ impl Vdev {
                 Ok(())
             }
         }
+    }
+
+    /// Reads several runs of blocks, each `(first block, buffer of whole blocks)`: as many
+    /// as fit in one vectored driver request (`MSG_BLOCK_READV`: up to
+    /// [`BLOCK_READV_MAX`] runs and the window's data area) go in one request, which the
+    /// driver may have in flight at once; a run that fits in no such request, and every
+    /// run when the driver lacks vectored reads, is read on its own.
+    ///
+    /// # Returns
+    /// `Ok(())` when every run was read, or the first error.
+    pub fn read_runs(&self, runs: &mut [(u64, Vec<u8>)]) -> Result<(), &'static str> {
+        let vectored = matches!(self.backend, Backend::Driver) && READV_OK.load(core::sync::atomic::Ordering::Relaxed);
+        let mut i = 0;
+        while i < runs.len() {
+            // The runs that fit together from i on
+            let mut n = 0;
+            let mut bytes = 0;
+            while vectored && i + n < runs.len() && n < BLOCK_READV_MAX && bytes + runs[i + n].1.len() <= BLOCK_READV_TABLE {
+                bytes += runs[i + n].1.len();
+                n += 1;
+            }
+            if n < 2 {
+                let (block, buf) = &mut runs[i];
+                self.read(*block, buf)?;
+                i += 1;
+                continue;
+            }
+            let group = &mut runs[i..i + n];
+            let mut total = 0u64;
+            for r in group.iter() {
+                if r.0 + (r.1.len() / ZFS_BLOCK_SIZE) as u64 > self.total_blocks {
+                    return Err("ZFS: block read past end of vdev");
+                }
+            }
+            {
+                let window = driver_window()?;
+                let mut off = 0usize;
+                for (k, (block, buf)) in group.iter().enumerate() {
+                    let count = (buf.len() / ZFS_BLOCK_SIZE) as u64;
+                    let entry = [*block, count, off as u64];
+                    for (j, v) in entry.iter().enumerate() {
+                        let at = BLOCK_READV_TABLE + (k * 3 + j) * 8;
+                        window[at..at + 8].copy_from_slice(&v.to_le_bytes());
+                    }
+                    off += buf.len();
+                    total += count;
+                }
+            }
+            let request = crate::ipc::Message::with_args(MSG_BLOCK_READV, [n as u64, 0, 0, 0]);
+            match service::call(ENDPOINT_BLOCK_DEV, request, DISK_TIMEOUT_TICKS) {
+                Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] == 0 && r.args[1] == total => {
+                    let window = driver_window()?;
+                    let mut off = 0usize;
+                    for (_, buf) in group.iter_mut() {
+                        let len = buf.len();
+                        buf.copy_from_slice(&window[off..off + len]);
+                        off += len;
+                    }
+                }
+                r => {
+                    // A driver without vectored reads (ENOSYS: no more vectored requests
+                    // to it) or one that failed: each run on its own
+                    if matches!(r, Ok(ref m) if m.label == MSG_BLOCK_REPLY && m.args[0] as i64 == -38) {
+                        READV_OK.store(false, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    for (block, buf) in group.iter_mut() {
+                        self.read(*block, buf)?;
+                    }
+                }
+            }
+            i += n;
+        }
+        Ok(())
     }
 
     /// Writes `buf` (a whole number of blocks) starting at `block`.
@@ -744,38 +824,45 @@ impl Spa {
         }
         want.sort_unstable_by_key(|bp| bp.block);
         want.dedup_by_key(|bp| bp.block);
-        let mut buf: Vec<u8> = alloc::vec![0u8; ZFS_BLOCK_SIZE * MAX_RUN];
+        // Runs: the wanted blocks within a driver window of each other in one run (a
+        // request costs about the same whatever its size, so the blocks in between come
+        // along, kept unchecked as by read_around); the runs then go to the driver
+        // together, as few vectored requests as they fit in (Vdev::read_runs)
+        let mut spans: Vec<(usize, usize)> = Vec::new(); // (first index in want, wanted blocks)
+        let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut i = 0;
         while i < want.len() {
-            // One request for the wanted blocks within a driver window of each other: a
-            // request costs about the same whatever its size, so the blocks in between
-            // come along (kept unchecked, as by read_around) rather than each wanted block
-            // being a request of its own
             let start = want[i].block;
             let mut n = 1;
             while i + n < want.len() && want[i + n].block < start + MAX_RUN as u64 && want[i + n].block - want[i + n - 1].block <= READ_AROUND as u64 {
                 n += 1;
             }
             let len = (want[i + n - 1].block - start + 1) as usize;
-            let run = &mut buf[..len * ZFS_BLOCK_SIZE];
-            if self.vdev.read(start, run).is_ok() {
-                self.cache.misses += n as u64;
-                let mut next = 0;
-                for b in 0..len {
-                    let data: &[u8; ZFS_BLOCK_SIZE] = run[b * ZFS_BLOCK_SIZE..(b + 1) * ZFS_BLOCK_SIZE].try_into().unwrap();
-                    let block = start + b as u64;
-                    if next < n && want[i + next].block == block {
-                        let bp = want[i + next];
-                        next += 1;
-                        if Fletcher4::compute(&data[..bp.lsize as usize]) == bp.checksum {
-                            self.cache.put(block, data);
-                        }
-                    } else {
-                        self.cache.put_unverified(block, data);
+            spans.push((i, n));
+            runs.push((start, alloc::vec![0u8; len * ZFS_BLOCK_SIZE]));
+            i += n;
+        }
+        if self.vdev.read_runs(&mut runs).is_err() {
+            return;
+        }
+        for (&(i, n), (start, run)) in spans.iter().zip(runs.iter()) {
+            let start = *start;
+            let len = run.len() / ZFS_BLOCK_SIZE;
+            self.cache.misses += n as u64;
+            let mut next = 0;
+            for b in 0..len {
+                let data: &[u8; ZFS_BLOCK_SIZE] = run[b * ZFS_BLOCK_SIZE..(b + 1) * ZFS_BLOCK_SIZE].try_into().unwrap();
+                let block = start + b as u64;
+                if next < n && want[i + next].block == block {
+                    let bp = want[i + next];
+                    next += 1;
+                    if Fletcher4::compute(&data[..bp.lsize as usize]) == bp.checksum {
+                        self.cache.put(block, data);
                     }
+                } else {
+                    self.cache.put_unverified(block, data);
                 }
             }
-            i += n;
         }
     }
 
