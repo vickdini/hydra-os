@@ -131,6 +131,25 @@ impl Xhci {
         Ok(())
     }
 
+    /// Whether device `di` was unplugged: its root port has nothing connected, or (behind
+    /// a hub that reported a change) its hub port has nothing connected.
+    pub(crate) fn device_gone(&mut self, di: usize) -> bool {
+        let (port, depth, parent, parent_port) = {
+            let d = &self.devices[di];
+            (d.port, d.depth, d.parent, d.parent_port)
+        };
+        if self.portsc(port) & crate::PORT_CCS == 0 {
+            return true;
+        }
+        if depth == 0 || !self.hub_changes.contains(&parent) {
+            return false;
+        }
+        match self.dev_of_slot(parent) {
+            Some(hi) => self.hub_port_status(hi, parent_port).is_none_or(|st| st & ST_CONNECTION == 0),
+            None => true,
+        }
+    }
+
     /// Port `port`'s status of hub `di`: status in the low half, changes in the high half.
     fn hub_port_status(&mut self, di: usize, port: u32) -> Option<u32> {
         let n = self.control(di, 0xA3, 0, 0, port as u16, 4).ok()?;

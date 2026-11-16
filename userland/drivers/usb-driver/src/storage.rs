@@ -23,7 +23,7 @@ use hydra_rt::protocol::{
 };
 use hydra_rt::Message;
 
-use crate::{println, sys, Deadline, Dma, Ring, Xhci, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS, DEV_IN_CTX, PAGE, PORT_CCS, TRB_CH, TRB_CONFIGURE_EP, TRB_IOC, TRB_ISP, TRB_NORMAL};
+use crate::{println, sys, Deadline, Dma, Ring, Xhci, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS, DEV_IN_CTX, PAGE, TRB_CH, TRB_CONFIGURE_EP, TRB_IOC, TRB_ISP, TRB_NORMAL};
 
 /// Most USB disks served at once.
 pub const MAX_DISKS: usize = 8;
@@ -350,7 +350,7 @@ impl Xhci {
     /// Waits for the TD of `trbs` on bulk endpoint `dci` to finish; returns the bytes
     /// moved, or the completion code (0: timed out, or the device is gone).
     fn bulk_wait(&mut self, di: usize, dci: u32, trbs: &[(u64, u32)], ms: u64) -> Result<usize, u32> {
-        let (slot, root) = (self.devices[di].slot, self.devices[di].port);
+        let slot = self.devices[di].slot;
         let total: usize = trbs.iter().map(|t| t.1 as usize).sum();
         let d = Deadline::after_ms(ms);
         loop {
@@ -366,7 +366,7 @@ impl Xhci {
                     code => return Err(code),
                 }
             }
-            if self.portsc(root) & PORT_CCS == 0 {
+            if self.device_gone(di) {
                 return Err(0);
             }
             if d.expired() {
@@ -449,7 +449,7 @@ impl Xhci {
     /// A transfer that failed with completion `code` (0: timed out or device gone):
     /// the endpoint is stopped and reset, then a reset recovery.
     fn transport_failed(&mut self, di: usize, dci: u32, code: u32) -> &'static str {
-        if self.portsc(self.devices[di].port) & PORT_CCS == 0 {
+        if self.device_gone(di) {
             return "the device is gone";
         }
         if code == 0 {
