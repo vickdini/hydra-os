@@ -572,10 +572,15 @@ pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Messa
     if svc.server.load(Ordering::Acquire) == 0 && !crate::task::supervisor::revive(endpoint) {
         return Err(ENODEV);
     }
-    match call_once(endpoint, request, timeout_ticks) {
+    let t0 = crate::compat::linux::prof::start();
+    let r = match call_once(endpoint, request, timeout_ticks) {
         Err(ETIMEDOUT) if !server_alive(svc) && crate::task::supervisor::revive(endpoint) => call_once(endpoint, request, timeout_ticks),
         r => r,
+    };
+    if endpoint == super::protocol::ENDPOINT_BLOCK_DEV {
+        crate::compat::linux::prof::disk_call(request.label == super::protocol::MSG_BLOCK_READ, request.args[1], t0);
     }
+    r
 }
 
 /// Checks whether the registered server process for `svc` is still running.

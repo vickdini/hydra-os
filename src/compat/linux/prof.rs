@@ -59,6 +59,21 @@ pub fn fs_request(op: u32, t0: u64) {
     }
 }
 
+/// Disk driver calls (reads, other), the blocks they moved and their time.
+static DISK: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+
+/// Records a call to the disk driver started at `t0`: a read (or another request) of
+/// `blocks` blocks.
+#[inline]
+pub fn disk_call(read: bool, blocks: u64, t0: u64) {
+    if t0 != 0 {
+        let d = &DISK[if read { 0 } else { 1 }];
+        d[0].fetch_add(1, Relaxed);
+        d[1].fetch_add(blocks, Relaxed);
+        d[2].fetch_add(crate::arch::pit::now_ns().saturating_sub(t0), Relaxed);
+    }
+}
+
 /// The task whose user-mode instruction pointer is sampled at each timer tick (0: none),
 /// and the samples (a ring of the last [`SAMPLES`]).
 pub static SAMPLE_TASK: AtomicU64 = AtomicU64::new(0);
@@ -293,6 +308,11 @@ pub fn reset() {
         FS_CALLS[i].store(0, Relaxed);
         FS_NANOS[i].store(0, Relaxed);
     }
+    for d in DISK.iter() {
+        for c in d.iter() {
+            c.store(0, Relaxed);
+        }
+    }
     for i in 0..7 {
         LAT_PENDING[i].store(0, Relaxed);
         LAT_RUN[i].store(0, Relaxed);
@@ -306,6 +326,10 @@ pub fn show(top: usize) {
         let n = FAULTS[k].load(Relaxed);
         let ns = FAULT_NANOS[k].load(Relaxed);
         crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {}", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, FAULT_NAMES[k]);
+    }
+    for (k, name) in ["disk reads", "other disk requests"].iter().enumerate() {
+        let (n, b, ns) = (DISK[k][0].load(Relaxed), DISK[k][1].load(Relaxed), DISK[k][2].load(Relaxed));
+        crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {} ({} blocks)", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, name, b);
     }
     lat_show("wakeup -> ready", &LAT_PENDING);
     lat_show("ready -> running", &LAT_RUN);
