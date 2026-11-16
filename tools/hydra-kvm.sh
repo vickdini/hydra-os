@@ -12,8 +12,9 @@ R=/opt/u2604
 POOL=/root/pool/hydrapool.qcow2
 [ -x $R/usr/bin/qemu-system-x86_64 ] || { echo "[!] No QEMU in $R (see the header of this script)"; exit 1; }
 [ -e /dev/kvm ] || { echo "[!] /dev/kvm is missing: WSL2 needs nested virtualization"; exit 1; }
-if pgrep -x qemu-system-x86 >/dev/null || pgrep -f "^qemu-system-x86_64" >/dev/null; then
-    echo "[!] A QEMU VM is already running in WSL: two VMs on one pool corrupt it"
+# Only a VM on the pool itself is in the way (test VMs use overlays of it: /root/pool/<x>-*.qcow2)
+if pgrep -f "file=$POOL([,: ]|$)" >/dev/null; then
+    echo "[!] A QEMU VM is already running on $POOL: two VMs on one pool corrupt it"
     exit 1
 fi
 # A real procfs: Ubuntu 26.04's coreutils (uutils, via rustix) refuse a bind-mounted /proc
