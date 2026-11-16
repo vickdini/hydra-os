@@ -69,10 +69,17 @@ if [ -e /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service ]; 
 fi
 
 # Hydra Apps and the welcome window are written with PyQt6: installed in the background
-# when missing (a minute after boot, when the network is up; nothing if it is there)
+# when missing, once the network is up (nothing happens when it is there)
 helper=/usr/local/libexec/hydra-apps-helper
 if [ "$(id -u)" = 0 ] && [ -x "$helper" ] && ! [ -d /usr/lib/python3/dist-packages/PyQt6 ]; then
-    (sleep 60; nice "$helper" ensure-base) >/dev/null 2>&1 < /dev/null &
+    (
+        n=0
+        until getent hosts archive.ubuntu.com >/dev/null 2>&1 || [ $n -ge 60 ]; do
+            sleep 10
+            n=$((n + 1))
+        done
+        nice "$helper" ensure-base
+    ) >/dev/null 2>&1 < /dev/null &
 fi
 
 if [ "$dm" = 1 ]; then

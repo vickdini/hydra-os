@@ -1,4 +1,5 @@
-TOOLKIT (Group B, stable): Python 3 + PyQt6 with Qt Widgets (packages python3-pyqt6, from Ubuntu universe). Reason: PySide6 pulls libshiboken6 -> libclang1-21 (+LLVM); PyQt6 is ~17 MB with no compiler libs; Qt Widgets get KDE's Breeze style, so windows look like other KDE apps; no QML/Kirigami needed. Hydra installs python3-pyqt6 itself if missing (see below).
-Now: setting up a dev VM and checking what the pool has (python3, PyQt6, polkit, sysusers).
-Works: -
-Next: Hydra Apps store (catalogue + PyQt6 window + root helper via pkexec), Windows shortcuts, sysusers at boot, first-login welcome.
+TOOLKIT (Group B, stable): Python 3 + PyQt6 with Qt Widgets (packages python3-pyqt6, from Ubuntu universe). Reason: PySide6 pulls libshiboken6 -> libclang1-21 (+LLVM); PyQt6 is ~17 MB with no compiler libs; Qt Widgets get KDE's Breeze style, so windows look like other KDE apps; no QML/Kirigami needed. Hydra installs python3-pyqt6 itself if missing (hydra-session at boot, or Hydra Apps' first start via pkexec).
+Now: testing apt installs through the polkit password dialog (VLC done, GIMP running), then LibreOffice, Thunderbird, uninstall; lock screen (Win+L) is slow/stuck on Hydra: investigating.
+Works (verified in VM): Hydra Apps window; Windows programs Notepad++, 7-Zip, SumatraPDF, WinMerge, PuTTY install from the store (SHA-256 checked, silent) and start from their start-menu entries; PyQt6 auto-install via the root helper. Polkit password dialog + VLC install and start from the store. Win+E/D/I/R/Up/Down/Left verified for a new user; welcome window at first login; no more "Unknown username" warnings.
+Next: LibreOffice/VLC/GIMP/Thunderbird installs + uninstall, lock screen check, sysusers warnings gone, full suite.
+Commits: 6d798f3 (store, welcome, shortcuts, sysusers).

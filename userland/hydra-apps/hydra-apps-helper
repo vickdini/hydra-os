@@ -90,10 +90,10 @@ def run_apt(args, lo, hi, label):
             except ValueError:
                 continue
             if f[0] == "dlstatus":
-                progress(lo + span * pct / 200, "Downloading %s… %d %%" % (label, pct))
+                progress(lo + span * pct / 200, "Downloading %s…" % label)
             elif f[0] == "pmstatus":
-                progress(lo + span / 2 + span * pct / 200, "Installing %s… (%s)" % (label, f[3]) if "remove" not in args
-                         else "Removing %s… (%s)" % (label, f[3]))
+                progress(lo + span / 2 + span * pct / 200, ("Installing %s…" if "remove" not in args
+                                                             else "Removing %s…") % label)
     rc = p.wait()
     out.seek(0)
     text = out.read()

@@ -19,7 +19,7 @@
       "publisher": "The Document Foundation",
       "category": "Office",
       "icon": ["libreoffice-startcenter", "libreoffice-main", "applications-office", "x-office-document"],
-      "summary": "Documents, spreadsheets and presentations; opens and saves Word, Excel and PowerPoint files",
+      "summary": "The office suite that opens and saves Word, Excel and PowerPoint files",
       "description": "The free office suite: Writer (like Word), Calc (like Excel) and Impress (like PowerPoint). It opens and saves Microsoft Office files (.docx, .xlsx, .pptx), so you can keep working with the files you have and exchange them with people who use Microsoft Office.",
       "kind": "apt",
       "packages": ["libreoffice-writer", "libreoffice-calc", "libreoffice-impress", "libreoffice-kf6"],

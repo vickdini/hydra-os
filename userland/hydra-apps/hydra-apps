@@ -35,7 +35,7 @@ def notify(title, body, icon="system-software-install"):
 
 
 try:
-    from PyQt6.QtCore import QObject, QProcess, QSize, Qt, QThread, QTimer, pyqtSignal
+    from PyQt6.QtCore import QEvent, QObject, QProcess, QSize, Qt, QThread, QTimer, pyqtSignal
     from PyQt6.QtGui import QFont, QIcon, QPalette
     from PyQt6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                  QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
@@ -391,6 +391,8 @@ class Card(QFrame):
         col.addWidget(kind)
         summary = QLabel(app["summary"])
         summary.setWordWrap(True)
+        summary.setMinimumWidth(60)
+        name.setMinimumWidth(60)
         col.addWidget(summary)
         col.addStretch(1)
         lay.addLayout(col, 1)
@@ -574,6 +576,7 @@ class Window(QMainWindow):
         self.listlay.setContentsMargins(24, 4, 24, 24)
         self.intro = QLabel()
         self.intro.setWordWrap(True)
+        self.intro.setMinimumWidth(100)
         self.intro.setObjectName("dim")
         self.listlay.addWidget(self.intro)
         self.grid = QGridLayout()
@@ -599,6 +602,8 @@ class Window(QMainWindow):
         self.footer.hide()
         right.addWidget(self.footer)
 
+        self.scroll = scroll
+        scroll.viewport().installEventFilter(self)
         self.cards = []
         self.refresh_state()
         self.nav.setCurrentRow(1 if opts.get("installed") else 0)
@@ -611,6 +616,12 @@ class Window(QMainWindow):
             if app:
                 self.show_details(app)
                 QTimer.singleShot(500, lambda: self.start_job(app, "install" if opts.get("install") else "remove"))
+
+    def eventFilter(self, obj, e):
+        # The list is as wide as its view: cards wrap their text rather than run off the side
+        if obj is self.scroll.viewport() and e.type() == QEvent.Type.Resize:
+            self.listw.setMaximumWidth(e.size().width())
+        return False
 
     def by_id(self, i):
         return next((a for a in self.apps if a["id"] == i), None)

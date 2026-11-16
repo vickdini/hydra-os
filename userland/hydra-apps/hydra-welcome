@@ -30,8 +30,16 @@ try:
     from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                  QScrollArea, QVBoxLayout, QWidget)
 except ImportError:
-    # Hydra installs PyQt6 at boot (hydra-apps-helper ensure-base); without it yet, the
-    # welcome waits for the next login rather than asking for a password now
+    # Hydra installs PyQt6 in the background at boot when it is missing (hydra-apps-helper
+    # ensure-base): at a first login the welcome waits for it (up to 15 minutes), and else
+    # comes at the next login, rather than asking for a password now
+    import time
+    if first and not os.environ.get("HYDRA_WELCOME_WAITED"):
+        for _ in range(90):
+            time.sleep(10)
+            if os.path.isdir("/usr/lib/python3/dist-packages/PyQt6"):
+                os.environ["HYDRA_WELCOME_WAITED"] = "1"
+                os.execv(sys.executable, [sys.executable] + sys.argv)
     sys.exit(0)
 
 SHORTCUTS = [
@@ -59,7 +67,7 @@ class Welcome(QDialog):
         super().__init__()
         self.setWindowTitle("Welcome to Hydra")
         self.setWindowIcon(QIcon.fromTheme("help-about"))
-        self.resize(860, 720)
+        self.resize(860, 660)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
