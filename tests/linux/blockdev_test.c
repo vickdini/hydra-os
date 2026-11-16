@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <linux/blkpg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,57 @@ static int has_tool(const char *t) {
     char c[128];
     snprintf(c, sizeof c, "command -v %s >/dev/null 2>&1", t);
     return system(c) == 0;
+}
+
+static uint32_t crc32(const uint8_t *d, size_t n) {
+    uint32_t c = 0xFFFFFFFF;
+    for (size_t i = 0; i < n; i++) {
+        c ^= d[i];
+        for (int k = 0; k < 8; k++) c = c & 1 ? (c >> 1) ^ 0xEDB88320 : c >> 1;
+    }
+    return ~c;
+}
+
+// What sfdisk would write, for systems without it: a protective MBR, the GPT header and
+// two entries (64 MiB EFI system partition from 1 MiB, Hydra pool partition after it to
+// the end), then BLKRRPART. Returns 0 on success.
+static int write_gpt(const char *dev, uint64_t size) {
+    static const uint8_t esp[16] = {0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B};
+    static const uint8_t pool[16] = {0xB8,0xA0,0x85,0x76,0x41,0xDF,0xEB,0x47,0xAF,0x4F,0x02,0xCE,0x6F,0xB0,0x18,0x79};
+    uint64_t sectors = size / 512, last = sectors - 34;
+    static uint8_t mbr[512], hdr[512], ent[128 * 128];
+    memset(mbr, 0, sizeof mbr); memset(hdr, 0, sizeof hdr); memset(ent, 0, sizeof ent);
+    mbr[446 + 4] = 0xEE;
+    *(uint32_t *)&mbr[446 + 8] = 1;
+    *(uint32_t *)&mbr[446 + 12] = sectors - 1 > 0xFFFFFFFFull ? 0xFFFFFFFF : sectors - 1;
+    mbr[510] = 0x55; mbr[511] = 0xAA;
+    memcpy(ent, esp, 16);
+    memset(ent + 16, 0x11, 16);
+    *(uint64_t *)&ent[32] = 2048;
+    *(uint64_t *)&ent[40] = 2048 + 64 * 2048 - 1;
+    memcpy(ent + 128, pool, 16);
+    memset(ent + 128 + 16, 0x22, 16);
+    *(uint64_t *)&ent[128 + 32] = 2048 + 64 * 2048;
+    *(uint64_t *)&ent[128 + 40] = last;
+    memcpy(hdr, "EFI PART", 8);
+    *(uint32_t *)&hdr[8] = 0x10000;
+    *(uint32_t *)&hdr[12] = 92;
+    *(uint64_t *)&hdr[24] = 1;
+    *(uint64_t *)&hdr[32] = sectors - 1;
+    *(uint64_t *)&hdr[40] = 34;
+    *(uint64_t *)&hdr[48] = last;
+    memset(hdr + 56, 0x33, 16);
+    *(uint64_t *)&hdr[72] = 2;
+    *(uint32_t *)&hdr[80] = 128;
+    *(uint32_t *)&hdr[84] = 128;
+    *(uint32_t *)&hdr[88] = crc32(ent, sizeof ent);
+    *(uint32_t *)&hdr[16] = crc32(hdr, 92);
+    int fd = open(dev, O_RDWR);
+    if (fd < 0) return -1;
+    int ok = pwrite(fd, mbr, 512, 0) == 512 && pwrite(fd, hdr, 512, 512) == 512 && pwrite(fd, ent, sizeof ent, 1024) == (ssize_t)sizeof ent;
+    ok = ok && fsync(fd) == 0 && ioctl(fd, BLKRRPART) == 0;
+    close(fd);
+    return ok ? 0 : -1;
 }
 
 // The pool's disk: written over the pool, re-read tables: refused
@@ -126,8 +178,15 @@ int main(void) {
 
     // Partition with sfdisk: a 64 MiB EFI system partition and a Hydra pool partition
     snprintf(p, sizeof p, "printf 'label: gpt\\nsize=64MiB, type=uefi, name=EFI\\ntype=7685A0B8-DF41-47EB-AF4F-02CE6FB01879, name=Hydra\\n' | sfdisk -q %s 2>&1", dev);
-    int rc = run(p);
-    CHECK(rc == 0, "sfdisk exited %d: %s", rc, out);
+    int rc;
+    int have_sfdisk = has_tool("sfdisk");
+    if (have_sfdisk) {
+        rc = run(p);
+        CHECK(rc == 0, "sfdisk exited %d: %s", rc, out);
+    } else {
+        printf("  (no sfdisk: GPT written by the test, then BLKRRPART)\n");
+        CHECK(write_gpt(dev, size) == 0, "writing the GPT / BLKRRPART: %s", strerror(errno));
+    }
     char s1[64], s2[64];
     snprintf(s1, sizeof s1, "/dev/%s1", disk);
     snprintf(s2, sizeof s2, "/dev/%s2", disk);
@@ -192,9 +251,17 @@ int main(void) {
     if (has_tool("mkfs.vfat")) CHECK(strstr(out, "vfat") != NULL, "lsblk shows no vfat");
 
     // Delete partition 2 with sfdisk: the device goes away
-    snprintf(p, sizeof p, "sfdisk -q --delete %s 2 2>&1", dev);
-    rc = run(p);
-    CHECK(rc == 0, "sfdisk --delete: %s", out);
+    if (have_sfdisk) {
+        snprintf(p, sizeof p, "sfdisk -q --delete %s 2 2>&1", dev);
+        rc = run(p);
+        CHECK(rc == 0, "sfdisk --delete: %s", out);
+    } else {
+        struct { long long start, length; int pno; char devname[64], volname[64]; } part = {0, 0, 2};
+        struct { int op, flags, datalen; void *data; } arg = {2 /* BLKPG_DEL_PARTITION */, 0, sizeof part, &part};
+        fd = open(dev, O_RDWR);
+        CHECK(fd >= 0 && ioctl(fd, BLKPG, &arg) == 0, "BLKPG delete: %s", strerror(errno));
+        if (fd >= 0) close(fd);
+    }
     CHECK(stat(s2, &st) != 0, "%s still there after deleting it", s2);
     CHECK(stat(s1, &st) == 0, "%s gone after deleting partition 2", s1);
     // sgdisk, if installed: the Hydra layout again
