@@ -414,6 +414,8 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     // would go back to user mode holding it, stalling every other CPU's kernel entry until
     // this one enters the kernel again (up to a timer tick)
     x86_64::instructions::interrupts::disable();
+    // A wakeup kick the call deferred: the woken task needs another CPU now
+    crate::arch::smp::flush_kick();
     crate::arch::smp::bkl_exit();
 }
 
@@ -520,6 +522,9 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     let arg0 = frame.rdi;
     let arg1 = frame.rsi;
     let _arg2 = frame.rdx;
+    // In a (native) system call: its wakeup kicks wait for its end (arch::smp::kick_idle);
+    // shown as 0x10000 + the number by the task dump
+    crate::task::CURRENT_SYSCALL.store(0x1_0000 | num, core::sync::atomic::Ordering::Relaxed);
 
     let mut stats = SYSCALL_STATS.lock();
     stats.total_calls += 1;
@@ -877,6 +882,7 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
 
     // Store return value in rax
     frame.rax = result as u64;
+    crate::task::CURRENT_SYSCALL.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

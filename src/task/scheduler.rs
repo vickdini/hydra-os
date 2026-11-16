@@ -56,11 +56,45 @@ pub fn reap_dead_tasks() {
             None => None,
         };
         match task {
-            Some(t) => drop(t),
+            Some(t) => {
+                note_stack_use(&t);
+                drop(t)
+            }
             None => break,
         }
     }
 }  // 64 KiB per kernel thread stack
+
+/// Deepest kernel stack use seen in a task that ended (bytes).
+pub static MAX_KSTACK_USE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Measures how deep task `t`'s kernel stack (zeroed when made) was ever used, and reports
+/// a new deepest use past half the stack: kernel stacks have no guard page, and an
+/// overflow would silently overwrite the heap below (another task's saved registers).
+fn note_stack_use(t: &Task) {
+    let Some(st) = t.stack.as_ref() else { return };
+    let words = unsafe { core::slice::from_raw_parts(st.as_ptr() as *const u64, st.len() / 8) };
+    let low = words.iter().position(|&w| w != 0).unwrap_or(words.len());
+    let used = st.len() - low * 8;
+    let prev = MAX_KSTACK_USE.fetch_max(used, core::sync::atomic::Ordering::Relaxed);
+    if used > prev && used > st.len() / 2 {
+        crate::kprintln!("[sched] deepest kernel stack use so far: {} of {} bytes (task {} {})", used, st.len(), t.id.0, t.name);
+        // The deepest call chain's frames are still there: the kernel code addresses in the
+        // lowest part (tools: rip - anchor + the map address of hydra_syscall_dispatcher)
+        let mut b = alloc::string::String::new();
+        let mut n = 0;
+        for &w in &words[low..(low + 3072).min(words.len())] {
+            if (0xFFFF_FFFF_8000_0000..0xFFFF_FFFF_8100_0000).contains(&w) {
+                b.push_str(&alloc::format!(" {:x}", w));
+                n += 1;
+                if n == 48 {
+                    break;
+                }
+            }
+        }
+        crate::kprintln!("[sched] its frames (anchor {:#x}):{}", crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize, b);
+    }
+}
 
 /// Diagnostic snapshot of a task for shell inspection (e.g. `ps` / `tasks` command).
 #[derive(Debug, Clone)]
@@ -1487,6 +1521,14 @@ impl Scheduler {
             }
         }
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
+        // A wakeup kick this CPU's system call deferred: needed only if other woken work
+        // remains besides the task picked here
+        if crate::arch::smp::kick_pending() {
+            let others = self.tasks.iter().enumerate().any(|(i, t)| {
+                i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle
+            });
+            crate::arch::smp::switch_kick(others);
+        }
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
         self.tasks[next_idx].passed_over = 0;

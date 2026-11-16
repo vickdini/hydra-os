@@ -56,6 +56,27 @@ pub const MSG_BLOCK_FLUSH: u32 = 0x2003;
 /// - `args[0..3]`: Reserved (must be 0).
 pub const MSG_BLOCK_GET_SIZE: u32 = 0x2004;
 
+/// Protocol label for a vectored block device read: several runs of blocks in one
+/// request, which the driver may have in flight at once (AHCI native command queueing).
+///
+/// Inline arguments:
+/// - `args[0]`: Number of runs `n` (1..=[`BLOCK_READV_MAX`]).
+/// - `args[1..3]`: Reserved (must be 0).
+///
+/// The run table is in the service window at [`BLOCK_READV_TABLE`]: `n` entries of three
+/// little-endian `u64`s, `[first block, block count, window byte offset]` (offsets are
+/// multiples of 4096; runs end at or before the table). The reply is
+/// [`MSG_BLOCK_REPLY`] `[status, blocks read]`, all runs or none; a driver without it
+/// answers `-ENOSYS` (-38).
+pub const MSG_BLOCK_READV: u32 = 0x2005;
+
+/// Most runs in one [`MSG_BLOCK_READV`] request (the AHCI command slots).
+pub const BLOCK_READV_MAX: usize = 32;
+
+/// Window offset of a [`MSG_BLOCK_READV`] run table: the window's last 4 KiB page (the
+/// data before it).
+pub const BLOCK_READV_TABLE: usize = 63 * 4096;
+
 /// Protocol label for a block device operation reply.
 ///
 /// Inline arguments:

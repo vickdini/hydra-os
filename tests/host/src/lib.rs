@@ -61,6 +61,8 @@ pub mod arch {
     pub mod smp {
         /// *stub* No kernel lock on the host.
         pub fn bkl_exit() {}
+        /// *stub* No other CPU to wake on the host.
+        pub fn flush_kick() {}
         pub fn shootdown(_cr3: Option<u64>, addr: Option<u64>) {
             match addr {
                 Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
@@ -675,6 +677,7 @@ pub mod task {
     /// *stub*
     pub mod scheduler {
         pub const DEFAULT_STACK_SIZE: usize = 65536;
+        pub static MAX_KSTACK_USE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     }
     /// *stub*
     pub use crate::fake::wait;
