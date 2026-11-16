@@ -64,6 +64,20 @@ LANGUAGES = [
     ("中文 (简体)", "zh_CN.UTF-8", "cn", "Asia/Shanghai"),
 ]
 
+# Languages whose script needs fonts the system may not have: (writing system, English name)
+NEEDS_FONT = {"ja": ("Japanese", "Japanese"), "ko": ("Korean", "Korean"), "zh": ("SimplifiedChinese", "Chinese (Simplified)")}
+
+
+def shown_name(name, loc):
+    """NAME, or its English name when no installed font can show its script."""
+    need = NEEDS_FONT.get(loc[:2])
+    if need:
+        from PyQt6.QtGui import QFontDatabase
+        if not QFontDatabase.families(getattr(QFontDatabase.WritingSystem, need[0])):
+            return need[1]
+    return name
+
+
 STEPS = ["Language", "Keyboard", "Time zone", "Disk", "Your account", "Summary", "Installing", "Finished"]
 
 # What the helper's step numbers mean, in the order it reports them
@@ -231,7 +245,7 @@ class WelcomePage(Page):
         self.box.addWidget(QLabel("<b>Choose your language and region</b>"))
         self.list = QListWidget()
         for name, loc, kb, tz in LANGUAGES:
-            it = QListWidgetItem(name)
+            it = QListWidgetItem(shown_name(name, loc))
             it.setData(Qt.ItemDataRole.UserRole, loc)
             self.list.addItem(it)
         cur = os.environ.get("LANG", "en_US.UTF-8").replace(".utf8", ".UTF-8")
@@ -591,7 +605,7 @@ class SummaryPage(Page):
             self.grid.takeAt(0).widget().deleteLater()
         w = self.wiz
         d = w.disk.value()
-        rows = [("Language", w.welcome.language()[0]),
+        rows = [("Language", shown_name(w.welcome.language()[0], w.welcome.language()[1])),
                 ("Keyboard", w.keyboard.describe()),
                 ("Time zone", w.time.value().replace("_", " ")),
                 ("Disk", "%s (%s, %s)" % (d["model"], human(d["size"]), d["path"]) if d else "-"),
