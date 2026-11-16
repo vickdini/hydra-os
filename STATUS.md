@@ -1,6 +1,7 @@
 # Group H - USB storage (branch i-usb)
-Current step: first version of USB stick support written and compiling; waiting to test it in a VM (the Linux helper (WSL) on this laptop is not responding at the moment)
+Current step: testing USB sticks behind a USB hub and unplugging/replugging a stick while the system runs
 Works so far:
-- USB driver code for USB sticks (Bulk-Only Transport + SCSI commands) and USB hubs, compiles (not yet tested)
-- kernel side: USB disks get their own service number next to the keyboard/mouse one; a "usbdisk" test command in the Hydra shell
-Next: boot a test VM with a virtual USB stick and run "usbdisk list" / "usbdisk test 0"
+- a virtual USB stick (USB 3) is recognized as a disk next to the keyboard and tablet (VM, "usbdisk list")
+- writing, reading back and comparing data on it works (VM, "usbdisk test": all data matched)
+- speed in the VM: reading 128 MiB/s from the USB stick vs 177 MiB/s from the SATA disk
+Next: put a whole Hydra pool on a USB stick and boot from it to the KDE login

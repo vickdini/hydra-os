@@ -233,7 +233,7 @@ fn speed(ep: u32, disk: u64, mib: u64, write: bool) {
     let _ = request(ep, disk, MSG_BLOCK_FLUSH, 0, 0, None, false);
     let t = (crate::arch::pit::ticks() - t0).max(1);
     crate::println!(
-        "usbdisk speed: read and wrote back {} MiB in {:.2} s: {} MiB/s each way (both together)",
+        "usbdisk speed: read and wrote back {} MiB in {:.2} s: {} MiB/s moved (reads + writes)",
         count / 256,
         t as f64 / 100.0,
         count * 4096 * 2 * 100 / t / (1024 * 1024)
