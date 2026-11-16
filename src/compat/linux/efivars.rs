@@ -96,7 +96,8 @@ pub fn get(name: &str, guid: &Guid) -> Result<(u32, Vec<u8>), i64> {
     }
 }
 
-/// Sets (or, with no data, deletes) a variable.
+/// Sets (or, with no data, deletes) a variable. `data` must be kernel memory (the
+/// firmware runs with the kernel's page tables).
 pub fn set(name: &str, guid: &Guid, attrs: u32, data: &[u8]) -> Result<(), i64> {
     let mut wide = [0u16; 512];
     let cname = CStr16::from_str_with_buf(name, &mut wide).map_err(|_| EINVAL)?;
@@ -238,7 +239,10 @@ impl CharDevice for VarFile {
             return EINVAL;
         }
         let attrs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-        let r = set(&self.name, &self.guid, attrs, &data[4..]);
+        // The firmware runs with the kernel's page tables, which do not map the caller's
+        // memory: the data goes through a kernel buffer
+        let value = data[4..].to_vec();
+        let r = set(&self.name, &self.guid, attrs, &value);
         refresh();
         match r {
             Ok(()) => data.len() as i64,
