@@ -138,8 +138,8 @@ def image_info():
             want = f.read().split()[0].lower()
     except (OSError, IndexError):
         pass
-    if os.path.isfile(raw):
-        return {"kind": "raw", "path": raw, "size": os.stat(raw).st_size, "sha256": want}
+    if os.path.isfile(raw) or (os.path.exists(raw) and stat.S_ISBLK(os.stat(raw).st_mode)):   # a device: tests
+        return {"kind": "raw", "path": raw, "size": device_size(raw), "sha256": want}
     if os.path.isfile(zst):
         conf = read_conf(os.path.join(SOURCE, "pool.conf"))
         try:
