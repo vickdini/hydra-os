@@ -41,6 +41,11 @@ STEPS=${*:-snapshot clean pack verify live stick}
 say() { echo "[build-image] $*"; }
 die() { echo "[build-image] ERROR: $*" >&2; exit 1; }
 inroot() { chroot $R /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root HYDRA_ISO="${HYDRA_ISO:-}" /bin/bash -c "$1"; }
+# The same, holding one of the shared VM slots (the QEMU root's /usr/local/bin/vmslot, when it
+# exists: several builders share one WSL): for VMs and big disk-image jobs
+SLOT=""
+[ -x $R/usr/local/bin/vmslot ] && SLOT=/usr/local/bin/vmslot
+heavy() { chroot $R $SLOT /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root HYDRA_ISO="${HYDRA_ISO:-}" /bin/bash -c "$1"; }
 
 # The QEMU root's mounts (WSL drops them when it idles)
 mountpoint -q $R/proc || mount -t proc proc $R/proc
@@ -66,7 +71,7 @@ vm() {
     if pgrep -f "file=$disk," >/dev/null; then die "a VM already uses $disk"; fi
     local q=""
     for a in "$@"; do q="$q '${a//\'/\'\\\'\'}'"; done
-    inroot "cd '$CTREE' && python3 tools/hydra_run.py --accel kvm --shared-host --smp 4 --disk '$disk' --wait $wait --until '$until' --log '$OUT/$log' $q" >/dev/null || true
+    heavy "cd '$CTREE' && python3 tools/hydra_run.py --accel kvm --shared-host --smp 2 --disk '$disk' --wait $wait --until '$until' --log '$OUT/$log' $q" >/dev/null || true
     tr -d '\000' < "$R$OUT/$log" > "$R$OUT/$log.txt"
 }
 
@@ -110,7 +115,7 @@ for step in $STEPS; do
     case $step in
     snapshot)
         if pgrep -f "file=$POOL" >/dev/null; then die "the main pool is in use by a VM: try again when it is off"; fi
-        inroot "set -e; cd '$WORK'; rm -f snap.qcow2 base.qcow2
+        heavy "set -e; cd '$WORK'; rm -f snap.qcow2 base.qcow2
                 qemu-img create -q -f qcow2 -F qcow2 -b $POOL snap.qcow2
                 qemu-img convert -O qcow2 snap.qcow2 base.qcow2
                 rm -f snap.qcow2"
@@ -119,21 +124,24 @@ for step in $STEPS; do
     clean)
         inroot "set -e; cd '$WORK'; rm -f clean.qcow2 clean.raw; qemu-img create -q -f qcow2 -F qcow2 -b $WORK/base.qcow2 clean.qcow2"
         serve "$CTREE/tools/build-image"
-        vm "$WORK/clean.qcow2" clean.log "Powering off" 1500 --login hydra:hydra \
+        # First the pool's own check of /run (runtime files only; it repairs damaged directories
+        # there: the main pool had one in /run/user/101 on 2026-11-16)
+        vm "$WORK/clean.qcow2" clean.log "Powering off" 1500 --login hydra:hydra --prompt '/bin$ ' \
+            "zfs fsck /ubuntu/run repair" \
             "linux chroot /ubuntu /usr/bin/bash -c \"echo hydra | sudo -S bash -c 'curl -s http://10.0.2.2:$PORT/clean-inside.sh -o /tmp/c.sh; bash /tmp/c.sh'\""
         stop_serving
         grep -q "^CLEAN-OK" "$R$OUT/clean.log.txt" || die "cleaning failed (see $OUT/clean.log.txt)"
         grep -a "^\[clean\]" "$R$OUT/clean.log.txt" || true
-        inroot "set -e; cd '$WORK'; qemu-img convert -O raw clean.qcow2 clean.raw; rm -f clean.qcow2"
+        heavy "set -e; cd '$WORK'; qemu-img convert -O raw clean.qcow2 clean.raw; rm -f clean.qcow2"
         ;;
     pack)
         pack_tool
-        inroot "set -e; cd '$OUT'; rm -f pool.img pool.img.zst
+        heavy "set -e; cd '$OUT'; rm -f pool.img pool.img.zst
                 '$WORK/hydra-pool-pack' --headroom $HEADROOM_CLEAN '$WORK/clean.raw' pool.img > '$WORK/pack-clean.txt'"
         cat "$R$WORK/pack-clean.txt"
         say "compressing (zstd)"
-        inroot "set -e; cd '$OUT'
-                zstd -q -T0 -12 -o pool.img.zst pool.img
+        heavy "set -e; cd '$OUT'
+                zstd -q -T2 -12 -o pool.img.zst pool.img
                 sha256sum pool.img > pool.img.sha256
                 {
                   echo '# Hydra install image (tools/build-image/build-image.sh); see LAYOUT.md, section F'
@@ -171,7 +179,7 @@ for step in $STEPS; do
         [ -n "$zst" ] && [ -f "$R$OUT/esp.tar" ] || die "no install set: run the pack step"
         # The clean pool again, with room for the install set and the live session
         head=$(( zst + $(stat -c %s "$R$OUT/esp.tar") + $(numfmt --from=iec "$HEADROOM_LIVE") ))
-        inroot "set -e; cd '$WORK'; rm -f live.raw live.qcow2
+        heavy "set -e; cd '$WORK'; rm -f live.raw live.qcow2
                 ./hydra-pool-pack --headroom $head clean.raw live.raw > pack-live.txt
                 qemu-img create -q -f qcow2 -F raw -b $WORK/live.raw live.qcow2"
         cat "$R$WORK/pack-live.txt"

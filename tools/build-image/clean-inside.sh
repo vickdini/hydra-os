@@ -70,7 +70,7 @@ rm -rf /etc/NetworkManager/system-connections/* /var/lib/NetworkManager/* /var/l
 rm -rf /var/lib/sudo/lectured/* /var/lib/sudo/ts/* 2>/dev/null
 
 # 8. Temporary files (the X11/ICE socket directories come back at boot)
-rm -rf /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]* 2>/dev/null
+rm -rf /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]* /run/user/* 2>/dev/null
 
 # Check
 left=$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd)

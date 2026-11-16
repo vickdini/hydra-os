@@ -120,7 +120,7 @@ static void wr(uint64_t block, const void *buf) {
 }
 
 /* Reads the block `bp` points to into buf, checking it. Returns 0 on failure. */
-static uint64_t cur_obj;
+static uint64_t cur_obj, cur_blkid;
 static int read_bp(const blkptr *bp, uint8_t *buf) {
     if (bp->block >= in_blocks || bp->lsize == 0 || bp->lsize > BLOCK) {
         fprintf(stderr, "bad block pointer: block %" PRIu64 " lsize %u\n", bp->block, bp->lsize);
@@ -129,7 +129,7 @@ static int read_bp(const blkptr *bp, uint8_t *buf) {
     }
     rd(bp->block, buf);
     if (!fl_eq(fl4(buf, bp->lsize), bp->checksum)) {
-        fprintf(stderr, "checksum mismatch at block %" PRIu64 " (level %u)\n", bp->block, bp->level);
+        fprintf(stderr, "checksum mismatch at block %" PRIu64 " (level %u) of object %" PRIu64 " (block %" PRIu64 " of it)\n", bp->block, bp->level, cur_obj, cur_blkid);
         bad++;
         return 0;
     }
@@ -159,6 +159,7 @@ static void relocate(blkptr *bp, int level, int is_meta, uint64_t blkid) {
         return;
     }
     uint8_t buf[BLOCK];
+    cur_blkid = blkid;
     int ok = read_bp(bp, buf);
     if (!ok) memset(buf, 0, BLOCK);
     int changes = 0;
@@ -172,7 +173,11 @@ static void relocate(blkptr *bp, int level, int is_meta, uint64_t blkid) {
         for (unsigned i = 0; i < BLOCK / DNODE_SIZE; i++)
             if (d[i].obj_type != 0 || d[i].bp[0].block || d[i].bp[1].block || d[i].bp[2].block) {
                 cur_obj = blkid * (BLOCK / DNODE_SIZE) + i;
+                uint64_t before = bad;
                 relocate_dnode(&d[i], 0);
+                if (bad != before)
+                    fprintf(stderr, "  object %" PRIu64 ": mode %o, %" PRIu64 " bytes, %u links, uid %u, parent %" PRIu64 ", mtime %" PRId64 "\n",
+                            cur_obj, d[i].mode, d[i].size, d[i].nlink, d[i].uid, d[i].parent, d[i].mtime);
             }
         changes = 1;
     }
