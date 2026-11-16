@@ -238,3 +238,20 @@ pub const MSG_SUPERVISOR_REPLY: u32 = 0x600F;
 
 
 
+
+/// Well-known endpoint of the USB input driver (xHCI host controller, HID keyboards and
+/// pointers) (0x25 = 37).
+pub const ENDPOINT_INPUT_DEV: u32 = 0x25;
+
+/// Protocol label to collect input from the USB driver: it services its controller's
+/// events, then fills the service window with 8-byte records:
+/// - `[1, scancode, 0...]`: one set-1 keyboard scancode byte (0xE0 prefixes are records too);
+/// - `[2, buttons, dx lo, dx hi, dy lo, dy hi, wheel, 0]`: relative pointer motion (dy down,
+///   wheel positive away from the user, buttons bit 0 left, 1 right, 2 middle);
+/// - `[3, buttons, x lo, x hi, y lo, y hi, wheel, 0]`: absolute pointer, x and y 0..=0xFFFF.
+///
+/// Reply ([`MSG_INPUT_REPLY`]): `args[0]` status, `args[1]` record count, `args[2]` devices.
+pub const MSG_INPUT_READ: u32 = 0x7001;
+
+/// Protocol label for the USB input driver's reply.
+pub const MSG_INPUT_REPLY: u32 = 0x700F;

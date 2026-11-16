@@ -1,0 +1,8 @@
+[package]
+name = "usb-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra USB driver: xHCI host controller with HID keyboards, mice and tablets"
+
+[dependencies]
+hydra-rt = { workspace = true }

@@ -369,6 +369,18 @@ impl Ps2Mouse {
     /// # Panics
     ///
     /// *Guaranteed to never panic under normal execution.*
+    /// Applies one relative movement (`dx` right, `screen_dy` down), the wheel and the
+    /// buttons (bit 0 left, 1 right, 2 middle) to the pointer state.
+    fn apply(&mut self, dx: i32, screen_dy: i32, wheel: i32, buttons: u8, screen_width: usize, screen_height: usize) -> MouseEvent {
+        let (left_button, right_button, middle_button) = (buttons & 1 != 0, buttons & 2 != 0, buttons & 4 != 0);
+        let new_x = ((self.state.x as i32) + dx).clamp(0, (screen_width.saturating_sub(1)) as i32) as usize;
+        let new_y = ((self.state.y as i32) + screen_dy).clamp(0, (screen_height.saturating_sub(1)) as i32) as usize;
+        let left_pressed = left_button && !self.state.left_button;
+        let right_pressed = right_button && !self.state.right_button;
+        self.state = MouseState { x: new_x, y: new_y, left_button, right_button, middle_button };
+        MouseEvent { state: self.state, delta_x: dx, delta_y: screen_dy, left_pressed, right_pressed, wheel }
+    }
+
     fn feed(&mut self, byte: u8, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
 
         // Byte 0 must have bit 3 set (always 1 in standard PS/2 packet)
@@ -393,11 +405,6 @@ impl Ps2Mouse {
         let b1 = self.packet_buf[1];
         let b2 = self.packet_buf[2];
 
-        // Parse button flags
-        let left_button = (b0 & 0x01) != 0;
-        let right_button = (b0 & 0x02) != 0;
-        let middle_button = (b0 & 0x04) != 0;
-
         // Parse relative motion with 9-bit sign extension
         let mut dx = b1 as i32;
         if (b0 & 0x10) != 0 {
@@ -410,30 +417,72 @@ impl Ps2Mouse {
         }
 
         // Invert dy: PS/2 upward movement is positive, but screen Y increases downward
-        let screen_dy = -dy;
-
-        // Apply clamped coordinate updates
-        let new_x = ((self.state.x as i32) + dx).clamp(0, (screen_width.saturating_sub(1)) as i32) as usize;
-        let new_y = ((self.state.y as i32) + screen_dy).clamp(0, (screen_height.saturating_sub(1)) as i32) as usize;
-
-        let left_pressed = left_button && !self.state.left_button;
-        let right_pressed = right_button && !self.state.right_button;
-
-        self.state.x = new_x;
-        self.state.y = new_y;
-        self.state.left_button = left_button;
-        self.state.right_button = right_button;
-        self.state.middle_button = middle_button;
-
-        Some(MouseEvent {
-            state: self.state,
-            delta_x: dx,
-            delta_y: screen_dy,
-            left_pressed,
-            right_pressed,
-            wheel,
-        })
+        Some(self.apply(dx, -dy, wheel, b0 & 7, screen_width, screen_height))
     }
+
+    /// Takes an absolute pointer report (position 0..=`max` on both axes) and queues the
+    /// event for Hydra's compositor.
+    fn absolute(&mut self, x: u32, y: u32, max: u32, wheel: i8, buttons: u8) {
+        let (w, h) = self.screen;
+        let x = (x as u64 * w.saturating_sub(1) as u64 / max.max(1) as u64) as usize;
+        let y = (y as u64 * h.saturating_sub(1) as u64 / max.max(1) as u64) as usize;
+        let left = buttons & 1 != 0;
+        let right = buttons & 2 != 0;
+        let prev = self.state;
+        self.state = MouseState { x, y, left_button: left, right_button: right, middle_button: buttons & 4 != 0 };
+        // Hydra's own compositor reads positions and presses from the pending event
+        let ev = MouseEvent {
+            state: self.state,
+            delta_x: x as i32 - prev.x as i32,
+            delta_y: y as i32 - prev.y as i32,
+            left_pressed: left && !prev.left_button,
+            right_pressed: right && !prev.right_button,
+            wheel: wheel as i32,
+        };
+        self.merge(ev);
+    }
+
+    /// Queues `ev` for the compositor, merged with one not yet polled so that presses
+    /// are not lost.
+    fn merge(&mut self, ev: MouseEvent) {
+        let merged = match self.pending.take() {
+            Some(p) => MouseEvent {
+                left_pressed: p.left_pressed || ev.left_pressed,
+                right_pressed: p.right_pressed || ev.right_pressed,
+                delta_x: p.delta_x + ev.delta_x,
+                delta_y: p.delta_y + ev.delta_y,
+                wheel: p.wheel + ev.wheel,
+                ..ev
+            },
+            None => ev,
+        };
+        self.pending = Some(merged);
+    }
+}
+
+/// A relative pointer report from a USB mouse (`dx` right, `dy` down, `wheel` positive
+/// away from the user, buttons bit 0 left, 1 right, 2 middle): handled as a PS/2 packet
+/// is, for the compositor and the Linux event devices. Called with interrupts off.
+pub fn inject_relative(dx: i32, dy: i32, wheel: i32, buttons: u8) {
+    let Some(mut mouse) = MOUSE_DRIVER.try_lock() else { return };
+    let (w, h) = mouse.screen;
+    let ev = mouse.apply(dx, dy, wheel, buttons, w, h);
+    mouse.merge(ev);
+    drop(mouse);
+    crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons);
+    crate::wayland::INPUT_WQ.wake_all();
+}
+
+/// An absolute pointer report from a USB tablet: position 0..=`max` on both axes, wheel
+/// clicks, buttons. Handled as a VMware mouse report is (the Linux event device's range is
+/// 0..=0xFFFF). Called with interrupts off.
+pub fn inject_absolute(x: u32, y: u32, max: u32, wheel: i8, buttons: u8) {
+    let Some(mut mouse) = MOUSE_DRIVER.try_lock() else { return };
+    mouse.absolute(x, y, max, wheel, buttons);
+    drop(mouse);
+    let scale = |v: u32| (v.min(max) as u64 * 0xFFFF / max.max(1) as u64) as u16;
+    crate::compat::linux::evdev::push_abs(scale(x), scale(y), wheel, buttons);
+    crate::wayland::INPUT_WQ.wake_all();
 }
 
 static MOUSE_DRIVER: Mutex<Ps2Mouse> = Mutex::new(Ps2Mouse::new());
@@ -595,33 +644,7 @@ pub fn on_mouse_irq() {
             n += 1;
         });
         for r in reports.iter().flatten() {
-            let x = r.x as usize * w.saturating_sub(1) / super::vmmouse::MAX as usize;
-            let y = r.y as usize * h.saturating_sub(1) / super::vmmouse::MAX as usize;
-            let left = r.buttons & 1 != 0;
-            let right = r.buttons & 2 != 0;
-            let prev = mouse.state;
-            mouse.state = MouseState { x, y, left_button: left, right_button: right, middle_button: r.buttons & 4 != 0 };
-            // Hydra's own compositor reads positions and presses from the pending event
-            let ev = MouseEvent {
-                state: mouse.state,
-                delta_x: x as i32 - prev.x as i32,
-                delta_y: y as i32 - prev.y as i32,
-                left_pressed: left && !prev.left_button,
-                right_pressed: right && !prev.right_button,
-                wheel: r.wheel as i32,
-            };
-            let merged = match mouse.pending.take() {
-                Some(p) => MouseEvent {
-                    left_pressed: p.left_pressed || ev.left_pressed,
-                    right_pressed: p.right_pressed || ev.right_pressed,
-                    delta_x: p.delta_x + ev.delta_x,
-                    delta_y: p.delta_y + ev.delta_y,
-                    wheel: p.wheel + ev.wheel,
-                    ..ev
-                },
-                None => ev,
-            };
-            mouse.pending = Some(merged);
+            mouse.absolute(r.x as u32, r.y as u32, super::vmmouse::MAX, r.wheel, r.buttons);
         }
         drop(mouse);
         static FIRST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
@@ -637,19 +660,7 @@ pub fn on_mouse_irq() {
         return;
     }
     if let Some(ev) = mouse.feed(byte, w, h) {
-        // Merge with an event not yet polled so presses are not lost
-        let merged = match mouse.pending.take() {
-            Some(prev) => MouseEvent {
-                left_pressed: prev.left_pressed || ev.left_pressed,
-                right_pressed: prev.right_pressed || ev.right_pressed,
-                delta_x: prev.delta_x + ev.delta_x,
-                delta_y: prev.delta_y + ev.delta_y,
-                wheel: prev.wheel + ev.wheel,
-                ..ev
-            },
-            None => ev,
-        };
-        mouse.pending = Some(merged);
+        mouse.merge(ev);
         drop(mouse);
         let buttons = ev.state.left_button as u8 | (ev.state.right_button as u8) << 1 | (ev.state.middle_button as u8) << 2;
         crate::compat::linux::evdev::push_mouse(ev.delta_x, ev.delta_y, ev.wheel, buttons);

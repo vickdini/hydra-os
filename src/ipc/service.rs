@@ -307,11 +307,12 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 4] = [
+static SERVICES: [Service; 5] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
     Service::new(ENDPOINT_DISPLAY_DEV),
+    Service::new(crate::ipc::protocol::ENDPOINT_INPUT_DEV),
 ];
 
 /// Resolves the static `Service` descriptor corresponding to `endpoint`.
@@ -971,6 +972,31 @@ pub fn msi_line(dev: &crate::arch::pci::PciDevice) -> Option<u8> {
         return None;
     }
     Some(MSI_FIRST_LINE + idx as u8)
+}
+
+/// As [`msi_line`], for a device that offers only MSI-X (QEMU's `qemu-xhci`): the device's
+/// MSI-X is enabled and its line allocated; its driver writes vector 0 of the table
+/// (it maps the BAR holding it) with the message address and data returned here.
+///
+/// # Arguments
+///
+/// * `dev` - The PCI function.
+///
+/// # Returns
+///
+/// `Some((line, table physical address, message address, message data))`.
+pub fn msix_line(dev: &crate::arch::pci::PciDevice) -> Option<(u8, u64, u32, u32)> {
+    let key = ((dev.bus as u32) << 16 | (dev.device as u32) << 8 | dev.function as u32) + 1;
+    let idx = MSI_DEVICE.iter().position(|d| d.load(Ordering::Acquire) == key).or_else(|| {
+        MSI_DEVICE.iter().position(|d| d.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire).is_ok())
+    })?;
+    let Some(table) = crate::arch::pci::enable_msix(dev) else {
+        MSI_DEVICE[idx].store(0, Ordering::Release);
+        return None;
+    };
+    let vector = crate::arch::idt::MSI_VECTOR_BASE as u32 + idx as u32;
+    let addr = 0xFEE0_0000 | (crate::arch::smp::boot_apic_id() & 0xFF) << 12;
+    Some((MSI_FIRST_LINE + idx as u8, table, addr, vector))
 }
 
 /// Queries diagnostics for all hardware IRQ lines currently owned by userland drivers.

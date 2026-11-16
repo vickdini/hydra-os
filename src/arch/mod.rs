@@ -45,6 +45,8 @@ pub mod keyboard;
 pub mod mouse;
 /// VMware's absolute pointer behind QEMU's PS/2 mouse (the guest pointer follows the host's).
 pub mod vmmouse;
+/// USB keyboards and pointers: the kernel side of the Ring 3 USB driver.
+pub mod usb_input;
 /// Peripheral Component Interconnect (PCI) bus enumeration and configuration space access.
 pub mod pci;
 pub mod percpu;

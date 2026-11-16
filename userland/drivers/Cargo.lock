@@ -105,6 +105,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "usb-driver"
+version = "0.1.0"
+dependencies = [
+ "hydra-rt",
+]
+
+[[package]]
 name = "volatile"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

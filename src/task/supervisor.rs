@@ -39,6 +39,8 @@ use crate::task::{is_task_alive, kill, TaskId};
 static ATA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/ata-driver"));
 /// The AHCI (SATA) disk driver program.
 static AHCI_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/ahci-driver"));
+/// The USB (xHCI and HID input) driver program.
+static USB_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/usb-driver"));
 /// The ZFS file server program.
 static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/zfs-server"));
 /// The e1000 network driver program.
@@ -211,6 +213,69 @@ fn e1000_args() -> Option<Vec<String>> {
 /// A vector of physical memory ranges `(base, length)` granted to the network driver.
 fn e1000_grants() -> Vec<(u64, u64)> {
     crate::net::e1000::find_adapter().map_or_else(Vec::new, |a| alloc::vec![(a.bar0, 128 * 1024)])
+}
+
+/// The first xHCI USB host controller (PCI class 0C:03, programming interface 30) with
+/// its register window (BAR 0, often 64-bit) and the window's size.
+///
+/// # Returns
+///
+/// `Some((device, base, length))`, or `None`.
+fn xhci_controller() -> Option<(crate::arch::pci::PciDevice, u64, u64)> {
+    use crate::arch::pci;
+    pci::find_all_class(0x0C, 0x03).into_iter().find_map(|dev| {
+        if pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09) != 0x30 {
+            return None; // UHCI, OHCI or EHCI
+        }
+        let base = pci::bar_address(&dev, 0);
+        let len = (pci::bar_size(&dev, 0) + 0xFFF) & !0xFFF;
+        (base != 0 && len != 0).then_some((dev, base, len))
+    })
+}
+
+/// The xHCI window's grant, computed once (sizing a BAR briefly turns off its decoding,
+/// which must not happen while the driver runs).
+static XHCI: spin::Once<Option<(crate::arch::pci::PciDevice, u64, u64)>> = spin::Once::new();
+
+/// USB driver: the xHCI controller's register window and its MSI line. On Intel chipsets
+/// of the 7 to 9 series (Panther Point, Lynx Point) the USB ports start out routed to the
+/// EHCI controllers; they are switched to the xHCI one here, as Linux does
+/// (`usb_enable_intel_xhci_ports`), or the keyboard and mouse would not appear on it.
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` with `mmio=<phys> len=<bytes>` and maybe `irq=<line>`, or `None`.
+fn usb_args() -> Option<Vec<String>> {
+    use crate::arch::pci;
+    let (dev, base, len) = (*XHCI.call_once(xhci_controller))?;
+    pci::enable_bus_mastering(&dev);
+    if dev.vendor_id == 0x8086 && matches!(dev.device_id, 0x1E31 | 0x8C31 | 0x9C31 | 0x8CB1 | 0x9CB1) {
+        let (b, d, f) = (dev.bus, dev.device, dev.function);
+        // USB 3 SuperSpeed enables (USB3_PSSEN) from their mask (USB3PRM), then the
+        // USB 2 port routing (XUSB2PR) from its mask (XUSB2PRM)
+        pci::pci_write_u32(b, d, f, 0xD8, pci::pci_read_u32(b, d, f, 0xDC));
+        pci::pci_write_u32(b, d, f, 0xD0, pci::pci_read_u32(b, d, f, 0xD4));
+        crate::kprintln!("[supervisor] Intel xHCI: USB ports switched from EHCI (routing {:#x})", pci::pci_read_u32(b, d, f, 0xD0));
+    }
+    let mut args = alloc::vec![alloc::format!("mmio={:#x}", base), alloc::format!("len={:#x}", len)];
+    if let Some(line) = service::msi_line(&dev) {
+        args.push(alloc::format!("irq={}", line));
+    } else if let Some((line, table, addr, data)) = service::msix_line(&dev) {
+        args.push(alloc::format!("irq={}", line));
+        args.push(alloc::format!("msix={:#x}:{:#x}:{:#x}", table, addr, data));
+    } else {
+        crate::kprintln!("[supervisor] xHCI controller: no MSI; its driver polls");
+    }
+    Some(args)
+}
+
+/// USB driver: the controller's register window.
+///
+/// # Returns
+///
+/// The granted `(base, length)` range, if there is a controller.
+fn usb_grants() -> Vec<(u64, u64)> {
+    XHCI.call_once(xhci_controller).map_or_else(Vec::new, |(_, base, len)| alloc::vec![(base, len)])
 }
 
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
@@ -436,6 +501,13 @@ pub fn supervisor_init() {
         service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
         sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
         sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
+        sup.services.push(ServiceDescriptor::new(
+            "usb_driver",
+            crate::ipc::protocol::ENDPOINT_INPUT_DEV,
+            USB_DRIVER_ELF,
+            usb_args,
+            usb_grants,
+        ));
     }
 }
 
@@ -493,6 +565,7 @@ pub fn start_all() {
             Err((name, e)) => crate::kprintln!("[supervisor] not starting '{}': {}", name, e),
         }
     }
+    crate::arch::usb_input::start();
     crate::task::spawn("supervisor", watchdog_task, crate::task::TaskPriority::Normal);
 }
 

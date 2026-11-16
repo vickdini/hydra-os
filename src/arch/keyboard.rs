@@ -282,6 +282,18 @@ pub static TASK_DUMP_REQUESTED: core::sync::atomic::AtomicBool = core::sync::ato
 pub fn on_keyboard_irq() {
     let mut data_port: Port<u8> = Port::new(0x60);
     let scancode = unsafe { data_port.read() };
+    handle_scancode(scancode);
+}
+
+/// Takes one set-1 scancode byte from any keyboard: the PS/2 one (its interrupt) or a USB
+/// one (the USB input task translates HID usages to set-1 codes), so both reach the
+/// console, Hydra's compositor and the Linux event devices the same way. Called with
+/// interrupts off.
+///
+/// # Arguments
+///
+/// * `scancode` - Set-1 scancode byte (0xE0 prefixes included).
+pub fn handle_scancode(scancode: u8) {
     if scancode == 0x58 {
         // F12: dump the task list on the serial port (handled by the timer interrupt)
         TASK_DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);

@@ -543,6 +543,39 @@ pub fn enable_msi(dev: &PciDevice, apic_id: u32, vector: u8) -> bool {
     true
 }
 
+/// Turns on the device's MSI-X capability with every vector still masked in its table,
+/// and its legacy INTx line off. The table lives in one of the device's BARs, which the
+/// kernel does not map: the device's driver fills in an entry and unmasks it (see
+/// `crate::ipc::service::msix_line`).
+///
+/// # Arguments
+///
+/// * `dev` - The device.
+///
+/// # Returns
+///
+/// The physical address of the vector table, if the device has MSI-X.
+pub fn enable_msix(dev: &PciDevice) -> Option<u64> {
+    let cap = find_capability(dev, 0x11)?;
+    let (b, d, f) = (dev.bus, dev.device, dev.function);
+    let table = pci_read_u32(b, d, f, cap + 4);
+    let base = bar_address(dev, (table & 7) as u8);
+    if base == 0 {
+        return None;
+    }
+    // Plain MSI off (only one of the two may be on)
+    if let Some(m) = find_capability(dev, 0x05) {
+        let ctrl = pci_read_u16(b, d, f, m + 2);
+        pci_write_u16(b, d, f, m + 2, ctrl & !1);
+    }
+    // Enabled, function mask clear: each vector's own mask bit (set at reset) decides
+    let ctrl = pci_read_u16(b, d, f, cap + 2);
+    pci_write_u16(b, d, f, cap + 2, (ctrl | 0x8000) & !0x4000);
+    let cmd = pci_read_u16(b, d, f, PCI_REG_COMMAND);
+    pci_write_u16(b, d, f, PCI_REG_COMMAND, cmd | 0x400);
+    Some(base + (table & !7) as u64)
+}
+
 /// Every function on the PCI bus whose class and subclass match (all of them, where
 /// [`find_class`] returns the first).
 ///
