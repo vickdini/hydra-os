@@ -3,9 +3,11 @@
 //! Drives one SATA disk behind an AHCI host bus adapter (PCI class 01:06) from Ring 3, in
 //! an address space of its own. The adapter's registers (`ABAR`, PCI `BAR5`) are device
 //! memory the supervisor granted; the command list, the received-FIS area, the command
-//! table and a bounce buffer are DMA memory this driver allocates. One command is in
-//! flight at a time (slot 0): the block protocol is strictly request/reply, so command
-//! queueing (NCQ) would gain nothing.
+//! tables and a bounce buffer are DMA memory this driver allocates. Requests are served
+//! one at a time; a vectored read (`MSG_BLOCK_READV`) puts all its runs in flight at once
+//! with native command queueing (NCQ, one command slot each) when the adapter and the
+//! disk have it, so the disk (or the emulator behind it) works on them together.
+//! Everything else uses slot 0.
 //!
 //! The supervisor starts it with `abar=<phys>` and, when the kernel routed the adapter's
 //! message-signalled interrupt (MSI) to this driver, `irq=<line>`; without it completion
@@ -14,6 +16,8 @@
 //! Requests on [`ENDPOINT_BLOCK_DEV`] are those of `ata-driver` (blocks are 4 KiB; data is
 //! in the service window at byte offset `args[2]`):
 //! - `MSG_BLOCK_READ [block, count, offset]`, `MSG_BLOCK_WRITE [block, count, offset]`;
+//! - `MSG_BLOCK_READV [runs]`: up to 32 runs `[block, count, offset]` from the table at
+//!   `BLOCK_READV_TABLE` in the window (see the kernel's `ipc/protocol.rs`);
 //! - `MSG_BLOCK_FLUSH`: flush the disk's write cache (FLUSH CACHE EXT);
 //! - `MSG_BLOCK_GET_SIZE`: reply `[0, blocks, lba48, dma]`, the model (40 bytes) in the window.
 //!
@@ -33,7 +37,8 @@ extern crate alloc;
 use core::sync::atomic::{fence, Ordering};
 
 use hydra_rt::protocol::{
-    ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
+    BLOCK_READV_MAX, BLOCK_READV_TABLE, ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_READV,
+    MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
 };
 use hydra_rt::{println, sys, Message, Server, WINDOW_SIZE};
 
@@ -55,6 +60,7 @@ const HBA_CAP2: usize = 0x24;
 const HBA_BOHC: usize = 0x28;
 
 const CAP_S64A: u32 = 1 << 31;
+const CAP_SNCQ: u32 = 1 << 30;
 const CAP_SSS: u32 = 1 << 27;
 const CAP_SCLO: u32 = 1 << 24;
 const GHC_AE: u32 = 1 << 31;
@@ -77,6 +83,7 @@ const PX_SIG: usize = 0x24;
 const PX_SSTS: usize = 0x28;
 const PX_SCTL: usize = 0x2C;
 const PX_SERR: usize = 0x30;
+const PX_SACT: usize = 0x34;
 const PX_CI: usize = 0x38;
 
 const CMD_ST: u32 = 1 << 0;
@@ -112,15 +119,19 @@ const ATA_WRITE_DMA_EXT: u8 = 0x35;
 const ATA_FLUSH_CACHE: u8 = 0xE7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xEA;
 const ATA_IDENTIFY: u8 = 0xEC;
+const ATA_READ_FPDMA_QUEUED: u8 = 0x60;
 
 // DMA memory layout: the command list (32 headers of 32 bytes, 1 KiB aligned), the
-// received-FIS area (256 bytes, 256-byte aligned), the command table of slot 0 (128-byte
-// aligned: the command FIS, then the PRD table at 0x80), then the bounce buffer
+// received-FIS area (256 bytes, 256-byte aligned), the command tables of the 32 slots
+// (each 0x100 bytes, 128-byte aligned: the command FIS, then the PRD table at 0x80), then
+// the bounce buffer
 const CLB_OFF: usize = 0x0000;
 const FB_OFF: usize = 0x0400;
 const CT_OFF: usize = 0x1000;
+/// Bytes per slot's command table.
+const CT_SLOT: usize = 0x100;
 const PRDT_OFF: usize = CT_OFF + 0x80;
-const BUF_OFF: usize = 0x2000;
+const BUF_OFF: usize = CT_OFF + 32 * CT_SLOT;
 /// The bounce buffer: one full service window.
 const BUF_LEN: usize = WINDOW_SIZE;
 const DMA_LEN: usize = BUF_OFF + BUF_LEN;
@@ -129,7 +140,7 @@ const DMA_LEN: usize = BUF_OFF + BUF_LEN;
 const PRD_BYTES: usize = 64 * 1024;
 /// PRD entries in the command table (they fit in its page after the command FIS).
 const MAX_PRDS: usize = BUF_LEN / PRD_BYTES;
-const _: () = assert!(PRDT_OFF + MAX_PRDS * 16 <= BUF_OFF);
+const _: () = assert!(PRDT_OFF + MAX_PRDS * 16 <= CT_OFF + CT_SLOT);
 
 /// Command time limit. Flushing a large write cache on a real disk can take seconds.
 const COMMAND_TIMEOUT_MS: u64 = 30_000;
@@ -245,6 +256,8 @@ struct Disk {
     write_cache: bool,
     /// Commands that failed and were retried after a port reset (diagnostics).
     recoveries: u32,
+    /// Command slots usable for queued (NCQ) reads at once; 0 without NCQ.
+    ncq_slots: usize,
 }
 
 impl Disk {
@@ -346,10 +359,20 @@ impl Disk {
     /// Fills the command header of slot 0, the command FIS and the PRD table for one
     /// command moving `bytes` bytes of the bounce buffer.
     fn build(&self, command: u8, lba: u64, count: u16, bytes: usize, dir: Dir) {
+        self.build_slot(0, command, lba, count, bytes, 0, dir);
+    }
+
+    /// Fills slot `tag`'s command header, command FIS and PRD table for one command
+    /// moving `bytes` bytes at byte `buf_off` of the bounce buffer. A queued read
+    /// (READ FPDMA QUEUED) carries its sector count in the features field and its tag in
+    /// the count field.
+    #[allow(clippy::too_many_arguments)]
+    fn build_slot(&self, tag: usize, command: u8, lba: u64, count: u16, bytes: usize, buf_off: usize, dir: Dir) {
         let prds = bytes.div_ceil(PRD_BYTES);
+        let ct_off = CT_OFF + tag * CT_SLOT;
         unsafe {
             // The command FIS: a host-to-device register FIS (20 bytes, 5 dwords)
-            let fis = self.at(CT_OFF);
+            let fis = self.at(ct_off);
             core::ptr::write_bytes(fis, 0, 0x80);
             let f = core::slice::from_raw_parts_mut(fis, 20);
             f[0] = FIS_TYPE_REG_H2D;
@@ -368,26 +391,32 @@ impl Disk {
             f[8] = (lba >> 24) as u8;
             f[9] = (lba >> 32) as u8;
             f[10] = (lba >> 40) as u8;
-            f[12] = count as u8;
-            f[13] = (count >> 8) as u8;
+            if command == ATA_READ_FPDMA_QUEUED {
+                f[3] = count as u8;
+                f[11] = (count >> 8) as u8;
+                f[12] = (tag as u8) << 3;
+            } else {
+                f[12] = count as u8;
+                f[13] = (count >> 8) as u8;
+            }
             // The PRD table: the bounce buffer in PRD_BYTES pieces
-            let prdt = self.at(PRDT_OFF) as *mut u32;
+            let prdt = self.at(ct_off + 0x80) as *mut u32;
             for i in 0..prds {
                 let off = i * PRD_BYTES;
                 let len = (bytes - off).min(PRD_BYTES);
-                let addr = self.mem_phys + (BUF_OFF + off) as u64;
+                let addr = self.mem_phys + (BUF_OFF + buf_off + off) as u64;
                 prdt.add(i * 4).write_volatile(addr as u32);
                 prdt.add(i * 4 + 1).write_volatile((addr >> 32) as u32);
                 prdt.add(i * 4 + 2).write_volatile(0);
                 // Byte count minus one (bit 0 set: counts are even); no per-entry interrupt
                 prdt.add(i * 4 + 3).write_volatile((len - 1) as u32);
             }
-            // Slot 0's header: FIS length 5 dwords, W for writes, the PRD count, the table
-            let hdr = self.at(CLB_OFF) as *mut u32;
+            // The slot's header: FIS length 5 dwords, W for writes, the PRD count, the table
+            let hdr = self.at(CLB_OFF + tag * 32) as *mut u32;
             let w = if dir == Dir::Write { 1 << 6 } else { 0 };
             hdr.write_volatile(5 | w | ((prds as u32) << 16));
             hdr.add(1).write_volatile(0); // PRDBC: bytes transferred, set by the adapter
-            let ct = self.mem_phys + CT_OFF as u64;
+            let ct = self.mem_phys + ct_off as u64;
             hdr.add(2).write_volatile(ct as u32);
             hdr.add(3).write_volatile((ct >> 32) as u32);
         }
@@ -481,6 +510,14 @@ impl Disk {
         }
         // Word 85 bit 5: write cache enabled (82 bit 5: supported)
         self.write_cache = id[82] & (1 << 5) != 0 && id[85] & (1 << 5) != 0;
+        // Word 76 bit 8: native command queueing; word 75: the queue depth minus one.
+        // Queued commands are 48-bit; the adapter must have NCQ and as many slots
+        let cap = self.hba.read(HBA_CAP);
+        if id[76] & (1 << 8) != 0 && self.lba48 && cap & CAP_SNCQ != 0 {
+            let depth = (id[75] & 0x1F) as usize + 1;
+            let slots = ((cap >> 8) & 0x1F) as usize + 1;
+            self.ncq_slots = depth.min(slots).min(BLOCK_READV_MAX);
+        }
         if self.sectors == 0 {
             return Err("the disk reports no sectors");
         }
@@ -540,6 +577,86 @@ impl Disk {
     fn flush(&mut self) -> Result<(), &'static str> {
         let cmd = if self.lba48 { ATA_FLUSH_CACHE_EXT } else { ATA_FLUSH_CACHE };
         self.command(cmd, 0, 0, 0, Dir::None)
+    }
+
+    /// Reads the runs `[block, count, window offset]` into `window`: all in flight at
+    /// once as queued commands when the disk has NCQ (each run in the bounce buffer at its
+    /// window offset), otherwise one after the other. A queued read that fails is redone
+    /// without queueing after the port is recovered.
+    fn readv(&mut self, runs: &[[u64; 3]], window: &mut [u8]) -> Result<(), &'static str> {
+        let spb = self.sectors_per_block();
+        if self.ncq_slots >= runs.len() && runs.len() > 1 {
+            let mut mask = 0u32;
+            for (tag, r) in runs.iter().enumerate() {
+                let (block, count, off) = (r[0], r[1] as usize, r[2] as usize);
+                let sectors = count as u64 * spb;
+                self.build_slot(tag, ATA_READ_FPDMA_QUEUED, block * spb, sectors as u16, count * BLOCK, off, Dir::Read);
+                mask |= 1 << tag;
+            }
+            if self.issue_queued(mask).is_ok() {
+                for r in runs {
+                    let (off, len) = (r[2] as usize, r[1] as usize * BLOCK);
+                    unsafe { core::ptr::copy_nonoverlapping(self.at(BUF_OFF + off), window[off..].as_mut_ptr(), len) };
+                }
+                return Ok(());
+            }
+            println!("[ahci-driver] a queued read failed; resetting the port and reading without queueing");
+            self.recover();
+        }
+        for r in runs {
+            let (block, count, off) = (r[0], r[1] as usize, r[2] as usize);
+            self.blocks(block, count, &mut window[off..], false)?;
+        }
+        Ok(())
+    }
+
+    /// Issues the queued commands of the slots in `mask` and waits for all of them.
+    fn issue_queued(&mut self, mask: u32) -> Result<(), &'static str> {
+        let (h, p) = (&self.hba, self.port);
+        fence(Ordering::SeqCst);
+        // A queued command's PxSACT bit is set before its PxCI bit
+        h.port_write(p, PX_SACT, mask);
+        h.port_write(p, PX_CI, mask);
+        let d = Deadline::after_ms(COMMAND_TIMEOUT_MS);
+        let mut spins = 0u32;
+        let result = loop {
+            let is = h.port_read(p, PX_IS);
+            if is & IS_ERRORS != 0 {
+                break Err(if is & IS_TFES != 0 { "the disk reported an error" } else { "adapter or link error" });
+            }
+            if (h.port_read(p, PX_SACT) | h.port_read(p, PX_CI)) & mask == 0 {
+                break Ok(());
+            }
+            if d.expired() {
+                break Err("command timed out");
+            }
+            match self.irq {
+                Some(irq) => {
+                    // Each completion interrupts (set device bits): its cause is cleared
+                    // before the next wait
+                    let _ = sys::irq_wait(irq, 2);
+                    let is = h.port_read(p, PX_IS);
+                    h.port_write(p, PX_IS, is & !IS_ERRORS);
+                    h.write(HBA_IS, 1 << p);
+                }
+                None => {
+                    spins += 1;
+                    if spins < 64 {
+                        core::hint::spin_loop();
+                    } else {
+                        sys::yield_now();
+                    }
+                }
+            }
+        };
+        let is = h.port_read(p, PX_IS);
+        h.port_write(p, PX_IS, is);
+        h.write(HBA_IS, 1 << p);
+        if result.is_err() {
+            let (tfd, serr, sact) = (h.port_read(p, PX_TFD), h.port_read(p, PX_SERR), h.port_read(p, PX_SACT));
+            println!("[ahci-driver] port {}: queued PxIS={:#x} PxTFD={:#x} PxSERR={:#x} PxSACT={:#x}", p, is, tfd, serr, sact);
+        }
+        result
     }
 }
 
@@ -637,6 +754,7 @@ fn main(args: &[&str]) {
         lba48: false,
         write_cache: false,
         recoveries: 0,
+        ncq_slots: 0,
     };
     if let Err(e) = disk.start() {
         println!("[ahci-driver] port {}: {}", port, e);
@@ -657,13 +775,14 @@ fn main(args: &[&str]) {
         }
     };
     println!(
-        "[ahci-driver] port {}: '{}': {} MiB, {}-byte sectors, LBA{}, write cache {}, {}",
+        "[ahci-driver] port {}: '{}': {} MiB, {}-byte sectors, LBA{}, write cache {}, NCQ {}, {}",
         port,
         disk.model_str(),
         disk.sectors * disk.sector_size as u64 / (1024 * 1024),
         disk.sector_size,
         if disk.lba48 { 48 } else { 28 },
         if disk.write_cache { "on" } else { "off" },
+        disk.ncq_slots,
         if disk.irq.is_some() { "MSI interrupt" } else { "polled" }
     );
     let blocks = disk.sectors / disk.sectors_per_block();
@@ -682,6 +801,36 @@ fn main(args: &[&str]) {
                 Ok(()) => reply(0, count as u64),
                 Err(e) => {
                     println!("[ahci-driver] {} of {} blocks at {} failed: {}", if write { "write" } else { "read" }, count, block, e);
+                    reply(EIO, 0)
+                }
+            }
+        }
+        MSG_BLOCK_READV => {
+            let n = msg.args[0] as usize;
+            if n == 0 || n > BLOCK_READV_MAX {
+                return reply(EINVAL, 0);
+            }
+            let window = srv.window();
+            let mut runs = [[0u64; 3]; BLOCK_READV_MAX];
+            let mut total = 0u64;
+            for (i, r) in runs[..n].iter_mut().enumerate() {
+                for (k, v) in r.iter_mut().enumerate() {
+                    let at = BLOCK_READV_TABLE + (i * 3 + k) * 8;
+                    *v = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
+                }
+                let (block, count, offset) = (r[0], r[1] as usize, r[2] as usize);
+                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE || block + count as u64 > blocks {
+                    return reply(EINVAL, 0);
+                }
+                total += count as u64;
+            }
+            let t = stats.start();
+            let result = disk.readv(&runs[..n], window);
+            stats.done(t, total * BLOCK as u64, false);
+            match result {
+                Ok(()) => reply(0, total),
+                Err(e) => {
+                    println!("[ahci-driver] vectored read of {} runs failed: {}", n, e);
                     reply(EIO, 0)
                 }
             }

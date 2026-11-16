@@ -56,11 +56,45 @@ pub fn reap_dead_tasks() {
             None => None,
         };
         match task {
-            Some(t) => drop(t),
+            Some(t) => {
+                note_stack_use(&t);
+                drop(t)
+            }
             None => break,
         }
     }
 }  // 64 KiB per kernel thread stack
+
+/// Deepest kernel stack use seen in a task that ended (bytes).
+pub static MAX_KSTACK_USE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Measures how deep task `t`'s kernel stack (zeroed when made) was ever used, and reports
+/// a new deepest use past half the stack: kernel stacks have no guard page, and an
+/// overflow would silently overwrite the heap below (another task's saved registers).
+fn note_stack_use(t: &Task) {
+    let Some(st) = t.stack.as_ref() else { return };
+    let words = unsafe { core::slice::from_raw_parts(st.as_ptr() as *const u64, st.len() / 8) };
+    let low = words.iter().position(|&w| w != 0).unwrap_or(words.len());
+    let used = st.len() - low * 8;
+    let prev = MAX_KSTACK_USE.fetch_max(used, core::sync::atomic::Ordering::Relaxed);
+    if used > prev && used > st.len() / 2 {
+        crate::kprintln!("[sched] deepest kernel stack use so far: {} of {} bytes (task {} {})", used, st.len(), t.id.0, t.name);
+        // The deepest call chain's frames are still there: the kernel code addresses in the
+        // lowest part (tools: rip - anchor + the map address of hydra_syscall_dispatcher)
+        let mut b = alloc::string::String::new();
+        let mut n = 0;
+        for &w in &words[low..(low + 3072).min(words.len())] {
+            if (0xFFFF_FFFF_8000_0000..0xFFFF_FFFF_8100_0000).contains(&w) {
+                b.push_str(&alloc::format!(" {:x}", w));
+                n += 1;
+                if n == 48 {
+                    break;
+                }
+            }
+        }
+        crate::kprintln!("[sched] its frames (anchor {:#x}):{}", crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize, b);
+    }
+}
 
 /// Diagnostic snapshot of a task for shell inspection (e.g. `ps` / `tasks` command).
 #[derive(Debug, Clone)]
@@ -130,7 +164,48 @@ pub fn load_linux_image(
 }
 
 /// Global preemptive round-robin scheduler instance.
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+pub static SCHEDULER: SchedLock<Scheduler> = SchedLock::new(Scheduler::new());
+
+/// The scheduler's spin lock. Waiting for it serves this CPU's TLB flush requests
+/// ([`crate::arch::smp::serve_tlb`]): its holder may be waiting for this CPU's flush
+/// (`fork` write-protects the parent's pages under it, which shoots down the TLBs of the
+/// CPUs running the parent's other threads), and a CPU spinning here with interrupts off
+/// would never take the flush interrupt. Before, a thread making an identity call
+/// (getpid, without the kernel lock, interrupts off) while another thread of its process
+/// forked froze the system.
+pub struct SchedLock<T>(Mutex<T>);
+
+impl<T> SchedLock<T> {
+    /// A lock holding `v`.
+    pub const fn new(v: T) -> Self {
+        Self(Mutex::new(v))
+    }
+
+    /// Takes the lock, serving TLB flush requests while waiting.
+    #[inline]
+    pub fn lock(&self) -> spin::MutexGuard<'_, T> {
+        loop {
+            if let Some(g) = self.0.try_lock() {
+                return g;
+            }
+            while self.0.is_locked() {
+                crate::arch::smp::serve_tlb();
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Takes the lock if it is free.
+    #[inline]
+    pub fn try_lock(&self) -> Option<spin::MutexGuard<'_, T>> {
+        self.0.try_lock()
+    }
+
+    /// Whether some CPU holds the lock.
+    pub fn is_locked(&self) -> bool {
+        self.0.is_locked()
+    }
+}
 
 /// Kinds of CPU time per CPU in [`CPU_TIMES`].
 pub const CPU_USER: usize = 0;
@@ -564,6 +639,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -673,6 +749,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -768,6 +845,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -866,6 +944,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -977,6 +1056,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -1168,6 +1248,7 @@ impl Scheduler {
             preempt_depth: 0,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            syscall_fpu: 0,
             event_wait: false,
             woken: false,
             wake_ns: 0,
@@ -1288,6 +1369,18 @@ impl Scheduler {
         // A task without an address space of its own keeps the kernel's tables
         let saved_cr3 = if curr_task.mm.is_none() && self.kernel_cr3 != 0 { self.kernel_cr3 } else { current_cr3 };
         curr_task.regs.save_from_context(ctx, saved_cr3);
+        // Kernel stacks have no guard page: the lowest 64 bytes (zeroed at creation) written
+        // means the stack came within reach of overflowing into the heap
+        if let Some(st) = curr_task.stack.as_ref() {
+            static STACK_WARNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            let low = unsafe { core::ptr::read_volatile(st.as_ptr() as *const [u64; 8]) };
+            if low.iter().any(|&w| w != 0) && !STACK_WARNED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let mut b = crate::console::FixedBuf::new();
+                let _ = core::fmt::Write::write_fmt(&mut b, format_args!("[sched] kernel stack of task {} nearly overflowed
+", curr_task.id.0));
+                crate::console::serial_write(b.as_str());
+            }
+        }
         curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
         if curr_task.mode == PrivilegeMode::User {
             crate::arch::segments::save(&mut curr_task.segs);
@@ -1428,6 +1521,14 @@ impl Scheduler {
             }
         }
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
+        // A wakeup kick this CPU's system call deferred: needed only if other woken work
+        // remains besides the task picked here
+        if crate::arch::smp::kick_pending() {
+            let others = self.tasks.iter().enumerate().any(|(i, t)| {
+                i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle
+            });
+            crate::arch::smp::switch_kick(others);
+        }
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
         self.tasks[next_idx].passed_over = 0;
@@ -1454,6 +1555,12 @@ impl Scheduler {
             self.tasks[curr_idx].syscall_args[k] =
                 super::CURRENT_SYSCALL_ARGS[k].swap(self.tasks[next_idx].syscall_args[k], core::sync::atomic::Ordering::Relaxed);
         }
+        // The FPU area of the system call each task is in belongs to the task too: a call
+        // that blocked and resumed (on any CPU) must not find another task's (clone gives
+        // the child the caller's FPU state from it, ptrace reads it)
+        self.tasks[curr_idx].syscall_fpu = crate::arch::syscall::SYSCALL_FPU
+            .swap(self.tasks[next_idx].syscall_fpu as *mut crate::arch::idt::FpuState, core::sync::atomic::Ordering::AcqRel)
+            as u64;
 
         // 4b'. Swap x87/SSE state through the trap frame's save area
         let trap_fpu = crate::arch::idt::CURRENT_TRAP_FPU.load(core::sync::atomic::Ordering::Acquire);

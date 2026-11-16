@@ -244,7 +244,9 @@ pub fn shootdown(cr3: Option<u64>, addr: Option<u64>) {
         }
         if cr3.map_or(true, |r| LOADED_CR3[c].load(Ordering::Acquire) == r) {
             wait[c] = TLB_WANT[c].fetch_add(1, Ordering::AcqRel) + 1;
+            let t0 = crate::compat::linux::prof::start();
             send_ipi_now(CPU_APIC[c].load(Ordering::Relaxed), TLB_VECTOR as u32);
+            crate::compat::linux::prof::ipi_sent(false, t0);
         }
     }
     for c in 0..MAX_CPUS {
@@ -260,8 +262,10 @@ pub fn shootdown(cr3: Option<u64>, addr: Option<u64>) {
 /// Sends fixed interrupt `vector` to local APIC `apic` (no waiting on the clock: callers
 /// may hold the kernel lock with interrupts off).
 fn send_ipi_now(apic: u32, vector: u32) {
-    lapic_write(LAPIC_ICR_HIGH, apic << 24);
-    lapic_write(LAPIC_ICR_LOW, 0x4000 | vector);
+    write_icr(apic, 0x4000 | vector);
+    if x2apic() {
+        return; // no delivery status to wait for
+    }
     for _ in 0..100_000 {
         if lapic_read(LAPIC_ICR_LOW) & (1 << 12) == 0 {
             break;
@@ -275,9 +279,11 @@ static HALTED: AtomicU64 = AtomicU64::new(0);
 /// Counts tasks made runnable: an idle CPU polls it briefly before halting.
 static RUNNABLE_GEN: AtomicU64 = AtomicU64::new(0);
 
-/// How long an idle CPU polls for work before halting: waking a halted virtual CPU costs
-/// tens of microseconds, longer than most waits between a wakeup and the next.
-const IDLE_POLL_NS: u64 = 50_000;
+/// How long an idle CPU polls for work before halting (`linux prof tune poll <us>`):
+/// waking a halted virtual CPU costs its waker 50-75 us and the woken CPU 50-200 us more
+/// under nested KVM, longer than most waits between a wakeup and the next. 200 us (as
+/// Linux's guest halt polling): a Wine start sent 5x fewer wakeup IPIs than with 50 us.
+pub static IDLE_POLL_NS: AtomicU64 = AtomicU64::new(200_000);
 
 /// Polls for a task made runnable (by another CPU, or an interrupt) for a short while,
 /// with interrupts enabled and without the kernel lock.
@@ -286,7 +292,7 @@ const IDLE_POLL_NS: u64 = 50_000;
 /// Whether one was.
 pub fn idle_poll() -> bool {
     let gen = RUNNABLE_GEN.load(Ordering::Acquire);
-    let end = super::pit::now_ns() + IDLE_POLL_NS;
+    let end = super::pit::now_ns() + IDLE_POLL_NS.load(Ordering::Relaxed);
     while super::pit::now_ns() < end {
         if RUNNABLE_GEN.load(Ordering::Acquire) != gen || crate::task::wait::wakes_pending() {
             return true;
@@ -327,15 +333,68 @@ pub fn idle_halting(gen: u64) -> bool {
 /// # Returns
 /// Whether another CPU woke it for a task made runnable ([`kick_idle`]).
 pub fn idle_halt_ended() -> bool {
-    let bit = 1 << super::percpu::cpu();
-    HALTED.fetch_and(!bit, Ordering::AcqRel) & bit == 0
+    let cpu = super::percpu::cpu();
+    let bit = 1 << cpu;
+    let kicked = HALTED.fetch_and(!bit, Ordering::AcqRel) & bit == 0;
+    if kicked {
+        let at = KICK_AT[cpu].load(Ordering::Relaxed);
+        crate::compat::linux::prof::kick_latency(super::pit::now_ns().saturating_sub(at));
+    }
+    kicked
 }
+
+/// When each CPU was last sent a wakeup kick ([`kick_idle`]), for the profile.
+static KICK_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Whether system calls defer their wakeup kicks ([`kick_idle`]; `linux prof tune`).
+pub static DEFER_KICKS: AtomicBool = AtomicBool::new(true);
+
+/// A wakeup kick a system call deferred, per CPU ([`kick_idle`]).
+static KICK_DEFERRED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
 /// A task became runnable: wakes one halted idle CPU (another than this one) to run it at
 /// once rather than at its next timer tick (a device interrupt, which only the boot
 /// processor takes, wakes a driver another CPU must run).
+///
+/// From a system call the kick waits for the call's end ([`flush_kick`]), and is dropped
+/// when the call blocks first and this CPU switches to the woken task ([`switch_kick`]):
+/// the usual request/reply exchange (a pipe or socket write, then a read that waits for
+/// the answer) then sends no inter-processor interrupt at all. Under a hypervisor sending
+/// one and waking a halted CPU each cost tens of microseconds, and the woken task could
+/// not have run before the call ended anyway: it resumes in the kernel, which needs the
+/// kernel lock the caller holds.
 pub fn kick_idle() {
     RUNNABLE_GEN.fetch_add(1, Ordering::SeqCst);
+    if DEFER_KICKS.load(Ordering::Relaxed) && crate::task::CURRENT_SYSCALL.load(Ordering::Relaxed) != u64::MAX && bkl_held() {
+        KICK_DEFERRED[super::percpu::cpu()].store(true, Ordering::Relaxed);
+        return;
+    }
+    kick_now();
+}
+
+/// Sends the wakeup kick the calling CPU's system call deferred, if any (the call is
+/// returning to user mode: the woken task needs another CPU).
+pub fn flush_kick() {
+    if KICK_DEFERRED[super::percpu::cpu()].swap(false, Ordering::Relaxed) {
+        kick_now();
+    }
+}
+
+/// The calling CPU switches tasks: a kick its system call deferred is sent only if
+/// `others_ready` (tasks made runnable remain after this CPU picked its next task).
+pub fn switch_kick(others_ready: bool) {
+    if KICK_DEFERRED[super::percpu::cpu()].swap(false, Ordering::Relaxed) && others_ready {
+        kick_now();
+    }
+}
+
+/// Whether the calling CPU holds a deferred kick.
+pub fn kick_pending() -> bool {
+    KICK_DEFERRED[super::percpu::cpu()].load(Ordering::Relaxed)
+}
+
+/// Wakes one halted idle CPU other than this one (see [`kick_idle`]).
+fn kick_now() {
     let me = 1u64 << super::percpu::cpu();
     loop {
         let halted = HALTED.load(Ordering::SeqCst) & !me;
@@ -346,9 +405,12 @@ pub fn kick_idle() {
         // Its bit is cleared by whoever wakes it: one IPI per halt (the TLB vector's
         // handler does nothing more when no flush is pending)
         if HALTED.fetch_and(!(1 << c), Ordering::AcqRel) & (1 << c) != 0 {
+            KICK_AT[c].store(super::pit::now_ns(), Ordering::Relaxed);
             let apic = CPU_APIC[c].load(Ordering::Acquire);
             if apic != u32::MAX {
+                let t0 = crate::compat::linux::prof::start();
                 x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
+                crate::compat::linux::prof::ipi_sent(true, t0);
             }
             return;
         }
@@ -377,16 +439,92 @@ pub fn present() -> usize {
     APIC_IDS.lock().len().max(1)
 }
 
+// ----------------------------------------------------------------------
+// Local APIC access: xAPIC (memory-mapped) or x2APIC (MSRs)
+// ----------------------------------------------------------------------
+//
+// Each CPU switches its own local APIC to x2APIC mode once the processors are started
+// (the start-up IPIs go out in xAPIC mode, as the firmware left it), as Linux does in
+// virtual machines. Under a hypervisor every local APIC access traps; a memory-mapped one
+// must be decoded and emulated, an MSR access is a cheaper exit, and an x2APIC IPI is a
+// single MSR write with no delivery status to poll (three exits before). Under nested
+// virtualization (KVM in WSL2) an IPI still costs its sender 50-75 us (most of it the
+// hypervisor waking the target), which is why wakeups avoid them (see kick_idle).
+
+/// CPUs whose local APIC is in x2APIC mode (a bit per CPU index). While 0 (early boot,
+/// before the per-CPU block exists) every access is memory-mapped.
+static X2APIC_CPUS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the calling CPU's local APIC is in x2APIC mode.
+#[inline]
+fn x2apic() -> bool {
+    let m = X2APIC_CPUS.load(Ordering::Relaxed);
+    m != 0 && m & (1 << super::percpu::cpu()) != 0
+}
+
+/// The x2APIC MSR of memory-mapped register offset `reg`.
+#[inline]
+fn x2_msr(reg: u64) -> u32 {
+    0x800 + (reg >> 4) as u32
+}
+
 fn lapic_read(reg: u64) -> u32 {
+    if x2apic() {
+        return unsafe { super::syscall::rdmsr(x2_msr(reg)) } as u32;
+    }
     unsafe { core::ptr::read_volatile((LAPIC_BASE.load(Ordering::Relaxed) + reg) as *const u32) }
 }
 
 fn lapic_write(reg: u64, v: u32) {
+    if x2apic() {
+        unsafe { super::syscall::wrmsr(x2_msr(reg), v as u64) };
+        return;
+    }
     unsafe { core::ptr::write_volatile((LAPIC_BASE.load(Ordering::Relaxed) + reg) as *mut u32, v) }
+}
+
+/// Sends interrupt command `low` (vector, delivery mode...) to local APIC `apic` from the
+/// calling CPU. In xAPIC mode the destination goes in ICR_HIGH first; in x2APIC mode one
+/// MSR write carries both.
+#[inline]
+fn write_icr(apic: u32, low: u32) {
+    if x2apic() {
+        unsafe { super::syscall::wrmsr(x2_msr(LAPIC_ICR_LOW), ((apic as u64) << 32) | low as u64) };
+    } else {
+        lapic_write(LAPIC_ICR_HIGH, apic << 24);
+        lapic_write(LAPIC_ICR_LOW, low);
+    }
+}
+
+/// Switches the calling CPU's local APIC to x2APIC mode when the CPU has it (CPUID 1
+/// ECX bit 21). The per-CPU block must be set up (its index is read from it).
+fn enable_x2apic() {
+    const IA32_APIC_BASE: u32 = 0x1B;
+    if core::arch::x86_64::__cpuid(1).ecx & (1 << 21) == 0 {
+        return;
+    }
+    unsafe {
+        let base = super::syscall::rdmsr(IA32_APIC_BASE);
+        // Enabled (bit 11) and extended (bit 10); xAPIC -> x2APIC is the allowed transition
+        if base & (1 << 11) != 0 && base & (1 << 10) == 0 {
+            super::syscall::wrmsr(IA32_APIC_BASE, base | (1 << 10));
+        }
+        if super::syscall::rdmsr(IA32_APIC_BASE) & (1 << 10) != 0 {
+            X2APIC_CPUS.fetch_or(1 << super::percpu::cpu(), Ordering::SeqCst);
+        }
+    }
+}
+
+/// Whether the local APICs are in x2APIC mode (the boot processor's).
+pub fn x2apic_on() -> bool {
+    X2APIC_CPUS.load(Ordering::Relaxed) & 1 != 0
 }
 
 /// This CPU's local APIC ID.
 pub fn apic_id() -> u32 {
+    if x2apic() {
+        return lapic_read(LAPIC_ID);
+    }
     lapic_read(LAPIC_ID) >> 24
 }
 
@@ -629,6 +767,7 @@ pub fn start_aps() {
     let tramp = TRAMPOLINE.load(Ordering::Relaxed);
     let ids = APIC_IDS.lock().clone();
     if tramp == 0 || ids.len() < 2 {
+        x86_64::instructions::interrupts::without_interrupts(enable_x2apic);
         return;
     }
     let me = apic_id();
@@ -687,6 +826,12 @@ pub fn start_aps() {
     while ONLINE.load(Ordering::Acquire) < next && crate::arch::pit::now_ns() < end {
         core::hint::spin_loop();
     }
+    // The start-up IPIs went out in xAPIC mode; from now on x2APIC (the APs switched as
+    // they started)
+    x86_64::instructions::interrupts::without_interrupts(enable_x2apic);
+    if x2apic_on() {
+        crate::kprintln!("[smp] local APICs in x2APIC mode");
+    }
     crate::kprintln!("[smp] {} CPU(s) online", ONLINE.load(Ordering::Acquire));
 }
 
@@ -706,6 +851,8 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     // From here on it serves TLB flush requests (from its wait loops, then interrupts)
     LIVE[cpu].store(true, Ordering::Release);
     crate::arch::syscall::init();
+    // x2APIC mode (the boot processor follows once every AP started)
+    enable_x2apic();
     // Local APIC on, spurious interrupts to vector 0xFF
     lapic_write(LAPIC_SVR, 0x1FF);
     // The legacy PIC's interrupts are the boot processor's alone: they reach every CPU

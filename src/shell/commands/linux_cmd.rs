@@ -222,6 +222,24 @@ impl Command for LinuxCommand {
                         println!("[+] Linux profile stopped");
                     }
                     "reset" => prof::reset(),
+                    // linux prof tune defer on|off | poll <us>: wakeup kick deferral, idle poll time
+                    "tune" => {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        match (args.get(2).copied(), args.get(3).copied()) {
+                            (Some("defer"), Some(v)) => crate::arch::smp::DEFER_KICKS.store(v == "on", Relaxed),
+                            (Some("poll"), Some(v)) => {
+                                if let Ok(us) = v.parse::<u64>() {
+                                    crate::arch::smp::IDLE_POLL_NS.store(us * 1000, Relaxed);
+                                }
+                            }
+                            _ => {}
+                        }
+                        println!(
+                            "[+] kick deferral {}, idle poll {} us",
+                            if crate::arch::smp::DEFER_KICKS.load(Relaxed) { "on" } else { "off" },
+                            crate::arch::smp::IDLE_POLL_NS.load(Relaxed) / 1000
+                        );
+                    }
                     // linux prof waits <ms>: log each call or fault at least this long (0: off)
                     "waits" if args.get(2).copied() == Some("show") => prof::slow_show(),
                     "waits" => {

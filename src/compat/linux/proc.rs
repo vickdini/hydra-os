@@ -171,7 +171,12 @@ pub struct SigAction {
 }
 
 /// Per-thread signal mask, pending signal bitmask, and alternate signal stack state.
-#[derive(Clone, Copy)]
+///
+/// Kept small (the senders table is allocated only for a thread that is sent a signal
+/// with a sender record): the process's thread map moves these by value, and the B-tree
+/// code that does so had stack frames of 13-26 KiB with the 4 KiB table inline, which took
+/// a thread's exit 58 KiB deep into its 64 KiB kernel stack.
+#[derive(Clone)]
 struct ThreadSig {
     /// Bitmask of signals currently blocked by this thread.
     mask: u64,
@@ -184,14 +189,35 @@ struct ThreadSig {
     /// Alternate stack flags (`SS_DISABLE`, `SS_ONSTACK`).
     alt_flags: u32,
     /// Senders of the signals pending for this thread (`tkill`/`tgkill`), by number.
-    senders: [SigSender; NSIG + 1],
+    senders: Senders,
     /// Signals a tracer let through after a signal-delivery stop: acted on without another.
     injected: u64,
 }
 
 impl Default for ThreadSig {
     fn default() -> Self {
-        ThreadSig { mask: 0, pending: 0, alt_sp: 0, alt_size: 0, alt_flags: 0, senders: [SigSender::default(); NSIG + 1], injected: 0 }
+        ThreadSig { mask: 0, pending: 0, alt_sp: 0, alt_size: 0, alt_flags: 0, senders: Senders(None), injected: 0 }
+    }
+}
+
+/// A thread's signal senders by number, allocated on the first record (indexing to write
+/// allocates it; reading an absent one gives the empty record).
+#[derive(Clone, Default)]
+struct Senders(Option<alloc::boxed::Box<[SigSender; NSIG + 1]>>);
+
+/// The record of a signal nobody recorded a sender for.
+static NO_SENDER: SigSender = SigSender { code: 0, pid: 0, uid: 0, call_addr: 0, syscall: 0, errno: 0, value: 0, trapno: 0, err: 0, cr2: 0 };
+
+impl core::ops::Index<usize> for Senders {
+    type Output = SigSender;
+    fn index(&self, sig: usize) -> &SigSender {
+        self.0.as_ref().map_or(&NO_SENDER, |t| &t[sig])
+    }
+}
+
+impl core::ops::IndexMut<usize> for Senders {
+    fn index_mut(&mut self, sig: usize) -> &mut SigSender {
+        &mut self.0.get_or_insert_with(|| alloc::boxed::Box::new([SigSender::default(); NSIG + 1]))[sig]
     }
 }
 
@@ -291,7 +317,7 @@ pub struct Process {
 }
 
 /// All Linux processes, including zombies not yet reaped.
-pub static PROCS: Mutex<BTreeMap<u64, Process>> = Mutex::new(BTreeMap::new());
+pub static PROCS: Mutex<BTreeMap<u64, alloc::boxed::Box<Process>>> = Mutex::new(BTreeMap::new());
 
 /// Converts a 1-based signal number (`1..=64`) into its corresponding 64-bit mask bit.
 ///
@@ -341,7 +367,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
     threads.insert(tid, ThreadSig { mask, ..ThreadSig::default() });
     procs.insert(
         pid,
-        Process {
+        alloc::boxed::Box::new(Process {
             pid,
             ppid,
             pgid,
@@ -368,7 +394,7 @@ pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>
             oom_score_adj,
             personality,
             fs_peer: 0,
-        },
+        }),
     );
 }
 
@@ -923,7 +949,7 @@ const SA_NOCLDWAIT: u64 = 2;
 /// # Arguments
 /// * `procs` - Mutable reference to the process map.
 /// * `ppid` - Parent process ID to notify.
-fn notify_parent_stop(procs: &mut BTreeMap<u64, Process>, ppid: u64, info: Option<(i32, u64, i32)>) {
+fn notify_parent_stop(procs: &mut BTreeMap<u64, alloc::boxed::Box<Process>>, ppid: u64, info: Option<(i32, u64, i32)>) {
     if let Some(parent) = procs.get_mut(&ppid) {
         if parent.actions[SIGCHLD as usize].flags & SA_NOCLDSTOP == 0 {
             if let Some(i) = info {
@@ -1124,7 +1150,7 @@ fn set_sender(p: &mut Process, tid: Option<u64>, sig: u32, sender: SigSender) ->
 /// own record first, then the process's), and moves the next queued instance of a
 /// real-time signal into its place, pending again.
 fn take_sender(p: &mut Process, tid: u64, sig: u32) -> SigSender {
-    let own = p.threads.get_mut(&tid).map(|t| core::mem::take(&mut t.senders[sig as usize]));
+    let own = p.threads.get_mut(&tid).and_then(|t| t.senders.0.as_mut()).map(|s| core::mem::take(&mut s[sig as usize]));
     let (sender, slot) = match own {
         Some(s) if s.pid != 0 || s.code != 0 => (s, Some(tid)),
         _ => (core::mem::take(&mut p.senders[sig as usize]), None),
@@ -1521,7 +1547,7 @@ pub fn sys_sigaltstack(ss: u64, old: u64, user_rsp: u64) -> i64 {
     let (tid, pid) = current_ids();
     let mut procs = PROCS.lock();
     let t = match procs.get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) {
-        Some(t) => *t,
+        Some(t) => ThreadSig { senders: Senders(None), ..*t },
         None => return EINVAL,
     };
     drop(procs);
@@ -1846,7 +1872,7 @@ pub fn set_timer_overrun(pid: u64, tid: Option<u64>, sig: u32, overrun: u32) {
     let mut procs = PROCS.lock();
     let Some(p) = procs.get_mut(&pid) else { return };
     let sender = match tid {
-        Some(t) => p.threads.get_mut(&t).map(|t| &mut t.senders[sig as usize]),
+        Some(t) => p.threads.get_mut(&t).and_then(|t| t.senders.0.as_mut()).map(|s| &mut s[sig as usize]),
         None => Some(&mut p.senders[sig as usize]),
     };
     if let Some(s) = sender.filter(|s| s.code == super::ptimer::SI_TIMER) {
@@ -2060,8 +2086,8 @@ pub fn signal_pending() -> bool {
     };
     match procs.get(&pid) {
         Some(p) => {
-            let t = p.threads.get(&tid).copied().unwrap_or_default();
-            (p.pending | t.pending) & !(t.mask & !UNBLOCKABLE) != 0
+            let (t_pending, t_mask) = p.threads.get(&tid).map_or((0, 0), |t| (t.pending, t.mask));
+            (p.pending | t_pending) & !(t_mask & !UNBLOCKABLE) != 0
         }
         None => false,
     }
@@ -2256,10 +2282,10 @@ pub fn force_seccomp_sigsys(nr: i32, ip: u64, errno: i32) {
 /// `true` on successful frame creation, `false` if stack memory could not be written.
 fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, old_mask: u64, cs: u16) -> bool {
     let (tid, pid) = current_ids();
-    let alt = PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).copied()).unwrap_or_default();
-    let on_alt = alt.alt_size != 0 && regs.rsp > alt.alt_sp && regs.rsp <= alt.alt_sp + alt.alt_size;
-    let mut sp = if act.flags & SA_ONSTACK != 0 && alt.alt_size != 0 && !on_alt {
-        alt.alt_sp + alt.alt_size
+    let (alt_sp, alt_size) = PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).map(|t| (t.alt_sp, t.alt_size))).unwrap_or((0, 0));
+    let on_alt = alt_size != 0 && regs.rsp > alt_sp && regs.rsp <= alt_sp + alt_size;
+    let mut sp = if act.flags & SA_ONSTACK != 0 && alt_size != 0 && !on_alt {
+        alt_sp + alt_size
     } else {
         regs.rsp - 128 // skip the red zone
     };
@@ -2291,9 +2317,9 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     // uc_flags: the FPU area holds XSAVE state
     put(&mut f, 8, if xstate { UC_FP_XSTATE } else { 0 });
     // ucontext: uc_flags, uc_link, uc_stack
-    put(&mut f, 8 + 16, alt.alt_sp);
-    f[8 + 24..8 + 28].copy_from_slice(&(if on_alt { SS_ONSTACK } else if alt.alt_size == 0 { SS_DISABLE } else { 0 }).to_le_bytes());
-    put(&mut f, 8 + 32, alt.alt_size);
+    put(&mut f, 8 + 16, alt_sp);
+    f[8 + 24..8 + 28].copy_from_slice(&(if on_alt { SS_ONSTACK } else if alt_size == 0 { SS_DISABLE } else { 0 }).to_le_bytes());
+    put(&mut f, 8 + 32, alt_size);
     // sigcontext (uc + 40)
     let mc = 8 + 40;
     let gprs = [
@@ -2720,6 +2746,7 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState, cs: u16) -> ! {
     // Back to user mode: interrupts stay off until iretq, the kernel lock is released and
     // the user GS base swapped in (as on every return to user mode)
     x86_64::instructions::interrupts::disable();
+    crate::arch::smp::flush_kick();
     crate::arch::smp::bkl_exit();
     let xsave = crate::arch::idt::use_xsave() as u64;
     core::arch::asm!(

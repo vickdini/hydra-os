@@ -11,6 +11,9 @@
 //! Requests on [`ENDPOINT_BLOCK_DEV`] (blocks are 4 KiB; data is in the service window at
 //! byte offset `args[2]`):
 //! - `MSG_BLOCK_READ [block, count, offset]`, `MSG_BLOCK_WRITE [block, count, offset]`;
+//! - `MSG_BLOCK_READV [runs]`: up to 32 runs `[block, count, offset]` from the table at
+//!   `BLOCK_READV_TABLE` in the window, read one after the other (IDE has no command
+//!   queueing; the caller still saves a request per run);
 //! - `MSG_BLOCK_FLUSH`: flush the disk's write cache;
 //! - `MSG_BLOCK_GET_SIZE`: reply `[0, blocks, lba48, dma]`, the model (40 bytes) in the window.
 //!
@@ -23,7 +26,8 @@ extern crate alloc;
 
 use hydra_rt::port::{inb, inw, outb, outl, outw};
 use hydra_rt::protocol::{
-    ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
+    BLOCK_READV_MAX, BLOCK_READV_TABLE, ENDPOINT_BLOCK_DEV, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_READ, MSG_BLOCK_READV,
+    MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
 };
 use hydra_rt::{println, sys, Message, Server, WINDOW_SIZE};
 
@@ -627,6 +631,42 @@ fn main(args: &[&str]) {
                 Ok(()) => reply(0, count as u64),
                 Err(e) => {
                     println!("[ata-driver] {} of {} blocks at {} failed: {}", if write { "write" } else { "read" }, count, block, e);
+                    reply(EIO, 0)
+                }
+            }
+        }
+        MSG_BLOCK_READV => {
+            let n = msg.args[0] as usize;
+            if n == 0 || n > BLOCK_READV_MAX {
+                return reply(EINVAL, 0);
+            }
+            let window = srv.window();
+            let mut runs = [[0u64; 3]; BLOCK_READV_MAX];
+            let mut total = 0u64;
+            for (i, r) in runs[..n].iter_mut().enumerate() {
+                for (k, v) in r.iter_mut().enumerate() {
+                    let at = BLOCK_READV_TABLE + (i * 3 + k) * 8;
+                    *v = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
+                }
+                let (block, count, offset) = (r[0], r[1] as usize, r[2] as usize);
+                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE || block + count as u64 > blocks {
+                    return reply(EINVAL, 0);
+                }
+                total += count as u64;
+            }
+            let t = stats.start();
+            let mut result = Ok(());
+            for r in &runs[..n] {
+                result = disk.blocks(r[0], r[1] as usize, &mut window[r[2] as usize..], false);
+                if result.is_err() {
+                    break;
+                }
+            }
+            stats.done(t, total * BLOCK as u64, false);
+            match result {
+                Ok(()) => reply(0, total),
+                Err(e) => {
+                    println!("[ata-driver] vectored read of {} runs failed: {}", n, e);
                     reply(EIO, 0)
                 }
             }

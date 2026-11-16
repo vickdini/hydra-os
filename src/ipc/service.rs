@@ -579,7 +579,14 @@ pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Messa
         r => r,
     };
     if endpoint == super::protocol::ENDPOINT_BLOCK_DEV {
-        crate::compat::linux::prof::disk_call(request.label == super::protocol::MSG_BLOCK_READ, request.args[1], t0);
+        use crate::compat::linux::prof::{DISK_OTHER, DISK_READ, DISK_READV};
+        let (kind, blocks) = match request.label {
+            super::protocol::MSG_BLOCK_READ => (DISK_READ, request.args[1]),
+            // The reply says how many blocks the runs had
+            super::protocol::MSG_BLOCK_READV => (DISK_READV, r.as_ref().map_or(0, |m| m.args[1])),
+            _ => (DISK_OTHER, request.args[1]),
+        };
+        crate::compat::linux::prof::disk_call(kind, blocks, t0);
     }
     r
 }

@@ -59,15 +59,38 @@ pub fn fs_request(op: u32, t0: u64) {
     }
 }
 
-/// Disk driver calls (reads, other), the blocks they moved and their time.
-static DISK: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+/// Inter-processor interrupts sent while profiling: [wakeup kicks, others] x [count, ns
+/// spent sending].
+static IPI: [[AtomicU64; 2]; 2] = [const { [const { AtomicU64::new(0) }; 2] }; 2];
 
-/// Records a call to the disk driver started at `t0`: a read (or another request) of
-/// `blocks` blocks.
+/// Records an inter-processor interrupt sent (`kick`: an idle CPU woken), started at `t0`
+/// (from [`start`]).
 #[inline]
-pub fn disk_call(read: bool, blocks: u64, t0: u64) {
+pub fn ipi_sent(kick: bool, t0: u64) {
     if t0 != 0 {
-        let d = &DISK[if read { 0 } else { 1 }];
+        let k = if kick { 0 } else { 1 };
+        IPI[k][0].fetch_add(1, Relaxed);
+        IPI[k][1].fetch_add(crate::arch::pit::now_ns().saturating_sub(t0), Relaxed);
+    }
+}
+
+/// Disk driver calls (reads, other requests, vectored reads), the blocks they moved and
+/// their time.
+static DISK: [[AtomicU64; 3]; 3] = [const { [const { AtomicU64::new(0) }; 3] }; 3];
+
+/// Kinds of disk driver calls for [`disk_call`].
+pub const DISK_READ: usize = 0;
+/// Requests other than reads.
+pub const DISK_OTHER: usize = 1;
+/// Vectored reads (several runs in one request).
+pub const DISK_READV: usize = 2;
+
+/// Records a call to the disk driver started at `t0`: a request of `kind` (DISK_READ...)
+/// moving `blocks` blocks.
+#[inline]
+pub fn disk_call(kind: usize, blocks: u64, t0: u64) {
+    if t0 != 0 && kind < DISK.len() {
+        let d = &DISK[kind];
         d[0].fetch_add(1, Relaxed);
         d[1].fetch_add(blocks, Relaxed);
         d[2].fetch_add(crate::arch::pit::now_ns().saturating_sub(t0), Relaxed);
@@ -215,6 +238,15 @@ static READY_AT: [AtomicU64; WAKE_SLOTS] = [const { AtomicU64::new(0) }; WAKE_SL
 const LAT_BOUNDS_US: [u64; 6] = [10, 50, 200, 1000, 5000, 20000];
 static LAT_PENDING: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 static LAT_RUN: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static LAT_KICK: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// A halted idle CPU woke `ns` after another CPU sent it a wakeup kick.
+#[inline]
+pub fn kick_latency(ns: u64) {
+    if ON.load(Relaxed) {
+        lat_add(&LAT_KICK, ns);
+    }
+}
 
 fn lat_add(h: &[AtomicU64; 7], ns: u64) {
     let us = ns / 1000;
@@ -313,9 +345,15 @@ pub fn reset() {
             c.store(0, Relaxed);
         }
     }
+    for k in IPI.iter() {
+        for c in k.iter() {
+            c.store(0, Relaxed);
+        }
+    }
     for i in 0..7 {
         LAT_PENDING[i].store(0, Relaxed);
         LAT_RUN[i].store(0, Relaxed);
+        LAT_KICK[i].store(0, Relaxed);
     }
 }
 
@@ -327,12 +365,18 @@ pub fn show(top: usize) {
         let ns = FAULT_NANOS[k].load(Relaxed);
         crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {}", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, FAULT_NAMES[k]);
     }
-    for (k, name) in ["disk reads", "other disk requests"].iter().enumerate() {
+    for (k, name) in ["disk reads", "other disk requests", "vectored disk reads"].iter().enumerate() {
         let (n, b, ns) = (DISK[k][0].load(Relaxed), DISK[k][1].load(Relaxed), DISK[k][2].load(Relaxed));
         crate::println!("[prof]   {:>9} {:>9} ms {:>7} us/each  {} ({} blocks)", n, ns / 1_000_000, if n > 0 { ns / n / 1000 } else { 0 }, name, b);
     }
+    for (k, name) in ["wakeup IPIs (idle CPU kicks)", "other IPIs (TLB flushes)"].iter().enumerate() {
+        let (n, ns) = (IPI[k][0].load(Relaxed), IPI[k][1].load(Relaxed));
+        crate::println!("[prof]   {:>9} {:>9} ms {:>7} ns/each  {} sent", n, ns / 1_000_000, if n > 0 { ns / n } else { 0 }, name);
+    }
+    crate::println!("[prof] deepest kernel stack use of an ended task: {} bytes", crate::task::scheduler::MAX_KSTACK_USE.load(Relaxed));
     lat_show("wakeup -> ready", &LAT_PENDING);
     lat_show("ready -> running", &LAT_RUN);
+    lat_show("kick -> halted CPU awake", &LAT_KICK);
     crate::println!("[prof] file-server requests (round trip, from the kernel):");
     for i in 0..FS_OPS {
         let n = FS_CALLS[i].load(Relaxed);
