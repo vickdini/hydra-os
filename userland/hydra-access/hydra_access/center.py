@@ -206,9 +206,7 @@ class Users(Page):
         d = QDialog(self)
         d.setWindowTitle("Sign-in hours for %s" % name)
         lay = QVBoxLayout(d)
-        page = ChildPage({"hours_enabled": u.get("hours_enabled", False), "hours": u.get("hours", {})})
-        # Only the hours tab applies to adults
-        tabs = page.findChild(QWidget, None)
+        page = ChildPage({"hours_enabled": u.get("hours_enabled", False), "hours": u.get("hours", {})}, hours_only=True)
         lay.addWidget(page)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
@@ -1221,9 +1219,10 @@ class Center(QMainWindow):
         if open_path:
             eff = self.page_of(Effective)
             eff.set_path(open_path)
-            self.select(Effective if page != "classify" else Properties)
-            if page == "classify":
-                ClassifyDialog(self, self.cfg, open_path).exec()
+            self.select(Effective)
+            if os.environ.get("USER") in [u for u, _, _ in core.system_users()]:
+                eff.user.setCurrentText(os.environ["USER"])
+            eff.check()
         elif page:
             for p in self.pages:
                 if p.name.lower().startswith(page.lower()):
@@ -1305,6 +1304,12 @@ def main():
     page = None
     if args and args[0].startswith("--"):
         page = args.pop(0)[2:]
+    if page == "classify" and args:
+        # Dolphin's "Classification…": just the dialog
+        d = ClassifyDialog(None, core.load_config(), args[0])
+        d.setWindowTitle("Classification of %s" % os.path.basename(args[0].rstrip("/")) or args[0])
+        d.exec()
+        return
     w = Center(args[0] if args else None, page)
     w.show()
     sys.exit(app.exec())

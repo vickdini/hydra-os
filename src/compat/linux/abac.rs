@@ -14,8 +14,8 @@
 //!   access, the policy may only take rights away (as Windows central access policies do).
 //!   Root is not restricted. A file without extended attributes, a process without a
 //!   subject, or no loaded policy skip it after one or two loads.
-//! - **Caches**: labels by `(inode, generation, change time)` (every xattr change updates
-//!   the change time), decisions by `(policy generation, subject, label set, local minute
+//! - **Caches**: labels by `(inode, generation)` (emptied when labels are set or removed),
+//!   decisions by `(policy generation, subject, label set, local minute
 //!   when a rule reads the time)` in a fixed table: a repeated decision takes no allocation
 //!   and no evaluation.
 //! - **Audit** ([`audit`]): denials, and where staged (proposed) rules would decide
@@ -74,6 +74,10 @@ static GEN: AtomicU32 = AtomicU32::new(1);
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static CHECKS: AtomicU64 = AtomicU64::new(0);
+/// Label reads from the file server (label cache misses).
+static LABEL_READS: AtomicU64 = AtomicU64::new(0);
+/// Bumped by every label change (see [`labels_of`]).
+static LABEL_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// The console login's subject (processes the kernel shell starts).
 static CONSOLE: AtomicU32 = AtomicU32::new(0);
 
@@ -84,8 +88,9 @@ struct State {
     subjects: Vec<AttrSet>,
     /// Label set `i + 1` and its raw text.
     labelsets: Vec<(AttrSet, Arc<[u8]>)>,
-    /// Label set of `(inode, generation, change time)`; 0 none.
-    label_cache: BTreeMap<(u64, u64, i64, u32), u32>,
+    /// Label set of `(inode, generation)`; 0 none. Every label change goes through
+    /// [`labels_changed`] (the xattr calls) or makes a new inode (inheritance).
+    label_cache: BTreeMap<(u64, u64), u32>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -196,11 +201,16 @@ fn labels_of(attr: &Attr) -> u32 {
     if !attr.has_xattr {
         return 0;
     }
-    let key = (attr.ino, attr.generation, attr.ctime.0, attr.ctime.1);
+    // Not keyed by change time: a folder's changes with every file made in it, and a
+    // labelled folder would be read again for each
+    let key = (attr.ino, attr.generation);
     if let Some(id) = with_state(|s| s.label_cache.get(&key).copied()) {
         return id;
     }
-    // Read outside the lock (a file server call)
+    // Read outside the lock (a file server call); a label change meanwhile (epoch moved)
+    // means the answer is not cached
+    let epoch = LABEL_EPOCH.load(Ordering::Acquire);
+    LABEL_READS.fetch_add(1, Ordering::Relaxed);
     let raw = ZfsClient::getxattr(attr.ino, LABELS).ok();
     with_state(|s| {
         let id = match raw.as_deref().and_then(|r| core::str::from_utf8(r).ok()) {
@@ -220,7 +230,9 @@ fn labels_of(attr: &Attr) -> u32 {
         if s.label_cache.len() >= MAX_LABEL_CACHE {
             s.label_cache.clear();
         }
-        s.label_cache.insert(key, id);
+        if LABEL_EPOCH.load(Ordering::Acquire) == epoch {
+            s.label_cache.insert(key, id);
+        }
         id
     })
 }
@@ -234,10 +246,12 @@ pub fn inherited_labels(dir: &Attr) -> Option<Vec<u8>> {
     with_state(|s| s.labelsets.get(id as usize - 1).map(|(_, raw)| raw.to_vec()))
 }
 
-/// A label attribute changed on some file: forget cached labels (the change time also
-/// moved, this is for an inode whose time did not).
+/// A label attribute changed on some file: forget the cached labels.
 pub fn labels_changed() {
-    with_state(|s| s.label_cache.clear());
+    with_state(|s| {
+        LABEL_EPOCH.fetch_add(1, Ordering::AcqRel);
+        s.label_cache.clear()
+    });
 }
 
 /// The calling process's subject (0: none).
@@ -747,7 +761,7 @@ pub fn prctl(a: [u64; 6]) -> i64 {
                 (au.len, au.dropped)
             };
             let text = alloc::format!(
-                "active={} apps={} generation={} policies={} rules={} app_rules={} subjects={} label_sets={} strings={} checks={} hits={} misses={} audit_pending={} audit_dropped={}\n",
+                "active={} apps={} generation={} policies={} rules={} app_rules={} subjects={} label_sets={} strings={} checks={} hits={} misses={} label_reads={} audit_pending={} audit_dropped={}\n",
                 ACTIVE.load(Ordering::Relaxed) as u8,
                 APPS.load(Ordering::Relaxed) as u8,
                 GEN.load(Ordering::Relaxed),
@@ -760,6 +774,7 @@ pub fn prctl(a: [u64; 6]) -> i64 {
                 CHECKS.load(Ordering::Relaxed),
                 HITS.load(Ordering::Relaxed),
                 MISSES.load(Ordering::Relaxed),
+                LABEL_READS.load(Ordering::Relaxed),
                 pending,
                 dropped
             );

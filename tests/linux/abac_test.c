@@ -185,6 +185,12 @@ static const char *POLICY =
 
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--probe")) return probe();
+    if (argc > 1 && !strcmp(argv[1], "--status")) {
+        char b[1024] = {0};
+        acc(STATUS, 0, (long)b, sizeof b - 1, 0);
+        fputs(b, stdout);
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "--load")) {
         // Loads a policy file (perf runs): abac --load FILE
         static char text[65536];

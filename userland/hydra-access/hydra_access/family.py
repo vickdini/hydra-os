@@ -95,9 +95,10 @@ class AddAccount(QDialog):
 class ChildPage(QWidget):
     """Screen time, apps and web for one child."""
 
-    def __init__(self, data):
+    def __init__(self, data, hours_only=False):
         super().__init__()
         self.data = data
+        self.hours_only = hours_only
         tabs = QTabWidget()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -132,7 +133,10 @@ class ChildPage(QWidget):
             self.days.append((on, a, b))
         sl.addLayout(grid)
         sl.addStretch()
-        tabs.addTab(st, "Screen time")
+        tabs.addTab(st, "Screen time" if not hours_only else "Sign-in hours")
+        if hours_only:
+            self.hours_on.setText("Limit when this person can sign in")
+            return
 
         # Apps
         ap = QWidget()
@@ -196,6 +200,8 @@ class ChildPage(QWidget):
                 if e == 2359:
                     e = 2400
                 d["hours"][str(i + 1)] = [s, e]
+        if self.hours_only:
+            return d
         d["blocked_apps"] = [self.apps.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.apps.count())
                              if self.apps.item(i).checkState() == Qt.CheckState.Checked]
         b = self.web_mode.checkedButton()
