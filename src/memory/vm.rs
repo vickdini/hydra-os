@@ -264,6 +264,11 @@ pub struct Mm {
     pub brk: u64,
     /// The process's auxiliary vector as passed at exec (`prctl(PR_GET_AUXV)`, `/proc/self/auxv`).
     pub auxv: Vec<u8>,
+    /// Where exec put the argument strings and the environment strings after them:
+    /// `(arg_start, arg_end, env_end)` (all 0 when unknown). `/proc/<pid>/cmdline` reads
+    /// the arguments there, as the program may have rewritten them (Wine shows the Windows
+    /// program's path; setproctitle).
+    pub args: (u64, u64, u64),
 }
 
 /// The address space of the task currently running on the CPU (null for kernel tasks).
@@ -458,6 +463,7 @@ impl Mm {
             brk_start: 0,
             brk: 0,
             auxv: Vec::new(),
+            args: (0, 0, 0),
         })
     }
 
@@ -491,6 +497,7 @@ impl Mm {
         child.brk_start = self.brk_start;
         child.brk = self.brk;
         child.auxv = self.auxv.clone();
+        child.args = self.args;
         let areas: Vec<(u64, u64, bool)> = self.vmas.values().map(|v| (v.start, v.end, v.shared)).collect();
         for (start, end, shared) in areas {
             let mut addr = start;

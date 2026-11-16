@@ -400,6 +400,9 @@ pub fn load_linux_exec(
 
     let strings_base = (STACK_TOP - 16 - strings.len() as u64) & !0xF;
     let addr_of = |off: usize| strings_base + off as u64;
+    // The arguments' strings, then the environment's (contiguous: pushed in that order)
+    let arg_end = envp_offs.first().copied().unwrap_or(execfn_off);
+    mm.args = (strings_base, addr_of(arg_end), addr_of(execfn_off));
 
     // --- argc / argv / envp / auxv words ---
     let mut words: Vec<u64> = Vec::new();

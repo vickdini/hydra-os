@@ -768,7 +768,7 @@ fn process_vm(pid: u64, liov: u64, lcnt: u64, riov: u64, rcnt: u64, flags: u64, 
 }
 
 /// Reads (`data` = None) or writes `n` bytes at `addr` of address space `mm`, within one page.
-fn remote_copy(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, data: Option<&[u8]>, n: u64) -> Option<Vec<u8>> {
+pub(super) fn remote_copy(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, data: Option<&[u8]>, n: u64) -> Option<Vec<u8>> {
     if addr >= 0x0000_8000_0000_0000 || addr.checked_add(n)? > 0x0000_8000_0000_0000 {
         return None;
     }

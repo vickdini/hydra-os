@@ -224,6 +224,40 @@ pub fn is_proc_dir(path: &str) -> bool {
     (who == "self" || who == "thread-self" || numeric(who)) && (dir == "task" || dir == "fd" || dir == "ns")
 }
 
+/// A process's arguments as they are now in its memory, by Linux's rules: the whole
+/// argument area; or, when the program overwrote the area's final NUL (setproctitle), the
+/// text up to the first NUL, which may run on into the environment. `None` when the process
+/// has no address space or its exec did not record the area.
+fn live_cmdline(pid: u64) -> Option<alloc::vec::Vec<u8>> {
+    let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
+    let (start, end, env_end) = mm.lock().args;
+    if start == 0 || end <= start {
+        return None;
+    }
+    // At most a page past the arguments' end when they run into the environment
+    let read = |from: u64, to: u64| -> Option<alloc::vec::Vec<u8>> {
+        let mut out = alloc::vec::Vec::with_capacity((to - from) as usize);
+        let mut at = from;
+        while at < to {
+            let n = (to - at).min(4096 - at % 4096);
+            out.extend_from_slice(&super::extra::remote_copy(&mm, at, None, n)?);
+            at += n;
+        }
+        Some(out)
+    };
+    let mut text = read(start, end.min(start + 128 * 1024))?;
+    if text.last() == Some(&0) {
+        return Some(text);
+    }
+    if env_end > end {
+        text.extend_from_slice(&read(end, env_end.min(end + 4096)).unwrap_or_default());
+    }
+    if let Some(nul) = text.iter().position(|&b| b == 0) {
+        text.truncate(nul + 1);
+    }
+    Some(text)
+}
+
 /// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
 /// `<pid>/fdinfo/<fd>`, with `<pid>` also `self` or `thread-self`. Takes no locks: path
 /// lookups run under the scheduler lock.
@@ -451,7 +485,7 @@ Seccomp:	{}
             Some(alloc::format!("{} {} {} 0 0 {} 0
 ", vm / 4096, anon + file, file, anon).into_bytes())
         }
-        "cmdline" => Some(cmdline.map(|c| c.to_vec()).unwrap_or_default()),
+        "cmdline" => Some(live_cmdline(pid).unwrap_or_else(|| cmdline.map(|c| c.to_vec()).unwrap_or_default())),
         "comm" => {
             // The executable's file name, truncated to TASK_COMM_LEN - 1 bytes
             let mut comm: alloc::vec::Vec<u8> = exe.rsplit('/').next().unwrap_or("").bytes().take(15).collect();
