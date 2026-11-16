@@ -222,6 +222,13 @@ impl Command for LinuxCommand {
                         println!("[+] Linux profile stopped");
                     }
                     "reset" => prof::reset(),
+                    // linux prof waits <ms>: log each call or fault at least this long (0: off)
+                    "waits" if args.get(2).copied() == Some("show") => prof::slow_show(),
+                    "waits" => {
+                        let ms = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(0);
+                        prof::SLOW_MS.store(ms, core::sync::atomic::Ordering::Relaxed);
+                        println!("[+] logging calls of {} ms or more", ms);
+                    }
                     // linux prof sample <task name> [all] | stop | show [N]: its PCs at ticks (user mode; all: kernel too)
                     "sample" => match args.get(2).copied() {
                         Some("show") => prof::sample_show(args.get(3).and_then(|n| n.parse().ok()).unwrap_or(40)),

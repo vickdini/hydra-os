@@ -45,6 +45,8 @@ const SECTOR: u64 = 512;
 pub(crate) const MAX_RUN: usize = crate::ipc::service::WINDOW_PAGES as usize;
 /// Size of the RAM-backed pool used when no ATA disk is present.
 const RAM_POOL_BYTES: u64 = 64 * 1024 * 1024;
+/// Blocks read in one disk request around a block that is not cached ([`Spa::read_around`]).
+const READ_AROUND: usize = 16;
 /// Default cap on cached blocks (128 MiB of frames), and the least the kernel may set.
 const CACHE_BLOCKS: usize = 32 * 1024;
 /// Cap on cached blocks of pools opened from now on ([`set_cache_blocks`]).
@@ -278,6 +280,9 @@ impl Vdev {
 struct CacheEntry {
     frame: PhysFrame<Size4KiB>,
     last_use: u64,
+    /// Read around another block, not checked yet: its checksum is checked against the
+    /// block pointer the first time it is used ([`Spa::read_bp`]).
+    unverified: bool,
 }
 
 /// Bounded cache of on-disk blocks, stored in physical frames.
@@ -325,6 +330,26 @@ impl BlockCache {
         })
     }
 
+    /// Whether `block` is cached but not checked yet (see [`CacheEntry::unverified`]).
+    fn unverified(&self, block: u64) -> bool {
+        self.map.get(&block).is_some_and(|e| e.unverified)
+    }
+
+    /// Keeps a block read around another one, unchecked, unless it is cached already. It
+    /// is the first to go when the cache is full (never used: oldest).
+    fn put_unverified(&mut self, block: u64, data: &[u8; ZFS_BLOCK_SIZE]) {
+        if self.map.contains_key(&block) {
+            return;
+        }
+        if self.map.len() >= self.capacity {
+            self.evict();
+        }
+        if let Some(frame) = alloc_user_frame() {
+            frame_bytes(frame).copy_from_slice(data);
+            self.map.insert(block, CacheEntry { frame, last_use: 0, unverified: true });
+        }
+    }
+
     /// Stores a copy of `data` for `block`.
     ///
     /// # Arguments
@@ -335,6 +360,7 @@ impl BlockCache {
         if let Some(e) = self.map.get_mut(&block) {
             frame_bytes(e.frame).copy_from_slice(data);
             e.last_use = self.clock;
+            e.unverified = false;
             return;
         }
         if self.map.len() >= self.capacity {
@@ -342,7 +368,7 @@ impl BlockCache {
         }
         if let Some(frame) = alloc_user_frame() {
             frame_bytes(frame).copy_from_slice(data);
-            self.map.insert(block, CacheEntry { frame, last_use: self.clock });
+            self.map.insert(block, CacheEntry { frame, last_use: self.clock, unverified: false });
         }
     }
 
@@ -645,13 +671,27 @@ impl Spa {
     /// # Returns
     /// Physical frame holding verified block contents on success, or an error string.
     pub fn read_bp(&mut self, bp: &BlockPointer) -> Result<PhysFrame<Size4KiB>, &'static str> {
-        if let Some(frame) = self.cache.get(bp.block) {
+        if self.cache.unverified(bp.block) {
+            // Read around another block: checked now, against its pointer
+            let frame = self.cache.get(bp.block).ok_or("ZFS: block cache")?;
+            if Fletcher4::compute(&frame_bytes(frame)[..bp.lsize as usize]) == bp.checksum {
+                if let Some(e) = self.cache.map.get_mut(&bp.block) {
+                    e.unverified = false;
+                }
+                self.cache.hits += 1;
+                return Ok(frame);
+            }
+            // Not what the pointer wants (it was not this block's contents): read it again
+            self.cache.invalidate(bp.block);
+        } else if let Some(frame) = self.cache.get(bp.block) {
             self.cache.hits += 1;
             return Ok(frame);
         }
         self.cache.misses += 1;
         let mut data = [0u8; ZFS_BLOCK_SIZE];
-        self.vdev.read(bp.block, &mut data)?;
+        if !self.read_around(bp.block, &mut data) {
+            self.vdev.read(bp.block, &mut data)?;
+        }
         if Fletcher4::compute(&data[..bp.lsize as usize]) != bp.checksum {
             return Err("ZFS Checksum verification failed (silent data corruption detected)");
         }
@@ -659,8 +699,40 @@ impl Spa {
         self.cache.get(bp.block).ok_or("ZFS: out of memory for block cache")
     }
 
-    /// Reads the blocks of `bps` that are not cached yet, consecutive ones in one disk
-    /// request (up to a driver window), and caches each whose checksum matches. A block
+    /// Reads the aligned run of [`READ_AROUND`] blocks holding `block` in one disk request
+    /// (a disk request costs about the same for 1 block as for 16: under nested
+    /// virtualization ~0.8 ms, nearly all of it the request itself), copies `block` to
+    /// `out` and keeps the others unchecked in the cache: metadata written in one
+    /// transaction group (dnodes, indirect blocks, directories) lies together on disk.
+    ///
+    /// # Returns
+    /// Whether it read (`false`: not a disk, or the read failed; read `block` alone).
+    fn read_around(&mut self, block: u64, out: &mut [u8; ZFS_BLOCK_SIZE]) -> bool {
+        if !self.vdev.is_hardware_backed() {
+            return false;
+        }
+        let first = block & !(READ_AROUND as u64 - 1);
+        let end = (first + READ_AROUND as u64).min(self.vdev.total_blocks);
+        if end <= block {
+            return false;
+        }
+        let mut buf = alloc::vec![0u8; ZFS_BLOCK_SIZE * (end - first) as usize];
+        if self.vdev.read(first, &mut buf).is_err() {
+            return false;
+        }
+        for b in first..end {
+            let data: &[u8; ZFS_BLOCK_SIZE] = buf[((b - first) as usize) * ZFS_BLOCK_SIZE..][..ZFS_BLOCK_SIZE].try_into().unwrap();
+            if b == block {
+                out.copy_from_slice(data);
+            } else {
+                self.cache.put_unverified(b, data);
+            }
+        }
+        true
+    }
+
+    /// Reads the blocks of `bps` that are not cached yet, near ones in one disk request (up
+    /// to a driver window), and caches each whose checksum matches. A block
     /// that fails is left out: [`Self::read_bp`] reads it again and reports the error.
     ///
     /// # Arguments
@@ -675,18 +747,31 @@ impl Spa {
         let mut buf: Vec<u8> = alloc::vec![0u8; ZFS_BLOCK_SIZE * MAX_RUN];
         let mut i = 0;
         while i < want.len() {
+            // One request for the wanted blocks within a driver window of each other: a
+            // request costs about the same whatever its size, so the blocks in between
+            // come along (kept unchecked, as by read_around) rather than each wanted block
+            // being a request of its own
             let start = want[i].block;
             let mut n = 1;
-            while i + n < want.len() && want[i + n].block == start + n as u64 && n < MAX_RUN {
+            while i + n < want.len() && want[i + n].block < start + MAX_RUN as u64 && want[i + n].block - want[i + n - 1].block <= READ_AROUND as u64 {
                 n += 1;
             }
-            let run = &mut buf[..n * ZFS_BLOCK_SIZE];
+            let len = (want[i + n - 1].block - start + 1) as usize;
+            let run = &mut buf[..len * ZFS_BLOCK_SIZE];
             if self.vdev.read(start, run).is_ok() {
                 self.cache.misses += n as u64;
-                for (k, bp) in want[i..i + n].iter().enumerate() {
-                    let data: &[u8; ZFS_BLOCK_SIZE] = run[k * ZFS_BLOCK_SIZE..(k + 1) * ZFS_BLOCK_SIZE].try_into().unwrap();
-                    if Fletcher4::compute(&data[..bp.lsize as usize]) == bp.checksum {
-                        self.cache.put(bp.block, data);
+                let mut next = 0;
+                for b in 0..len {
+                    let data: &[u8; ZFS_BLOCK_SIZE] = run[b * ZFS_BLOCK_SIZE..(b + 1) * ZFS_BLOCK_SIZE].try_into().unwrap();
+                    let block = start + b as u64;
+                    if next < n && want[i + next].block == block {
+                        let bp = want[i + next];
+                        next += 1;
+                        if Fletcher4::compute(&data[..bp.lsize as usize]) == bp.checksum {
+                            self.cache.put(block, data);
+                        }
+                    } else {
+                        self.cache.put_unverified(block, data);
                     }
                 }
             }

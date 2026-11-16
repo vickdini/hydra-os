@@ -553,10 +553,18 @@ impl PseudoFile {
                 let fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
                 let (total, free) = (fa.total_usable_memory() / 1024, fa.free_memory() / 1024);
                 drop(fa);
-                let mut text = alloc::format!("MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n", total, free, free);
+                // The kernel's page cache: what only it keeps counts as available (it is
+                // given back when memory runs short). File data the ZFS server caches is that
+                // program's own memory, as ZFS's ARC is on Linux
+                let (cached, reclaimable) = super::mm::cache_pages();
+                let (cached, reclaimable) = (cached as u64 * 4, reclaimable as u64 * 4);
+                let available = (free + reclaimable).min(total);
+                let mut text =
+                    alloc::format!("MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n", total, free, available);
                 let (swap_total, swap_free) = super::admin::swap_kib();
                 for field in ["Buffers", "Cached", "SwapCached", "SwapTotal", "SwapFree", "Shmem", "SReclaimable", "SUnreclaim"] {
                     let v = match field {
+                        "Cached" => cached,
                         "SwapTotal" => swap_total,
                         "SwapFree" => swap_free,
                         _ => 0,

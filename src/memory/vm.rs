@@ -1588,6 +1588,7 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
                     _ => FAULT_OBJECT,
                 };
                 crate::compat::linux::prof::fault(kind, t0);
+                crate::compat::linux::prof::slow(u64::MAX, 0, addr, kind as u64, 0, t0);
             }
             Some(r)
         }

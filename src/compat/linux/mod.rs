@@ -254,6 +254,9 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
     let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
     let r = dispatch_checked(frame);
     prof::syscall(num, t0);
+    if t0 != 0 {
+        prof::slow(num, r, arg0, arg1, arg2, t0);
+    }
     if t0 != 0 && (num == SYS_POLL || num == SYS_PPOLL) {
         slow_poll(arg0, arg1, t0, r);
     }

@@ -414,6 +414,53 @@ pub fn cache_truncated(ino: u64, size: u64) {
     obj.dirty.lock().retain(|&p| p < first_gone);
 }
 
+/// The page cache's size for `/proc/meminfo`: `(pages it holds, pages of files only the
+/// cache keeps)`. The second are free memory in waiting ([`cache_shrink`] lets them go),
+/// Linux's reclaimable page cache.
+pub fn cache_pages() -> (usize, usize) {
+    let total = CACHED_PAGES.load(Ordering::Relaxed);
+    // try_lock: /proc readers must not wait on (or deadlock with) a cache update
+    let reclaimable = RETAINED.try_lock().map_or(0, |r| {
+        r.iter().filter(|o| Arc::strong_count(o) == 1).map(|o| o.pages.try_lock().map_or(0, |p| p.len())).sum()
+    });
+    (total, reclaimable.min(total))
+}
+
+/// Memory is short: lets go of the least recently used files only the cache keeps until
+/// `want` pages are freed (or none is left). Only tries the locks: it runs inside
+/// allocations, which may hold them.
+pub fn cache_shrink(want: usize) {
+    let victims = {
+        let Some(mut r) = RETAINED.try_lock() else { return };
+        let mut order: Vec<(u64, usize)> =
+            r.iter().enumerate().filter(|(_, o)| Arc::strong_count(o) == 1).map(|(i, o)| (o.used.load(Ordering::Relaxed), i)).collect();
+        order.sort_unstable();
+        let mut gone = alloc::vec![false; r.len()];
+        let mut freed = 0;
+        for (_, i) in order {
+            if freed >= want {
+                break;
+            }
+            let Some(n) = r[i].pages.try_lock().map(|p| p.len()) else { continue };
+            freed += n;
+            gone[i] = true;
+        }
+        let mut victims = Vec::new();
+        let mut i = 0;
+        r.retain(|o| {
+            let keep = !gone[i];
+            i += 1;
+            if !keep {
+                o.retained.store(false, Ordering::Release);
+                victims.push(o.clone());
+            }
+            keep
+        });
+        victims
+    };
+    drop(victims);
+}
+
 /// Lets go of every cached file nothing maps (Linux's `drop_caches`); what shared mappings
 /// wrote goes back first.
 pub fn cache_drop_all() {

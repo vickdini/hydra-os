@@ -461,7 +461,19 @@ pub fn init_memory_from_uefi() {
 ///
 /// `Some(frame)` with reference count 1 and zeroed contents, or `None` if out of memory.
 pub fn alloc_user_frame() -> Option<PhysFrame<Size4KiB>> {
-    FRAME_ALLOCATOR.lock().allocate_zeroed_frame()
+    let (frame, low) = {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        let frame = fa.allocate_zeroed_frame();
+        // Below 1/32 of memory free: the page cache gives back files nothing maps
+        (frame, fa.free_memory() < fa.total_usable_memory() / 32)
+    };
+    if low || frame.is_none() {
+        crate::compat::linux::mm::cache_shrink(4096);
+        if frame.is_none() {
+            return FRAME_ALLOCATOR.lock().allocate_zeroed_frame();
+        }
+    }
+    frame
 }
 
 /// Adds a reference to a frame in the global allocator.
