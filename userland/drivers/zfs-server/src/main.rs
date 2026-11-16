@@ -912,6 +912,10 @@ fn main(args: &[&str]) {
         if let Some(n) = a.strip_prefix("cache_blocks=").and_then(|n| n.parse().ok()) {
             zfs::spa::set_cache_blocks(n);
         }
+        // new_guid=<id>: a new pool GUID, once per id (the first boot of an installation)
+        if let Some(n) = a.strip_prefix("new_guid=").and_then(|n| u64::from_str_radix(n, 16).ok()) {
+            zfs::spa::set_new_guid_for(n);
+        }
     }
     if let Err(e) = zfs_init() {
         hydra_rt::println!("[zfs-server] {}", e);

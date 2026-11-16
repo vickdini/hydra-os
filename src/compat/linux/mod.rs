@@ -9,6 +9,7 @@ pub mod abac_core;
 pub mod acl;
 pub mod admin;
 pub mod aio;
+pub mod blockdev;
 pub mod bpf;
 pub mod chardev;
 pub mod devices;

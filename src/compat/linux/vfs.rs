@@ -1335,6 +1335,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         let kind = if ftype == S_IFCHR { super::bpf::DEV_CHAR } else { super::bpf::DEV_BLOCK };
         super::bpf::device_check(kind, dev_major(attr.rdev), dev_minor(attr.rdev), access)?;
     }
+    if ftype == 0o060000 {
+        if let Some(dev) = super::blockdev::open(attr.rdev, flags) {
+            return install(FileDescriptor::Device(dev?), flags);
+        }
+    }
     if ftype == S_IFCHR {
         if let Some(dev) = super::chardev::open(attr.rdev, flags) {
             return install(FileDescriptor::Device(dev?), flags);
@@ -3610,6 +3615,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         // none: EINVAL) and report a failed write-back (EIO); syncfs takes any open one
         NR_SYNC => {
             let _ = ZfsClient::sync();
+            crate::fs::blockdev::flush_all();
             0
         }
         NR_FSYNC | NR_FDATASYNC | NR_SYNCFS => {
@@ -3619,6 +3625,11 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned())
             };
             let Some(desc) = desc else { return Some(EBADF) };
+            if let FileDescriptor::Device(d) = &desc {
+                if let Some(r) = d.fsync() {
+                    return Some(r);
+                }
+            }
             let syncable = matches!(desc, FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. } | FileDescriptor::File { .. });
             if num != NR_SYNCFS && !syncable {
                 return Some(EINVAL);
