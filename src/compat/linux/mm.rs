@@ -564,7 +564,7 @@ pub fn current_mm() -> Option<Arc<Mutex<Mm>>> {
 /// * `Err(-EBADF)` if descriptor is invalid.
 /// * `Err(-EACCES)` if descriptor is not readable.
 /// * `Err(-ENODEV)` if underlying resource does not support memory mapping.
-fn fd_object(fd: usize) -> Result<(Arc<dyn MappedObject>, i64), i64> {
+fn fd_object(fd: usize, pgoff: u64) -> Result<(Arc<dyn MappedObject>, i64), i64> {
     const O_ACCMODE: u32 = 0o3;
     const O_RDONLY: u32 = 0o0;
     const F_SEAL_WRITE: u32 = 0x0008;
@@ -599,7 +599,7 @@ fn fd_object(fd: usize) -> Result<(Arc<dyn MappedObject>, i64), i64> {
             Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }))
         }
         // A device's mmap_object decides for itself what may be mapped
-        crate::fs::FileDescriptor::Device(d) => Ok((d.mmap_object()?, 0)),
+        crate::fs::FileDescriptor::Device(d) => Ok((d.mmap_object_at(pgoff)?, 0)),
         _ => Err(-ENODEV),
     }
 }
@@ -640,7 +640,7 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         if fd < 0 {
             return -EBADF;
         }
-        match fd_object(fd as usize) {
+        match fd_object(fd as usize, offset / PAGE_SIZE) {
             Ok((obj, write_err)) => {
                 // A shared mapping writes the file itself, so as Linux: only through a
                 // descriptor that may write it, now (EACCES/EPERM) or after mprotect

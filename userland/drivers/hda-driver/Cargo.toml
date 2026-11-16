@@ -1,0 +1,8 @@
+[package]
+name = "hda-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra sound driver for Intel High Definition Audio controllers and their codecs"
+
+[dependencies]
+hydra-rt = { workspace = true }

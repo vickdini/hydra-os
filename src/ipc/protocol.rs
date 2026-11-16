@@ -255,3 +255,38 @@ pub const MSG_INPUT_READ: u32 = 0x7001;
 
 /// Protocol label for the USB input driver's reply.
 pub const MSG_INPUT_REPLY: u32 = 0x700F;
+
+/// Well-known endpoint of the sound driver (Intel High Definition Audio) (0x26 = 38).
+pub const ENDPOINT_SOUND_DEV: u32 = 0x26;
+
+/// Sound: describe the card. Reply ([`MSG_SND_REPLY`]): `args[0]` status, `args[1]` codec
+/// vendor and device ID, `args[2]` directions (bit 0 playback, bit 1 capture), `args[3]`
+/// amplifiers: bits 0..32 the playback volume's, 32..64 the capture volume's, each
+/// `steps | offset << 8 | step size << 16 | present << 24 | can mute << 25` (the HDA
+/// amplifier capabilities: gain `offset` is 0 dB, each step is `(step size + 1) / 4` dB).
+/// The window holds a NUL-terminated description of the codec.
+pub const MSG_SND_INFO: u32 = 0x8001;
+
+/// Sound: program a stream. The window holds six little-endian u64: direction (0
+/// playback, 1 capture), the ring buffer's physical address, its length in bytes, the
+/// period length in bytes (the buffer holds a whole number of them, at most 256), the HDA
+/// stream format word, and the physical address of the 4 KiB position buffer the
+/// controller writes each stream's position into. Reply: `args[0]` status, `args[1]` the
+/// stream's slot in the position buffer (its u64 at `8 * slot`, low 32 bits = byte
+/// position in the ring).
+pub const MSG_SND_SETUP: u32 = 0x8002;
+
+/// Sound: start (`args[1]` = 1) or stop (0) the stream of direction `args[0]`; the
+/// position is kept across a stop (pause). Reply: `args[0]` status, `args[1]` position.
+pub const MSG_SND_TRIGGER: u32 = 0x8003;
+
+/// Sound: the stream of direction `args[0]`'s byte position in its ring. Reply: `args[0]`
+/// status, `args[1]` position.
+pub const MSG_SND_POSITION: u32 = 0x8004;
+
+/// Sound: set the volume of direction `args[0]`: `args[1]` left and `args[2]` right gain
+/// (amplifier steps), `args[3]` bit 0 mutes left, bit 1 right.
+pub const MSG_SND_VOLUME: u32 = 0x8005;
+
+/// Protocol label for the sound driver's reply.
+pub const MSG_SND_REPLY: u32 = 0x800F;

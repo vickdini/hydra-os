@@ -86,6 +86,9 @@ pub enum PseudoFile {
     MaxUserNs,
     /// `/proc/<pid>/oom_score_adj` and `oom_score` (the path after `/proc/`).
     ProcOom(alloc::string::String),
+    /// `/proc/asound/...` (the path after `/proc/asound/`): the sound card's state, from
+    /// [`super::snd::proc_text`].
+    ProcSnd(alloc::string::String),
 }
 
 /// Where the cgroup v2 hierarchy is mounted.
@@ -199,6 +202,7 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
         "/proc/sys/kernel/perf_event_paranoid" => Some(PseudoFile::ProcStatic(b"2\n")),
         // /proc/<pid>/oom_score_adj and oom_score
+        p if p.starts_with("/proc/asound/") && super::snd::is_proc_file(p) => Some(PseudoFile::ProcSnd(alloc::string::String::from(&p[13..]))),
         p if OOM_FILES && p.starts_with("/proc/") && is_oom_file(&p[6..]) => Some(PseudoFile::ProcOom(alloc::string::String::from(&p[6..]))),
         p if is_proc_dir(p) => Some(PseudoFile::ProcDir(alloc::string::String::from(p))),
         p if p.starts_with("/proc/") && p.ends_with("/mountinfo") && p[6..p.len() - 10].bytes().all(|b| b.is_ascii_digit()) => {
@@ -644,6 +648,7 @@ impl PseudoFile {
                 read_slice(text.as_bytes(), cursor, buf)
             }
             PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
+            PseudoFile::ProcSnd(rest) => read_slice(super::snd::proc_text(rest).unwrap_or_default().as_bytes(), cursor, buf),
             PseudoFile::ProcUuid(boot) => read_slice(uuid_text(*boot).as_bytes(), cursor, buf),
             PseudoFile::ProcKeys => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
             PseudoFile::ProcDir(_) => 0,

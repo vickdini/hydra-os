@@ -342,6 +342,9 @@ pub mod compat {
                 fn mmap_object(&self) -> Result<Arc<dyn MappedObject>, i64> {
                     Err(-19)
                 }
+                fn mmap_object_at(&self, _pgoff: u64) -> Result<Arc<dyn MappedObject>, i64> {
+                    self.mmap_object()
+                }
                 fn set_nonblock(&self, on: bool);
                 fn nonblock(&self) -> bool;
                 fn stat(&self) -> crate::compat::linux::types::LinuxStat {

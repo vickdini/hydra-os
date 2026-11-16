@@ -45,6 +45,8 @@ static USB_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/zfs-server"));
 /// The e1000 network driver program.
 static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/e1000-driver"));
+/// The sound driver program (Intel High Definition Audio).
+static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
 /// The display server program.
 static DISPLAY_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/display-server"));
 
@@ -278,6 +280,59 @@ fn usb_grants() -> Vec<(u64, u64)> {
     XHCI.call_once(xhci_controller).map_or_else(Vec::new, |(_, base, len)| alloc::vec![(base, len)])
 }
 
+/// The first High Definition Audio controller (PCI class 04:03) with a codec that can
+/// play analog sound, and its register window (BAR 0, 16 KiB). Intel's HDMI-only audio
+/// controllers (on the processor, next to the chipset's) are skipped.
+fn hda_controller() -> Option<(crate::arch::pci::PciDevice, u64)> {
+    use crate::arch::pci;
+    const HDMI_ONLY: [u16; 6] = [0x0A0C, 0x0C0C, 0x0D0C, 0x160C, 0x2807, 0x2808];
+    pci::find_all_class(0x04, 0x03).into_iter().find_map(|dev| {
+        if dev.vendor_id == 0x8086 && HDMI_ONLY.contains(&dev.device_id) {
+            return None;
+        }
+        let base = pci::bar_address(&dev, 0);
+        (base != 0).then_some((dev, base))
+    })
+}
+
+/// The controller found once (sizing BARs must not happen while the driver runs).
+static HDA: spin::Once<Option<(crate::arch::pci::PciDevice, u64)>> = spin::Once::new();
+
+/// Sound driver: the controller's register window (bus mastering enabled here). On
+/// Intel chipsets the controller's DMA must snoop the processor caches (Linux clears the
+/// "no snoop" bit of the device control register 0x78 for the same reason): the ring
+/// buffers are ordinary cached memory.
+///
+/// # Returns
+///
+/// `Some(Vec<String>)` with `mmio=<phys>`, or `None` without a controller.
+fn hda_args() -> Option<Vec<String>> {
+    use crate::arch::pci;
+    let (dev, base) = (*HDA.call_once(hda_controller))?;
+    pci::enable_bus_mastering(&dev);
+    if dev.vendor_id == 0x8086 {
+        let (b, d, f) = (dev.bus, dev.device, dev.function);
+        let devc = pci::pci_read_u16(b, d, f, 0x78);
+        if devc & (1 << 11) != 0 {
+            pci::pci_write_u16(b, d, f, 0x78, devc & !(1 << 11));
+        }
+    }
+    let sub = pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x2C);
+    crate::compat::linux::snd::set_controller(
+        base,
+        alloc::format!("0000:{:02x}:{:02x}.{}", dev.bus, dev.device, dev.function),
+        dev.vendor_id,
+        dev.device_id,
+        sub,
+    );
+    Some(alloc::vec![alloc::format!("mmio={:#x}", base)])
+}
+
+/// Sound driver: the controller's 16 KiB register window.
+fn hda_grants() -> Vec<(u64, u64)> {
+    HDA.call_once(hda_controller).map_or_else(Vec::new, |(_, base)| alloc::vec![(base & !0xFFF, 0x4000)])
+}
+
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
 ///
 /// # Returns
@@ -508,6 +563,13 @@ pub fn supervisor_init() {
             usb_args,
             usb_grants,
         ));
+        sup.services.push(ServiceDescriptor::new(
+            "sound_driver",
+            crate::ipc::protocol::ENDPOINT_SOUND_DEV,
+            HDA_DRIVER_ELF,
+            hda_args,
+            hda_grants,
+        ));
     }
 }
 
@@ -566,6 +628,7 @@ pub fn start_all() {
         }
     }
     crate::arch::usb_input::start();
+    crate::compat::linux::snd::start();
     crate::task::spawn("supervisor", watchdog_task, crate::task::TaskPriority::Normal);
 }
 

@@ -559,6 +559,9 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     }
     t.dir(s, "/sys/bus/serio/devices")?;
     t.dir(s, "/sys/bus/platform/devices")?;
+    // ---- Sound: the ALSA card (see sound_tree) ----
+    sound_tree(t, s, usec)?;
+
     // udev is "running": libudev's monitor stays enabled when this exists
     t.file(s, "/run/udev/control", "")?;
 
@@ -1138,5 +1141,104 @@ pub fn populate(root: &str) -> Result<(), &'static str> {
     // No sync of its own: the changes are visible at once, and the background commit
     // writes them (most boots only give the device nodes back to root, which took a
     // second's sync before the login screen could start)
+    Ok(())
+}
+
+/// The sound card (`super::snd`): `/dev/snd` nodes, its sysfs devices (PipeWire finds cards
+/// through libudev, subsystem "sound"), their udev records, and the `/proc/asound`
+/// directories (the files are served by `super::snd::proc_text`; the ones here only make
+/// them show in directory listings). Without a card, the records a previous boot wrote are
+/// removed, so nothing looks for it.
+fn sound_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64) -> Result<(), i64> {
+    let Some((slot, vendor, device, subsys)) = super::snd::controller() else {
+        for path in ["/run/udev/data/+sound:card0", "/sys/class/sound/card0", "/sys/class/sound/controlC0", "/sys/class/sound/pcmC0D0p", "/sys/class/sound/pcmC0D0c"] {
+            let (parent, name) = split(path);
+            if let Some(dir) = lookup_path(s, t.root, parent) {
+                if s.lookup(dir, name.as_bytes()).is_ok() {
+                    let _ = s.unlink(dir, name.as_bytes());
+                    t.changed = true;
+                }
+            }
+        }
+        return Ok(());
+    };
+    let capture = super::snd::has_dir(1);
+    let pci = alloc::format!("/sys/devices/pci0000:00/{}", slot);
+    let (sub_vendor, sub_device) = (subsys as u16, (subsys >> 16) as u16);
+    t.file(
+        s,
+        &alloc::format!("{}/uevent", pci),
+        &alloc::format!(
+            "DRIVER=snd_hda_intel\nPCI_CLASS=40300\nPCI_ID={:04X}:{:04X}\nPCI_SUBSYS_ID={:04X}:{:04X}\nPCI_SLOT_NAME={}\nMODALIAS=pci:v{:08X}d{:08X}sv{:08X}sd{:08X}bc04sc03i00\n",
+            vendor, device, sub_vendor, sub_device, slot, vendor, device, sub_vendor, sub_device
+        ),
+    )?;
+    for (name, value) in [
+        ("vendor", alloc::format!("0x{:04x}\n", vendor)),
+        ("device", alloc::format!("0x{:04x}\n", device)),
+        ("subsystem_vendor", alloc::format!("0x{:04x}\n", sub_vendor)),
+        ("subsystem_device", alloc::format!("0x{:04x}\n", sub_device)),
+        ("class", String::from("0x040300\n")),
+        ("enable", String::from("1\n")),
+    ] {
+        t.file(s, &alloc::format!("{}/{}", pci, name), &value)?;
+    }
+    t.link(s, &alloc::format!("{}/subsystem", pci), "../../../bus/pci")?;
+    t.link(s, &alloc::format!("{}/driver", pci), "../../../bus/pci/drivers/snd_hda_intel")?;
+    t.dir(s, "/sys/bus/pci/drivers/snd_hda_intel")?;
+    t.link(s, &alloc::format!("/sys/bus/pci/devices/{}", slot), &alloc::format!("../../../devices/pci0000:00/{}", slot))?;
+
+    let card = alloc::format!("{}/sound/card0", pci);
+    t.file(s, &alloc::format!("{}/uevent", card), "")?;
+    t.file(s, &alloc::format!("{}/id", card), "Intel\n")?;
+    t.file(s, &alloc::format!("{}/number", card), "0\n")?;
+    t.link(s, &alloc::format!("{}/subsystem", card), "../../../../../class/sound")?;
+    t.link(s, &alloc::format!("{}/device", card), &alloc::format!("../../../{}", slot))?;
+    t.link(s, "/sys/class/sound/card0", &alloc::format!("../../devices/pci0000:00/{}/sound/card0", slot))?;
+    let path_tag: String = slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();
+    t.file(
+        s,
+        "/run/udev/data/+sound:card0",
+        &alloc::format!(
+            "I:{}\nE:ID_PATH=pci-{}\nE:ID_PATH_TAG=pci-{}\nE:SOUND_INITIALIZED=1\nE:SOUND_FORM_FACTOR=internal\nE:ID_BUS=pci\nE:ID_VENDOR_ID=0x{:04x}\nE:ID_MODEL_ID=0x{:04x}\nE:ID_VENDOR_FROM_DATABASE=Intel Corporation\nE:ID_MODEL_FROM_DATABASE=High Definition Audio Controller\nG:seat\nQ:seat\nV:1\n",
+            usec, slot, path_tag, vendor, device
+        ),
+    )?;
+    let mut nodes = alloc::vec![("controlC0", 0u64), ("pcmC0D0p", 16)];
+    if capture {
+        nodes.push(("pcmC0D0c", 24));
+    }
+    for (name, minor) in nodes {
+        let dir = alloc::format!("{}/{}", card, name);
+        t.file(s, &alloc::format!("{}/uevent", dir), &alloc::format!("MAJOR=116\nMINOR={}\nDEVNAME=snd/{}\n", minor, name))?;
+        t.file(s, &alloc::format!("{}/dev", dir), &alloc::format!("116:{}\n", minor))?;
+        if name.starts_with("pcm") {
+            t.file(s, &alloc::format!("{}/pcm_class", dir), "generic\n")?;
+        }
+        t.link(s, &alloc::format!("{}/subsystem", dir), "../../../../../../class/sound")?;
+        t.link(s, &alloc::format!("{}/device", dir), "../../card0")?;
+        let rel = alloc::format!("../../devices/pci0000:00/{}/sound/card0/{}", slot, name);
+        t.link(s, &alloc::format!("/sys/class/sound/{}", name), &rel)?;
+        t.link(s, &alloc::format!("/sys/dev/char/116:{}", minor), &rel)?;
+        // Anyone may play sound: a desktop's user owns the seat
+        t.node_mode(s, &alloc::format!("/dev/snd/{}", name), super::chardev::makedev(116, minor), 29, 0o666)?;
+        t.file(
+            s,
+            &alloc::format!("/run/udev/data/c116:{}", minor),
+            &alloc::format!("I:{}\nE:ID_PATH=pci-{}\nE:ID_PATH_TAG=pci-{}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\nV:1\n", usec, slot, path_tag),
+        )?;
+    }
+    t.link(s, &alloc::format!("/dev/snd/by-path/pci-{}", slot), "../controlC0")?;
+
+    // /proc/asound: directories and placeholders (contents from super::snd)
+    t.link(s, "/proc/asound/Intel", "card0")?;
+    for f in ["cards", "devices", "pcm", "version", "card0/id", "card0/codec#0"] {
+        t.file(s, &alloc::format!("/proc/asound/{}", f), "")?;
+    }
+    for d in if capture { &["p", "c"][..] } else { &["p"][..] } {
+        for f in ["info", "sub0/info", "sub0/status", "sub0/hw_params", "sub0/sw_params"] {
+            t.file(s, &alloc::format!("/proc/asound/card0/pcm0{}/{}", d, f), "")?;
+        }
+    }
     Ok(())
 }
