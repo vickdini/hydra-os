@@ -905,6 +905,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         }
         32 => {
             // Vector 32 = IRQ 0: 8254 PIT Timer Tick (counted and acknowledged on entry)
+            crate::video::splash::tick();
 
 
             // Preemptive Multitasking Round-Robin Scheduling: only user mode and kernel

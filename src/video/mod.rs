@@ -29,6 +29,8 @@ pub mod font;
 pub mod framebuffer;
 /// UEFI Graphics Output Protocol (GOP) discovery and hardware mode query.
 pub mod gop;
+/// The Hydra logo shown during boot instead of the boot messages.
+pub mod splash;
 
 pub use console::{clear_screen, is_active, set_colors, write_str, VideoConsole, VIDEO_CONSOLE};
 pub use framebuffer::Framebuffer;

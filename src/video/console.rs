@@ -423,6 +423,8 @@ static SHADOW: Mutex<Option<(alloc::vec::Vec<u8>, usize)>> = Mutex::new(None);
 ///
 /// `Some((addr, width, height, stride, is_bgr))` if video console is active, or `None`.
 pub fn release_display() -> Option<(*mut u8, usize, usize, usize, bool)> {
+    // A compositor draws over the boot logo
+    super::splash::compositor_took();
     let mut guard = VIDEO_CONSOLE.lock();
     let console = guard.as_mut()?;
     let mut shadow = SHADOW.lock();
@@ -440,6 +442,40 @@ pub fn release_display() -> Option<(*mut u8, usize, usize, usize, bool)> {
     Some((real, info.1, info.2, info.3, info.4))
 }
 
+/// Moves the console to a black off-screen copy for the boot logo (as for a compositor,
+/// see [`release_display`]). Returns the real framebuffer (address, width, height, stride
+/// in pixels, BGR order) for the logo.
+pub fn hide_behind_splash() -> Option<(*mut u8, usize, usize, usize, bool)> {
+    let mut guard = VIDEO_CONSOLE.lock();
+    let console = guard.as_mut()?;
+    let mut shadow = SHADOW.lock();
+    if shadow.is_some() {
+        return None;
+    }
+    let fb = console.framebuffer_mut();
+    let mut copy = alloc::vec![0u8; fb.size()];
+    let real = fb.base_ptr() as usize;
+    fb.set_base(copy.as_mut_ptr());
+    let info = (real as *mut u8, fb.width(), fb.height(), fb.stride(), fb.is_bgr());
+    *shadow = Some((copy, real));
+    console.clear();
+    Some(info)
+}
+
+/// [`reclaim_display`] for a kernel panic: gives up rather than wait on a lock, and keeps
+/// the off-screen copy's memory (the heap may be what failed).
+pub fn reclaim_display_nowait() {
+    let Some(mut guard) = VIDEO_CONSOLE.try_lock() else { return };
+    let Some(console) = guard.as_mut() else { return };
+    let Some(mut shadow) = SHADOW.try_lock() else { return };
+    if let Some((copy, real)) = shadow.take() {
+        let fb = console.framebuffer_mut();
+        unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), real as *mut u8, fb.size().min(copy.len())) };
+        fb.set_base(real as *mut u8);
+        core::mem::forget(copy);
+    }
+}
+
 /// Returns the screen to the console, showing what it drew in the meantime.
 pub fn reclaim_display() {
     let mut guard = VIDEO_CONSOLE.lock();
@@ -454,13 +490,13 @@ pub fn reclaim_display() {
     }
 }
 
-/// True while a compositor owns the screen.
+/// True while a compositor owns the screen (not the boot logo).
 ///
 /// # Returns
 ///
 /// `true` if display is currently released to compositor, `false` otherwise.
 pub fn display_released() -> bool {
-    SHADOW.lock().is_some()
+    SHADOW.lock().is_some() && !super::splash::is_active()
 }
 
 /// Writes a string to the autonomous video console if active.

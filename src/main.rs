@@ -115,6 +115,7 @@ fn panic(_info: &PanicInfo) -> ! {
             let _ = write!(com1, "[!] heap: {} KiB used, {} KiB free of {} KiB\n", h.used_bytes / 1024, h.free_bytes / 1024, h.total_bytes / 1024);
         }
     }
+    video::splash::panic_reveal();
     console::set_color(Color::LightRed, Color::Black);
     println!("\n[!] KERNEL PANIC: {:?}", _info);
     loop {
@@ -147,6 +148,8 @@ fn main() -> Status {
 fn boot() -> ! {
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
+    // The Hydra logo instead of boot messages, unless the boot entry asks for them
+    video::splash::decide();
     // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
     arch::boottime::mark("banner");
     arch::percpu::init_this_cpu(0);
@@ -354,6 +357,7 @@ fn boot() -> ! {
                 info.text_cols, info.text_rows
             );
             println!("    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4");
+            video::splash::start();
         }
         Err(e) => {
             console::set_color(Color::Yellow, Color::Black);

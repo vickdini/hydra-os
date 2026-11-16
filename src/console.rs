@@ -390,6 +390,9 @@ impl Write for Console {
         if is_standalone_video() {
             crate::video::console::write_str(s);
             serial_write(s);
+        } else if crate::video::splash::is_quiet() {
+            // The boot logo shows: the firmware console would draw over it
+            serial_write(s);
         } else {
             uefi::system::with_stdout(|stdout| {
                 let _ = stdout.write_str(s);
@@ -514,7 +517,7 @@ pub fn set_color(foreground: Color, background: Color) {
     }
     if is_standalone_video() {
         crate::video::console::set_colors(color_to_rgb(foreground), color_to_rgb(background));
-    } else {
+    } else if !crate::video::splash::is_quiet() {
         uefi::system::with_stdout(|stdout| {
             let _ = stdout.set_color(foreground, background);
         });
@@ -527,7 +530,7 @@ pub fn set_color(foreground: Color, background: Color) {
 pub fn clear_screen() {
     if is_standalone_video() {
         crate::video::console::clear_screen();
-    } else {
+    } else if !crate::video::splash::is_quiet() {
         uefi::system::with_stdout(|stdout| {
             let _ = stdout.clear();
         });
@@ -805,13 +808,52 @@ pub fn is_hardware_mode() -> bool {
 /// * `Some(Key)` - If a key press event is immediately available.
 /// * `None` - If no key has been pressed.
 pub fn read_key() -> Option<Key> {
-    if is_hardware_mode() {
+    crate::video::splash::poll();
+    let key = if is_hardware_mode() {
         crate::arch::keyboard::read_key()
     } else {
         uefi::system::with_stdin(|stdin| {
             stdin.read_key().unwrap_or(None)
         })
+    };
+    // Esc during the boot logo shows the boot messages
+    let esc = match &key {
+        Some(Key::Printable(c)) => u16::from(*c) == 0x1B,
+        Some(Key::Special(s)) => *s == ScanCode::ESCAPE,
+        None => false,
+    };
+    if esc && crate::video::splash::is_active() {
+        crate::video::splash::end();
+        return None;
     }
+    key
+}
+
+/// Repaints the screen from the scrollback: the last screenful of lines, with their
+/// colours, the cursor after the last one (when the boot logo gives the screen back).
+pub fn redraw_from_scrollback() {
+    let (_cols, rows) = screen_size();
+    let console = CONSOLE.lock();
+    let total = console.scrollback.total_lines();
+    clear_screen();
+    let mut line_buf = [0u8; SCROLLBACK_LINE_LEN];
+    let mut attr_buf = [0u8; SCROLLBACK_LINE_LEN];
+    let top = total.saturating_sub(rows.saturating_sub(1).max(1));
+    for i in top..total {
+        if i > top {
+            write_viewport_str("\r\n");
+        }
+        if let Some(len) = console.scrollback.get_line_with_attrs(i, &mut line_buf, &mut attr_buf) {
+            render_formatted_line(&line_buf[..len], &attr_buf[..len]);
+        }
+    }
+    // A finished last line: the cursor goes to the next
+    if console.scrollback.cur_len == 0 && total > 0 {
+        write_viewport_str("\r\n");
+    }
+    let attr = console.current_attr;
+    drop(console);
+    set_viewport_color(u8_to_color(attr), u8_to_bg_color(attr));
 }
 
 /// Checks non-blockingly whether Ctrl+C (ASCII 3) or Ctrl+\ (ASCII 28) was pressed to interrupt execution.

@@ -221,7 +221,9 @@ def main():
 
     # One VM at a time: two QEMUs on the same pool image (or one on an overlay while the
     # pool changes underneath) corrupt it, and QEMU on Windows does not prevent it
-    others = running_qemus()
+    # VMs of other checkouts run on their own overlays of the pool: only a VM on the same
+    # disk file is refused
+    others = [o for o in running_qemus() if a.disk and os.path.basename(a.disk) in o[1]]
     if a.kill_stale:
         for pid, cmd in others:
             if "-display none" in cmd:
@@ -230,7 +232,7 @@ def main():
                 else:
                     subprocess.run(["kill", "-9", str(pid)], capture_output=True)
         time.sleep(1.0)
-        others = running_qemus()
+        others = [o for o in running_qemus() if a.disk and os.path.basename(a.disk) in o[1]]
     if others:
         for pid, cmd in others:
             print(f"[hydra_run] another QEMU is running (pid {pid}{', headless' if '-display none' in cmd else ', with a window'}): not starting a second VM on the pool")

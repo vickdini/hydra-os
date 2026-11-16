@@ -330,6 +330,7 @@ fn auto_plasma_countdown(state: &mut ShellState) {
     let key = crate::console::read_key().is_some();
     let asked = crate::arch::fwcfg::read_file("opt/hydra/boot").is_some_and(|v| v.starts_with(b"shell"));
     if key || asked {
+        crate::video::splash::end();
         set_color(Color::LightCyan, Color::Black);
         crate::println!("[*] Hydra shell (the desktop was not started; type 'linux plasma' to start it)");
         set_color(Color::White, Color::Black);
@@ -338,6 +339,10 @@ fn auto_plasma_countdown(state: &mut ShellState) {
         crate::println!("[*] Starting KDE Plasma (the Hydra shell is on Ctrl+Alt+F1)");
         set_color(Color::White, Color::Black);
         execute_command("linux plasma", state);
+        if !crate::video::splash::is_desktop_starting() {
+            // No desktop to wait for: the boot logo makes way for the shell
+            crate::video::splash::end();
+        }
     }
 }
 

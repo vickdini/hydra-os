@@ -32,6 +32,27 @@ fn read_bytes(buf: &mut [u8]) {
 /// # Returns
 /// `None` without the device or the file.
 pub fn read_file(name: &str) -> Option<Vec<u8>> {
+    let (item, size) = find(name)?;
+    let mut v = alloc::vec![0u8; size];
+    select(item);
+    read_bytes(&mut v);
+    Some(v)
+}
+
+/// [`read_file`] into `buf`, without allocating (usable before the heap exists).
+///
+/// # Returns
+/// The number of bytes read (at most `buf.len()`), or `None` without the device or the file.
+pub fn read_file_into(name: &str, buf: &mut [u8]) -> Option<usize> {
+    let (item, size) = find(name)?;
+    let n = size.min(buf.len());
+    select(item);
+    read_bytes(&mut buf[..n]);
+    Some(n)
+}
+
+/// The selector and size of the fw_cfg file `name`.
+fn find(name: &str) -> Option<(u16, usize)> {
     select(SIGNATURE);
     let mut sig = [0u8; 4];
     read_bytes(&mut sig);
@@ -49,10 +70,7 @@ pub fn read_file(name: &str) -> Option<Vec<u8>> {
         if &e[8..8 + len] == name.as_bytes() {
             let size = u32::from_be_bytes([e[0], e[1], e[2], e[3]]).min(4096) as usize;
             let item = u16::from_be_bytes([e[4], e[5]]);
-            let mut v = alloc::vec![0u8; size];
-            select(item);
-            read_bytes(&mut v);
-            return Some(v);
+            return Some((item, size));
         }
     }
     None

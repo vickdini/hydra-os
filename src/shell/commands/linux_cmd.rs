@@ -286,6 +286,7 @@ impl Command for LinuxCommand {
                 // (a service, as on Ubuntu: the console stays free for its own login)
                 if has("/usr/bin/sddm") && args.get(2).copied() != Some("nologin") {
                     println!("[*] Starting the login screen (SDDM)...");
+                    crate::video::splash::desktop_starting();
                     start_service(root, &["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"]);
                     return;
                 }
@@ -300,7 +301,10 @@ impl Command for LinuxCommand {
                     println!("[*] Plasma (plasma-workspace) is not installed in {}; starting KWin with Konsole...", root);
                     argv.extend_from_slice(&["kwin_wayland", "--drm", "konsole"]);
                 }
+                crate::video::splash::desktop_starting();
                 run_chroot(root, &argv, 0, 0);
+                // The session ended (or never showed): the console comes back
+                crate::video::splash::end();
             }
 
             "rootfs" => {
