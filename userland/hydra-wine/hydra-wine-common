@@ -67,6 +67,13 @@ add_uninstall_actions() {
             'Icon=edit-delete' "Exec=/usr/local/libexec/hydra-wine-uninstall$arg" >> "$f"
         echo "$f"
     done)
+    # Wine files the programs under a start-menu folder named "Wine": Windows users look for
+    # their programs, not for the name of the software that runs them
+    d="$HOME/.local/share/desktop-directories/wine-wine.directory"
+    if grep -q '^Name=Wine$' "$d" 2>/dev/null; then
+        sed -i 's/^Name=Wine$/Name=Windows Programs/' "$d"
+        changed=yes
+    fi
     # The start menu reads a cache of the entries, which does not notice an entry growing
     [ -n "$changed" ] && kbuildsycoca6 > /dev/null 2>&1
     return 0
