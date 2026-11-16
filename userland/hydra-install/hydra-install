@@ -958,6 +958,15 @@ def screenshots(app, w, outdir):
     def shot(name):
         app.processEvents()
         w.grab().save(os.path.join(outdir, name + ".png"))
+        # Slow mode, so the screen can be photographed from outside (Hydra's VM tests)
+        pause = float(os.environ.get("HYDRA_INSTALL_SHOT_DELAY", "0") or 0)
+        if pause > 0:
+            import time
+            print("SHOT", name, flush=True)
+            end = time.time() + pause
+            while time.time() < end:
+                app.processEvents()
+                time.sleep(0.05)
 
     w.show()
     w.welcome.list.setCurrentRow(2)
@@ -983,6 +992,20 @@ def screenshots(app, w, outdir):
     shot("5-account")
     w.go_next()
     shot("6-summary")
+    if TEST and os.environ.get("HYDRA_INSTALL_SHOT_INSTALL") == "1":
+        # A real installation (test mode: onto the test disk image) driven through the window
+        import time
+        w.go_next()
+        t0, n = time.time(), 0
+        while w.installing:
+            app.processEvents()
+            time.sleep(0.05)
+            if time.time() - t0 > 2 + 3 * n and n < 3:
+                shot("7-progress-%d" % n)
+                n += 1
+        shot("8-result")
+        print("RESULT", "ok" if getattr(w.done, "ok", False) else "failed", w.error or "", flush=True)
+        return
     w.progress.set_step(4)
     w.progress.bar.setValue(42)
     w.progress.detail.setText("2.1 GB of 5.0 GB, about 3 min left")
