@@ -1,6 +1,6 @@
-TOOLKIT (Group B, stable): Python 3 + PyQt6 with Qt Widgets (packages python3-pyqt6, from Ubuntu universe). Reason: PySide6 pulls libshiboken6 -> libclang1-21 (+LLVM); PyQt6 is ~17 MB with no compiler libs; Qt Widgets get KDE's Breeze style, so windows look like other KDE apps; no QML/Kirigami needed. Hydra installs python3-pyqt6 itself if missing (hydra-session at boot, or Hydra Apps' first start via pkexec).
-Now: running the full regression suite on the final image, then the report.
-Works (verified in VM with screenshots): Hydra Apps (pinned on the taskbar, found by "store" in Start); Windows programs Notepad++, 7-Zip, SumatraPDF, WinMerge, PuTTY install (SHA-256 checked, silent) and start; LibreOffice, VLC, GIMP (apt) and Thunderbird (Mozilla archive) install through the polkit password dialog and start; uninstall of VLC (apt), Thunderbird and Notepad++ (Windows uninstaller); cancel of the password dialog reported in plain words.
-Works: Win+E/D/I/R/L/Up/Down/Left for a new user; welcome window at first login; no "Unknown username" warnings (systemd-sysusers at boot).
-Known: lock screen works but its greeter needs ~20 s to appear (~60 s first time) and freezes while dpkg writes a lot (unlocks afterwards).
-Commits: 6d798f3, 9d703b9, 88063ff (branch g2-apps).
+# Group H - USB storage (branch i-usb)
+Current step: first version of USB stick support written and compiling; waiting to test it in a VM (the Linux helper (WSL) on this laptop is not responding at the moment)
+Works so far:
+- USB driver code for USB sticks (Bulk-Only Transport + SCSI commands) and USB hubs, compiles (not yet tested)
+- kernel side: USB disks get their own service number next to the keyboard/mouse one; a "usbdisk" test command in the Hydra shell
+Next: boot a test VM with a virtual USB stick and run "usbdisk list" / "usbdisk test 0"

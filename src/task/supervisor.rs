@@ -343,7 +343,14 @@ fn zfs_args() -> Option<Vec<String>> {
     // heap is 1 GiB). 128 MiB held less than Firefox maps at every start
     let ram = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().total_usable_memory();
     let blocks = (ram / 8 / 4096).clamp(32 * 1024, 128 * 1024);
-    Some(alloc::vec![alloc::format!("cache_blocks={}", blocks)])
+    let mut args = alloc::vec![alloc::format!("cache_blocks={}", blocks)];
+    // No ATA or SATA disk, but USB disks: the pool is on the first USB disk that holds
+    // one (a blank one is never formatted)
+    if !service::is_online(ENDPOINT_BLOCK_DEV) && service::is_online(crate::ipc::protocol::ENDPOINT_USB_DISK) {
+        args.push(String::from("disk=usb"));
+        crate::shell::commands::usbdisk::POOL_ON_USB.store(true, core::sync::atomic::Ordering::Release);
+    }
+    Some(args)
 }
 
 /// No device memory (port I/O and its own DMA buffers only).
@@ -551,11 +558,8 @@ pub fn supervisor_init() {
         // takes the disk endpoint; the IDE driver starts only if it did not
         sup.services.push(ServiceDescriptor::new("ahci_driver", ENDPOINT_BLOCK_DEV, AHCI_DRIVER_ELF, ahci_args, ahci_grants));
         sup.services.push(ServiceDescriptor::new("ata_driver", ENDPOINT_BLOCK_DEV, ATA_DRIVER_ELF, ata_args, no_grants));
-        // The file server imports the pool through the disk driver
-        sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
-        service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
-        sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
-        sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
+        // The USB driver before the file server: the pool may be on a USB disk (the
+        // driver serves the USB disks next to its input endpoint)
         sup.services.push(ServiceDescriptor::new(
             "usb_driver",
             crate::ipc::protocol::ENDPOINT_INPUT_DEV,
@@ -563,6 +567,12 @@ pub fn supervisor_init() {
             usb_args,
             usb_grants,
         ));
+        // The file server imports the pool through the disk driver
+        sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
+        service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
+        service::allow_client(crate::ipc::protocol::ENDPOINT_USB_DISK, ENDPOINT_ZFS_SERVER);
+        sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
+        sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,
@@ -643,6 +653,8 @@ pub fn start_all() {
 ///
 /// `true` if service was successfully revived and is online, `false` otherwise.
 pub fn revive(endpoint: u32) -> bool {
+    // An endpoint served by another service's process (the USB disks): that service
+    let endpoint = service::primary_of(endpoint);
     let restarted = {
         let mut sup = match SUPERVISOR.try_lock() {
             Some(s) => s,
@@ -690,10 +702,14 @@ pub fn supervisor_tick() {
             continue; // still starting up
         }
         let seq = crate::arch::pit::ticks();
-        let answered = matches!(
-            service::call_once(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100),
-            Ok(reply) if reply.label == MSG_SUPERVISOR_PONG && reply.args[0] == seq
-        );
+        let answered = match service::call_once(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100) {
+            Ok(reply) => reply.label == MSG_SUPERVISOR_PONG && reply.args[0] == seq,
+            // Busy with a request that came through another endpoint it serves (the USB
+            // driver's disks share its slot): alive. A stuck request ends when its caller
+            // gives up, and a later heartbeat gets through
+            Err(-16) => endpoint == crate::ipc::protocol::ENDPOINT_INPUT_DEV,
+            Err(_) => false,
+        };
         let hung = {
             let mut sup = SUPERVISOR.lock();
             let svc = &mut sup.services[idx];

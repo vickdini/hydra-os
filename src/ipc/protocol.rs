@@ -277,6 +277,48 @@ pub const MSG_INPUT_READ: u32 = 0x7001;
 /// Protocol label for the USB input driver's reply.
 pub const MSG_INPUT_REPLY: u32 = 0x700F;
 
+/// Well-known endpoint of the USB disks (USB mass storage: sticks, card readers, USB
+/// hard disks) (0x27 = 39). Served by the USB driver (the process owning the xHCI
+/// controller), which also serves [`ENDPOINT_INPUT_DEV`]: the two endpoints share one
+/// call slot, so a call to either may find the driver busy with the other (`-EBUSY`; the
+/// kernel's `ipc::service::call` waits and retries for this endpoint).
+///
+/// The block protocol of the disk drivers (`MSG_BLOCK_READ`, `_WRITE`, `_READV`, `_FLUSH`,
+/// `_GET_SIZE`, 4 KiB blocks, data in this endpoint's own window), with `args[3]` the USB
+/// disk number (0, 1, ... as [`MSG_BLOCK_LIST`] reports them; `-ENODEV` for none).
+/// More replies: `-ENOMEDIUM` (-123: a card reader without a card), `-EROFS` (-30: a
+/// write-protected medium).
+pub const ENDPOINT_USB_DISK: u32 = 0x27;
+
+/// Protocol label to describe the disks a multi-disk driver serves (the USB driver).
+///
+/// Reply ([`MSG_BLOCK_REPLY`]): `args[0]` status, `args[1]` the number of disks `n`,
+/// `args[2]` a generation counter that changes whenever a disk is plugged in or out.
+/// The window holds `n` records of [`BLOCK_LIST_RECORD`] bytes (little-endian):
+/// - `0..4` disk number (`args[3]` of the other requests), `4..8` its generation (a new
+///   disk under a reused number has a new one);
+/// - `8..16` size in 4 KiB blocks (0: no medium), `16..20` sector size in bytes;
+/// - `20` root port of the xHCI controller (1-based), `21` hubs between it and the root
+///   port (its tier), `22` speed (xHCI protocol speed ID: 1 full, 2 low, 3 high, 4 Super-
+///   Speed, 5 SuperSpeedPlus), `23` flags (bit 0 removable medium, bit 1 write-protected,
+///   bit 2 medium present);
+/// - `24..28` route string (hub port at each tier below the root port, 4 bits each,
+///   tier 1 in bits 0..3; ports above 15 read 15);
+/// - `28..30` USB vendor ID, `30..32` product ID;
+/// - `32..72` model: SCSI INQUIRY vendor (8), space, product (16), space, revision (4),
+///   space padded; `72..104` USB serial number string (ASCII, space padded);
+/// - `104` USB interface number, `105` LUN; the rest is 0.
+///
+/// A UEFI device path of the disk reads `PciRoot(..)/Pci(<xHCI>)/USB(<root port - 1>, i)`
+/// for a disk on a root port, `.../USB(<root port - 1>, 0)/USB(<tier 1 hub port - 1>,
+/// i)` behind one hub, and so on: one USB node per tier, the root port and then each
+/// route nibble minus one (UEFI numbers ports from 0), the last node carrying the
+/// interface number `i`.
+pub const MSG_BLOCK_LIST: u32 = 0x2006;
+
+/// Bytes per disk record of [`MSG_BLOCK_LIST`].
+pub const BLOCK_LIST_RECORD: usize = 128;
+
 /// Well-known endpoint of the sound driver (Intel High Definition Audio) (0x26 = 38).
 pub const ENDPOINT_SOUND_DEV: u32 = 0x26;
 

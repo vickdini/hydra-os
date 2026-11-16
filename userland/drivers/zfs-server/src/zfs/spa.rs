@@ -157,6 +157,18 @@ pub struct Vdev {
 unsafe impl Send for Vdev {}
 
 impl Vdev {
+    /// Opens the disk through the disk driver, without a RAM disk fallback: `None` if the
+    /// driver has no such disk (to look for the pool among several disks).
+    ///
+    /// # Returns
+    /// The disk's [`Vdev`], or `None`.
+    pub fn open_disk() -> Option<Self> {
+        if !service::is_online(ENDPOINT_BLOCK_DEV) {
+            return None;
+        }
+        Self::query_driver().ok().filter(|&b| b > 0).map(|blocks| Self { backend: Backend::Driver, total_blocks: blocks })
+    }
+
     /// Opens the disk through the disk driver (started at the hardware takeover), or a RAM
     /// disk if there is none.
     ///

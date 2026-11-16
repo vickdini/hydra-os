@@ -72,6 +72,8 @@ pub mod zfs_cmds;
 pub mod linux_cmd;
 /// MINIX 3-style driver reincarnation server and process supervisor inspection command (`service`).
 pub mod service_cmd;
+/// USB disks: list, test and measure (`usbdisk`).
+pub mod usbdisk;
 
 use crate::shell::command::Command;
 
@@ -100,6 +102,7 @@ pub use misc::{ClearCommand, ColorCommand, CursorCommand, EchoCommand, PanicComm
 pub use power::{HaltCommand, RebootCommand, ShutdownCommand};
 pub use script::ShCommand;
 pub use service_cmd::ServiceCommand;
+pub use usbdisk::UsbDiskCommand;
 pub use status::StatusCommand;
 pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
 pub use time::TimeCommand;
@@ -194,6 +197,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &ElfCommand,
     &LinuxCommand,
     &ServiceCommand,
+    &UsbDiskCommand,
     // Power Management
     &RebootCommand,
     &ShutdownCommand,

@@ -484,6 +484,26 @@ pub mod ipc {
 
         /// The disk driver's window, attached at startup.
         static BLOCK_WINDOW: AtomicU64 = AtomicU64::new(0);
+        /// The endpoint the pool's disk is served on (the ATA/AHCI disk endpoint, or the
+        /// USB disks'), and the disk's number there (`args[3]` of block requests).
+        static DISK_ENDPOINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(super::protocol::ENDPOINT_BLOCK_DEV);
+        static DISK_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+        /// Uses disk `number` of the disks served on `endpoint` from now on (the pool code
+        /// keeps calling it [`super::protocol::ENDPOINT_BLOCK_DEV`]).
+        ///
+        /// # Arguments
+        /// * `endpoint` - Endpoint serving the disk.
+        /// * `number` - The disk's number there.
+        pub fn use_disk(endpoint: u32, number: u64) {
+            DISK_ENDPOINT.store(endpoint, Ordering::Release);
+            DISK_NUMBER.store(number, Ordering::Release);
+        }
+
+        /// Forgets the disk driver: the pool goes to a RAM disk.
+        pub fn detach_block() {
+            BLOCK_WINDOW.store(0, Ordering::Release);
+        }
 
         /// Maps the disk driver's window into this server.
         ///
@@ -493,7 +513,7 @@ pub mod ipc {
         /// # Errors
         /// Returns negative error code on attachment failure.
         pub fn attach_block() -> Result<(), i64> {
-            let addr = hydra_rt::sys::svc_attach(super::protocol::ENDPOINT_BLOCK_DEV)?;
+            let addr = hydra_rt::sys::svc_attach(DISK_ENDPOINT.load(Ordering::Acquire))?;
             BLOCK_WINDOW.store(addr, Ordering::Release);
             Ok(())
         }
@@ -534,7 +554,13 @@ pub mod ipc {
         /// # Errors
         /// Returns negative error code on failure or timeout.
         pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
-            let r = hydra_rt::sys::svc_call(endpoint, hydra_rt::Message::new(request.label as u64, request.args), timeout_ticks)?;
+            let (mut endpoint, mut args) = (endpoint, request.args);
+            if endpoint == super::protocol::ENDPOINT_BLOCK_DEV {
+                // The pool's disk, wherever it is served
+                endpoint = DISK_ENDPOINT.load(Ordering::Acquire);
+                args[3] = DISK_NUMBER.load(Ordering::Acquire);
+            }
+            let r = hydra_rt::sys::svc_call(endpoint, hydra_rt::Message::new(request.label as u64, args), timeout_ticks)?;
             Ok(Message::with_args(r.label as u32, r.args))
         }
     }
@@ -913,7 +939,9 @@ fn main(args: &[&str]) {
             zfs::spa::set_cache_blocks(n);
         }
     }
-    if let Err(e) = zfs_init() {
+    // disk=usb: the pool is on a USB disk (there is no ATA or SATA disk)
+    let usb = args.iter().any(|a| *a == "disk=usb");
+    if let Err(e) = zfs_init(usb) {
         hydra_rt::println!("[zfs-server] {}", e);
         return;
     }
@@ -958,7 +986,10 @@ fn main(args: &[&str]) {
 ///
 /// # Errors
 /// Static error string if disk driver is unavailable.
-fn zfs_init() -> Result<(), &'static str> {
+fn zfs_init(usb: bool) -> Result<(), &'static str> {
+    if usb {
+        ipc::service::use_disk(ipc::protocol::ENDPOINT_USB_DISK, 0);
+    }
     // The disk driver starts first; it may still be coming up
     let mut tries = 0;
     while ipc::service::attach_block().is_err() {
@@ -967,6 +998,18 @@ fn zfs_init() -> Result<(), &'static str> {
             return Err("the disk driver is not running");
         }
         sys::sleep_ms(100);
+    }
+    if usb {
+        // The first USB disk with a pool on it (never a blank one: it would be formatted)
+        let found = (0..8u64).find(|&n| {
+            ipc::service::use_disk(ipc::protocol::ENDPOINT_USB_DISK, n);
+            let vdev = zfs::spa::Vdev::open_disk();
+            vdev.is_some_and(|v| zfs::spa::Spa::probe(&v) == Some(zfs::spa::DiskContents::Pool))
+        });
+        match found {
+            Some(n) => hydra_rt::println!("[zfs-server] the pool is on USB disk {}", n),
+            None => return Err("no USB disk holds a pool"),
+        }
     }
     let server = ZfsServer::new();
     *ZFS_SERVER.lock() = Some(server);

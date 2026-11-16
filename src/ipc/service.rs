@@ -217,6 +217,8 @@ struct CallSlot {
     delivered: bool,
     /// The server's answer.
     reply: Option<Message>,
+    /// Tick the reply was given (a reply not taken for long is stale).
+    replied_at: u64,
 }
 
 /// One driver service.
@@ -239,14 +241,24 @@ pub struct Service {
     /// Services whose servers may call this one and map its window (the file server uses
     /// the disk driver).
     clients: Mutex<Vec<u32>>,
+    /// The endpoint whose server also serves this one and whose call slot (and server
+    /// wait queue) it uses: one request at a time reaches that process, whichever
+    /// endpoint it came through (0: none, the service has its own). The USB driver serves
+    /// the USB disks this way next to its input endpoint.
+    primary: u32,
 }
 
 impl Service {
     const fn new(endpoint: u32) -> Self {
+        Self::with_primary(endpoint, 0)
+    }
+
+    const fn with_primary(endpoint: u32, primary: u32) -> Self {
         Self {
+            primary,
             endpoint,
             server: AtomicU64::new(0),
-            slot: Mutex::new(CallSlot { seq: 0, request: None, delivered: false, reply: None }),
+            slot: Mutex::new(CallSlot { seq: 0, request: None, delivered: false, reply: None, replied_at: 0 }),
             recv_wq: WaitQueue::new(),
             window: Mutex::new(None),
             grants: Mutex::new(Vec::new()),
@@ -307,14 +319,38 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 6] = [
+static SERVICES: [Service; 7] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
     Service::new(ENDPOINT_DISPLAY_DEV),
     Service::new(crate::ipc::protocol::ENDPOINT_INPUT_DEV),
     Service::new(crate::ipc::protocol::ENDPOINT_SOUND_DEV),
+    Service::with_primary(crate::ipc::protocol::ENDPOINT_USB_DISK, crate::ipc::protocol::ENDPOINT_INPUT_DEV),
 ];
+
+/// The service whose call slot `svc` uses (itself, or its primary).
+fn slot_owner(svc: &'static Service) -> &'static Service {
+    if svc.primary == 0 {
+        return svc;
+    }
+    service(svc.primary).unwrap_or(svc)
+}
+
+/// The endpoint whose process serves `endpoint` and is supervised under it: its primary,
+/// if it has one (the USB disks are served by the USB driver).
+pub fn primary_of(endpoint: u32) -> u32 {
+    match service(endpoint) {
+        Some(s) if s.primary != 0 => s.primary,
+        _ => endpoint,
+    }
+}
+
+/// Whether calls to `endpoint` share a call slot with another endpoint (and may find the
+/// server busy with that one's request).
+fn shares_slot(svc: &Service) -> bool {
+    svc.primary != 0 || SERVICES.iter().any(|s| s.primary == svc.endpoint)
+}
 
 /// Resolves the static `Service` descriptor corresponding to `endpoint`.
 ///
@@ -536,9 +572,27 @@ pub fn unregister(endpoint: u32) {
         if server != 0 {
             crate::task::SCHEDULER.lock().end_handoff(server);
         }
-        let mut slot = svc.slot.lock();
+        let mut slot = slot_owner(svc).slot.lock();
         slot.request = None;
         slot.reply = None;
+        drop(slot);
+        // The endpoints its process also served go with it
+        for alias in SERVICES.iter().filter(|s| s.primary == endpoint) {
+            alias.server.store(0, Ordering::Release);
+        }
+    }
+}
+
+/// [`call_once`], waiting while the server is busy with a request that came through
+/// another endpoint it serves (the slot is shared, see `Service::primary`), up to
+/// `timeout_ticks`.
+fn call_shared(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Message, i64> {
+    let deadline = crate::arch::pit::ticks() + timeout_ticks;
+    loop {
+        match call_once(endpoint, request, timeout_ticks) {
+            Err(EBUSY) if crate::arch::pit::ticks() < deadline => crate::task::yield_now(),
+            r => return r,
+        }
     }
 }
 
@@ -575,8 +629,9 @@ pub fn call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<Messa
         return Err(ENODEV);
     }
     let t0 = crate::compat::linux::prof::start();
-    let r = match call_once(endpoint, request, timeout_ticks) {
-        Err(ETIMEDOUT) if !server_alive(svc) && crate::task::supervisor::revive(endpoint) => call_once(endpoint, request, timeout_ticks),
+    let once = if svc.primary != 0 { call_shared } else { call_once };
+    let r = match once(endpoint, request, timeout_ticks) {
+        Err(ETIMEDOUT) if !server_alive(svc) && crate::task::supervisor::revive(endpoint) => once(endpoint, request, timeout_ticks),
         r => r,
     };
     if endpoint == super::protocol::ENDPOINT_BLOCK_DEV {
@@ -641,10 +696,16 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
     if crate::task::SCHEDULER.lock().current_task_id().0 == server {
         return Err(EDEADLK); // a server calling its own service would wait for itself
     }
+    let owner = slot_owner(svc);
     let seq = {
-        let mut slot = svc.slot.lock();
-        if slot.request.is_some() {
-            crate::kprintln!("[service] call to {:#x} by task {}: busy (cpu {})", endpoint, crate::task::SCHEDULER.lock().current_task_id().0, crate::arch::percpu::cpu());
+        let mut slot = owner.slot.lock();
+        // Busy: a request in progress, or a reply its caller has not taken yet (one not
+        // taken within a second belongs to a caller that is gone)
+        let now = crate::arch::pit::ticks();
+        if slot.request.is_some() || (slot.reply.is_some() && now < slot.replied_at + 100) {
+            if !shares_slot(svc) {
+                crate::kprintln!("[service] call to {:#x} by task {}: busy (cpu {})", endpoint, crate::task::SCHEDULER.lock().current_task_id().0, crate::arch::percpu::cpu());
+            }
             return Err(EBUSY);
         }
         slot.seq += 1;
@@ -653,21 +714,26 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
         slot.reply = None;
         slot.seq
     };
-    svc.recv_wq.wake_all();
+    owner.recv_wq.wake_all();
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
     let handed = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().begin_handoff(server, deadline));
     if !handed {
-        svc.slot.lock().request = None;
+        owner.slot.lock().request = None;
         crate::kprintln!("[service] call to {:#x}: no handoff slot", endpoint);
         return Err(EBUSY);
     }
     crate::task::yield_now();
-    let mut slot = svc.slot.lock();
+    let mut slot = owner.slot.lock();
+    let ours = slot.seq == seq;
     match slot.reply.take() {
-        Some(reply) if slot.seq == seq => Ok(reply),
-        _ => {
+        Some(reply) if ours => Ok(reply),
+        other => {
             // No answer: abandon the call (a late reply is ignored)
-            slot.request = None;
+            if ours {
+                slot.request = None;
+            } else {
+                slot.reply = other; // another caller's
+            }
             drop(slot);
             crate::kprintln!(
                 "[service] call to {:#x} by task {}: no reply (cpu {}, tick {} deadline {})",
@@ -705,7 +771,9 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
 ///
 /// *Guaranteed to never panic under normal execution.*
 fn own_service(endpoint: u32) -> Result<&'static Service, i64> {
-    if crate::task::current_service() != Some(endpoint) {
+    // Its own endpoint, or one its endpoint is the primary of
+    let me = crate::task::current_service();
+    if me != Some(endpoint) && (me.is_none() || me != Some(primary_of(endpoint))) {
         return Err(EPERM);
     }
     service(endpoint).ok_or(ENODEV)
@@ -792,7 +860,7 @@ pub fn register(endpoint: u32) -> Result<u64, i64> {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn recv(endpoint: u32) -> Result<Message, i64> {
-    let svc = own_service(endpoint)?;
+    let svc = slot_owner(own_service(endpoint)?);
     loop {
         svc.recv_wq.register();
         {
@@ -831,7 +899,7 @@ pub fn recv(endpoint: u32) -> Result<Message, i64> {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn reply(endpoint: u32, answer: Message) -> Result<(), i64> {
-    let svc = own_service(endpoint)?;
+    let svc = slot_owner(own_service(endpoint)?);
     {
         let mut slot = svc.slot.lock();
         if slot.request.is_none() || !slot.delivered {
@@ -839,6 +907,7 @@ pub fn reply(endpoint: u32, answer: Message) -> Result<(), i64> {
         }
         slot.request = None;
         slot.reply = Some(answer);
+        slot.replied_at = crate::arch::pit::ticks();
     }
     let me = svc.server.load(Ordering::Acquire);
     x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff(me));
