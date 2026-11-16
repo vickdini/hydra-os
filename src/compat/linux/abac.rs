@@ -58,7 +58,8 @@ pub mod cmd {
     pub const GET_SUBJECT: u64 = 3;
     /// `(0, buf, size)`: takes the audit records that fit (root).
     pub const READ_AUDIT: u64 = 4;
-    /// `(query, len, buf, size)`: evaluates a query (anyone), see [`super::evaluate`].
+    /// `(query, len | size << 32, buf)`: evaluates a query (anyone), see
+    /// [`super::evaluate`]. (glibc's `prctl` passes four arguments after the option.)
     pub const EVALUATE: u64 = 5;
     /// `(0, buf, size)`: counters.
     pub const STATUS: u64 = 6;
@@ -727,12 +728,12 @@ pub fn prctl(a: [u64; 6]) -> i64 {
             }
         }
         cmd::EVALUATE => {
-            let q = match read_user(a[2], a[3]) {
+            let q = match read_user(a[2], a[3] & 0xFFFF_FFFF) {
                 Ok(t) => t,
                 Err(e) => return e,
             };
             match evaluate(&q) {
-                Ok(text) => write_user(a[4], a[5], text.as_bytes()),
+                Ok(text) => write_user(a[4], a[3] >> 32, text.as_bytes()),
                 Err(e) => e,
             }
         }

@@ -12,7 +12,8 @@ all: build
 # Linux userland pieces installed into the Ubuntu root by `linux chroot` (needs libdbus-1-dev)
 LOGIND := esp/bin/hydra-logind.elf
 SOCKACT := esp/bin/hydra-socket-activate.elf
-userland: $(LOGIND) $(SOCKACT)
+ACCHECK := esp/bin/hydra-access-check.elf
+userland: $(LOGIND) $(SOCKACT) $(ACCHECK)
 
 $(LOGIND): userland/hydra-logind/hydra-logind.c
 	mkdir -p esp/bin
@@ -24,10 +25,15 @@ $(SOCKACT): userland/hydra-logind/hydra-socket-activate.c
 	gcc -O2 -Wall -o $@ $<
 	strip $@
 
+$(ACCHECK): userland/hydra-access/hydra-access-check.c
+	mkdir -p esp/bin
+	gcc -O2 -Wall -o $@ $<
+	strip $@
+
 $(EFI_BIN):
 	@echo "EFI binary must be pre-built via Windows cargo"
 
-build: $(EFI_BIN) $(LOGIND) $(SOCKACT)
+build: $(EFI_BIN) $(LOGIND) $(SOCKACT) $(ACCHECK)
 	mkdir -p $(DIST_DIR)
 	@if [ ! -f $(STORAGE_IMG) ]; then \
 		echo "Creating persistent 32MB ATA storage image..."; \

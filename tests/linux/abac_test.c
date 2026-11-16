@@ -167,7 +167,7 @@ static int t_app_list(void) {
 static int t_evaluate(void) {
     const char *q = "department=Finance\nclearance=Confidential\n--\ndepartment=Finance\nclassification=Secret\npolicy=Fin\n";
     char out[512] = {0};
-    long n = acc(EVALUATE, (long)q, (long)strlen(q), (long)out, sizeof out - 1);
+    long n = acc(EVALUATE, (long)q, (long)strlen(q) | (long)(sizeof out - 1) << 32, (long)out, 0);
     if (n <= 0) return 1;
     printf("     evaluate: %s", out);
     return strstr(out, "enforced=- ") && strstr(out, "covered=1") && strstr(out, "rule=fin-dept") ? 0 : 2;
@@ -185,6 +185,17 @@ static const char *POLICY =
 
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--probe")) return probe();
+    if (argc > 2 && !strcmp(argv[1], "--load")) {
+        // Loads a policy file (perf runs): abac --load FILE
+        static char text[65536];
+        FILE *f = fopen(argv[2], "r");
+        size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+        if (f) fclose(f);
+        text[n] = 0;
+        long r = load(text);
+        printf("load: %ld\n", r);
+        return r != 0;
+    }
     char st[512] = {0};
     if (acc(STATUS, 0, (long)st, sizeof st - 1, 0) < 0) {
         printf("FAIL PR_HYDRA_ACCESS not supported (%s)\n", strerror(errno));

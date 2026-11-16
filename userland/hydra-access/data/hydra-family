@@ -1,0 +1,3 @@
+#!/bin/sh
+# Family & accounts (Hydra access control, Home face)
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/hydra-access"); from hydra_access.family import main; main()' "$@"

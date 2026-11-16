@@ -1,0 +1,6 @@
+#!/usr/bin/python3 -I
+# Root helper of Hydra's access apps (run through pkexec; see hydra_access/helper.py)
+import sys
+sys.path.insert(0, "/usr/lib/hydra-access")
+from hydra_access.helper import main
+main(sys.argv[1:])

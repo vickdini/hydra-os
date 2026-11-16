@@ -779,10 +779,10 @@ static void make_runtime_dir(unsigned uid, unsigned gid, char *out, size_t len) 
 #define SUBJECTS_DIR "/etc/hydra/access/subjects/"
 
 /* The attributes of `se`'s user, as the kernel takes them (key=value lines): who it is
- * (user, uid, groups), the session (class, local or remote), then what the administrator
+ * (name, uid, groups), the session (class, local or remote), then what the administrator
  * set (/etc/hydra/access/subjects/<user>, written by hydra-access). */
 static int session_attrs(const struct session *se, char *buf, size_t len) {
-    int n = snprintf(buf, len, "user=%s\nuid=%u\nsession.class=%s\nsession.remote=%d\n", se->user, se->uid, se->klass, se->remote ? 1 : 0);
+    int n = snprintf(buf, len, "name=%s\nuid=%u\nsession.class=%s\nsession.remote=%d\n", se->user, se->uid, se->klass, se->remote ? 1 : 0);
     gid_t groups[64];
     int ng = 64;
     if (getgrouplist(se->user, se->gid, groups, &ng) > 0 && ng > 0) {
@@ -822,7 +822,7 @@ static int session_allowed(const struct session *se) {
     char q[9000], out[512];
     int n = session_attrs(se, q, sizeof q - 64);
     n += snprintf(q + n, sizeof q - n, "\n--\naction=session\ncategory=session\n");
-    long r = prctl(PR_HYDRA_ACCESS, ACCESS_EVALUATE, (unsigned long)q, (unsigned long)n, (unsigned long)out, (unsigned long)sizeof out - 1);
+    long r = prctl(PR_HYDRA_ACCESS, ACCESS_EVALUATE, (unsigned long)q, (unsigned long)n | (unsigned long)(sizeof out - 1) << 32, (unsigned long)out);
     if (r <= 0)
         return 1; /* no policy */
     out[r] = 0;
@@ -835,6 +835,26 @@ static int session_allowed(const struct session *se) {
         if (*c == 'x')
             return 1;
     return 0;
+}
+
+/* Moves the kernel's access audit records (denials, staged-rule differences) to
+ * /var/log/hydra/access.log, where Hydra Access Center reads them. */
+#define ACCESS_READ_AUDIT 4
+static void drain_access_audit(void) {
+    static char buf[65536];
+    long n = prctl(PR_HYDRA_ACCESS, ACCESS_READ_AUDIT, 0UL, (unsigned long)buf, (unsigned long)sizeof buf);
+    if (n <= 0)
+        return;
+    mkdir("/var/log/hydra", 0755);
+    int fd = open("/var/log/hydra/access.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
+    if (fd < 0)
+        return;
+    /* Administrators (sudo group) read it */
+    struct group *g = getgrnam("sudo");
+    if (g)
+        fchown(fd, 0, g->gr_gid);
+    if (write(fd, buf, (size_t)n) < 0) {}
+    close(fd);
 }
 
 static int add_session(unsigned uid, pid_t leader, const char *service, const char *type, const char *klass, const char *desktop,
@@ -1944,6 +1964,7 @@ int main(int argc, char **argv) {
         time_t t = time(NULL);
         if (t - last_check >= 30) {
             last_check = t;
+            drain_access_audit();
             for (int i = 0; i < MAX_SESSIONS; i++)
                 if (sessions[i].used && strcmp(sessions[i].klass, "user") == 0 && !session_allowed(&sessions[i])) {
                     logmsg("session %s of %s: outside its allowed hours, ending it", sessions[i].id, sessions[i].user);

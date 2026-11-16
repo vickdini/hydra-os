@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hydra Access Center
+GenericName=Access rules and file classification
+Comment=Attribute-based access control: user attributes, file classification, rules, policies, effective access and audit
+Exec=hydra-access-center %f
+Icon=preferences-system-privacy
+Categories=Qt;KDE;Settings;System;
+Keywords=access;security;classification;policy;rules;audit;dynamic access control;applocker;compliance;
