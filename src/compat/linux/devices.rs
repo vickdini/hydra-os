@@ -722,13 +722,42 @@ MaximumUid=60000
 
     // Firefox (Mozilla's APT repo, /usr/lib/firefox): native Wayland and its own sandbox need
     // no wrapper. Policies turn off what a fresh profile shows first (an onboarding dialog
-    // over a gray backdrop on the whole window, the default-browser question) and the
-    // built-in updater (apt updates it). Written once: an administrator's later edits stay
-    if lookup_path(s, t.root, "/usr/lib/firefox/firefox").is_some() && lookup_path(s, t.root, "/etc/firefox/policies/policies.json").is_none() {
-        t.file(
-            s,
-            "/etc/firefox/policies/policies.json",
-            r#"{
+    // over a gray backdrop on the whole window, the default-browser question), the built-in
+    // updater (apt updates it), sponsored shortcuts and stories on the new tab page, and the
+    // "Open previous tabs?" bar of the second start (a message shown when this counter is 1:
+    // locked at 2). Written when missing or still an earlier version of Hydra's: an
+    // administrator's own edits stay
+    if lookup_path(s, t.root, "/usr/lib/firefox/firefox").is_some() {
+        const POLICIES: &str = r#"{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "FirefoxHome": {
+      "SponsoredTopSites": false,
+      "SponsoredPocket": false,
+      "SponsoredStories": false,
+      "Pocket": false,
+      "Stories": false
+    },
+    "Preferences": {
+      "browser.startup.couldRestoreSession.count": { "Value": 2, "Status": "locked" }
+    },
+    "UserMessaging": {
+      "SkipOnboarding": true,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "MoreFromMozilla": false,
+      "FirefoxLabs": false
+    }
+  }
+}
+"#;
+        // Hydra's earlier versions of the file
+        const EARLIER: [&str; 1] = [r#"{
   "policies": {
     "DisableAppUpdate": true,
     "DisableTelemetry": true,
@@ -745,8 +774,20 @@ MaximumUid=60000
     }
   }
 }
-"#,
-        )?;
+"#];
+        let path = "/etc/firefox/policies/policies.json";
+        let replace = match lookup_path(s, t.root, path) {
+            None => true,
+            Some(ino) => {
+                let size = s.getattr(ino).map(|a| a.size).unwrap_or(0) as usize;
+                let mut cur = alloc::vec![0u8; size.min(16384)];
+                let n = s.read(ino, 0, &mut cur).unwrap_or(0);
+                EARLIER.iter().any(|e| e.as_bytes() == &cur[..n])
+            }
+        };
+        if replace {
+            t.file(s, path, POLICIES)?;
+        }
     }
 
     // Windows programs (Wine in /opt/wine, tools/build-wine.sh): each user's Windows
