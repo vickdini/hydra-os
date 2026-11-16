@@ -32,8 +32,10 @@ hydra_rt::entry!(main);
 const SECTOR: usize = 512;
 const BLOCK: usize = 4096;
 const SECTORS_PER_BLOCK: u64 = (BLOCK / SECTOR) as u64;
-/// Blocks per ATA command (the sector count register holds up to 255 sectors).
+/// Blocks per ATA command: the 28-bit commands' sector count register holds up to 255
+/// sectors; the 48-bit ones take 16 bits, and a command is then a whole window run.
 const MAX_RUN: usize = 31;
+const MAX_RUN_LBA48: usize = 64;
 
 const CMD_READ_SECTORS: u8 = 0x20;
 const CMD_READ_SECTORS_EXT: u8 = 0x24;
@@ -61,8 +63,8 @@ const BM_STATUS_ACTIVE: u8 = 0x01;
 const BM_STATUS_ERROR: u8 = 0x02;
 const BM_STATUS_IRQ: u8 = 0x04;
 
-/// Pages in the DMA bounce buffer: one command of up to 255 sectors fits.
-const DMA_PAGES: usize = 32;
+/// Pages in the DMA bounce buffer: one command of [`MAX_RUN_LBA48`] blocks fits.
+const DMA_PAGES: usize = 64;
 
 const EIO: i64 = -5;
 const EINVAL: i64 = -22;
@@ -100,9 +102,14 @@ impl Deadline {
 }
 
 /// Task-file registers of one channel.
+///
+/// Every port access is slow in a virtual machine (a VM exit; inside WSL2's nested KVM
+/// tens of microseconds), so a command writes only the registers that change.
 struct Ports {
     io: u16,
     ctrl: u16,
+    /// The drive/head register's value since the last write (0xFF: unknown).
+    selected: core::cell::Cell<u8>,
 }
 
 impl Ports {
@@ -115,6 +122,7 @@ impl Ports {
 
     /// Issues an ATA software reset to the channel and waits for BSY to clear.
     fn soft_reset(&self) {
+        self.selected.set(0xFF);
         outb(self.ctrl, 0x04 | 0x02); // SRST, interrupts off
         self.delay_400ns();
         outb(self.ctrl, 0x02);
@@ -174,18 +182,22 @@ impl Ports {
     /// * `lba` - Logical block address.
     /// * `count` - Sector count.
     /// * `lba48` - Whether to issue 48-bit LBA command registers.
-    fn setup(&self, lba: u64, count: u8, lba48: bool) {
-        outb(self.io + 6, if lba48 { 0x40 } else { 0xE0 | ((lba >> 24) & 0x0F) as u8 });
-        self.delay_400ns();
+    fn setup(&self, lba: u64, count: u16, lba48: bool) {
+        let select = if lba48 { 0x40 } else { 0xE0 | ((lba >> 24) & 0x0F) as u8 };
+        if self.selected.get() != select {
+            outb(self.io + 6, select);
+            self.delay_400ns();
+            self.selected.set(select);
+        }
         if lba48 {
-            outb(self.io + 2, 0);
+            outb(self.io + 2, (count >> 8) as u8);
             outb(self.io + 3, (lba >> 24) as u8);
             outb(self.io + 4, (lba >> 32) as u8);
             outb(self.io + 5, (lba >> 40) as u8);
         } else {
             outb(self.io + 1, 0);
         }
-        outb(self.io + 2, count);
+        outb(self.io + 2, count as u8);
         outb(self.io + 3, lba as u8);
         outb(self.io + 4, (lba >> 8) as u8);
         outb(self.io + 5, (lba >> 16) as u8);
@@ -199,6 +211,9 @@ struct BusMaster {
     prdt_phys: u64,
     buf: *mut u8,
     buf_phys: u64,
+    /// Whether the controller holds the PRD table's address and its command and status
+    /// registers are clear (as each successful transfer leaves them).
+    primed: bool,
 }
 
 impl BusMaster {
@@ -214,7 +229,7 @@ impl BusMaster {
         if phys + ((DMA_PAGES as u64 + 1) * 4096) > 0x1_0000_0000 {
             return None; // PRD entries hold 32-bit addresses
         }
-        Some(Self { base, prdt: mem as *mut u32, prdt_phys: phys, buf: unsafe { mem.add(4096) }, buf_phys: phys + 4096 })
+        Some(Self { base, prdt: mem as *mut u32, prdt_phys: phys, buf: unsafe { mem.add(4096) }, buf_phys: phys + 4096, primed: false })
     }
 
     /// Describes `bytes` of the bounce buffer, one entry per page (none crosses 64 KiB).
@@ -245,6 +260,10 @@ struct Disk {
     /// The channel's interrupt line, when this driver receives it: a DMA transfer then
     /// waits for the completion interrupt instead of polling the status register.
     irq: Option<u8>,
+    /// Whether the device's interrupt is enabled (nIEN clear). Left on between DMA
+    /// transfers; port I/O polls, and the interrupts it raises only make a later DMA wait
+    /// look at the status once more.
+    ints_on: bool,
 }
 
 impl Disk {
@@ -288,7 +307,7 @@ impl Disk {
         } else {
             id[60] as u64 | (id[61] as u64) << 16
         };
-        (sectors != 0).then_some(Self { ports, model, sectors, lba48, dma: None, dma_failures: 0, irq: None })
+        (sectors != 0).then_some(Self { ports, model, sectors, lba48, dma: None, dma_failures: 0, irq: None, ints_on: false })
     }
 
     /// Returns the drive model string trimmed of trailing spaces.
@@ -324,20 +343,27 @@ impl Disk {
     ///
     /// # Errors
     /// Static error string on DMA or device fault.
-    fn dma_transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
-        let bm = self.dma.as_ref().ok_or("no DMA")?;
+    fn dma_transfer(&mut self, lba: u64, count: u16, data: &mut [u8], write: bool) -> Result<(), &'static str> {
+        let lba48 = self.use_lba48(lba);
+        let wants_ints = self.irq.is_some();
+        let bm = self.dma.as_mut().ok_or("no DMA")?;
         let bytes = count as usize * SECTOR;
         if write {
             unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), bm.buf, bytes) };
         }
         bm.build_prdt(bytes);
-        outb(bm.base + BM_COMMAND, 0);
-        outb(bm.base + BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
-        outl(bm.base + BM_PRDT, bm.prdt_phys as u32);
-        let direction = if write { 0 } else { BM_CMD_TO_MEMORY };
-        outb(bm.base + BM_COMMAND, direction);
-        self.ports.wait_not_busy()?;
-        let lba48 = self.use_lba48(lba);
+        // After a successful transfer the engine is stopped, its status clear, the PRD
+        // table's address loaded and the drive not busy: only a first or failed one sets
+        // them up again
+        if !bm.primed {
+            outb(bm.base + BM_COMMAND, 0);
+            outb(bm.base + BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
+            outl(bm.base + BM_PRDT, bm.prdt_phys as u32);
+            self.ports.wait_not_busy()?;
+        }
+        bm.primed = false;
+        let (base, direction) = (bm.base, if write { 0 } else { BM_CMD_TO_MEMORY });
+        outb(base + BM_COMMAND, direction);
         self.ports.setup(lba, count, lba48);
         let cmd = match (write, lba48) {
             (false, false) => CMD_READ_DMA,
@@ -345,13 +371,16 @@ impl Disk {
             (true, false) => CMD_WRITE_DMA,
             (true, true) => CMD_WRITE_DMA_EXT,
         };
-        // The completion interrupt, when waited for (nIEN clear)
-        outb(self.ports.ctrl, if self.irq.is_some() { 0x00 } else { 0x02 });
+        // The completion interrupt, when waited for (nIEN clear); it stays on
+        if self.ints_on != wants_ints {
+            outb(self.ports.ctrl, if wants_ints { 0x00 } else { 0x02 });
+            self.ints_on = wants_ints;
+        }
         outb(self.ports.io + 7, cmd);
-        outb(bm.base + BM_COMMAND, direction | BM_CMD_START);
+        outb(base + BM_COMMAND, direction | BM_CMD_START);
         let mut d = Deadline::new();
         let result = loop {
-            let st = inb(bm.base + BM_STATUS);
+            let st = inb(base + BM_STATUS);
             if st & BM_STATUS_ERROR != 0 {
                 break Err("DMA transfer error");
             }
@@ -370,16 +399,15 @@ impl Disk {
                 None => core::hint::spin_loop(),
             }
         };
-        outb(bm.base + BM_COMMAND, 0);
-        if self.irq.is_some() {
-            outb(self.ports.ctrl, 0x02); // interrupts off again (port I/O polls)
-        }
+        outb(base + BM_COMMAND, 0);
         let status = self.ports.wait_not_busy()?;
-        outb(bm.base + BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
+        outb(base + BM_STATUS, BM_STATUS_ERROR | BM_STATUS_IRQ);
         result?;
         if status & (STATUS_ERR | STATUS_DF) != 0 {
             return Err("device error after DMA");
         }
+        let bm = self.dma.as_mut().ok_or("no DMA")?;
+        bm.primed = true;
         if !write {
             unsafe { core::ptr::copy_nonoverlapping(bm.buf, data.as_mut_ptr(), bytes) };
         }
@@ -399,7 +427,7 @@ impl Disk {
     ///
     /// # Errors
     /// Static error string on timeout or device fault.
-    fn pio_transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
+    fn pio_transfer(&mut self, lba: u64, count: u16, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         self.ports.wait_not_busy()?;
         let lba48 = self.use_lba48(lba);
         self.ports.setup(lba, count, lba48);
@@ -443,7 +471,7 @@ impl Disk {
     ///
     /// # Errors
     /// Static error string on persistent failure.
-    fn transfer(&mut self, lba: u64, count: u8, data: &mut [u8], write: bool) -> Result<(), &'static str> {
+    fn transfer(&mut self, lba: u64, count: u16, data: &mut [u8], write: bool) -> Result<(), &'static str> {
         if lba + count as u64 > self.sectors {
             return Err("past the end of the disk");
         }
@@ -452,6 +480,7 @@ impl Disk {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     self.ports.soft_reset();
+                    self.ints_on = false;
                     self.dma_failures += 1;
                     println!("[ata-driver] DMA failed ({}); retrying with port I/O", e);
                     if self.dma_failures >= 3 {
@@ -463,6 +492,7 @@ impl Disk {
         }
         self.pio_transfer(lba, count, data, write).or_else(|_| {
             self.ports.soft_reset();
+            self.ints_on = false;
             self.pio_transfer(lba, count, data, write)
         })
     }
@@ -483,6 +513,7 @@ impl Disk {
         };
         once(&self.ports, self.lba48).or_else(|_| {
             self.ports.soft_reset();
+            self.ints_on = false;
             once(&self.ports, self.lba48)
         })
     }
@@ -501,9 +532,10 @@ impl Disk {
     /// # Errors
     /// Static error string on transfer failure.
     fn blocks(&mut self, block: u64, count: usize, data: &mut [u8], write: bool) -> Result<(), &'static str> {
-        for (i, chunk) in data[..count * BLOCK].chunks_mut(MAX_RUN * BLOCK).enumerate() {
-            let lba = (block + (i * MAX_RUN) as u64) * SECTORS_PER_BLOCK;
-            self.transfer(lba, (chunk.len() / SECTOR) as u8, chunk, write)?;
+        let run = if self.lba48 { MAX_RUN_LBA48 } else { MAX_RUN };
+        for (i, chunk) in data[..count * BLOCK].chunks_mut(run * BLOCK).enumerate() {
+            let lba = (block + (i * run) as u64) * SECTORS_PER_BLOCK;
+            self.transfer(lba, (chunk.len() / SECTOR) as u16, chunk, write)?;
         }
         Ok(())
     }
@@ -548,7 +580,7 @@ fn main(args: &[&str]) {
     }
     let io = arg(args, "io").unwrap_or(0x1F0) as u16;
     let ctrl = arg(args, "ctrl").unwrap_or(0x3F6) as u16;
-    let Some(mut disk) = Disk::probe(Ports { io, ctrl }) else {
+    let Some(mut disk) = Disk::probe(Ports { io, ctrl, selected: core::cell::Cell::new(0xFF) }) else {
         println!("[ata-driver] no ATA disk at {:#x}", io);
         return;
     };
