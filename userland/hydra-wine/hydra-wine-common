@@ -56,7 +56,6 @@ wait_for_setup() {
 add_uninstall_actions() {
     changed=$(find "$HOME/.local/share/applications/wine" -name '*.desktop' 2>/dev/null | while IFS= read -r f; do
         grep -q '^Actions=' "$f" && continue
-        grep -q '^Path=' "$f" || continue
         # The entry's own path, written out: the start menu leaves an action's %k empty. A
         # path the Exec line would need escapes for gets none (the list of programs opens)
         case "$f" in

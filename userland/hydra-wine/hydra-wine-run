@@ -26,7 +26,14 @@ log="$CACHE/$(basename "$f").log"
 # they do on Windows
 WINEDEBUG="${WINEDEBUG:-fixme-all}" "$WINE" start /wait /unix "$f" > "$log" 2>&1
 rc=$?
-# An installer may have added start-menu entries
+# An installer may have added start-menu entries: Wine writes them in the background
+# (winemenubuilder), often after the installer has gone
+sleep 3
+n=0
+while [ $n -lt 60 ] && pgrep -u "$(id -u)" -f winemenubuilder > /dev/null; do
+    sleep 1
+    n=$((n + 1))
+done
 add_uninstall_actions
 
 # Wine's message for a library that is missing: "err:module:import_dll Library MSVCP140.dll
