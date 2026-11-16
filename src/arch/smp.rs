@@ -244,7 +244,9 @@ pub fn shootdown(cr3: Option<u64>, addr: Option<u64>) {
         }
         if cr3.map_or(true, |r| LOADED_CR3[c].load(Ordering::Acquire) == r) {
             wait[c] = TLB_WANT[c].fetch_add(1, Ordering::AcqRel) + 1;
+            let t0 = crate::compat::linux::prof::start();
             send_ipi_now(CPU_APIC[c].load(Ordering::Relaxed), TLB_VECTOR as u32);
+            crate::compat::linux::prof::ipi_sent(false, t0);
         }
     }
     for c in 0..MAX_CPUS {
@@ -327,9 +329,18 @@ pub fn idle_halting(gen: u64) -> bool {
 /// # Returns
 /// Whether another CPU woke it for a task made runnable ([`kick_idle`]).
 pub fn idle_halt_ended() -> bool {
-    let bit = 1 << super::percpu::cpu();
-    HALTED.fetch_and(!bit, Ordering::AcqRel) & bit == 0
+    let cpu = super::percpu::cpu();
+    let bit = 1 << cpu;
+    let kicked = HALTED.fetch_and(!bit, Ordering::AcqRel) & bit == 0;
+    if kicked {
+        let at = KICK_AT[cpu].load(Ordering::Relaxed);
+        crate::compat::linux::prof::kick_latency(super::pit::now_ns().saturating_sub(at));
+    }
+    kicked
 }
+
+/// When each CPU was last sent a wakeup kick ([`kick_idle`]), for the profile.
+static KICK_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// A task became runnable: wakes one halted idle CPU (another than this one) to run it at
 /// once rather than at its next timer tick (a device interrupt, which only the boot
@@ -346,9 +357,12 @@ pub fn kick_idle() {
         // Its bit is cleared by whoever wakes it: one IPI per halt (the TLB vector's
         // handler does nothing more when no flush is pending)
         if HALTED.fetch_and(!(1 << c), Ordering::AcqRel) & (1 << c) != 0 {
+            KICK_AT[c].store(super::pit::now_ns(), Ordering::Relaxed);
             let apic = CPU_APIC[c].load(Ordering::Acquire);
             if apic != u32::MAX {
+                let t0 = crate::compat::linux::prof::start();
                 x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
+                crate::compat::linux::prof::ipi_sent(true, t0);
             }
             return;
         }

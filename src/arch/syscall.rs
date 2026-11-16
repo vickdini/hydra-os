@@ -409,6 +409,11 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     if crate::task::current_retired() {
         crate::task::leave_retired();
     }
+    // Interrupts off first: an interrupt between releasing the lock and the entry stub's
+    // `cli` takes the lock again and keeps it (it returns to kernel code), and the CPU
+    // would go back to user mode holding it, stalling every other CPU's kernel entry until
+    // this one enters the kernel again (up to a timer tick)
+    x86_64::instructions::interrupts::disable();
     crate::arch::smp::bkl_exit();
 }
 
