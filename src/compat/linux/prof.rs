@@ -62,23 +62,28 @@ pub fn fs_request(op: u32, t0: u64) {
 /// The task whose user-mode instruction pointer is sampled at each timer tick (0: none),
 /// and the samples (a ring of the last [`SAMPLES`]).
 pub static SAMPLE_TASK: AtomicU64 = AtomicU64::new(0);
+/// Whether ticks in kernel mode are sampled too.
+static SAMPLE_KERNEL: AtomicBool = AtomicBool::new(false);
 const SAMPLES: usize = 16384;
 static SAMPLE_AT: AtomicU64 = AtomicU64::new(0);
 static SAMPLE_RIP: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
 
-/// Records a tick that interrupted task `task` at `rip` (user mode only).
+/// Records a tick that interrupted task `task` at `rip` (in user mode, or in either mode
+/// when kernel ticks are sampled too).
 #[inline]
 pub fn sample(task: u64, rip: u64, cs: u64) {
     let want = SAMPLE_TASK.load(Relaxed);
-    if want != 0 && want == task && cs & 3 == 3 {
+    if want != 0 && want == task && (cs & 3 == 3 || SAMPLE_KERNEL.load(Relaxed)) {
         let i = SAMPLE_AT.fetch_add(1, Relaxed) as usize % SAMPLES;
         SAMPLE_RIP[i].store(rip, Relaxed);
     }
 }
 
-/// Starts sampling `task` (0 stops), clearing earlier samples.
-pub fn sample_start(task: u64) {
+/// Starts sampling `task` (0 stops) in user mode, or in both modes when `kernel`,
+/// clearing earlier samples.
+pub fn sample_start(task: u64, kernel: bool) {
     SAMPLE_AT.store(0, Relaxed);
+    SAMPLE_KERNEL.store(kernel, Relaxed);
     SAMPLE_TASK.store(task, Relaxed);
 }
 
