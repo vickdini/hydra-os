@@ -930,6 +930,18 @@ impl ZfsServer {
         if out.len() < max {
             let from = cookie.saturating_sub(2);
             let entries = self.zap.readdir(&mut self.dmu, dir, from, max - out.len()).map_err(io)?;
+            // Their dnodes, in a few disk requests: listings are usually followed by a stat
+            // or open of each entry
+            let inos: Vec<u64> = entries.iter().map(|e| e.ino).collect();
+            self.dmu.prefetch_dnodes(&inos);
+            // and a walk through the tree reads each subdirectory next
+            let dirs: Vec<u64> = entries.iter().filter(|e| e.dtype == DT_DIR).map(|e| e.ino).collect();
+            if dirs.len() > 1 {
+                for &d in &dirs {
+                    let _ = self.dmu.get_dnode(d);
+                }
+                self.dmu.prefetch_first_blocks(&dirs);
+            }
             for e in entries {
                 out.push(ReaddirEntry { name: e.name, ino: e.ino, dtype: e.dtype, next_cookie: e.next_pos + 2 });
             }

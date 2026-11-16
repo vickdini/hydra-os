@@ -324,11 +324,52 @@ impl Dmu {
         Ok(())
     }
 
+    /// The committed block pointers of leaves `blkids` of an object (holes left out),
+    /// reading the indirect blocks on the way level by level: all those a level needs in
+    /// one batch ([`Spa::prefetch`]: missing ones, neighbours on disk in one request),
+    /// rather than one synchronous disk read per indirect block (about a millisecond each
+    /// under nested virtualization).
+    ///
+    /// # Arguments
+    /// * `dn` - The object's dnode.
+    /// * `blkids` - Leaf block indices, ascending.
+    ///
+    /// # Returns
+    /// `(blkid, block pointer)` of each leaf that is not a hole; stops at a read error
+    /// (the read itself then reports it).
+    fn tree_bps(&mut self, dn: &DnodePhys, blkids: &[u64]) -> Vec<(u64, BlockPointer)> {
+        let levels = dn.nlevels.max(1) as u32;
+        let mut cur: Vec<(u64, BlockPointer)> = blkids
+            .iter()
+            .filter_map(|&b| {
+                let top = b / pow64(levels - 1);
+                (top < DN_TOP_PTRS as u64).then(|| (b, dn.blkptr[top as usize]))
+            })
+            .filter(|(_, bp)| !bp.is_hole())
+            .collect();
+        for level in (1..levels).rev() {
+            let reads: Vec<BlockPointer> = cur.iter().map(|&(_, bp)| bp).collect();
+            self.spa.prefetch(&reads);
+            let mut next = Vec::with_capacity(cur.len());
+            for &(b, bp) in &cur {
+                let Ok(frame) = self.spa.read_bp(&bp) else { return next };
+                let idx = ((b / pow64(level - 1)) % BP_PER_BLOCK as u64) as usize;
+                let child = unsafe { *(frame.start_address().as_u64() as *const BlockPointer).add(idx) };
+                if !child.is_hole() {
+                    next.push((b, child));
+                }
+            }
+            cur = next;
+        }
+        cur
+    }
+
     /// Brings the blocks of a read of `len` bytes at `offset`, and some after it, into the
     /// block cache with as few disk requests as possible ([`Spa::prefetch`]): one block
     /// at a time, each a request to the disk driver, reading ran at a few MB/s. Ahead of
     /// the read: a window when it continues the previous read of the object (sequential
-    /// reading), a small cluster otherwise.
+    /// reading), a small cluster otherwise. The indirect blocks leading to them are read
+    /// in batches too ([`Self::tree_bps`]).
     fn prefetch(&mut self, obj: u64, dn: &DnodePhys, offset: u64, len: u64) {
         if len == 0 {
             return;
@@ -340,16 +381,53 @@ impl Dmu {
         let stop = (end + ahead).min(last_block).max(end);
         self.last_read = (obj, end);
         let cut = self.truncated.get(&obj).copied();
+        let blkids: Vec<u64> =
+            (first..stop).filter(|&b| !self.dirty_data.contains_key(&(obj, b)) && !cut.map_or(false, |t| b >= t)).collect();
+        let bps: Vec<BlockPointer> = self.tree_bps(dn, &blkids).into_iter().map(|(_, bp)| bp).collect();
+        self.spa.prefetch(&bps);
+    }
+
+    /// Brings the dnodes of objects `objs` into the block cache in as few disk requests as
+    /// possible (the blocks of the meta object holding them, and the indirect blocks
+    /// leading there): a directory listing is usually followed by a `stat` (or `open`) of
+    /// each entry, each otherwise a synchronous read of its dnode's block.
+    ///
+    /// # Arguments
+    /// * `objs` - Object numbers (any order; uncached ones are read).
+    pub fn prefetch_dnodes(&mut self, objs: &[u64]) {
+        let per_block = (ZFS_BLOCK_SIZE / DNODE_SIZE) as u64;
+        let mut blkids: Vec<u64> = objs
+            .iter()
+            .filter(|&&o| o != 0 && o < self.ub.next_obj && !self.dnodes.contains_key(&o))
+            .map(|&o| o / per_block)
+            .filter(|&b| !self.dirty_data.contains_key(&(0, b)))
+            .collect();
+        if blkids.len() < 2 {
+            return;
+        }
+        blkids.sort_unstable();
+        blkids.dedup();
+        let meta = self.ub.meta_dnode;
+        let bps: Vec<BlockPointer> = self.tree_bps(&meta, &blkids).into_iter().map(|(_, bp)| bp).collect();
+        self.spa.prefetch(&bps);
+    }
+
+    /// Brings the first blocks of objects `objs` (directories a listing found: a walk
+    /// through the tree opens each next) into the block cache in as few disk requests as
+    /// possible. Only objects whose dnode is cached and whose blocks hang off the dnode
+    /// itself (one level: up to 3 blocks, a small directory) are looked at.
+    ///
+    /// # Arguments
+    /// * `objs` - Object numbers.
+    pub fn prefetch_first_blocks(&mut self, objs: &[u64]) {
         let mut bps = Vec::new();
-        for blkid in first..stop {
-            if self.dirty_data.contains_key(&(obj, blkid)) || cut.map_or(false, |t| blkid >= t) {
+        for o in objs {
+            let Some(dn) = self.dnodes.get(o) else { continue };
+            if dn.nlevels > 1 || self.truncated.contains_key(o) {
                 continue;
             }
-            match self.lookup_bp(dn, blkid) {
-                Ok(bp) if !bp.is_hole() => bps.push(bp),
-                Ok(_) => {}
-                Err(_) => break,
-            }
+            let blocks = dn.size.div_ceil(BLOCK).min(DN_TOP_PTRS as u64) as usize;
+            bps.extend(dn.blkptr[..blocks].iter().filter(|bp| !bp.is_hole()).copied());
         }
         self.spa.prefetch(&bps);
     }
