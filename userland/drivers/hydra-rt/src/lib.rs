@@ -15,6 +15,7 @@
 
 extern crate alloc;
 
+pub mod heap;
 pub mod port;
 pub mod sys;
 
@@ -37,7 +38,7 @@ pub mod __private {
 const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 
 #[global_allocator]
-static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
+static ALLOCATOR: heap::RtHeap = heap::RtHeap::empty();
 
 // The kernel enters with the stack holding argc, argv[] and envp[] (Linux layout)
 core::arch::global_asm!(
@@ -64,7 +65,7 @@ extern "Rust" {
 /// Does not return (`!`).
 extern "C" fn rt_start(stack: *const u64) -> ! {
     let heap = sys::map_anon(HEAP_SIZE).unwrap_or_else(|_| sys::exit(127));
-    unsafe { ALLOCATOR.lock().init(heap as *mut u8, HEAP_SIZE) };
+    unsafe { ALLOCATOR.init(heap as *mut u8, HEAP_SIZE) };
     let argc = unsafe { *stack } as usize;
     let mut args: Vec<&'static str> = Vec::with_capacity(argc);
     for i in 0..argc {
@@ -100,8 +101,7 @@ macro_rules! entry {
 /// # Returns
 /// Tuple of `(used_bytes, free_bytes)`.
 pub fn heap_usage() -> (usize, usize) {
-    let heap = ALLOCATOR.lock();
-    (heap.used(), heap.free())
+    ALLOCATOR.usage()
 }
 
 /// Console output (standard output of the process, which the kernel prints).

@@ -222,6 +222,21 @@ impl Command for LinuxCommand {
                         println!("[+] Linux profile stopped");
                     }
                     "reset" => prof::reset(),
+                    // linux prof sample <task name> | stop | show [N]: user-mode PCs at ticks
+                    "sample" => match args.get(2).copied() {
+                        Some("show") => prof::sample_show(args.get(3).and_then(|n| n.parse().ok()).unwrap_or(40)),
+                        Some("stop") | None => prof::sample_start(0),
+                        Some(name) => {
+                            let id = crate::task::SCHEDULER.lock().task_named(name).map(|t| t.0);
+                            match id {
+                                Some(id) => {
+                                    prof::sample_start(id);
+                                    println!("[+] sampling task {} ({})", id, name);
+                                }
+                                None => println!("[!] no task named {}", name),
+                            }
+                        }
+                    },
                     _ => prof::show(args.get(2).and_then(|n| n.parse().ok()).unwrap_or(25)),
                 }
             }

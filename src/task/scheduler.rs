@@ -1696,7 +1696,9 @@ impl Scheduler {
         if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
             return;
         }
-        self.charge(self.cur[crate::arch::percpu::cpu()], ctx);
+        let idx = self.cur[crate::arch::percpu::cpu()];
+        crate::compat::linux::prof::sample(self.tasks[idx].id.0, ctx.rip, ctx.cs);
+        self.charge(idx, ctx);
         if crate::arch::percpu::cpu() == 0 {
             self.update_load();
         }
@@ -2159,6 +2161,11 @@ impl Scheduler {
             }
         }
         false
+    }
+
+    /// The id of the first task named `name`.
+    pub fn task_named(&self, name: &str) -> Option<TaskId> {
+        self.tasks.iter().find(|t| t.name == name).map(|t| t.id)
     }
 
     /// Returns the total count of registered tasks (active and dead).

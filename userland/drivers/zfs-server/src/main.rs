@@ -310,13 +310,23 @@ pub mod fs {
 pub mod memory {
     /// Userland page buffer frame allocator compatibility shim.
     pub mod frame_allocator {
-        use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+        use alloc::alloc::{alloc_zeroed, Layout};
+        use alloc::vec::Vec;
         use alloc::collections::BTreeMap;
         use spin::Mutex;
         use x86_64::structures::paging::{PhysFrame, Size4KiB};
         use x86_64::PhysAddr;
 
         static REFS: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
+
+        /// Free buffers, reused before new ones are taken from the heap. The block cache
+        /// and dirty data take and drop 4 KiB buffers all the time: through the heap's
+        /// first-fit free list each of them, and every other allocation, walked thousands
+        /// of page-sized holes (a cold read spent more time there than on the disk).
+        static FREE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+        /// Buffers taken from the heap at a time when none is free (1 MiB).
+        const CHUNK_PAGES: usize = 256;
 
         /// Computes memory layout for `pages` 4 KiB frames.
         ///
@@ -334,11 +344,23 @@ pub mod memory {
         /// # Returns
         /// `Some(PhysFrame)` containing allocated buffer on success, or `None`.
         pub fn alloc_user_frame() -> Option<PhysFrame<Size4KiB>> {
-            let p = unsafe { alloc_zeroed(layout(1)) };
-            if p.is_null() {
-                return None;
+            let mut free = FREE.lock();
+            if free.is_empty() {
+                // Fresh heap pages are zero
+                let chunk = unsafe { alloc_zeroed(layout(CHUNK_PAGES)) };
+                if chunk.is_null() {
+                    return None;
+                }
+                free.extend((0..CHUNK_PAGES as u64).rev().map(|i| (chunk as u64 + i * 4096) | 1));
             }
-            REFS.lock().insert(p as u64, 1);
+            let entry = free.pop()?;
+            drop(free);
+            // Bit 0: not used since it came from the heap (still zero)
+            let p = entry & !1;
+            if entry & 1 == 0 {
+                unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096) };
+            }
+            REFS.lock().insert(p, 1);
             Some(PhysFrame::containing_address(PhysAddr::new(p as u64)))
         }
 
@@ -370,7 +392,7 @@ pub mod memory {
             if last {
                 refs.remove(&addr);
                 drop(refs);
-                unsafe { dealloc(addr as *mut u8, layout(1)) };
+                FREE.lock().push(addr);
             }
         }
 
@@ -622,18 +644,6 @@ pub mod compat {
 
 use zfs::fsproto::*;
 use zfs::server::{with_server, ZfsServer, ZFS_SERVER};
-
-/// Copies what the request encoded (it is overwritten by the reply).
-///
-/// # Arguments
-/// * `window` - Shared service window slice.
-/// * `len` - Length of parameters in bytes.
-///
-/// # Returns
-/// Byte vector copy of request payload.
-fn params(window: &[u8], len: usize) -> Vec<u8> {
-    window[..len.min(window.len())].to_vec()
-}
 
 /// Serves one request: returns `(status, value, reply bytes)`, the reply data written to
 /// `out`.
@@ -914,10 +924,18 @@ fn main(args: &[&str]) {
             return;
         }
     };
+    // The request is copied out (the reply overwrites it) into one buffer kept across
+    // requests: only the bytes the kernel encoded (args[0]; all before the event area
+    // when it does not say)
+    let mut req: Vec<u8> = Vec::with_capacity(EVENT_OFFSET);
     server.serve(|srv, msg| {
         let window = srv.window();
-        // The request (at most what precedes the event area) is read before the reply overwrites it
-        let req = params(window, EVENT_OFFSET);
+        let len = match msg.args[0] as usize {
+            0 => EVENT_OFFSET,
+            n => n.min(EVENT_OFFSET),
+        };
+        req.clear();
+        req.extend_from_slice(&window[..len.min(window.len())]);
         compat::linux::inotify::take();
         let (status, value, len) = serve(msg.label as u32, &req, &mut window[..EVENT_OFFSET]);
         let events = compat::linux::inotify::take();

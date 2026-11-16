@@ -59,6 +59,48 @@ pub fn fs_request(op: u32, t0: u64) {
     }
 }
 
+/// The task whose user-mode instruction pointer is sampled at each timer tick (0: none),
+/// and the samples (a ring of the last [`SAMPLES`]).
+pub static SAMPLE_TASK: AtomicU64 = AtomicU64::new(0);
+const SAMPLES: usize = 16384;
+static SAMPLE_AT: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_RIP: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
+
+/// Records a tick that interrupted task `task` at `rip` (user mode only).
+#[inline]
+pub fn sample(task: u64, rip: u64, cs: u64) {
+    let want = SAMPLE_TASK.load(Relaxed);
+    if want != 0 && want == task && cs & 3 == 3 {
+        let i = SAMPLE_AT.fetch_add(1, Relaxed) as usize % SAMPLES;
+        SAMPLE_RIP[i].store(rip, Relaxed);
+    }
+}
+
+/// Starts sampling `task` (0 stops), clearing earlier samples.
+pub fn sample_start(task: u64) {
+    SAMPLE_AT.store(0, Relaxed);
+    SAMPLE_TASK.store(task, Relaxed);
+}
+
+/// Prints the sampled instruction pointers, most frequent first (`top` of them).
+pub fn sample_show(top: usize) {
+    let n = (SAMPLE_AT.load(Relaxed) as usize).min(SAMPLES);
+    let mut rips: alloc::vec::Vec<u64> = (0..n).map(|i| SAMPLE_RIP[i].load(Relaxed)).collect();
+    rips.sort_unstable();
+    let mut counts: alloc::vec::Vec<(usize, u64)> = alloc::vec::Vec::new();
+    for r in rips {
+        match counts.last_mut() {
+            Some((c, x)) if *x == r => *c += 1,
+            _ => counts.push((1, r)),
+        }
+    }
+    counts.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    crate::println!("[sample] {} samples of task {}", n, SAMPLE_TASK.load(Relaxed));
+    for (c, r) in counts.into_iter().take(top) {
+        crate::println!("[sample] {:>6} {:#x}", c, r);
+    }
+}
+
 /// Start time for a hook, or 0 when profiling is off.
 #[inline]
 pub fn start() -> u64 {
