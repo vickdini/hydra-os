@@ -21,9 +21,13 @@ use hydra_rt::protocol::{
     BLOCK_LIST_RECORD, BLOCK_READV_MAX, BLOCK_READV_TABLE, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_LIST, MSG_BLOCK_READ, MSG_BLOCK_READV,
     MSG_BLOCK_REPLY, MSG_BLOCK_WRITE,
 };
+use hydra_rt::blockunits::{self, DiskSet, PoolView, Units};
 use hydra_rt::Message;
 
 use crate::{println, sys, Deadline, Dma, Ring, Xhci, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS, DEV_IN_CTX, PAGE, TRB_CH, TRB_CONFIGURE_EP, TRB_IOC, TRB_ISP, TRB_NORMAL};
+
+/// Block 0 of a pool written to a whole disk starts with this (`VDEV_LABEL_MAGIC`).
+const POOL_LABEL_MAGIC: [u8; 8] = *b"HYDRAZF2";
 
 /// Most USB disks served at once.
 pub const MAX_DISKS: usize = 8;
@@ -698,8 +702,60 @@ impl Xhci {
         n
     }
 
-    /// Serves a block request (`MSG_BLOCK_*`, `args[3]` the disk number) with its data in
-    /// `window`.
+    /// The USB disk number of the pool view, if the pool view is still on the disk it was
+    /// chosen on (a disk plugged in under the same number later is another one).
+    fn pool_disk(&self) -> Option<usize> {
+        let v = self.units.pool?;
+        let di = self.disk_dev(v.disk)?;
+        (self.msd(di).generation == self.pool_generation).then_some(v.disk)
+    }
+
+    /// The units as they are now: no pool view once the pool's disk is gone.
+    fn live_units(&self) -> Units {
+        Units { pool: self.pool_disk().and(self.units.pool) }
+    }
+
+    /// Decides which USB disk holds the pool, once the disks present at start are set up:
+    /// with `boot_part=<GUID>` the disk with that partition (its Hydra pool partition);
+    /// with `pool=usb` (no ATA or SATA disk) the first USB disk with a Hydra pool partition,
+    /// or a pool written to the whole disk; otherwise none (the pool is on another disk).
+    pub(crate) fn choose_pool(&mut self, args: &[&str]) {
+        if args.iter().any(|a| a.starts_with("boot_part=")) {
+            self.units = Units::choose(args, self, "usb-driver");
+        } else if args.contains(&"pool=usb") {
+            self.units = Units { pool: None };
+            for d in 0..MAX_DISKS {
+                let Some(di) = self.disk_dev(d) else { continue };
+                if !self.msd(di).ready {
+                    continue;
+                }
+                let part = blockunits::table(self, d).and_then(|t| t.by_type(&blockunits::gpt::HYDRA_POOL_TYPE).cloned());
+                if let Some(p) = part {
+                    let base = p.start.div_ceil(BLOCK as u64);
+                    let end = (p.start + p.len) / BLOCK as u64;
+                    println!("[usb-driver] the pool: partition {} of USB disk {}", p.number, d);
+                    self.units = Units { pool: Some(PoolView { disk: d, base, blocks: end.saturating_sub(base) }) };
+                    break;
+                }
+                let mut b0 = alloc::vec![0u8; BLOCK];
+                if DiskSet::read(self, d, 0, &mut b0).is_ok() && b0[..8] == POOL_LABEL_MAGIC[..] {
+                    println!("[usb-driver] the pool: all of USB disk {}", d);
+                    self.units = Units { pool: Some(PoolView { disk: d, base: 0, blocks: DiskSet::blocks(self, d) }) };
+                    break;
+                }
+            }
+            if self.units.pool.is_none() {
+                println!("[usb-driver] no USB disk holds a pool");
+            }
+        }
+        if let Some(v) = self.units.pool {
+            self.pool_generation = self.disk_dev(v.disk).map_or(0, |di| self.msd(di).generation);
+        }
+    }
+
+    /// Serves a block request (`MSG_BLOCK_*`) with its data in `window`. The unit is in
+    /// `args[3]` (`args[1]` of `MSG_BLOCK_READV`): 0 the pool view, `1 + i` USB disk `i`
+    /// whole (see `hydra_rt::blockunits`).
     pub(crate) fn block_request(&mut self, msg: &Message, window: &mut [u8]) -> Message {
         let reply = |status: i64, value: u64| Message::new(MSG_BLOCK_REPLY as u64, [status as u64, value, 0, 0]);
         // Unplugged and new disks first
@@ -709,7 +765,11 @@ impl Xhci {
             let n = self.list_disks(window);
             return Message::new(MSG_BLOCK_REPLY as u64, [0, n as u64, self.disk_generation as u64, 0]);
         }
-        let Some(di) = self.disk_dev(msg.args[3] as usize) else { return reply(ENODEV, 0) };
+        let unit = if label == MSG_BLOCK_READV { msg.args[1] } else { msg.args[3] };
+        // The disk behind the unit, present (the pool's disk not replaced)
+        let disk = if unit == 0 { self.pool_disk() } else { Some((unit - 1) as usize).filter(|&d| d < MAX_DISKS && self.disk_dev(d).is_some()) };
+        let Some(disk) = disk else { return reply(ENODEV, 0) };
+        let di = self.disk_dev(disk).unwrap();
         if !self.msd(di).ready && matches!(label, MSG_BLOCK_GET_SIZE | MSG_BLOCK_READ | MSG_BLOCK_WRITE | MSG_BLOCK_READV) {
             // A card put in since, or a disk slow to start
             self.probe_medium(di, 1000);
@@ -717,25 +777,32 @@ impl Xhci {
                 return reply(ENOMEDIUM, 0);
             }
         }
-        let blocks = self.msd(di).sectors * self.msd(di).sector_size as u64 / BLOCK as u64;
+        let units = self.live_units();
         match label {
             MSG_BLOCK_GET_SIZE => {
                 window[..40].copy_from_slice(&self.msd(di).model);
-                Message::new(MSG_BLOCK_REPLY as u64, [0, blocks, 1, 1])
+                let sector = self.msd(di).sector_size;
+                // USB disks count as removable for the Linux side (USB sticks, udisks)
+                units.describe(unit, window, sector, true);
+                Message::new(MSG_BLOCK_REPLY as u64, [0, units.blocks_of(unit, self), 1, 1])
             }
             MSG_BLOCK_READ | MSG_BLOCK_WRITE => {
                 let (block, count, offset) = (msg.args[0], msg.args[1] as usize, msg.args[2] as usize);
-                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > window.len() || block + count as u64 > blocks {
+                let write = label == MSG_BLOCK_WRITE;
+                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > window.len() {
                     return reply(EINVAL, 0);
                 }
-                let write = label == MSG_BLOCK_WRITE;
+                let at = match units.map(unit, block, count as u64, write, self) {
+                    Ok((_, at)) => at,
+                    Err(e) => return reply(e, 0),
+                };
                 if write && self.msd(di).write_protected {
                     return reply(EROFS, 0);
                 }
-                match self.disk_blocks(di, block, count, &mut window[offset..offset + count * BLOCK], write) {
+                match self.disk_blocks(di, at, count, &mut window[offset..offset + count * BLOCK], write) {
                     Ok(()) => reply(0, count as u64),
                     Err(e) => {
-                        println!("[usb-driver] {}: {} of {} blocks at {} failed: {}", self.loc(di), if write { "write" } else { "read" }, count, block, e);
+                        println!("[usb-driver] {}: {} of {} blocks at {} failed: {}", self.loc(di), if write { "write" } else { "read" }, count, at, e);
                         reply(EIO, 0)
                     }
                 }
@@ -753,8 +820,12 @@ impl Xhci {
                         *v = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
                     }
                     let (block, count, offset) = (r[0], r[1] as usize, r[2] as usize);
-                    if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE || block + count as u64 > blocks {
+                    if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE {
                         return reply(EINVAL, 0);
+                    }
+                    match units.map(unit, block, count as u64, false, self) {
+                        Ok((_, at)) => r[0] = at,
+                        Err(e) => return reply(e, 0),
                     }
                     total += count as u64;
                 }
@@ -777,5 +848,26 @@ impl Xhci {
             },
             _ => reply(ENOSYS, 0),
         }
+    }
+}
+
+/// The USB disks as `hydra_rt::blockunits` sees them: disk `i` is USB disk number `i`
+/// (absent numbers have no blocks).
+impl DiskSet for Xhci {
+    fn count(&self) -> usize {
+        (0..MAX_DISKS).rev().find(|&d| self.disk_dev(d).is_some()).map_or(0, |d| d + 1)
+    }
+
+    fn blocks(&self, disk: usize) -> u64 {
+        match self.disk_dev(disk) {
+            Some(di) if self.msd(di).ready => self.msd(di).sectors * self.msd(di).sector_size as u64 / BLOCK as u64,
+            _ => 0,
+        }
+    }
+
+    fn read(&mut self, disk: usize, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let di = self.disk_dev(disk).ok_or("no such USB disk")?;
+        let count = buf.len() / BLOCK;
+        self.disk_blocks(di, block, count, &mut buf[..count * BLOCK], false).map_err(|_| "USB disk read failed")
     }
 }

@@ -28,6 +28,7 @@
 
 /// UEFI Boot Services termination and full bare-metal hardware takeover sequence.
 pub mod boot_services;
+pub mod bootdisk;
 /// Boot stage timing ([`boottime::mark`], printed by [`boottime::report`]).
 pub mod boottime;
 /// `x86_64` control register (`CR0`, `CR2`, `CR3`, `CR4`) state inspection.

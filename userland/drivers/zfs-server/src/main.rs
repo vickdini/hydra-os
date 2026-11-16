@@ -938,6 +938,10 @@ fn main(args: &[&str]) {
         if let Some(n) = a.strip_prefix("cache_blocks=").and_then(|n| n.parse().ok()) {
             zfs::spa::set_cache_blocks(n);
         }
+        // new_guid=<id>: a new pool GUID, once per id (the first boot of an installation)
+        if let Some(n) = a.strip_prefix("new_guid=").and_then(|n| u64::from_str_radix(n, 16).ok()) {
+            zfs::spa::set_new_guid_for(n);
+        }
     }
     // disk=usb: the pool is on a USB disk (there is no ATA or SATA disk)
     let usb = args.iter().any(|a| *a == "disk=usb");
@@ -1000,16 +1004,9 @@ fn zfs_init(usb: bool) -> Result<(), &'static str> {
         sys::sleep_ms(100);
     }
     if usb {
-        // The first USB disk with a pool on it (never a blank one: it would be formatted)
-        let found = (0..8u64).find(|&n| {
-            ipc::service::use_disk(ipc::protocol::ENDPOINT_USB_DISK, n);
-            let vdev = zfs::spa::Vdev::open_disk();
-            vdev.is_some_and(|v| zfs::spa::Spa::probe(&v) == Some(zfs::spa::DiskContents::Pool))
-        });
-        match found {
-            Some(n) => hydra_rt::println!("[zfs-server] the pool is on USB disk {}", n),
-            None => return Err("no USB disk holds a pool"),
-        }
+        // The USB driver's pool view (unit 0), which it chose from the boot partition or
+        // as the first USB disk holding a pool
+        hydra_rt::println!("[zfs-server] the pool is on a USB disk");
     }
     let server = ZfsServer::new();
     *ZFS_SERVER.lock() = Some(server);

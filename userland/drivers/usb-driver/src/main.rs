@@ -337,6 +337,10 @@ struct Xhci {
     disks: [u32; storage::MAX_DISKS],
     /// Counts disk attachments (each disk records the value it got).
     disk_generation: u32,
+    /// Where the pool is, if on a USB disk (`hydra_rt::blockunits`).
+    units: hydra_rt::blockunits::Units,
+    /// Generation of the pool's disk when it was chosen.
+    pool_generation: u32,
 }
 
 const MEM_DCBAA: usize = 0;
@@ -1261,6 +1265,8 @@ fn main(args: &[&str]) {
         out: Vec::new(),
         disks: [0; storage::MAX_DISKS],
         disk_generation: 0,
+        units: hydra_rt::blockunits::Units { pool: None },
+        pool_generation: 0,
     };
     println!(
         "[usb-driver] xHCI {}.{:02x} at {:#x}: {} ports, {} slots, {}-byte contexts, {}",
@@ -1289,6 +1295,7 @@ fn main(args: &[&str]) {
     hc.handle_port_changes();
     // Devices behind hubs that reported their ports while the others were set up
     hc.housekeeping();
+    hc.choose_pool(args);
     // The disk endpoint first: once the input endpoint is registered the supervisor
     // starts the services that may use the disks
     let disk_window = match sys::svc_register(ENDPOINT_USB_DISK) {

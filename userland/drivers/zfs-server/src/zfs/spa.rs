@@ -55,6 +55,22 @@ const CACHE_BLOCKS: usize = 32 * 1024;
 /// Cap on cached blocks of pools opened from now on ([`set_cache_blocks`]).
 static CACHE_CAP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(CACHE_BLOCKS);
 
+/// The first-boot setup this pool was last given a new GUID for (`new_guid=<id>`; 0:
+/// none asked). See [`Spa::adjust`].
+static NEW_GUID_FOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Asks for a new pool GUID at the next import, once per `id` (the kernel's hash of the
+/// first-boot settings file `\hydra\setup.conf`): two computers installed from one image
+/// must not have the same pool.
+pub fn set_new_guid_for(id: u64) {
+    NEW_GUID_FOR.store(id, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where in block 0, after the label, the id of the last [`set_new_guid_for`] applied is
+/// kept (a magic, then the id; outside the label's checksum).
+const GUID_STAMP_AT: usize = 2048;
+const GUID_STAMP_MAGIC: u64 = 0x4459_5247_5545_4e47; // "GNEUGRYD"
+
 /// Sets how many blocks the block cache of pools opened from now on may hold (at least
 /// [`CACHE_BLOCKS`]). The kernel sizes it from the RAM: Firefox alone maps 150 MB of
 /// libraries at every start, more than 128 MiB, so an LRU cache that size kept nothing.
@@ -157,18 +173,6 @@ pub struct Vdev {
 unsafe impl Send for Vdev {}
 
 impl Vdev {
-    /// Opens the disk through the disk driver, without a RAM disk fallback: `None` if the
-    /// driver has no such disk (to look for the pool among several disks).
-    ///
-    /// # Returns
-    /// The disk's [`Vdev`], or `None`.
-    pub fn open_disk() -> Option<Self> {
-        if !service::is_online(ENDPOINT_BLOCK_DEV) {
-            return None;
-        }
-        Self::query_driver().ok().filter(|&b| b > 0).map(|blocks| Self { backend: Backend::Driver, total_blocks: blocks })
-    }
-
     /// Opens the disk through the disk driver (started at the hardware takeover), or a RAM
     /// disk if there is none.
     ///
@@ -682,10 +686,97 @@ impl Spa {
             }
             b += n as u64;
         }
-        let tail = spa.bitmap.len() as u64 * 64 - label.total_blocks;
+        // Bits past the end that an earlier commit wrote (fenced in memory) are not blocks
+        let tail_bits = label.total_blocks % 64;
+        if tail_bits != 0 {
+            let last = spa.bitmap.len() - 1;
+            spa.bitmap[last] &= !(!0u64 << tail_bits);
+        }
+        if let Err(e) = spa.adjust() {
+            crate::println!("[!] OpenZFS: {}", e);
+        }
+        let tail = spa.bitmap.len() as u64 * 64 - spa.label.total_blocks;
         spa.fence_tail();
         spa.allocated_blocks = spa.bitmap.iter().map(|w| w.count_ones() as u64).sum::<u64>() - tail;
         Ok((spa, ub))
+    }
+
+    /// At import, before anything is written: grows the pool to the whole device when the
+    /// device became larger (the pool image of an installation written to a larger
+    /// partition), and gives the pool a new GUID when asked ([`set_new_guid_for`]).
+    ///
+    /// Growth puts a new, larger allocation bitmap at the end of the device (in the space
+    /// gained, so nothing in use moves): the bitmap is written and flushed first, then the
+    /// label that points to it. A crash in between leaves the old label, which still
+    /// describes the old, intact pool. The old bitmap's blocks stay marked in use.
+    fn adjust(&mut self) -> Result<(), &'static str> {
+        let mut block0 = [0u8; ZFS_BLOCK_SIZE];
+        self.vdev.read(0, &mut block0)?;
+        let mut label = self.label;
+        let mut changed = false;
+
+        let old_total = label.total_blocks;
+        let new_total = self.vdev.total_blocks;
+        if new_total > old_total && self.vdev.is_hardware_backed() {
+            let need = (new_total + BLOCK * 8 - 1) / (BLOCK * 8);
+            // Worth it from 64 MiB on, and only if the new bitmap fits in the space gained
+            if new_total - old_total >= 16384 && new_total - old_total > need {
+                let words = ((new_total + 63) / 64) as usize;
+                let mut bitmap = alloc::vec![0u64; need as usize * ZFS_BLOCK_SIZE / 8];
+                bitmap[..self.bitmap.len()].copy_from_slice(&self.bitmap);
+                let start = new_total - need;
+                for b in start..new_total {
+                    bitmap[(b / 64) as usize] |= 1 << (b % 64);
+                }
+                let mut buf = alloc::vec![0u8; ZFS_BLOCK_SIZE * MAX_RUN];
+                let mut b = 0u64;
+                while b < need {
+                    let n = ((need - b) as usize).min(MAX_RUN);
+                    for (i, word) in buf[..n * ZFS_BLOCK_SIZE].chunks_exact_mut(8).enumerate() {
+                        let idx = b as usize * ZFS_BLOCK_SIZE / 8 + i;
+                        // Past the device's end (the last word's tail) counts as used on disk
+                        let mut w = bitmap[idx];
+                        if idx == words - 1 && new_total % 64 != 0 {
+                            w |= !0u64 << (new_total % 64);
+                        }
+                        word.copy_from_slice(&w.to_le_bytes());
+                    }
+                    self.vdev.write(start + b, &buf[..n * ZFS_BLOCK_SIZE])?;
+                    b += n as u64;
+                }
+                self.vdev.flush()?;
+                bitmap.truncate(words);
+                self.bitmap = bitmap;
+                label.total_blocks = new_total;
+                label.bitmap_start = start;
+                label.bitmap_blocks = need;
+                changed = true;
+                crate::println!("[+] OpenZFS: the pool grew from {} MiB to {} MiB (its partition is larger)", old_total * BLOCK >> 20, new_total * BLOCK >> 20);
+            }
+        }
+
+        let want = NEW_GUID_FOR.load(core::sync::atomic::Ordering::Relaxed);
+        let stamp = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let stamped = stamp(&block0, GUID_STAMP_AT) == GUID_STAMP_MAGIC && stamp(&block0, GUID_STAMP_AT + 8) == want;
+        if want != 0 && !stamped {
+            let old = label.pool_guid;
+            label.pool_guid = unsafe { core::arch::x86_64::_rdtsc() } ^ old.rotate_left(17) ^ want ^ 0x4859_4452_4150_4f4f;
+            block0[GUID_STAMP_AT..GUID_STAMP_AT + 8].copy_from_slice(&GUID_STAMP_MAGIC.to_le_bytes());
+            block0[GUID_STAMP_AT + 8..GUID_STAMP_AT + 16].copy_from_slice(&want.to_le_bytes());
+            changed = true;
+            crate::println!("[+] OpenZFS: new pool GUID {:#018x} (first boot of this installation)", label.pool_guid);
+        }
+
+        if changed {
+            label.seal();
+            unsafe {
+                core::ptr::copy_nonoverlapping(&label as *const VdevLabel as *const u8, block0.as_mut_ptr(), core::mem::size_of::<VdevLabel>());
+            }
+            self.vdev.write(0, &block0)?;
+            self.vdev.flush()?;
+            self.label = label;
+        }
+        Ok(())
     }
 
     /// Sets or clears the allocation bit for `block` in the allocation bitmap.

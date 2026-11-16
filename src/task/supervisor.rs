@@ -146,6 +146,7 @@ fn ahci_args() -> Option<Vec<String>> {
     let (dev, abar) = ahci_adapter()?;
     crate::arch::pci::enable_bus_mastering(&dev);
     let mut args = alloc::vec![alloc::format!("abar={:#x}", abar)];
+    args.extend(crate::arch::bootdisk::driver_arg());
     match service::msi_line(&dev) {
         Some(line) => args.push(alloc::format!("irq={}", line)),
         None => crate::kprintln!("[supervisor] AHCI adapter {:02x}:{:02x}.{}: no MSI; its driver polls", dev.bus, dev.device, dev.function),
@@ -179,6 +180,7 @@ fn ata_args() -> Option<Vec<String>> {
         return None;
     }
     let mut args = alloc::vec![String::from("io=0x1f0"), String::from("ctrl=0x3f6")];
+    args.extend(crate::arch::bootdisk::driver_arg());
     if let Some(dev) = crate::arch::pci::find_class(0x01, 0x01) {
         let prog_if = crate::arch::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
         let bar4 = crate::arch::pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x20);
@@ -260,6 +262,14 @@ fn usb_args() -> Option<Vec<String>> {
         crate::kprintln!("[supervisor] Intel xHCI: USB ports switched from EHCI (routing {:#x})", pci::pci_read_u32(b, d, f, 0xD0));
     }
     let mut args = alloc::vec![alloc::format!("mmio={:#x}", base), alloc::format!("len={:#x}", len)];
+    // Where the pool is: the boot partition when the kernel came from a disk (the USB
+    // driver serves the pool view if that partition is on a USB disk); otherwise, with
+    // no ATA or SATA disk, the first USB disk holding a pool
+    match crate::arch::bootdisk::driver_arg() {
+        Some(a) => args.push(a),
+        None if !service::is_online(ENDPOINT_BLOCK_DEV) => args.push(String::from("pool=usb")),
+        None => {}
+    }
     if let Some(line) = service::msi_line(&dev) {
         args.push(alloc::format!("irq={}", line));
     } else if let Some((line, table, addr, data)) = service::msix_line(&dev) {
@@ -333,6 +343,19 @@ fn hda_grants() -> Vec<(u64, u64)> {
     HDA.call_once(hda_controller).map_or_else(Vec::new, |(_, base)| alloc::vec![(base & !0xFFF, 0x4000)])
 }
 
+/// Whether the block driver on `endpoint` serves a pool view (unit 0 answers its size).
+fn has_pool_view(endpoint: u32) -> bool {
+    use crate::ipc::protocol::{MSG_BLOCK_GET_SIZE, MSG_BLOCK_REPLY};
+    if !service::is_online(endpoint) {
+        return false;
+    }
+    let _window = service::hold_window(endpoint);
+    matches!(
+        service::call(endpoint, Message::with_args(MSG_BLOCK_GET_SIZE, [0; 4]), service::CALL_TIMEOUT_TICKS),
+        Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] == 0 && r.args[1] > 0
+    )
+}
+
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
 ///
 /// # Returns
@@ -344,9 +367,12 @@ fn zfs_args() -> Option<Vec<String>> {
     let ram = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().total_usable_memory();
     let blocks = (ram / 8 / 4096).clamp(32 * 1024, 128 * 1024);
     let mut args = alloc::vec![alloc::format!("cache_blocks={}", blocks)];
-    // No ATA or SATA disk, but USB disks: the pool is on the first USB disk that holds
-    // one (a blank one is never formatted)
-    if !service::is_online(ENDPOINT_BLOCK_DEV) && service::is_online(crate::ipc::protocol::ENDPOINT_USB_DISK) {
+    if let Some(id) = crate::arch::bootdisk::new_guid_id() {
+        args.push(alloc::format!("new_guid={:x}", id));
+    }
+    // The pool on a USB disk: the ATA/SATA driver has no pool view (no disk, or the boot
+    // disk is a USB stick) and the USB driver has one
+    if !has_pool_view(ENDPOINT_BLOCK_DEV) && has_pool_view(crate::ipc::protocol::ENDPOINT_USB_DISK) {
         args.push(String::from("disk=usb"));
         crate::shell::commands::usbdisk::POOL_ON_USB.store(true, core::sync::atomic::Ordering::Release);
     }
