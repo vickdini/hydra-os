@@ -20,8 +20,12 @@ fi
 # A real procfs: Ubuntu 26.04's coreutils (uutils, via rustix) refuse a bind-mounted /proc
 mountpoint -q $R/proc || mount -t proc proc $R/proc
 for m in sys dev dev/pts; do mountpoint -q $R/$m || mount --bind /$m $R/$m; done
-mkdir -p $R/mnt/d $R/mnt/wslg $R/tmp/.X11-unix
+# D:\os may be a junction to the SSD E: (/mnt/d/os -> /mnt/e/os), and its build output to C:
+mountpoint -q /mnt/e || { [ -d /mnt/e ] && mount -t drvfs E: /mnt/e -o metadata 2>/dev/null; }
+mkdir -p $R/mnt/d $R/mnt/c $R/mnt/e $R/mnt/wslg $R/tmp/.X11-unix
 mountpoint -q $R/mnt/d || mount --bind /mnt/d $R/mnt/d
+mountpoint -q $R/mnt/c || mount --bind /mnt/c $R/mnt/c
+mountpoint -q /mnt/e && { mountpoint -q $R/mnt/e || mount --bind /mnt/e $R/mnt/e; }
 mountpoint -q $R/mnt/wslg || mount --bind /mnt/wslg $R/mnt/wslg
 mountpoint -q $R/tmp/.X11-unix || mount --bind /tmp/.X11-unix $R/tmp/.X11-unix
 [ -f $R$POOL ] || { echo "[!] No pool at $R$POOL"; exit 1; }
