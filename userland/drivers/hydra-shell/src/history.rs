@@ -1,4 +1,5 @@
-//! # Shell Subsystem: Fixed-Capacity Session Command History
+//! # Session command history (moved from the kernel shell, unchanged; host-tested by
+//! `tests/host/tests/shell.rs`)
 //!
 //! Implements a stack-allocated circular ring buffer (`History`) that records interactive
 //! shell commands for recall via arrow-key navigation, `history` inspection, and `!!` expansion.
@@ -6,7 +7,7 @@
 //! ## Architectural Role & Design Rationale
 //! Interactive shells must retain command history even before heap allocators or persistent
 //! filesystems are mounted. By storing up to `MAX_HISTORY` entries of `MAX_CMD_LEN` bytes
-//! in a fixed-size ring buffer inside [`crate::shell::state::ShellState`], history tracking
+//! in a fixed-size ring buffer inside the shell's session, history tracking
 //! requires zero dynamic memory allocation and cannot fragment the kernel heap.
 //!
 //! ## Key Types & Interfaces
@@ -15,9 +16,9 @@
 //! - `MAX_CMD_LEN`: Maximum byte length of a single stored command line (1024).
 //!
 //! ## Hardware & Dependency Context
-//! - CPU Privilege Level: Ring 0 (Kernel)
+//! - CPU Privilege Level: Ring 3 (hydra-shell)
 //! - Hardware Interaction: None (pure in-memory ring buffer)
-//! - Concurrency: Owned exclusively by the active [`crate::shell::state::ShellState`] instance
+//! - Concurrency: Owned exclusively by the active the shell's session instance
 
 /// Maximum number of recent commands retained in the `History` ring buffer.
 pub const MAX_HISTORY: usize = 32;
@@ -27,7 +28,7 @@ pub const MAX_CMD_LEN: usize = 1024;
 /// Fixed-size command history ring buffer for the Hydra interactive shell.
 ///
 /// # Concurrency & Thread Safety
-/// Embedded directly within [`crate::shell::state::ShellState`] and accessed exclusively by
+/// Embedded directly within the shell's session and accessed exclusively by
 /// the interactive shell REPL thread without locking overhead.
 ///
 /// # Lifetime & Cleanup

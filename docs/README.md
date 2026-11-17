@@ -33,7 +33,7 @@ docs/
     │   ├── mod.md                 # Capability types & Rights bitflags (src/capability/mod.rs)
     │   └── table.md               # Task capability table & CSpace (src/capability/table.rs)
     ├── video.md                   # Hardware GOP display driver & framebuffer console (src/video/)
-    ├── shell.md                   # Interactive microkernel shell & command REPL (src/shell.rs)
+    ├── shell.md                   # The console shell (ring-3 hydra-shell) and the emergency prompt
     ├── ipc/
     │   ├── mod.md                 # IPC subsystem root (src/ipc/mod.rs)
     │   ├── message.md             # Fast register payload & transferred caps (src/ipc/message.rs)
@@ -52,7 +52,7 @@ docs/
 | **Boot & Main** | [`src/main.rs`](file:///d:/os/src/main.rs) | [docs/src/main.md](file:///d:/os/docs/src/main.md) | Entry point, boot sequence, hardware diagnostics, and panic handler. |
 | **Console I/O** | [`src/console.rs`](file:///d:/os/src/console.rs) | [docs/src/console.md](file:///d:/os/docs/src/console.md) | Thread-safe `print!` / `println!` macros, keyboard input, screen formatting. |
 | **Video & GOP** | [`src/video/`](file:///d:/os/src/video) | [docs/src/video.md](file:///d:/os/docs/src/video.md) | UEFI GOP linear framebuffer, 8x16 bitmap font, and standalone graphical console. |
-| **Interactive Shell**| [`src/shell.rs`](file:///d:/os/src/shell.rs) | [docs/src/shell.md](file:///d:/os/docs/src/shell.md) | Command REPL, real-time memory/CPU inspection, CSpace manipulation, IPC testing. |
+| **Console Shell**| [`userland/drivers/hydra-shell`](../userland/drivers/hydra-shell), [`src/admin`](../src/admin), [`src/shell`](../src/shell) | [docs/src/shell.md](src/shell.md) | The ring-3 console shell on the kernel's admin interface; the in-kernel emergency prompt. |
 | **GDT & TSS** | [`src/arch/gdt.rs`](file:///d:/os/src/arch/gdt.rs) | [docs/src/arch/gdt.md](file:///d:/os/docs/src/arch/gdt.md) | Ring 0 / Ring 3 privilege levels, Task State Segment, double-fault stack. |
 | **IDT & Traps** | [`src/arch/idt.rs`](file:///d:/os/src/arch/idt.rs) | [docs/src/arch/idt.md](file:///d:/os/docs/src/arch/idt.md) | 256-gate IDT, assembly exception trampolines, IST double fault isolation, #BP/#PF dispatchers. |
 | **Hardware Takeover** | [`src/arch/boot_services.rs`](file:///d:/os/src/arch/boot_services.rs) | [docs/src/arch/boot_services.md](file:///d:/os/docs/src/arch/boot_services.md) | ExitBootServices, GDT/TSS switch, autonomous CR3 PML4, and PS/2 keyboard takeover. |
@@ -103,7 +103,7 @@ When understanding or reviewing Hydra OS from initial hardware power-on through 
    - [IPC Fast Register Messages](file:///d:/os/docs/src/ipc/message.md) (4 fast inline register payload words, labels, transferred capability tokens)
    - [IPC Endpoints & Mailbox Rendezvous](file:///d:/os/docs/src/ipc/endpoint.md) (Circular FIFO ring buffers, rendezvous channels, thread-safe `SharedEndpoint`)
 8. **Interactive User Space & Subsystem Diagnostics**:
-   - [Interactive Microkernel Shell](file:///d:/os/docs/src/shell.md) (Command REPL, real-time memory/CPU inspection, CSpace manipulation, IPC testing, RTC clock, reboot/shutdown)
+   - [Console Shell](src/shell.md) (the ring-3 hydra-shell, its admin interface, the emergency prompt)
 
 ---
 

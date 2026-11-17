@@ -1,51 +1,84 @@
-//! # Shell Commands: Network Diagnostics, DHCP, Ping & Package Fetcher
+//! # Admin operations for the network commands (op group `0x6_`), TEMPORARY
 //!
-//! Provides CLI tools (`ifconfig`, `dhcp`, `ping`, `wget`/`fetch`) to manage networking and download packages.
+//! `ifconfig`, `dhcp`, `dns`, `ping` and `wget` of the console, moved from the kernel
+//! shell: report operations that print on the caller's standard output.
 //!
-//! ## Architectural Role & Design Rationale
-//!
-//! To verify end-to-end network operation, configure dynamic addressing, test gateway reachability,
-//! and pull external software packages directly into the persistent OpenZFS filesystem, Hydra OS exposes:
-//! - **`ifconfig` / `ip`**: Inspects network interface hardware addresses (MAC), IP assignments, and link status.
-//! - **`dhcp`**: Initiates a DHCP 4-way lease handshake against the local gateway router.
-//! - **`ping`**: Dispatches ICMP Echo Requests and calculates round-trip network transit time.
-//! - **`wget` / `fetch`**: Synchronously retrieves remote files over HTTP and saves them into ZFS datasets.
-//!
-//! The network itself is net-server's (Ring 3): these commands use the kernel's client of
-//! it ([`crate::net`]: the interface's state, DHCP renewal, DNS, ping and HTTP GET on its
-//! sockets), the same functions a ring-3 shell would reach through admin operations.
-
-extern crate alloc;
+//! The network itself is the ring-3 `net-server`'s. These operations use the kernel's
+//! client of it ([`crate::net`]: the interface's state, DHCP renewal, DNS, ping and HTTP GET
+//! on its sockets). Later `hydra-shell`'s network module
+//! (`userland/drivers/hydra-shell/src/net.rs`, the only place that uses this group) can talk
+//! to net-server directly, and this file goes away.
 
 use alloc::vec;
 use uefi::proto::console::text::Color;
+
+use super::proto::*;
+use super::{Failure, Failure::*};
 use crate::console::set_color;
+use crate::println;
 use crate::fs::client::ZfsClient;
 use crate::net;
-use crate::shell::command::Command;
-use crate::shell::state::ShellState;
 
-/// Shell command to inspect network interface state and link telemetry.
-pub struct IfconfigCommand;
+/// `ADMIN_NET` (report).
+///
+/// # Arguments
+/// * `code` - `NET_*`.
+/// * `args` - The command's arguments.
+pub fn run(code: u64, args: &[&str]) -> Result<(), Failure> {
+    match code {
+        NET_IFCONFIG => ifconfig(args),
+        NET_DHCP => dhcp(args),
+        NET_DNS => dns(args),
+        NET_PING => ping(args),
+        NET_WGET => wget(args),
+        _ => return Err(Errno(EINVAL)),
+    }
+    Ok(())
+}
 
-impl Command for IfconfigCommand {
-    fn name(&self) -> &'static str {
-        "ifconfig"
+/// Helper function to parse a dotted-quad IPv4 string (`"10.0.2.2"`) into `[u8; 4]`.
+///
+/// # Arguments
+/// * `s` - Dotted-quad IPv4 string slice.
+///
+/// # Returns
+///
+/// `Some([a, b, c, d])` on successful parse, or `None` if invalid format.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut parts = [0u8; 4];
+    let mut part_idx = 0;
+    let mut current_val: u16 = 0;
+    let mut has_digits = false;
+
+    for &b in s.as_bytes() {
+        if b == b'.' {
+            if !has_digits || part_idx >= 3 || current_val > 255 {
+                return None;
+            }
+            parts[part_idx] = current_val as u8;
+            part_idx += 1;
+            current_val = 0;
+            has_digits = false;
+        } else if b.is_ascii_digit() {
+            current_val = current_val * 10 + ((b - b'0') as u16);
+            if current_val > 255 {
+                return None;
+            }
+            has_digits = true;
+        } else {
+            return None;
+        }
     }
 
-    fn aliases(&self) -> &'static [&'static str] {
-        &["ip", "netstat"]
+    if !has_digits || part_idx != 3 || current_val > 255 {
+        return None;
     }
+    parts[3] = current_val as u8;
 
-    fn description(&self) -> &'static str {
-        "Display network interface configuration, IP assignment, and carrier status"
-    }
-
-    fn usage(&self) -> &'static str {
-        "ifconfig"
-    }
-
-    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+    Some(parts)
+}
+/// `ifconfig` (moved from the kernel shell).
+fn ifconfig(_args: &[&str]) {
         set_color(Color::LightCyan, Color::Black);
         println!("=== Hydra OS Network Interfaces ===");
 
@@ -53,11 +86,9 @@ impl Command for IfconfigCommand {
         if !iface.present {
             set_color(Color::Yellow, Color::Black);
             if !iface.running {
-                println!("
-The network server (net_server) is not running.");
+                println!("\nThe network server (net_server) is not running.");
             } else {
-                println!("
-No Ethernet network interface controller detected on PCI bus.");
+                println!("\nNo Ethernet network interface controller detected on PCI bus.");
                 println!("Tip: Enable Intel PRO/1000 MT (82540EM) in VirtualBox or -device e1000 in QEMU.");
             }
             set_color(Color::White, Color::Black);
@@ -66,8 +97,7 @@ No Ethernet network interface controller detected on PCI bus.");
 
         if iface.ip == [0, 0, 0, 0] && iface.link {
             set_color(Color::Yellow, Color::Black);
-            println!("
-[*] Requesting dynamic DHCP lease for eth0...");
+            println!("\n[*] Requesting dynamic DHCP lease for eth0...");
             if let Ok(i) = net::dhcp_renew() {
                 iface = i;
             }
@@ -83,8 +113,7 @@ No Ethernet network interface controller detected on PCI bus.");
         println!("  - Driver RX:         {} requests, {} frames (net-server)", calls, frames);
 
         set_color(Color::LightGreen, Color::Black);
-        println!("
-Interface: eth0 (Intel 82540EM Gigabit Ethernet)");
+        println!("\nInterface: eth0 (Intel 82540EM Gigabit Ethernet)");
         set_color(Color::White, Color::Black);
         println!(
             "  - Hardware MAC:      {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -114,29 +143,9 @@ Interface: eth0 (Intel 82540EM Gigabit Ethernet)");
         println!("  - Telemetry TX:      {} packets ({} bytes)", tx_pkts, tx_bytes);
         set_color(Color::White, Color::Black);
     }
-}
 
-/// Shell command to acquire a dynamic network lease via DHCP.
-pub struct DhcpCommand;
-
-impl Command for DhcpCommand {
-    fn name(&self) -> &'static str {
-        "dhcp"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["dhclient", "renew"]
-    }
-
-    fn description(&self) -> &'static str {
-        "Acquire dynamic IPv4 address and gateway parameters via DHCP"
-    }
-
-    fn usage(&self) -> &'static str {
-        "dhcp"
-    }
-
-    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+/// `dhcp` (moved from the kernel shell).
+fn dhcp(_args: &[&str]) {
         set_color(Color::Yellow, Color::Black);
         println!("[*] Broadcasting DHCP Discover query across eth0...");
 
@@ -157,25 +166,9 @@ impl Command for DhcpCommand {
         }
         set_color(Color::White, Color::Black);
     }
-}
 
-/// Shell command to test network reachability via ICMP Echo Requests (`ping`).
-pub struct PingCommand;
-
-impl Command for PingCommand {
-    fn name(&self) -> &'static str {
-        "ping"
-    }
-
-    fn description(&self) -> &'static str {
-        "Send ICMP Echo Requests to verify IP connectivity to an IP address or domain URL"
-    }
-
-    fn usage(&self) -> &'static str {
-        "ping <ip_or_url> (e.g. 'ping 10.0.2.2' or 'ping google.com')"
-    }
-
-    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+/// `ping` (moved from the kernel shell).
+fn ping(args: &[&str]) {
         if args.is_empty() {
             set_color(Color::LightRed, Color::Black);
             println!("Usage: ping <ip_or_url> (e.g. ping 10.0.2.2 or ping google.com)");
@@ -254,29 +247,9 @@ impl Command for PingCommand {
         }
         set_color(Color::White, Color::Black);
     }
-}
 
-/// Shell command to query DNS name resolution.
-pub struct DnsCommand;
-
-impl Command for DnsCommand {
-    fn name(&self) -> &'static str {
-        "dns"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["nslookup", "host", "resolve"]
-    }
-
-    fn description(&self) -> &'static str {
-        "Resolve a domain name or URL to an IPv4 address via DNS (RFC 1035)"
-    }
-
-    fn usage(&self) -> &'static str {
-        "dns <domain_or_url> (e.g. 'dns google.com')"
-    }
-
-    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+/// `dns` (moved from the kernel shell).
+fn dns(args: &[&str]) {
         if args.is_empty() {
             set_color(Color::LightRed, Color::Black);
             println!("Usage: dns <domain_or_url> (e.g. 'dns google.com')");
@@ -304,29 +277,9 @@ impl Command for DnsCommand {
         }
         set_color(Color::White, Color::Black);
     }
-}
 
-/// Shell command to download a remote file over HTTP and save directly into ZFS.
-pub struct WgetCommand;
-
-impl Command for WgetCommand {
-    fn name(&self) -> &'static str {
-        "wget"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["fetch", "curl"]
-    }
-
-    fn description(&self) -> &'static str {
-        "Download remote files or packages over HTTP directly into persistent ZFS"
-    }
-
-    fn usage(&self) -> &'static str {
-        "wget <server_ip_or_url> <port> <remote_path> <dest_zfs_path>"
-    }
-
-    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+/// `wget` (moved from the kernel shell).
+fn wget(args: &[&str]) {
         if args.len() < 4 {
             set_color(Color::LightRed, Color::Black);
             println!("Usage: wget <server_ip_or_url> <port> <remote_path> <dest_zfs_path>");
@@ -395,46 +348,3 @@ impl Command for WgetCommand {
         }
         set_color(Color::White, Color::Black);
     }
-}
-
-/// Helper function to parse a dotted-quad IPv4 string (`"10.0.2.2"`) into `[u8; 4]`.
-///
-/// # Arguments
-/// * `s` - Dotted-quad IPv4 string slice.
-///
-/// # Returns
-///
-/// `Some([a, b, c, d])` on successful parse, or `None` if invalid format.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    let mut parts = [0u8; 4];
-    let mut part_idx = 0;
-    let mut current_val: u16 = 0;
-    let mut has_digits = false;
-
-    for &b in s.as_bytes() {
-        if b == b'.' {
-            if !has_digits || part_idx >= 3 || current_val > 255 {
-                return None;
-            }
-            parts[part_idx] = current_val as u8;
-            part_idx += 1;
-            current_val = 0;
-            has_digits = false;
-        } else if b.is_ascii_digit() {
-            current_val = current_val * 10 + ((b - b'0') as u16);
-            if current_val > 255 {
-                return None;
-            }
-            has_digits = true;
-        } else {
-            return None;
-        }
-    }
-
-    if !has_digits || part_idx != 3 || current_val > 255 {
-        return None;
-    }
-    parts[3] = current_val as u8;
-
-    Some(parts)
-}

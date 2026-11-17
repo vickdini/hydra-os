@@ -61,7 +61,8 @@ pub mod fs;
 pub mod ipc;
 /// Physical frame allocation, dynamic kernel heap, 4-level PML4 paging, and process virtual memory.
 pub mod memory;
-/// Interactive microkernel command-line shell, line editor, pipeline executor, and built-in utilities.
+/// The emergency prompt: the tiny in-kernel console for when user space is broken (the console
+/// shell is the ring-3 `hydra-shell`, started by `admin::boot`).
 pub mod shell;
 /// Sleep-capable kernel synchronization primitives (wait queues, mutexes, semaphores, condvars, channels).
 pub mod sync;
@@ -447,6 +448,10 @@ fn boot() -> ! {
     arch::boottime::mark("supervisor");
     task::supervisor_init();
 
+    // Group 4: the boot options of the console (the emergency prompt), read while the
+    // firmware's boot volume is still reachable
+    crate::admin::boot::discover();
+
     // 9. Hardware takeover: the kernel leaves the firmware behind and the driver programs
     //    (the disk driver among them) start in Ring 3
     arch::boottime::mark("hardware takeover (CPUs, drivers, network)");
@@ -490,5 +495,5 @@ fn boot() -> ! {
     // Hand over execution to the interactive microkernel shell
     arch::boottime::mark("shell");
     arch::boottime::report();
-    shell::run();
+    admin::boot::run();
 }

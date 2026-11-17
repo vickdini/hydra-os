@@ -276,7 +276,7 @@ pub fn discover() {
         *OFF_BY.lock() = Some("QEMU fw_cfg opt/hydra/iommu=off");
     } else if load_options_say(&[b"iommu=off", b"noiommu"]) {
         *OFF_BY.lock() = Some("boot option iommu=off");
-    } else if crate::shell::fs::file_exists("\\hydra\\noiommu") {
+    } else if crate::fs::bootfs::file_exists("\\hydra\\noiommu") {
         *OFF_BY.lock() = Some("file \\hydra\\noiommu on the EFI partition");
     }
     if fw.is_some_and(|v| v.starts_with(b"test")) {

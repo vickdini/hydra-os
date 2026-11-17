@@ -4,7 +4,7 @@
 
 The Hydra multitasking subsystem implements a **preemptive round-robin scheduler** driven by the 8254 Programmable Interval Timer (PIT) firing at 100 Hz on IDT Vector 32 (IRQ 0). Multitasking enables concurrent execution of independent kernel threads, background worker tasks, and the interactive shell with transparent hardware context switching.
 
-The implementation resides in [`src/task/scheduler.rs`](file:///d:/os/src/task/scheduler.rs), with the public API exposed through [`src/task/mod.rs`](file:///d:/os/src/task/mod.rs) and interactive shell commands in [`src/shell/commands/task_cmds.rs`](file:///d:/os/src/shell/commands/task_cmds.rs).
+The implementation resides in [`src/task/scheduler.rs`](file:///d:/os/src/task/scheduler.rs), with the public API exposed through [`src/task/mod.rs`](file:///d:/os/src/task/mod.rs) and the console's task commands in [`userland/drivers/hydra-shell/src/system.rs`](../../../userland/drivers/hydra-shell/src/system.rs) (through `src/admin`).
 
 ---
 

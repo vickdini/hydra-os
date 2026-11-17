@@ -16,7 +16,7 @@ The core implementation is split across:
 - **GDT & TSS RSP0 Configuration**: [`src/arch/gdt.rs`](file:///d:/os/src/arch/gdt.rs)
 - **Page Table User Accessibility**: [`src/memory/paging.rs`](file:///d:/os/src/memory/paging.rs)
 - **Process Spawning & Preemption**: [`src/task/scheduler.rs`](file:///d:/os/src/task/scheduler.rs)
-- **Shell Diagnostics**: [`src/shell/commands/task_cmds.rs`](file:///d:/os/src/shell/commands/task_cmds.rs)
+- **Shell Diagnostics**: the console's `syscalls` command ([`userland/drivers/hydra-shell/src/system.rs`](../../../userland/drivers/hydra-shell/src/system.rs)), through the admin operation `ADMIN_SYSCALL_STATS` (`src/admin/system.rs`); the admin interface itself is native call 40 (`SYS_ADMIN`, `src/admin`)
 
 ---
 

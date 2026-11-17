@@ -1,0 +1,8 @@
+[package]
+name = "admin-probe"
+version = "0.1.0"
+edition = "2021"
+description = "Test program: a native process that is not the console calls SYS_ADMIN and must get -EPERM (wave 2, group 4)"
+
+[dependencies]
+hydra-rt = { workspace = true }

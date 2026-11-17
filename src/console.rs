@@ -1036,6 +1036,11 @@ pub fn is_scroll_lock_active() -> bool {
     if SCROLL_LOCK.load(Ordering::Relaxed) {
         return true;
     }
+    // The BIOS data area is identity-mapped only in the boot address space (under UEFI);
+    // after the takeover the ring-3 console asks from its own address space, where it is not
+    if is_hardware_mode() {
+        return false;
+    }
     unsafe {
         let ptr = 0x417 as *const u8;
         (*ptr & 0x10) != 0

@@ -1,38 +1,184 @@
-//! # Shell Command: USB disks (`usbdisk`)
+//! # Admin operations on the pool and the disks (op group `0x5_`)
 //!
-//! Lists the USB disks the USB driver serves ([`ENDPOINT_USB_DISK`], `MSG_BLOCK_LIST`) and
-//! tests them through the block protocol, as the file server and the Linux block layer
-//! use them:
-//! - `usbdisk` / `usbdisk list`: number, size, sector size, where it is plugged in (root
-//!   port and hub ports), USB IDs, model and serial;
-//! - `usbdisk test <n> [blocks]`: writes patterns over `blocks` 4 KiB blocks (default
-//!   2048, 8 MiB) at the start, the middle and the end of disk `n`, reads them back and
-//!   compares, then puts the original data back;
-//! - `usbdisk speed <n|ahci> [MiB] [write]`: sequential read speed (and, with `write`,
-//!   write speed: the data read is written back unchanged) over the first `MiB` (64).
+//! Thin wrappers over the ZFS file server (a ring-3 server already): directory listings,
+//! lookups, the changes the file commands make (`mkdir`, `cp`, `mv`, `rm`, writes), the
+//! datasets, the file server's checks, and the disks. File contents are read with the
+//! native `open`/`read` calls, not through here. When the shell talks to the file server
+//! over IPC itself, most of this goes away.
 //!
-//! The disk holding the running pool is refused for `test` and `speed ... write`.
+//! The USB disk tool (`usbdisk`) is a report operation: it drives the USB driver's block
+//! protocol through the kernel's service windows, which a ring-3 client cannot reach.
 
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
+use super::proto::*;
+use super::{Failure, Failure::*};
+use crate::fs::ZfsClient;
 use crate::ipc::protocol::{
     BLOCK_LIST_RECORD, ENDPOINT_BLOCK_DEV, ENDPOINT_USB_DISK, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_LIST, MSG_BLOCK_READ, MSG_BLOCK_REPLY,
     MSG_BLOCK_WRITE,
 };
 use crate::ipc::service;
 use crate::ipc::Message;
-use crate::shell::command::Command;
-use crate::shell::state::ShellState;
 
-/// Set when the file server was told to find the pool on a USB disk (lives in `fs::zfs`).
-use crate::fs::zfs::POOL_ON_USB;
+/// `ADMIN_POOL_STATUS`.
+pub fn pool_status() -> PoolStatus {
+    let mut st = PoolStatus { on_disk: crate::fs::zfs::disk_info().is_some() as u64, ..Default::default() };
+    if let Ok((total_mib, alloc_kib, free_kib, txg)) = ZfsClient::pool_status() {
+        st.metrics_valid = 1;
+        st.total_mib = total_mib;
+        st.alloc_kib = alloc_kib;
+        st.free_kib = free_kib;
+        st.txg = txg;
+    }
+    st
+}
+
+/// The record kind of a dnode type.
+fn kind_of(t: crate::fs::zfs::types::DnodeType) -> u8 {
+    use crate::fs::zfs::types::DnodeType;
+    match t {
+        DnodeType::Directory => KIND_DIR,
+        DnodeType::PlainFile => KIND_FILE,
+        _ => KIND_OTHER,
+    }
+}
+
+/// `ADMIN_DIR_LIST`.
+pub fn dir_list(path: &str, out: &mut Vec<u8>) -> Result<(), Failure> {
+    let (entries, count, dataset) = ZfsClient::list_dir(path).map_err(|e| Message(ENOENT, e))?;
+    let header = DirHeader { count: count as u64, dataset: name_field(dataset) };
+    out.extend_from_slice(as_bytes(&header));
+    for e in entries.iter() {
+        let rec = DirRecord {
+            obj: e.object_id,
+            kind: if !e.is_valid { KIND_INVALID } else { kind_of(e.obj_type) },
+            _pad: [0; 7],
+            name: name_field(&e.name),
+        };
+        out.extend_from_slice(as_bytes(&rec));
+    }
+    Ok(())
+}
+
+/// `ADMIN_LOOKUP`.
+pub fn lookup(path: &str) -> Result<LookupRecord, Failure> {
+    let st = ZfsClient::file_stat(path).map_err(|e| Message(ENOENT, e))?;
+    Ok(LookupRecord { obj: st.obj_id, kind: kind_of(st.obj_type) as u64, size: st.size })
+}
+
+/// `ADMIN_FILE_STAT`.
+pub fn stat(path: &str) -> Result<StatRecord, Failure> {
+    let st = ZfsClient::file_stat(path).map_err(|e| Message(ENOENT, e))?;
+    Ok(StatRecord { obj: st.obj_id, kind: kind_of(st.obj_type) as u64, size: st.size, birth_txg: st.birth_txg, checksum: st.checksum })
+}
+
+/// `ADMIN_FS_OP`.
+///
+/// # Arguments
+/// * `code` - `FS_*`.
+/// * `input` - `path`, or `path`, a NUL and the second part.
+///
+/// # Returns
+/// The transaction group of the change (0 when the file server does not say).
+pub fn fs_op(code: u64, input: &[u8]) -> Result<u64, Failure> {
+    let (path, second) = match input.iter().position(|&b| b == 0) {
+        Some(i) => (&input[..i], &input[i + 1..]),
+        None => (input, &[][..]),
+    };
+    let path = core::str::from_utf8(path).map_err(|_| Errno(EINVAL))?;
+    let text = || core::str::from_utf8(second).map_err(|_| Errno(EINVAL));
+    let fail = |e: &'static str| Message(EIO, e);
+    match code {
+        FS_MKDIR => ZfsClient::create_dir(path).map_err(fail),
+        FS_MKDIR_ALL => ZfsClient::create_dir_all(path).map_err(fail),
+        FS_RMDIR => ZfsClient::remove_dir(path).map(|_| 0).map_err(fail),
+        FS_UNLINK => ZfsClient::remove_file(path).map(|_| 0).map_err(fail),
+        FS_COPY => ZfsClient::copy_file(path, text()?).map_err(fail),
+        FS_RENAME => ZfsClient::move_entry(path, text()?).map(|_| 0).map_err(fail),
+        FS_TOUCH => ZfsClient::touch_file(path).map_err(fail),
+        FS_WRITE => ZfsClient::write_file_by_path(path, second).map_err(fail),
+        FS_APPEND => {
+            let size = ZfsClient::file_stat(path).map(|s| s.size as usize).unwrap_or(0);
+            let mut all = alloc::vec![0u8; size];
+            let n = if size > 0 { ZfsClient::read_file_by_path(path, &mut all).unwrap_or(0) } else { 0 };
+            all.truncate(n);
+            all.extend_from_slice(second);
+            ZfsClient::write_file_by_path(path, &all).map_err(fail)
+        }
+        FS_SYNC => ZfsClient::sync().map(|_| 0).map_err(fail),
+        FS_SNAPSHOT => ZfsClient::snapshot(0).map_err(fail),
+        _ => Err(Errno(EINVAL)),
+    }
+}
+
+/// `ADMIN_DATASET_LIST`.
+pub fn datasets(out: &mut Vec<u8>) -> Result<(), Failure> {
+    let pool = crate::fs::zfs::with_server(|s| Ok((s.pool_status()?, s.datasets()?)));
+    let ((_, allocated, free, _, _), sets) = pool.map_err(|_| Message(EIO, "the file server did not answer"))?;
+    out.extend_from_slice(as_bytes(&DatasetHeader { count: sets.len() as u64, allocated, free }));
+    for (name, mount, txg, snapshot) in sets.iter() {
+        let rec = DatasetRecord { txg: *txg, snapshot: *snapshot as u64, name: name_field(name), mount: name_field(mount) };
+        out.extend_from_slice(as_bytes(&rec));
+    }
+    Ok(())
+}
+
+/// `ADMIN_ZFS_DIAG` (report: the file server prints on the console).
+pub fn zfs_diag(code: u64, repair: bool, dir: &str) -> Result<(), Failure> {
+    use crate::fs::zfs::fsproto::{FS_FSCK, FS_SELFTEST, FS_VERIFY};
+    let (op, dir) = match code {
+        ZFSDIAG_SELFTEST => (FS_SELFTEST, ""),
+        ZFSDIAG_VERIFY => (FS_VERIFY, ""),
+        ZFSDIAG_FSCK => (FS_FSCK, if dir.is_empty() { "/" } else { dir }),
+        _ => return Err(Errno(EINVAL)),
+    };
+    let _ = crate::fs::zfs::with_server(|s| s.diagnostic(op, dir, repair));
+    Ok(())
+}
+
+/// `ADMIN_DISK_INFO`.
+pub fn disk_info() -> DiskInfo {
+    match crate::fs::zfs::disk_info() {
+        Some(d) => DiskInfo { present: 1, sectors: d.sectors, lba48: d.lba48 as u64, dma: d.dma as u64, model: name_field(&d.model) },
+        None => DiskInfo::default(),
+    }
+}
+
+/// `ADMIN_USBDISK` (report).
+pub fn usbdisk(args: &[u64; 4]) -> Result<(), Failure> {
+    use crate::fs::zfs::POOL_ON_USB;
+    match args[0] {
+        USBDISK_LIST => list(),
+        USBDISK_TEST => {
+            if POOL_ON_USB.load(Ordering::Acquire) {
+                crate::println!("usbdisk: the running pool is on a USB disk; not writing to USB disks");
+                return Ok(());
+            }
+            test(args[1], args[2])
+        }
+        USBDISK_SPEED => {
+            let write = args[3] != 0;
+            let (ep, disk) = if args[1] == u64::MAX { (ENDPOINT_BLOCK_DEV, 0) } else { (ENDPOINT_USB_DISK, args[1]) };
+            if write && (ep == ENDPOINT_BLOCK_DEV || POOL_ON_USB.load(Ordering::Acquire)) {
+                crate::println!("usbdisk: not writing to the disk of the running pool");
+                return Ok(());
+            }
+            speed(ep, disk, args[2], write)
+        }
+        _ => return Err(Errno(EINVAL)),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The USB disk tool (moved from the kernel shell's usbdisk command)
+// ---------------------------------------------------------------------------
 
 /// Blocks per request (the window holds 64).
 const CHUNK: u64 = 64;
 
-/// Shell command for USB disks.
-pub struct UsbDiskCommand;
 
 /// One block request to disk `disk` of `endpoint`; returns the reply's status and value.
 fn request(endpoint: u32, disk: u64, label: u32, a0: u64, a1: u64, data: Option<&mut [u8]>, write: bool) -> Result<u64, i64> {
@@ -240,42 +386,3 @@ fn speed(ep: u32, disk: u64, mib: u64, write: bool) {
     );
 }
 
-impl Command for UsbDiskCommand {
-    fn name(&self) -> &'static str {
-        "usbdisk"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn description(&self) -> &'static str {
-        "List and test USB disks (USB mass storage)"
-    }
-
-    fn usage(&self) -> &'static str {
-        "usbdisk [list | test <n> [blocks] | speed <n|ahci> [MiB] [write]]"
-    }
-
-    fn execute(&self, args: &[&str], _state: &mut ShellState) {
-        let num = |i: usize, default: u64| args.get(i).and_then(|a| a.parse::<u64>().ok()).unwrap_or(default);
-        match args.first().copied().unwrap_or("list") {
-            "list" => list(),
-            "test" => {
-                if POOL_ON_USB.load(Ordering::Acquire) {
-                    return crate::println!("usbdisk: the running pool is on a USB disk; not writing to USB disks");
-                }
-                test(num(1, 0), num(2, 2048))
-            }
-            "speed" => {
-                let write = args.contains(&"write");
-                let (ep, disk) = if args.get(1) == Some(&"ahci") { (ENDPOINT_BLOCK_DEV, 0) } else { (ENDPOINT_USB_DISK, num(1, 0)) };
-                if write && (ep == ENDPOINT_BLOCK_DEV || POOL_ON_USB.load(Ordering::Acquire)) {
-                    return crate::println!("usbdisk: not writing to the disk of the running pool");
-                }
-                speed(ep, disk, num(2, 64), write)
-            }
-            _ => crate::println!("usage: {}", self.usage()),
-        }
-    }
-}
