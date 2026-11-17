@@ -1,13 +1,25 @@
 #!/bin/sh
 # Written by Hydra: in the live session ("try Hydra" from its USB stick), tells the person at
 # the desktop what this is, with a button to start the installer. Autostarted for every user;
-# does nothing outside the live session.
+# does nothing outside the live session. A desktop notification that stays until closed,
+# through the notification service's D-Bus interface (gdbus: libnotify's notify-send is not
+# installed).
 [ -e /run/hydra/live ] || exit 0
 # After the desktop has settled (the notification would otherwise come while it still builds)
 sleep 10
-answer=$(notify-send --app-name=Hydra --icon=drive-removable-media --urgency=critical --wait \
-    --action=install="Install Hydra" \
+reply=$(gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+    --method org.freedesktop.Notifications.Notify "Hydra" 0 "drive-removable-media" \
     "You are trying Hydra" \
-    "Nothing you do here is saved to this computer. To keep Hydra, double-click \"Install Hydra\" on the desktop.")
-[ "$answer" = install ] && exec /usr/bin/hydra-install
+    "Nothing you do here is saved to this computer. To keep Hydra, double-click \"Install Hydra\" on the desktop." \
+    "['install', 'Install Hydra']" "{'urgency': <byte 2>}" 0) || exit 0
+id=$(echo "$reply" | sed -n 's/.*uint32 \([0-9]*\).*/\1/p')
+[ -n "$id" ] || exit 0
+# The button: start the installer; the notification closed: done
+gdbus monitor --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications |
+while read -r line; do
+    case "$line" in
+        *"ActionInvoked (uint32 $id, 'install')"*) setsid /usr/bin/hydra-install >/dev/null 2>&1 < /dev/null & exit 0 ;;
+        *"NotificationClosed (uint32 $id,"*) exit 0 ;;
+    esac
+done
 exit 0

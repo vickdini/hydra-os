@@ -16,6 +16,8 @@
 #             (accounts, homes, logs...) -> out/verify-clean.txt
 #   live      the live pool: the clean pool packed again with room for the install set,
 #             booted as a live session that fetches it into /opt/hydra-install/ -> work/live.raw
+#   liveiso   (not in "all") only work/hydra-live-test.iso: the tree's boot ISO with \hydra\live,
+#             to try the live session on a pool disk without the stick
 #   stick     out/hydra-live.img: GPT disk image, EFI partition (kernel, boot files, \hydra\live)
 #             + Hydra pool partition (work/live.raw)
 #
@@ -230,6 +232,10 @@ EOF
         sfdisk --list "$S"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img ($(numfmt --to=iec "$total")), $(cat "$R$OUT/hydra-live.img.sha256")"
+        ;;
+    liveiso)
+        # Only the test ISO (the kernel of the tree with \hydra\live): work/hydra-live-test.iso
+        live_iso
         ;;
     *) die "unknown step $step" ;;
     esac

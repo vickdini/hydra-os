@@ -1,4 +1,6 @@
-#!/bin/sh
+#!/usr/bin/python3
 # Written by Hydra: stands in for the installer until this version of Hydra has it (the
 # installer replaces this file).
-exec kdialog --title "Install Hydra" --sorry "The installer is not part of this version of Hydra yet."
+from PyQt6.QtWidgets import QApplication, QMessageBox
+app = QApplication([])
+QMessageBox.information(None, "Install Hydra", "The installer is not part of this version of Hydra yet.")
