@@ -23,6 +23,7 @@
 
 pub mod blockdev;
 pub mod client;
+pub mod firstboot; // Group G: installer first-boot settings
 pub mod fd;
 pub mod gpt;
 pub mod pipe;

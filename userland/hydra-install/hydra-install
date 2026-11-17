@@ -1,0 +1,1053 @@
+#!/usr/bin/python3
+# Written by Hydra: the Hydra installer ("Install Hydra" on the live system's desktop).
+#   hydra-install [--screenshots DIR]
+# A few clear steps, like Windows Setup: language, keyboard, time zone, the disk (the whole disk
+# is erased; the stick Hydra runs from is never offered), your account, a summary, then the
+# installation with its progress in plain words, and "Restart now".
+# The disk is written by /usr/libexec/hydra-install-helper, run as root through polkit (pkexec;
+# the live system's user "live" needs no password). This window never sees root rights; the
+# password is turned into a crypt(3) hash (yescrypt, as /etc/shadow keeps it) here, and only
+# the hash leaves this program. The settings are applied at the first start of the new computer
+# (hydra-firstboot).
+# --screenshots DIR: fills in sample answers and saves a picture of every page to DIR (for
+# Hydra's tests; nothing is installed).
+# For tests on disk image files: HYDRA_INSTALL_TEST=1 runs the helper directly (as the calling
+# user, who must be root) instead of through pkexec, so HYDRA_INSTALL_TEST_DISKS and
+# HYDRA_INSTALL_SOURCE reach it; HYDRA_INSTALL_HELPER names another helper.
+import ctypes
+import datetime
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+
+from PyQt6.QtCore import QProcess, QSize, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QIcon, QPalette, QPixmap
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout,
+                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+                             QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy,
+                             QStackedWidget, QVBoxLayout, QWidget)
+
+HELPER = os.environ.get("HYDRA_INSTALL_HELPER", "/usr/libexec/hydra-install-helper")
+SHARE = "/usr/share/hydra-install"
+LOGO = next((p for p in (os.path.join(SHARE, "hydra-logo.png"),
+                         os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra-logo.png")) if os.path.exists(p)), "")
+TEST = os.environ.get("HYDRA_INSTALL_TEST") == "1"
+
+# Language: (name shown, locale, keyboard layout, time zone that usually goes with it)
+LANGUAGES = [
+    ("English (United States)", "en_US.UTF-8", "us", "America/New_York"),
+    ("English (United Kingdom)", "en_GB.UTF-8", "gb", "Europe/London"),
+    ("Deutsch (Deutschland)", "de_DE.UTF-8", "de", "Europe/Berlin"),
+    ("Deutsch (Österreich)", "de_AT.UTF-8", "at", "Europe/Vienna"),
+    ("Deutsch (Schweiz)", "de_CH.UTF-8", "ch", "Europe/Zurich"),
+    ("Français (France)", "fr_FR.UTF-8", "fr", "Europe/Paris"),
+    ("Español (España)", "es_ES.UTF-8", "es", "Europe/Madrid"),
+    ("Español (México)", "es_MX.UTF-8", "latam", "America/Mexico_City"),
+    ("Italiano", "it_IT.UTF-8", "it", "Europe/Rome"),
+    ("Nederlands", "nl_NL.UTF-8", "us", "Europe/Amsterdam"),
+    ("Português (Brasil)", "pt_BR.UTF-8", "br", "America/Sao_Paulo"),
+    ("Português (Portugal)", "pt_PT.UTF-8", "pt", "Europe/Lisbon"),
+    ("Polski", "pl_PL.UTF-8", "pl", "Europe/Warsaw"),
+    ("Svenska", "sv_SE.UTF-8", "se", "Europe/Stockholm"),
+    ("Dansk", "da_DK.UTF-8", "dk", "Europe/Copenhagen"),
+    ("Norsk bokmål", "nb_NO.UTF-8", "no", "Europe/Oslo"),
+    ("Suomi", "fi_FI.UTF-8", "fi", "Europe/Helsinki"),
+    ("Čeština", "cs_CZ.UTF-8", "cz", "Europe/Prague"),
+    ("Türkçe", "tr_TR.UTF-8", "tr", "Europe/Istanbul"),
+    ("Русский", "ru_RU.UTF-8", "ru", "Europe/Moscow"),
+    ("Українська", "uk_UA.UTF-8", "ua", "Europe/Kyiv"),
+    ("日本語", "ja_JP.UTF-8", "jp", "Asia/Tokyo"),
+    ("한국어", "ko_KR.UTF-8", "kr", "Asia/Seoul"),
+    ("中文 (简体)", "zh_CN.UTF-8", "cn", "Asia/Shanghai"),
+]
+
+# Languages whose script needs fonts the system may not have: (writing system, English name)
+NEEDS_FONT = {"ja": ("Japanese", "Japanese"), "ko": ("Korean", "Korean"), "zh": ("SimplifiedChinese", "Chinese (Simplified)")}
+
+
+def shown_name(name, loc):
+    """NAME, or its English name when no installed font can show its script."""
+    need = NEEDS_FONT.get(loc[:2])
+    if need:
+        from PyQt6.QtGui import QFontDatabase
+        if not QFontDatabase.families(getattr(QFontDatabase.WritingSystem, need[0])):
+            return need[1]
+    return name
+
+
+STEPS = ["Language", "Keyboard", "Time zone", "Disk", "Your account", "Summary", "Installing", "Finished"]
+
+# What the helper's step numbers mean, in the order it reports them
+INSTALL_STEPS = [
+    "Checking the disk and the installation files",
+    "Erasing the disk and creating the partitions",
+    "Preparing the start-up partition",
+    "Copying Hydra to the disk",
+    "Copying the start-up files",
+    "Checking what was written",
+    "Adding Hydra to the computer's start-up list",
+]
+
+
+# ---------------------------------------------------------------------------------------------
+# Helpers
+
+def human(n):
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return ("%d %s" if unit == "bytes" else "%.0f %s" if n >= 100 else "%.1f %s") % (n, unit)
+        n /= 1000.0
+
+
+def hash_password(password):
+    """crypt(3) yescrypt hash of PASSWORD (libxcrypt, the library /etc/shadow's tools use)."""
+    lib = ctypes.CDLL("libcrypt.so.1")
+    lib.crypt_gensalt.restype = ctypes.c_char_p
+    lib.crypt_gensalt.argtypes = [ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p, ctypes.c_int]
+    lib.crypt.restype = ctypes.c_char_p
+    lib.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    salt = lib.crypt_gensalt(b"$y$", 0, None, 0)
+    if not salt:
+        raise RuntimeError("no salt")
+    h = lib.crypt(password.encode(), salt)
+    if not h or not h.startswith(b"$y$"):
+        raise RuntimeError("hashing failed")
+    return h.decode()
+
+
+def keyboard_layouts():
+    """[(layout, description)] and {layout: [(variant, description)]} from xkb's list."""
+    layouts, variants, sect = [], {}, None
+    try:
+        with open("/usr/share/X11/xkb/rules/evdev.lst", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("!"):
+                    sect = line[1:].strip()
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                if sect == "layout":
+                    name, _, desc = line.partition(" ")
+                    layouts.append((name, desc.strip()))
+                elif sect == "variant":
+                    name, _, rest = line.partition(" ")
+                    lay, _, desc = rest.strip().partition(":")
+                    variants.setdefault(lay.strip(), []).append((name, desc.strip()))
+    except OSError:
+        layouts = [(l[2], l[0]) for l in LANGUAGES]
+    layouts.sort(key=lambda x: x[1].lower())
+    return layouts, variants
+
+
+def time_zones():
+    zones = []
+    for tab in ("/usr/share/zoneinfo/tzdata.zi",):
+        pass
+    try:
+        with open("/usr/share/zoneinfo/zone1970.tab", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 3:
+                    zones.append(parts[2])
+    except OSError:
+        pass
+    for extra in ("Europe/Vienna", "Europe/Zurich", "Europe/Copenhagen", "Europe/Oslo", "Europe/Stockholm",
+                  "Europe/Amsterdam", "Europe/Luxembourg", "Europe/Brussels", "UTC"):
+        if extra not in zones and os.path.exists("/usr/share/zoneinfo/" + extra):
+            zones.append(extra)
+    return sorted(set(zones))
+
+
+def live_timezone():
+    try:
+        with open("/etc/timezone") as f:
+            tz = f.read().strip()
+    except OSError:
+        tz = ""
+    if not tz:
+        try:
+            tz = os.path.realpath("/etc/localtime").split("/zoneinfo/", 1)[1]
+        except (IndexError, OSError):
+            tz = ""
+    return "" if tz in ("", "UTC", "Etc/UTC", "Etc/Universal") else tz
+
+
+def reserved_names():
+    try:
+        return {p.pw_name for p in pwd.getpwall()} | {"root", "live", "admin", "hydra-setup"}
+    except Exception:
+        return {"root", "live", "admin"}
+
+
+def suggest_user(full):
+    import unicodedata
+    first = (full.strip().split() or [""])[0]
+    s = unicodedata.normalize("NFKD", first).encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"[^a-z0-9_-]", "", s)
+    if s and not s[0].isalpha():
+        s = "u" + s
+    return s[:32]
+
+
+# ---------------------------------------------------------------------------------------------
+# Pages
+
+def title(text):
+    l = QLabel(text)
+    f = l.font()
+    f.setPointSizeF(f.pointSizeF() * 1.9)
+    f.setWeight(QFont.Weight.Light)
+    l.setFont(f)
+    l.setWordWrap(True)
+    return l
+
+
+def para(text, dim=False):
+    l = QLabel(text)
+    l.setWordWrap(True)
+    l.setTextFormat(Qt.TextFormat.RichText)
+    if dim:
+        l.setObjectName("dim")
+    return l
+
+
+class Page(QWidget):
+    next_text = "Next"
+
+    def __init__(self, wiz):
+        super().__init__()
+        self.wiz = wiz
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(36, 30, 36, 12)
+        self.box.setSpacing(12)
+
+    def ready(self):
+        return True
+
+    def enter(self):
+        pass
+
+
+class WelcomePage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Welcome to Hydra"))
+        self.box.addWidget(para("This will install Hydra on this computer. It takes a few minutes and a few "
+                                "questions. Nothing is changed on your computer until you click <b>Install</b> "
+                                "at the end."))
+        self.box.addSpacing(6)
+        self.box.addWidget(QLabel("<b>Choose your language and region</b>"))
+        self.list = QListWidget()
+        for name, loc, kb, tz in LANGUAGES:
+            it = QListWidgetItem(shown_name(name, loc))
+            it.setData(Qt.ItemDataRole.UserRole, loc)
+            self.list.addItem(it)
+        cur = os.environ.get("LANG", "en_US.UTF-8").replace(".utf8", ".UTF-8")
+        idx = next((i for i, l in enumerate(LANGUAGES) if l[1] == cur), 0)
+        self.list.setCurrentRow(idx)
+        self.list.currentRowChanged.connect(self.changed)
+        self.box.addWidget(self.list, 1)
+        self.box.addWidget(para("This sets the language and the formats for dates and numbers of the new "
+                                "system. (This installer itself is in English.)", dim=True))
+
+    def changed(self, row):
+        self.wiz.language_changed(LANGUAGES[row])
+
+    def language(self):
+        return LANGUAGES[max(0, self.list.currentRow())]
+
+
+class KeyboardPage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Keyboard layout"))
+        self.box.addWidget(para("Choose the layout of your keyboard. Then type in the test box to check that "
+                                "the keys give the right letters, for example Z, Y, Ä, É or @."))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search for a layout, e.g. German or French")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.filter)
+        self.box.addWidget(self.search)
+        self.list = QListWidget()
+        self.layouts, self.variants = keyboard_layouts()
+        for name, desc in self.layouts:
+            it = QListWidgetItem("%s" % desc)
+            it.setData(Qt.ItemDataRole.UserRole, name)
+            it.setToolTip(name)
+            self.list.addItem(it)
+        self.list.currentItemChanged.connect(self.layout_changed)
+        self.box.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Variant:"))
+        self.variant = QComboBox()
+        self.variant.currentIndexChanged.connect(self.apply_live)
+        row.addWidget(self.variant, 1)
+        self.box.addLayout(row)
+        self.test = QLineEdit()
+        self.test.setPlaceholderText("Type here to test your keyboard")
+        self.box.addWidget(self.test)
+        self.note = para("", dim=True)
+        self.box.addWidget(self.note)
+        self.timer = QTimer(self, singleShot=True, interval=400, timeout=self.apply_now)
+
+    def filter(self, text):
+        t = text.lower().strip()
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(t) and t not in it.text().lower() and t != it.data(Qt.ItemDataRole.UserRole))
+
+    def select(self, layout):
+        for i in range(self.list.count()):
+            if self.list.item(i).data(Qt.ItemDataRole.UserRole) == layout:
+                self.list.setCurrentRow(i)
+                self.list.scrollToItem(self.list.item(i), QAbstractItemView.ScrollHint.PositionAtCenter)
+                return
+
+    def layout_changed(self, cur, _prev):
+        self.variant.blockSignals(True)
+        self.variant.clear()
+        self.variant.addItem("Standard", "")
+        if cur:
+            for name, desc in self.variants.get(cur.data(Qt.ItemDataRole.UserRole), []):
+                self.variant.addItem(desc, name)
+        self.variant.blockSignals(False)
+        self.apply_live()
+
+    def value(self):
+        cur = self.list.currentItem()
+        return (cur.data(Qt.ItemDataRole.UserRole) if cur else "us"), (self.variant.currentData() or "")
+
+    def describe(self):
+        cur = self.list.currentItem()
+        v = self.variant.currentText() if self.variant.currentData() else ""
+        return (cur.text() if cur else "English (US)") + (" - " + v if v else "")
+
+    def apply_live(self, *_):
+        self.timer.start()
+
+    def apply_now(self):
+        """Switches this live session to the chosen layout, so the test box shows it."""
+        lay, var = self.value()
+        if pwd.getpwuid(os.getuid()).pw_name != "live" or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            self.note.setText("The test box uses the keyboard layout of this session; the layout you choose "
+                              "is used on the new system.")
+            return
+        cfg = os.path.join(os.path.expanduser("~"), ".config", "kxkbrc")
+        try:
+            os.makedirs(os.path.dirname(cfg), exist_ok=True)
+            with open(cfg, "w") as f:
+                f.write("[Layout]\nLayoutList=%s\nVariantList=%s\nUse=true\n" % (lay, var))
+            subprocess.run(["dbus-send", "--session", "--type=signal", "/Layouts", "org.kde.keyboard.reloadConfig"],
+                           capture_output=True, timeout=5)
+            self.note.setText("")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+class TimePage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Time zone"))
+        self.box.addWidget(para("Choose the city nearest to you that is in your time zone. The clock of the new "
+                                "system follows it, including summer time."))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search for a city, e.g. Berlin")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.filter)
+        self.box.addWidget(self.search)
+        self.list = QListWidget()
+        for z in time_zones():
+            it = QListWidgetItem(z.replace("_", " ").replace("/", "  /  "))
+            it.setData(Qt.ItemDataRole.UserRole, z)
+            self.list.addItem(it)
+        self.list.currentItemChanged.connect(self.show_time)
+        self.box.addWidget(self.list, 1)
+        self.clock = QLabel()
+        self.box.addWidget(self.clock)
+        self.tick = QTimer(self, interval=10000, timeout=self.show_time)
+        self.tick.start()
+
+    def filter(self, text):
+        t = text.lower().replace(" ", "_").strip()
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(t) and t not in it.data(Qt.ItemDataRole.UserRole).lower())
+
+    def select(self, tz):
+        for i in range(self.list.count()):
+            if self.list.item(i).data(Qt.ItemDataRole.UserRole) == tz:
+                self.list.setCurrentRow(i)
+                self.list.scrollToItem(self.list.item(i), QAbstractItemView.ScrollHint.PositionAtCenter)
+                return True
+        return False
+
+    def value(self):
+        cur = self.list.currentItem()
+        return cur.data(Qt.ItemDataRole.UserRole) if cur else "UTC"
+
+    def show_time(self, *_):
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.datetime.now(ZoneInfo(self.value()))
+            self.clock.setText("Time there now: <b>%s</b>" % now.strftime("%H:%M, %A %d %B %Y"))
+        except Exception:
+            self.clock.setText("")
+
+
+class DiskPage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Where should Hydra be installed?"))
+        self.box.addWidget(para("Choose the disk. Hydra uses the <b>whole disk</b>: everything on it is deleted, "
+                                "including Windows and your files on it. Copy what you want to keep to another "
+                                "disk or a USB stick first."))
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(40, 40))
+        self.list.setSpacing(3)
+        self.list.currentItemChanged.connect(self.changed)
+        self.box.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.info = para("", dim=True)
+        row.addWidget(self.info, 1)
+        refresh = QPushButton(QIcon.fromTheme("view-refresh"), "Look for disks again")
+        refresh.clicked.connect(self.load)
+        row.addWidget(refresh)
+        self.box.addLayout(row)
+        self.warn = QFrame()
+        self.warn.setObjectName("danger")
+        w = QVBoxLayout(self.warn)
+        self.warn_text = QLabel()
+        self.warn_text.setWordWrap(True)
+        self.warn_text.setObjectName("dangertext")
+        w.addWidget(self.warn_text)
+        self.confirm = QCheckBox("I understand that everything on this disk will be deleted.")
+        self.confirm.toggled.connect(self.wiz.update_buttons)
+        w.addWidget(self.confirm)
+        self.box.addWidget(self.warn)
+        self.warn.hide()
+        self.disks = []
+        self.loaded = False
+
+    def enter(self):
+        if not self.loaded:
+            self.load()
+
+    def load(self):
+        self.loaded = True
+        self.list.clear()
+        self.confirm.setChecked(False)
+        try:
+            env = dict(os.environ)
+            r = subprocess.run([sys.executable, HELPER, "list-disks"] if HELPER.endswith(".py") else [HELPER, "list-disks"],
+                               capture_output=True, text=True, timeout=60, env=env)
+            data = json.loads(r.stdout)
+        except Exception as e:
+            data = {"disks": [], "needed": None}
+            self.info.setText("The disks could not be listed (%s)." % e)
+        self.disks = data.get("disks", [])
+        need = data.get("needed")
+        for d in self.disks:
+            kind = {"usb": "USB disk", "nvme": "NVMe SSD", "sata": "SATA disk", "ata": "disk", "file": "test image"}.get(d["transport"], "disk")
+            text = "%s\n%s  -  %s  -  %s" % (d["model"], human(d["size"]), kind, d["path"])
+            if not d["usable"]:
+                text += "\n" + d["why"]
+            it = QListWidgetItem(QIcon.fromTheme("drive-removable-media-usb" if d["removable"] or d["transport"] == "usb"
+                                                 else "drive-harddisk"), text)
+            it.setData(Qt.ItemDataRole.UserRole, d)
+            if not d["usable"]:
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list.addItem(it)
+        usable = [d for d in self.disks if d["usable"]]
+        if not self.disks:
+            self.info.setText("No disk was found. Is the disk connected?")
+        elif not usable:
+            self.info.setText("None of the disks can be used." + (" Hydra needs at least %s." % human(need) if need else ""))
+        else:
+            self.info.setText("Hydra needs at least %s." % human(need) if need else "")
+        if len(usable) == 1:
+            for i in range(self.list.count()):
+                if self.list.item(i).data(Qt.ItemDataRole.UserRole)["usable"]:
+                    self.list.setCurrentRow(i)
+        self.wiz.update_buttons()
+
+    def changed(self, cur, _prev):
+        self.confirm.setChecked(False)
+        d = self.value()
+        if d:
+            self.warn_text.setText("Everything on <b>%s (%s)</b> will be deleted." % (d["model"], human(d["size"])))
+            self.warn.show()
+        else:
+            self.warn.hide()
+        self.wiz.update_buttons()
+
+    def value(self):
+        cur = self.list.currentItem()
+        d = cur.data(Qt.ItemDataRole.UserRole) if cur else None
+        return d if d and d["usable"] else None
+
+    def ready(self):
+        return bool(self.value()) and self.confirm.isChecked()
+
+
+class AccountPage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Who will use this computer?"))
+        self.box.addWidget(para("This account is an administrator: it can install programs and change settings. "
+                                "You can add accounts for other people later in Settings."))
+        g = QGridLayout()
+        g.setVerticalSpacing(8)
+        g.setHorizontalSpacing(14)
+        self.full = QLineEdit(placeholderText="e.g. Anna Smith")
+        self.user = QLineEdit(placeholderText="e.g. anna")
+        self.pw1 = QLineEdit(echoMode=QLineEdit.EchoMode.Password)
+        self.pw2 = QLineEdit(echoMode=QLineEdit.EchoMode.Password)
+        self.host = QLineEdit(placeholderText="e.g. anna-pc")
+        self.user_edited = self.host_edited = False
+        self.msgs = {}
+        rows = [("Your name", self.full, "Shown on the login screen."),
+                ("User name", self.user, "Short name for logging in: small letters and digits, no spaces."),
+                ("Password", self.pw1, ""),
+                ("Password again", self.pw2, ""),
+                ("Computer name", self.host, "How this computer appears to others on the network.")]
+        for r, (label, edit, hint) in enumerate(rows):
+            g.addWidget(QLabel(label + ":"), 2 * r, 0)
+            g.addWidget(edit, 2 * r, 1)
+            m = QLabel(hint)
+            m.setObjectName("dim")
+            m.setWordWrap(True)
+            self.msgs[edit] = (m, hint)
+            g.addWidget(m, 2 * r + 1, 1)
+        self.box.addLayout(g)
+        self.show_pw = QCheckBox("Show the password")
+        self.show_pw.toggled.connect(lambda on: [e.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
+                                                 for e in (self.pw1, self.pw2)])
+        self.box.addWidget(self.show_pw)
+        self.box.addStretch(1)
+        self.full.textChanged.connect(self.full_changed)
+        self.user.textEdited.connect(lambda _: setattr(self, "user_edited", True))
+        self.host.textEdited.connect(lambda _: setattr(self, "host_edited", True))
+        for e in (self.full, self.user, self.pw1, self.pw2, self.host):
+            e.textChanged.connect(self.check)
+        self.reserved = reserved_names()
+
+    def full_changed(self, text):
+        if not self.user_edited:
+            self.user.setText(suggest_user(text))
+        if not self.host_edited:
+            u = self.user.text()
+            self.host.setText((u + "-pc") if u else "")
+
+    def set_msg(self, edit, text):
+        m, hint = self.msgs[edit]
+        m.setText(text or hint)
+        m.setObjectName("error" if text else "dim")
+        m.style().unpolish(m)
+        m.style().polish(m)
+
+    def problems(self):
+        p = {}
+        u, h = self.user.text(), self.host.text()
+        if u and not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", u):
+            p[self.user] = "Use only small letters (a-z), digits, - and _; start with a letter."
+        elif u in self.reserved:
+            p[self.user] = "This name is used by the system. Please choose another one."
+        if ":" in self.full.text():
+            p[self.full] = "The name cannot contain a colon (:)."
+        if self.pw1.text() and len(self.pw1.text()) < 4:
+            p[self.pw1] = "Please use at least 4 characters (longer is safer)."
+        if self.pw2.text() and self.pw2.text() != self.pw1.text():
+            p[self.pw2] = "The two passwords are not the same."
+        if h and not re.match(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$", h):
+            p[self.host] = "Use only letters, digits and - (not at the start or end), no spaces."
+        return p
+
+    def check(self, *_):
+        p = self.problems()
+        for e in self.msgs:
+            self.set_msg(e, p.get(e, ""))
+        self.wiz.update_buttons()
+
+    def ready(self):
+        return (not self.problems() and all(e.text() for e in (self.full, self.user, self.pw1, self.pw2, self.host))
+                and self.pw1.text() == self.pw2.text())
+
+
+class SummaryPage(Page):
+    next_text = "Install"
+
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.box.addWidget(title("Ready to install"))
+        self.box.addWidget(para("Please check your choices. Use <b>Back</b> to change something."))
+        self.grid = QGridLayout()
+        self.grid.setHorizontalSpacing(18)
+        self.grid.setVerticalSpacing(8)
+        self.grid.setColumnStretch(1, 1)
+        self.box.addLayout(self.grid)
+        self.box.addSpacing(10)
+        self.warn = QLabel()
+        self.warn.setObjectName("dangertext")
+        self.warn.setWordWrap(True)
+        self.box.addWidget(self.warn)
+        self.box.addWidget(para("Installing takes about 5 to 20 minutes, depending on the disk. Keep the computer "
+                                "plugged in.", dim=True))
+        self.box.addStretch(1)
+
+    def enter(self):
+        while self.grid.count():
+            self.grid.takeAt(0).widget().deleteLater()
+        w = self.wiz
+        d = w.disk.value()
+        rows = [("Language", shown_name(w.welcome.language()[0], w.welcome.language()[1])),
+                ("Keyboard", w.keyboard.describe()),
+                ("Time zone", w.time.value().replace("_", " ")),
+                ("Disk", "%s (%s, %s)" % (d["model"], human(d["size"]), d["path"]) if d else "-"),
+                ("Your name", w.account.full.text()),
+                ("User name", w.account.user.text() + "  (administrator)"),
+                ("Computer name", w.account.host.text())]
+        for r, (k, v) in enumerate(rows):
+            kl = QLabel(k + ":")
+            kl.setObjectName("dim")
+            self.grid.addWidget(kl, r, 0, Qt.AlignmentFlag.AlignTop)
+            vl = QLabel(v)
+            vl.setWordWrap(True)
+            vl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.grid.addWidget(vl, r, 1)
+        if d:
+            self.warn.setText("When you click Install, everything on <b>%s (%s)</b> will be deleted." % (d["model"], human(d["size"])))
+
+
+class ProgressPage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.head = title("Installing Hydra")
+        self.box.addWidget(self.head)
+        self.box.addWidget(para("You can keep using this computer while Hydra is installed. Please do not "
+                                "switch it off or unplug the disk or the stick."))
+        self.steps = []
+        sl = QVBoxLayout()
+        sl.setSpacing(6)
+        for s in INSTALL_STEPS:
+            l = QLabel()
+            self.steps.append((l, s))
+            sl.addWidget(l)
+        self.box.addLayout(sl)
+        self.box.addSpacing(8)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.box.addWidget(self.bar)
+        self.detail = para("", dim=True)
+        self.box.addWidget(self.detail)
+        self.box.addStretch(1)
+        self.set_step(0)
+
+    def set_step(self, n, failed=False):
+        for i, (l, s) in enumerate(self.steps):
+            if i + 1 < n or (n > len(self.steps)):
+                l.setText("<span style='color:#2e9d4b'>&#10004;</span>&nbsp;&nbsp;%s" % s)
+            elif i + 1 == n:
+                l.setText(("<span style='color:#d4382c'>&#10008;</span>&nbsp;&nbsp;<b>%s</b>" if failed else
+                           "<span style='color:palette(highlight)'>&#9654;</span>&nbsp;&nbsp;<b>%s</b>") % s)
+            else:
+                l.setText("<span style='color:gray'>&#9675;</span>&nbsp;&nbsp;<span style='color:gray'>%s</span>" % s)
+
+
+class DonePage(Page):
+    def __init__(self, wiz):
+        super().__init__(wiz)
+        self.head = title("")
+        self.box.addWidget(self.head)
+        self.text = para("")
+        self.box.addWidget(self.text)
+        self.note = para("", dim=True)
+        self.box.addWidget(self.note)
+        self.details = QPlainTextEdit(readOnly=True)
+        self.details.hide()
+        self.box.addWidget(self.details, 1)
+        self.box.addStretch(1)
+
+    def success(self, notes):
+        self.ok = True
+        self.head.setText("Hydra is installed")
+        self.text.setText("Remove the installation stick, then click <b>Restart now</b>. At its first start the "
+                          "computer sets up your account (this takes a minute), then shows the login screen: log "
+                          "in with your user name <b>%s</b> and your password." % self.wiz.account.user.text())
+        self.note.setText("<br>".join(notes))
+
+    def failure(self, error, log, touched=True):
+        self.ok = False
+        self.head.setText("Hydra could not be installed")
+        after = ("The disk you chose may now be partly erased, but nothing else on this computer was changed."
+                 if touched else "Nothing was changed on the disk.")
+        self.text.setText("<span style='color:#d4382c'><b>%s</b></span><br><br>%s You can try again, or "
+                          "choose another disk." % (error.replace("<", "&lt;"), after))
+        self.note.setText("The full report is in /var/log/hydra-install.log.")
+        self.details.setPlainText(log)
+        self.details.setVisible(bool(log.strip()))
+
+
+# ---------------------------------------------------------------------------------------------
+# The window
+
+class Wizard(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Install Hydra")
+        if LOGO:
+            self.setWindowIcon(QIcon(LOGO))
+        self.resize(940, 640)
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        side = QFrame()
+        side.setObjectName("side")
+        side.setFixedWidth(220)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(22, 26, 16, 20)
+        logo = QLabel()
+        if LOGO:
+            logo.setPixmap(QPixmap(LOGO).scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio,
+                                                Qt.TransformationMode.SmoothTransformation))
+        logo.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        sl.addWidget(logo)
+        name = QLabel("Setup")
+        name.setObjectName("sidetitle")
+        sl.addWidget(name)
+        sl.addSpacing(18)
+        self.side_labels = []
+        for s in STEPS:
+            l = QLabel(s)
+            l.setObjectName("sidestep")
+            self.side_labels.append(l)
+            sl.addWidget(l)
+        sl.addStretch(1)
+        outer.addWidget(side)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        self.stack = QStackedWidget()
+        right.addWidget(self.stack, 1)
+        foot = QFrame()
+        foot.setObjectName("footer")
+        fl = QHBoxLayout(foot)
+        fl.setContentsMargins(36, 12, 36, 16)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.clicked.connect(self.close)
+        fl.addWidget(self.cancel)
+        fl.addStretch(1)
+        self.back = QPushButton("Back")
+        self.back.clicked.connect(self.go_back)
+        self.next = QPushButton("Next")
+        self.next.setDefault(True)
+        self.next.setObjectName("primary")
+        self.next.clicked.connect(self.go_next)
+        for b in (self.back, self.next):
+            b.setMinimumWidth(110)
+            fl.addWidget(b)
+        right.addWidget(foot)
+        outer.addLayout(right, 1)
+
+        self.welcome = WelcomePage(self)
+        self.keyboard = KeyboardPage(self)
+        self.time = TimePage(self)
+        self.disk = DiskPage(self)
+        self.account = AccountPage(self)
+        self.summary = SummaryPage(self)
+        self.progress = ProgressPage(self)
+        self.done = DonePage(self)
+        for p in (self.welcome, self.keyboard, self.time, self.disk, self.account, self.summary, self.progress, self.done):
+            self.stack.addWidget(p)
+        self.proc = None
+        self.installing = False
+        self.out = ""
+        self.error = None
+        self.notes = []
+        self.language_changed(self.welcome.language(), first=True)
+        self.show_page(0)
+
+    def language_changed(self, lang, first=False):
+        self.keyboard.select(lang[2])
+        tz = live_timezone() if first else ""
+        if not (tz and self.time.select(tz)):
+            self.time.select(lang[3])
+
+    def show_page(self, i):
+        self.stack.setCurrentIndex(i)
+        page = self.stack.currentWidget()
+        page.enter()
+        for n, l in enumerate(self.side_labels):
+            l.setProperty("state", "done" if n < i else "current" if n == i else "todo")
+            l.style().unpolish(l)
+            l.style().polish(l)
+        self.update_buttons()
+
+    def update_buttons(self, *_):
+        i = self.stack.currentIndex()
+        page = self.stack.currentWidget()
+        if page is self.progress:
+            self.back.hide()
+            self.next.hide()
+            self.cancel.setEnabled(False)
+        elif page is self.done:
+            self.back.hide()
+            self.cancel.hide()
+            self.next.show()
+            self.next.setEnabled(True)
+            self.next.setText("Restart now" if getattr(page, "ok", False) else "Close")
+            if not getattr(page, "ok", False):
+                self.back.setText("Try again")
+                self.back.show()
+        else:
+            self.back.show()
+            self.back.setText("Back")
+            self.back.setEnabled(i > 0)
+            self.next.show()
+            self.next.setText(page.next_text)
+            self.next.setEnabled(page.ready())
+            self.cancel.setEnabled(True)
+            self.cancel.show()
+
+    def go_back(self):
+        if self.stack.currentWidget() is self.done:   # "Try again": back to the disk
+            self.disk.loaded = False
+            self.show_page(3)
+            return
+        self.show_page(max(0, self.stack.currentIndex() - 1))
+
+    def go_next(self):
+        page = self.stack.currentWidget()
+        if page is self.done:
+            if getattr(page, "ok", False):
+                self.restart()
+            QApplication.quit()
+            return
+        if not page.ready():
+            return
+        if page is self.summary:
+            self.start_install()
+            return
+        self.show_page(self.stack.currentIndex() + 1)
+
+    # ---- Installing ----
+
+    def request(self):
+        lay, var = self.keyboard.value()
+        a = self.account
+        return {"disk": self.disk.value()["path"],
+                "setup": {"user_name": a.user.text(), "full_name": a.full.text().strip(),
+                          "password_hash": hash_password(a.pw1.text()), "hostname": a.host.text(),
+                          "timezone": self.time.value(), "keyboard_layout": lay, "keyboard_variant": var,
+                          "language": self.welcome.language()[1]}}
+
+    def start_install(self):
+        try:
+            req = json.dumps(self.request())
+        except Exception as e:
+            QMessageBox.critical(self, "Install Hydra", "Your password could not be prepared (%s)." % e)
+            return
+        self.installing = True
+        self.out, self.error, self.notes = "", None, []
+        self.progress.set_step(1)
+        self.progress.bar.setValue(0)
+        self.progress.detail.setText("")
+        self.show_page(6)
+        self.proc = QProcess(self)
+        self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self.proc.readyReadStandardOutput.connect(self.read_out)
+        self.proc.finished.connect(self.finished)
+        self.proc.errorOccurred.connect(self.proc_error)
+        if TEST:
+            self.proc.start(HELPER, ["install"])
+        else:
+            self.proc.start("pkexec", [HELPER, "install"])
+        self.proc.write(req.encode())
+        self.proc.closeWriteChannel()
+        self.buf = b""
+
+    def read_out(self):
+        self.buf += bytes(self.proc.readAllStandardOutput())
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            line = line.decode(errors="replace")
+            self.out += line + "\n"
+            kind, _, rest = line.partition(" ")
+            if kind == "STEP":
+                n, _, _text = rest.partition(" ")
+                self.progress.set_step(int(n) if n.isdigit() else 1)
+            elif kind == "PROGRESS":
+                pct, _, text = rest.partition(" ")
+                if pct.isdigit():
+                    self.progress.bar.setValue(int(pct))
+                self.progress.detail.setText(text)
+            elif kind == "NOTE":
+                self.notes.append(rest)
+            elif kind == "ERROR":
+                self.error = rest
+            elif kind == "DONE":
+                self.progress.set_step(len(INSTALL_STEPS) + 1)
+
+    def proc_error(self, err):
+        if err == QProcess.ProcessError.FailedToStart:
+            self.error = "The installer's helper could not be started."
+            self.finished(-1, None)
+
+    def finished(self, code, _status):
+        if not self.installing:
+            return
+        self.installing = False
+        self.read_out()
+        err = bytes(self.proc.readAllStandardError()).decode(errors="replace")
+        ok = code == 0 and "DONE" in self.out.split() and not self.error
+        if ok:
+            self.done.success(self.notes)
+        else:
+            if not self.error:
+                if not TEST and code in (126, 127):
+                    self.error = "Installing needs an administrator's permission, which was not given. Nothing was changed."
+                else:
+                    self.error = "The installation stopped unexpectedly (code %s)." % code
+            self.progress.set_step(int(self.progress_step()), failed=True)
+            self.done.failure(self.error, (self.out + err).strip(), touched=self.progress_step() >= 2)
+        self.show_page(7)
+
+    def progress_step(self):
+        n = 1
+        for line in self.out.splitlines():
+            if line.startswith("STEP "):
+                p = line.split()
+                if len(p) > 1 and p[1].isdigit():
+                    n = int(p[1])
+        return n
+
+    def restart(self):
+        r = subprocess.run(["dbus-send", "--system", "--print-reply", "--dest=org.freedesktop.login1",
+                            "/org/freedesktop/login1", "org.freedesktop.login1.Manager.Reboot", "boolean:true"],
+                           capture_output=True)
+        if r.returncode != 0:
+            subprocess.run(["reboot"], capture_output=True)
+
+    def closeEvent(self, ev):
+        if self.installing:
+            QMessageBox.information(self, "Install Hydra", "Please wait until the installation has finished. "
+                                    "Stopping it now would leave the disk unusable.")
+            ev.ignore()
+            return
+        ev.accept()
+
+
+STYLE = """
+QFrame#side { background: #10233f; }
+QFrame#side QLabel { color: #c9d6ea; }
+QLabel#sidetitle { color: white; font-size: 15pt; font-weight: 600; }
+QLabel#sidestep { padding: 5px 8px; border-radius: 5px; }
+QLabel#sidestep[state="current"] { background: #2a5aa0; color: white; font-weight: 600; }
+QLabel#sidestep[state="done"] { color: #8fb3e6; }
+QLabel#sidestep[state="todo"] { color: #7f8ea6; }
+QFrame#footer { border-top: 1px solid palette(midlight); }
+QLabel#dim { color: palette(placeholder-text); }
+QLabel#error { color: #d4382c; }
+QFrame#danger { background: #fdecea; border: 2px solid #d4382c; border-radius: 6px; }
+QFrame#danger QCheckBox { color: #5a1610; font-weight: 600; }
+QLabel#dangertext { color: #b3261e; font-size: 12pt; }
+QPushButton#primary { font-weight: 600; }
+QListWidget::item { padding: 4px; }
+"""
+
+
+def screenshots(app, w, outdir):
+    """Saves a picture of every page with sample answers (for Hydra's tests)."""
+    os.makedirs(outdir, exist_ok=True)
+
+    def shot(name):
+        app.processEvents()
+        w.grab().save(os.path.join(outdir, name + ".png"))
+        # Slow mode, so the screen can be photographed from outside (Hydra's VM tests)
+        pause = float(os.environ.get("HYDRA_INSTALL_SHOT_DELAY", "0") or 0)
+        if pause > 0:
+            import time
+            print("SHOT", name, flush=True)
+            end = time.time() + pause
+            while time.time() < end:
+                app.processEvents()
+                time.sleep(0.05)
+
+    w.show()
+    w.welcome.list.setCurrentRow(2)
+    shot("1-welcome")
+    w.go_next()
+    w.keyboard.test.setText("Grüße aus Zürich: z y ä ö ü ß @")
+    shot("2-keyboard")
+    w.go_next()
+    shot("3-timezone")
+    w.go_next()
+    usable = [i for i in range(w.disk.list.count()) if w.disk.list.item(i).data(Qt.ItemDataRole.UserRole)["usable"]]
+    if usable:
+        w.disk.list.setCurrentRow(usable[0])
+    shot("4-disk")
+    w.disk.confirm.setChecked(True)
+    shot("4-disk-confirmed")
+    w.go_next()
+    w.account.full.setText("Anna Schmidt")
+    w.account.pw1.setText("secret")
+    w.account.pw2.setText("secreT")
+    shot("5-account-mismatch")
+    w.account.pw2.setText("secret")
+    shot("5-account")
+    w.go_next()
+    shot("6-summary")
+    if TEST and os.environ.get("HYDRA_INSTALL_SHOT_INSTALL") == "1":
+        # A real installation (test mode: onto the test disk image) driven through the window
+        import time
+        w.go_next()
+        t0, n = time.time(), 0
+        while w.installing:
+            app.processEvents()
+            time.sleep(0.05)
+            if time.time() - t0 > 2 + 3 * n and n < 3:
+                shot("7-progress-%d" % n)
+                n += 1
+        shot("8-result")
+        print("RESULT", "ok" if getattr(w.done, "ok", False) else "failed", w.error or "", flush=True)
+        return
+    w.progress.set_step(4)
+    w.progress.bar.setValue(42)
+    w.progress.detail.setText("2.1 GB of 5.0 GB, about 3 min left")
+    w.show_page(6)
+    shot("7-progress")
+    w.done.success(["The computer's start-up list could not be changed from here; Hydra will start through the "
+                    "standard start-up path of the disk."])
+    w.show_page(7)
+    shot("8-finished")
+    w.done.failure("What was read back from the disk differs from what was written. The disk may be faulty.",
+                   "STEP 1 ...\nERROR What was read back ...")
+    w.show_page(7)
+    shot("9-failed")
+
+
+def main():
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("hydra-install")
+    app.setApplicationDisplayName("Install Hydra")
+    app.setDesktopFileName("hydra-install")
+    app.setStyleSheet(STYLE)
+    w = Wizard()
+    if len(sys.argv) == 3 and sys.argv[1] == "--screenshots":
+        screenshots(app, w, sys.argv[2])
+        return 0
+    w.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

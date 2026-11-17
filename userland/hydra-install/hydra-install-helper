@@ -1,0 +1,648 @@
+#!/usr/bin/python3 -I
+# Written by Hydra: the part of the Hydra installer (hydra-install) that writes the disk.
+#   hydra-install-helper list-disks     (any user) the disks Hydra can be installed on, as JSON
+#   hydra-install-helper install        (root, through pkexec: polkit action org.hydra.install.run)
+#                                        reads what to do as JSON on standard input:
+#     {"disk": "/dev/sdb", "setup": {"user_name": ..., "full_name": ..., "password_hash": ...,
+#      "hostname": ..., "timezone": ..., "keyboard_layout": ..., "keyboard_variant": ...,
+#      "language": ...}}
+# "install" ERASES the whole disk and gives it the layout every installed Hydra computer has
+# (D:\os-install-shared\LAYOUT.md): GPT, partition 1 = 512 MiB EFI system partition (FAT32) with
+# the Hydra kernel and its boot files, partition 2 = the rest, the Hydra pool, written from the
+# clean image Hydra's live system carries. The pool is never mounted: the computer's own
+# settings (account, name, time zone, keyboard, language) go to \hydra\setup.conf on the EFI
+# partition and are applied at the first start (hydra-firstboot). The password is never written
+# anywhere: the installer passes its crypt(3) hash.
+# Report lines on standard output, one each:
+#   STEP <n> <what is happening>   PROGRESS <0-100> <detail>   NOTE <plain words>
+#   ERROR <what went wrong, in plain words>   DONE
+# Testing on disk image FILES (no real disk needed): HYDRA_INSTALL_TEST_DISKS=/a.img:/b.img adds
+# those files to the list and allows them as targets (root only reads it from the environment of
+# the caller when it is run directly, never through pkexec, which clears the environment);
+# HYDRA_INSTALL_ONLY_TEST_DISKS=1 hides the real disks (tests on a build machine).
+import hashlib
+import json
+import mmap
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+SOURCE = os.environ.get("HYDRA_INSTALL_SOURCE", "/opt/hydra-install")
+LOG = "/var/log/hydra-install.log"
+MIB = 1024 * 1024
+ESP_START = 1 * MIB            # partition 1 starts at 1 MiB
+ESP_SIZE = 512 * MIB           # and is 512 MiB
+POOL_START = ESP_START + ESP_SIZE
+GPT_TAIL = 1 * MIB             # room for the backup GPT at the end of the disk
+ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+POOL_TYPE = "7685A0B8-DF41-47EB-AF4F-02CE6FB01879"
+# The first and last MiBs of the pool image hold its labels (with their uberblocks): written in
+# full, zeros included, so labels an earlier pool left on this disk cannot survive
+LABEL_ZONE = 4 * MIB
+BLOCK = 1 * MIB
+STEPS = 7
+
+
+def say(kind, *parts):
+    print(kind, *parts, flush=True)
+
+
+def log(text):
+    try:
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip("\n") + "\n")
+    except OSError:
+        pass
+
+
+class Failure(Exception):
+    pass
+
+
+def fail(text):
+    raise Failure(text)
+
+
+_last = [None]
+
+
+def progress(pct, text=""):
+    line = (int(max(0, min(100, pct))), text)
+    if line != _last[0]:
+        _last[0] = line
+        say("PROGRESS", *line)
+
+
+def step(n, text):
+    log("STEP %d %s" % (n, text))
+    say("STEP", n, text)
+
+
+def run(cmd, what, env=None, input=None):
+    """Runs CMD; on failure raises Failure with WHAT and the tool's last words (logged in full)."""
+    log("RUN " + " ".join(cmd))
+    e = dict(os.environ)
+    e.update(LC_ALL="C.UTF-8", MTOOLS_SKIP_CHECK="1", PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    if env:
+        e.update(env)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, env=e, input=input)
+    except FileNotFoundError:
+        fail("%s: the program %s is missing on this system." % (what, cmd[0]))
+    if r.returncode != 0:
+        log("FAILED (%d): %s %s" % (r.returncode, r.stdout, r.stderr))
+        detail = (r.stderr or r.stdout).strip().splitlines()
+        fail("%s (%s)" % (what, detail[-1] if detail else "exit status %d" % r.returncode))
+    return r.stdout
+
+
+# ---------------------------------------------------------------------------------------------
+# Disks
+
+def test_disks():
+    return [p for p in os.environ.get("HYDRA_INSTALL_TEST_DISKS", "").split(":") if p]
+
+
+def image_paths():
+    return os.path.join(SOURCE, "pool.img"), os.path.join(SOURCE, "esp")
+
+
+def read_conf(path):
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                k, sep, v = line.strip().partition("=")
+                if sep and not k.startswith("#"):
+                    out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def image_info():
+    """The clean pool image the live system carries (Group F, /opt/hydra-install): a dict with
+    kind ("raw" or "zst"), path, size (bytes of the raw image) and sha256 (of the raw image, or
+    None), or None when there is none. pool.img.zst + pool.conf is what F ships; a plain pool.img
+    (sparse file) also works."""
+    raw, zst = os.path.join(SOURCE, "pool.img"), os.path.join(SOURCE, "pool.img.zst")
+    want = None
+    try:
+        with open(os.path.join(SOURCE, "pool.img.sha256")) as f:
+            want = f.read().split()[0].lower()
+    except (OSError, IndexError):
+        pass
+    if os.path.isfile(raw) or (os.path.exists(raw) and stat.S_ISBLK(os.stat(raw).st_mode)):   # a device: tests
+        return {"kind": "raw", "path": raw, "size": device_size(raw), "sha256": want}
+    if os.path.isfile(zst):
+        conf = read_conf(os.path.join(SOURCE, "pool.conf"))
+        try:
+            size = int(conf.get("image_bytes", ""))
+        except ValueError:
+            return None
+        return {"kind": "zst", "path": zst, "size": size, "sha256": (conf.get("sha256") or want or "").lower() or None}
+    return None
+
+
+def needed_bytes():
+    info = image_info()
+    return POOL_START + info["size"] + GPT_TAIL if info else None
+
+
+def device_size(path):
+    st = os.stat(path)
+    if stat.S_ISREG(st.st_mode):
+        return st.st_size
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        return os.lseek(fd, 0, os.SEEK_END)
+    finally:
+        os.close(fd)
+
+
+def partitions_of(path):
+    """The partition table of PATH as sfdisk reports it (empty list when there is none)."""
+    try:
+        r = subprocess.run(["sfdisk", "-J", path], capture_output=True, text=True, env={"LC_ALL": "C.UTF-8", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+        return json.loads(r.stdout)["partitiontable"].get("partitions", []) if r.returncode == 0 else []
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def is_live_medium(path):
+    """True when PATH carries a Hydra live system: an EFI partition with \\hydra\\live on it."""
+    for p in partitions_of(path):
+        if p.get("type", "").upper() == ESP_TYPE:
+            off = int(p["start"]) * 512
+            r = subprocess.run(["mdir", "-b", "-i", "%s@@%d" % (path, off), "::/hydra/live"], capture_output=True, text=True,
+                               env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+            if r.returncode == 0 and "live" in r.stdout:
+                return True
+    return False
+
+
+def list_disks():
+    """Every disk, with whether Hydra may be installed on it and why not."""
+    need = needed_bytes()
+    out = []
+    try:
+        r = subprocess.run(["lsblk", "-J", "-b", "-d", "-o", "NAME,PATH,SIZE,MODEL,VENDOR,TRAN,RO,RM,TYPE"],
+                           capture_output=True, text=True)
+        devs = json.loads(r.stdout).get("blockdevices", []) if r.returncode == 0 else []
+    except (OSError, ValueError):
+        devs = []
+    # The disk the running system's pool is on (Group E writes its name at boot), and whether
+    # this is the live system
+    try:
+        with open("/run/hydra/boot-disk") as f:
+            boot_disk = f.read().strip()
+    except OSError:
+        boot_disk = ""
+    live = os.path.exists("/run/hydra/live")
+    if os.environ.get("HYDRA_INSTALL_ONLY_TEST_DISKS") == "1":
+        devs = []   # tests on a build machine: never offer its real disks
+    for d in devs:
+        if d.get("type") != "disk" or str(d.get("name", "")).startswith(("loop", "zram", "ram", "sr")):
+            continue
+        path = d.get("path") or "/dev/" + d["name"]
+        size = int(d.get("size") or 0)
+        model = " ".join(x for x in [(d.get("vendor") or "").strip(), (d.get("model") or "").strip()] if x) or "Disk"
+        e = {"path": path, "size": size, "model": model, "transport": d.get("tran") or "",
+             "removable": bool(d.get("rm")), "usable": True, "why": ""}
+        if os.path.basename(path) == boot_disk:
+            e.update(usable=False, why="This is the Hydra installation stick." if live else
+                     "This is the disk Hydra is running from right now.")
+        elif d.get("ro") in (True, 1, "1"):
+            e.update(usable=False, why="This disk is write-protected.")
+        elif is_live_medium(path):
+            e.update(usable=False, why="This is the Hydra installation stick.")
+        elif need and size < need:
+            e.update(usable=False, why="Too small: Hydra needs at least %s." % human(need))
+        out.append(e)
+    for path in test_disks():
+        try:
+            size = device_size(path)
+        except OSError:
+            continue
+        e = {"path": path, "size": size, "model": "Test disk image " + os.path.basename(path), "transport": "file",
+             "removable": False, "usable": True, "why": ""}
+        if need and size < need:
+            e.update(usable=False, why="Too small: Hydra needs at least %s." % human(need))
+        out.append(e)
+    return out
+
+
+def human(n):
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return ("%d %s" if unit == "bytes" else "%.1f %s") % (n, unit)
+        n /= 1000.0
+
+
+# ---------------------------------------------------------------------------------------------
+# What goes into \hydra\setup.conf
+
+NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+XKB_RE = re.compile(r"^[A-Za-z0-9_()+-]{0,64}$")
+LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(_[A-Z]{2})?(\.UTF-8)?(@[a-z]+)?$")
+HASH_RE = re.compile(r"^\$(y|6|gy|7)\$[./A-Za-z0-9$]+$")
+
+
+def setup_conf(s):
+    def val(k, required=True):
+        v = s.get(k, "")
+        if not isinstance(v, str) or "\n" in v or "\r" in v or "\0" in v:
+            fail("The setting %s is not valid." % k)
+        if required and not v:
+            fail("The setting %s is missing." % k)
+        return v
+    user, host, tz = val("user_name"), val("hostname"), val("timezone")
+    full, pw = val("full_name", False), val("password_hash")
+    kb, kbv, lang = val("keyboard_layout"), val("keyboard_variant", False), val("language")
+    if not NAME_RE.match(user) or user in ("root", "live", "hydra-setup"):
+        fail("The user name %r cannot be used." % user)
+    if not HOST_RE.match(host):
+        fail("The computer name %r cannot be used." % host)
+    if ".." in tz or tz.startswith("/") or not os.path.isfile(os.path.join("/usr/share/zoneinfo", tz)):
+        fail("The time zone %r is not known." % tz)
+    if not HASH_RE.match(pw):
+        fail("The password was not passed in a safe (hashed) form.")
+    if not XKB_RE.match(kb) or not XKB_RE.match(kbv):
+        fail("The keyboard layout is not valid.")
+    if not LOCALE_RE.match(lang):
+        fail("The language %r is not valid." % lang)
+    if ":" in full:
+        fail("The full name may not contain a colon (:).")
+    lines = ["# Hydra first-start settings, written by hydra-install on %s." % time.strftime("%Y-%m-%d"),
+             "# Applied and deleted at the first start of this computer (hydra-firstboot).",
+             "version=1", "install_id=%s" % uuid.uuid4(), "user_name=" + user, "full_name=" + full,
+             "password_hash=" + pw, "hostname=" + host, "timezone=" + tz, "keyboard_layout=" + kb,
+             "keyboard_variant=" + kbv, "language=" + lang]
+    return ("\n".join(lines) + "\n").encode()
+
+
+# ---------------------------------------------------------------------------------------------
+# Writing
+
+def mounted_parts(disk):
+    real = os.path.realpath(disk)
+    base = os.path.basename(real)
+    hits = []
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                dev = line.split()[0]
+                if dev.startswith("/dev/") and os.path.basename(os.path.realpath(dev)).startswith(base):
+                    hits.append(dev)
+    except OSError:
+        pass
+    return hits
+
+
+def drop_cache(fd):
+    try:
+        os.fsync(fd)
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+
+
+def open_direct(path):
+    """Opens PATH for reading past the page cache when it can (O_DIRECT), else normally."""
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECT), True
+    except (OSError, AttributeError):
+        return os.open(path, os.O_RDONLY), False
+
+
+def write_pool(disk, info, part_start, lo, hi):
+    """Writes the image INFO (image_info) at PART_START of DISK, skipping all-zero blocks outside
+    the label zones. Returns (list of written block offsets, digest of what was written)."""
+    size = info["size"]
+    want = info["sha256"]
+    proc = None
+    if info["kind"] == "zst":
+        proc = subprocess.Popen(["zstd", "-dc", "-q", info["path"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                bufsize=0)
+        src = proc.stdout
+
+        def read(n, off):
+            parts, got = [], 0
+            while got < n:
+                b = src.read(n - got)
+                if not b:
+                    break
+                parts.append(b)
+                got += len(b)
+            return b"".join(parts)
+    else:
+        fd = os.open(info["path"], os.O_RDONLY)
+
+        def read(n, off):
+            return os.pread(fd, n, off)
+    dst = os.open(disk, os.O_WRONLY)
+    whole = hashlib.sha256() if want else None
+    written = hashlib.sha256()
+    blocks = []
+    zero = bytes(BLOCK)
+    off = 0
+    t0 = time.time()
+    try:
+        while off < size:
+            n = min(BLOCK, size - off)
+            buf = read(n, off)
+            if len(buf) != n:
+                fail("The installation image could not be read (it ends early). Please write the stick again.")
+            if whole:
+                whole.update(buf)
+            in_labels = off < LABEL_ZONE or off >= size - LABEL_ZONE
+            if in_labels or buf != zero[:n]:
+                done = 0
+                while done < n:
+                    done += os.pwrite(dst, buf[done:], part_start + off + done)
+                written.update(off.to_bytes(8, "little"))
+                written.update(buf)
+                blocks.append((off, n))
+            off += n
+            if (off // BLOCK) % 16 == 0 or off >= size:
+                el = time.time() - t0
+                rate = off / el if el > 0 else 0
+                left = (size - off) / rate if rate > 0 else 0
+                progress(lo + (hi - lo) * off / size, "%s of %s%s" % (human(off), human(size),
+                         ", about %d min left" % max(1, round(left / 60)) if el > 5 and left > 60 else ""))
+        if proc and proc.stdout.read(1):
+            fail("The installation image is longer than recorded. Please write the stick again.")
+        os.fsync(dst)
+    finally:
+        os.close(dst)
+        if proc:
+            proc.stdout.close()
+            proc.wait()
+            if proc.returncode not in (0, None) and off < size:
+                log("zstd: %s" % proc.stderr.read().decode(errors="replace"))
+        else:
+            os.close(fd)
+    if whole and whole.hexdigest() != want:
+        fail("The installation image on this stick is damaged (its checksum does not match). "
+             "Please write the stick again.")
+    log("image written: %d bytes, %d blocks with data, sha256 %s" % (size, len(blocks), "checked" if want else "not recorded"))
+    return blocks, written.hexdigest()
+
+
+def verify_pool(disk, part_start, blocks, digest, lo, hi):
+    fd, direct = open_direct(disk)
+    drop_cache(fd)
+    h = hashlib.sha256()
+    total = sum(n for _, n in blocks) or 1
+    done = 0
+    buf = mmap.mmap(-1, BLOCK)
+    plain = None
+    try:
+        for i, (off, n) in enumerate(blocks):
+            data = None
+            if direct and n % 4096 == 0:
+                try:
+                    got = os.preadv(fd, [memoryview(buf)[:n]], part_start + off)
+                    data = buf[:got]
+                except OSError:
+                    direct = False
+            if data is None:
+                if plain is None:
+                    plain = os.open(disk, os.O_RDONLY)
+                data = os.pread(plain, n, part_start + off)
+            if len(data) != n:
+                fail("The new disk could not be read back.")
+            h.update(off.to_bytes(8, "little"))
+            h.update(data)
+            done += n
+            if i % 32 == 0:
+                progress(lo + (hi - lo) * done / total, "checked %s of %s" % (human(done), human(total)))
+    finally:
+        buf.close()
+        os.close(fd)
+        if plain is not None:
+            os.close(plain)
+    log("verify: %s read back%s, %s written" % (h.hexdigest(), " (direct)" if direct else "", digest))
+    if h.hexdigest() != digest:
+        fail("What was read back from the disk differs from what was written. The disk may be faulty.")
+
+
+def esp_partition_node(disk):
+    """The device of partition 1 of DISK (/dev/sdb1, /dev/nvme0n1p1) when it exists and is the
+    new 512 MiB EFI partition, else None."""
+    if not disk.startswith("/dev/"):
+        return None
+    name = os.path.basename(os.path.realpath(disk))
+    part = name + ("p1" if name[-1:].isdigit() else "1")
+    try:
+        with open("/sys/class/block/%s/start" % part) as f:
+            start = int(f.read()) * 512
+        with open("/sys/class/block/%s/size" % part) as f:
+            size = int(f.read()) * 512
+    except (OSError, ValueError):
+        return None
+    path = "/dev/" + part
+    if start == ESP_START and size == ESP_SIZE and os.path.exists(path) and stat.S_ISBLK(os.stat(path).st_mode):
+        return path
+    log("partition node %s: start %d size %d, not used" % (path, start, size))
+    return None
+
+
+def esp_mkdir(img_spec, path):
+    """Creates the folder PATH on the FAT file system IMG_SPEC unless it is there already (mmd
+    fails for an existing folder, even when told to skip it)."""
+    r = subprocess.run(["mdir", "-b", "-i", img_spec, path], capture_output=True,
+                       env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+    if r.returncode != 0:
+        run(["mmd", "-i", img_spec, path], "Could not create a folder on the start-up partition")
+
+
+def esp_copy(img_spec, src_dir):
+    """Copies the tree SRC_DIR onto the FAT file system IMG_SPEC (mtools, nothing mounted)."""
+    for root, dirs, files in os.walk(src_dir):
+        rel = os.path.relpath(root, src_dir)
+        target = "::/" if rel == "." else "::/" + rel.replace(os.sep, "/")
+        for d in sorted(dirs):
+            esp_mkdir(img_spec, target.rstrip("/") + "/" + d)
+        for f in sorted(files):
+            run(["mcopy", "-o", "-i", img_spec, os.path.join(root, f), target.rstrip("/") + "/" + f], "Could not copy %s to the start-up partition" % f)
+
+
+def esp_read(img_spec, path):
+    """The contents of PATH on the FAT file system IMG_SPEC, or None when it is not there."""
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f")
+        r = subprocess.run(["mcopy", "-n", "-i", img_spec, path, out], capture_output=True,
+                           env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+        if r.returncode != 0 or not os.path.exists(out):
+            return None
+        with open(out, "rb") as f:
+            return f.read()
+
+
+def boot_entry(disk):
+    """Adds the UEFI boot entry "Hydra" first in the boot order. Returns a NOTE text or None."""
+    if not os.path.isdir("/sys/firmware/efi/efivars") or not os.listdir("/sys/firmware/efi/efivars"):
+        return ("The computer's start-up list could not be changed from here; Hydra will start through the "
+                "standard start-up path of the disk. If the computer does not start Hydra, choose this disk in its boot menu.")
+    if not shutil.which("efibootmgr"):
+        return "efibootmgr is missing; Hydra will start through the standard start-up path of the disk."
+    if os.path.isfile(disk):
+        return None   # a test image: no boot entry for files
+    try:
+        out = run(["efibootmgr"], "Could not read the start-up list")
+        for m in re.finditer(r"^Boot([0-9A-Fa-f]{4})\*? Hydra\b", out, re.M):
+            run(["efibootmgr", "-q", "-b", m.group(1), "-B"], "Could not remove an old Hydra start-up entry")
+        run(["efibootmgr", "-q", "-c", "-d", disk, "-p", "1", "-L", "Hydra", "-l", r"\EFI\hydra\hydra.efi"],
+            "Could not add Hydra to the start-up list")
+    except Failure as e:
+        log("boot entry: %s" % e)
+        return ("%s. Hydra will start through the standard start-up path of the disk; if it does not, choose "
+                "this disk in the computer's boot menu." % e)
+    return None
+
+
+def install(req):
+    disk = req.get("disk", "")
+    setup = setup_conf(req.get("setup") or {})
+    _, esp_src = image_paths()
+    info = image_info()
+
+    step(1, "Checking the disk and the installation files")
+    progress(0)
+    disks = {d["path"]: d for d in list_disks()}
+    if disk not in disks:
+        fail("The disk %s was not found any more. Was it unplugged?" % disk)
+    if not disks[disk]["usable"]:
+        fail(disks[disk]["why"])
+    if os.path.isfile(disk) and disk not in test_disks():
+        fail("%s is not a disk." % disk)
+    if not info:
+        fail("The installation image (%s/pool.img.zst) is missing on this system." % SOURCE)
+    if info["kind"] == "zst" and not shutil.which("zstd"):
+        fail("The program zstd, needed to unpack the installation image, is missing on this system.")
+    kernel = os.path.join(esp_src, "EFI", "BOOT", "BOOTX64.EFI")
+    if not os.path.isfile(kernel):
+        fail("The Hydra start-up files (%s) are missing on this system." % kernel)
+    busy = mounted_parts(disk)
+    if busy:
+        fail("A part of this disk is in use (%s). Please close what uses it and try again." % ", ".join(busy))
+    disk_size = device_size(disk)
+    img_size = info["size"]
+    if POOL_START + img_size + GPT_TAIL > disk_size:
+        fail("The disk is too small: Hydra needs at least %s." % human(POOL_START + img_size + GPT_TAIL))
+    log("install to %s (%d bytes), image %d bytes" % (disk, disk_size, img_size))
+    progress(1)
+
+    step(2, "Erasing the disk and creating the partitions")
+    run(["sfdisk", "--wipe", "always", "--wipe-partitions", "always", "--no-reread", "--no-tell-kernel", "-q", disk],
+        "Could not create the partitions",
+        input="label: gpt\nfirst-lba: 2048\n"
+              "start=%d, size=%d, type=%s, name=\"EFI\"\n"
+              "start=%d, type=%s, name=\"Hydra\"\n" % (ESP_START // 512, ESP_SIZE // 512, ESP_TYPE, POOL_START // 512, POOL_TYPE))
+    parts = partitions_of(disk)
+    if (len(parts) != 2 or int(parts[0]["start"]) * 512 != ESP_START or int(parts[1]["start"]) * 512 != POOL_START
+            or parts[1]["type"].upper() != POOL_TYPE):
+        fail("The new partitions are not what was written (%s)." % parts)
+    pool_size = int(parts[1]["size"]) * 512
+    if pool_size < img_size:
+        fail("The Hydra partition came out too small.")
+    # Nothing an earlier pool left at the end of the partition is mistaken for a label
+    fd = os.open(disk, os.O_WRONLY)
+    try:
+        os.pwrite(fd, bytes(LABEL_ZONE), POOL_START + pool_size - LABEL_ZONE)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        subprocess.run(["blockdev", "--rereadpt", disk], capture_output=True)
+    except OSError:
+        pass
+    progress(2)
+
+    step(3, "Preparing the start-up partition")
+    esp = "%s@@%d" % (disk, ESP_START)
+    part = esp_partition_node(disk)
+    if part:
+        run(["mkfs.fat", "-F", "32", "-n", "HYDRA-EFI", part], "Could not format the start-up partition")
+    else:
+        # no partition device (a disk image file, or the kernel did not re-read the table): the
+        # same area of the whole disk (-I: mkfs.fat would refuse a disk that has partitions)
+        run(["mkfs.fat", "-I", "-F", "32", "-n", "HYDRA-EFI", "--offset", str(ESP_START // 512), disk, str(ESP_SIZE // 1024)],
+            "Could not format the start-up partition")
+    progress(3)
+
+    step(4, "Copying Hydra to the disk")
+    blocks, digest = write_pool(disk, info, POOL_START, 3, 85)
+
+    step(5, "Copying the start-up files")
+    esp_copy(esp, esp_src)
+    esp_mkdir(esp, "::/EFI/hydra")
+    run(["mcopy", "-o", "-i", esp, kernel, "::/EFI/hydra/hydra.efi"], "Could not copy the Hydra kernel")
+    if esp_read(esp, "::/hydra/live") is not None:   # never a live system on the new disk
+        run(["mdel", "-i", esp, "::/hydra/live"], "Could not remove the live-system marker")
+    esp_mkdir(esp, "::/hydra")
+    with tempfile.NamedTemporaryFile(prefix="setup-", dir="/run" if os.access("/run", os.W_OK) else None) as tmp:
+        os.chmod(tmp.name, 0o600)
+        tmp.write(setup)
+        tmp.flush()
+        run(["mcopy", "-o", "-i", esp, tmp.name, "::/hydra/setup.conf"], "Could not save your settings on the disk")
+    progress(87)
+
+    step(6, "Checking what was written")
+    fd = os.open(disk, os.O_RDONLY)
+    drop_cache(fd)
+    os.close(fd)
+    with open(kernel, "rb") as f:
+        k = f.read()
+    for path in ("::/EFI/BOOT/BOOTX64.EFI", "::/EFI/hydra/hydra.efi"):
+        if esp_read(esp, path) != k:
+            fail("The start-up file %s on the new disk is not correct." % path.replace("::", "").replace("/", "\\"))
+    if esp_read(esp, "::/hydra/setup.conf") != setup:
+        fail("Your settings were not saved correctly on the new disk.")
+    verify_pool(disk, POOL_START, blocks, digest, 88, 98)
+
+    step(7, "Adding Hydra to the computer's start-up list")
+    note = boot_entry(disk)
+    if note:
+        say("NOTE", note)
+        log("NOTE " + note)
+    os.sync()
+    progress(100)
+    log("install finished")
+    say("DONE")
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["list-disks"]:
+        print(json.dumps({"disks": list_disks(), "needed": needed_bytes()}))
+        return 0
+    if args == ["install"]:
+        if os.geteuid() != 0:
+            say("ERROR", "The installer needs administrator rights.")
+            return 1
+        try:
+            req = json.loads(sys.stdin.read())
+            install(req)
+            return 0
+        except Failure as e:
+            log("ERROR %s" % e)
+            say("ERROR", str(e))
+        except Exception as e:  # anything unexpected is still reported in words, never as success
+            log("ERROR unexpected: %r" % e)
+            say("ERROR", "Something unexpected went wrong (%s)." % e)
+        return 1
+    print(__doc__ or "usage: hydra-install-helper list-disks | install", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

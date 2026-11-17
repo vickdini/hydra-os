@@ -727,7 +727,20 @@ MaximumUid=60000
         dns_ip
     );
     t.file_bytes(s, "/etc/resolv.conf", resolv_content.as_bytes(), 0o644)?;
-    t.file_bytes(s, "/etc/hosts", b"127.0.0.1\tlocalhost\n127.0.1.1\thydra\n::1\tlocalhost ip6-localhost ip6-loopback\n", 0o644)?;
+    // ---- Group G: the computer name chosen in the installer (/etc/hostname, written by
+    // hydra-firstboot) names 127.0.1.1; "hydra" when there is none ----
+    let mut host = String::from("hydra");
+    if let Some(ino) = lookup_path(s, t.root, "/etc/hostname") {
+        let mut buf = [0u8; 64];
+        let n = s.read(ino, 0, &mut buf).unwrap_or(0);
+        let name = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+        if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
+            host = String::from(name);
+        }
+    }
+    let hosts = alloc::format!("127.0.0.1\tlocalhost\n127.0.1.1\t{}\n::1\tlocalhost ip6-localhost ip6-loopback\n", host);
+    t.file_bytes(s, "/etc/hosts", hosts.as_bytes(), 0o644)?;
+    // ---- end Group G ----
     t.file_bytes(
         s,
         "/usr/bin/hydra-net-check",
@@ -1011,6 +1024,23 @@ X-KDE-autostart-phase=2
         t.file(s, "/usr/share/applications/org.hydra.welcome.desktop", include_str!("../../../userland/hydra-apps/org.hydra.welcome.desktop"))?;
         t.file(s, "/etc/xdg/autostart/hydra-welcome.desktop", include_str!("../../../userland/hydra-apps/hydra-welcome-autostart.desktop"))?;
     }
+
+    // ---- Group G: the installer (userland/hydra-install) ----
+    // hydra-install: the "Install Hydra" window (PyQt6) of the live system; its root helper
+    // erases the chosen disk and writes Hydra to it (polkit action org.hydra.install.run; the
+    // live user needs no password). hydra-firstboot: run by hydra-session at the first start
+    // of an installed computer, applies /etc/hydra/setup.conf (src/fs/firstboot.rs). Both are
+    // in every pool, so the clean image the live stick carries has them
+    t.file_bytes(s, "/usr/libexec/hydra-firstboot", include_bytes!("../../../userland/hydra-install/hydra-firstboot"), 0o755)?;
+    if lookup_path(s, t.root, "/usr/bin/python3").is_some() {
+        t.file_bytes(s, "/usr/bin/hydra-install", include_bytes!("../../../userland/hydra-install/hydra-install"), 0o755)?;
+        t.file_bytes(s, "/usr/libexec/hydra-install-helper", include_bytes!("../../../userland/hydra-install/hydra-install-helper"), 0o755)?;
+        t.file_bytes(s, "/usr/share/hydra-install/hydra-logo.png", include_bytes!("../../../userland/hydra-install/hydra-logo.png"), 0o644)?;
+        t.file(s, "/usr/share/applications/hydra-install.desktop", include_str!("../../../userland/hydra-install/hydra-install.desktop"))?;
+        t.file(s, "/usr/share/polkit-1/actions/org.hydra.install.policy", include_str!("../../../userland/hydra-install/org.hydra.install.policy"))?;
+        t.file(s, "/etc/polkit-1/rules.d/60-hydra-install.rules", include_str!("../../../userland/hydra-install/60-hydra-install.rules"))?;
+    }
+    // ---- end Group G ----
 
     // ---- Group B: system users ----
     // hydra-session runs systemd-sysusers at boot (as systemd does elsewhere), which creates

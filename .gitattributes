@@ -5,3 +5,5 @@ userland/hydra-wine/* text eol=lf
 userland/hydra-desktop/** text eol=lf
 userland/hydra-apps/* text eol=lf
 userland/hydra-live/* text eol=lf
+userland/hydra-install/* text eol=lf
+userland/hydra-install/*.png binary

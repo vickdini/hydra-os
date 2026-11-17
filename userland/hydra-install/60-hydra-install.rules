@@ -1,0 +1,8 @@
+// Written by Hydra: on the live system (USB stick) its user "live" has no password; it may
+// run the installer's disk step without one, as live systems of other distributions allow.
+// Only that one action, only for that user, and only in an active local session.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.hydra.install.run" && subject.user == "live" && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

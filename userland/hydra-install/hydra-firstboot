@@ -1,0 +1,179 @@
+#!/bin/sh
+# Written by Hydra: the first start of a newly installed Hydra computer (like Windows' "out of
+# box experience", but with the answers given in the installer).
+#   hydra-firstboot [SETTINGS]      (root; SETTINGS defaults to /etc/hydra/setup.conf)
+# The installer (hydra-install) never opens the new system: it leaves the computer's own
+# settings in \hydra\setup.conf on the EFI partition; the kernel moves that file to
+# /etc/hydra/setup.conf at the first start (src/fs/firstboot.rs) and hydra-session runs this
+# script before the login screen. It creates the user account (uid 1000, an administrator:
+# group sudo and the usual desktop groups) with the password HASH the installer wrote, and sets
+# the computer name, time zone, keyboard layout (console, login screen, Plasma), language and a
+# new machine id. Then the settings file is deleted. Everything is logged in
+# /var/log/hydra-firstboot.log. Lines of the file: key=value (see LAYOUT.md); it is parsed,
+# never run as a script.
+conf=${1:-/etc/hydra/setup.conf}
+log=/var/log/hydra-firstboot.log
+[ -f "$conf" ] || exit 0
+[ "$(id -u)" = 0 ] || { echo "hydra-firstboot: must run as root" >&2; exit 1; }
+umask 022
+exec 3>>"$log"
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >&3; }
+say "first start: applying $conf"
+
+get() {
+    # the value of key $1 (the rest of the line after the first '=')
+    sed -n "s/^$1=//p" "$conf" | head -n 1 | tr -d '\r'
+}
+user=$(get user_name); full=$(get full_name); hash=$(get password_hash)
+host=$(get hostname); tz=$(get timezone); kb=$(get keyboard_layout); kbv=$(get keyboard_variant)
+lang=$(get language); id=$(get install_id)
+ok=1
+# The same settings again (a boot medium the kernel could not delete them from, e.g. a CD):
+# applied once only
+if [ -n "$id" ] && [ "$(cat /var/lib/hydra/setup-done 2>/dev/null)" = "$id" ]; then
+    say "settings $id were applied before: removed, nothing changed"
+    rm -f "$conf"
+    exit 0
+fi
+
+# ---- The user account ----
+case "$user" in
+    ''|root|*[!a-z0-9_-]*) say "ERROR: unusable user name '$user'"; ok=0; user= ;;
+esac
+case "$hash" in
+    '$y$'*|'$6$'*|'$gy$'*|'$7$'*) ;;
+    *) say "ERROR: the password is not a hash; the account gets no password and is locked"; hash='!' ;;
+esac
+if [ -n "$user" ]; then
+    groups=
+    for g in adm cdrom sudo dip plugdev users lpadmin audio video render input netdev bluetooth; do
+        getent group "$g" >/dev/null 2>&1 && groups="${groups:+$groups,}$g"
+    done
+    if getent passwd "$user" >/dev/null 2>&1; then
+        say "user $user exists already: only password and groups are set"
+        usermod -c "$full" -a -G "$groups" "$user" >&3 2>&1 || ok=0
+    else
+        uidopt=
+        getent passwd 1000 >/dev/null 2>&1 || uidopt="-u 1000"
+        # the home from /etc/skel, a private group of the same name, bash
+        useradd -m $uidopt -U -s /bin/bash -c "$full" -G "$groups" "$user" >&3 2>&1 || { say "ERROR: useradd failed"; ok=0; }
+    fi
+    if getent passwd "$user" >/dev/null 2>&1; then
+        printf '%s:%s\n' "$user" "$hash" | chpasswd -e >&3 2>&1 || { say "ERROR: chpasswd failed"; ok=0; }
+        say "user $user (uid $(id -u "$user")), groups $groups"
+    fi
+fi
+home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
+
+# ---- Computer name ----
+case "$host" in
+    ''|-*|*[!A-Za-z0-9-]*) say "ERROR: unusable computer name '$host'"; host=hydra ;;
+esac
+echo "$host" > /etc/hostname
+if grep -q '^127\.0\.1\.1' /etc/hosts 2>/dev/null; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$host/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' "$host" >> /etc/hosts
+fi
+hostname "$host" 2>/dev/null
+say "computer name $host"
+
+# ---- Time zone ----
+if [ -n "$tz" ] && [ -f "/usr/share/zoneinfo/$tz" ] && ! echo "$tz" | grep -q '\.\.'; then
+    ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+    echo "$tz" > /etc/timezone
+    say "time zone $tz"
+else
+    say "ERROR: unknown time zone '$tz'"
+fi
+
+# ---- Keyboard: console (/etc/default/keyboard), login screen and Plasma (kxkbrc) ----
+case "$kb$kbv" in *[!A-Za-z0-9_\(\)+-]*) say "ERROR: unusable keyboard '$kb' '$kbv'"; kb=us; kbv= ;; esac
+[ -n "$kb" ] || kb=us
+if [ -f /etc/default/keyboard ]; then
+    sed -i -e "s/^XKBLAYOUT=.*/XKBLAYOUT=\"$kb\"/" -e "s/^XKBVARIANT=.*/XKBVARIANT=\"$kbv\"/" /etc/default/keyboard
+else
+    printf 'XKBMODEL="pc105"\nXKBLAYOUT="%s"\nXKBVARIANT="%s"\nXKBOPTIONS=""\nBACKSPACE="guess"\n' "$kb" "$kbv" > /etc/default/keyboard
+fi
+kxkb="[Layout]
+LayoutList=$kb
+VariantList=$kbv
+Use=true
+"
+# SDDM's greeter (KWin) reads the sddm user's kxkbrc, as Plasma's login-screen settings write it
+sddm_home=$(getent passwd sddm 2>/dev/null | cut -d: -f6)
+if [ -n "$sddm_home" ]; then
+    mkdir -p "$sddm_home/.config"
+    printf '%s' "$kxkb" > "$sddm_home/.config/kxkbrc"
+    chown -R sddm:sddm "$sddm_home/.config" 2>/dev/null
+fi
+if [ -n "$home" ] && [ -d "$home" ]; then
+    mkdir -p "$home/.config"
+    printf '%s' "$kxkb" > "$home/.config/kxkbrc"
+fi
+say "keyboard $kb${kbv:+ ($kbv)}"
+
+# ---- Language and formats ----
+case "$lang" in ''|*[!A-Za-z0-9_.@-]*) lang=en_US.UTF-8 ;; esac
+if ! locale -a 2>/dev/null | sed 's/utf8/UTF-8/' | grep -qx "$lang"; then
+    if [ -f /etc/locale.gen ] && command -v locale-gen >/dev/null 2>&1; then
+        sed -i "s/^# *\($lang .*\)/\1/" /etc/locale.gen
+        grep -q "^$lang " /etc/locale.gen || echo "$lang UTF-8" >> /etc/locale.gen
+        locale-gen >&3 2>&1 || say "ERROR: locale-gen failed"
+    elif command -v locale-gen >/dev/null 2>&1; then
+        locale-gen "$lang" >&3 2>&1 || say "ERROR: locale-gen $lang failed"
+    fi
+fi
+short=${lang%%_*}; short=${short%%.*}
+printf 'LANG=%s\n' "$lang" > /etc/default/locale
+[ "$short" = en ] || printf 'LANGUAGE=%s\n' "$short:en" >> /etc/default/locale
+if [ -n "$home" ] && [ -d "$home" ]; then
+    printf '[Formats]\nLANG=%s\n\n[Translations]\nLANGUAGE=%s\n' "$lang" "$short" > "$home/.config/plasma-localerc"
+    chown -R "$user:" "$home/.config"
+fi
+say "language $lang"
+# Plasma's translations come in Ubuntu's language packs: fetched once the network is up (in
+# the background, the login screen does not wait; English needs none)
+if [ "$short" != en ] && command -v apt-get >/dev/null 2>&1; then
+    (
+        n=0
+        until getent hosts archive.ubuntu.com >/dev/null 2>&1 || [ $n -ge 60 ]; do sleep 10; n=$((n + 1)); done
+        # a clean image comes without package lists
+        nice apt-get -q -o DPkg::Lock::Timeout=900 update >>"$log" 2>&1
+        DEBIAN_FRONTEND=noninteractive nice apt-get -y -q -o DPkg::Lock::Timeout=900 --no-install-recommends \
+            install "language-pack-$short" "language-pack-kde-$short" >>"$log" 2>&1 \
+            && echo "$(date '+%Y-%m-%d %H:%M:%S') language packs for $short installed" >>"$log"
+    ) </dev/null >/dev/null 2>&1 &
+fi
+
+# ---- A machine id of this computer's own ----
+rm -f /etc/machine-id /var/lib/dbus/machine-id
+if command -v systemd-machine-id-setup >/dev/null 2>&1; then
+    systemd-machine-id-setup >&3 2>&1
+fi
+[ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
+mkdir -p /var/lib/dbus
+ln -sf /etc/machine-id /var/lib/dbus/machine-id
+# Host keys of its own, if the SSH server is installed
+if [ -d /etc/ssh ] && command -v ssh-keygen >/dev/null 2>&1; then
+    ssh-keygen -A >&3 2>&1
+fi
+say "machine id $(cat /etc/machine-id)"
+
+# ---- Done: the settings (with the password hash) are removed ----
+mkdir -p /var/lib/hydra
+echo "$id" > /var/lib/hydra/setup-done
+shred -u "$conf" 2>/dev/null || rm -f "$conf"
+# The kernel's other copy (Group E) and, should the kernel not have managed to delete it at
+# boot, the file on the EFI partition of this computer's disk
+rm -f /run/hydra/setup.conf
+disk=$(cat /run/hydra/boot-disk 2>/dev/null)
+if [ -n "$disk" ] && command -v mdel >/dev/null 2>&1; then
+    case "$disk" in *[0-9]) esp="/dev/${disk}p1" ;; *) esp="/dev/${disk}1" ;; esac
+    if [ -b "$esp" ] && MTOOLS_SKIP_CHECK=1 mdir -i "$esp" ::/hydra/setup.conf >/dev/null 2>&1; then
+        MTOOLS_SKIP_CHECK=1 mdel -i "$esp" ::/hydra/setup.conf >&3 2>&1 && say "removed setup.conf from $esp"
+    fi
+fi
+sync
+if [ "$ok" = 1 ]; then say "first start finished"; else say "first start finished WITH ERRORS (see above)"; fi
+exit 0
