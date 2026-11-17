@@ -535,6 +535,9 @@ pub mod fs {
     #[path = "../../../../src/fs/pipe.rs"]
     pub mod pipe;
 
+    #[path = "../../../../src/fs/gpt.rs"]
+    pub mod gpt;
+
     /// *stub* The kernel's descriptor enum has many more variants; these are
     /// the ones the code under test matches on, with the fields it reads.
     #[derive(Clone)]

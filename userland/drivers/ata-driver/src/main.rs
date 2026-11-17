@@ -115,6 +115,8 @@ impl Deadline {
 struct Ports {
     io: u16,
     ctrl: u16,
+    /// The slave drive of the channel (drive select bit 4).
+    slave: bool,
     /// The drive/head register's value since the last write (0xFF: unknown).
     selected: core::cell::Cell<u8>,
 }
@@ -190,7 +192,7 @@ impl Ports {
     /// * `count` - Sector count.
     /// * `lba48` - Whether to issue 48-bit LBA command registers.
     fn setup(&self, lba: u64, count: u16, lba48: bool) {
-        let select = if lba48 { 0x40 } else { 0xE0 | ((lba >> 24) & 0x0F) as u8 };
+        let select = if lba48 { 0x40 } else { 0xE0 | ((lba >> 24) & 0x0F) as u8 } | if self.slave { 0x10 } else { 0 };
         if self.selected.get() != select {
             outb(self.io + 6, select);
             self.delay_400ns();
@@ -274,7 +276,7 @@ struct Disk {
 }
 
 impl Disk {
-    /// Identifies the primary master; `None` if there is no ATA disk there.
+    /// Identifies the drive `ports` select; `None` if there is no ATA disk there.
     ///
     /// # Arguments
     /// * `ports` - Channel task-file port registers.
@@ -283,7 +285,7 @@ impl Disk {
     /// `Some(Disk)` if an ATA hard drive is detected, or `None`.
     fn probe(ports: Ports) -> Option<Self> {
         outb(ports.ctrl, 0x02); // interrupts off
-        outb(ports.io + 6, 0xA0);
+        outb(ports.io + 6, if ports.slave { 0xB0 } else { 0xA0 });
         ports.delay_400ns();
         for r in 2..6 {
             outb(ports.io + r, 0);
@@ -576,7 +578,42 @@ fn arg(args: &[&str], key: &str) -> Option<u64> {
     }
 }
 
-/// Driver entry point that probes the ATA controller, registers service, and dispatches requests.
+/// The driver's disks, for the unit logic shared with the other block drivers.
+struct Set(alloc::vec::Vec<Disk>, usize);
+
+impl hydra_rt::blockunits::DiskSet for Set {
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+    fn blocks(&self, disk: usize) -> u64 {
+        self.0[disk].sectors / SECTORS_PER_BLOCK
+    }
+    fn read(&mut self, disk: usize, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let count = buf.len() / BLOCK;
+        self.switch(disk).blocks(block, count, buf, false)
+    }
+}
+
+impl Set {
+    /// Disk `d`. When another drive was used before (it may share the channel), the
+    /// channel's drive select, DMA engine and interrupt enable are set up again.
+    fn switch(&mut self, d: usize) -> &mut Disk {
+        if self.1 != d {
+            let disk = &mut self.0[d];
+            disk.ports.selected.set(0xFF);
+            disk.ints_on = false;
+            outb(disk.ports.ctrl, 0x02);
+            if let Some(bm) = disk.dma.as_mut() {
+                bm.primed = false;
+            }
+            self.1 = d;
+        }
+        &mut self.0[d]
+    }
+}
+
+/// Driver entry point: probes both IDE channels (master and slave each), registers the
+/// service and serves block requests (units: see `hydra_rt::blockunits`).
 ///
 /// # Arguments
 /// * `args` - Command-line argument strings.
@@ -587,16 +624,47 @@ fn main(args: &[&str]) {
     }
     let io = arg(args, "io").unwrap_or(0x1F0) as u16;
     let ctrl = arg(args, "ctrl").unwrap_or(0x3F6) as u16;
-    let Some(mut disk) = Disk::probe(Ports { io, ctrl, selected: core::cell::Cell::new(0xFF) }) else {
+    let bm = arg(args, "bm").map(|b| b as u16);
+    // The given channel, then the other legacy one (secondary: 0x170/0x376, bus master + 8)
+    let mut channels = alloc::vec![(io, ctrl, bm)];
+    if io == 0x1F0 && arg(args, "one_channel").is_none() {
+        channels.push((0x170, 0x376, bm.map(|b| b + 8)));
+    }
+    let mut disks = alloc::vec::Vec::new();
+    for (io, ctrl, bm) in channels {
+        for slave in [false, true] {
+            let Some(mut disk) = Disk::probe(Ports { io, ctrl, slave, selected: core::cell::Cell::new(0xFF) }) else {
+                continue;
+            };
+            disk.dma = bm.and_then(BusMaster::new);
+            // The channel's interrupt (14: primary, 15: secondary) for DMA completions
+            let irq = if io == 0x170 { 15 } else { 14 };
+            if disk.dma.is_some() && (disks.iter().any(|d: &Disk| d.irq == Some(irq)) || sys::irq_register(irq).is_ok()) {
+                disk.irq = Some(irq);
+            }
+            println!(
+                "[ata-driver] disk {} ({:#x} {}): '{}': {} MiB, LBA{}, {}",
+                disks.len(),
+                io,
+                if slave { "slave" } else { "master" },
+                disk.model_str(),
+                disk.sectors * SECTOR as u64 / (1024 * 1024),
+                if disk.lba48 { 48 } else { 28 },
+                match (disk.dma.is_some(), disk.irq.is_some()) {
+                    (true, true) => "bus-master DMA, interrupt-driven",
+                    (true, false) => "bus-master DMA, polled",
+                    _ => "port I/O",
+                }
+            );
+            disks.push(disk);
+        }
+    }
+    if disks.is_empty() {
         println!("[ata-driver] no ATA disk at {:#x}", io);
         return;
-    };
-    disk.dma = arg(args, "bm").and_then(|bm| BusMaster::new(bm as u16));
-    // The channel's interrupt (14: primary, 15: secondary) for DMA completions
-    let irq = if io == 0x170 { 15 } else { 14 };
-    if disk.dma.is_some() && sys::irq_register(irq).is_ok() {
-        disk.irq = Some(irq);
     }
+    let mut set = Set(disks, usize::MAX);
+    let units = hydra_rt::blockunits::Units::choose(args, &mut set, "ata-driver");
     let mut server = match Server::register(ENDPOINT_BLOCK_DEV) {
         Ok(s) => s,
         Err(e) => {
@@ -604,33 +672,25 @@ fn main(args: &[&str]) {
             return;
         }
     };
-    println!(
-        "[ata-driver] '{}': {} MiB, LBA{}, {}",
-        disk.model_str(),
-        disk.sectors * SECTOR as u64 / (1024 * 1024),
-        if disk.lba48 { 48 } else { 28 },
-        match (disk.dma.is_some(), disk.irq.is_some()) {
-            (true, true) => "bus-master DMA, interrupt-driven",
-            (true, false) => "bus-master DMA, polled",
-            _ => "port I/O",
-        }
-    );
-    let blocks = disk.sectors / SECTORS_PER_BLOCK;
     let mut stats = iostat::IoStats::new("ata-driver");
     server.serve(|srv, msg| match msg.label as u32 {
         MSG_BLOCK_READ | MSG_BLOCK_WRITE => {
             let (block, count, offset) = (msg.args[0], msg.args[1] as usize, msg.args[2] as usize);
-            if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > WINDOW_SIZE || block + count as u64 > blocks {
+            let write = msg.label as u32 == MSG_BLOCK_WRITE;
+            if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > WINDOW_SIZE {
                 return reply(EINVAL, 0);
             }
-            let write = msg.label as u32 == MSG_BLOCK_WRITE;
+            let (d, at) = match units.map(msg.args[3], block, count as u64, write, &set) {
+                Ok(m) => m,
+                Err(e) => return reply(e, 0),
+            };
             let t = stats.start();
-            let result = disk.blocks(block, count, &mut srv.window()[offset..], write);
+            let result = set.switch(d).blocks(at, count, &mut srv.window()[offset..], write);
             stats.done(t, (count * BLOCK) as u64, write);
             match result {
                 Ok(()) => reply(0, count as u64),
                 Err(e) => {
-                    println!("[ata-driver] {} of {} blocks at {} failed: {}", if write { "write" } else { "read" }, count, block, e);
+                    println!("[ata-driver] {} of {} blocks at {} (disk {}) failed: {}", if write { "write" } else { "read" }, count, at, d, e);
                     reply(EIO, 0)
                 }
             }
@@ -643,21 +703,30 @@ fn main(args: &[&str]) {
             let window = srv.window();
             let mut runs = [[0u64; 3]; BLOCK_READV_MAX];
             let mut total = 0u64;
+            let mut disk = 0;
             for (i, r) in runs[..n].iter_mut().enumerate() {
                 for (k, v) in r.iter_mut().enumerate() {
                     let at = BLOCK_READV_TABLE + (i * 3 + k) * 8;
                     *v = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
                 }
                 let (block, count, offset) = (r[0], r[1] as usize, r[2] as usize);
-                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE || block + count as u64 > blocks {
+                if count == 0 || offset % BLOCK != 0 || offset + count * BLOCK > BLOCK_READV_TABLE {
                     return reply(EINVAL, 0);
+                }
+                match units.map(msg.args[1], block, count as u64, false, &set) {
+                    Ok((d, at)) => {
+                        disk = d;
+                        r[0] = at;
+                    }
+                    Err(e) => return reply(e, 0),
                 }
                 total += count as u64;
             }
             let t = stats.start();
             let mut result = Ok(());
+            let dk = set.switch(disk);
             for r in &runs[..n] {
-                result = disk.blocks(r[0], r[1] as usize, &mut window[r[2] as usize..], false);
+                result = dk.blocks(r[0], r[1] as usize, &mut window[r[2] as usize..], false);
                 if result.is_err() {
                     break;
                 }
@@ -671,16 +740,30 @@ fn main(args: &[&str]) {
                 }
             }
         }
-        MSG_BLOCK_FLUSH => match disk.flush() {
-            Ok(()) => reply(0, 0),
-            Err(e) => {
-                println!("[ata-driver] cache flush failed: {}", e);
-                reply(EIO, 0)
+        MSG_BLOCK_FLUSH => {
+            let d = match units.disk_of(msg.args[3], &set) {
+                Ok(d) => d,
+                Err(e) => return reply(e, 0),
+            };
+            match set.switch(d).flush() {
+                Ok(()) => reply(0, 0),
+                Err(e) => {
+                    println!("[ata-driver] cache flush failed: {}", e);
+                    reply(EIO, 0)
+                }
             }
-        },
+        }
         MSG_BLOCK_GET_SIZE => {
-            srv.window()[..40].copy_from_slice(&disk.model);
-            Message::new(MSG_BLOCK_REPLY as u64, [0, blocks, disk.lba48 as u64, disk.dma.is_some() as u64])
+            let unit = msg.args[3];
+            let d = match units.disk_of(unit, &set) {
+                Ok(d) => d,
+                Err(e) => return reply(e, 0),
+            };
+            let blocks = units.blocks_of(unit, &set);
+            let w = srv.window();
+            w[..40].copy_from_slice(&set.0[d].model);
+            units.describe(unit, w, SECTOR as u32, false);
+            Message::new(MSG_BLOCK_REPLY as u64, [0, blocks, set.0[d].lba48 as u64, set.0[d].dma.is_some() as u64])
         }
         _ => reply(-38, 0),
     })
