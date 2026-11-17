@@ -219,6 +219,10 @@ struct CallSlot {
     reply: Option<Message>,
     /// Tick the reply was given (a reply not taken for long is stale).
     replied_at: u64,
+    /// On the slot owner: the endpoint the request in progress came through and its call
+    /// number there (the reply goes to that endpoint's slot).
+    from: u32,
+    from_seq: u64,
 }
 
 /// One driver service.
@@ -258,7 +262,7 @@ impl Service {
             primary,
             endpoint,
             server: AtomicU64::new(0),
-            slot: Mutex::new(CallSlot { seq: 0, request: None, delivered: false, reply: None, replied_at: 0 }),
+            slot: Mutex::new(CallSlot { seq: 0, request: None, delivered: false, reply: None, replied_at: 0, from: 0, from_seq: 0 }),
             recv_wq: WaitQueue::new(),
             window: Mutex::new(None),
             grants: Mutex::new(Vec::new()),
@@ -696,45 +700,69 @@ pub fn call_once(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<
     if crate::task::SCHEDULER.lock().current_task_id().0 == server {
         return Err(EDEADLK); // a server calling its own service would wait for itself
     }
+    // The request goes into the slot owner's slot (one request at a time reaches its
+    // server); the reply comes back in this endpoint's own slot, so a reply waiting for
+    // its caller does not hold up calls through the owner's other endpoints
     let owner = slot_owner(svc);
+    let shared = !core::ptr::eq(owner, svc);
     let seq = {
-        let mut slot = owner.slot.lock();
-        // Busy: a request in progress, or a reply its caller has not taken yet (one not
-        // taken within a second belongs to a caller that is gone)
+        let mut o = owner.slot.lock();
+        // Busy: a request in progress, or a reply on this endpoint its caller has not
+        // taken yet (one not taken within a second belongs to a caller that is gone)
         let now = crate::arch::pit::ticks();
-        if slot.request.is_some() || (slot.reply.is_some() && now < slot.replied_at + 100) {
+        let pending = |s: &CallSlot| s.reply.is_some() && now < s.replied_at + 100;
+        let busy = o.request.is_some() || if shared { pending(&svc.slot.lock()) } else { pending(&o) };
+        if busy {
             if !shares_slot(svc) {
                 crate::kprintln!("[service] call to {:#x} by task {}: busy (cpu {})", endpoint, crate::task::SCHEDULER.lock().current_task_id().0, crate::arch::percpu::cpu());
             }
             return Err(EBUSY);
         }
-        slot.seq += 1;
-        slot.request = Some(request);
-        slot.delivered = false;
-        slot.reply = None;
-        slot.seq
+        let seq = if shared {
+            let mut s = svc.slot.lock();
+            s.seq += 1;
+            s.reply = None;
+            s.seq
+        } else {
+            o.seq += 1;
+            o.reply = None;
+            o.seq
+        };
+        o.request = Some(request);
+        o.delivered = false;
+        o.from = endpoint;
+        o.from_seq = seq;
+        seq
+    };
+    // Abandons this call's request if it is still in the owner's slot
+    let abandon = || {
+        let mut o = owner.slot.lock();
+        if o.from == endpoint && o.from_seq == seq {
+            o.request = None;
+        }
     };
     owner.recv_wq.wake_all();
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
     let handed = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().begin_handoff(server, deadline));
     if !handed {
-        owner.slot.lock().request = None;
+        abandon();
         crate::kprintln!("[service] call to {:#x}: no handoff slot", endpoint);
         return Err(EBUSY);
     }
     crate::task::yield_now();
-    let mut slot = owner.slot.lock();
-    let ours = slot.seq == seq;
-    match slot.reply.take() {
-        Some(reply) if ours => Ok(reply),
-        other => {
+    let answer = {
+        let mut s = svc.slot.lock();
+        if s.seq == seq {
+            s.reply.take()
+        } else {
+            None
+        }
+    };
+    match answer {
+        Some(reply) => Ok(reply),
+        None => {
             // No answer: abandon the call (a late reply is ignored)
-            if ours {
-                slot.request = None;
-            } else {
-                slot.reply = other; // another caller's
-            }
-            drop(slot);
+            abandon();
             crate::kprintln!(
                 "[service] call to {:#x} by task {}: no reply (cpu {}, tick {} deadline {})",
                 endpoint,
@@ -900,14 +928,22 @@ pub fn recv(endpoint: u32) -> Result<Message, i64> {
 /// *Guaranteed to never panic under normal execution.*
 pub fn reply(endpoint: u32, answer: Message) -> Result<(), i64> {
     let svc = slot_owner(own_service(endpoint)?);
-    {
+    let (from, from_seq) = {
         let mut slot = svc.slot.lock();
         if slot.request.is_none() || !slot.delivered {
             return Err(EINVAL);
         }
         slot.request = None;
-        slot.reply = Some(answer);
-        slot.replied_at = crate::arch::pit::ticks();
+        (slot.from, slot.from_seq)
+    };
+    // The answer goes to the slot of the endpoint the request came through, if its call
+    // is still waiting
+    if let Some(dst) = service(from) {
+        let mut slot = dst.slot.lock();
+        if slot.seq == from_seq {
+            slot.reply = Some(answer);
+            slot.replied_at = crate::arch::pit::ticks();
+        }
     }
     let me = svc.server.load(Ordering::Acquire);
     x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff(me));
