@@ -673,20 +673,11 @@ pub mod pkg {
 }
 
 pub mod shell {
-    /// Stand-in for the kernel's `ShellState`; `command.rs` only names the
-    /// type in the `Command` trait signature.
-    pub mod state {
-        pub struct ShellState;
-    }
-
-    /// *stub*
-    pub mod fs {
-        pub use crate::fake::read_boot_file;
-    }
-
-    #[path = "../../../../src/shell/command.rs"]
+    //! The console shell's pure parts, now in the ring-3 `hydra-shell` (wave 2, group 4):
+    //! the argument parsers and the command-history ring, moved there unchanged.
+    #[path = "../../../../userland/drivers/hydra-shell/src/parse.rs"]
     pub mod command;
-    #[path = "../../../../src/shell/history.rs"]
+    #[path = "../../../../userland/drivers/hydra-shell/src/history.rs"]
     pub mod history;
 }
 

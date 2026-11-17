@@ -1,254 +1,122 @@
-//! # Shell Subsystem: Interactive Microkernel Command Interpreter
+//! # The emergency prompt: a tiny console inside the kernel
 //!
-//! Provides the primary interactive read-eval-print loop (REPL), command line lexical
-//! analyzer, pipeline router, and boot-service transition sequence for Hydra OS.
+//! The console shell is the ring-3 program `hydra-shell` (see `crate::admin::boot`). This
+//! prompt is what is left of the old kernel shell, for when user space is broken: it runs
+//! when `hydra-shell` cannot start or keeps dying, or when asked for at boot (the boot
+//! option `emergency`; see `crate::admin::boot` for the list).
 //!
-//! ## Architectural Role & Design Rationale
-//! The Hydra interactive shell serves as the administrative and user-facing command console
-//! during both early UEFI boot services and post-takeover bare-metal execution. Rather than
-//! relying on an external userland shell binary to bootstrap the system, this built-in
-//! command interpreter allows immediate inspection of kernel subsystems, capability tables,
-//! ZFS datasets, and Ring 3 ELF process execution.
+//! It keeps only what repairs a system: list, read and copy files, see and end tasks,
+//! memory, restart services, the pool's status, a program of the Linux root (a root shell
+//! of the installed system: `linux chroot /ubuntu /bin/bash`), power, and `ushell` to go
+//! back to `hydra-shell`. Everything else is in `hydra-shell`.
 //!
-//! ## Key Types & Interfaces
-//! - `Command`: Trait implemented by all built-in shell commands.
-//! - `ShellState`: Persistent session context holding capabilities, working directory, and history.
-//! - `run`: Main diverging REPL entry point that drives interactive console input and dispatch.
-//! - `execute_command`: High-level dispatcher supporting history expansion (`!!`), pipelines, and redirections.
-//! - `execute_single_command`: Direct command and `$PATH` binary resolver.
-//! - `split_words`: POSIX-like lexical tokenizer handling single quotes, double quotes, and backslash escapes.
+//! It asks for the console login when the installed system can check passwords (the rules
+//! of `crate::admin::session`: root and members of `sudo` only).
 //!
-//! ## Hardware & Dependency Context
-//! - CPU Privilege Level: Ring 0 (Kernel supervisor context; spawns Ring 3 userland tasks on demand)
-//! - Hardware Interaction: Console text output and keyboard polling via [`crate::console`]
-//! - Concurrency: Single-threaded interactive REPL loop on the bootstrap processor (BSP)
+//! ## Context
+//! - Ring 0, the kernel's main thread (task 0); reads keys with `console::read_key`.
 
-/// Command trait definition and integer argument parsing helpers.
-pub mod command;
-/// Built-in shell command implementations and command registry.
-pub mod commands;
-/// Interactive line editor with history navigation and tab auto-completion.
-pub mod editor;
-/// Filesystem binary search, UEFI image loading, and Ring 3 ELF process spawning.
-pub mod fs;
-/// Fixed-capacity circular buffer for session command history.
-pub mod history;
-/// Console login: administrators only, passwords checked by PAM's helper.
-pub mod login;
-/// Interactive terminal text pager for multi-page command output.
-pub mod pager;
-/// Unidirectional pipe chaining (`|`) and file output redirection (`>`, `>>`).
-pub mod pipeline;
-/// Session state management including working directory, credentials, and capabilities.
-pub mod state;
+use alloc::string::String;
+use alloc::vec::Vec;
+use uefi::proto::console::text::{Color, Key};
 
-use core::str;
-use uefi::proto::console::text::Color;
-
+use crate::admin::proto::{LOGIN_NOT_ADMIN, LOGIN_OK, LOGIN_UNPROTECTED};
+use crate::admin::session;
 use crate::console::set_color;
-pub use command::Command;
-pub use state::ShellState;
+use crate::fs::ZfsClient;
 
-/// Maximum byte capacity of the interactive input line buffer.
-const LINE_BUF_LEN: usize = 1024;
-/// Maximum number of whitespace-separated arguments parsed per command invocation.
-const MAX_ARGS: usize = 16;
+/// The commands, with a line of help each.
+const HELP: &[(&str, &str)] = &[
+    ("help", "this list"),
+    ("cd <dir> | ls [dir]", "change or list a directory of the pool"),
+    ("cat <file>", "print a file (first 64 KiB)"),
+    ("cp <from> <to>", "copy a file in the pool"),
+    ("ps | kill <pid>", "list tasks, end one"),
+    ("mem", "physical memory"),
+    ("service [restart|start <name>]", "supervised drivers and servers"),
+    ("zpool", "the pool's status"),
+    ("linux chroot <root> <program> [args]", "e.g. linux chroot /ubuntu /bin/bash"),
+    ("ushell", "leave this prompt, start hydra-shell again"),
+    ("shutdown | reboot | halt", "power"),
+];
 
-/// Prints the formatted ASCII welcome banner for the Hydra Microkernel Interactive Shell.
-///
-/// Renders a cyan-bordered header box to the active console output device to indicate
-/// that the interactive shell initialization is ready.
-///
-/// # Panics
-///
-/// - *Guaranteed to never panic under normal execution.*
-pub fn print_welcome_banner() {
-    set_color(Color::LightCyan, Color::Black);
-    println!("\n+--------------------------------------------------------------+");
-    println!("|             HYDRA MICROKERNEL INTERACTIVE SHELL              |");
-    println!("|  Type 'help' for available commands, or 'info' for details.  |");
-    println!("+--------------------------------------------------------------+\n");
-}
-
-/// Parses and executes an interactive shell command line, including history expansion and pipelines.
-///
-/// Trims leading and trailing whitespace, expands the `!!` history substitution shortcut if
-/// requested, delegates pipeline (`|`) and redirection (`>`, `>>`) chains to
-/// [`pipeline::try_execute_pipeline`], and falls back to `execute_single_command` for
-/// simple command invocations.
-///
-/// # Arguments
-///
-/// * `cmd_line` - Raw UTF-8 command line string entered by the user or script runner.
-/// * `state` - Mutable reference to the active `ShellState` session context.
-///
-/// # Panics
-///
-/// - *Guaranteed to never panic under normal execution.*
-pub fn execute_command(cmd_line: &str, state: &mut ShellState) {
-    let trimmed = cmd_line.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    // Support '!!' to repeat the last command (Bash / Zsh style)
-    if trimmed == "!!" {
-        let mut target_cmd = None;
-        for i in 0..state.history.len() {
-            if let Some(cmd) = state.history.get_from_latest(i) {
-                if cmd != "!!" {
-                    target_cmd = Some(cmd);
-                    break;
+/// Reads a line from the keyboard, echoing it unless `secret`. Ctrl+C clears it.
+fn read_input(prompt: &str, secret: bool) -> String {
+    crate::print!("{}", prompt);
+    let mut line = String::new();
+    loop {
+        match crate::console::read_key() {
+            Some(Key::Printable(ch)) => match u16::from(ch) {
+                13 | 10 => {
+                    crate::println!();
+                    return line;
                 }
-            }
-        }
-
-        if let Some(prev) = target_cmd {
-            set_color(Color::LightCyan, Color::Black);
-            println!("{}", prev);
-            let mut copy_buf = [0u8; 1024];
-            let len = prev.len().min(copy_buf.len());
-            copy_buf[..len].copy_from_slice(&prev.as_bytes()[..len]);
-            if let Ok(prev_str) = core::str::from_utf8(&copy_buf[..len]) {
-                execute_command(prev_str, state);
-            }
-            return;
-        } else {
-            set_color(Color::LightRed, Color::Black);
-            println!("!!: event not found");
-            state.last_status = 1;
-            return;
-        }
-    }
-
-    // Check for shell pipeline (|) or file output redirection (> or >>)
-    if pipeline::try_execute_pipeline(trimmed, state) {
-        return;
-    }
-
-    execute_single_command(trimmed, state);
-}
-
-/// Executes a single unpiped, unredirected shell command.
-///
-/// Tokenizes the command line via `split_words`, resolves the primary command name
-/// against built-in commands in [`commands::find_command`], searches external binaries
-/// via [`fs::search_and_execute`], or invokes the `sh` interpreter for `.sh` scripts.
-/// Updates `state.last_status` to `127` if the command cannot be resolved.
-///
-/// # Arguments
-///
-/// * `cmd_line` - Single command string without unquoted pipe or redirection operators.
-/// * `state` - Mutable reference to the active `ShellState` session context.
-///
-/// # Panics
-///
-/// - *Guaranteed to never panic under normal execution.*
-pub fn execute_single_command(cmd_line: &str, state: &mut ShellState) {
-    let trimmed = cmd_line.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    let words = split_words(trimmed);
-    let mut args_buf = [""; MAX_ARGS];
-    let mut arg_count = 0;
-
-    for word in words.iter() {
-        if arg_count < MAX_ARGS {
-            args_buf[arg_count] = word.as_str();
-            arg_count += 1;
-        }
-    }
-
-    if arg_count == 0 {
-        return;
-    }
-
-    let command_name = args_buf[0];
-    let args = &args_buf[1..arg_count];
-
-    if let Some(cmd) = commands::find_command(command_name) {
-        cmd.execute(args, state);
-    } else if fs::search_and_execute(command_name, args, state) {
-        // Successfully found and executed external program via $PATH
-        state.last_status = 0;
-    } else if command_name.starts_with("./") || command_name.ends_with(".sh") {
-        // Direct execution of scripts (e.g. "./demo.sh" or "demo.sh")
-        if let Some(sh_cmd) = commands::find_command("sh") {
-            sh_cmd.execute(&args_buf[..arg_count], state);
-        }
-    } else {
-        set_color(Color::LightRed, Color::Black);
-        println!("Unknown command: '{}'. Type 'help' for built-ins or 'path' for executable search dirs.", command_name);
-        state.last_status = 127;
-    }
-}
-
-/// Splits a command line into words using POSIX-compatible quoting and escaping rules.
-///
-/// Whitespace separates words outside of quotes. Single quotes (`'...'`) preserve all
-/// enclosed characters literally. Double quotes (`"..."`) group characters while allowing
-/// backslash escapes for `"`, `\`, `\$`, and `` ` ``. Unquoted backslashes escape the
-/// immediately following character.
-///
-/// # Arguments
-///
-/// * `line` - Raw input command line slice to tokenize.
-///
-/// # Returns
-///
-/// A heap-allocated `Vec<String>` containing the unquoted, unescaped argument tokens.
-///
-/// # Panics
-///
-/// - *Guaranteed to never panic under normal execution.*
-pub fn split_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
-    const SQ: char = '\'';
-    const BS: char = '\\';
-    let mut words = alloc::vec::Vec::new();
-    let mut cur = alloc::string::String::new();
-    let mut in_word = false;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c == SQ {
-            in_word = true;
-            for q in chars.by_ref() {
-                if q == SQ {
-                    break;
+                3 => {
+                    crate::println!("^C");
+                    line.clear();
+                    crate::print!("{}", prompt);
                 }
-                cur.push(q);
-            }
-        } else if c == '"' {
-            in_word = true;
-            while let Some(q) = chars.next() {
-                if q == '"' {
-                    break;
-                }
-                if q == BS {
-                    if let Some(n) = chars.next() {
-                        if !(n == '"' || n == BS || n == '$' || n == '`') {
-                            cur.push(BS);
-                        }
-                        cur.push(n);
+                8 | 127 => {
+                    if line.pop().is_some() && !secret {
+                        crate::print!("\x08 \x08");
                     }
-                } else {
-                    cur.push(q);
+                }
+                c if c >= 32 && line.len() < 512 => {
+                    if let Some(ch) = char::from_u32(c as u32) {
+                        line.push(ch);
+                        if !secret {
+                            crate::print!("{}", ch);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Some(_) => {}
+            None => crate::task::sleep_ms(10),
+        }
+    }
+}
+
+/// Asks for a login until an administrator logs in (when passwords can be checked).
+fn login() {
+    session::begin();
+    while !session::logged_in() {
+        let name = read_input("login: ", false);
+        let password = read_input("Password: ", true);
+        match session::login(&name, &password) {
+            LOGIN_OK | LOGIN_UNPROTECTED => crate::println!("[+] Logged in as '{}'.\n", session::user().2),
+            LOGIN_NOT_ADMIN => crate::println!("'{}' is not an administrator (not in 'sudo').\n", name),
+            _ => {
+                crate::println!("Login incorrect\n");
+                crate::task::sleep_ms(2000);
+            }
+        }
+    }
+}
+
+/// Splits a command line into words (double and single quotes group).
+fn split(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let (mut quote, mut in_word) = (None, false);
+    for c in line.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c.is_whitespace() => {
+                if in_word {
+                    words.push(core::mem::take(&mut cur));
+                    in_word = false;
                 }
             }
-        } else if c == BS {
-            in_word = true;
-            if let Some(n) = chars.next() {
-                cur.push(n);
+            None => {
+                cur.push(c);
+                in_word = true;
             }
-        } else if c.is_whitespace() {
-            if in_word {
-                words.push(core::mem::take(&mut cur));
-                in_word = false;
-            }
-        } else {
-            in_word = true;
-            cur.push(c);
         }
     }
     if in_word {
@@ -257,150 +125,120 @@ pub fn split_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
     words
 }
 
-/// Runs an interactive 3-second countdown before automatically invoking `exitboot`.
-///
-/// Allows the user to press Enter to transition immediately to bare-metal hardware mode,
-/// or press any other key to cancel the transition and remain under UEFI Boot Services.
-///
-/// # Arguments
-///
-/// * `state` - Mutable reference to the active `ShellState` passed to the `exitboot` command.
-fn auto_exitboot_countdown(state: &mut ShellState) {
-    if crate::arch::boot_services::is_hardware_takeover_complete() {
-        return;
-    }
-
-    set_color(Color::LightCyan, Color::Black);
-    crate::print!("[*] Transitioning to bare-metal hardware mode in 3 seconds (press any key to cancel): ");
-
-    let mut cancelled = false;
-    let mut proceed_early = false;
-
-    for remaining in (1..=3).rev() {
-        set_color(Color::Yellow, Color::Black);
-        crate::print!("{}... ", remaining);
-
-        for _ in 0..20 {
-            if let Some(key) = crate::console::read_key() {
-                match key {
-                    uefi::proto::console::text::Key::Printable(ch)
-                        if u16::from(ch) == 13 || u16::from(ch) == 10 || char::from(ch) == '\r' || char::from(ch) == '\n' =>
-                    {
-                        proceed_early = true;
-                        break;
-                    }
-                    _ => {
-                        cancelled = true;
-                        break;
-                    }
-                }
-            }
-            crate::console::stall(core::time::Duration::from_millis(50));
-        }
-
-        if cancelled || proceed_early {
-            break;
-        }
-    }
-
-    if cancelled {
-        set_color(Color::LightRed, Color::Black);
-        crate::println!("CANCELLED");
-        set_color(Color::White, Color::Black);
-        crate::println!("    Operating under UEFI Boot Services. Type 'exitboot' to transition to bare metal.\n");
-    } else {
-        set_color(Color::LightGreen, Color::Black);
-        crate::println!("NOW");
-        execute_command("exitboot", state);
-        crate::println!();
-    }
-}
-
-/// After the bare-metal transition, starts the KDE desktop (`linux plasma`) at once, unless
-/// a key is already waiting (pressed during boot) or QEMU's `opt/hydra/boot` fw_cfg value is
-/// `shell` (test harnesses): then the Hydra shell stays. The shell is also reachable from the
-/// desktop on the first virtual terminal (Ctrl+Alt+F1).
-///
-/// # Arguments
-/// * `state` - Mutable reference to the shell session state.
-fn auto_plasma_countdown(state: &mut ShellState) {
-    if !crate::arch::boot_services::is_hardware_takeover_complete() {
-        return; // the user stayed under UEFI Boot Services
-    }
-    let key = crate::console::read_key().is_some();
-    let asked = crate::arch::fwcfg::read_file("opt/hydra/boot").is_some_and(|v| v.starts_with(b"shell"));
-    if key || asked {
-        crate::video::splash::end();
-        set_color(Color::LightCyan, Color::Black);
-        crate::println!("[*] Hydra shell (the desktop was not started; type 'linux plasma' to start it)");
-        set_color(Color::White, Color::Black);
-    } else {
-        set_color(Color::LightCyan, Color::Black);
-        crate::println!("[*] Starting KDE Plasma (the Hydra shell is on Ctrl+Alt+F1)");
-        set_color(Color::White, Color::Black);
-        execute_command("linux plasma", state);
-        if !crate::video::splash::is_desktop_starting() {
-            // No desktop to wait for: the boot logo makes way for the shell
-            crate::video::splash::end();
-        }
-    }
-}
-
-/// Starts the main diverging interactive shell read-eval-print loop (REPL).
-///
-/// Initializes a fresh `ShellState`, prints the welcome banner, runs the automatic
-/// bare-metal transition countdown, and repeatedly reads and executes user commands
-/// until EOF (`Ctrl+D` on an empty line) triggers system shutdown.
+/// Runs one command line of the emergency prompt.
 ///
 /// # Returns
-///
-/// Never returns (`!`). Enters an infinite stall loop if system shutdown returns.
-///
-/// # Panics
-///
-/// - *Guaranteed to never panic under normal execution.*
-pub fn run() -> ! {
-    let mut state = ShellState::new();
-    let mut line_buf = [0u8; LINE_BUF_LEN];
+/// `false` to leave the prompt (`ushell`).
+fn execute(w: &[&str], cwd: &mut String) -> bool {
+    let path = |p: &str| {
+        let mut b = [0u8; 128];
+        String::from(crate::fs::client::normalize_path(cwd, p, &mut b))
+    };
+    match w {
+        ["help" | "?", ..] => {
+            for (c, about) in HELP {
+                crate::println!("  {:<38} {}", c, about);
+            }
+        }
+        ["cd", rest @ ..] => {
+            let p = path(rest.first().copied().unwrap_or("/"));
+            match ZfsClient::file_stat(&p) {
+                Ok(st) if st.obj_type == crate::fs::zfs::types::DnodeType::Directory => *cwd = p,
+                _ => crate::println!("cd: not a directory: {}", p),
+            }
+        }
+        ["ls", rest @ ..] => match ZfsClient::list_dir(&path(rest.first().copied().unwrap_or("."))) {
+            Ok((entries, _, _)) => {
+                for e in entries.iter().filter(|e| e.is_valid) {
+                    let dir = e.obj_type == crate::fs::zfs::types::DnodeType::Directory;
+                    crate::println!("  {}{}", e.name, if dir { "/" } else { "" });
+                }
+            }
+            Err(e) => crate::println!("ls: {}", e),
+        },
+        ["cat", f, ..] => {
+            let mut buf = alloc::vec![0u8; 65536];
+            match ZfsClient::read_file_by_path(&path(f), &mut buf) {
+                Ok(n) => crate::println!("{}", String::from_utf8_lossy(&buf[..n])),
+                Err(e) => crate::println!("cat: {}", e),
+            }
+        }
+        ["cp", from, to, ..] => match ZfsClient::copy_file(&path(from), &path(to)) {
+            Ok(txg) => crate::println!("[+] Copied '{}' -> '{}' (Committed TXG #{})", from, path(to), txg),
+            Err(e) => crate::println!("cp: failed to copy '{}' to '{}': {}", from, to, e),
+        },
+        ["ps", ..] => {
+            for t in crate::task::get_task_snapshots() {
+                crate::println!("  {:<5} {:<5} {:<16} {:?}", t.id.0, t.uid, t.name, t.state);
+            }
+        }
+        ["kill", pid, ..] => match pid.parse::<u64>() {
+            Ok(pid) if pid > 1 && crate::task::kill(crate::task::TaskId(pid)) => crate::println!("[+] Task #{} terminated.", pid),
+            _ => crate::println!("kill: no such task (or not allowed)"),
+        },
+        ["mem", ..] => {
+            let m = crate::admin::system::mem_info();
+            crate::println!("  RAM {} MiB, free {} MiB; kernel heap {} KiB used of {} KiB", m.total >> 20, m.free >> 20, m.heap_used >> 10, m.heap_total >> 10);
+        }
+        ["service", "restart", name, ..] => crate::println!("{:?}", crate::task::supervisor::restart_service_by_name(name).map(|t| t.0)),
+        ["service", "start", name, ..] => crate::println!("{:?}", crate::task::supervisor::SUPERVISOR.lock().start_service(name).map(|t| t.0)),
+        ["service", ..] => {
+            for s in crate::task::supervisor::get_service_snapshots() {
+                crate::println!("  {:<16} pid {:<6} {:?}, {} restarts", s.name, s.task_id.map_or(-1, |p| p as i64), s.state, s.restart_count);
+            }
+        }
+        ["zpool", ..] => {
+            let disk = if crate::fs::zfs::disk_info().is_some() { "on disk" } else { "RAM fallback" };
+            match ZfsClient::pool_status() {
+                Ok((mib, alloc_kib, free_kib, txg)) => crate::println!("  hydrapool {}: {} MiB, {} KiB used, {} KiB free, TXG #{}", disk, mib, alloc_kib, free_kib, txg),
+                Err(e) => crate::println!("zpool: {}", e),
+            }
+        }
+        ["linux", "chroot", root, argv @ ..] if !argv.is_empty() => {
+            let (uid, gid, _) = session::user();
+            crate::admin::linux::run_chroot(root, argv, uid, gid);
+        }
+        ["ushell" | "exit", ..] => return false,
+        ["shutdown" | "poweroff", ..] => {
+            crate::println!("[*] Powering down system...");
+            crate::arch::power::power_off();
+        }
+        ["reboot", ..] => {
+            crate::println!("[*] Rebooting system...");
+            crate::arch::power::reboot();
+        }
+        ["halt", ..] => {
+            crate::println!("[*] Halting CPU. Hardware interrupts disabled.");
+            x86_64::instructions::interrupts::disable();
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
+        [cmd, ..] => crate::println!("'{}': not an emergency command, or arguments missing; type 'help'", cmd),
+        [] => {}
+    }
+    true
+}
 
-    print_welcome_banner();
-    auto_exitboot_countdown(&mut state);
-    auto_plasma_countdown(&mut state);
-    login::login(&mut state);
-
+/// Runs the emergency prompt until `ushell`.
+///
+/// # Arguments
+/// * `reason` - Why it runs (shown at the top).
+pub fn run(reason: &str) {
+    set_color(Color::LightRed, Color::Black);
+    crate::println!("\n[!] EMERGENCY PROMPT: {}", reason);
+    set_color(Color::White, Color::Black);
+    crate::println!("    A tiny console inside the kernel: 'help' lists its commands, 'ushell' starts hydra-shell again.\n");
+    login();
+    let mut cwd = String::from("/");
     loop {
-        set_color(state.prompt_color, Color::Black);
-        let mut prompt_buf = [0u8; 96];
-        let prompt_str = state.format_prompt(&mut prompt_buf);
-        let len = match editor::read_line(prompt_str, &mut line_buf, &mut state) {
-            Some(l) => l,
-            None => {
-                // End of input (Ctrl+D): log out; the next user logs in again
-                set_color(Color::LightCyan, Color::Black);
-                println!("logout\n");
-                login::login(&mut state);
-                continue;
-            }
-        };
+        set_color(Color::LightRed, Color::Black);
+        let line = read_input(&alloc::format!("emergency:{}# ", cwd), false);
         set_color(Color::White, Color::Black);
-
-        if len == 0 {
-            continue;
+        let words = split(&line);
+        let w: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+        if !execute(&w, &mut cwd) {
+            return;
         }
-
-        let input_str = match str::from_utf8(&line_buf[..len]) {
-            Ok(s) => s.trim(),
-            Err(_) => {
-                set_color(Color::LightRed, Color::Black);
-                println!("[!] Invalid input encoding.");
-                continue;
-            }
-        };
-
-        if input_str.is_empty() {
-            continue;
-        }
-
-        execute_command(input_str, &mut state);
     }
 }

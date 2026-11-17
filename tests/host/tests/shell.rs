@@ -1,5 +1,5 @@
-//! Tests for the shell's argument parsers (`src/shell/command.rs`) and the
-//! command-history ring (`src/shell/history.rs`).
+//! Tests for the console shell's argument parsers and command-history ring
+//! (`userland/drivers/hydra-shell/src/parse.rs` and `history.rs`, moved from the kernel shell).
 
 use hydra_hosttests::shell::command::{parse_hex, parse_u32, parse_u64, parse_usize};
 use hydra_hosttests::shell::history::{History, MAX_CMD_LEN, MAX_HISTORY};
