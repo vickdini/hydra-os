@@ -129,7 +129,7 @@ There are 161 references to `compat::linux` from 23 files outside `src/compat`; 
   - `tests/linux/lxbench.c` runs each test 5 times in a loop. It prints the lowest, median and highest loop, each loop being tens of thousands of iterations (100 for fork+exec).
   - It ran in 4 separate boots: 2 stock and 2 probe builds.
   - Workloads were timed with `time` and profiled with the kernel's own `linux prof` (calls per system call number, faults, file-server requests).
-  - The KDE start was timed by screendumps every 0.7 s (`scratch/g6/kde.sh`, `frames.py`).
+  - The KDE start (3 runs) was timed by screendumps every 0.7 s (`scratch/g6/kde.sh`, `frames.py`).
 - **Time unit:** µs (microseconds) unless stated otherwise.
 
 ### 3.2 System calls today
@@ -197,6 +197,7 @@ Wall-clock times, with the system calls each one makes on the normal path (from 
 | Firefox headless screenshot, warm start | 2.9 s | 18,669 | 6,464 | 40,342 / 17,160 | 8,573 |
 | KDE: password entered to full desktop (taskbar shown), run 1 | 50.9 s | 332,763 | 67,351 | 366,730 / 211,811 | 99,882 |
 | KDE, run 2 | 58.3 s | 337,184 | 70,756 | 366,847 / 230,414 | 97,730 |
+| KDE, run 3 | 60.6 s | 331,176 | 66,646 | 367,794 / 211,776 | 95,286 |
 | `apt-get update`, run 2 | 30.2 s | 106,017 | 6,162 | 38,853 / 143,252 | 114,548 |
 | Firefox first start, run 2 | 9.0 s | 19,596 | 6,589 | 39,759 / 17,230 | 11,580 |
 | Firefox warm start, run 2 | 3.0 s | 18,655 | 6,388 | 39,292 / 17,075 | 8,553 |
@@ -214,7 +215,8 @@ KDE milestones (seconds after Enter on the SDDM password):
 |---|---:|---:|---:|---:|
 | 1 | 1.0 | 41.0 | 45.2 | 50.9 |
 | 2 | 1.0 | 43.2 | 50.4 | 58.3 |
-KDE3_PLACEHOLDER
+| 3 (host busier: other groups' VMs ran) | 2.5 | 49.9 | 54.2 | 60.6 |
+| **Median of 3** | | | | **58.3** (range 50.9–60.6) |
 
 The KDE start is 23 % memory, futex, signal-mask and identity calls (in design C they stay in the kernel), then mostly path calls: `statx` 61,919, `access` 43,319, `openat` 18,175, `readlink` 16,986, `newfstatat` 13,903, plus `read` 19,925, `close` 15,744, `write` 11,472, `recvmsg`/`sendmsg` 14,704 (D-Bus and Wayland on Unix sockets). Its zfs-server requests are mostly `resolve_mnt` 43,740, `readlink` 15,334, `resolve` 11,656 and `getattr` 10,943: the name and attribute caches catch most path calls, but not all.
 
@@ -400,7 +402,7 @@ Estimated cost, from the components measured in section 3.2:
 | Argument page, copy-in/copy-out table, bookkeeping | 0.2–0.3 |
 | **Total** | **about 2.0** (1.7–2.2) |
 
-With PCID (tagged TLB entries, available on the NUC's Haswell CPU), the TLB flushes go away: about 1.2–1.5 µs.
+With PCID (tagged TLB entries, available on the NUC's Haswell CPU), the TLB flushes go away: about 1.2–1.5 µs, or about 1.7 µs with the server's own kernel calls (section 6.1).
 
 What it takes to build (part of step 1):
 
@@ -435,6 +437,7 @@ Estimated added time = (forwarded calls) × (added cost per call). This assumes 
 |---|---:|---:|---:|---:|---:|---:|
 | KDE password to desktop, run 1 | 50.9 s | 265,412 | +1.9 s (4 %) | +4.9 s (10 %) | +2.5 s (5 %) | **+0.7 s (1 %)** |
 | KDE password to desktop, run 2 | 58.3 s | 266,428 | +1.9 s (3 %) | +4.9 s (8 %) | +2.5 s (4 %) | **+0.7 s (1 %)** |
+| KDE password to desktop, run 3 | 60.6 s | 264,530 | +1.9 s (3 %) | +4.9 s (8 %) | +2.5 s (4 %) | **+0.7 s (1 %)** |
 | KDE, design A (every call forwarded), run 1 | 50.9 s | 332,763 | +2.3 s (5 %) | +6.2 s (12 %) | +3.1 s (6 %) | **+0.8 s (2 %)** |
 | `apt-get update`, runs 1 and 2 | 27.9 / 30.2 s | 98,177 / 99,855 | +0.7 s (2 %) | +1.8 s (6–7 %) | +0.9 s (3 %) | **+0.25 s (1 %)** |
 | Firefox headless, first start | 8.9 / 9.0 s | 13,337 / 13,007 | +0.09 s (1 %) | +0.24 s (3 %) | +0.12 s (1 %) | **+0.03 s (0.4 %)** |
@@ -448,7 +451,7 @@ Estimated added time = (forwarded calls) × (added cost per call). This assumes 
 What this shows:
 - **Desktop, browser and network workloads are not dominated by system calls.**
   - KDE's start is mostly page faults, disk reads and the programs' own work.
-  - Even today's Handoff IPC would add only about 4 % (2 s of 51–58 s).
+  - Even today's Handoff IPC would add only about 4 % (2 s of 51–61 s).
   - The direct switch keeps them near 1 %.
 - **Metadata-heavy tools on warm caches are system-call-bound**, and they pay in full:
   - a warm `find /usr` would be about **31 % slower** with the direct switch (21 % with PCID);
@@ -473,7 +476,7 @@ Each step from step 1 on must meet these limits, measured as here with `lxbench`
 | Forwarded file calls (`stat`, `fstat`, `open`+`close`, `pread` 4 KiB) | At most **today + 3 µs per forward** (`stat` ≤ 5.6, `open`+`close` ≤ 11.3, `pread` 4 KiB ≤ 4.3) |
 | Pipe and Unix socket round trips | **≤ today** (25.9 and 32.3): the new implementation must fix the slow wake-up, not add to it |
 | `fork`+`exec`+`wait` | ≤ 2.15 ms (+10 %) |
-| KDE password to full desktop | Median of 3 runs ≤ step-0 median **+5 %** (the run-to-run spread is about 15 %, so 3 runs are the minimum) |
+| KDE password to full desktop | Median of 3 runs ≤ step-0 median **+5 %** (the step-0 runs spread from 50.9 to 60.6 s, about 20 %, so 3 runs are the minimum) |
 | Firefox headless warm start, `apt-get update`, `tar` | **≤ +5 %** each (median of 3) |
 | Metadata-heavy tools: warm `find /usr`, warm `du -s /usr/lib` | **≤ +35 %** (the direct-switch estimate is 31 % and 6 %); a stricter limit needs decision 2 |
 | Concurrency | No global serialization: 2 threads making forwarded calls on 2 CPUs must not take longer than one thread making both sets (a new lxbench test in step 1) |
