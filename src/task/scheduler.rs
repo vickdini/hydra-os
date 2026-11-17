@@ -428,14 +428,21 @@ impl Scheduler {
     ///
     /// * `server` - Server Task ID matching the active handoff.
     pub fn end_handoff(&mut self, server: u64) {
-        if let Some(i) = self.handoffs.iter().rposition(|h| h.is_some()) {
+        // The innermost call this server serves, wherever it is: with several CPUs, calls
+        // to different servers (a disk read and a USB input request) are in progress at
+        // once and their replies come in any order. Ending only the top entry left a call
+        // whose server answered first blocked until its deadline (and its reply lost)
+        if let Some(i) = self.handoffs.iter().rposition(|h| matches!(h, Some(h) if h.server == server)) {
             if let Some(h) = self.handoffs[i] {
-                if h.server == server {
-                    self.handoffs[i] = None;
-                    self.note_handoffs();
-                    self.resume_caller(h.caller);
-                    call_ended();
+                // Close the gap, so the stack stays in call order (new calls go on top)
+                for j in i..self.handoffs.len() - 1 {
+                    self.handoffs[j] = self.handoffs[j + 1];
                 }
+                let last = self.handoffs.len() - 1;
+                self.handoffs[last] = None;
+                self.note_handoffs();
+                self.resume_caller(h.caller);
+                call_ended();
             }
         }
     }
