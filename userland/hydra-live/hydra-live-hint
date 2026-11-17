@@ -1,0 +1,66 @@
+#!/usr/bin/python3
+# Written by Hydra: in the live session ("try Hydra" from its USB stick), tells the person at
+# the desktop what this is, with a button to start the installer. Autostarted for every user;
+# does nothing outside the live session. A small window (a desktop notification sent here was
+# accepted but not shown by Plasma on Hydra); what happened goes to
+# ~/.cache/hydra-live-hint.log.
+import os
+import subprocess
+import sys
+import time
+
+if not os.path.exists("/run/hydra/live"):
+    sys.exit(0)
+log_dir = os.path.expanduser("~/.cache")
+os.makedirs(log_dir, exist_ok=True)
+log = open(os.path.join(log_dir, "hydra-live-hint.log"), "a")
+sys.stderr = log
+# After the desktop has settled (the window would otherwise come while it still builds)
+time.sleep(15)
+try:
+    from PyQt6.QtGui import QIcon
+    from PyQt6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+except ImportError as e:
+    print(time.ctime(), "no PyQt6:", e, file=log, flush=True)
+    sys.exit(0)
+
+app = QApplication(sys.argv[:1])
+app.setApplicationName("hydra-live-hint")
+app.setDesktopFileName("hydra-install")
+w = QDialog()
+w.setWindowTitle("Try Hydra")
+w.setWindowIcon(QIcon.fromTheme("drive-removable-media"))
+box = QVBoxLayout(w)
+box.setContentsMargins(24, 20, 24, 20)
+box.setSpacing(12)
+title = QLabel("You are trying Hydra")
+f = title.font()
+f.setPointSizeF(f.pointSizeF() * 1.6)
+title.setFont(f)
+box.addWidget(title)
+text = QLabel("Hydra is running from the USB stick. Nothing you do here is saved to this computer, "
+              "and nothing on it is changed.\n\nTo keep Hydra, click \"Install Hydra\" (also on the desktop).")
+text.setWordWrap(True)
+text.setMinimumWidth(420)
+box.addWidget(text)
+row = QHBoxLayout()
+row.addStretch(1)
+install = QPushButton(QIcon.fromTheme("system-software-install"), "Install Hydra")
+keep = QPushButton("Keep trying")
+row.addWidget(install)
+row.addWidget(keep)
+box.addLayout(row)
+keep.setDefault(True)
+
+
+def start_installer():
+    subprocess.Popen(["/usr/bin/hydra-install"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    w.accept()
+
+
+install.clicked.connect(start_installer)
+keep.clicked.connect(w.reject)
+print(time.ctime(), "shown", file=log, flush=True)
+w.show()
+app.exec()

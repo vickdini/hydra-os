@@ -298,7 +298,8 @@ def main():
         args += ["-nic", f"user,model={a.nic}"]
     if a.usb:
         args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
-    # HYDRA_ISO: a copy of the ISO elsewhere (e.g. on the VM host's own disk, not a 9p mount)
+    # HYDRA_ISO: another boot ISO (the live-session test ISO of tools/build-image, or a copy
+    # on the VM host's own disk instead of a 9p mount)
     iso = os.environ.get("HYDRA_ISO") or os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
     if a.no_cd:
         pass

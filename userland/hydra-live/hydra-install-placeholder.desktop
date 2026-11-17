@@ -1,0 +1,11 @@
+[Desktop Entry]
+# Written by Hydra: stands in for the installer's own entry until this version of Hydra has it
+Type=Application
+Name=Install Hydra
+GenericName=Hydra Setup
+Comment=Install Hydra on this computer
+Keywords=install;setup;installer;hydra;
+Exec=/usr/bin/hydra-install
+Icon=system-software-install
+Terminal=false
+Categories=System;

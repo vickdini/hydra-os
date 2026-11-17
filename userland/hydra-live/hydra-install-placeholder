@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+# Written by Hydra: stands in for the installer until this version of Hydra has it (the
+# installer replaces this file).
+from PyQt6.QtWidgets import QApplication, QMessageBox
+app = QApplication([])
+QMessageBox.information(None, "Install Hydra", "The installer is not part of this version of Hydra yet.")

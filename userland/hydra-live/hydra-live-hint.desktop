@@ -1,0 +1,9 @@
+[Desktop Entry]
+# Written by Hydra: the "You are trying Hydra" window of the live session
+Type=Application
+Name=Hydra live session notice
+Exec=/usr/local/libexec/hydra-live-hint
+TryExec=/usr/local/libexec/hydra-live-hint
+NoDisplay=true
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=2

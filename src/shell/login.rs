@@ -211,6 +211,16 @@ pub fn login(state: &mut ShellState) {
         set_color(Color::White, Color::Black);
         return;
     }
+    // Group F: the live session (Hydra from its USB stick) has no accounts of anyone's to
+    // protect, and nobody could log in: the console is root's at once
+    if crate::compat::linux::live::is_live() {
+        state.set_user("root", 0, 0);
+        set_color(Color::LightGreen, Color::Black);
+        crate::println!("[+] Live session (Hydra from its USB stick): logged in as 'root' without a password.
+");
+        set_color(Color::White, Color::Black);
+        return;
+    }
     set_color(Color::LightCyan, Color::Black);
     crate::println!("Hydra administration console. Log in as root or as a member of 'sudo'.");
     let mut failures = 0u32;

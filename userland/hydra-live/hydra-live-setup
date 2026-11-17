@@ -1,0 +1,34 @@
+#!/bin/sh
+# Written by Hydra: prepares the live session ("try Hydra" from its USB stick). hydra-session
+# runs it as root at boot, before the login screen, when the kernel found the stick's live flag
+# (it then writes /run/hydra/live). It adds the user "live" (no password; the login screen
+# logs it in by itself, see /etc/sddm.conf.d/zz-hydra-live.conf) and, once, its desktop:
+# "Install Hydra" on it, no welcome window, no screen lock, no Windows setup in the
+# background (it would write some 500 MB to the stick for a session that is thrown away).
+[ -e /run/hydra/live ] || exit 0
+user=live
+if ! getent passwd "$user" >/dev/null; then
+    groups=""
+    for g in adm cdrom sudo dip plugdev users lpadmin audio video render; do
+        getent group "$g" >/dev/null && groups="$groups${groups:+,}$g"
+    done
+    uid=""
+    getent passwd 1000 >/dev/null || uid="--uid 1000"
+    useradd --create-home $uid --shell /bin/bash --comment "Live session" --groups "$groups" "$user" || exit 1
+    passwd --quiet --delete "$user"
+fi
+home=$(getent passwd "$user" | cut -d: -f6)
+[ -n "$home" ] || exit 1
+if [ ! -e "$home/.config/hydra-live-prepared" ]; then
+    mkdir -p "$home/Desktop" "$home/.config/autostart"
+    if [ -e /usr/share/applications/hydra-install.desktop ]; then
+        cp /usr/share/applications/hydra-install.desktop "$home/Desktop/"
+        chmod 755 "$home/Desktop/hydra-install.desktop"
+    fi
+    printf '[Welcome]\nShown=1\n' > "$home/.config/hydra-desktoprc"
+    printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > "$home/.config/kscreenlockerrc"
+    printf '[Desktop Entry]\nHidden=true\n' > "$home/.config/autostart/hydra-wine-setup.desktop"
+    touch "$home/.config/hydra-live-prepared"
+    chown -R "$user:" "$home"
+fi
+exit 0
