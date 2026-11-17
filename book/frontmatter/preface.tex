@@ -19,7 +19,7 @@ At the same time, Hydra introduces several major advancements:
 \begin{itemize}
     \item \textbf{Pure Rust Microkernel Core:} The Ring~0 kernel is built with safe Rust abstractions wherever possible, isolating unsafe assembly instructions (like context switching and CR3 page table manipulations) behind bulletproof, type-checked boundaries.
     \item \textbf{Enterprise OpenZFS Storage Engine:} Hydra incorporates a native OpenZFS implementation directly into its storage hierarchy, featuring pooled storage (\texttt{hydrapool}), 64-bit object sets (dnodes), Copy-on-Write transactions, and Fletcher-4 checksumming.
-    \item \textbf{Isolated Ring~3 Drivers:} Hardware device drivers (ATA/IDE bus-master DMA, Intel 82540EM Gigabit NIC, and graphics display servers) run as distinct Ring~3 processes communicating through synchronous IPC endpoints.
+    \item \textbf{Isolated Ring~3 Drivers:} Hardware device drivers (ATA/IDE bus-master DMA, and the Intel 82540EM Gigabit NIC) run as distinct Ring~3 processes communicating through synchronous IPC endpoints.
     \item \textbf{Linux Binary Compatibility Subsystem:} Hydra provides an in-kernel Linux ABI layer that intercepts x86\_64 \texttt{syscall} invocations, implements POSIX process and virtual filesystem semantics, and runs unmodified upstream Linux binaries—from GNU coreutils and Python to the SDDM display manager, KWin Wayland compositor, and KDE Plasma 6.
 \end{itemize}
 

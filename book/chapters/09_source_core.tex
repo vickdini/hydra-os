@@ -123,7 +123,6 @@ fn main() -> Status {
     task::supervisor::spawn_server("ata_driver", "/bin/ata_driver.elf", ipc::EndpointId(0x21));
     task::supervisor::spawn_server("zfs_server", "/bin/zfs_server.elf", ipc::EndpointId(0x20));
     task::supervisor::spawn_server("net_driver", "/bin/net_driver.elf", ipc::EndpointId(0x22));
-    task::supervisor::spawn_server("display_server", "/bin/display_server.elf", ipc::EndpointId(0x23));
 
     // Phase 7: Activate Preemptive Multitasking Scheduler at 100 Hz
     println!("[*] Step 7: Starting 100 Hz Preemptive Scheduler & Shell...\n");

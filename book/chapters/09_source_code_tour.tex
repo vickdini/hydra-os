@@ -29,8 +29,7 @@ d:\os
 |   |-- drivers/
 |   |   |-- ata-driver/       # Ring 3 IDE/ATA Bus-Master DMA storage server (0x21)
 |   |   |-- zfs-server/       # Ring 3 OpenZFS storage daemon (0x20)
-|   |   |-- e1000-driver/     # Ring 3 Intel 82540EM Gigabit NIC server (0x22)
-|   |   +-- display-server/   # Ring 3 DRM/KMS graphics compositor server (0x23)
+|   |   +-- e1000-driver/     # Ring 3 Intel 82540EM Gigabit NIC server (0x22)
 |   +-- hydra-logind/         # D-Bus session and seat management daemon
 +-- book/                     # The Hydra: Design and Implementation textbook
 \end{verbatim}
@@ -123,7 +122,6 @@ fn main() -> Status {
     task::supervisor::spawn_server("ata_driver", "/bin/ata_driver.elf", ipc::EndpointId(0x21));
     task::supervisor::spawn_server("zfs_server", "/bin/zfs_server.elf", ipc::EndpointId(0x20));
     task::supervisor::spawn_server("net_driver", "/bin/net_driver.elf", ipc::EndpointId(0x22));
-    task::supervisor::spawn_server("display_server", "/bin/display_server.elf", ipc::EndpointId(0x23));
 
     // Phase 7: Activate Preemptive Scheduler at 100 Hz
     task::scheduler::start_multitasking();

@@ -172,7 +172,6 @@ Hydra implements an autonomous driver watchdog inspired by the **MINIX 3 Reincar
 |  User-Space Driver Daemons  |               | Preemptive Task Scheduler  |
 |  - ATA Block Driver (0x21)  |               | (spawn_user, kill)         |
 |  - E1000 Net Driver (0x22)  |               +----------------------------+
-|  - Display Server   (0x23)  |
 |  - ZFS File Server  (0x20)  |
 +-----------------------------+
 ```
