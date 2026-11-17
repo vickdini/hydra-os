@@ -138,3 +138,18 @@ After each step: the full suite, KDE, Firefox, Wine and the installer test, plus
 1. **Linux ABI:** the whole layer moves out of the kernel, in separate steps (group 6 above).
 2. **Emergency prompt:** a tiny in-kernel prompt stays for when user space is broken; the rest of the shell moves out.
 3. **Wave 1 size:** four groups at once (1, 3, 5 and 4 part 1).
+
+### Decisions for moving the Linux layer (made 2026-11-17, from section 10 of [linux-server-design.md](linux-server-design.md))
+
+4. **Shape:** one ring-3 Linux server (design C), beside zfs-server and net-server.
+5. **Fast path:** build the direct switch in step 1. PCID (tagged TLB) is done as a separate small task in the same wave and merges first.
+6. **When the Linux server crashes:** every Linux program ends, the supervisor restarts the server, and the desktop comes back at the login screen. The kernel, the drivers and the emergency prompt stay up.
+7. **Budget and order:** the proposed budget (at most 3 µs added per forwarded call; desktop, browser and network at most 5 % slower; metadata-heavy tools at most 35 % slower) and the order of section 7 of the design are accepted.
+8. **Still open, decided before the steps that need them:**
+   - whether the VFS fast paths stay in the kernel for good (before step 6a);
+   - where sound and the display go (before step 5).
+
+### Wave 3 (started 2026-11-17)
+
+- **Group 7:** step 1 of the design. The forwarding machinery and the direct switch, a ring-3 `linux-server`, and `keys` as the first tenant.
+- **Group 8:** PCID. It merges first.
