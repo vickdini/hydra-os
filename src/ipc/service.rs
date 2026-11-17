@@ -895,7 +895,7 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     }
     // The pages lent with it, pinned for as long as the server may use them
     let gidx = match grant {
-        Some(spec) => make_grant(spec, endpoint)?,
+        Some(spec) => make_grant(spec, owner.endpoint)?,
         None => 0,
     };
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -1047,10 +1047,27 @@ struct Grant {
     frames: [u64; GRANT_PAGES],
     nframes: usize,
     server_writes: bool,
+    /// The serving driver's primary endpoint: its IOMMU domain holds `segs` while the grant
+    /// lives (`iommu::map_dma` counts references, so pages lent twice stay mapped).
+    endpoint: u32,
 }
 
 impl Grant {
-    const FREE: Self = Self { used: false, segs: [(0, 0); GRANT_PAGES], nsegs: 0, frames: [0; GRANT_PAGES], nframes: 0, server_writes: false };
+    const FREE: Self = Self { used: false, segs: [(0, 0); GRANT_PAGES], nsegs: 0, frames: [0; GRANT_PAGES], nframes: 0, server_writes: false, endpoint: 0 };
+
+    /// Takes the segments out of the driver's IOMMU domain (no-op when the IOMMU is off).
+    fn unmap_dma(&self, nsegs: usize) {
+        for &(phys, len) in &self.segs[..nsegs] {
+            crate::arch::iommu::unmap_dma(self.endpoint, phys, len);
+        }
+    }
+
+    /// Unpins the frames.
+    fn unpin(&self) {
+        for &f in &self.frames[..self.nframes] {
+            crate::memory::frame_allocator::frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(f)));
+        }
+    }
 }
 
 static GRANTS: Mutex<[Grant; MAX_GRANTS]> = Mutex::new([Grant::FREE; MAX_GRANTS]);
@@ -1069,8 +1086,8 @@ pub static GRANTS_MADE: AtomicU64 = AtomicU64::new(0);
 /// - `-EINVAL`: Too many ranges or pages, or a caller without an address space of its own.
 /// - `-EFAULT`: A page is not mapped (or not writable when the server writes).
 /// - `-EBUSY`: Too many grants alive.
-fn make_grant(spec: &GrantSpec, _endpoint: u32) -> Result<u8, i64> {
-    use crate::memory::frame_allocator::{frame_ref_dec, frame_ref_inc};
+fn make_grant(spec: &GrantSpec, endpoint: u32) -> Result<u8, i64> {
+    use crate::memory::frame_allocator::frame_ref_inc;
     if spec.n == 0 || spec.n > GRANT_RANGES {
         return Err(EINVAL);
     }
@@ -1111,10 +1128,19 @@ fn make_grant(spec: &GrantSpec, _endpoint: u32) -> Result<u8, i64> {
         Ok(())
     };
     if let Err(e) = pin(&mut g) {
-        for &f in &g.frames[..g.nframes] {
-            frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(f)));
-        }
+        g.unpin();
         return Err(e);
+    }
+    // With the IOMMU on, the driver's device may only DMA into memory in its domain
+    g.endpoint = endpoint;
+    for i in 0..g.nsegs {
+        let (phys, len) = g.segs[i];
+        if crate::arch::iommu::map_dma(endpoint, phys, len).is_err() {
+            g.unmap_dma(i);
+            g.unpin();
+            // EINVAL makes zfs-server fall back to the window, which needs no mapping
+            return Err(EINVAL);
+        }
     }
     g.used = true;
     let idx = x86_64::instructions::interrupts::without_interrupts(|| {
@@ -1129,9 +1155,8 @@ fn make_grant(spec: &GrantSpec, _endpoint: u32) -> Result<u8, i64> {
             Ok(i as u8 + 1)
         }
         None => {
-            for &f in &g.frames[..g.nframes] {
-                frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(f)));
-            }
+            g.unmap_dma(g.nsegs);
+            g.unpin();
             Err(EBUSY)
         }
     }
@@ -1148,9 +1173,9 @@ fn release_grant(g: u8) {
         t[g as usize - 1] = Grant::FREE;
         x
     });
-    for &f in &grant.frames[..grant.nframes] {
-        crate::memory::frame_allocator::frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(f)));
-    }
+    // Out of the device's reach before the frames can be reused
+    grant.unmap_dma(grant.nsegs);
+    grant.unpin();
 }
 
 /// The physical segments `(address, length)` lent with request `id`, for its server to
