@@ -182,3 +182,12 @@ the crash policy then handles.
   (`EINTR`), and 4 processes x 8 threads making key calls and test calls at once (every answer
   checked). `lxfwd hammer N` is the load for the kill test.
 - `tests/linux/lxbench.c`: `lx_null`, `lx_null_par2`, `keyctl`, `keyctl_par2`.
+
+## Cost
+
+Measured in KVM with 2 CPUs (details and the breakdown in section 11 of
+[linux-server-design.md](../linux-server-design.md)): a forwarded null call costs 4.5 µs
+without PCID and 3.4 µs with it, against 0.7 µs for a null call answered in the kernel (the
+budget allows 3 µs added: met with PCID). `keyctl` through the server costs 3.5 µs with PCID
+(0.7 µs in the kernel). Calls that were not moved are unchanged. Two threads forwarding at
+once are not faster than one: the kernel lock still serializes the kernel part of each call.
