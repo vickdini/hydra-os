@@ -48,6 +48,7 @@ fn input_task() {
     loop {
         USB_WQ.register();
         records.clear();
+        let mut busy = false;
         let got = {
             let _window = service::hold_window(ENDPOINT_INPUT_DEV);
             match service::call(ENDPOINT_INPUT_DEV, Message::with_args(MSG_INPUT_READ, [0; 4]), service::CALL_TIMEOUT_TICKS) {
@@ -58,11 +59,21 @@ fn input_task() {
                     }
                     true
                 }
+                // The driver is serving a USB disk request (the endpoints share one
+                // slot): ask again in a moment
+                Err(-16) => {
+                    busy = true;
+                    false
+                }
                 _ => false,
             }
         };
         for r in records.chunks_exact(8) {
             deliver(r);
+        }
+        if busy {
+            crate::task::wait::wait(Some(crate::arch::pit::ticks() + 1));
+            continue;
         }
         if !got {
             // The driver died or is restarting: the supervisor revives it; try again later

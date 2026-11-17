@@ -67,16 +67,23 @@ pub struct DiskInfo {
 ///
 /// An [`Option<DiskInfo>`] containing information about the disk driver, or `None` if unavailable.
 pub fn disk_info() -> Option<DiskInfo> {
-    use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, MSG_BLOCK_GET_SIZE, MSG_BLOCK_REPLY};
-    if !service::is_online(ENDPOINT_BLOCK_DEV) {
+    use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_USB_DISK, MSG_BLOCK_GET_SIZE, MSG_BLOCK_REPLY};
+    // The pool's disk (the pool view, unit 0): the USB driver's when the file server was
+    // told the pool is on a USB disk, else the ATA/SATA driver's
+    let endpoint = if crate::shell::commands::usbdisk::POOL_ON_USB.load(Ordering::Acquire) {
+        ENDPOINT_USB_DISK
+    } else {
+        ENDPOINT_BLOCK_DEV
+    };
+    if !service::is_online(endpoint) {
         return None;
     }
-    let _window = service::hold_window(ENDPOINT_BLOCK_DEV);
-    let r = service::call(ENDPOINT_BLOCK_DEV, Message::new(MSG_BLOCK_GET_SIZE), service::CALL_TIMEOUT_TICKS).ok()?;
+    let _window = service::hold_window(endpoint);
+    let r = service::call(endpoint, Message::new(MSG_BLOCK_GET_SIZE), service::CALL_TIMEOUT_TICKS).ok()?;
     if r.label != MSG_BLOCK_REPLY || (r.args[0] as i64) < 0 {
         return None;
     }
-    let window = service::window(ENDPOINT_BLOCK_DEV)?;
+    let window = service::window(endpoint)?;
     let model = core::str::from_utf8(&window[..40]).unwrap_or("").trim_end_matches(|c: char| c == ' ' || c == '\0');
     Some(DiskInfo { model: alloc::string::String::from(model), sectors: r.args[1] * 8, lba48: r.args[2] != 0, dma: r.args[3] != 0 })
 }

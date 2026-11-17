@@ -35,7 +35,7 @@ const ENOSPC: i64 = -28;
 
 /// The block driver endpoints, in the order their disks are named (`sda`, `sdb`, ...).
 /// A new block driver (USB storage) adds its endpoint here.
-pub const ENDPOINTS: &[u32] = &[ENDPOINT_BLOCK_DEV];
+pub const ENDPOINTS: &[u32] = &[ENDPOINT_BLOCK_DEV, crate::ipc::protocol::ENDPOINT_USB_DISK];
 
 /// Longest a disk request may take (60 s, as the ZFS file server allows).
 const DISK_TIMEOUT_TICKS: u64 = 6000;
@@ -283,7 +283,13 @@ pub fn scan() {
                 let pool_blocks = u64::from_le_bytes(w[56..64].try_into().unwrap());
                 (r.args[1], String::from(model.trim()), sector, flags, pool_base, pool_blocks)
             });
-            let Ok((blocks, model, sector, flags, pool_base, pool_blocks)) = info else { break };
+            // USB disk numbers can have gaps (a stick unplugged): look at all of them
+            let Ok((blocks, model, sector, flags, pool_base, pool_blocks)) = info else {
+                if ep == crate::ipc::protocol::ENDPOINT_USB_DISK && unit < 8 {
+                    continue;
+                }
+                break;
+            };
             let pool = (flags & 2 != 0).then_some((pool_base * BLOCK, (pool_base + pool_blocks) * BLOCK));
             found.push(Disk {
                 name: disk_name(found.len()),

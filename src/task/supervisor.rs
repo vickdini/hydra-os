@@ -262,6 +262,14 @@ fn usb_args() -> Option<Vec<String>> {
         crate::kprintln!("[supervisor] Intel xHCI: USB ports switched from EHCI (routing {:#x})", pci::pci_read_u32(b, d, f, 0xD0));
     }
     let mut args = alloc::vec![alloc::format!("mmio={:#x}", base), alloc::format!("len={:#x}", len)];
+    // Where the pool is: the boot partition when the kernel came from a disk (the USB
+    // driver serves the pool view if that partition is on a USB disk); otherwise, with
+    // no ATA or SATA disk, the first USB disk holding a pool
+    match crate::arch::bootdisk::driver_arg() {
+        Some(a) => args.push(a),
+        None if !service::is_online(ENDPOINT_BLOCK_DEV) => args.push(String::from("pool=usb")),
+        None => {}
+    }
     if let Some(line) = service::msi_line(&dev) {
         args.push(alloc::format!("irq={}", line));
     } else if let Some((line, table, addr, data)) = service::msix_line(&dev) {
@@ -335,6 +343,19 @@ fn hda_grants() -> Vec<(u64, u64)> {
     HDA.call_once(hda_controller).map_or_else(Vec::new, |(_, base)| alloc::vec![(base & !0xFFF, 0x4000)])
 }
 
+/// Whether the block driver on `endpoint` serves a pool view (unit 0 answers its size).
+fn has_pool_view(endpoint: u32) -> bool {
+    use crate::ipc::protocol::{MSG_BLOCK_GET_SIZE, MSG_BLOCK_REPLY};
+    if !service::is_online(endpoint) {
+        return false;
+    }
+    let _window = service::hold_window(endpoint);
+    matches!(
+        service::call(endpoint, Message::with_args(MSG_BLOCK_GET_SIZE, [0; 4]), service::CALL_TIMEOUT_TICKS),
+        Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] == 0 && r.args[1] > 0
+    )
+}
+
 /// ZFS file server: no arguments; it finds the pool through the disk driver.
 ///
 /// # Returns
@@ -348,6 +369,12 @@ fn zfs_args() -> Option<Vec<String>> {
     let mut args = alloc::vec![alloc::format!("cache_blocks={}", blocks)];
     if let Some(id) = crate::arch::bootdisk::new_guid_id() {
         args.push(alloc::format!("new_guid={:x}", id));
+    }
+    // The pool on a USB disk: the ATA/SATA driver has no pool view (no disk, or the boot
+    // disk is a USB stick) and the USB driver has one
+    if !has_pool_view(ENDPOINT_BLOCK_DEV) && has_pool_view(crate::ipc::protocol::ENDPOINT_USB_DISK) {
+        args.push(String::from("disk=usb"));
+        crate::shell::commands::usbdisk::POOL_ON_USB.store(true, core::sync::atomic::Ordering::Release);
     }
     Some(args)
 }
@@ -557,11 +584,8 @@ pub fn supervisor_init() {
         // takes the disk endpoint; the IDE driver starts only if it did not
         sup.services.push(ServiceDescriptor::new("ahci_driver", ENDPOINT_BLOCK_DEV, AHCI_DRIVER_ELF, ahci_args, ahci_grants));
         sup.services.push(ServiceDescriptor::new("ata_driver", ENDPOINT_BLOCK_DEV, ATA_DRIVER_ELF, ata_args, no_grants));
-        // The file server imports the pool through the disk driver
-        sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
-        service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
-        sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
-        sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
+        // The USB driver before the file server: the pool may be on a USB disk (the
+        // driver serves the USB disks next to its input endpoint)
         sup.services.push(ServiceDescriptor::new(
             "usb_driver",
             crate::ipc::protocol::ENDPOINT_INPUT_DEV,
@@ -569,6 +593,12 @@ pub fn supervisor_init() {
             usb_args,
             usb_grants,
         ));
+        // The file server imports the pool through the disk driver
+        sup.services.push(ServiceDescriptor::new("zfs_server", ENDPOINT_ZFS_SERVER, ZFS_SERVER_ELF, zfs_args, no_grants));
+        service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
+        service::allow_client(crate::ipc::protocol::ENDPOINT_USB_DISK, ENDPOINT_ZFS_SERVER);
+        sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
+        sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,
@@ -649,6 +679,8 @@ pub fn start_all() {
 ///
 /// `true` if service was successfully revived and is online, `false` otherwise.
 pub fn revive(endpoint: u32) -> bool {
+    // An endpoint served by another service's process (the USB disks): that service
+    let endpoint = service::primary_of(endpoint);
     let restarted = {
         let mut sup = match SUPERVISOR.try_lock() {
             Some(s) => s,
@@ -696,10 +728,14 @@ pub fn supervisor_tick() {
             continue; // still starting up
         }
         let seq = crate::arch::pit::ticks();
-        let answered = matches!(
-            service::call_once(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100),
-            Ok(reply) if reply.label == MSG_SUPERVISOR_PONG && reply.args[0] == seq
-        );
+        let answered = match service::call_once(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100) {
+            Ok(reply) => reply.label == MSG_SUPERVISOR_PONG && reply.args[0] == seq,
+            // Busy with a request that came through another endpoint it serves (the USB
+            // driver's disks share its slot): alive. A stuck request ends when its caller
+            // gives up, and a later heartbeat gets through
+            Err(-16) => endpoint == crate::ipc::protocol::ENDPOINT_INPUT_DEV,
+            Err(_) => false,
+        };
         let hung = {
             let mut sup = SUPERVISOR.lock();
             let svc = &mut sup.services[idx];

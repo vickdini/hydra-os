@@ -283,7 +283,9 @@ def main():
         "-no-reboot",
     ]
     disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
-    if a.disk_bus == "ahci":
+    if a.disk == "none":
+        pass  # no pool disk (e.g. the pool on a USB stick given through HYDRA_QEMU_EXTRA)
+    elif a.disk_bus == "ahci":
         # An ICH9 AHCI adapter (as on real Intel chipsets) with the pool disk on port 0
         args += ["-device", "ahci,id=ahci", "-drive", f"file={a.disk},format={disk_format},if=none,id=pooldisk",
                  "-device", "ide-hd,drive=pooldisk,bus=ahci.0"]
@@ -296,7 +298,8 @@ def main():
         args += ["-nic", f"user,model={a.nic}"]
     if a.usb:
         args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
-    iso = os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
+    # HYDRA_ISO: a copy of the ISO elsewhere (e.g. on the VM host's own disk, not a 9p mount)
+    iso = os.environ.get("HYDRA_ISO") or os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
     if a.no_cd:
         pass
     elif a.boot_dir:
