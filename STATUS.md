@@ -1,5 +1,5 @@
 # Group F - Image & live USB (branch i-live)
-Current step: stopped and reported; WSL has been frozen since about 01:25, so the USB stick image could not be built or booted yet
+Current step: the USB stick image is built (6.25 GiB) and boots by itself into the live desktop; now finding out why the "You are trying Hydra" notice does not show, then the regression suite
 Works so far:
 - Clean install image, built twice by the script from a throwaway copy of the main pool: 5.3 GiB pool (3.3 GiB of data), 951 MiB compressed. Checked by booting it: no hydra/vick accounts, empty /home, no passwords, machine-id, SSH keys, logs, apt lists, network connections, histories, Wine prefixes or browser profiles; no files owned by the old user numbers; installer tools present
 - Live system (the clean image plus the install files in /opt/hydra-install, SHA-256 checked): logs in by itself as "live", "Install Hydra" icon on the desktop (screenshots scratch/f/live1-*.png, live2-*.png)

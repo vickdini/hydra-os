@@ -5,6 +5,9 @@
 # through the notification service's D-Bus interface (gdbus: libnotify's notify-send is not
 # installed).
 [ -e /run/hydra/live ] || exit 0
+# What happened, for anyone wondering why no notice came
+mkdir -p "$HOME/.cache"
+exec 2>>"$HOME/.cache/hydra-live-hint.log"
 # After the desktop has settled (the notification would otherwise come while it still builds)
 sleep 10
 reply=$(gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
@@ -12,6 +15,7 @@ reply=$(gdbus call --session --dest org.freedesktop.Notifications --object-path 
     "You are trying Hydra" \
     "Nothing you do here is saved to this computer. To keep Hydra, double-click \"Install Hydra\" on the desktop." \
     "['install', 'Install Hydra']" "{'urgency': <byte 2>}" "int32 0") || exit 0
+echo "$(date) notification: $reply" >&2
 id=$(echo "$reply" | sed -n 's/.*uint32 \([0-9]*\).*/\1/p')
 [ -n "$id" ] || exit 0
 # The button: start the installer; the notification closed: done
