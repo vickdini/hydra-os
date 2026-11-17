@@ -1,29 +1,66 @@
-#!/bin/sh
+#!/usr/bin/python3
 # Written by Hydra: in the live session ("try Hydra" from its USB stick), tells the person at
 # the desktop what this is, with a button to start the installer. Autostarted for every user;
-# does nothing outside the live session. A desktop notification that stays until closed,
-# through the notification service's D-Bus interface (gdbus: libnotify's notify-send is not
-# installed).
-[ -e /run/hydra/live ] || exit 0
-# What happened, for anyone wondering why no notice came
-mkdir -p "$HOME/.cache"
-exec 2>>"$HOME/.cache/hydra-live-hint.log"
-# After the desktop has settled (the notification would otherwise come while it still builds)
-sleep 10
-reply=$(gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
-    --method org.freedesktop.Notifications.Notify "Hydra" "uint32 0" "drive-removable-media" \
-    "You are trying Hydra" \
-    "Nothing you do here is saved to this computer. To keep Hydra, double-click \"Install Hydra\" on the desktop." \
-    "['install', 'Install Hydra']" "{'urgency': <byte 2>}" "int32 0") || exit 0
-echo "$(date) notification: $reply" >&2
-id=$(echo "$reply" | sed -n 's/.*uint32 \([0-9]*\).*/\1/p')
-[ -n "$id" ] || exit 0
-# The button: start the installer; the notification closed: done
-gdbus monitor --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications |
-while read -r line; do
-    case "$line" in
-        *"ActionInvoked (uint32 $id, 'install')"*) setsid /usr/bin/hydra-install >/dev/null 2>&1 < /dev/null & exit 0 ;;
-        *"NotificationClosed (uint32 $id,"*) exit 0 ;;
-    esac
-done
-exit 0
+# does nothing outside the live session. A small window (a desktop notification sent here was
+# accepted but not shown by Plasma on Hydra); what happened goes to
+# ~/.cache/hydra-live-hint.log.
+import os
+import subprocess
+import sys
+import time
+
+if not os.path.exists("/run/hydra/live"):
+    sys.exit(0)
+log_dir = os.path.expanduser("~/.cache")
+os.makedirs(log_dir, exist_ok=True)
+log = open(os.path.join(log_dir, "hydra-live-hint.log"), "a")
+sys.stderr = log
+# After the desktop has settled (the window would otherwise come while it still builds)
+time.sleep(15)
+try:
+    from PyQt6.QtGui import QIcon
+    from PyQt6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+except ImportError as e:
+    print(time.ctime(), "no PyQt6:", e, file=log, flush=True)
+    sys.exit(0)
+
+app = QApplication(sys.argv[:1])
+app.setApplicationName("hydra-live-hint")
+app.setDesktopFileName("hydra-install")
+w = QDialog()
+w.setWindowTitle("Try Hydra")
+w.setWindowIcon(QIcon.fromTheme("drive-removable-media"))
+box = QVBoxLayout(w)
+box.setContentsMargins(24, 20, 24, 20)
+box.setSpacing(12)
+title = QLabel("You are trying Hydra")
+f = title.font()
+f.setPointSizeF(f.pointSizeF() * 1.6)
+title.setFont(f)
+box.addWidget(title)
+text = QLabel("Hydra is running from the USB stick. Nothing you do here is saved to this computer, "
+              "and nothing on it is changed.\n\nTo keep Hydra, click \"Install Hydra\" (also on the desktop).")
+text.setWordWrap(True)
+text.setMinimumWidth(420)
+box.addWidget(text)
+row = QHBoxLayout()
+row.addStretch(1)
+install = QPushButton(QIcon.fromTheme("system-software-install"), "Install Hydra")
+keep = QPushButton("Keep trying")
+row.addWidget(install)
+row.addWidget(keep)
+box.addLayout(row)
+keep.setDefault(True)
+
+
+def start_installer():
+    subprocess.Popen(["/usr/bin/hydra-install"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    w.accept()
+
+
+install.clicked.connect(start_installer)
+keep.clicked.connect(w.reject)
+print(time.ctime(), "shown", file=log, flush=True)
+w.show()
+app.exec()

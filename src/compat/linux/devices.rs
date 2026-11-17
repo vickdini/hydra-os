@@ -1093,7 +1093,7 @@ const LIVE_ONLY: [&str; 4] = [
 /// administer without a password (sudo, polkit: the installer); "Install Hydra" on the desktop
 /// (hydra-live-setup copies the installer's start menu entry there) starts the installer
 /// (`/usr/bin/hydra-install` and its entry are Group G's, written into every pool; placeholders
-/// until a pool has them); a notification says that nothing is saved to the computer
+/// until a pool has them); a small window says that nothing is saved to the computer
 /// (userland/hydra-live).
 fn live_session_files(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     if !super::live::is_live() {
