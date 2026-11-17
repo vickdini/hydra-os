@@ -1070,8 +1070,6 @@ impl ZfsClient {
             Ok(r) => r,
             Err(_) => return files,
         };
-        // Group F: a live session when the boot volume has the live flag
-        crate::compat::linux::live::detect(&mut root);
 
         let fixed_files = [
             ("\\bin\\hello.elf", "/bin/hello.elf"),

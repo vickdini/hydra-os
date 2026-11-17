@@ -1145,6 +1145,12 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     let raw = join_path_raw(&base_path, path);
     let acc = flags & O_ACCMODE;
     let wants_write = acc != O_RDONLY || flags & O_TRUNC != 0;
+    // UEFI variables (efivarfs)
+    if flags & O_PATH == 0 {
+        if let Some(dev) = super::efivars::open(&abs, flags) {
+            return install(FileDescriptor::Device(dev?), flags);
+        }
+    }
     // Device control for the devices Hydra serves by name
     if flags & O_PATH == 0 {
         if let Some((major, minor)) = named_device(&abs) {
@@ -1334,6 +1340,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         let access = if acc != O_WRONLY { super::bpf::DEV_READ } else { 0 } | if acc != O_RDONLY { super::bpf::DEV_WRITE } else { 0 };
         let kind = if ftype == S_IFCHR { super::bpf::DEV_CHAR } else { super::bpf::DEV_BLOCK };
         super::bpf::device_check(kind, dev_major(attr.rdev), dev_minor(attr.rdev), access)?;
+    }
+    if ftype == 0o060000 {
+        if let Some(dev) = super::blockdev::open(attr.rdev, flags) {
+            return install(FileDescriptor::Device(dev?), flags);
+        }
     }
     if ftype == S_IFCHR {
         if let Some(dev) = super::chardev::open(attr.rdev, flags) {
@@ -2551,6 +2562,8 @@ fn fs_magic(abs: &str) -> i64 {
         DEVPTS_SUPER_MAGIC
     } else if under("/proc") {
         0x9fa0 // PROC_SUPER_MAGIC
+    } else if under(super::efivars::DIR) {
+        super::efivars::EFIVARFS_MAGIC
     } else if under(super::fs::CGROUP_ROOT) {
         0x6367_7270 // CGROUP2_SUPER_MAGIC (libsystemd refuses a hierarchy without it)
     } else if under("/sys") {
@@ -3507,6 +3520,15 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                         return Err(EACCES);
                     }
                 }
+                // A UEFI variable's file: the variable goes first
+                if !rmdir {
+                    if let Some(r) = super::efivars::unlink(dir, name) {
+                        r?;
+                        let r = zfs(|s| s.unlink(dir, name).map(|_| 0));
+                        super::efivars::refresh();
+                        return r;
+                    }
+                }
                 zfs(|s| if rmdir { s.rmdir(dir, name) } else { s.unlink(dir, name) }.map(|_| 0))
             })
         }
@@ -3610,6 +3632,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         // none: EINVAL) and report a failed write-back (EIO); syncfs takes any open one
         NR_SYNC => {
             let _ = ZfsClient::sync();
+            crate::fs::blockdev::flush_all();
             0
         }
         NR_FSYNC | NR_FDATASYNC | NR_SYNCFS => {
@@ -3619,6 +3642,11 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned())
             };
             let Some(desc) = desc else { return Some(EBADF) };
+            if let FileDescriptor::Device(d) = &desc {
+                if let Some(r) = d.fsync() {
+                    return Some(r);
+                }
+            }
             let syncable = matches!(desc, FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. } | FileDescriptor::File { .. });
             if num != NR_SYNCFS && !syncable {
                 return Some(EINVAL);

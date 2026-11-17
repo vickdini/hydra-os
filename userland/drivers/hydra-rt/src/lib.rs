@@ -15,6 +15,7 @@
 
 extern crate alloc;
 
+pub mod blockunits;
 pub mod heap;
 pub mod port;
 pub mod sys;

@@ -10,6 +10,7 @@ from the first command onwards, and shuts QEMU down.
 import argparse
 import json
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -206,7 +207,10 @@ def main():
     ap.add_argument("--gap", type=float, default=1.0, help="seconds between commands")
     ap.add_argument("--prompt", default=None, help="wait for one more occurrence of this text before typing each command after the first")
     ap.add_argument("--prompt-timeout", type=float, default=60, help="longest wait for each prompt (seconds)")
-    ap.add_argument("--extra-disk", default=None)
+    ap.add_argument("--extra-disk", default=None, help="a second disk (qcow2 or raw), on the same bus as the pool disk")
+    ap.add_argument("--boot-dir", default=None, help="boot from a host directory (QEMU's virtual FAT, read-only) holding EFI/BOOT/BOOTX64.EFI and bin/ instead of the ISO")
+    ap.add_argument("--no-cd", action="store_true", help="no boot ISO: the firmware boots from the disks (an installed system)")
+    ap.add_argument("--efivars", default=None, help="a writable UEFI variable store (copied from OVMF's template when missing): boot entries persist in it")
     ap.add_argument("--disk", default=os.path.join(ROOT, "dist", "x86_64", "hydrapool.qcow2"))
     ap.add_argument("--disk-bus", default="ide", choices=["ide", "ahci"],
                     help="how the pool disk is attached: the IDE controller (ata-driver) or an AHCI SATA adapter (ahci-driver)")
@@ -264,6 +268,10 @@ def main():
         firmware = ["-accel", "whpx,kernel-irqchip=off", "-bios", fw]
     elif a.accel == "kvm":
         firmware = ["-accel", "kvm", "-cpu", "host", "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}"]
+        if a.efivars:
+            if not os.path.exists(a.efivars):
+                shutil.copyfile(OVMF_VARS, a.efivars)
+            firmware += ["-drive", f"if=pflash,format=raw,file={a.efivars}"]
     else:
         firmware = ["-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}"]
     args = [
@@ -290,7 +298,12 @@ def main():
         args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
     # HYDRA_ISO: another boot ISO (e.g. the live-session test ISO of tools/build-image)
     iso = os.environ.get("HYDRA_ISO") or os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
-    if a.cd == "virtio":
+    if a.no_cd:
+        pass
+    elif a.boot_dir:
+        args += ["-device", "virtio-scsi-pci,id=scsi0", "-drive", (f"file={a.boot_dir},if=none,id=bootfat,format=raw,readonly=on" if a.boot_dir.endswith(".img") else f"file=fat:{a.boot_dir},if=none,id=bootfat,format=raw,readonly=on"),
+                 "-device", "scsi-hd,drive=bootfat,bootindex=0"]
+    elif a.cd == "virtio":
         # The firmware reads the boot volume (the kernel and the files staged for the pool)
         # by DMA instead of the IDE CD-ROM's port I/O; Hydra needs no driver for it
         args += ["-device", "virtio-scsi-pci,id=scsi0", "-drive", f"file={iso},if=none,id=bootcd,media=cdrom,format=raw",
@@ -303,7 +316,11 @@ def main():
     # e.g. HYDRA_QEMU_EXTRA="-d cpu_reset -D D:/os/scratch/qemu_dbg.log"
     args += os.environ.get("HYDRA_QEMU_EXTRA", "").split()
     if a.extra_disk:
-        args += ["-drive", f"file={a.extra_disk},format=raw,if=ide,index=1,media=disk"]
+        extra_format = 'qcow2' if a.extra_disk.endswith('.qcow2') else 'raw'
+        if a.disk_bus == "ahci":
+            args += ["-drive", f"file={a.extra_disk},format={extra_format},if=none,id=extradisk", "-device", "ide-hd,drive=extradisk,bus=ahci.1"]
+        else:
+            args += ["-drive", f"file={a.extra_disk},format={extra_format},if=ide,index=1,media=disk"]
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
         qmp = Qmp(proc)
