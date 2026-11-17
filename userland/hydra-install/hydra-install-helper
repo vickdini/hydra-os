@@ -434,6 +434,27 @@ def verify_pool(disk, part_start, blocks, digest, lo, hi):
         fail("What was read back from the disk differs from what was written. The disk may be faulty.")
 
 
+def esp_partition_node(disk):
+    """The device of partition 1 of DISK (/dev/sdb1, /dev/nvme0n1p1) when it exists and is the
+    new 512 MiB EFI partition, else None."""
+    if not disk.startswith("/dev/"):
+        return None
+    name = os.path.basename(os.path.realpath(disk))
+    part = name + ("p1" if name[-1:].isdigit() else "1")
+    try:
+        with open("/sys/class/block/%s/start" % part) as f:
+            start = int(f.read()) * 512
+        with open("/sys/class/block/%s/size" % part) as f:
+            size = int(f.read()) * 512
+    except (OSError, ValueError):
+        return None
+    path = "/dev/" + part
+    if start == ESP_START and size == ESP_SIZE and os.path.exists(path) and stat.S_ISBLK(os.stat(path).st_mode):
+        return path
+    log("partition node %s: start %d size %d, not used" % (path, start, size))
+    return None
+
+
 def esp_copy(img_spec, src_dir):
     """Copies the tree SRC_DIR onto the FAT file system IMG_SPEC (mtools, nothing mounted)."""
     for root, dirs, files in os.walk(src_dir):
@@ -539,8 +560,14 @@ def install(req):
 
     step(3, "Preparing the start-up partition")
     esp = "%s@@%d" % (disk, ESP_START)
-    run(["mkfs.fat", "-F", "32", "-n", "HYDRA-EFI", "--offset", str(ESP_START // 512), disk, str(ESP_SIZE // 1024)],
-        "Could not format the start-up partition")
+    part = esp_partition_node(disk)
+    if part:
+        run(["mkfs.fat", "-F", "32", "-n", "HYDRA-EFI", part], "Could not format the start-up partition")
+    else:
+        # no partition device (a disk image file, or the kernel did not re-read the table): the
+        # same area of the whole disk (-I: mkfs.fat would refuse a disk that has partitions)
+        run(["mkfs.fat", "-I", "-F", "32", "-n", "HYDRA-EFI", "--offset", str(ESP_START // 512), disk, str(ESP_SIZE // 1024)],
+            "Could not format the start-up partition")
     progress(3)
 
     step(4, "Copying Hydra to the disk")
