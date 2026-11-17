@@ -628,4 +628,5 @@ These are also written in `D:\os-mk-shared\NOTES.md`:
   - In the VM: `cp /bin/lxbench.elf /ubuntu/tmp/lxbench.elf`, then `linux chroot /ubuntu /usr/bin/bash -c 'cat /tmp/lxbench.elf > /tmp/lxb; chmod 755 /tmp/lxb; /tmp/lxb'`.
   - Arguments name single tests. `PROBE_EP=0x22` picks the probe's server.
 - **Probe kernel:** `cargo build --release --target x86_64-unknown-uefi --features g6-probe`. A normal build does not contain the probe.
+  - The probe was left out when this branch was merged into host-unit-tests. To measure again, restore it from commit `90fe5ca` (`git show 90fe5ca -- Cargo.toml src/compat/linux`). Without it, `lxbench` skips its probe tests.
 - **VM scripts:** in `tools/lxbench/`. `vm.sh` runs one VM on an overlay with an ISO kept on WSL's disk. `kde.sh` runs the KDE timing, `work.sh` the workload profiles. `frames.py`, `profparse.py`, `agg.py` and `estimate.py` turn the logs into the tables of this report.

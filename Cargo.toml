@@ -13,10 +13,6 @@ log = "0.4"
 linked_list_allocator = "0.10.6"
 patina_lzma_rs = { version = "0.3.2", default-features = false }
 
-[features]
-# MEASUREMENT ONLY (wave 2 group 6): the IPC forwarding probe system call (src/compat/linux/g6_probe.rs)
-g6-probe = []
-
 [profile.dev]
 panic = "abort"
 
