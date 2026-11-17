@@ -138,6 +138,8 @@ if [ "$short" != en ] && command -v apt-get >/dev/null 2>&1; then
     (
         n=0
         until getent hosts archive.ubuntu.com >/dev/null 2>&1 || [ $n -ge 60 ]; do sleep 10; n=$((n + 1)); done
+        # a clean image comes without package lists
+        nice apt-get -q -o DPkg::Lock::Timeout=900 update >>"$log" 2>&1
         DEBIAN_FRONTEND=noninteractive nice apt-get -y -q -o DPkg::Lock::Timeout=900 --no-install-recommends \
             install "language-pack-$short" "language-pack-kde-$short" >>"$log" 2>&1 \
             && echo "$(date '+%Y-%m-%d %H:%M:%S') language packs for $short installed" >>"$log"
