@@ -59,8 +59,15 @@ heavy() { chroot $R $SLOT /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOM
 # The QEMU root's mounts (WSL drops them when it idles)
 mountpoint -q $R/proc || mount -t proc proc $R/proc
 for m in sys dev dev/pts; do mountpoint -q $R/$m || mount --bind /$m $R/$m; done
-mkdir -p $R/mnt/d
-mountpoint -q $R/mnt/d || mount --bind /mnt/d $R/mnt/d
+# The tree may be on D: or E: (D:\os can be a junction to E:\os, which WSL shows as a link
+# into /mnt/e), so the QEMU root needs both, and C:
+if [ -d /mnt/e ] && ! mountpoint -q /mnt/e; then mount -t drvfs E: /mnt/e -o metadata 2>/dev/null || true; fi
+for m in c d e; do
+    if [ -d /mnt/$m ]; then
+        mkdir -p $R/mnt/$m
+        mountpoint -q $R/mnt/$m || mount --bind /mnt/$m $R/mnt/$m
+    fi
+done
 mkdir -p $R$WORK $R$OUT
 
 # A web server for the VMs (they reach the host at 10.0.2.2), serving directory $1
