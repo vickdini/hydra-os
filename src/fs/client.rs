@@ -1066,7 +1066,7 @@ impl ZfsClient {
             return files;
         }
 
-        let mut root = match crate::shell::fs::open_root_volume() {
+        let mut root = match crate::fs::bootfs::open_root_volume() {
             Ok(r) => r,
             Err(_) => return files,
         };
@@ -1099,7 +1099,7 @@ impl ZfsClient {
             .iter()
             .map(|&(f, z)| (alloc::string::String::from(f), alloc::string::String::from(z)))
             .collect();
-        if let Some(cstr) = crate::shell::fs::path_to_cstr16(r"\bin", &mut [0u16; 16]) {
+        if let Some(cstr) = crate::fs::bootfs::path_to_cstr16(r"\bin", &mut [0u16; 16]) {
             if let Ok(handle) = root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
                 if let Some(mut dir) = handle.into_directory() {
                     let mut entry_buf = [0u8; 512];
@@ -1120,7 +1120,7 @@ impl ZfsClient {
 
         for (fat_path, zfs_path) in candidate_files.iter() {
             let (fat_path, zfs_path) = (fat_path.as_str(), zfs_path.as_str());
-            let cstr = match crate::shell::fs::path_to_cstr16(fat_path, &mut path_u16) {
+            let cstr = match crate::fs::bootfs::path_to_cstr16(fat_path, &mut path_u16) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1140,7 +1140,7 @@ impl ZfsClient {
             let mut file_buf = alloc::vec![0u8; file_size];
             let mut total_read = 0;
             while total_read < file_buf.len() {
-                match crate::shell::fs::fw_read(&mut file, &mut file_buf[total_read..]) {
+                match crate::fs::bootfs::fw_read(&mut file, &mut file_buf[total_read..]) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => total_read += n,
                 }

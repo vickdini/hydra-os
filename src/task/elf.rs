@@ -783,7 +783,7 @@ pub fn load_linux_elf(elf_data: &[u8], args: &[&str]) -> Result<ElfProcessImage,
                 alloc::string::String::from("\\bin\\ld-linux-x86-64.so.2"),
             ];
             for fp in &fat_candidates {
-                if let Ok(data) = crate::shell::fs::read_boot_file(fp) {
+                if let Ok(data) = crate::fs::bootfs::read_boot_file(fp) {
                     found_data = Some(data);
                     break;
                 }

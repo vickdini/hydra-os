@@ -41,11 +41,16 @@ pub use crate::ipc::protocol::ENDPOINT_ZFS_SERVER;
 pub use types::{DnodeType, ZFS_BLOCK_SIZE};
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::ipc::service;
 use crate::ipc::Message;
 use fsproto::*;
+
+/// Set when the file server was told to find the pool on a USB disk (by the supervisor,
+/// which passes it `disk=usb`). Read by [`disk_info`] and the `usbdisk` shell command.
+/// (Moved here from the shell's `usbdisk` command.)
+pub static POOL_ON_USB: AtomicBool = AtomicBool::new(false);
 
 /// What the disk driver reports about the pool's disk (`disks`, `zpool status`).
 #[derive(Clone)]
@@ -70,7 +75,7 @@ pub fn disk_info() -> Option<DiskInfo> {
     use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_USB_DISK, MSG_BLOCK_GET_SIZE, MSG_BLOCK_REPLY};
     // The pool's disk (the pool view, unit 0): the USB driver's when the file server was
     // told the pool is on a USB disk, else the ATA/SATA driver's
-    let endpoint = if crate::shell::commands::usbdisk::POOL_ON_USB.load(Ordering::Acquire) {
+    let endpoint = if POOL_ON_USB.load(Ordering::Acquire) {
         ENDPOINT_USB_DISK
     } else {
         ENDPOINT_BLOCK_DEV

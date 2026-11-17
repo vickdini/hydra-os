@@ -64,8 +64,8 @@ pub fn detect() {
             }
         }
     }
-    info.live = crate::shell::fs::read_boot_file("\\hydra\\live").is_ok() || crate::shell::fs::file_exists("\\hydra\\live");
-    info.setup_conf = crate::shell::fs::read_boot_file("\\hydra\\setup.conf").ok();
+    info.live = crate::fs::bootfs::read_boot_file("\\hydra\\live").is_ok() || crate::fs::bootfs::file_exists("\\hydra\\live");
+    info.setup_conf = crate::fs::bootfs::read_boot_file("\\hydra\\setup.conf").ok();
     crate::kprintln!(
         "[boot] loaded from {}; live session: {}; first-boot settings: {}",
         match &info.boot_part {
