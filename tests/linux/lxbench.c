@@ -1,0 +1,341 @@
+/* lxbench: Linux system call micro-benchmarks for the Linux-server design (wave 2,
+ * group 6, step 0). Each test runs a loop, five times; the line printed per test is
+ *   BENCH <name> min <ns> med <ns> max <ns> ns/op (<iterations per run>)
+ * Optional arguments name the tests to run (default: all). The "probe_*" tests need a
+ * kernel built with `--features g6-probe` (src/compat/linux/g6_probe.rs) and are skipped
+ * on a normal kernel. Build: gcc -O1 -w -pthread lxbench.c -o lxbench
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/futex.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#define REPS 5
+#define PROBE_NR 0x6706
+
+static uint64_t now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+
+static int cmp(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
+typedef double (*bench_fn)(long n);
+
+static char buf[65536];
+static long probe_ep = 0x20;
+
+/* --- system calls without work --- */
+static double b_getpid(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_getpid);
+    return (double)(now() - t) / n;
+}
+static double b_getpgrp(long n) { /* not on the lock-free fast path: the normal locked path */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_getpgrp);
+    return (double)(now() - t) / n;
+}
+static double b_clock(long n) {
+    struct timespec ts;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)(now() - t) / n;
+}
+
+/* --- files --- */
+static double b_read_cached(long n) {
+    int fd = open("/usr/bin/bash", O_RDONLY);
+    if (fd < 0) return -1;
+    pread(fd, buf, 4096, 0);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) pread(fd, buf, 4096, 0);
+    double r = (double)(now() - t) / n;
+    close(fd);
+    return r;
+}
+static double b_read_64k(long n) {
+    int fd = open("/usr/bin/bash", O_RDONLY);
+    if (fd < 0) return -1;
+    pread(fd, buf, 65536, 0);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) pread(fd, buf, 65536, 0);
+    double r = (double)(now() - t) / n;
+    close(fd);
+    return r;
+}
+static double b_write_null(long n) {
+    int fd = open("/dev/null", O_WRONLY);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) write(fd, buf, 64);
+    double r = (double)(now() - t) / n;
+    close(fd);
+    return r;
+}
+static double b_open_close(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        int fd = open("/etc/passwd", O_RDONLY);
+        if (fd < 0) return -1;
+        close(fd);
+    }
+    return (double)(now() - t) / n;
+}
+static double b_stat(long n) {
+    struct stat st;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++)
+        if (stat("/usr/bin/bash", &st)) return -1;
+    return (double)(now() - t) / n;
+}
+static double b_fstat(long n) {
+    struct stat st;
+    int fd = open("/etc/passwd", O_RDONLY);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) fstat(fd, &st);
+    double r = (double)(now() - t) / n;
+    close(fd);
+    return r;
+}
+
+/* --- round trips between two processes or threads --- */
+static double pingpong(int a[2], int b[2], long n) {
+    char c = 0;
+    pid_t p = fork();
+    if (p == 0) {
+        for (long i = 0; i < n; i++) {
+            if (read(a[0], &c, 1) != 1) _exit(1);
+            write(b[1], &c, 1);
+        }
+        _exit(0);
+    }
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(a[1], &c, 1);
+        if (read(b[0], &c, 1) != 1) return -1;
+    }
+    double r = (double)(now() - t) / n;
+    waitpid(p, 0, 0);
+    return r;
+}
+static double b_pipe_rtt(long n) {
+    int a[2], b[2];
+    pipe(a);
+    pipe(b);
+    double r = pingpong(a, b, n);
+    close(a[0]); close(a[1]); close(b[0]); close(b[1]);
+    return r;
+}
+static double b_unix_rtt(long n) {
+    int s[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s)) return -1;
+    /* parent writes s[0] -> child reads s[1]; child writes s[1] -> parent reads s[0] */
+    int a[2] = {s[1], s[0]}, b[2] = {s[0], s[1]};
+    double r = pingpong(a, b, n);
+    close(s[0]); close(s[1]);
+    return r;
+}
+
+static _Atomic int fword;
+static long fcount;
+static long futex(void *a, int op, int v) { return syscall(SYS_futex, a, op, v, 0, 0, 0); }
+static void *fpartner(void *x) {
+    for (long i = 0; i < fcount; i++) {
+        while (atomic_load(&fword) == 0) futex(&fword, FUTEX_WAIT_PRIVATE, 0);
+        atomic_store(&fword, 0);
+        futex(&fword, FUTEX_WAKE_PRIVATE, 1);
+    }
+    return 0;
+}
+static double b_futex_rtt(long n) {
+    pthread_t th;
+    fcount = n;
+    atomic_store(&fword, 0);
+    pthread_create(&th, 0, fpartner, 0);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        atomic_store(&fword, 1);
+        futex(&fword, FUTEX_WAKE_PRIVATE, 1);
+        while (atomic_load(&fword) == 1) futex(&fword, FUTEX_WAIT_PRIVATE, 1);
+    }
+    double r = (double)(now() - t) / n;
+    pthread_join(th, 0);
+    return r;
+}
+static double b_futex_wake_none(long n) { /* a wake nobody waits for (the lock-free fast path) */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) futex(&fword, FUTEX_WAKE_PRIVATE, 1);
+    return (double)(now() - t) / n;
+}
+
+/* --- the same round trips with everything on CPU 0 (no cross-CPU wake-up: the cost of the
+ * switches themselves, the floor for a direct-switch forward) --- */
+static void pin(int all) {
+    cpu_set_t s;
+    CPU_ZERO(&s);
+    if (all) for (int i = 0; i < 2; i++) CPU_SET(i, &s);
+    else CPU_SET(0, &s);
+    sched_setaffinity(0, sizeof s, &s);
+}
+static double b_yield(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) sched_yield();
+    return (double)(now() - t) / n;
+}
+static double b_yield_pingpong_1cpu(long n) { /* two processes yielding to each other: per switch */
+    pin(0);
+    pid_t p = fork();
+    if (p == 0) {
+        for (long i = 0; i < n; i++) sched_yield();
+        _exit(0);
+    }
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) sched_yield();
+    waitpid(p, 0, 0);
+    double r = (double)(now() - t) / (2 * n);
+    pin(1);
+    return r;
+}
+static double b_pipe_rtt_1cpu(long n) { pin(0); double r = b_pipe_rtt(n); pin(1); return r; }
+static double b_futex_rtt_1cpu(long n) { pin(0); double r = b_futex_rtt(n); pin(1); return r; }
+
+/* --- processes --- */
+static double b_fork_wait(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        pid_t p = fork();
+        if (p == 0) _exit(0);
+        waitpid(p, 0, 0);
+    }
+    return (double)(now() - t) / n;
+}
+static double b_fork_exec_wait(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        pid_t p = fork();
+        if (p == 0) {
+            execl("/bin/true", "true", (char *)0);
+            _exit(127);
+        }
+        int st;
+        waitpid(p, &st, 0);
+        if (!WIFEXITED(st) || WEXITSTATUS(st)) return -1;
+    }
+    return (double)(now() - t) / n;
+}
+
+/* --- memory --- */
+static double b_mmap_munmap(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        void *p = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return -1;
+        munmap(p, 1 << 20);
+    }
+    return (double)(now() - t) / n;
+}
+static double b_fault_anon(long n) { /* per page: mmap 1 MiB, touch its 256 pages, munmap */
+    long pages = 0;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        char *p = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return -1;
+        for (long o = 0; o < (1 << 20); o += 4096, pages++) p[o] = 1;
+        munmap(p, 1 << 20);
+    }
+    return (double)(now() - t) / pages;
+}
+
+/* --- forwarding probe (kernel built with --features g6-probe) --- */
+static int probe_ok(void) { return syscall(PROBE_NR, 0, 0, 0) == 0; }
+static double b_probe_null(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(PROBE_NR, 0, 0, 0);
+    return (double)(now() - t) / n;
+}
+static double probe_user(int op, long n) { /* one forwarded call per system call */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++)
+        if (syscall(PROBE_NR, op, probe_ep, 1) < 0) return -1;
+    return (double)(now() - t) / n;
+}
+static double probe_kernel(int op, long n) { /* n calls inside one system call */
+    long ns = syscall(PROBE_NR, op, probe_ep, n);
+    return ns < 0 ? -1 : (double)ns / n;
+}
+static double b_probe_handoff(long n) { return probe_user(1, n); }
+static double b_probe_queued(long n) { return probe_user(2, n); }
+static double b_probe_handoff_k(long n) { return probe_kernel(1, n); }
+static double b_probe_queued_k(long n) { return probe_kernel(2, n); }
+
+struct bench { const char *name; bench_fn fn; long n; int probe; };
+static struct bench benches[] = {
+    {"getpid", b_getpid, 200000, 0},
+    {"getpgrp", b_getpgrp, 200000, 0},
+    {"clock_gettime", b_clock, 200000, 0},
+    {"pread_4k_cached", b_read_cached, 50000, 0},
+    {"pread_64k_cached", b_read_64k, 5000, 0},
+    {"write_devnull_64", b_write_null, 100000, 0},
+    {"open_close", b_open_close, 20000, 0},
+    {"stat_3level", b_stat, 20000, 0},
+    {"fstat", b_fstat, 100000, 0},
+    {"pipe_rtt", b_pipe_rtt, 20000, 0},
+    {"unix_rtt", b_unix_rtt, 20000, 0},
+    {"futex_rtt", b_futex_rtt, 20000, 0},
+    {"futex_wake_none", b_futex_wake_none, 200000, 0},
+    {"sched_yield", b_yield, 200000, 0},
+    {"yield_switch_1cpu", b_yield_pingpong_1cpu, 50000, 0},
+    {"pipe_rtt_1cpu", b_pipe_rtt_1cpu, 20000, 0},
+    {"futex_rtt_1cpu", b_futex_rtt_1cpu, 20000, 0},
+    {"mmap_munmap_1m", b_mmap_munmap, 20000, 0},
+    {"fault_anon_page", b_fault_anon, 200, 0},
+    {"fork_wait", b_fork_wait, 200, 0},
+    {"fork_exec_wait", b_fork_exec_wait, 100, 0},
+    {"probe_null", b_probe_null, 200000, 1},
+    {"probe_handoff", b_probe_handoff, 20000, 1},
+    {"probe_queued", b_probe_queued, 20000, 1},
+    {"probe_handoff_k", b_probe_handoff_k, 20000, 1},
+    {"probe_queued_k", b_probe_queued_k, 20000, 1},
+};
+
+int main(int argc, char **argv) {
+    const char *e = getenv("PROBE_EP");
+    if (e) probe_ep = strtol(e, 0, 0);
+    int probe = probe_ok();
+    printf("lxbench: probe %s, endpoint %#lx\n", probe ? "available" : "absent", probe_ep);
+    for (unsigned k = 0; k < sizeof benches / sizeof *benches; k++) {
+        struct bench *b = &benches[k];
+        if (argc > 1) {
+            int want = 0;
+            for (int a = 1; a < argc; a++) want |= !strcmp(argv[a], b->name);
+            if (!want) continue;
+        }
+        if (b->probe && !probe) continue;
+        double r[REPS];
+        b->fn(b->n / 10 + 1); /* warm-up */
+        for (int i = 0; i < REPS; i++) r[i] = b->fn(b->n);
+        qsort(r, REPS, sizeof *r, cmp);
+        printf("BENCH %-18s min %10.0f med %10.0f max %10.0f ns/op (%ld)\n", b->name, r[0], r[REPS / 2], r[REPS - 1], b->n);
+        fflush(stdout);
+    }
+    printf("LXBENCH-DONE\n");
+    return 0;
+}
