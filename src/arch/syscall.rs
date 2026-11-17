@@ -95,6 +95,26 @@ pub const SYS_IRQ_ACK: u64 = 30;
 pub const SYS_CLOCK: u64 = 31;
 /// Native Hydra system call: map the window of a service the driver uses (`sys_svc_attach`).
 pub const SYS_SVC_ATTACH: u64 = 32;
+/// Native Hydra system call: the physical segments lent with a request being served
+/// (`sys_svc_grant`).
+pub const SYS_SVC_GRANT: u64 = 33;
+/// Native Hydra system call: call another service lending it pages of the caller
+/// (`sys_svc_call_grant`).
+pub const SYS_SVC_CALL_GRANT: u64 = 34;
+
+/// [`SYS_SVC_CALL_GRANT`]'s argument block (as `hydra_rt::sys::GrantCall`): the request
+/// (the reply replaces it), the timeout in ticks (0: the default), and the ranges lent.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GrantCall {
+    msg: crate::ipc::service::WireMessage,
+    timeout: u64,
+    /// Ranges used.
+    n: u64,
+    /// Bit 0: the server writes into the ranges (a device read).
+    flags: u64,
+    ranges: [[u64; 2]; crate::ipc::service::GRANT_RANGES],
+}
 
 /// Diagnostic counters for syscall activity.
 #[derive(Debug, Clone, Copy, Default)]
@@ -835,8 +855,12 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
         SYS_SVC_RECV => {
             drop(stats);
             // arg0: endpoint, arg1: where to store the request (`WireMessage`)
+            // Returns the request's ID (the reply names it)
             match crate::ipc::service::recv(arg0 as u32) {
-                Ok(m) => store_wire_message(arg1, m),
+                Ok((id, m)) => match store_wire_message(arg1, m) {
+                    0 => id as i64,
+                    e => e,
+                },
                 Err(e) => e,
             }
         }
@@ -844,7 +868,8 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             drop(stats);
             // arg0: endpoint, arg1: the answer (`WireMessage`)
             match load_wire_message(arg1) {
-                Ok(m) => crate::ipc::service::reply(arg0 as u32, m).map_or_else(|e| e, |()| 0),
+                // arg2: the request's ID (0: the oldest one taken and unanswered)
+                Ok(m) => crate::ipc::service::reply(arg0 as u32, _arg2, m).map_or_else(|e| e, |()| 0),
                 Err(e) => e,
             }
         }
@@ -856,10 +881,55 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
                 -1 // -EPERM
             } else {
                 let timeout = if _arg2 == 0 { crate::ipc::service::CALL_TIMEOUT_TICKS } else { _arg2 };
-                match load_wire_message(arg1).and_then(|m| crate::ipc::service::call(arg0 as u32, m, timeout)) {
+                let mode = crate::ipc::service::driver_call_mode();
+                match load_wire_message(arg1).and_then(|m| crate::ipc::service::call_mode(arg0 as u32, m, timeout, mode)) {
                     Ok(r) => store_wire_message(arg1, r),
                     Err(e) => e,
                 }
+            }
+        }
+        SYS_SVC_CALL_GRANT => {
+            drop(stats);
+            // arg0: endpoint, arg1: a `GrantCall` (its message becomes the reply)
+            if crate::task::current_service().is_none() {
+                -1 // -EPERM
+            } else {
+                match crate::compat::linux::vfs::copy_in(arg1, core::mem::size_of::<GrantCall>()) {
+                    Ok(bytes) => {
+                        let gc = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const GrantCall) };
+                        let mut spec = crate::ipc::service::GrantSpec {
+                            ranges: [(0, 0); crate::ipc::service::GRANT_RANGES],
+                            n: gc.n as usize,
+                            server_writes: gc.flags & 1 != 0,
+                        };
+                        for (d, r) in spec.ranges.iter_mut().zip(gc.ranges.iter()) {
+                            *d = (r[0], r[1]);
+                        }
+                        let timeout = if gc.timeout == 0 { crate::ipc::service::CALL_TIMEOUT_TICKS } else { gc.timeout };
+                        let mode = crate::ipc::service::driver_call_mode();
+                        match crate::ipc::service::call_with(arg0 as u32, gc.msg.into(), timeout, mode, Some(&spec)) {
+                            Ok(r) => store_wire_message(arg1, r),
+                            Err(e) => e,
+                        }
+                    }
+                    Err(e) => e,
+                }
+            }
+        }
+        SYS_SVC_GRANT => {
+            drop(stats);
+            // arg0: endpoint served, arg1: request ID, arg2: where to store up to
+            // `GRANT_SEGMENTS_MAX` segments `[physical address, length]`; returns how many
+            match crate::ipc::service::grant_segments(arg0 as u32, arg1) {
+                Ok((segs, _)) => {
+                    let mut out = alloc::vec::Vec::with_capacity(segs.len() * 16);
+                    for (a, l) in &segs {
+                        out.extend_from_slice(&a.to_le_bytes());
+                        out.extend_from_slice(&l.to_le_bytes());
+                    }
+                    crate::compat::linux::vfs::copy_out(_arg2, &out).map_or_else(|e| e, |()| segs.len() as i64)
+                }
+                Err(e) => e,
             }
         }
         SYS_MAP_ANON => {

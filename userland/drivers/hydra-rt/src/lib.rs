@@ -195,17 +195,22 @@ impl Server {
     /// # Returns
     /// Does not return (`!`).
     pub fn serve(&mut self, mut handle: impl FnMut(&mut Self, &Message) -> Message) -> ! {
+        self.serve_ids(|srv, _, msg| handle(srv, msg))
+    }
+
+    /// As [`Self::serve`], also passing each request's ID (for [`sys::svc_grant`]).
+    pub fn serve_ids(&mut self, mut handle: impl FnMut(&mut Self, u64, &Message) -> Message) -> ! {
         loop {
-            let req = match sys::svc_recv(self.endpoint) {
-                Ok(m) => m,
+            let (id, req) = match sys::svc_recv(self.endpoint) {
+                Ok(r) => r,
                 Err(_) => continue,
             };
             let reply = if req.label == protocol::MSG_SUPERVISOR_PING as u64 {
                 Message::new(protocol::MSG_SUPERVISOR_PONG as u64, [req.args[0], 1, 0, 0])
             } else {
-                handle(self, &req)
+                handle(self, id, &req)
             };
-            let _ = sys::svc_reply(self.endpoint, &reply);
+            let _ = sys::svc_reply(self.endpoint, id, &reply);
         }
     }
 }
