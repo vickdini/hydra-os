@@ -15,14 +15,34 @@
 //! memory. The client copies a request's data into the window before the call and the
 //! reply's data out after it; messages carry offsets and lengths, never pointers.
 //!
-//! Kernel callers are often deep inside a subsystem with its locks held (the file system
-//! asking the disk driver for a block). A call therefore hands the CPU to the server and
-//! lets nothing else run until it replies (see [`crate::task::scheduler::Scheduler::begin_handoff`]),
-//! exactly as an in-kernel driver would have run in the caller's place: no other task can
-//! contend for those locks. A server that crashes or misses the deadline ends the call
-//! with an error and is restarted by the supervisor.
+//! Every call is a request in one table (section "Requests in flight"): several may be
+//! outstanding per service, the server takes them in any order (`recv` returns the
+//! request's ID) and answers by ID (`reply`), so a reply can only reach its own caller.
 //!
-//! Requests and replies use separate slots, so neither side can pick up its own message.
+//! How a caller waits depends on what it holds ([`CallMode`]). Kernel callers are often
+//! deep inside a subsystem with its locks held (the file system asking for a block). Those
+//! use [`CallMode::Handoff`] ([`call`]): the CPU goes to the server and nothing else runs
+//! until it replies (see [`crate::task::scheduler::Scheduler::begin_handoff`]), exactly as
+//! an in-kernel driver would have run in the caller's place, so no other task can contend
+//! for those locks. Callers holding no locks use [`CallMode::Queued`] ([`call_queued`]):
+//! they sleep and everything else keeps running, so a hung server delays only them. A
+//! server that crashes or misses the deadline ends the call with an error and is restarted
+//! by the supervisor; its outstanding requests fail at once (`unregister`).
+//!
+//! Callers that keep the hand-off (they hold locks, or were not checked):
+//! - the file system's requests to the ZFS server (`fs::zfs`): reads hold the file's
+//!   vnode lock (`fs::fd`), page faults hold the address space's lock (`memory::vm` ->
+//!   `InodeObject::get_page`), and the ZFS server's own calls to the disk driver made
+//!   while serving them are hand-offs too ([`driver_call_mode`]);
+//! - `fs::blockdev` (Linux block devices), `net::e1000` (the network stack's lock),
+//!   `compat::linux::snd` (stream locks), `video::display`, the shell's `usbdisk`
+//!   commands, and the supervisor's start-up size query.
+//! Queued: USB keyboard/pointer polling (`arch::usb_input`), the watchdog's heartbeats
+//! (`task::supervisor`), and driver calls made outside any hand-off.
+//!
+//! Page grants ([`GrantSpec`], `SYS_SVC_CALL_GRANT` / `SYS_SVC_GRANT`) lend a caller's
+//! pages to the server for one request instead of copying through the window: the ZFS
+//! server lends its block buffers and the AHCI driver points the disk's DMA at them.
 //!
 //! ## Device access
 //!
@@ -297,7 +317,7 @@ static REQ_WQ: [WaitQueue; MAX_REQUESTS] = [const { WaitQueue::new() }; MAX_REQU
 /// Next request ID.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Lock-free mirror for the scheduler: per entry, the caller of a queued-mode request still
-/// waiting (0: none) and the endpoint serving it.
+/// waiting (its ID plus one; 0: none) and the endpoint serving it.
 static QUEUED_CALLER: [AtomicU64; MAX_REQUESTS] = [const { AtomicU64::new(0) }; MAX_REQUESTS];
 static QUEUED_OWNER: [AtomicU32; MAX_REQUESTS] = [const { AtomicU32::new(0) }; MAX_REQUESTS];
 
@@ -315,8 +335,9 @@ const EIO: i64 = -5;
 /// hand-off when that call depends on it). Lock-free.
 pub fn serves_queued_for(ep: u32, waits: impl Fn(u64) -> bool) -> bool {
     (0..MAX_REQUESTS).any(|i| {
+        // (Stored plus one: task 0 is a task like any other)
         let c = QUEUED_CALLER[i].load(Ordering::Acquire);
-        c != 0 && QUEUED_OWNER[i].load(Ordering::Acquire) == ep && waits(c)
+        c != 0 && QUEUED_OWNER[i].load(Ordering::Acquire) == ep && waits(c - 1)
     })
 }
 
@@ -766,8 +787,11 @@ pub fn call_queued(endpoint: u32, request: Message, timeout_ticks: u64) -> Resul
 /// or waits in a hand-off (it works for a caller that may hold kernel locks, as the file
 /// server reading a block for the kernel), queued otherwise.
 pub fn driver_call_mode() -> CallMode {
-    let me = crate::task::SCHEDULER.lock();
-    if me.in_handoff(me.current_task_id().0) {
+    let in_handoff = x86_64::instructions::interrupts::without_interrupts(|| {
+        let s = crate::task::SCHEDULER.lock();
+        s.in_handoff(s.current_task_id().0)
+    });
+    if in_handoff {
         CallMode::Handoff
     } else {
         CallMode::Queued
@@ -886,7 +910,7 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     };
     if mode == CallMode::Queued {
         QUEUED_OWNER[i].store(owner.endpoint, Ordering::Release);
-        QUEUED_CALLER[i].store(me, Ordering::Release);
+        QUEUED_CALLER[i].store(me + 1, Ordering::Release);
     }
     owner.recv_wq.wake_all();
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
@@ -1295,18 +1319,17 @@ pub fn reply(endpoint: u32, id: u64, answer: Message) -> Result<(), i64> {
         if r.abandoned {
             // Its caller gave up: nobody takes the answer
             *r = Request::FREE;
-            return Some((i, 0, CallMode::Queued, g));
+            return Some((i, None, g));
         }
         r.state = ReqState::Replied;
         r.reply = answer;
-        Some((i, r.caller, r.mode, g))
+        Some((i, Some((r.caller, r.mode)), g))
     });
-    let Some((i, caller, mode, grant)) = found else { return Err(EINVAL) };
+    let Some((i, waiting, grant)) = found else { return Err(EINVAL) };
     // The server is done with the lent pages
     release_grant(grant);
-    if caller == 0 {
-        return Ok(());
-    }
+    // (Task 0, the boot task, is a caller like any other)
+    let Some((caller, mode)) = waiting else { return Ok(()) };
     match mode {
         CallMode::Handoff => {
             x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
