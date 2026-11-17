@@ -261,14 +261,14 @@ During boot, Hydra queries the UEFI firmware's Graphics Output Protocol (GOP). G
     \item Pixel format (typically \texttt{PixelBlueGreenRedReserved8BitPerColor}).
 \end{itemize}
 
-Hydra maps this physical framebuffer into the address space of the Ring~3 \texttt{display\_server} process (\texttt{userland/drivers/display-server/}).
+The kernel itself draws on this framebuffer only for the boot splash and a minimal emergency text console (early boot messages, kernel panics, and the console login when no desktop runs). Desktop graphics go through the DRM device described below. An earlier Ring~3 \texttt{display\_server} and an in-kernel Wayland compositor were removed in the first microkernel wave (2026).
 
 \subsection{Linux DRM/KMS Emulation and Double-Buffering}
 To allow unmodified modern graphical desktop environments (such as the **KWin Wayland compositor** and **KDE Plasma 6**) to run on Hydra, the kernel exposes a Linux-compatible **Direct Rendering Manager (DRM)** and **Kernel Mode Setting (KMS)** character device node at \texttt{/dev/dri/card0}:
 \begin{itemize}
     \item \texttt{DRM\_IOCTL\_MODE\_GETRESOURCES}: Reports connected connectors, encoders, and CRTCs.
     \item \texttt{DRM\_IOCTL\_MODE\_CREATE\_DUMB}: Allocates a linear off-screen drawing surface in shared memory.
-    \item \textbf{Atomic Page Flipping (\texttt{DRM\_IOCTL\_MODE\_PAGE\_FLIP}):} KWin renders desktop windows into an off-screen surface. When the frame is complete, it issues an atomic page-flip ioctl. The display server swaps the display pointer during the vertical blanking interval (VBLANK), delivering tear-free, 60~FPS graphics.
+    \item \textbf{Atomic Page Flipping (\texttt{DRM\_IOCTL\_MODE\_PAGE\_FLIP}):} KWin renders desktop windows into an off-screen surface. When the frame is complete, it issues an atomic page-flip ioctl. The kernel copies the finished frame to the framebuffer during the vertical blanking interval (VBLANK), delivering tear-free, 60~FPS graphics.
 \end{itemize}
 
 % ==============================================================================

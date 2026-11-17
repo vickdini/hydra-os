@@ -255,7 +255,7 @@ fn pump() {
                 Raw::Scancode(0xE0) => st.e0 = true,
                 Raw::Scancode(sc) => {
                     let make = sc & 0x7F;
-                    let code = if st.e0 { crate::wayland::e0_keycode(make) } else { make as u32 };
+                    let code = if st.e0 { e0_keycode(make) } else { make as u32 };
                     let scan = if st.e0 { 0xE000 | make as i32 } else { make as i32 };
                     st.e0 = false;
                     if code == 0 || code >= 768 {
@@ -656,5 +656,34 @@ impl CharDevice for EvdevFile {
 
     fn nonblock(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
+    }
+}
+
+/// The Linux key code of an `0xE0`-prefixed set-1 scancode (the make code without the
+/// prefix), or 0 if it has none.
+///
+/// # Arguments
+///
+/// * `make` - The make code after the `0xE0` prefix (bit 7 clear).
+pub(crate) fn e0_keycode(make: u8) -> u32 {
+    match make {
+        0x1C => 96,  // KP Enter
+        0x1D => 97,  // Right Ctrl
+        0x35 => 98,  // KP /
+        0x38 => 100, // Right Alt
+        0x47 => 102, // Home
+        0x48 => 103, // Up
+        0x49 => 104, // Page Up
+        0x4B => 105, // Left
+        0x4D => 106, // Right
+        0x4F => 107, // End
+        0x50 => 108, // Down
+        0x51 => 109, // Page Down
+        0x52 => 110, // Insert
+        0x53 => 111, // Delete
+        0x5B => 125, // Left Meta
+        0x5C => 126, // Right Meta
+        0x5D => 127, // Menu
+        _ => 0,
     }
 }

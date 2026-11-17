@@ -207,13 +207,12 @@ pub fn end() {
     crate::console::redraw_from_scrollback();
 }
 
-/// Kernel panic: the console shows at once, without waiting on locks the panicking code
-/// may hold.
+/// Kernel panic: the console shows at once, over the boot logo or a desktop session,
+/// without waiting on locks the panicking code may hold.
 pub fn panic_reveal() {
     QUIET.store(false, Ordering::Relaxed);
-    if ACTIVE.swap(false, Ordering::AcqRel) {
-        super::console::reclaim_display_nowait();
-    }
+    ACTIVE.store(false, Ordering::Release);
+    super::console::panic_reclaim();
 }
 
 /// The real framebuffer.

@@ -287,7 +287,7 @@ pub fn on_keyboard_irq() {
 
 /// Takes one set-1 scancode byte from any keyboard: the PS/2 one (its interrupt) or a USB
 /// one (the USB input task translates HID usages to set-1 codes), so both reach the
-/// console, Hydra's compositor and the Linux event devices the same way. Called with
+/// console and the Linux event devices the same way. Called with
 /// interrupts off.
 ///
 /// # Arguments
@@ -327,12 +327,7 @@ pub fn handle_scancode(scancode: u8) {
         crate::compat::linux::evdev::push_scancode(scancode);
         return;
     }
-    if crate::wayland::RAW_KEYBOARD.load(core::sync::atomic::Ordering::Acquire) {
-        // The Wayland compositor shows: it receives the keyboard as raw scancodes
-        crate::wayland::push_scancode(scancode);
-        return;
-    }
-    // Ctrl+Alt+F2 on the console switches to the compositor's screen
+    // Ctrl+Alt+F2 on the console switches back to the hidden desktop session
     use core::sync::atomic::Ordering::Relaxed;
     match scancode {
         0x1D => CONSOLE_CTRL.store(true, Relaxed),
@@ -341,11 +336,6 @@ pub fn handle_scancode(scancode: u8) {
         0xB8 => CONSOLE_ALT.store(false, Relaxed),
         0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::compat::linux::drm::session_hidden() => {
             crate::compat::linux::drm::request_vt_switch(true);
-            return;
-        }
-        0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::wayland::is_running() => {
-            crate::wayland::SWITCH_TO_COMPOSITOR.store(true, core::sync::atomic::Ordering::Release);
-            crate::wayland::INPUT_WQ.wake_all();
             return;
         }
         _ => {}

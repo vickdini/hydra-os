@@ -102,7 +102,6 @@ hydra# ps
     2     1     3  Blocked      410.12         942  ata-driver (0x21)
     3     1     3  Blocked    1,824.50       3,410  zfs-server (0x20)
     4     1     3  Blocked      620.80       1,280  net_driver (0x22)
-    5     1     3  Blocked    8,410.20      24,190  display_server (0x23)
     6     1     3  Ready        912.40       2,100  hydra-logind
     7     6     3  Blocked    6,120.90      18,420  kwin_wayland
     8     7     3  Ready     12,840.10      41,200  firefox-bin
@@ -185,8 +184,7 @@ errors: No known data errors
 \toprule
 \textbf{Command} & \textbf{Source File} & \textbf{Description and Functionality} \\
 \midrule
-\texttt{video} & \texttt{commands/video.rs} & Reports UEFI GOP resolution, pixel format, stride, and physical address. \\
-\texttt{plasma} & \texttt{commands/plasma\_cmd.rs} & Starts KDE Plasma 6 desktop session via \texttt{hydra-session}. \\
+\texttt{linux plasma} & \texttt{commands/linux\_cmd.rs} & Starts the KDE Plasma 6 desktop (SDDM, then Plasma) via \texttt{hydra-session}. \\
 \texttt{linux} & \texttt{commands/linux\_cmd.rs} & Executes unmodified Linux 64-bit ELF executable under compatibility ABI. \\
 \texttt{elf} & \texttt{commands/elf\_cmd.rs} & Dumps ELF headers, program segments, dynamic symbols, and interpreter tags. \\
 \bottomrule

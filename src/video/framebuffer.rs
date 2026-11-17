@@ -253,31 +253,6 @@ impl Framebuffer {
         }
     }
 
-    /// Renders a text string at the given pixel coordinates.
-    ///
-    /// # Arguments
-    /// * `x` - Starting left pixel coordinate.
-    /// * `y` - Baseline top pixel coordinate.
-    /// * `text` - String slice to render.
-    /// * `fg` - Foreground RGB color tuple.
-    /// * `bg` - Background RGB color tuple.
-    pub fn draw_string(
-        &mut self,
-        mut x: usize,
-        y: usize,
-        text: &str,
-        fg: (u8, u8, u8),
-        bg: (u8, u8, u8),
-    ) {
-        for c in text.chars() {
-            if x + FONT_WIDTH > self.width {
-                break;
-            }
-            self.draw_char(x, y, c, fg, bg);
-            x += FONT_WIDTH;
-        }
-    }
-
     /// Scrolls the screen contents upwards by `pixel_rows` and clears the exposed bottom area.
     ///
     /// # Arguments

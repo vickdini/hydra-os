@@ -30,7 +30,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_DISPLAY_DEV, ENDPOINT_NET_DEV, ENDPOINT_ZFS_SERVER, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
+use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_NET_DEV, ENDPOINT_ZFS_SERVER, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
 use crate::ipc::service;
 use crate::ipc::Message;
 use crate::task::{is_task_alive, kill, TaskId};
@@ -47,8 +47,6 @@ static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/e1000-driver"));
 /// The sound driver program (Intel High Definition Audio).
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
-/// The display server program.
-static DISPLAY_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/display-server"));
 
 /// Operational state of a supervised service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,29 +386,6 @@ fn no_grants() -> Vec<(u64, u64)> {
     Vec::new()
 }
 
-/// Display server: the framebuffer, and whether there is a disk (for its widgets).
-///
-/// # Returns
-///
-/// `Some(Vec<String>)` containing framebuffer parameters and storage presence.
-fn display_args() -> Option<Vec<String>> {
-    let info = crate::video::get_video_info()?;
-    let disk = if service::is_online(crate::ipc::protocol::ENDPOINT_BLOCK_DEV) { "disk=ata" } else { "disk=none" };
-    Some(alloc::vec![
-        alloc::format!("fb={:#x}:{}:{}:{}:{}", info.base_ptr as u64, info.width, info.height, info.stride, info.is_bgr as u8),
-        String::from(disk),
-    ])
-}
-
-/// Computes physical memory grants for the display server framebuffer.
-///
-/// # Returns
-///
-/// Vector of `(physical_address, length_bytes)` tuples.
-fn display_grants() -> Vec<(u64, u64)> {
-    crate::video::get_video_info().map_or_else(Vec::new, |info| alloc::vec![(info.base_ptr as u64, ((info.size as u64) + 4095) & !4095)])
-}
-
 /// Telemetry of one service (`service status`).
 #[derive(Debug, Clone)]
 pub struct ServiceSnapshot {
@@ -598,7 +573,6 @@ pub fn supervisor_init() {
         service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
         service::allow_client(crate::ipc::protocol::ENDPOINT_USB_DISK, ENDPOINT_ZFS_SERVER);
         sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
-        sup.services.push(ServiceDescriptor::new("display_server", ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_args, display_grants));
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,

@@ -1,28 +1,27 @@
-//! # Video Subsystem: Framebuffer, Text Console, and Display Client
+//! # Video Subsystem: the Emergency Text Console and the Boot Splash
 //!
-//! Provides the UEFI Graphics Output Protocol (GOP) linear framebuffer, the kernel's
-//! bitmap text console, and the client side of the display server.
+//! The kernel keeps only what it needs to show text without any user-space program: the
+//! UEFI Graphics Output Protocol (GOP) linear framebuffer, a text console with an embedded
+//! 8x16 font, and the boot logo.
 //!
 //! ## Architectural Role & Design Rationale
 //!
-//! Modern graphical displays in UEFI systems provide a linear frame buffer configured via GOP.
-//! The kernel keeps only what it needs to print: the framebuffer and a text console with an
-//! embedded 8x16 font. The graphical desktop (compositor, window management, the
-//! Plasma-style shell) is the display server, a Ring 3 program (`userland/drivers/display-server`)
-//! that the supervisor starts with the framebuffer granted to it; `display` talks to it.
+//! The desktop is KDE Plasma: KWin draws through the Linux DRM device
+//! ([`crate::compat::linux::drm`]), which borrows the framebuffer from this console while a
+//! session shows and gives it back on Ctrl+Alt+F1, at logout, and on a kernel panic. The
+//! console is what remains when no desktop runs: early boot messages, the Hydra shell and
+//! its login, and panic messages. There is no compositor or window drawing in the kernel.
 //!
 //! ## Key Modules
 //!
 //! - `gop`: Discovers and maps the UEFI GOP linear framebuffer before ExitBootServices.
-//! - `framebuffer`: 32-bit ARGB/BGR canvas abstraction and drawing primitives.
-//! - `font`: Embedded 8x16 VGA font glyphs (shared with the display server).
-//! - [`console`]: Terminal emulation layer rendering scrolling text onto the graphical framebuffer.
-//! - `display`: Requests to the display server (input events, frames).
+//! - `framebuffer`: Pixel, rectangle, glyph and scroll primitives on that framebuffer.
+//! - `font`: Embedded 8x16 VGA font glyphs.
+//! - [`console`]: Scrolling text terminal (with the ANSI sequences the shell uses) on the framebuffer.
+//! - `splash`: The Hydra logo shown during boot instead of the messages.
 
 /// Graphical text console emulation backed by the GOP framebuffer.
 pub mod console;
-/// Client of the Ring 3 display server.
-pub mod display;
 /// Embedded 8x16 bitmap font glyph table and character blitting.
 pub mod font;
 /// Linear framebuffer memory abstraction and pixel manipulation primitives.
@@ -32,18 +31,4 @@ pub mod gop;
 /// The Hydra logo shown during boot instead of the boot messages.
 pub mod splash;
 
-pub use console::{clear_screen, is_active, set_colors, write_str, VideoConsole, VIDEO_CONSOLE};
-pub use framebuffer::Framebuffer;
 pub use gop::{get_video_info, init_gop, VideoModeInfo};
-
-/// Executes a closure with mutable access to the global display Framebuffer.
-///
-/// # Arguments
-/// * `f` - Closure taking a mutable reference to [`Framebuffer`].
-///
-/// # Returns
-///
-/// `Some(R)` with the closure result if the video console is active, or `None` otherwise.
-pub fn with_framebuffer<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
-    VIDEO_CONSOLE.lock().as_mut().map(|vc| f(vc.framebuffer_mut()))
-}

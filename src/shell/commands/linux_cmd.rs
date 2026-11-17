@@ -267,27 +267,6 @@ impl Command for LinuxCommand {
                 }
             }
 
-            "wayland" => {
-                // linux wayland [root]: start the compositor for clients in a Linux root
-                let root = args.get(1).copied().unwrap_or("/ubuntu");
-                if !crate::arch::boot_services::is_hardware_takeover_complete() {
-                    let _ = crate::arch::boot_services::take_hardware_ownership();
-                }
-                let root_ino = match crate::fs::ZfsClient::resolve(0, root.as_bytes(), true) {
-                    Ok(i) => i,
-                    Err(_) => {
-                        println!("[!] linux wayland: no such directory: {}", root);
-                        return;
-                    }
-                };
-                prepare_runtime_dir(root, state.current_uid, state.current_gid);
-                let path = alloc::format!("/run/user/{}/wayland-0", state.current_uid);
-                match crate::wayland::start(root_ino, &path, state.current_uid, state.current_gid) {
-                    Ok(()) => println!("[+] Wayland compositor started: WAYLAND_DISPLAY=wayland-0 in {} (Ctrl+Alt+F1 console, Ctrl+Alt+F2 desktop)", root),
-                    Err(e) => println!("[!] linux wayland: {}", e),
-                }
-            }
-
             "chroot" => {
                 if args.len() < 3 {
                     println!("Usage: linux chroot <dir> <program> [args...]   e.g. linux chroot /ubuntu /usr/bin/bash -c 'ls /'");
@@ -369,16 +348,9 @@ impl Command for LinuxCommand {
                 }
             }
 
-            "click" => {
-                let x = if args.len() > 1 { args[1].parse::<usize>().unwrap_or(640) } else { 640 };
-                let y = if args.len() > 2 { args[2].parse::<usize>().unwrap_or(400) } else { 400 };
-                crate::compat::linux::inject_simulated_click(x, y);
-                println!("[+] Injected simulated mouse click at ({}, {})", x, y);
-            }
-
             _ => {
                 console::set_color(Color::LightRed, Color::Black);
-                println!("Invalid subcommand. Usage: linux [status|info|test|run <path>|click <x> <y>]");
+                println!("Invalid subcommand. Usage: linux [status|info|test|run <path>]");
                 console::set_color(Color::White, Color::Black);
             }
         }

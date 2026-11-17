@@ -4,9 +4,10 @@
 //!
 //! ## Architectural Role & Design Rationale
 //!
-//! To support modern graphical desktop environments (such as the KDE Plasma-style Wayland
-//! compositor shell) without relying on firmware boot services, Hydra OS requires an autonomous
-//! pointer input driver operating directly on hardware I/O ports `0x60` (data) and `0x64` (status/command).
+//! The desktop (KWin) reads the pointer from the Linux event devices (`/dev/input/event*`,
+//! [`crate::compat::linux::evdev`]): this driver decodes the packets on hardware I/O ports
+//! `0x60` (data) and `0x64` (status/command) and passes each one on; it keeps no pointer
+//! position of its own.
 //!
 //! The 8042 Keyboard and Auxiliary Controller multiplexes input from both the keyboard (Port 1, IRQ 1)
 //! and the mouse (Port 2 / Auxiliary, IRQ 12). By inspecting bit 5 (`AUX`) of the controller status register,
@@ -14,10 +15,9 @@
 //!
 //! ## Key Types & Interfaces
 //!
-//! - `MouseState`: Tracks absolute pointer coordinates `(x, y)` and button press states.
-//! - `MouseEvent`: Represents a discrete pointing motion or button transition event.
 //! - `init`: Initializes the 8042 auxiliary port and enables streaming packet reporting.
-//! - `poll_mouse`: Dispatches pending hardware packets and updates the pointer state.
+//! - `on_mouse_irq`: Decodes packets (or VMware absolute reports) and passes them to evdev.
+//! - `inject_relative` / `inject_absolute`: Reports of USB mice and tablets.
 //!
 //! ## Hardware Context
 //!
@@ -45,52 +45,6 @@ const MOUSE_ACK: u8 = 0xFA;
 // Status Register Bits
 const STATUS_OUTPUT_BUFFER_FULL: u8 = 0x01;
 const STATUS_INPUT_BUFFER_FULL: u8 = 0x02;
-const STATUS_AUX_OUTPUT: u8 = 0x20;
-
-/// State of the mouse pointing device across the active display canvas.
-#[derive(Debug, Clone, Copy)]
-pub struct MouseState {
-    /// Horizontal screen coordinate (clamped to display width).
-    pub x: usize,
-    /// Vertical screen coordinate (clamped to display height).
-    pub y: usize,
-    /// Primary (left) mouse button state.
-    pub left_button: bool,
-    /// Secondary (right) mouse button state.
-    pub right_button: bool,
-    /// Tertiary (middle/wheel) mouse button state.
-    pub middle_button: bool,
-}
-
-impl MouseState {
-    /// Creates a default mouse state centered at the given screen coordinates.
-    pub const fn new(initial_x: usize, initial_y: usize) -> Self {
-        Self {
-            x: initial_x,
-            y: initial_y,
-            left_button: false,
-            right_button: false,
-            middle_button: false,
-        }
-    }
-}
-
-/// Represents a mouse update event emitted by the hardware driver.
-#[derive(Debug, Clone, Copy)]
-pub struct MouseEvent {
-    /// Absolute cursor position and current button press states.
-    pub state: MouseState,
-    /// Relative horizontal motion delta since the previous packet.
-    pub delta_x: i32,
-    /// Relative vertical motion delta since the previous packet.
-    pub delta_y: i32,
-    /// Whether the left mouse button transitioned from unpressed to pressed.
-    pub left_pressed: bool,
-    /// Whether the right mouse button transitioned from unpressed to pressed.
-    pub right_pressed: bool,
-    /// Wheel clicks since the previous packet (positive = away from the user).
-    pub wheel: i32,
-}
 
 struct Ps2Mouse {
     data_port: Port<u8>,
@@ -99,14 +53,9 @@ struct Ps2Mouse {
     packet_idx: usize,
     /// Bytes per packet: 3, or 4 once the IntelliMouse wheel protocol is enabled.
     packet_len: usize,
-    state: MouseState,
     initialized: bool,
     /// Bytes arrive through IRQ 12 (after hardware takeover) instead of polling.
     irq_mode: bool,
-    /// Latest event decoded by the interrupt handler, not yet polled.
-    pending: Option<MouseEvent>,
-    /// Screen size the position is clamped to (from the last poll).
-    screen: (usize, usize),
 }
 
 impl Ps2Mouse {
@@ -117,11 +66,8 @@ impl Ps2Mouse {
             packet_buf: [0; 4],
             packet_idx: 0,
             packet_len: 3,
-            state: MouseState::new(400, 300),
             initialized: false,
             irq_mode: false,
-            pending: None,
-            screen: (1024, 768),
         }
     }
 
@@ -308,81 +254,21 @@ impl Ps2Mouse {
         id == 3
     }
 
-    /// Polls for incoming mouse packet bytes and updates coordinates.
-    ///
-    /// In polled mode (before IRQ 12 is enabled), inspects status port `0x64` for pending
-    /// auxiliary data bytes and feeds them into the packet assembler. In IRQ mode, returns
-    /// any pending event decoded by the interrupt handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `screen_width` - Current display width in pixels for boundary clamping.
-    /// * `screen_height` - Current display height in pixels for boundary clamping.
-    ///
-    /// # Returns
-    ///
-    /// `Some(MouseEvent)` if a complete mouse packet was assembled; `None` otherwise.
-    ///
-    /// # Panics
-    ///
-    /// *Guaranteed to never panic under normal execution.*
-    fn poll(&mut self, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
-        self.screen = (screen_width, screen_height);
-        if self.irq_mode {
-            return self.pending.take();
-        }
-        if !self.initialized {
-            let _ = self.init();
-        }
-
-        // Check if data is pending in the 8042 output buffer
-        let status = unsafe { self.cmd_port.read() };
-        if (status & STATUS_OUTPUT_BUFFER_FULL) == 0 {
-            return None;
-        }
-
-        // Verify that the byte originated from the auxiliary device (mouse)
-        if (status & STATUS_AUX_OUTPUT) == 0 {
-            return None;
-        }
-
-        let byte = unsafe { self.data_port.read() };
-        self.feed(byte, screen_width, screen_height)
-    }
-
     /// Appends one byte to the active packet buffer and decodes complete mouse packets.
     ///
-    /// Assembles standard 3-byte PS/2 packets (or 4-byte IntelliMouse wheel packets),
-    /// performs 9-bit sign extension on X and Y movement deltas, inverts screen Y coordinates,
-    /// updates internal position clamping against screen boundaries, and detects button transitions.
+    /// Assembles standard 3-byte PS/2 packets (or 4-byte IntelliMouse wheel packets) and
+    /// performs 9-bit sign extension on the X and Y movement deltas.
     ///
     /// # Arguments
     ///
     /// * `byte` - Incoming byte from the 8042 auxiliary port.
-    /// * `screen_width` - Maximum horizontal boundary in pixels.
-    /// * `screen_height` - Maximum vertical boundary in pixels.
     ///
     /// # Returns
     ///
-    /// `Some(MouseEvent)` when a full packet is assembled; `None` while receiving partial bytes.
-    ///
-    /// # Panics
-    ///
-    /// *Guaranteed to never panic under normal execution.*
-    /// Applies one relative movement (`dx` right, `screen_dy` down), the wheel and the
-    /// buttons (bit 0 left, 1 right, 2 middle) to the pointer state.
-    fn apply(&mut self, dx: i32, screen_dy: i32, wheel: i32, buttons: u8, screen_width: usize, screen_height: usize) -> MouseEvent {
-        let (left_button, right_button, middle_button) = (buttons & 1 != 0, buttons & 2 != 0, buttons & 4 != 0);
-        let new_x = ((self.state.x as i32) + dx).clamp(0, (screen_width.saturating_sub(1)) as i32) as usize;
-        let new_y = ((self.state.y as i32) + screen_dy).clamp(0, (screen_height.saturating_sub(1)) as i32) as usize;
-        let left_pressed = left_button && !self.state.left_button;
-        let right_pressed = right_button && !self.state.right_button;
-        self.state = MouseState { x: new_x, y: new_y, left_button, right_button, middle_button };
-        MouseEvent { state: self.state, delta_x: dx, delta_y: screen_dy, left_pressed, right_pressed, wheel }
-    }
-
-    fn feed(&mut self, byte: u8, screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
-
+    /// `Some((dx, dy, wheel, buttons))` when a full packet is assembled (`dy` down, `wheel`
+    /// positive away from the user, buttons bit 0 left, 1 right, 2 middle); `None` while
+    /// receiving partial bytes.
+    fn feed(&mut self, byte: u8) -> Option<(i32, i32, i32, u8)> {
         // Byte 0 must have bit 3 set (always 1 in standard PS/2 packet)
         // A header with both overflow bits set is a stray reply (ACK 0xFA, resend 0xFE)
         if self.packet_idx == 0 && ((byte & 0x08) == 0 || byte & 0xC0 == 0xC0) {
@@ -417,72 +303,23 @@ impl Ps2Mouse {
         }
 
         // Invert dy: PS/2 upward movement is positive, but screen Y increases downward
-        Some(self.apply(dx, -dy, wheel, b0 & 7, screen_width, screen_height))
-    }
-
-    /// Takes an absolute pointer report (position 0..=`max` on both axes) and queues the
-    /// event for Hydra's compositor.
-    fn absolute(&mut self, x: u32, y: u32, max: u32, wheel: i8, buttons: u8) {
-        let (w, h) = self.screen;
-        let x = (x as u64 * w.saturating_sub(1) as u64 / max.max(1) as u64) as usize;
-        let y = (y as u64 * h.saturating_sub(1) as u64 / max.max(1) as u64) as usize;
-        let left = buttons & 1 != 0;
-        let right = buttons & 2 != 0;
-        let prev = self.state;
-        self.state = MouseState { x, y, left_button: left, right_button: right, middle_button: buttons & 4 != 0 };
-        // Hydra's own compositor reads positions and presses from the pending event
-        let ev = MouseEvent {
-            state: self.state,
-            delta_x: x as i32 - prev.x as i32,
-            delta_y: y as i32 - prev.y as i32,
-            left_pressed: left && !prev.left_button,
-            right_pressed: right && !prev.right_button,
-            wheel: wheel as i32,
-        };
-        self.merge(ev);
-    }
-
-    /// Queues `ev` for the compositor, merged with one not yet polled so that presses
-    /// are not lost.
-    fn merge(&mut self, ev: MouseEvent) {
-        let merged = match self.pending.take() {
-            Some(p) => MouseEvent {
-                left_pressed: p.left_pressed || ev.left_pressed,
-                right_pressed: p.right_pressed || ev.right_pressed,
-                delta_x: p.delta_x + ev.delta_x,
-                delta_y: p.delta_y + ev.delta_y,
-                wheel: p.wheel + ev.wheel,
-                ..ev
-            },
-            None => ev,
-        };
-        self.pending = Some(merged);
+        Some((dx, -dy, wheel, b0 & 7))
     }
 }
 
 /// A relative pointer report from a USB mouse (`dx` right, `dy` down, `wheel` positive
 /// away from the user, buttons bit 0 left, 1 right, 2 middle): handled as a PS/2 packet
-/// is, for the compositor and the Linux event devices. Called with interrupts off.
+/// is, for the Linux event devices. Called with interrupts off.
 pub fn inject_relative(dx: i32, dy: i32, wheel: i32, buttons: u8) {
-    let Some(mut mouse) = MOUSE_DRIVER.try_lock() else { return };
-    let (w, h) = mouse.screen;
-    let ev = mouse.apply(dx, dy, wheel, buttons, w, h);
-    mouse.merge(ev);
-    drop(mouse);
     crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons);
-    crate::wayland::INPUT_WQ.wake_all();
 }
 
 /// An absolute pointer report from a USB tablet: position 0..=`max` on both axes, wheel
 /// clicks, buttons. Handled as a VMware mouse report is (the Linux event device's range is
 /// 0..=0xFFFF). Called with interrupts off.
 pub fn inject_absolute(x: u32, y: u32, max: u32, wheel: i8, buttons: u8) {
-    let Some(mut mouse) = MOUSE_DRIVER.try_lock() else { return };
-    mouse.absolute(x, y, max, wheel, buttons);
-    drop(mouse);
     let scale = |v: u32| (v.min(max) as u64 * 0xFFFF / max.max(1) as u64) as u16;
     crate::compat::linux::evdev::push_abs(scale(x), scale(y), wheel, buttons);
-    crate::wayland::INPUT_WQ.wake_all();
 }
 
 static MOUSE_DRIVER: Mutex<Ps2Mouse> = Mutex::new(Ps2Mouse::new());
@@ -515,53 +352,6 @@ pub fn init() {
             }
         }
     }
-}
-
-/// Polls for incoming mouse events and returns an updated pointer event if movement occurred.
-///
-/// # Arguments
-///
-/// * `screen_width` - Display width in pixels (used for coordinate clamping).
-/// * `screen_height` - Display height in pixels (used for coordinate clamping).
-///
-/// # Returns
-///
-/// `Some(MouseEvent)` if a movement or button state change was decoded; `None` otherwise.
-///
-/// # Panics
-///
-/// *Guaranteed to never panic under normal execution.*
-pub fn poll_mouse(screen_width: usize, screen_height: usize) -> Option<MouseEvent> {
-    MOUSE_DRIVER.lock().poll(screen_width, screen_height)
-}
-
-/// Sets the current pointer coordinates (e.g. upon resolution change or center reset).
-///
-/// # Arguments
-///
-/// * `x` - Target horizontal coordinate in pixels.
-/// * `y` - Target vertical coordinate in pixels.
-///
-/// # Panics
-///
-/// *Guaranteed to never panic under normal execution.*
-pub fn set_position(x: usize, y: usize) {
-    let mut mouse = MOUSE_DRIVER.lock();
-    mouse.state.x = x;
-    mouse.state.y = y;
-}
-
-/// Returns the current snapshot of pointer coordinates and button states.
-///
-/// # Returns
-///
-/// A copy of the current `MouseState` containing coordinates and button press flags.
-///
-/// # Panics
-///
-/// *Guaranteed to never panic under normal execution.*
-pub fn current_state() -> MouseState {
-    MOUSE_DRIVER.lock().state
 }
 
 /// Switches the mouse to interrupt-driven input (IRQ 12), once Hydra owns the PIC and IDT.
@@ -613,9 +403,8 @@ pub fn enable_irq() {
 
 /// Handles incoming bytes from the auxiliary PS/2 port on IRQ 12 (IDT Vector 44).
 ///
-/// Reads the byte from data port `0x60`, feeds it into the packet decoder, merges any
-/// unconsumed pending motion events, dispatches events to Linux evdev, and wakes
-/// waiting graphical tasks via the Wayland input wait queue.
+/// Reads the byte from data port `0x60`, feeds it into the packet decoder and passes
+/// complete packets (or the VMware mouse's absolute reports) to the Linux event devices.
 ///
 /// # Panics
 ///
@@ -627,10 +416,9 @@ pub fn on_mouse_irq() {
         Some(m) => m,
         None => return,
     };
-    let (w, h) = mouse.screen;
     if super::vmmouse::active() {
         // The packet only says that absolute reports are queued: read those instead
-        if mouse.feed(byte, w, h).is_none() {
+        if mouse.feed(byte).is_none() {
             return;
         }
         let mut reports = [None; 8];
@@ -643,9 +431,6 @@ pub fn on_mouse_irq() {
             reports[n] = Some(r);
             n += 1;
         });
-        for r in reports.iter().flatten() {
-            mouse.absolute(r.x as u32, r.y as u32, super::vmmouse::MAX, r.wheel, r.buttons);
-        }
         drop(mouse);
         static FIRST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
         for r in reports.iter().flatten() {
@@ -654,16 +439,10 @@ pub fn on_mouse_irq() {
             }
             crate::compat::linux::evdev::push_abs(r.x, r.y, r.wheel, r.buttons);
         }
-        if n > 0 {
-            crate::wayland::INPUT_WQ.wake_all();
-        }
         return;
     }
-    if let Some(ev) = mouse.feed(byte, w, h) {
-        mouse.merge(ev);
+    if let Some((dx, dy, wheel, buttons)) = mouse.feed(byte) {
         drop(mouse);
-        let buttons = ev.state.left_button as u8 | (ev.state.right_button as u8) << 1 | (ev.state.middle_button as u8) << 2;
-        crate::compat::linux::evdev::push_mouse(ev.delta_x, ev.delta_y, ev.wheel, buttons);
-        crate::wayland::INPUT_WQ.wake_all();
+        crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons);
     }
 }

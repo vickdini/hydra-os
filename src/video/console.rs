@@ -377,11 +377,7 @@ impl VideoConsole {
         &mut self.framebuffer
     }
 
-    /// Obtains an immutable reference to the underlying linear [`Framebuffer`].
-    ///
-    /// # Returns
-    ///
-    /// Immutable reference to the internal [`Framebuffer`].
+    /// The underlying linear [`Framebuffer`].
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.framebuffer
     }
@@ -462,10 +458,31 @@ pub fn hide_behind_splash() -> Option<(*mut u8, usize, usize, usize, bool)> {
     Some(info)
 }
 
-/// [`reclaim_display`] for a kernel panic: gives up rather than wait on a lock, and keeps
-/// the off-screen copy's memory (the heap may be what failed).
-pub fn reclaim_display_nowait() {
-    let Some(mut guard) = VIDEO_CONSOLE.try_lock() else { return };
+/// Set by a kernel panic: whoever borrowed the screen (the DRM device of a desktop
+/// session) stops drawing on it, so that the panic message stays visible.
+static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the kernel has panicked (the screen belongs to the console for good).
+pub fn panicked() -> bool {
+    PANICKED.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// [`reclaim_display`] for a kernel panic: takes the screen back from the boot logo or a
+/// desktop session for good, gives up rather than wait on a lock, and keeps the off-screen
+/// copy's memory (the heap may be what failed).
+pub fn panic_reclaim() {
+    PANICKED.store(true, core::sync::atomic::Ordering::Release);
+    // A lock held by the panicking code (or a CPU in the middle of a frame) is not waited
+    // for long: the copy below is best effort
+    let mut guard = None;
+    for _ in 0..1_000_000 {
+        if let Some(g) = VIDEO_CONSOLE.try_lock() {
+            guard = Some(g);
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let Some(mut guard) = guard else { return };
     let Some(console) = guard.as_mut() else { return };
     let Some(mut shadow) = SHADOW.try_lock() else { return };
     if let Some((copy, real)) = shadow.take() {

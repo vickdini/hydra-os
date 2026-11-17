@@ -194,10 +194,6 @@ impl Command for ElfCommand {
         // 5. Spawn Unprivileged Ring 3 Process
         let is_linux_elf = elf.interp_path().is_some()
             || resolved_path.contains("linux")
-            || resolved_path.contains("plasmashell")
-            || resolved_path.contains("krunner")
-            || resolved_path.contains("wlclient")
-            || resolved_path.contains("wlseat")
             || resolved_path.contains("dynclient");
         let leaked_name: &'static str = Box::leak(resolved_path.into_boxed_str());
         let spawn_res = if is_linux_elf {

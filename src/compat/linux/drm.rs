@@ -210,6 +210,13 @@ unsafe impl Send for Kms {}
 
 static KMS: Mutex<Option<Kms>> = Mutex::new(None);
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
+/// Open DRM files (to notice that the last desktop session is gone).
+static OPEN_FILES: AtomicU64 = AtomicU64::new(0);
+/// How long the screen stays with a desktop that closed its last DRM file before the
+/// console takes it back: the next session (SDDM after a logout) opens the device sooner.
+const GONE_GRACE_MS: u64 = 10_000;
+/// A [`session_gone_main`] task is waiting.
+static GONE_CHECK: AtomicBool = AtomicBool::new(false);
 
 /// Executes a closure with access to the global KMS subsystem.
 ///
@@ -287,6 +294,21 @@ fn start_vtd() {
     }
 }
 
+/// A desktop closed its last DRM file without a master (its logind dropped mastership
+/// first), so nothing will draw any more: unless a new session opens the device within
+/// [`GONE_GRACE_MS`], the console takes the screen back instead of leaving the desktop's
+/// last picture up.
+fn session_gone_main() {
+    crate::task::sleep_ms(GONE_GRACE_MS);
+    with_kms(|k| {
+        if k.master.is_none() && OPEN_FILES.load(Ordering::Acquire) == 0 {
+            k.give_screen();
+            SESSION_HIDDEN.store(false, Ordering::Release);
+        }
+    });
+    GONE_CHECK.store(false, Ordering::Release);
+}
+
 /// Main loop for the `vtd` kernel task handling display switching.
 fn vtd_main() {
     loop {
@@ -337,9 +359,6 @@ impl Kms {
     fn take_screen(&mut self) -> Result<(), i64> {
         if self.screen.is_some() {
             return Ok(());
-        }
-        if crate::wayland::is_running() && crate::video::console::display_released() {
-            return Err(EBUSY); // Hydra's own compositor shows
         }
         let (fb, _w, _h, stride, bgr) = crate::video::console::release_display().ok_or(ENXIO)?;
         self.screen = Some((fb, stride, bgr));
@@ -395,6 +414,8 @@ impl Kms {
     /// * `y1` - Ending Y row (exclusive).
     fn copy_rect(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
         let (screen, stride, bgr) = match self.screen {
+            // After a kernel panic the screen shows the panic message
+            Some(_) if crate::video::console::panicked() => return,
             Some(s) => s,
             None => return,
         };
@@ -435,6 +456,7 @@ impl Kms {
     /// Blends the cursor image over the screen at its position.
     fn draw_cursor(&mut self) {
         let (screen, stride, bgr) = match self.screen {
+            Some(_) if crate::video::console::panicked() => return,
             Some(s) => s,
             None => return,
         };
@@ -531,6 +553,7 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
         return Err(ENXIO);
     }
     let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    OPEN_FILES.fetch_add(1, Ordering::AcqRel);
     // The first opener of an unmastered device becomes master
     with_kms(|k| {
         if k.master.is_none() {
@@ -567,6 +590,11 @@ impl Drop for DrmFile {
                 k.cursor_bo = None;
                 k.give_screen();
                 SESSION_HIDDEN.store(false, Ordering::Release);
+            }
+            if OPEN_FILES.fetch_sub(1, Ordering::AcqRel) == 1 && k.master.is_none() && k.screen.is_some() {
+                if !GONE_CHECK.swap(true, Ordering::AcqRel) {
+                    crate::task::spawn("drmgone", session_gone_main, crate::task::TaskPriority::High);
+                }
             }
         });
     }
