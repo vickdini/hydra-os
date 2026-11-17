@@ -548,6 +548,19 @@ impl TcpConn {
             }
         }
         if flags & TcpFlags::ACK != 0 {
+            // The window reopened while what we sent into a (nearly) closed window was not
+            // taken (the receiver had no room: a window probe, or data on a stale window):
+            // send again from the oldest unacknowledged byte now, instead of after the
+            // retransmission timeout (which cost 300 ms per window on loopback)
+            if (self.snd_wnd as usize) < MSS
+                && seg.window_size as u32 > self.snd_wnd
+                && seg.ack_num == self.snd_una
+                && self.snd_una != self.snd_nxt
+                && self.fin_seq.is_none()
+                && matches!(self.state, TcpState::Established | TcpState::CloseWait)
+            {
+                self.snd_nxt = self.snd_una;
+            }
             self.snd_wnd = seg.window_size as u32;
         }
 

@@ -280,11 +280,17 @@ fn request(label: u32, args: [u64; 4]) -> Result<[u64; 4], i64> {
 }
 
 /// A request on live socket `id`, whose server handle goes in `args[0]` (`dead_err` if it
-/// died with its server).
+/// died with its server). Never retried on a restarted server (as [`request`] is): the
+/// handle means nothing there, or worse, another socket.
 fn on(id: u32, dead_err: i64, label: u32, mut args: [u64; 4]) -> Result<[u64; 4], i64> {
     let Some(sid) = sid(id) else { return Err(dead_err) };
     args[0] = sid as u64;
-    request(label, args)
+    match service::call_once(ENDPOINT_NET_SERVER, Message::with_args(label, args), CALL_TIMEOUT_TICKS) {
+        Ok(r) if (r.args[0] as i64) < 0 => Err(r.args[0] as i64),
+        Ok(r) => Ok(r.args),
+        // The server went away during the call
+        Err(_) => Err(dead_err),
+    }
 }
 
 /// Runs `f` with the server's window held (for a request with a payload).

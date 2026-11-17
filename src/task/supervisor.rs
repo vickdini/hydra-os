@@ -719,6 +719,11 @@ pub fn supervisor_tick() {
         }
         let Some(id) = task else { continue };
         if !is_task_alive(id) {
+            // A kernel caller may have revived it meanwhile (`revive`): then it is not
+            // this process any more, and nothing is to be done
+            if SUPERVISOR.lock().services[idx].task_id != Some(id) {
+                continue;
+            }
             crate::kprintln!("[supervisor] service on endpoint {:#x} (process {}) died", endpoint, id.0);
             let restarted = SUPERVISOR.lock().reincarnate(idx);
             if let Ok(id) = restarted {

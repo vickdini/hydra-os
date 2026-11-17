@@ -101,6 +101,8 @@ struct State {
     next_link: u64,
     /// Carrier link seen at the last check.
     link: bool,
+    /// Next poll of the card without an interrupt.
+    next_poll: u64,
 }
 
 /// Interface changes (leases), for `NETS_ST_IFACE_SEQ`.
@@ -586,6 +588,7 @@ fn main(args: &[&str]) {
         next_timer: 0,
         next_link: 0,
         link: false,
+        next_poll: 0,
     };
     // The status area of a previous instance (the window outlives it) is cleared first
     st.window()[NETS_STATUS_OFF..].fill(0);
@@ -606,8 +609,18 @@ fn main(args: &[&str]) {
     );
     loop {
         let poll_nic = match sys::svc_recv_notify(ENDPOINT_NET_SERVER, wait_ticks(&st)) {
-            // A notification (the card's interrupt) or the timeout
-            Ok((0, _)) => true,
+            // The card's interrupt, or the timeout (then the card is polled only now and
+            // then: its interrupt may not work)
+            Ok((0, m)) => {
+                let now = sys::uptime_ticks();
+                let due = now >= st.next_poll;
+                if m.args[0] & NOTIFY_IRQ != 0 || due {
+                    st.next_poll = now + IDLE_TICKS;
+                    true
+                } else {
+                    false
+                }
+            }
             Ok((id, m)) => {
                 if m.label == MSG_SUPERVISOR_PING as u64 {
                     let _ = sys::svc_reply(ENDPOINT_NET_SERVER, id, &Message::new(MSG_SUPERVISOR_PONG as u64, [m.args[0], 1, 0, 0]));
