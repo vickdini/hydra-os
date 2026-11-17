@@ -1924,9 +1924,11 @@ impl Scheduler {
             // The console shell runs on the boot processor: it waits for keys and ticks with
             // `hlt`, for that CPU's interrupts
             return false;
-        } else if !self.handoff_participant(idx)
-            && ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
-                || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
+        } else if ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
+            || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
+            // (the participant check last: it searches the queued requests, and most of the
+            // time no call is in progress)
+            && !self.handoff_participant(idx)
         {
             // Kernel code resumes only outside other tasks' driver calls, until their
             // callers have read the replies (it may use the same window or the locks those
