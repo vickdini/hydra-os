@@ -52,7 +52,7 @@ clearance=Confidential
 project=Apollo,Gemini
 ```
 
-The console login (kernel shell) attaches the same file to the programs it starts.
+The console login (the kernel's console session, `src/admin/session.rs`) attaches the same file to the programs it starts.
 
 ### Resources (files and folders)
 

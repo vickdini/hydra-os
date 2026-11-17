@@ -11,8 +11,8 @@ The implementation is located across:
 - **Task Control Block & Stack Allocation**: [`src/task/tcb.rs`](file:///d:/os/src/task/tcb.rs)
 - **Scheduler Process Spawner**: [`src/task/scheduler.rs`](file:///d:/os/src/task/scheduler.rs)
 - **Hardware Syscall Trampoline & Dispatcher**: [`src/arch/syscall.rs`](file:///d:/os/src/arch/syscall.rs)
-- **Interactive Shell Command**: [`src/shell/commands/elf_cmd.rs`](file:///d:/os/src/shell/commands/elf_cmd.rs)
-- **Direct Shell Invoker**: [`src/shell/fs.rs`](file:///d:/os/src/shell/fs.rs)
+- **Console Command**: `elf` in [`userland/drivers/hydra-shell/src/system.rs`](../../../userland/drivers/hydra-shell/src/system.rs) (it inspects headers itself)
+- **Program start for the console**: `ADMIN_TASK_EXEC` in [`src/admin/system.rs`](../../../src/admin/system.rs) (native programs get an address space of their own)
 
 ---
 

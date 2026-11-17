@@ -1,6 +1,6 @@
 # Unix File Descriptor Table & Shell Pipelines
 
-- **Source Files**: [`src/fs/fd.rs`](file:///d:/os/src/fs/fd.rs), [`src/fs/pipe.rs`](file:///d:/os/src/fs/pipe.rs), [`src/shell/pipeline.rs`](file:///d:/os/src/shell/pipeline.rs)
+- **Source Files**: [`src/fs/fd.rs`](file:///d:/os/src/fs/fd.rs), [`src/fs/pipe.rs`](file:///d:/os/src/fs/pipe.rs)
 - **Subsystem**: Virtual File System (VFS), POSIX File Descriptors, IPC Pipes, Shell Streams
 - **Privilege Levels**: Ring 0 (Kernel Subsystem) & Ring 3 (Userland Syscalls)
 
@@ -83,7 +83,7 @@ Hydra OS exposes the full complement of POSIX I/O system calls to Ring 3 process
 
 ## 5. Shell Pipelines & Redirection
 
-The Hydra Interactive Shell ([`src/shell/pipeline.rs`](file:///d:/os/src/shell/pipeline.rs)) supports arbitrary pipeline chaining and file redirection:
+The console shell ([`userland/drivers/hydra-shell/src/main.rs`](../../userland/drivers/hydra-shell/src/main.rs), in ring 3, on the native `pipe`/`dup2` calls) supports arbitrary pipeline chaining and file redirection:
 
 ### 1. Pipelines (`|`)
 Chains the standard output (`fd 1`) of command $N$ to the standard input (`fd 0`) of command $N+1$:

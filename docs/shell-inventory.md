@@ -2,6 +2,21 @@
 
 Microkernel wave 1, group 4 (shell, part 1). This lists every command of the in-kernel shell (`src/shell`, about 10,200 lines), grouped by what it needs from the kernel. It is the work list for part 2, when the commands move to the ring-3 `hydra-shell` and `src/shell` shrinks to the emergency prompt.
 
+**Part 2 (wave 2) is done:** every command below now lives in the ring-3 `hydra-shell` (or was dropped, see the list), the console runs `hydra-shell`, and `src/shell` is only the emergency prompt (`src/shell/mod.rs`). The tables below are the part 1 survey, kept as the record of what each command needed; the admin operations that replaced those kernel calls are in `docs/shell-admin-interface.md`.
+
+## Part 2: where each command went
+
+- **Moved to `hydra-shell`, same output:** help, info, status, history, clear, color, echo, cursor, scroll, sh, pwd, cd, ls, cat, write, touch, mkdir, rmdir, rm, cp, mv, stat, df, du, sync, head, tail, wc, grep, more, basename, dirname, seq, yes, true, false, sleep, uname, whoami, su, sudo, uptime, ps, kill, syscalls, elf (and programs of the pool by name), mem, heap, cpu, translate, time, service (status, restart, kill, start, tick), iommu, zpool, zfs, disks, usbdisk, ifconfig, dhcp, dns, ping, wget, linux (status, test, run, chroot, plasma, trace, prof), shutdown, reboot, halt, panic, trap; the login, pipes, redirects, `!!`, scripts. All with their aliases.
+- **Changed:** `exit`/`logout` end the session (back to `login:`), as Ctrl+D did; in the kernel shell `exit` was an alias of `shutdown`. `cpu` prints the register values with the flag names it decodes itself. `translate` walks the console shell's own address space (the kernel half is the same in every space). `color` changes the text colour until the next command (the prompt has its fixed colours).
+- **Dropped, with the reason:**
+  - `exitboot` (`takeover`, `baremetal`, `hwmode`) and the boot countdown: the kernel takes the hardware over during boot (since the installer round), before any console runs; the command had nothing left to do.
+  - `efifs`, starting `.efi` programs, and `linux rootfs install`: they read the UEFI boot volume, which is gone after the takeover at boot (they could only run before it, which no console reaches any more). Linux roots are installed by the installer.
+  - `spawn` (kernel demo tasks), `ipc` (endpoint ping-pong demo) and the `DEMO_MUTEX` part of `sync --all`: demonstrations that ran kernel code as tasks of the kernel shell; nothing to port to ring 3.
+  - `caps`, `cap_insert`, `cap_revoke`: they showed and changed the kernel shell's own toy capability table, which went away with the kernel shell.
+  - `alloc` (leaked a physical frame) and `map`/`unmap` (mapped arbitrary physical memory into the current address space): dangerous test tools without a meaning for a ring-3 caller.
+  - `ushell`: `hydra-shell` is the console now (the emergency prompt has `ushell` to go back to it).
+- **Kept in the emergency prompt** (`src/shell/mod.rs`, 14 commands): help, cd, ls, cat, cp, ps, kill, mem, service (status, restart, start), zpool, linux chroot, ushell, shutdown/poweroff, reboot, halt. Trimmed from part 1's proposal: echo, clear, whoami, pwd (the prompt shows the directory), exitboot (see above).
+
 How to read the tables:
 - **Calls into** names the kernel modules the command uses directly (`crate::...`). Every one of them needs an admin operation (see `docs/shell-admin-interface.md`) or another ring-3 path before the command can move.
 - **E** marks the commands the **emergency prompt** keeps. The emergency prompt is the tiny in-kernel prompt that stays for when user space is broken (user decision, 2026-11-17).
@@ -144,14 +159,10 @@ Note: in the kernel shell `exit` is an alias of `shutdown`. In `hydra-shell` `ex
 
 Kept in the kernel after part 2: `help`, `echo`, `clear`, `whoami`, `pwd`, `cd`, `ls`, `cat`, `cp`, `ps`, `kill`, `mem`, `service status` and `service restart`, `zpool status`, `exitboot`, `linux chroot` (to start the Linux root by hand), `shutdown`, `reboot`, `halt`. About 20 commands. It needs only the console, the scheduler table, the supervisor, the file server and power, which are all in the kernel anyway. Everything else moves to `hydra-shell`.
 
-## What `hydra-shell` has in part 1
-
-`help`, `echo`, `pwd`, `cd`, `ls`, `cat` (first 4 KiB), `uname`, `ps`, `mem`, `service` (`status`, `list`), `zpool` (`status`, `list`), `shutdown`/`poweroff`, `reboot`, `exit`. The output text is copied from the kernel commands, so the same command prints the same lines (numbers that change from moment to moment aside).
-
 ## Other kernel code that used the shell
 
 Before part 1, kernel code outside `src/shell` called into it:
 - `fs/client.rs`, `task/elf.rs`, `task/scheduler.rs`, `arch/bootdisk.rs`: the boot-file helpers (`read_boot_file`, `open_root_volume`, `path_to_cstr16`, `fw_read`). Now in `src/fs/bootfs.rs`.
 - `fs/zfs/mod.rs`, `task/supervisor.rs`: `usbdisk::POOL_ON_USB`. Now `fs::zfs::POOL_ON_USB`.
 
-After part 1, `grep -rn "crate::shell" src --include=*.rs` outside `src/shell` finds nothing. The only remaining link is `main.rs` calling `shell::run()` to start the console.
+After part 1, `grep -rn "crate::shell" src --include=*.rs` outside `src/shell` found only `arch/iommu.rs` (`file_exists`, fixed in part 2) and `main.rs`. After part 2 the only user is `src/admin/boot.rs`, which runs the emergency prompt (`crate::shell::run`).
