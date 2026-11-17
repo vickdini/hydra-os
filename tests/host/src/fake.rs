@@ -29,7 +29,7 @@ thread_local! {
     pub static ZFS_WRITE_FAILS: RefCell<Vec<String>> = RefCell::new(Vec::new());
     /// Number of `ZfsClient::sync` calls.
     pub static ZFS_SYNCS: Cell<usize> = const { Cell::new(0) };
-    /// Files on the FAT boot volume (`shell::fs::read_boot_file`).
+    /// Files on the FAT boot volume (`fs::bootfs::read_boot_file`).
     pub static BOOT_FILES: RefCell<BTreeMap<String, Vec<u8>>> = RefCell::new(BTreeMap::new());
     /// Ranges passed to `make_user_accessible`.
     pub static USER_RANGES: RefCell<Vec<(u64, usize)>> = RefCell::new(Vec::new());

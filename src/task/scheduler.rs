@@ -2526,7 +2526,7 @@ fn read_interpreter(path: &str) -> Option<Vec<u8>> {
     }
     if !crate::arch::boot_services::is_hardware_takeover_complete() {
         let fat_path = path.replace('/', "\\");
-        if let Ok(data) = crate::shell::fs::read_boot_file(&fat_path) {
+        if let Ok(data) = crate::fs::bootfs::read_boot_file(&fat_path) {
             return Some(data);
         }
     }

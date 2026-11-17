@@ -381,7 +381,7 @@ fn zfs_args() -> Option<Vec<String>> {
     // disk is a USB stick) and the USB driver has one
     if !has_pool_view(ENDPOINT_BLOCK_DEV) && has_pool_view(crate::ipc::protocol::ENDPOINT_USB_DISK) {
         args.push(String::from("disk=usb"));
-        crate::shell::commands::usbdisk::POOL_ON_USB.store(true, core::sync::atomic::Ordering::Release);
+        crate::fs::zfs::POOL_ON_USB.store(true, core::sync::atomic::Ordering::Release);
     }
     Some(args)
 }

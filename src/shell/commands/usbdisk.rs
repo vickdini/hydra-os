@@ -14,7 +14,7 @@
 //! The disk holding the running pool is refused for `test` and `speed ... write`.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 
 use crate::ipc::protocol::{
     BLOCK_LIST_RECORD, ENDPOINT_BLOCK_DEV, ENDPOINT_USB_DISK, MSG_BLOCK_FLUSH, MSG_BLOCK_GET_SIZE, MSG_BLOCK_LIST, MSG_BLOCK_READ, MSG_BLOCK_REPLY,
@@ -25,8 +25,8 @@ use crate::ipc::Message;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
-/// Set when the file server was told to find the pool on a USB disk.
-pub static POOL_ON_USB: AtomicBool = AtomicBool::new(false);
+/// Set when the file server was told to find the pool on a USB disk (lives in `fs::zfs`).
+use crate::fs::zfs::POOL_ON_USB;
 
 /// Blocks per request (the window holds 64).
 const CHUNK: u64 = 64;

@@ -42,7 +42,7 @@ pub fn setup_pending() -> bool {
 pub fn read_from_boot_volume(root: &mut uefi::proto::media::file::Directory) {
     use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
     let mut path_u16 = [0u16; 64];
-    let Some(cstr) = crate::shell::fs::path_to_cstr16(ESP_PATH, &mut path_u16) else { return };
+    let Some(cstr) = crate::fs::bootfs::path_to_cstr16(ESP_PATH, &mut path_u16) else { return };
     // Read-write, so it can be deleted; a read-only medium (CD) falls back to reading only
     let (handle, writable) = match root.open(cstr, FileMode::ReadWrite, FileAttribute::empty()) {
         Ok(h) => (h, true),
@@ -61,7 +61,7 @@ pub fn read_from_boot_volume(root: &mut uefi::proto::media::file::Directory) {
     let mut data = alloc::vec![0u8; size];
     let mut got = 0;
     while got < size {
-        match crate::shell::fs::fw_read(&mut file, &mut data[got..]) {
+        match crate::fs::bootfs::fw_read(&mut file, &mut data[got..]) {
             Ok(0) | Err(_) => break,
             Ok(n) => got += n,
         }

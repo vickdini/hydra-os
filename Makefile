@@ -40,8 +40,8 @@ build: $(EFI_BIN) $(LOGIND) $(SOCKACT) $(ACCHECK)
 		dd if=/dev/zero of=$(STORAGE_IMG) bs=1M count=32; \
 	fi
 	cp $(EFI_BIN) $(DIST_DIR)/bootx64.efi
-	# Create FAT EFI disk image (32MB; El Torito boot image size)
-	dd if=/dev/zero of=$(IMG) bs=1M count=32
+	# Create FAT EFI disk image (40MB: 32MB had only ~60KB left with esp/bin; El Torito boot image size)
+	dd if=/dev/zero of=$(IMG) bs=1M count=40
 	mkfs.vfat $(IMG)
 	mmd -i $(IMG) ::/EFI ::/EFI/BOOT ::/bin ::/apps
 	mcopy -i $(IMG) $(DIST_DIR)/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI

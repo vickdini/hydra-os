@@ -534,6 +534,11 @@ pub mod compat {
 }
 
 pub mod fs {
+    /// *stub*: boot-volume files (`src/fs/bootfs.rs`)
+    pub mod bootfs {
+        pub use crate::fake::read_boot_file;
+    }
+
     #[path = "../../../../src/fs/pipe.rs"]
     pub mod pipe;
 

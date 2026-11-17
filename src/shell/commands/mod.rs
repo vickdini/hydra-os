@@ -72,6 +72,7 @@ pub mod service_cmd;
 pub mod iommu_cmd;
 /// USB disks: list, test and measure (`usbdisk`).
 pub mod usbdisk;
+pub mod ushell; // group 4: runs the Ring 3 hydra-shell
 
 use crate::shell::command::Command;
 
@@ -102,6 +103,7 @@ pub use script::ShCommand;
 pub use service_cmd::ServiceCommand;
 pub use iommu_cmd::IommuCommand;
 pub use usbdisk::UsbDiskCommand;
+pub use ushell::UshellCommand;
 pub use status::StatusCommand;
 pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
 pub use time::TimeCommand;
@@ -194,6 +196,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &ServiceCommand,
     &IommuCommand,
     &UsbDiskCommand,
+    &UshellCommand,
     // Power Management
     &RebootCommand,
     &ShutdownCommand,
