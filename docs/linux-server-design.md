@@ -622,6 +622,93 @@ These are also written in `D:\os-mk-shared\NOTES.md`:
    - into the Linux server (simplest);
    - or next to their drivers: an ALSA layer beside hda-driver, a display/input server (better isolation, more protocol).
 
+## 11. Step 1 as built (wave 3, Group 7, branch `mk-lxfwd`)
+
+What step 1 built, and how it is used, is in [src/linux-server.md](src/linux-server.md). In short:
+- one ring-3 `linux-server` (4 worker threads and a main thread, endpoint 0x29);
+- a forwarding table in the trap: `add_key`, `request_key`, `keyctl` and a test call go to it;
+- syscall pages, `SYS_LX_REPLY_RECV`/`SYS_LX_COMPLETE`, client memory primitives, a notification ring;
+- a direct switch (vector 0x82, no run-queue pass, no FPU traffic, no machine-wide stop);
+- the crash policy;
+- a switch back to the in-kernel code (`opt/hydra/lx=kernel`).
+
+### 11.1 Measured cost (KVM, 2 CPUs, same VM setup as section 3; µs, medians of 5 loops)
+
+| What | b01f2e3 (before) | Step 1, no PCID | Step 1 + Group 8's PCID | Budget |
+|---|---:|---:|---:|---|
+| In-kernel null call (`getpgrp`; the test call with `lx=kernel`: 0.71) | 0.73 | 0.72 | 0.72 | |
+| **Forwarded null call** (`lx_null`) | n/a | 4.52 | **3.42** | ≤ 3.74 (0.74 + 3) |
+| Added per forwarded call | | +3.8 | **+2.7** | ≤ +3.0 |
+| `keyctl` (in the kernel before, in the server after) | 0.735 | 4.88 | 3.46 | |
+| Two threads on 2 CPUs, per call: `lx_null_par2` (one thread: `lx_null`) | n/a | 4.83 (4.52) | 3.99 (3.42) | not slower than one thread |
+| Same for `keyctl_par2` | 1.04 (0.735) | 5.11 | 4.47 | |
+
+- **The per-call budget is met with PCID, and missed without it** (+3.8 µs). The
+  "with PCID" column is commit 333acaa plus Group 8's first PCID commit (146dbb5), built
+  in a throw-away tree. The merged branch (mk-lxfwd + final mk-pcid) was built but not yet
+  measured: WSL stopped executing commands before those runs.
+- Where the time goes, without PCID (rdtsc profile of one round trip, about 2 GHz):
+  - each of the two switches about 3,000 cycles: the trap about 1,300, saving the
+    caller about 700, `switch_to` about 1,000;
+  - the worker's return to user mode and its next system call about 2,100;
+  - setting up the call about 1,000 and answering it about 400.
+- Most of it is TLB refills after each CR3 write (the kernel has no global pages), which
+  is why PCID helps so much. Two cuts made it from 6.4 to 4.5 µs before PCID:
+  - index hints instead of searching the task table;
+  - the switch vector that moves no FPU state.
+- **Two threads are slower per call than one** (3.99 against 3.42 µs). The design's
+  concurrency rule (section 6.6) is not met. Before step 1, the in-kernel `keyctl` showed
+  the same effect: 1.04 µs per call with two threads against 0.735 with one.
+  - The kernel lock serializes the kernel part of every call. Here each forwarded call
+    holds it three times: the caller's entry, the worker's reply, and the switches.
+  - There is no machine-wide stop (as with today's hand-off): other CPUs run user code
+    and take the lock in turn.
+  - Meeting the rule needs the forwarding path to run without the kernel lock. That is
+    work for a later step: the request table and the direct switch would need their own
+    locking, and the scheduler lock is still global.
+
+**Calls that were not moved** (full lxbench, before → step 1 without PCID → with PCID):
+
+| Call | Before | Step 1 | + PCID |
+|---|---:|---:|---:|
+| `getpid` | 0.152 | 0.153 | 0.154 |
+| `pread` 4 KiB cached | 1.18 | 1.14 | 1.23 |
+| `stat` | 2.34 | 2.38 | 2.43 |
+| `open`+`close` | 4.46 | 4.50 | 4.65 |
+| pipe round trip | 26.3 | 26.3 | 26.2 |
+| futex round trip | 2.54 | 2.37 | 2.44 |
+| `mmap`+`munmap` 1 MiB | 3.05 | 2.79 | 2.78 |
+| `fork`+`exec`+`wait` | 2,465 | 2,122 | 2,191 |
+
+These are within run-to-run noise: none got slower. The forwarding table costs one atomic
+load per system call.
+
+**Not measured:** the KDE password-to-desktop time with step 1. WSL stopped before those
+runs; the desktop itself was used, including Firefox and the crash test, without anything
+visibly slow.
+
+### 11.2 What step 2 can build on, and what it still lacks
+
+- **Ready to use:**
+  - moving a call means adding its number to `lx::MOVED` and serving it in linux-server;
+  - blocking calls answer `LX_REPLY_PENDING` and later `lx_complete`;
+  - signals reach pending calls as notifications;
+  - process events come through the ring, in order with the calls;
+  - the crash policy and the switch back need no change.
+- **Still missing:**
+  - **A copy-in table.** Every pointer argument costs a client memory call, about one
+    system call each; the design's per-call table of paths and small structures in the
+    syscall page is not there yet.
+  - **The other primitives** of section 5.2: `sig_post`, `task_*`, `as_*`, `obj_*`,
+    `timer_arm`, and `lx_grant`.
+  - **A growing worker pool.** It is fixed at 4 workers; with more blocking calls than
+    workers, calls queue.
+  - **Concurrency without the kernel lock** (section 11.1).
+  - **A cheaper switch.** Global kernel pages, or a lighter switch entry, would help, and
+    the metadata-heavy budget (warm `find` ≤ +35 %) depends on it once the VFS moves.
+- **Restarting the desktop after a crash** re-runs the boot's `linux plasma` when SDDM
+  had been started. It does not restore a desktop started by hand from the shell.
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.

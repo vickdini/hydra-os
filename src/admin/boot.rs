@@ -49,6 +49,10 @@ pub fn discover() {
     } else {
         None
     };
+    // The Linux calls moved to linux-server go back to the in-kernel code (`crate::lx`)
+    if load_options_say(b"lx=kernel") {
+        crate::lx::KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
+    }
     if let Some(by) = by {
         *EMERGENCY_BY.lock() = by;
         EMERGENCY_AT_BOOT.store(true, Ordering::Release);

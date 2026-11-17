@@ -105,6 +105,25 @@ pub const SYS_SVC_CALL_GRANT: u64 = 34;
 /// net-server's sockets changed readiness).
 pub const SYS_SVC_SIGNAL: u64 = 35;
 
+/// Native Hydra system call: start a thread in the calling native process (`sys_thread_create`:
+/// entry, stack pointer, argument in `rdi`; returns its task ID). Wave 3, the Linux server.
+pub const SYS_THREAD_CREATE: u64 = 50;
+/// Linux server (`crate::lx`): attach a worker / go online (`sys_lx_ctl`).
+pub const SYS_LX_CTL: u64 = 51;
+/// Linux server: answer the call served and wait for the next (`sys_lx_reply_recv`).
+pub const SYS_LX_REPLY_RECV: u64 = 52;
+/// Linux server: answer a pending call (`sys_lx_complete`).
+pub const SYS_LX_COMPLETE: u64 = 53;
+/// Linux server: copy from the caller of a call (`sys_lx_read`: id, address, length, buffer).
+pub const SYS_LX_READ: u64 = 54;
+/// Linux server: copy to the caller of a call (`sys_lx_write`: id, address, length, buffer).
+pub const SYS_LX_WRITE: u64 = 55;
+/// Linux server: copy a string from the caller of a call (`sys_lx_read_str`: id, address,
+/// maximum, buffer; returns its length).
+pub const SYS_LX_READ_STR: u64 = 56;
+/// Linux server: a process's parent and credentials (`sys_lx_proc_info`).
+pub const SYS_LX_PROC_INFO: u64 = 57;
+
 /// [`SYS_SVC_CALL_GRANT`]'s argument block (as `hydra_rt::sys::GrantCall`): the request
 /// (the reply replaces it), the timeout in ticks (0: the default), and the ranges lent.
 #[repr(C)]
@@ -723,6 +742,11 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
         SYS_EXIT => {
             stats.exit_calls += 1;
             drop(stats);
+            // arg1 = 1: every thread of the process (a native program with threads that
+            // panicked, as the Linux server)
+            if arg1 == 1 {
+                crate::task::exit_group();
+            }
             crate::task::exit();
         }
         SYS_GETPID => {
@@ -951,6 +975,41 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
                     .map_or_else(|e| e, |a| a as i64),
                 None => -14, // -EFAULT: no address space of its own
             }
+        }
+        // Wave 3 (Group 7): native threads and the Linux server's primitives (crate::lx)
+        SYS_THREAD_CREATE => {
+            drop(stats);
+            // arg0: entry, arg1: stack pointer, arg2: argument (rdi)
+            let r = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().spawn_native_thread(frame, arg0, arg1, _arg2));
+            match r {
+                Ok(id) => id.0 as i64,
+                Err(_) => -12, // -ENOMEM
+            }
+        }
+        SYS_LX_CTL => {
+            drop(stats);
+            crate::lx::ctl(arg0)
+        }
+        SYS_LX_REPLY_RECV => {
+            drop(stats);
+            crate::lx::reply_recv(arg0 as i64, arg1)
+        }
+        SYS_LX_COMPLETE => {
+            drop(stats);
+            crate::lx::complete(arg0, arg1 as i64)
+        }
+        SYS_LX_READ | SYS_LX_WRITE | SYS_LX_READ_STR => {
+            drop(stats);
+            let op = match num {
+                SYS_LX_READ => crate::lx::MemOp::Read,
+                SYS_LX_WRITE => crate::lx::MemOp::Write,
+                _ => crate::lx::MemOp::ReadStr,
+            };
+            crate::lx::client_mem(op, arg0, arg1, _arg2, frame.r10)
+        }
+        SYS_LX_PROC_INFO => {
+            drop(stats);
+            crate::lx::proc_info(arg0, arg1)
         }
         // Group 4: the admin interface of the Ring 3 shell (authorized console only)
         crate::admin::proto::SYS_ADMIN => {

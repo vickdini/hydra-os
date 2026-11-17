@@ -261,6 +261,12 @@ const MAX_HANDOFFS: usize = 8;
 /// halted until its next timer tick.
 static CALL_DEFERRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// The task each CPU switches to at its next voluntary yield, plus one (0: none): set by
+/// the direct switch of a forwarded Linux call ([`Scheduler::direct_handover`], `crate::lx`).
+pub static DIRECT_TO: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// Where that task is in the task table (a hint).
+static DIRECT_HINT: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+
 /// A driver call ended, or its caller read the reply: tasks it held back may run now.
 pub fn call_ended() {
     if CALL_DEFERRED.swap(false, core::sync::atomic::Ordering::AcqRel) {
@@ -486,6 +492,14 @@ impl Scheduler {
             return true;
         }
         let Some(ep) = self.tasks[idx].service else { return false };
+        // The Linux server's worker threads may hold its state lock that its main thread,
+        // serving a kernel request (`/proc/keys`), waits for (wave 3, `crate::lx`)
+        if ep == crate::ipc::protocol::ENDPOINT_LINUX_SERVER {
+            let tgid = self.tasks[idx].tgid;
+            if self.handoffs.iter().flatten().any(|h| self.tasks.iter().any(|t| t.id.0 == h.server && t.tgid == tgid)) {
+                return true;
+            }
+        }
         // A short chain: participant <- server <- server
         crate::ipc::service::serves_queued_for(crate::ipc::service::primary_of(ep), |c| {
             self.in_handoff(c)
@@ -1605,6 +1619,16 @@ impl Scheduler {
             self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;
             return;
         }
+        let slice = self.default_timeslice;
+        self.switch_to(curr_idx, next_idx, ctx, current_cr3, slice);
+    }
+
+    /// Switches the CPU from task `curr_idx` (its registers already saved) to `next_idx`,
+    /// which gets `timeslice` ticks: the per-task markers, the FPU state, the kernel stack,
+    /// the segment state and the trap frame, then the address space. Used by [`Self::schedule`]
+    /// and by the direct switch ([`Self::direct_switch`]); `current_cr3` is the page table
+    /// root loaded now. Its only CR3 write is step 6 (Group 8's PCID helper goes there).
+    fn switch_to(&mut self, curr_idx: usize, next_idx: usize, ctx: &mut ExceptionContext, current_cr3: u64, timeslice: u32) {
         crate::compat::linux::perf::switched(self.tasks[curr_idx].tgid);
         // CPU time is charged at timer ticks only (to the task and mode each one
         // interrupts), as Linux samples it. Charging the time since the last tick here too
@@ -1641,7 +1665,7 @@ impl Scheduler {
 
         let next_task = &mut self.tasks[next_idx];
         next_task.state = TaskState::Running;
-        next_task.timeslice_remaining = self.default_timeslice;
+        next_task.timeslice_remaining = timeslice;
         crate::memory::vm::set_current_mm(next_task.mm.as_ref());
 
         // 4b. Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task
@@ -1680,6 +1704,204 @@ impl Scheduler {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Direct switch (wave 3, step 1 of the Linux server: `crate::lx`)
+    // ------------------------------------------------------------------
+    //
+    // A forwarded Linux system call hands the CPU straight to an idle linux-server worker,
+    // and the worker's answer hands it straight back: the caller blocks, the other task
+    // becomes ready and the next `yield_now` on this CPU switches to it at once
+    // ([`Self::direct_switch`]), without the run-queue pass of [`Self::schedule`], without
+    // waking another CPU and without the hand-off's machine-wide stop. Both tasks run under
+    // the kernel lock while they set this up, so no other CPU can run either in between.
+
+    /// Blocks the current task and makes task `target` (blocked: a worker waiting for a call,
+    /// or a caller waiting for its answer) ready, without waking another CPU for it: the
+    /// caller then sets [`DIRECT_TO`] and yields, and this CPU runs `target` next. The
+    /// current task keeps its remaining timeslice, which `target` inherits.
+    ///
+    /// `hint` is where `target` was last seen in the task table (a wrong hint costs a
+    /// search: the table is large, and after an address-space switch every entry looked at
+    /// misses the TLB).
+    ///
+    /// # Returns
+    ///
+    /// `Some((index of target, index of the current task))`, or `None` (nothing changed)
+    /// if `target` is not blocked or not found.
+    pub fn direct_handover(&mut self, target: u64, hint: usize) -> Option<(usize, usize)> {
+        let me = crate::arch::percpu::cpu();
+        if !self.initialized || self.cur[me] >= self.tasks.len() {
+            return None;
+        }
+        let idx = self.index_of(target, hint)?;
+        if self.tasks[idx].state != TaskState::Blocked {
+            return None;
+        }
+        self.tasks[idx].state = TaskState::Ready;
+        let cur = self.cur[me];
+        self.tasks[cur].state = TaskState::Blocked;
+        DIRECT_HINT.store(idx as u64, core::sync::atomic::Ordering::Relaxed);
+        Some((idx, cur))
+    }
+
+    /// The index of task `id` in the table, trying `hint` first.
+    fn index_of(&self, id: u64, hint: usize) -> Option<usize> {
+        if self.tasks.get(hint).is_some_and(|t| t.id.0 == id) {
+            return Some(hint);
+        }
+        self.tasks.iter().position(|t| t.id.0 == id)
+    }
+
+    /// The current task's index in the table (a hint for [`Self::direct_handover`]).
+    pub fn current_index(&self) -> usize {
+        self.cur[crate::arch::percpu::cpu()]
+    }
+
+    /// The switch [`Self::direct_handover`] prepared (from the yield vector): saves the current
+    /// task and switches to task `target`, which inherits the current timeslice. Falls back
+    /// to [`Self::schedule_now`] whenever the fast path does not apply (a driver call in
+    /// progress, a caller to resume first, the target not ready or running elsewhere).
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - The yield's trap frame.
+    /// * `target` - Task to run next.
+    pub fn direct_switch(&mut self, ctx: &mut ExceptionContext, target: u64) {
+        if !self.direct_switch_core(ctx, target, false) {
+            self.schedule_now(ctx);
+        }
+    }
+
+    /// [`Self::direct_switch`] from the direct-switch vector (`arch::idt::DIRECT_VECTOR`): no
+    /// FPU state moves (`CURRENT_TRAP_FPU` is null), and the target must have blocked in the
+    /// kernel. Nothing happens when the fast path does not apply.
+    ///
+    /// # Returns
+    ///
+    /// Whether the CPU switched to `target`.
+    pub fn direct_switch_nofpu(&mut self, ctx: &mut ExceptionContext, target: u64) -> bool {
+        self.direct_switch_core(ctx, target, true)
+    }
+
+    /// The direct switch itself (see [`Self::direct_switch`]); `kernel_only`: only to a
+    /// task saved in kernel mode.
+    fn direct_switch_core(&mut self, ctx: &mut ExceptionContext, target: u64, kernel_only: bool) -> bool {
+        let me = crate::arch::percpu::cpu();
+        if !self.initialized || self.cur[me] >= self.tasks.len() || self.resume_first.is_some() || self.handoff_top().is_some() {
+            return false;
+        }
+        let curr_idx = self.cur[me];
+        let hint = DIRECT_HINT.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        let Some(next_idx) = self.index_of(target, hint) else { return false };
+        if next_idx == curr_idx || self.tasks[next_idx].state != TaskState::Ready || self.running_anywhere(next_idx) || !self.can_run(next_idx, me) {
+            return false;
+        }
+        if kernel_only && self.tasks[next_idx].regs.cs & 3 != 0 {
+            return false;
+        }
+        // Save the current task, as `schedule` does (step 3)
+        let current_cr3 = Cr3::read().0.start_address().as_u64();
+        let kernel_cr3 = self.kernel_cr3;
+        let curr_task = &mut self.tasks[curr_idx];
+        let saved_cr3 = if curr_task.mm.is_none() && kernel_cr3 != 0 { kernel_cr3 } else { current_cr3 };
+        curr_task.regs.save_from_context(ctx, saved_cr3);
+        curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
+        if curr_task.mode == PrivilegeMode::User {
+            crate::arch::segments::save(&mut curr_task.segs);
+        }
+        if curr_task.state == TaskState::Running {
+            curr_task.state = TaskState::Ready;
+        }
+        // The timeslice goes with the call (a caller and a worker handing the CPU back and
+        // forth share one slice, and the timer still preempts the pair)
+        let slice = curr_task.timeslice_remaining.max(1);
+        // A wakeup kick the call deferred: needed only if other woken work remains
+        if crate::arch::smp::kick_pending() {
+            let others = self.tasks.iter().enumerate().any(|(i, t)| i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
+            crate::arch::smp::switch_kick(others);
+        }
+        crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
+        self.tasks[next_idx].woken = false;
+        self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].passed_over = 0;
+        self.switch_to(curr_idx, next_idx, ctx, current_cr3, slice);
+        true
+    }
+
+    /// Ends every thread of process `tgid` (the Linux server's threads when it crashed).
+    ///
+    /// # Returns
+    ///
+    /// How many threads were ended.
+    pub fn kill_group(&mut self, tgid: u64) -> usize {
+        let mut n = 0;
+        for idx in 0..self.tasks.len() {
+            if self.tasks[idx].tgid == tgid && self.tasks[idx].id.0 > 1 && self.tasks[idx].state != TaskState::Dead && !self.tasks[idx].retired {
+                self.retire_task(idx);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Ends every Linux program (every user-mode task with the Linux personality): the Linux
+    /// server crashed, and their descriptors and processes lived in it. Hydra's own programs
+    /// (drivers, servers, hydra-shell) and kernel tasks go on.
+    ///
+    /// # Returns
+    ///
+    /// How many threads were ended.
+    pub fn kill_linux_tasks(&mut self) -> usize {
+        let mut n = 0;
+        for idx in 0..self.tasks.len() {
+            let t = &self.tasks[idx];
+            if t.personality == super::tcb::TaskPersonality::Linux
+                && t.mode == PrivilegeMode::User
+                && t.service.is_none()
+                && t.id.0 > 1
+                && t.state != TaskState::Dead
+                && !t.retired
+            {
+                self.retire_task(idx);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Spawns a thread in the calling native (Hydra) process: it shares the address space and
+    /// the descriptor table, serves the same endpoint, and starts at `entry` with stack
+    /// pointer `stack` and `arg` in `rdi` (`SYS_THREAD_CREATE`: the Linux server's workers).
+    ///
+    /// # Errors
+    ///
+    /// A message if the caller is not a native process or the thread cannot be made.
+    pub fn spawn_native_thread(&mut self, frame: &crate::arch::syscall::SyscallFrame, entry: u64, stack: u64, arg: u64) -> Result<TaskId, &'static str> {
+        use crate::compat::linux::types::{CLONE_FILES, CLONE_THREAD};
+        const CLONE_VM: u64 = 0x100;
+        const CLONE_FS: u64 = 0x200;
+        const CLONE_SIGHAND: u64 = 0x800;
+        let me = crate::arch::percpu::cpu();
+        if !self.initialized || self.cur[me] >= self.tasks.len() {
+            return Err("Scheduler not initialized");
+        }
+        let cur = &self.tasks[self.cur[me]];
+        let service = cur.service;
+        if cur.personality != super::tcb::TaskPersonality::Hydra || cur.mm.is_none() {
+            return Err("not a native process");
+        }
+        // SAFETY: SyscallFrame is plain register data (repr(C), no references)
+        let mut f: crate::arch::syscall::SyscallFrame = unsafe { core::ptr::read(frame) };
+        f.rip = entry;
+        f.rdi = arg;
+        let id = self.spawn_clone(&f, [CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD, stack, 0, 0, 0])?;
+        self.with_task_mut(id, |t| {
+            t.personality = super::tcb::TaskPersonality::Hydra;
+            t.service = service;
+        });
+        Ok(id)
+    }
+
     /// Whether task `idx` may run on CPU `me` now: ready, not another CPU's idle task, and
     /// its address space not loaded on another CPU (one CPU per address space).
     fn can_run(&self, idx: usize, me: usize) -> bool {
@@ -1695,9 +1917,11 @@ impl Scheduler {
             // The console shell runs on the boot processor: it waits for keys and ticks with
             // `hlt`, for that CPU's interrupts
             return false;
-        } else if !self.handoff_participant(idx)
-            && ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
-                || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
+        } else if ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
+            || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
+            // (the participant check last: it searches the queued requests, and most of the
+            // time no call is in progress)
+            && !self.handoff_participant(idx)
         {
             // Kernel code resumes only outside other tasks' driver calls, until their
             // callers have read the replies (it may use the same window or the locks those

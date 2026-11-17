@@ -638,6 +638,13 @@ pub mod ipc {
     pub mod protocol;
 }
 
+/// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
+/// events it is told about go nowhere on the host.
+pub mod lx {
+    /// *stub* A notification for the Linux server.
+    pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+}
+
 pub mod memory {
     #[path = "../../../../src/memory/frame_allocator.rs"]
     pub mod frame_allocator;

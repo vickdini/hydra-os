@@ -570,3 +570,158 @@ pub const MSG_SND_VOLUME: u32 = 0x8005;
 
 /// Protocol label for the sound driver's reply.
 pub const MSG_SND_REPLY: u32 = 0x800F;
+
+// ----------------------------------------------------------------------------------------
+// Linux server (linux-server): Linux system calls forwarded out of the kernel (wave 3, step 1)
+// ----------------------------------------------------------------------------------------
+//
+// The kernel's system-call trap forwards the calls its forwarding table gives to the server
+// (`src/lx`) to the ring-3 `linux-server` (`userland/drivers/linux-server`). Each worker
+// thread of the server has a syscall page ([`LxCall`] at offset 0), mapped in both the
+// kernel and the server: the kernel writes a call into it and the worker answers with
+// `SYS_LX_REPLY_RECV`, which also waits for the next call. The design is in
+// `docs/linux-server-design.md` (sections 5.2 and 6.3) and `docs/src/linux-server.md`.
+//
+// The server's main thread serves [`ENDPOINT_LINUX_SERVER`] as an ordinary service:
+// supervisor heartbeats, kernel requests made while the kernel may hold locks
+// ([`MSG_LX_PROC_KEYS`]), and the notification ring in its window ([`LX_NOTES_OFF`]).
+
+/// Well-known endpoint of the Linux server (0x29 = 41).
+pub const ENDPOINT_LINUX_SERVER: u32 = 0x29;
+
+/// Hydra's test call (a Linux system call number of its own): forwarded to the server when
+/// the forwarding is on, answered in the kernel otherwise. `arg0` = [`LX_NULL_RETURN`] (0)
+/// answers 0 at once; [`LX_NULL_PENDING`] answers 42 later, from the main thread, after
+/// `arg1` ms (`lx_complete`); [`LX_NULL_COPY`] reads `arg2` bytes at `arg1` of the caller,
+/// adds 1 to each and writes them back (client memory primitives), returning the length.
+pub const LX_NULL_NR: u64 = 0x6710;
+/// [`LX_NULL_NR`] operation: return 0.
+pub const LX_NULL_RETURN: u64 = 0;
+/// [`LX_NULL_NR`] operation: answer later (pending), then 42.
+pub const LX_NULL_PENDING: u64 = 1;
+/// [`LX_NULL_NR`] operation: read, change and write back the caller's buffer.
+pub const LX_NULL_COPY: u64 = 2;
+
+/// Size of a worker's syscall page.
+pub const LX_PAGE_SIZE: usize = 4096;
+/// Most supplementary groups passed with a call (more are cut off).
+pub const LX_GROUPS: usize = 32;
+
+/// A forwarded call, at offset 0 of the worker's syscall page. The kernel fills it before
+/// the worker returns from `SYS_LX_REPLY_RECV`; only `flags` changes while the worker
+/// serves it (the kernel sets [`LX_CALL_INTERRUPTED`]).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxCall {
+    /// The request's ID (for `SYS_LX_COMPLETE` and the client memory primitives).
+    pub id: u64,
+    /// The calling thread.
+    pub tid: u64,
+    /// The calling thread's process.
+    pub tgid: u64,
+    /// Linux system call number.
+    pub nr: u64,
+    /// The system call's arguments.
+    pub args: [u64; 6],
+    /// Real user ID.
+    pub uid: u32,
+    /// Effective user ID.
+    pub euid: u32,
+    /// Saved user ID.
+    pub suid: u32,
+    /// Real group ID.
+    pub gid: u32,
+    /// Effective group ID.
+    pub egid: u32,
+    /// Saved group ID.
+    pub sgid: u32,
+    /// Effective capabilities (0 when they hold only inside a user namespace of its own).
+    pub caps: u64,
+    /// Notifications posted before this call: the server takes the ring up to here before
+    /// serving it ([`LX_NOTES_OFF`]).
+    pub note_seq: u64,
+    /// [`LX_CALL_INTERRUPTED`].
+    pub flags: u64,
+    /// How many of `groups` are used.
+    pub ngroups: u64,
+    /// Supplementary groups.
+    pub groups: [u32; LX_GROUPS],
+}
+
+impl LxCall {
+    /// A call with every field zero.
+    pub const EMPTY: Self = Self {
+        id: 0,
+        tid: 0,
+        tgid: 0,
+        nr: 0,
+        args: [0; 6],
+        uid: 0,
+        euid: 0,
+        suid: 0,
+        gid: 0,
+        egid: 0,
+        sgid: 0,
+        caps: 0,
+        note_seq: 0,
+        flags: 0,
+        ngroups: 0,
+        groups: [0; LX_GROUPS],
+    };
+}
+
+/// [`LxCall::flags`]: a signal arrived for the caller while the call was being served (the
+/// server may answer `-EINTR`).
+pub const LX_CALL_INTERRUPTED: u64 = 1;
+
+/// `SYS_LX_REPLY_RECV` flag: the call blocks; the caller keeps sleeping until some thread
+/// answers it with `SYS_LX_COMPLETE`.
+pub const LX_REPLY_PENDING: u64 = 1;
+/// `SYS_LX_REPLY_RECV` flag: no answer (the worker's first call).
+pub const LX_REPLY_NONE: u64 = 2;
+
+/// `SYS_LX_CTL` operation: register the calling thread as a worker; returns the address of
+/// its syscall page.
+pub const LX_CTL_ATTACH: u64 = 0;
+/// `SYS_LX_CTL` operation: every worker is attached and the endpoint registered: the kernel
+/// starts forwarding.
+pub const LX_CTL_ONLINE: u64 = 1;
+/// `SYS_LX_CTL` operation: wake the server's main thread ([`NOTIFY_LX_NOTES`]), which then
+/// looks at its timed work (a worker queued some).
+pub const LX_CTL_WAKE: u64 = 2;
+
+/// Notification ring in the server's window: u64 words at this offset: `[0]` head (the
+/// kernel's next sequence number), `[1]` tail (the server's: everything before it is
+/// taken), `[2]` notifications dropped because the ring was full. Entries follow at
+/// [`LX_NOTES_ENTRY_OFF`]: entry `seq % LX_NOTES` is four u64 `[kind, a, b, c]`.
+pub const LX_NOTES_OFF: usize = 0;
+/// Offset of the first ring entry.
+pub const LX_NOTES_ENTRY_OFF: usize = 64;
+/// Ring entries.
+pub const LX_NOTES: u64 = 4096;
+/// Notification: process `a` forked process `b` (a new process, not a thread).
+pub const LX_NOTE_FORK: u64 = 1;
+/// Notification: thread `a` of process `b` called `execve`.
+pub const LX_NOTE_EXEC: u64 = 2;
+/// Notification: the last thread of process `a` ended.
+pub const LX_NOTE_EXIT: u64 = 3;
+/// Notification: a signal arrived for the caller of pending request `a` (answered later
+/// with `SYS_LX_COMPLETE`); the server may answer it `-EINTR`.
+pub const LX_NOTE_INTERRUPT: u64 = 4;
+/// Notification bit ([`MSG_SVC_NOTIFY`]): notifications were posted to the ring.
+pub const NOTIFY_LX_NOTES: u64 = 2;
+
+/// Kernel to linux-server's main thread: the text of `/proc/keys` for the caller. `args`:
+/// `[0]` tid, `[1]` tgid, `[2]` `euid | egid << 32`, `[3]` effective capabilities. The
+/// window holds the caller's supplementary groups at [`LX_PROC_KEYS_GROUPS_OFF`] (u32
+/// count, then the IDs); the text goes to [`LX_PROC_KEYS_TEXT_OFF`]. Reply
+/// [`MSG_LX_REPLY`] with `args[0]` the text's length or a negative errno.
+pub const MSG_LX_PROC_KEYS: u32 = 0xA001;
+/// Reply label of the Linux server's endpoint requests.
+pub const MSG_LX_REPLY: u32 = 0xA00F;
+/// Window offset of the groups of [`MSG_LX_PROC_KEYS`].
+pub const LX_PROC_KEYS_GROUPS_OFF: usize = 0x30000;
+/// Window offset of the text of [`MSG_LX_PROC_KEYS`] (up to [`LX_PROC_KEYS_TEXT_MAX`] bytes).
+pub const LX_PROC_KEYS_TEXT_OFF: usize = 0x31000;
+/// Most bytes of `/proc/keys` text.
+pub const LX_PROC_KEYS_TEXT_MAX: usize = 0xF000;

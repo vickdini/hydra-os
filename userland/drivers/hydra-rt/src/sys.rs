@@ -24,6 +24,14 @@ const SYS_SVC_ATTACH: u64 = 32;
 const SYS_SVC_GRANT: u64 = 33;
 const SYS_SVC_CALL_GRANT: u64 = 34;
 const SYS_SVC_SIGNAL: u64 = 35;
+const SYS_THREAD_CREATE: u64 = 50;
+const SYS_LX_CTL: u64 = 51;
+const SYS_LX_REPLY_RECV: u64 = 52;
+const SYS_LX_COMPLETE: u64 = 53;
+const SYS_LX_READ: u64 = 54;
+const SYS_LX_WRITE: u64 = 55;
+const SYS_LX_READ_STR: u64 = 56;
+const SYS_LX_PROC_INFO: u64 = 57;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -64,6 +72,27 @@ unsafe fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) -> i64 {
         in("rdi") a0,
         in("rsi") a1,
         in("rdx") a2,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// Invokes a raw Hydra syscall with 4 arguments (the fourth in `r10`).
+///
+/// # Safety
+/// As [`syscall3`].
+#[inline(always)]
+unsafe fn syscall4(num: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        inlateout("rax") num as i64 => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
         out("rcx") _,
         out("r11") _,
         options(nostack)
@@ -112,6 +141,95 @@ pub fn exit(code: u64) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// Ends every thread of the process (a program with threads that cannot go on).
+///
+/// # Returns
+/// Does not return (`!`).
+pub fn exit_group(code: u64) -> ! {
+    unsafe { syscall3(SYS_EXIT, code, 1, 0) };
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Starts a thread of this process at `entry` with stack pointer `stack` and `arg` as its
+/// argument (in `rdi`); `entry` must never return (it ends with [`exit`]).
+///
+/// # Returns
+/// The new thread's task ID.
+///
+/// # Errors
+/// Returns negative error code on failure.
+///
+/// # Safety
+/// `stack` must point just past (16-byte aligned, minus 8 for the missing return address)
+/// memory the thread alone uses for its stack, and `entry` must follow the C ABI.
+pub unsafe fn thread_create(entry: extern "C" fn(u64) -> !, stack: u64, arg: u64) -> Result<u64, i64> {
+    check(syscall3(SYS_THREAD_CREATE, entry as usize as u64, stack, arg))
+}
+
+/// Linux server: `op` ([`crate::protocol::LX_CTL_ATTACH`]: returns this worker's syscall
+/// page; [`crate::protocol::LX_CTL_ONLINE`]: start forwarding).
+///
+/// # Errors
+/// Returns negative error code on failure.
+pub fn lx_ctl(op: u64) -> Result<u64, i64> {
+    check(unsafe { syscall3(SYS_LX_CTL, op, 0, 0) })
+}
+
+/// Linux server: answers the call this worker serves with `result` (`flags`:
+/// [`crate::protocol::LX_REPLY_PENDING`], [`crate::protocol::LX_REPLY_NONE`]) and waits for
+/// the next call, which is in the syscall page when this returns `Ok`.
+///
+/// # Errors
+/// Returns negative error code on failure.
+pub fn lx_reply_recv(result: i64, flags: u64) -> Result<(), i64> {
+    check(unsafe { syscall3(SYS_LX_REPLY_RECV, result as u64, flags, 0) }).map(|_| ())
+}
+
+/// Linux server: answers pending call `id` with `result`.
+///
+/// # Errors
+/// `-EINVAL` if `id` is not a pending call.
+pub fn lx_complete(id: u64, result: i64) -> Result<(), i64> {
+    check(unsafe { syscall3(SYS_LX_COMPLETE, id, result as u64, 0) }).map(|_| ())
+}
+
+/// Linux server: copies `buf.len()` bytes at `addr` of the caller of call `id` into `buf`.
+///
+/// # Errors
+/// `-EFAULT` for a bad address, `-ESRCH` if `id` is not being served.
+pub fn lx_read(id: u64, addr: u64, buf: &mut [u8]) -> Result<(), i64> {
+    check(unsafe { syscall4(SYS_LX_READ, id, addr, buf.len() as u64, buf.as_mut_ptr() as u64) }).map(|_| ())
+}
+
+/// Linux server: copies `data` to `addr` of the caller of call `id`.
+///
+/// # Errors
+/// `-EFAULT` for a bad address, `-ESRCH` if `id` is not being served.
+pub fn lx_write(id: u64, addr: u64, data: &[u8]) -> Result<(), i64> {
+    check(unsafe { syscall4(SYS_LX_WRITE, id, addr, data.len() as u64, data.as_ptr() as u64) }).map(|_| ())
+}
+
+/// Linux server: copies the NUL-terminated string at `addr` of the caller of call `id`
+/// into `buf` (without the NUL) and returns its length.
+///
+/// # Errors
+/// `-EFAULT` for a bad address, `-ENAMETOOLONG` if no NUL is within `buf.len()` bytes.
+pub fn lx_read_str(id: u64, addr: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    check(unsafe { syscall4(SYS_LX_READ_STR, id, addr, buf.len() as u64, buf.as_mut_ptr() as u64) }).map(|n| n as usize)
+}
+
+/// Linux server: process `tgid`'s `[ppid, uid, euid, suid, gid, egid, sgid]`.
+///
+/// # Errors
+/// `-ESRCH` if there is no such process.
+pub fn lx_proc_info(tgid: u64) -> Result<[u64; 7], i64> {
+    let mut out = [0u64; 7];
+    check(unsafe { syscall3(SYS_LX_PROC_INFO, tgid, out.as_mut_ptr() as u64, 0) })?;
+    Ok(out)
 }
 
 /// Gives up the rest of the time slice.

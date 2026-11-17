@@ -241,6 +241,7 @@ extern "C" {
     fn asm_irq_46();
     fn asm_irq_47();
     fn asm_yield();
+    fn asm_direct_switch();
     fn asm_lapic_timer();
     fn asm_tlb_ipi();
     fn asm_msi_0();
@@ -348,6 +349,8 @@ pub fn init() {
         .set_dpl(3);
     // Vector 0x81: voluntary reschedule (`task::yield_now`), kernel only
     idt.entries[YIELD_VECTOR as usize].set_handler_addr(asm_yield as *const () as usize, kernel_cs);
+    // Vector 0x82: the direct switch of a forwarded Linux call (`crate::lx`), kernel only
+    idt.entries[DIRECT_VECTOR as usize].set_handler_addr(asm_direct_switch as *const () as usize, kernel_cs);
     // Vector 0x40: an application processor's local APIC timer
     idt.entries[LAPIC_TIMER_VECTOR as usize].set_handler_addr(asm_lapic_timer as *const () as usize, kernel_cs);
     // Vector 0x42: a TLB flush request from another CPU
@@ -619,6 +622,36 @@ impl FpuState {
 
 /// Software interrupt vector used by `task::yield_now` for voluntary rescheduling.
 pub const YIELD_VECTOR: u64 = 0x81;
+/// Software interrupt vector of the direct switch (`crate::lx`): to the task
+/// `task::scheduler::DIRECT_TO` names, without saving or restoring FPU state (both sides
+/// block only where the compiler keeps nothing in vector registers).
+pub const DIRECT_VECTOR: u64 = 0x82;
+
+/// The direct switch's handler (vector [`DIRECT_VECTOR`], from `asm_direct_switch`, which
+/// saves only the general registers): switches to the task `DIRECT_TO` names, prepared by
+/// `Scheduler::direct_handover` under the kernel lock this CPU holds. When that cannot be
+/// done here, `rax` comes back 1 and the caller yields the ordinary way.
+#[no_mangle]
+extern "C" fn hydra_direct_switch_handler(ctx: &mut ExceptionContext) {
+    let target = crate::task::scheduler::DIRECT_TO.swap(0, Ordering::Relaxed);
+    let mut switched = false;
+    if target != 0 && crate::task::is_active() {
+        // No FPU area: the switch moves none (see DIRECT_VECTOR)
+        let prev = CURRENT_TRAP_FPU.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        loop {
+            if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                switched = sched.direct_switch_nofpu(ctx, target - 1);
+                break;
+            }
+            crate::arch::smp::serve_tlb();
+            core::hint::spin_loop();
+        }
+        CURRENT_TRAP_FPU.store(prev, Ordering::Release);
+    }
+    if !switched {
+        ctx.rax = 1;
+    }
+}
 /// `int $0x80`: Linux's 32-bit system call gate (DPL 3).
 pub const INT80_VECTOR: u64 = 0x80;
 
@@ -986,9 +1019,15 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             // must switch (the caller may have just blocked itself): another CPU may hold
             // the scheduler lock for a moment, so wait for it rather than give up
             if crate::task::is_active() {
+                // The direct switch of a forwarded Linux call names the task to run next
+                let direct = crate::task::scheduler::DIRECT_TO.swap(0, Ordering::Relaxed);
                 loop {
                     if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                        sched.schedule_now(ctx);
+                        if direct != 0 {
+                            sched.direct_switch(ctx, direct - 1);
+                        } else {
+                            sched.schedule_now(ctx);
+                        }
                         break;
                     }
                     crate::arch::smp::serve_tlb();
@@ -1186,6 +1225,53 @@ global_asm!(
     TRAP_NO_ERRCODE asm_msi_13, 0x5d
     TRAP_NO_ERRCODE asm_msi_14, 0x5e
     TRAP_NO_ERRCODE asm_msi_15, 0x5f
+
+    // The direct switch (vector 0x82, kernel mode only): the general registers in an
+    // ExceptionContext, no FPU state, and back to kernel mode (the task switched to is
+    // always one that blocked in the kernel)
+    .global asm_direct_switch
+    asm_direct_switch:
+        push 0
+        push 0x82
+        push rax
+        push rcx
+        push rdx
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        push r11
+        push rbx
+        push rbp
+        push r12
+        push r13
+        push r14
+        push r15
+        mov rbp, rsp
+        and rsp, -16
+        mov rcx, rbp
+        mov rdi, rbp
+        sub rsp, 32
+        call hydra_direct_switch_handler
+        mov rsp, rbp
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop rbp
+        pop rbx
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rdx
+        pop rcx
+        pop rax
+        add rsp, 16
+        iretq
 
     common_trap_handler:
         // From user mode: the kernel's GS base (per-CPU data). [rsp+24] is the CS pushed

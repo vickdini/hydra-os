@@ -276,6 +276,15 @@ pub fn prof(args: &[u64; 4], name: &str) -> bool {
     true
 }
 
+/// The login screen (SDDM) was started: after a crash of the Linux server, which ends every
+/// Linux program, it is started again (`crate::lx`).
+static DISPLAY_MANAGER_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the login screen (SDDM) was started since boot.
+pub fn display_manager_started() -> bool {
+    DISPLAY_MANAGER_STARTED.load(core::sync::atomic::Ordering::Acquire)
+}
+
 /// `ADMIN_LINUX_PLASMA` (report), and the desktop start at boot: the graphical KDE
 /// desktop on the DRM display from `root`. The login screen (SDDM) if installed (a
 /// service: the console stays free for its own login), otherwise (or with `nologin`) the
@@ -291,6 +300,7 @@ pub fn plasma(root: &str, nologin: bool) {
         crate::println!("[*] Starting the login screen (SDDM)...");
         crate::video::splash::desktop_starting();
         let argv = ["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"];
+        DISPLAY_MANAGER_STARTED.store(true, core::sync::atomic::Ordering::Release);
         match spawn_in_root(root, &argv, 0, 0) {
             Ok(tid) => crate::println!("[+] Started {} (process {}).", argv.join(" "), tid.0),
             Err(e) => crate::println!("[!] linux chroot: {}", e),

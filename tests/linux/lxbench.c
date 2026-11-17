@@ -26,6 +26,9 @@
 
 #define REPS 5
 #define PROBE_NR 0x6706
+/* Hydra's test call (wave 3, group 7): a forwarded null call, answered by linux-server, or
+ * in the kernel when the forwarding is switched off (ENOSYS on kernels before it) */
+#define LX_NULL_NR 0x6710
 
 static uint64_t now(void) {
     struct timespec t;
@@ -264,6 +267,39 @@ static double b_fault_anon(long n) { /* per page: mmap 1 MiB, touch its 256 page
     return (double)(now() - t) / pages;
 }
 
+/* --- forwarding to linux-server (wave 3, group 7) --- */
+static double b_lx_null(long n) { /* the forwarded null call */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(LX_NULL_NR);
+    return (double)(now() - t) / n;
+}
+static double b_keyctl(long n) { /* keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING, 0) */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_keyctl, 0, -3, 0);
+    return (double)(now() - t) / n;
+}
+static long par_n; static long par_nr;
+static void *par_worker(void *x) {
+    for (long i = 0; i < par_n; i++) {
+        if (par_nr == LX_NULL_NR) syscall(LX_NULL_NR); else syscall(SYS_keyctl, 0, -3, 0);
+    }
+    return 0;
+}
+/* Two threads making n calls each at once: time per call over both (no global serialization:
+ * this must not be slower than one thread making all 2n calls) */
+static double par2(long nr, long n) {
+    pthread_t a, b;
+    par_n = n; par_nr = nr;
+    uint64_t t = now();
+    pthread_create(&a, 0, par_worker, 0);
+    pthread_create(&b, 0, par_worker, 0);
+    pthread_join(a, 0);
+    pthread_join(b, 0);
+    return (double)(now() - t) / (2 * n);
+}
+static double b_lx_null_par2(long n) { return par2(LX_NULL_NR, n); }
+static double b_keyctl_par2(long n) { return par2(SYS_keyctl, n); }
+
 /* --- forwarding probe (kernel built with --features g6-probe) --- */
 static int probe_ok(void) { return syscall(PROBE_NR, 0, 0, 0) == 0; }
 static double b_probe_null(long n) {
@@ -309,6 +345,10 @@ static struct bench benches[] = {
     {"fault_anon_page", b_fault_anon, 200, 0},
     {"fork_wait", b_fork_wait, 200, 0},
     {"fork_exec_wait", b_fork_exec_wait, 100, 0},
+    {"lx_null", b_lx_null, 200000, 0},
+    {"lx_null_par2", b_lx_null_par2, 100000, 0},
+    {"keyctl", b_keyctl, 100000, 0},
+    {"keyctl_par2", b_keyctl_par2, 50000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},

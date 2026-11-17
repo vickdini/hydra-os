@@ -47,6 +47,8 @@ static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/e1000-driver"));
 /// The network server program (the protocols: Ethernet to TCP, DHCP, DNS).
 static NET_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/net-server"));
+/// The Linux server program (wave 3: the Linux system calls moved out of the kernel).
+static LINUX_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/linux-server"));
 /// The sound driver program (Intel High Definition Audio).
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
 
@@ -225,6 +227,11 @@ fn net_server_args() -> Option<Vec<String>> {
         args.push(String::from("nic=1"));
     }
     Some(args)
+}
+
+/// linux-server: always started; `workers=N` worker threads serve the forwarded calls.
+fn linux_server_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=4")])
 }
 
 /// e1000 driver: its 128 KiB register window.
@@ -601,6 +608,17 @@ pub fn supervisor_init() {
         service::allow_client(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
         service::forward_irq(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
         service::set_signal_hook(ENDPOINT_NET_SERVER, crate::net::client::on_signal);
+        // The Linux server (wave 3): the Linux system calls the kernel forwards
+        // (`crate::lx`); its going away runs the crash policy (the endpoint's hook)
+        crate::lx::init();
+        sup.services.push(ServiceDescriptor::new(
+            "linux_server",
+            crate::ipc::protocol::ENDPOINT_LINUX_SERVER,
+            LINUX_SERVER_ELF,
+            linux_server_args,
+            no_grants,
+        ));
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::lx::on_signal);
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,
@@ -713,6 +731,8 @@ pub fn supervisor_tick() {
         .enumerate()
         .map(|(i, s)| (i, s.endpoint_id, s.task_id, s.state))
         .collect();
+    // A Linux server worker that died alone ends the whole server (restarted below)
+    crate::lx::watch();
     for (idx, endpoint, task, state) in services {
         if state != ServiceState::Running {
             continue;
