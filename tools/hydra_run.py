@@ -225,8 +225,16 @@ def main():
     ap.add_argument("--login", default="hydra:hydra", help="user:password for the console login after the countdown ('' to skip)")
     ap.add_argument("--control", default=None, help="after the commands, take more steps from DIR/*.cmd files until 'quit' (see control_loop)")
     ap.add_argument("--screen", default="1280x800", help="guest screen size for pointer steps (>click X Y)")
+    ap.add_argument("--machine", default="pc", choices=["pc", "q35"],
+                    help="the chipset: pc (i440fx, IDE) or q35 (ICH9; -drive if=ide lands on its built-in AHCI)")
+    ap.add_argument("--iommu", action="store_true", help="add an Intel VT-d IOMMU (intel-iommu; implies --machine q35)")
+    ap.add_argument("--iommu-test", action="store_true",
+                    help="tell the kernel (fw_cfg opt/hydra/iommu=test) to allow the rogue-DMA test (`iommu dmatest`)")
+    ap.add_argument("--iommu-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/iommu=off) not to use the IOMMU")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
+    if a.iommu:
+        a.machine = "q35"
     a.screen = tuple(int(v) for v in a.screen.lower().split("x"))
 
     # One VM at a time: two QEMUs on the same pool image (or one on an overlay while the
@@ -282,6 +290,17 @@ def main():
         "-qmp", "stdio",
         "-no-reboot",
     ]
+    if a.machine == "q35":
+        args += ["-machine", "q35"]
+        if a.iommu:
+            # The IOMMU must come before every other PCI device. Interrupt remapping is
+            # not used by Hydra; caching-mode makes QEMU see each new mapping (the kernel
+            # flushes the IOTLB on map when CAP.CM is set).
+            args += ["-device", "intel-iommu,intremap=off,caching-mode=on"]
+    if a.iommu_test:
+        args += ["-fw_cfg", "name=opt/hydra/iommu,string=test"]
+    elif a.iommu_off:
+        args += ["-fw_cfg", "name=opt/hydra/iommu,string=off"]
     disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
     if a.disk == "none":
         pass  # no pool disk (e.g. the pool on a USB stick given through HYDRA_QEMU_EXTRA)
@@ -293,8 +312,9 @@ def main():
         args += ["-drive", f"file={a.disk},format={disk_format},if=ide,index=0,media=disk"]
     if a.nic == "none":
         args += ["-nic", "none"]
-    elif a.nic != "e1000":
-        # QEMU's default for the pc machine is an e1000 with user networking
+    elif a.nic != "e1000" or a.machine == "q35":
+        # QEMU's default for the pc machine is an e1000 with user networking (q35's is
+        # an e1000e, so the model is named there)
         args += ["-nic", f"user,model={a.nic}"]
     if a.usb:
         args += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0"]
