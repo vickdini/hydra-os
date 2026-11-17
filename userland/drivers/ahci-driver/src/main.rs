@@ -134,7 +134,13 @@ const PRDT_OFF: usize = CT_OFF + 0x80;
 const BUF_OFF: usize = CT_OFF + 32 * CT_SLOT;
 /// The bounce buffer: one full service window.
 const BUF_LEN: usize = WINDOW_SIZE;
-const DMA_LEN: usize = BUF_OFF + BUF_LEN;
+/// The command table of a command on lent pages (slot 0 only): its PRD table has one entry
+/// per physically contiguous piece of the lent memory, more than fit in a `CT_SLOT`.
+const LENT_CT_OFF: usize = BUF_OFF + BUF_LEN;
+const LENT_CT_LEN: usize = 0x1000;
+/// PRD entries in the lent command table.
+const LENT_MAX_PRDS: usize = (LENT_CT_LEN - 0x80) / 16;
+const DMA_LEN: usize = LENT_CT_OFF + LENT_CT_LEN;
 /// Bytes per PRD entry. AHCI allows up to 4 MiB; 64 KiB entries are what the older
 /// bus-master IDE engines could do and every AHCI implementation handles them.
 const PRD_BYTES: usize = 64 * 1024;
@@ -147,6 +153,22 @@ const COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 const EIO: i64 = -5;
 const EINVAL: i64 = -22;
+/// A lent request this driver cannot do on the lent pages themselves (pages out of a
+/// 32-bit adapter's reach, odd addresses): the caller sends it again through the window.
+const EOPNOTSUPP: i64 = -95;
+
+/// `args[2]` (the window offset) of a read or write whose data is in pages the caller lent
+/// with the request (`hydra_rt::sys::svc_grant`) instead of in the window.
+const OFFSET_LENT: u64 = u64::MAX;
+
+/// Where a command's data is.
+#[derive(Clone, Copy)]
+enum Data<'a> {
+    /// The bounce buffer, at this byte offset.
+    Bounce(usize),
+    /// Lent memory: its physical segments `(address, length)`, from this byte on.
+    Lent(&'a [(u64, u64)], usize),
+}
 
 /// A time limit in milliseconds, measured with the 100 Hz uptime clock.
 struct Deadline {
@@ -257,6 +279,8 @@ struct Disk {
     write_cache: bool,
     /// Commands that failed and were retried after a port reset (diagnostics).
     recoveries: u32,
+    /// The adapter reaches 64-bit addresses (lent pages may be anywhere).
+    s64a: bool,
     /// Command slots usable for queued (NCQ) reads at once; 0 without NCQ.
     ncq_slots: usize,
 }
@@ -359,18 +383,20 @@ impl Disk {
 
     /// Fills the command header of slot 0, the command FIS and the PRD table for one
     /// command moving `bytes` bytes of the bounce buffer.
-    fn build(&self, command: u8, lba: u64, count: u16, bytes: usize, dir: Dir) {
-        self.build_slot(0, command, lba, count, bytes, 0, dir);
+    fn build(&self, command: u8, lba: u64, count: u16, bytes: usize, data: Data, dir: Dir) {
+        self.build_slot(0, command, lba, count, bytes, data, dir);
     }
 
     /// Fills slot `tag`'s command header, command FIS and PRD table for one command
-    /// moving `bytes` bytes at byte `buf_off` of the bounce buffer. A queued read
+    /// moving `bytes` bytes of `data` (lent memory: slot 0 only). A queued read
     /// (READ FPDMA QUEUED) carries its sector count in the features field and its tag in
     /// the count field.
     #[allow(clippy::too_many_arguments)]
-    fn build_slot(&self, tag: usize, command: u8, lba: u64, count: u16, bytes: usize, buf_off: usize, dir: Dir) {
-        let prds = bytes.div_ceil(PRD_BYTES);
-        let ct_off = CT_OFF + tag * CT_SLOT;
+    fn build_slot(&self, tag: usize, command: u8, lba: u64, count: u16, bytes: usize, data: Data, dir: Dir) {
+        let ct_off = match data {
+            Data::Bounce(_) => CT_OFF + tag * CT_SLOT,
+            Data::Lent(..) => LENT_CT_OFF,
+        };
         unsafe {
             // The command FIS: a host-to-device register FIS (20 bytes, 5 dwords)
             let fis = self.at(ct_off);
@@ -400,17 +426,46 @@ impl Disk {
                 f[12] = count as u8;
                 f[13] = (count >> 8) as u8;
             }
-            // The PRD table: the bounce buffer in PRD_BYTES pieces
+            // The PRD table: the data in pieces of at most PRD_BYTES
             let prdt = self.at(ct_off + 0x80) as *mut u32;
-            for i in 0..prds {
-                let off = i * PRD_BYTES;
-                let len = (bytes - off).min(PRD_BYTES);
-                let addr = self.mem_phys + (BUF_OFF + buf_off + off) as u64;
-                prdt.add(i * 4).write_volatile(addr as u32);
-                prdt.add(i * 4 + 1).write_volatile((addr >> 32) as u32);
-                prdt.add(i * 4 + 2).write_volatile(0);
+            let mut prds = 0usize;
+            let mut put = |addr: u64, len: usize| {
+                prdt.add(prds * 4).write_volatile(addr as u32);
+                prdt.add(prds * 4 + 1).write_volatile((addr >> 32) as u32);
+                prdt.add(prds * 4 + 2).write_volatile(0);
                 // Byte count minus one (bit 0 set: counts are even); no per-entry interrupt
-                prdt.add(i * 4 + 3).write_volatile((len - 1) as u32);
+                prdt.add(prds * 4 + 3).write_volatile((len - 1) as u32);
+                prds += 1;
+            };
+            match data {
+                Data::Bounce(buf_off) => {
+                    for off in (0..bytes).step_by(PRD_BYTES) {
+                        put(self.mem_phys + (BUF_OFF + buf_off + off) as u64, (bytes - off).min(PRD_BYTES));
+                    }
+                }
+                Data::Lent(segs, from) => {
+                    // The segments' bytes from `from` on, `bytes` of them (`blocks_lent`
+                    // checked that they fit in the table)
+                    let (mut skip, mut left) = (from as u64, bytes as u64);
+                    for &(a, l) in segs {
+                        if left == 0 {
+                            break;
+                        }
+                        if skip >= l {
+                            skip -= l;
+                            continue;
+                        }
+                        let (mut a, mut l) = (a + skip, (l - skip).min(left));
+                        skip = 0;
+                        left -= l;
+                        while l > 0 {
+                            let n = l.min(PRD_BYTES as u64);
+                            put(a, n as usize);
+                            a += n;
+                            l -= n;
+                        }
+                    }
+                }
             }
             // The slot's header: FIS length 5 dwords, W for writes, the PRD count, the table
             let hdr = self.at(CLB_OFF + tag * 32) as *mut u32;
@@ -473,14 +528,14 @@ impl Disk {
     }
 
     /// Runs one command, retrying it once after recovering the port.
-    fn command(&mut self, command: u8, lba: u64, count: u16, bytes: usize, dir: Dir) -> Result<(), &'static str> {
-        self.build(command, lba, count, bytes, dir);
+    fn command(&mut self, command: u8, lba: u64, count: u16, bytes: usize, data: Data, dir: Dir) -> Result<(), &'static str> {
+        self.build(command, lba, count, bytes, data, dir);
         match self.issue() {
             Ok(()) => Ok(()),
             Err(e) => {
                 println!("[ahci-driver] command {:#x} at sector {} failed ({}); resetting the port and retrying", command, lba, e);
                 self.recover();
-                self.build(command, lba, count, bytes, dir);
+                self.build(command, lba, count, bytes, data, dir);
                 self.issue()
             }
         }
@@ -488,7 +543,7 @@ impl Disk {
 
     /// Reads the disk's IDENTIFY DEVICE data and learns its size and features.
     fn identify(&mut self) -> Result<(), &'static str> {
-        self.command(ATA_IDENTIFY, 0, 0, 512, Dir::Read)?;
+        self.command(ATA_IDENTIFY, 0, 0, 512, Data::Bounce(0), Dir::Read)?;
         let mut id = [0u16; 256];
         for (i, w) in id.iter_mut().enumerate() {
             *w = unsafe { (self.at(BUF_OFF + i * 2) as *const u16).read_volatile() };
@@ -566,7 +621,7 @@ impl Disk {
                 (true, true) => ATA_WRITE_DMA_EXT,
             };
             // 256 sectors are encoded as 0 in the 28-bit commands' 8-bit count
-            self.command(cmd, lba, sectors as u16, chunk.len(), if write { Dir::Write } else { Dir::Read })?;
+            self.command(cmd, lba, sectors as u16, chunk.len(), Data::Bounce(0), if write { Dir::Write } else { Dir::Read })?;
             if !write {
                 unsafe { core::ptr::copy_nonoverlapping(self.at(BUF_OFF), chunk.as_mut_ptr(), chunk.len()) };
             }
@@ -574,10 +629,52 @@ impl Disk {
         Ok(())
     }
 
+    /// Reads or writes `count` 4 KiB blocks at `block` straight to or from memory the
+    /// caller lent (`segs`: its physical segments, in order), with no copy through the
+    /// bounce buffer.
+    ///
+    /// # Errors
+    /// `Err(None)`: the lent memory cannot be used as it is (see [`EOPNOTSUPP`]);
+    /// `Err(Some(e))`: the disk failed.
+    fn blocks_lent(&mut self, block: u64, count: usize, segs: &[(u64, u64)], write: bool) -> Result<(), Option<&'static str>> {
+        let total: u64 = segs.iter().map(|s| s.1).sum();
+        if total < (count * BLOCK) as u64
+            || segs.iter().any(|&(a, l)| a % 2 != 0 || l % 2 != 0 || (!self.s64a && a + l > 0x1_0000_0000))
+            || segs.iter().map(|s| s.1.div_ceil(PRD_BYTES as u64) as usize).sum::<usize>() + segs.len() > LENT_MAX_PRDS
+        {
+            return Err(None);
+        }
+        let spb = self.sectors_per_block();
+        let max_sectors: u64 = if self.lba48 { 65535 } else { 256 };
+        let run = ((max_sectors / spb) as usize).max(1);
+        let mut done = 0;
+        while done < count {
+            let n = run.min(count - done);
+            let lba = (block + done as u64) * spb;
+            let sectors = n as u64 * spb;
+            if lba + sectors > self.sectors {
+                return Err(Some("past the end of the disk"));
+            }
+            if !self.lba48 && lba + sectors > 0x1000_0000 {
+                return Err(Some("beyond the 28-bit address range"));
+            }
+            let cmd = match (write, self.lba48) {
+                (false, false) => ATA_READ_DMA,
+                (false, true) => ATA_READ_DMA_EXT,
+                (true, false) => ATA_WRITE_DMA,
+                (true, true) => ATA_WRITE_DMA_EXT,
+            };
+            let data = Data::Lent(segs, done * BLOCK);
+            self.command(cmd, lba, sectors as u16, n * BLOCK, data, if write { Dir::Write } else { Dir::Read }).map_err(Some)?;
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Flushes the disk's write cache to the media.
     fn flush(&mut self) -> Result<(), &'static str> {
         let cmd = if self.lba48 { ATA_FLUSH_CACHE_EXT } else { ATA_FLUSH_CACHE };
-        self.command(cmd, 0, 0, 0, Dir::None)
+        self.command(cmd, 0, 0, 0, Data::Bounce(0), Dir::None)
     }
 
     /// Reads the runs `[block, count, window offset]` into `window`: all in flight at
@@ -591,7 +688,7 @@ impl Disk {
             for (tag, r) in runs.iter().enumerate() {
                 let (block, count, off) = (r[0], r[1] as usize, r[2] as usize);
                 let sectors = count as u64 * spb;
-                self.build_slot(tag, ATA_READ_FPDMA_QUEUED, block * spb, sectors as u16, count * BLOCK, off, Dir::Read);
+                self.build_slot(tag, ATA_READ_FPDMA_QUEUED, block * spb, sectors as u16, count * BLOCK, Data::Bounce(off), Dir::Read);
                 mask |= 1 << tag;
             }
             if self.issue_queued(mask).is_ok() {
@@ -777,6 +874,7 @@ fn main(args: &[&str]) {
             lba48: false,
             write_cache: false,
             recoveries: 0,
+            s64a: cap & CAP_S64A != 0,
             ncq_slots: 0,
         };
         if let Err(e) = disk.start() {
@@ -817,7 +915,36 @@ fn main(args: &[&str]) {
         }
     };
     let mut stats = iostat::IoStats::new("ahci-driver");
-    server.serve(|srv, msg| match msg.label as u32 {
+    server.serve_ids(|srv, id, msg| match msg.label as u32 {
+        MSG_BLOCK_READ | MSG_BLOCK_WRITE if msg.args[2] == OFFSET_LENT => {
+            // The data is in pages the caller lent with the request: the disk reads or
+            // writes them directly
+            let (block, count) = (msg.args[0], msg.args[1] as usize);
+            let write = msg.label as u32 == MSG_BLOCK_WRITE;
+            let mut segs = [(0u64, 0u64); sys::GRANT_SEGMENTS_MAX];
+            let nsegs = match sys::svc_grant(ENDPOINT_BLOCK_DEV, id, &mut segs) {
+                Ok(n) => n.min(segs.len()),
+                Err(_) => return reply(EINVAL, 0),
+            };
+            if count == 0 {
+                return reply(EINVAL, 0);
+            }
+            let (d, at) = match units.map(msg.args[3], block, count as u64, write, &set) {
+                Ok(m) => m,
+                Err(e) => return reply(e, 0),
+            };
+            let t = stats.start();
+            let result = set.0[d].blocks_lent(at, count, &segs[..nsegs], write);
+            stats.done(t, (count * BLOCK) as u64, write);
+            match result {
+                Ok(()) => reply(0, count as u64),
+                Err(None) => reply(EOPNOTSUPP, 0),
+                Err(Some(e)) => {
+                    println!("[ahci-driver] {} of {} lent blocks at {} (disk {}) failed: {}", if write { "write" } else { "read" }, count, at, d, e);
+                    reply(EIO, 0)
+                }
+            }
+        }
         MSG_BLOCK_READ | MSG_BLOCK_WRITE => {
             let (block, count, offset) = (msg.args[0], msg.args[1] as usize, msg.args[2] as usize);
             let write = msg.label as u32 == MSG_BLOCK_WRITE;
