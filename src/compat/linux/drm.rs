@@ -1251,7 +1251,8 @@ impl DrmFile {
                     return Err(ENOENT);
                 }
                 let (fb_id, flags, user_data) = (get32(b, 4), get32(b, 8), get64(b, 16));
-                crate::kprintln!("[DRM] file {} PAGE_FLIP fb_id={}", self.id, fb_id);
+                // No log line here: a desktop flips every frame, which flooded the console
+                // (Ctrl+Alt+F1) and the kernel log
                 if flags & !0x3 != 0 {
                     return Err(EINVAL);
                 }
