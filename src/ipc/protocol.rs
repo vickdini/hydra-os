@@ -170,6 +170,12 @@ pub const MSG_NET_GET_MAC: u32 = 0x4003;
 /// - `args[0..3]`: Reserved.
 pub const MSG_NET_GET_STATUS: u32 = 0x4004;
 
+/// Test only (IOMMU, Group 1): makes the adapter read physical address `args[0]` by DMA, as
+/// a rogue driver would (one transmit descriptor pointing there). The driver accepts it
+/// only when started with `dma_test=1` (QEMU `opt/hydra/iommu=test`). Reply `[0]` once
+/// the descriptor completed, or a negative errno.
+pub const MSG_NET_DMA_TEST: u32 = 0x4005;
+
 /// Protocol label for network driver operation reply.
 ///
 /// Inline arguments:

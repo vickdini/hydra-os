@@ -108,6 +108,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
 
     // 2b. The processors (ACPI MADT) and the start-up pages for the others
     crate::arch::smp::discover();
+    // 2c. The IOMMU's ACPI table (DMAR) and boot options
+    crate::arch::iommu::discover();
 
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
@@ -224,6 +226,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     // Driver programs run from here on (the takeover lock is released first: they run
     // while their registration is awaited)
     drop(done);
+    // DMA remapping on before any driver programs its device
+    crate::arch::iommu::init();
     crate::task::supervisor::start_all();
 
     // 10. Automatically initialize and configure network adapter via DHCP

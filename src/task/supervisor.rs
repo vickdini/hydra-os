@@ -144,6 +144,7 @@ fn ahci_adapter() -> Option<(crate::arch::pci::PciDevice, u64)> {
 /// `Some(Vec<String>)` with `abar=<phys>` and maybe `irq=<line>`, or `None`.
 fn ahci_args() -> Option<Vec<String>> {
     let (dev, abar) = ahci_adapter()?;
+    crate::arch::iommu::attach(ENDPOINT_BLOCK_DEV, "ahci_driver", &dev);
     crate::arch::pci::enable_bus_mastering(&dev);
     let mut args = alloc::vec![alloc::format!("abar={:#x}", abar)];
     args.extend(crate::arch::bootdisk::driver_arg());
@@ -185,6 +186,7 @@ fn ata_args() -> Option<Vec<String>> {
         let prog_if = crate::arch::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
         let bar4 = crate::arch::pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x20);
         if prog_if & 0x80 != 0 && bar4 & 1 != 0 && bar4 & !3 != 0 {
+            crate::arch::iommu::attach(ENDPOINT_BLOCK_DEV, "ata_driver", &dev);
             crate::arch::pci::enable_bus_mastering(&dev);
             args.push(alloc::format!("bm={:#x}", bar4 & 0xFFFC));
         }
@@ -201,7 +203,12 @@ fn ata_args() -> Option<Vec<String>> {
 /// `Some(Vec<String>)` containing base address, model and IRQ flags, or `None` if no adapter found.
 fn e1000_args() -> Option<Vec<String>> {
     let a = crate::net::e1000::find_adapter()?;
+    crate::arch::iommu::attach(ENDPOINT_NET_DEV, "net_driver", &a.dev);
     let mut args = alloc::vec![alloc::format!("bar0={:#x}", a.bar0), alloc::format!("model={}", a.model)];
+    if crate::arch::iommu::dma_test_enabled() {
+        // QEMU's opt/hydra/iommu=test: the driver accepts the rogue-DMA test request
+        args.push(String::from("dma_test=1"));
+    }
     let msi = if a.model == "82540" { None } else { service::msi_line(&a.dev) };
     let irq = msi.unwrap_or(a.dev.irq_line);
     if msi.is_some() || (irq != 0 && irq < 16 && irq != 2) {
@@ -252,6 +259,7 @@ static XHCI: spin::Once<Option<(crate::arch::pci::PciDevice, u64, u64)>> = spin:
 fn usb_args() -> Option<Vec<String>> {
     use crate::arch::pci;
     let (dev, base, len) = (*XHCI.call_once(xhci_controller))?;
+    crate::arch::iommu::attach(crate::ipc::protocol::ENDPOINT_INPUT_DEV, "usb_driver", &dev);
     pci::enable_bus_mastering(&dev);
     if dev.vendor_id == 0x8086 && matches!(dev.device_id, 0x1E31 | 0x8C31 | 0x9C31 | 0x8CB1 | 0x9CB1) {
         let (b, d, f) = (dev.bus, dev.device, dev.function);
@@ -319,6 +327,7 @@ static HDA: spin::Once<Option<(crate::arch::pci::PciDevice, u64)>> = spin::Once:
 fn hda_args() -> Option<Vec<String>> {
     use crate::arch::pci;
     let (dev, base) = (*HDA.call_once(hda_controller))?;
+    crate::arch::iommu::attach(crate::ipc::protocol::ENDPOINT_SOUND_DEV, "sound_driver", &dev);
     pci::enable_bus_mastering(&dev);
     if dev.vendor_id == 0x8086 {
         let (b, d, f) = (dev.bus, dev.device, dev.function);
@@ -765,6 +774,8 @@ fn watchdog_task() {
         // Descriptors of processes that died without a system call to close them (a fault)
         crate::task::close_retired();
         supervisor_tick();
+        // DMA the IOMMU blocked since the last look
+        crate::arch::iommu::poll_faults();
     }
 }
 

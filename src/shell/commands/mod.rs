@@ -72,6 +72,8 @@ pub mod zfs_cmds;
 pub mod linux_cmd;
 /// MINIX 3-style driver reincarnation server and process supervisor inspection command (`service`).
 pub mod service_cmd;
+/// Intel VT-d DMA remapping: status, faults, rogue-DMA test (`iommu`).
+pub mod iommu_cmd;
 /// USB disks: list, test and measure (`usbdisk`).
 pub mod usbdisk;
 
@@ -102,6 +104,7 @@ pub use misc::{ClearCommand, ColorCommand, CursorCommand, EchoCommand, PanicComm
 pub use power::{HaltCommand, RebootCommand, ShutdownCommand};
 pub use script::ShCommand;
 pub use service_cmd::ServiceCommand;
+pub use iommu_cmd::IommuCommand;
 pub use usbdisk::UsbDiskCommand;
 pub use status::StatusCommand;
 pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
@@ -197,6 +200,7 @@ pub static COMMANDS: &[&dyn Command] = &[
     &ElfCommand,
     &LinuxCommand,
     &ServiceCommand,
+    &IommuCommand,
     &UsbDiskCommand,
     // Power Management
     &RebootCommand,
