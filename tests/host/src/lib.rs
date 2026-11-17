@@ -79,6 +79,7 @@ pub mod arch {
         pub fn load_cr3(_pml4: u64) {}
         pub fn forget(_pml4: u64) {}
         pub fn mark_remote(_cpu: usize, _pml4: u64) {}
+        pub fn flush_all_ids() {}
         pub fn without_invpcid<R>(f: impl FnOnce() -> R) -> R {
             f()
         }

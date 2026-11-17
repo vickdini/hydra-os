@@ -1840,7 +1840,8 @@ impl Drop for BufferObject {
 ///   the entries and the test proves nothing);
 /// - a shootdown of V in A, and of all of A (INVPCID, or the stale mark without it);
 /// - another CPU's stale mark (`pcid::mark_remote` on this CPU's slot);
-/// - the teardown's `pcid::forget`.
+/// - the teardown's `pcid::forget`;
+/// - a flush of every ID (kernel-table changes), with and without `INVPCID`.
 ///
 /// Returns a line for the boot log; `Err` if a stale entry was used after an invalidation.
 pub fn tlb_self_test() -> Result<alloc::string::String, alloc::string::String> {
@@ -1871,13 +1872,15 @@ pub fn tlb_self_test() -> Result<alloc::string::String, alloc::string::String> {
     let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut out = alloc::vec::Vec::new();
-        let tries: [(&str, &dyn Fn()); 6] = [
+        let tries: [(&str, &dyn Fn()); 8] = [
             ("control (no invalidation)", &|| {}),
             ("shootdown of the page", &|| crate::arch::smp::shootdown(Some(ra), Some(V))),
             ("shootdown of the address space", &|| crate::arch::smp::shootdown(Some(ra), None)),
             ("shootdown of the page, without INVPCID", &|| pcid::without_invpcid(|| crate::arch::smp::shootdown(Some(ra), Some(V)))),
             ("another CPU's stale mark", &|| pcid::mark_remote(crate::arch::percpu::cpu(), ra)),
             ("teardown (forget)", &|| pcid::forget(ra)),
+            ("flush of every ID", &|| pcid::flush_all_ids()),
+            ("flush of every ID, without INVPCID", &|| pcid::without_invpcid(pcid::flush_all_ids)),
         ];
         for (name, invalidate) in tries.iter() {
             // V -> f1, cached under A's ID
