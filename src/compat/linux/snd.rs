@@ -212,6 +212,14 @@ pub fn start() {
             dirs &= !(1 << dir);
         }
     }
+    // IOMMU (Group 1): the controller reaches these kernel buffers by DMA; they live as
+    // long as the kernel, across driver restarts
+    let shared = POSBUF.get().into_iter().chain(BUFFERS.iter().filter_map(|b| b.get().and_then(|b| b.as_ref())));
+    for b in shared {
+        if crate::arch::iommu::map_dma(ENDPOINT_SOUND_DEV, b.base, b.pages * 4096).is_err() {
+            crate::kprintln!("[snd] the sound controller's IOMMU domain could not map a buffer");
+        }
+    }
     if dirs & 1 == 0 {
         crate::kprintln!("[snd] no playback buffer");
         return;

@@ -134,6 +134,9 @@ pub struct ContiguousFrames {
     pub base: u64,
     /// Number of 4 KiB pages.
     pub pages: u64,
+    /// IOMMU (Group 1): the endpoint whose driver's DMA domain maps these frames (0:
+    /// none); they leave that domain before they are freed.
+    iommu: u32,
 }
 
 impl ContiguousFrames {
@@ -151,6 +154,12 @@ impl ContiguousFrames {
     ///
     /// *Guaranteed to never panic under normal execution.*
     pub fn allocate(pages: u64) -> Option<Arc<Self>> {
+        Self::allocate_for(pages, 0)
+    }
+
+    /// As [`Self::allocate`], recording the endpoint whose IOMMU domain will map the
+    /// frames (`dma_alloc`).
+    fn allocate_for(pages: u64, iommu: u32) -> Option<Arc<Self>> {
         let mut fa = crate::memory::frame_allocator::FRAME_ALLOCATOR.lock();
         let first = fa.allocate_contiguous_frames(pages as usize)?;
         let base = first.start_address().as_u64();
@@ -159,7 +168,7 @@ impl ContiguousFrames {
         }
         drop(fa);
         unsafe { core::ptr::write_bytes(crate::memory::frame_allocator::phys_to_virt(base), 0, (pages * 4096) as usize) };
-        Some(Arc::new(Self { base, pages }))
+        Some(Arc::new(Self { base, pages, iommu }))
     }
 
     /// Accesses the contiguous memory as a mutable byte slice through the kernel's direct map.
@@ -199,6 +208,10 @@ impl MappedObject for ContiguousFrames {
 impl Drop for ContiguousFrames {
     /// Decrements the reference counts of all underlying physical frames.
     fn drop(&mut self) {
+        // The device must not reach the frames once they can belong to someone else
+        if self.iommu != 0 {
+            crate::arch::iommu::unmap_dma(self.iommu, self.base, self.pages * 4096);
+        }
         for i in 0..self.pages {
             crate::memory::frame_allocator::frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(self.base + i * 4096)));
         }
@@ -1375,6 +1388,8 @@ pub fn physmap(phys: u64, len: u64) -> Result<u64, i64> {
 }
 
 /// Allocates physically contiguous memory for device DMA and maps it into the calling driver.
+/// With the IOMMU on, it is also mapped (at its physical address) into the DMA domain of
+/// the driver's device, and leaves it when freed (the driver unmaps it or dies).
 ///
 /// # Arguments
 ///
@@ -1393,12 +1408,14 @@ pub fn physmap(phys: u64, len: u64) -> Result<u64, i64> {
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn dma_alloc(len: u64) -> Result<(u64, u64), i64> {
-    crate::task::current_service().ok_or(EPERM)?;
+    let endpoint = crate::task::current_service().ok_or(EPERM)?;
     if len == 0 || len > 16 * 1024 * 1024 {
         return Err(EINVAL);
     }
     let pages = (len + 4095) / 4096;
-    let mem = ContiguousFrames::allocate(pages).ok_or(ENOMEM)?;
+    let mem = ContiguousFrames::allocate_for(pages, endpoint).ok_or(ENOMEM)?;
+    // IOMMU (Group 1): the driver's device may reach the buffer, at its physical address
+    crate::arch::iommu::map_dma(endpoint, mem.base, pages * 4096).map_err(|_| ENOMEM)?;
     let phys = mem.base;
     let addr = map_into_current(mem, pages)?;
     Ok((addr, phys))

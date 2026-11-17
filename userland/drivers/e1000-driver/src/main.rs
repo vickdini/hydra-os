@@ -22,7 +22,10 @@
 //! - `MSG_NET_RECEIVE`: fill the window with received frames, each a 16-bit little-endian
 //!   length then its bytes; reply `[0, frame count]`;
 //! - `MSG_NET_GET_MAC`: reply `[0, MAC bytes 0..4, MAC bytes 4..6]`;
-//! - `MSG_NET_GET_STATUS`: reply `[0, link up]`.
+//! - `MSG_NET_GET_STATUS`: reply `[0, link up]`;
+//! - `MSG_NET_DMA_TEST [phys]` (test only, with the argument `dma_test=1`): the adapter
+//!   reads 64 bytes at physical `phys` by DMA (a transmit descriptor pointing there), as
+//!   a rogue driver would; the IOMMU should block it.
 
 #![no_std]
 #![no_main]
@@ -30,7 +33,8 @@
 extern crate alloc;
 
 use hydra_rt::protocol::{
-    ENDPOINT_NET_DEV, MSG_NET_GET_MAC, MSG_NET_GET_STATUS, MSG_NET_RECEIVE, MSG_NET_REPLY, MSG_NET_TRANSMIT,
+    ENDPOINT_NET_DEV, MSG_NET_DMA_TEST, MSG_NET_GET_MAC, MSG_NET_GET_STATUS, MSG_NET_RECEIVE, MSG_NET_REPLY,
+    MSG_NET_TRANSMIT,
 };
 use hydra_rt::{println, sys, Message, Server, WINDOW_SIZE};
 
@@ -498,6 +502,42 @@ impl Nic {
         Err("transmit timed out")
     }
 
+    /// Test only: sends one 64-byte frame whose buffer is at physical `phys` (outside this
+    /// driver's DMA memory), then puts the descriptor's own buffer address back.
+    ///
+    /// # Errors
+    /// Static error string if the descriptor does not complete.
+    fn rogue_dma(&mut self, phys: u64) -> Result<(), &'static str> {
+        let cur = self.tx_cur;
+        let own = self.mem_phys + (TX_BUF_OFF + cur * BUF) as u64;
+        unsafe {
+            let d = self.tx_desc(cur);
+            let mut desc = d.read_volatile();
+            desc.addr = phys;
+            desc.length = 64;
+            desc.cmd_or_csum_hi = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
+            desc.status = 0;
+            d.write_volatile(desc);
+        }
+        self.tx_cur = (cur + 1) % NUM_TX;
+        self.write(REG_TDT, self.tx_cur as u32);
+        let mut done = false;
+        for _ in 0..200 {
+            if unsafe { self.tx_desc(cur).read_volatile().status } & 1 != 0 {
+                done = true;
+                break;
+            }
+            sys::sleep_ms(2);
+        }
+        unsafe {
+            let d = self.tx_desc(cur);
+            let mut desc = d.read_volatile();
+            desc.addr = own;
+            d.write_volatile(desc);
+        }
+        if done { Ok(()) } else { Err("the test descriptor did not complete") }
+    }
+
     /// Moves received frames into `out` (length-prefixed); returns how many. Acknowledges
     /// the interrupt and unmasks the line.
     ///
@@ -596,6 +636,8 @@ fn main(args: &[&str]) {
         Some("pch") => Model::Pch,
         _ => Model::I82540,
     };
+    // Test only (QEMU opt/hydra/iommu=test): accept MSG_NET_DMA_TEST
+    let dma_test = arg(args, "dma_test") == Some(1);
     let mut nic = Nic { model, regs, mem, mem_phys, mac: [0; 6], tx_cur: 0, rx_cur: 0, irq: None };
     nic.init();
     if let Some(irq) = arg(args, "irq") {
@@ -642,6 +684,13 @@ fn main(args: &[&str]) {
         MSG_NET_GET_STATUS => {
             let d = unsafe { nic.rx_desc(nic.rx_cur).read_volatile() };
             reply([0, nic.link_up() as u64, nic.read(REG_RDH) as u64 | (nic.read(REG_RDT) as u64) << 16, nic.rx_cur as u64 | (d.status as u64) << 16 | (d.length as u64) << 32 | (d.css_or_errors as u64) << 48])
+        }
+        MSG_NET_DMA_TEST if dma_test => {
+            println!("[e1000-driver] DMA test: pointing a transmit descriptor at {:#x}", msg.args[0]);
+            match nic.rogue_dma(msg.args[0]) {
+                Ok(()) => reply([0, 0, 0, 0]),
+                Err(_) => reply([EIO as u64, 0, 0, 0]),
+            }
         }
         _ => reply([(-38i64) as u64, 0, 0, 0]),
     })

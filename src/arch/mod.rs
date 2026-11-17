@@ -34,12 +34,16 @@ pub mod boottime;
 /// `x86_64` control register (`CR0`, `CR2`, `CR3`, `CR4`) state inspection.
 pub mod cpu;
 pub mod debugregs;
+/// The ACPI DMAR table and VT-d I/O page tables (hardware-independent part of the IOMMU).
+pub mod dmar;
 /// QEMU firmware configuration values (`-fw_cfg`): the boot mode test harnesses choose.
 pub mod fwcfg;
 /// 64-bit Global Descriptor Table (GDT) and Task State Segment (TSS) management.
 pub mod gdt;
 /// 256-entry Interrupt Descriptor Table (IDT), CPU exception handlers, and IRQ trampolines.
 pub mod idt;
+/// Intel VT-d DMA remapping: each driver's device reaches only its own DMA memory.
+pub mod iommu;
 /// 8042 PS/2 keyboard controller and Scancode Set 1 decoder.
 pub mod keyboard;
 /// 8042 PS/2 auxiliary pointing device (mouse) 3-byte packet driver.
