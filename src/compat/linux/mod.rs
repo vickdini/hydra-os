@@ -22,6 +22,9 @@ pub mod ns;
 pub mod eventfd;
 pub mod fs;
 pub mod fuse;
+/// MEASUREMENT ONLY (wave 2 group 6): IPC forwarding probe, absent from normal builds.
+#[cfg(feature = "g6-probe")]
+pub mod g6_probe;
 pub mod itimer;
 pub mod inotify;
 pub mod io_uring;
@@ -250,6 +253,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         stats.total_calls += 1;
     }
 
+    // MEASUREMENT ONLY (wave 2 group 6): compiled only with `--features g6-probe`
+    #[cfg(feature = "g6-probe")]
+    if num == g6_probe::NR {
+        return g6_probe::run(arg0, arg1, arg2);
+    }
     let t0 = prof::start();
     if let seccomp::Verdict::Return(r) = seccomp::check(frame) {
         prof::syscall(num, t0);
