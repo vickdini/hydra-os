@@ -159,6 +159,49 @@ fn driver_request(label: u32, args: [u64; 4], what: &'static str) -> Result<crat
     }
 }
 
+/// Lends the buffer of a single read or write to the disk driver (a page grant: the disk's
+/// DMA goes straight to or from it) instead of copying it through the window. Cleared for
+/// good when the driver or the kernel does not take grants ([`grant_request`]).
+static GRANTS_OK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// `args[2]` (the window offset) of a read or write whose data is in the lent pages.
+const OFFSET_LENT: u64 = u64::MAX;
+
+/// Reads or writes `buf` (whole blocks at `block`) with the buffer lent to the disk driver.
+///
+/// # Returns
+/// `Some(result)` when the driver did the request on the lent pages (or failed it);
+/// `None` when it must go through the window instead (grants not taken, or not for this
+/// buffer).
+fn grant_request(label: u32, block: u64, addr: u64, len: usize, write: bool) -> Option<Result<(), &'static str>> {
+    use core::sync::atomic::Ordering::Relaxed;
+    // The disk's DMA needs word-aligned addresses
+    if !GRANTS_OK.load(Relaxed) || addr % 2 != 0 || len > service::WINDOW_SIZE {
+        return None;
+    }
+    let n = (len / ZFS_BLOCK_SIZE) as u64;
+    let request = crate::ipc::Message::with_args(label, [block, n, OFFSET_LENT, 0]);
+    match service::call_grant(ENDPOINT_BLOCK_DEV, request, DISK_TIMEOUT_TICKS, addr, len as u64, !write) {
+        Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] == 0 => Some(Ok(())),
+        // EINVAL: a driver that does not know lent data (it takes the offset as a window
+        // offset and refuses it); ENOSYS: a kernel without grants
+        Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] as i64 == -22 => {
+            GRANTS_OK.store(false, Relaxed);
+            None
+        }
+        Err(-38) => {
+            GRANTS_OK.store(false, Relaxed);
+            None
+        }
+        // EOPNOTSUPP: not for this buffer (out of the adapter's reach); EINVAL, EFAULT,
+        // EBUSY from the kernel: the pages could not be lent this time
+        Ok(r) if r.label == MSG_BLOCK_REPLY && r.args[0] as i64 == -95 => None,
+        Err(-22) | Err(-14) | Err(-16) => None,
+        Ok(_) => Some(Err(if write { "ZFS: disk write failed" } else { "ZFS: disk read failed" })),
+        Err(_) => Some(Err("ZFS: the disk driver did not answer")),
+    }
+}
+
 /// The disk driver serves vectored reads (`MSG_BLOCK_READV`); cleared when it answers
 /// one with `ENOSYS` (an older driver).
 static READV_OK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
@@ -249,6 +292,10 @@ impl Vdev {
                 for (i, chunk) in buf.chunks_mut(run).enumerate() {
                     let n = (chunk.len() / ZFS_BLOCK_SIZE) as u64;
                     let at = block + (i * run / ZFS_BLOCK_SIZE) as u64;
+                    if let Some(r) = grant_request(MSG_BLOCK_READ, at, chunk.as_mut_ptr() as u64, chunk.len(), false) {
+                        r?;
+                        continue;
+                    }
                     driver_request(MSG_BLOCK_READ, [at, n, 0, 0], "ZFS: disk read failed")?;
                     chunk.copy_from_slice(&driver_window()?[..chunk.len()]);
                 }
@@ -353,6 +400,10 @@ impl Vdev {
                 for (i, chunk) in buf.chunks(run).enumerate() {
                     let n = (chunk.len() / ZFS_BLOCK_SIZE) as u64;
                     let at = block + (i * run / ZFS_BLOCK_SIZE) as u64;
+                    if let Some(r) = grant_request(MSG_BLOCK_WRITE, at, chunk.as_ptr() as u64, chunk.len(), true) {
+                        r?;
+                        continue;
+                    }
                     driver_window()?[..chunk.len()].copy_from_slice(chunk);
                     driver_request(MSG_BLOCK_WRITE, [at, n, 0, 0], "ZFS: disk write failed")?;
                 }

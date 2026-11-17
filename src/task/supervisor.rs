@@ -728,12 +728,10 @@ pub fn supervisor_tick() {
             continue; // still starting up
         }
         let seq = crate::arch::pit::ticks();
-        let answered = match service::call_once(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100) {
+        // A queued call: the watchdog holds no locks, and a heartbeat waits behind the
+        // requests the driver already has (a busy driver is not a hung one)
+        let answered = match service::call_once_mode(endpoint, Message::with_args(MSG_SUPERVISOR_PING, [seq, 0, 0, 0]), 100, service::CallMode::Queued) {
             Ok(reply) => reply.label == MSG_SUPERVISOR_PONG && reply.args[0] == seq,
-            // Busy with a request that came through another endpoint it serves (the USB
-            // driver's disks share its slot): alive. A stuck request ends when its caller
-            // gives up, and a later heartbeat gets through
-            Err(-16) => endpoint == crate::ipc::protocol::ENDPOINT_INPUT_DEV,
             Err(_) => false,
         };
         let hung = {

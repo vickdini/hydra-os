@@ -422,29 +422,73 @@ impl Scheduler {
         true
     }
 
-    /// Ends the innermost driver call, served by `server`, and makes its caller runnable.
+    /// Ends the innermost driver call, served by `server`, and makes its caller runnable
+    /// (a server that just registered ends a wait for it to start).
     ///
     /// # Arguments
     ///
     /// * `server` - Server Task ID matching the active handoff.
     pub fn end_handoff(&mut self, server: u64) {
-        // The innermost call this server serves, wherever it is: with several CPUs, calls
-        // to different servers (a disk read and a USB input request) are in progress at
-        // once and their replies come in any order. Ending only the top entry left a call
-        // whose server answered first blocked until its deadline (and its reply lost)
         if let Some(i) = self.handoffs.iter().rposition(|h| matches!(h, Some(h) if h.server == server)) {
-            if let Some(h) = self.handoffs[i] {
-                // Close the gap, so the stack stays in call order (new calls go on top)
-                for j in i..self.handoffs.len() - 1 {
-                    self.handoffs[j] = self.handoffs[j + 1];
-                }
-                let last = self.handoffs.len() - 1;
-                self.handoffs[last] = None;
-                self.note_handoffs();
-                self.resume_caller(h.caller);
-                call_ended();
-            }
+            self.remove_handoff(i);
         }
+    }
+
+    /// Ends the driver call task `caller` waits in, wherever it is on the stack: with
+    /// several CPUs, calls to different servers are in progress at once and their replies
+    /// come in any order (bba48c0). A caller waits in one call at a time, so the caller
+    /// names the call exactly, whichever thread of the server answers it.
+    pub fn end_handoff_of(&mut self, caller: u64) {
+        if let Some(i) = self.handoffs.iter().rposition(|h| matches!(h, Some(h) if h.caller == caller)) {
+            self.remove_handoff(i);
+        }
+    }
+
+    /// Ends every driver call `server` serves (it went away).
+    pub fn end_handoffs_to(&mut self, server: u64) {
+        while let Some(i) = self.handoffs.iter().rposition(|h| matches!(h, Some(h) if h.server == server)) {
+            self.remove_handoff(i);
+        }
+    }
+
+    /// Removes hand-off entry `i` (the stack is compacted to keep call order: new calls go
+    /// on top) and resumes its caller.
+    fn remove_handoff(&mut self, i: usize) {
+        if let Some(h) = self.handoffs[i] {
+            for j in i..self.handoffs.len() - 1 {
+                self.handoffs[j] = self.handoffs[j + 1];
+            }
+            let last = self.handoffs.len() - 1;
+            self.handoffs[last] = None;
+            self.note_handoffs();
+            self.resume_caller(h.caller);
+            call_ended();
+        }
+    }
+
+    /// Whether task `id` serves or waits in a driver call's hand-off (its calls are then
+    /// made on behalf of a caller that may hold kernel locks, and are hand-offs too).
+    pub fn in_handoff(&self, id: u64) -> bool {
+        self.handoffs.iter().flatten().any(|h| h.server == id || h.caller == id)
+    }
+
+    /// Whether task `idx` may run during other tasks' hand-offs: it serves or waits in one,
+    /// or it is a server that a hand-off participant waits on through a queued request
+    /// (directly or through other such servers), which would otherwise never answer.
+    fn handoff_participant(&self, idx: usize) -> bool {
+        let id = self.tasks[idx].id.0;
+        if self.in_handoff(id) {
+            return true;
+        }
+        let Some(ep) = self.tasks[idx].service else { return false };
+        // A short chain: participant <- server <- server
+        crate::ipc::service::serves_queued_for(crate::ipc::service::primary_of(ep), |c| {
+            self.in_handoff(c)
+                || self.tasks.iter().any(|t| {
+                    t.id.0 == c
+                        && t.service.is_some_and(|e2| crate::ipc::service::serves_queued_for(crate::ipc::service::primary_of(e2), |c2| self.in_handoff(c2)))
+                })
+        })
     }
 
     /// Makes a task blocked in a driver call runnable again, and the next to run.
@@ -1316,22 +1360,34 @@ impl Scheduler {
 
         // 1b. A driver call whose server died or missed its deadline ends: the caller
         // resumes and finds no reply
-        while let Some(h) = self.handoff_top() {
-            let server_alive = self.tasks.iter().any(|t| t.id.0 == h.server && t.state != TaskState::Dead);
-            if server_alive && current_ticks < h.deadline {
-                break;
-            }
+        // Any entry, not only the top one (calls to different servers are on the stack at
+        // once with several CPUs); one whose server waits in a nested call above it ends
+        // only after that call (its server is busy on its behalf)
+        loop {
+            let expired = (0..self.handoffs.len()).rev().find(|&i| {
+                let Some(h) = self.handoffs[i] else { return false };
+                let server_alive = self.tasks.iter().any(|t| t.id.0 == h.server && t.state != TaskState::Dead);
+                if !server_alive {
+                    return true;
+                }
+                current_ticks >= h.deadline && !self.handoffs[i + 1..].iter().flatten().any(|n| n.caller == h.server)
+            });
+            let Some(i) = expired else { break };
+            let h = self.handoffs[i].unwrap();
             // A driver call that ran out of time (QEMU's `nmi` monitor command dumps the
             // tasks when more is needed)
             crate::console::serial_write(&alloc::format!(
-                "[handoff] expired: server {} caller {} (cpu {})\n",
+                "[handoff] expired: server {} caller {} (cpu {})
+",
                 h.server,
                 h.caller,
                 crate::arch::percpu::cpu()
             ));
-            if let Some(i) = self.handoffs.iter().rposition(|x| x.is_some()) {
-                self.handoffs[i] = None;
+            for j in i..self.handoffs.len() - 1 {
+                self.handoffs[j] = self.handoffs[j + 1];
             }
+            let last = self.handoffs.len() - 1;
+            self.handoffs[last] = None;
             self.note_handoffs();
             self.resume_caller(h.caller);
         }
@@ -1641,7 +1697,7 @@ impl Scheduler {
             // The console shell runs on the boot processor: it waits for keys and ticks with
             // `hlt`, for that CPU's interrupts
             return false;
-        } else if !self.handoffs.iter().flatten().any(|h| h.server == t.id.0 || h.caller == t.id.0)
+        } else if !self.handoff_participant(idx)
             && ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
                 || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
         {

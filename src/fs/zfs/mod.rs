@@ -14,9 +14,9 @@
 //! - [`fsproto`]: the requests, their types (`Attr`, `SetAttr`, ...) and encoding.
 //!
 //! ## Concurrency
-//! A request runs the server in the caller's place ([`crate::ipc::service::call`]); nothing
-//! else runs until it answers, so requests are serialized and the window is the caller's
-//! for the duration.
+//! A request runs the server in the caller's place ([`crate::ipc::service::call`], a
+//! hand-off: callers hold the vnode or address-space locks); nothing else runs until it
+//! answers, so requests are serialized and the window is the caller's for the duration.
 
 pub mod fsproto;
 pub mod types;

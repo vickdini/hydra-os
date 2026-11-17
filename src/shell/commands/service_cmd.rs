@@ -106,6 +106,17 @@ impl Command for ServiceCommand {
                         irq, owner, count, notified, pending, if masked { "masked" } else { "unmasked" }
                     );
                 }
+                // (Group 5, mk-ipc) Requests in flight and page grants made
+                let reqs = crate::ipc::service::request_list();
+                set_color(Color::LightGray, Color::Black);
+                crate::println!(
+                    "  Requests in flight: {}; page grants made since boot: {}",
+                    reqs.len(),
+                    crate::ipc::service::GRANTS_MADE.load(core::sync::atomic::Ordering::Relaxed)
+                );
+                for (id, ep, caller, state, mode) in reqs {
+                    crate::println!("    request {} to {:#x} by task {}: {} ({:?})", id, ep, caller, state, mode);
+                }
                 set_color(Color::LightCyan, Color::Black);
                 crate::println!("=========================================================================================\n");
                 set_color(Color::White, Color::Black);

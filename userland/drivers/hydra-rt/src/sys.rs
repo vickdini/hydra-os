@@ -21,6 +21,8 @@ const SYS_IRQ_WAIT: u64 = 29;
 const SYS_IRQ_ACK: u64 = 30;
 const SYS_CLOCK: u64 = 31;
 const SYS_SVC_ATTACH: u64 = 32;
+const SYS_SVC_GRANT: u64 = 33;
+const SYS_SVC_CALL_GRANT: u64 = 34;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -279,33 +281,65 @@ pub fn svc_register(endpoint: u32) -> Result<u64, i64> {
 
 /// Waits for the next request to `endpoint`.
 ///
-/// # Arguments
-/// * `endpoint` - Service endpoint ID.
-///
 /// # Returns
-/// Received [`Message`] on success.
+/// `(request ID, request)`: the reply names the ID ([`svc_reply`]). Several requests may be
+/// taken before answering them, and answered in any order.
 ///
 /// # Errors
 /// Returns negative error code on failure.
-pub fn svc_recv(endpoint: u32) -> Result<Message, i64> {
+pub fn svc_recv(endpoint: u32) -> Result<(u64, Message), i64> {
     let mut m = Message::default();
-    check(unsafe { syscall3(SYS_SVC_RECV, endpoint as u64, &mut m as *mut Message as u64, 0) })?;
-    Ok(m)
+    let id = check(unsafe { syscall3(SYS_SVC_RECV, endpoint as u64, &mut m as *mut Message as u64, 0) })?;
+    Ok((id, m))
 }
 
-/// Answers the request being served on `endpoint`.
-///
-/// # Arguments
-/// * `endpoint` - Service endpoint ID.
-/// * `reply` - Reply message payload.
-///
-/// # Returns
-/// `Ok(())` on success.
+/// Answers request `id` taken on `endpoint` (0: the oldest one taken and unanswered).
 ///
 /// # Errors
 /// Returns negative error code on failure.
-pub fn svc_reply(endpoint: u32, reply: &Message) -> Result<(), i64> {
-    check(unsafe { syscall3(SYS_SVC_REPLY, endpoint as u64, reply as *const Message as u64, 0) }).map(|_| ())
+pub fn svc_reply(endpoint: u32, id: u64, reply: &Message) -> Result<(), i64> {
+    check(unsafe { syscall3(SYS_SVC_REPLY, endpoint as u64, reply as *const Message as u64, id) }).map(|_| ())
+}
+
+/// Most address ranges lent with one call (the kernel's `ipc::service::GRANT_RANGES`).
+pub const GRANT_RANGES: usize = 4;
+
+/// Most physical segments one grant has (the kernel's `GRANT_PAGES`).
+pub const GRANT_SEGMENTS_MAX: usize = 72;
+
+/// The argument block of [`svc_call_grant`] (the kernel's `GrantCall`).
+#[repr(C)]
+struct GrantCall {
+    msg: Message,
+    timeout: u64,
+    n: u64,
+    flags: u64,
+    ranges: [[u64; 2]; GRANT_RANGES],
+}
+
+/// Calls another service lending it `ranges` of this process's memory for the request
+/// (the pages are pinned until it answers; a disk driver points its device's DMA at
+/// them). `server_writes`: the server fills them (a read).
+///
+/// # Errors
+/// Returns negative error code on failure or timeout (`-EINVAL` from a server that does
+/// not take grants for this request).
+pub fn svc_call_grant(endpoint: u32, request: Message, timeout_ticks: u64, ranges: &[(u64, u64)], server_writes: bool) -> Result<Message, i64> {
+    let mut gc = GrantCall { msg: request, timeout: timeout_ticks, n: ranges.len().min(GRANT_RANGES) as u64, flags: server_writes as u64, ranges: [[0; 2]; GRANT_RANGES] };
+    for (d, r) in gc.ranges.iter_mut().zip(ranges.iter()) {
+        *d = [r.0, r.1];
+    }
+    check(unsafe { syscall3(SYS_SVC_CALL_GRANT, endpoint as u64, &mut gc as *mut GrantCall as u64, 0) })?;
+    Ok(gc.msg)
+}
+
+/// The physical segments `(address, length)` lent with request `id` (being served on
+/// `endpoint`), in the order of the lent bytes; returns how many were stored in `out`.
+///
+/// # Errors
+/// `-EINVAL` if the request lends nothing or is not being served.
+pub fn svc_grant(endpoint: u32, id: u64, out: &mut [(u64, u64); GRANT_SEGMENTS_MAX]) -> Result<usize, i64> {
+    check(unsafe { syscall3(SYS_SVC_GRANT, endpoint as u64, id, out.as_mut_ptr() as u64) }).map(|n| n as usize)
 }
 
 /// Calls another service; `timeout_ticks` 0 means the kernel's default.

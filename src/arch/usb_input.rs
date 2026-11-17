@@ -46,12 +46,16 @@ fn deliver(r: &[u8]) {
 fn input_task() {
     let mut records = alloc::vec::Vec::new();
     loop {
-        USB_WQ.register();
+        // Interrupts counted before the request: one arriving while it is in progress
+        // (whose wakeup the request's own wait consumes) makes the next request follow at once
+        let irqs = USB_WQ.wakes();
         records.clear();
-        let mut busy = false;
         let got = {
-            let _window = service::hold_window(ENDPOINT_INPUT_DEV);
-            match service::call(ENDPOINT_INPUT_DEV, Message::with_args(MSG_INPUT_READ, [0; 4]), service::CALL_TIMEOUT_TICKS) {
+            // A queued call: this task holds no kernel locks, so everything else keeps
+            // running while the driver works (a hand-off here stalled every CPU's kernel
+            // entries for each poll)
+            let _window = service::hold_window_queued(ENDPOINT_INPUT_DEV);
+            match service::call_queued(ENDPOINT_INPUT_DEV, Message::with_args(MSG_INPUT_READ, [0; 4]), service::CALL_TIMEOUT_TICKS) {
                 Ok(r) if r.label == MSG_INPUT_REPLY && (r.args[0] as i64) >= 0 => {
                     if let Some(w) = service::window(ENDPOINT_INPUT_DEV) {
                         let n = (r.args[1] as usize).min(w.len() / 8);
@@ -59,25 +63,21 @@ fn input_task() {
                     }
                     true
                 }
-                // The driver is serving a USB disk request (the endpoints share one
-                // slot): ask again in a moment
-                Err(-16) => {
-                    busy = true;
-                    false
-                }
                 _ => false,
             }
         };
         for r in records.chunks_exact(8) {
             deliver(r);
         }
-        if busy {
-            crate::task::wait::wait(Some(crate::arch::pit::ticks() + 1));
-            continue;
-        }
         if !got {
             // The driver died or is restarting: the supervisor revives it; try again later
+            USB_WQ.unregister();
             crate::task::wait::wait(Some(crate::arch::pit::ticks() + 100));
+            continue;
+        }
+        USB_WQ.register();
+        if USB_WQ.wakes() != irqs {
+            USB_WQ.unregister();
             continue;
         }
         crate::task::wait::wait(Some(crate::arch::pit::ticks() + POLL_TICKS));

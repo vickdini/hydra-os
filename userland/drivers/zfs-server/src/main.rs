@@ -563,6 +563,25 @@ pub mod ipc {
             let r = hydra_rt::sys::svc_call(endpoint, hydra_rt::Message::new(request.label as u64, args), timeout_ticks)?;
             Ok(Message::with_args(r.label as u32, r.args))
         }
+
+        /// Calls the disk driver lending it `len` bytes at `addr` of this server's memory
+        /// for the request (a page grant: the disk's DMA goes straight to or from them).
+        ///
+        /// # Arguments
+        /// * `server_writes` - The driver fills the memory (a read from the disk).
+        ///
+        /// # Errors
+        /// Returns negative error code on failure or timeout.
+        pub fn call_grant(endpoint: u32, request: Message, timeout_ticks: u64, addr: u64, len: u64, server_writes: bool) -> Result<Message, i64> {
+            let (mut endpoint, mut args) = (endpoint, request.args);
+            if endpoint == super::protocol::ENDPOINT_BLOCK_DEV {
+                endpoint = DISK_ENDPOINT.load(Ordering::Acquire);
+                args[3] = DISK_NUMBER.load(Ordering::Acquire);
+            }
+            let m = hydra_rt::Message::new(request.label as u64, args);
+            let r = hydra_rt::sys::svc_call_grant(endpoint, m, timeout_ticks, &[(addr, len)], server_writes)?;
+            Ok(Message::with_args(r.label as u32, r.args))
+        }
     }
 }
 
