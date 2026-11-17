@@ -70,6 +70,22 @@ pub mod arch {
             }
         }
     }
+    /// *stub* PCID (tagged TLB) is off on the host: CR3 is never loaded, and
+    /// shootdowns are the single-CPU stub above.
+    pub mod pcid {
+        pub fn enabled() -> bool {
+            false
+        }
+        pub fn load_cr3(_pml4: u64) {}
+        pub fn forget(_pml4: u64) {}
+        pub fn mark_remote(_cpu: usize, _pml4: u64) {}
+        pub fn without_invpcid<R>(f: impl FnOnce() -> R) -> R {
+            f()
+        }
+        pub fn summary() -> alloc::string::String {
+            "PCID off (host)".into()
+        }
+    }
     /// *stub* The kernel's user code and data selectors.
     pub mod gdt {
         pub const USER_CS: u16 = 0x2b;
