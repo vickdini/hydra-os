@@ -455,13 +455,22 @@ def esp_partition_node(disk):
     return None
 
 
+def esp_mkdir(img_spec, path):
+    """Creates the folder PATH on the FAT file system IMG_SPEC unless it is there already (mmd
+    fails for an existing folder, even when told to skip it)."""
+    r = subprocess.run(["mdir", "-b", "-i", img_spec, path], capture_output=True,
+                       env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+    if r.returncode != 0:
+        run(["mmd", "-i", img_spec, path], "Could not create a folder on the start-up partition")
+
+
 def esp_copy(img_spec, src_dir):
     """Copies the tree SRC_DIR onto the FAT file system IMG_SPEC (mtools, nothing mounted)."""
     for root, dirs, files in os.walk(src_dir):
         rel = os.path.relpath(root, src_dir)
         target = "::/" if rel == "." else "::/" + rel.replace(os.sep, "/")
         for d in sorted(dirs):
-            run(["mmd", "-D", "s", "-i", img_spec, target.rstrip("/") + "/" + d], "Could not create a folder on the start-up partition")
+            esp_mkdir(img_spec, target.rstrip("/") + "/" + d)
         for f in sorted(files):
             run(["mcopy", "-o", "-i", img_spec, os.path.join(root, f), target.rstrip("/") + "/" + f], "Could not copy %s to the start-up partition" % f)
 
@@ -575,11 +584,11 @@ def install(req):
 
     step(5, "Copying the start-up files")
     esp_copy(esp, esp_src)
-    run(["mmd", "-D", "s", "-i", esp, "::/EFI/hydra"], "Could not create a folder on the start-up partition")
+    esp_mkdir(esp, "::/EFI/hydra")
     run(["mcopy", "-o", "-i", esp, kernel, "::/EFI/hydra/hydra.efi"], "Could not copy the Hydra kernel")
     if esp_read(esp, "::/hydra/live") is not None:   # never a live system on the new disk
         run(["mdel", "-i", esp, "::/hydra/live"], "Could not remove the live-system marker")
-    run(["mmd", "-D", "s", "-i", esp, "::/hydra"], "Could not create a folder on the start-up partition")
+    esp_mkdir(esp, "::/hydra")
     with tempfile.NamedTemporaryFile(prefix="setup-", dir="/run" if os.access("/run", os.W_OK) else None) as tmp:
         os.chmod(tmp.name, 0o600)
         tmp.write(setup)
