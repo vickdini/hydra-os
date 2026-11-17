@@ -7,7 +7,8 @@
 //
 //  - remap: a writer thread replaces pages of a region with new frames (mremap of a
 //    prepared page over the old one, MAP_FIXED mmap, madvise(DONTNEED)) and publishes a
-//    version number; a reader thread reads the published version, then the page. A stale
+//    version number; reader threads read the published version, then the page (one of
+//    them gives the CPU to other processes after every read). A stale
 //    translation shows an older version, or a freed frame's garbage;
 //  - fork: a thread keeps writing a counter while the main thread forks; the child's copy
 //    must stay frozen (a stale writable entry would let the parent's writes reach the
@@ -99,8 +100,7 @@ static void *writer(void *arg) {
     return NULL;
 }
 
-static void *reader(void *arg) {
-    unsigned seed = (unsigned)(uintptr_t)arg;
+static void read_loop(unsigned seed, uint64_t yield_mask) {
     uint64_t n = 0;
     while (!stop) {
         int j = rand_r(&seed) % NPAGES;
@@ -113,9 +113,21 @@ static void *reader(void *arg) {
             if (!word_ok(w)) fail("garbage in page (a freed frame?)", w, p);
             else if ((w & 0xffffffffu) < p) fail("stale page version (read older than published)", w & 0xffffffffu, p);
         }
-        if ((++n & 0xfffff) == 0) sched_yield();
+        if ((++n & yield_mask) == 0) sched_yield();
     }
     __sync_fetch_and_add(&reads, n);
+}
+
+static void *reader(void *arg) {
+    read_loop((unsigned)(uintptr_t)arg, 0xfffff);
+    return NULL;
+}
+
+// Gives the CPU away after every read: with the yielder processes, the CPU switches to
+// another address space and back between two reads, with no timer interrupt in between
+// (the case where a CPU keeps a switched-away address space's entries under PCID)
+static void *yield_reader(void *arg) {
+    read_loop((unsigned)(uintptr_t)arg, 0);
     return NULL;
 }
 
@@ -179,6 +191,7 @@ static int run_process(int secs, int id) {
     pthread_t th[6];
     pthread_create(&th[0], NULL, writer, (void *)(uintptr_t)(id * 7 + 1));
     pthread_create(&th[1], NULL, reader, (void *)(uintptr_t)(id * 7 + 2));
+    pthread_create(&th[2], NULL, yield_reader, (void *)(uintptr_t)(id * 7 + 3));
     pthread_create(&th[3], NULL, counter, NULL);
     pthread_create(&th[4], NULL, prot_writer, NULL);
     double end = now() + secs;
@@ -208,8 +221,7 @@ static int run_process(int secs, int id) {
         protects++;
     }
     stop = 1;
-    for (int i = 0; i < 5; i++)
-        if (i != 2) pthread_join(th[i], NULL);
+    for (int i = 0; i < 5; i++) pthread_join(th[i], NULL);
     printf("tlbstress[%d]: remaps %llu, reads %llu, forks %llu, mprotect rounds %llu, failures %llu\n", id,
            (unsigned long long)remaps, (unsigned long long)reads, (unsigned long long)forks,
            (unsigned long long)protects, (unsigned long long)failures);
@@ -220,12 +232,21 @@ int main(int argc, char **argv) {
     int secs = argc > 1 ? atoi(argv[1]) : 10;
     int procs = argc > 2 ? atoi(argv[2]) : 2;
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("tlbstress: %d s, %d processes x (writer, reader, counter, mprotect writer, forking main), %ld CPUs\n", secs, procs,
+    printf("tlbstress: %d s, %d processes x (writer, reader, yielding reader, counter, mprotect writer, forking main) + yielders, %ld CPUs\n", secs, procs,
            sysconf(_SC_NPROCESSORS_ONLN));
-    pid_t pids[64];
+    pid_t pids[64], yielders[64];
     for (int i = 0; i < procs && i < 64; i++) {
         pids[i] = fork();
         if (pids[i] == 0) _exit(run_process(secs, i));
+    }
+    // Processes that only give the CPU away: other address spaces to switch to
+    for (int i = 0; i < procs && i < 64; i++) {
+        yielders[i] = fork();
+        if (yielders[i] == 0) {
+            double end = now() + secs;
+            while (now() < end) sched_yield();
+            _exit(0);
+        }
     }
     int bad = 0;
     for (int i = 0; i < procs && i < 64; i++) {
@@ -236,6 +257,7 @@ int main(int argc, char **argv) {
             bad++;
         }
     }
+    for (int i = 0; i < procs && i < 64; i++) waitpid(yielders[i], NULL, 0);
     printf(bad ? "TLBSTRESS FAILED (%d processes)\n" : "TLBSTRESS PASSED%.0d\n", bad);
     return bad ? 1 : 0;
 }
