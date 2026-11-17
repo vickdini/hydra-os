@@ -1,0 +1,9 @@
+[package]
+name = "linux-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra Linux server: the Linux system calls moved out of the kernel, in Ring 3"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

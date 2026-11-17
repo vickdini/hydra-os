@@ -498,6 +498,8 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     if !now_zombie {
         return;
     }
+    // The Linux server forgets the process (its keyrings)
+    crate::lx::note(crate::ipc::protocol::LX_NOTE_EXIT, pid, 0, 0);
     super::locks::process_exited(pid);
     super::limits::on_exit(pid);
     if super::admin::acct_on() {

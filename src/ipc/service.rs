@@ -480,7 +480,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 8] = [
+static SERVICES: [Service; 9] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -489,6 +489,8 @@ static SERVICES: [Service; 8] = [
     Service::new(crate::ipc::protocol::ENDPOINT_SOUND_DEV),
     Service::with_primary(crate::ipc::protocol::ENDPOINT_USB_DISK, crate::ipc::protocol::ENDPOINT_INPUT_DEV),
     Service::new(crate::ipc::protocol::ENDPOINT_NET_SERVER),
+    // Wave 3 (Group 7): the Linux server's main thread (its workers use `crate::lx`)
+    Service::new(crate::ipc::protocol::ENDPOINT_LINUX_SERVER),
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).
@@ -1332,7 +1334,7 @@ fn own_service(endpoint: u32) -> Result<&'static Service, i64> {
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
-fn map_into_current(obj: Arc<dyn MappedObject>, pages: u64) -> Result<u64, i64> {
+pub(crate) fn map_into_current(obj: Arc<dyn MappedObject>, pages: u64) -> Result<u64, i64> {
     let mm = crate::task::with_current_task_mut(|t| t.mm.clone()).flatten().ok_or(EFAULT)?;
     let addr = mm.lock().mmap(0, pages * 4096, PROT_RW, true, false, false, Backing::Object { obj, pgoff: 0 })?;
     Ok(addr)

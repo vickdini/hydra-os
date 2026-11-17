@@ -146,7 +146,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let mut line = alloc::string::String::new();
     let _ = write!(line, "[driver] panic: {}\n", info);
     sys::write(2, line.as_bytes());
-    sys::exit(101)
+    // Every thread: a program with threads (the Linux server) must not limp on without one
+    sys::exit_group(101)
 }
 
 /// The server of a driver service: receives requests and answers them; bulk data is in

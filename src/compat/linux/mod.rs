@@ -256,7 +256,11 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
         return r;
     }
     let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
-    let r = dispatch_checked(frame);
+    // Calls moved to the ring-3 Linux server (wave 3: the forwarding table, `crate::lx`)
+    let r = match crate::lx::forward(frame) {
+        Some(r) => r,
+        None => dispatch_checked(frame),
+    };
     prof::syscall(num, t0);
     if t0 != 0 {
         prof::slow(num, r, arg0, arg1, arg2, t0);
@@ -2394,6 +2398,8 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     if args[0] & types::CLONE_THREAD == 0 {
         // A new process inherits the session keyring
         keys::on_fork(proc::current_ids().1, child);
+        // The Linux server learns it too (before any call of the child can reach it)
+        crate::lx::note(crate::ipc::protocol::LX_NOTE_FORK, proc::current_ids().1, child, 0);
     }
     if args[0] & (types::CLONE_FS | types::CLONE_FILES | types::CLONE_THREAD) == types::CLONE_FS {
         // Shares our root and working directory, which live in the descriptor table

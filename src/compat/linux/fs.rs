@@ -650,7 +650,11 @@ impl PseudoFile {
             PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
             PseudoFile::ProcSnd(rest) => read_slice(super::snd::proc_text(rest).unwrap_or_default().as_bytes(), cursor, buf),
             PseudoFile::ProcUuid(boot) => read_slice(uuid_text(*boot).as_bytes(), cursor, buf),
-            PseudoFile::ProcKeys => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
+            // From linux-server when the key calls are forwarded to it
+            PseudoFile::ProcKeys => match crate::lx::proc_keys_text() {
+                Some(t) => read_slice(t.as_bytes(), cursor, buf),
+                None => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
+            },
             PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = super::mm::current_mm().map(|m| m.lock().maps_text()).unwrap_or_default();
