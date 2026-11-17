@@ -185,6 +185,217 @@ pub const MSG_NET_DMA_TEST: u32 = 0x4005;
 /// - `args[3]`: Link state bitmask (bit 0 = Link Up, bit 1 = Full Duplex, bit 2 = 1 Gbps).
 pub const MSG_NET_REPLY: u32 = 0x400F;
 
+/// Transmit several frames in one request (net-server's batches): the window holds
+/// `args[0]` frames, each a 16-bit little-endian length and the frame (as
+/// [`MSG_NET_RECEIVE`] returns them). Reply `[0, frames sent]`, or a negative errno with
+/// `args[1]` the frames sent before the failure.
+pub const MSG_NET_TRANSMIT_BATCH: u32 = 0x4006;
+
+// ----------------------------------------------------------------------------------------
+// Server notifications (any server)
+// ----------------------------------------------------------------------------------------
+
+/// What `SYS_SVC_RECV` returns (request ID 0) to a server that asked for notifications
+/// ([`RECV_NOTIFY`] in `arg2`) when it has no request to take: `args[0]` holds the
+/// notification bits that were raised ([`NOTIFY_IRQ`], ...), 0 if its timeout (the low
+/// bits of `arg2`, in ticks) ran out first. A notification needs no reply.
+pub const MSG_SVC_NOTIFY: u32 = 0x6010;
+
+/// Notification bit: the interrupt of a device another driver owns arrived (the kernel
+/// forwards it, `ipc::service::forward_irq`): net-server learns that the network driver
+/// has frames for it.
+pub const NOTIFY_IRQ: u64 = 1;
+
+/// `SYS_SVC_RECV` `arg2` flag: also return notifications (the low bits: a timeout in
+/// ticks, 0 for none).
+pub const RECV_NOTIFY: u64 = 1 << 63;
+
+// ----------------------------------------------------------------------------------------
+// Network server (net-server): sockets over Ethernet, IPv4, ICMP, UDP and TCP
+// ----------------------------------------------------------------------------------------
+//
+// net-server (`userland/drivers/net-server`) owns the protocols; its clients (the kernel's
+// Linux socket layer today, a ring-3 Linux server later) hold socket handles (u32) and
+// make every blocking wait themselves: no request waits for the network, each answers at
+// once (except [`MSG_NETS_DHCP`] and [`MSG_NETS_RESOLVE`], which answer later and must be
+// queued calls).
+//
+// Addresses: an IPv4 address `[a, b, c, d]` travels as `u32::from_le_bytes([a, b, c,
+// d])`; with a port, `addr << 16 | port`. IPv6 `::1` and the card's `fe80::` address are
+// carried as `0.0.0.1` and `0.0.0.2` (see net-server's `stack.rs`).
+//
+// Payloads are in the server's window: requests name an offset in its data area
+// ([`NETS_DATA_LEN`] bytes from 0) where the client put or wants the bytes.
+//
+// The window's last 64 KiB is the status area, written only by the server: the status
+// page ([`NETS_STATUS_OFF`], words below), the event ring ([`NETS_EVENTS_OFF`]) and the
+// readiness table ([`NETS_SOCKS_OFF`]). A client reads readiness from the table instead of
+// asking; when words change the server appends the handles to the ring and rings the
+// doorbell (`SYS_SVC_SIGNAL`), whose kernel hook wakes the waiters of those sockets.
+//
+// Every reply is [`MSG_NETS_REPLY`] with `args[0]` the result (>= 0) or a negative errno.
+
+/// Well-known endpoint of the network server (0x28 = 40).
+pub const ENDPOINT_NET_SERVER: u32 = 0x28;
+
+/// Bytes of the window's data area (offset 0): payloads of requests and replies.
+pub const NETS_DATA_LEN: usize = 0x30000;
+/// Offset of the status page: little-endian u64 words `NETS_ST_*`.
+pub const NETS_STATUS_OFF: usize = 0x30000;
+/// Offset of the event ring: [`NETS_EVENTS`] u32 handles; entry `n % NETS_EVENTS` is the
+/// `n`-th event, and the status word [`NETS_ST_EVENT_HEAD`] counts the events written.
+pub const NETS_EVENTS_OFF: usize = 0x31000;
+/// Entries of the event ring.
+pub const NETS_EVENTS: usize = 4096;
+/// Offset of the readiness table: [`NETS_SLOTS`] u64 words, one per socket slot (a
+/// handle's low 12 bits): bits 0..32 the handle (0: free slot), 32..40 readiness
+/// (`NETS_R_*`), 40..48 the TCP state (`NETS_TCP_*`, 0 for others), 48..64 a pending
+/// socket error (a positive errno).
+pub const NETS_SOCKS_OFF: usize = 0x38000;
+/// Socket slots (a handle is `generation << 12 | slot`).
+pub const NETS_SLOTS: usize = 4096;
+
+/// Status word: [`NETS_MAGIC`] once the server has set the area up.
+pub const NETS_ST_MAGIC: usize = 0;
+/// The value of [`NETS_ST_MAGIC`] ("NETSRV01").
+pub const NETS_MAGIC: u64 = u64::from_le_bytes(*b"NETSRV01");
+/// Status word: flags `NETS_F_*`.
+pub const NETS_ST_FLAGS: usize = 1;
+/// Status word: the card's MAC address (bytes 0..6).
+pub const NETS_ST_MAC: usize = 2;
+/// Status word: the IPv4 address (as above; 0 while unconfigured).
+pub const NETS_ST_IP: usize = 3;
+/// Status word: the subnet mask.
+pub const NETS_ST_MASK: usize = 4;
+/// Status word: the default gateway.
+pub const NETS_ST_GATEWAY: usize = 5;
+/// Status word: the DNS server.
+pub const NETS_ST_DNS: usize = 6;
+/// Status word: the DHCP server that gave the lease.
+pub const NETS_ST_DHCP_SERVER: usize = 7;
+/// Status word: events written to the ring so far.
+pub const NETS_ST_EVENT_HEAD: usize = 8;
+/// Status words: card traffic: packets received, bytes received, packets sent, bytes sent.
+pub const NETS_ST_ETH_COUNTERS: usize = 9;
+/// Status words: loopback traffic: bytes, packets.
+pub const NETS_ST_LO_COUNTERS: usize = 13;
+/// Status words: receive requests made to the network driver and frames they returned.
+pub const NETS_ST_RX_CALLS: usize = 15;
+/// Status word: bumped whenever the interface changes (a lease).
+pub const NETS_ST_IFACE_SEQ: usize = 17;
+
+/// Flag: a network card (and its driver) is present.
+pub const NETS_F_NIC: u64 = 1;
+/// Flag: the card has a carrier link.
+pub const NETS_F_LINK: u64 = 2;
+/// Flag: DHCP gave an address (the interface is configured).
+pub const NETS_F_CONFIGURED: u64 = 4;
+/// Flag: a DHCP exchange is in progress.
+pub const NETS_F_DHCP_BUSY: u64 = 8;
+
+/// Readiness: data (or end of stream, or an error) to read.
+pub const NETS_R_IN: u64 = 1;
+/// Readiness: room to write.
+pub const NETS_R_OUT: u64 = 2;
+/// Readiness: hung up.
+pub const NETS_R_HUP: u64 = 4;
+/// Readiness: an error is pending.
+pub const NETS_R_ERR: u64 = 8;
+/// Readiness (listeners): a connection waits to be accepted.
+pub const NETS_R_ACCEPT: u64 = 16;
+
+/// TCP state `SynSent` (readiness words, [`MSG_NETS_TCP_INFO`]).
+pub const NETS_TCP_SYN_SENT: u64 = 1;
+/// TCP state `SynReceived`.
+pub const NETS_TCP_SYN_RECEIVED: u64 = 2;
+/// TCP state `Established`.
+pub const NETS_TCP_ESTABLISHED: u64 = 3;
+/// TCP state `FinWait1`.
+pub const NETS_TCP_FIN_WAIT1: u64 = 4;
+/// TCP state `FinWait2`.
+pub const NETS_TCP_FIN_WAIT2: u64 = 5;
+/// TCP state `CloseWait`.
+pub const NETS_TCP_CLOSE_WAIT: u64 = 6;
+/// TCP state `LastAck`.
+pub const NETS_TCP_LAST_ACK: u64 = 7;
+/// TCP state `Closing`.
+pub const NETS_TCP_CLOSING: u64 = 8;
+/// TCP state `TimeWait`.
+pub const NETS_TCP_TIME_WAIT: u64 = 9;
+/// TCP state `Closed`.
+pub const NETS_TCP_CLOSED: u64 = 10;
+
+/// TCP: connect `[addr, port, local port (0: any)]` -> `[handle]` (in `SynSent`; the
+/// state in the readiness word tells when it is established or failed).
+pub const MSG_NETS_TCP_CONNECT: u32 = 0x9001;
+/// TCP: send `[handle, offset, length]` -> `[bytes taken]` (0: no room yet).
+pub const MSG_NETS_TCP_SEND: u32 = 0x9002;
+/// TCP: receive `[handle, offset, capacity, peek]` -> `[bytes, end of stream]`.
+pub const MSG_NETS_TCP_RECV: u32 = 0x9003;
+/// TCP: shut down writing (`FIN` after the buffered data) `[handle]`.
+pub const MSG_NETS_TCP_SHUTDOWN: u32 = 0x9004;
+/// TCP: close `[handle]` (the connection finishes in the background).
+pub const MSG_NETS_TCP_CLOSE: u32 = 0x9005;
+/// TCP: take the pending error `[handle]` -> `[positive errno, or 0]`.
+pub const MSG_NETS_TCP_TAKE_ERROR: u32 = 0x9006;
+/// TCP: endpoints `[handle]` -> `[0, local addr << 16 | port, remote addr << 16 | port,
+/// state]`.
+pub const MSG_NETS_TCP_INFO: u32 = 0x9007;
+/// TCP: reserve a port `[addr, port (0: any), flags]` (flags bit 0 `SO_REUSEADDR`, 1
+/// `SO_REUSEPORT`, 2 IPv4, 3 IPv6) -> `[handle, port]`.
+pub const MSG_NETS_TCP_BIND: u32 = 0x9008;
+/// TCP: release a reservation `[handle]`.
+pub const MSG_NETS_TCP_UNBIND: u32 = 0x9009;
+/// TCP: listen on a reservation `[bind handle, backlog]` -> `[listener handle]`.
+pub const MSG_NETS_TCP_LISTEN: u32 = 0x900A;
+/// TCP: change a listener's backlog `[handle, backlog]`.
+pub const MSG_NETS_TCP_BACKLOG: u32 = 0x900B;
+/// TCP: accept `[listener]` -> `[connection handle]` or `-EAGAIN`.
+pub const MSG_NETS_TCP_ACCEPT: u32 = 0x900C;
+/// TCP: stop listening `[listener]` (waiting connections are reset).
+pub const MSG_NETS_TCP_UNLISTEN: u32 = 0x900D;
+/// UDP: open `[port (0: any)]` -> `[handle]`.
+pub const MSG_NETS_UDP_OPEN: u32 = 0x9010;
+/// UDP: move to a port `[handle, port]`.
+pub const MSG_NETS_UDP_REBIND: u32 = 0x9011;
+/// UDP: its port `[handle]` -> `[port]`.
+pub const MSG_NETS_UDP_PORT: u32 = 0x9012;
+/// UDP: send `[handle, addr << 16 | port, offset, length]` -> `[length]`.
+pub const MSG_NETS_UDP_SEND: u32 = 0x9013;
+/// UDP: receive `[handle, offset, peek]` -> `[length, addr << 16 | port, arrival time
+/// (ns since 1970)]` with the whole datagram at the offset, or `-EAGAIN`.
+pub const MSG_NETS_UDP_RECV: u32 = 0x9014;
+/// UDP: close `[handle]`.
+pub const MSG_NETS_UDP_CLOSE: u32 = 0x9015;
+/// ICMP: open `[raw, IPv6]` -> `[handle]` (a ping socket unless raw).
+pub const MSG_NETS_ICMP_OPEN: u32 = 0x9020;
+/// ICMP: echo identifier `[handle]` -> `[identifier]`.
+pub const MSG_NETS_ICMP_IDENT: u32 = 0x9021;
+/// ICMP: set the echo identifier (`bind`) `[handle, identifier]`.
+pub const MSG_NETS_ICMP_SET_IDENT: u32 = 0x9022;
+/// ICMP: send `[handle, addr, offset, length]` -> `[length]`.
+pub const MSG_NETS_ICMP_SEND: u32 = 0x9023;
+/// ICMP: receive `[handle, offset, peek]` -> `[length, addr, arrival time]`, or `-EAGAIN`.
+pub const MSG_NETS_ICMP_RECV: u32 = 0x9024;
+/// ICMP: close `[handle]`.
+pub const MSG_NETS_ICMP_CLOSE: u32 = 0x9025;
+/// Tables `[kind, offset, capacity]` -> `[records]`, each [`NETS_LIST_RECORD`] bytes of
+/// little-endian u64 words: kind 0 TCP connections `[handle, local addr << 16 | port,
+/// remote addr << 16 | port, state, bytes queued to send, bytes unread]`; 1 listeners
+/// `[handle, addr << 16 | port, waiting, backlog]`; 2 UDP sockets `[handle, port, bytes
+/// queued]`; 3 the ARP cache `[addr, MAC]`.
+pub const MSG_NETS_LIST: u32 = 0x9030;
+/// Bytes per record of [`MSG_NETS_LIST`].
+pub const NETS_LIST_RECORD: usize = 64;
+/// Run DHCP again (deferred reply, a queued call): `[0, lease address]` once it is bound,
+/// or an error.
+pub const MSG_NETS_DHCP: u32 = 0x9031;
+/// Look a name up (DNS A record) `[offset, length]` (the name in the data area) (deferred
+/// reply, a queued call) -> `[0, address]`.
+pub const MSG_NETS_RESOLVE: u32 = 0x9032;
+/// The network server's reply.
+pub const MSG_NETS_REPLY: u32 = 0x90FF;
+
 /// Protocol label to query linear framebuffer hardware properties and dimensions.
 ///
 /// Inline arguments:

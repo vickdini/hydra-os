@@ -7,7 +7,7 @@
 //! Applications communicating over the network (e.g., package managers downloading `.tar` archives
 //! or HTTP clients) require reliable, ordered, byte-stream delivery.
 //!
-//! The microkernel TCP engine handles the 3-way connection handshake (SYN, SYN-ACK, ACK),
+//! The TCP engine (`stack.rs`) handles the 3-way connection handshake (SYN, SYN-ACK, ACK),
 //! windowed sequence acknowledgment, data payload transfer (PSH-ACK), and clean connection
 //! termination (FIN-ACK).
 //!
@@ -19,7 +19,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: Zero-allocation (`no_std`) TCP segment parser, serializer, and pseudo-header checksum calculator.
 
 /// Namespace for 8-bit TCP control flag bitmasks (RFC 793).

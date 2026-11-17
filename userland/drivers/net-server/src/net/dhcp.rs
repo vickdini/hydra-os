@@ -5,7 +5,7 @@
 //! ## Architectural Role & Design Rationale
 //!
 //! Rather than requiring administrators to manually configure static IP addresses, default gateways,
-//! and subnet masks, the microkernel broadcasts a DHCP Discover datagram during initialization.
+//! and subnet masks, net-server broadcasts a DHCP Discover datagram during initialization.
 //!
 //! Upon receiving an offer from a DHCP server (such as the virtualized gateway `10.0.2.2` in VirtualBox/QEMU),
 //! the client transitions through the standard 4-way handshake:
@@ -29,11 +29,13 @@
 //! - [`build_dhcp_discover()`]: Constructs an initial DHCP Discover broadcast datagram.
 //! - [`build_dhcp_request()`]: Requests assignment of an offered IPv4 address.
 //! - [`parse_dhcp_reply()`]: Parses server offers and acknowledgments, extracting options.
+//! - [`DhcpClient`]: The exchange as a state machine driven by replies and a clock (no I/O
+//!   of its own): net-server sends what it returns and feeds it what arrives.
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
-//! - Dependencies: Pure packet construction and parsing (`no_std`, zero heap allocations). Driven by [`crate::net::dhcp_acquire`].
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
+//! - Dependencies: Pure packet construction and parsing (`no_std`); the host tests cover it.
 
 /// RFC 2132 DHCP magic cookie (`0x63825363`).
 const DHCP_MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99]; // 0x63825363
@@ -349,4 +351,115 @@ pub fn parse_dhcp_reply(buf: &[u8], expected_xid: u32) -> Option<(u8, DhcpLease)
     }
 
     msg_type.map(|t| (t, lease))
+}
+
+/// Where a [`DhcpClient`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DhcpState {
+    /// Not started.
+    Idle,
+    /// Discover sent, waiting for an offer.
+    Selecting,
+    /// Request sent for the offered address, waiting for the acknowledgement.
+    Requesting,
+    /// Lease acquired.
+    Bound(DhcpLease),
+    /// No answer after the retries.
+    Failed,
+}
+
+/// Time between retransmissions (100 Hz ticks): 1 s.
+pub const DHCP_RETRY_TICKS: u64 = 100;
+/// Transmissions of each message before giving up (Discover: 4 s in all; Request: 4 s).
+pub const DHCP_TRIES: u32 = 4;
+
+/// A DHCP exchange (RFC 2131 4-way handshake) as a state machine: [`DhcpClient::start`]
+/// returns the Discover to broadcast, [`DhcpClient::input`] takes each reply and may return
+/// the Request to broadcast, [`DhcpClient::timer`] returns a retransmission when one is
+/// due. The caller wraps the messages in UDP (68 -> 67), IPv4 (0.0.0.0 ->
+/// 255.255.255.255) and an Ethernet broadcast.
+#[derive(Debug, Clone)]
+pub struct DhcpClient {
+    /// Current state.
+    pub state: DhcpState,
+    mac: [u8; 6],
+    xid: u32,
+    offered: [u8; 4],
+    server: [u8; 4],
+    /// Transmissions of the current message.
+    tries: u32,
+    /// Tick of the last transmission.
+    sent_at: u64,
+}
+
+impl DhcpClient {
+    /// A client that has not started.
+    pub const fn new() -> Self {
+        Self { state: DhcpState::Idle, mac: [0; 6], xid: 0, offered: [0; 4], server: [0; 4], tries: 0, sent_at: 0 }
+    }
+
+    /// Starts (or restarts) the exchange for card `mac` with transaction `xid` at tick
+    /// `now`; returns the Discover message.
+    pub fn start(&mut self, mac: [u8; 6], xid: u32, now: u64) -> alloc::vec::Vec<u8> {
+        self.mac = mac;
+        self.xid = xid;
+        self.state = DhcpState::Selecting;
+        self.tries = 1;
+        self.sent_at = now;
+        self.discover()
+    }
+
+    fn discover(&self) -> alloc::vec::Vec<u8> {
+        let mut buf = [0u8; 350];
+        let n = build_dhcp_discover(self.mac, self.xid, &mut buf).unwrap_or(0);
+        buf[..n].to_vec()
+    }
+
+    fn request(&self) -> alloc::vec::Vec<u8> {
+        let mut buf = [0u8; 350];
+        let n = build_dhcp_request(self.mac, self.xid, self.offered, self.server, &mut buf).unwrap_or(0);
+        buf[..n].to_vec()
+    }
+
+    /// Whether an exchange is in progress.
+    pub fn busy(&self) -> bool {
+        matches!(self.state, DhcpState::Selecting | DhcpState::Requesting)
+    }
+
+    /// Takes a DHCP message received on port 68; returns the Request to send after an
+    /// offer. Messages of other transactions, and replies that do not fit the state, are
+    /// ignored.
+    pub fn input(&mut self, payload: &[u8], now: u64) -> Option<alloc::vec::Vec<u8>> {
+        let (ty, lease) = parse_dhcp_reply(payload, self.xid)?;
+        match (self.state, ty) {
+            (DhcpState::Selecting, DHCP_MSG_OFFER) => {
+                self.offered = lease.ip;
+                self.server = if lease.server_ip == [0; 4] { [10, 0, 2, 2] } else { lease.server_ip };
+                self.state = DhcpState::Requesting;
+                self.tries = 1;
+                self.sent_at = now;
+                Some(self.request())
+            }
+            (DhcpState::Requesting, DHCP_MSG_ACK) => {
+                self.state = DhcpState::Bound(lease);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Runs the retransmission timer at tick `now`: returns the message to send again, if
+    /// one is due (after [`DHCP_TRIES`] transmissions the client fails instead).
+    pub fn timer(&mut self, now: u64) -> Option<alloc::vec::Vec<u8>> {
+        if !self.busy() || now.saturating_sub(self.sent_at) < DHCP_RETRY_TICKS {
+            return None;
+        }
+        if self.tries >= DHCP_TRIES {
+            self.state = DhcpState::Failed;
+            return None;
+        }
+        self.tries += 1;
+        self.sent_at = now;
+        Some(if self.state == DhcpState::Selecting { self.discover() } else { self.request() })
+    }
 }

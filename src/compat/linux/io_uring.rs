@@ -1106,7 +1106,6 @@ fn worker_main() {
             }
         });
         waits.register();
-        crate::net::stack::kick();
         let deadline = ring.progress(&frame);
         drop(ring);
         // Check now and then that the process is still there

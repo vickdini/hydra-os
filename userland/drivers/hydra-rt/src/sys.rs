@@ -23,6 +23,7 @@ const SYS_CLOCK: u64 = 31;
 const SYS_SVC_ATTACH: u64 = 32;
 const SYS_SVC_GRANT: u64 = 33;
 const SYS_SVC_CALL_GRANT: u64 = 34;
+const SYS_SVC_SIGNAL: u64 = 35;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -291,6 +292,25 @@ pub fn svc_recv(endpoint: u32) -> Result<(u64, Message), i64> {
     let mut m = Message::default();
     let id = check(unsafe { syscall3(SYS_SVC_RECV, endpoint as u64, &mut m as *mut Message as u64, 0) })?;
     Ok((id, m))
+}
+
+/// As [`svc_recv`], but also returns notifications raised for this server (the kernel's
+/// `MSG_SVC_NOTIFY` with the bits in `args[0]`, request ID 0, no reply), and gives up after
+/// `timeout_ticks` (0: never) with ID 0 and no bits.
+///
+/// # Errors
+/// Returns negative error code on failure.
+pub fn svc_recv_notify(endpoint: u32, timeout_ticks: u64) -> Result<(u64, Message), i64> {
+    let mut m = Message::default();
+    let flags = crate::protocol::RECV_NOTIFY | timeout_ticks;
+    let id = check(unsafe { syscall3(SYS_SVC_RECV, endpoint as u64, &mut m as *mut Message as u64, flags) })?;
+    Ok((id, m))
+}
+
+/// Rings the doorbell of the kernel client of `endpoint` (which this process serves) with
+/// `bits` (net-server: socket readiness changed).
+pub fn svc_signal(endpoint: u32, bits: u64) {
+    unsafe { syscall3(SYS_SVC_SIGNAL, endpoint as u64, bits, 0) };
 }
 
 /// Answers request `id` taken on `endpoint` (0: the oldest one taken and unanswered).

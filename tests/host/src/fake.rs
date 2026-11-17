@@ -588,66 +588,12 @@ pub fn make_user_accessible(start: x86_64::VirtAddr, size: usize) -> Result<(), 
 
 // ------------------------------------------------------------------ network
 
-/// Scripted network: `send_ipv4` records packets, `poll_ipv4` returns the
-/// queued replies one per call.
+/// What used to be the scripted network interface (the DNS resolver loop moved into
+/// net-server as a state machine and needs none): only the sleep counter is left.
 #[derive(Default)]
 pub struct Net {
-    pub ip: [u8; 4],
-    pub dns: [u8; 4],
-    pub nic_present: bool,
-    /// IP that `dhcp_acquire` assigns (if the NIC is present).
-    pub dhcp_ip: Option<[u8; 4]>,
-    pub dhcp_calls: usize,
-    pub sent: Vec<([u8; 4], u8, Vec<u8>)>,
-    /// (source IP, IPv4 payload) pairs handed out by `poll_ipv4`.
-    pub inbox: std::collections::VecDeque<([u8; 4], Vec<u8>)>,
-    pub polls: usize,
+    /// Milliseconds slept (`arch::pit::sleep_ms`).
     pub sleeps: u64,
-}
-
-/// Zero-sized handle; the state lives in [`NET`] for the calling thread.
-pub struct Interface;
-
-impl Interface {
-    pub const fn new() -> Self {
-        Interface
-    }
-    pub fn ip(&self) -> [u8; 4] {
-        NET.with_borrow(|n| n.ip)
-    }
-    pub fn dns_server(&self) -> [u8; 4] {
-        NET.with_borrow(|n| n.dns)
-    }
-    pub fn send_ipv4(
-        &mut self,
-        dst: [u8; 4],
-        proto: crate::net::ipv4::IpProtocol,
-        payload: &[u8],
-    ) -> Result<(), &'static str> {
-        NET.with_borrow_mut(|n| n.sent.push((dst, proto.as_u8(), payload.to_vec())));
-        Ok(())
-    }
-    pub fn poll_ipv4<'a>(&mut self, rx: &'a mut [u8]) -> Option<([u8; 4], &'a [u8])> {
-        let (src, data) = NET.with_borrow_mut(|n| {
-            n.polls += 1;
-            n.inbox.pop_front()
-        })?;
-        rx[..data.len()].copy_from_slice(&data);
-        Some((src, &rx[..data.len()]))
-    }
-}
-
-pub fn nic_present() -> bool {
-    NET.with_borrow(|n| n.nic_present)
-}
-
-pub fn dhcp_acquire() -> Result<crate::net::dhcp::DhcpLease, &'static str> {
-    NET.with_borrow_mut(|n| {
-        n.dhcp_calls += 1;
-        let ip = n.dhcp_ip.ok_or("DHCP timed out")?;
-        n.ip = ip;
-        Ok(crate::net::dhcp::DhcpLease { ip, ..crate::net::dhcp::DhcpLease::empty() })
-    })
 }
 
 pub fn sleep_ms(ms: u64) {

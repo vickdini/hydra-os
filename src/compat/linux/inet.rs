@@ -1,7 +1,8 @@
 //! # Linux Compatibility: IPv4 Internet Sockets (`AF_INET`)
 //!
 //! Provides TCP (`SOCK_STREAM`) and UDP (`SOCK_DGRAM`) sockets for Linux processes,
-//! backed by the in-kernel TCP/IP transport engine in [`crate::net::stack`].
+//! backed by the TCP/IP transport engine of net-server (Ring 3), through the kernel's
+//! client of it, [`crate::net::client`] (imported here as `stack`).
 //!
 //! ## Architectural Role & Design Rationale
 //! Networking applications (`curl`, `apt`, DNS resolvers, SSH clients) interact with the
@@ -18,15 +19,15 @@
 //! back to IPv4.
 //!
 //! ## Key Types & Interfaces
-//! - [`InetSocket`]: Per-descriptor `AF_INET` socket state wrapping a TCP or UDP handle in [`crate::net::stack`].
+//! - [`InetSocket`]: Per-descriptor `AF_INET` socket state wrapping a TCP or UDP handle of net-server.
 //! - [`dispatch()`]: Intercepts socket system calls targeting `AF_INET` descriptors.
 //! - [`read()`] / [`write()`]: Stream and datagram I/O paths when accessed via standard VFS `read`/`write`.
 //! - [`pending_bytes()`]: Implements `FIONREAD` byte-available queries.
 //!
 //! ## Hardware & Dependency Context
 //! - CPU Privilege Level: Ring 0 (Kernel)
-//! - Hardware Interaction: Indirectly kicks the network interface ([`crate::net::stack::kick`])
-//!   to poll VirtIO-Net / NIC rings.
+//! - Hardware Interaction: none; net-server drives the card. Blocking calls sleep on the
+//!   socket's wait queue, which the server's doorbell wakes ([`crate::net::client::on_signal`]).
 //! - Concurrency: Each [`InetSocket`] is wrapped in `Arc<Mutex<InetSocket>>` inside the file table.
 
 use alloc::sync::Arc;
@@ -35,7 +36,8 @@ use spin::Mutex;
 
 use crate::fs::FileDescriptor;
 use crate::memory::vm::prefault_current;
-use crate::net::stack;
+// The socket engine is net-server's (Ring 3); this is the kernel's client of it
+use crate::net::client as stack;
 
 /// Address family constant for IPv4 Internet sockets.
 const AF_INET: u32 = 2;
@@ -101,18 +103,18 @@ const EPIPE: i64 = -32;
 ///
 /// # Concurrency & Thread Safety
 /// Guarded by `Arc<Mutex<InetSocket>>` in the file descriptor table. Blocking calls release
-/// this mutex before sleeping on the underlying transport wait queue in [`crate::net::stack`].
+/// this mutex before sleeping on the socket's wait queue ([`crate::net::client::wait_queue`]).
 ///
 /// # Lifetime & Cleanup
-/// When dropped, closes any associated TCP connection or UDP port binding in [`crate::net::stack`].
+/// When dropped, closes any associated TCP connection or UDP port binding in net-server.
 pub struct InetSocket {
     /// `true` for TCP (`SOCK_STREAM`), `false` for UDP (`SOCK_DGRAM`).
     stream: bool,
     /// Whether `O_NONBLOCK` is enabled on this socket description.
     pub nonblock: bool,
-    /// Underlying TCP connection handle in [`crate::net::stack`] once `connect` has been called.
+    /// Underlying TCP connection handle (net-server's) once `connect` has been called.
     tcp: Option<u32>,
-    /// Underlying UDP endpoint handle in [`crate::net::stack`] (created on `bind`, `connect`, or first send).
+    /// Underlying UDP endpoint handle (net-server's; created on `bind`, `connect`, or first send).
     udp: Option<u32>,
     /// Local port number requested via `bind(2)` before the transport endpoint is opened.
     bound_port: u16,
@@ -205,7 +207,7 @@ impl InetSocket {
         0x4 | readable as u32
     }
 
-    /// Lazily allocates or returns the existing UDP endpoint handle in [`crate::net::stack`].
+    /// Lazily allocates or returns the existing UDP endpoint handle in net-server.
     ///
     /// # Returns
     ///
@@ -397,7 +399,6 @@ fn wait_for<T>(id: u32, nonblock: bool, timeout: Option<u64>, mut ready: impl Fn
     }
     loop {
         waits.register();
-        stack::kick();
         if let Some(r) = ready() {
             return r;
         }
@@ -727,7 +728,7 @@ pub fn proc_net(file: &str) -> Option<alloc::string::String> {
             );
             let c = stack::counters();
             let mut ifaces = alloc::vec![("lo", c[0])];
-            if !isolated && crate::net::e1000::is_present() {
+            if !isolated && crate::net::iface().present {
                 ifaces.push(("eth0", c[1]));
             }
             if isolated {
@@ -946,6 +947,8 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
     if let Some((id, filter)) = icmp {
         let (src, data, arrived) = wait_for(id, nonblock, timeout, || loop {
             match stack::icmp_recv(id, peek) {
+                // The socket died with the network server
+                None if stack::dead(id) => return Some(Err(stack::ENETDOWN)),
                 None => return None,
                 // Raw sockets drop the message types their ICMP filter blocks
                 Some((_, d, _)) if !peek && filter.as_ref().is_some_and(|f| f(&d)) => continue,
@@ -976,7 +979,12 @@ fn recv(sock: &Arc<Mutex<InetSocket>>, buf: &mut [u8], flags: u64) -> Result<(us
         return Ok((n, None, false));
     }
     let id = sock.lock().udp_id()?;
-    let (ip, port, data, arrived) = wait_for(id, nonblock, timeout, || stack::udp_recv(id, peek).map(Ok))?;
+    let (ip, port, data, arrived) = wait_for(id, nonblock, timeout, || match stack::udp_recv(id, peek) {
+        Some(d) => Some(Ok(d)),
+        // The socket died with the network server
+        None if stack::dead(id) => Some(Err(stack::ENETDOWN)),
+        None => None,
+    })?;
     sock.lock().rx_stamp = Some(arrived);
     let n = data.len().min(buf.len());
     buf[..n].copy_from_slice(&data[..n]);
@@ -1177,7 +1185,6 @@ pub fn write(sock: &Arc<Mutex<InetSocket>>, data: &[u8]) -> i64 {
 ///
 /// Number of bytes available for reading.
 pub fn pending_bytes(sock: &Arc<Mutex<InetSocket>>) -> usize {
-    stack::kick();
     let s = sock.lock();
     if let Some(id) = s.tcp {
         let mut probe = alloc::vec![0u8; 65536];
@@ -1431,7 +1438,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         }
         51 | 52 => {
             let s = sock.lock();
-            let me = crate::net::GLOBAL_INTERFACE.lock().ip();
+            let me = crate::net::iface().ip;
             let (ip, port) = if num == 51 && s.icmp.is_some() {
                 let id = s.icmp.unwrap();
                 (s.bound_ip, if s.raw { if s.v6 { 58 } else { 1 } } else { stack::icmp_ident(id) })

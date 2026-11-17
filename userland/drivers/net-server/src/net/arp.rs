@@ -6,7 +6,7 @@
 //!
 //! Because Ethernet hardware operates on 48-bit MAC addresses while IP routing operates on 32-bit IPv4 addresses,
 //! ARP dynamically bridges the two layers. When communicating with the default gateway (e.g., `10.0.2.2` in QEMU/VirtualBox)
-//! or a local host, the microkernel broadcasts an ARP Request (`Who has X.X.X.X? Tell Y.Y.Y.Y`).
+//! or a local host, net-server broadcasts an ARP Request (`Who has X.X.X.X? Tell Y.Y.Y.Y`).
 //!
 //! The driver caches resolved IP-to-MAC associations in a thread-safe ARP cache table to avoid redundant broadcasts.
 //!
@@ -18,7 +18,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: No dynamic memory allocation (`no_std`); relies on [`spin::Mutex`] for concurrent cache access.
 
 use spin::Mutex;

@@ -230,13 +230,10 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::arch::iommu::init();
     crate::task::supervisor::start_all();
 
-    // 10. Automatically initialize and configure network adapter via DHCP
-    // The network adapter, through its driver (started above): address, then DHCP
+    // 10. The network: net-server (started above) brings the card up and runs DHCP;
+    // report it once the lease is there
     crate::net::init();
-    if crate::net::e1000::is_present() {
-        crate::net::stack::start_service();
-        println!();
-    }
+    println!();
     crate::fs::client::start_txg_sync();
 
     Ok(HardwareTakeoverStats {

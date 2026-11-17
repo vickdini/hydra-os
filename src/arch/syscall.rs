@@ -101,6 +101,9 @@ pub const SYS_SVC_GRANT: u64 = 33;
 /// Native Hydra system call: call another service lending it pages of the caller
 /// (`sys_svc_call_grant`).
 pub const SYS_SVC_CALL_GRANT: u64 = 34;
+/// Native Hydra system call: a server rings its kernel client's doorbell (`sys_svc_signal`:
+/// net-server's sockets changed readiness).
+pub const SYS_SVC_SIGNAL: u64 = 35;
 
 /// [`SYS_SVC_CALL_GRANT`]'s argument block (as `hydra_rt::sys::GrantCall`): the request
 /// (the reply replaces it), the timeout in ticks (0: the default), and the ranges lent.
@@ -854,9 +857,10 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
         }
         SYS_SVC_RECV => {
             drop(stats);
-            // arg0: endpoint, arg1: where to store the request (`WireMessage`)
+            // arg0: endpoint, arg1: where to store the request (`WireMessage`), arg2: 0, or
+            // `RECV_NOTIFY` | timeout in ticks (notifications come back as ID 0)
             // Returns the request's ID (the reply names it)
-            match crate::ipc::service::recv(arg0 as u32) {
+            match crate::ipc::service::recv_with(arg0 as u32, _arg2) {
                 Ok((id, m)) => match store_wire_message(arg1, m) {
                     0 => id as i64,
                     e => e,
@@ -915,6 +919,11 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
                     Err(e) => e,
                 }
             }
+        }
+        SYS_SVC_SIGNAL => {
+            drop(stats);
+            // arg0: endpoint served, arg1: bits for the client's hook
+            crate::ipc::service::signal(arg0 as u32, arg1).map_or_else(|e| e, |()| 0)
         }
         SYS_SVC_GRANT => {
             drop(stats);

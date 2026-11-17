@@ -1,6 +1,6 @@
-//! Tests for the packet codecs in `src/net`: Ethernet, ARP, IPv4, ICMP, UDP,
-//! TCP and DHCP. The interface/driver glue in `net/mod.rs`, `stack.rs` and
-//! `e1000.rs` needs hardware and is not covered here.
+//! Tests for the packet codecs of net-server (`userland/drivers/net-server/src/net`):
+//! Ethernet, ARP, IPv4, ICMP, UDP, TCP and DHCP. The interface/driver glue (`iface.rs`,
+//! `stack.rs`, `nic.rs`) needs the network driver and is not covered here.
 
 use hydra_hosttests::net::arp::{ArpCache, ArpPacket};
 use hydra_hosttests::net::dhcp::*;
@@ -545,4 +545,51 @@ fn arp_cache_lists_its_entries() {
     let mut e = cache.entries();
     e.sort();
     assert_eq!(e, vec![(IP_B, MAC_B), (IP_A, MAC_B)], "for /proc/net/arp");
+}
+
+// ------------------------------------------------------------- DhcpClient
+// The DHCP exchange as net-server drives it: start -> Discover, Offer -> Request,
+// Ack -> Bound; timers retransmit and finally fail.
+
+fn reply_payload(msg_type: u8, xid: u32, ip: [u8; 4], server: [u8; 4]) -> Vec<u8> {
+    let opts = [53, 1, msg_type, 54, 4, server[0], server[1], server[2], server[3], 1, 4, 255, 255, 255, 0, 255];
+    dhcp_reply(2, xid, ip, &opts)
+}
+
+#[test]
+fn dhcp_client_full_exchange() {
+    let mut c = DhcpClient::new();
+    assert_eq!(c.state, DhcpState::Idle);
+    let d = c.start(MAC_A, XID, 100);
+    assert_eq!(&d[240..243], &[53, 1, DHCP_MSG_DISCOVER]);
+    assert!(c.busy());
+    // An Ack before any offer, or another transaction's offer, is ignored
+    assert_eq!(c.input(&reply_payload(DHCP_MSG_ACK, XID, IP_A, IP_B), 101), None);
+    assert_eq!(c.input(&reply_payload(DHCP_MSG_OFFER, XID + 1, IP_A, IP_B), 101), None);
+    assert_eq!(c.state, DhcpState::Selecting);
+    let req = c.input(&reply_payload(DHCP_MSG_OFFER, XID, IP_A, IP_B), 102).expect("a Request");
+    assert_eq!(&req[240..243], &[53, 1, DHCP_MSG_REQUEST]);
+    assert_eq!(c.state, DhcpState::Requesting);
+    assert_eq!(c.input(&reply_payload(DHCP_MSG_ACK, XID, IP_A, IP_B), 103), None);
+    match c.state {
+        DhcpState::Bound(l) => assert_eq!((l.ip, l.server_ip, l.subnet_mask), (IP_A, IP_B, [255, 255, 255, 0])),
+        s => panic!("not bound: {s:?}"),
+    }
+    assert!(!c.busy());
+}
+
+#[test]
+fn dhcp_client_retransmits_then_fails() {
+    let mut c = DhcpClient::new();
+    c.start(MAC_A, XID, 0);
+    assert_eq!(c.timer(DHCP_RETRY_TICKS - 1), None, "not due yet");
+    let mut t = 0;
+    for _ in 1..DHCP_TRIES {
+        t += DHCP_RETRY_TICKS;
+        let again = c.timer(t).expect("a retransmission");
+        assert_eq!(&again[240..243], &[53, 1, DHCP_MSG_DISCOVER]);
+    }
+    t += DHCP_RETRY_TICKS;
+    assert_eq!(c.timer(t), None);
+    assert_eq!(c.state, DhcpState::Failed);
 }

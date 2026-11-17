@@ -10,6 +10,10 @@
 //! - **`dhcp`**: Initiates a DHCP 4-way lease handshake against the local gateway router.
 //! - **`ping`**: Dispatches ICMP Echo Requests and calculates round-trip network transit time.
 //! - **`wget` / `fetch`**: Synchronously retrieves remote files over HTTP and saves them into ZFS datasets.
+//!
+//! The network itself is net-server's (Ring 3): these commands use the kernel's client of
+//! it ([`crate::net`]: the interface's state, DHCP renewal, DNS, ping and HTTP GET on its
+//! sockets), the same functions a ring-3 shell would reach through admin operations.
 
 extern crate alloc;
 
@@ -17,7 +21,7 @@ use alloc::vec;
 use uefi::proto::console::text::Color;
 use crate::console::set_color;
 use crate::fs::client::ZfsClient;
-use crate::net::{self, e1000, GLOBAL_INTERFACE};
+use crate::net;
 use crate::shell::command::Command;
 use crate::shell::state::ShellState;
 
@@ -45,36 +49,42 @@ impl Command for IfconfigCommand {
         set_color(Color::LightCyan, Color::Black);
         println!("=== Hydra OS Network Interfaces ===");
 
-        let is_present = e1000::is_present();
-        if !is_present {
+        let mut iface = net::iface();
+        if !iface.present {
             set_color(Color::Yellow, Color::Black);
-            println!("\nNo Ethernet network interface controller detected on PCI bus.");
-            println!("Tip: Enable Intel PRO/1000 MT (82540EM) in VirtualBox or -device e1000 in QEMU.");
+            if !iface.running {
+                println!("
+The network server (net_server) is not running.");
+            } else {
+                println!("
+No Ethernet network interface controller detected on PCI bus.");
+                println!("Tip: Enable Intel PRO/1000 MT (82540EM) in VirtualBox or -device e1000 in QEMU.");
+            }
             set_color(Color::White, Color::Black);
             return;
         }
 
-        let is_up = e1000::is_link_up();
-        let mut iface = GLOBAL_INTERFACE.lock();
-        if iface.ip() == [0, 0, 0, 0] && is_up {
+        if iface.ip == [0, 0, 0, 0] && iface.link {
             set_color(Color::Yellow, Color::Black);
-            println!("\n[*] Requesting dynamic DHCP lease for eth0...");
-            drop(iface);
-            let _ = net::dhcp_acquire();
-            iface = GLOBAL_INTERFACE.lock();
+            println!("
+[*] Requesting dynamic DHCP lease for eth0...");
+            if let Ok(i) = net::dhcp_renew() {
+                iface = i;
+            }
         }
 
-        let mac = iface.mac();
-        let ip = iface.ip();
-        let mask = iface.subnet_mask();
-        let gw = iface.gateway();
-        let dns = iface.dns_server();
-        let (rx_pkts, tx_pkts, rx_bytes, tx_bytes) = e1000::metrics();
-        let (calls, frames, head, cur) = e1000::rx_diagnostics();
-        println!("  - Driver RX:         {} requests, {} frames, ring head/tail {:#x} / driver {:#x}", calls, frames, head, cur);
+        let mac = iface.mac;
+        let ip = iface.ip;
+        let mask = iface.mask;
+        let gw = iface.gateway;
+        let dns = iface.dns;
+        let [rx_pkts, rx_bytes, tx_pkts, tx_bytes] = iface.eth;
+        let [calls, frames] = iface.rx_calls;
+        println!("  - Driver RX:         {} requests, {} frames (net-server)", calls, frames);
 
         set_color(Color::LightGreen, Color::Black);
-        println!("\nInterface: eth0 (Intel 82540EM Gigabit Ethernet)");
+        println!("
+Interface: eth0 (Intel 82540EM Gigabit Ethernet)");
         set_color(Color::White, Color::Black);
         println!(
             "  - Hardware MAC:      {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -82,7 +92,7 @@ impl Command for IfconfigCommand {
         );
         println!(
             "  - Carrier Link:      {}",
-            if is_up { "UP (1000 Mbps Full-Duplex)" } else { "DOWN (No carrier detected)" }
+            if iface.link { "UP (1000 Mbps Full-Duplex)" } else { "DOWN (No carrier detected)" }
         );
         println!(
             "  - IPv4 Address:      {}.{}.{}.{}",
@@ -130,15 +140,15 @@ impl Command for DhcpCommand {
         set_color(Color::Yellow, Color::Black);
         println!("[*] Broadcasting DHCP Discover query across eth0...");
 
-        match net::dhcp_acquire() {
+        match net::dhcp_renew() {
             Ok(lease) => {
                 set_color(Color::LightGreen, Color::Black);
                 println!("[+] DHCP Lease Successfully Acquired!");
                 println!("    - Assigned IP:     {}.{}.{}.{}", lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3]);
-                println!("    - Subnet Mask:     {}.{}.{}.{}", lease.subnet_mask[0], lease.subnet_mask[1], lease.subnet_mask[2], lease.subnet_mask[3]);
-                println!("    - Default Gateway: {}.{}.{}.{}", lease.router[0], lease.router[1], lease.router[2], lease.router[3]);
-                println!("    - DNS Server:      {}.{}.{}.{}", lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]);
-                println!("    - DHCP Server:     {}.{}.{}.{}", lease.server_ip[0], lease.server_ip[1], lease.server_ip[2], lease.server_ip[3]);
+                println!("    - Subnet Mask:     {}.{}.{}.{}", lease.mask[0], lease.mask[1], lease.mask[2], lease.mask[3]);
+                println!("    - Default Gateway: {}.{}.{}.{}", lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3]);
+                println!("    - DNS Server:      {}.{}.{}.{}", lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3]);
+                println!("    - DHCP Server:     {}.{}.{}.{}", lease.dhcp_server[0], lease.dhcp_server[1], lease.dhcp_server[2], lease.dhcp_server[3]);
             }
             Err(e) => {
                 set_color(Color::LightRed, Color::Black);
@@ -173,12 +183,13 @@ impl Command for PingCommand {
         }
 
         let target_str = args[0];
-        let clean_target = net::dns::clean_host(target_str);
+        let clean_target = net::clean_host(target_str);
 
-        if GLOBAL_INTERFACE.lock().ip() == [0, 0, 0, 0] && e1000::is_link_up() {
+        let iface = net::iface();
+        if iface.ip == [0, 0, 0, 0] && iface.link {
             set_color(Color::Yellow, Color::Black);
             println!("[*] Interface has no IP address. Automatically acquiring DHCP lease...");
-            let _ = net::dhcp_acquire();
+            let _ = net::dhcp_renew();
         }
 
         let target_ip = match parse_ipv4(clean_target) {
@@ -186,7 +197,7 @@ impl Command for PingCommand {
             None => {
                 set_color(Color::Yellow, Color::Black);
                 println!("[*] Resolving domain '{}' via DNS...", clean_target);
-                match net::dns::resolve(clean_target) {
+                match net::resolve(clean_target) {
                     Ok(ip) => {
                         set_color(Color::LightGreen, Color::Black);
                         println!(
@@ -231,9 +242,7 @@ impl Command for PingCommand {
             }
 
             // Small delay between pings
-            for _ in 0..500_000 {
-                core::hint::spin_loop();
-            }
+            crate::task::sleep_ms(200);
         }
 
         set_color(Color::Yellow, Color::Black);
@@ -274,15 +283,15 @@ impl Command for DnsCommand {
             return;
         }
 
-        let clean = net::dns::clean_host(args[0]);
-        let dns_server = net::GLOBAL_INTERFACE.lock().dns_server();
+        let clean = net::clean_host(args[0]);
+        let dns_server = net::iface().dns;
         set_color(Color::Yellow, Color::Black);
         println!(
             "[*] Querying DNS server {}.{}.{}.{} for '{}'...",
             dns_server[0], dns_server[1], dns_server[2], dns_server[3], clean
         );
 
-        match net::dns::resolve(clean) {
+        match net::resolve(clean) {
             Ok(ip) => {
                 set_color(Color::LightGreen, Color::Black);
                 println!("Domain:  {}", clean);
@@ -325,13 +334,13 @@ impl Command for WgetCommand {
             return;
         }
 
-        let clean_server = net::dns::clean_host(args[0]);
+        let clean_server = net::clean_host(args[0]);
         let ip = match parse_ipv4(clean_server) {
             Some(parsed) => parsed,
             None => {
                 set_color(Color::Yellow, Color::Black);
                 println!("[*] Resolving '{}' via DNS...", clean_server);
-                match net::dns::resolve(clean_server) {
+                match net::resolve(clean_server) {
                     Ok(resolved) => {
                         set_color(Color::LightGreen, Color::Black);
                         println!("[+] Resolved '{}' -> {}.{}.{}.{}", clean_server, resolved[0], resolved[1], resolved[2], resolved[3]);
@@ -363,10 +372,8 @@ impl Command for WgetCommand {
 
         let mut download_buf = vec![0u8; 128 * 1024]; // 128 KiB download buffer
 
-        let mut iface_guard = GLOBAL_INTERFACE.lock();
-        match net::http::http_get(&mut iface_guard, ip, port, remote_path, &mut download_buf) {
+        match net::http_get(ip, port, remote_path, &mut download_buf) {
             Ok(bytes_len) => {
-                drop(iface_guard);
                 set_color(Color::LightGreen, Color::Black);
                 println!("[+] Successfully downloaded {} bytes!", bytes_len);
                 println!("[*] Writing payload directly to persistent OpenZFS path '{}'...", dest_path);

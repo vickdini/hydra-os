@@ -716,7 +716,7 @@ MaximumUid=60000
     )?;
 
     // Network configuration & test script
-    let dns = crate::net::GLOBAL_INTERFACE.lock().dns_server();
+    let dns = crate::net::iface().dns;
     let dns_ip = if dns != [0, 0, 0, 0] {
         alloc::format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3])
     } else {

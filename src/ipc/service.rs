@@ -391,6 +391,15 @@ pub struct Service {
     /// Services whose servers may call this one and map its window (the file server uses
     /// the disk driver).
     clients: Mutex<Vec<u32>>,
+    /// Notification bits raised for its server and not yet taken (`recv_with`).
+    notify: AtomicU64,
+    /// Endpoint whose server is notified ([`crate::ipc::protocol::NOTIFY_IRQ`]) when this
+    /// service's driver interrupt arrives (0: none): the network driver's interrupt goes
+    /// to net-server.
+    irq_forward: AtomicU32,
+    /// Kernel client's hook for its server's doorbell (`SYS_SVC_SIGNAL`), a `fn(u64)` (0:
+    /// none); also called with [`SIGNAL_GONE`] when the server goes away.
+    signal_hook: core::sync::atomic::AtomicUsize,
     /// The endpoint whose server also serves this one and whose request queue (and server
     /// wait queue) it uses: that process takes the requests of both, whichever endpoint
     /// they came through (0: none, the service has its own). The USB driver serves the USB
@@ -413,6 +422,9 @@ impl Service {
             grants: Mutex::new(Vec::new()),
             irq_notify: AtomicPtr::new(core::ptr::null_mut()),
             clients: Mutex::new(Vec::new()),
+            notify: AtomicU64::new(0),
+            irq_forward: AtomicU32::new(0),
+            signal_hook: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -468,7 +480,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 7] = [
+static SERVICES: [Service; 8] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -476,6 +488,7 @@ static SERVICES: [Service; 7] = [
     Service::new(crate::ipc::protocol::ENDPOINT_INPUT_DEV),
     Service::new(crate::ipc::protocol::ENDPOINT_SOUND_DEV),
     Service::with_primary(crate::ipc::protocol::ENDPOINT_USB_DISK, crate::ipc::protocol::ENDPOINT_INPUT_DEV),
+    Service::new(crate::ipc::protocol::ENDPOINT_NET_SERVER),
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).
@@ -715,6 +728,69 @@ pub fn notify_on_irq(endpoint: u32, wq: &'static WaitQueue) {
     }
 }
 
+// ----------------------------------------------------------------------
+// Notifications and doorbells (Group 2, net-server)
+// ----------------------------------------------------------------------
+//
+// A server that serves requests and also reacts to events (net-server: frames arrive,
+// timers run out) asks `recv` for notifications too (`SYS_SVC_RECV` with
+// `protocol::RECV_NOTIFY`): raised bits come back as request ID 0 with label
+// `MSG_SVC_NOTIFY`. The kernel raises them for another driver's interrupt
+// ([`forward_irq`]). The other way, a server rings its kernel client's doorbell
+// (`SYS_SVC_SIGNAL`, [`signal`]): the hook the client registered ([`set_signal_hook`])
+// runs at once (net-server: wake the sockets whose readiness changed).
+
+/// Hook argument: the server went away (died, or replaced): its client forgets its state.
+pub const SIGNAL_GONE: u64 = u64::MAX;
+
+/// Raises notification `bits` for the server of `endpoint` and wakes it if it waits in
+/// `recv`. Safe in interrupt handlers (atomics and a wake only).
+pub fn notify(endpoint: u32, bits: u64) {
+    if let Some(svc) = service(endpoint) {
+        let owner = slot_owner(svc);
+        owner.notify.fetch_or(bits, Ordering::AcqRel);
+        owner.recv_wq.wake_all();
+    }
+}
+
+/// From now on the interrupt of `from`'s driver also notifies `to`'s server
+/// ([`crate::ipc::protocol::NOTIFY_IRQ`]): the network driver's interrupt tells
+/// net-server that frames arrived.
+pub fn forward_irq(from: u32, to: u32) {
+    if let Some(svc) = service(from) {
+        svc.irq_forward.store(to, Ordering::Release);
+    }
+}
+
+/// Registers the kernel hook run when the server of `endpoint` rings its doorbell
+/// ([`signal`]) and with [`SIGNAL_GONE`] when that server goes away.
+pub fn set_signal_hook(endpoint: u32, hook: fn(u64)) {
+    if let Some(svc) = service(endpoint) {
+        svc.signal_hook.store(hook as usize, Ordering::Release);
+    }
+}
+
+/// Runs `svc`'s doorbell hook, if any.
+fn run_signal_hook(svc: &Service, bits: u64) {
+    let h = svc.signal_hook.load(Ordering::Acquire);
+    if h != 0 {
+        // Stored from a `fn(u64)` by `set_signal_hook`
+        let hook: fn(u64) = unsafe { core::mem::transmute::<usize, fn(u64)>(h) };
+        hook(bits);
+    }
+}
+
+/// `SYS_SVC_SIGNAL`: the server of `endpoint` (the caller) rings its client's doorbell.
+///
+/// # Errors
+///
+/// `-EPERM` if the caller does not serve `endpoint`.
+pub fn signal(endpoint: u32, bits: u64) -> Result<(), i64> {
+    let svc = own_service(endpoint)?;
+    run_signal_hook(svc, bits);
+    Ok(())
+}
+
 /// Unregisters the server currently bound to `endpoint` (it died or is being replaced):
 /// every request waiting for it fails, so its callers get an error at once (hand-off
 /// callers resume, queued callers wake) instead of waiting for their deadlines.
@@ -764,6 +840,10 @@ pub fn unregister(endpoint: u32) {
                 }
                 CallMode::Queued => REQ_WQ[i].wake_all(),
             }
+        }
+        // Its kernel client forgets what the server held (net-server: sockets)
+        if server != 0 {
+            run_signal_hook(svc, SIGNAL_GONE);
         }
         // Callers waiting for it to start (`supervisor::await_registration`)
         if server != 0 {
@@ -1309,7 +1389,20 @@ pub fn register(endpoint: u32) -> Result<u64, i64> {
 /// - `-EPERM`: Caller does not own this endpoint.
 /// - `-EINTR`: Interrupted by a pending signal.
 pub fn recv(endpoint: u32) -> Result<(u64, Message), i64> {
+    recv_with(endpoint, 0)
+}
+
+/// [`recv`] with `SYS_SVC_RECV`'s `arg2`: with [`crate::ipc::protocol::RECV_NOTIFY`] set,
+/// raised notification bits are returned too (request ID 0, label `MSG_SVC_NOTIFY`, the
+/// bits in `args[0]`; requests come first), and the low bits are a timeout in ticks (0:
+/// none) after which it returns ID 0 with no bits.
+pub fn recv_with(endpoint: u32, flags: u64) -> Result<(u64, Message), i64> {
+    use crate::ipc::protocol::{MSG_SVC_NOTIFY, RECV_NOTIFY};
     let svc = slot_owner(own_service(endpoint)?);
+    let notifications = flags & RECV_NOTIFY != 0;
+    let timeout = flags & !RECV_NOTIFY;
+    let deadline = (notifications && timeout != 0).then(|| crate::arch::pit::ticks() + timeout);
+    let notification = |bits: u64| Ok((0, Message::with_args(MSG_SVC_NOTIFY, [bits, 0, 0, 0])));
     loop {
         svc.recv_wq.register();
         let got = requests(|t| {
@@ -1326,7 +1419,18 @@ pub fn recv(endpoint: u32) -> Result<(u64, Message), i64> {
             svc.recv_wq.unregister();
             return Ok(req);
         }
-        crate::task::wait::wait(None);
+        if notifications {
+            let bits = svc.notify.swap(0, Ordering::AcqRel);
+            if bits != 0 {
+                svc.recv_wq.unregister();
+                return notification(bits);
+            }
+            if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+                svc.recv_wq.unregister();
+                return notification(0);
+            }
+        }
+        crate::task::wait::wait(deadline);
         if crate::compat::linux::proc::signal_pending() {
             svc.recv_wq.unregister();
             return Err(EINTR);
@@ -1644,6 +1748,12 @@ pub fn irq_raised(irq: u8) -> bool {
     if !notify.is_null() {
         IRQ_NOTIFIED[irq as usize].fetch_add(1, Ordering::Relaxed);
         unsafe { (*notify).wake_all() };
+    }
+    // Another server reacts to this driver's interrupts (net-server to the network card's)
+    let fwd = service(IRQ_SERVICE[irq as usize].load(Ordering::Acquire)).map_or(0, |s| s.irq_forward.load(Ordering::Acquire));
+    if fwd != 0 {
+        IRQ_NOTIFIED[irq as usize].fetch_add(1, Ordering::Relaxed);
+        self::notify(fwd, crate::ipc::protocol::NOTIFY_IRQ);
     }
     true
 }

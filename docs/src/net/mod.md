@@ -1,127 +1,87 @@
-# Intel E1000 Gigabit Ethernet Driver & Microkernel Network Stack
+# Networking: net-server and the kernel's socket client
 
-## 1. Architectural Role & Design Rationale
-
-Hydra OS implements a zero-dependency, `no_std` native network protocol stack running directly in Ring 0 / Ring 3 microkernel space. Rather than relying on monolithic Linux network subsystems or third-party crates with external POSIX requirements, Hydra OS provides a purpose-built networking architecture designed for microkernel efficiency, zero-copy packet processing, and direct integration with persistent OpenZFS storage.
+Since microkernel wave 2 (Group 2, branch `mk-net`) the network protocols run in Ring 3.
+The kernel keeps only the Linux socket semantics and a thin client.
 
 ```text
-+--------------------------------------------------------------------------+
-|                  Application & Shell Utilities Layer                     |
-|     - `ifconfig` / `ip` (Interface diagnostics & TX/RX telemetry)        |
-|     - `dhcp` (Automated DHCP dynamic lease acquisition)                  |
-|     - `ping <ip>` (ICMP Echo Request/Reply latency tester)               |
-|     - `wget <ip> <port> <path> <zfs_path>` (HTTP/1.0 File Downloader)    |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|                   Transport Layer Protocols (RFC 768 / 793)             |
-|     - UDP (User Datagram Protocol: Checksum, ports, datagram mux)        |
-|     - TCP (Transmission Control Protocol: 3-Way Handshake, SEQ/ACK, PSH) |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|                   Internetwork Layer Protocols (RFC 791 / 792 / 826)     |
-|     - IPv4 (Internet Protocol v4: 20-byte header, RFC 1071 Checksum)     |
-|     - ICMP (Internet Control Message Protocol: Echo Request / Reply)     |
-|     - ARP (Address Resolution Protocol: Dynamic 16-entry MAC cache)      |
-|     - DHCP Client (RFC 2131: Discover -> Offer -> Request -> Ack)       |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|                    Link Layer: Ethernet II Framing                       |
-|     - Destination MAC (6B), Source MAC (6B), EtherType (2B)              |
-|     - EtherType 0x0800 (IPv4), EtherType 0x0806 (ARP)                    |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-+--------------------------------------------------------------------------+
-|      Ring 3 Intel 82540EM (E1000) NIC Driver (Endpoint 0x22, MMIO/DMA)   |
-|     - PCI Bus Enumeration (Vendor: 0x8086, Device: 0x100E)               |
-|     - 32-Entry Circular Ring Transmit (TX) & Receive (RX) Descriptors    |
-|     - Memory Mapped I/O (MMIO) Registers via Supervisor Grant            |
-|     - Direct Memory Access (DMA) Packet Buffers (2048 bytes per slot)    |
-|     - Fast IPC Packet Streaming via 256 KiB Shared Data Window           |
-+--------------------------------------------------------------------------+
-                                     │
-                                     ▼
-       Physical / Virtualized Hardware (VirtualBox 82540EM / QEMU E1000)
+ Linux programs (curl, apt, Firefox, sshd...)        kernel shell (ifconfig, ping, dns, wget)
+        | socket system calls                                 |
+        v                                                     v
+ compat/linux/inet.rs  (blocking, poll/epoll, SO_* options, MSG_PEEK, SIGPIPE, sockaddrs)
+        |                                                     |
+ src/net/client.rs  (requests, readiness from the status area, per-socket wait queues)
+        |  hand-off calls to endpoint 0x28            ^ doorbell (syscall 35) wakes waiters
+        v                                             |
+ net-server (Ring 3, userland/drivers/net-server)
+   Ethernet, ARP, IPv4, ICMP, UDP, TCP, loopback (127/8, ::1), DHCP client, DNS resolver
+        |  calls to endpoint 0x22 through the driver's window   ^ its interrupt, forwarded
+        v                                                     |   as a notification
+ e1000-driver (Ring 3)  ->  Intel 8254x / 82574 / I217-I218 adapter (DMA in its IOMMU domain)
 ```
 
----
+## Who does what
 
-## 2. PCI Subsystem & Intel 82540EM Hardware Controller
+| Piece | Where | Job |
+|---|---|---|
+| `e1000-driver` | `userland/drivers/e1000-driver` | Rings, DMA buffers, interrupt; frames in batches through its window |
+| net-server | `userland/drivers/net-server` | All protocols and socket state; DHCP; DNS lookups |
+| kernel client | `src/net/client.rs` | The socket functions `inet.rs` calls; status-area reads; wait queues |
+| kernel helpers | `src/net/mod.rs` | Boot report, `dhcp_renew`, `resolve`, `ping`, `http_get` (for the shell) |
+| Linux sockets | `src/compat/linux/inet.rs`, `rtnetlink.rs` | Linux semantics; unchanged in shape |
 
-Hardware interaction begins with the x86 PCI Configuration Mechanism #1 ([`src/arch/pci.rs`](file:///d:/os/src/arch/pci.rs)):
-- **Config Address Port (`0xCF8`)**: Formats 32-bit queries containing the Bus (0–255), Device (0–31), Function (0–7), and Register offset (aligned to 4 bytes).
-- **Config Data Port (`0xCFC`)**: Reads and writes 32-bit register values.
-- **Bus Mastering**: Bit 2 of the PCI Command Register (`0x04`) is explicitly enabled to allow the NIC's DMA engine to access host system memory.
+The supervisor starts `net_driver` and then `net_server` (always, so loopback works without
+a card; `nic=1` when the driver runs), and restarts either when it dies.
 
-### Intel 82540EM Architecture ([`src/net/e1000.rs`](file:///d:/os/src/net/e1000.rs))
-The Intel 82540EM Gigabit Ethernet controller is initialized via standard MMIO registers:
-1. **Device Reset**: The `CTRL_RST` bit is asserted, followed by hardware link setup (`CTRL_SLU`).
-2. **MAC Address Extraction**: The hardware burned-in MAC address is read from registers `RAL0` (Receive Address Low) and `RAH0` (Receive Address High).
-3. **Receive Engine (`RCTL`)**:
-   - Programmed with 32 circular RX descriptors (`RxDesc`).
-   - Configured with `RCTL_EN` (Receiver Enable), `RCTL_BAM` (Broadcast Accept Mode), and `RCTL_BSIZE_2048` (2048-byte DMA packet buffer per descriptor).
-4. **Transmit Engine (`TCTL`)**:
-   - Programmed with 32 circular TX descriptors (`TxDesc`).
-   - Configured with `TCTL_EN` (Transmitter Enable), `TCTL_PSP` (Pad Short Packets), and standard IPG (Inter-Packet Gap) timings via `TIPG`.
+## The protocol
 
----
+Labels, arguments and the window layout are documented in `src/ipc/protocol.rs`
+(`ENDPOINT_NET_SERVER = 0x28`, `MSG_NETS_*`, `NETS_*`). hydra-rt includes the same file, so
+server and kernel cannot disagree. In short:
 
-## 3. Network Stack Implementation
+- **Requests** carry a socket handle and arguments; payloads sit in the server's window at an
+  offset the request names (the data area is the first 192 KiB). Socket requests never wait
+  for the network: they answer at once (`-EAGAIN` when there is nothing yet), so callers can
+  use hand-off calls while holding socket locks. Only `MSG_NETS_DHCP` and `MSG_NETS_RESOLVE`
+  answer later, and must be queued calls.
+- **Readiness** lives in the window's status area: one 64-bit word per socket slot (handle,
+  in/out/hup/err/accept bits, TCP state, pending error). `poll`, `select`, `epoll`, and the
+  quick checks before `recv` read it without a call.
+- **Waking**: when words change, the server appends the handles to an event ring in the
+  status area and calls `SYS_SVC_SIGNAL` (35). The kernel runs the hook the client registered
+  (`client::on_signal`), which wakes the wait queue of each listed socket.
+- **Interface state** (MAC, address, mask, gateway, DNS, link, counters) is in the status
+  page too: `rtnetlink`, `/proc/net/*`, `ifconfig` read it directly.
 
-### Ethernet II Framing ([`src/net/ethernet.rs`](file:///d:/os/src/net/ethernet.rs))
-Packs 14-byte Ethernet headers containing 6-byte Destination MAC, 6-byte Source MAC, and 16-bit EtherType:
-- `0x0806`: Address Resolution Protocol (ARP).
-- `0x0800`: Internet Protocol version 4 (IPv4).
+## Kernel IPC primitives added for it (`src/ipc/service.rs`)
 
-### Address Resolution Protocol & Cache ([`src/net/arp.rs`](file:///d:/os/src/net/arp.rs))
-Maintains an internal dynamic `ArpCache` of up to 16 mappings between 4-byte IPv4 addresses and 6-byte Ethernet hardware addresses.
-- **ARP Request**: Broadcasts `FF:FF:FF:FF:FF:FF` asking `"Who has IP X.X.X.X? Tell Hydra OS"`.
-- **ARP Reply**: Dynamically updates the cache with target MAC addresses upon receipt.
+- `SYS_SVC_RECV` with `RECV_NOTIFY | timeout` in `arg2`: the server also gets notifications
+  (request ID 0, `MSG_SVC_NOTIFY`, bits in `args[0]`) and a timeout for its timers.
+- `service::forward_irq(from, to)`: the e1000 interrupt becomes a notification for net-server.
+- `service::set_signal_hook(endpoint, fn)` and syscall 35 `SYS_SVC_SIGNAL`: a server's
+  doorbell to its kernel client; the hook is also called with `SIGNAL_GONE` when the server
+  goes away.
+- Scheduler (`wait_out_handoff`): a server that a hand-off participant waits on through a
+  queued request may enter the kernel during the hand-off (the e1000 driver while net-server,
+  serving a kernel caller's hand-off, waits for it).
 
-### IPv4 Engine & Checksum Verification ([`src/net/ipv4.rs`](file:///d:/os/src/net/ipv4.rs))
-Encapsulates 20-byte IPv4 headers with Type of Service (`0x00`), Total Length, Identification counter, Flags/Fragment Offset (`0x4000` Don't Fragment), TTL (`64`), Protocol (`1` ICMP, `6` TCP, `17` UDP), Source IP, and Destination IP.
-- Implements RFC 1071 standard One's Complement 16-bit Internet Checksum computation.
+## When net-server dies
 
-### DHCP Dynamic Lease Acquisition ([`src/net/dhcp.rs`](file:///d:/os/src/net/dhcp.rs))
-Automates network configuration via RFC 2131:
-1. **DHCP Discover**: Broadcast packet sent from port 68 to port 67 (`255.255.255.255`).
-2. **DHCP Offer**: Parses offered IP address, server identifier, subnet mask (Option 1), router gateway (Option 3), and DNS servers (Option 6).
-3. **DHCP Request**: Broadcasts formal request for the offered lease.
-4. **DHCP Ack**: Acknowledges lease and applies network parameters directly to the global `Interface` state.
+The supervisor restarts it (DHCP runs again; QEMU gives the same address). The hook wakes
+every waiting socket; sockets of the old server are dead from then on: TCP calls fail with
+`ECONNRESET`, UDP/ICMP receives with `ENETDOWN`, `poll` reports `POLLERR|POLLHUP`. The kernel
+names sockets by handles of its own, so a socket of the old server can never reach a socket
+of the new one even if the new server hands out the same numbers. New sockets work at once.
 
-### Domain Name System (DNS) Client ([`src/net/dns.rs`](file:///d:/os/src/net/dns.rs))
-Implements standard RFC 1035 UDP-based name resolution over port 53:
-- **URL & Hostname Sanitization**: Strips `http://`, `https://`, trailing paths (`/...`), and port numbers (`:80`).
-- **Standard Query Formatting**: Emits 12-byte header with recursion desired (`0x0100`), single question, and length-prefixed domain labels (e.g. `\x06google\x03com\x00`).
-- **Response Parsing**: Validates transaction IDs and response flags, handles DNS name pointer compression (`0xC0`), parses Answer records, and extracts 4-byte `A` (IPv4) addresses.
+## Performance notes
 
-### Transport Layer & HTTP Downloader ([`src/net/tcp.rs`](file:///d:/os/src/net/tcp.rs) & [`src/net/http.rs`](file:///d:/os/src/net/http.rs))
-- **TCP Handshake**: Performs SYN -> SYN-ACK -> ACK connection establishment with sequence and acknowledgment tracking.
-- **HTTP/1.0 GET**: Transmits `GET <path> HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n`, receives streaming segments, strips HTTP response headers (`200 OK`), and returns binary file content.
+- One hand-off call per socket operation (the old in-kernel stack had none); readiness
+  checks need no call.
+- Frames: received in batches per interrupt; sent in batches (`MSG_NET_TRANSMIT_BATCH`)
+  flushed before each reply and after each round of received frames.
+- Before/after numbers: see the Group 2 report (branch `mk-net`).
 
----
+## Future clients
 
-## 4. OpenZFS Storage Integration
-
-Hydra OS connects its network stack directly to persistent OpenZFS storage pools:
-- The `wget` command downloads remote binaries, configuration files, and assets over TCP/HTTP using either IP addresses or domain names.
-- Streamed payloads are committed into persistent OpenZFS storage via [`ZfsClient::write_file_by_path`](file:///d:/os/src/fs/zfs.rs).
-
----
-
-## 5. Shell Command Reference
-
-| Command | Arguments | Description |
-| :--- | :--- | :--- |
-| `ifconfig` / `ip` | None | Displays MAC address, link state, IP address, subnet mask, gateway, DNS, and TX/RX packet telemetry. |
-| `dhcp` | None | Manually triggers the RFC 2131 DHCP state machine to refresh network parameters (auto-acquired at boot). |
-| `dns` / `nslookup` | `<domain_or_url>` | Queries the configured DNS server to resolve a domain name into an IPv4 address. |
-| `ping` | `<ip_or_url>` | Resolves domain names/URLs via DNS and transmits 4 ICMP Echo Request packets to verify connectivity. |
-| `wget` | `<server_or_url> <port> <path> <dest>` | Fetches a remote file over HTTP and commits the payload directly into OpenZFS. |
-
+A ring-3 Linux server (wave 3) can be net-server's client directly: the same requests, its
+own data offset in the window (`allow_client` to attach it), and the doorbell delivered to it
+as a notification instead of a kernel hook.

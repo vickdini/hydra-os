@@ -301,7 +301,12 @@ pub fn wait_out_handoff() {
         }
         // (with interrupts off while the scheduler lock is held: see service::holders)
         let in_call = x86_64::instructions::interrupts::without_interrupts(|| {
-            SCHEDULER.try_lock().map(|s| s.handoffs.iter().flatten().any(|h| h.server == me || h.caller == me))
+            // (Group 2: also a server that a participant waits on through a queued request,
+            // as the network driver for net-server: it must answer, so it may enter)
+            SCHEDULER.try_lock().map(|s| {
+                s.handoffs.iter().flatten().any(|h| h.server == me || h.caller == me)
+                    || s.tasks.iter().position(|t| t.id.0 == me).is_some_and(|i| s.handoff_participant(i))
+            })
         })?;
         Some(!in_call && !crate::ipc::service::holds_window(me) && (handoff_active() || crate::ipc::service::window_held_by_other(me)))
     };

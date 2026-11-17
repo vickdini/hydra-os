@@ -14,7 +14,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: Zero-allocation (`no_std`) UDP datagram parser and serializer.
 
 /// Structured zero-copy representation of a UDP datagram (RFC 768).

@@ -109,12 +109,11 @@ fn message(out: &mut Vec<u8>, ty: u16, flags: u16, seq: u32, port: u32, body: &[
 /// The Ethernet interface's `(mac, ip, netmask, gateway)`, if it has an address and the
 /// caller can see it.
 fn ethernet() -> Option<([u8; 6], [u8; 4], [u8; 4], [u8; 4])> {
-    if super::ns::net_isolated() || !crate::net::e1000::is_present() {
+    let i = crate::net::iface();
+    if super::ns::net_isolated() || !i.present {
         return None;
     }
-    let iface = crate::net::GLOBAL_INTERFACE.lock();
-    let ip = iface.ip();
-    (ip != [0; 4]).then(|| (crate::net::e1000::mac_address(), ip, iface.subnet_mask(), iface.gateway()))
+    (i.ip != [0; 4]).then_some((i.mac, i.ip, i.mask, i.gateway))
 }
 
 /// `RTM_NEWLINK` bodies for the visible interfaces.
@@ -160,7 +159,7 @@ fn addresses(family: u8) -> Vec<Vec<u8>> {
         let mut lo = [0u8; 16];
         lo[15] = 1;
         out.push(addr6(1, lo, 128, 254));
-        if let Some(ll) = crate::net::stack::link_local6() {
+        if let Some(ll) = crate::net::client::link_local6() {
             if ethernet().is_some() {
                 out.push(addr6(2, ll, 64, 253));
             }
@@ -239,7 +238,7 @@ fn hex6(a: &[u8; 16]) -> String {
 /// `GetAdaptersAddresses`). The same view as the netlink dumps above.
 pub fn proc_net_text(file: &str) -> Option<String> {
     let eth = ethernet();
-    let ll = eth.and(crate::net::stack::link_local6());
+    let ll = eth.and(crate::net::client::link_local6());
     let mut lo6 = [0u8; 16];
     lo6[15] = 1;
     match file {
@@ -292,7 +291,7 @@ pub fn proc_net_text(file: &str) -> Option<String> {
         "arp" => {
             let mut out = String::from("IP address       HW type     Flags       HW address            Mask     Device\n");
             if eth.is_some() {
-                for (ip, m) in crate::net::arp::ARP_TABLE.lock().entries() {
+                for (ip, m) in crate::net::client::arp_entries() {
                     let ip = alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
                     let mac = alloc::format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
                     // ATF_COM: complete
@@ -302,7 +301,7 @@ pub fn proc_net_text(file: &str) -> Option<String> {
             Some(out)
         }
         "snmp" => {
-            let c = crate::net::stack::counters();
+            let c = crate::net::client::counters();
             let (rx, tx) = if super::ns::net_isolated() { (0, 0) } else { ((c[0].0).1 + (c[1].0).1, (c[0].1).1 + (c[1].1).1) };
             let zeros = |n: usize| alloc::vec!["0"; n].join(" ");
             Some(alloc::format!(

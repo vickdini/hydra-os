@@ -17,7 +17,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: Zero-allocation (`no_std`) parser, serializer, and RFC 1071 checksum calculator.
 
 /// Supported transport-layer protocol numbers encapsulated within IPv4 (RFC 790 / IANA).
