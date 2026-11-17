@@ -600,18 +600,22 @@ fn map_identity(st: &mut State, di: usize, phys: u64, len: u64) -> Result<(), St
     let first = phys & !0xFFF;
     let end = (phys + len + 0xFFF) & !0xFFF;
     let mut a = first;
+    let mut new = 0;
     while a < end {
-        if let Err(e) = dmar::map_page(&mut mem, root, levels, a, a, PTE_R | PTE_W) {
-            let mut b = first;
-            while b < a {
-                dmar::unmap_page(&mut mem, root, levels, b);
-                b += 4096;
+        match dmar::map_page(&mut mem, root, levels, a, a, PTE_R | PTE_W) {
+            Ok(fresh) => new += fresh as u64,
+            Err(e) => {
+                let mut b = first;
+                while b < a {
+                    dmar::unmap_page(&mut mem, root, levels, b);
+                    b += 4096;
+                }
+                return Err(String::from(e));
             }
-            return Err(String::from(e));
         }
         a += 4096;
     }
-    st.domains[di].pages += (end - first) / 4096;
+    st.domains[di].pages += new;
     Ok(())
 }
 

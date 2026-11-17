@@ -263,11 +263,15 @@ pub fn reach(levels: u8) -> u64 {
 }
 
 /// Maps the 4 KiB page at `iova` to `phys` with `perm` ([`PTE_R`] | [`PTE_W`]) in the table
-/// rooted at `root`, adding tables as needed.
+/// rooted at `root`, adding tables as needed. Mapping a page that is already mapped to
+/// the same `phys` counts one more reference (see [`unmap_page`]).
+///
+/// # Returns
+/// Whether the page was newly mapped (false: one more reference to a mapped page).
 ///
 /// # Errors
 /// The address is outside the table's reach, or no memory for a table.
-pub fn map_page(mem: &mut dyn TableMemory, root: u64, levels: u8, iova: u64, phys: u64, perm: u64) -> Result<(), &'static str> {
+pub fn map_page(mem: &mut dyn TableMemory, root: u64, levels: u8, iova: u64, phys: u64, perm: u64) -> Result<bool, &'static str> {
     if iova >= reach(levels) {
         return Err("address beyond the domain's width");
     }
@@ -285,15 +289,29 @@ pub fn map_page(mem: &mut dyn TableMemory, root: u64, levels: u8, iova: u64, phy
         };
     }
     let e = mem.entry(table, index(iova, 1));
+    let old = unsafe { e.read_volatile() };
+    if old & (PTE_R | PTE_W) != 0 && old & PTE_ADDR == phys & PTE_ADDR {
+        // Mapped already (a page lent for two requests at once): one more reference
+        let refs = ((old & PTE_REFS) >> PTE_REFS_SHIFT).saturating_add(1).min(PTE_REFS >> PTE_REFS_SHIFT);
+        unsafe { e.write_volatile((old & !PTE_REFS) | refs << PTE_REFS_SHIFT | (perm & (PTE_R | PTE_W))) };
+        mem.flushed(e);
+        return Ok(false);
+    }
     unsafe { e.write_volatile((phys & PTE_ADDR) | (perm & (PTE_R | PTE_W))) };
     mem.flushed(e);
-    Ok(())
+    Ok(true)
 }
 
-/// Unmaps the page at `iova`. Intermediate tables stay (they are few).
+/// Extra references to a mapped page, minus one, kept in bits the unit ignores (52..=61).
+pub const PTE_REFS: u64 = 0x3FF << PTE_REFS_SHIFT;
+/// First bit of [`PTE_REFS`].
+pub const PTE_REFS_SHIFT: u64 = 52;
+
+/// Drops one reference to the page at `iova`, unmapping it with the last one.
+/// Intermediate tables stay (they are few).
 ///
 /// # Returns
-/// Whether a page was mapped there.
+/// Whether a page was unmapped (false when it was not mapped or is still referenced).
 pub fn unmap_page(mem: &mut dyn TableMemory, root: u64, levels: u8, iova: u64) -> bool {
     if iova >= reach(levels) {
         return false;
@@ -307,7 +325,13 @@ pub fn unmap_page(mem: &mut dyn TableMemory, root: u64, levels: u8, iova: u64) -
         table = v & PTE_ADDR;
     }
     let e = mem.entry(table, index(iova, 1));
-    let was = unsafe { e.read_volatile() } & (PTE_R | PTE_W) != 0;
+    let v = unsafe { e.read_volatile() };
+    let was = v & (PTE_R | PTE_W) != 0;
+    if was && v & PTE_REFS != 0 {
+        unsafe { e.write_volatile(v - (1 << PTE_REFS_SHIFT)) };
+        mem.flushed(e);
+        return false;
+    }
     unsafe { e.write_volatile(0) };
     mem.flushed(e);
     was

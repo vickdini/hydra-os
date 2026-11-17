@@ -165,13 +165,13 @@ fn maps_and_unmaps_pages() {
         let root = m.alloc_table().unwrap();
         let iova = 0x1_2345_6000u64;
         assert_eq!(translate(&m, root, levels, iova), None);
-        map_page(&mut m, root, levels, iova, iova, PTE_R | PTE_W).unwrap();
+        assert!(map_page(&mut m, root, levels, iova, iova, PTE_R | PTE_W).unwrap());
         assert_eq!(translate(&m, root, levels, iova + 0x10), Some((iova + 0x10, PTE_R | PTE_W)));
         assert_eq!(translate(&m, root, levels, iova + 0x1000), None);
         let tables = m.0.len();
         assert_eq!(tables, levels as usize);
         // A neighbour shares all tables
-        map_page(&mut m, root, levels, iova + 0x1000, 0x7000, PTE_R).unwrap();
+        assert!(map_page(&mut m, root, levels, iova + 0x1000, 0x7000, PTE_R).unwrap());
         assert_eq!(m.0.len(), tables);
         assert_eq!(translate(&m, root, levels, iova + 0x1000), Some((0x7000, PTE_R)));
         assert!(unmap_page(&mut m, root, levels, iova));
@@ -227,4 +227,27 @@ fn decodes_faults() {
     assert_eq!(reason_text(f.reason), "read from memory not mapped for this device");
     assert_eq!(reason_text(5), "write to memory not mapped writable for this device");
     assert_eq!(reason_text(0x77), "another remapping fault");
+}
+
+#[test]
+fn counts_references_to_a_page_mapped_twice() {
+    let mut m = Mem(Vec::new());
+    let root = m.alloc_table().unwrap();
+    let a = 0x40_0000u64;
+    assert!(map_page(&mut m, root, 4, a, a, PTE_R | PTE_W).unwrap());
+    // Lent again for a second request: still one page, two references
+    assert!(!map_page(&mut m, root, 4, a, a, PTE_R | PTE_W).unwrap());
+    assert!(!map_page(&mut m, root, 4, a, a, PTE_R).unwrap());
+    assert_eq!(translate(&m, root, 4, a), Some((a, PTE_R | PTE_W)));
+    assert!(!unmap_page(&mut m, root, 4, a));
+    assert!(!unmap_page(&mut m, root, 4, a));
+    assert_eq!(translate(&m, root, 4, a), Some((a, PTE_R | PTE_W)));
+    assert!(unmap_page(&mut m, root, 4, a));
+    assert_eq!(translate(&m, root, 4, a), None);
+    assert!(!unmap_page(&mut m, root, 4, a));
+    // Another physical page at the same address replaces the mapping
+    assert!(map_page(&mut m, root, 4, a, a, PTE_R).unwrap());
+    assert!(map_page(&mut m, root, 4, a, 0x9000, PTE_R).unwrap());
+    assert_eq!(translate(&m, root, 4, a), Some((0x9000, PTE_R)));
+    assert!(unmap_page(&mut m, root, 4, a));
 }
