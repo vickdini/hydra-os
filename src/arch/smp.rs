@@ -187,18 +187,16 @@ pub fn bkl_held() -> bool {
 /// Vector of the TLB flush request interrupt.
 pub const TLB_VECTOR: u64 = 0x42;
 
-/// The page table root each CPU has loaded (0: none recorded).
+/// The page table root each CPU has loaded (0: none recorded). Written by
+/// `arch::pcid::load_cr3` before it loads CR3.
 pub static LOADED_CR3: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Flush requests made to each CPU, and those it has served.
 static TLB_WANT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static TLB_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// With PCID: a pending request needs every ID flushed (a change of the kernel's tables).
+static TLB_ALL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 /// CPUs able to serve flush requests (their IDT is loaded).
 static LIVE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-
-/// Records the page table root the calling CPU loaded.
-pub fn note_cr3(cr3: u64) {
-    LOADED_CR3[super::percpu::cpu()].store(cr3, Ordering::Release);
-}
 
 /// Flushes the calling CPU's whole TLB (global entries too).
 fn flush_everything() {
@@ -220,7 +218,19 @@ pub fn serve_tlb() {
     let me = super::percpu::cpu();
     let want = TLB_WANT[me].load(Ordering::Acquire);
     if TLB_DONE[me].load(Ordering::Relaxed) != want {
-        flush_everything();
+        if super::pcid::enabled() {
+            // A change of the kernel's shared tables: every ID. Otherwise the requests
+            // were for the address space loaded here when they were made: if it is still
+            // loaded, its ID; if this CPU switched away meanwhile, the requester marked
+            // its slot stale, and flushing the current ID is merely harmless.
+            if TLB_ALL[me].swap(false, Ordering::AcqRel) {
+                super::pcid::flush_all_ids();
+            } else {
+                super::pcid::flush_current(None);
+            }
+        } else {
+            flush_everything();
+        }
         TLB_DONE[me].store(want, Ordering::Release);
     }
 }
@@ -228,21 +238,45 @@ pub fn serve_tlb() {
 /// Flushes the translation of `addr` (everything: `None`) on the calling CPU, and makes
 /// every other CPU that has page table root `cr3` loaded (`None`: every CPU) flush too,
 /// waiting until they have.
+///
+/// With PCID (see `arch::pcid`), translations of `cr3` may also be cached under its ID on
+/// CPUs that ran it earlier: their slot for it is marked stale (flushed when they load it
+/// again), and `None` (the kernel's shared tables) flushes every ID everywhere.
 pub fn shootdown(cr3: Option<u64>, addr: Option<u64>) {
-    match addr {
-        Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
-        None => flush_everything(),
-    }
+    let pcid = super::pcid::enabled();
+    // The page table change is visible before slots and LOADED_CR3 are read
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let me = if pcid {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            match cr3 {
+                Some(r) => super::pcid::shoot_local(r, addr),
+                None => super::pcid::flush_all_ids(),
+            }
+            super::percpu::cpu()
+        })
+    } else {
+        match addr {
+            Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
+            None => flush_everything(),
+        }
+        super::percpu::cpu()
+    };
     if ONLINE.load(Ordering::Acquire) <= 1 {
         return;
     }
-    let me = super::percpu::cpu();
     let mut wait = [0u64; MAX_CPUS];
     for c in 0..MAX_CPUS {
         if c == me || !LIVE[c].load(Ordering::Acquire) {
             continue;
         }
-        if cr3.map_or(true, |r| LOADED_CR3[c].load(Ordering::Acquire) == r) {
+        if pcid {
+            match cr3 {
+                // Marked before LOADED_CR3 is read (see arch::pcid)
+                Some(r) => super::pcid::mark_remote(c, r),
+                None => TLB_ALL[c].store(true, Ordering::SeqCst),
+            }
+        }
+        if cr3.map_or(true, |r| LOADED_CR3[c].load(Ordering::SeqCst) == r) {
             wait[c] = TLB_WANT[c].fetch_add(1, Ordering::AcqRel) + 1;
             let t0 = crate::compat::linux::prof::start();
             send_ipi_now(CPU_APIC[c].load(Ordering::Relaxed), TLB_VECTOR as u32);

@@ -1500,6 +1500,9 @@ impl Mm {
 impl Drop for Mm {
     /// Tears down the address space, decrementing reference counts on mapped frames and freeing page tables.
     fn drop(&mut self) {
+        // No CPU has it loaded (see reap_retired_mms): with PCID, every CPU drops its
+        // cached translations' claim before the tables can be reused
+        crate::arch::pcid::forget(self.pml4.as_u64());
         // Owned: the user half, and in PML4[0] the private PDPT with the low slots that are
         // the process's (the others are the kernel's shared identity map, see
         // KERNEL_LOW_SLOTS). The kernel half is shared.
@@ -1827,4 +1830,97 @@ impl Drop for BufferObject {
             frame_ref_dec(*frame);
         }
     }
+}
+
+/// PCID self-test, run once at boot on the boot processor before the others start (see
+/// `arch::pcid`). Two address spaces A and B; page V of A is read with A loaded (the TLB
+/// caches it under A's ID), B is loaded, A's entry for V is pointed at another frame, and
+/// then each way of invalidating is tried before A is loaded again and V read:
+/// - nothing (the control: with PCID the old frame must still show, or the CPU did not keep
+///   the entries and the test proves nothing);
+/// - a shootdown of V in A, and of all of A (INVPCID, or the stale mark without it);
+/// - another CPU's stale mark (`pcid::mark_remote` on this CPU's slot);
+/// - the teardown's `pcid::forget`.
+///
+/// Returns a line for the boot log; `Err` if a stale entry was used after an invalidation.
+pub fn tlb_self_test() -> Result<alloc::string::String, alloc::string::String> {
+    use crate::arch::pcid;
+    use alloc::format;
+    const V: u64 = 0x0000_7E00_0000_0000;
+    if !pcid::enabled() {
+        return Ok("skipped (PCID off)".into());
+    }
+    let mut a = Mm::new().map_err(|e| format!("no memory ({})", e))?;
+    let b = Mm::new().map_err(|e| format!("no memory ({})", e))?;
+    let (f1, f2) = match (alloc_user_frame(), alloc_user_frame()) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err("no memory".into()),
+    };
+    let put = |f: PhysFrame<Size4KiB>, v: u64| unsafe {
+        core::ptr::write_volatile(crate::memory::frame_allocator::phys_to_virt(f.start_address().as_u64()) as *mut u64, v)
+    };
+    put(f1, 0x1111);
+    put(f2, 0x2222);
+    // Kernel-only leaf (no SMAP concerns), present, writable
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    if a.pte(V, true).is_none() {
+        return Err("no memory".into());
+    }
+    let (ra, rb) = (a.cr3(), b.cr3());
+    let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let result = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut out = alloc::vec::Vec::new();
+        let tries: [(&str, &dyn Fn()); 6] = [
+            ("control (no invalidation)", &|| {}),
+            ("shootdown of the page", &|| crate::arch::smp::shootdown(Some(ra), Some(V))),
+            ("shootdown of the address space", &|| crate::arch::smp::shootdown(Some(ra), None)),
+            ("shootdown of the page, without INVPCID", &|| pcid::without_invpcid(|| crate::arch::smp::shootdown(Some(ra), Some(V)))),
+            ("another CPU's stale mark", &|| pcid::mark_remote(crate::arch::percpu::cpu(), ra)),
+            ("teardown (forget)", &|| pcid::forget(ra)),
+        ];
+        for (name, invalidate) in tries.iter() {
+            // V -> f1, cached under A's ID
+            pcid::load_cr3(rb);
+            a.pte(V, false).unwrap().set_addr(f1.start_address(), flags);
+            crate::arch::smp::shootdown(Some(ra), Some(V));
+            pcid::load_cr3(ra);
+            let before = read();
+            // A not loaded: V -> f2, then the invalidation under test
+            pcid::load_cr3(rb);
+            a.pte(V, false).unwrap().set_addr(f2.start_address(), flags);
+            invalidate();
+            pcid::load_cr3(ra);
+            let after = read();
+            out.push((*name, before, after));
+        }
+        pcid::load_cr3(rb);
+        // Leave V -> f1 for the teardown (f2 freed below), flushed
+        a.pte(V, false).unwrap().set_addr(f1.start_address(), flags);
+        crate::arch::smp::shootdown(Some(ra), Some(V));
+        pcid::load_cr3(orig);
+        out
+    });
+    drop(a);
+    drop(b);
+    frame_ref_dec(f2);
+    let mut kept = false;
+    let mut bad = alloc::vec::Vec::new();
+    for (i, (name, before, after)) in result.iter().enumerate() {
+        if *before != 0x1111 {
+            bad.push(format!("{}: first read {:#x}", name, before));
+        } else if i == 0 {
+            kept = *after == 0x1111;
+        } else if *after != 0x2222 {
+            bad.push(format!("{}: read {:#x} (stale)", name, after));
+        }
+    }
+    if !bad.is_empty() {
+        return Err(bad.join("; "));
+    }
+    Ok(if kept {
+        "passed (the CPU kept a switched-away address space's entries, and every invalidation removed them)".into()
+    } else {
+        "passed, but inconclusive: the CPU (or hypervisor) dropped the cached entries by itself".into()
+    })
 }
