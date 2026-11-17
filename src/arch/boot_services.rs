@@ -110,6 +110,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::arch::smp::discover();
     // 2c. The IOMMU's ACPI table (DMAR) and boot options
     crate::arch::iommu::discover();
+    // 2d. PCID's off switches
+    crate::arch::pcid::discover();
 
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
@@ -175,6 +177,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         }
     }
     let cr3_frame = Cr3::read().0.start_address().as_u64();
+    // Tagged TLB entries (before the other processors start: they copy this CPU's CR4)
+    crate::arch::pcid::init();
     crate::task::update_cr3(cr3_frame);
     crate::memory::paging::KERNEL_PML4.store(cr3_frame, core::sync::atomic::Ordering::SeqCst);
     // Hydra's tables hold the direct map of physical memory: use it from now on
@@ -221,6 +225,14 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
 
     // 9. Enable CPU hardware interrupts (sti) after banner rendering completes
     x86_64::instructions::interrupts::enable();
+    // 9a. PCID's self-test (one CPU yet): stale TLB entries must never be used
+    match crate::memory::vm::tlb_self_test() {
+        Ok(s) => crate::kprintln!("[pcid] self-test {}", s),
+        Err(e) => {
+            crate::kprintln!("[pcid] SELF-TEST FAILED: {}", e);
+            crate::arch::pcid::disable("its boot self-test failed");
+        }
+    }
     // 9b. The other processors come online (and wait)
     crate::arch::smp::start_aps();
     // Driver programs run from here on (the takeover lock is released first: they run

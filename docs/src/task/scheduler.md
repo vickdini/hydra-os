@@ -43,7 +43,7 @@ sequenceDiagram
 3. **Round-Robin Selection**: When the timeslice expires, the outgoing task's registers and `CR3` paging root are saved from `ExceptionContext`. The run-queue is scanned in two passes:
    - **Pass 1 (Normal & High Priority)**: Scans for the next runnable non-idle task (`priority > Idle`).
    - **Pass 2 (Idle Fallback)**: If no normal tasks are ready, schedules Task 1 (`idle`) to execute low-power CPU halts (`hlt`).
-4. **Context Switch Restoration**: The chosen task's registers are written back into `ExceptionContext`, its timeslice is reset to 50 ms, and if the task has a distinct `CR3` page table, the CPU paging root is updated via `Cr3::write()`.
+4. **Context Switch Restoration**: The chosen task's registers are written back into `ExceptionContext`, its timeslice is reset to 50 ms, and if the task has a distinct `CR3` page table, the CPU paging root is updated via `arch::pcid::load_cr3()` (which keeps the TLB entries with PCID, see [`pcid.md`](../arch/pcid.md)).
 
 ---
 

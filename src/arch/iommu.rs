@@ -258,7 +258,7 @@ fn flush_iotlb(u: &Unit, did: Option<u16>) -> bool {
 }
 
 /// Words of the boot entry's load options (lower case), without allocating much.
-fn load_options_say(words: &[&[u8]]) -> bool {
+pub(crate) fn load_options_say(words: &[&[u8]]) -> bool {
     let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) else {
         return false;
     };
