@@ -143,6 +143,8 @@ pub mod arch {
     }
     #[path = "../../../../src/arch/vdso.rs"]
     pub mod vdso;
+    #[path = "../../../../src/arch/dmar.rs"]
+    pub mod dmar;
     /// *stub*
     pub mod syscall {
         pub use crate::fake::rdmsr;
