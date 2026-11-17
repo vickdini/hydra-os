@@ -637,31 +637,22 @@ pub mod memory {
 }
 
 pub mod net {
-    #[path = "../../../../src/net/dns.rs"]
+    // The packet formats moved with the protocols into net-server (Ring 3)
+    #[path = "../../../../userland/drivers/net-server/src/net/dns.rs"]
     pub mod dns;
-
-    /// *stub*
-    pub use crate::fake::{dhcp_acquire, Interface};
-    /// *stub*
-    pub static GLOBAL_INTERFACE: spin::Mutex<Interface> = spin::Mutex::new(Interface::new());
-    /// *stub*
-    pub mod e1000 {
-        pub use crate::fake::nic_present as is_present;
-    }
-
-    #[path = "../../../../src/net/arp.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/arp.rs"]
     pub mod arp;
-    #[path = "../../../../src/net/dhcp.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/dhcp.rs"]
     pub mod dhcp;
-    #[path = "../../../../src/net/ethernet.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/ethernet.rs"]
     pub mod ethernet;
-    #[path = "../../../../src/net/icmp.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/icmp.rs"]
     pub mod icmp;
-    #[path = "../../../../src/net/ipv4.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/ipv4.rs"]
     pub mod ipv4;
-    #[path = "../../../../src/net/tcp.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/tcp.rs"]
     pub mod tcp;
-    #[path = "../../../../src/net/udp.rs"]
+    #[path = "../../../../userland/drivers/net-server/src/net/udp.rs"]
     pub mod udp;
 }
 

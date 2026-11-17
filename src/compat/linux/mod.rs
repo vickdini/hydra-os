@@ -1987,7 +1987,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             loop {
                 waits.register();
                 tty::pump();
-                crate::net::stack::kick();
                 let mut ready_count = 0;
                 crate::task::with_current_fds_mut(|fds| {
                     for i in 0..nfds {

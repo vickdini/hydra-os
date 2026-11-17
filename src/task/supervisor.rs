@@ -30,7 +30,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_NET_DEV, ENDPOINT_ZFS_SERVER, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
+use crate::ipc::protocol::{ENDPOINT_BLOCK_DEV, ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER, ENDPOINT_ZFS_SERVER, MSG_SUPERVISOR_PING, MSG_SUPERVISOR_PONG};
 use crate::ipc::service;
 use crate::ipc::Message;
 use crate::task::{is_task_alive, kill, TaskId};
@@ -45,6 +45,8 @@ static USB_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 static ZFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/zfs-server"));
 /// The e1000 network driver program.
 static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/e1000-driver"));
+/// The network server program (the protocols: Ethernet to TCP, DHCP, DNS).
+static NET_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/net-server"));
 /// The sound driver program (Intel High Definition Audio).
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
 
@@ -211,6 +213,16 @@ fn e1000_args() -> Option<Vec<String>> {
     let irq = msi.unwrap_or(a.dev.irq_line);
     if msi.is_some() || (irq != 0 && irq < 16 && irq != 2) {
         args.push(alloc::format!("irq={}", irq));
+    }
+    Some(args)
+}
+
+/// net-server: always started (loopback works without a card); `nic=1` when the network
+/// driver runs (net-server then takes frames from it directly).
+fn net_server_args() -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    if service::is_online(ENDPOINT_NET_DEV) {
+        args.push(String::from("nic=1"));
     }
     Some(args)
 }
@@ -582,6 +594,13 @@ pub fn supervisor_init() {
         service::allow_client(ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER);
         service::allow_client(crate::ipc::protocol::ENDPOINT_USB_DISK, ENDPOINT_ZFS_SERVER);
         sup.services.push(ServiceDescriptor::new("net_driver", ENDPOINT_NET_DEV, E1000_DRIVER_ELF, e1000_args, e1000_grants));
+        // The network protocols, after the card's driver: net-server uses the driver
+        // directly (its window, its interrupt as a notification) and the kernel's socket
+        // layer is net-server's client (woken through the doorbell hook)
+        sup.services.push(ServiceDescriptor::new("net_server", ENDPOINT_NET_SERVER, NET_SERVER_ELF, net_server_args, no_grants));
+        service::allow_client(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
+        service::forward_irq(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
+        service::set_signal_hook(ENDPOINT_NET_SERVER, crate::net::client::on_signal);
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,
@@ -700,6 +719,11 @@ pub fn supervisor_tick() {
         }
         let Some(id) = task else { continue };
         if !is_task_alive(id) {
+            // A kernel caller may have revived it meanwhile (`revive`): then it is not
+            // this process any more, and nothing is to be done
+            if SUPERVISOR.lock().services[idx].task_id != Some(id) {
+                continue;
+            }
             crate::kprintln!("[supervisor] service on endpoint {:#x} (process {}) died", endpoint, id.0);
             let restarted = SUPERVISOR.lock().reincarnate(idx);
             if let Ok(id) = restarted {

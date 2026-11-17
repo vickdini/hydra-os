@@ -1,0 +1,9 @@
+[package]
+name = "net-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra network server: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS in Ring 3"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

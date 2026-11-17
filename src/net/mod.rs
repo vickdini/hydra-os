@@ -1,598 +1,198 @@
-//! # Network Subsystem: Core Interface Management & Protocol Dispatch
+//! # Network: the kernel's side
 //!
-//! Provides the primary network interface abstraction, packet dispatching, ARP resolution, and DHCP automation.
+//! The network protocols (Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS) run in Ring 3,
+//! in net-server (`userland/drivers/net-server`), which drives the card through
+//! `e1000-driver` itself. What stays in the kernel:
 //!
-//! ## Architectural Role & Design Rationale
-//!
-//! The network subsystem acts as the unified bridge between physical link-layer network adapters
-//! (e.g., `e1000::E1000Device`) and higher-layer transport and application protocols (ARP, IPv4, ICMP, UDP, TCP, DNS, HTTP).
-//!
-//! The `Interface` struct manages assigned network parameters (IP, Subnet Mask, Gateway Router, DNS),
-//! coordinates hardware packet polling, and transparently resolves destination MAC addresses via ARP.
-//!
-//! ## Key Types & Interfaces
-//!
-//! - `Interface`: Encapsulates the local network interface state (MAC, IPv4 address, subnet mask, gateway, DNS) and provides link-layer and IPv4 transmission/polling methods.
-//! - `GLOBAL_INTERFACE`: Thread-safe global singleton protecting the primary system network interface.
-//! - `init`: Probes PCI for the Intel E1000 NIC and automatically acquires a DHCP lease when link carrier is present.
-//! - `dhcp_acquire`: Executes the 4-way RFC 2131 DHCP handshake to configure `GLOBAL_INTERFACE`.
-//! - `ping`: Transmits an ICMP Echo Request and measures round-trip time (RTT) in milliseconds.
+//! - [`client`]: the client of net-server's protocol: sockets for the Linux personality
+//!   (`compat/linux/inet.rs`), the interface's state, DHCP renewal and DNS lookups;
+//! - [`e1000`]: finding the card on the PCI bus for the supervisor;
+//! - the functions below for the shell (and later its admin operations): the boot-time
+//!   report, [`ping`] and [`http_get`] on net-server sockets.
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
-//! - Hardware Dependencies: Relies on `e1000` for DMA frame transmission/reception and `crate::arch::pit` for millisecond timeout polling.
-//! - Concurrency: Protected via [`spin::Mutex`] in `GLOBAL_INTERFACE`.
+//! - Privilege Level: Ring 0; everything goes through [`crate::ipc::service`] calls to
+//!   net-server (endpoint `ENDPOINT_NET_SERVER`).
 
-pub mod arp;
-pub mod dhcp;
-pub mod dns;
+pub mod client;
 pub mod e1000;
-pub mod ethernet;
-pub mod http;
-pub mod icmp;
-pub mod ipv4;
-pub mod stack;
-pub mod tcp;
-pub mod udp;
 
-use spin::Mutex;
-use crate::net::arp::{ArpPacket, ARP_TABLE};
-use crate::net::ethernet::{EtherType, EthernetFrame};
-use crate::net::icmp::{IcmpPacket, IcmpType};
-use crate::net::ipv4::{IpProtocol, Ipv4Packet};
+/// net-server's DNS code, for [`clean_host`] (one source for both).
+#[allow(dead_code)]
+#[path = "../../userland/drivers/net-server/src/net/dns.rs"]
+mod dns;
 
-/// Manages the local network interface configuration and packet routing.
-///
-/// Stores the hardware 48-bit MAC address alongside the assigned IPv4 address, subnet mask,
-/// default gateway, and DNS server. Synchronized globally via `GLOBAL_INTERFACE`.
-pub struct Interface {
-    /// Hardware 48-bit Ethernet MAC address.
-    mac: [u8; 6],
-    /// Assigned local IPv4 address.
-    ip: [u8; 4],
-    /// Local IPv4 subnet mask.
-    subnet_mask: [u8; 4],
-    /// Default gateway router IPv4 address.
-    gateway: [u8; 4],
-    /// Configured recursive DNS server IPv4 address.
-    dns_server: [u8; 4],
+use alloc::vec::Vec;
+
+pub use client::{iface, IfaceInfo};
+pub use dns::clean_host;
+
+/// Formats an IPv4 address.
+fn dotted(ip: [u8; 4]) -> alloc::string::String {
+    alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
 }
 
-impl Interface {
-    /// Creates a new unconfigured network `Interface` with zeroed addresses and a `/24` default mask.
-    ///
-    /// # Returns
-    /// A newly initialized `Interface` instance suitable for `const` static initialization.
-    pub const fn new() -> Self {
-        Self {
-            mac: [0; 6],
-            ip: [0, 0, 0, 0],
-            subnet_mask: [255, 255, 255, 0],
-            gateway: [0, 0, 0, 0],
-            dns_server: [0, 0, 0, 0],
-        }
-    }
-
-    /// Returns the 6-byte hardware MAC address of this interface.
-    ///
-    /// # Returns
-    ///
-    /// The 6-byte Ethernet MAC address array.
-    pub fn mac(&self) -> [u8; 6] {
-        self.mac
-    }
-
-    /// Returns the currently assigned 4-byte IPv4 address of this interface.
-    ///
-    /// # Returns
-    ///
-    /// The 4-byte IPv4 address array.
-    pub fn ip(&self) -> [u8; 4] {
-        self.ip
-    }
-
-    /// Returns the 4-byte IPv4 subnet mask of this interface.
-    ///
-    /// # Returns
-    ///
-    /// The 4-byte IPv4 subnet mask array.
-    pub fn subnet_mask(&self) -> [u8; 4] {
-        self.subnet_mask
-    }
-
-    /// Returns the 4-byte IPv4 address of the default gateway router.
-    ///
-    /// # Returns
-    ///
-    /// The 4-byte default gateway IPv4 address.
-    pub fn gateway(&self) -> [u8; 4] {
-        self.gateway
-    }
-
-    /// Returns the 4-byte IPv4 address of the configured DNS server.
-    ///
-    /// # Returns
-    ///
-    /// The 4-byte DNS server IPv4 address.
-    pub fn dns_server(&self) -> [u8; 4] {
-        self.dns_server
-    }
-
-    /// Assigns the local 4-byte IPv4 address for this interface.
-    ///
-    /// # Arguments
-    /// - `ip`: The 4-byte IPv4 address to assign.
-    pub fn set_ip(&mut self, ip: [u8; 4]) {
-        self.ip = ip;
-    }
-
-    /// Assigns the 4-byte IPv4 subnet mask for this interface.
-    ///
-    /// # Arguments
-    /// - `mask`: The 4-byte subnet mask (e.g., `[255, 255, 255, 0]`).
-    pub fn set_subnet_mask(&mut self, mask: [u8; 4]) {
-        self.subnet_mask = mask;
-    }
-
-    /// Assigns the default gateway router IPv4 address for this interface.
-    ///
-    /// # Arguments
-    /// - `gw`: The 4-byte gateway IPv4 address.
-    pub fn set_gateway(&mut self, gw: [u8; 4]) {
-        self.gateway = gw;
-    }
-
-    /// Assigns the recursive DNS server IPv4 address for this interface.
-    ///
-    /// # Arguments
-    /// - `dns`: The 4-byte DNS server IPv4 address.
-    pub fn set_dns_server(&mut self, dns: [u8; 4]) {
-        self.dns_server = dns;
-    }
-
-    /// Determines whether a target IPv4 address resides within the local subnet.
-    ///
-    /// Compares the bitwise AND of `self.ip` and `target_ip` against `self.subnet_mask`.
-    ///
-    /// # Arguments
-    /// - `target_ip`: Destination 4-byte IPv4 address to test.
-    ///
-    /// # Returns
-    /// `true` if `target_ip` is on the local link subnet, or `false` if it requires gateway routing.
-    pub fn is_in_subnet(&self, target_ip: [u8; 4]) -> bool {
-        for i in 0..4 {
-            if (self.ip[i] & self.subnet_mask[i]) != (target_ip[i] & self.subnet_mask[i]) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Resolves the destination hardware MAC address for a target IPv4 address, routing via the default gateway if remote.
-    ///
-    /// First queries [`ARP_TABLE`]; on a cache miss, broadcasts an ARP Request and polls the NIC
-    /// for up to ~1500 ms waiting for a matching ARP Reply.
-    ///
-    /// # Arguments
-    /// - `target_ip`: Destination 4-byte IPv4 address to resolve.
-    ///
-    /// # Returns
-    /// `Ok([u8; 6])` containing the resolved next-hop hardware MAC address.
-    ///
-    /// # Errors
-    /// Returns `Err` if frame serialization/transmission fails or if the ARP request times out.
-    pub fn resolve_mac(&mut self, target_ip: [u8; 4]) -> Result<[u8; 6], &'static str> {
-        let next_hop_ip = if self.is_in_subnet(target_ip) {
-            target_ip
-        } else if self.gateway != [0, 0, 0, 0] {
-            self.gateway
-        } else {
-            target_ip
-        };
-
-        // 1. Check ARP cache table
-        if let Some(mac) = ARP_TABLE.lock().lookup(next_hop_ip) {
-            return Ok(mac);
-        }
-
-        // 2. Broadcast ARP Request
-        let mut arp_buf = [0u8; 28];
-        let arp_req = ArpPacket::new_request(self.mac, self.ip, next_hop_ip);
-        arp_req.serialize(&mut arp_buf)?;
-
-        let mut eth_buf = [0u8; 64];
-        let eth_len = EthernetFrame::serialize(
-            EthernetFrame::BROADCAST_MAC,
-            self.mac,
-            EtherType::Arp,
-            &arp_buf,
-            &mut eth_buf,
-        )?;
-
-        e1000::send_frame(&eth_buf[..eth_len])?;
-
-        // 3. Poll for incoming ARP Reply
-        let mut rx_frame = [0u8; 1518];
-        for _ in 0..1500 {
-            if let Some(len) = e1000::receive_frame(&mut rx_frame) {
-                if let Some(frame) = EthernetFrame::parse(&rx_frame[..len]) {
-                    if frame.ethertype == EtherType::Arp {
-                        if let Some(arp) = ArpPacket::parse(frame.payload) {
-                            if arp.opcode == 2 && arp.sender_ip == next_hop_ip {
-                                ARP_TABLE.lock().insert(arp.sender_ip, arp.sender_mac);
-                                return Ok(arp.sender_mac);
-                            }
-                        }
-                    }
-                }
-            }
-            crate::arch::pit::sleep_ms(1);
-        }
-
-        Err("ARP request timed out: unable to resolve target MAC address")
-    }
-
-    /// Encapsulates an IPv4 payload into an Ethernet frame and transmits it over the physical link.
-    ///
-    /// Resolves the next-hop MAC address via [`Interface::resolve_mac`], constructs the IPv4 header
-    /// and Ethernet II header, and hands the frame to the E1000 driver.
-    ///
-    /// # Arguments
-    /// - `dst_ip`: Destination 4-byte IPv4 address.
-    /// - `protocol`: Encapsulated transport-layer protocol ([`IpProtocol`]).
-    /// - `payload`: Transport-layer byte slice to encapsulate.
-    ///
-    /// # Returns
-    /// `Ok(())` when the frame has been queued and transmitted by the NIC.
-    ///
-    /// # Errors
-    /// Returns `Err` if MAC resolution fails, buffers are exceeded, or NIC transmission fails.
-    pub fn send_ipv4(
-        &mut self,
-        dst_ip: [u8; 4],
-        protocol: IpProtocol,
-        payload: &[u8],
-    ) -> Result<(), &'static str> {
-        let dst_mac = self.resolve_mac(dst_ip)?;
-
-        let mut ip_buf = [0u8; 1518];
-        let ip_len = Ipv4Packet::serialize(self.ip, dst_ip, protocol, payload, &mut ip_buf)?;
-
-        let mut eth_buf = [0u8; 1518];
-        let eth_len = EthernetFrame::serialize(
-            dst_mac,
-            self.mac,
-            EtherType::Ipv4,
-            &ip_buf[..ip_len],
-            &mut eth_buf,
-        )?;
-
-        e1000::send_frame(&eth_buf[..eth_len])
-    }
-
-    /// Polls the network hardware for an incoming IPv4 datagram addressed to this host.
-    ///
-    /// Automatically intercepts incoming ARP packets to update [`ARP_TABLE`] and reply to ARP requests
-    /// targeting this host's IPv4 address.
-    ///
-    /// # Arguments
-    /// - `rx_buf`: Mutable scratch buffer (recommended >= 1518 bytes) to store the received Ethernet frame.
-    ///
-    /// # Returns
-    /// `Some((src_ip, payload))` containing the sender's IPv4 address and a slice into `rx_buf`
-    /// covering the IPv4 payload, or `None` if no matching IPv4 frame was available.
-    pub fn poll_ipv4<'a>(&mut self, rx_buf: &'a mut [u8]) -> Option<([u8; 4], &'a [u8])> {
-        let len = e1000::receive_frame(rx_buf)?;
-        let frame = EthernetFrame::parse(&rx_buf[..len])?;
-
-        match frame.ethertype {
-            EtherType::Arp => {
-                if let Some(arp) = ArpPacket::parse(frame.payload) {
-                    ARP_TABLE.lock().insert(arp.sender_ip, arp.sender_mac);
-
-                    // If it's an ARP request for our IP, reply back
-                    if arp.opcode == 1 && arp.target_ip == self.ip && self.ip != [0, 0, 0, 0] {
-                        let mut arp_reply = [0u8; 28];
-                        let reply_pkt = ArpPacket::new_reply(self.mac, self.ip, arp.sender_mac, arp.sender_ip);
-                        if reply_pkt.serialize(&mut arp_reply).is_ok() {
-                            let mut eth_buf = [0u8; 64];
-                            if let Ok(eth_len) = EthernetFrame::serialize(
-                                arp.sender_mac,
-                                self.mac,
-                                EtherType::Arp,
-                                &arp_reply,
-                                &mut eth_buf,
-                            ) {
-                                let _ = e1000::send_frame(&eth_buf[..eth_len]);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            EtherType::Ipv4 => {
-                let ip_pkt = Ipv4Packet::parse(frame.payload)?;
-                // Verify destination is our IP or broadcast
-                if ip_pkt.dst_ip == self.ip || ip_pkt.dst_ip == [255, 255, 255, 255] || self.ip == [0, 0, 0, 0] {
-                    // Safety: calculate slice range within rx_buf
-                    let payload_offset = 14 + (ip_pkt.ihl as usize * 4);
-                    let payload_len = ip_pkt.payload.len();
-                    if payload_offset + payload_len <= len {
-                        Some((ip_pkt.src_ip, &rx_buf[payload_offset..payload_offset + payload_len]))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Global spinlock-protected network interface singleton.
-pub static GLOBAL_INTERFACE: Mutex<Interface> = Mutex::new(Interface::new());
-
-/// Initializes the microkernel network subsystem and discovers attached Ethernet hardware.
-///
-/// Probes the PCI bus for an Intel E1000 NIC, records its hardware MAC address into `GLOBAL_INTERFACE`,
-/// and if carrier link is active, attempts an automatic DHCP lease acquisition via `dhcp_acquire`.
+/// Reports the network at boot, once net-server runs: the card, then the DHCP lease
+/// (waiting up to 10 s for it).
 pub fn init() {
-    match e1000::init() {
-        Ok(()) => {
-            let mac = e1000::mac_address();
-            let mut iface = GLOBAL_INTERFACE.lock();
-            iface.mac = mac;
-            drop(iface);
-
-            // Give the adapter up to 8 seconds to complete auto-negotiation and link up
-            let mut is_up = false;
-            for _ in 0..80 {
-                if e1000::is_link_up() {
-                    is_up = true;
-                    break;
-                }
-                crate::arch::pit::sleep_ms(100);
-            }
-
-            crate::console::set_color(
-                uefi::proto::console::text::Color::LightGreen,
-                uefi::proto::console::text::Color::Black,
-            );
-            crate::println!(
-                "[+] Network Subsystem: Intel E1000 Online (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, Link: {})",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                if is_up { "UP" } else { "NEGOTIATING" }
-            );
-
-            crate::console::set_color(
-                uefi::proto::console::text::Color::Yellow,
-                uefi::proto::console::text::Color::Black,
-            );
-            crate::print!("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ");
-            match dhcp_acquire() {
-                Ok(lease) => {
-                    crate::console::set_color(
-                        uefi::proto::console::text::Color::LightGreen,
-                        uefi::proto::console::text::Color::Black,
-                    );
-                    crate::println!(
-                        "ONLINE ({}.{}.{}.{}, GW {}.{}.{}.{}, DNS {}.{}.{}.{})",
-                        lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
-                        lease.router[0], lease.router[1], lease.router[2], lease.router[3],
-                        lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]
-                    );
-                }
-                Err(e) => {
-                    crate::console::set_color(
-                        uefi::proto::console::text::Color::LightRed,
-                        uefi::proto::console::text::Color::Black,
-                    );
-                    crate::println!("Deferred ({})", e);
-                }
-            }
-        }
-        Err(e) => {
-            crate::console::set_color(
-                uefi::proto::console::text::Color::Yellow,
-                uefi::proto::console::text::Color::Black,
-            );
-            crate::println!("[*] Network Subsystem: No compatible Ethernet adapter detected: {}", e);
-        }
+    // net-server was started by the supervisor; it starts DHCP at once and publishes its
+    // status area right after registering
+    let mut i = iface();
+    let deadline = crate::arch::pit::ticks() + 200;
+    while !i.running && client::service_running() && crate::arch::pit::ticks() < deadline {
+        crate::task::sleep_ms(10);
+        i = iface();
+    }
+    if !i.running {
+        crate::console::set_color(uefi::proto::console::text::Color::Yellow, uefi::proto::console::text::Color::Black);
+        crate::println!("[*] Network Subsystem: the network server is not running");
+        return;
+    }
+    if !i.present {
+        crate::console::set_color(uefi::proto::console::text::Color::Yellow, uefi::proto::console::text::Color::Black);
+        crate::println!("[*] Network Subsystem: No compatible Ethernet adapter detected (loopback only)");
+        return;
+    }
+    let m = i.mac;
+    crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
+    crate::println!(
+        "[+] Network Subsystem: Intel E1000 Online (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, Link: {}), protocols in net-server",
+        m[0], m[1], m[2], m[3], m[4], m[5],
+        if i.link { "UP" } else { "NEGOTIATING" }
+    );
+    crate::console::set_color(uefi::proto::console::text::Color::Yellow, uefi::proto::console::text::Color::Black);
+    crate::print!("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ");
+    let deadline = crate::arch::pit::ticks() + 1000;
+    while i.ip == [0; 4] && crate::arch::pit::ticks() < deadline {
+        crate::task::sleep_ms(20);
+        i = iface();
+    }
+    if i.ip != [0; 4] {
+        crate::console::set_color(uefi::proto::console::text::Color::LightGreen, uefi::proto::console::text::Color::Black);
+        crate::println!("ONLINE ({}, GW {}, DNS {})", dotted(i.ip), dotted(i.gateway), dotted(i.dns));
+    } else {
+        crate::console::set_color(uefi::proto::console::text::Color::LightRed, uefi::proto::console::text::Color::Black);
+        crate::println!("Deferred (no DHCP answer yet; net-server keeps trying)");
     }
 }
 
-/// Triggers an automated DHCP 4-way handshake to acquire an IPv4 configuration lease.
-///
-/// Broadcasts a DHCP Discover message, awaits a DHCP Offer, sends a DHCP Request, and awaits a
-/// DHCP Ack before applying the leased IPv4 address, subnet mask, default gateway, and DNS server
-/// to `GLOBAL_INTERFACE`.
-///
-/// # Returns
-/// `Ok(DhcpLease)` containing the leased network configuration parameters.
+/// Runs DHCP again and waits for the lease: the interface afterwards.
 ///
 /// # Errors
-/// Returns `Err` if no Ethernet card is active, packet serialization fails, or the handshake times out.
-pub fn dhcp_acquire() -> Result<dhcp::DhcpLease, &'static str> {
-    let mut iface = GLOBAL_INTERFACE.lock();
-    let mac = iface.mac;
-    if mac == [0; 6] {
-        return Err("No active Ethernet network card detected");
-    }
-
-    let xid: u32 = 0x3903_F326;
-
-    // Ensure carrier link has settled before transmitting
-    for _ in 0..50 {
-        if e1000::is_link_up() {
-            break;
-        }
-        crate::arch::pit::sleep_ms(100);
-    }
-
-    // 1. Send DHCP Discover broadcast
-    let mut dhcp_payload = [0u8; 350];
-    let dhcp_len = dhcp::build_dhcp_discover(mac, xid, &mut dhcp_payload)?;
-
-    let mut udp_payload = [0u8; 400];
-    let udp_len = udp::UdpPacket::serialize(
-        dhcp::DHCP_CLIENT_PORT,
-        dhcp::DHCP_SERVER_PORT,
-        &dhcp_payload[..dhcp_len],
-        &mut udp_payload,
-    )?;
-
-    let mut ip_payload = [0u8; 450];
-    let ip_len = ipv4::Ipv4Packet::serialize(
-        [0, 0, 0, 0],
-        [255, 255, 255, 255],
-        IpProtocol::Udp,
-        &udp_payload[..udp_len],
-        &mut ip_payload,
-    )?;
-
-    let mut eth_payload = [0u8; 500];
-    let eth_len = EthernetFrame::serialize(
-        EthernetFrame::BROADCAST_MAC,
-        mac,
-        EtherType::Ipv4,
-        &ip_payload[..ip_len],
-        &mut eth_payload,
-    )?;
-
-    e1000::send_frame(&eth_payload[..eth_len])?;
-
-    // 2. Poll for DHCP Offer
-    let mut rx_buf = [0u8; 1518];
-    let mut offered_ip: Option<[u8; 4]> = None;
-    let mut server_id: Option<[u8; 4]> = None;
-
-    for _ in 0..3000 {
-        if let Some(len) = e1000::receive_frame(&mut rx_buf) {
-            if let Some(frame) = EthernetFrame::parse(&rx_buf[..len]) {
-                if frame.ethertype == EtherType::Ipv4 {
-                    if let Some(ip) = Ipv4Packet::parse(frame.payload) {
-                        if ip.protocol == IpProtocol::Udp {
-                            if let Some(udp) = udp::UdpPacket::parse(ip.payload) {
-                                if udp.dst_port == dhcp::DHCP_CLIENT_PORT {
-                                    if let Some((msg_type, lease)) = dhcp::parse_dhcp_reply(udp.payload, xid) {
-                                        if msg_type == dhcp::DHCP_MSG_OFFER {
-                                            offered_ip = Some(lease.ip);
-                                            server_id = Some(lease.server_ip);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        crate::arch::pit::sleep_ms(1);
-    }
-
-    let offered = offered_ip.ok_or("DHCP Discover timed out (no DHCP Offer received)")?;
-    let srv = server_id.unwrap_or([10, 0, 2, 2]);
-
-    // 3. Send DHCP Request
-    let req_len = dhcp::build_dhcp_request(mac, xid, offered, srv, &mut dhcp_payload)?;
-    let udp_len = udp::UdpPacket::serialize(
-        dhcp::DHCP_CLIENT_PORT,
-        dhcp::DHCP_SERVER_PORT,
-        &dhcp_payload[..req_len],
-        &mut udp_payload,
-    )?;
-    let ip_len = ipv4::Ipv4Packet::serialize(
-        [0, 0, 0, 0],
-        [255, 255, 255, 255],
-        IpProtocol::Udp,
-        &udp_payload[..udp_len],
-        &mut ip_payload,
-    )?;
-    let eth_len = EthernetFrame::serialize(
-        EthernetFrame::BROADCAST_MAC,
-        mac,
-        EtherType::Ipv4,
-        &ip_payload[..ip_len],
-        &mut eth_payload,
-    )?;
-
-    e1000::send_frame(&eth_payload[..eth_len])?;
-
-    // 4. Poll for DHCP Ack
-    for _ in 0..3000 {
-        if let Some(len) = e1000::receive_frame(&mut rx_buf) {
-            if let Some(frame) = EthernetFrame::parse(&rx_buf[..len]) {
-                if frame.ethertype == EtherType::Ipv4 {
-                    if let Some(ip) = Ipv4Packet::parse(frame.payload) {
-                        if ip.protocol == IpProtocol::Udp {
-                            if let Some(udp) = udp::UdpPacket::parse(ip.payload) {
-                                if udp.dst_port == dhcp::DHCP_CLIENT_PORT {
-                                    if let Some((msg_type, lease)) = dhcp::parse_dhcp_reply(udp.payload, xid) {
-                                        if msg_type == dhcp::DHCP_MSG_ACK {
-                                            iface.set_ip(lease.ip);
-                                            iface.set_subnet_mask(lease.subnet_mask);
-                                            iface.set_gateway(lease.router);
-                                            iface.set_dns_server(lease.dns_server);
-                                            return Ok(lease);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        crate::arch::pit::sleep_ms(1);
-    }
-
-    Err("DHCP Request timed out (no DHCP Ack received)")
+/// No card, or no DHCP answer.
+pub fn dhcp_renew() -> Result<IfaceInfo, &'static str> {
+    client::dhcp_renew()?;
+    Ok(iface())
 }
 
-/// Sends an ICMP Echo Request and waits for an Echo Reply, measuring round-trip latency in milliseconds.
-///
-/// # Arguments
-/// - `target_ip`: Destination 4-byte IPv4 address to ping.
-/// - `seq`: ICMP sequence number to tag the request with.
-///
-/// # Returns
-/// `Ok(rtt_ms)` containing the round-trip time in milliseconds.
+/// Looks a host name up over DNS.
 ///
 /// # Errors
-/// Returns `Err` if the local interface has no assigned IP address, ARP/transmission fails, or the reply times out.
-pub fn ping(target_ip: [u8; 4], seq: u16) -> Result<u64, &'static str> {
-    let mut iface = GLOBAL_INTERFACE.lock();
-    let local_ip = iface.ip;
-    if local_ip == [0, 0, 0, 0] {
+/// See [`client::resolve`].
+pub fn resolve(name: &str) -> Result<[u8; 4], &'static str> {
+    let clean = clean_host(name);
+    if clean.is_empty() {
+        return Err("Domain name cannot be empty");
+    }
+    client::resolve(clean)
+}
+
+/// Sends one ICMP echo request to `target` (sequence `seq`, on a ping socket) and waits up
+/// to 1.5 s for the reply: the round trip in milliseconds.
+///
+/// # Errors
+/// No address, no server, or no reply.
+pub fn ping(target: [u8; 4], seq: u16) -> Result<u64, &'static str> {
+    if !client::is_local(target) && iface().ip == [0; 4] {
         return Err("Local network interface has no IP address assigned (run 'dhcp' first)");
     }
-
-    let payload = b"HydraOS_ICMP_Echo_Ping_Payload!";
-    let mut icmp_buf = [0u8; 64];
-    let icmp_len = icmp::IcmpPacket::serialize_echo_request(0x1337, seq, payload, &mut icmp_buf)?;
-
-    let start_time = crate::arch::pit::uptime_ms();
-    iface.send_ipv4(target_ip, IpProtocol::Icmp, &icmp_buf[..icmp_len])?;
-
-    // Poll for Echo Reply
-    let mut rx_buf = [0u8; 1518];
-    for _ in 0..1500 {
-        if let Some((src_ip, payload)) = iface.poll_ipv4(&mut rx_buf) {
-            if src_ip == target_ip {
-                if let Some(icmp) = IcmpPacket::parse(payload) {
-                    if icmp.msg_type == IcmpType::EchoReply && icmp.identifier == 0x1337 && icmp.sequence == seq {
-                        let end_time = crate::arch::pit::uptime_ms();
-                        return Ok(end_time.saturating_sub(start_time));
-                    }
+    let id = client::icmp_open(false, false);
+    if id == 0 {
+        return Err("the network server is not running");
+    }
+    let mut msg = alloc::vec![8u8, 0, 0, 0, 0, 0];
+    msg.extend_from_slice(&seq.to_be_bytes());
+    msg.extend_from_slice(b"HydraOS_ICMP_Echo_Ping_Payload!");
+    let start = crate::arch::pit::uptime_ms();
+    let r = (|| {
+        client::icmp_send(id, target, &msg).map_err(|_| "cannot send the echo request")?;
+        while crate::arch::pit::uptime_ms() - start < 1500 {
+            if let Some((src, reply, _)) = client::icmp_recv(id, false) {
+                // A ping socket gets only echo replies with its identifier
+                if src == target && reply.len() >= 8 && u16::from_be_bytes([reply[6], reply[7]]) == seq {
+                    return Ok(crate::arch::pit::uptime_ms().saturating_sub(start));
                 }
             }
+            crate::task::sleep_ms(1);
         }
-        crate::arch::pit::sleep_ms(1);
-    }
+        Err("Request timed out (no ICMP Echo Reply received)")
+    })();
+    client::icmp_close(id);
+    r
+}
 
-    Err("Request timed out (no ICMP Echo Reply received)")
+/// HTTP/1.0 GET of `path` from `ip:port` over a net-server TCP socket; the response body
+/// (headers removed) goes into `out` (truncated to its size): its length. Replaces the
+/// kernel's raw-segment HTTP client (`net/http.rs`); waits at most 5 s for the connection
+/// and 5 s between received bytes.
+///
+/// # Errors
+/// Connection refused or timed out, or a malformed response.
+pub fn http_get(ip: [u8; 4], port: u16, path: &str, out: &mut [u8]) -> Result<usize, &'static str> {
+    let id = client::tcp_connect(ip, port, None).map_err(|_| "cannot connect (no network?)")?;
+    let r = (|| {
+        let start = crate::arch::pit::uptime_ms();
+        loop {
+            match client::tcp_state(id) {
+                client::TcpState::SynSent => {}
+                client::TcpState::Closed => return Err("connection refused"),
+                _ => break,
+            }
+            if crate::arch::pit::uptime_ms() - start > 5000 {
+                return Err("TCP handshake timed out (no SYN-ACK received)");
+            }
+            crate::task::sleep_ms(2);
+        }
+        let host = dotted(ip);
+        let req = alloc::format!("GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: HydraOS\r\nConnection: close\r\n\r\n", path, host);
+        let mut sent = 0;
+        while sent < req.len() {
+            let n = client::tcp_send(id, &req.as_bytes()[sent..]).map_err(|_| "sending the request failed")?;
+            sent += n;
+            if n == 0 {
+                crate::task::sleep_ms(2);
+            }
+        }
+        let mut resp: Vec<u8> = Vec::new();
+        let mut buf = alloc::vec![0u8; 64 * 1024];
+        let mut last = crate::arch::pit::uptime_ms();
+        loop {
+            match client::tcp_recv(id, &mut buf, false) {
+                Ok((0, true)) => break,
+                Ok((0, false)) => {
+                    if crate::arch::pit::uptime_ms() - last > 5000 {
+                        return Err("the transfer stalled (no data for 5 s)");
+                    }
+                    crate::task::sleep_ms(1);
+                }
+                Ok((n, eof)) => {
+                    last = crate::arch::pit::uptime_ms();
+                    if resp.len() < out.len() + 64 * 1024 {
+                        resp.extend_from_slice(&buf[..n]);
+                    }
+                    if eof {
+                        break;
+                    }
+                }
+                Err(_) => return Err("the connection was reset"),
+            }
+        }
+        let body = resp.windows(4).position(|w| w == b"\r\n\r\n").ok_or("malformed HTTP response (no header end)")? + 4;
+        let n = (resp.len() - body).min(out.len());
+        out[..n].copy_from_slice(&resp[body..body + n]);
+        Ok(n)
+    })();
+    client::tcp_close(id);
+    r
 }

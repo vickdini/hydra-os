@@ -15,7 +15,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: Uses [`super::ipv4::compute_checksum`] for RFC 792 16-bit one's complement checksums.
 
 use super::ipv4::compute_checksum;

@@ -12,13 +12,16 @@
 //! All three take the legacy descriptor formats and the same queue registers; they differ
 //! in reset and in how the link comes up (see [`Nic::init`]).
 //!
-//! The driver only answers requests. When the adapter interrupts, the kernel masks the line
-//! (or, for a message-signalled interrupt, just counts it) and wakes its network task,
-//! which asks for the received frames; the driver acknowledges the interrupt causes and
-//! unmasks the line then.
+//! The driver only answers requests; its client is net-server (`net-server`), which takes
+//! the frames through this driver's window. When the adapter interrupts, the kernel masks
+//! the line (or, for a message-signalled interrupt, just counts it) and notifies
+//! net-server, which asks for the received frames; the driver acknowledges the interrupt
+//! causes and unmasks the line then.
 //!
 //! Requests on [`ENDPOINT_NET_DEV`] (frames travel through the service window):
 //! - `MSG_NET_TRANSMIT [len]`: send the frame at the start of the window;
+//! - `MSG_NET_TRANSMIT_BATCH [count]`: send `count` frames, laid out in the window as
+//!   `MSG_NET_RECEIVE` returns them; reply `[0, frames sent]`;
 //! - `MSG_NET_RECEIVE`: fill the window with received frames, each a 16-bit little-endian
 //!   length then its bytes; reply `[0, frame count]`;
 //! - `MSG_NET_GET_MAC`: reply `[0, MAC bytes 0..4, MAC bytes 4..6]`;
@@ -34,7 +37,7 @@ extern crate alloc;
 
 use hydra_rt::protocol::{
     ENDPOINT_NET_DEV, MSG_NET_DMA_TEST, MSG_NET_GET_MAC, MSG_NET_GET_STATUS, MSG_NET_RECEIVE, MSG_NET_REPLY,
-    MSG_NET_TRANSMIT,
+    MSG_NET_TRANSMIT, MSG_NET_TRANSMIT_BATCH,
 };
 use hydra_rt::{println, sys, Message, Server, WINDOW_SIZE};
 
@@ -672,6 +675,27 @@ fn main(args: &[&str]) {
                 Ok(()) => reply([0, len as u64, 0, 0]),
                 Err(_) => reply([EIO as u64, 0, 0, 0]),
             }
+        }
+        MSG_NET_TRANSMIT_BATCH => {
+            // Frames as MSG_NET_RECEIVE returns them: a 16-bit length, then the frame
+            let count = msg.args[0] as usize;
+            let (mut at, mut sent) = (0usize, 0u64);
+            for _ in 0..count {
+                let w = srv.window();
+                if at + 2 > WINDOW_SIZE {
+                    return reply([EINVAL as u64, sent, 0, 0]);
+                }
+                let len = u16::from_le_bytes([w[at], w[at + 1]]) as usize;
+                if len == 0 || len > BUF || at + 2 + len > WINDOW_SIZE {
+                    return reply([EINVAL as u64, sent, 0, 0]);
+                }
+                if nic.transmit(&w[at + 2..at + 2 + len]).is_err() {
+                    return reply([EIO as u64, sent, 0, 0]);
+                }
+                at += 2 + len;
+                sent += 1;
+            }
+            reply([0, sent, 0, 0])
         }
         MSG_NET_RECEIVE => {
             let n = nic.receive(srv.window());

@@ -671,7 +671,7 @@ impl FileDescriptor {
             FileDescriptor::Inet(s) => {
                 let mut s = s.lock();
                 match s.wait_queue() {
-                    Some(q) if crate::net::stack::service_running() => waits.add(QueueRef::Shared(q)),
+                    Some(q) if crate::net::client::service_running() => waits.add(QueueRef::Shared(q)),
                     Some(_) => waits.polled = true,
                     None => waits.polled = true,
                 }

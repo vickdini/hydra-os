@@ -29,21 +29,19 @@
 //! - [`clean_host()`]: Strips URL scheme prefixes, paths, and port numbers to isolate the domain name.
 //! - [`build_dns_query()`]: Serializes an RFC 1035 recursive `A`-record query packet.
 //! - [`parse_dns_response()`]: Parses an RFC 1035 DNS answer section and extracts the first IPv4 `A` record.
-//! - [`resolve()`]: End-to-end synchronous DNS resolver over [`GLOBAL_INTERFACE`].
+//! - [`Lookup`]: One lookup as a state machine (query, retransmissions, answer) without I/O
+//!   of its own: net-server sends its query on a UDP socket and feeds it the replies
+//!   (`MSG_NETS_RESOLVE`).
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
-//! - Dependencies: Uses [`GLOBAL_INTERFACE`] and [`UdpPacket`] for UDP transport on port 53, and `crate::arch::pit` for polling timeouts.
+//! - Runs in net-server (Ring 3; moved from the kernel's `src/net`). The kernel includes
+//!   this file too, for [`clean_host`] (its shell parses URLs). Pure code: the host tests
+//!   cover it.
 
-use crate::net::ipv4::IpProtocol;
-use crate::net::udp::UdpPacket;
-use crate::net::GLOBAL_INTERFACE;
 
 /// Standard UDP destination port for DNS servers (`53`).
 pub const DNS_PORT: u16 = 53;
-/// Ephemeral local UDP source port used by the kernel DNS resolver (`53535`).
-pub const DNS_CLIENT_PORT: u16 = 53535;
 
 /// Strips protocols (`http://`, `https://`), paths (`/...`), and port numbers (`:80`) from input URLs.
 ///
@@ -253,74 +251,72 @@ pub fn parse_dns_response(buf: &[u8], expected_tx_id: u16) -> Result<[u8; 4], &'
     Err("No IPv4 (A) record found in DNS answers")
 }
 
-/// Resolves a domain name into an IPv4 address using the configured DNS server.
-///
-/// Automatically sanitizes `domain` via [`clean_host`] and triggers DHCP acquisition if
-/// the interface is unconfigured. Falls back to `10.0.2.3` if no DNS server was leased.
-///
-/// # Arguments
-/// - `domain`: Domain name or URL string to resolve.
-///
-/// # Returns
-/// `Ok([u8; 4])` containing the resolved IPv4 address.
-///
-/// # Errors
-/// Returns `Err` if the domain is empty, the network interface is offline, or the DNS query times out.
-pub fn resolve(domain: &str) -> Result<[u8; 4], &'static str> {
-    let clean = clean_host(domain);
-    if clean.is_empty() {
-        return Err("Domain name cannot be empty");
+/// Time between retransmissions of a query (100 Hz ticks): 1 s.
+pub const DNS_RETRY_TICKS: u64 = 100;
+/// Transmissions of a query before the lookup fails.
+pub const DNS_TRIES: u32 = 3;
+
+/// What [`Lookup::timer`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookupTimer {
+    /// Nothing to do yet.
+    Wait,
+    /// Send the query again.
+    Resend,
+    /// No answer: give up.
+    Failed,
+}
+
+/// One DNS A lookup: its query and retransmission schedule. The caller sends
+/// [`Lookup::query`] to [`Lookup::server`] port 53 (again when [`Lookup::timer`] says so)
+/// and passes every reply to [`Lookup::answer`].
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    /// DNS server asked.
+    pub server: [u8; 4],
+    /// Transaction ID.
+    pub tx_id: u16,
+    /// The query message.
+    pub query: alloc::vec::Vec<u8>,
+    tries: u32,
+    sent_at: u64,
+}
+
+impl Lookup {
+    /// A lookup of `name` (cleaned with [`clean_host`]) at `server` (`0.0.0.0`: QEMU's
+    /// resolver `10.0.2.3`), sent first at tick `now`.
+    ///
+    /// # Errors
+    /// An empty or malformed name.
+    pub fn new(name: &str, tx_id: u16, server: [u8; 4], now: u64) -> Result<Self, &'static str> {
+        let clean = clean_host(name);
+        if clean.is_empty() {
+            return Err("Domain name cannot be empty");
+        }
+        let mut buf = [0u8; 512];
+        let n = build_dns_query(clean, tx_id, &mut buf)?;
+        let server = if server == [0, 0, 0, 0] { [10, 0, 2, 3] } else { server };
+        Ok(Self { server, tx_id, query: buf[..n].to_vec(), tries: 1, sent_at: now })
     }
 
-    let mut iface = GLOBAL_INTERFACE.lock();
-    if iface.ip() == [0, 0, 0, 0] {
-        if crate::net::e1000::is_present() {
-            drop(iface);
-            let _ = crate::net::dhcp_acquire();
-            iface = GLOBAL_INTERFACE.lock();
+    /// A reply from `src`: `None` if it is not this lookup's, else its result.
+    pub fn answer(&self, src: [u8; 4], payload: &[u8]) -> Option<Result<[u8; 4], &'static str>> {
+        if src != self.server || payload.len() < 2 || u16::from_be_bytes([payload[0], payload[1]]) != self.tx_id {
+            return None;
         }
-        if iface.ip() == [0, 0, 0, 0] {
-            return Err("Network interface has no IP address. Run 'dhcp' first.");
-        }
+        Some(parse_dns_response(payload, self.tx_id))
     }
 
-    let dns_server = if iface.dns_server() != [0, 0, 0, 0] {
-        iface.dns_server()
-    } else {
-        // Fallback to standard QEMU/VirtualBox DNS or Cloudflare DNS
-        [10, 0, 2, 3]
-    };
-
-    let tx_id: u16 = 0x5432;
-    let mut dns_buf = [0u8; 512];
-    let query_len = build_dns_query(clean, tx_id, &mut dns_buf)?;
-
-    let mut udp_buf = [0u8; 550];
-    let udp_len = UdpPacket::serialize(
-        DNS_CLIENT_PORT,
-        DNS_PORT,
-        &dns_buf[..query_len],
-        &mut udp_buf,
-    )?;
-
-    iface.send_ipv4(dns_server, IpProtocol::Udp, &udp_buf[..udp_len])?;
-
-    // Poll for DNS response
-    let mut rx_buf = [0u8; 1518];
-    for _ in 0..1500 {
-        if let Some((src_ip, payload)) = iface.poll_ipv4(&mut rx_buf) {
-            if src_ip == dns_server {
-                if let Some(udp) = UdpPacket::parse(payload) {
-                    if udp.dst_port == DNS_CLIENT_PORT {
-                        if let Ok(ip) = parse_dns_response(udp.payload, tx_id) {
-                            return Ok(ip);
-                        }
-                    }
-                }
-            }
+    /// The retransmission timer at tick `now`.
+    pub fn timer(&mut self, now: u64) -> LookupTimer {
+        if now.saturating_sub(self.sent_at) < DNS_RETRY_TICKS {
+            return LookupTimer::Wait;
         }
-        crate::arch::pit::sleep_ms(1);
+        if self.tries >= DNS_TRIES {
+            return LookupTimer::Failed;
+        }
+        self.tries += 1;
+        self.sent_at = now;
+        LookupTimer::Resend
     }
-
-    Err("DNS query timed out: no response from DNS server")
 }

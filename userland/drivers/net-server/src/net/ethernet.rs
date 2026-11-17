@@ -19,7 +19,7 @@
 //!
 //! ## Hardware & Dependency Context
 //!
-//! - Privilege Level: Ring 0 (Kernel Mode).
+//! - Runs in net-server (Ring 3); moved from the kernel's `src/net`.
 //! - Dependencies: Zero-allocation (`no_std`) slice parser and serializer for IEEE 802.3 frames.
 
 /// Supported IEEE 802.3 EtherType values.

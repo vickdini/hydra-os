@@ -1,12 +1,10 @@
-//! Tests for the DNS client in `src/net/dns.rs`: host-name cleanup, query
-//! encoding (RFC 1035 §4.1), response parsing, and the `resolve` loop running
-//! against the scripted fake interface in `fake::NET`.
+//! Tests for the DNS client in net-server's `net/dns.rs`: host-name cleanup, query
+//! encoding (RFC 1035 §4.1), response parsing, and the resolver state machine
+//! (`Lookup`) net-server drives.
 
-use hydra_hosttests::fake;
 use hydra_hosttests::net::dns::*;
-use hydra_hosttests::net::udp::UdpPacket;
 
-const TX: u16 = 0x5432; // the transaction id `resolve` uses
+const TX: u16 = 0x5432; // a transaction id
 
 // ------------------------------------------------------------- clean_host
 
@@ -166,109 +164,54 @@ fn corrupted_responses_never_panic() {
     }
 }
 
-// --------------------------------------------------------------- resolve
+// ---------------------------------------------------------------- Lookup
+// The resolver runs in net-server as a state machine: it sends `query` (on a UDP socket
+// of its own) and feeds replies to `answer`; `timer` schedules retransmissions.
 
-const MY_IP: [u8; 4] = [10, 0, 2, 15];
 const DNS_IP: [u8; 4] = [10, 0, 2, 3];
 
-fn udp_reply(dns_payload: &[u8], dst_port: u16) -> Vec<u8> {
-    let mut buf = vec![0u8; 8 + dns_payload.len()];
-    let n = UdpPacket::serialize(DNS_PORT, dst_port, dns_payload, &mut buf).unwrap();
-    buf.truncate(n);
-    buf
-}
-
-fn online(dns: [u8; 4]) {
-    fake::reset();
-    fake::NET.with_borrow_mut(|n| {
-        n.ip = MY_IP;
-        n.dns = dns;
-        n.nic_present = true;
-    });
+#[test]
+fn lookup_builds_the_query_for_the_cleaned_host() {
+    let l = Lookup::new("https://example.com/index.html", TX, [8, 8, 8, 8], 0).unwrap();
+    let mut q = [0u8; 512];
+    let qn = build_dns_query("example.com", TX, &mut q).unwrap();
+    assert_eq!(l.query, &q[..qn], "the URL was reduced to its host name");
+    assert_eq!(l.server, [8, 8, 8, 8]);
 }
 
 #[test]
-fn resolve_sends_one_query_and_returns_the_answer() {
-    online([8, 8, 8, 8]);
-    let reply = response(TX, OK, "example.com", &[a_record([93, 184, 216, 34])]);
-    fake::NET.with_borrow_mut(|n| n.inbox.push_back(([8, 8, 8, 8], udp_reply(&reply, DNS_CLIENT_PORT))));
-
-    assert_eq!(resolve("https://example.com/index.html"), Ok([93, 184, 216, 34]));
-
-    fake::NET.with_borrow(|n| {
-        assert_eq!(n.sent.len(), 1);
-        let (dst, proto, payload) = &n.sent[0];
-        assert_eq!((*dst, *proto), ([8, 8, 8, 8], 17), "UDP to the configured server");
-        let udp = UdpPacket::parse(payload).unwrap();
-        assert_eq!((udp.src_port, udp.dst_port), (DNS_CLIENT_PORT, DNS_PORT));
-        let mut q = [0u8; 512];
-        let qn = build_dns_query("example.com", TX, &mut q).unwrap();
-        assert_eq!(udp.payload, &q[..qn], "the URL was reduced to its host name");
-    });
+fn lookup_falls_back_to_the_qemu_resolver() {
+    assert_eq!(Lookup::new("example.com", TX, [0; 4], 0).unwrap().server, DNS_IP);
 }
 
 #[test]
-fn resolve_falls_back_to_the_qemu_resolver() {
-    online([0; 4]);
-    let reply = response(TX, OK, "example.com", &[a_record([1, 2, 3, 4])]);
-    fake::NET.with_borrow_mut(|n| n.inbox.push_back((DNS_IP, udp_reply(&reply, DNS_CLIENT_PORT))));
-    assert_eq!(resolve("example.com"), Ok([1, 2, 3, 4]));
-    fake::NET.with_borrow(|n| assert_eq!(n.sent[0].0, DNS_IP));
-}
-
-#[test]
-fn resolve_ignores_unrelated_traffic() {
-    online(DNS_IP);
+fn lookup_takes_its_answer_and_ignores_unrelated_traffic() {
+    let l = Lookup::new("example.com", TX, DNS_IP, 0).unwrap();
     let good = response(TX, OK, "example.com", &[a_record([4, 4, 4, 4])]);
     let wrong_id = response(TX + 1, OK, "example.com", &[a_record([6, 6, 6, 6])]);
-    fake::NET.with_borrow_mut(|n| {
-        n.inbox.push_back(([6, 6, 6, 6], udp_reply(&good, DNS_CLIENT_PORT))); // spoofed source
-        n.inbox.push_back((DNS_IP, udp_reply(&good, 9999))); // other port
-        n.inbox.push_back((DNS_IP, udp_reply(&wrong_id, DNS_CLIENT_PORT)));
-        n.inbox.push_back((DNS_IP, vec![1, 2, 3])); // not even UDP
-        n.inbox.push_back((DNS_IP, udp_reply(&good, DNS_CLIENT_PORT)));
-    });
-    assert_eq!(resolve("example.com"), Ok([4, 4, 4, 4]));
+    assert_eq!(l.answer([6, 6, 6, 6], &good), None, "spoofed source");
+    assert_eq!(l.answer(DNS_IP, &wrong_id), None, "another transaction");
+    assert_eq!(l.answer(DNS_IP, &[1]), None, "too short");
+    assert_eq!(l.answer(DNS_IP, &good), Some(Ok([4, 4, 4, 4])));
+    let nx = response(TX, 0x8183, "example.com", &[]);
+    assert!(matches!(l.answer(DNS_IP, &nx), Some(Err(_))), "an error answer ends the lookup");
 }
 
 #[test]
-fn resolve_times_out_after_1500_polls() {
-    online(DNS_IP);
-    assert!(resolve("example.com").is_err());
-    fake::NET.with_borrow(|n| {
-        assert_eq!(n.polls, 1500);
-        assert_eq!(n.sleeps, 1500, "1 ms between polls");
-    });
+fn lookup_retransmits_then_fails() {
+    let mut l = Lookup::new("example.com", TX, DNS_IP, 1000).unwrap();
+    assert_eq!(l.timer(1000 + DNS_RETRY_TICKS - 1), LookupTimer::Wait);
+    let mut t = 1000;
+    for _ in 1..DNS_TRIES {
+        t += DNS_RETRY_TICKS;
+        assert_eq!(l.timer(t), LookupTimer::Resend);
+    }
+    t += DNS_RETRY_TICKS;
+    assert_eq!(l.timer(t), LookupTimer::Failed);
 }
 
 #[test]
-fn resolve_runs_dhcp_when_unconfigured() {
-    fake::reset();
-    fake::NET.with_borrow_mut(|n| {
-        n.nic_present = true;
-        n.dhcp_ip = Some(MY_IP);
-    });
-    let reply = response(TX, OK, "example.com", &[a_record([9, 9, 9, 9])]);
-    fake::NET.with_borrow_mut(|n| n.inbox.push_back((DNS_IP, udp_reply(&reply, DNS_CLIENT_PORT))));
-    assert_eq!(resolve("example.com"), Ok([9, 9, 9, 9]));
-    fake::NET.with_borrow(|n| assert_eq!(n.dhcp_calls, 1));
-}
-
-#[test]
-fn resolve_without_network_fails_fast() {
-    fake::reset();
-    assert!(resolve("example.com").is_err(), "no NIC, no IP");
-    fake::NET.with_borrow(|n| assert!(n.sent.is_empty() && n.dhcp_calls == 0));
-
-    fake::NET.with_borrow_mut(|n| n.nic_present = true); // DHCP fails
-    assert!(resolve("example.com").is_err());
-    fake::NET.with_borrow(|n| assert!(n.sent.is_empty() && n.dhcp_calls == 1));
-}
-
-#[test]
-fn resolve_rejects_empty_names() {
-    online(DNS_IP);
-    assert!(resolve("   ").is_err());
-    assert!(resolve("http:///path").is_err());
-    fake::NET.with_borrow(|n| assert!(n.sent.is_empty()));
+fn lookup_rejects_empty_names() {
+    assert!(Lookup::new("   ", TX, DNS_IP, 0).is_err());
+    assert!(Lookup::new("http:///path", TX, DNS_IP, 0).is_err());
 }
