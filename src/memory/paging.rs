@@ -28,7 +28,7 @@
 //!   their physical addresses.
 
 use spin::Mutex;
-use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{Page, PageTable, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
@@ -69,7 +69,7 @@ pub static KERNEL_PML4: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 pub fn load_kernel_tables_for_good() {
     let pml4 = KERNEL_PML4.load(core::sync::atomic::Ordering::SeqCst);
     if pml4 != 0 {
-        unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags)) };
+        crate::arch::pcid::load_cr3(pml4);
     }
 }
 
@@ -77,11 +77,10 @@ pub fn load_kernel_tables_for_good() {
 /// then puts back the ones loaded before, interrupts off meanwhile.
 pub fn with_kernel_tables<R>(f: impl FnOnce() -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        let before: u64;
-        unsafe { core::arch::asm!("mov {}, cr3", out(reg) before, options(nomem, nostack, preserves_flags)) };
+        let before = Cr3::read().0.start_address().as_u64();
         load_kernel_tables_for_good();
         let r = f();
-        unsafe { core::arch::asm!("mov cr3, {}", in(reg) before, options(nostack, preserves_flags)) };
+        crate::arch::pcid::load_cr3(before);
         r
     })
 }
@@ -134,8 +133,7 @@ impl AddressSpace {
     /// The caller must ensure that the address space contains valid mappings
     /// for the currently executing kernel code and stack.
     pub unsafe fn switch(&self) {
-        let frame = PhysFrame::containing_address(self.pml4_phys);
-        Cr3::write(frame, Cr3Flags::empty());
+        crate::arch::pcid::load_cr3(self.pml4_phys.as_u64());
     }
 
     /// In UEFI x86_64 identity-mapped environments or direct-mapped kernels,

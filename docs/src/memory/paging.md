@@ -62,7 +62,7 @@ Represents a virtual memory context anchored by its PML4 root table.
 | :--- | :--- | :--- |
 | `active()` | `fn() -> Self` | Attaches to the active address space by reading `CR3`. |
 | `from_pml4()` | `const fn(PhysAddr) -> Self` | Creates an address space handle for a given root PML4 table. |
-| `switch()` | `unsafe fn(&self)` | Reloads the CPU's `CR3` register with this address space's PML4 root. |
+| `switch()` | `unsafe fn(&self)` | Loads this address space's PML4 root through `arch::pcid::load_cr3` (the one `CR3` helper). |
 | `translate_addr()` | `unsafe fn(&self, VirtAddr) -> Option<PhysAddr>` | Walks PML4 hierarchy to translate any virtual address to its physical address. |
 | `translate_page()` | `unsafe fn(&self, Page) -> Option<(PhysFrame, PageTableFlags)>` | Queries mapped frame and protection flags (`PRESENT`, `WRITABLE`, `USER`, `NX`). |
 | `map_page()` | `unsafe fn(&mut self, Page, PhysFrame, PageTableFlags, &mut PhysicalMemoryManager) -> Result<(), &'static str>` | Allocates missing intermediate tables (PDPT, PD, PT) on demand, maps a 4 KiB page, and flushes the TLB. |

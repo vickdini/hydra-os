@@ -54,6 +54,8 @@ pub mod vmmouse;
 pub mod usb_input;
 /// Peripheral Component Interconnect (PCI) bus enumeration and configuration space access.
 pub mod pci;
+/// PCID (tagged TLB entries) and the one helper that loads CR3.
+pub mod pcid;
 pub mod percpu;
 /// Dual 8259 Programmable Interrupt Controller (PIC) initialization and IRQ masking.
 pub mod pic;

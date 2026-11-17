@@ -1675,15 +1675,8 @@ impl Scheduler {
         let me = crate::arch::percpu::cpu();
         if next_task.regs.cr3 != 0 && next_task.regs.cr3 != current_cr3 {
             self.loaded_cr3[me] = next_task.regs.cr3;
-            crate::arch::smp::LOADED_CR3[me].store(next_task.regs.cr3, core::sync::atomic::Ordering::Release);
-            unsafe {
-                Cr3::write(
-                    x86_64::structures::paging::PhysFrame::containing_address(
-                        x86_64::PhysAddr::new(next_task.regs.cr3),
-                    ),
-                    x86_64::registers::control::Cr3Flags::empty(),
-                );
-            }
+            // Records LOADED_CR3 too; keeps the TLB with PCID (arch::pcid)
+            crate::arch::pcid::load_cr3(next_task.regs.cr3);
         }
     }
 
