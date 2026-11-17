@@ -1,0 +1,8 @@
+[package]
+name = "hydra-shell"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra's console shell as a Ring 3 program (microkernel plan, group 4): talks to the kernel through the admin interface"
+
+[dependencies]
+hydra-rt = { workspace = true }

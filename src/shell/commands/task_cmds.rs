@@ -2,7 +2,7 @@
 //!
 //! Provides interactive process management commands for inspecting tasks, spawning threads, and terminating tasks.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 use uefi::proto::console::text::Color;
 
 use crate::console::set_color;
@@ -10,7 +10,8 @@ use crate::shell::command::{parse_u64, Command};
 use crate::shell::state::ShellState;
 use crate::task::{self, TaskId, TaskPriority, TaskState};
 
-static WORKER_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The demo workers' counter (kept in `crate::admin`, which reports it to the Ring 3 shell's `ps`).
+use crate::admin::DEMO_WORKER_COUNTER as WORKER_COUNTER;
 
 /// Background demo worker task executing concurrently with the interactive shell (Ring 0).
 fn demo_background_worker() {

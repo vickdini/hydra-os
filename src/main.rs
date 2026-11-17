@@ -48,6 +48,7 @@
 extern crate alloc;
 
 /// Hardware architecture abstraction layer for `x86_64` CPUs and legacy PC peripherals.
+pub mod admin; // group 4: the admin interface for the Ring 3 shell
 pub mod arch;
 /// Object-capability security model, access rights bitmasks, and per-task CSpace tables.
 pub mod capability;

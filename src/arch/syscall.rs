@@ -873,6 +873,11 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
                 None => -14, // -EFAULT: no address space of its own
             }
         }
+        // Group 4: the admin interface of the Ring 3 shell (authorized console only)
+        crate::admin::proto::SYS_ADMIN => {
+            drop(stats);
+            crate::admin::syscall(arg0)
+        }
         _ => {
             stats.unknown_calls += 1;
             drop(stats);
