@@ -60,10 +60,6 @@ pub mod time;
 pub mod translate;
 /// Preemptive task scheduler inspection (`ps`), spawning (`spawn`), and signaling (`kill`) commands.
 pub mod task_cmds;
-/// UEFI GOP framebuffer resolution mode switcher and test pattern generator (`video`).
-pub mod video;
-/// KDE Plasma 6 Wayland desktop compositor launcher (`plasma`).
-pub mod plasma_cmd;
 /// VirtIO-Net / e1000 network interface configuration, DHCP, DNS, ICMP ping, and HTTP `wget` commands.
 pub mod net_cmds;
 /// OpenZFS storage pool (`zpool`), dataset (`zfs`), and block device (`disks`) management commands.
@@ -107,8 +103,6 @@ pub use status::StatusCommand;
 pub use task_cmds::{KillCommand, PsCommand, SpawnCommand, SyncCommand, SyscallsCommand};
 pub use time::TimeCommand;
 pub use translate::{MapCommand, TranslateCommand, UnmapCommand};
-pub use video::VideoCommand;
-pub use plasma_cmd::PlasmaCommand;
 pub use net_cmds::{DhcpCommand, DnsCommand, IfconfigCommand, PingCommand, WgetCommand};
 pub use zfs_cmds::{DisksCommand, ZfsCommand, ZpoolCommand};
 pub use linux_cmd::LinuxCommand;
@@ -169,8 +163,6 @@ pub static COMMANDS: &[&dyn Command] = &[
     &TranslateCommand,
     &MapCommand,
     &UnmapCommand,
-    &VideoCommand,
-    &PlasmaCommand,
     &CapsCommand,
     &CapInsertCommand,
     &CapRevokeCommand,

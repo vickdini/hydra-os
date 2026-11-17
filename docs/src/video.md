@@ -39,34 +39,18 @@ graph TD
 | :--- | :--- |
 | [`src/video/gop.rs`](file:///d:/os/src/video/gop.rs) | Hardware discovery via UEFI GOP, physical framebuffer extraction, and VMM page mapping. |
 | [`src/video/font.rs`](file:///d:/os/src/video/font.rs) | 8x16 ASCII bitmap font table covering characters 32 to 126. |
-| [`src/video/framebuffer.rs`](file:///d:/os/src/video/framebuffer.rs) | Direct linear pixel buffer controller: `put_pixel`, `fill_rect`, `clear`, `draw_char`, `draw_string`, and `scroll_up` (`core::ptr::copy`). |
+| [`src/video/framebuffer.rs`](file:///d:/os/src/video/framebuffer.rs) | Direct linear pixel buffer controller: `put_pixel`, `fill_rect`, `clear`, `draw_char`, and `scroll_up` (`core::ptr::copy`). |
 | [`src/video/console.rs`](file:///d:/os/src/video/console.rs) | Autonomous text terminal running on the pixel buffer. Implements `core::fmt::Write`, cursor management, line wrapping, and color mapping. |
+| [`src/video/splash.rs`](file:///d:/os/src/video/splash.rs) | The Hydra boot logo and its spinner, shown instead of the boot messages. |
 | [`src/video/mod.rs`](file:///d:/os/src/video/mod.rs) | Video subsystem coordinator and public API exports. |
 
 ---
 
-## 4. Interactive Shell Inspection & Testing
+## 4. Scope: an Emergency Console Only
 
-Hydra provides the `video` (aliases: `gop`, `fb`) command in the shell:
+The video subsystem is the kernel's emergency console: early boot messages, the boot logo (`splash.rs`), the Hydra shell and its login when no desktop runs, and kernel panic messages. It draws no windows. The desktop is KDE Plasma, whose compositor (KWin) draws through the Linux DRM device; that device borrows the framebuffer from the console (`console::release_display`) and gives it back on Ctrl+Alt+F1, when the session ends, and on a kernel panic (`console::panic_reclaim`, after which the DRM device stops drawing). `panic 30` in the shell panics 30 seconds later from a kernel task, to check that a panic shows over the desktop.
 
-```text
-hydra> video info
-Hardware Video Subsystem & Framebuffer Statistics:
-  Driver Status:      ONLINE (Direct GOP Linear Framebuffer)
-  Resolution:         1024 x 768 pixels (32 bpp)
-  Pixel Stride:       1024 pixels/scanline (4096 bytes)
-  Pixel Encoding:     BGR888 (Little-Endian)
-  Video Memory Base:  0xe0000000
-  Framebuffer Size:   3145728 bytes (3 MiB)
-  Text Terminal Grid: 128 columns x 48 rows (8x16 font)
-  Kernel VMM Status:  Identity-mapped in Hydra Autonomous PML4
-
-hydra> video test
-[+] Graphical test pattern & Wayland preview window rendered to screen.
-
-hydra> video clear
-[+] Framebuffer display cleared.
-```
+The framebuffer geometry is printed at boot (Step 3b).
 
 ---
 

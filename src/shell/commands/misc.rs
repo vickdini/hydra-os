@@ -117,16 +117,33 @@ impl Command for PanicCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Manually trigger a kernel panic to test diagnostic handler"
+        "Manually trigger a kernel panic to test diagnostic handler (after N seconds: from a kernel task)"
     }
 
     fn usage(&self) -> &'static str {
-        "panic"
+        "panic [seconds]"
     }
 
-    fn execute(&self, _args: &[&str], _state: &mut ShellState) {
+    fn execute(&self, args: &[&str], _state: &mut ShellState) {
+        // panic N: a kernel task panics N seconds later, so that a panic can be tested while
+        // the desktop shows (switch to it with Ctrl+Alt+F2 meanwhile)
+        if let Some(secs) = args.first().and_then(|a| a.parse::<u64>().ok()) {
+            PANIC_DELAY_MS.store(secs * 1000, core::sync::atomic::Ordering::Relaxed);
+            crate::task::spawn("panictest", delayed_panic, crate::task::TaskPriority::High);
+            println!("[*] The kernel panics in {} s", secs);
+            return;
+        }
         panic!("Manual kernel panic triggered by user from shell.");
     }
+}
+
+/// Delay of `panic N`, in milliseconds.
+static PANIC_DELAY_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The kernel task of `panic N`: waits, then panics.
+fn delayed_panic() {
+    crate::task::sleep_ms(PANIC_DELAY_MS.load(core::sync::atomic::Ordering::Relaxed));
+    panic!("Test kernel panic (panic N from the shell)");
 }
 
 /// Shell command triggering an architectural CPU exception trap (`#BP`, `#DE`, `#UD`).

@@ -498,28 +498,3 @@ pub fn unregister_socket(path: &str) {
     let mut reg = GLOBAL_UNIX_SOCKETS.lock();
     reg.remove(path);
 }
-
-/// Initializes and returns the default Wayland display server listening socket
-/// (`/run/user/1000/wayland-0`) if not yet registered.
-///
-/// # Returns
-/// Shared handle to the listening [`UnixSocket`] for `/run/user/1000/wayland-0`.
-pub fn ensure_wayland_socket() -> Arc<Mutex<UnixSocket>> {
-    let path = "/run/user/1000/wayland-0";
-    let mut reg = GLOBAL_UNIX_SOCKETS.lock();
-    if let Some(sock) = reg.get(path) {
-        return sock.clone();
-    }
-
-    let sock = UnixSocket::new(AF_UNIX, SOCK_STREAM, false);
-    {
-        let mut s = sock.lock();
-        s.role = UnixSocketRole::Listening {
-            path: String::from(path),
-            backlog: 32,
-            pending: VecDeque::new(),
-        };
-    }
-    reg.insert(String::from(path), sock.clone());
-    sock
-}

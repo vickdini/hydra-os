@@ -67,7 +67,6 @@ pub mod unix;
 pub mod userfaultfd;
 pub mod vfs;
 pub mod xfer;
-pub mod wayland_bridge;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -81,7 +80,6 @@ pub use memfd::*;
 pub use socket::*;
 pub use syscalls::*;
 pub use types::*;
-pub use wayland_bridge::*;
 
 /// Linux ABI subsystem diagnostic counters.
 #[derive(Debug, Clone, Copy, Default)]
@@ -487,7 +485,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if !crate::memory::vm::prefault_current(ptr as u64, count as u64, true) {
                 return -EFAULT;
             }
-            dispatch_wayland_events();
 
             let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
             let read_errno = |e: &'static str| match e {
@@ -538,9 +535,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     -EBADF
                 }
             });
-            if res > 0 {
-                dispatch_wayland_events();
-            }
             res
         }
 
@@ -1177,10 +1171,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 None => return -EINVAL,
             };
 
-            if path == "/run/user/1000/wayland-0" || path == "wayland-0" {
-                ensure_wayland_bridge();
-            }
-
             let res = crate::task::with_current_fds_mut(|fds| {
                 if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
                     sock.lock().connect(&path)
@@ -1188,9 +1178,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     Err(-EBADF)
                 }
             });
-            if res.is_ok() && (path == "/run/user/1000/wayland-0" || path == "wayland-0") {
-                dispatch_wayland_events();
-            }
             match res {
                 Ok(()) => 0,
                 Err(e) => e,
@@ -1260,9 +1247,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     -EBADF
                 }
             });
-            if res > 0 {
-                dispatch_wayland_events();
-            }
             res
         }
 
@@ -1277,7 +1261,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if count == 0 {
                 return 0;
             }
-            dispatch_wayland_events();
             let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
             crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
@@ -1347,9 +1330,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     }
                 }
             }
-            if total_sent > 0 {
-                dispatch_wayland_events();
-            }
             total_sent
         }
 
@@ -1361,7 +1341,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 return -EFAULT;
             }
             let msg = unsafe { *msg_ptr };
-            dispatch_wayland_events();
 
             // 1. Receive incoming ancillary data (SCM_RIGHTS) if requested
             if !msg.msg_control.is_null() && msg.msg_controllen >= 20 {

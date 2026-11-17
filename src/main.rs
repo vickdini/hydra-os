@@ -68,10 +68,8 @@ pub mod sync;
 pub mod syscall;
 /// Preemptive round-robin task scheduler, Task Control Blocks (TCB), and ELF64 binary loader.
 pub mod task;
-/// UEFI Graphics Output Protocol (GOP) framebuffer driver, bitmap font renderer, and Plasma desktop.
+/// The emergency text console on the UEFI GOP framebuffer, its bitmap font, and the boot splash.
 pub mod video;
-/// Native Wayland display server protocol engine, shared memory pools, and compositor state.
-pub mod wayland;
 /// Intel 82540EM (e1000) Gigabit Ethernet driver and full TCP/UDP/IPv4/DNS/DHCP/HTTP network stack.
 pub mod net;
 /// Lossless DEFLATE (RFC 1951) and GZIP (RFC 1952) decompression routines for package extraction.

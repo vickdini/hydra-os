@@ -338,9 +338,6 @@ impl Kms {
         if self.screen.is_some() {
             return Ok(());
         }
-        if crate::wayland::is_running() && crate::video::console::display_released() {
-            return Err(EBUSY); // Hydra's own compositor shows
-        }
         let (fb, _w, _h, stride, bgr) = crate::video::console::release_display().ok_or(ENXIO)?;
         self.screen = Some((fb, stride, bgr));
         self.drawn_cursor = None;
@@ -395,6 +392,8 @@ impl Kms {
     /// * `y1` - Ending Y row (exclusive).
     fn copy_rect(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
         let (screen, stride, bgr) = match self.screen {
+            // After a kernel panic the screen shows the panic message
+            Some(_) if crate::video::console::panicked() => return,
             Some(s) => s,
             None => return,
         };
@@ -435,6 +434,7 @@ impl Kms {
     /// Blends the cursor image over the screen at its position.
     fn draw_cursor(&mut self) {
         let (screen, stride, bgr) = match self.screen {
+            Some(_) if crate::video::console::panicked() => return,
             Some(s) => s,
             None => return,
         };
