@@ -1542,6 +1542,31 @@ impl Drop for Mm {
     }
 }
 
+/// Per CPU: the address space (a `*const Mutex<Mm>`, as a number; 0: none) whose lock the
+/// lock-free copy-in of `crate::lx` holds or is about to take. It holds it only for a short
+/// copy with interrupts off and never waits for anything meanwhile, so a fault handler
+/// finding the lock busy for that reason waits instead of reporting a recursive lock.
+pub static LX_COPY_MM: [core::sync::atomic::AtomicU64; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+
+/// The lock of address space `mm` for a fault handler: taken at once, or after waiting
+/// for another CPU's lock-free copy-in ([`LX_COPY_MM`]); `None` if someone else holds it.
+fn fault_lock(mm: &Mutex<Mm>) -> Option<spin::MutexGuard<'_, Mm>> {
+    let me = crate::arch::percpu::cpu();
+    let key = mm as *const Mutex<Mm> as u64;
+    loop {
+        if let Some(g) = mm.try_lock() {
+            return Some(g);
+        }
+        let copying = LX_COPY_MM.iter().enumerate().any(|(c, v)| c != me && v.load(Ordering::SeqCst) == key);
+        if !copying {
+            return None;
+        }
+        crate::arch::smp::serve_tlb();
+        core::hint::spin_loop();
+    }
+}
+
 /// Waits while `addr` is a missing page of a range registered with a userfaultfd, until its
 /// handler supplies it (`kernel`: an access by a system call). `false` if the descriptor
 /// refuses such accesses.
@@ -1553,7 +1578,7 @@ pub fn uffd_resolve_current(addr: u64, write: bool, kernel: bool) -> bool {
     }
     let mm = unsafe { &*ptr };
     loop {
-        let id = match mm.try_lock() {
+        let id = match fault_lock(mm) {
             Some(mut g) => g.uffd_missing(addr),
             None => return true,
         };
@@ -1589,7 +1614,7 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
         return None;
     }
     let mm = unsafe { &*ptr };
-    match mm.try_lock() {
+    match fault_lock(mm) {
         Some(mut guard) => {
             let t0 = crate::compat::linux::prof::start();
             // For the profile: whether the page was there already (copy-on-write, upgrade)

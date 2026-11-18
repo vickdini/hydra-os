@@ -262,10 +262,19 @@ const MAX_HANDOFFS: usize = 8;
 static CALL_DEFERRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// The task each CPU switches to at its next voluntary yield, plus one (0: none): set by
-/// the direct switch of a forwarded Linux call ([`Scheduler::direct_handover`], `crate::lx`).
+/// the direct switch of a forwarded Linux call ([`Scheduler::direct_call`], `crate::lx`).
 pub static DIRECT_TO: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
 /// Where that task is in the task table (a hint).
-static DIRECT_HINT: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+pub static DIRECT_HINT: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// The direct switch does not happen if this flag (an `AtomicBool`, null: none) is set when
+/// it would: the worker of `crate::lx` handing the CPU back must not block if a call was
+/// delivered to it meanwhile (see `Scheduler::direct_call`).
+pub static DIRECT_GUARD: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// The task this CPU is about to switch away from blocked at a lock-free point of
+/// `crate::lx` (its `Task::nobkl_wait`): set right before the switch, taken by it.
+pub static BLOCK_NOBKL: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// Each CPU's current task's index in the task table (a hint for code without the lock).
+pub static CURRENT_IDX: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
 
 /// A driver call ended, or its caller read the reply: tasks it held back may run now.
 pub fn call_ended() {
@@ -707,6 +716,7 @@ impl Scheduler {
             cmdline: None,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -817,6 +827,7 @@ impl Scheduler {
             cmdline: None,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -913,6 +924,7 @@ impl Scheduler {
             cmdline: None,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -1012,6 +1024,7 @@ impl Scheduler {
             cmdline: None,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -1124,6 +1137,7 @@ impl Scheduler {
             cmdline: Some(Task::join_cmdline(args.iter().map(|a| a.as_bytes()))),
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -1316,6 +1330,7 @@ impl Scheduler {
             cmdline: parent_cmdline,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,
@@ -1483,6 +1498,10 @@ impl Scheduler {
             if idx == curr_idx || self.running_anywhere(idx) || self.tasks[idx].state != TaskState::Dead {
                 continue;
             }
+            // Nor one whose kernel stack another CPU is still leaving (arch::percpu)
+            if crate::arch::percpu::leaving_elsewhere(self.tasks[idx].id.0) {
+                continue;
+            }
             if self.tasks[idx].mm.is_some() && self.loaded_elsewhere(self.tasks[idx].regs.cr3, me) {
                 continue;
             }
@@ -1635,6 +1654,14 @@ impl Scheduler {
         // put every tick that a switch crossed first in system time (the switch runs in the
         // kernel): with frequent switches nearly all user time showed as system time
         self.cur[crate::arch::percpu::cpu()] = next_idx;
+        CURRENT_IDX.store(next_idx as u64, core::sync::atomic::Ordering::Relaxed);
+        // Whether the task left can be resumed by a CPU without the kernel lock, and that
+        // this CPU is on its stack until the trap epilogue (arch::percpu::leaving_elsewhere)
+        self.tasks[curr_idx].nobkl_wait = BLOCK_NOBKL.swap(0, core::sync::atomic::Ordering::Relaxed) != 0;
+        // (only the first switch of a trap: its frame stays on that task's stack)
+        if crate::arch::percpu::leaving_of(crate::arch::percpu::cpu()) == 0 {
+            crate::arch::percpu::set_leaving(self.tasks[curr_idx].id.0);
+        }
         super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(self.tasks[next_idx].retired, core::sync::atomic::Ordering::Release);
         super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
 
@@ -1715,33 +1742,68 @@ impl Scheduler {
     // waking another CPU and without the hand-off's machine-wide stop. Both tasks run under
     // the kernel lock while they set this up, so no other CPU can run either in between.
 
-    /// Blocks the current task and makes task `target` (blocked: a worker waiting for a call,
-    /// or a caller waiting for its answer) ready, without waking another CPU for it: the
-    /// caller then sets [`DIRECT_TO`] and yields, and this CPU runs `target` next. The
-    /// current task keeps its remaining timeslice, which `target` inherits.
+    /// The direct switch of a forwarded call (from the direct-switch vector, wave 4): in one
+    /// step under the scheduler lock, the current task blocks and task `target` (blocked in
+    /// the kernel at one of `crate::lx`'s yield points: a worker waiting for a call, or a
+    /// caller waiting for its answer) runs on this CPU at once, inheriting the timeslice.
+    /// No run-queue pass, no other CPU woken.
     ///
-    /// `hint` is where `target` was last seen in the task table (a wrong hint costs a
-    /// search: the table is large, and after an address-space switch every entry looked at
-    /// misses the TLB).
+    /// Nothing changes, and `false` comes back, when it cannot be done here: `target` not
+    /// blocked, saved in user mode, running or being left on another CPU, needing the
+    /// kernel lock this CPU does not hold (it blocked outside the lock-free path), a driver
+    /// call in progress, a caller to resume first, or `guard` set (a call was delivered to
+    /// the current task meanwhile, so it must not block). The caller then wakes `target`
+    /// the ordinary way.
     ///
-    /// # Returns
-    ///
-    /// `Some((index of target, index of the current task))`, or `None` (nothing changed)
-    /// if `target` is not blocked or not found.
-    pub fn direct_handover(&mut self, target: u64, hint: usize) -> Option<(usize, usize)> {
+    /// `hint` is where `target` was last seen in the task table.
+    pub fn direct_call(&mut self, ctx: &mut ExceptionContext, target: u64, hint: usize, guard: *const core::sync::atomic::AtomicBool) -> bool {
         let me = crate::arch::percpu::cpu();
-        if !self.initialized || self.cur[me] >= self.tasks.len() {
-            return None;
+        if !self.initialized || self.cur[me] >= self.tasks.len() || self.resume_first.is_some() || self.handoff_top().is_some() {
+            return false;
         }
-        let idx = self.index_of(target, hint)?;
-        if self.tasks[idx].state != TaskState::Blocked {
-            return None;
+        let curr_idx = self.cur[me];
+        let Some(next_idx) = self.index_of(target, hint) else { return false };
+        let t = &self.tasks[next_idx];
+        if next_idx == curr_idx
+            || t.state != TaskState::Blocked
+            || t.regs.cs & 3 != 0
+            || (!t.nobkl_wait && !crate::arch::smp::bkl_held())
+            || self.running_anywhere(next_idx)
+        {
+            return false;
         }
-        self.tasks[idx].state = TaskState::Ready;
-        let cur = self.cur[me];
-        self.tasks[cur].state = TaskState::Blocked;
-        DIRECT_HINT.store(idx as u64, core::sync::atomic::Ordering::Relaxed);
-        Some((idx, cur))
+        // SAFETY: the guard is a static flag of crate::lx
+        if !guard.is_null() && unsafe { (*guard).load(core::sync::atomic::Ordering::SeqCst) } {
+            return false;
+        }
+        self.tasks[next_idx].state = TaskState::Ready;
+        if !self.can_run(next_idx, me) {
+            self.tasks[next_idx].state = TaskState::Blocked;
+            return false;
+        }
+        // Save the current task, as `schedule` does (step 3); it blocks
+        let current_cr3 = Cr3::read().0.start_address().as_u64();
+        let kernel_cr3 = self.kernel_cr3;
+        let curr_task = &mut self.tasks[curr_idx];
+        let saved_cr3 = if curr_task.mm.is_none() && kernel_cr3 != 0 { kernel_cr3 } else { current_cr3 };
+        curr_task.regs.save_from_context(ctx, saved_cr3);
+        curr_task.fs_base = unsafe { crate::arch::syscall::rdmsr(0xC000_0100) };
+        if curr_task.mode == PrivilegeMode::User {
+            crate::arch::segments::save(&mut curr_task.segs);
+        }
+        curr_task.state = TaskState::Blocked;
+        let slice = curr_task.timeslice_remaining.max(1);
+        curr_task.timeslice_remaining = 0;
+        if crate::arch::smp::kick_pending() {
+            let others = self.tasks.iter().enumerate().any(|(i, t)| i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
+            crate::arch::smp::switch_kick(others);
+        }
+        crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
+        self.tasks[next_idx].woken = false;
+        self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].passed_over = 0;
+        self.switch_to(curr_idx, next_idx, ctx, current_cr3, slice);
+        true
     }
 
     /// The index of task `id` in the table, trying `hint` first.
@@ -1752,12 +1814,12 @@ impl Scheduler {
         self.tasks.iter().position(|t| t.id.0 == id)
     }
 
-    /// The current task's index in the table (a hint for [`Self::direct_handover`]).
+    /// The current task's index in the table (a hint for [`Self::direct_call`]).
     pub fn current_index(&self) -> usize {
         self.cur[crate::arch::percpu::cpu()]
     }
 
-    /// The switch [`Self::direct_handover`] prepared (from the yield vector): saves the current
+    /// A direct switch from the yield vector (`DIRECT_TO` set at a yield): saves the current
     /// task and switches to task `target`, which inherits the current timeslice. Falls back
     /// to [`Self::schedule_now`] whenever the fast path does not apply (a driver call in
     /// progress, a caller to resume first, the target not ready or running elsewhere).
@@ -1772,16 +1834,6 @@ impl Scheduler {
         }
     }
 
-    /// [`Self::direct_switch`] from the direct-switch vector (`arch::idt::DIRECT_VECTOR`): no
-    /// FPU state moves (`CURRENT_TRAP_FPU` is null), and the target must have blocked in the
-    /// kernel. Nothing happens when the fast path does not apply.
-    ///
-    /// # Returns
-    ///
-    /// Whether the CPU switched to `target`.
-    pub fn direct_switch_nofpu(&mut self, ctx: &mut ExceptionContext, target: u64) -> bool {
-        self.direct_switch_core(ctx, target, true)
-    }
 
     /// The direct switch itself (see [`Self::direct_switch`]); `kernel_only`: only to a
     /// task saved in kernel mode.
@@ -1907,6 +1959,15 @@ impl Scheduler {
     fn can_run(&self, idx: usize, me: usize) -> bool {
         let t = &self.tasks[idx];
         if t.state != TaskState::Ready {
+            return false;
+        }
+        // Another CPU still runs it, or is still on its kernel stack (a switch away from it a
+        // moment ago). A task can be ready while its CPU still runs it: it blocked itself and
+        // was woken before it yielded. Without the kernel lock (crate::lx's lock-free path)
+        // another CPU may see it so
+        if crate::arch::percpu::leaving_elsewhere(t.id.0)
+            || (0..crate::arch::smp::MAX_CPUS).any(|c| c != me && self.idle_of[c].is_some() && self.cur[c] == idx)
+        {
             return false;
         }
         if let Some(c) = self.idle_of.iter().position(|i| *i == Some(t.id)) {
@@ -2626,6 +2687,7 @@ impl Scheduler {
                 ));
             }
         }
+        crate::lx::dump();
         for (e, t) in crate::ipc::service::window_holders() {
             crate::console::serial_write(&alloc::format!("[window] endpoint {:#x} held by task {}\n", e, t));
         }

@@ -168,6 +168,11 @@ pub fn bkl_exit() {
     })
 }
 
+/// The CPU holding the kernel lock (`usize::MAX`: none), for the task dump.
+pub fn bkl_owner() -> usize {
+    BKL_OWNER.load(Ordering::Relaxed)
+}
+
 /// Whether the calling CPU holds the kernel lock.
 pub fn bkl_held() -> bool {
     BKL_OWNER.load(Ordering::Acquire) == super::percpu::cpu()

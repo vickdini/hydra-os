@@ -137,6 +137,47 @@ static void hammer(int procs) {
     for (;;) pause();
 }
 
+/* --- signals arriving during forwarded calls (wave 4): a 1 ms timer while 4 threads call --- */
+static volatile long sig_seen;
+static volatile int sig_stop;
+static void on_tick(int s) { (void)s; __sync_fetch_and_add(&sig_seen, 1); }
+static void *sig_worker(void *arg) {
+    long bad = 0, n = 0;
+    (void)arg;
+    while (!sig_stop) {
+        if (lx(0, 0, 0) != 0) bad++;
+        long r = syscall(SYS_keyctl, 0, -3, 0);
+        if (r < 0 && errno != EINTR) bad++;
+        n++;
+    }
+    return (void *)(bad * 1000000000L + n);
+}
+static int sigstress(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = on_tick;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGALRM, &sa, 0);
+    struct itimerval it = {{0, 1000}, {0, 1000}};
+    pthread_t t[4];
+    sig_stop = 0; sig_seen = 0;
+    for (long i = 0; i < 4; i++) pthread_create(&t[i], 0, sig_worker, 0);
+    setitimer(ITIMER_REAL, &it, 0);
+    uint64_t t0 = now_ms();
+    while (now_ms() - t0 < 3000) usleep(10000);
+    struct itimerval off = {{0, 0}, {0, 0}};
+    setitimer(ITIMER_REAL, &off, 0);
+    sig_stop = 1;
+    long bad = 0, calls = 0;
+    for (int i = 0; i < 4; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        bad += (long)r / 1000000000L;
+        calls += (long)r % 1000000000L;
+    }
+    printf("sigstress: %ld call pairs, %ld signals delivered, %ld bad answers\n", calls, sig_seen, bad);
+    return bad == 0 && sig_seen > 100 && calls > 1000;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     if (argc > 1 && !strcmp(argv[1], "hammer")) hammer(argc > 2 ? atoi(argv[2]) : 2);
@@ -213,6 +254,7 @@ int main(int argc, char **argv) {
         munmap(m, 4096);
     }
     check(concurrency(4, 8), "4 processes x 8 threads: every forwarded call answered correctly");
+    check(sigstress(), "signals every millisecond during forwarded calls: no hang, no wrong answer");
     printf(fails ? "LXFWD TEST FAILED (%d)\n" : "LXFWD TEST PASSED\n", fails);
     return fails != 0;
 }

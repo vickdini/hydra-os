@@ -14,7 +14,7 @@
 //!   ([`LxCall`], shared by the kernel and the server) and wait in `SYS_LX_REPLY_RECV`,
 //!   which answers the call being served and waits for the next in one trap.
 //! - **The direct switch**: a forwarded call goes to an idle worker by handing it the CPU
-//!   straight away ([`crate::task::scheduler::Scheduler::direct_handover`]), and the answer
+//!   straight away ([`crate::task::scheduler::Scheduler::direct_call`]), and the answer
 //!   comes back the same way. There is no run-queue pass, no wake-up of another CPU and no
 //!   machine-wide stop (today's hand-off stops every other system call entry): other CPUs
 //!   and other processes keep running. With no idle worker the call is queued, and the
@@ -36,10 +36,12 @@
 //!
 //! ## Concurrency
 //!
-//! Everything here runs under the kernel lock (`arch::smp`), so a caller handing the CPU
-//! to a worker, and a worker going idle, cannot interleave with another CPU's kernel code.
-//! The request table is a spin lock taken with interrupts off, never while the scheduler
-//! lock is held (the scheduler lock may be taken inside it).
+//! Since wave 4 the forwarded call and the worker's answer run without the kernel lock (see
+//! "The lock-free path" below, and [`copy`] for the copy-in/copy-out table). The request
+//! table is a spin lock taken with interrupts off (serving TLB flush requests while
+//! waiting), never while the scheduler lock is held (the scheduler lock may be taken
+//! inside it). The other entry points (`SYS_LX_CTL`, `SYS_LX_COMPLETE`, client memory, the
+//! crash policy) still run under the kernel lock, and take the same locks.
 
 pub mod copy;
 
@@ -245,9 +247,10 @@ struct Lx {
 
 static LX: Mutex<Lx> = Mutex::new(Lx { server_tgid: 0, workers: alloc::vec::Vec::new(), reqs: [Req::FREE; MAX_REQS], calls: [LxCall::EMPTY; MAX_REQS], next_id: 1 });
 
-/// Runs `f` on the request table with interrupts off.
+/// Runs `f` on the request table with interrupts off (serving TLB flush requests while
+/// waiting for the lock: the lock-free path takes it without the kernel lock).
 fn lx<R>(f: impl FnOnce(&mut Lx) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| f(&mut LX.lock()))
+    x86_64::instructions::interrupts::without_interrupts(|| f(&mut copy::lock_serving(&LX)))
 }
 
 /// The server's workers are attached and its endpoint registered: calls are forwarded.
@@ -290,6 +293,7 @@ fn deliver(s: &mut Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&co
     }
     w.idle = false;
     w.req = slot;
+    HAS_WORK[wi].store(true, Ordering::SeqCst);
 }
 
 /// Gives worker `wi` the oldest queued request, if any.
@@ -315,7 +319,9 @@ fn free_if(id: u64, state: RState) {
     });
 }
 
-/// Forwards the current Linux system call to the server and waits for the answer.
+/// Forwards the current Linux system call to the server and waits for the answer (the
+/// path under the kernel lock, for callers the lock-free path does not take: traced tasks,
+/// seccomp filters, tracing on).
 fn call(frame: &SyscallFrame) -> i64 {
     let mut c = LxCall::EMPTY;
     c.nr = frame.rax;
@@ -343,6 +349,13 @@ fn call(frame: &SyscallFrame) -> i64 {
             c.ngroups = n as u64;
         }
     }
+    call_with(me, my_idx, c, false)
+}
+
+/// Forwards call `c` (its identity filled in) of task `me` (at `my_idx`, a hint) and waits
+/// for the answer. `nobkl`: the lock-free path ([`fast_entry`]), whose waits do not need
+/// the kernel lock.
+fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     c.note_seq = notes_head();
     // The copy-in table: the call's pointer arguments, copied now (a bad one fails here)
     let mut copies = None;
@@ -356,17 +369,23 @@ fn call(frame: &SyscallFrame) -> i64 {
     }
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
-    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies))
+    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl))
 }
 
-/// [`call`] with the call filled in and its copies made.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>) -> i64 {
+/// [`call_with`] with the copies made.
+fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool) -> i64 {
     let placed = lx(|s| {
-        let slot = s.reqs.iter().position(|r| r.state == RState::Free)?;
+        // Checked under the table's lock: `server_gone` clears ONLINE before it takes the
+        // lock, so a call placed here is either failed by it or refused now
+        if !ONLINE.load(Ordering::Acquire) {
+            return Err(ENOSYS);
+        }
+        let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Err(EAGAIN) };
         let id = s.next_id;
         s.next_id += 1;
         c.id = id;
         s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some() };
+        REQ_DONE[slot].store(false, Ordering::SeqCst);
         if let Some(b) = copies {
             let kept = buf_of(slot);
             kept.hdr = b.hdr;
@@ -388,33 +407,43 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
                 None
             }
         };
-        Some((slot, id, target))
+        Ok((slot, id, target))
     });
-    let Some((slot, id, target)) = placed else {
-        crate::kprintln!("[lx] too many calls in flight");
-        return EAGAIN;
+    let (slot, id, target) = match placed {
+        Ok(p) => p,
+        Err(e) => {
+            if e == EAGAIN {
+                crate::kprintln!("[lx] too many calls in flight");
+            }
+            return e;
+        }
     };
     match target {
         Some((w, hint)) => {
             DIRECT_CALLS.fetch_add(1, Ordering::Relaxed);
-            // The direct switch: this thread blocks, the worker runs next on this CPU
-            let handed = crate::task::SCHEDULER.lock().direct_handover(w, hint);
-            if handed.is_some() {
-                switch_to_task(w);
+            // The direct switch: this thread blocks, the worker runs next on this CPU. When
+            // that cannot be done (the worker is still running, or blocked outside the
+            // lock-free path, ...), the worker is woken the ordinary way; a worker still
+            // running finds the call under the table's lock before it would block
+            // (not if the answer came already: a worker running on another CPU may have
+            // taken the call and answered it before this thread got here)
+            if !direct_to(w, hint, Some(&REQ_DONE[slot]), nobkl) {
+                crate::task::SCHEDULER.lock().unblock_task(TaskId(w));
             }
-            // (Otherwise the worker is already runnable, woken by something else: it finds
-            // the call when it runs)
         }
         None => {
             QUEUED_CALLS.fetch_add(1, Ordering::Relaxed);
         }
     }
-    wait_for(slot, id, &c.args)
+    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl)
 }
 
 /// Waits for the answer to request `id` (in `slot`), copies its output to the caller's
 /// pointers `args` (the copy-out table), and frees it.
-fn wait_for(slot: usize, id: u64, args: &[u64; 6]) -> i64 {
+///
+/// No wake-up is lost: the answer is marked under the table's lock and the caller woken
+/// after it, and the caller blocks only under the same lock after seeing no answer.
+fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool) -> i64 {
     loop {
         let done = lx(|s| {
             let r = &mut s.reqs[slot];
@@ -447,8 +476,12 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6]) -> i64 {
             return r;
         }
         // A signal: a call not taken yet is withdrawn; one being served is marked (the
-        // server may answer -EINTR; a pending one learns it through a notification)
+        // server may answer -EINTR; a pending one learns it through a notification). The
+        // slow path: under the kernel lock (the notification wakes the server's endpoint)
         if crate::compat::linux::proc::signal_pending() {
+            if !crate::arch::smp::bkl_held() {
+                crate::arch::smp::bkl_enter();
+            }
             let what = lx(|s| {
                 let r = &mut s.reqs[slot];
                 if r.id != id {
@@ -484,38 +517,239 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6]) -> i64 {
                 None => {}
             }
         }
-        crate::task::SCHEDULER.lock().block_current();
-        lx_yield();
+        // Block, unless the answer came meanwhile (checked under the lock the answer is
+        // marked under)
+        let blocked = lx(|s| {
+            let r = &s.reqs[slot];
+            if r.id != id || matches!(r.state, RState::Done | RState::Failed) {
+                return false;
+            }
+            // A signal posted before the block finds the thread running and is only noted:
+            // looked for after blocking (its poster wakes the thread after posting it)
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.block_current();
+            // (once the call is marked interrupted, the server has been told: block)
+            if !r.interrupted && crate::compat::linux::proc::signal_pending_for(who.0, who.1) {
+                sched.current_task_mut(|t| t.state = crate::task::TaskState::Running);
+                return false;
+            }
+            true
+        });
+        if blocked {
+            lx_yield(nobkl);
+        }
     }
 }
 
 /// Gives up the CPU (the task blocked itself first). Every register the compiler could keep
 /// a value in across it is declared clobbered, so a task resumed here needs no FPU state:
-/// the direct switch moves none ([`switch_to_task`]). Every place this module blocks uses
-/// it, so a task the direct switch resumes has always stopped at one of them.
+/// the direct switch moves none ([`direct_to`]). Every place this module blocks uses it, so
+/// a task the direct switch resumes has always stopped at one of them. `nobkl`: the task
+/// is on the lock-free path (a CPU without the kernel lock may resume it).
 #[inline(never)]
-fn lx_yield() {
+fn lx_yield(nobkl: bool) {
+    if nobkl {
+        crate::task::scheduler::BLOCK_NOBKL.store(1, Ordering::Relaxed);
+    }
     // SAFETY: the yield vector switches tasks and comes back here
     unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+    crate::task::scheduler::BLOCK_NOBKL.store(0, Ordering::Relaxed);
 }
 
-/// The direct switch: hands the CPU to `target`, which [`Scheduler::direct_handover`] made
-/// ready (and the current task blocked), through the direct-switch vector; an ordinary
-/// yield when that cannot be done (a driver call's hand-off in progress, ...).
+/// The direct switch ([`Scheduler::direct_call`]): blocks the current task and hands the
+/// CPU to `target` (blocked at one of this module's yield points; `hint`: where it is in
+/// the task table), unless `guard` is set by then. `nobkl`: as for [`lx_yield`].
 ///
-/// [`Scheduler::direct_handover`]: crate::task::scheduler::Scheduler::direct_handover
-fn switch_to_task(target: u64) {
+/// # Returns
+///
+/// `true` once this task runs again after the switch; `false` at once (nothing changed)
+/// if the switch could not be done.
+///
+/// [`Scheduler::direct_call`]: crate::task::scheduler::Scheduler::direct_call
+fn direct_to(target: u64, hint: usize, guard: Option<&'static AtomicBool>, nobkl: bool) -> bool {
+    use crate::task::scheduler::{BLOCK_NOBKL, DIRECT_GUARD, DIRECT_HINT, DIRECT_TO};
     if crate::task::scheduler::handoff_active() {
-        return lx_yield();
+        return false;
     }
-    crate::task::scheduler::DIRECT_TO.store(target + 1, Ordering::Relaxed);
+    DIRECT_TO.store(target + 1, Ordering::Relaxed);
+    DIRECT_HINT.store(hint as u64, Ordering::Relaxed);
+    DIRECT_GUARD.store(guard.map_or(0, |g| g as *const AtomicBool as u64), Ordering::Relaxed);
+    if nobkl {
+        BLOCK_NOBKL.store(1, Ordering::Relaxed);
+    }
     let failed: u64;
     // SAFETY: vector 0x82 switches to `target` and comes back here when this task runs
     // again (rax 0), or returns at once with rax 1
     unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
-    if failed != 0 {
-        lx_yield();
+    BLOCK_NOBKL.store(0, Ordering::Relaxed);
+    failed == 0
+}
+
+// ----------------------------------------------------------------------
+// The lock-free path (wave 4, Group 10)
+// ----------------------------------------------------------------------
+//
+// A forwarded call and the worker's answer run without the kernel lock: the system call
+// entry ([`fast_entry`], from `arch::syscall`) takes this path for every forwarded call of
+// a Linux thread without a tracer or seccomp filter, and for every `SYS_LX_REPLY_RECV`.
+//
+// What protects what:
+// - the request table and the worker list: the table's spin lock ([`LX`], interrupts off,
+//   TLB requests served while waiting);
+// - task states and the switch itself: the scheduler lock, taken once per switch (in the
+//   direct-switch vector, `Scheduler::direct_call`);
+// - the caller's identity: a per-CPU cache ([`IDENT`]) checked against the identity epoch
+//   of `compat::linux` (bumped by everything that changes credentials, groups, seccomp,
+//   tracing, or ends a task);
+// - the copy-in table's user memory: the caller's address-space lock.
+//
+// Why nothing is lost: an answer (or a delivery to a worker) is marked under the table's
+// lock and the waiter woken after it; a waiter blocks only under that lock after seeing
+// nothing (so the wake finds it blocked), or through the direct switch, which blocks the
+// switching task only if a flag set under the table's lock is still clear when the
+// scheduler lock is held: a worker's `HAS_WORK` (a call was delivered to it), a caller's
+// `REQ_DONE` (its call was answered: on two CPUs a worker may take and answer it before
+// the caller gets to the switch). A caller also looks for a signal after blocking, under
+// the scheduler lock (a signal posted just before only marks a running thread).
+//
+// Why nothing runs twice: a task switched away from without the kernel lock is marked
+// `nobkl_wait`; only those may be resumed by a CPU without the lock; no CPU resumes (or
+// frees) a task whose stack another CPU is still leaving (`arch::percpu::leaving`), nor
+// one another CPU still runs (it may be ready already: it blocked itself and was woken
+// before it yielded). Anything slow (a page to fault in, a signal, a dying task) takes the
+// kernel lock first.
+
+/// The thread IDs of the workers (0: none), readable without the table's lock: the system
+/// call entry tells `SYS_LX_REPLY_RECV` (native call 52) from a Linux `getpeername` (52).
+static WORKER_TIDS: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
+/// Per request slot: the call was answered (or failed). The caller's direct switch to the
+/// worker does not happen once this is set: on two CPUs a worker may take and answer the
+/// call before its caller gets to the switch (the same rule as [`HAS_WORK`]).
+static REQ_DONE: [AtomicBool; MAX_REQS] = [const { AtomicBool::new(false) }; MAX_REQS];
+/// Per worker: a call was delivered to it that it has not taken yet (see the section).
+static HAS_WORK: [AtomicBool; MAX_WORKERS] = [const { AtomicBool::new(false) }; MAX_WORKERS];
+
+/// Whether thread `tid` is one of the server's workers.
+fn is_worker(tid: u64) -> bool {
+    tid != 0 && WORKER_TIDS.iter().any(|t| t.load(Ordering::Relaxed) == tid)
+}
+
+/// A CPU's cached identity of the Linux thread it runs (see [`ident`]).
+#[derive(Clone, Copy)]
+struct Ident {
+    /// The identity epoch it was filled under (0: empty).
+    epoch: u64,
+    tid: u64,
+    tgid: u64,
+    ids: [u32; 6],
+    caps: u64,
+    ngroups: u64,
+    groups: [u32; LX_GROUPS],
+}
+
+/// Per CPU, used only by that CPU with interrupts off.
+struct IdentCache([UnsafeCell<Ident>; crate::arch::smp::MAX_CPUS]);
+// SAFETY: each CPU touches only its own entry, with interrupts off
+unsafe impl Sync for IdentCache {}
+static IDENT: IdentCache = IdentCache(
+    [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS] }) }; crate::arch::smp::MAX_CPUS],
+);
+
+/// The calling thread's identity for a forwarded call, from this CPU's cache when nothing
+/// changed since it was filled; `None` for a thread the lock-free path does not serve (not
+/// a Linux thread, a seccomp filter, a tracer). Interrupts off.
+fn ident() -> Option<Ident> {
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    let epoch = crate::compat::linux::ident_epoch();
+    let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+    // SAFETY: this CPU's own entry, interrupts off
+    let e = unsafe { &mut *IDENT.0[cpu].get() };
+    if tid != 0 && e.tid == tid && e.epoch == epoch {
+        return Some(*e);
     }
+    let found = crate::task::SCHEDULER.lock().current_task_mut(|t| {
+        let ok = t.personality == crate::task::TaskPersonality::Linux && t.seccomp.mode == 0;
+        (ok, t.id.0, t.tgid, [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid], if t.caps.in_userns { 0 } else { t.caps.effective })
+    })?;
+    let (ok, tid, tgid, ids, caps) = found;
+    if !ok || crate::compat::linux::ptrace::is_traced(tid) {
+        return None;
+    }
+    let mut n = Ident { epoch, tid, tgid, ids, caps, ngroups: 0, groups: [0; LX_GROUPS] };
+    // (never waiting for the process table: see `fast_entry`)
+    let procs = crate::compat::linux::proc::PROCS.try_lock()?;
+    if let Some(p) = procs.get(&tgid) {
+        let k = p.groups.len().min(LX_GROUPS);
+        n.groups[..k].copy_from_slice(&p.groups[..k]);
+        n.ngroups = k as u64;
+    }
+    drop(procs);
+    *e = n;
+    Some(n)
+}
+
+/// What [`fast_entry`] did.
+pub enum Fast {
+    /// A forwarded Linux call, answered: deliver signals on the way out.
+    Call(i64),
+    /// A worker's `SYS_LX_REPLY_RECV`.
+    Reply(i64),
+}
+
+/// The lock-free path's system call entry (called by `arch::syscall` before the kernel
+/// lock, interrupts off): a forwarded call of a Linux thread without tracer or seccomp
+/// filter, or a worker's `SYS_LX_REPLY_RECV`. `None`: the ordinary path.
+pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
+    let nr = frame.rax;
+    if nr == crate::arch::syscall::SYS_LX_REPLY_RECV {
+        let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+        if is_worker(tid) {
+            let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
+            return Some(Fast::Reply(reply_recv_as(tid, idx, frame.rdi as i64, frame.rsi, true)));
+        }
+        return None;
+    }
+    // During a driver call (whose caller may hold kernel locks) the ordinary path waits it
+    // out first; this path never waits for a lock such a caller could hold
+    if route(nr) != Route::Server
+        || !ONLINE.load(Ordering::Acquire)
+        || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
+        || crate::task::scheduler::handoff_active()
+    {
+        return None;
+    }
+    let id = ident()?;
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    c.tid = id.tid;
+    c.tgid = id.tgid;
+    [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] = id.ids;
+    c.caps = id.caps;
+    if nr != LX_NULL_NR {
+        c.ngroups = id.ngroups;
+        c.groups = id.groups;
+    }
+    let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
+    FAST_CALLS.fetch_add(1, Ordering::Relaxed);
+    Some(Fast::Call(call_with(id.tid, idx, c, true)))
+}
+
+/// Calls forwarded on the lock-free path since boot.
+pub static FAST_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the calling Linux thread, back from a call on the lock-free path, may have a
+/// signal to take or a stop to make (then `arch::syscall` delivers the ordinary way, under
+/// the kernel lock). Interrupts off.
+pub fn delivery_maybe() -> bool {
+    let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    // SAFETY: this CPU's own entry, interrupts off
+    let e = unsafe { &*IDENT.0[cpu].get() };
+    if e.tid != tid || tid == 0 {
+        return true;
+    }
+    crate::compat::linux::proc::delivery_maybe(tid, e.tgid)
 }
 
 // ----------------------------------------------------------------------
@@ -554,6 +788,9 @@ pub fn ctl(op: u64) -> i64 {
                 lx(|s| {
                     s.workers.clear();
                     s.server_tgid = 0;
+                    for t in WORKER_TIDS.iter() {
+                        t.store(0, Ordering::Release);
+                    }
                 });
             }
             let Some(page) = ContiguousFrames::allocate(1) else { return ENOMEM };
@@ -567,6 +804,8 @@ pub fn ctl(op: u64) -> i64 {
                 }
                 s.server_tgid = tgid;
                 let idx = crate::task::SCHEDULER.lock().current_index();
+                WORKER_TIDS[s.workers.len()].store(me, Ordering::Release);
+                HAS_WORK[s.workers.len()].store(false, Ordering::Release);
                 s.workers.push(Worker { task: me, page, idle: false, req: NONE, idx });
                 addr as i64
             })
@@ -603,81 +842,99 @@ pub fn ctl(op: u64) -> i64 {
 /// `flags` has [`LX_REPLY_NONE`]; [`LX_REPLY_PENDING`]: the call goes on, answered later by
 /// [`complete`]), then waits for the next call, which is in the worker's syscall page when
 /// this returns 0. The answer hands the CPU straight back to its caller when this worker
-/// has nothing else to do (the direct switch).
+/// has nothing else to do (the direct switch). (The path under the kernel lock; workers
+/// normally come in through [`fast_entry`].)
 pub fn reply_recv(result: i64, flags: u64) -> i64 {
     let (me, my_idx) = match server_caller_at() {
         Ok((me, _, idx)) => (me, idx),
         Err(e) => return e,
     };
-    let answered = lx(|s| {
-        let wi = s.workers.iter().position(|w| w.task == me)?;
-        s.workers[wi].idx = my_idx;
-        let mut wake = (0u64, 0u64, 0usize);
-        let cur = s.workers[wi].req;
-        if flags & LX_REPLY_NONE == 0 && cur != NONE {
-            let r = &mut s.reqs[cur];
-            if r.state == RState::Delivered {
-                if flags & LX_REPLY_PENDING != 0 {
-                    r.state = RState::Pending;
-                } else {
-                    r.state = RState::Done;
-                    r.result = result;
-                    wake = (r.client, r.id, r.client_idx);
-                    // The output the server left in the page (copy-out table)
-                    if r.has_copy {
-                        let page = s.workers[wi].call_mut() as *const u8;
-                        // SAFETY: the worker's page (see `deliver`); the header and copy
-                        // area lie within it
-                        let (out_len, data) = unsafe {
-                            let h = core::ptr::read_volatile(page.add(LX_COPY_OFF) as *const LxCopy);
-                            (h.out_len, core::slice::from_raw_parts(page.add(LX_DATA_OFF), LX_DATA_SIZE))
-                        };
-                        copy::take_output(buf_of(cur), &out_len, data);
+    reply_recv_as(me, my_idx, result, flags, false)
+}
+
+/// [`reply_recv`] for worker `me` (at `my_idx`, a hint); `nobkl`: the lock-free path.
+fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -> i64 {
+    let answered = x86_64::instructions::interrupts::without_interrupts(|| {
+        lx(|s| {
+            let wi = s.workers.iter().position(|w| w.task == me)?;
+            s.workers[wi].idx = my_idx;
+            let mut wake = (0u64, 0u64, 0usize);
+            let cur = s.workers[wi].req;
+            if flags & LX_REPLY_NONE == 0 && cur != NONE {
+                let r = &mut s.reqs[cur];
+                if r.state == RState::Delivered {
+                    if flags & LX_REPLY_PENDING != 0 {
+                        r.state = RState::Pending;
+                    } else {
+                        r.state = RState::Done;
+                        r.result = result;
+                        REQ_DONE[cur].store(true, Ordering::SeqCst);
+                        wake = (r.client, r.id, r.client_idx);
+                        // The output the server left in the page (copy-out table)
+                        if r.has_copy {
+                            let page = s.workers[wi].call_mut() as *const u8;
+                            // SAFETY: the worker's page (see `deliver`); the header and copy
+                            // area lie within it
+                            let (out_len, data) = unsafe {
+                                let h = core::ptr::read_volatile(page.add(LX_COPY_OFF) as *const LxCopy);
+                                (h.out_len, core::slice::from_raw_parts(page.add(LX_DATA_OFF), LX_DATA_SIZE))
+                            };
+                            copy::take_output(buf_of(cur), &out_len, data);
+                        }
                     }
                 }
             }
-        }
-        s.workers[wi].req = NONE;
-        // A call waiting in the queue comes next; otherwise this worker goes idle
-        let next = take_queued(s, wi);
-        if !next {
-            s.workers[wi].idle = true;
-        }
-        Some((wake, next))
+            s.workers[wi].req = NONE;
+            HAS_WORK[wi].store(false, Ordering::SeqCst);
+            // A call waiting in the queue comes next; otherwise this worker goes idle
+            let next = take_queued(s, wi);
+            if !next {
+                s.workers[wi].idle = true;
+            }
+            Some((wake, next, wi))
+        })
     });
-    let Some(((client, id, hint), next)) = answered else { return EPERM };
+    let Some(((client, id, hint), next, wi)) = answered else { return EPERM };
     if client != 0 {
-        let mut sched = crate::task::SCHEDULER.lock();
-        if !next && sched.direct_handover(client, hint).is_some() {
-            // Straight back to the caller; this worker waits for its next call
-            drop(sched);
-            switch_to_task(client);
-        } else if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
-            // Its caller died meanwhile: nobody takes the answer
-            drop(sched);
-            free_if(id, RState::Done);
+        // Straight back to the caller, unless a call was delivered to this worker meanwhile;
+        // otherwise the caller is woken the ordinary way
+        let switched = !next && x86_64::instructions::interrupts::without_interrupts(|| direct_to(client, hint, Some(&HAS_WORK[wi]), nobkl));
+        if !switched {
+            let mut sched = crate::task::SCHEDULER.lock();
+            if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
+                // Its caller died meanwhile: nobody takes the answer
+                drop(sched);
+                free_if(id, RState::Done);
+            }
         }
     }
     if next {
         return 0;
     }
-    wait_work(me)
+    wait_work(me, nobkl)
 }
 
-/// Waits (blocked) until a call is delivered to worker `me`, or one is queued.
-fn wait_work(me: u64) -> i64 {
+/// Waits (blocked) until a call is delivered to worker `me`, or one is queued. The worker
+/// blocks only under the table's lock after seeing nothing, so a delivery (marked under the
+/// same lock, the worker woken after it) is never missed.
+fn wait_work(me: u64, nobkl: bool) -> i64 {
     loop {
-        let st = lx(|s| {
-            let Some(wi) = s.workers.iter().position(|w| w.task == me) else { return Err(ESRCH) };
-            if s.workers[wi].req != NONE {
-                s.workers[wi].idle = false;
-                return Ok(true);
-            }
-            if take_queued(s, wi) {
-                return Ok(true);
-            }
-            s.workers[wi].idle = true;
-            Ok(false)
+        let st = x86_64::instructions::interrupts::without_interrupts(|| {
+            lx(|s| {
+                let Some(wi) = s.workers.iter().position(|w| w.task == me) else { return Err(ESRCH) };
+                if s.workers[wi].req != NONE {
+                    s.workers[wi].idle = false;
+                    HAS_WORK[wi].store(false, Ordering::SeqCst);
+                    return Ok(true);
+                }
+                if take_queued(s, wi) {
+                    HAS_WORK[wi].store(false, Ordering::SeqCst);
+                    return Ok(true);
+                }
+                s.workers[wi].idle = true;
+                crate::task::SCHEDULER.lock().block_current();
+                Ok(false)
+            })
         });
         match st {
             Err(e) => return e,
@@ -686,8 +943,7 @@ fn wait_work(me: u64) -> i64 {
             }
             Ok(false) => {}
         }
-        crate::task::SCHEDULER.lock().block_current();
-        lx_yield();
+        x86_64::instructions::interrupts::without_interrupts(|| lx_yield(nobkl));
     }
 }
 
@@ -697,7 +953,9 @@ pub fn complete(id: u64, result: i64) -> i64 {
         return e;
     }
     let client = lx(|s| {
-        let r = s.reqs.iter_mut().find(|r| r.id == id && r.state == RState::Pending)?;
+        let slot = s.reqs.iter().position(|r| r.id == id && r.state == RState::Pending)?;
+        REQ_DONE[slot].store(true, Ordering::SeqCst);
+        let r = &mut s.reqs[slot];
         r.state = RState::Done;
         r.result = result;
         Some(r.client)
@@ -902,8 +1160,12 @@ fn server_gone() {
         let tgid = s.server_tgid;
         s.server_tgid = 0;
         s.workers.clear();
-        for r in s.reqs.iter_mut() {
+        for t in WORKER_TIDS.iter() {
+            t.store(0, Ordering::Release);
+        }
+        for (i, r) in s.reqs.iter_mut().enumerate() {
             if matches!(r.state, RState::Queued | RState::Delivered | RState::Pending) {
+                REQ_DONE[i].store(true, Ordering::SeqCst);
                 r.state = RState::Failed;
                 r.result = EIO;
                 clients[n] = r.client;
@@ -979,6 +1241,34 @@ pub fn watch() {
     if let Some(dead) = workers[..n].iter().find(|&&t| !sched.is_task_alive(TaskId(t))) {
         crate::kprintln!("[lx] linux-server worker {} died: ending the server (process {})", dead, tgid);
         sched.kill_group(tgid);
+    }
+}
+
+/// The forwarding state for the task dump (QEMU's `nmi`): each worker, each call in flight,
+/// each CPU's LEAVING mark and the kernel lock's owner. Never waits for a lock.
+pub fn dump() {
+    use alloc::format;
+    let w = crate::console::serial_write;
+    w(&format!(
+        "[lx] online {} bkl owner {} leaving [{}] fast calls {} direct {} queued {}\n",
+        is_online(),
+        crate::arch::smp::bkl_owner(),
+        (0..crate::arch::smp::MAX_CPUS).map(|c| format!("{}", crate::arch::percpu::leaving_of(c))).collect::<alloc::vec::Vec<_>>().join(" "),
+        FAST_CALLS.load(Ordering::Relaxed),
+        DIRECT_CALLS.load(Ordering::Relaxed),
+        QUEUED_CALLS.load(Ordering::Relaxed)
+    ));
+    let Some(s) = LX.try_lock() else {
+        w("[lx] request table locked\n");
+        return;
+    };
+    for (i, x) in s.workers.iter().enumerate() {
+        w(&format!("[lx] worker {} task {} idle {} req {} has_work {}\n", i, x.task, x.idle, x.req as i64, HAS_WORK[i].load(Ordering::Relaxed)));
+    }
+    for (i, r) in s.reqs.iter().enumerate() {
+        if r.state != RState::Free {
+            w(&format!("[lx] req slot {} id {} {:?} client {} result {}\n", i, r.id, r.state, r.client, r.result));
+        }
     }
 }
 

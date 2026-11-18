@@ -363,6 +363,10 @@ pub struct Task {
     /// Nesting depth of `task::preemptible` wait points this task is inside; saved and
     /// restored with the task so the timer only preempts the task that is actually waiting.
     pub preempt_depth: u32,
+    /// Switched away at a point of `crate::lx`'s lock-free forwarding path, whose code does
+    /// not need the kernel lock: a CPU without the lock may resume it (the direct switch).
+    /// Every other task blocked in the kernel resumes only on a CPU holding the lock.
+    pub nobkl_wait: bool,
     /// Linux system call in progress (`u64::MAX` when none); saved with the task.
     pub syscall_nr: u64,
     /// First two arguments of that system call (shown by the task dump).
@@ -449,6 +453,7 @@ impl Task {
             cmdline: None,
             service: None,
             preempt_depth: 0,
+            nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
             syscall_fpu: 0,

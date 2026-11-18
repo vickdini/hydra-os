@@ -2091,6 +2091,35 @@ pub fn tgid_of(tid: u64) -> Option<u64> {
     PROCS.lock().values().find(|p| !p.zombie && p.threads.contains_key(&tid)).map(|p| p.pid)
 }
 
+/// Whether thread `tid` of process `pid` has an unblocked signal pending (`true` also when
+/// the process table is busy). Takes no lock that waits: `crate::lx` asks it with the
+/// scheduler lock held, right after blocking the thread, so a signal posted meanwhile is
+/// never missed.
+pub fn signal_pending_for(tid: u64, pid: u64) -> bool {
+    let Some(procs) = PROCS.try_lock() else { return true };
+    match procs.get(&pid) {
+        Some(p) => {
+            let (t_pending, t_mask) = p.threads.get(&tid).map_or((0, 0), |t| (t.pending, t.mask));
+            (p.pending | t_pending) & !(t_mask & !UNBLOCKABLE) != 0
+        }
+        None => false,
+    }
+}
+
+/// Whether thread `tid` of process `pid` may have a signal to take or a stop to make on its
+/// way back to user mode (`true` also when the process table is busy): the lock-free
+/// forwarding path (`crate::lx`) then delivers the ordinary way. Takes no lock that waits.
+pub fn delivery_maybe(tid: u64, pid: u64) -> bool {
+    let Some(procs) = PROCS.try_lock() else { return true };
+    match procs.get(&pid) {
+        Some(p) => {
+            let (t_pending, t_mask) = p.threads.get(&tid).map_or((0, 0), |t| (t.pending, t.mask));
+            p.stopped || (p.pending | t_pending) & !(t_mask & !UNBLOCKABLE) != 0
+        }
+        None => false,
+    }
+}
+
 /// Returns `true` if the calling thread has an unblocked pending signal (blocking syscalls poll this).
 ///
 /// # Returns

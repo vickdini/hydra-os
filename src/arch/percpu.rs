@@ -34,6 +34,13 @@ pub struct PerCpu {
     /// off the task's kernel stack before the kernel lock is released: another CPU may
     /// resume that task, on that stack, as soon as it gets the lock (gs:[EXIT_FRAME]).
     pub exit_frame: [u64; 5],
+    /// The task whose kernel stack this CPU is still leaving, plus one (0: none): set by a
+    /// task switch, cleared by the trap epilogues once the `iretq` frame is off that stack
+    /// (gs:[LEAVING]). Until then no other CPU may resume that task (it would run on the
+    /// stack this CPU is still reading): the scheduler skips it ([`leaving_elsewhere`]).
+    /// The kernel lock used to guarantee this alone; the lock-free forwarding path of
+    /// `crate::lx` (wave 4) switches tasks without it.
+    pub leaving: u64,
 }
 
 /// Words of [`PerCpu::exit_stack`] (16 KiB).
@@ -44,9 +51,12 @@ pub const EXIT_SCRATCH: usize = 32;
 pub const EXIT_FRAME: usize = 40 + 8 * EXIT_STACK_WORDS;
 const _: () = assert!(core::mem::offset_of!(PerCpu, exit_scratch) == EXIT_SCRATCH);
 const _: () = assert!(core::mem::offset_of!(PerCpu, exit_frame) == EXIT_FRAME);
+/// Offset of [`PerCpu::leaving`] (used by the trap epilogues in `arch::idt`).
+pub const LEAVING: usize = EXIT_FRAME + 40;
+const _: () = assert!(core::mem::offset_of!(PerCpu, leaving) == LEAVING);
 
 static mut PERCPU: [PerCpu; MAX_CPUS] = [const {
-    PerCpu { self_ptr: 0, cpu: 0, kernel_rsp: 0, user_rsp: 0, exit_scratch: 0, exit_stack: [0; EXIT_STACK_WORDS], exit_frame: [0; 5] }
+    PerCpu { self_ptr: 0, cpu: 0, kernel_rsp: 0, user_rsp: 0, exit_scratch: 0, exit_stack: [0; EXIT_STACK_WORDS], exit_frame: [0; 5], leaving: 0 }
 }; MAX_CPUS];
 
 const IA32_GS_BASE: u32 = 0xC000_0101;
@@ -71,6 +81,28 @@ pub fn cpu() -> usize {
     let v: u64;
     unsafe { core::arch::asm!("mov {}, qword ptr gs:[8]", out(reg) v, options(nostack, readonly, preserves_flags)) };
     v as usize
+}
+
+/// Records that the calling CPU is leaving task `id`'s kernel stack (see [`PerCpu::leaving`]).
+#[inline(always)]
+pub fn set_leaving(id: u64) {
+    unsafe { core::arch::asm!("mov qword ptr gs:[{o}], {v}", o = const LEAVING, v = in(reg) id + 1, options(nostack, preserves_flags)) };
+}
+
+/// CPU `c`'s LEAVING mark (task ID plus one; 0: none), for the task dump.
+pub fn leaving_of(c: usize) -> u64 {
+    // SAFETY: a plain word of another CPU's block
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PERCPU[c].leaving)) }
+}
+
+/// Whether a CPU other than the calling one is still leaving task `id`'s kernel stack.
+#[inline]
+pub fn leaving_elsewhere(id: u64) -> bool {
+    let me = cpu();
+    (0..MAX_CPUS).any(|c| {
+        // SAFETY: a plain word of another CPU's block, written by that CPU alone
+        c != me && unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PERCPU[c].leaving)) } == id + 1
+    })
 }
 
 /// Sets the kernel stack the calling CPU's next `syscall` from user mode switches to.

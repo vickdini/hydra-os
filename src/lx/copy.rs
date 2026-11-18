@@ -284,12 +284,38 @@ fn each_piece(addr: u64, len: usize, write: bool, mut f: impl FnMut(*mut u8, usi
     let mm = unsafe { &*mm };
     let mut done = 0usize;
     let mut faulted = false;
+    // Announced before the lock is taken, withdrawn after it is released: a fault handler
+    // on another CPU finding the lock busy then waits (memory::vm::LX_COPY_MM)
+    let marker = &crate::memory::vm::LX_COPY_MM[crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1)];
+    struct Unmark<'a>(&'a core::sync::atomic::AtomicU64);
+    impl Drop for Unmark<'_> {
+        fn drop(&mut self) {
+            self.0.store(0, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
     while done < len {
         let at = addr + done as u64;
         let n = (4096 - (at & 0xFFF) as usize).min(len - done);
-        let mut m = lock_serving(mm);
+        // Without the kernel lock, never wait for an address-space lock: its holder may be in a
+        // driver call (a page fault reading a file) that needs this CPU's patience under the
+        // ordinary rules; take the kernel lock and wait out driver calls first
+        marker.store(mm as *const spin::Mutex<crate::memory::vm::Mm> as u64, core::sync::atomic::Ordering::SeqCst);
+        let unmark = Unmark(marker);
+        let mut m = match mm.try_lock() {
+            Some(g) => g,
+            None => {
+                // (under the kernel lock no fault handler runs meanwhile: no mark needed)
+                marker.store(0, core::sync::atomic::Ordering::SeqCst);
+                if !crate::arch::smp::bkl_held() {
+                    crate::arch::smp::bkl_enter();
+                    crate::task::scheduler::wait_out_handoff();
+                }
+                lock_serving(mm)
+            }
+        };
         let Some(phys) = m.present_user(at, write) else {
             drop(m);
+            drop(unmark);
             if faulted || !fault_in(at, n as u64, write) {
                 return Err(EFAULT);
             }
@@ -300,6 +326,7 @@ fn each_piece(addr: u64, len: usize, write: bool, mut f: impl FnMut(*mut u8, usi
         let p = crate::memory::frame_allocator::phys_to_virt(phys.as_u64());
         let more = f(p, n);
         drop(m);
+        drop(unmark);
         if !more {
             return Ok(());
         }
