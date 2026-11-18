@@ -126,6 +126,52 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
 
+// ----------------------------------------------------------------------
+// Socket routing (Group 12, wave 5): by address family and by descriptor kind
+// ----------------------------------------------------------------------
+//
+// The socket calls cannot be routed by their number alone: `socket(AF_INET, ..)` belongs
+// to the server once Internet sockets moved, `socket(AF_UNIX, ..)` to the kernel until Unix
+// sockets move; `sendmsg(fd, ..)` belongs to whoever owns `fd`. Two table bits say so:
+//
+// - [`T_FAMILY`] (`socket`, `socketpair`): the server answers iff the address family in
+//   `args[0]` is in [`FAMILIES`] (filled from [`MOVED_FAMILIES`]) and the server is online;
+//   otherwise the kernel's dispatcher runs as before.
+// - [`T_BYFD`] (the calls on a socket descriptor, [`BYFD_NUMBERS`]): the server answers iff
+//   descriptor `args[0]` holds a server object; the call then carries the object exactly as
+//   with [`T_FD0`]. Any other descriptor (a kernel socket, a file, a bad number) goes to the
+//   kernel, which answers as before. The test is cheap: the descriptor table's lock-free
+//   bitmap of server objects (`FdTable::srv_bits`), reached through a per-CPU cache, so a
+//   call on a kernel descriptor costs a bit test and no lock.
+//
+// [`route`] still says `Server` for these numbers; [`forward`] and [`fast_entry`] make the
+// per-call decision. The server dispatches the same way (`linux-server/src/socket.rs`: by
+// family, then by the object's kind).
+
+/// Table bit (Group 12): `socket`/`socketpair`: the server answers iff the family in
+/// `args[0]` moved ([`FAMILIES`]).
+const T_FAMILY: u8 = 32;
+/// Table bit (Group 12): the server answers iff descriptor `args[0]` holds a server object
+/// (which the call then carries, as with [`T_FD0`]); otherwise the kernel.
+const T_BYFD: u8 = 64;
+/// The address families whose `socket`/`socketpair` go to the server (bit `f` = family `f`).
+static FAMILIES: AtomicU64 = AtomicU64::new(0);
+/// The address families that moved to the server: one line per step.
+pub const MOVED_FAMILIES: &[u64] = &[
+    // Group 12 (step 3): AF_INET, AF_INET6, AF_NETLINK
+];
+/// `socket`, `socketpair`: routed by family.
+pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
+/// The calls on a socket descriptor, routed by the descriptor: connect, accept, sendto,
+/// recvfrom, sendmsg, recvmsg, shutdown, bind, listen, getsockname, getpeername,
+/// setsockopt, getsockopt, accept4, recvmmsg, sendmmsg.
+pub const BYFD_NUMBERS: &[u64] = &[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55, 288, 299, 307];
+
+/// Whether `socket`/`socketpair` of address family `family` go to the server.
+pub fn family_moved(family: u64) -> bool {
+    family < 64 && FAMILIES.load(Ordering::Relaxed) & (1 << family) != 0
+}
+
 /// Where a forwarded system call is answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
@@ -156,7 +202,28 @@ pub fn set_forwarding(on: bool) {
     for &(nr, bits) in MOVED_STEP2 {
         TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
     }
+    // Socket routing (Group 12): the per-call bits only once some family moved, so that
+    // nothing changes for the socket calls before
+    let families = if on { MOVED_FAMILIES.iter().fold(0u64, |m, &f| m | 1 << f) } else { 0 };
+    FAMILIES.store(families, Ordering::Release);
+    let sockets = families != 0;
+    for nr in BYFAMILY_NUMBERS {
+        TABLE[nr as usize].store(if sockets { T_SERVER | T_FAMILY } else { 0 }, Ordering::Release);
+    }
+    for &nr in BYFD_NUMBERS {
+        TABLE[nr as usize].store(if sockets { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
+    }
     NULL_TO_SERVER.store(on, Ordering::Release);
+}
+
+/// The table byte of system call `nr` (0: the kernel answers it).
+#[inline]
+fn table_bits(nr: u64) -> u8 {
+    if (nr as usize) < TABLE_LEN {
+        TABLE[nr as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    }
 }
 
 /// Where system call `nr` is answered.
@@ -187,9 +254,91 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     match route(nr) {
         Route::Kernel if nr == LX_NULL_NR => Some(0),
         Route::Kernel => None,
-        Route::Server if !ONLINE.load(Ordering::Acquire) => Some(ENOSYS),
-        Route::Server => Some(call(frame)),
+        Route::Server => {
+            let bits = table_bits(nr);
+            if bits & (T_FAMILY | T_BYFD) != 0 {
+                // Routed per call (Group 12): while no server is online, sockets are the
+                // kernel's (and no descriptor holds a live server object)
+                if !ONLINE.load(Ordering::Acquire) || (bits & T_FAMILY != 0 && !family_moved(frame.rdi)) {
+                    return None;
+                }
+                if bits & T_BYFD != 0 {
+                    let o = byfd_object(frame.rdi)?;
+                    return Some(call(frame, Some(o)));
+                }
+            }
+            if !ONLINE.load(Ordering::Acquire) {
+                return Some(ENOSYS);
+            }
+            Some(call(frame, None))
+        }
     }
+}
+
+/// The server object at descriptor `fd` of the calling thread (for a [`T_BYFD`] call on the
+/// path under the kernel lock), `None` if `fd` holds anything else: through this CPU's
+/// cached table and its bitmap when the identity cache serves the thread, otherwise with
+/// the table's lock.
+fn byfd_object(fd: u64) -> Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)> {
+    let fast = x86_64::instructions::interrupts::without_interrupts(|| {
+        let id = ident()?;
+        byfd_fast(&id, fd).ok()
+    });
+    match fast {
+        Some(r) => r,
+        None => obj::current_fd(fd),
+    }
+}
+
+/// The lock-free decision for a [`T_BYFD`] call (interrupts off): `Ok(None)` the kernel
+/// answers (`fd` holds no server object), `Ok(Some(object))` the server does, `Err(())` it
+/// cannot be told without waiting for a lock (the caller takes the ordinary path).
+fn byfd_fast(id: &Ident, fd: u64) -> Result<Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>, ()> {
+    let (fds, srv) = cached_fds(id).ok_or(())?;
+    // SAFETY: the bits live as long as the table, which `fds` holds
+    let maybe = unsafe { &*srv }.get().is_some_and(|b| b.maybe(fd));
+    let r = if !maybe {
+        Ok(None)
+    } else {
+        match fds.try_lock() {
+            Some(t) => Ok(obj::object_in(&t, fd)),
+            None => Err(()),
+        }
+    };
+    drop_last(fds);
+    r
+}
+
+/// Per CPU (interrupts off): the descriptor table of the thread whose identity [`IDENT`]
+/// holds, as a `Weak` (a cache must not keep a dead process's descriptors open) and the
+/// address of its server-object bits. Valid while that identity is (exec and unshare,
+/// which can give a thread another table, bump the identity epoch).
+struct FdsCache([UnsafeCell<(u64, u64, alloc::sync::Weak<Mutex<crate::fs::FdTable>>, usize)>; crate::arch::smp::MAX_CPUS]);
+// SAFETY: each CPU touches only its own entry, with interrupts off
+unsafe impl Sync for FdsCache {}
+static FDS: FdsCache = FdsCache([const { UnsafeCell::new((0, 0, alloc::sync::Weak::new(), 0)) }; crate::arch::smp::MAX_CPUS]);
+
+/// The calling thread's descriptor table and the address of its server-object bits, from
+/// this CPU's cache (`id` is its identity from [`ident`]); `None` if the table cannot be
+/// had without waiting. Interrupts off.
+fn cached_fds(id: &Ident) -> Option<(crate::fs::SharedFdTable, *const crate::fs::SrvPtr)> {
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    // SAFETY: this CPU's own entry, interrupts off
+    let e = unsafe { &mut *FDS.0[cpu].get() };
+    if e.0 == id.tid && e.1 == id.epoch && e.3 != 0 {
+        if let Some(t) = e.2.upgrade() {
+            return Some((t, e.3 as *const crate::fs::SrvPtr));
+        }
+    }
+    let fds = crate::task::SCHEDULER.lock().current_fds()?;
+    let srv = fds.try_lock().map(|t| t.srv_bits() as *const crate::fs::SrvPtr as usize);
+    let Some(srv) = srv else {
+        drop_last(fds);
+        return None;
+    };
+    let old = core::mem::replace(e, (id.tid, id.epoch, Arc::downgrade(&fds), srv));
+    drop(old);
+    Some((fds, srv as *const crate::fs::SrvPtr))
 }
 
 /// Forwards system call `nr` with `args` made on server object `dev` (a descriptor's
@@ -383,14 +532,18 @@ fn free_if(id: u64, state: RState) {
 /// Forwards the current Linux system call to the server and waits for the answer (the
 /// path under the kernel lock, for callers the lock-free path does not take: traced tasks,
 /// seccomp filters, tracing on).
-fn call(frame: &SyscallFrame) -> i64 {
+fn call(frame: &SyscallFrame, byfd: Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>) -> i64 {
     let mut c = LxCall::EMPTY;
     c.nr = frame.rax;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
-    let bits = if (c.nr as usize) < TABLE_LEN { TABLE[c.nr as usize].load(Ordering::Relaxed) } else { 0 };
+    let bits = table_bits(c.nr);
     // Group 9: the server object at args[0], held until the call is answered (a close on
-    // another thread cannot overtake the call)
-    let _held = if bits & T_FD0 != 0 {
+    // another thread cannot overtake the call); Group 12: a T_BYFD call's, found already
+    let _held = if let Some((dev, slot, flags)) = byfd {
+        c.obj = slot;
+        c.obj_flags = flags;
+        Some(dev)
+    } else if bits & T_FD0 != 0 {
         obj::current_fd(c.args[0]).map(|(dev, slot, flags)| {
             c.obj = slot;
             c.obj_flags = flags;
@@ -842,8 +995,23 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     // What Group 9's calls carry besides their arguments (see `call`), gathered without
     // waiting for any lock a kernel-lock holder could hold: the descriptor table is taken
     // with `try_lock` (busy: the ordinary path), the IPC namespace comes with the identity
-    let bits = if (nr as usize) < TABLE_LEN { TABLE[nr as usize].load(Ordering::Relaxed) } else { 0 };
+    let bits = table_bits(nr);
     let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
+    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
+    // ordinary path, whose `forward` finds it the kernel's again (one more bit test)
+    if bits & T_FAMILY != 0 && !family_moved(c.args[0]) {
+        return None;
+    }
+    if bits & T_BYFD != 0 {
+        match byfd_fast(&id, c.args[0]) {
+            Ok(Some((dev, slot, flags))) => {
+                c.obj = slot;
+                c.obj_flags = flags;
+                held[0] = Some(dev);
+            }
+            Ok(None) | Err(()) => return None,
+        }
+    }
     if bits & T_IPC != 0 {
         c.ipc_ns = id.ipc_ns;
     }
