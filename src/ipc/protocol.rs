@@ -807,6 +807,20 @@ pub const LX_OBJ_UNPIN: u64 = 4;
 /// `SYS_LX_OBJ` operation: `(token, buf, len)`: queues `len` bytes as a notification
 /// message on a kept descriptor (a netlink socket).
 pub const LX_OBJ_NOTIFY: u64 = 5;
+/// `SYS_LX_OBJ` operation: `(request id, buf, len)`: the caller's `comm` (bpf's
+/// `get_current_comm`), NUL-padded to `len` (at most 16) bytes.
+pub const LX_OBJ_COMM: u64 = 6;
+/// `SYS_LX_OBJ` operation, **temporary** (until the VFS moves, step 6): `(request id, fd,
+/// buf) -> length`: the path of the caller's file descriptor `fd` (at most 4096 bytes; a bpf
+/// cgroup attachment names its cgroup by a directory descriptor).
+pub const LX_OBJ_FDPATH: u64 = 7;
+/// `SYS_LX_OBJ` operation: `(buf, len)`: the complete list of bpf device programs attached
+/// to cgroups, which the kernel runs itself on device opens and `mknod`s: entries of
+/// `[u32 cgroup length, cgroup path below /sys/fs/cgroup, u32 instruction count, the
+/// instructions (8 bytes each)]`. `-EINVAL` if one is refused (it uses maps, or fails the
+/// kernel's checks); the kernel then keeps its previous list.
+pub const LX_OBJ_BPF_DEVICE: u64 = 8;
+
 /// Most bytes of an object's name in [`LxObjDesc`].
 pub const LX_OBJ_NAME_MAX: usize = 104;
 

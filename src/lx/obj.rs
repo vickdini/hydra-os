@@ -37,7 +37,8 @@ use spin::Mutex;
 use crate::compat::linux::chardev::CharDevice;
 use crate::fs::FileDescriptor;
 use crate::ipc::protocol::{
-    LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_CHANGED_OFF, LX_OBJ_FD, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY, LX_OBJ_OFF, LX_OBJ_PIN, LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_UNPIN,
+    LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_BPF_DEVICE, LX_OBJ_CHANGED_OFF, LX_OBJ_COMM, LX_OBJ_FD, LX_OBJ_FDPATH, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY, LX_OBJ_OFF, LX_OBJ_PIN,
+    LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_UNPIN,
 };
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 use crate::task::TaskId;
@@ -229,6 +230,8 @@ pub(super) fn offline() {
     }
     let pins = core::mem::take(&mut *PINS.lock());
     drop(pins);
+    // The server's bpf device programs went with it
+    crate::compat::linux::bpf::set_server_device_programs(&[]);
 }
 
 /// The doorbell ([`LX_SIGNAL_OBJS`]): wakes the waiters of every object the server marked
@@ -300,12 +303,48 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             };
             let dev = match fds.lock().get(b as i32 as usize) {
                 Some(FileDescriptor::Device(d)) => d.clone(),
-                _ => return EBADF,
+                Some(_) => return EINVAL,
+                None => return EBADF,
             };
             match dev.as_server().and_then(|o| o.slot().map(|s| (s, o.kind(), o.nonblock()))) {
                 Some((slot, kind, nb)) => (slot | (kind as u64) << 32 | (nb as u64) << 62) as i64,
-                None => EBADF,
+                None => EINVAL,
             }
+        }
+        LX_OBJ_COMM => {
+            let Some(client) = super::client_of(a) else { return ESRCH };
+            let tgid = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.tgid).unwrap_or(0);
+            let text = crate::compat::linux::fs::proc_pid_file_text(&alloc::format!("{}/comm", tgid)).unwrap_or_default();
+            let mut out = [0u8; 16];
+            for (o, c) in out.iter_mut().zip(text.iter().take(15).take_while(|c| **c != b'\n')) {
+                *o = *c;
+            }
+            let n = (c as usize).min(16);
+            crate::compat::linux::vfs::copy_out(b, &out[..n]).map_or_else(|e| e, |()| 0)
+        }
+        LX_OBJ_FDPATH => {
+            let fds = match client_fds(a) {
+                Ok(f) => f,
+                Err(e) => return e,
+            };
+            let path = match fds.lock().get(b as i32 as usize) {
+                Some(FileDescriptor::Vnode(f)) => f.lock().path.clone(),
+                Some(FileDescriptor::File { path, .. }) => path.clone(),
+                Some(_) => return EINVAL,
+                None => return EBADF,
+            };
+            let p = &path.as_bytes()[..path.len().min(4096)];
+            crate::compat::linux::vfs::copy_out(c, p).map_or_else(|e| e, |()| p.len() as i64)
+        }
+        LX_OBJ_BPF_DEVICE => {
+            if b > 1 << 20 {
+                return EINVAL;
+            }
+            let data = match crate::compat::linux::vfs::copy_in(a, b as usize) {
+                Ok(d) => d,
+                Err(e) => return e,
+            };
+            crate::compat::linux::bpf::set_server_device_programs(&data)
         }
         LX_OBJ_SETFL => {
             if a as usize >= LX_OBJ_SLOTS {

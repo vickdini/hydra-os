@@ -29,6 +29,7 @@
 
 extern crate alloc;
 
+mod bpf;
 mod client;
 mod keys;
 mod lock;
@@ -238,6 +239,7 @@ fn serve(c: &LxCall) -> (i64, u64) {
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
         240..=245 => mqueue::dispatch(&cx),
         64..=66 | 220 | 68..=71 => sysv::dispatch(&cx),
+        321 => (bpf::sys_bpf(&cx), 0),
         _ => (ENOSYS, 0),
     };
     obj::flush();

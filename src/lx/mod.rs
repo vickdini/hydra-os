@@ -108,6 +108,8 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
     (69, T_IPC),
     (70, T_IPC),
     (71, T_IPC),
+    // bpf (maps, programs, links: server objects; device programs come back to the kernel)
+    (321, 0),
 ];
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
@@ -129,7 +131,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }

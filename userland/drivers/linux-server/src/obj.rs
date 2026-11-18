@@ -125,7 +125,6 @@ pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, g
 }
 
 /// The object behind descriptor `fd` of the caller: `(slot, kind, nonblock)`.
-#[allow(dead_code)]
 pub fn of_fd(cx: &Cx, fd: u64) -> Result<(u32, u32, bool), i64> {
     let v = sys::lx_obj(LX_OBJ_FD, cx.id, fd, 0)?;
     Ok((v as u32, (v >> 32) as u32 & 0xFFFF, v & (1 << 62) != 0))
@@ -138,6 +137,7 @@ pub fn closed(slot: u32, kind: u32) {
             TEST_CLOSES.fetch_add(1, Ordering::Relaxed);
         }
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
+        LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
         _ => {}
     }
     set_ready(slot, 0, 0);
