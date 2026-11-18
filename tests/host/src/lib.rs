@@ -63,6 +63,10 @@ pub mod arch {
         pub fn bkl_exit() {}
         /// *stub* No other CPU to wake on the host.
         pub fn flush_kick() {}
+        /// *mirror* of the kernel's CPU limit.
+        pub const MAX_CPUS: usize = 16;
+        /// *stub* No flush requests on the host.
+        pub fn serve_tlb() {}
         pub fn shootdown(_cr3: Option<u64>, addr: Option<u64>) {
             match addr {
                 Some(a) => x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(a)),
@@ -74,6 +78,10 @@ pub mod arch {
     /// shootdowns are the single-CPU stub above.
     pub mod pcid {
         pub fn enabled() -> bool {
+            false
+        }
+        /// *stub* No global pages on the host (wave 4).
+        pub fn global_enabled() -> bool {
             false
         }
         pub fn load_cr3(_pml4: u64) {}
