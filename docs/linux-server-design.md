@@ -709,6 +709,102 @@ visibly slow.
 - **Restarting the desktop after a crash** re-runs the boot's `linux plasma` when SDDM
   had been started. It does not restore a desktop started by hand from the shell.
 
+## 12. A faster forwarding path (wave 4, Group 10, branch `mk-lxfast`)
+
+Three independent parts, each in its own commits (`docs/src/linux-server.md` and
+`docs/src/arch/pcid.md` describe them as built):
+
+1. **The copy-in/copy-out table** (section 6.3): per forwarded call, the kernel copies the
+   pointer arguments it is known to have into the syscall page at trap time (a bad pointer
+   fails with `EFAULT` without the server) and copies the server's output back after the
+   answer. `keys` uses it; the server's helpers fall back to the client memory primitives
+   for anything not copied.
+2. **Forwarding without the kernel lock:** the forwarded call and the worker's answer run
+   from the system call entry without the kernel lock; the request table has its own lock,
+   the direct switch is one scheduler-lock step, and the scheduler now enforces itself what
+   the kernel lock used to guarantee (no task resumed on a stack another CPU is still
+   leaving, none picked while another CPU still runs it).
+3. **Global kernel pages:** the kernel half's TLB entries survive every CR3 write (CR4.PGE,
+   G bit), with a boot self-test and an off switch (`noglobal`, `hydra_run --global-off`).
+
+### 12.1 Measured cost (KVM, 2 CPUs, same VM setup; µs, median of the runs' medians)
+
+Before = 5027d87, after = mk-lxfast 0d72ee7, both with the IPC probe compiled in (it is
+called only by its own benchmarks). Runs: before 3, after 3 (PCID on); 2 each (PCID off).
+The host also ran other groups' VMs at times; single runs differ by up to 10 %.
+
+| What | before, PCID | after, PCID | after, PCID, no global | before, no PCID | after, no PCID | after, no PCID, no global |
+|---|---:|---:|---:|---:|---:|---:|
+| `getpid` | 0.15 | 0.16 | 0.16 | 0.16 | 0.16 | 0.16 |
+| In-kernel null call (`getpgrp`) | 0.72 | 0.73 | 0.79 | 0.73 | 0.80 | 0.73 |
+| **Forwarded null call** (`lx_null`) | 3.21 | 2.73 | 2.75 | 4.53 | 2.96 | 3.92 |
+| Two threads on 2 CPUs, per call (`lx_null_par2`) | 3.94 | 2.19 | 2.18 | 5.01 | 2.20 | 2.88 |
+| `keyctl` (no pointer) | 3.38 | 2.81 | 2.84 | 4.77 | 3.00 | 4.06 |
+| `keyctl_par2` | 4.10 | 2.21 | 2.23 | 5.27 | 2.26 | 2.96 |
+| `add_key` (two strings and a 16-byte payload in) | 7.02 | 5.41 | 5.38 | 8.80 | 5.63 | 6.80 |
+| `keyctl` DESCRIBE (a buffer out) | 5.67 | 5.04 | 4.93 | 7.26 | 5.38 | 6.50 |
+| `pread` 4 KiB cached | 1.24 | 1.22 | 1.27 | 1.27 | 1.24 | 1.22 |
+| `stat` | 2.40 | 2.39 | 2.41 | 2.42 | 2.41 | 2.33 |
+| `fstat` | 1.07 | 1.09 | 1.12 | 1.08 | 1.10 | 1.08 |
+| `open`+`close` | 4.59 | 4.53 | 4.56 | 4.71 | 4.86 | 4.48 |
+| pipe round trip | 24.46 | 24.34 | 25.35 | 36.24 | 24.71 | 27.28 |
+| Unix socket round trip | 24.96 | 25.00 | 26.44 | 30.10 | 25.34 | 27.90 |
+| futex round trip | 2.24 | 2.33 | 2.55 | 2.30 | 2.30 | 2.32 |
+| `sched_yield` | 2.81 | 2.99 | 3.02 | 2.91 | 2.98 | 2.97 |
+| yield between two threads on 1 CPU | 3.37 | 3.63 | 3.61 | 3.49 | 3.58 | 3.65 |
+| `mmap`+`munmap` 1 MiB | 2.59 | 2.65 | 2.61 | 2.60 | 2.65 | 2.61 |
+| anonymous page fault | 9.06 | 9.05 | 8.98 | 9.24 | 8.96 | 9.09 |
+| `fork`+`wait` | 251 | 246 | 253 | 253 | 251 | 240 |
+| `fork`+`exec`+`wait` | 1,977 | 1,954 | 1,945 | 1,979 | 2,379 | 1,949 |
+| IPC round trip to a ring-3 server, Handoff (from user) | 5.89 | 5.80 | 5.74 | 7.87 | 6.63 | 7.47 |
+| same, Queued | 18.20 | 18.77 | 18.68 | 19.20 | 18.42 | 20.20 |
+| same, Handoff, inside one system call | 6.04 | 5.58 | 4.94 | 8.25 | 4.82 | 6.09 |
+| same, Queued, inside one system call | 8.57 | 9.03 | 9.01 | 9.38 | 8.88 | 9.88 |
+| warm `find /usr` | 442 ms | 438 ms | 438 ms | 548 ms | 452 ms | 536 ms |
+| `dd` of a 100+ MiB file (cached) | 183 ms | 182 ms | 179 ms | 196 ms | 190 ms | 207 ms |
+
+- **Per forwarded call:** +2.0 µs over the in-kernel null call with PCID (was +2.5), and
+  **+2.2 µs without PCID** (was +3.8): the 3 µs budget is now met both ways. Without PCID
+  the gain is the global kernel pages (with them off: +3.2); with PCID they add little,
+  since the kernel half's entries already stayed tagged per PCID; there the gain is part 2
+  (no kernel lock taken three times per call, one scheduler-lock step per switch).
+- **Concurrency rule met:** two threads on 2 CPUs now take 2.19 µs per call against 2.73
+  for one thread (before: 3.94 against 3.21). Same for `keyctl` (2.21 against 2.81).
+- **Copy-in table:** `add_key` (two strings and a payload) 7.0 → 5.4 µs, `keyctl`
+  DESCRIBE (a buffer out) 5.7 → 5.0 µs: each pointer no longer costs a client memory call.
+- **Calls that were not moved:** within noise, except the scheduler's own paths:
+  `sched_yield` +6 % and a yield between two threads +8 %, futex round trip +4 % (the
+  scheduler's new checks, and the per-CPU frame copy of kernel-mode trap returns). Within
+  the +10 % budget of section 6.6 for calls that stay in the kernel; not zero. Without
+  PCID the pipe and Unix socket round trips got 30 % and 16 % faster (global pages).
+- **IPC to a ring-3 server** (the probe, endpoint 0x22): Handoff unchanged (5.9 → 5.8),
+  Queued +3 % (18.2 → 18.8); inside one system call Queued +5 % (8.6 → 9.0).
+- **KDE password to desktop** (`kde.sh`, 3 boots each, alternating, a suite VM running
+  beside some of them): the desktop is drawn at 21.7 s before and 22.4 s after (+3 %),
+  and fully settled at 25.3 and 25.9 s (+3 %). Within the 5 % budget (the spread between
+  runs is about 3 %). (Wave 3 never measured this; under heavier host load the same
+  kernel gave 31.7, 31.7 and 36.1 s, so only side-by-side runs compare.)
+- **Not measured here:** apt-get, tar and the Firefox start (`work.sh`).
+
+### 12.2 What it means for the budget and for step 6a
+
+| What | Budget (6.6) | Before | After |
+|---|---|---:|---:|
+| Added per forwarded call, PCID | ≤ +3.0 µs | +2.5 | **+2.0** |
+| Added per forwarded call, no PCID | ≤ +3.0 µs | +3.8 (missed) | **+2.2** |
+| Calls that stay in the kernel | ≤ +10 % | | ≤ +8 % (`sched_yield`, yields), most unchanged |
+| Concurrency: 2 threads on 2 CPUs not slower per call than 1 | met | missed (3.94 > 3.21) | **met (2.19 < 2.73)** |
+| KDE password to desktop | ≤ +5 % | 21.7 s (median of 3: 22.4, 21.7, 21.7) | **22.4 s (+3 %)** (23.1, 22.4, 22.4) |
+
+**For step 6a (the VFS):** a forwarded file call should now cost about **+2.0 µs** with
+PCID, or +2.2 without it, plus what the server itself spends; path arguments and small
+structures come with the call (no `SYS_LX_READ_STR` per path). A warm `find /usr` with
+about 77,000 forwarded calls (section 6.5) would then add about 0.15 s: +25 % on the
+section 6.5 baseline (0.62 s), +35 % on today's faster one (0.44 s here). That is at the
+edge of the 35 % budget: step 6a should still cut forwards (a server-side name cache,
+fewer `open_ref`/`release` round trips) or keep the descriptor-table fast paths (decision
+2). The two-CPU case is no longer serialized, so concurrent tools scale.
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.
