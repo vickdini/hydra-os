@@ -14,7 +14,8 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 2 | net-server, shell part 2, Linux-layer design | Merged, pushed, deployed (ecca368) | 91,702 |
 | 3 | PCID, Linux layer step 1 | Merged, pushed, deployed (5027d87) | 93,725 |
 | 4 | Linux layer step 2, faster forwarding | **Running**, started 2026-11-18 | |
-| 5–9 | Linux layer steps 3–8 | Planned (below) | about 50,000 expected at the end |
+| 5–9 | Linux layer steps 3–8, plus the personality hook (wave 5) | Planned (below) | about 50,000 expected at the end |
+| 10–12 | Shared POSIX core, then FreeBSD and macOS programs | Planned (below) | |
 
 - **Why the line count rose in wave 3:** step 1 added the forwarding machinery (`src/lx`, 946 lines) and PCID (`src/arch/pcid.rs`, 365 lines). It also keeps the in-kernel copy of each moved piece, as the switch back to the kernel (`lx=kernel`), until a later step deletes it.
 - **Today:** the Linux layer (`src/compat/linux`) is 51,444 lines, still mostly in the kernel. The ring-3 drivers and servers (`userland/drivers`) are 22,339 lines.
@@ -175,13 +176,13 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
 
 | Wave | Steps (design 7.2) | What moves | Needs first | Agent-days |
 |---|---|---|---|---:|
-| **5** | **3:** network sockets and netlink, as net-server's client<br>**4:** Unix sockets, pipes, event descriptors (in parallel: different files) | `inet`, `sockopt`, `rtnetlink`, `netlink` (about 2,900 lines); `unix`, `socket`, pipes, `eventfd`, `timerfd`, `signalfd`, `pidfd` (about 3,300) | Wave 4's server-object descriptors | 4–5 and 5–6 |
+| **5** | **3:** network sockets and netlink, as net-server's client<br>**4:** Unix sockets, pipes, event descriptors (in parallel: different files)<br>**Personality hook** (a small third group, see "Waves 10–12") | `inet`, `sockopt`, `rtnetlink`, `netlink` (about 2,900 lines); `unix`, `socket`, pipes, `eventfd`, `timerfd`, `signalfd`, `pidfd` (about 3,300); nothing moves for the hook | Wave 4's server-object descriptors | 4–5, 5–6 and 3–4 |
 | **6** | **5a:** sound<br>**5b:** terminals, DRM and input | `snd` (2,137); `tty`, `pty` (1,583); `drm`, `evdev` (2,309) | **Your decision:** where sound and the display go | 6–7 |
 | **7** | **6a:** VFS, mounts, pseudo files, the descriptor table (alone: the largest and riskiest step) | about 17,000 lines | **Your decision:** whether the VFS fast paths stay in the kernel | 12–14 |
 | **8** | **6b:** the rest of the file side<br>**7:** processes and signal policy (in parallel) | `io_uring`, `aio`, `inotify`, `fanotify`, `fuse`, `landlock`, `acl`, `abac` (about 7,150); `proc` policy, `process`, `execve`, `ns`, `limits`, timers, `admin` (about 5,900) | Step 6a | 5–6 and 7–8 |
 | **9** | **8:** debugging and the last pieces, plus the final cleanup | `ptrace` policy, `perf`, `userfaultfd` glue, System V shared memory; the dispatcher shrinks to the trap and the local calls | Steps 6b and 7 | 4–6 |
 
-- **Total left after wave 4:** about 43–52 agent-days of group work, plus the lead's merges and checks.
+- **Total left after wave 4:** about 46–56 agent-days of group work for waves 5–9 (including the personality hook), plus the lead's merges and checks.
 - **The end state:** about 45,000 lines moved out. The kernel keeps the trap, memory management and faults, futex, threads, signal delivery and the ptrace stop mechanism (about 6,000 lines of Linux support), and should be about 50,000 lines in total.
 
 **Wave 5 detail:**
@@ -189,6 +190,12 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
   - Tests: `apt-get update`, Firefox loading pages, download throughput before and after, and killing net-server and linux-server.
 - **Step 4:** pipes and Unix sockets carry D-Bus and Wayland, so their speed shows at once on the desktop. Budget: pipe and Unix round trips no slower than today.
 - **Temporary primitives:** step 4 adds two, path lookup for socket files and descriptor passing between processes. Step 6a removes them.
+- **Personality hook:** small kernel changes that prepare for programs from other systems (waves 11–12). It changes no behavior for Linux programs.
+  - Each process gets a personality, chosen from its ELF marking (the OS/ABI byte and the ABI note) or by its loader. Linux stays the default.
+  - The forwarding table is looked up per personality instead of being one global Linux table. The cost must stay one load per system call.
+  - The trap returns results in the personality's convention. Linux returns a negative error number; the BSDs set the carry flag and return a positive error.
+  - Signal numbers and the signal frame are chosen per personality.
+  - Tests: the full suite, the forwarded-call budget unchanged, and a tiny test program marked as a non-Linux personality whose calls reach a stub table.
 
 **Wave 6 detail:** the natural home for DRM and input is a display/input server, not necessarily the Linux server. Sound can live in the Linux server or next to the hda driver. The same display server could later serve native (non-Linux) programs, such as a native Wine back end or Mac programs.
 
@@ -197,16 +204,57 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
 - If its fast paths stay in the kernel, the step is smaller, but the kernel keeps file-system code for good.
 - Wave 4's numbers will show which is realistic, so this decision is best made after wave 4.
 
+### Waves 10–12: programs from other systems (planned)
+
+By the end of wave 9, `linux-server` owns the files, descriptors, sockets, pipes, processes and signal policy. It is then really a general POSIX server with a Linux front end. These waves use that to run FreeBSD and macOS programs **without Linux as an intermediary**: their calls go to a shared core, not through Linux system calls.
+
+**Why FreeBSD and macOS go together.** The BSD half of macOS (system calls, sockets, signals, `kqueue`, `sysctl`) came from FreeBSD. The two are not binary-compatible: system call numbers, structure layouts and constants differ. But they share one model, which differs from Linux in the same ways:
+- `kqueue` instead of `epoll`;
+- `sysctl` instead of most of `/proc`;
+- socket addresses that carry their length;
+- errors returned in the carry flag.
+
+So one **BSD core** serves both, with a thin front end each. macOS adds Mach on top.
+
+**Why FreeBSD first.** It is the easier proving ground for the BSD core:
+- its user space (C library, base system, `pkg` packages) is open source, and installs as a `/freebsd` root like today's `/ubuntu`;
+- its programs are ELF, which Hydra already loads;
+- its desktop programs use the same Wayland, Mesa and Qt stack as Linux. They can draw through the KDE compositor over a shared Unix socket, so graphics come almost free;
+- it has its own test suite (`kyua`) to measure progress.
+
+| Wave | What | Needs first | Agent-days (rough) |
+|---|---|---|---:|
+| **10** | **The core split:** `linux-server` becomes a shared POSIX core (VFS, descriptors, sockets, pipes, processes, signals) with Linux as one front end. No behavior change for Linux programs | Wave 9 | 5–7 |
+| **11** | **FreeBSD programs:** a FreeBSD front end, a `/freebsd` root from `base.txz`, then `pkg` and graphical programs | Waves 5 (hook) and 10 | 15–25 |
+| **12 and later** | **macOS programs (Intel builds only):** a macOS front end on the BSD core, a `mach-server` for Mach traps and ports, and a root of Darling's open-source frameworks | Wave 11 | large; graphics decide it |
+
+**Wave 11 detail, the FreeBSD front end:**
+- **Threads and locks:** `thr_new` and `_umtx_op`, mapped onto the kernel's existing thread and futex primitives.
+- **`kqueue`:** built on wave 4's readiness words.
+- **`sysctl`:** FreeBSD's C library asks it for many things: the CPU count, the OS version, random bytes.
+- **File and socket calls:** FreeBSD's `stat`, `getdirentries` and `fcntl` layouts and the socket constants.
+- **Security features:** Capsicum (`cap_enter`) and jails, first as stubs, later mapped onto Hydra's ABAC and namespaces.
+- **Tests:** the base system's tools, `pkg install`, parts of `kyua`, and a graphical FreeBSD program on the KDE desktop.
+- **Not included:** FreeBSD's own `zfs` and `zpool` tools. They talk to a kernel module, which Hydra's zfs-server does not provide.
+
+**Wave 12 detail, macOS:**
+- **The bottom layer:** Darling's frameworks are macOS code. Only their bottom layer (`libsystem_kernel`) talks to the system, so it is rebuilt to call Hydra's macOS front end and `mach-server` instead of Linux.
+- **Mach:** Hydra's IPC (endpoints, request IDs, page grants) is close to Mach's ports and out-of-line memory.
+- **Graphics are the hard part.** Darling's AppKit and CoreGraphics are incomplete. Without Linux in the path, they need back ends for Hydra's display server (wave 6). Metal needs a Metal-on-Vulkan layer and a GPU driver, which Hydra does not have. Command-line Mac programs are the realistic first goal.
+- **Limits:**
+  - only Intel or universal binaries run on x86_64 machines, and macOS 26 is the last macOS for Intel;
+  - Apple's own frameworks cannot be shipped.
+
+**The same pattern applies to Windows programs.** A Wine back end that talks to the POSIX core or to Hydra directly, instead of through Linux system calls, would be a front end of the same kind. It is likely more useful than macOS, because Windows programs already run under Wine today.
+
+**A shortcut, if FreeBSD programs are wanted sooner.** Translate FreeBSD calls into Linux calls inside `linux-server`, as FreeBSD's own "Linuxulator" does in the other direction. It works earlier, with only the wave 5 hook, but it puts Linux in the path, and the core split would throw most of it away. Use it only if a specific FreeBSD program is needed before wave 10.
+
 ### Alongside the waves (open items)
 
 These are not group work yet, but should not be forgotten:
 - **First test on the real NUC** (i5-4250U): VT-d on in the firmware, the IOMMU log lines, the PCID boot line, e1000e networking, xHCI input, and the installer. No wave has run on real hardware yet. This needs you at the machine; a good time is after wave 4.
 - **The rare `regstress` hang:** both virtual CPUs spinning, once in 6 runs on wave 2's merge, not reproduced since. `suite_loop.sh` takes a task dump if it happens again.
 - **The `lowmem` failure on q35:** the firmware loads the kernel where the test wants to map memory.
-- **Native personalities (ideas, not planned):**
-  - a Wine back end that talks to Hydra directly instead of through Linux system calls;
-  - Mac programs through a `mach-server` and a Darling-based root.
-  - Both would use the per-process forwarding table from step 1.
 
 ## Merge order and testing
 
@@ -243,3 +291,4 @@ These are not group work yet, but should not be forgotten:
 |---|---|---|
 | Where sound and the display go | Wave 6 (step 5) | A display/input server serving Linux programs, and later native ones too, is the design's suggestion |
 | Whether the VFS fast paths stay in the kernel for good | Wave 7 (step 6a) | Best decided with wave 4's forwarding numbers in hand |
+| Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 10 (the core split) | The wave 5 hook is cheap and serves all of them; the FreeBSD shortcut is only worth it for a specific program needed early |
