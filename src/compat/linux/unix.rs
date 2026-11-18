@@ -1505,11 +1505,9 @@ fn shutdown(sock: &Arc<UnixSocket>, how: u64) -> i64 {
 /// # Returns
 /// `Some(result)` if handled, or `None` if the syscall does not target an `AF_UNIX` socket.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
-    // Group 13 (wave 5, step 4): Unix sockets live in linux-server unless switched back
-    // (`lx=kernel`); calls on its sockets reach it through `ServerObject::socket_call`
-    if (num == 41 || num == 53) && a[0] as u32 == AF_UNIX && crate::lx::step4() {
-        return Some(crate::lx::call_plain(num, a));
-    }
+    // (Group 13, wave 5, step 4: `socket`/`socketpair(AF_UNIX)` reach linux-server at the
+    // trap, by family, unless switched back with `lx=kernel`; calls on its sockets by
+    // descriptor, `bind`/`connect` through `ServerObject::socket_call` and `server_call`)
     match num {
         41 => {
             // socket(domain, type, protocol)
