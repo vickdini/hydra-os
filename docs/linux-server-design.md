@@ -935,6 +935,33 @@ edge of the 35 % budget: step 6a should still cut forwards (a server-side name c
 fewer `open_ref`/`release` round trips) or keep the descriptor-table fast paths (decision
 2). The two-CPU case is no longer serialized, so concurrent tools scale.
 
+### 12.3 Step 2's calls after the wave 4 merge
+
+At the merge (af5c30e) Group 9's calls (`mq_*`, `semop`, `msg*`, `bpf`) were 3 to 10 times
+slower forwarded than on Group 9's own branch. The cause, from the `[prof] lx:` counters:
+their table entries carry extras (the descriptor's server object, the IPC namespace, the
+umask), so the lock-free entry declined them; on the path under the kernel lock the caller
+blocked as needing the lock, and the worker, answering without it, could never switch
+straight back: every one of their answers (2,040,054 of 2,040,054 in the benchmark) woke
+the caller through the scheduler, while every `lx_null`/`keyctl` answer switched back.
+
+The fix (3f3fcdd): the lock-free entry gathers the extras itself (the IPC namespace with
+the per-CPU identity; the descriptor table with `try_lock`, falling back to the ordinary
+path when busy; the object held across the call as before), and the path under the kernel
+lock waits lock-free and takes the lock again afterwards. Afterwards every answer of these
+calls switched straight back.
+
+| Call (µs, KVM, 2 CPUs) | In the kernel (`lx=kernel`) | Forwarded at the merge | Forwarded after the fix | Group 9's branch |
+|---|---:|---:|---:|---:|
+| `mq_timedsend`+`mq_timedreceive` round trip (2 calls) | 2.27 | 25.9 | **7.2** | 8.16 |
+| `semop` | 1.40 | 12.9 | **3.5** | 4.13 |
+| `msgsnd`+`msgrcv` round trip (2 calls) | 2.74 | 27.7 | **7.2** | 8.31 |
+| `bpf` map lookup (as root) | 1.52 | 14.2 | **4.8** | 5.49 |
+| `lx_null` / `keyctl` (unchanged) | 0.69 / 0.86 | 2.87 / 2.98 | 2.88 / 2.95 | |
+
+So about +2.0 to +2.5 µs per forwarded call, as for the null call; `bpf` +3.3 (it also
+reads the attribute block's descriptor from user memory in the trap).
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.

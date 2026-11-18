@@ -145,6 +145,24 @@ Anything slow on the way takes the kernel lock first: a page of a copy-in argume
 in, a signal for the caller (delivered the ordinary way on the way out), a task that was
 killed meanwhile, a call during a driver call's hand-off (the ordinary path).
 
+**Step 2's calls** (after the wave 4 merge) carry more than their arguments: the server
+object of the descriptor in `args[0]` (`T_FD0`) or in the bpf attribute block's first u32
+(`T_FDAT1`), the IPC namespace (`T_IPC`), the umask (`T_UMASK`). The lock-free path gathers
+them too: the IPC namespace comes with the per-CPU identity (unshare, setns and execve bump
+its epoch); the descriptor table is taken with `try_lock` (busy: the ordinary path, since
+its holder may be in a driver call) for the object and the umask. The object's reference
+is held until the answer, as on the ordinary path, so a `close` on another thread cannot
+overtake the call; a last reference (a close came meanwhile) is dropped under the kernel
+lock.
+
+**The path under the kernel lock** (traced or seccomp-filtered callers, `read`/`write`/
+`ioctl` on server objects through `call_obj`) waits the same lock-free way and takes the
+kernel lock again afterwards. A caller blocked as needing the lock could otherwise never be
+switched back to directly by a worker answering without it: it would be woken through the
+scheduler every time (that made step 2's calls 3 to 10 times slower at the merge).
+`linux prof show` prints a `[prof] lx:` line: calls forwarded, on the lock-free path,
+queued, failed, and answers switched straight back or woken the ordinary way.
+
 **Why no FPU state moves:** the direct switch only ever resumes tasks that blocked at one of
 `src/lx`'s own yield points (`lx_yield`, `switch_to_task`), whose `asm!` declares every
 vector and x87 register clobbered (`clobber_abi("sysv64")`), so the compiler keeps nothing
