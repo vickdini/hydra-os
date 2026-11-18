@@ -874,9 +874,13 @@ mach-server hands its port to every macOS task it creates.
 - **Command-line programs work:** `darling shell` gives a macOS `bash`/`zsh` with the
   usual Unix tools built from Apple's open source (`shell_cmds`, `file_cmds`, `text_cmds`,
   `system_cmds`, `network_cmds`, `adv_cmds`), Python, Perl, Ruby, `vim`, `nano`, `less`,
-  `curl`, `openssh`, `rsync` (all in its source tree). Darling's documentation also
-  describes installing Apple's Command Line Tools (`clang`, `ld`) and Homebrew; that was not
-  tried here.
+  `curl`, `openssh`, `rsync` (all in its source tree). Darling's "What to try" page
+  (docs.darlinghq.org, read 2026-11-18) lists as working: the shell tools, `uname`/`sw_vers`,
+  `nm`/`otool`, `ps`, `launchctl`, `defaults`, `hdiutil`, `installer`, `xtrace`, `curl`,
+  Python/Ruby/Perl, Apple's Command Line Tools with an installed SDK (`clang` for C,
+  `swiftc` for Swift), Homebrew "with issues with certain formulas" (`brew install wget`),
+  and Midnight Commander from a `.pkg`; GUI support is "experimental", for simple Cocoa
+  programs. None of this was run here.
 - **AppKit** is Cocotron's AppKit (140,000 lines of Objective-C) with **X11 and Wayland back
   ends**; the Wayland back end (12,490 lines) loads the host's `libwayland-client` and
   `libxkbcommon` with `dlopen`. Simple Cocoa programs open windows; complex ones do not.
