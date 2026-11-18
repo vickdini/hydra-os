@@ -13,7 +13,7 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 1 | IOMMU, retire compositor, concurrent IPC, shell part 1 | Merged, pushed (2c6bc80) | |
 | 2 | net-server, shell part 2, Linux-layer design | Merged, pushed, deployed (ecca368) | 91,702 |
 | 3 | PCID, Linux layer step 1 | Merged, pushed, deployed (5027d87) | 93,725 |
-| 4 | Linux layer step 2, faster forwarding | **Running**, started 2026-11-18 | |
+| 4 | Linux layer step 2, faster forwarding, FreeBSD/macOS step 0 | Merged (e15cd6a), checked | 96,061 |
 | 5–9 | Linux layer steps 3–8, plus the personality hook (wave 5) | Planned (below) | about 50,000 expected at the end |
 | 10–13 | Shared POSIX core, then FreeBSD and macOS programs | Planned (below); step 0 done in wave 4 | |
 
@@ -141,32 +141,46 @@ For the Linux-layer steps (waves 3 and later), section 7 of the design sets the 
   - calls that were not moved are unchanged, and KDE starts in 28–32 s.
 - **Not met:** two threads making forwarded calls are slower per call than one, because the kernel lock serializes the kernel part. Wave 4 takes this on.
 
-### Wave 4: Linux layer step 2, plus a faster forwarding path (running, started 2026-11-18)
+### Wave 4: Linux layer step 2, a faster forwarding path, and step 0 for FreeBSD/macOS (done, 2026-11-18)
 
-**Group 9 (`E:\os-9`, `mk-lxobj`): step 2 of the design**
-- **Server-object descriptors:** a descriptor kind whose operations go to linux-server.
-  - Readiness lives in a word shared with the kernel, so `poll`, `select` and `epoll` need no call to the server.
-  - Steps 3, 4 and 6 build on it.
-- **`sig_post`:** the server sends signals to processes.
-- **Blocking calls:** they answer "pending" and finish later, so they no longer tie up one of the 4 workers.
-- **What moves:**
-  - message queues (`mqueue`);
-  - System V messages and semaphores (shared memory stays in the kernel until step 8);
-  - `bpf`.
-  - The hard spot: the kernel's open path checks device permissions with bpf programs (`device_check`), which can't wait on an IPC call.
-- **Estimate:** 4–5 agent-days.
+**Group 9: step 2 of the design** ([linux-server-design.md](linux-server-design.md) section 12)
+- **Server-object descriptors:** linux-server owns them, and their readiness lives in words shared with the kernel, so `poll`, `select` and `epoll` (edge-triggered too) need no call to the server. There are 2,048 slots.
+- **`sig_post`** and native calls 60–61. Blocking calls answer "pending" and are finished later, so 16 callers blocked in `mq_receive` do not hold up anything else.
+- **Moved:** message queues, System V messages and semaphores, and `bpf`. bpf's device programs are handed back to the kernel, which still decides device opens itself (programs that use maps are refused).
+- **An old bug found during the checks:** the kernel's `FUTEX_WAKE_OP` changed its second word without an atomic operation. This crashed `kwin_wayland` about one KDE start in five (Qt keeps that word on a thread's stack). Fixed, with a new suite test (`wakeop`).
 
-**Group 10 (`E:\os-10`, `mk-lxfast`): a faster forwarding path**
+**Group 10: a faster forwarding path** (design section 13)
+- **The copy-in/copy-out table:** the kernel copies pointer arguments into the syscall page.
+- **Forwarding without the kernel lock:** two threads are now faster per call than one, so the concurrency rule is met.
+- **Global kernel pages:** with a self-test and an off switch (`noglobal`).
+- **After the merge,** it also put step 2's calls on the lock-free path.
 
-Three parts, each in its own commits, so a subset can be merged:
-- **A copy-in table in the syscall page:** the kernel copies pointer arguments for the server, instead of the server fetching each one with an extra call.
-- **Forwarding without the kernel lock,** to meet the concurrency rule.
-- **Global kernel pages,** so kernel mappings survive address-space switches. A boot option turns them off.
-- **Also:** it measures KDE start time with step 1, which wave 3 never did.
+**Group 11: step 0 for FreeBSD and macOS programs** ([personality-design.md](personality-design.md), see "Waves 10–13").
 
-The goal is a forwarded call clearly under +3 µs with PCID, and within +3 µs without it. Later steps forward much hotter calls, and the metadata-heavy budget for step 6a depends on this.
+**Measured on the final merge** (KVM, 2 CPUs; µs; "in-kernel" is the same build with `lx=kernel`):
 
-**Merge order:** decided when both are done; expect one rebase or a lead merge. After the merge: all checks, then push and deploy with your OK.
+| Call | In-kernel | Forwarded | Added |
+|---|---:|---:|---:|
+| Null call | 0.65 | 2.87 | +2.2 |
+| `keyctl` (one thread / two threads) | 0.72 / 0.77 | 3.40 / 3.00 | +2.7 / +2.2 |
+| `semop` | 1.28 | 3.54 | +2.3 |
+| `mq_send` + `mq_receive` (2 calls) | 2.22 | 7.62 | +2.7 per call |
+| `msgsnd` + `msgrcv` (2 calls) | 2.61 | 7.57 | +2.5 per call |
+| bpf map lookup | 1.46 | 4.84 | +3.4 (reads two more pointers the table cannot describe) |
+
+- Calls that were not moved are unchanged.
+- Fresh KDE logins settle in 25–30 s.
+
+**Checks on the final merge:**
+- full suite 78/78, and 3 runs in a row with no freeze;
+- IOMMU suite 77/78 (`lowmem` only);
+- host tests 663;
+- KDE with Firefox, console, sound and Wine;
+- KDE with USB input;
+- 4 fresh KDE logins with no crash;
+- the installer test (stick → disk → first boot → new user's desktop).
+
+**Kernel size:** `src/` grew to 96,061 lines, because each moved piece's in-kernel copy stays as the `lx=kernel` switch back. Wave 5 deletes the copies of waves 3 and 4.
 
 ### Waves 5–9: the rest of the Linux layer (planned)
 
