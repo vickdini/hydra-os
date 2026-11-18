@@ -7,7 +7,7 @@
  * For each timer kind (setitimer ITIMER_REAL, ITIMER_PROF, timer_create SIGEV_SIGNAL) the
  * test counts the signals of a 1 ms periodic timer while the main thread sleeps in
  * sigsuspend (reference count), then while it spins without any system call (the TSC
- * measures the time). The busy count must be at least 70 % of the reference (both are
+ * measures the time). The busy count must be at least 70 % of the reference (50 % for ITIMER_PROF) (both are
  * limited by the kernel's timer resolution: ~100/s on Hydra, ~1000/s on Linux). alarm(1)
  * must interrupt a busy loop within 2 s.
  *
@@ -146,7 +146,10 @@ int main(int argc, char **argv) {
         spin_ms(ms);
         long busy = seen; /* read before the next system call delivers more */
         arm(kind, 0);
-        int ok = idle > 0 && busy * 10 >= idle * 7;
+        /* CPU time is sampled at ticks and loses what the host steals from the virtual CPU:
+         * the CPU-time timer, compared with real time, gets a lower bar (the bug gave 0-10 %) */
+        int bar = kind == K_PROF ? 5 : 7;
+        int ok = idle > 0 && busy * 10 >= idle * bar;
         printf("%s %s: %ld signals while sleeping, %ld while spinning (%ld %%)\n", ok ? "PASS" : "FAIL", names[kind], idle,
                busy, idle ? busy * 100 / idle : 0);
         if (!ok) fails++;
