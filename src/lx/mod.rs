@@ -659,7 +659,116 @@ fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     }
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
-    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl))
+    loop {
+        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl));
+        // A net wait ended (Group 12): the same call again, at once
+        if r != crate::ipc::protocol::LX_RETRY {
+            return r;
+        }
+        NET_RETRIES.fetch_add(1, Ordering::Relaxed);
+        c.note_seq = notes_head();
+        c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
+    }
+}
+
+// ----------------------------------------------------------------------
+// Net waits (Group 12, wave 5): blocked socket calls woken by net-server's doorbell
+// ----------------------------------------------------------------------
+//
+// A socket call linux-server cannot answer yet (nothing to receive, no connection to
+// accept, a connect in progress, no room to send) registers the net-server handle it waits
+// on (`LX_OBJ_NETWAIT`) and is answered "pending". When net-server's doorbell lists that
+// handle, the kernel's hook ([`net_event`]) completes the request with `LX_RETRY` and the
+// caller makes the same call again ([`call_with`]): one wake-up, as when the sockets were the
+// kernel's, instead of a hop through linux-server's main thread. No wake-up is lost: the
+// registration compares the handle's readiness word with the one the server saw under the
+// same lock the hook takes, and net-server writes the word before it lists the handle.
+
+/// linux-server's main thread needs net-server's events (`LX_OBJ_RELAY`): it keeps calls
+/// waiting with a deadline or with part of their work done.
+static RELAY_SERVER: AtomicBool = AtomicBool::new(false);
+/// Internet sockets someone waits on in `poll`/`select`/`epoll` (their readiness words must
+/// follow net-server's): counted once per object ([`obj`]).
+pub static WATCHED_NET: AtomicU64 = AtomicU64::new(0);
+
+/// Whether net-server's doorbell must reach linux-server's main thread: it relays readiness
+/// to the words of watched sockets and tries its own waiting calls again. Without either,
+/// the words of sockets nobody polls may lag; the main thread catches up from net-server's
+/// event ring when the relay is wanted again ([`relay_on`]).
+pub fn relay_wanted() -> bool {
+    RELAY_SERVER.load(Ordering::Acquire) || WATCHED_NET.load(Ordering::Acquire) != 0
+}
+
+/// The relay is wanted again: the main thread takes the events it missed now.
+pub fn relay_on() {
+    crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, crate::ipc::protocol::NOTIFY_LX_NET);
+}
+
+/// `LX_OBJ_RELAY(on)`: linux-server keeps calls that need the relay (`on`) or none any more.
+pub fn set_relay(on: bool) -> i64 {
+    if !RELAY_SERVER.swap(on, Ordering::AcqRel) && on {
+        relay_on();
+    }
+    0
+}
+
+/// Registered net waits: `(net-server handle, request id)`.
+static NETWAITS: Mutex<alloc::vec::Vec<(u32, u64)>> = Mutex::new(alloc::vec::Vec::new());
+/// Calls made again after a net wait ended.
+pub static NET_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+fn netwaits<R>(f: impl FnOnce(&mut alloc::vec::Vec<(u32, u64)>) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| f(&mut NETWAITS.lock()))
+}
+
+/// `LX_OBJ_NETWAIT(id, handle, word)`: 1 if the word changed (try again), 0 registered.
+pub fn netwait(id: u64, handle: u32, word: u64) -> i64 {
+    if client_of(id).is_none() {
+        return ESRCH;
+    }
+    netwaits(|w| {
+        if crate::net::client::raw_word(handle) != word {
+            return 1;
+        }
+        // Waits whose call ended otherwise (its process went) are dropped now and then
+        if w.len() >= 256 {
+            w.retain(|&(_, i)| client_of(i).is_some());
+        }
+        w.push((handle, id));
+        0
+    })
+}
+
+/// `LX_OBJ_NETCANCEL(id)`: 1 if request `id`'s net wait was still registered.
+pub fn netcancel(id: u64) -> i64 {
+    netwaits(|w| {
+        let before = w.len();
+        w.retain(|&(_, i)| i != id);
+        (w.len() != before) as i64
+    })
+}
+
+/// net-server listed `handles` in its event ring (`None`: anything may have changed, or it
+/// went away): the requests waiting on them are made again.
+pub fn net_event(handles: Option<&[u32]>) {
+    let ids: alloc::vec::Vec<u64> = netwaits(|w| {
+        let mut out = alloc::vec::Vec::new();
+        if w.is_empty() {
+            return out;
+        }
+        w.retain(|&(h, i)| {
+            if handles.is_none_or(|hs| hs.contains(&h)) {
+                out.push(i);
+                false
+            } else {
+                true
+            }
+        });
+        out
+    });
+    for id in ids {
+        complete_as_kernel(id, crate::ipc::protocol::LX_RETRY);
+    }
 }
 
 /// [`call_with`] with the copies made.
@@ -1365,6 +1474,11 @@ pub fn complete(id: u64, result: i64) -> i64 {
     if let Err(e) = server_caller() {
         return e;
     }
+    complete_as_kernel(id, result)
+}
+
+/// [`complete`] without the check that the server calls it (the net-server doorbell hook).
+fn complete_as_kernel(id: u64, result: i64) -> i64 {
     let client = lx(|s| {
         // Still being served (its "pending" answer not given yet): kept for that answer
         if let Some(r) = s.reqs.iter_mut().find(|r| r.id == id && r.state == RState::Delivered && !r.early) {
@@ -1576,6 +1690,9 @@ pub fn on_signal(bits: u64) {
 /// threads end, and the crash policy runs ([`recover_task`]).
 fn server_gone() {
     let was_online = ONLINE.swap(false, Ordering::AcqRel);
+    netwaits(|w| w.clear());
+    RELAY_SERVER.store(false, Ordering::Release);
+    WATCHED_NET.store(0, Ordering::Release);
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
     obj::offline();

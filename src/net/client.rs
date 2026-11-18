@@ -211,6 +211,19 @@ fn word(id: u32) -> Option<u64> {
     (v as u32 == sid).then_some(v)
 }
 
+/// The whole readiness word of the running server's handle `sid` (0: not published): for
+/// linux-server's net waits (`crate::lx::netwait`).
+pub fn raw_word(sid: u32) -> u64 {
+    let Some(w) = service::window(ENDPOINT_NET_SERVER) else { return 0 };
+    let slot = (sid as usize) & (NETS_SLOTS - 1);
+    let v = unsafe { core::ptr::read_volatile((w.as_ptr().add(NETS_SOCKS_OFF) as *const u64).add(slot)) };
+    if v as u32 == sid {
+        v
+    } else {
+        0
+    }
+}
+
 /// Readiness bits (`NETS_R_*`) of a readiness word.
 fn bits(w: u64) -> u64 {
     (w >> 32) & 0xFF
@@ -221,10 +234,12 @@ fn bits(w: u64) -> u64 {
 /// (`SIGNAL_GONE`) or the ring overflowed.
 pub fn on_signal(arg: u64) {
     // linux-server, net-server's other client (wave 5), takes the ring itself: it is told
-    if crate::lx::is_online() && crate::lx::family_moved(2) {
+    if crate::lx::is_online() && crate::lx::family_moved(2) && (arg == service::SIGNAL_GONE || crate::lx::relay_wanted()) {
         service::notify(ENDPOINT_LINUX_SERVER, if arg == service::SIGNAL_GONE { NOTIFY_LX_NET_GONE } else { NOTIFY_LX_NET });
     }
     if arg == service::SIGNAL_GONE {
+        // linux-server's net waits: made again (they find their sockets dead)
+        crate::lx::net_event(None);
         // Its handles mean nothing any more; the sockets stay (dead) until closed
         EVENT_TAIL.store(0, Ordering::Release);
         handles(|_, by| by.clear());
@@ -235,12 +250,15 @@ pub fn on_signal(arg: u64) {
     let head = status_word(w, NETS_ST_EVENT_HEAD);
     let tail = EVENT_TAIL.swap(head, Ordering::AcqRel);
     if head < tail || head - tail > NETS_EVENTS as u64 {
+        crate::lx::net_event(None);
         wake_all();
         return;
     }
     let ids: Vec<u32> = (tail..head)
         .map(|n| unsafe { core::ptr::read_volatile((w.as_ptr().add(NETS_EVENTS_OFF) as *const u32).add(n as usize % NETS_EVENTS)) })
         .collect();
+    // linux-server's calls waiting on these handles are made again (Group 12)
+    crate::lx::net_event(Some(&ids));
     let queues: Vec<Arc<WaitQueue>> = handles(|h, by| ids.iter().filter_map(|sid| by.get(sid).and_then(|k| h.get(k)).map(|x| x.wq.clone())).collect());
     for q in queues {
         q.wake_all();

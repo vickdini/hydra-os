@@ -529,7 +529,7 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
         }
         45 => {
             let peek_len = a[2] as usize;
-            return match recv(cx, &sock, slot, peek_len, a[3]) {
+            return match recv(cx, &sock, slot, peek_len, a[3], prog) {
                 Ok(Some((data, src, _))) => {
                     if let Err(e) = cx.copy_out_any(a[1], &data) {
                         return Out::Done(e);
@@ -615,7 +615,7 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
         55 => getsockopt(cx, &sock),
         // read, write, readv, writev, ioctl on the socket
         0 => {
-            return match recv(cx, &sock, slot, a[2] as usize, 0) {
+            return match recv(cx, &sock, slot, a[2] as usize, 0, prog) {
                 Ok(Some((data, _, _))) => match cx.copy_out_any(a[1], &data) {
                     Ok(()) => Out::Done(data.len() as i64),
                     Err(e) => Out::Done(e),
@@ -631,7 +631,7 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
                 Err(e) => return Out::Done(e),
             };
             let total: u64 = segs.iter().map(|s| s.1).sum();
-            return match recv(cx, &sock, slot, total as usize, 0) {
+            return match recv(cx, &sock, slot, total as usize, 0, prog) {
                 Ok(Some((data, _, _))) => match scatter(cx, &segs, &data) {
                     Ok(()) => Out::Done(data.len() as i64),
                     Err(e) => Out::Done(e),
@@ -655,8 +655,9 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
 
 /// `connect(addr, len)`.
 fn connect(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, addr: u64, len: u64, prog: &mut Prog) -> Out {
-    // A connect in progress, tried again: wait for the handshake
-    if prog.deadline.is_some() {
+    // A connect in progress, tried again (or made again after its net wait): wait for the
+    // handshake
+    if prog.deadline.is_some() || cx.c.flags & LX_CALL_RETRIED != 0 {
         let (id, dead) = {
             let s = sock.lock();
             (s.tcp, s.dead())
@@ -665,8 +666,17 @@ fn connect(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, addr: u64, len: u64, pro
         if dead {
             return Out::Done(stack::ECONNRESET);
         }
+        let snap = stack::word_raw(id);
         return match stack::tcp_state(id) {
-            stack::SYN_SENT => Out::Block,
+            stack::SYN_SENT => {
+                prog.wait_on = Some((id, snap));
+                if prog.deadline.is_none() {
+                    // (made again after a net wait: no deadline of its own)
+                    prog.on_signal = EINTR;
+                    return prog.wait(None);
+                }
+                Out::Block
+            }
             stack::CLOSED => Out::Done(stack::tcp_take_error(id).unwrap_or(stack::ECONNREFUSED)),
             _ => Out::Done(0),
         };
@@ -736,8 +746,10 @@ fn connect(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, addr: u64, len: u64, pro
             }
         }
     };
+    let snap = stack::word_raw(id);
     match stack::tcp_state(id) {
         stack::SYN_SENT => {
+            prog.wait_on = Some((id, snap));
             // An interrupted or timed-out connect keeps going in the background (Linux)
             prog.on_timeout = EINPROGRESS;
             let o = prog.wait(timeout);
@@ -896,7 +908,9 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
     if dead {
         return Out::Done(stack::ENETDOWN);
     }
+    let snap = stack::word_raw(lid);
     let Some(cid) = stack::tcp_accept(lid) else {
+        prog.wait_on = Some((lid, snap));
         return if cx.nonblock() { Out::Done(EAGAIN) } else { prog.wait(timeout) };
     };
     let (lport, rip, rport, lip) = stack::tcp_info(cid).unwrap_or((0, [0; 4], 0, [0; 4]));
@@ -997,8 +1011,10 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
                 Ok(d) => d,
                 Err(e) => return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { e }),
             };
+            let snap = stack::word_raw(id);
             match stack::tcp_send(id, &chunk) {
                 Ok(0) => {
+                    prog.wait_on = Some((id, snap));
                     if nonblock {
                         return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { EAGAIN });
                     }
@@ -1047,7 +1063,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
 /// One receive of at most `cap` bytes: `Some((data, source, truncated))`, or `None` when
 /// a blocking call must wait (a non-blocking one gets `EAGAIN`).
 #[allow(clippy::type_complexity)]
-fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64) -> Result<Option<(Vec<u8>, Option<([u8; 4], u16)>, bool)>, i64> {
+fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, prog: &mut Prog) -> Result<Option<(Vec<u8>, Option<([u8; 4], u16)>, bool)>, i64> {
     let (stream, tcp, shut_rd, dead) = {
         let s = sock.lock();
         (s.stream, s.tcp, s.shut_rd, s.dead())
@@ -1064,8 +1080,12 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64) -> 
             return Err(stack::ENETDOWN);
         }
         loop {
+            let snap = stack::word_raw(id);
             match stack::icmp_recv(id, peek) {
-                None => return wait(),
+                None => {
+                    prog.wait_on = Some((id, snap));
+                    return wait();
+                }
                 Some((_, d, _)) if !peek && filter.as_ref().is_some_and(|f| f(&d)) => continue,
                 Some((src, mut data, arrived)) => {
                     sock.lock().rx_stamp = Some(arrived);
@@ -1087,11 +1107,13 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64) -> 
         if cap == 0 {
             return Ok(Some((Vec::new(), None, false)));
         }
+        let snap = stack::word_raw(id);
         return match stack::tcp_recv(id, cap, peek) {
             Ok((d, false)) if d.is_empty() => {
                 if stack::tcp_state(id) == stack::CLOSED {
                     Ok(Some((d, None, false)))
                 } else {
+                    prog.wait_on = Some((id, snap));
                     wait()
                 }
             }
@@ -1103,6 +1125,8 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64) -> 
         return Err(stack::ENETDOWN);
     }
     let id = sock.lock().udp_id(slot)?;
+    let snap = stack::word_raw(id);
+    prog.wait_on = Some((id, snap));
     match stack::udp_recv(id, peek) {
         Some((ip, port, mut data, whole, arrived)) => {
             sock.lock().rx_stamp = Some(arrived);
@@ -1156,7 +1180,7 @@ fn recvmsg(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, msg: u64, flags: u64, pr
         Err(e) => return Out::Done(e),
     };
     let total: u64 = iovs.iter().map(|&(_, l)| l).sum();
-    let (data, src, trunc) = match recv(cx, sock, slot, total as usize, flags) {
+    let (data, src, trunc) = match recv(cx, sock, slot, total as usize, flags, prog) {
         Ok(Some(r)) => r,
         Ok(None) => return prog.wait(sock.lock().opts.rcv_timeout()),
         Err(e) => return Out::Done(e),

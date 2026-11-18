@@ -715,6 +715,9 @@ impl LxCall {
 /// [`LxCall::flags`]: a signal arrived for the caller while the call was being served (the
 /// server may answer `-EINTR`).
 pub const LX_CALL_INTERRUPTED: u64 = 1;
+/// [`LxCall::flags`] bit (Group 12): the call is made again after its net wait ended
+/// (`LX_OBJ_NETWAIT`): a `connect` then waits for its handshake instead of starting one.
+pub const LX_CALL_RETRIED: u64 = 2;
 
 // The copy-in/copy-out table (wave 4, Group 10). For the calls the kernel's table
 // (`src/lx/copy.rs`) describes, the kernel copies pointer arguments (paths, small structures,
@@ -962,3 +965,19 @@ pub const MSG_LX_PROC_NET: u32 = 0xA002;
 /// `SYS_SVC_CALL` timeout bit: a hand-off call (only linux-server calling net-server: its
 /// socket requests answer at once, like the kernel's own hand-off socket calls).
 pub const SVC_CALL_HANDOFF: u64 = 1 << 62;
+/// `SYS_LX_OBJ` operation: `(request id, net-server handle, readiness word seen)`: the
+/// request waits on the handle (a socket call that must block). 1: the handle's readiness
+/// word is no longer the one seen (try the call again now); 0: registered: the kernel's
+/// net-server doorbell completes the request with [`LX_RETRY`] when the handle has an event,
+/// and the caller makes the call again (the server answers it "pending" as usual).
+pub const LX_OBJ_NETWAIT: u64 = 18;
+/// `SYS_LX_OBJ` operation: `(request id)`: withdraws its net wait; 1 if it was still
+/// registered (the server then answers the request itself), 0 if not.
+pub const LX_OBJ_NETCANCEL: u64 = 19;
+/// `SYS_LX_OBJ` operation: `(on)`: linux-server keeps socket calls that need net-server's
+/// events relayed to its main thread (on), or none any more (the kernel then relays only
+/// while an Internet socket is watched by `poll`/`select`/`epoll`).
+pub const LX_OBJ_RELAY: u64 = 20;
+/// The answer to a forwarded call that means "make the same call again" (a net wait ended):
+/// handled by the kernel's forwarding, never seen by a Linux program (not an errno).
+pub const LX_RETRY: i64 = -4097;

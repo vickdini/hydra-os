@@ -55,11 +55,14 @@ pub struct Prog {
     /// The answer to a signal: `ERESTARTSYS` (restarted with `SA_RESTART`), `EINTR` for a
     /// call with a timeout, as Linux.
     pub on_signal: i64,
+    /// The net-server handle the call waits on and its readiness word as the attempt saw it
+    /// (for a net wait in the kernel, `LX_OBJ_NETWAIT`).
+    pub wait_on: Option<(u32, u64)>,
 }
 
 impl Prog {
     pub const fn new() -> Self {
-        Self { sent: 0, deadline: None, on_timeout: EAGAIN, on_signal: ERESTARTSYS }
+        Self { sent: 0, deadline: None, on_timeout: EAGAIN, on_signal: ERESTARTSYS, wait_on: None }
     }
 
     /// The call is about to wait, bounded by `timeout_ns` (fixed at the first wait).
@@ -93,6 +96,19 @@ struct Waiter {
 
 /// The blocked calls.
 static WAITERS: YLock<Vec<Waiter>> = YLock::new(Vec::new());
+/// The kernel relays net-server's events to the main thread for [`WAITERS`]
+/// (`LX_OBJ_RELAY`; switched on and off under that list's lock).
+static RELAY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Switches the relay off once no call waits here (the main thread, after its work).
+pub fn relay_check() {
+    let w = WAITERS.lock();
+    if w.is_empty() && RELAY.load(Ordering::Acquire) {
+        RELAY.store(false, Ordering::Release);
+        let _ = sys::lx_obj(LX_OBJ_RELAY, 0, 0, 0);
+    }
+    drop(w);
+}
 /// Per slot: events seen (see "No lost wake-ups" above).
 static SEQ: [AtomicU32; LX_OBJ_SLOTS] = [const { AtomicU32::new(0) }; LX_OBJ_SLOTS];
 /// Slots with a local event whose waiters the main thread tries again.
@@ -147,7 +163,28 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
                 return (r, 0);
             }
             Out::Block => {
+                // A wait on a net-server handle with no deadline and nothing done yet: the
+                // kernel's net-server doorbell makes the call again (no hop through the main
+                // thread); see "Net waits" in the kernel's src/lx
+                if let (Some((h, snap)), Some(None), 0) = (prog.wait_on.take(), prog.deadline, prog.sent) {
+                    match sys::lx_obj(LX_OBJ_NETWAIT, cx.id, h as u64, snap) {
+                        // The handle changed since the attempt saw it: once more
+                        Ok(1) => continue,
+                        Ok(_) => {
+                            net_waiting(cx.id, slot, cx.c.tgid);
+                            refresh(slot, false);
+                            return (0, LX_REPLY_PENDING);
+                        }
+                        Err(_) => {}
+                    }
+                }
                 let mut w = WAITERS.lock();
+                // net-server's events must reach the main thread while calls wait here (the
+                // kernel then also has it catch up on what it missed: the event-count check
+                // below sees it, or the main thread finds this waiter)
+                if !RELAY.swap(true, Ordering::AcqRel) {
+                    let _ = sys::lx_obj(LX_OBJ_RELAY, 1, 0, 0);
+                }
                 if SEQ[slot as usize].load(Ordering::Acquire) != seq {
                     // Something happened since the attempt began: once more
                     continue;
@@ -163,6 +200,57 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
             }
         }
     }
+}
+
+/// Calls waiting in the kernel on a net-server handle (`LX_OBJ_NETWAIT`): `(request id, slot,
+/// process)`. The kernel completes them itself (`LX_RETRY`); an entry stays here until a
+/// local event, a signal, its process's end or the list's size makes us look again, and
+/// `LX_OBJ_NETCANCEL` then says whether the wait was still registered.
+static NET_WAITING: YLock<Vec<(u64, u32, u64)>> = YLock::new(Vec::new());
+
+/// Records a net wait (and withdraws all when the list grows long: those still registered
+/// are made again, which is harmless).
+fn net_waiting(id: u64, slot: u32, tgid: u64) {
+    let old = {
+        let mut n = NET_WAITING.lock();
+        n.push((id, slot, tgid));
+        if n.len() > 128 {
+            core::mem::take(&mut *n)
+        } else {
+            Vec::new()
+        }
+    };
+    for (i, _, _) in old {
+        if i != id {
+            unwait(i, LX_RETRY);
+        }
+    }
+    // (the newest one stays registered either way)
+}
+
+/// Withdraws request `id`'s net wait; if it was still registered, answers it `result`.
+fn unwait(id: u64, result: i64) -> bool {
+    if sys::lx_obj(LX_OBJ_NETCANCEL, id, 0, 0) == Ok(1) {
+        let _ = sys::lx_complete(id, result);
+        true
+    } else {
+        false
+    }
+}
+
+/// Takes the net waits matching `f` out of the list.
+fn take_net_waiting(f: impl Fn(&(u64, u32, u64)) -> bool) -> Vec<(u64, u32, u64)> {
+    let mut n = NET_WAITING.lock();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n.len() {
+        if f(&n[i]) {
+            out.push(n.swap_remove(i));
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Tries the waiters of `slots` (all with `None`) again, completing those that finish.
@@ -223,6 +311,10 @@ fn retry(slots: Option<&[u32]>) {
 /// A local event on slot `slot` (a shutdown, a netlink message for it): its waiters are
 /// tried again by the main thread.
 pub fn poke(slot: u32) {
+    // Calls waiting in the kernel on this socket are made again
+    for (id, _, _) in take_net_waiting(|w| w.1 == slot) {
+        unwait(id, LX_RETRY);
+    }
     if (slot as usize) < LX_OBJ_SLOTS {
         SEQ[slot as usize].fetch_add(1, Ordering::AcqRel);
         POKED.lock().push(slot);
@@ -264,6 +356,11 @@ pub fn notified(bits: u64) {
 /// A signal arrived for the caller of pending request `id`: answered at once if it is one
 /// of ours (`true`).
 pub fn interrupted(id: u64) -> bool {
+    // A net wait (no deadline: restarted with SA_RESTART, as Linux)
+    if !take_net_waiting(|w| w.0 == id).is_empty() {
+        unwait(id, ERESTARTSYS);
+        return true;
+    }
     let w = {
         let mut w = WAITERS.lock();
         match w.iter().position(|x| x.c.id == id) {
@@ -284,6 +381,9 @@ pub fn interrupted(id: u64) -> bool {
 
 /// Process `tgid` ended: its blocked calls go (the kernel dropped them).
 pub fn on_exit(tgid: u64) {
+    for (id, _, _) in take_net_waiting(|w| w.2 == tgid) {
+        let _ = sys::lx_obj(LX_OBJ_NETCANCEL, id, 0, 0);
+    }
     WAITERS.lock().retain(|w| w.c.tgid != tgid);
     LATE_INTR.lock().clear();
 }

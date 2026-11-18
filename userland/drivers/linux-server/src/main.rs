@@ -147,6 +147,7 @@ fn serve_endpoint(srv: &mut Server) -> ! {
         notes::drain_all();
         // Sockets (wave 5): net-server's readiness relayed, blocked calls tried again
         socket::notified(bits);
+        socket::relay_check();
         complete_due();
         obj::flush();
     }

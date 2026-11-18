@@ -79,6 +79,12 @@ fn word(h: u32) -> Option<u64> {
     (v as u32 == h).then_some(v)
 }
 
+/// The whole readiness word of handle `h` (0: not published), as the kernel's net waits
+/// compare it (`LX_OBJ_NETWAIT`).
+pub fn word_raw(h: u32) -> u64 {
+    word(h).unwrap_or(0)
+}
+
 /// Readiness bits (`NETS_R_*`) of a word.
 fn bits(w: u64) -> u64 {
     (w >> 32) & 0xFF

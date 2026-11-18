@@ -92,6 +92,8 @@ pub struct ServerObject {
     /// Set when the server must not hear of this object's end (its install failed: the
     /// server frees the slot itself).
     quiet: AtomicBool,
+    /// Counted in [`super::WATCHED_NET`] (an Internet socket someone waited on).
+    watched: AtomicBool,
 }
 
 impl ServerObject {
@@ -137,6 +139,9 @@ impl Drop for ServerObject {
         if self.gen != GEN.load(Ordering::Acquire) {
             return;
         }
+        if self.watched.load(Ordering::Acquire) {
+            let _ = super::WATCHED_NET.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1)));
+        }
         let slot = self.slot as usize;
         reg(|r| {
             if r[slot].as_ref().is_some_and(|s| Arc::ptr_eq(s, &self.shared)) {
@@ -168,6 +173,13 @@ impl CharDevice for ServerObject {
             let words = (base + LX_OBJ_WATCHED_OFF as u64) as *const AtomicU64;
             // SAFETY: the bitmap lies in the window, mapped while the server is online
             unsafe { (*words.add(self.slot as usize / 64)).fetch_or(1 << (self.slot % 64), Ordering::SeqCst) };
+            // An Internet socket: net-server's events must reach its word from now on (the
+            // main thread catches up on what it missed and rings the doorbell)
+            if self.kind == crate::ipc::protocol::LX_OBJ_KIND_INET && !self.watched.swap(true, Ordering::AcqRel) {
+                if super::WATCHED_NET.fetch_add(1, Ordering::AcqRel) == 0 {
+                    super::relay_on();
+                }
+            }
         }
     }
 
@@ -334,6 +346,9 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Err(e) => e,
             }
         }
+        crate::ipc::protocol::LX_OBJ_NETWAIT => super::netwait(a, b as u32, c),
+        crate::ipc::protocol::LX_OBJ_NETCANCEL => super::netcancel(a),
+        crate::ipc::protocol::LX_OBJ_RELAY => super::set_relay(a != 0),
         crate::ipc::protocol::LX_OBJ_SIGTHREAD => {
             let Some(client) = super::client_of(a) else { return ESRCH };
             if !(1..=64).contains(&b) {
@@ -473,6 +488,7 @@ fn install(id: u64, desc: u64) -> i64 {
         uid: d.uid,
         gid: d.gid,
         quiet: AtomicBool::new(false),
+        watched: AtomicBool::new(false),
     });
     let dev: Arc<dyn CharDevice> = obj.clone();
     let r = {
