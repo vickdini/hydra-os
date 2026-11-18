@@ -763,6 +763,10 @@ pub const LX_PROC_KEYS_TEXT_MAX: usize = 0xF000;
 // [`LX_OBJ_CHANGED_OFF`] and rings `SYS_SVC_SIGNAL(ENDPOINT_LINUX_SERVER, LX_SIGNAL_OBJS)`,
 // and the kernel wakes the waiters.
 
+/// [`LxCall::obj_flags`] bit: `obj` is the object of the descriptor `args[1]` points to (its
+/// number in bits 32..62), not of `args[0]`.
+pub const LX_OBJ_FLAGS_AT1: u64 = 1 << 63;
+
 /// Number of server-object slots.
 pub const LX_OBJ_SLOTS: usize = 2048;
 /// [`LxCall::obj`]: no server object.
@@ -775,6 +779,13 @@ pub const LX_OBJ_OFF: usize = 0x21000;
 /// sets bit `s` (atomic or) after changing slot `s`; the kernel takes the words (atomic swap
 /// with 0) and wakes the objects' waiters.
 pub const LX_OBJ_CHANGED_OFF: usize = 0x29000;
+/// Window offset of the watched-slot bitmap (`LX_OBJ_SLOTS` bits): the kernel sets bit `s`
+/// (atomic or) the first time a task waits for slot `s` (`poll`, `select`, `epoll`) and never
+/// clears it; the server clears it when it hands the slot out again. The server rings the
+/// doorbell only for watched slots (an object nobody ever waited on costs no doorbell).
+/// Ordering: the kernel sets the bit before it reads the word; the server writes the word,
+/// then (after a full fence) reads the bit.
+pub const LX_OBJ_WATCHED_OFF: usize = 0x29100;
 /// `SYS_SVC_SIGNAL` bits from the server: readiness words changed.
 pub const LX_SIGNAL_OBJS: u64 = 1;
 

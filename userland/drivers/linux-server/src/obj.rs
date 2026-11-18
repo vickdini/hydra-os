@@ -42,6 +42,9 @@ pub fn alloc(kind: u32) -> Result<u32, i64> {
             s[i] = kind as u8;
             NEXT.store(((i + 1) % LX_OBJ_SLOTS) as u32, Ordering::Relaxed);
             write_word(i as u32, 0, 0, 0);
+            // Nobody waits for the new object yet
+            // SAFETY: the bitmap lies in the window; the kernel sets bits with atomic or
+            unsafe { (*bitmap(LX_OBJ_WATCHED_OFF).add(i / 64)).fetch_and(!(1 << (i % 64)), Ordering::AcqRel) };
             return Ok(i as u32);
         }
     }
@@ -62,6 +65,11 @@ pub fn free(slot: u32) {
     if (slot as usize) < LX_OBJ_SLOTS {
         SLOTS.lock()[slot as usize] = 0;
     }
+}
+
+/// The bitmap at window offset `off`, as u64 words.
+fn bitmap(off: usize) -> *const AtomicU64 {
+    (BASE.load(Ordering::Acquire) + off as u64) as *const AtomicU64
 }
 
 fn word_ptr(slot: u32) -> *mut u32 {
@@ -99,10 +107,17 @@ pub fn set_ready_ev(slot: u32, ready: u32, size: u64, event: bool) {
     }
     let edges = if ready & !old != 0 || event { edges.wrapping_add(1) } else { edges };
     write_word(slot, ready, edges, size);
-    let bits = (BASE.load(Ordering::Acquire) + LX_OBJ_CHANGED_OFF as u64) as *const AtomicU64;
-    // SAFETY: the bitmap lies in the window; the kernel takes it with atomic swaps
-    unsafe { (*bits.add(slot as usize / 64)).fetch_or(1 << (slot % 64), Ordering::AcqRel) };
-    DIRTY.store(true, Ordering::Release);
+    // The doorbell only for an object someone waits on (the kernel marks it before it reads
+    // the word; the fence orders this write before that read)
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let (w, b) = (slot as usize / 64, 1u64 << (slot % 64));
+    // SAFETY: the bitmaps lie in the window
+    let watched = unsafe { (*bitmap(LX_OBJ_WATCHED_OFF).add(w)).load(Ordering::SeqCst) } & b != 0;
+    if watched {
+        // SAFETY: as above; the kernel takes the changed bits with atomic swaps
+        unsafe { (*bitmap(LX_OBJ_CHANGED_OFF).add(w)).fetch_or(b, Ordering::AcqRel) };
+        DIRTY.store(true, Ordering::Release);
+    }
 }
 
 /// Rings the doorbell if words changed since the last time: the kernel wakes the waiters of

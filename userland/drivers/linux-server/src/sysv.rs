@@ -178,8 +178,10 @@ fn finish(done: Done) {
     }
 }
 
+/// Seconds since 1970 (`sem_otime`, `msg_stime`, ...), without a clock call
+/// ([`timeout::now_secs`]).
 fn now() -> i64 {
-    sys::clock().0 as i64
+    timeout::now_secs() as i64
 }
 
 /// Whether the caller may access an object with `perm` for `want` (4 read, 2 write).

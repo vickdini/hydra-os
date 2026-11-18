@@ -38,7 +38,7 @@ use crate::compat::linux::chardev::CharDevice;
 use crate::fs::FileDescriptor;
 use crate::ipc::protocol::{
     LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_BPF_DEVICE, LX_OBJ_CHANGED_OFF, LX_OBJ_COMM, LX_OBJ_FD, LX_OBJ_FDPATH, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY, LX_OBJ_OFF, LX_OBJ_PIN,
-    LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_UNPIN,
+    LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_UNPIN, LX_OBJ_WATCHED_OFF,
 };
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 use crate::task::TaskId;
@@ -161,6 +161,14 @@ impl CharDevice for ServerObject {
 
     fn add_wait_queues(&self, waits: &mut WaitSet) {
         waits.add(QueueRef::Shared(self.shared.wq.clone()));
+        // Someone waits for this object: the server rings the doorbell for it from now on
+        // (set before the caller reads the readiness word)
+        let base = WINDOW.load(Ordering::Acquire);
+        if base != 0 && self.slot().is_some() {
+            let words = (base + LX_OBJ_WATCHED_OFF as u64) as *const AtomicU64;
+            // SAFETY: the bitmap lies in the window, mapped while the server is online
+            unsafe { (*words.add(self.slot as usize / 64)).fetch_or(1 << (self.slot % 64), Ordering::SeqCst) };
+        }
     }
 
     fn rdev(&self) -> u64 {
@@ -207,6 +215,7 @@ pub(super) fn online(window: u64) {
     unsafe {
         core::ptr::write_bytes((window + LX_OBJ_OFF as u64) as *mut u8, 0, 16 * LX_OBJ_SLOTS);
         core::ptr::write_bytes((window + LX_OBJ_CHANGED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
+        core::ptr::write_bytes((window + LX_OBJ_WATCHED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
     }
     GEN.fetch_add(1, Ordering::AcqRel);
     WINDOW.store(window, Ordering::Release);

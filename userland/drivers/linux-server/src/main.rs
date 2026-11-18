@@ -117,6 +117,7 @@ fn main(args: &[&str]) {
 /// The main thread: heartbeats, kernel requests and notifications.
 fn serve_endpoint(srv: &mut Server) -> ! {
     loop {
+        timeout::update_clock();
         let now = sys::uptime_ticks();
         let timeout = match next_deadline(now) {
             Some(d) => d.saturating_sub(now).clamp(1, 100),

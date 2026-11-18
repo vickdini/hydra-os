@@ -50,7 +50,7 @@ use spin::Mutex;
 use crate::arch::syscall::SyscallFrame;
 use crate::ipc::protocol::{
     LxCall, ENDPOINT_LINUX_SERVER, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
-    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
+    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
 };
 use crate::ipc::service::ContiguousFrames;
 use crate::task::TaskId;
@@ -82,8 +82,15 @@ const T_SERVER: u8 = 1;
 /// Table bit (Group 9): `args[0]` is a descriptor; the call carries its server object's slot
 /// ([`LxCall::obj`]) and holds the descriptor while it is in flight.
 const T_FD0: u8 = 2;
-/// Table bit (Group 9): the call carries the caller's IPC namespace and umask.
+/// Table bit (Group 9): the call carries the caller's IPC namespace.
 const T_IPC: u8 = 4;
+/// Table bit (Group 9): the call carries the caller's umask.
+const T_UMASK: u8 = 8;
+/// Table bit (Group 9): the u32 that `args[1]` points to is a descriptor (bpf's attribute
+/// block starts with one for the map element commands): its server object's slot goes in
+/// [`LxCall::obj`], and `obj_flags` gets [`LX_OBJ_FLAGS_AT1`] and the descriptor in bits 32..62
+/// (the server uses it only when its own reading of the attribute names the same one).
+const T_FDAT1: u8 = 16;
 /// [`LX_NULL_NR`] (outside the table) goes to the server.
 static NULL_TO_SERVER: AtomicBool = AtomicBool::new(false);
 /// The calls step 1 moved to the server: `add_key`, `request_key`, `keyctl`.
@@ -91,7 +98,7 @@ pub const MOVED: [u64; 3] = [248, 249, 250];
 /// The calls step 2 moves (Group 9), with their table bits.
 pub const MOVED_STEP2: &[(u64, u8)] = &[
     // mq_open, mq_unlink (by name, per IPC namespace)
-    (240, T_IPC),
+    (240, T_IPC | T_UMASK),
     (241, T_IPC),
     // mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr (on a queue descriptor)
     (242, T_FD0),
@@ -109,7 +116,7 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
     (70, T_IPC),
     (71, T_IPC),
     // bpf (maps, programs, links: server objects; device programs come back to the kernel)
-    (321, 0),
+    (321, T_FDAT1),
 ];
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
@@ -345,8 +352,22 @@ fn call(frame: &SyscallFrame) -> i64 {
     } else {
         None
     };
+    let _held1 = if bits & T_FDAT1 != 0 {
+        crate::compat::linux::vfs::copy_in(c.args[1], 4).ok().and_then(|b| {
+            let fd = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
+            obj::current_fd(fd).map(|(dev, slot, flags)| {
+                c.obj = slot;
+                c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                dev
+            })
+        })
+    } else {
+        None
+    };
     if bits & T_IPC != 0 {
         c.ipc_ns = crate::compat::linux::ns::ipc_ns();
+    }
+    if bits & T_UMASK != 0 {
         c.umask = crate::task::with_current_fds_mut(|f| f.umask) as u64;
     }
     call_with(c, true)

@@ -8,7 +8,14 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/bpf.h>
 #include <linux/futex.h>
+#include <mqueue.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -300,6 +307,109 @@ static double par2(long nr, long n) {
 static double b_lx_null_par2(long n) { return par2(LX_NULL_NR, n); }
 static double b_keyctl_par2(long n) { return par2(SYS_keyctl, n); }
 
+/* --- step 2 (wave 4, group 9): calls moved to linux-server, and readiness without a call --- */
+static double b_mq_rtt(long n) { /* mq_send + mq_receive of 16 bytes, per pair */
+    struct mq_attr a = {.mq_maxmsg = 10, .mq_msgsize = 64};
+    mq_unlink("/lxbench");
+    mqd_t q = mq_open("/lxbench", O_CREAT | O_RDWR, 0600, &a);
+    if (q < 0) return -1;
+    char m[64];
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        mq_send(q, buf, 16, 0);
+        mq_receive(q, m, 64, 0);
+    }
+    double r = (double)(now() - t) / n;
+    mq_close(q);
+    mq_unlink("/lxbench");
+    return r;
+}
+static double b_semop(long n) { /* one uncontended semop (alternately +1 and -1) */
+    int s = semget(IPC_PRIVATE, 1, 0600);
+    if (s < 0) return -1;
+    struct sembuf up = {0, 1, 0}, down = {0, -1, 0};
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) semop(s, i & 1 ? &down : &up, 1);
+    double r = (double)(now() - t) / n;
+    semctl(s, 0, IPC_RMID);
+    return r;
+}
+static double b_msg_rtt(long n) { /* msgsnd + msgrcv of 16 bytes, per pair */
+    int q = msgget(IPC_PRIVATE, 0600);
+    if (q < 0) return -1;
+    struct { long type; char text[64]; } m = {1, {0}};
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        msgsnd(q, &m, 16, 0);
+        msgrcv(q, &m, 64, 0, 0);
+    }
+    double r = (double)(now() - t) / n;
+    msgctl(q, IPC_RMID, 0);
+    return r;
+}
+static double b_bpf_lookup(long n) { /* BPF_MAP_LOOKUP_ELEM on an array map (root only) */
+    union bpf_attr a;
+    memset(&a, 0, sizeof a);
+    a.map_type = BPF_MAP_TYPE_ARRAY;
+    a.key_size = 4;
+    a.value_size = 8;
+    a.max_entries = 4;
+    int fd = syscall(SYS_bpf, BPF_MAP_CREATE, &a, sizeof a);
+    if (fd < 0) return -1;
+    uint32_t k = 1;
+    uint64_t v;
+    memset(&a, 0, sizeof a);
+    a.map_fd = fd;
+    a.key = (uint64_t)&k;
+    a.value = (uint64_t)&v;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &a, sizeof a);
+    double r = (double)(now() - t) / n;
+    close(fd);
+    return r;
+}
+static double poll_one(int fd, long n) {
+    struct pollfd p = {fd, POLLIN, 0};
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) poll(&p, 1, 0);
+    return (double)(now() - t) / n;
+}
+static double b_poll_pipe(long n) { /* poll on a readable pipe (not a server object) */
+    int p[2];
+    pipe(p);
+    write(p[1], "x", 1);
+    double r = poll_one(p[0], n);
+    close(p[0]);
+    close(p[1]);
+    return r;
+}
+static double b_epoll_pipe(long n) { /* epoll_wait on a readable pipe (not a server object) */
+    int p[2];
+    pipe(p);
+    write(p[1], "x", 1);
+    int ep = epoll_create1(0);
+    struct epoll_event e = {.events = EPOLLIN};
+    epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &e);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) epoll_wait(ep, &e, 1, 0);
+    double r = (double)(now() - t) / n;
+    close(ep);
+    close(p[0]);
+    close(p[1]);
+    return r;
+}
+static double b_poll_mq(long n) { /* poll on a readable message queue (a server object's readiness word) */
+    struct mq_attr a = {.mq_maxmsg = 10, .mq_msgsize = 64};
+    mq_unlink("/lxbench-p");
+    mqd_t q = mq_open("/lxbench-p", O_CREAT | O_RDWR, 0600, &a);
+    if (q < 0) return -1;
+    mq_send(q, buf, 16, 0);
+    double r = poll_one(q, n);
+    mq_close(q);
+    mq_unlink("/lxbench-p");
+    return r;
+}
+
 /* --- forwarding probe (kernel built with --features g6-probe) --- */
 static int probe_ok(void) { return syscall(PROBE_NR, 0, 0, 0) == 0; }
 static double b_probe_null(long n) {
@@ -349,6 +459,13 @@ static struct bench benches[] = {
     {"lx_null_par2", b_lx_null_par2, 100000, 0},
     {"keyctl", b_keyctl, 100000, 0},
     {"keyctl_par2", b_keyctl_par2, 50000, 0},
+    {"mq_rtt", b_mq_rtt, 50000, 0},
+    {"semop", b_semop, 100000, 0},
+    {"msg_rtt", b_msg_rtt, 50000, 0},
+    {"bpf_lookup", b_bpf_lookup, 100000, 0},
+    {"poll_pipe", b_poll_pipe, 100000, 0},
+    {"epoll_pipe", b_epoll_pipe, 100000, 0},
+    {"poll_mq", b_poll_mq, 100000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},

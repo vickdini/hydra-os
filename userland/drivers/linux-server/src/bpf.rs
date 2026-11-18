@@ -221,9 +221,15 @@ fn install(cx: &Cx, obj: Obj) -> i64 {
     }
 }
 
-/// The bpf object behind descriptor `fd` of the caller.
+/// The bpf object behind descriptor `fd` of the caller (the kernel's lookup of the
+/// attribute's first descriptor, when it names this one; otherwise one primitive call).
 fn obj_of(cx: &Cx, fd: u32) -> Result<Obj, i64> {
-    let (slot, _, _) = crate::obj::of_fd(cx, fd as u64)?;
+    let f = cx.c.obj_flags;
+    let slot = if cx.c.obj != LX_OBJ_NONE && f & LX_OBJ_FLAGS_AT1 != 0 && (f >> 32) & 0x3FFF_FFFF == fd as u64 {
+        cx.c.obj as u32
+    } else {
+        crate::obj::of_fd(cx, fd as u64)?.0
+    };
     SLOTS.lock().get(&slot).cloned().ok_or(EINVAL)
 }
 

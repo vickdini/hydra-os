@@ -45,6 +45,38 @@ pub fn relative(cx: &Cx, ptr: u64) -> Result<Option<u64>, i64> {
     Ok(Some(sys::uptime_ticks() + ticks))
 }
 
+/// The real-time clock without a system call: `(TSC, nanoseconds since 1970)` as the main
+/// thread last read them (it does at least once a second), and the TSC's rate (nanoseconds
+/// per 2^32 cycles) from its last two readings.
+static CLOCK: crate::lock::YLock<(u64, u64, u64)> = crate::lock::YLock::new((0, 0, 0));
+
+fn rdtsc() -> u64 {
+    // SAFETY: rdtsc only reads the time-stamp counter
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// Takes a new reading of the real-time clock (the main thread, every time it wakes).
+pub fn update_clock() {
+    let (s, ns) = sys::clock();
+    let now = s * 1_000_000_000 + ns as u64;
+    let tsc = rdtsc();
+    let mut c = CLOCK.lock();
+    let (t0, n0, _) = *c;
+    let rate = if t0 != 0 && tsc > t0 + 1_000_000 && now > n0 { (((now - n0) as u128) << 32) / (tsc - t0) as u128 } else { c.2 as u128 };
+    *c = (tsc, now, rate as u64);
+}
+
+/// Seconds since 1970 (`sem_otime`, `msg_stime`): the last reading moved on by the TSC; a
+/// clock call until two readings were taken.
+pub fn now_secs() -> u64 {
+    let (t0, n0, rate) = *CLOCK.lock();
+    if rate == 0 {
+        return sys::clock().0;
+    }
+    let ns = n0 + ((rdtsc().saturating_sub(t0) as u128 * rate as u128) >> 32) as u64;
+    ns / 1_000_000_000
+}
+
 /// Whether deadline `d` has passed.
 pub fn passed(d: Option<u64>) -> bool {
     d.is_some_and(|d| sys::uptime_ticks() >= d)
