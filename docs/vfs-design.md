@@ -17,7 +17,7 @@ Microkernel wave 5, Group 16, 2026-11-18. Base: `host-unit-tests` 329aaf7. No co
   - **A, everything out** (VFS, caches and the descriptor table in linux-server): warm `find` +227 ms. That is +21 % on this run's 1.07 s, but **+52 % on wave 4's 0.44 s**: over the 35 % budget.
   - **B, out with kernel fast paths.** Measured in two forms:
     - **B-lean:** the kernel keeps only the descriptor table as a table of handles and reads files by handle. Warm `find` +106 ms (+10 %, or +24 % on 0.44 s).
-    - **B-full:** B-lean plus a kernel name cache. Warm `find` +83 ms (+19 % on 0.44 s). It helps only `ls -lR`.
+    - **B-full:** B-lean plus a kernel name cache. Warm `find` +83 ms (+19 % on 0.44 s). It helps mainly `ls -lR` and the KDE login (+0.5 % instead of +2.6 %).
   - **C, the VFS stays:** nothing added; the kernel keeps about 15,000 lines of file-system code for good.
 - **Recommendation: B-lean.**
   - **What moves:** the whole VFS (path lookup and its caches, mounts, pseudo files, permission policy, `open`, every change) moves to linux-server.
@@ -86,27 +86,27 @@ These are the couplings step 6a must cut, whichever option is chosen:
 
 ## 3. Measurements
 
-### 3.1 VFS calls today (µs, medians of 5 loops; two boots)
+### 3.1 VFS calls today (µs, medians of 5 loops; three boots)
 
-| Call | What it does | Boot 1 | Boot 2 (busier host) |
-|---|---|---:|---:|
-| `getpgrp` | The in-kernel null call | 0.73 | 0.82 |
-| `lx_null` | The forwarded null call | 2.77 | 3.24 |
-| `stat("/usr/bin/bash")` | 3 path components, name cache hit | 2.20 | 2.83 |
-| `fstatat(dirfd, "bash")` | Relative to a directory descriptor | 2.20 | 2.66 |
-| `stat` of a missing file | | 4.90 | 6.22 |
-| `statx` | | 2.66 | 2.80 |
-| `access(X_OK)` | | 2.32 | 2.36 |
-| `readlink` | A link in `/tmp` | 2.63 | 4.48 |
-| `openat` + `close` of a file | | 4.73 | 5.58 |
-| **`open` + `close` of a directory** | What `find` does per directory | **23.0** | **24.3** |
-| `open` + `read` + `close` of `/proc/self/stat` | A pseudo file | 13.8 | 24.8 |
-| `fstat` | | 1.16 | 2.21 |
-| `fcntl(F_GETFD)` | | 0.83 | 1.07 |
-| `dup` + `close` | | 1.89 | 1.96 |
-| `lseek` | | 0.91 | 1.17 |
-| `pread` 256 bytes / 4 KiB, cached | | 1.20 / 1.33 | 1.94 / 2.38 |
-| **`getdents64` of a 20-entry directory** | One call | **30.9** | **28.7** |
+| Call | What it does | Boot 1 | Boot 2 (busier host) | Boot 3 |
+|---|---|---:|---:|---:|
+| `getpgrp` | The in-kernel null call | 0.73 | 0.82 | 0.83 |
+| `lx_null` | The forwarded null call | 2.77 | 3.24 | 3.22 |
+| `stat("/usr/bin/bash")` | 3 path components, name cache hit | 2.20 | 2.83 | 2.87 |
+| `fstatat(dirfd, "bash")` | Relative to a directory descriptor | 2.20 | 2.66 | 2.36 |
+| `stat` of a missing file | | 4.90 | 6.22 | 5.74 |
+| `statx` | | 2.66 | 2.80 | 2.60 |
+| `access(X_OK)` | | 2.32 | 2.36 | 2.61 |
+| `readlink` | A link in `/tmp` | 2.63 | 4.48 | 2.91 |
+| `openat` + `close` of a file | | 4.73 | 5.58 | 5.20 |
+| **`open` + `close` of a directory** | What `find` does per directory | **23.0** | **24.3** | **24.1** |
+| `open` + `read` + `close` of `/proc/self/stat` | A pseudo file | 13.8 | 24.8 | 15.5 |
+| `fstat` | | 1.16 | 2.21 | 1.22 |
+| `fcntl(F_GETFD)` | | 0.83 | 1.07 | 0.90 |
+| `dup` + `close` | | 1.89 | 1.96 | 2.01 |
+| `lseek` | | 0.91 | 1.17 | 1.06 |
+| `pread` 256 bytes / 4 KiB, cached | | 1.20 / 1.33 | 1.94 / 2.38 | 1.40 / 1.45 |
+| **`getdents64` of a 20-entry directory** | One call | **30.9** | **28.7** | **22.5** |
 
 What stands out:
 - **Calls that need zfs-server are 10–30 times dearer than the rest.** Opening a directory costs 23 µs and listing it 29–31 µs, because each asks zfs-server (`open_ref`, `readdir`, `release`: about 9–20 µs each with the server's own work; directory listings are not cached in the kernel).
@@ -114,23 +114,23 @@ What stands out:
 
 ### 3.2 The prototype: VFS-shaped calls answered by linux-server
 
-| Stub call (forwarded, PCID on) | Boot 1 | Boot 2 | Added over `getpgrp` (boot 1) | The design's estimate (section 13.2) |
-|---|---:|---:|---:|---|
-| Null call (`lx_null`) | 2.77 | 3.24 | **+2.0** | +2.0 |
-| `stat`: a path in (14 bytes), 144 bytes out, a lookup in the server's map | 5.17 | 5.19 | **+4.4** | +2.0 "plus what the server spends" |
-| `getdents64` into a 1 KiB buffer (600 bytes out, through the page) | 5.90 | 5.22 | +5.2 | |
-| `getdents64` into a 32 KiB buffer (600 bytes, through `SYS_LX_WRITE`) | 5.42 | 5.43 | **+4.7** | |
-| `read` of 256 bytes (out through the page) | 3.73 | 6.63 | +3.0 | |
-| `read` of 4 KiB (through `SYS_LX_WRITE`, as `obj_read` would copy) | 4.59 | 7.54 | **+3.9** (+3.3 net of today's own 4 KiB copy) | +2.0 + 0.5 for the primitive |
+| Stub call (forwarded, PCID on) | Boot 1 | Boot 2 | Boot 3 | Added over `getpgrp`: boot 1 / 3 | The design's estimate (section 13.2) |
+|---|---:|---:|---:|---:|---|
+| Null call (`lx_null`) | 2.77 | 3.24 | 3.22 | **+2.0 / +2.4** | +2.0 |
+| `stat`: a path in (14 bytes), 144 bytes out, a lookup in the server's map | 5.17 | 5.19 | 4.16 | **+4.4 / +3.3** | +2.0 "plus what the server spends" |
+| `getdents64` into a 1 KiB buffer (600 bytes out, through the page) | 5.90 | 5.22 | 4.05 | +5.2 / +3.2 | |
+| `getdents64` into a 32 KiB buffer (600 bytes, through `SYS_LX_WRITE`) | 5.42 | 5.43 | 4.12 | **+4.7 / +3.3** | |
+| `read` of 256 bytes (out through the page) | 3.73 | 6.63 | 3.96 | +3.0 / +3.1 | |
+| `read` of 4 KiB (through `SYS_LX_WRITE`, as `obj_read` would copy) | 4.59 | 7.54 | 4.82 | **+3.9 / +4.0** (+3.3 / +3.4 net of today's own 4 KiB copy) | +2.0 + 0.5 for the primitive |
 
 What this shows:
-- **The forward itself matches wave 4's +2.0 µs.**
-- **Every pointer costs more than expected: 1–2 µs.** The `stat` stub is 2.4 µs dearer than the null call, though the server's lookup takes about 0.2 µs. The same shows in wave 4's numbers: `keyctl` DESCRIBE (one buffer out) is 2.2 µs dearer than plain `keyctl`.
+- **The forward itself costs +2.0 to +2.4 µs** (wave 4: +2.0 on a quieter host).
+- **Every pointer costs more than expected: about 1–2 µs.** The `stat` stub is 2.4 µs dearer than the null call in boot 1 and 0.9 µs in boot 3, though the server's lookup takes about 0.2 µs (the three boots ran beside other groups' VMs; boot 3 had the tightest spread). The same shows in wave 4's numbers: `keyctl` DESCRIBE (one buffer out) is 2.2 µs dearer than plain `keyctl`.
   - The kernel side of the copy table takes the address-space lock and walks the page tables for every argument (`lx/copy.rs`, `each_piece`).
   - It also copies twice: user to a kernel buffer to the syscall page, and back the same way.
   - Almost every VFS call has a pointer (a path, a `struct stat`, a buffer), so this matters more for step 6a than for the earlier steps.
 - **A buffer larger than the 3 KiB copy area costs a `SYS_LX_WRITE` instead,** about the same as through the page (`getdents64` 32 KiB: 4.7; 1 KiB: 5.2, within the noise).
-- **So a forwarded VFS call adds about +2.0 µs without pointers, +4.2 µs for a path call, +4.7 µs for `getdents64` and +3.3 µs for a 4 KiB read.** These are the numbers section 5 uses. With a cheaper copy (section 8.2) the pointer part could drop from about 2 µs to well under 1 µs.
+- **So a forwarded VFS call adds about +2.0 µs without pointers, +4.2 µs for a path call, +4.7 µs for `getdents64` and +3.3 µs for a 4 KiB read** (boot 1, the dearer case for the pointer calls; boot 3 gives 3.3, 3.3 and 3.4). These are the numbers section 5 uses, so its estimates lean pessimistic; with `fwd=2.4` (boot 3) A's `find` gains another 24 ms. With a cheaper copy (section 8.2) the pointer part could drop from about 2 µs to well under 1 µs.
 - **Against the per-call budget** (design 6.6: today + 3 µs per forward), `stat` would be 2.2 + 4.2 = 6.4 µs against a limit of 5.2: **missed by about 1 µs.** It is met only with the cheaper copy.
 
 ### 3.3 Real workloads: calls by kind
@@ -139,7 +139,7 @@ What this shows:
 
 | Workload | Time | Calls | Calls/s | Path calls (ZFS / pseudo) | of them `open` | Descriptor calls on files and directories (`fstat`, `close`, `fcntl`, ...) | `getdents64` | File reads / writes | `poll`/`epoll` | zfs-server requests (time) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `find /usr` (warm) | 1.07 s | 84,874 | 79,174 | 11,687 / 4 | 5,886 | 60,327 | 11,612 | 10 / 0 | 0 | 41,898 (0.64 s) |
+| `find /usr` (warm) | 1.07 s (0.81–1.35 in three boots) | 84,874 | 79,174 | 11,687 / 4 | 5,886 | 60,327 | 11,612 | 10 / 0 | 0 | 41,898 (0.64 s) |
 | `ls -lR /usr/share` (warm) | 7.92 s | 262,269 | 33,111 | 105,497 / 5 | 9,634 | 19,240 | 9,644 | 19 / 0 | 1 | 396,719 (3.9 s) |
 | `git status` (3,851 files, warm) | 0.58 s | 19,269 | 33,511 | 9,808 / 3 | 2,517 | 4,614 | 4,529 | 37 / 0 | 0 | 30,708 (0.38 s) |
 | `tar cf - /usr/share/doc \| cat` | 1.41 s | 41,217 | 29,336 | 8,977 / 7 | 4,105 | 18,693 | 4,343 | 4,140 / 0 | 1 | 27,400 (0.35 s) |
@@ -156,6 +156,8 @@ What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints th
 - **`apt-get install`:** `write` 4,307 (file data: dpkg), `openat` 3,630, `close` 3,424, `newfstatat` 2,395, `read` 2,248, `fstat` 1,991, `mmap` 1,433, `ioctl` 1,302 (on files: dpkg's `FIFREEZE`-style checks and terminal queries), `rename` 24, `fsync` 28.
 - **Firefox:** `mmap` 2,068, `read` 1,705 (half on pipes), `poll` 1,488, `openat` 1,451, `mprotect` 1,354, `close` 1,263, `access` 637; 250 path calls under `/proc`, `/sys` and `/dev`; `rename` 185 (its profile files).
 - **KDE:** `statx` 62,153, `access` 43,532, `mmap` 26,176 (21,267 of files), `mprotect` 25,188, `read` 20,390 (13,486 of files, 5,214 of eventfds), `openat` 19,152, `readlink` 17,238, `close` 16,493, `newfstatat` 13,955, `write` 12,252 (11,553 to eventfds), `fstat` 10,460, `recvmsg` 9,664, `ppoll` 8,789. 3,420 path calls under `/proc`, `/sys`, `/dev` and `/run`. The name cache hit 88 % here (the desktop looks up the same few thousand paths again and again), yet zfs-server still got 99,466 requests, 43,533 of them `resolve_mnt`.
+
+**A bug found on the way: `make -j` busy-loops.** The first compile run used `make -j2`. GNU make 4.x hands its jobserver to the compilers as a FIFO in `/tmp`, and opening a FIFO on Hydra gives a regular-file descriptor (`vfs.rs` has no FIFO open path). make then spins: `read` returns 0, `epoll_wait` reports the file ready, `wait4(WNOHANG)` finds nothing. That run made **954,000 rounds of `read`/`epoll_wait`/`wait4` in 8 s** for 30 small files (2.97 million calls). The compile row above is `make` without `-j`. The bug is reported to Group 13 (FIFOs are in their step) in NOTES.md.
 
 **The name cache.** The kernel's name cache hit 55 % of its lookups in `find`, 39 % in `git status` and only **13 % in `ls -lR`** (attribute cache: 84 %, 73 %, 71 %). It holds 8,192 results and empties itself when full, so a walk over more than a few thousand names keeps emptying it. Every miss is a zfs-server request: `ls -lR` makes 204,518 `resolve` requests for 105,497 path calls.
 
@@ -208,7 +210,7 @@ From the counts of section 3.3 and the per-call costs of section 3.2 (`tools/vfs
 
 The server's own work is assumed to cost what the kernel's does today.
 
-The first five columns assume that linux-server's zfs-server requests cost what the kernel's cost today. The last column is the extra if they are today's Queued calls instead (+3.2 µs each). B-full assumes its name cache hits 95 % of the `stat`-kind calls (a cache sized for the workload; today's hits much less).
+The A, B-lean and B-full columns assume that linux-server's zfs-server requests cost what the kernel's cost today. The last column is the extra if they are today's Queued calls instead (+3.2 µs each). B-full assumes its name cache hits 95 % of the `stat`-kind calls (a cache sized for the workload; today's hits much less).
 
 | Workload | Time today | A: everything out | B-lean | B-full | C | Extra with Queued server calls (A or B) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -417,7 +419,7 @@ The groups own separate files. Shared files are handled as in waves 4 and 5: eac
 ## 11. Not measured, and limits
 
 - **KVM, not the NUC.** Forwarding costs and zfs-server request costs on real hardware were never measured.
-- **Timings are noisy.** Five other groups' VMs shared the PC: the two boots of section 3.1 differ by up to 40 % on single calls, and a warm `find` took 1.07–1.35 s here against 0.44 s in wave 4. That is why section 5.1 shows both baselines. The counts, not the times, are the solid part.
+- **Timings are noisy.** Five other groups' VMs shared the PC: the two boots of section 3.1 differ by up to 40 % on single calls, and a warm `find` took 0.81–1.35 s in three boots here against 0.44 s in wave 4 (same call counts each time). That is why section 5.1 shows both baselines. The counts, not the times, are the solid part.
 - **The prototype measures a stub,** not a server VFS. The server's real work for `open` or `stat` is assumed to cost what the kernel's costs today; a server-side cache could make it cheaper (fewer zfs-server requests) or dearer (user-space locks).
 - **Server-to-server calls were not measured.** Their cost is taken from the design's IPC numbers: Handoff 5.8 µs, Queued in a loop 9.0 µs.
 - **The `git` repository was small** (3,851 files); a larger one would scale the counts, not change their mix.
