@@ -935,7 +935,7 @@ edge of the 35 % budget: step 6a should still cut forwards (a server-side name c
 fewer `open_ref`/`release` round trips) or keep the descriptor-table fast paths (decision
 2). The two-CPU case is no longer serialized, so concurrent tools scale.
 
-### 12.3 Step 2's calls after the wave 4 merge
+### 13.3 Step 2's calls after the wave 4 merge
 
 At the merge (af5c30e) Group 9's calls (`mq_*`, `semop`, `msg*`, `bpf`) were 3 to 10 times
 slower forwarded than on Group 9's own branch. The cause, from the `[prof] lx:` counters:
