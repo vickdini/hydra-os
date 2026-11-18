@@ -445,6 +445,11 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         crate::arch::pit::on_timer_tick();
         crate::arch::pic::send_eoi(0);
     }
+    // An application processor's tick is acknowledged at once too: signal delivery on a
+    // tick (below) may block the task (a stop) before the tick's work is done
+    if ctx.vector == LAPIC_TIMER_VECTOR {
+        crate::arch::smp::lapic_eoi();
+    }
     // CPU time, at every tick: before the kernel lock, which another CPU may hold (the
     // scheduler lock is only tried; a tick finding it busy is counted by the next)
     if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
@@ -458,9 +463,6 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     // would stop the clock that code holding it may be waiting on)
     if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
         if !crate::arch::smp::bkl_try_enter() {
-            if ctx.vector == LAPIC_TIMER_VECTOR {
-                crate::arch::smp::lapic_eoi();
-            }
             return;
         }
     } else {
@@ -476,6 +478,18 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         unsafe { core::arch::asm!("mov cr2, {}", in(reg) cr2, options(nostack, preserves_flags)) };
     }
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
+    // A tick from user mode: deliver pending signals before the tick may switch away. A
+    // task switched in on another task's frame gets no delivery on that return (below), so
+    // its next trap is the only chance; when that is a tick that switches again (to the
+    // kernel task posting its timer signals, itimerd/ptimerd), a busy thread would see a
+    // signal only on the rare tick that does not switch. The frame is its own here.
+    if (ctx.cs & 3) == 3
+        && (ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR)
+        && crate::task::is_active()
+        && crate::task::on_current_kernel_stack(ctx as *const ExceptionContext as u64)
+    {
+        crate::compat::linux::proc::deliver_on_trap_return(ctx, fpu);
+    }
     dispatch_exception(ctx);
     // A device interrupt that made a driver call's server ready (its device answered): run
     // it now rather than at the next tick, when this CPU was running a program in user mode
@@ -1006,8 +1020,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
         }
         LAPIC_TIMER_VECTOR => {
             // An application processor's tick: its tasks' timeslices (the time base and
-            // the sleepers' wakeups are the boot processor's PIT)
-            crate::arch::smp::lapic_eoi();
+            // the sleepers' wakeups are the boot processor's PIT; acknowledged on entry)
             let at_preempt_point = (ctx.cs & 3) == 3
                 || crate::task::PREEMPT_POINTS.load(core::sync::atomic::Ordering::SeqCst) > 0;
             if at_preempt_point && crate::task::is_active() {
