@@ -79,21 +79,61 @@ starts.
 
 A forwarded call with an idle worker:
 
-1. The caller (in its system call, under the kernel lock) writes the call into the worker's
-   page and calls `Scheduler::direct_handover(worker)`: the caller becomes blocked and the
-   worker ready, **without waking another CPU**.
-2. `int 0x82`: the direct-switch vector saves only the general registers and calls
-   `direct_switch_core`, which saves the caller and switches to the worker through the same
-   `switch_to` tail as the scheduler (the one CR3 write is there). There is no run-queue
-   pass, no FPU save or restore, and the worker inherits the caller's timeslice.
+1. The caller writes the call into the worker's page (under the request table's lock) and
+   enters `int 0x82`.
+2. The direct-switch vector saves only the general registers and calls
+   `Scheduler::direct_call`, which, in one step under the scheduler lock, blocks the caller
+   and switches to the worker through the same `switch_to` tail as the scheduler (the one
+   CR3 write is there). There is no run-queue pass, no other CPU woken, no FPU save or
+   restore, and the worker inherits the caller's timeslice.
 3. The worker returns to user mode with the call in its page, serves it, and calls
    `SYS_LX_REPLY_RECV` with the answer: the same steps hand the CPU straight back to the
    caller, and the worker is idle again.
 
-There is no machine-wide stop: today's hand-off (`CallMode::Handoff`) stops every other
-system call entry while it runs, but the direct switch is an ordinary switch between two
-tasks of one CPU, and other CPUs and other processes keep running (they wait only for the
-kernel lock, as every system call does).
+When the switch cannot be done (the worker is still running on the other CPU, a driver
+call's hand-off is in progress, ...), nothing changes and the worker is woken the ordinary
+way. There is no machine-wide stop: the direct switch is an ordinary switch between two
+tasks of one CPU, and other CPUs and other processes keep running.
+
+## Without the kernel lock (wave 4)
+
+Since wave 4 (Group 10, branch `mk-lxfast`) a forwarded call and the worker's answer run
+**without the kernel lock**: the system call entry (`arch::syscall`) hands every forwarded
+call of a Linux thread without a tracer or seccomp filter, and every `SYS_LX_REPLY_RECV`,
+to `lx::fast_entry` before it would take the lock. Two threads on two CPUs then forward at
+the same time (before, the lock made them take turns: two threads were slower per call than
+one).
+
+| What | Protected by |
+|---|---|
+| The request table, the worker list, the copy buffers | The table's spin lock (`LX`; interrupts off; TLB flush requests served while waiting) |
+| Task states and the switch | The scheduler lock, once per switch (`Scheduler::direct_call`) |
+| The caller's identity (IDs, capabilities, groups) | A per-CPU cache, valid while `compat::linux`'s identity epoch is unchanged |
+| The copy-in table's user memory | The caller's address-space lock (taken with `try_lock`; when busy, the kernel lock first) |
+
+**Why no answer or wake-up is lost:**
+- an answer, a failure, or a delivery to a worker is marked under the table's lock, and
+  the waiter woken after it;
+- a waiter blocks only under that lock after seeing nothing (and a caller re-checks for a
+  signal after blocking, under the scheduler lock, so a signal posted meanwhile wakes it);
+- the direct switch blocks the switching task only if a flag is still clear when the
+  scheduler lock is held: for a worker, "a call was delivered to me" (`HAS_WORK`); for a
+  caller, "my call was answered" (`REQ_DONE`). On two CPUs a worker may take and answer a
+  call before its caller gets to the switch.
+
+**Why no task runs twice or on a freed stack:**
+- a task switched away from without the kernel lock is marked `nobkl_wait`, and only those
+  may be resumed by a CPU without the lock (everything else resumes only where the lock is
+  held, as before);
+- a CPU switching away from a task stays on that task's kernel stack until its trap
+  epilogue has moved the `iretq` frame into its own per-CPU block (`PerCpu::leaving`); no
+  other CPU resumes, or frees, that task until then;
+- a task another CPU still runs is never picked, even when it is ready (it blocked itself
+  and was woken before it yielded).
+
+Anything slow on the way takes the kernel lock first: a page of a copy-in argument to fault
+in, a signal for the caller (delivered the ordinary way on the way out), a task that was
+killed meanwhile, a call during a driver call's hand-off (the ordinary path).
 
 **Why no FPU state moves:** the direct switch only ever resumes tasks that blocked at one of
 `src/lx`'s own yield points (`lx_yield`, `switch_to_task`), whose `asm!` declares every
@@ -109,6 +149,39 @@ answer a call takes it instead of going idle (and then wakes that call's caller 
 **Signals:** a queued call is withdrawn (`-EINTR`); a call being served gets
 `LX_CALL_INTERRUPTED` in its page; a pending call's server gets an `LX_NOTE_INTERRUPT`
 notification and may answer `-EINTR`.
+
+## The copy-in/copy-out table (wave 4)
+
+Without it every pointer argument costs the server a client memory call (below), about one
+system call each. With it, the kernel copies the pointer arguments a forwarded call is known
+to have into the worker's syscall page at trap time, and copies back what the server leaves
+there for output after the answer.
+
+**Page layout:** `0x000` the `LxCall`, `0x200` an `LxCopy` header, `0x400..0x1000` the copy
+area (3 KiB). `LxCopy` (`src/ipc/protocol.rs`), per argument `i`: `in_off[i]`/`in_len[i]`
+(where the bytes of `args[i]`'s pointer are, and how many; 0: not copied), `out_off[i]`/
+`out_cap[i]` (room for output to that pointer; 0: none), `out_len[i]` (written by the server:
+how many bytes the kernel copies back).
+
+**The table** is `src/lx/copy.rs`: `describe(nr, &args)` gives, per call, what each of the
+six arguments is: `Str(max)` (a NUL-terminated string), `In(len)`, `Out(len)`, `InOut(len)`,
+with `len = fixed + mul * args[arg]`. Multiplexed calls choose by an argument (keyctl by its
+operation). Today: `add_key`, `request_key`, `keyctl` operations 1, 2, 6, 10, 11, 17 and 31.
+
+**Rules:**
+- a NULL pointer is never copied and never faults: the server decides;
+- a non-NULL input pointer that faults gives `-EFAULT` at once, without the server;
+- what does not fit (a string without its NUL within its limit, a buffer larger than what is
+  left of the 3 KiB) is not copied, and the server uses the client memory primitives;
+- output is copied after an immediate answer only; a copy-out that faults makes the result
+  `-EFAULT`. A call answered `LX_REPLY_PENDING` must copy what it needs out of the page first
+  and write its output with `SYS_LX_WRITE` (the page is reused meanwhile);
+- queued calls get the same copies (kept with the request in kernel memory).
+
+**Server side:** `Cx::copy_in`, `Cx::user_cstr` and `Cx::copy_out` (`linux-server/src/
+client.rs`) look in the page first (the pointer must equal an argument the kernel copied, or
+gave output room to) and fall back to the primitives by themselves. Moving a call to the
+table means adding its arm to `describe`; the code serving it does not change.
 
 ## Client memory
 
@@ -181,7 +254,12 @@ the crash policy then handles.
   `EFAULT` cases, a pending call completed by another thread, a signal during a pending call
   (`EINTR`), and 4 processes x 8 threads making key calls and test calls at once (every answer
   checked). `lxfwd hammer N` is the load for the kill test.
-- `tests/linux/lxbench.c`: `lx_null`, `lx_null_par2`, `keyctl`, `keyctl_par2`.
+- `tests/linux/lxbench.c`: `lx_null`, `lx_null_par2`, `keyctl`, `keyctl_par2`, `add_key`,
+  `keyctl_describe`.
+- wave 4 additions to `lxfwd_test.c`: the copy table at page edges (strings ending at an
+  unmapped page, output crossing into one, read-only output, bad pointers, a payload larger
+  than the copy area, a 64 KiB output buffer), and `sigstress` (a 1 ms timer signal while 4
+  threads make forwarded calls for 3 s).
 
 ## Cost
 
