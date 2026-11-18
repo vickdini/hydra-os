@@ -145,7 +145,7 @@ What this shows:
 | `tar cf - /usr/share/doc \| cat` | 1.41 s | 41,217 | 29,336 | 8,977 / 7 | 4,105 | 18,693 | 4,343 | 4,140 / 0 | 1 | 27,400 (0.35 s) |
 | `apt-get install hello` (from the cache) | 11.8 s | 24,681 | 2,093 | 6,204 / 107 | 3,550 | 6,500 | 78 | 2,122 / 4,134 | 57 | 20,494 (2.7 s) |
 | Firefox headless start (warm) | 5.05 s | 19,049 | 3,771 | 3,242 / 250 | 1,322 | 1,628 | 54 | 975 / 196 | 1,676 | 8,524 (0.87 s) |
-| `make -j2` of 30 C files (gcc) | GCC_TIME | GCC_CALLS | GCC_RATE | GCC_PATH | GCC_OPEN | GCC_META | GCC_DENTS | GCC_RW | GCC_POLL | GCC_ZFS |
+| `make` of 30 C files (gcc, 4,372 lines; without `-j`, see below) | 8.30 s | 107,464 | 12,951 | 81,868 / 2 | 14,152 | 11,108 | 60 | 5,431 / 433 | 0 | 88,318 (1.0 s) |
 | KDE: password to desktop (profile from the console before the login to after the desktop settled, about 80 s; the login itself settles in about 25 s, wave 4) | about 25 s | 341,804 | about 13,700 (over 25 s) | 148,179 / 3,420 | 16,673 | 28,435 | 2,064 | 13,823 / 331 | 17,569 | 99,466 |
 
 What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints the full lists):
@@ -155,6 +155,7 @@ What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints th
 - **`tar`:** `fstat` 10,282, `newfstatat` 4,451, `fcntl` 4,351, `read` 4,140 (file data), `getdents64`, `openat`, `close`; `write` and `splice` on the pipe.
 - **`apt-get install`:** `write` 4,307 (file data: dpkg), `openat` 3,630, `close` 3,424, `newfstatat` 2,395, `read` 2,248, `fstat` 1,991, `mmap` 1,433, `ioctl` 1,302 (on files: dpkg's `FIFREEZE`-style checks and terminal queries), `rename` 24, `fsync` 28.
 - **Firefox:** `mmap` 2,068, `read` 1,705 (half on pipes), `poll` 1,488, `openat` 1,451, `mprotect` 1,354, `close` 1,263, `access` 637; 250 path calls under `/proc`, `/sys` and `/dev`; `rename` 185 (its profile files).
+- **gcc:** `readlink` 64,400 (the compiler driver and `cc1` resolve paths link by link; the kernel's link cache missed 56,043 times), `openat` 14,154 (headers searched along the include path), `close` 5,541, `fstat` 5,513, `read` 5,247.
 - **KDE:** `statx` 62,153, `access` 43,532, `mmap` 26,176 (21,267 of files), `mprotect` 25,188, `read` 20,390 (13,486 of files, 5,214 of eventfds), `openat` 19,152, `readlink` 17,238, `close` 16,493, `newfstatat` 13,955, `write` 12,252 (11,553 to eventfds), `fstat` 10,460, `recvmsg` 9,664, `ppoll` 8,789. 3,420 path calls under `/proc`, `/sys`, `/dev` and `/run`. The name cache hit 88 % here (the desktop looks up the same few thousand paths again and again), yet zfs-server still got 99,466 requests, 43,533 of them `resolve_mnt`.
 
 **A bug found on the way: `make -j` busy-loops.** The first compile run used `make -j2`. GNU make 4.x hands its jobserver to the compilers as a FIFO in `/tmp`, and opening a FIFO on Hydra gives a regular-file descriptor (`vfs.rs` has no FIFO open path). make then spins: `read` returns 0, `epoll_wait` reports the file ready, `wait4(WNOHANG)` finds nothing. That run made **954,000 rounds of `read`/`epoll_wait`/`wait4` in 8 s** for 30 small files (2.97 million calls). The compile row above is `make` without `-j`. The bug is reported to Group 13 (FIFOs are in their step) in NOTES.md.
@@ -219,7 +220,7 @@ The A, B-lean and B-full columns assume that linux-server's zfs-server requests 
 | `ls -lR /usr/share` | 7.92 s | +528 ms (7 %) | +490 ms (6 %) | +107 ms (1 %) | 0 | +1,270 ms (16 %) |
 | `git status` | 0.58 s | +72 ms (13 %) | +63 ms (11 %) | +33 ms (6 %) | 0 | +98 ms (17 %) |
 | `tar` of `/usr/share/doc` | 1.41 s | +109 ms (8 %) | +58 ms (4 %) | +39 ms (3 %) | 0 | +88 ms (6 %) |
-| `make -j2` of 30 C files | GCC_TIME | GCC_A | GCC_BL | GCC_BF | 0 | GCC_Q |
+| `make` of 30 C files | 8.30 s | +391 ms (4.7 %) | +345 ms (4.2 %) | +76 ms (0.9 %) | 0 | +283 ms (3.4 %) |
 | `apt-get install hello` | 11.8 s | +58 ms (0.5 %) | +36 ms (0.3 %) | +26 ms (0.2 %) | 0 | +66 ms (0.6 %) |
 | Firefox headless start | 5.05 s | +27 ms (0.5 %) | +16 ms (0.3 %) | +9 ms (0.2 %) | 0 | +27 ms (0.5 %) |
 | KDE: password to desktop (all its calls counted against 25 s) | about 25 s | +843 ms (3.4 %) | +649 ms (2.6 %) | +126 ms (0.5 %) | 0 | +318 ms (1.3 %) |
