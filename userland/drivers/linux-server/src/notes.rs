@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 
-use hydra_rt::protocol::{LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF, LX_NOTE_EXEC, LX_NOTE_EXIT, LX_NOTE_FORK, LX_NOTE_INTERRUPT};
+use hydra_rt::protocol::{LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF, LX_NOTE_CLOSE, LX_NOTE_EXEC, LX_NOTE_EXIT, LX_NOTE_FORK, LX_NOTE_INTERRUPT};
 
 use crate::lock::YLock;
 
@@ -66,8 +66,12 @@ fn take(seq: u64) {
         match kind {
             LX_NOTE_FORK => crate::keys::on_fork(a, b),
             LX_NOTE_EXEC => crate::keys::on_exec(a, b),
-            LX_NOTE_EXIT => crate::keys::on_exit(a),
+            LX_NOTE_EXIT => {
+                crate::keys::on_exit(a);
+                crate::mqueue::on_exit(a);
+            }
             LX_NOTE_INTERRUPT => crate::interrupted(a),
+            LX_NOTE_CLOSE => crate::obj::closed(a as u32, b as u32),
             _ => {}
         }
         t += 1;

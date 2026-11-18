@@ -41,6 +41,8 @@
 //! The request table is a spin lock taken with interrupts off, never while the scheduler
 //! lock is held (the scheduler lock may be taken inside it).
 
+pub mod obj;
+
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
@@ -56,6 +58,7 @@ use crate::task::TaskId;
 const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
 const EINTR: i64 = -4;
+const EBADF: i64 = -9;
 const EIO: i64 = -5;
 const EAGAIN: i64 = -11;
 const ENOMEM: i64 = -12;
@@ -71,12 +74,31 @@ const ENOSYS: i64 = -38;
 
 /// Linux system call numbers the table covers (the rest always run in the kernel).
 const TABLE_LEN: usize = 512;
-/// Per system call number: 1 if the server answers it.
+/// Per system call number: 0 if the kernel answers it; otherwise the server does, and the
+/// bits say what the call carries ([`T_SERVER`], [`T_FD0`], [`T_IPC`]).
 static TABLE: [AtomicU8; TABLE_LEN] = [const { AtomicU8::new(0) }; TABLE_LEN];
+/// Table bit: the server answers the call.
+const T_SERVER: u8 = 1;
+/// Table bit (Group 9): `args[0]` is a descriptor; the call carries its server object's slot
+/// ([`LxCall::obj`]) and holds the descriptor while it is in flight.
+const T_FD0: u8 = 2;
+/// Table bit (Group 9): the call carries the caller's IPC namespace and umask.
+const T_IPC: u8 = 4;
 /// [`LX_NULL_NR`] (outside the table) goes to the server.
 static NULL_TO_SERVER: AtomicBool = AtomicBool::new(false);
 /// The calls step 1 moved to the server: `add_key`, `request_key`, `keyctl`.
 pub const MOVED: [u64; 3] = [248, 249, 250];
+/// The calls step 2 moves (Group 9), with their table bits.
+pub const MOVED_STEP2: &[(u64, u8)] = &[
+    // mq_open, mq_unlink (by name, per IPC namespace)
+    (240, T_IPC),
+    (241, T_IPC),
+    // mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr (on a queue descriptor)
+    (242, T_FD0),
+    (243, T_FD0),
+    (244, T_FD0),
+    (245, T_FD0),
+];
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
 
@@ -97,7 +119,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl: {}",
+        "[lx] add_key, request_key, keyctl, mq_*: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -106,6 +128,9 @@ pub fn init() {
 pub fn set_forwarding(on: bool) {
     for nr in MOVED {
         TABLE[nr as usize].store(on as u8, Ordering::Release);
+    }
+    for &(nr, bits) in MOVED_STEP2 {
+        TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
     }
     NULL_TO_SERVER.store(on, Ordering::Release);
 }
@@ -141,6 +166,23 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
         Route::Server if !ONLINE.load(Ordering::Acquire) => Some(ENOSYS),
         Route::Server => Some(call(frame)),
     }
+}
+
+/// Forwards system call `nr` with `args` made on server object `dev` (a descriptor's
+/// device; `args[0]` is the descriptor): `read`, `write`, `readv`, `writev` and `ioctl` on
+/// it (wave 4, step 2). A stale object (its server went away) gives `-EBADF`.
+pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
+    let Some(o) = dev.as_server() else { return EBADF };
+    let Some(slot) = o.slot() else { return EBADF };
+    if !ONLINE.load(Ordering::Acquire) {
+        return EBADF;
+    }
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = args;
+    c.obj = slot;
+    c.obj_flags = o.flags();
+    call_with(c, false)
 }
 
 // ----------------------------------------------------------------------
@@ -279,6 +321,28 @@ fn call(frame: &SyscallFrame) -> i64 {
     let mut c = LxCall::EMPTY;
     c.nr = frame.rax;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    let bits = if (c.nr as usize) < TABLE_LEN { TABLE[c.nr as usize].load(Ordering::Relaxed) } else { 0 };
+    // Group 9: the server object at args[0], held until the call is answered (a close on
+    // another thread cannot overtake the call)
+    let _held = if bits & T_FD0 != 0 {
+        obj::current_fd(c.args[0]).map(|(dev, slot, flags)| {
+            c.obj = slot;
+            c.obj_flags = flags;
+            dev
+        })
+    } else {
+        None
+    };
+    if bits & T_IPC != 0 {
+        c.ipc_ns = crate::compat::linux::ns::ipc_ns();
+        c.umask = crate::task::with_current_fds_mut(|f| f.umask) as u64;
+    }
+    call_with(c, true)
+}
+
+/// [`call`] with the call's number, arguments and object filled in: adds the caller's
+/// identity (and its groups when `groups`) and waits for the answer.
+fn call_with(mut c: LxCall, groups: bool) -> i64 {
     let mut sched = crate::task::SCHEDULER.lock();
     let my_idx = sched.current_index();
     let me = sched.current_task_mut(|t| {
@@ -295,7 +359,7 @@ fn call(frame: &SyscallFrame) -> i64 {
     });
     drop(sched);
     let Some(me) = me else { return ENOSYS };
-    if c.nr != LX_NULL_NR {
+    if groups && c.nr != LX_NULL_NR {
         if let Some(p) = crate::compat::linux::proc::PROCS.lock().get(&c.tgid) {
             let n = p.groups.len().min(LX_GROUPS);
             c.groups[..n].copy_from_slice(&p.groups[..n]);
@@ -447,6 +511,11 @@ fn switch_to_task(target: u64) {
 // Server side (native system calls of linux-server)
 // ----------------------------------------------------------------------
 
+/// The thread that made request `id` (served or pending), for the object primitives.
+fn client_of(id: u64) -> Option<u64> {
+    lx(|s| s.reqs.iter().find(|r| r.id == id && matches!(r.state, RState::Delivered | RState::Pending)).map(|r| r.client))
+}
+
 /// The calling task's ID and process, if it is linux-server.
 fn server_caller() -> Result<(u64, u64), i64> {
     server_caller_at().map(|(id, tgid, _)| (id, tgid))
@@ -511,6 +580,7 @@ pub fn ctl(op: u64) -> i64 {
             }
             NOTES_HEAD.store(0, Ordering::Release);
             NOTES.store(base, Ordering::Release);
+            obj::online(win.as_mut_ptr() as u64);
             ONLINE.store(true, Ordering::Release);
             let n = lx(|s| s.workers.len());
             crate::kprintln!("[lx] linux-server online (process {}, {} workers)", tgid, n);
@@ -538,12 +608,18 @@ pub fn reply_recv(result: i64, flags: u64) -> i64 {
         let wi = s.workers.iter().position(|w| w.task == me)?;
         s.workers[wi].idx = my_idx;
         let mut wake = (0u64, 0u64, 0usize);
+        let mut interrupted = 0u64;
         let cur = s.workers[wi].req;
         if flags & LX_REPLY_NONE == 0 && cur != NONE {
             let r = &mut s.reqs[cur];
             if r.state == RState::Delivered {
                 if flags & LX_REPLY_PENDING != 0 {
                     r.state = RState::Pending;
+                    // Group 9: a signal that came while the call was served is told now
+                    // (the caller already marked it and will not tell again)
+                    if r.interrupted {
+                        interrupted = r.id;
+                    }
                 } else {
                     r.state = RState::Done;
                     r.result = result;
@@ -557,9 +633,12 @@ pub fn reply_recv(result: i64, flags: u64) -> i64 {
         if !next {
             s.workers[wi].idle = true;
         }
-        Some((wake, next))
+        Some((wake, next, interrupted))
     });
-    let Some(((client, id, hint), next)) = answered else { return EPERM };
+    let Some(((client, id, hint), next, interrupted)) = answered else { return EPERM };
+    if interrupted != 0 {
+        note(LX_NOTE_INTERRUPT, interrupted, 0, 0);
+    }
     if client != 0 {
         let mut sched = crate::task::SCHEDULER.lock();
         if !next && sched.direct_handover(client, hint).is_some() {
@@ -801,6 +880,8 @@ static RECOVERING: AtomicBool = AtomicBool::new(false);
 pub fn on_signal(bits: u64) {
     if bits == crate::ipc::service::SIGNAL_GONE {
         server_gone();
+    } else if bits & crate::ipc::protocol::LX_SIGNAL_OBJS != 0 {
+        obj::on_doorbell();
     }
 }
 
@@ -810,6 +891,7 @@ fn server_gone() {
     let was_online = ONLINE.swap(false, Ordering::AcqRel);
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
+    obj::offline();
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
     let tgid = lx(|s| {

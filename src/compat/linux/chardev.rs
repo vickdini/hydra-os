@@ -240,6 +240,18 @@ pub trait CharDevice: Send + Sync {
     fn as_landlock(&self) -> Option<&super::landlock::Ruleset> {
         None
     }
+
+    /// The linux-server object behind this descriptor, if it is one (wave 4, step 2: its
+    /// calls are forwarded to the server).
+    fn as_server(&self) -> Option<&crate::lx::obj::ServerObject> {
+        None
+    }
+
+    /// For edge-triggered epoll: a count that changes whenever the device becomes ready in
+    /// a new way (a watch reports again only after it changed); `None`: level-triggered.
+    fn edges(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Opens the driver behind character device `rdev`; `None` if no driver claims it.

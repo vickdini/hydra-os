@@ -54,6 +54,8 @@ pub struct Cx {
     pub nr: u64,
     /// Its arguments.
     pub args: [u64; 6],
+    /// The whole call as the kernel gave it (identity, server object, IPC namespace).
+    pub c: LxCall,
     caller: Caller,
 }
 
@@ -61,7 +63,27 @@ impl Cx {
     /// The call in a worker's syscall page.
     pub fn from_call(c: &LxCall) -> Self {
         let n = (c.ngroups as usize).min(LX_GROUPS);
-        Self { id: c.id, nr: c.nr, args: c.args, caller: Caller::new(c.tid, c.tgid, c.euid, c.egid, c.caps, &c.groups[..n]) }
+        Self { id: c.id, nr: c.nr, args: c.args, c: *c, caller: Caller::new(c.tid, c.tgid, c.euid, c.egid, c.caps, &c.groups[..n]) }
+    }
+
+    /// Whether the caller holds capability `cap` (a bit number).
+    pub fn has_cap(&self, cap: u32) -> bool {
+        self.c.caps & (1 << cap) != 0
+    }
+
+    /// Whether `gid` is the caller's effective group or one of its supplementary groups.
+    pub fn in_group(&self, gid: u32) -> bool {
+        self.c.egid == gid || self.caller.in_groups(gid)
+    }
+
+    /// The descriptor's `O_NONBLOCK` (calls on a server object).
+    pub fn nonblock(&self) -> bool {
+        self.c.obj_flags & 0o4000 != 0
+    }
+
+    /// A little-endian u64 at `off` of `b`.
+    pub fn u64_at(b: &[u8], off: usize) -> u64 {
+        u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
     }
 
     /// Who made the call.
@@ -77,6 +99,22 @@ impl Cx {
         let mut v = alloc::vec![0u8; len];
         sys::lx_read(self.id, ptr, &mut v)?;
         Ok(v)
+    }
+
+    /// [`Cx::copy_in`], where an empty range needs no valid pointer.
+    pub fn copy_in_any(&self, ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        self.copy_in(ptr, len)
+    }
+
+    /// [`Cx::copy_out`], where an empty range needs no valid pointer.
+    pub fn copy_out_any(&self, ptr: u64, data: &[u8]) -> Result<(), i64> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.copy_out(ptr, data)
     }
 
     /// Writes `data` to `ptr` of the caller.

@@ -3210,6 +3210,12 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     if !stream {
         return None;
     }
+    // A linux-server object: the call goes to the server as it is (wave 4, step 2)
+    if let FileDescriptor::Device(d) = &desc {
+        if d.as_server().is_some() {
+            return Some(crate::lx::call_obj(num, a, d));
+        }
+    }
     // (buffer, length) pairs: one for read/write, the iovec array for readv/writev
     let iov: Vec<(u64, u64)> = match num {
         0 | 1 => alloc::vec![(a[1], a[2])],
@@ -3316,6 +3322,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                         }
                         Err(e) => e,
                     },
+                    _ if d.as_server().is_some() => crate::lx::call_obj(16, a, d),
                     _ => d.ioctl(a[1], a[2]),
                 },
                 Some(FileDescriptor::Inotify(ref i)) if a[1] == 0x541B => {
