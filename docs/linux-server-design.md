@@ -988,8 +988,13 @@ pipes and event descriptors"). In short:
   but a step the kernel takes in the caller's context before forwarding `bind`/`connect` on
   a path name (`LxCall::ino`): the node is made or checked with the caller's root, working
   directory, umask, credentials, ACLs and Landlock, which the server does not have yet.
-  Descriptor passing is `LX_OBJ_TAKE`/`GIVE`/`DROP` (below). FIFOs (`mkfifo` nodes) were not
-  supported by the kernel before either and still are not (see 15.3).
+  Descriptor passing is `LX_OBJ_TAKE`/`GIVE`/`DROP` (below).
+- **FIFOs** (`mkfifo` nodes) opened as empty regular files before (GNU make's `-j` jobserver
+  FIFO then busy-looped, Group 16's finding); now the kernel's `open` of an `S_IFIFO` node,
+  after its permission checks, asks the server for a pipe end found by the node's inode
+  (`LX_KCALL_FIFO`; Linux's open semantics: a reader waits for a writer and the other way
+  round, `O_NONBLOCK`, `ENXIO`, `O_RDWR`), or with `lx=kernel` makes one of the kernel's
+  pipes (`vfs::open_fifo_kernel`). Suite test `fifo`.
 
 ### 15.1 Descriptor passing for kernel-owned descriptors
 
@@ -1018,7 +1023,39 @@ self-loops and listener queues for the collector.
 
 ### 15.2 Measured cost (KVM, 2 CPUs; µs)
 
-(see the tables below; numbers filled in at the end of the wave)
+`tests/linux/lxbench.c` as root (`scratch/bench13.sh`), on ca0b31d forwarded and with
+`lx=kernel` (the in-kernel code, same build), alternated twice (both runs given). The host
+ran other groups' VMs throughout; single runs differ by up to 25 %.
+
+| Call | `lx=kernel` | forwarded | Budget |
+|---|---:|---:|---|
+| pipe round trip (2 processes, 1 byte each way) | 31.7 / 25.2 | **27.1 / 22.0** | not slower: met |
+| Unix socket round trip | 32.5 / 25.8 | **24.9 / 22.0** | not slower: met |
+| eventfd round trip (2 processes; median of the earlier series, 3 runs each) | 30.2 | **23.9** | not slower: met |
+| `write`+`read` of an eventfd, one thread | 11.9 / 9.7 | **9.1 / 8.1** | |
+| `write`+`read` of 64 bytes through a pipe, one thread | 11.7 / 9.7 | **9.6 / 8.1** | |
+| `send`+`recv` of 64 bytes on a socketpair, one thread | 12.5 / 10.3 | **9.9 / 8.8** | |
+| `sendmsg` with one descriptor + `recvmsg` (Wayland-like) | 15.0 / 12.8 | 17.4 / 16.5 | +2.4 to +3.7 (two forwarded calls, three descriptor primitives) |
+| `timerfd_settime` | 0.98 / 0.79 | 4.96 / 4.60 | +3.8 to +4.0 (over the +3 per call budget: the server re-arms `timer_arm`, one more system call) |
+| `poll` on a readable eventfd (series) | 1.16 | 1.18 | not slower: met |
+| `lx_null` (forwarded null call) | 0.78 / 0.67 | 3.72 / 3.14 | |
+| **Calls not moved:** `getpid` | 0.18 / 0.16 | 0.17 / 0.16 | |
+| `pread` 4 KiB cached | 1.41 / 1.21 | 1.43 / 1.19 | |
+| `write` 64 bytes to `/dev/null` (pays the descriptor-kind bit test) | 1.18 / 1.01 | 1.24 / 1.07 | +5 % (within noise; +40 % before ca0b31d) |
+| `fstat` | 1.24 / 1.16 | 1.25 / 1.16 | |
+| `stat` | 2.67 / 2.29 | 2.59 / 2.32 | |
+| `open`+`close` | 5.34 / 4.66 | 5.97 / 4.42 | |
+
+- **Why the round trips got faster:** a blocked `read` of the in-kernel pipe sleeps on a
+  wait queue and is woken through the scheduler; forwarded, the reader's call is pending
+  in the server, the writer's forwarded call writes the bytes straight into the reader's
+  memory and completes it, and the writer's answer switches straight back (99.9 % of the
+  answers during a KDE login were direct switches). The one-thread write+read loops show
+  that the in-kernel calls themselves are not cheap here either (about 5 µs each).
+- **Over budget:** `timerfd_settime` (+4 µs) and descriptor passing (+3 µs per message
+  pair); neither is on the desktop's hot path (a KDE login makes 5 to 8 timerfds).
+- **KDE password to desktop** (`kderep.sh`, screen settled after Enter; busy host): see
+  15.4.
 
 ### 15.3 What later steps can build on, and what is missing
 
@@ -1027,8 +1064,7 @@ self-loops and listener queues for the collector.
   carry DRM and evdev descriptors already.
 - **Step 6a (VFS, descriptor table):** `vfs_resolve` (`LxCall::ino`, `unix::server_call`)
   and `LX_OBJ_TAKE`/`GIVE`/`DROP` go: the server then resolves socket nodes and owns the
-  descriptors it passes. FIFOs (`mkfifo`, open of an `S_IFIFO` node) are not supported, as
-  before step 4; with the VFS in the server they become a pipe found by inode.
+  descriptors it passes; the FIFO open (`LX_KCALL_FIFO`) becomes the server's own.
 - **Missing or approximate:** unconnected datagram sends and autobind (as before);
   `SO_RCVTIMEO`/`SO_SNDTIMEO` are accepted and ignored (as before; `timer_arm` can serve
   them); a signalfd's `poll` answers for the process that made it; a blocking signalfd read

@@ -321,7 +321,7 @@ read the readiness words, and `lx=kernel` sends every call back to the in-kernel
 
 | Server module | Calls | Object kind |
 |---|---|---|
-| `pipe.rs` | `pipe`, `pipe2`; `read`/`write`/`readv`/`writev`, `FIONREAD`, `F_GETPIPE_SZ`/`F_SETPIPE_SZ`, `tee`; `splice`/`vmsplice` through them; `/proc/self/fd/N` re-open | `LX_OBJ_KIND_PIPE_R`/`_W` (one slot per end) |
+| `pipe.rs` | `pipe`, `pipe2`, FIFOs (`open` of an `mkfifo` node: `LX_KCALL_FIFO`); `read`/`write`/`readv`/`writev`, `FIONREAD`, `F_GETPIPE_SZ`/`F_SETPIPE_SZ`, `tee`; `splice`/`vmsplice` through them; `/proc/self/fd/N` re-open | `LX_OBJ_KIND_PIPE_R`/`_W` (one slot per end) |
 | `unix.rs` | `socket`/`socketpair(AF_UNIX)`, every socket call on them, `read`/`write`, `FIONREAD`/`SIOCOUTQ`, `/proc/net/unix` | `LX_OBJ_KIND_UNIX` |
 | `eventfd.rs` | `eventfd`, `eventfd2`; `read`/`write` | `LX_OBJ_KIND_EVENTFD` |
 | `timerfd.rs` | `timerfd_create`, `timerfd_settime`, `timerfd_gettime`; `read` | `LX_OBJ_KIND_TIMERFD` |
@@ -360,6 +360,14 @@ object (io_uring's registered eventfd), `ServerObject::read/write` make a *kerne
 call: `args[1]` is `LX_KBUF_ADDR`, the bytes travel in the syscall page's copy area
 (`LX_OBJ_FLAGS_KBUF`: never pending, no `SIGPIPE`); io_uring's eventfd is written from a
 kernel task (`obj::write_later`), since completions are posted under the ring's lock.
+
+**FIFOs.** Opening an `mkfifo` node (after the kernel's permission, Landlock and mount
+checks) asks the server for a pipe end found by the node's inode (`LX_KCALL_FIFO(ino,
+flags)`): a reader's open waits for a writer and a writer's for a reader (answered pending,
+installed when the other side comes), `O_NONBLOCK` lets a reader go on and fails a writer
+with `ENXIO`, `O_RDWR` is one end that reads and writes (`LX_OBJ_KIND_PIPE_RW`). With
+`lx=kernel` the kernel's own pipes do the same (`vfs::open_fifo_kernel`; `O_RDWR` gives the
+read end there). Before, a FIFO opened as an empty regular file.
 
 **pidfd.** The server keeps the object and makes it readable when the process ends
 (`LX_NOTE_EXIT`); the kernel reads the process back from the descriptor (`LxObjDesc::tag`,
