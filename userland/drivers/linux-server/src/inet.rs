@@ -168,8 +168,29 @@ static HMAP: YLock<BTreeMap<u32, u32>> = YLock::new(BTreeMap::new());
 /// Next inode number.
 static INODE: AtomicU64 = AtomicU64::new(0x8000);
 
+/// Handles net-server reported events for before we knew them (a connection's handshake
+/// can finish between net-server's answer to `TCP_CONNECT` and our recording the handle):
+/// the most recent ones, checked when a handle is recorded. Kept under [`HMAP`]'s lock.
+static ORPHANS: YLock<[u32; 64]> = YLock::new([0; 64]);
+static ORPHAN_NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// Records that handle `h` is slot `slot`'s; an event that came for it before counts now.
 fn track(h: u32, slot: u32) {
-    HMAP.lock().insert(h, slot);
+    let early = {
+        let mut m = HMAP.lock();
+        m.insert(h, slot);
+        let mut o = ORPHANS.lock();
+        match o.iter().position(|&x| x == h) {
+            Some(i) => {
+                o[i] = 0;
+                true
+            }
+            None => false,
+        }
+    };
+    if early {
+        crate::socket::poke(slot);
+    }
 }
 
 fn sock_of(slot: u32) -> Option<Arc<YLock<Sock>>> {
@@ -179,7 +200,19 @@ fn sock_of(slot: u32) -> Option<Arc<YLock<Sock>>> {
 /// The slots holding any of `handles`.
 pub fn slots_of(handles: &[u32]) -> Vec<u32> {
     let m = HMAP.lock();
-    let mut v: Vec<u32> = handles.iter().filter_map(|h| m.get(h).copied()).collect();
+    let mut v: Vec<u32> = Vec::new();
+    for &h in handles {
+        match m.get(&h) {
+            Some(&s) => v.push(s),
+            None if h != 0 => {
+                // Not ours, or not recorded yet (see ORPHANS)
+                let mut o = ORPHANS.lock();
+                let i = ORPHAN_NEXT.fetch_add(1, Ordering::Relaxed) as usize % 64;
+                o[i] = h;
+            }
+            None => {}
+        }
+    }
     v.sort_unstable();
     v.dedup();
     v

@@ -154,12 +154,23 @@ const T_FAMILY: u8 = 32;
 /// Table bit (Group 12): the server answers iff descriptor `args[0]` holds a server object
 /// (which the call then carries, as with [`T_FD0`]); otherwise the kernel.
 const T_BYFD: u8 = 64;
-/// The address families whose `socket`/`socketpair` go to the server (bit `f` = family `f`).
+/// The address families whose `socket`/`socketpair` go to a server (bit `f` = family `f`).
 static FAMILIES: AtomicU64 = AtomicU64::new(0);
-/// The address families that moved to the server: one line per step.
-pub const MOVED_FAMILIES: &[u64] = &[
+/// Per address family: the server that answers its `socket`/`socketpair` (a [`Target`];
+/// 0 while it is the kernel's). Only [`TARGET_LINUX`] exists today; a later step that
+/// splits the Linux layer into several services gives a family another target here
+/// (decision 9) without changing the routing itself.
+static FAMILY_TARGET: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+/// A routing target: which server answers (0: the kernel).
+pub type Target = u8;
+/// The target linux-server (endpoint `ENDPOINT_LINUX_SERVER`).
+pub const TARGET_LINUX: Target = 1;
+/// The address families that moved to a server, with their target: one line per step.
+pub const MOVED_FAMILIES: &[(u64, Target)] = &[
     // Group 12 (step 3): AF_INET, AF_INET6, AF_NETLINK
-    2, 10, 16,
+    (2, TARGET_LINUX),
+    (10, TARGET_LINUX),
+    (16, TARGET_LINUX),
 ];
 /// `socket`, `socketpair`: routed by family.
 pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
@@ -171,6 +182,15 @@ pub const BYFD_NUMBERS: &[u64] = &[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 5
 /// Whether `socket`/`socketpair` of address family `family` go to the server.
 pub fn family_moved(family: u64) -> bool {
     family < 64 && FAMILIES.load(Ordering::Relaxed) & (1 << family) != 0
+}
+
+/// The server that answers `socket`/`socketpair` of address family `family` (0: the kernel).
+pub fn family_target(family: u64) -> Target {
+    if family_moved(family) {
+        FAMILY_TARGET[family as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    }
 }
 
 /// Where a forwarded system call is answered.
@@ -205,7 +225,10 @@ pub fn set_forwarding(on: bool) {
     }
     // Socket routing (Group 12): the per-call bits only once some family moved, so that
     // nothing changes for the socket calls before
-    let families = if on { MOVED_FAMILIES.iter().fold(0u64, |m, &f| m | 1 << f) } else { 0 };
+    let families = if on { MOVED_FAMILIES.iter().fold(0u64, |m, &(f, _)| m | 1 << f) } else { 0 };
+    for &(f, t) in MOVED_FAMILIES {
+        FAMILY_TARGET[f as usize].store(if on { t } else { 0 }, Ordering::Release);
+    }
     FAMILIES.store(families, Ordering::Release);
     let sockets = families != 0;
     for nr in BYFAMILY_NUMBERS {
@@ -260,7 +283,7 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
             if bits & (T_FAMILY | T_BYFD) != 0 {
                 // Routed per call (Group 12): while no server is online, sockets are the
                 // kernel's (and no descriptor holds a live server object)
-                if !ONLINE.load(Ordering::Acquire) || (bits & T_FAMILY != 0 && !family_moved(frame.rdi)) {
+                if !ONLINE.load(Ordering::Acquire) || (bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX) {
                     return None;
                 }
                 if bits & T_BYFD != 0 {
@@ -1012,7 +1035,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
     // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
     // ordinary path, whose `forward` finds it the kernel's again (one more bit test)
-    if bits & T_FAMILY != 0 && !family_moved(c.args[0]) {
+    if bits & T_FAMILY != 0 && family_target(c.args[0]) != TARGET_LINUX {
         return None;
     }
     if bits & T_BYFD != 0 {
