@@ -39,4 +39,12 @@ fn build_drivers()
 fn main()
 {
     build_drivers();
+    // The kernel image's preferred load address. UEFI firmware (EDK2/OVMF) loads an image at
+    // its preferred base when that memory is free, else anywhere. The kernel runs at its
+    // physical address, so the 1 GiB slot it lands in is the kernel's in every address space
+    // (`memory::vm::init_low_layout`). The linker's default for 64-bit images, 0x1_4000_0000,
+    // is the base of 64-bit Windows programs, which Wine needs: on machines with RAM there
+    // (QEMU q35 with 4 GiB, real machines with more than about 5 GiB) programs lost that
+    // slot. 0x1_0000_0000 (slot 4) is used by neither Wine nor Linux programs.
+    println!("cargo:rustc-link-arg-bins=/BASE:0x100000000");
 }
