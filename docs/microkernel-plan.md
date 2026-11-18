@@ -322,5 +322,5 @@ These are not group work yet, but should not be forgotten:
 |---|---|---|
 | Where sound and the display go | Wave 6 (step 5) | A display/input server serving Linux programs, and later native ones too, is the design's suggestion |
 | How the separate file-system service is shaped (what it owns, what stays in the kernel, crash behavior) | Wave 7 (step 6a) | The VFS is a service of its own (decision 9); Group 16 revises [vfs-design.md](vfs-design.md) |
-| How the Linux layer is split into services, and how the kernel routes calls to several servers | Before wave 7 | Decision 9; a step-0 design is being written |
+| How the Linux layer is split into services, and how the kernel routes calls to several servers | Before wave 6 (its foundation is wave 6's work) | Decision 9; step 0 done in wave 5 (Group 18): [linux-services-design.md](linux-services-design.md), nine questions in its section 8 |
 | Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 10 (the core split) | The wave 5 hook is cheap and serves all of them; the FreeBSD shortcut is only worth it for a specific program needed early |
