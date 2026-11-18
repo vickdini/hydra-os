@@ -105,7 +105,11 @@ pub static TICK_YIELD: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::Per
 /// timeslice, switches away here as a tick would have. Call with no lock held, at the end of
 /// a Linux system call.
 pub fn tick_on_return() {
-    if TICK_DEFERRED.swap(0, core::sync::atomic::Ordering::Relaxed) == 0 || !is_active() {
+    // (a plain load first: no locked instruction on the common path)
+    if TICK_DEFERRED.load(core::sync::atomic::Ordering::Relaxed) == 0
+        || TICK_DEFERRED.swap(0, core::sync::atomic::Ordering::Relaxed) == 0
+        || !is_active()
+    {
         return;
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
