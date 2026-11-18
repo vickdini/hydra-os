@@ -55,7 +55,7 @@ use spin::Mutex;
 use crate::arch::syscall::SyscallFrame;
 use crate::ipc::protocol::{
     LxCall, LxCopy, ENDPOINT_LINUX_SERVER, LX_COPY_OFF, LX_DATA_OFF, LX_DATA_SIZE, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
-    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
+    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_OBJ_FLAGS_NETNS, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
 };
 use crate::ipc::service::ContiguousFrames;
 use crate::task::TaskId;
@@ -159,6 +159,7 @@ static FAMILIES: AtomicU64 = AtomicU64::new(0);
 /// The address families that moved to the server: one line per step.
 pub const MOVED_FAMILIES: &[u64] = &[
     // Group 12 (step 3): AF_INET, AF_INET6, AF_NETLINK
+    2, 10, 16,
 ];
 /// `socket`, `socketpair`: routed by family.
 pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
@@ -189,7 +190,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, AF_INET/AF_INET6/AF_NETLINK sockets: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -539,9 +540,12 @@ fn call(frame: &SyscallFrame, byfd: Option<(Arc<dyn crate::compat::linux::charde
     let bits = table_bits(c.nr);
     // Group 9: the server object at args[0], held until the call is answered (a close on
     // another thread cannot overtake the call); Group 12: a T_BYFD call's, found already
+    if bits & (T_FAMILY | T_BYFD) != 0 && crate::compat::linux::ns::net_isolated() {
+        c.obj_flags |= LX_OBJ_FLAGS_NETNS;
+    }
     let _held = if let Some((dev, slot, flags)) = byfd {
         c.obj = slot;
-        c.obj_flags = flags;
+        c.obj_flags |= flags;
         Some(dev)
     } else if bits & T_FD0 != 0 {
         obj::current_fd(c.args[0]).map(|(dev, slot, flags)| {
@@ -906,6 +910,9 @@ struct Ident {
     /// The process's IPC namespace (`ns::ipc_ns`: unshare, setns and execve bump the
     /// identity epoch too).
     ipc_ns: u64,
+    /// The process is in a network namespace of its own (`ns::net_isolated`; unshare and
+    /// setns bump the identity epoch).
+    net: bool,
 }
 
 /// Per CPU, used only by that CPU with interrupts off.
@@ -913,7 +920,7 @@ struct IdentCache([UnsafeCell<Ident>; crate::arch::smp::MAX_CPUS]);
 // SAFETY: each CPU touches only its own entry, with interrupts off
 unsafe impl Sync for IdentCache {}
 static IDENT: IdentCache = IdentCache(
-    [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0 }) }; crate::arch::smp::MAX_CPUS],
+    [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0, net: false }) }; crate::arch::smp::MAX_CPUS],
 );
 
 /// The calling thread's identity for a forwarded call, from this CPU's cache when nothing
@@ -936,7 +943,7 @@ fn ident() -> Option<Ident> {
     if !ok || crate::compat::linux::ptrace::is_traced(tid) {
         return None;
     }
-    let mut n = Ident { epoch, tid, tgid, ids, caps, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0 };
+    let mut n = Ident { epoch, tid, tgid, ids, caps, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0, net: false };
     // (never waiting for the process table: see `fast_entry`)
     let procs = crate::compat::linux::proc::PROCS.try_lock()?;
     if let Some(p) = procs.get(&tgid) {
@@ -944,6 +951,7 @@ fn ident() -> Option<Ident> {
         n.groups[..k].copy_from_slice(&p.groups[..k]);
         n.ngroups = k as u64;
         n.ipc_ns = p.ns.ipc;
+        n.net = p.ns.net != 0;
     }
     drop(procs);
     *e = n;
@@ -1011,6 +1019,9 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
             }
             Ok(None) | Err(()) => return None,
         }
+    }
+    if bits & (T_FAMILY | T_BYFD) != 0 && id.net {
+        c.obj_flags |= LX_OBJ_FLAGS_NETNS;
     }
     if bits & T_IPC != 0 {
         c.ipc_ns = id.ipc_ns;
@@ -1664,6 +1675,32 @@ pub fn stats() -> (bool, usize, usize, usize, u64, u64, u64) {
 // ----------------------------------------------------------------------
 // Kernel requests to the server's main thread
 // ----------------------------------------------------------------------
+
+/// `/proc/net/tcp`, `tcp6`, `udp` or `udp6` (Group 12): from linux-server, whose sockets
+/// they list, once Internet sockets moved; `None` while they are the kernel's.
+pub fn proc_net_text(file: &str) -> Option<alloc::string::String> {
+    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_NET};
+    let code = match file {
+        "tcp" => 0,
+        "tcp6" => 1,
+        "udp" => 2,
+        "udp6" => 3,
+        _ => return None,
+    };
+    if !family_moved(2) || !is_online() {
+        return None;
+    }
+    let isolated = crate::compat::linux::ns::net_isolated() as u64;
+    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
+    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
+    let msg = crate::ipc::Message::with_args(MSG_LX_PROC_NET, [code, isolated, 0, 0]);
+    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
+        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
+        _ => return None,
+    };
+    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
+    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+}
 
 /// `/proc/keys` for the calling Linux thread, from the server when the key calls are
 /// forwarded (`None`: the in-kernel table answers). A hand-off call: the reader may hold

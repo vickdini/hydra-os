@@ -487,6 +487,22 @@ pub fn check_port(port: u16, want: u64) -> Result<(), i64> {
     Ok(())
 }
 
+/// [`check_port`] for task `tid` (wave 5: linux-server asks it for the callers of the
+/// socket calls it serves, `SYS_LX_OBJ` `LX_OBJ_NETCHECK`).
+pub fn check_port_of(tid: u64, port: u16, want: u64) -> Result<(), i64> {
+    if !ANY.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let Some(d) = crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| t.seccomp.landlock.clone()).flatten() else { return Ok(()) };
+    for l in &d.layers {
+        let need = want & l.net;
+        if need != 0 && need & !l.ports.get(&port).copied().unwrap_or(0) != 0 {
+            return Err(EACCES);
+        }
+    }
+    Ok(())
+}
+
 /// Mount changes: refused (`EPERM`) to a landlocked thread.
 pub fn check_mount() -> Result<(), i64> {
     if active() {

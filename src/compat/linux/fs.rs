@@ -582,7 +582,11 @@ impl PseudoFile {
             PseudoFile::ProcNet(i) => {
                 let text = match PROC_NET[*i as usize] {
                     "unix" => super::unix::proc_net_unix(),
-                    t => super::inet::proc_net(t).or_else(|| super::rtnetlink::proc_net_text(t)).unwrap_or_default(),
+                    // Internet sockets in linux-server (wave 5): it lists them
+                    t => crate::lx::proc_net_text(t)
+                        .or_else(|| super::inet::proc_net(t))
+                        .or_else(|| super::rtnetlink::proc_net_text(t))
+                        .unwrap_or_default(),
                 };
                 read_slice(text.as_bytes(), cursor, buf)
             }

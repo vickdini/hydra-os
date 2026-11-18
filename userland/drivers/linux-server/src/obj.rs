@@ -153,6 +153,14 @@ pub fn closed(slot: u32, kind: u32) {
         }
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
         LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
+        LX_OBJ_KIND_INET => {
+            crate::socket::closed(slot);
+            crate::inet::closed(slot);
+        }
+        LX_OBJ_KIND_NETLINK => {
+            crate::socket::closed(slot);
+            crate::netlink::closed(slot);
+        }
         _ => {}
     }
     set_ready(slot, 0, 0);

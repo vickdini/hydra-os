@@ -105,6 +105,46 @@ struct State {
     next_poll: u64,
 }
 
+/// Kinds of handle, for [`OWNERS`].
+const H_TCP: u8 = 0;
+const H_BIND: u8 = 1;
+const H_LISTEN: u8 = 2;
+const H_UDP: u8 = 3;
+const H_ICMP: u8 = 4;
+
+/// Wave 5: who made each handle a client holds (`(client tag, kind)`), so that
+/// [`MSG_NETS_CLIENT_RESET`] can close a restarted client's leftovers. The kernel's
+/// (tag 0) are recorded too; handles net-server uses itself (DNS) are not.
+static OWNERS: Mutex<alloc::collections::BTreeMap<u32, (u8, u8)>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+fn own(h: u32, tag: u64, kind: u8) {
+    OWNERS.lock().insert(h, (tag as u8, kind));
+}
+
+fn disown(h: u32) {
+    OWNERS.lock().remove(&h);
+}
+
+fn tag_of(h: u32) -> u64 {
+    OWNERS.lock().get(&h).map_or(0, |o| o.0 as u64)
+}
+
+/// [`MSG_NETS_CLIENT_RESET`]: closes every handle of client `tag`; how many.
+fn client_reset(tag: u64) -> i64 {
+    let handles: Vec<(u32, u8)> = OWNERS.lock().iter().filter(|(_, o)| o.0 as u64 == tag).map(|(h, o)| (*h, o.1)).collect();
+    for &(h, kind) in &handles {
+        match kind {
+            H_TCP => stack::tcp_close(h),
+            H_BIND => stack::tcp_unbind(h),
+            H_LISTEN => stack::tcp_unlisten(h),
+            H_UDP => stack::udp_close(h),
+            _ => stack::icmp_close(h),
+        }
+        disown(h);
+    }
+    handles.len() as i64
+}
+
 /// Interface changes (leases), for `NETS_ST_IFACE_SEQ`.
 static IFACE_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -219,7 +259,10 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
     let h = a[0] as u32;
     let r = match m.label as u32 {
         MSG_NETS_TCP_CONNECT => match stack::tcp_connect(ip_of(a[0]), a[1] as u16, (a[2] != 0).then_some(a[2] as u16)) {
-            Ok(c) => result(c as i64),
+            Ok(c) => {
+                own(c, a[3], H_TCP);
+                result(c as i64)
+            }
             Err(e) => result(e),
         },
         MSG_NETS_TCP_SEND => match st.data(a[1], a[2]) {
@@ -239,6 +282,7 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
         }
         MSG_NETS_TCP_CLOSE => {
             stack::tcp_close(h);
+            disown(h);
             result(0)
         }
         MSG_NETS_TCP_TAKE_ERROR => result(stack::tcp_take_error(h).map_or(0, |e| -e)),
@@ -252,29 +296,49 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
         MSG_NETS_TCP_BIND => {
             let f = a[2];
             match stack::tcp_bind(ip_of(a[0]), a[1] as u16, f & 1 != 0, f & 2 != 0, f & 4 != 0, f & 8 != 0) {
-                Ok((b, port)) => reply([b as u64, port as u64, 0, 0]),
+                Ok((b, port)) => {
+                    own(b, a[3], H_BIND);
+                    reply([b as u64, port as u64, 0, 0])
+                }
                 Err(e) => result(e),
             }
         }
         MSG_NETS_TCP_UNBIND => {
             stack::tcp_unbind(h);
+            disown(h);
             result(0)
         }
-        MSG_NETS_TCP_LISTEN => result(stack::tcp_listen(h, a[1] as usize).map_or_else(|e| e, |l| l as i64)),
+        MSG_NETS_TCP_LISTEN => result(stack::tcp_listen(h, a[1] as usize).map_or_else(
+            |e| e,
+            |l| {
+                own(l, tag_of(h), H_LISTEN);
+                l as i64
+            },
+        )),
         MSG_NETS_TCP_BACKLOG => {
             stack::tcp_set_backlog(h, a[1] as usize);
             result(0)
         }
         MSG_NETS_TCP_ACCEPT => match stack::tcp_accept(h) {
-            Some(c) => result(c as i64),
+            Some(c) => {
+                own(c, tag_of(h), H_TCP);
+                result(c as i64)
+            }
             None if stack::listener_exists(h) => result(EAGAIN),
             None => result(EBADF),
         },
         MSG_NETS_TCP_UNLISTEN => {
             stack::tcp_unlisten(h);
+            disown(h);
             result(0)
         }
-        MSG_NETS_UDP_OPEN => result(stack::udp_open(a[0] as u16).map_or_else(|e| e, |u| u as i64)),
+        MSG_NETS_UDP_OPEN => result(stack::udp_open(a[0] as u16).map_or_else(
+            |e| e,
+            |u| {
+                own(u, a[3], H_UDP);
+                u as i64
+            },
+        )),
         MSG_NETS_UDP_REBIND => result(stack::udp_rebind(h, a[1] as u16).map_or_else(|e| e, |()| 0)),
         MSG_NETS_UDP_PORT => result(stack::udp_port(h) as i64),
         MSG_NETS_UDP_SEND => match st.data(a[2], a[3]) {
@@ -283,21 +347,30 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
             None => result(EINVAL),
         },
         MSG_NETS_UDP_RECV => match stack::udp_recv(h, a[2] != 0) {
-            Some((ip, port, data, stamp)) => match st.data(a[1], data.len() as u64) {
-                Some(d) => {
-                    d.copy_from_slice(&data);
-                    reply([data.len() as u64, addr(ip) << 16 | port as u64, stamp, 0])
+            Some((ip, port, data, stamp)) => {
+                // At most `capacity` bytes (wave 5: a client's part of the data area)
+                let n = if a[3] != 0 { data.len().min(a[3] as usize) } else { data.len() };
+                match st.data(a[1], n as u64) {
+                    Some(d) => {
+                        d.copy_from_slice(&data[..n]);
+                        reply([data.len() as u64, addr(ip) << 16 | port as u64, stamp, n as u64])
+                    }
+                    None => result(EINVAL),
                 }
-                None => result(EINVAL),
-            },
+            }
             None if stack::udp_exists(h) => result(EAGAIN),
             None => result(EBADF),
         },
         MSG_NETS_UDP_CLOSE => {
             stack::udp_close(h);
+            disown(h);
             result(0)
         }
-        MSG_NETS_ICMP_OPEN => result(stack::icmp_open(a[0] != 0, a[1] != 0) as i64),
+        MSG_NETS_ICMP_OPEN => {
+            let i = stack::icmp_open(a[0] != 0, a[1] != 0);
+            own(i, a[3], H_ICMP);
+            result(i as i64)
+        }
         MSG_NETS_ICMP_IDENT => result(stack::icmp_ident(h) as i64),
         MSG_NETS_ICMP_SET_IDENT => result(stack::icmp_set_ident(h, a[1] as u16).map_or_else(|e| e, |()| 0)),
         MSG_NETS_ICMP_SEND => match st.data(a[2], a[3]) {
@@ -305,20 +378,25 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
             None => result(EINVAL),
         },
         MSG_NETS_ICMP_RECV => match stack::icmp_recv(h, a[2] != 0) {
-            Some((ip, data, stamp)) => match st.data(a[1], data.len() as u64) {
-                Some(d) => {
-                    d.copy_from_slice(&data);
-                    reply([data.len() as u64, addr(ip), stamp, 0])
+            Some((ip, data, stamp)) => {
+                let n = if a[3] != 0 { data.len().min(a[3] as usize) } else { data.len() };
+                match st.data(a[1], n as u64) {
+                    Some(d) => {
+                        d.copy_from_slice(&data[..n]);
+                        reply([data.len() as u64, addr(ip), stamp, n as u64])
+                    }
+                    None => result(EINVAL),
                 }
-                None => result(EINVAL),
-            },
+            }
             None if stack::icmp_exists(h) => result(EAGAIN),
             None => result(EBADF),
         },
         MSG_NETS_ICMP_CLOSE => {
             stack::icmp_close(h);
+            disown(h);
             result(0)
         }
+        MSG_NETS_CLIENT_RESET => result(client_reset(a[0])),
         MSG_NETS_LIST => result(list(st, a[0], a[1], a[2])),
         MSG_NETS_DHCP => {
             if !nic::is_present() {

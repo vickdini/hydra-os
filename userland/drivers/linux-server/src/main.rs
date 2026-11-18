@@ -31,11 +31,16 @@ extern crate alloc;
 
 mod bpf;
 mod client;
+mod inet;
 mod keys;
 mod lock;
 mod mqueue;
+mod netc;
+mod netlink;
 mod notes;
 mod obj;
+mod socket;
+mod sockopt;
 mod sysv;
 mod timeout;
 
@@ -107,6 +112,8 @@ fn main(args: &[&str]) {
     };
     notes::init(srv.window().as_mut_ptr());
     obj::init(srv.window().as_mut_ptr());
+    // What a previous linux-server left in net-server (its sockets) goes (wave 5)
+    netc::reset();
     if let Err(e) = sys::lx_ctl(LX_CTL_ONLINE) {
         println!("[linux-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -123,12 +130,14 @@ fn serve_endpoint(srv: &mut Server) -> ! {
             Some(d) => d.saturating_sub(now).clamp(1, 100),
             None => 100,
         };
+        let mut bits = 0;
         match sys::svc_recv_notify(srv.endpoint, timeout) {
-            Ok((0, _)) => {}
+            Ok((0, m)) => bits = m.args[0],
             Ok((id, req)) => {
                 let reply = match req.label as u32 {
                     MSG_SUPERVISOR_PING => Message::new(MSG_SUPERVISOR_PONG as u64, [req.args[0], 1, 0, 0]),
                     MSG_LX_PROC_KEYS => proc_keys(srv, &req),
+                    MSG_LX_PROC_NET => proc_net(srv, &req),
                     _ => Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0]),
                 };
                 let _ = sys::svc_reply(srv.endpoint, id, &reply);
@@ -136,6 +145,8 @@ fn serve_endpoint(srv: &mut Server) -> ! {
             Err(_) => {}
         }
         notes::drain_all();
+        // Sockets (wave 5): net-server's readiness relayed, blocked calls tried again
+        socket::notified(bits);
         complete_due();
         obj::flush();
     }
@@ -147,7 +158,18 @@ pub fn next_deadline(now: u64) -> Option<u64> {
     let null = if PENDING.lock().is_empty() { None } else { Some(now + 1) };
     let mq = mqueue::tick(now);
     let sv = sysv::tick(now);
-    [null, mq, sv].into_iter().flatten().min()
+    let so = socket::tick(now);
+    [null, mq, sv, so].into_iter().flatten().min()
+}
+
+/// `/proc/net/tcp`, `tcp6`, `udp`, `udp6` (see [`MSG_LX_PROC_NET`]).
+fn proc_net(srv: &mut Server, req: &Message) -> Message {
+    notes::drain_all();
+    let text = inet::proc_net(req.args[0], req.args[1] != 0);
+    let win = srv.window();
+    let len = text.len().min(LX_PROC_KEYS_TEXT_MAX);
+    win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
+    Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
 }
 
 /// `/proc/keys` for the caller the kernel describes (see [`MSG_LX_PROC_KEYS`]).
@@ -187,7 +209,7 @@ fn complete_due() {
 /// A signal arrived for the caller of pending request `id`: a pending test call is
 /// answered `-EINTR` at once.
 pub fn interrupted(id: u64) {
-    if mqueue::interrupted(id) || sysv::interrupted(id) {
+    if mqueue::interrupted(id) || sysv::interrupted(id) || socket::interrupted(id) {
         return;
     }
     let found = {
@@ -236,7 +258,10 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     let r = match c.nr {
         LX_NULL_NR => null_call(&cx),
         // read, write, readv, writev, ioctl on a server object
-        0 | 1 | 16 | 19 | 20 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
+        0 | 1 | 16 | 19 | 20 if c.obj != LX_OBJ_NONE => object_io(&cx),
+        // Sockets (wave 5, step 3): socket/socketpair by family, the rest by object kind
+        41 | 53 => socket::by_family(&cx),
+        42..=52 | 54 | 55 | 288 | 299 | 307 => socket::by_kind(&cx),
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
         240..=245 => mqueue::dispatch(&cx),
         64..=66 | 220 | 68..=71 => sysv::dispatch(&cx),
@@ -248,14 +273,15 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
 }
 
 /// `read`, `write`, `readv`, `writev` and `ioctl` on the server object in `cx.c.obj`.
-fn object_io(cx: &Cx) -> i64 {
+fn object_io(cx: &Cx) -> (i64, u64) {
     const EINVAL_: i64 = -22;
     const ENOTTY: i64 = -25;
     match (obj::kind_of(cx.c.obj as u32), cx.nr) {
-        (LX_OBJ_KIND_TEST, _) => obj::test_io(cx),
-        (LX_OBJ_KIND_MQ, 0) => mqueue::read(cx),
-        (_, 16) => ENOTTY,
-        _ => EINVAL_,
+        (LX_OBJ_KIND_TEST, _) => (obj::test_io(cx), 0),
+        (LX_OBJ_KIND_MQ, 0) => (mqueue::read(cx), 0),
+        (LX_OBJ_KIND_INET | LX_OBJ_KIND_NETLINK, _) => socket::by_kind(cx),
+        (_, 16) => (ENOTTY, 0),
+        _ => (EINVAL_, 0),
     }
 }
 
