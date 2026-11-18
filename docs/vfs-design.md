@@ -9,7 +9,7 @@ Microkernel wave 5, Group 16, 2026-11-18. Base: `host-unit-tests` 329aaf7. No co
 - **What was measured** (KVM, 2 CPUs, the same setup as the Linux design):
   - the system calls of eight real workloads, sorted by the kind of call and the kind of descriptor (section 3.3);
   - the cost of the VFS calls today, and of VFS-shaped calls answered by a stub in linux-server (a local prototype, not committed; section 3.2).
-- **The metadata-heavy tools are the only workloads that care.** They make **17,000 to 79,000 system calls a second** (warm `find /usr`: 79,000/s). The desktop, the browser and `apt-get install` make 2,000 to 4,000 a second (KDE: section 3.3), and none of the options costs them more than 1 %.
+- **The metadata-heavy tools are the only workloads that care.** They make **17,000 to 79,000 system calls a second** (warm `find /usr`: 79,000/s). Firefox's start and `apt-get install` make 2,000 to 4,000 a second and no option costs them more than 1 %. A KDE login makes about 14,000 a second for 25 s; it costs +0.5 % to +3.4 % depending on the option.
 - **Most of those calls are on descriptors, not paths.** A warm `find /usr` makes 84,900 calls: 60,300 of them are `fcntl`, `close` and `fstat` on directory descriptors, 11,600 `getdents64`, and only 11,700 path calls.
 - **Today's time is mostly zfs-server requests,** not system calls: the kernel's name cache (8,192 entries, emptied when full) hits only 13–56 % in a tree walk, and `find` makes 42,000 file-server requests (about 0.64 s of its 1.07 s).
 - **A forwarded VFS call costs more than a forwarded null call.** Measured with the stub: +2.0 µs for a call without pointers, **+4.2 µs for a path call** (the path in, a `struct stat` out), +4.7 µs for `getdents64`, +3.3 µs for a 4 KiB read. The copy-in/copy-out table costs 1–2 µs per pointer.
@@ -27,7 +27,7 @@ Microkernel wave 5, Group 16, 2026-11-18. Base: `host-unit-tests` 329aaf7. No co
   - **cheaper user-memory copies in the forwarding path** (1–2 µs per pointer today);
   - **a fast call from linux-server to zfs-server.** A ring-3 server's call is Queued today: about 3 µs more per request, which would add 10–17 % to the metadata tools.
   - Both are small, separate kernel tasks for wave 6.
-- **Wave 7** splits into five groups in parallel plus one closing group (section 10), about 19–23 agent-days in total, 6–8 days of wall time.
+- **Wave 7** splits into five groups in parallel plus one closing group (section 10), about 21–23 agent-days in total (plus 6–8 for the prerequisites), 6–8 days of wall time.
 
 Section 9 lists the decisions, in plain words.
 
@@ -146,7 +146,7 @@ What this shows:
 | `apt-get install hello` (from the cache) | 11.8 s | 24,681 | 2,093 | 6,204 / 107 | 3,550 | 6,500 | 78 | 2,122 / 4,134 | 57 | 20,494 (2.7 s) |
 | Firefox headless start (warm) | 5.05 s | 19,049 | 3,771 | 3,242 / 250 | 1,322 | 1,628 | 54 | 975 / 196 | 1,676 | 8,524 (0.87 s) |
 | `make -j2` of 30 C files (gcc) | GCC_TIME | GCC_CALLS | GCC_RATE | GCC_PATH | GCC_OPEN | GCC_META | GCC_DENTS | GCC_RW | GCC_POLL | GCC_ZFS |
-| KDE: password to desktop | KDE_TIME | KDE_CALLS | KDE_RATE | KDE_PATH | KDE_OPEN | KDE_META | KDE_DENTS | KDE_RW | KDE_POLL | KDE_ZFS |
+| KDE: password to desktop (profile from the console before the login to after the desktop settled, about 80 s; the login itself settles in about 25 s, wave 4) | about 25 s | 341,804 | about 13,700 (over 25 s) | 148,179 / 3,420 | 16,673 | 28,435 | 2,064 | 13,823 / 331 | 17,569 | 99,466 |
 
 What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints the full lists):
 - **`find`:** `fcntl` 27,200 (all on directories: `F_DUPFD_CLOEXEC`/`F_GETFD`), `close` 21,488, `fstat` 11,647, `getdents64` 11,612, `openat` 5,889 (relative to a directory descriptor), `newfstatat` 5,794, and 1,043 `write`s to `/dev/null`.
@@ -155,12 +155,12 @@ What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints th
 - **`tar`:** `fstat` 10,282, `newfstatat` 4,451, `fcntl` 4,351, `read` 4,140 (file data), `getdents64`, `openat`, `close`; `write` and `splice` on the pipe.
 - **`apt-get install`:** `write` 4,307 (file data: dpkg), `openat` 3,630, `close` 3,424, `newfstatat` 2,395, `read` 2,248, `fstat` 1,991, `mmap` 1,433, `ioctl` 1,302 (on files: dpkg's `FIFREEZE`-style checks and terminal queries), `rename` 24, `fsync` 28.
 - **Firefox:** `mmap` 2,068, `read` 1,705 (half on pipes), `poll` 1,488, `openat` 1,451, `mprotect` 1,354, `close` 1,263, `access` 637; 250 path calls under `/proc`, `/sys` and `/dev`; `rename` 185 (its profile files).
-- **KDE:** KDE_DETAIL
+- **KDE:** `statx` 62,153, `access` 43,532, `mmap` 26,176 (21,267 of files), `mprotect` 25,188, `read` 20,390 (13,486 of files, 5,214 of eventfds), `openat` 19,152, `readlink` 17,238, `close` 16,493, `newfstatat` 13,955, `write` 12,252 (11,553 to eventfds), `fstat` 10,460, `recvmsg` 9,664, `ppoll` 8,789. 3,420 path calls under `/proc`, `/sys`, `/dev` and `/run`. The name cache hit 88 % here (the desktop looks up the same few thousand paths again and again), yet zfs-server still got 99,466 requests, 43,533 of them `resolve_mnt`.
 
 **The name cache.** The kernel's name cache hit 55 % of its lookups in `find`, 39 % in `git status` and only **13 % in `ls -lR`** (attribute cache: 84 %, 73 %, 71 %). It holds 8,192 results and empties itself when full, so a walk over more than a few thousand names keeps emptying it. Every miss is a zfs-server request: `ls -lR` makes 204,518 `resolve` requests for 105,497 path calls.
 
 **What this means for the options:**
-1. **Only the metadata tools are at risk.** They make 17,000–79,000 calls a second, most of which take 1–3 µs in the kernel today. Desktop, browser and package workloads make 2,000–4,000 a second.
+1. **Only the metadata tools are at risk.** They make 17,000–79,000 calls a second, most of which take 1–3 µs in the kernel today. Firefox and package workloads make 2,000–4,000 a second; a KDE login about 14,000, but 38 % of those are `stat`-kind path calls that hit the name cache.
 2. **In the tools, descriptor calls outnumber path calls.** `find` makes 5 descriptor calls (`fcntl`, `close`, `fstat`, `getdents64`) for every path call. A kernel descriptor table saves more than a kernel name cache.
 3. **zfs-server requests are where today's time goes** (`find`: 0.64 s of 1.07 s; `ls -lR`: 3.9 of 7.9 s). A bigger cache in linux-server would win back more than forwarding loses, but only if linux-server reaches zfs-server as cheaply as the kernel does (section 8.2).
 
@@ -220,14 +220,14 @@ The first five columns assume that linux-server's zfs-server requests cost what 
 | `make -j2` of 30 C files | GCC_TIME | GCC_A | GCC_BL | GCC_BF | 0 | GCC_Q |
 | `apt-get install hello` | 11.8 s | +58 ms (0.5 %) | +36 ms (0.3 %) | +26 ms (0.2 %) | 0 | +66 ms (0.6 %) |
 | Firefox headless start | 5.05 s | +27 ms (0.5 %) | +16 ms (0.3 %) | +9 ms (0.2 %) | 0 | +27 ms (0.5 %) |
-| KDE: password to desktop | KDE_TIME | KDE_A | KDE_BL | KDE_BF | 0 | KDE_Q |
+| KDE: password to desktop (all its calls counted against 25 s) | about 25 s | +843 ms (3.4 %) | +649 ms (2.6 %) | +126 ms (0.5 %) | 0 | +318 ms (1.3 %) |
 
 Against the budget (design 6.6; desktop, browser and network +5 %, metadata tools +35 %):
 - **A misses the metadata budget** for a warm `find` on the faster baseline (+52 %), and meets it on today's slower one only if the server-to-server call is fast.
 - **B-lean and B-full meet it** on both baselines, provided the server-to-server call is fast. With Queued server calls, B-lean's `find` comes to +54 % on the fast baseline: the fast call is a prerequisite in every option (section 8.2).
-- **The desktop, the browser and `apt-get` stay under 1 % in every option.**
-- **The name cache of B-full** saves 0.4 s in `ls -lR` (which calls `lgetxattr`, `statx` and `readlink` on every file) and 23–30 ms in `find` and `git status`. It costs a coherence protocol in the kernel (section 6). It is worth adding later only if a step misses the budget on a workload like `ls -lR`.
-- **The cheaper copy changes the picture.** If the copy table's per-pointer cost dropped from about 2 µs to 0.5 µs, path calls would add about 2.5 µs. A's `find` would then come to about +36 % on the fast baseline and B-lean's to about +15 %.
+- **Firefox and `apt-get` stay under 1 % in every option. The KDE login** costs +3.4 % (A), +2.6 % (B-lean) or +0.5 % (B-full): within the 5 % budget, but with Queued server calls B-lean's +3.9 % leaves little room.
+- **The name cache of B-full** saves 0.4 s in `ls -lR` (which calls `lgetxattr`, `statx` and `readlink` on every file) and 23–30 ms in `find` and `git status`. It costs a coherence protocol in the kernel (section 6). It also saves about 0.5 s of the KDE login's 0.65 s (131,000 `statx`, `access` and `readlink` calls). It is worth adding later only if a step misses the budget on a workload like `ls -lR` or the KDE login.
+- **The cheaper copy changes the picture.** If the copy table's per-pointer cost dropped from about 2 µs to 0.5 µs, path calls would add about 2.5 µs. A's `find` would then come to about +42 % on the fast baseline (+17 % on today's) and B-lean's to about +15 % (+6 %); the KDE login to +2.3 % (A) and +1.5 % (B-lean).
 
 ### 5.2 The rest of the comparison
 
@@ -239,7 +239,7 @@ Against the budget (design 6.6; desktop, browser and network +5 %, metadata tool
 | **Cache coherence** | none in the kernel (the server's own caches are private) | per-file attributes only: the server forgets a file's attributes before it answers a call that changed them | names, attributes and link targets (section 6) | as today |
 | **When linux-server crashes** | every Linux program ends (decision 6); nothing to repair in the kernel | the same; the kernel empties the attribute cache and the handles of the dead server fail with `EBADF` | the same, plus the name cache is emptied | a VFS bug is a kernel panic, as today |
 | **Isolation gained** | everything that parses paths, mount options and pseudo-file text is out of the kernel | the same: the table and file reads are mechanism; no path is parsed in the kernel | the kernel compares path bytes for its cache, but parses nothing | none |
-| **Agent-days (wave 7)** | 24–28: B-lean's work, plus moving the table, `poll`/`epoll`/`select`, kernel-object readiness to the server and the `mmap`/`ioctl`/`sendfile` forwards | **19–23** (section 10) | 22–26 | 3–5 |
+| **Agent-days (wave 7)** | 26–29: B-lean's work, plus moving the table, `poll`/`epoll`/`select`, kernel-object readiness to the server and the `mmap`/`ioctl`/`sendfile` forwards | **21–23** (section 10) | 24–26 | 3–5 |
 | **Main risks** | Misses the metadata budget; every `poll`/`epoll_wait` of the desktop becomes a forward; the largest change to `fork`, `exec` and exit | The handle table must stay correct for objects owned by two parties (kernel file handles, server objects); `execve` and `mmap` couplings | B-lean's, plus a coherence protocol whose bugs would be silent stale results | The kernel keeps 15,000 lines of file-system policy for good, against decision 1 ("the whole layer moves out") |
 
 ## 6. Cache coherence (option B)
@@ -330,7 +330,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 1. **It meets the budget,** with the two prerequisites below:
    - warm `find` about +10 % (+24 % on the faster baseline);
    - `git status` +11 %, `tar` +4 %;
-   - the desktop, the browser and `apt-get` under 1 %.
+   - the KDE login +2.6 % (+1.5 % with the cheaper copy); Firefox and `apt-get` under 1 %.
 2. **It keeps the user's decision 1 ("the whole Linux layer moves out") for everything that is policy:**
    - paths, mounts, pseudo files, permissions, `open`, every change, the name caches;
    - what stays is mechanism that every microkernel keeps: a handle table (Zircon and seL4 keep their handle and capability tables in the kernel), readiness, and reads from the page cache, which stays in the kernel anyway.
@@ -358,7 +358,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 
 1. **Does the VFS move out of the kernel?**
    - Recommended: **yes** (option B-lean). Path lookup, mounts, `/proc`, `/sys`, `/dev`, permissions and every file change go to linux-server.
-   - The cost is about +10 % on a warm `find` (up to +24 % on the fastest earlier measurement), +4–11 % on `git status` and `tar`, and under 1 % on the desktop, Firefox and `apt-get`.
+   - The cost is about +10 % on a warm `find` (up to +24 % on the fastest earlier measurement), +4–11 % on `git status` and `tar`, about +2.6 % on a KDE login, and under 1 % on Firefox and `apt-get`.
    - The alternative, keeping the VFS in the kernel for good (option C), costs nothing in speed but keeps about 15,000 lines of file-system code in the kernel.
 2. **Does the descriptor table stay in the kernel for good?**
    - Recommended: **yes, as a table of handles.** The kernel keeps "descriptor 5 is that object" and answers `close`, `dup`, `fstat`, `lseek`, `poll` and reads of cached file data itself. It decides no file-system policy.
@@ -373,7 +373,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
    - Note: it makes today's baseline faster, so wave 7's percentages are measured against a faster system.
 6. **`execve` in wave 7:** let linux-server resolve the program and the interpreter, with the kernel's ELF loader behind a `task_exec` primitive (pulled forward from step 7)?
    - Recommended: **yes.** The alternative is a temporary kernel-to-server request that step 7 deletes again.
-7. **Splitting wave 7:** five groups in parallel, then one closing group (section 10), about 19–23 agent-days in 6–8 days.
+7. **Splitting wave 7:** five groups in parallel, then one closing group (section 10), about 21–23 agent-days in 6–8 days.
    - The other way is two waves: first the path calls and file handles, then mounts and pseudo files. That is slower, but each merge is smaller.
    - Recommended: **one wave, six groups,** because the groups own separate files and the interfaces are agreed in their first day.
 
