@@ -586,6 +586,9 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             crate::kprintln!("[trace]   = {}", res);
         }
         frame.rax = res as u64;
+        // A tick that came during the call: its scheduling pass now (a woken timer daemon
+        // posts its signal before the delivery below)
+        crate::task::tick_on_return();
         crate::compat::linux::proc::deliver_on_syscall_return(frame, fpu, num);
         return;
     }

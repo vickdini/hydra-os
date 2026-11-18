@@ -175,7 +175,10 @@ static int sigstress(void) {
         calls += (long)r % 1000000000L;
     }
     printf("sigstress: %ld call pairs, %ld signals delivered, %ld bad answers\n", calls, sig_seen, bad);
-    return bad == 0 && sig_seen > 0 && calls > 1000;
+    /* A 1 ms timer for 3 s: Hydra's timers have the 10 ms tick's resolution, so ~300 at
+     * most (Linux: ~3000). Wave 4 saw 4-5 with lx=kernel (the timer daemon starved while
+     * the threads were in system calls; fixed in wave 5): at least two thirds now */
+    return bad == 0 && sig_seen >= 200 && calls > 1000;
 }
 
 int main(int argc, char **argv) {
