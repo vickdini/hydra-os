@@ -342,6 +342,18 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             continue;
         }
 
+        // The personality the program runs with: FreeBSD and Mach-O programs, and ELF files
+        // of other systems, are refused until a front end exists (crate::personality)
+        let pers = match crate::personality::choose(data, &abs_path) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        // A seccomp filter judges Linux system call numbers: it cannot follow a program
+        // into another personality
+        if pers != crate::task::TaskPersonality::Linux && crate::task::with_current_task_mut(|t| t.seccomp.mode != 0).unwrap_or(false) {
+            crate::kprintln!("[exec] {}: a seccomp filter is installed: refused, ENOEXEC", abs_path);
+            return ENOEXEC;
+        }
         if crate::task::elf::ElfBinary::parse(data).is_err() {
             return ENOEXEC;
         }
@@ -373,6 +385,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         let envp_r: Vec<&str> = envp_s.iter().map(|s| s.as_str()).collect();
         match crate::task::exec::load_linux_exec(
             source,
+            pers,
             &abs_path,
             &argv_r,
             &envp_r,
@@ -408,6 +421,9 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         sched.terminate_current_group();
         sched.current_task_mut(|t| {
             t.regs.cr3 = cr3;
+            // The new program's personality (a FreeBSD program may exec a Linux one, and back)
+            t.personality = image.pers;
+            crate::personality::set_current(image.pers);
             t.exe = Some(exe);
             t.cmdline = Some(cmdline);
             t.fs_base = 0;
@@ -483,7 +499,8 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     frame.rip = image.entry;
     frame.rsp = image.rsp;
     frame.rflags = 0x202;
-    frame.rdi = 0;
+    // (FreeBSD: the address of argc)
+    frame.rdi = image.rdi;
     frame.rsi = 0;
     frame.rdx = 0;
     frame.r8 = 0;

@@ -19,6 +19,7 @@ use hydra_hosttests::memory::frame_allocator::FRAME_ALLOCATOR;
 use hydra_hosttests::memory::vm::*;
 use hydra_hosttests::task::elf::ElfError;
 use hydra_hosttests::task::exec::*;
+use hydra_hosttests::task::TaskPersonality;
 
 const P: u64 = PAGE_SIZE;
 const PF_X: u32 = 1;
@@ -169,7 +170,7 @@ fn aux(s: &Stack, key: u64) -> u64 {
 }
 
 fn exec(bytes: Vec<u8>, argv: &[&str], envp: &[&str]) -> LinuxExecImage {
-    load_linux_exec(src(bytes), "/usr/bin/app", argv, envp, USER, &no_files).unwrap()
+    load_linux_exec(src(bytes), TaskPersonality::Linux, "/usr/bin/app", argv, envp, USER, &no_files).unwrap()
 }
 
 // ------------------------------------------------------------- segments
@@ -238,7 +239,7 @@ fn kernel_addresses_are_refused() {
     isolated(|| {
         let exe = Elf::new(ET_EXEC, 0xFFFF_8000_0000_0100, &[load(0, 0xFFFF_8000_0000_0000, 0x100, 0x100)], 0x100);
         assert!(!is_vm_loadable(&exe.bytes));
-        let r = load_linux_exec(src(exe.bytes), "/x", &[], &[], USER, &no_files);
+        let r = load_linux_exec(src(exe.bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &no_files);
         assert_eq!(r.err(), Some(ElfError::AllocationFailed));
     });
 }
@@ -254,7 +255,7 @@ fn is_vm_loadable_classification() {
 #[test]
 fn malformed_executables() {
     isolated(|| {
-        let r = |b: Vec<u8>| load_linux_exec(src(b), "/x", &[], &[], USER, &no_files).err();
+        let r = |b: Vec<u8>| load_linux_exec(src(b), TaskPersonality::Linux, "/x", &[], &[], USER, &no_files).err();
         assert_eq!(r(b"\x7fELF".to_vec()), Some(ElfError::BufferTooSmall));
         let no_load = Elf::new(ET_DYN, 0, &[Ph { ty: PT_PHDR, flags: 4, offset: 64, vaddr: 64, filesz: 56, memsz: 56 }], 0x100);
         assert_eq!(r(no_load.bytes), Some(ElfError::NoLoadableSegments));
@@ -267,7 +268,7 @@ fn malformed_executables() {
 fn crafted_huge_vaddr_fails_cleanly() {
     isolated(|| {
         let exe = Elf::new(ET_DYN, 0, &[load(0, u64::MAX - 0x100, 0x100, 0x1000)], 0x200);
-        let r = std::panic::catch_unwind(|| load_linux_exec(src(exe.bytes), "/x", &[], &[], USER, &no_files).err());
+        let r = std::panic::catch_unwind(|| load_linux_exec(src(exe.bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &no_files).err());
         assert!(matches!(r, Ok(Some(_))), "expected an ElfError, not a panic or success");
     });
 }
@@ -277,7 +278,7 @@ fn segment_with_filesz_above_memsz_is_rejected() {
     // Linux: p_filesz > p_memsz is -EINVAL.
     isolated(|| {
         let exe = Elf::new(ET_DYN, 0, &[load_with(PF_R | PF_W, 0, 0, 0x2000, 0x1000)], 0x2000);
-        let r = std::panic::catch_unwind(|| load_linux_exec(src(exe.bytes), "/x", &[], &[], USER, &no_files).err());
+        let r = std::panic::catch_unwind(|| load_linux_exec(src(exe.bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &no_files).err());
         assert!(matches!(r, Ok(Some(_))), "expected an ElfError");
     });
 }
@@ -372,7 +373,7 @@ fn secure_mode_for_set_id_programs() {
             (USER, 0),
         ];
         for (creds, want) in cases {
-            let mut img = load_linux_exec(src(static_pie().bytes), "/x", &["x"], &[], creds, &no_files).unwrap();
+            let mut img = load_linux_exec(src(static_pie().bytes), TaskPersonality::Linux, "/x", &["x"], &[], creds, &no_files).unwrap();
             assert_eq!(aux(&stack(&mut img), AT_SECURE), want);
             assert_eq!(aux(&stack(&mut img), AT_EUID), creds.euid as u64);
         }
@@ -409,7 +410,7 @@ fn dynamic_executable_starts_in_the_interpreter() {
     isolated(|| {
         let ld = ld_so();
         let read = |p: &str| (p == INTERP).then(|| src(ld.clone()));
-        let mut img = load_linux_exec(src(dynamic_pie().bytes), "/usr/bin/app", &["app"], &[], USER, &read).unwrap();
+        let mut img = load_linux_exec(src(dynamic_pie().bytes), TaskPersonality::Linux, "/usr/bin/app", &["app"], &[], USER, &read).unwrap();
         let s = stack(&mut img);
         let base = aux(&s, AT_BASE);
         assert_ne!(base, 0);
@@ -435,7 +436,7 @@ fn interpreter_path_is_looked_up_verbatim() {
             asked.borrow_mut().push(p.to_string());
             None
         };
-        let r = load_linux_exec(src(dynamic_pie().bytes), "/x", &[], &[], USER, &read);
+        let r = load_linux_exec(src(dynamic_pie().bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &read);
         assert_eq!(r.err(), Some(ElfError::InterpreterNotFound));
         assert_eq!(asked.get_mut().as_slice(), [INTERP.to_string()]);
     });
@@ -446,7 +447,7 @@ fn broken_interpreter_is_an_error() {
     isolated(|| {
         // Long enough to pass the size check, so the magic is what fails.
         let read = |_: &str| Some(src([&b"#!/bin/sh\n"[..], &[b' '; 100]].concat()));
-        let r = load_linux_exec(src(dynamic_pie().bytes), "/x", &[], &[], USER, &read);
+        let r = load_linux_exec(src(dynamic_pie().bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &read);
         assert_eq!(r.err(), Some(ElfError::InvalidMagic));
     });
 }
@@ -473,7 +474,7 @@ fn program_headers_beyond_the_64k_head_are_not_seen() {
         let headers = exe[64..64 + 3 * 56].to_vec();
         exe[66_000..66_000 + headers.len()].copy_from_slice(&headers);
         exe[32..40].copy_from_slice(&66_000u64.to_le_bytes());
-        let r = load_linux_exec(src(exe), "/x", &[], &[], USER, &no_files);
+        let r = load_linux_exec(src(exe), TaskPersonality::Linux, "/x", &[], &[], USER, &no_files);
         assert_eq!(r.err(), Some(ElfError::ProgramHeaderOutOfBounds));
     });
 }
@@ -534,5 +535,84 @@ fn one_process_cannot_change_another_processs_vdso() {
             let _ = a.mm.write_bytes(va + 0x100, &original); // undo, for the other tests in this binary
         }
         assert_eq!(seen, original, "the attacker's write reached the victim's vDSO code");
+    });
+}
+
+// ------------------------------------------------- personalities (wave 5)
+
+/// A FreeBSD program (OS/ABI 9) gets FreeBSD's layout: rdi = &argc, rsp = ((stack - 8) &
+/// ~15) + 8, FreeBSD's auxiliary vector numbers, the signal trampoline page, no vDSO.
+#[test]
+fn freebsd_exec_layout() {
+    use hydra_hosttests::personality::abi::{freebsd_at as at, FREEBSD_OSRELDATE, FREEBSD_SIGCODE, FREEBSD_SIGCODE_ADDR};
+    isolated(|| {
+        let mut bytes = static_pie().bytes;
+        bytes[7] = 9;
+        let mut img = load_linux_exec(src(bytes), TaskPersonality::FreeBsd, "/bin/fb", &["fb", "one"], &["A=1"], USER, &no_files).unwrap();
+        assert_eq!(img.pers, TaskPersonality::FreeBsd);
+        assert_eq!(img.rdi % 16, 0, "argc 16-byte aligned");
+        assert_eq!(img.rsp, ((img.rdi - 8) & !15) + 8, "rsp as after a call");
+        assert_eq!(img.rsp % 16, 8);
+        img.rsp = img.rdi;
+        let s = stack(&mut img);
+        assert_eq!(s.argv, ["fb", "one"]);
+        assert_eq!(s.envp, ["A=1"]);
+        assert_eq!(aux(&s, at::OSRELDATE), FREEBSD_OSRELDATE);
+        assert_eq!(aux(&s, at::ARGC), 2);
+        assert_eq!(aux(&s, at::ARGV), img.rdi + 8);
+        assert_eq!(aux(&s, at::ENVC), 1);
+        assert_eq!(aux(&s, at::ENVV), img.rdi + 8 * 4);
+        assert_eq!(aux(&s, at::PAGESZ), P);
+        assert_eq!(aux(&s, at::BSDFLAGS), 0, "no sigfastblock");
+        assert_eq!(cstr(&mut img.mm, aux(&s, at::EXECPATH)), "/bin/fb");
+        let ps = aux(&s, at::PS_STRINGS);
+        assert_eq!(ps % 8, 0);
+        assert_eq!(word(&mut img.mm, ps), img.rdi + 8, "ps_argvstr");
+        assert_eq!(word(&mut img.mm, ps + 8), 2, "ps_nargvstr");
+        assert_eq!(word(&mut img.mm, ps + 16), img.rdi + 8 * 4, "ps_envstr");
+        let sizes = aux(&s, at::PAGESIZES);
+        assert_eq!(aux(&s, at::PAGESIZESLEN), 24);
+        assert_eq!(word(&mut img.mm, sizes), P);
+        // No vDSO: Linux's AT_SYSINFO_EHDR (33) would be AT_FXRNG to FreeBSD
+        assert!(s.auxv.iter().all(|(k, _)| *k != AT_SYSINFO_EHDR));
+        let vma = img.mm.find_vma(FREEBSD_SIGCODE_ADDR).expect("signal trampoline mapped");
+        assert_eq!(vma.prot, PROT_READ | PROT_EXEC);
+        img.mm.handle_fault(FREEBSD_SIGCODE_ADDR, false, true).unwrap();
+        assert_eq!(peek(&mut img.mm, FREEBSD_SIGCODE_ADDR, FREEBSD_SIGCODE.len()), FREEBSD_SIGCODE);
+    });
+}
+
+/// A Linux program keeps Linux's entry: rdi = 0, rsp at argc.
+#[test]
+fn linux_exec_entry_unchanged() {
+    isolated(|| {
+        let img = exec(static_pie().bytes, &["app"], &[]);
+        assert_eq!(img.pers, TaskPersonality::Linux);
+        assert_eq!(img.rdi, 0);
+        assert_eq!(img.rsp % 16, 0);
+    });
+}
+
+/// A program and its interpreter must be of the same system.
+#[test]
+fn interpreter_must_have_the_programs_personality() {
+    isolated(|| {
+        let ld = ld_so();
+        let read = |p: &str| (p == INTERP).then(|| src(ld.clone()));
+        // A FreeBSD-marked program with a Linux ld.so
+        let mut b = dynamic_pie().bytes;
+        b[7] = 9;
+        let r = load_linux_exec(src(b), TaskPersonality::FreeBsd, "/x", &[], &[], USER, &read);
+        assert_eq!(r.err(), Some(ElfError::UnsupportedType));
+        // A Linux program with a FreeBSD-marked interpreter
+        let mut fb_ld = ld_so();
+        fb_ld[7] = 9;
+        let read_fb = |p: &str| (p == INTERP).then(|| src(fb_ld.clone()));
+        let r = load_linux_exec(src(dynamic_pie().bytes), TaskPersonality::Linux, "/x", &[], &[], USER, &read_fb);
+        assert_eq!(r.err(), Some(ElfError::UnsupportedType));
+        // Both FreeBSD: loads
+        let mut b = dynamic_pie().bytes;
+        b[7] = 9;
+        assert!(load_linux_exec(src(b), TaskPersonality::FreeBsd, "/x", &[], &[], USER, &read_fb).is_ok());
     });
 }

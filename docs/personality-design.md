@@ -454,6 +454,55 @@ calls its test needs.
 and 4: it touches the trap and the exec path, not the socket or pipe code. It must merge
 after Group 10's lock-free entry (it rewrites the same lines).
 
+### 2.10 As built in wave 5 (Group 14), and where it differs
+
+The hook is in `src/personality/` (module page: [src/personality.md](src/personality.md)).
+Where it differs from sections 2.1–2.9, and why:
+
+- **FreeBSD programs are refused by default** (`ENOEXEC` with a log line), as the wave 5
+  brief asks, instead of starting on the stub table (2.2, last point). The stub table is
+  reachable only through the test switch `persona=fbsd-stub` (fw_cfg `opt/hydra/persona`
+  or the boot option word), so nothing in normal use reaches a half-built personality.
+- **One per-CPU pointer, null for Linux** (2.1, 2.3). There is no `CURRENT_PERS`, and the
+  Linux table was **not** turned into a `Table` of `u32` entries: Groups 12 and 13 were
+  adding entries to it in the same wave, and its interface (`MOVED`, `MOVED_STEP2`,
+  `set_forwarding`, `route`) had to stay as it was. The entry tests the pointer first (one
+  per-CPU load); null continues on the unchanged Linux path, where `lx::route` reads the
+  Linux table (one load) as before. So a Linux call costs the same loads as the design's
+  version; `fast_syscall` and `lx::fast_entry` never see a non-Linux task and needed no guard.
+- **`LINUX_AS` runs the Linux call through `dispatch_linux_syscall`,** so a moved Linux call
+  is still routed by `lx::route` (the one place). The other personalities' calls run under
+  the kernel lock (no lock-free path for them yet).
+- **No `SERVER` route yet:** `LxCall.pers`, `LxReply.result2` and a front-end dispatch in
+  linux-server were not built (`R_SERVER` and `R_MACH` answer `ENOSYS`). `protocol.rs` and
+  linux-server's `main.rs` were being changed by Groups 12 and 13, and no stub-table call
+  needs the server. Wave 10/11 appends the two fields as planned. `thr_self` is kernel-local
+  (it is in 2.8's list of kernel-local calls anyway).
+- **The FreeBSD signal frame is built now** (2.5 planned "unimplemented → SIGKILL" with the
+  frame in wave 11), because the brief asks for the frame to be checked: FreeBSD's
+  `struct sigframe`, the trampoline, `sigaction` and `sigreturn`. Not yet: the XSAVE
+  extension (`mc_xfpustate`; AVX upper halves are not kept across a handler), fault details
+  in `siginfo` (`si_addr`, codes other than `SI_USER`), and the check for a signal that
+  `sigreturn`'s mask makes deliverable at once (it is delivered at the next call or trap).
+- **No `SigAction.pers`:** the frame builder is picked by the running task's table (a
+  process has one personality, and `exec` resets handlers).
+- **The trampoline page** is at a fixed address in the gap below the stack
+  (`abi::FREEBSD_SIGCODE_ADDR` = `0x7FFF_EF7F_F000`), not at FreeBSD's shared-page address
+  above the stack; programs only reach it through the frame. Wave 11 builds the rest of the
+  shared page (`AT_TIMEKEEP`, `AT_KPRELOAD`).
+- **`getpid` returns the parent's pid in `rdx`** (FreeBSD's `COMPAT_43` second result): the
+  stub table's `RET2` test.
+- **`ptrace` and `seccomp`:** a FreeBSD task's calls make no `ptrace` system call stops yet,
+  and `execve` of a FreeBSD program fails with `ENOEXEC` while a seccomp filter is installed
+  (the filter judges Linux numbers).
+- **Not built:** the personality field of `ADMIN_LINUX_RUN` (2.2), the macOS table and
+  layout (Mach-O is refused; `TaskPersonality::MacOs` and the macOS errno map exist).
+
+What wave 11 plugs into: replace `freebsd::TABLE`'s entries (and add kernel-local handlers
+in `freebsd::local_call`), extend the exec layout in `task::exec` (`AT_TIMEKEEP`, the shared
+page), add the `SERVER` route (`LxCall.pers` appended, a front-end dispatch in the server),
+the XSAVE part of the frame, and drop the test switch from `personality::choose`.
+
 ## 3. The core split (wave 10)
 
 By the end of wave 9 linux-server owns files, descriptors, sockets, pipes, processes and

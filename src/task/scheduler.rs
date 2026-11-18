@@ -157,9 +157,11 @@ pub fn load_linux_image(
         read_interpreter(path).map(|b| super::exec::ElfSource::from_bytes(b.into_boxed_slice()))
     };
     let interp_reader: &dyn Fn(&str) -> Option<super::exec::ElfSource> = if root.is_some() { &read_in_root } else { &read_legacy };
+    // A program of another system is refused (or, with the test switch, gets its personality)
+    let pers = crate::personality::choose(&exe.head, exec_path).map_err(|_| "not a program this system can run (see the kernel log)")?;
     let env = linux_env(uid);
     let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
-    super::exec::load_linux_exec(exe, exec_path, args, &env, super::exec::ExecCreds { uid, gid, euid: uid, egid: gid, secure: false }, interp_reader)
+    super::exec::load_linux_exec(exe, pers, exec_path, args, &env, super::exec::ExecCreds { uid, gid, euid: uid, egid: gid, secure: false }, interp_reader)
         .map_err(|e| e.as_str())
 }
 
@@ -719,6 +721,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -830,6 +833,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -927,6 +931,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -1027,6 +1032,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -1087,6 +1093,7 @@ impl Scheduler {
         let mut regs = TaskRegisters::empty();
         regs.rip = image.entry;
         regs.rsp = image.rsp;
+        regs.rdi = image.rdi;
         regs.cs = crate::arch::gdt::USER_CS as u64;  // 64-bit user code (0x33, RPL 3)
         regs.ss = crate::arch::gdt::USER_DS as u64;  // User data (0x2b, RPL 3)
         regs.rflags = 0x202;
@@ -1098,7 +1105,7 @@ impl Scheduler {
             state: TaskState::Ready,
             priority,
             mode: PrivilegeMode::User,
-            personality: super::tcb::TaskPersonality::Linux,
+            personality: image.pers,
             fs_base: 0,
             segs: Default::default(),
             ldt: None,
@@ -1140,6 +1147,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -1187,6 +1195,8 @@ impl Scheduler {
         let parent_brk = parent.brk;
         let parent_name = parent.name;
         let parent_priority = parent.priority;
+        // fork and threads keep the personality (wave 5: FreeBSD tasks fork as FreeBSD)
+        let parent_pers = parent.personality;
         // Threads share the descriptor table; a new process gets a copy
         let parent_fds = if flags & CLONE_FILES != 0 {
             parent.fds.clone()
@@ -1298,7 +1308,7 @@ impl Scheduler {
             state: TaskState::Ready,
             priority: parent_priority,
             mode: PrivilegeMode::User,
-            personality: super::tcb::TaskPersonality::Linux,
+            personality: parent_pers,
             fs_base: child_fs_base,
             segs: child_segs,
             ldt: child_ldt,
@@ -1333,6 +1343,7 @@ impl Scheduler {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,
@@ -1438,7 +1449,7 @@ impl Scheduler {
         // During a driver call: its server keeps running, and so does a Linux program in user
         // mode unless the server is ready (it runs first, here)
         let may_continue = handoff_server.map_or(true, |s| {
-            s == curr_task.id.0 || (ctx.cs & 3 == 3 && curr_task.personality == super::tcb::TaskPersonality::Linux && !server_ready)
+            s == curr_task.id.0 || (ctx.cs & 3 == 3 && curr_task.personality.is_posix() && !server_ready)
         })
             && self.resume_first.is_none();
         if curr_task.state == TaskState::Running && curr_task.timeslice_remaining > 1 && may_continue {
@@ -1664,6 +1675,8 @@ impl Scheduler {
         }
         super::CURRENT_RETIRED[crate::arch::percpu::cpu()].store(self.tasks[next_idx].retired, core::sync::atomic::Ordering::Release);
         super::CURRENT_TID.store(self.tasks[next_idx].id.0, core::sync::atomic::Ordering::Release);
+        // The system call table of the task's personality (null for Linux and native tasks)
+        crate::personality::CURRENT_TABLE.store(crate::personality::table_for(self.tasks[next_idx].personality), core::sync::atomic::Ordering::Relaxed);
 
         // 4a. The preemption-point marker belongs to the task, not the CPU
         self.tasks[curr_idx].preempt_depth =
@@ -1907,7 +1920,7 @@ impl Scheduler {
         let mut n = 0;
         for idx in 0..self.tasks.len() {
             let t = &self.tasks[idx];
-            if t.personality == super::tcb::TaskPersonality::Linux
+            if t.personality.is_posix()
                 && t.mode == PrivilegeMode::User
                 && t.service.is_none()
                 && t.id.0 > 1
@@ -1982,7 +1995,7 @@ impl Scheduler {
             // The console shell runs on the boot processor: it waits for keys and ticks with
             // `hlt`, for that CPU's interrupts
             return false;
-        } else if ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || t.personality != super::tcb::TaskPersonality::Linux))
+        } else if ((self.handoff_top().is_some() && (t.regs.cs & 3 == 0 || !t.personality.is_posix()))
             || (t.regs.cs & 3 == 0 && crate::ipc::service::window_held_by_other(t.id.0)))
             // (the participant check last: it searches the queued requests, and most of the
             // time no call is in progress)
@@ -2477,7 +2490,7 @@ impl Scheduler {
         if let Ok(fds) = alloc::sync::Arc::try_unwrap(fds) {
             self.pending_close.push(fds.into_inner());
         }
-        if self.tasks[idx].personality == super::tcb::TaskPersonality::Linux {
+        if self.tasks[idx].personality.is_posix() {
             if crate::compat::linux::admin::acct_on() {
                 let t = &self.tasks[idx];
                 crate::compat::linux::admin::note_task(t.tgid, t.uid, t.gid, t.exe_path());

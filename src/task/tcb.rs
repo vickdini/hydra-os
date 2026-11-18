@@ -264,9 +264,22 @@ pub enum TaskPersonality {
     Hydra,
     /// Linux x86_64 ABI compatibility layer.
     Linux,
+    /// A FreeBSD program (wave 5 hook: only with the stub table, `persona=fbsd-stub`;
+    /// `crate::personality`).
+    FreeBsd,
+    /// A macOS program (reserved: Mach-O files are refused until wave 12).
+    MacOs,
 }
 
 impl TaskPersonality {
+    /// A program of the POSIX layer (Linux, FreeBSD, macOS): a process of the Linux
+    /// layer's process table, with signals, the crash policy of linux-server and so on.
+    /// Only native Hydra tasks are not.
+    #[inline]
+    pub fn is_posix(self) -> bool {
+        self != TaskPersonality::Hydra
+    }
+
     /// Returns a static string name for this OS personality.
     ///
     /// # Returns
@@ -276,6 +289,8 @@ impl TaskPersonality {
         match self {
             TaskPersonality::Hydra => "Hydra",
             TaskPersonality::Linux => "Linux",
+            TaskPersonality::FreeBsd => "FreeBSD",
+            TaskPersonality::MacOs => "macOS",
         }
     }
 }
@@ -371,6 +386,11 @@ pub struct Task {
     pub syscall_nr: u64,
     /// First two arguments of that system call (shown by the task dump).
     pub syscall_args: [u64; 2],
+    /// A system call of a non-Linux personality between its answer and the return to user
+    /// mode: its registers as the program passed them (rax, rdi, rsi, rdx, r10, r8, r9) and
+    /// the address after the `syscall` (`crate::personality`: a signal frame built meanwhile
+    /// saves the context in the personality's convention).
+    pub pers_call: Option<[u64; 8]>,
     /// FPU save area of the system call the task is in while switched out (see
     /// [`crate::arch::syscall::SYSCALL_FPU`]), on its own kernel stack.
     pub syscall_fpu: u64,
@@ -456,6 +476,7 @@ impl Task {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,

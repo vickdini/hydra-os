@@ -69,6 +69,7 @@ docs/
 | **IPC Service** | [`src/ipc/service.rs`](file:///d:/os/src/ipc/service.rs) | [docs/src/ipc/service.md](file:///d:/os/docs/src/ipc/service.md) | Driver services, shared data windows (256 KiB zero-copy), and direct CPU handoff. |
 | **IPC Root** | [`src/ipc/mod.rs`](file:///d:/os/src/ipc/mod.rs) | [docs/src/ipc/mod.md](file:///d:/os/docs/src/ipc/mod.md) | Inter-process communication module export. |
 | **Driver Supervisor** | [`src/task/supervisor.rs`](file:///d:/os/src/task/supervisor.rs) | [docs/src/task/supervisor.md](file:///d:/os/docs/src/task/supervisor.md) | MINIX 3-style driver reincarnation server, on-the-spot crash revival, heartbeats. |
+| **Personalities** | [`src/personality/`](../src/personality) | [docs/src/personality.md](src/personality.md) | Wave 5 hook for programs of other systems: ENOEXEC for FreeBSD/Mach-O, per-personality system call tables through a per-CPU pointer, BSD result convention, FreeBSD signal frames and exec layout (stub table behind `persona=fbsd-stub`). |
 | **Build Automation**| [`build.rs`](file:///d:/os/build.rs) | [docs/build.md](file:///d:/os/docs/build.md) | NASM assembly build script and link configuration. |
 | **Legacy Boot** | [`src/arch/x86_64/boot/`](file:///d:/os/src/arch/x86_64/boot) | [docs/src/arch/x86_64/boot.md](file:///d:/os/docs/src/arch/x86_64/boot.md) | Multiboot2 header and 32-bit to 64-bit assembly trampoline. |
 
