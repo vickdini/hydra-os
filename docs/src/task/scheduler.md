@@ -47,6 +47,22 @@ sequenceDiagram
 
 ---
 
+## Ticks that land in kernel code, and signals at a tick
+
+Kernel code is not preempted (only user mode and explicit wait points are), so a tick that
+finds its CPU in a system call, or finds the kernel lock held by another CPU, cannot run its
+scheduling pass. It sets the per-CPU flag `task::TICK_DEFERRED` instead, and the end of the
+next Linux system call on that CPU runs the pass (`task::tick_on_return`: a yield whose
+handler calls `schedule`, which may keep the task). Without this, threads busy in system
+calls kept their CPUs: the timer daemons (`itimerd`, `ptimerd`) and timed sleepers starved,
+and a 1 ms interval timer reached such a process 4 times in 3 s (wave 5, Group 17).
+
+A tick from user mode delivers the task's pending signals **before** its scheduling pass,
+while the trap frame is still on the task's own kernel stack. After a switch the frame
+belongs to the task switched away from, so the return path cannot deliver there; when the
+tick then switched again (to the timer daemon posting the next signal), a thread that never
+made a system call saw almost none of its timer signals. Test: `tests/linux/sigbusy_test.c`.
+
 ## Hardware Context Switching via `iretq`
 
 Hydra employs an in-place stack frame modification pattern for architectural context switching:

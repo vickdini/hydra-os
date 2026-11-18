@@ -11,7 +11,7 @@
  * limited by the kernel's timer resolution: ~100/s on Hydra, ~1000/s on Linux). alarm(1)
  * must interrupt a busy loop within 2 s.
  *
- *   sigbusy [ms per phase, default 1000] [threads spinning besides main, default 0]
+ *   sigbusy [ms per phase, default 1000] [threads spinning besides main, default 0] [sys: they call umask]
  * Build: gcc -O1 -w -pthread sigbusy_test.c -o sigbusy.elf -lrt
  */
 #include <pthread.h>
@@ -23,6 +23,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 
 static volatile long seen;
 static volatile int spin_stop;
@@ -79,19 +80,30 @@ static void arm(int kind, int on) {
     }
 }
 
+static int sys_mode; /* the extra threads make system calls instead of spinning */
 static void *spinner(void *a) {
     (void)a;
     sigset_t all;
     sigfillset(&all);
     pthread_sigmask(SIG_BLOCK, &all, 0); /* the main thread takes the signals */
-    while (!spin_stop) __asm__ volatile("pause");
+    while (!spin_stop) {
+        if (sys_mode) syscall(SYS_umask, 022);
+        else __asm__ volatile("pause");
+    }
     return 0;
+}
+
+/* Calls umask for ms milliseconds (a thread busy in system calls). */
+static void syscall_ms(int ms) {
+    uint64_t end = rdtsc() + (uint64_t)(tsc_per_ns * 1e6 * ms);
+    while (rdtsc() < end) syscall(SYS_umask, 022);
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     int ms = argc > 1 ? atoi(argv[1]) : 1000;
     int nspin = argc > 2 ? atoi(argv[2]) : 0;
+    sys_mode = argc > 3 && !strcmp(argv[3], "sys");
     int fails = 0;
     calibrate();
     printf("sigbusy: %d ms per phase, %d extra spinning threads, TSC %.3f GHz\n", ms, nspin, tsc_per_ns);
@@ -137,6 +149,21 @@ int main(int argc, char **argv) {
         int ok = idle > 0 && busy * 10 >= idle * 7;
         printf("%s %s: %ld signals while sleeping, %ld while spinning (%ld %%)\n", ok ? "PASS" : "FAIL", names[kind], idle,
                busy, idle ? busy * 100 / idle : 0);
+        if (!ok) fails++;
+        sleep_ms(30);
+    }
+
+    /* A thread busy in system calls (umask, under the kernel lock): the timer daemon must
+     * still get the CPU to post (a tick during a call is not a preemption point) */
+    {
+        seen = 0;
+        arm(K_REAL, 1);
+        syscall_ms(ms);
+        long busy = seen;
+        arm(K_REAL, 0);
+        int ok = ref_real > 0 && busy * 10 >= ref_real * 7;
+        printf("%s setitimer ITIMER_REAL, busy in system calls: %ld signals (%ld %% of %ld)\n", ok ? "PASS" : "FAIL", busy,
+               ref_real ? busy * 100 / ref_real : 0, ref_real);
         if (!ok) fails++;
         sleep_ms(30);
     }

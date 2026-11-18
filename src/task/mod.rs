@@ -90,6 +90,30 @@ pub static CURRENT_TID: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::Pe
 /// Linux system call the running task is executing (`u64::MAX` when none), for
 /// [`scheduler::Scheduler::dump_tasks`].
 pub static CURRENT_SYSCALL: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(u64::MAX);
+/// A timer tick found this CPU in a system call (kernel code is not preempted): the call
+/// runs that tick's scheduling pass on its way back to user mode ([`tick_on_return`]).
+/// Without it a thread that spends nearly all its time in system calls (and the other
+/// threads of a CPU it shares) would hardly ever let a woken kernel task run, such as the
+/// timer daemons posting timer signals.
+pub static TICK_DEFERRED: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// Set right before the yield of [`tick_on_return`]: the yield vector runs a tick's
+/// scheduling pass (which may keep the task) instead of switching away.
+pub static TICK_YIELD: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+
+/// Runs the scheduling pass of a timer tick that arrived during the calling task's system
+/// call ([`TICK_DEFERRED`]), if one did: a woken task of higher priority, or the end of the
+/// timeslice, switches away here as a tick would have. Call with no lock held, at the end of
+/// a Linux system call.
+pub fn tick_on_return() {
+    if TICK_DEFERRED.swap(0, core::sync::atomic::Ordering::Relaxed) == 0 || !is_active() {
+        return;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        TICK_YIELD.store(1, core::sync::atomic::Ordering::Relaxed);
+        unsafe { core::arch::asm!("int 0x81") };
+    });
+}
+
 /// First two arguments of [`CURRENT_SYSCALL`] (for the task dump).
 pub static CURRENT_SYSCALL_ARGS: [crate::arch::percpu::PerCpuU64; 2] =
     [crate::arch::percpu::PerCpuU64::new(0), crate::arch::percpu::PerCpuU64::new(0)];

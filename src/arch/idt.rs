@@ -463,6 +463,8 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     // would stop the clock that code holding it may be waiting on)
     if ctx.vector == 32 || ctx.vector == LAPIC_TIMER_VECTOR {
         if !crate::arch::smp::bkl_try_enter() {
+            // The next system call's end on this CPU runs this tick's pass
+            crate::task::TICK_DEFERRED.store(1, Ordering::Relaxed);
             return;
         }
     } else {
@@ -1009,6 +1011,11 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
                     sched.schedule(ctx);
                 }
+            } else if crate::task::is_active() {
+                // In kernel code (a system call): its end runs this tick's pass
+                // (task::tick_on_return). Also when the tick came right as the call enabled
+                // interrupts, before it is marked as in a call
+                crate::task::TICK_DEFERRED.store(1, Ordering::Relaxed);
             }
             kernel_watchdog(ctx, at_preempt_point);
             if crate::arch::keyboard::TASK_DUMP_REQUESTED.load(Ordering::Relaxed) && crate::task::is_active() {
@@ -1027,6 +1034,11 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
                     sched.schedule(ctx);
                 }
+            } else if crate::task::is_active() {
+                // In kernel code (a system call): its end runs this tick's pass
+                // (task::tick_on_return). Also when the tick came right as the call enabled
+                // interrupts, before it is marked as in a call
+                crate::task::TICK_DEFERRED.store(1, Ordering::Relaxed);
             }
         }
         YIELD_VECTOR => {
@@ -1036,10 +1048,14 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             if crate::task::is_active() {
                 // The direct switch of a forwarded Linux call names the task to run next
                 let direct = crate::task::scheduler::DIRECT_TO.swap(0, Ordering::Relaxed);
+                // A deferred tick's pass (task::tick_on_return): the task may go on
+                let tick = crate::task::TICK_YIELD.swap(0, Ordering::Relaxed) != 0;
                 loop {
                     if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
                         if direct != 0 {
                             sched.direct_switch(ctx, direct - 1);
+                        } else if tick {
+                            sched.schedule(ctx);
                         } else {
                             sched.schedule_now(ctx);
                         }
