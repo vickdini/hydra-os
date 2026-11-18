@@ -300,15 +300,27 @@ These are not group work yet, but should not be forgotten:
 
 ### For moving the Linux layer (made 2026-11-17, from section 10 of [linux-server-design.md](linux-server-design.md))
 
-4. **Shape:** one ring-3 Linux server (design C), beside zfs-server and net-server.
+4. **Shape:** one ring-3 Linux server (design C), beside zfs-server and net-server. *Refined by decision 9: one Linux server for now, split into several services later.*
 5. **Fast path:** build the direct switch in step 1. PCID (tagged TLB) is done as a separate small task in the same wave and merges first.
 6. **When the Linux server crashes:** every Linux program ends, the supervisor restarts the server, and the desktop comes back at the login screen. The kernel, the drivers and the emergency prompt stay up.
 7. **Budget and order:** the proposed budget (at most 3 µs added per forwarded call; desktop, browser and network at most 5 % slower; metadata-heavy tools at most 35 % slower) and the order of section 7 of the design are accepted.
+
+### Made 2026-11-18
+
+9. **Separate services, for resilience.**
+   - **The file system does not go into linux-server.** It becomes a service of its own, so a fault in the Linux layer and a fault in the file system do not take each other down.
+   - **Later, the Linux layer itself is split into several services.**
+   - **Consequences:**
+     - the kernel's forwarding must route calls to more than one server;
+     - fast server-to-server calls become essential;
+     - every service needs its own crash and restart behavior.
+   - Group 16's "B-lean" option, the VFS inside linux-server ([vfs-design.md](vfs-design.md)), is therefore rejected. The designs for waves 6 and 7 are being revised to match.
 
 ### Still open, and when they are needed
 
 | Decision | Needed before | Notes |
 |---|---|---|
 | Where sound and the display go | Wave 6 (step 5) | A display/input server serving Linux programs, and later native ones too, is the design's suggestion |
-| Whether the VFS fast paths stay in the kernel for good | Wave 7 (step 6a) | Best decided with wave 4's forwarding numbers in hand |
+| How the separate file-system service is shaped (what it owns, what stays in the kernel, crash behavior) | Wave 7 (step 6a) | The VFS is a service of its own (decision 9); Group 16 revises [vfs-design.md](vfs-design.md) |
+| How the Linux layer is split into services, and how the kernel routes calls to several servers | Before wave 7 | Decision 9; a step-0 design is being written |
 | Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 10 (the core split) | The wave 5 hook is cheap and serves all of them; the FreeBSD shortcut is only worth it for a specific program needed early |
