@@ -35,6 +35,7 @@ mod lock;
 mod mqueue;
 mod notes;
 mod obj;
+mod sysv;
 mod timeout;
 
 use alloc::vec::Vec;
@@ -143,7 +144,8 @@ fn serve_endpoint(srv: &mut Server) -> ! {
 pub fn next_deadline(now: u64) -> Option<u64> {
     let null = if PENDING.lock().is_empty() { None } else { Some(now + 1) };
     let mq = mqueue::tick(now);
-    [null, mq].into_iter().flatten().min()
+    let sv = sysv::tick(now);
+    [null, mq, sv].into_iter().flatten().min()
 }
 
 /// `/proc/keys` for the caller the kernel describes (see [`MSG_LX_PROC_KEYS`]).
@@ -183,7 +185,7 @@ fn complete_due() {
 /// A signal arrived for the caller of pending request `id`: a pending test call is
 /// answered `-EINTR` at once.
 pub fn interrupted(id: u64) {
-    if mqueue::interrupted(id) {
+    if mqueue::interrupted(id) || sysv::interrupted(id) {
         return;
     }
     let found = {
@@ -235,6 +237,7 @@ fn serve(c: &LxCall) -> (i64, u64) {
         0 | 1 | 16 | 19 | 20 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
         240..=245 => mqueue::dispatch(&cx),
+        64..=66 | 220 | 68..=71 => sysv::dispatch(&cx),
         _ => (ENOSYS, 0),
     };
     obj::flush();

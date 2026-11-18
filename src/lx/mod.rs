@@ -98,6 +98,16 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
     (243, T_FD0),
     (244, T_FD0),
     (245, T_FD0),
+    // System V semaphores and messages (shared memory stays in the kernel): semget, semop,
+    // semctl, semtimedop, msgget, msgsnd, msgrcv, msgctl
+    (64, T_IPC),
+    (65, T_IPC),
+    (66, T_IPC),
+    (220, T_IPC),
+    (68, T_IPC),
+    (69, T_IPC),
+    (70, T_IPC),
+    (71, T_IPC),
 ];
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
@@ -119,7 +129,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
