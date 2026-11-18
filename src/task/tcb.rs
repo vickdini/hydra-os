@@ -386,6 +386,11 @@ pub struct Task {
     pub syscall_nr: u64,
     /// First two arguments of that system call (shown by the task dump).
     pub syscall_args: [u64; 2],
+    /// A system call of a non-Linux personality between its answer and the return to user
+    /// mode: its registers as the program passed them (rax, rdi, rsi, rdx, r10, r8, r9) and
+    /// the address after the `syscall` (`crate::personality`: a signal frame built meanwhile
+    /// saves the context in the personality's convention).
+    pub pers_call: Option<[u64; 8]>,
     /// FPU save area of the system call the task is in while switched out (see
     /// [`crate::arch::syscall::SYSCALL_FPU`]), on its own kernel stack.
     pub syscall_fpu: u64,
@@ -471,6 +476,7 @@ impl Task {
             nobkl_wait: false,
             syscall_nr: u64::MAX,
             syscall_args: [0; 2],
+            pers_call: None,
             syscall_fpu: 0,
             event_wait: false,
             woken: false,

@@ -66,6 +66,18 @@ static int run(const char *path, char *const argv[], const char *out)
     return n == sizeof e ? (0x10000 | e) : st;
 }
 
+/* Starts path with argv in a child (no wait); returns its pid */
+static pid_t spawn(const char *path, char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *env[] = { NULL };
+        execve(path, argv, env);
+        _exit(127);
+    }
+    return pid;
+}
+
 static const char *desc(int st, char *buf)
 {
     if (st & 0x10000) sprintf(buf, "execve failed, errno %d (%s)", st & 0xffff, strerror(st & 0xffff));
@@ -171,6 +183,24 @@ int main(int argc, char **argv)
         char *killargv[] = { "fbhook", "usr2", NULL };
         st = run(path, killargv, NULL);
         CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGUSR2, "FreeBSD kill(self, 31 SIGUSR2) arrives as Linux SIGUSR2 (12): %s", desc(st, b));
+        /* A signal with a handler during a FreeBSD nanosleep: EINTR in FreeBSD's convention,
+         * saved in the signal frame's context and returned by sigreturn */
+        char *eintrargv[] = { "fbhook", "eintr", NULL };
+        pid_t c = spawn(path, eintrargv);
+        usleep(400000);
+        kill(c, SIGUSR1);
+        waitpid(c, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "FreeBSD nanosleep + handler: carry + EINTR 4: %s", desc(st, b));
+        /* A stop and continue during a FreeBSD nanosleep: restarted with FreeBSD's number (a
+         * Linux number left in rax would be another FreeBSD call: SIGSYS) */
+        char *restartargv[] = { "fbhook", "restart", NULL };
+        c = spawn(path, restartargv);
+        usleep(300000);
+        kill(c, SIGSTOP);
+        usleep(300000);
+        kill(c, SIGCONT);
+        waitpid(c, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "FreeBSD nanosleep restarted after SIGSTOP/SIGCONT: %s", desc(st, b));
         char *execargv[] = { "fbhook", "exec", NULL };
         st = run(path, execargv, "/tmp/persona_exec.out");
         CHECK(st == 0 && file_has("/tmp/persona_exec.out", "LINUX-AFTER-FREEBSD"), "FreeBSD program execs a Linux one (/bin/echo): %s", desc(st, b));

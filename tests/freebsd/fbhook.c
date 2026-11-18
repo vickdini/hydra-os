@@ -15,7 +15,10 @@
  * Modes (argv[1]): none = the checks above, then "FBHOOK-DONE" and exit 0 (else exit N at the
  * first failed check N); "nosys" = an unknown call with SIGSYS at its default (killed by
  * SIGSYS); "usr2" = kill(self, 31 SIGUSR2) at its default; "exec" = execve /bin/echo (a
- * Linux program) with "LINUX-AFTER-FREEBSD".
+ * Linux program) with "LINUX-AFTER-FREEBSD"; "eintr" = a 3 s nanosleep with a SIGUSR1 handler
+ * (the driver sends SIGUSR1): must end with carry + EINTR 4 after the handler ran;
+ * "restart" = a 1 s nanosleep (the driver stops and continues the program): must be restarted
+ * with FreeBSD's number and end with success.
  *
  * Build (Group 11's build root, clang 15): see tools/personality/build-fbhook.sh.
  */
@@ -116,6 +119,23 @@ void _start(long *ap)
         struct res r = sys(SYS_execve, (long)"/bin/echo", (long)nargv, (long)envp, 0, 0);
         say("fbhook: execve failed\n");
         die(r.carry ? 92 : 93);
+    }
+
+    if (streq(mode, "eintr")) {
+        struct fsigaction sa = { (void *)handler, SA_SIGINFO, { 0, 0, 0, 0 } };
+        sys(SYS_sigaction, FBSD_SIGUSR1, (long)&sa, 0, 0, 0);
+        long ts[2] = { 3, 0 };
+        struct res r = sys(SYS_nanosleep, (long)ts, 0, 0, 0, 0);
+        if (r.carry && r.val == 4 && got == 1 && gotsig == FBSD_SIGUSR1) { say("fbhook: EINTR-OK\n"); die(0); }
+        say("fbhook: nanosleep interrupted by a handler did not end with carry + EINTR 4\n");
+        die(94);
+    }
+    if (streq(mode, "restart")) {
+        long ts[2] = { 1, 0 };
+        struct res r = sys(SYS_nanosleep, (long)ts, 0, 0, 0, 0);
+        if (!r.carry && r.val == 0) { say("fbhook: RESTART-OK\n"); die(0); }
+        say("fbhook: nanosleep across a stop did not succeed\n");
+        die(95);
     }
 
     check(argc >= 1 && argv[0] != 0 && slen(argv[0]) > 0, 1, "entry: rdi = &argc, argv[0] there");

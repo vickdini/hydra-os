@@ -236,30 +236,6 @@ pub fn frame_builder() -> Option<FrameFn> {
 // The system call path of a non-Linux personality
 // ----------------------------------------------------------------------
 
-/// The registers of the call in progress on a CPU, as the program made it: the frame
-/// builders put them back into a saved context when the call is restarted after the
-/// handler, and turn an error result into the personality's convention.
-#[derive(Clone, Copy)]
-struct InCall {
-    /// A call of a non-Linux personality is between its answer and the return to user mode.
-    active: bool,
-    /// rax, rdi, rsi, rdx, r10, r8, r9 as the program passed them.
-    raw: [u64; 7],
-    /// The address after the `syscall` instruction.
-    rip: u64,
-}
-
-struct InCalls([core::cell::UnsafeCell<InCall>; crate::arch::smp::MAX_CPUS]);
-// SAFETY: each CPU touches only its own entry, under the kernel lock, for the call it runs
-unsafe impl Sync for InCalls {}
-static IN_CALL: InCalls = InCalls([const { core::cell::UnsafeCell::new(InCall { active: false, raw: [0; 7], rip: 0 }) }; crate::arch::smp::MAX_CPUS]);
-
-fn in_call() -> &'static mut InCall {
-    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
-    // SAFETY: see InCalls
-    unsafe { &mut *IN_CALL.0[cpu].get() }
-}
-
 /// Is `r` one of the internal restart codes (`ERESTARTSYS`, `ERESTARTNOINTR`,
 /// `ERESTARTNOHAND`, `ERESTART_RESTARTBLOCK`)?
 fn restart_code(r: i64) -> bool {
@@ -287,13 +263,12 @@ fn encode(t: &Table, rax: &mut u64, rflags: &mut u64, rdx: &mut u64, r: i64, r2:
 /// a positive errno with the carry flag, and a call restarted after the handler gets back
 /// the personality's own number and arguments (the trap had put a Linux number there).
 pub fn fix_saved_context(t: &Table, regs: &mut crate::compat::linux::proc::UserRegs) {
-    let c = in_call();
-    if !c.active {
-        return;
-    }
-    if regs.rip == c.rip.wrapping_sub(2) {
-        [regs.rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9] = c.raw;
-    } else if regs.rip == c.rip {
+    // (kept in the task: delivery may wait in a stop and go on on another CPU)
+    let Some(c) = crate::task::with_current_task_mut(|t| t.pers_call).flatten() else { return };
+    let rip = c[7];
+    if regs.rip == rip.wrapping_sub(2) {
+        [regs.rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6]];
+    } else if regs.rip == rip {
         let r = regs.rax as i64;
         if (-4095..0).contains(&r) {
             let mut fl = regs.rflags;
@@ -396,10 +371,10 @@ pub fn syscall(frame: &mut SyscallFrame, fpu: *mut FpuState, t: &'static Table) 
         } else {
             encode(t, &mut frame.rax, &mut frame.rflags, &mut frame.rdx, ret.r, ret.r2);
         }
-        *in_call() = InCall { active: true, raw, rip };
+        crate::task::with_current_task_mut(|t| t.pers_call = Some([raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], rip]));
         let orig = if linux_nr != u64::MAX { linux_nr } else { raw[0] };
         crate::compat::linux::proc::deliver_on_syscall_return(frame, fpu, orig);
-        in_call().active = false;
+        crate::task::with_current_task_mut(|t| t.pers_call = None);
         if frame.rip == rip.wrapping_sub(2) {
             // Restarted: the program's own number and arguments
             [frame.rax, frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9] = raw;
