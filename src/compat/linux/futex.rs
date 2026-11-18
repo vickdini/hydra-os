@@ -727,17 +727,30 @@ fn wake_op_apply(uaddr2: u64, encoded: u32) -> Result<bool, i64> {
     if op & 8 != 0 {
         oparg = 1u32 << (oparg & 31);
     }
-    let p = uaddr2 as *mut u32;
-    let old = unsafe { core::ptr::read_volatile(p) };
-    let new = match op & 7 {
+    if op & 7 > 4 {
+        return Err(ENOSYS);
+    }
+    // One atomic read-modify-write, as Linux's futex_atomic_op_inuser: the word is shared
+    // with user threads changing it with their own atomics. A plain read and write would
+    // lose their updates, and could write a stale value after the word's owner has moved
+    // on (Qt's QSemaphore keeps its word on the waiter's stack; the old non-atomic write
+    // once put a stale 0 into the upper half of a pointer kwin_wayland had stored there)
+    // SAFETY: the word was faulted in writable and is 4-byte aligned
+    let word = unsafe { &*(uaddr2 as *const core::sync::atomic::AtomicU32) };
+    let apply = |old: u32| match op & 7 {
         0 => oparg,
         1 => old.wrapping_add(oparg),
         2 => old | oparg,
         3 => old & !oparg,
-        4 => old ^ oparg,
-        _ => return Err(ENOSYS),
+        _ => old ^ oparg,
     };
-    unsafe { core::ptr::write_volatile(p, new) };
+    let mut old = word.load(core::sync::atomic::Ordering::SeqCst);
+    loop {
+        match word.compare_exchange_weak(old, apply(old), core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst) {
+            Ok(_) => break,
+            Err(v) => old = v,
+        }
+    }
     let (o, c) = (old as i32, cmparg);
     Ok(match cmp {
         0 => o == c,
