@@ -1108,18 +1108,22 @@ The wake-up hop of 14.3 is gone:
   a socket nobody polls may lag until its next call or its first watch.
 - **read/write on sockets** take the lock-free path (Group 13's `BYFD_IO_NUMBERS`, merged).
 
-| What (µs unless noted) | `lx=kernel` / 329aaf7 | before the fix (64fe9ec) | after (merge with step 4) |
+| What (µs unless noted) | `lx=kernel` / 329aaf7 | before the fix (64fe9ec) | after (765d0a3, all of wave 5) |
 |---|---:|---:|---:|
-| TCP 1-byte ping-pong, 2 processes (`tcp_rtt`) | 88.0 | 144.5 | **108.6 (+23 %)** |
-| 16-byte send + receive, one thread (`tcp_sendrecv`) | 44.5 | 67.3 | **54.1 (+22 %)** |
-| `lolat` (netbench, 1-byte TCP round trips) | 87 | 126 | **119 (+37 %)** |
+| TCP 1-byte ping-pong, 2 processes (`tcp_rtt`) | 90.4 | 144.5 | **105.7 (+17 %)** |
+| 16-byte send + receive, one thread (`tcp_sendrecv`) | 43.2 | 67.3 | **51.4 (+19 %)** |
+| UDP 16-byte ping-pong, 2 processes (`udp_rtt`) | 89.3 | 140.5 | **103.1 (+15 %)** |
+| TCP connect + accept + 2 closes | 147.7 | 169 | 160.0 (+8 %) |
+| `getsockopt` | 1.06 | 4.00 | 4.08 |
+| `lolat` (netbench, 1-byte TCP round trips) | 87 | 126 | **109 (+25 %)** |
 | HTTP GET from a server in the guest (median) | 1,108 / 1,223 | 922 / 940 | **815 / 821 (faster)** |
-| 100 MB download (MB/s) | 14.8 / 13.6 / 13.8 | | 20.7 / 18.6 / 18.8 |
-| `apt-get update`, first / second (s) | 28.8 / 7.9 | | 26.0 / 9.4 |
-| UDP round trip to the host (median) | 580 | | 584 |
-| `getsockopt` | 1.11 | 4.00 | 4.57 |
+| 100 MB download (MB/s) | 14.8 / 13.6 / 13.8 | | 21.0 / 19.0 / 20.2 |
+| `apt-get update`, first / second (s) | 28.8 / 7.9 | | 24.5 / 8.8 |
+| UDP round trip to the host (median) | 580 | | 531 |
+| Calls not moved (`getpid`, `pread`, `open`+`close`, `fstat`, futex, fork+exec) | | | unchanged (within 3 %) |
 
-(Paired runs base4/new4 and lxm_krn/lxm_fwd on one evening; the host ran other VMs.)
+(lxbench: `lx=kernel` and forwarded runs of the same build, one after the other on a quiet
+host; netbench: paired runs base4 (329aaf7) / new5.)
 
 What is left on the ping-pong benchmarks is the forwarding itself: four forwarded calls per
 round trip (+2 to 2.5 µs each) and, per blocked receive, the attempt, the registration and
