@@ -78,6 +78,17 @@ struct Pipe {
     rwait: VecDeque<RWait>,
     wwait: VecDeque<WWait>,
     ino: u64,
+    /// A FIFO (`mkfifo` node `ino`): found again by its node until no end is left.
+    fifo: bool,
+}
+
+/// An `open` of a FIFO waiting for the other side (its end's slot is counted already, as
+/// Linux counts a waiting reader or writer).
+struct OWait {
+    c: LxCall,
+    slot: u32,
+    kind: u32,
+    pipe: u64,
 }
 
 struct Pipes {
@@ -85,9 +96,15 @@ struct Pipes {
     /// Slot -> (pipe, is a write end).
     ends: BTreeMap<u32, (u64, bool)>,
     next: u64,
+    /// FIFO ends opened `O_RDWR` (in `ends` as read ends, in both slot lists).
+    rw: alloc::collections::BTreeSet<u32>,
+    /// FIFO node -> its pipe.
+    fifos: BTreeMap<u64, u64>,
+    /// FIFO opens waiting for the other side.
+    owait: Vec<OWait>,
 }
 
-static PIPES: YLock<Pipes> = YLock::new(Pipes { pipes: BTreeMap::new(), ends: BTreeMap::new(), next: 1 });
+static PIPES: YLock<Pipes> = YLock::new(Pipes { pipes: BTreeMap::new(), ends: BTreeMap::new(), next: 1, rw: alloc::collections::BTreeSet::new(), fifos: BTreeMap::new(), owait: Vec::new() });
 
 /// Answers to give once the lock is let go: `(request id, result)`.
 type Done = Vec<(u64, i64)>;
@@ -204,7 +221,7 @@ pub fn create(cx: &Cx) -> (i64, u64) {
         let id = p.next;
         p.next += 1;
         let ino = 0x6000_0000 + id;
-        p.pipes.insert(id, Pipe { buf: VecDeque::new(), cap: DEFAULT_CAP, rslots: alloc::vec![r], wslots: alloc::vec![w], rwait: VecDeque::new(), wwait: VecDeque::new(), ino });
+        p.pipes.insert(id, Pipe { buf: VecDeque::new(), cap: DEFAULT_CAP, rslots: alloc::vec![r], wslots: alloc::vec![w], rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo: false });
         p.ends.insert(r, (id, false));
         p.ends.insert(w, (id, true));
         p.pipes[&id].publish(false, false);
@@ -307,7 +324,10 @@ fn write(cx: &Cx, slot: u32) -> (i64, u64) {
     let mut done = Done::new();
     let r = {
         let mut ps = PIPES.lock();
-        let Some(&(id, true)) = ps.ends.get(&slot) else { return (EBADF, 0) };
+        let id = match ps.ends.get(&slot) {
+            Some(&(id, w)) if w || ps.rw.contains(&slot) => id,
+            _ => return (EBADF, 0),
+        };
         let p = ps.pipes.get_mut(&id).unwrap();
         if p.rslots.is_empty() {
             drop(ps);
@@ -485,8 +505,13 @@ pub fn closed(slot: u32) {
     {
         let mut ps = PIPES.lock();
         let Some((id, write)) = ps.ends.remove(&slot) else { return };
+        // (an O_RDWR FIFO end is a reader and a writer)
+        let both = ps.rw.remove(&slot);
         let p = ps.pipes.get_mut(&id).unwrap();
-        if write {
+        if both {
+            p.wslots.retain(|&s| s != slot);
+        }
+        if write || both {
             p.wslots.retain(|&s| s != slot);
             if p.wslots.is_empty() {
                 // End of file for every waiting reader
@@ -494,7 +519,8 @@ pub fn closed(slot: u32) {
                     done.push((r.id, 0));
                 }
             }
-        } else {
+        }
+        if !write {
             p.rslots.retain(|&s| s != slot);
             if p.rslots.is_empty() {
                 for w in p.wwait.drain(..) {
@@ -508,6 +534,10 @@ pub fn closed(slot: u32) {
             }
         }
         if p.rslots.is_empty() && p.wslots.is_empty() {
+            if p.fifo {
+                let ino = p.ino;
+                ps.fifos.remove(&ino);
+            }
             ps.pipes.remove(&id);
         } else {
             p.publish(false, false);
@@ -521,6 +551,16 @@ pub fn closed(slot: u32) {
 
 /// A signal arrived for the caller of pending call `id`: `true` if it was one of ours.
 pub fn interrupted(id: u64) -> bool {
+    // A FIFO open waiting for the other side: its end goes
+    let ow = {
+        let mut ps = PIPES.lock();
+        ps.owait.iter().position(|w| w.c.id == id).map(|i| ps.owait.remove(i))
+    };
+    if let Some(w) = ow {
+        forget(w.slot);
+        let _ = sys::lx_complete(id, ERESTARTSYS);
+        return true;
+    }
     let r = {
         let mut ps = PIPES.lock();
         let mut found = None;
@@ -549,6 +589,15 @@ pub fn interrupted(id: u64) -> bool {
 
 /// Process `tgid` ended: its waiting calls are gone.
 pub fn on_exit(tgid: u64) {
+    let gone: Vec<u32> = {
+        let mut ps = PIPES.lock();
+        let (g, keep): (Vec<OWait>, Vec<OWait>) = core::mem::take(&mut ps.owait).into_iter().partition(|w| w.c.tgid == tgid);
+        ps.owait = keep;
+        g.into_iter().map(|w| w.slot).collect()
+    };
+    for s in gone {
+        forget(s);
+    }
     let mut ps = PIPES.lock();
     for p in ps.pipes.values_mut() {
         p.rwait.retain(|r| r.tgid != tgid);
@@ -560,4 +609,107 @@ pub fn on_exit(tgid: u64) {
 #[allow(dead_code)]
 pub fn is_pipe(slot: u32) -> bool {
     PIPES.lock().ends.contains_key(&slot)
+}
+
+// ----------------------------------------------------------------------
+// FIFOs (`mkfifo` nodes)
+// ----------------------------------------------------------------------
+
+/// `LX_KCALL_FIFO(ino, flags)`: the kernel's `open` of FIFO node `ino` (permissions checked
+/// already). As on Linux: a reader waits for a writer and a writer for a reader (unless
+/// `O_NONBLOCK`: a reader goes on, a writer fails with `ENXIO`), `O_RDWR` never waits; the
+/// pipe lives while any end is open, and its bytes go with it.
+pub fn fifo_open(cx: &Cx) -> (i64, u64) {
+    const ENXIO: i64 = -6;
+    let (ino, flags) = (cx.args[0], cx.args[1]);
+    let acc = flags & O_ACCMODE;
+    let nonblock = flags & O_NONBLOCK != 0;
+    let kind = match acc {
+        0 => LX_OBJ_KIND_PIPE_R,
+        1 => LX_OBJ_KIND_PIPE_W,
+        2 => LX_OBJ_KIND_PIPE_RW,
+        _ => return (EINVAL, 0),
+    };
+    let slot = match crate::obj::alloc(kind) {
+        Ok(s) => s,
+        Err(e) => return (e, 0),
+    };
+    let mut ready: Vec<OWait> = Vec::new();
+    let wait = {
+        let mut ps = PIPES.lock();
+        let id = match ps.fifos.get(&ino) {
+            Some(&id) => id,
+            None => {
+                let id = ps.next;
+                ps.next += 1;
+                ps.pipes.insert(id, Pipe { buf: VecDeque::new(), cap: DEFAULT_CAP, rslots: Vec::new(), wslots: Vec::new(), rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo: true });
+                ps.fifos.insert(ino, id);
+                id
+            }
+        };
+        let (readers, writers) = {
+            let p = &ps.pipes[&id];
+            (!p.rslots.is_empty(), !p.wslots.is_empty())
+        };
+        if kind == LX_OBJ_KIND_PIPE_W && !readers && nonblock {
+            drop(ps);
+            crate::obj::free(slot);
+            // (a pipe made for nothing goes again)
+            let mut ps = PIPES.lock();
+            if ps.pipes.get(&id).is_some_and(|p| p.rslots.is_empty() && p.wslots.is_empty()) {
+                ps.pipes.remove(&id);
+                ps.fifos.remove(&ino);
+            }
+            return (ENXIO, 0);
+        }
+        let p = ps.pipes.get_mut(&id).unwrap();
+        if kind != LX_OBJ_KIND_PIPE_W {
+            p.rslots.push(slot);
+        }
+        if kind != LX_OBJ_KIND_PIPE_R {
+            p.wslots.push(slot);
+        }
+        p.publish(false, false);
+        ps.ends.insert(slot, (id, kind == LX_OBJ_KIND_PIPE_W));
+        if kind == LX_OBJ_KIND_PIPE_RW {
+            ps.rw.insert(slot);
+        }
+        // Opens waiting for this side go on
+        let mut keep = Vec::new();
+        for w in core::mem::take(&mut ps.owait) {
+            let wakes = w.pipe == id && ((w.kind == LX_OBJ_KIND_PIPE_R && kind != LX_OBJ_KIND_PIPE_R) || (w.kind == LX_OBJ_KIND_PIPE_W && kind != LX_OBJ_KIND_PIPE_W));
+            if wakes {
+                ready.push(w);
+            } else {
+                keep.push(w);
+            }
+        }
+        ps.owait = keep;
+        let must_wait = !nonblock && ((kind == LX_OBJ_KIND_PIPE_R && !writers) || (kind == LX_OBJ_KIND_PIPE_W && !readers));
+        if must_wait {
+            ps.owait.push(OWait { c: cx.c, slot, kind, pipe: id });
+        }
+        must_wait
+    };
+    for w in ready {
+        let wcx = Cx::from_call(&w.c, core::ptr::null_mut());
+        let r = install_end(&wcx, w.slot, w.kind, w.c.args[1], ino);
+        let _ = sys::lx_complete(w.c.id, r);
+    }
+    if wait {
+        return (0, LX_REPLY_PENDING);
+    }
+    (install_end(cx, slot, kind, flags, ino), 0)
+}
+
+/// Gives FIFO end `slot` its descriptor in the caller's table (`forget` on failure).
+fn install_end(cx: &Cx, slot: u32, kind: u32, flags: u64, ino: u64) -> i64 {
+    let name = alloc::format!("pipe:[{}]", ino);
+    match crate::obj::install_tag(cx, slot, kind, (flags & (O_NONBLOCK | O_CLOEXEC)) as u32, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+        Ok(fd) => fd,
+        Err(e) => {
+            forget(slot);
+            e
+        }
+    }
 }

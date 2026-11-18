@@ -933,6 +933,8 @@ pub const LX_OBJ_KIND_TIMERFD: u32 = 20;
 pub const LX_OBJ_KIND_SIGNALFD: u32 = 21;
 /// A pidfd.
 pub const LX_OBJ_KIND_PIDFD: u32 = 22;
+/// A FIFO opened `O_RDWR` (a read and a write end in one).
+pub const LX_OBJ_KIND_PIPE_RW: u32 = 23;
 
 /// [`LxCall::obj_flags`] bit: a transfer the kernel makes with its own buffer (`splice`,
 /// `sendfile`, io_uring, aio's eventfd): `args[1]` is [`LX_KBUF_ADDR`], whose bytes are all in
@@ -997,3 +999,6 @@ pub const LX_KCALL_PIDFD: u64 = 0x6781;
 /// `LX_KCALL_FCNTL(fd, cmd, arg)`: `fcntl` commands of server objects
 /// (`F_GETPIPE_SZ`, `F_SETPIPE_SZ`).
 pub const LX_KCALL_FCNTL: u64 = 0x6782;
+/// `LX_KCALL_FIFO(ino, flags)`: `open` of FIFO node `ino` (permissions checked by the
+/// kernel): a pipe end in the caller's table, waiting for the other side as Linux does.
+pub const LX_KCALL_FIFO: u64 = 0x6783;

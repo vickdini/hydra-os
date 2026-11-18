@@ -198,7 +198,7 @@ pub fn closed(slot: u32, kind: u32) {
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
         LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
         LX_OBJ_KIND_EVENTFD => crate::eventfd::closed(slot),
-        LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W => crate::pipe::closed(slot),
+        LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W | LX_OBJ_KIND_PIPE_RW => crate::pipe::closed(slot),
         LX_OBJ_KIND_UNIX => crate::unix::closed(slot),
         LX_OBJ_KIND_PIDFD => crate::pidfd::closed(slot),
         LX_OBJ_KIND_SIGNALFD => crate::signalfd::closed(slot),

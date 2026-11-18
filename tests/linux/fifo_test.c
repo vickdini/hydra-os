@@ -1,0 +1,136 @@
+// FIFOs (mkfifo nodes) open as pipes (wave 5, Group 13): before, a FIFO opened as an empty
+// regular file and GNU make's jobserver FIFO busy-looped (every make -j burned a CPU).
+// - a reader's open waits for a writer (and the other way round), data passes, end of file
+//   when the writer closes; O_NONBLOCK: a reader goes on, a writer without reader: ENXIO;
+// - O_RDWR never waits and reads what it wrote (linux-server's FIFOs; lx=kernel: skipped);
+// - poll on a FIFO with nothing in it waits (no busy loop);
+// - make -j4 of 4 targets with a FIFO jobserver uses little CPU (skipped without make).
+// Build: gcc -O1 -w -o fifo fifo_test.c
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static int fails;
+static void check(int ok, const char *what) {
+    printf("%s %s\n", ok ? "ok  " : "FAIL", what);
+    fflush(stdout);
+    if (!ok) fails++;
+}
+static long long ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000LL + t.tv_nsec / 1000000;
+}
+
+int main(void) {
+    const char *f = "/tmp/fifo_test.fifo";
+    unlink(f);
+    check(mkfifo(f, 0600) == 0, "mkfifo");
+    struct stat st;
+    check(stat(f, &st) == 0 && S_ISFIFO(st.st_mode), "the node is a FIFO");
+
+    // A reader waits for the writer, which comes 300 ms later
+    pid_t w = fork();
+    if (w == 0) {
+        usleep(300000);
+        int fd = open(f, O_WRONLY);
+        write(fd, "hello", 5);
+        usleep(100000);
+        close(fd);
+        _exit(0);
+    }
+    long long t0 = ms();
+    int r = open(f, O_RDONLY);
+    long long waited = ms() - t0;
+    check(r >= 0 && waited >= 200, "a reader's open waits for a writer");
+    struct stat fs;
+    check(r >= 0 && fstat(r, &fs) == 0 && S_ISFIFO(fs.st_mode), "the descriptor is a pipe (S_IFIFO)");
+    char buf[16] = {0};
+    check(read(r, buf, sizeof buf) == 5 && !memcmp(buf, "hello", 5), "the writer's bytes arrive");
+    check(read(r, buf, sizeof buf) == 0, "end of file once the writer closed");
+    close(r);
+    waitpid(w, 0, 0);
+
+    // A writer waits for a reader
+    pid_t rd = fork();
+    if (rd == 0) {
+        usleep(300000);
+        int fd = open(f, O_RDONLY);
+        char b[8];
+        int n = read(fd, b, sizeof b);
+        _exit(n == 3 ? 0 : 1);
+    }
+    t0 = ms();
+    int wr = open(f, O_WRONLY);
+    waited = ms() - t0;
+    check(wr >= 0 && waited >= 200, "a writer's open waits for a reader");
+    check(write(wr, "abc", 3) == 3, "the writer writes");
+    close(wr);
+    int status;
+    waitpid(rd, &status, 0);
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the reader read it");
+
+    // O_NONBLOCK
+    errno = 0;
+    check(open(f, O_WRONLY | O_NONBLOCK) < 0 && errno == ENXIO, "a non-blocking writer without reader: ENXIO");
+    int nr = open(f, O_RDONLY | O_NONBLOCK);
+    check(nr >= 0, "a non-blocking reader opens at once");
+    int nw = open(f, O_WRONLY | O_NONBLOCK);
+    check(nw >= 0, "then a non-blocking writer opens");
+    // poll with nothing to read waits for its timeout (no busy loop)
+    struct pollfd p = {nr, POLLIN, 0};
+    t0 = ms();
+    int pr = poll(&p, 1, 200);
+    check(pr == 0 && ms() - t0 >= 150, "poll on an empty FIFO waits");
+    write(nw, "x", 1);
+    check(poll(&p, 1, 1000) == 1 && (p.revents & POLLIN), "poll sees the byte");
+    close(nr);
+    close(nw);
+
+    // O_RDWR (linux-server's FIFOs)
+    long srv = syscall(0x6710, 3, 0);
+    if (srv > 2) {
+        close(srv);
+        int rw = open(f, O_RDWR);
+        check(rw >= 0 && write(rw, "rw", 2) == 2 && read(rw, buf, 2) == 2 && !memcmp(buf, "rw", 2), "O_RDWR does not wait and reads what it wrote");
+        close(rw);
+    } else {
+        puts("skip O_RDWR (FIFOs in the kernel: lx=kernel)");
+    }
+    unlink(f);
+
+    // make -j4 with its FIFO jobserver
+    if (access("/usr/bin/make", X_OK) == 0) {
+        mkdir("/tmp/fifo_make", 0755);
+        FILE *mk = fopen("/tmp/fifo_make/Makefile", "w");
+        fprintf(mk, "all: a b c d e f\n%%:\n\tsleep 0.4; touch $@\n");
+        fclose(mk);
+        system("cd /tmp/fifo_make && rm -f a b c d e f");
+        t0 = ms();
+        int rc = system("cd /tmp/fifo_make && make -s -j4 --jobserver-style=fifo all >/dev/null 2>&1 || make -s -j4 all >/dev/null 2>&1");
+        long long el = ms() - t0;
+        struct rusage ru;
+        getrusage(RUSAGE_CHILDREN, &ru);
+        double cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+        printf("     make -j4: %lld ms, %.2f s CPU in children\n", el, cpu);
+        check(rc == 0 && access("/tmp/fifo_make/f", F_OK) == 0, "make -j4 builds the targets");
+        check(cpu < 0.8 * el / 1000.0, "make -j4 does not busy-loop (CPU well below elapsed time)");
+        system("rm -rf /tmp/fifo_make");
+    } else {
+        puts("skip make (not installed)");
+    }
+
+    printf(fails ? "FIFO TEST FAILED (%d)\n" : "FIFO TEST PASSED\n", fails);
+    return fails != 0;
+}
