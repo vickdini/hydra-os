@@ -110,6 +110,50 @@ int main(void) {
     }
     unlink(f);
 
+    // A jobserver as GNU make -j4 runs it on a FIFO: 3 tokens, 6 jobs that each take one
+    // (a blocking read), work 0.3 s, and give it back; the waits must sleep, not spin
+    {
+        const char *js = "/tmp/fifo_test.jobs";
+        unlink(js);
+        mkfifo(js, 0600);
+        int jr = open(js, O_RDONLY | O_NONBLOCK);
+        int jw = open(js, O_WRONLY);
+        fcntl(jr, F_SETFL, 0);
+        write(jw, "+++", 3);
+        struct rusage before;
+        getrusage(RUSAGE_CHILDREN, &before);
+        t0 = ms();
+        for (int i = 0; i < 6; i++) {
+            if (fork() == 0) {
+                char tok;
+                int fd = open(js, O_RDONLY);
+                int wfd = open(js, O_WRONLY);
+                if (read(fd, &tok, 1) != 1) _exit(1);
+                struct timespec ts = {0, 300000000};
+                nanosleep(&ts, 0);
+                write(wfd, &tok, 1);
+                _exit(0);
+            }
+        }
+        int ok = 1;
+        for (int i = 0; i < 6; i++) {
+            int st2;
+            wait(&st2);
+            ok &= WIFEXITED(st2) && WEXITSTATUS(st2) == 0;
+        }
+        long long el = ms() - t0;
+        struct rusage after;
+        getrusage(RUSAGE_CHILDREN, &after);
+        double cpu = (after.ru_utime.tv_sec - before.ru_utime.tv_sec) + (after.ru_utime.tv_usec - before.ru_utime.tv_usec) / 1e6 +
+                     (after.ru_stime.tv_sec - before.ru_stime.tv_sec) + (after.ru_stime.tv_usec - before.ru_stime.tv_usec) / 1e6;
+        printf("     jobserver: 6 jobs of 0.3 s with 3 tokens took %lld ms, %.2f s CPU%c", el, cpu, 10);
+        check(ok && el >= 550 && el < 3000, "a FIFO jobserver runs 6 jobs 3 at a time");
+        check(cpu < 0.5, "the jobs wait for tokens without spinning");
+        close(jr);
+        close(jw);
+        unlink(js);
+    }
+
     // make -j4 with its FIFO jobserver
     if (access("/usr/bin/make", X_OK) == 0) {
         mkdir("/tmp/fifo_make", 0755);
