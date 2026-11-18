@@ -178,6 +178,40 @@ int main(int argc, char **argv) {
         check(v == -1 && errno == EINTR && dt < 3000, "signal during a pending call: EINTR");
         printf("     (took %llu ms)\n", (unsigned long long)dt);
     }
+    /* The copy-in/copy-out table (wave 4): strings and buffers at page edges, bad pointers,
+     * more than fits in the syscall page. Linux's answers, forwarded or not. */
+    {
+        char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        munmap(m + 4096, 4096);
+        strcpy(m + 4096 - 5, "user"); /* the NUL is the page's last byte */
+        strcpy(m + 2000, "lxfwd-edge");
+        long k = syscall(SYS_add_key, m + 4096 - 5, m + 2000, "abc", 3, THREAD_KEYRING);
+        check(k > 0, "copy table: a string ending at an unmapped page");
+        check(syscall(SYS_add_key, "user", "lxfwd-bad", (void *)0x10, 4, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: bad payload pointer: EFAULT");
+        check(syscall(SYS_add_key, (void *)0x10, "x", "a", 1, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: bad string pointer: EFAULT");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 4093, 3) == 3 && !memcmp(m + 4093, "abc", 3),
+              "copy table: output ending at the end of a page");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 4094, 3) == -1 && errno == EFAULT,
+              "copy table: output crossing into an unmapped page: EFAULT");
+        char *huge = malloc(65536);
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, huge, 65536) == 3 && !memcmp(huge, "abc", 3),
+              "copy table: a short answer into a 64 KiB buffer");
+        static char big[3500], back[4000];
+        for (int i = 0; i < (int)sizeof big; i++) big[i] = (char)(i * 13 + 1);
+        long kb = syscall(SYS_add_key, "user", "lxfwd-big", big, sizeof big, THREAD_KEYRING);
+        long nb = syscall(SYS_keyctl, KEYCTL_READ, kb, back, sizeof back);
+        check(kb > 0 && nb == (long)sizeof big && !memcmp(back, big, sizeof big),
+              "copy table: a payload larger than the syscall page's copy area");
+        mprotect(m, 4096, PROT_READ);
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 100, 16) == -1 && errno == EFAULT,
+              "copy table: read-only output buffer: EFAULT");
+        syscall(SYS_keyctl, KEYCTL_UNLINK, k, THREAD_KEYRING);
+        syscall(SYS_keyctl, KEYCTL_UNLINK, kb, THREAD_KEYRING);
+        free(huge);
+        munmap(m, 4096);
+    }
     check(concurrency(4, 8), "4 processes x 8 threads: every forwarded call answered correctly");
     printf(fails ? "LXFWD TEST FAILED (%d)\n" : "LXFWD TEST PASSED\n", fails);
     return fails != 0;

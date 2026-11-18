@@ -194,7 +194,7 @@ extern "C" fn worker(_index: u64) -> ! {
             Ok(()) => {
                 // SAFETY: the kernel filled the page before returning; it is ours alone
                 let c = unsafe { core::ptr::read_volatile(call) };
-                answer = serve(&c);
+                answer = serve(&c, page as *mut u8);
             }
             Err(e) => {
                 // The kernel no longer knows this worker (the server is being replaced)
@@ -205,10 +205,10 @@ extern "C" fn worker(_index: u64) -> ! {
     }
 }
 
-/// Serves one forwarded call: `(result, SYS_LX_REPLY_RECV flags)`.
-fn serve(c: &LxCall) -> (i64, u64) {
+/// Serves one forwarded call (in syscall page `page`): `(result, SYS_LX_REPLY_RECV flags)`.
+fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     notes::drain_to(c.note_seq);
-    let cx = Cx::from_call(c);
+    let cx = Cx::from_call(c, page);
     match c.nr {
         LX_NULL_NR => null_call(&cx),
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),

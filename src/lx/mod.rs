@@ -41,13 +41,16 @@
 //! The request table is a spin lock taken with interrupts off, never while the scheduler
 //! lock is held (the scheduler lock may be taken inside it).
 
+pub mod copy;
+
 use alloc::sync::Arc;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::ipc::protocol::{
-    LxCall, ENDPOINT_LINUX_SERVER, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
+    LxCall, LxCopy, ENDPOINT_LINUX_SERVER, LX_COPY_OFF, LX_DATA_OFF, LX_DATA_SIZE, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
     LX_NOTE_INTERRUPT, LX_NULL_NR, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
 };
 use crate::ipc::service::ContiguousFrames;
@@ -183,10 +186,31 @@ struct Req {
     result: i64,
     /// A signal arrived for the caller while the call was in the server.
     interrupted: bool,
+    /// The call has copies ([`copy::describe`]): its header (and, while queued, its bytes)
+    /// are in [`BUFS`] at the same index.
+    has_copy: bool,
 }
 
 impl Req {
-    const FREE: Self = Self { state: RState::Free, id: 0, client: 0, client_idx: 0, result: 0, interrupted: false };
+    const FREE: Self = Self { state: RState::Free, id: 0, client: 0, client_idx: 0, result: 0, interrupted: false, has_copy: false };
+}
+
+/// The copies of each request slot (the copy-in/copy-out table, [`copy`]): the header
+/// always, the copied-in bytes while the call is queued, the output after the answer. A
+/// slot's buffer belongs to whoever holds the request: written under the request table's
+/// lock while the call is placed, delivered or answered, read by the caller alone once it
+/// saw the answer (the slot is freed after that). Kernel memory, so a caller that dies with
+/// its call in the server leaves nothing dangling.
+struct CopyBufs([UnsafeCell<copy::CopyBuf>; MAX_REQS]);
+// SAFETY: see the type: every access is ordered by the request table's lock
+unsafe impl Sync for CopyBufs {}
+static BUFS: CopyBufs = CopyBufs([const { UnsafeCell::new(copy::CopyBuf::EMPTY) }; MAX_REQS]);
+
+/// Request slot `slot`'s copy buffer (see [`CopyBufs`] for who may use it when).
+#[allow(clippy::mut_from_ref)]
+fn buf_of(slot: usize) -> &'static mut copy::CopyBuf {
+    // SAFETY: see CopyBufs
+    unsafe { &mut *BUFS.0[slot].get() }
 }
 
 /// A worker thread of the server.
@@ -241,13 +265,29 @@ pub fn is_online() -> bool {
     ONLINE.load(Ordering::Acquire)
 }
 
-/// Delivers request `slot` (its call is `call`) to worker `wi`: the call goes into the
-/// worker's syscall page.
-fn deliver(s: &mut Lx, slot: usize, wi: usize, call: &LxCall) {
+/// Delivers request `slot` (its call is `call`, its copies `copies`) to worker `wi`: the
+/// call goes into the worker's syscall page, with the copy header (empty without copies)
+/// and the copied-in bytes.
+fn deliver(s: &mut Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&copy::CopyBuf>) {
     s.reqs[slot].state = RState::Delivered;
     let w = &mut s.workers[wi];
-    // SAFETY: the page is the worker's own and stays allocated while it is in the table
-    unsafe { core::ptr::write_volatile(w.call_mut(), *call) };
+    let page = w.call_mut() as *mut u8;
+    // SAFETY: the page is the worker's own and stays allocated while it is in the table;
+    // the header and the copy area lie within it
+    unsafe {
+        core::ptr::write_volatile(w.call_mut(), *call);
+        let hdr = page.add(LX_COPY_OFF) as *mut LxCopy;
+        match copies {
+            Some(b) => {
+                let mut h = b.hdr;
+                h.out_len = [0; 6];
+                core::ptr::write_volatile(hdr, h);
+                let data = b.used_bytes();
+                core::ptr::copy_nonoverlapping(data.as_ptr(), page.add(LX_DATA_OFF), data.len().min(LX_DATA_SIZE));
+            }
+            None => core::ptr::write_volatile(hdr, LxCopy::EMPTY),
+        }
+    }
     w.idle = false;
     w.req = slot;
 }
@@ -258,7 +298,8 @@ fn take_queued(s: &mut Lx, wi: usize) -> bool {
     match next {
         Some(slot) => {
             let call = s.calls[slot];
-            deliver(s, slot, wi, &call);
+            let copies = if s.reqs[slot].has_copy { Some(&*buf_of(slot)) } else { None };
+            deliver(s, slot, wi, &call, copies);
             true
         }
         None => false,
@@ -303,27 +344,47 @@ fn call(frame: &SyscallFrame) -> i64 {
         }
     }
     c.note_seq = notes_head();
+    // The copy-in table: the call's pointer arguments, copied now (a bad one fails here)
+    let mut copies = None;
+    let mut buf;
+    if let Some(desc) = copy::describe(c.nr, &c.args) {
+        buf = copy::CopyBuf::EMPTY;
+        if let Err(e) = copy::fill(&mut buf, desc, &c.args) {
+            return e;
+        }
+        copies = Some(&buf);
+    }
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
-    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c))
+    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies))
 }
 
-/// [`call`] with the call filled in.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall) -> i64 {
+/// [`call`] with the call filled in and its copies made.
+fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>) -> i64 {
     let placed = lx(|s| {
         let slot = s.reqs.iter().position(|r| r.state == RState::Free)?;
         let id = s.next_id;
         s.next_id += 1;
         c.id = id;
-        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false };
+        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some() };
+        if let Some(b) = copies {
+            let kept = buf_of(slot);
+            kept.hdr = b.hdr;
+            kept.used = b.used;
+        }
         // An idle worker takes it at once
         let target = match s.workers.iter().position(|w| w.idle) {
             Some(wi) => {
-                deliver(s, slot, wi, &c);
+                deliver(s, slot, wi, &c, copies);
                 Some((s.workers[wi].task, s.workers[wi].idx))
             }
             None => {
                 s.calls[slot] = c;
+                // Its bytes wait with it (the caller's stack is not reachable from the
+                // worker that takes it)
+                if let Some(b) = copies {
+                    buf_of(slot).data[..b.used].copy_from_slice(b.used_bytes());
+                }
                 None
             }
         };
@@ -348,28 +409,42 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall) -> i64 {
             QUEUED_CALLS.fetch_add(1, Ordering::Relaxed);
         }
     }
-    wait_for(slot, id)
+    wait_for(slot, id, &c.args)
 }
 
-/// Waits for the answer to request `id` (in `slot`) and frees it.
-fn wait_for(slot: usize, id: u64) -> i64 {
+/// Waits for the answer to request `id` (in `slot`), copies its output to the caller's
+/// pointers `args` (the copy-out table), and frees it.
+fn wait_for(slot: usize, id: u64, args: &[u64; 6]) -> i64 {
     loop {
         let done = lx(|s| {
             let r = &mut s.reqs[slot];
             if r.id != id {
-                return Some(EIO);
+                return Some((EIO, false));
             }
             match r.state {
                 RState::Done | RState::Failed => {
                     let v = r.result;
-                    *r = Req::FREE;
-                    Some(v)
+                    let out = r.state == RState::Done && r.has_copy && copy::has_output(buf_of(slot));
+                    if !out {
+                        *r = Req::FREE;
+                    }
+                    Some((v, out))
                 }
                 _ => None,
             }
         });
-        if let Some(v) = done {
-            return v;
+        if let Some((v, out)) = done {
+            if !out {
+                return v;
+            }
+            // The output, from the slot's buffer (the request is still ours: nobody else
+            // touches an answered request), then the slot goes
+            let r = match copy::copy_out(buf_of(slot), args) {
+                Ok(()) => v,
+                Err(e) => e,
+            };
+            free_if(id, RState::Done);
+            return r;
         }
         // A signal: a call not taken yet is withdrawn; one being served is marked (the
         // server may answer -EINTR; a pending one learns it through a notification)
@@ -548,6 +623,17 @@ pub fn reply_recv(result: i64, flags: u64) -> i64 {
                     r.state = RState::Done;
                     r.result = result;
                     wake = (r.client, r.id, r.client_idx);
+                    // The output the server left in the page (copy-out table)
+                    if r.has_copy {
+                        let page = s.workers[wi].call_mut() as *const u8;
+                        // SAFETY: the worker's page (see `deliver`); the header and copy
+                        // area lie within it
+                        let (out_len, data) = unsafe {
+                            let h = core::ptr::read_volatile(page.add(LX_COPY_OFF) as *const LxCopy);
+                            (h.out_len, core::slice::from_raw_parts(page.add(LX_DATA_OFF), LX_DATA_SIZE))
+                        };
+                        copy::take_output(buf_of(cur), &out_len, data);
+                    }
                 }
             }
         }

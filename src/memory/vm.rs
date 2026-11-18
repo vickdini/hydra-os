@@ -696,6 +696,19 @@ impl Mm {
         }
     }
 
+    /// The physical address of user address `addr` if its page is present for user mode
+    /// now (and writable, for `write`), without faulting anything in: the copy-in table of
+    /// `crate::lx` copies through the direct map while holding this address space's lock,
+    /// and faults pages in the ordinary way only when this says no.
+    pub fn present_user(&mut self, addr: u64, write: bool) -> Option<PhysAddr> {
+        let entry = self.pte(addr, false)?;
+        let f = entry.flags();
+        if !f.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) || (write && !f.contains(PageTableFlags::WRITABLE)) {
+            return None;
+        }
+        Some(entry.addr() + (addr & (PAGE_SIZE - 1)))
+    }
+
     /// Unmaps every page in `[start, end)`, dropping frame references. Areas are untouched.
     ///
     /// # Arguments

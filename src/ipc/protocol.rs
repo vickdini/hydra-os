@@ -674,6 +674,54 @@ impl LxCall {
 /// server may answer `-EINTR`).
 pub const LX_CALL_INTERRUPTED: u64 = 1;
 
+// The copy-in/copy-out table (wave 4, Group 10). For the calls the kernel's table
+// (`src/lx/copy.rs`) describes, the kernel copies pointer arguments (paths, small structures,
+// buffers) into the syscall page at trap time, and copies results the server leaves in the
+// page back to the caller after the answer: most calls then need no client memory call.
+
+/// Offset of the [`LxCopy`] header in the syscall page.
+pub const LX_COPY_OFF: usize = 0x200;
+/// Offset of the copy area in the syscall page: the copied-in bytes and the space for output.
+pub const LX_DATA_OFF: usize = 0x400;
+/// Size of the copy area.
+pub const LX_DATA_SIZE: usize = LX_PAGE_SIZE - LX_DATA_OFF;
+
+/// Where the kernel put each pointer argument's bytes, at [`LX_COPY_OFF`] of the syscall page.
+/// Offsets count from the start of the page; 0 means none. Valid until the worker answers.
+///
+/// - `in_off[i]`/`in_len[i]`: the bytes `args[i]` points to (a string: its length, without
+///   the NUL that follows it). 0: not copied (a NULL pointer, too long, or no table entry):
+///   the server uses `SYS_LX_READ` / `SYS_LX_READ_STR`.
+/// - `out_off[i]`/`out_cap[i]`: space for output to `args[i]`'s pointer (0: none: the server
+///   uses `SYS_LX_WRITE`). For in/out arguments it is the same place as the input.
+/// - `out_len[i]`: written by the server before an immediate answer: bytes the kernel copies
+///   from `out_off[i]` to `args[i]` after the answer (not after `LX_REPLY_PENDING`). A copy
+///   that faults makes the call's result `-EFAULT`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LxCopy {
+    /// See the type.
+    pub in_off: [u16; 6],
+    /// See the type.
+    pub in_len: [u16; 6],
+    /// See the type.
+    pub out_off: [u16; 6],
+    /// See the type.
+    pub out_cap: [u16; 6],
+    /// See the type.
+    pub out_len: [u16; 6],
+    /// Reserved (0).
+    pub reserved: [u16; 2],
+}
+
+impl LxCopy {
+    /// No copies.
+    pub const EMPTY: Self = Self { in_off: [0; 6], in_len: [0; 6], out_off: [0; 6], out_cap: [0; 6], out_len: [0; 6], reserved: [0; 2] };
+}
+
+const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_COPY_OFF);
+const _: () = assert!(LX_COPY_OFF + core::mem::size_of::<LxCopy>() <= LX_DATA_OFF);
+
 /// `SYS_LX_REPLY_RECV` flag: the call blocks; the caller keeps sleeping until some thread
 /// answers it with `SYS_LX_COMPLETE`.
 pub const LX_REPLY_PENDING: u64 = 1;

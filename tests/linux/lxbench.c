@@ -278,6 +278,21 @@ static double b_keyctl(long n) { /* keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_SESSI
     for (long i = 0; i < n; i++) syscall(SYS_keyctl, 0, -3, 0);
     return (double)(now() - t) / n;
 }
+static double b_add_key(long n) { /* add_key("user", "lxbench", 16-byte payload, process keyring): two strings and a buffer in */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++)
+        if (syscall(SYS_add_key, "user", "lxbench", "0123456789abcdef", 16, -2) < 0) return -1;
+    return (double)(now() - t) / n;
+}
+static double b_keyctl_describe(long n) { /* keyctl(KEYCTL_DESCRIBE, key, buf, 256): a buffer out */
+    char buf[256];
+    long id = syscall(SYS_add_key, "user", "lxbench", "0123456789abcdef", 16, -2);
+    if (id < 0) return -1;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++)
+        if (syscall(SYS_keyctl, 6, id, buf, sizeof buf) < 0) return -1;
+    return (double)(now() - t) / n;
+}
 static long par_n; static long par_nr;
 static void *par_worker(void *x) {
     for (long i = 0; i < par_n; i++) {
@@ -349,6 +364,8 @@ static struct bench benches[] = {
     {"lx_null_par2", b_lx_null_par2, 100000, 0},
     {"keyctl", b_keyctl, 100000, 0},
     {"keyctl_par2", b_keyctl_par2, 50000, 0},
+    {"add_key", b_add_key, 50000, 0},
+    {"keyctl_describe", b_keyctl_describe, 100000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},
