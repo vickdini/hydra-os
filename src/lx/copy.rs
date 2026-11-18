@@ -80,7 +80,7 @@ pub enum Arg {
 /// What the six arguments of a call are.
 pub type Desc = [Arg; 6];
 
-use Arg::{In, None as N, Out, Str};
+use Arg::{In, InOut, None as N, Out, Str};
 
 /// Strings of the key service (type, description, keyring name): Linux limits them to
 /// 4095 bytes plus the NUL.
@@ -133,6 +133,12 @@ static SIGNALFD: Desc = [N, In(fixed(8)), N, N, N, N];
 static READ: Desc = [N, Out(len_arg(2)), N, N, N, N];
 static WRITE: Desc = [N, In(len_arg(2)), N, N, N, N];
 static IOVEC: Desc = [N, In(Len { fixed: 0, arg: 2, mul: 16 }), N, N, N, N];
+// sendmsg(fd, msg, flags) / recvmsg(fd, msg, flags): the msghdr (recvmsg's goes back whole
+// with msg_namelen, msg_controllen and msg_flags); sendto/recvfrom's buffer
+static SENDMSG: Desc = [N, In(fixed(56)), N, N, N, N];
+static RECVMSG: Desc = [N, InOut(fixed(56)), N, N, N, N];
+static SENDTO: Desc = [N, In(len_arg(2)), N, N, N, N];
+static RECVFROM: Desc = [N, Out(len_arg(2)), N, N, N, N];
 
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
@@ -158,6 +164,10 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         70 => Some(&MSGRCV),
         321 => Some(&BPF),
         0 => Some(&READ),
+        46 => Some(&SENDMSG),
+        47 => Some(&RECVMSG),
+        44 => Some(&SENDTO),
+        45 => Some(&RECVFROM),
         1 => Some(&WRITE),
         19 | 20 => Some(&IOVEC),
         286 => Some(&TFD_SET),

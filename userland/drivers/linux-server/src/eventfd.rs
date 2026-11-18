@@ -131,17 +131,22 @@ pub fn create(cx: &Cx) -> (i64, u64) {
 /// `read`/`write`/`ioctl` on an eventfd (slot `cx.c.obj`).
 pub fn io(cx: &Cx) -> (i64, u64) {
     let slot = cx.c.obj as u32;
-    let len = cx.args[2];
+    // (readv/writev: the vector's bytes as one buffer of 8)
+    let iov = match crate::fdio::Iov::of_call(cx) {
+        Ok(v) => v,
+        Err(e) => return (e, 0),
+    };
+    if iov.total() < 8 && cx.nr != 16 {
+        return (EINVAL, 0);
+    }
     match cx.nr {
-        0 | 1 if len < 8 => (EINVAL, 0),
-        19 | 20 => (EINVAL, 0), // (readv/writev: rare; Linux allows them, Hydra did not)
-        0 => {
+        0 | 19 => {
             let mut done = alloc::vec::Vec::new();
             let r = {
                 let mut m = EFDS.lock();
                 let Some(e) = m.get_mut(&slot) else { return (EBADF, 0) };
                 match e.take() {
-                    Some(v) => match cx.copy_out(cx.args[1], &v.to_ne_bytes()) {
+                    Some(v) => match iov.scatter(cx, &v.to_ne_bytes()) {
                         Ok(()) => {
                             e.settle(&mut done);
                             e.publish(slot, false);
@@ -153,8 +158,11 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                         }
                     },
                     None if cx.nonblock() || kbuf(cx) => (EAGAIN, 0),
+                    // (a vector read waits with its first piece, which must hold the 8 bytes)
+                    None if cx.nr == 19 && iov.0.first().map_or(true, |p| p.1 < 8) => (EINVAL, 0),
                     None => {
-                        e.readers.push_back(Waiter { id: cx.id, tgid: cx.c.tgid, arg: cx.args[1] });
+                        let at = if cx.nr == 19 { iov.0[0].0 } else { cx.args[1] };
+                        e.readers.push_back(Waiter { id: cx.id, tgid: cx.c.tgid, arg: at });
                         (0, LX_REPLY_PENDING)
                     }
                 }
@@ -162,8 +170,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
             finish(done);
             r
         }
-        1 => {
-            let raw = match cx.copy_in(cx.args[1], 8) {
+        1 | 20 => {
+            let raw = match iov.gather(cx, 0, 8) {
                 Ok(r) => r,
                 Err(e) => return (e, 0),
             };

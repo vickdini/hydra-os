@@ -422,17 +422,19 @@ fn deliver(cx: &Cx, iov: &Iov, kind: RecvKind, flags: u64, passcred: bool, g: Go
         }
         RecvKind::Msg { msg, mmsg } => {
             let r = (|| -> Result<i64, i64> {
-                let hdr = cx.copy_in(msg, 56)?;
+                let mut hdr = cx.copy_in(msg, 56)?;
                 let (control, cap) = (Cx::u64_at(&hdr, 32), Cx::u64_at(&hdr, 40) as usize);
                 let cred = if passcred { g.cred } else { None };
                 let (used, mut mflags) = build_control(cx, control, cap, g.fds, cred, flags & MSG_CMSG_CLOEXEC != 0, after)?;
                 if g.truncated {
                     mflags |= MSG_TRUNC;
                 }
-                // msg_namelen = 0 (connected sockets), msg_controllen, msg_flags
-                cx.copy_out(msg + 8, &0u32.to_le_bytes())?;
-                cx.copy_out(msg + 40, &(used as u64).to_le_bytes())?;
-                cx.copy_out(msg + 48, &mflags.to_le_bytes())?;
+                // msg_namelen = 0 (connected sockets), msg_controllen, msg_flags: the header
+                // goes back whole (one copy, through the page when the kernel gave room)
+                hdr[8..12].copy_from_slice(&0u32.to_le_bytes());
+                hdr[40..48].copy_from_slice(&(used as u64).to_le_bytes());
+                hdr[48..52].copy_from_slice(&mflags.to_le_bytes());
+                cx.copy_out(msg, &hdr)?;
                 if mmsg {
                     cx.copy_out(msg + 56, &(n as u32).to_le_bytes())?;
                     return Ok(1);

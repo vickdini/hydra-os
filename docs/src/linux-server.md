@@ -310,6 +310,116 @@ program that uses maps (they live in the server) is refused at attach (`EINVAL`)
 `DeviceAllow=` programs use none. Seccomp filters are classic BPF in `seccomp.rs` and stay in
 the kernel; no socket filter runs eBPF.
 
+## Unix sockets, pipes and event descriptors (step 4)
+
+Wave 5, Group 13 (branch `mk-lxunix`) moved the descriptors the desktop uses most into the
+server: Unix sockets (D-Bus, Wayland), pipes, eventfd, timerfd, signalfd and pidfd. Each is
+a server object (above); the kernel keeps the descriptor table, `poll`/`select`/`epoll`
+read the readiness words, and `lx=kernel` sends every call back to the in-kernel code
+(`src/compat/linux/unix.rs`, `fs/pipe.rs`, `eventfd.rs`, `timerfd.rs`, `signalfd.rs`,
+`pidfd.rs`), which stays until a later step deletes it.
+
+| Server module | Calls | Object kind |
+|---|---|---|
+| `pipe.rs` | `pipe`, `pipe2`; `read`/`write`/`readv`/`writev`, `FIONREAD`, `F_GETPIPE_SZ`/`F_SETPIPE_SZ`, `tee`; `splice`/`vmsplice` through them; `/proc/self/fd/N` re-open | `LX_OBJ_KIND_PIPE_R`/`_W` (one slot per end) |
+| `unix.rs` | `socket`/`socketpair(AF_UNIX)`, every socket call on them, `read`/`write`, `FIONREAD`/`SIOCOUTQ`, `/proc/net/unix` | `LX_OBJ_KIND_UNIX` |
+| `eventfd.rs` | `eventfd`, `eventfd2`; `read`/`write` | `LX_OBJ_KIND_EVENTFD` |
+| `timerfd.rs` | `timerfd_create`, `timerfd_settime`, `timerfd_gettime`; `read` | `LX_OBJ_KIND_TIMERFD` |
+| `signalfd.rs` | `signalfd`, `signalfd4`; `read` | `LX_OBJ_KIND_SIGNALFD` |
+| `pidfd.rs` | `pidfd_open`, `clone(CLONE_PIDFD)`, `SO_PEERPIDFD` | `LX_OBJ_KIND_PIDFD` |
+
+**Routing.** `pipe`, `pipe2`, `eventfd`, `eventfd2`, `pidfd_open`, `timerfd_*` and
+`signalfd*` are table entries (`lx::MOVED_STEP4`; the calls taking a descriptor carry its
+object with `T_FD0`). `socket`/`socketpair` go by address family and the socket calls by
+descriptor (Group 12's routing, `T_FAMILY`/`T_BYFD`; AF_UNIX is in `MOVED_FAMILIES`).
+`read`, `write`, `readv` and `writev` are routed by descriptor too (`BYFD_IO_NUMBERS`): a
+call on a kernel descriptor pays one bit test of the table's server-object bitmap; one on
+a server object takes the lock-free path. (When that test cannot be made, for example for
+a seccomp-filtered program, `vfs::stream_io` forwards the call under the kernel lock as in
+step 2.) `ioctl` and `fcntl` stay on the kernel-lock path (`FIONBIO`, `FIOCLEX`, `F_SETFL`
+are kernel descriptor state); `F_GETPIPE_SZ`/`F_SETPIPE_SZ` are forwarded from there with
+the kernel's own call number `LX_KCALL_FCNTL`.
+
+**Blocking.** A `read` of an empty pipe, a `recv` with nothing queued, a full `write`/`send`,
+an `accept` with nobody connecting and a timerfd or signalfd `read` with nothing to give
+answer "pending". The call that unblocks them completes them: it writes the bytes straight
+into the waiter's memory (`SYS_LX_WRITE`, the waiter's `iovec` kept from its call), installs
+its descriptors, and answers `SYS_LX_COMPLETE`. A completion that arrives before the
+worker's "pending" answer is kept (Group 12's fix, `Req::early`). A signal answers
+`ERESTARTSYS`, so `SA_RESTART` restarts the call as on Linux (a writer that wrote part gets
+its count). A write to a pipe or socket nobody reads posts `SIGPIPE` (`sig_post`) and
+fails with `EPIPE` (not with `MSG_NOSIGNAL`).
+
+**Kernel calls made on the program's behalf.** `clone(CLONE_PIDFD)` asks the server for the
+pidfd (`LX_KCALL_PIDFD`), the `/proc/self/fd/N` re-open of a pipe for a new end
+(`LX_KCALL_REOPEN`), both with `lx::call_plain`/`call_obj` from the system call that needs
+them. `splice`, `vmsplice` and `sendfile` already worked through the program's own
+`read`/`write` calls (`nested`), so a server pipe needs nothing more; `tee` between two
+server pipes is one forwarded call. When the kernel itself moves bytes to or from a server
+object (io_uring's registered eventfd), `ServerObject::read/write` make a *kernel-buffer*
+call: `args[1]` is `LX_KBUF_ADDR`, the bytes travel in the syscall page's copy area
+(`LX_OBJ_FLAGS_KBUF`: never pending, no `SIGPIPE`); io_uring's eventfd is written from a
+kernel task (`obj::write_later`), since completions are posted under the ring's lock.
+
+**pidfd.** The server keeps the object and makes it readable when the process ends
+(`LX_NOTE_EXIT`); the kernel reads the process back from the descriptor (`LxObjDesc::tag`,
+`ServerObject::tag`) for the calls that act on it and stay in the kernel:
+`pidfd_send_signal`, `pidfd_getfd`, `waitid(P_PIDFD)`, `setns`, `process_madvise`.
+
+**signalfd.** The server keeps the mask; reading takes signals with **`sig_take`**
+(`SYS_LX_SIGTAKE`, native 63: the lowest pending signal of the mask for the request's
+caller, its thread's first, as one 128-byte `signalfd_siginfo`). The kernel answers `poll`
+on a signalfd itself from the process's pending signals (`LX_OBJ_SIGMASK` gives it the
+mask), since posting a signal already wakes the process's waits; a blocking read with
+nothing pending is looked at again by the main thread at every tick.
+
+**timerfd** arms **`timer_arm`** (`SYS_LX_TIMER`, native 62): `LX_TIMER_ARM(cookie,
+deadline)` on the kernel's monotonic clock, `LX_TIMER_CANCEL`, `LX_TIMER_NOW`. When the
+deadline passes the kernel posts `LX_NOTE_TIMER(cookie)` (the timer tick looks every
+10 ms; an idle CPU waits for the earliest deadline the way it waits for precise sleeps, so
+the suite's 2.5 ms timerfd ends within its 3 ms bound). Cookies carry their owner in the
+top byte (1 timerfd; 3 reserved for Group 12's socket timeouts).
+
+**Unix socket names (temporary `vfs_resolve`, until step 6a).** A path name is a socket node
+in the file system, found through its inode (a socket is attached to its node, under any
+name the node gets). `bind` and `connect` on a server socket are not forwarded at the trap
+(`lx::kernel_first`): the kernel's dispatcher reaches `ServerObject::socket_call`, which
+calls `unix::server_call` in the caller's context: `bind` makes the node (mode `0777 &
+~umask`, ACL inheritance, Landlock), `connect` checks it is a socket the caller may write to
+(`ENOENT`, `ECONNREFUSED`, `EACCES`); the call then carries the node's inode
+(`LxCall::ino`). A bind the server refuses afterwards removes the node again. Abstract
+names are the server's alone.
+
+**Descriptor passing (`SCM_RIGHTS`, temporary until the descriptor table moves).** The
+server never holds descriptors. A send's `SCM_RIGHTS` descriptors are taken into the
+kernel's kept table (`LX_OBJ_TAKE(request, [fd -> token, what])`: a reference like a `dup`,
+any kind: a regular file, DRM, a memfd, a pipe end, another server object; all or nothing).
+The message holds the tokens. The receive installs them in the receiver's table
+(`LX_OBJ_GIVE`, with `MSG_CMSG_CLOEXEC`); those that do not fit the control buffer, those of
+a plain `read`, and those of a socket closed with its queue full are let go
+(`LX_OBJ_DROP`), and `MSG_CTRUNC` is set. `SCM_CREDENTIALS` (with `SO_PASSCRED`) and
+`SO_PEERCRED` give the sender's process and effective IDs from its call; `SO_PEERPIDFD`
+makes a server pidfd. **Garbage collection:** a socket whose own receive queue holds a
+Unix socket cannot be sent (`ETOOMANYREFS`, the kernel's rule), and sockets alive only in
+unreadable queues (a socket sent through itself, then closed) are collected as Linux's
+`unix_gc` does: candidates are sockets all of whose kernel references are tokens in our
+queues (`LX_OBJ_REFS(slot)` equals their count in flight); those not reachable from the
+queue of a non-candidate have their queues emptied, and the kernel then drops them. The
+main thread collects about once a second, before answering `/proc/net/unix`, and after
+256 sockets were sent.
+
+| New primitive | Number | What it does |
+|---|---|---|
+| `timer_arm` | native 62 `SYS_LX_TIMER(op, cookie, ns)` | A notification at a deadline (`LX_NOTE_TIMER`) |
+| `sig_take` | native 63 `SYS_LX_SIGTAKE(id, mask, buf)` | Takes a pending signal of a call's caller as a `signalfd_siginfo` |
+| `LX_OBJ_TAKE`/`GIVE`/`DROP` | `SYS_LX_OBJ` 9/10/11 | Descriptor passing: keep any descriptor of a caller under a token, install kept ones in a caller's table, let them go (temporary) |
+| `LX_OBJ_REFS` | `SYS_LX_OBJ` 12 | Kernel references to a server object (garbage collection) |
+| `LX_OBJ_PROC` | `SYS_LX_OBJ` 13 | Whether a process runs or has exited (pidfd) |
+| `LX_OBJ_SIGMASK` | `SYS_LX_OBJ` 14 | A signalfd's mask, for the kernel's `poll` |
+| `LxCall::ino` | | The socket node `bind`/`connect` resolved (temporary `vfs_resolve`) |
+| `LxObjDesc::tag` | | A value the kernel reads back (a pidfd's process; a pipe's or socket's inode for `fstat`) |
+| `MSG_LX_PROC_NET_UNIX` | endpoint request | `/proc/net/unix` |
+
 ## Notifications
 
 Events the server must know about go to a ring at the start of its service window
