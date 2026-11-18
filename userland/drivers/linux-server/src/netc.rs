@@ -163,7 +163,7 @@ impl Drop for Region {
 /// One request: the reply's words, or its negative errno (`ENETDOWN` without net-server).
 fn request(label: u32, args: [u64; 4]) -> Result<[u64; 4], i64> {
     base().ok_or(ENETDOWN)?;
-    match sys::svc_call(ENDPOINT_NET_SERVER, Message::new(label as u64, args), 0) {
+    match sys::svc_call(ENDPOINT_NET_SERVER, Message::new(label as u64, args), SVC_CALL_HANDOFF) {
         Ok(r) if (r.args[0] as i64) < 0 => Err(r.args[0] as i64),
         Ok(r) => Ok(r.args),
         Err(_) => Err(ENETDOWN),

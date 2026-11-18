@@ -221,7 +221,7 @@ fn bits(w: u64) -> u64 {
 /// (`SIGNAL_GONE`) or the ring overflowed.
 pub fn on_signal(arg: u64) {
     // linux-server, net-server's other client (wave 5), takes the ring itself: it is told
-    if crate::lx::is_online() {
+    if crate::lx::is_online() && crate::lx::family_moved(2) {
         service::notify(ENDPOINT_LINUX_SERVER, if arg == service::SIGNAL_GONE { NOTIFY_LX_NET_GONE } else { NOTIFY_LX_NET });
     }
     if arg == service::SIGNAL_GONE {

@@ -938,8 +938,16 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             if crate::task::current_service().is_none() {
                 -1 // -EPERM
             } else {
-                let timeout = if _arg2 == 0 { crate::ipc::service::CALL_TIMEOUT_TICKS } else { _arg2 };
-                let mode = crate::ipc::service::driver_call_mode();
+                // Wave 5 (Group 12): bit 62 asks for a hand-off, allowed only for linux-server
+                // calling net-server: its socket requests answer at once, as the kernel's
+                // own socket layer's hand-off calls did (a queued call costs a scheduler
+                // round trip each way)
+                let handoff = _arg2 & crate::ipc::protocol::SVC_CALL_HANDOFF != 0
+                    && arg0 as u32 == crate::ipc::protocol::ENDPOINT_NET_SERVER
+                    && crate::task::current_service() == Some(crate::ipc::protocol::ENDPOINT_LINUX_SERVER);
+                let t = _arg2 & !crate::ipc::protocol::SVC_CALL_HANDOFF;
+                let timeout = if t == 0 { crate::ipc::service::CALL_TIMEOUT_TICKS } else { t };
+                let mode = if handoff { crate::ipc::service::CallMode::Handoff } else { crate::ipc::service::driver_call_mode() };
                 match load_wire_message(arg1).and_then(|m| crate::ipc::service::call_mode(arg0 as u32, m, timeout, mode)) {
                     Ok(r) => store_wire_message(arg1, r),
                     Err(e) => e,
