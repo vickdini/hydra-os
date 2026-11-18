@@ -55,6 +55,11 @@ scripts: [personality-freebsd-syscalls.md](personality-freebsd-syscalls.md),
   emulation directory goes away. The work moves into Hydra: a macOS front end and a
   `mach-server`. darlingserver (12,300 lines of its own, plus 66,500 lines of XNU's Mach
   code compiled in) is the obvious starting point for the mach-server (section 5.4).
+- **Darling builds** in Group 11's own build root (Ubuntu 22.04, clang 15): 27,909 of
+  28,038 steps in about 2¼ hours. The whole command-line layer built (libSystem, dyld,
+  CoreFoundation, Foundation, launchd, darlingserver, shells); 7 GUI, audio and Metal objects
+  failed because Darling's head now expects a newer compiler and FFmpeg, plus two fresh
+  source errors (section 5.5).
 - **Graphics for Mac programs are closer than the plan assumed:** Darling's AppKit has a
   Wayland back end (12,500 lines), so a Mac program could draw through the KDE compositor
   over a shared Unix socket, just like FreeBSD programs, once `libwayland-client` is built as
@@ -823,7 +828,8 @@ mach-server hands its port to every macOS task it creates.
 ### 5.4 Darling: build, bottom layer, what works
 
 **Build** (in Group 11's build root, Ubuntu 22.04, clang 15, `cmake -G Ninja
--DTARGET_i386=OFF`, `ninja -j4` at nice 19): see section 5.5 for the result.
+-DTARGET_i386=OFF`, `ninja -j4` at nice 19): 27,909 of 28,038 steps; the whole command-line
+layer built, 7 GUI/audio/Metal objects failed (section 5.5).
 
 **The bottom layer, measured in Darling's source** (2649752):
 
@@ -922,7 +928,45 @@ macOS refuses static executables, Hydra's loader need not.
 
 ### 5.5 The Darling build here
 
-(Filled in at the end of this step; see below.)
+- **Where and how:** Group 11's build root (`/opt/g11root`: Ubuntu 22.04 by `debootstrap`,
+  Darling's documented 22.04 dependencies, clang/lld 15), Darling 2649752 cloned with its 158
+  submodules (5.9 GB), `cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DTARGET_i386=OFF`,
+  `ninja -j4 -k 0` at nice 19 / idle I/O (`tools/personality/build-darling.sh`). Started
+  08:47, ended about 11:00 (about 2 h 15 min while two other groups ran VMs).
+- **Result: 27,909 of 28,038 steps.** 7 objects failed, and the about 130 steps that depend
+  on them (AppKit, QuartzCore, Metal, two CoreAudio components, the `AE` part of
+  CoreServices) were not built. Everything below the GUI built: `libsystem_kernel.dylib`,
+  `libSystem.B.dylib`, `dyld`, CoreFoundation, Foundation, CoreGraphics, `launchd`,
+  `darlingserver`, `mldr`, `bash`, `zsh` and 273 dylibs in all (build tree 963 MB).
+- **Why the 7 failed:**
+
+  | Object | Error | Cause |
+  |---|---|---|
+  | CoreServices `AEDescriptors.c` | declaration right after a `case` label | C23 syntax; clang 16+ accepts it, clang 15 does not |
+  | CoreAudio `AUMixerUnit.cpp` | `std::clamp` unknown | C++17 by default from clang 16 on |
+  | CoreAudio `AudioFileAVFormat.cpp` | `AVCodecParameters::ch_layout` unknown | needs FFmpeg 5.1+; Ubuntu 22.04 has 4.4 |
+  | Metal `MTLDevice.mm` | `mslc/mslc.h` not found | a Metal shader-compiler dependency the documented package list lacks |
+  | QuartzCore `CAMetalLayer.mm` | duplicate member `_device` | a source error at this commit |
+  | AppKit `NSText.m`, `NSDisplay.m` | `-Wint-conversion` errors | source errors at this commit (recent AppKit work) |
+
+  So Darling's current head expects a newer toolchain than its documented Ubuntu 22.04 one
+  (an Ubuntu 24.04 root with clang 18 and FFmpeg 6 would likely fix four of the seven;
+  WSL's old `debootstrap` cannot create 24.04 without a newer `debootstrap`), and its GUI
+  side has fresh source errors. None of this affects the command-line layer Hydra would
+  use first. Fixing the GUI build was not attempted (the brief's limit: report, do not
+  sink a day into it).
+- **The built bottom layer confirms section 5.4:** the built `libsystem_kernel.dylib`
+  contains exactly **3 `syscall` instructions, all Linux ones**: `linux_syscall`, its
+  cancellable twin, and the signal restorer (Linux `rt_sigreturn`, 15). Every macOS system
+  call stub from XNU's `libsyscall` has been redirected into the emulation
+  (`__darling_bsd_syscall`, a table call) instead of trapping (measured with
+  `tools/personality/lsk_syscalls.sh`). For Hydra the change is the reverse: build
+  `libsyscall`'s stubs as Apple does (the `syscall` instruction with the class in `rax`)
+  and leave the emulation out. The rest of libSystem, dyld and the frameworks are used as
+  Darling builds them.
+- **Not tried:** running anything from the build. Darling needs its own installed runtime
+  on a Linux host (a prefix on overlayfs, `darlingserver`), which says nothing about Hydra;
+  the Mach-O test `rawmac` was built with this build's `ld64` instead (5.4).
 
 ## 6. What the kernel needs beyond the hook
 
