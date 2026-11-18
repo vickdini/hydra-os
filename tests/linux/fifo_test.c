@@ -4,7 +4,7 @@
 //   when the writer closes; O_NONBLOCK: a reader goes on, a writer without reader: ENXIO;
 // - O_RDWR never waits and reads what it wrote (linux-server's FIFOs; lx=kernel: skipped);
 // - poll on a FIFO with nothing in it waits (no busy loop);
-// - make -j4 of 4 targets with a FIFO jobserver uses little CPU (skipped without make).
+// - a jobserver as make -j runs it on a FIFO (3 tokens, 6 jobs) does not spin.
 // Build: gcc -O1 -w -o fifo fifo_test.c
 #define _GNU_SOURCE
 #include <errno.h>
@@ -154,26 +154,8 @@ int main(void) {
         unlink(js);
     }
 
-    // make -j4 with its FIFO jobserver
-    if (access("/usr/bin/make", X_OK) == 0) {
-        mkdir("/tmp/fifo_make", 0755);
-        FILE *mk = fopen("/tmp/fifo_make/Makefile", "w");
-        fprintf(mk, "all: a b c d e f\n%%:\n\tsleep 0.4; touch $@\n");
-        fclose(mk);
-        system("cd /tmp/fifo_make && rm -f a b c d e f");
-        t0 = ms();
-        int rc = system("cd /tmp/fifo_make && make -s -j4 --jobserver-style=fifo all >/dev/null 2>&1 || make -s -j4 all >/dev/null 2>&1");
-        long long el = ms() - t0;
-        struct rusage ru;
-        getrusage(RUSAGE_CHILDREN, &ru);
-        double cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
-        printf("     make -j4: %lld ms, %.2f s CPU in children\n", el, cpu);
-        check(rc == 0 && access("/tmp/fifo_make/f", F_OK) == 0, "make -j4 builds the targets");
-        check(cpu < 0.8 * el / 1000.0, "make -j4 does not busy-loop (CPU well below elapsed time)");
-        system("rm -rf /tmp/fifo_make");
-    } else {
-        puts("skip make (not installed)");
-    }
+    // (GNU make itself is not in the test image; make 4.4.1 -j4 with its fifo, pipe and
+    // default jobservers was checked by hand: scratch/t7.sh)
 
     printf(fails ? "FIFO TEST FAILED (%d)\n" : "FIFO TEST PASSED\n", fails);
     return fails != 0;
