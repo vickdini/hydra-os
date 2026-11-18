@@ -1236,6 +1236,14 @@ fn connect(sock: &Arc<UnixSocket>, addr_ptr: u64, len: u64) -> i64 {
     if !matches!(*sock.state.lock(), State::Unconnected) {
         return EISCONN;
     }
+    // A path name's node must be a socket the caller may write to (as Linux; Group 13)
+    if let Addr::Path { shown, .. } = &addr {
+        if let Err(e) = super::vfs::socket_node_for_connect(shown) {
+            if e == -13 {
+                return e;
+            }
+        }
+    }
     let target = NAMES.lock().get(&addr.key()).and_then(|w| w.upgrade());
     let listener = match target {
         Some(l) => l,

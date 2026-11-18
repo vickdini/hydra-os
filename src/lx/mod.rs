@@ -518,10 +518,15 @@ struct Req {
     /// The call has copies ([`copy::describe`]): its header (and, while queued, its bytes)
     /// are in [`BUFS`] at the same index.
     has_copy: bool,
+    /// Group 12: `SYS_LX_COMPLETE` came while the call was still being served (the server
+    /// kept it as waiting and another of its threads finished it before the worker's
+    /// "pending" answer reached the kernel): `result` holds the answer, and the "pending"
+    /// answer turns into it.
+    early: bool,
 }
 
 impl Req {
-    const FREE: Self = Self { state: RState::Free, id: 0, client: 0, client_idx: 0, result: 0, interrupted: false, has_copy: false };
+    const FREE: Self = Self { state: RState::Free, id: 0, client: 0, client_idx: 0, result: 0, interrupted: false, has_copy: false, early: false };
 }
 
 /// The copies of each request slot (the copy-in/copy-out table, [`copy`]): the header
@@ -760,7 +765,7 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
         let id = s.next_id;
         s.next_id += 1;
         c.id = id;
-        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some() };
+        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some(), early: false };
         REQ_DONE[slot].store(false, Ordering::SeqCst);
         if let Some(b) = copies {
             let kept = buf_of(slot);
@@ -1361,7 +1366,7 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
             if flags & LX_REPLY_NONE == 0 && cur != NONE {
                 let r = &mut s.reqs[cur];
                 if r.state == RState::Delivered {
-                    if flags & LX_REPLY_PENDING != 0 {
+                    if flags & LX_REPLY_PENDING != 0 && !r.early {
                         r.state = RState::Pending;
                         // Group 9: a signal that came while the call was served is told now
                         // (the caller already marked it and will not tell again)
@@ -1370,11 +1375,14 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
                         }
                     } else {
                         r.state = RState::Done;
-                        r.result = result;
+                        if !r.early {
+                            r.result = result;
+                        }
                         REQ_DONE[cur].store(true, Ordering::SeqCst);
                         wake = (r.client, r.id, r.client_idx);
-                        // The output the server left in the page (copy-out table)
-                        if r.has_copy {
+                        // The output the server left in the page (copy-out table; a call
+                        // completed early wrote its output itself)
+                        if r.has_copy && !r.early {
                             let page = s.workers[wi].call_mut() as *const u8;
                             // SAFETY: the worker's page (see `deliver`); the header and copy
                             // area lie within it
@@ -1462,6 +1470,12 @@ pub fn complete(id: u64, result: i64) -> i64 {
         return e;
     }
     let client = lx(|s| {
+        // Still being served (its "pending" answer not given yet): kept for that answer
+        if let Some(r) = s.reqs.iter_mut().find(|r| r.id == id && r.state == RState::Delivered && !r.early) {
+            r.early = true;
+            r.result = result;
+            return Some(0);
+        }
         let slot = s.reqs.iter().position(|r| r.id == id && r.state == RState::Pending)?;
         REQ_DONE[slot].store(true, Ordering::SeqCst);
         let r = &mut s.reqs[slot];
@@ -1470,6 +1484,9 @@ pub fn complete(id: u64, result: i64) -> i64 {
         Some(r.client)
     });
     let Some(client) = client else { return EINVAL };
+    if client == 0 {
+        return 0;
+    }
     let mut sched = crate::task::SCHEDULER.lock();
     if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
         drop(sched);
