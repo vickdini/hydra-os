@@ -77,16 +77,21 @@ pub fn next_due() -> u64 {
 /// Called at every timer tick, and by an idle CPU at the earliest deadline (interrupts
 /// off): posts the timers whose deadline passed.
 pub fn on_tick() {
+    fire();
+}
+
+/// [`on_tick`]: `true` if a timer was posted (the server's main thread was woken).
+pub fn fire() -> bool {
     let next = NEXT.load(Ordering::Acquire);
     if next == u64::MAX {
-        return;
+        return false;
     }
     let now = crate::arch::pit::now_ns();
     if now < next {
-        return;
+        return false;
     }
     // Another CPU changes the list: the next tick looks again
-    let Some(mut t) = TIMERS.try_lock() else { return };
+    let Some(mut t) = TIMERS.try_lock() else { return false };
     let mut fired = 0;
     while let Some((&(at, cookie), _)) = t.by_time.iter().next() {
         if at > now || fired >= 64 {
@@ -102,6 +107,7 @@ pub fn on_tick() {
     if fired > 0 {
         crate::ipc::service::notify(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::ipc::protocol::NOTIFY_LX_NOTES);
     }
+    fired > 0
 }
 
 /// The server went away: its timers go with it.
