@@ -48,8 +48,9 @@ pub const ENETUNREACH: i64 = -101;
 /// Linux errno for Network Is Down (`-100`): the network server is gone.
 pub const ENETDOWN: i64 = -100;
 
-/// Most bytes moved by one send or receive request.
-const CHUNK: usize = 128 * 1024;
+/// Most bytes moved by one send or receive request: the kernel's part of the window's data
+/// area (linux-server, net-server's other client, has the rest; wave 5).
+const CHUNK: usize = NETS_KERNEL_DATA_LEN;
 
 /// RFC 793 TCP connection states (as net-server reports them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +220,10 @@ fn bits(w: u64) -> u64 {
 /// the server listed in the event ring; all of them when the server went away
 /// (`SIGNAL_GONE`) or the ring overflowed.
 pub fn on_signal(arg: u64) {
+    // linux-server, net-server's other client (wave 5), takes the ring itself: it is told
+    if crate::lx::is_online() && crate::lx::family_moved(2) {
+        service::notify(ENDPOINT_LINUX_SERVER, if arg == service::SIGNAL_GONE { NOTIFY_LX_NET_GONE } else { NOTIFY_LX_NET });
+    }
     if arg == service::SIGNAL_GONE {
         // Its handles mean nothing any more; the sockets stay (dead) until closed
         EVENT_TAIL.store(0, Ordering::Release);

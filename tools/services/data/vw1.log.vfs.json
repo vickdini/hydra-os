@@ -1,0 +1,1548 @@
+{
+ "FIND": {
+  "sc": {
+   "61": 2,
+   "217": 11612,
+   "262": 5794,
+   "257": 5889,
+   "3": 21488,
+   "72": 27200,
+   "5": 11647,
+   "1": 1043,
+   "59": 1,
+   "10": 10,
+   "12": 30,
+   "9": 59,
+   "137": 2,
+   "21": 5,
+   "56": 1,
+   "0": 8,
+   "138": 1,
+   "318": 2,
+   "11": 2,
+   "16": 6,
+   "14": 15,
+   "13": 22,
+   "17": 4,
+   "63": 2,
+   "302": 3,
+   "158": 2,
+   "118": 1,
+   "33": 2,
+   "273": 3,
+   "52": 1,
+   "81": 1,
+   "79": 1,
+   "111": 1,
+   "218": 2,
+   "334": 2,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 443,
+   "resolve": 5889,
+   "getattr": 6204,
+   "setattr": 4,
+   "read": 237,
+   "readlink": 49,
+   "unlink": 2,
+   "readdir": 17417,
+   "statfs": 3,
+   "open_ref": 5824,
+   "release": 5824,
+   "sync_if_dirty": 1,
+   "getxattr": 1
+  },
+  "fd": {
+   "0": {
+    "file": 6,
+    "pseudo": 2
+   },
+   "1": {
+    "pseudo": 1042,
+    "tty": 1
+   },
+   "3": {
+    "file": 34,
+    "dir": 21449,
+    "pseudo": 4,
+    "tty": 1
+   },
+   "5": {
+    "file": 34,
+    "dir": 11610,
+    "pseudo": 2,
+    "tty": 1
+   },
+   "9": {
+    "bad": 18,
+    "tty": 34
+   },
+   "16": {
+    "pseudo": 2,
+    "tty": 4
+   },
+   "17": {
+    "file": 4
+   },
+   "72": {
+    "dir": 27199,
+    "pseudo": 1
+   },
+   "217": {
+    "dir": 11612
+   },
+   "81": {
+    "dir": 1
+   },
+   "33": {
+    "pseudo": 2
+   }
+  },
+  "path": {
+   "257": {
+    "proc": 1,
+    "dev": 2,
+    "abs": 65,
+    "rel": 5821
+   },
+   "262": {
+    "abs": 7,
+    "rel": 5787
+   },
+   "21": {
+    "abs": 5
+   },
+   "59": {
+    "abs": 1
+   },
+   "137": {
+    "sys": 1,
+    "abs": 1
+   }
+  },
+  "cache": {
+   "names": [
+    7617,
+    6332
+   ],
+   "attrs": [
+    31393,
+    6204
+   ],
+   "links": [
+    2,
+    49
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 55,
+   "fault: anonymous (zero page)": 547,
+   "fault: mapped object": 780,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 0,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (0 blocks)": 0,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 125,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 16,
+   "resolve": 131,
+   "getattr": 57,
+   "setattr": 0,
+   "read": 6,
+   "readlink": 0,
+   "unlink": 0,
+   "readdir": 353,
+   "statfs": 0,
+   "open_ref": 55,
+   "release": 52,
+   "sync_if_dirty": 0,
+   "getxattr": 0
+  },
+  "time_s": 1.348
+ },
+ "LSLR": {
+  "sc": {
+   "61": 2,
+   "194": 127016,
+   "332": 63515,
+   "89": 27546,
+   "217": 9644,
+   "257": 9638,
+   "262": 4798,
+   "3": 9627,
+   "5": 9621,
+   "1": 614,
+   "10": 12,
+   "11": 13,
+   "59": 1,
+   "9": 62,
+   "0": 19,
+   "25": 11,
+   "21": 5,
+   "56": 1,
+   "137": 2,
+   "12": 16,
+   "42": 4,
+   "318": 2,
+   "16": 10,
+   "13": 31,
+   "14": 15,
+   "41": 4,
+   "17": 4,
+   "302": 4,
+   "72": 4,
+   "8": 5,
+   "131": 3,
+   "7": 1,
+   "33": 2,
+   "118": 1,
+   "158": 2,
+   "79": 1,
+   "63": 1,
+   "273": 3,
+   "52": 1,
+   "157": 1,
+   "218": 2,
+   "111": 1,
+   "204": 1,
+   "334": 2,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 461,
+   "resolve": 204518,
+   "getattr": 66822,
+   "setattr": 4,
+   "read": 237,
+   "readlink": 27596,
+   "unlink": 2,
+   "readdir": 14466,
+   "statfs": 2,
+   "open_ref": 9592,
+   "release": 9592,
+   "sync_if_dirty": 3,
+   "getxattr": 1,
+   "listxattr": 63424
+  },
+  "fd": {
+   "0": {
+    "file": 15,
+    "pseudo": 4
+   },
+   "1": {
+    "pseudo": 613,
+    "tty": 1
+   },
+   "3": {
+    "file": 27,
+    "dir": 9592,
+    "pseudo": 3,
+    "unix": 4,
+    "tty": 1
+   },
+   "5": {
+    "file": 26,
+    "dir": 9592,
+    "pseudo": 2,
+    "tty": 1
+   },
+   "8": {
+    "file": 5
+   },
+   "9": {
+    "bad": 21,
+    "tty": 22
+   },
+   "16": {
+    "pseudo": 5,
+    "tty": 5
+   },
+   "17": {
+    "file": 4
+   },
+   "72": {
+    "pseudo": 3,
+    "tty": 1
+   },
+   "217": {
+    "dir": 9644
+   },
+   "332": {
+    "file": 3
+   },
+   "33": {
+    "pseudo": 2
+   }
+  },
+  "path": {
+   "257": {
+    "proc": 2,
+    "dev": 2,
+    "abs": 9634
+   },
+   "262": {
+    "abs": 4797,
+    "rel": 1
+   },
+   "332": {
+    "abs": 4,
+    "rel": 63508
+   },
+   "21": {
+    "abs": 5
+   },
+   "89": {
+    "abs": 27546
+   },
+   "59": {
+    "abs": 1
+   },
+   "137": {
+    "sys": 1,
+    "abs": 1
+   }
+  },
+  "cache": {
+   "names": [
+    29759,
+    204979
+   ],
+   "attrs": [
+    159890,
+    66822
+   ],
+   "links": [
+    2,
+    27596
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 57,
+   "fault: anonymous (zero page)": 2870,
+   "fault: mapped object": 1511,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 0,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (13 blocks)": 5,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 189,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 16,
+   "resolve": 3967,
+   "getattr": 630,
+   "setattr": 0,
+   "read": 4,
+   "readlink": 289,
+   "unlink": 0,
+   "readdir": 378,
+   "statfs": 0,
+   "open_ref": 101,
+   "release": 102,
+   "sync_if_dirty": 16,
+   "getxattr": 0,
+   "listxattr": 604
+  },
+  "time_s": 10.716
+ },
+ "GIT": {
+  "sc": {
+   "61": 2,
+   "262": 7227,
+   "202": 3,
+   "217": 4517,
+   "257": 2511,
+   "3": 2309,
+   "80": 2,
+   "5": 2300,
+   "1": 2,
+   "21": 21,
+   "87": 1,
+   "59": 1,
+   "9": 68,
+   "12": 33,
+   "10": 16,
+   "11": 15,
+   "89": 1,
+   "0": 33,
+   "56": 1,
+   "435": 7,
+   "28": 14,
+   "318": 2,
+   "14": 45,
+   "79": 6,
+   "13": 29,
+   "16": 6,
+   "273": 10,
+   "17": 4,
+   "302": 3,
+   "158": 2,
+   "118": 1,
+   "63": 1,
+   "33": 2,
+   "218": 2,
+   "52": 1,
+   "111": 1,
+   "72": 1,
+   "334": 2,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 457,
+   "resolve": 11945,
+   "getattr": 6555,
+   "setattr": 4,
+   "read": 237,
+   "create": 1,
+   "readlink": 50,
+   "unlink": 3,
+   "readdir": 6815,
+   "open_ref": 2261,
+   "release": 2261,
+   "sync_if_dirty": 1,
+   "getxattr": 1
+  },
+  "fd": {
+   "0": {
+    "file": 33
+   },
+   "1": {
+    "pseudo": 1,
+    "tty": 1
+   },
+   "3": {
+    "file": 45,
+    "dir": 2260,
+    "pseudo": 3,
+    "tty": 1
+   },
+   "5": {
+    "file": 37,
+    "dir": 2260,
+    "pseudo": 2,
+    "tty": 1
+   },
+   "9": {
+    "bad": 15,
+    "tty": 29
+   },
+   "16": {
+    "pseudo": 3,
+    "tty": 3
+   },
+   "17": {
+    "file": 4
+   },
+   "72": {
+    "pseudo": 1
+   },
+   "217": {
+    "dir": 4517
+   },
+   "33": {
+    "pseudo": 2
+   }
+  },
+  "path": {
+   "257": {
+    "dev": 3,
+    "tmp": 2,
+    "abs": 45,
+    "rel": 2461
+   },
+   "262": {
+    "tmp": 10,
+    "abs": 7,
+    "rel": 7210
+   },
+   "21": {
+    "tmp": 2,
+    "abs": 15,
+    "rel": 4
+   },
+   "89": {
+    "rel": 1
+   },
+   "59": {
+    "abs": 1
+   },
+   "80": {
+    "tmp": 2
+   },
+   "87": {
+    "tmp": 1
+   }
+  },
+  "cache": {
+   "names": [
+    7960,
+    12402
+   ],
+   "attrs": [
+    17555,
+    6555
+   ],
+   "links": [
+    2,
+    50
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 55,
+   "fault: anonymous (zero page)": 328,
+   "fault: mapped object": 1145,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 0,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (10 blocks)": 6,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 138,
+   "other IPIs (TLB flushes) sent": 19
+  },
+  "fs_ms": {
+   "lookup": 19,
+   "resolve": 421,
+   "getattr": 105,
+   "setattr": 0,
+   "read": 5,
+   "create": 0,
+   "readlink": 0,
+   "unlink": 0,
+   "readdir": 141,
+   "open_ref": 34,
+   "release": 28,
+   "sync_if_dirty": 145,
+   "getxattr": 0
+  },
+  "time_s": 0.935
+ },
+ "TAR": {
+  "sc": {
+   "61": 3,
+   "275": 2124,
+   "0": 4140,
+   "262": 4451,
+   "217": 4343,
+   "257": 4109,
+   "1": 2595,
+   "3": 4093,
+   "5": 10282,
+   "267": 405,
+   "72": 4351,
+   "10": 18,
+   "59": 2,
+   "9": 86,
+   "56": 2,
+   "332": 4,
+   "137": 4,
+   "21": 9,
+   "42": 4,
+   "437": 1,
+   "318": 3,
+   "12": 16,
+   "11": 4,
+   "13": 38,
+   "16": 6,
+   "14": 24,
+   "41": 4,
+   "17": 6,
+   "302": 5,
+   "8": 4,
+   "33": 4,
+   "158": 3,
+   "7": 1,
+   "293": 1,
+   "273": 5,
+   "118": 1,
+   "79": 1,
+   "63": 1,
+   "131": 3,
+   "52": 1,
+   "157": 1,
+   "218": 3,
+   "111": 1,
+   "204": 1,
+   "334": 3,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 443,
+   "resolve": 4532,
+   "getattr": 4898,
+   "setattr": 4,
+   "read": 2405,
+   "readlink": 455,
+   "unlink": 2,
+   "readdir": 6532,
+   "statfs": 4,
+   "open_ref": 4061,
+   "release": 4061,
+   "sync_if_dirty": 2,
+   "getxattr": 2
+  },
+  "fd": {
+   "0": {
+    "file": 4134,
+    "pseudo": 6
+   },
+   "1": {
+    "pipe": 2591,
+    "tty": 4
+   },
+   "3": {
+    "bad": 2,
+    "file": 1902,
+    "dir": 2173,
+    "pseudo": 4,
+    "pipe": 6,
+    "unix": 4,
+    "tty": 2
+   },
+   "5": {
+    "file": 3760,
+    "dir": 6515,
+    "pseudo": 4,
+    "pipe": 2,
+    "tty": 1
+   },
+   "8": {
+    "file": 4
+   },
+   "9": {
+    "bad": 33,
+    "pipe": 6,
+    "tty": 34
+   },
+   "16": {
+    "pseudo": 1,
+    "pipe": 2,
+    "tty": 3
+   },
+   "17": {
+    "file": 6
+   },
+   "72": {
+    "dir": 4342,
+    "pseudo": 4,
+    "pipe": 2,
+    "tty": 3
+   },
+   "217": {
+    "dir": 4343
+   },
+   "332": {
+    "file": 1
+   },
+   "33": {
+    "pseudo": 2,
+    "pipe": 2
+   }
+  },
+  "path": {
+   "257": {
+    "proc": 3,
+    "dev": 2,
+    "abs": 75,
+    "rel": 4029
+   },
+   "437": {
+    "abs": 1
+   },
+   "262": {
+    "abs": 15,
+    "rel": 4436
+   },
+   "332": {
+    "abs": 3
+   },
+   "21": {
+    "abs": 9
+   },
+   "267": {
+    "rel": 405
+   },
+   "59": {
+    "abs": 2
+   },
+   "137": {
+    "sys": 2,
+    "abs": 2
+   }
+  },
+  "cache": {
+   "names": [
+    6300,
+    4975
+   ],
+   "attrs": [
+    27266,
+    4898
+   ],
+   "links": [
+    2,
+    455
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 93,
+   "fault: anonymous (zero page)": 144,
+   "fault: mapped object": 1759,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 2168,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (26 blocks)": 12,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 1055,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 14,
+   "resolve": 97,
+   "getattr": 47,
+   "setattr": 0,
+   "read": 75,
+   "readlink": 4,
+   "unlink": 0,
+   "readdir": 88,
+   "statfs": 0,
+   "open_ref": 45,
+   "release": 50,
+   "sync_if_dirty": 56,
+   "getxattr": 0
+  },
+  "time_s": 2.345
+ },
+ "GCC": {
+  "sc": {
+   "61": 2,
+   "80": 2,
+   "257": 66,
+   "1": 3,
+   "262": 18,
+   "59": 1,
+   "9": 46,
+   "10": 7,
+   "259": 1,
+   "3": 39,
+   "87": 1,
+   "56": 1,
+   "0": 5,
+   "21": 4,
+   "5": 39,
+   "217": 2,
+   "318": 2,
+   "11": 2,
+   "12": 7,
+   "13": 32,
+   "14": 16,
+   "72": 12,
+   "16": 5,
+   "17": 4,
+   "158": 2,
+   "79": 2,
+   "302": 3,
+   "273": 3,
+   "218": 2,
+   "118": 1,
+   "52": 1,
+   "33": 2,
+   "63": 1,
+   "111": 1,
+   "334": 2,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 458,
+   "resolve": 91,
+   "getattr": 468,
+   "setattr": 4,
+   "read": 238,
+   "write": 1,
+   "mknod": 1,
+   "readlink": 49,
+   "unlink": 3,
+   "readdir": 43,
+   "open_ref": 4,
+   "release": 4,
+   "sync_if_dirty": 1,
+   "getxattr": 1
+  },
+  "fd": {
+   "0": {
+    "file": 5
+   },
+   "1": {
+    "file": 1,
+    "pseudo": 1,
+    "tty": 1
+   },
+   "3": {
+    "file": 33,
+    "dir": 3,
+    "pseudo": 2,
+    "tty": 1
+   },
+   "5": {
+    "file": 31,
+    "dir": 3,
+    "pseudo": 4,
+    "tty": 1
+   },
+   "9": {
+    "bad": 9,
+    "tty": 31
+   },
+   "16": {
+    "pseudo": 2,
+    "tty": 3
+   },
+   "17": {
+    "file": 4
+   },
+   "72": {
+    "file": 8,
+    "pseudo": 3,
+    "tty": 1
+   },
+   "217": {
+    "dir": 2
+   },
+   "33": {
+    "pseudo": 2
+   }
+  },
+  "path": {
+   "257": {
+    "dev": 2,
+    "tmp": 2,
+    "abs": 61,
+    "rel": 1
+   },
+   "262": {
+    "tmp": 2,
+    "abs": 9,
+    "rel": 7
+   },
+   "21": {
+    "abs": 4
+   },
+   "59": {
+    "abs": 1
+   },
+   "80": {
+    "tmp": 2
+   },
+   "87": {
+    "tmp": 1
+   }
+  },
+  "cache": {
+   "names": [
+    1830,
+    549
+   ],
+   "attrs": [
+    2324,
+    468
+   ],
+   "links": [
+    2,
+    49
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 53,
+   "fault: anonymous (zero page)": 98,
+   "fault: mapped object": 741,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 1,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (0 blocks)": 0,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 134,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 4,
+   "resolve": 2,
+   "getattr": 3,
+   "setattr": 0,
+   "read": 3,
+   "write": 0,
+   "mknod": 0,
+   "readlink": 0,
+   "unlink": 0,
+   "readdir": 4,
+   "open_ref": 0,
+   "release": 0,
+   "sync_if_dirty": 0,
+   "getxattr": 0
+  },
+  "time_s": 0.01
+ },
+ "APT": {
+  "sc": {
+   "271": 5,
+   "61": 101,
+   "270": 38,
+   "0": 2248,
+   "74": 28,
+   "7": 14,
+   "1": 4307,
+   "257": 3630,
+   "58": 11,
+   "262": 2395,
+   "11": 100,
+   "59": 47,
+   "10": 304,
+   "435": 3,
+   "217": 78,
+   "56": 38,
+   "3": 3424,
+   "9": 1433,
+   "16": 1302,
+   "82": 24,
+   "5": 1991,
+   "137": 48,
+   "21": 79,
+   "87": 13,
+   "80": 9,
+   "307": 2,
+   "12": 446,
+   "42": 31,
+   "318": 51,
+   "84": 29,
+   "332": 35,
+   "8": 533,
+   "293": 37,
+   "18": 1,
+   "45": 7,
+   "72": 291,
+   "91": 12,
+   "41": 40,
+   "89": 14,
+   "280": 8,
+   "14": 215,
+   "13": 526,
+   "86": 2,
+   "17": 87,
+   "83": 2,
+   "263": 2,
+   "302": 101,
+   "93": 6,
+   "77": 6,
+   "33": 72,
+   "90": 6,
+   "92": 5,
+   "158": 43,
+   "273": 81,
+   "44": 5,
+   "436": 19,
+   "138": 1,
+   "258": 1,
+   "218": 43,
+   "53": 2,
+   "95": 23,
+   "131": 24,
+   "157": 32,
+   "260": 1,
+   "79": 6,
+   "334": 43,
+   "112": 3,
+   "63": 5,
+   "117": 16,
+   "73": 3,
+   "54": 7,
+   "119": 11,
+   "204": 8,
+   "26": 3,
+   "118": 3,
+   "37": 1,
+   "32": 5,
+   "290": 2,
+   "49": 2,
+   "277": 8,
+   "116": 7,
+   "115": 2,
+   "105": 3,
+   "111": 4,
+   "141": 1,
+   "52": 1,
+   "47": 2,
+   "292": 3,
+   "55": 4,
+   "140": 1,
+   "120": 3,
+   "28": 2,
+   "106": 1,
+   "109": 2,
+   "122": 2,
+   "127": 1,
+   "51": 1,
+   "124": 1,
+   "123": 2
+  },
+  "fs": {
+   "lookup": 550,
+   "resolve": 4951,
+   "getattr": 2494,
+   "setattr": 62,
+   "read": 3856,
+   "write": 4575,
+   "create": 20,
+   "mkdir": 3,
+   "readlink": 80,
+   "link": 2,
+   "unlink": 15,
+   "rmdir": 4,
+   "rename": 24,
+   "readdir": 145,
+   "statfs": 49,
+   "open_ref": 1795,
+   "release": 1795,
+   "sync": 28,
+   "sync_if_dirty": 3,
+   "getxattr": 43
+  },
+  "fd": {
+   "0": {
+    "file": 2035,
+    "pseudo": 73,
+    "pipe": 115,
+    "unix": 1,
+    "tty": 20,
+    "memfd": 4
+   },
+   "1": {
+    "file": 4133,
+    "pseudo": 45,
+    "pipe": 60,
+    "tty": 69
+   },
+   "3": {
+    "bad": 3,
+    "file": 3100,
+    "dir": 74,
+    "pseudo": 68,
+    "pipe": 119,
+    "unix": 37,
+    "inet": 2,
+    "device": 1,
+    "tty": 18,
+    "memfd": 2
+   },
+   "5": {
+    "file": 1847,
+    "dir": 73,
+    "pseudo": 43,
+    "pipe": 25,
+    "tty": 3
+   },
+   "8": {
+    "file": 505,
+    "pseudo": 6,
+    "pipe": 19,
+    "tty": 3
+   },
+   "9": {
+    "bad": 630,
+    "pseudo": 180,
+    "pipe": 294,
+    "tty": 85
+   },
+   "16": {
+    "file": 1194,
+    "pseudo": 21,
+    "pipe": 38,
+    "inet": 4,
+    "tty": 45
+   },
+   "17": {
+    "file": 87
+   },
+   "18": {
+    "file": 1
+   },
+   "72": {
+    "file": 163,
+    "dir": 7,
+    "pseudo": 41,
+    "pipe": 55,
+    "unix": 6,
+    "tty": 19
+   },
+   "74": {
+    "file": 15,
+    "dir": 13
+   },
+   "77": {
+    "file": 6
+   },
+   "217": {
+    "dir": 78
+   },
+   "332": {
+    "file": 8
+   },
+   "33": {
+    "pseudo": 38,
+    "pipe": 28,
+    "unix": 1,
+    "tty": 5
+   }
+  },
+  "path": {
+   "257": {
+    "proc": 48,
+    "dev": 31,
+    "run": 1,
+    "abs": 3544,
+    "rel": 6
+   },
+   "262": {
+    "dev": 1,
+    "abs": 2380,
+    "rel": 14
+   },
+   "332": {
+    "run": 1,
+    "abs": 26
+   },
+   "21": {
+    "abs": 79
+   },
+   "89": {
+    "proc": 1,
+    "abs": 13
+   },
+   "59": {
+    "abs": 47
+   },
+   "80": {
+    "tmp": 1,
+    "abs": 8
+   },
+   "83": {
+    "abs": 2
+   },
+   "258": {
+    "rel": 1
+   },
+   "87": {
+    "abs": 13
+   },
+   "263": {
+    "abs": 1,
+    "rel": 1
+   },
+   "82": {
+    "abs": 24
+   },
+   "137": {
+    "sys": 23,
+    "abs": 25
+   },
+   "90": {
+    "abs": 6
+   },
+   "92": {
+    "dev": 1,
+    "abs": 4
+   },
+   "260": {
+    "rel": 1
+   },
+   "280": {
+    "abs": 5,
+    "rel": 1,
+    "bad": 2
+   }
+  },
+  "cache": {
+   "names": [
+    12673,
+    5501
+   ],
+   "attrs": [
+    20024,
+    2494
+   ],
+   "links": [
+    54,
+    80
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 10319,
+   "fault: anonymous (zero page)": 49016,
+   "fault: mapped object": 63828,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 3618,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (15401 blocks)": 547,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 818,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 11,
+   "resolve": 138,
+   "getattr": 25,
+   "setattr": 1,
+   "read": 360,
+   "write": 755,
+   "create": 1,
+   "mkdir": 0,
+   "readlink": 1,
+   "link": 0,
+   "unlink": 0,
+   "rmdir": 0,
+   "rename": 1,
+   "readdir": 18,
+   "statfs": 2,
+   "open_ref": 25,
+   "release": 29,
+   "sync": 1030,
+   "sync_if_dirty": 257,
+   "getxattr": 1
+  },
+  "time_s": 11.79
+ },
+ "FF": {
+  "sc": {
+   "202": 620,
+   "7": 1488,
+   "232": 158,
+   "230": 74,
+   "61": 76,
+   "47": 292,
+   "0": 1705,
+   "271": 2,
+   "257": 1451,
+   "74": 2,
+   "10": 1354,
+   "24": 167,
+   "9": 2068,
+   "21": 637,
+   "332": 222,
+   "4": 241,
+   "435": 106,
+   "52": 10,
+   "82": 185,
+   "83": 43,
+   "318": 599,
+   "262": 263,
+   "89": 284,
+   "44": 13,
+   "3": 1263,
+   "56": 8,
+   "17": 209,
+   "46": 414,
+   "87": 12,
+   "14": 447,
+   "1": 957,
+   "217": 57,
+   "59": 9,
+   "6": 130,
+   "138": 86,
+   "28": 291,
+   "11": 265,
+   "45": 50,
+   "88": 3,
+   "137": 15,
+   "5": 657,
+   "42": 27,
+   "41": 18,
+   "307": 1,
+   "72": 356,
+   "141": 57,
+   "51": 8,
+   "157": 502,
+   "263": 2,
+   "54": 33,
+   "293": 27,
+   "131": 182,
+   "204": 186,
+   "16": 8,
+   "273": 118,
+   "179": 4,
+   "319": 34,
+   "140": 57,
+   "8": 44,
+   "77": 32,
+   "13": 170,
+   "233": 28,
+   "18": 1,
+   "84": 1,
+   "53": 17,
+   "80": 1,
+   "302": 32,
+   "55": 9,
+   "12": 14,
+   "63": 11,
+   "79": 11,
+   "221": 32,
+   "291": 7,
+   "118": 4,
+   "33": 11,
+   "290": 9,
+   "228": 3,
+   "158": 7,
+   "99": 7,
+   "247": 4,
+   "218": 7,
+   "98": 2,
+   "32": 4,
+   "95": 4,
+   "120": 4,
+   "62": 1,
+   "143": 1,
+   "48": 3,
+   "49": 2,
+   "272": 1,
+   "334": 7,
+   "112": 1,
+   "109": 1,
+   "111": 1,
+   "145": 1,
+   "239": 1
+  },
+  "fs": {
+   "lookup": 876,
+   "resolve": 3084,
+   "getattr": 2461,
+   "setattr": 195,
+   "read": 245,
+   "write": 196,
+   "create": 187,
+   "mkdir": 3,
+   "symlink": 2,
+   "readlink": 323,
+   "unlink": 9,
+   "rmdir": 3,
+   "rename": 185,
+   "readdir": 100,
+   "statfs": 101,
+   "open_ref": 271,
+   "release": 272,
+   "sync": 2,
+   "sync_if_dirty": 3,
+   "getxattr": 6
+  },
+  "fd": {
+   "0": {
+    "file": 766,
+    "pseudo": 151,
+    "pipe": 754,
+    "event": 5,
+    "memfd": 32
+   },
+   "1": {
+    "file": 195,
+    "pseudo": 4,
+    "pipe": 750,
+    "tty": 1,
+    "event": 7
+   },
+   "3": {
+    "file": 876,
+    "dir": 73,
+    "pseudo": 57,
+    "pipe": 34,
+    "unix": 73,
+    "inet": 10,
+    "device": 2,
+    "tty": 5,
+    "event": 4,
+    "memfd": 129
+   },
+   "5": {
+    "file": 563,
+    "dir": 30,
+    "pseudo": 27,
+    "pipe": 5,
+    "tty": 1,
+    "memfd": 31
+   },
+   "8": {
+    "file": 32,
+    "pseudo": 8,
+    "memfd": 4
+   },
+   "9": {
+    "bad": 972,
+    "pseudo": 71,
+    "tty": 413
+   },
+   "16": {
+    "pseudo": 1,
+    "inet": 4,
+    "tty": 3
+   },
+   "17": {
+    "file": 209
+   },
+   "18": {
+    "file": 1
+   },
+   "72": {
+    "file": 74,
+    "dir": 4,
+    "pseudo": 3,
+    "pipe": 75,
+    "unix": 55,
+    "inet": 6,
+    "tty": 5,
+    "memfd": 134
+   },
+   "74": {
+    "file": 2
+   },
+   "77": {
+    "memfd": 32
+   },
+   "217": {
+    "dir": 54,
+    "pseudo": 3
+   },
+   "332": {
+    "file": 6
+   },
+   "33": {
+    "pseudo": 8,
+    "pipe": 2,
+    "unix": 1
+   }
+  },
+  "path": {
+   "257": {
+    "proc": 73,
+    "sys": 33,
+    "dev": 20,
+    "run": 3,
+    "tmp": 3,
+    "abs": 1319
+   },
+   "4": {
+    "sys": 7,
+    "dev": 3,
+    "run": 4,
+    "tmp": 4,
+    "abs": 223
+   },
+   "6": {
+    "proc": 19,
+    "sys": 19,
+    "dev": 6,
+    "tmp": 3,
+    "abs": 83
+   },
+   "262": {
+    "run": 8,
+    "tmp": 1,
+    "abs": 253,
+    "rel": 1
+   },
+   "332": {
+    "abs": 214,
+    "rel": 1,
+    "bad": 1
+   },
+   "21": {
+    "proc": 8,
+    "sys": 1,
+    "tmp": 1,
+    "abs": 627
+   },
+   "89": {
+    "proc": 21,
+    "sys": 20,
+    "tmp": 1,
+    "abs": 242
+   },
+   "59": {
+    "abs": 9
+   },
+   "80": {
+    "tmp": 1
+   },
+   "83": {
+    "run": 1,
+    "tmp": 2,
+    "abs": 40
+   },
+   "87": {
+    "tmp": 3,
+    "abs": 9
+   },
+   "263": {
+    "abs": 2
+   },
+   "82": {
+    "abs": 185
+   },
+   "137": {
+    "sys": 4,
+    "abs": 11
+   },
+   "88": {
+    "tmp": 1,
+    "abs": 2
+   }
+  },
+  "cache": {
+   "names": [
+    6082,
+    3960
+   ],
+   "attrs": [
+    10693,
+    2461
+   ],
+   "links": [
+    33,
+    323
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 5079,
+   "fault: anonymous (zero page)": 17231,
+   "fault: mapped object": 39493,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 8,
+   "disk reads (66 blocks)": 5,
+   "other disk requests (110 blocks)": 43,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 306,
+   "other IPIs (TLB flushes) sent": 13421
+  },
+  "fs_ms": {
+   "lookup": 22,
+   "resolve": 362,
+   "getattr": 61,
+   "setattr": 4,
+   "read": 15,
+   "write": 5,
+   "create": 14,
+   "mkdir": 8,
+   "symlink": 0,
+   "readlink": 4,
+   "unlink": 10,
+   "rmdir": 0,
+   "rename": 15,
+   "readdir": 7,
+   "statfs": 4,
+   "open_ref": 17,
+   "release": 12,
+   "sync": 275,
+   "sync_if_dirty": 34,
+   "getxattr": 0
+  },
+  "time_s": 5.052
+ }
+}

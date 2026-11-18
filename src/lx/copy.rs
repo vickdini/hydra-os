@@ -133,12 +133,36 @@ static SIGNALFD: Desc = [N, In(fixed(8)), N, N, N, N];
 static READ: Desc = [N, Out(len_arg(2)), N, N, N, N];
 static WRITE: Desc = [N, In(len_arg(2)), N, N, N, N];
 static IOVEC: Desc = [N, In(Len { fixed: 0, arg: 2, mul: 16 }), N, N, N, N];
-// sendmsg(fd, msg, flags) / recvmsg(fd, msg, flags): the msghdr (recvmsg's goes back whole
-// with msg_namelen, msg_controllen and msg_flags); sendto/recvfrom's buffer
+// (the socket calls' arms are Group 12's, below; recvmsg's msghdr is InOut: Group 13's
+// Unix sockets write it back whole)
+
+// Step 3's socket calls (Group 12; family-independent: Group 13's Unix sockets get the
+// same arms). A socket address goes out into 128 bytes of room (the server writes only
+// what the caller's `*addrlen` allows) and its length in/out as 4 bytes; a `msghdr` comes
+// whole (the server writes it back whole: `msg_namelen`, `msg_controllen`, `msg_flags`),
+// its iovecs and control data through the client memory calls.
+/// Room for a socket address the server writes (`sockaddr_storage`).
+const SOCKADDR_OUT: Len = fixed(128);
+/// A `socklen_t`.
+const SOCKLEN: Len = fixed(4);
+/// connect, bind (fd, addr, addrlen)
+static SOCK_ADDR_IN: Desc = [N, In(len_arg(2)), N, N, N, N];
+/// accept, accept4, getsockname, getpeername (fd, addr, addrlen*)
+static SOCK_ADDR_OUT: Desc = [N, Out(SOCKADDR_OUT), InOut(SOCKLEN), N, N, N];
+/// sendto(fd, buf, len, flags, dest, addrlen)
+static SENDTO: Desc = [N, In(len_arg(2)), N, N, In(len_arg(5)), N];
+/// recvfrom(fd, buf, len, flags, src, addrlen*)
+static RECVFROM: Desc = [N, Out(len_arg(2)), N, N, Out(SOCKADDR_OUT), InOut(SOCKLEN)];
+/// sendmsg(fd, msg, flags)
 static SENDMSG: Desc = [N, In(fixed(56)), N, N, N, N];
+/// recvmsg(fd, msg, flags)
 static RECVMSG: Desc = [N, InOut(fixed(56)), N, N, N, N];
-static SENDTO: Desc = [N, In(len_arg(2)), N, N, N, N];
-static RECVFROM: Desc = [N, Out(len_arg(2)), N, N, N, N];
+/// setsockopt(fd, level, name, val, len)
+static SETSOCKOPT: Desc = [N, N, N, In(len_arg(4)), N, N];
+/// getsockopt(fd, level, name, val, len*): `TCP_INFO` is the largest (232 bytes)
+static GETSOCKOPT: Desc = [N, N, N, Out(fixed(256)), InOut(SOCKLEN), N];
+/// socketpair(family, type, protocol, sv[2])
+static SOCKETPAIR: Desc = [N, N, N, Out(fixed(8)), N, N];
 
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
@@ -164,15 +188,21 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         70 => Some(&MSGRCV),
         321 => Some(&BPF),
         0 => Some(&READ),
-        46 => Some(&SENDMSG),
-        47 => Some(&RECVMSG),
-        44 => Some(&SENDTO),
-        45 => Some(&RECVFROM),
         1 => Some(&WRITE),
         19 | 20 => Some(&IOVEC),
         286 => Some(&TFD_SET),
         287 => Some(&TFD_GET),
         282 | 289 => Some(&SIGNALFD),
+        // Sockets (step 3)
+        42 | 49 => Some(&SOCK_ADDR_IN),
+        43 | 288 | 51 | 52 => Some(&SOCK_ADDR_OUT),
+        44 => Some(&SENDTO),
+        45 => Some(&RECVFROM),
+        46 => Some(&SENDMSG),
+        47 => Some(&RECVMSG),
+        54 => Some(&SETSOCKOPT),
+        55 => Some(&GETSOCKOPT),
+        53 => Some(&SOCKETPAIR),
         _ => None,
     }
 }

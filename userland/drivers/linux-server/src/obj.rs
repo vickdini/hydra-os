@@ -203,6 +203,14 @@ pub fn closed(slot: u32, kind: u32) {
         LX_OBJ_KIND_PIDFD => crate::pidfd::closed(slot),
         LX_OBJ_KIND_SIGNALFD => crate::signalfd::closed(slot),
         LX_OBJ_KIND_TIMERFD => crate::timerfd::closed(slot),
+        LX_OBJ_KIND_INET => {
+            crate::socket::closed(slot);
+            crate::inet::closed(slot);
+        }
+        LX_OBJ_KIND_NETLINK => {
+            crate::socket::closed(slot);
+            crate::netlink::closed(slot);
+        }
         _ => {}
     }
     set_ready(slot, 0, 0);

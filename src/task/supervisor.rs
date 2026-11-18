@@ -608,6 +608,8 @@ pub fn supervisor_init() {
         service::allow_client(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
         service::forward_irq(ENDPOINT_NET_DEV, ENDPOINT_NET_SERVER);
         service::set_signal_hook(ENDPOINT_NET_SERVER, crate::net::client::on_signal);
+        // Wave 5 (step 3): linux-server is net-server's second client (Internet sockets)
+        service::allow_client(ENDPOINT_NET_SERVER, crate::ipc::protocol::ENDPOINT_LINUX_SERVER);
         // The Linux server (wave 3): the Linux system calls the kernel forwards
         // (`crate::lx`); its going away runs the crash policy (the endpoint's hook)
         crate::lx::init();

@@ -1,0 +1,298 @@
+diff --git a/src/compat/linux/mod.rs b/src/compat/linux/mod.rs
+index 4e32577..eb72b2f 100644
+--- a/src/compat/linux/mod.rs
++++ b/src/compat/linux/mod.rs
+@@ -262,6 +262,9 @@ pub fn dispatch_linux_syscall(frame: &mut SyscallFrame) -> i64 {
+         return r;
+     }
+     let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
++    if t0 != 0 {
++        prof::g16_classify(num, [arg0, arg1, arg2, arg3, arg4, arg5]);
++    }
+     // Calls moved to the ring-3 Linux server (wave 3: the forwarding table, `crate::lx`)
+     let r = match crate::lx::forward(frame) {
+         Some(r) => r,
+diff --git a/src/compat/linux/prof.rs b/src/compat/linux/prof.rs
+index bd181d7..f2dfe70 100644
+--- a/src/compat/linux/prof.rs
++++ b/src/compat/linux/prof.rs
+@@ -326,8 +326,151 @@ pub fn fault(kind: usize, t0: u64) {
+     }
+ }
+ 
++// ---- Group 16 (wave 5) throwaway counters: descriptor kinds, path classes, cache hits ----
++/// Descriptor calls counted by the kind of descriptor.
++const G16_FD_NRS: [u64; 21] = [0, 1, 3, 5, 8, 9, 16, 17, 18, 19, 20, 72, 74, 75, 77, 217, 40, 262, 332, 81, 33];
++const G16_KINDS: usize = 12;
++const G16_KIND_NAMES: [&str; G16_KINDS] = ["bad", "file", "dir", "pseudo", "pipe", "unix", "inet", "srvobj", "device", "tty", "event", "memfd"];
++static G16_FD: [[AtomicU64; G16_KINDS]; 21] = [const { [const { AtomicU64::new(0) }; G16_KINDS] }; 21];
++/// Path calls counted by the path's start.
++const G16_PATH_NRS: [u64; 34] = [2, 257, 437, 4, 6, 262, 332, 21, 269, 439, 89, 267, 59, 322, 80, 83, 258, 87, 263, 82, 264, 316, 137, 191, 192, 188, 90, 268, 92, 260, 280, 133, 88, 266];
++const G16_PCLASSES: usize = 9;
++const G16_PCLASS_NAMES: [&str; G16_PCLASSES] = ["proc", "sys", "dev", "run", "tmp", "abs", "rel", "empty", "bad"];
++static G16_PATH: [[AtomicU64; G16_PCLASSES]; 34] = [const { [const { AtomicU64::new(0) }; G16_PCLASSES] }; 34];
++/// ZFS client caches: [names, attrs, links] x [hit, miss].
++pub static G16_CACHE: [[AtomicU64; 2]; 3] = [const { [const { AtomicU64::new(0) }; 2] }; 3];
++
++fn g16_kind(fd: u64) -> usize {
++    use crate::fs::fd::FileDescriptor as F;
++    if (fd as i64) < 0 || fd > 1 << 20 {
++        return 0;
++    }
++    crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
++        None => 0,
++        Some(F::Vnode(f)) => {
++            if f.try_lock().map(|g| g.is_dir).unwrap_or(false) {
++                2
++            } else {
++                1
++            }
++        }
++        Some(F::File { .. }) => 3,
++        Some(F::PipeRead(_)) | Some(F::PipeWrite(_)) => 4,
++        Some(F::Socket(_)) | Some(F::Unix(_)) => 5,
++        Some(F::Inet(_)) => 6,
++        Some(F::Device(d)) => {
++            if d.as_server().is_some() {
++                7
++            } else {
++                8
++            }
++        }
++        Some(F::ConsoleIn) | Some(F::ConsoleOut) | Some(F::ConsoleErr) | Some(F::Pty(_)) => 9,
++        Some(F::MemFd { .. }) => 11,
++        Some(_) => 10,
++    })
++}
++
++fn g16_pclass(ptr: u64) -> usize {
++    match super::vfs::user_cstr(ptr) {
++        Err(_) => 8,
++        Ok(p) if p.is_empty() => 7,
++        Ok(p) if p[0] != b'/' => 6,
++        Ok(p) => {
++            let first = p[1..].split(|&b| b == b'/').next().unwrap_or(b"");
++            match first {
++                b"proc" => 0,
++                b"sys" => 1,
++                b"dev" => 2,
++                b"run" => 3,
++                b"tmp" => 4,
++                _ => 5,
++            }
++        }
++    }
++}
++
++/// Classifies one call while profiling (called before it runs).
++pub fn g16_classify(nr: u64, a: [u64; 6]) {
++    // fstatat/statx with an empty path (AT_EMPTY_PATH) are descriptor calls
++    let empty_at = |flags: u64, ptr: u64| flags & 0x1000 != 0 && matches!(super::vfs::user_cstr(ptr), Ok(p) if p.is_empty());
++    let fd_call = match nr {
++        262 => empty_at(a[3], a[1]),
++        332 => empty_at(a[2], a[1]),
++        // mmap of a descriptor (not MAP_ANONYMOUS)
++        9 => a[4] as i64 >= 0 && a[3] & 0x20 == 0,
++        _ => true,
++    };
++    if fd_call {
++        if let Some(i) = G16_FD_NRS.iter().position(|&n| n == nr) {
++            G16_FD[i][g16_kind(if nr == 9 { a[4] } else { a[0] })].fetch_add(1, Relaxed);
++            return;
++        }
++    }
++    if let Some(i) = G16_PATH_NRS.iter().position(|&n| n == nr) {
++        let at = matches!(nr, 257 | 437 | 262 | 332 | 269 | 439 | 267 | 322 | 258 | 263 | 264 | 316 | 268 | 260 | 280);
++        let ptr = match nr {
++            266 => a[2], // symlinkat(target, dirfd, linkpath)
++            88 => a[1],  // symlink(target, linkpath)
++            _ if at => a[1],
++            _ => a[0],
++        };
++        G16_PATH[i][g16_pclass(ptr)].fetch_add(1, Relaxed);
++    }
++}
++
++fn g16_show() {
++    let c = |i: usize, k: usize| G16_CACHE[i][k].load(Relaxed);
++    crate::println!("[g16] cache names hit {} miss {} attrs hit {} miss {} links hit {} miss {}", c(0, 0), c(0, 1), c(1, 0), c(1, 1), c(2, 0), c(2, 1));
++    for (i, nr) in G16_FD_NRS.iter().enumerate() {
++        let v: alloc::vec::Vec<u64> = G16_FD[i].iter().map(|x| x.load(Relaxed)).collect();
++        if v.iter().sum::<u64>() == 0 {
++            continue;
++        }
++        let mut s = alloc::string::String::new();
++        for (k, n) in v.iter().enumerate() {
++            if *n > 0 {
++                s.push_str(&alloc::format!(" {}={}", G16_KIND_NAMES[k], n));
++            }
++        }
++        crate::println!("[g16] fd nr {}{}", nr, s);
++    }
++    for (i, nr) in G16_PATH_NRS.iter().enumerate() {
++        let v: alloc::vec::Vec<u64> = G16_PATH[i].iter().map(|x| x.load(Relaxed)).collect();
++        if v.iter().sum::<u64>() == 0 {
++            continue;
++        }
++        let mut s = alloc::string::String::new();
++        for (k, n) in v.iter().enumerate() {
++            if *n > 0 {
++                s.push_str(&alloc::format!(" {}={}", G16_PCLASS_NAMES[k], n));
++            }
++        }
++        crate::println!("[g16] path nr {}{}", nr, s);
++    }
++}
++
++fn g16_reset() {
++    for r in G16_FD.iter() {
++        for x in r.iter() {
++            x.store(0, Relaxed);
++        }
++    }
++    for r in G16_PATH.iter() {
++        for x in r.iter() {
++            x.store(0, Relaxed);
++        }
++    }
++    for r in G16_CACHE.iter() {
++        for x in r.iter() {
++            x.store(0, Relaxed);
++        }
++    }
++}
++
+ /// Clears every counter.
+ pub fn reset() {
++    g16_reset();
+     for i in 0..NR_MAX {
+         CALLS[i].store(0, Relaxed);
+         NANOS[i].store(0, Relaxed);
+@@ -390,6 +533,7 @@ pub fn show(top: usize) {
+     let mut rows: alloc::vec::Vec<(u64, u64, usize)> =
+         (0..NR_MAX).map(|i| (NANOS[i].load(Relaxed), CALLS[i].load(Relaxed), i)).filter(|r| r.1 > 0).collect();
+     rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
++    g16_show();
+     crate::println!("[prof] system calls by total time (blocking calls include their waits):");
+     for (ns, n, nr) in rows.into_iter().take(top) {
+         crate::println!("[prof]   nr {:>3} {:>9} calls {:>9} ms {:>7} us/each", nr, n, ns / 1_000_000, ns / n / 1000);
+diff --git a/src/fs/zfs/mod.rs b/src/fs/zfs/mod.rs
+index 021e901..ea31030 100644
+--- a/src/fs/zfs/mod.rs
++++ b/src/fs/zfs/mod.rs
+@@ -163,7 +163,9 @@ fn attr_gen() -> u64 {
+ 
+ /// The cached attributes of `ino`.
+ fn cached_attr(ino: u64) -> Option<Attr> {
+-    x86_64::instructions::interrupts::without_interrupts(|| ATTRS.lock().get(&ino).copied())
++    let r = x86_64::instructions::interrupts::without_interrupts(|| ATTRS.lock().get(&ino).copied());
++    crate::compat::linux::prof::G16_CACHE[1][r.is_none() as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++    r
+ }
+ 
+ /// Keeps the attributes of `ino` read by a request made at generation `gen` (unless
+@@ -222,7 +224,9 @@ fn names_gen() -> u64 {
+ }
+ 
+ fn cached_name(key: &[u8]) -> Option<Found> {
+-    x86_64::instructions::interrupts::without_interrupts(|| NAMES.lock().get(key).cloned())
++    let r = x86_64::instructions::interrupts::without_interrupts(|| NAMES.lock().get(key).cloned());
++    crate::compat::linux::prof::G16_CACHE[0][r.is_none() as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++    r
+ }
+ 
+ /// Keeps a result asked for at generation `gen` (unless a name changed since; errors other
+@@ -275,7 +279,9 @@ static LINKS: spin::Mutex<alloc::collections::BTreeMap<u64, Vec<u8>>> = spin::Mu
+ const LINKS_MAX: usize = 4096;
+ 
+ fn cached_link(ino: u64) -> Option<Vec<u8>> {
+-    x86_64::instructions::interrupts::without_interrupts(|| LINKS.lock().get(&ino).cloned())
++    let r = x86_64::instructions::interrupts::without_interrupts(|| LINKS.lock().get(&ino).cloned());
++    crate::compat::linux::prof::G16_CACHE[2][r.is_none() as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++    r
+ }
+ 
+ /// Keeps the target of `ino` read by a request made at generation `gen` (unless a name
+diff --git a/src/lx/copy.rs b/src/lx/copy.rs
+index 4334fa6..d98d0c5 100644
+--- a/src/lx/copy.rs
++++ b/src/lx/copy.rs
+@@ -147,10 +147,21 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
+         69 => Some(&MSGSND),
+         70 => Some(&MSGRCV),
+         321 => Some(&BPF),
++        // Group 16 prototype (local only): VFS-shaped stubs of the test call
++        0x6710 => match a[0] {
++            0x1605 => Some(&G16_STAT),
++            0x1606 | 0x1607 => Some(&G16_BUF_OUT),
++            _ => None,
++        },
+         _ => None,
+     }
+ }
+ 
++/// Group 16 prototype: stat(path, statbuf) shaped.
++static G16_STAT: Desc = [N, Str(4096), Out(fixed(144)), N, N, N];
++/// Group 16 prototype: getdents64/read shaped (a buffer of args[2] bytes out).
++static G16_BUF_OUT: Desc = [N, Out(len_arg(2)), N, N, N, N];
++
+ /// The copies of one call: the header for the page and the copy area's bytes (offset
+ /// `LX_DATA_OFF` of the page is `data[0]`).
+ #[repr(C)]
+diff --git a/userland/drivers/linux-server/src/main.rs b/userland/drivers/linux-server/src/main.rs
+index c99593c..bbea864 100644
+--- a/userland/drivers/linux-server/src/main.rs
++++ b/userland/drivers/linux-server/src/main.rs
+@@ -259,6 +259,33 @@ fn object_io(cx: &Cx) -> i64 {
+     }
+ }
+ 
++/// Group 16 prototype: a server-side name and attribute cache (path -> struct stat).
++static G16_NAMES: YLock<alloc::collections::BTreeMap<Vec<u8>, [u8; 144]>> = YLock::new(alloc::collections::BTreeMap::new());
++
++/// Group 16 prototype: stat(path, statbuf) answered from the server's cache.
++fn g16_stat(cx: &Cx) -> i64 {
++    let path = match cx.user_cstr(cx.args[1]) {
++        Ok(p) => p,
++        Err(e) => return e,
++    };
++    let st = {
++        let mut m = G16_NAMES.lock();
++        if let Some(st) = m.get(&path) {
++            *st
++        } else {
++            let mut st = [0u8; 144];
++            st[8..16].copy_from_slice(&(m.len() as u64 + 2).to_le_bytes()); // st_ino
++            st[24..28].copy_from_slice(&0o100644u32.to_le_bytes()); // st_mode
++            m.insert(path, st);
++            st
++        }
++    };
++    match cx.copy_out(cx.args[2], &st) {
++        Ok(()) => 0,
++        Err(e) => if e == 0 { EFAULT } else { e },
++    }
++}
++
+ /// Hydra's test call ([`LX_NULL_NR`]).
+ fn null_call(cx: &Cx) -> (i64, u64) {
+     match cx.args[0] {
+@@ -289,6 +316,18 @@ fn null_call(cx: &Cx) -> (i64, u64) {
+         }
+         LX_NULL_OBJ => (obj::test_new(cx, cx.args[1]), 0),
+         LX_NULL_OBJ_CLOSES => (obj::TEST_CLOSES.load(Ordering::Relaxed) as i64, 0),
++        0x1605 => (g16_stat(cx), 0),
++        0x1606 | 0x1607 => {
++            let n = if cx.args[0] == 0x1606 { cx.args[3] as usize } else { cx.args[2] as usize };
++            if n > 65536 || n > cx.args[2] as usize {
++                return (EINVAL, 0);
++            }
++            let buf = alloc::vec![0x5au8; n];
++            match cx.copy_out(cx.args[1], &buf) {
++                Ok(()) => (n as i64, 0),
++                Err(e) => (if e == 0 { EFAULT } else { e }, 0),
++            }
++        }
+         _ => (EINVAL, 0),
+     }
+ }

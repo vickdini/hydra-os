@@ -11,6 +11,8 @@
 #include <linux/bpf.h>
 #include <linux/futex.h>
 #include <mqueue.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/ipc.h>
@@ -428,6 +430,104 @@ static double b_poll_mq(long n) { /* poll on a readable message queue (a server 
     return r;
 }
 
+/* --- Internet sockets (wave 5, Group 12: forwarded to linux-server, net-server's client) --- */
+static int lo_listener(int *port) {
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    if (l < 0 || bind(l, (void *)&a, sizeof a) || listen(l, 64)) return -1;
+    socklen_t n = sizeof a;
+    getsockname(l, (void *)&a, &n);
+    *port = ntohs(a.sin_port);
+    return l;
+}
+static int lo_connect(int port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    if (s < 0 || connect(s, (void *)&a, sizeof a)) return -1;
+    return s;
+}
+/* a connected loopback TCP pair: c (client end), s (accepted end) */
+static int tcp_pair(int *c, int *s) {
+    int port, l = lo_listener(&port);
+    if (l < 0) return -1;
+    *c = lo_connect(port);
+    *s = accept(l, 0, 0);
+    close(l);
+    return *c < 0 || *s < 0 ? -1 : 0;
+}
+static double b_tcp_rtt(long n) { /* 1 byte each way between two processes over 127.0.0.1 */
+    int c, s;
+    if (tcp_pair(&c, &s)) return -1;
+    int a[2] = {s, c}, b[2] = {c, s};
+    double r = pingpong(a, b, n);
+    close(c); close(s);
+    return r;
+}
+static double b_tcp_sendrecv(long n) { /* send 16 bytes and receive them, one thread (2 calls) */
+    int c, s;
+    if (tcp_pair(&c, &s)) return -1;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        send(c, buf, 16, 0);
+        if (recv(s, buf, 16, MSG_WAITALL) != 16) return -1;
+    }
+    double r = (double)(now() - t) / n;
+    close(c); close(s);
+    return r;
+}
+static double b_tcp_connect(long n) { /* socket + connect + accept + 2 close on 127.0.0.1 */
+    int port, l = lo_listener(&port);
+    if (l < 0) return -1;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        int c = lo_connect(port);
+        int s = accept(l, 0, 0);
+        if (c < 0 || s < 0) return -1;
+        close(c);
+        close(s);
+    }
+    double r = (double)(now() - t) / n;
+    close(l);
+    return r;
+}
+static double b_udp_rtt(long n) { /* 16-byte datagram each way between two processes */
+    int x = socket(AF_INET, SOCK_DGRAM, 0), y = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}, b = a;
+    socklen_t k = sizeof a;
+    bind(x, (void *)&a, sizeof a);
+    bind(y, (void *)&b, sizeof b);
+    getsockname(x, (void *)&a, &k);
+    k = sizeof b;
+    getsockname(y, (void *)&b, &k);
+    connect(x, (void *)&b, sizeof b);
+    connect(y, (void *)&a, sizeof a);
+    int p[2] = {y, x}, q[2] = {x, y};
+    double r = pingpong(p, q, n);
+    close(x); close(y);
+    return r;
+}
+static double b_getsockopt(long n) { /* getsockopt(SO_RCVBUF) on a TCP socket */
+    int s = socket(AF_INET, SOCK_STREAM, 0), v;
+    socklen_t l;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        l = sizeof v;
+        getsockopt(s, SOL_SOCKET, SO_RCVBUF, &v, &l);
+    }
+    double r = (double)(now() - t) / n;
+    close(s);
+    return r;
+}
+static double b_poll_tcp(long n) { /* poll on a readable TCP socket (its readiness word) */
+    int c, s;
+    if (tcp_pair(&c, &s)) return -1;
+    send(c, "x", 1, 0);
+    usleep(20000);
+    double r = poll_one(s, n);
+    close(c); close(s);
+    return r;
+}
+
 /* --- forwarding probe (kernel built with --features g6-probe) --- */
 static int probe_ok(void) { return syscall(PROBE_NR, 0, 0, 0) == 0; }
 static double b_probe_null(long n) {
@@ -606,6 +706,12 @@ static struct bench benches[] = {
     {"unix_msg_fd", b_unix_msg_fd, 50000, 0},
     {"poll_eventfd", b_poll_eventfd, 100000, 0},
     {"timerfd_set", b_timerfd_set, 100000, 0},
+    {"tcp_rtt", b_tcp_rtt, 10000, 0},
+    {"tcp_sendrecv", b_tcp_sendrecv, 20000, 0},
+    {"tcp_connect", b_tcp_connect, 200, 0},
+    {"udp_rtt", b_udp_rtt, 10000, 0},
+    {"getsockopt", b_getsockopt, 100000, 0},
+    {"poll_tcp", b_poll_tcp, 100000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},

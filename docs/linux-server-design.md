@@ -962,6 +962,147 @@ calls switched straight back.
 So about +2.0 to +2.5 µs per forwarded call, as for the null call; `bpf` +3.3 (it also
 reads the attribute block's descriptor from user memory in the trap).
 
+## 14. Step 3 as built (wave 5, Group 12, branch `mk-lxnet`)
+
+How it works in detail is in [src/linux-server.md](src/linux-server.md) ("Network sockets")
+and [src/net/mod.md](src/net/mod.md) ("Two clients"). In short:
+
+- **Moved:** `AF_INET`, `AF_INET6` and `AF_NETLINK` sockets (routing and uevent) are server
+  objects (kinds 7 and 8). linux-server's `inet.rs`, `sockopt.rs` and `netlink.rs` are the
+  kernel's files with the caller's memory through `Cx`, blocking replaced by pending calls,
+  and readiness written to the objects' words; `netc.rs` is a port of the kernel's
+  `net/client.rs` for a ring-3 client. The kernel's copies stay for `lx=kernel`.
+- **linux-server is net-server's client directly:** its own part of the window, its own tail
+  of the event ring, its client tag on every handle it makes. The kernel is not in the middle
+  of these sockets any more, except to relay net-server's doorbell as a notification.
+- **Socket routing** (built once in `src/lx`, used by Group 13 for `AF_UNIX`): `socket` and
+  `socketpair` by address family (`T_FAMILY`, `MOVED_FAMILIES`); every call on a socket
+  descriptor by the descriptor's kind (`T_BYFD`): a server object goes to the server, anything
+  else to the kernel. The decision is a bit test in a lock-free per-table bitmap of server
+  objects, reached through a per-CPU cache of the caller's table.
+
+### 14.1 Readiness: linux-server relays (decided)
+
+Two shapes were open (section 12.3): net-server writes the readiness words of linux-server's
+objects itself (one hop), or linux-server relays (net-server's doorbell becomes a notification
+to linux-server, which writes its words and rings the kernel: two hops). **Built: the relay.**
+
+- linux-server must learn of every readiness change anyway: its blocked calls (`recv`,
+  `accept`, `connect`, a full `send`) are kept pending by it and must be tried again when
+  their socket changes. With net-server writing the words, it would still need the same
+  notification, so the one hop would not remove the second.
+- A socket's poll bits are not net-server's alone: `shutdown(SHUT_RD)`, a listening socket,
+  a UDP socket's lazily opened port, a dead socket after a net-server restart and the netlink
+  sockets are linux-server state. net-server would need linux-server's slot numbers, the
+  edge-count rule of the words and that state: a shared layout between two servers that both
+  restart independently.
+- Waiters stay call-free: `poll`, `select` and `epoll` (edge-triggered too: the relay counts an
+  edge for every net-server event on the socket) read the words in the kernel; only the
+  wake-up takes the extra hop. Its cost is in 14.3 (`poll`/`epoll` loops are unchanged; a
+  blocked receive's wake-up adds one notification and one doorbell).
+
+### 14.2 What else was needed
+
+- **A race in `SYS_LX_COMPLETE`** (kernel, fixed): a waiting call completed by another server
+  thread before the worker's "pending" answer reached the kernel was refused, and its caller
+  slept forever. A blocked call is registered before the worker answers "pending", so the
+  main thread could retry and complete it in between: a TCP ping-pong between two processes
+  hung within a few hundred round trips. Step 2's blocked calls had the same window (rarely
+  hit). `complete` now keeps the result for a call still being served (`Req::early`) and the
+  "pending" answer turns into it.
+- **Events for a handle not recorded yet:** a connection's handshake can finish between
+  net-server's answer to `TCP_CONNECT` and linux-server recording the handle; such an event
+  is remembered and counted when the handle is recorded (`inet::ORPHANS`).
+- **Two kernel facts as primitives:** Landlock's TCP port rules (`LX_OBJ_NETCHECK`) and
+  `SIGPIPE` to the calling thread (`LX_OBJ_SIGTHREAD`); the caller's network namespace comes
+  with the call (`LX_OBJ_FLAGS_NETNS`). `/proc/net/{tcp,udp}[6]` come from the server
+  (`MSG_LX_PROC_NET`).
+- **Copy-table arms** for every socket call with pointer arguments (section 13).
+- **`timer_arm`:** not needed. Socket timeouts use the main thread's deadline list, as step
+  2's blocked calls do.
+- **More slots:** not needed. With KDE, Firefox showing Wikipedia, the desktop's daemons
+  and a console session, 13 Internet sockets were open (`/proc/net/{tcp,udp}[6]`), plus a
+  few netlink sockets: far below the 2,048 slots. (Unix sockets, step 4, are the many.)
+- **`sendfile`/`splice`** with a moved socket on either side: not supported yet (nothing in
+  the suite, apt, Firefox or the desktop used them in the runs below); Group 13's kernel-buffer
+  I/O on server objects will give them.
+
+### 14.3 Measured cost
+
+KVM, 2 CPUs, the same overlay setup as the earlier sections; the host also ran other
+groups' VMs, so single numbers vary by about 10 %. `lx=kernel` is the in-kernel code of the
+same build (64fe9ec); "before" is 329aaf7.
+
+**lxbench** (µs, median of 5 loops; `tests/linux/lxbench.c`, new socket benchmarks):
+
+| Call | `lx=kernel` | forwarded | Change |
+|---|---:|---:|---|
+| `getsockopt(SO_RCVBUF)` | 1.20 | 4.00 | +2.8 µs (a forwarded call with a 4-byte copy-in and copy-out) |
+| `poll` on a readable TCP socket | 1.26 | 1.05 | faster (one readiness word, no net-server word and socket lock) |
+| TCP connect + accept + 2 closes on 127.0.0.1 | 174 | 169 | same |
+| TCP 1-byte ping-pong between 2 processes (`tcp_rtt`, per round trip) | 91.5 | 144.5 | +53 µs |
+| 16-byte send + receive, one thread (`tcp_sendrecv`) | 44.7 | 67.3 | +22.6 µs |
+| UDP 16-byte ping-pong between 2 processes (`udp_rtt`) | 90.9 | 140.5 | +49.6 µs |
+| Calls not moved (`getpid`, `pread`, `open`+`close`, `stat`, pipe and Unix round trips, futex, `mmap`, fork, fork+exec, `poll`/`epoll` on pipes) | | | within the noise (largest: pipe round trip 28.8 → 31.0, fork+exec 2,188 → 2,269; fork 296 → 274) |
+
+- **Per call:** a socket call that answers at once costs the forwarding (+2.0 to 2.5 µs) plus
+  what the copy table cannot carry (iovecs, a second pointer).
+- **Per wake-up:** a receive that has to wait costs about 20 to 25 µs more per wake-up than
+  in the kernel. In the kernel, net-server's doorbell wakes the waiting thread directly,
+  which then asks net-server for the data. Here the doorbell wakes linux-server's main
+  thread (a second CPU or a switch), which asks net-server for the data on the waiter's
+  behalf and completes the call (another wake-up). Ping-pong benchmarks pay it on every
+  message; bulk transfers and non-blocking programs (Firefox polls) do not.
+- **linux-server's requests to net-server are hand-off calls** (`SVC_CALL_HANDOFF`, allowed
+  only for linux-server to net-server), as the kernel's were: a queued call costs a
+  scheduler round trip each way.
+
+**Real network** (`scratch/bench.sh`, netbench and apt-get in the Ubuntu root; host HTTP
+server and UDP echo through QEMU user networking; paired runs base2/new3):
+
+| What | 329aaf7 | step 3 | Budget (≤ 5 % slower) |
+|---|---:|---:|---|
+| 100 MB download (MB/s, 3 runs) | 15.6, 19.5, 20.2 | 23.0, 21.2, 21.1 | met (faster) |
+| `apt-get update`, first / second (s) | 31.2 / 6.8 | 25.5 / 6.3 | met |
+| UDP round trip to the host (median µs) | 573 | 551 | met |
+| TCP over 127.0.0.1, 20 MB (MB/s) | 129 | 148 | met |
+| TCP 1-byte round trips over 127.0.0.1 (`lolat`, µs) | 88 | 126 | **missed: +43 %** (the wake-up hop above) |
+| HTTP GET from a server in the guest, new connection each (median µs, 2 × 60) | 775, 769 | 922, 940 | **missed: +20 %** |
+| HTTP GET from the host through QEMU user networking (median) | 3 ms | 500 ms | see below |
+
+**The 500 ms GET is QEMU's user networking (slirp), not the guest.** Packet captures on
+both sides (`-object filter-dump` on the guest's network, `tcpdump` on the host's loopback)
+show the guest's SYN going out at once and slirp connecting to the host server at once,
+but slirp sending its SYN-ACK to the guest only after the guest's SYN retransmission
+(net-server's RTO, 300 ms) wakes QEMU's main loop: slirp answers a SYN on its next
+main-loop pass. The base build shows the same stall (one connection of three in the
+capture of 329aaf7); the forwarded build hits it on nearly every new connection because its
+SYN is followed by no other guest packet (the previous connection's close has already gone
+out: it is asynchronous, `LX_NOTE_CLOSE`). Connections to the Internet (apt, Firefox) were
+not affected in these runs; on real hardware there is no slirp. Not fixed here.
+
+**Desktop:** KDE with Firefox (Wikipedia), sound, Wine `ipconfig` (through the netlink socket
+in the server) worked; 3 fresh KDE logins with no crash (`kderep`). The desktop's own use of
+Internet sockets is small (13 sockets with Firefox), so the per-wake-up cost does not show in
+its timing (password to settled desktop 1 to 68 s in these runs, dominated by host load).
+
+**Not measured:** Firefox page-load time side by side; the kill tests' recovery times.
+
+### 14.4 What step 4 (Unix sockets) can build on
+
+- The routing: add `1` to `lx::MOVED_FAMILIES` and the `AF_UNIX` arms in
+  `linux-server/src/socket.rs` (`by_family`, `by_kind`); the copy-table arms are shared.
+- The blocked-call machinery of `socket.rs` (waiters, event counts, deadlines, signals) is not
+  inet-specific.
+- **Routing targets for the services split** (decision 9, `docs/linux-services-design.md`):
+  each moved family names its target (`lx::MOVED_FAMILIES: &[(family, Target)]`,
+  `TARGET_LINUX = 1`, `lx::family_target`). This is the "service id" entry of the
+  services design for `socket`/`socketpair`; calls on a descriptor go to the owner of its
+  server object, so `ServerObject` would carry its service id once objects can belong to
+  several servers.
+- Still missing for step 4: read/write/readv/writev on the lock-free path (`T_BYFD` for 0, 1,
+  19, 20: the bitmap test makes it cheap for kernel descriptors), descriptor passing, and
+  kernel-buffer I/O on server objects (Group 13).
 ## 15. Step 4 as built (wave 5, Group 13, branch `mk-lxunix`)
 
 How it is used, in detail, is in [src/linux-server.md](src/linux-server.md) ("Unix sockets,
@@ -1056,9 +1197,9 @@ ran other groups' VMs throughout; single runs differ by up to 25 %.
 - **Over budget:** `timerfd_settime` (+4 µs) and descriptor passing (+3 µs per message
   pair); neither is on the desktop's hot path (a KDE login makes 5 to 8 timerfds).
 - **KDE password to desktop** (`kderep.sh`, screen settled after Enter; busy host): see
-  15.4.
+  15.3.
 
-### 15.4 The desktop: KDE, Firefox, sound, Wine, the crash policy
+### 15.3 The desktop: KDE, Firefox, sound, Wine, the crash policy
 
 - **KDE password to desktop** (`kderep.sh`: fresh boot, login, screen settled after Enter;
   other groups' VMs ran throughout): before (the deployed 329aaf7 ISO) 35.9, 47.8, 32.3 s
@@ -1081,7 +1222,7 @@ ran other groups' VMs throughout; single runs differ by up to 25 %.
   fault on another CPU could see the lock held and then no mark. `vm::fault_lock` now tries
   the lock again in that case (b657fc3); step 4 made such copies frequent.
 
-### 15.3 What later steps can build on, and what is missing
+### 15.4 What later steps can build on, and what is missing
 
 - **Step 5 (terminals, devices):** pseudo-terminal pairs can follow the pipe module (the
   same blocking, readiness and kernel-buffer machinery). The descriptor-passing primitives

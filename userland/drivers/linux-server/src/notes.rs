@@ -76,6 +76,7 @@ fn take(seq: u64) {
                 crate::pidfd::on_exit(a);
                 crate::signalfd::on_exit(a);
                 crate::timerfd::on_exit(a);
+                crate::socket::on_exit(a);
             }
             LX_NOTE_INTERRUPT => crate::interrupted(a),
             LX_NOTE_CLOSE => crate::obj::closed(a as u32, b as u32),

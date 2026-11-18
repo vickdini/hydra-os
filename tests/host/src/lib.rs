@@ -61,6 +61,10 @@ pub mod arch {
     pub mod smp {
         /// *stub* No kernel lock on the host.
         pub fn bkl_exit() {}
+        /// *stub* (Group 13: vm.rs's fault message) No kernel lock owner on the host.
+        pub fn bkl_owner() -> usize {
+            0
+        }
         /// *stub* No other CPU to wake on the host.
         pub fn flush_kick() {}
         /// *mirror* of the kernel's CPU limit.
@@ -750,6 +754,8 @@ pub mod shell {
 }
 
 pub mod task {
+    /// *stub* (Group 13: vm.rs's fault message) The running thread (none on the host).
+    pub static CURRENT_TID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     #[path = "../../../../src/task/elf.rs"]
     pub mod elf;
     #[path = "../../../../src/task/exec.rs"]

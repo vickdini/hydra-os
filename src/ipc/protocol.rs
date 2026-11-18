@@ -240,6 +240,21 @@ pub const ENDPOINT_NET_SERVER: u32 = 0x28;
 
 /// Bytes of the window's data area (offset 0): payloads of requests and replies.
 pub const NETS_DATA_LEN: usize = 0x30000;
+/// The kernel's part of the data area: `[0, NETS_KERNEL_DATA_LEN)`, and its DNS name page
+/// at `NETS_DATA_LEN - 4096` (wave 5: two clients share the window).
+pub const NETS_KERNEL_DATA_LEN: usize = 0x10000;
+/// linux-server's part of the data area (wave 5, step 3): `NETS_LX_DATA_LEN` bytes at
+/// `NETS_LX_DATA_OFF`, which it divides among its threads.
+pub const NETS_LX_DATA_OFF: usize = 0x10000;
+/// See [`NETS_LX_DATA_OFF`].
+pub const NETS_LX_DATA_LEN: usize = 0x1E000;
+/// Client tags (wave 5): the requests that make a handle (`TCP_CONNECT`, `TCP_BIND`,
+/// `UDP_OPEN`, `ICMP_OPEN`) carry the client's tag in `args[3]`; listeners and accepted
+/// connections take their parent's. [`MSG_NETS_CLIENT_RESET`] closes all of one tag's
+/// handles (a restarted linux-server's predecessor's). The kernel's tag is 0.
+pub const NETS_CLIENT_KERNEL: u64 = 0;
+/// The tag of linux-server (see [`NETS_CLIENT_KERNEL`]).
+pub const NETS_CLIENT_LX: u64 = 1;
 /// Offset of the status page: little-endian u64 words `NETS_ST_*`.
 pub const NETS_STATUS_OFF: usize = 0x30000;
 /// Offset of the event ring: [`NETS_EVENTS`] u32 handles; entry `n % NETS_EVENTS` is the
@@ -362,8 +377,9 @@ pub const MSG_NETS_UDP_REBIND: u32 = 0x9011;
 pub const MSG_NETS_UDP_PORT: u32 = 0x9012;
 /// UDP: send `[handle, addr << 16 | port, offset, length]` -> `[length]`.
 pub const MSG_NETS_UDP_SEND: u32 = 0x9013;
-/// UDP: receive `[handle, offset, peek]` -> `[length, addr << 16 | port, arrival time
-/// (ns since 1970)]` with the whole datagram at the offset, or `-EAGAIN`.
+/// UDP: receive `[handle, offset, peek, capacity (0: the data area's end)]` -> `[length,
+/// addr << 16 | port, arrival time (ns since 1970), bytes copied]` with the datagram (at
+/// most `capacity` bytes of it) at the offset, or `-EAGAIN`.
 pub const MSG_NETS_UDP_RECV: u32 = 0x9014;
 /// UDP: close `[handle]`.
 pub const MSG_NETS_UDP_CLOSE: u32 = 0x9015;
@@ -375,7 +391,8 @@ pub const MSG_NETS_ICMP_IDENT: u32 = 0x9021;
 pub const MSG_NETS_ICMP_SET_IDENT: u32 = 0x9022;
 /// ICMP: send `[handle, addr, offset, length]` -> `[length]`.
 pub const MSG_NETS_ICMP_SEND: u32 = 0x9023;
-/// ICMP: receive `[handle, offset, peek]` -> `[length, addr, arrival time]`, or `-EAGAIN`.
+/// ICMP: receive `[handle, offset, peek, capacity (0: the data area's end)]` -> `[length,
+/// addr, arrival time, bytes copied]`, or `-EAGAIN`.
 pub const MSG_NETS_ICMP_RECV: u32 = 0x9024;
 /// ICMP: close `[handle]`.
 pub const MSG_NETS_ICMP_CLOSE: u32 = 0x9025;
@@ -393,6 +410,9 @@ pub const MSG_NETS_DHCP: u32 = 0x9031;
 /// Look a name up (DNS A record) `[offset, length]` (the name in the data area) (deferred
 /// reply, a queued call) -> `[0, address]`.
 pub const MSG_NETS_RESOLVE: u32 = 0x9032;
+/// Close every handle made by the client with tag `[tag]` (wave 5: a restarted linux-server
+/// clears what its predecessor left).
+pub const MSG_NETS_CLIENT_RESET: u32 = 0x9033;
 /// The network server's reply.
 pub const MSG_NETS_REPLY: u32 = 0x90FF;
 
@@ -941,7 +961,7 @@ pub const LX_OBJ_KIND_PIPE_RW: u32 = 23;
 /// the copy area (in for a write, out for a read). The server must answer at once (never
 /// `LX_REPLY_PENDING`: `-EAGAIN` instead; the kernel waits on the readiness word) and posts
 /// no `SIGPIPE` (the kernel does).
-pub const LX_OBJ_FLAGS_KBUF: u64 = 1 << 61;
+pub const LX_OBJ_FLAGS_KBUF: u64 = 1 << 60;
 /// `args[1]` of a kernel-buffer call: not a user address (a fallback to the client memory
 /// primitives fails with `-EFAULT`).
 pub const LX_KBUF_ADDR: u64 = 0xFFFF_FF80_0000_0000;
@@ -985,7 +1005,7 @@ pub const LX_NOTE_SIGNAL: u64 = 7;
 
 /// Kernel to linux-server's main thread: the text of `/proc/net/unix`; the text goes to
 /// [`LX_PROC_KEYS_TEXT_OFF`] (reply `args[0]`: its length).
-pub const MSG_LX_PROC_NET_UNIX: u32 = 0xA002;
+pub const MSG_LX_PROC_NET_UNIX: u32 = 0xA003;
 
 /// Hydra-private call numbers the kernel forwards on behalf of the current Linux thread
 /// (not reachable from user mode: the table only routes numbers below 512 and
@@ -1002,3 +1022,38 @@ pub const LX_KCALL_FCNTL: u64 = 0x6782;
 /// `LX_KCALL_FIFO(ino, flags)`: `open` of FIFO node `ino` (permissions checked by the
 /// kernel): a pipe end in the caller's table, waiting for the other side as Linux does.
 pub const LX_KCALL_FIFO: u64 = 0x6783;
+// Network sockets in linux-server (Group 12, wave 5, step 3)
+// ----------------------------------------------------------------------------------------
+//
+// AF_INET, AF_INET6 and AF_NETLINK sockets are server objects; linux-server is
+// net-server's second client (its part of the window: [`NETS_LX_DATA_OFF`], its tag
+// [`NETS_CLIENT_LX`]). net-server's doorbell reaches it as a notification
+// ([`NOTIFY_LX_NET`]), and it relays the readiness of its sockets to their objects'
+// readiness words (`docs/linux-server-design.md`, step 3 as built).
+
+/// Notification bit ([`MSG_SVC_NOTIFY`]): net-server rang its doorbell (socket readiness
+/// changed: new entries in its event ring).
+pub const NOTIFY_LX_NET: u64 = 4;
+/// Notification bit: net-server went away (its sockets are dead; a new one may come).
+pub const NOTIFY_LX_NET_GONE: u64 = 8;
+/// Kind of a server object: an `AF_INET` or `AF_INET6` socket.
+pub const LX_OBJ_KIND_INET: u32 = 7;
+/// Kind of a server object: an `AF_NETLINK` socket (routing or uevent).
+pub const LX_OBJ_KIND_NETLINK: u32 = 8;
+/// [`LxCall::obj_flags`] bit of a socket call (routed by family or descriptor): the caller
+/// is in a network namespace of its own (it sees only loopback). Never set together with
+/// [`LX_OBJ_FLAGS_AT1`].
+pub const LX_OBJ_FLAGS_NETNS: u64 = 1 << 61;
+/// `SYS_LX_OBJ` operation: `(request id, port, access)`: Landlock's check of a TCP `bind`
+/// (access 1) or `connect` (2) to `port` for the request's caller: 0 or `-EACCES`.
+pub const LX_OBJ_NETCHECK: u64 = 16;
+/// `SYS_LX_OBJ` operation: `(request id, signal)`: posts `signal` to the request's calling
+/// thread (`SIGPIPE` of a send on a broken connection).
+pub const LX_OBJ_SIGTHREAD: u64 = 17;
+/// Kernel to linux-server's main thread: the text of `/proc/net/<file>` (`args[0]`: 0 `tcp`,
+/// 1 `tcp6`, 2 `udp`, 3 `udp6`; `args[1]`: 1 if the reader is in a network namespace of
+/// its own) to [`LX_PROC_KEYS_TEXT_OFF`]. Reply [`MSG_LX_REPLY`], `args[0]` its length.
+pub const MSG_LX_PROC_NET: u32 = 0xA002;
+/// `SYS_SVC_CALL` timeout bit: a hand-off call (only linux-server calling net-server: its
+/// socket requests answer at once, like the kernel's own hand-off socket calls).
+pub const SVC_CALL_HANDOFF: u64 = 1 << 62;
