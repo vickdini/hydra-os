@@ -301,6 +301,10 @@ the crash policy then handles.
 Measured in KVM with 2 CPUs (details and the breakdown in section 11 of
 [linux-server-design.md](../linux-server-design.md)): a forwarded null call costs 4.5 µs
 without PCID and 3.4 µs with it, against 0.7 µs for a null call answered in the kernel (the
-budget allows 3 µs added: met with PCID). `keyctl` through the server costs 3.5 µs with PCID
+budget allows 3 µs added: met with PCID). Step 2's moved calls add, per call, against the
+in-kernel code of the same build: `mq_send`/`mq_receive` +3.1 µs, `semop` +2.9, `msgsnd`/`msgrcv`
++2.9, a bpf map lookup +4.1 (one client memory call per pointer; Group 10's copy-in table
+removes those); `poll` on a server object costs no more than in the kernel (section 12 of the
+design). `keyctl` through the server costs 3.5 µs with PCID
 (0.7 µs in the kernel). Calls that were not moved are unchanged. Two threads forwarding at
 once are not faster than one: the kernel lock still serializes the kernel part of each call.
