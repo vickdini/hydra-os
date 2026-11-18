@@ -32,6 +32,8 @@ const SYS_LX_READ: u64 = 54;
 const SYS_LX_WRITE: u64 = 55;
 const SYS_LX_READ_STR: u64 = 56;
 const SYS_LX_PROC_INFO: u64 = 57;
+const SYS_LX_OBJ: u64 = 60;
+const SYS_LX_SIG: u64 = 61;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -230,6 +232,42 @@ pub fn lx_proc_info(tgid: u64) -> Result<[u64; 7], i64> {
     let mut out = [0u64; 7];
     check(unsafe { syscall3(SYS_LX_PROC_INFO, tgid, out.as_mut_ptr() as u64, 0) })?;
     Ok(out)
+}
+
+/// Invokes a raw Hydra syscall with 5 arguments (`rdi`, `rsi`, `rdx`, `r10`, `r8`).
+unsafe fn syscall5(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        inlateout("rax") num as i64 => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        in("r8") a4,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// Linux server: a server-object operation (`SYS_LX_OBJ`, [`crate::protocol::LX_OBJ_INSTALL`]
+/// and the others); returns its non-negative result.
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_obj(op: u64, a: u64, b: u64, c: u64) -> Result<u64, i64> {
+    check(unsafe { syscall4(SYS_LX_OBJ, op, a, b, c) }).map(|v| v as u64)
+}
+
+/// Linux server: queues signal `sig` for process `tgid` with `si_code` `code`, the sender
+/// `spid`/`suid` and `si_value` `value` (`sig_post`).
+///
+/// # Errors
+/// `-ESRCH` if there is no such process.
+pub fn lx_sig(tgid: u64, sig: u32, code: i32, spid: u32, suid: u32, value: u64) -> Result<(), i64> {
+    check(unsafe { syscall5(SYS_LX_SIG, tgid, sig as u64, code as i64 as u64, spid as u64 | (suid as u64) << 32, value) }).map(|_| ())
 }
 
 /// Gives up the rest of the time slice.

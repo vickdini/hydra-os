@@ -95,6 +95,35 @@ static KEYCTL_BUF_OUT: Desc = [N, N, Out(len_arg(3)), N, N, N];
 static KEYCTL_SEARCH: Desc = [N, N, Str(KEY_STR), Str(KEY_STR), N, N];
 static KEYCTL_CAPS: Desc = [N, Out(len_arg(2)), N, N, N, N];
 
+/// A length of `fixed` bytes plus argument `i` bytes (a header before a buffer).
+const fn fixed_plus_arg(fixed: u16, i: u8) -> Len {
+    Len { fixed, arg: i, mul: 1 }
+}
+/// A `struct timespec`.
+const TIMESPEC: Len = fixed(16);
+/// `struct sembuf` entries: 6 bytes each, their count in argument `i`.
+const fn sembufs(i: u8) -> Len {
+    Len { fixed: 0, arg: i, mul: 6 }
+}
+
+// Step 2's calls (Group 9's server reads exactly these lengths; anything else falls back to
+// the client memory calls)
+/// mq_timedsend(mqd, msg, len, prio, abs_timeout)
+static MQ_SEND: Desc = [N, In(len_arg(2)), N, N, In(TIMESPEC), N];
+/// mq_timedreceive(mqd, msg, len, prio_ptr, abs_timeout)
+static MQ_RECEIVE: Desc = [N, Out(len_arg(2)), N, Out(fixed(4)), In(TIMESPEC), N];
+/// semop(id, sops, nsops)
+static SEMOP: Desc = [N, In(sembufs(2)), N, N, N, N];
+/// semtimedop(id, sops, nsops, timeout)
+static SEMTIMEDOP: Desc = [N, In(sembufs(2)), N, In(TIMESPEC), N, N];
+/// msgsnd(id, msgp, size, flags): `mtype` (8 bytes) and the text
+static MSGSND: Desc = [N, In(fixed_plus_arg(8, 2)), N, N, N, N];
+/// msgrcv(id, msgp, size, type, flags)
+static MSGRCV: Desc = [N, Out(fixed_plus_arg(8, 2)), N, N, N, N];
+/// bpf(cmd, attr, size): the attribute block in only (some commands write parts of it back
+/// themselves, which a copy-back of the whole block would overwrite)
+static BPF: Desc = [N, In(len_arg(2)), N, N, N, N];
+
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
 pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
@@ -111,6 +140,13 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
             31 => Some(&KEYCTL_CAPS),           // CAPABILITIES
             _ => None,
         },
+        242 => Some(&MQ_SEND),
+        243 => Some(&MQ_RECEIVE),
+        65 => Some(&SEMOP),
+        220 => Some(&SEMTIMEDOP),
+        69 => Some(&MSGSND),
+        70 => Some(&MSGRCV),
+        321 => Some(&BPF),
         _ => None,
     }
 }

@@ -377,6 +377,10 @@ pub mod compat {
                 fn add_wait_queues(&self, waits: &mut WaitSet);
                 fn rdev(&self) -> u64;
                 fn path(&self) -> String;
+                /// Edge count for edge-triggered epoll (linux-server objects, wave 4).
+                fn edges(&self) -> Option<u64> {
+                    None
+                }
                 fn mmap_object(&self) -> Result<Arc<dyn MappedObject>, i64> {
                     Err(-19)
                 }

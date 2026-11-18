@@ -123,6 +123,10 @@ pub const SYS_LX_WRITE: u64 = 55;
 pub const SYS_LX_READ_STR: u64 = 56;
 /// Linux server: a process's parent and credentials (`sys_lx_proc_info`).
 pub const SYS_LX_PROC_INFO: u64 = 57;
+/// Linux server (Group 9, wave 4): an operation on its server objects (`crate::lx::obj`).
+pub const SYS_LX_OBJ: u64 = 60;
+/// Linux server (Group 9, wave 4): queue a signal with its siginfo (`sig_post`).
+pub const SYS_LX_SIG: u64 = 61;
 
 /// [`SYS_SVC_CALL_GRANT`]'s argument block (as `hydra_rt::sys::GrantCall`): the request
 /// (the reply replaces it), the timeout in ticks (0: the default), and the ranges lent.
@@ -1036,6 +1040,14 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
         SYS_LX_PROC_INFO => {
             drop(stats);
             crate::lx::proc_info(arg0, arg1)
+        }
+        SYS_LX_OBJ => {
+            drop(stats);
+            crate::lx::obj::obj_ctl(arg0, arg1, _arg2, frame.r10)
+        }
+        SYS_LX_SIG => {
+            drop(stats);
+            crate::lx::obj::sig_post(arg0, arg1, _arg2, frame.r10, frame.r8)
         }
         // Group 4: the admin interface of the Ring 3 shell (authorized console only)
         crate::admin::proto::SYS_ADMIN => {

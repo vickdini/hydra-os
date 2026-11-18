@@ -601,6 +601,13 @@ pub const LX_NULL_RETURN: u64 = 0;
 pub const LX_NULL_PENDING: u64 = 1;
 /// [`LX_NULL_NR`] operation: read, change and write back the caller's buffer.
 pub const LX_NULL_COPY: u64 = 2;
+/// [`LX_NULL_NR`] operation (Group 9): a new test server object; `arg1` = `O_CLOEXEC` /
+/// `O_NONBLOCK`; returns its descriptor. Writing `r` / `w` to it makes it readable /
+/// writable, `c` clears both; reading it gives `slot N\n`.
+pub const LX_NULL_OBJ: u64 = 3;
+/// [`LX_NULL_NR`] operation (Group 9): how many test objects the server has seen closed
+/// (their last descriptor went) since it started.
+pub const LX_NULL_OBJ_CLOSES: u64 = 4;
 
 /// Size of a worker's syscall page.
 pub const LX_PAGE_SIZE: usize = 4096;
@@ -646,6 +653,17 @@ pub struct LxCall {
     pub ngroups: u64,
     /// Supplementary groups.
     pub groups: [u32; LX_GROUPS],
+    // Group 9 (wave 4, step 2): server-object descriptors. Appended; filled only for calls
+    // whose forwarding-table entry asks for them.
+    /// The slot of the server object at descriptor `args[0]` ([`LX_OBJ_NONE`]: not one of
+    /// this server's objects, or the call does not take a descriptor first).
+    pub obj: u64,
+    /// That descriptor's status flags (`O_NONBLOCK`).
+    pub obj_flags: u64,
+    /// The caller's IPC namespace (System V IPC, POSIX message queues).
+    pub ipc_ns: u64,
+    /// The caller's umask.
+    pub umask: u64,
 }
 
 impl LxCall {
@@ -667,6 +685,10 @@ impl LxCall {
         flags: 0,
         ngroups: 0,
         groups: [0; LX_GROUPS],
+        obj: LX_OBJ_NONE,
+        obj_flags: 0,
+        ipc_ns: 0,
+        umask: 0,
     };
 }
 
@@ -756,6 +778,9 @@ pub const LX_NOTE_EXIT: u64 = 3;
 /// Notification: a signal arrived for the caller of pending request `a` (answered later
 /// with `SYS_LX_COMPLETE`); the server may answer it `-EINTR`.
 pub const LX_NOTE_INTERRUPT: u64 = 4;
+/// Notification: the last descriptor of server object `a` (a slot) went away (closed,
+/// its process ended, or close-on-exec); `b` is the object's kind ([`LX_OBJ_KIND_MQ`], ...).
+pub const LX_NOTE_CLOSE: u64 = 5;
 /// Notification bit ([`MSG_SVC_NOTIFY`]): notifications were posted to the ring.
 pub const NOTIFY_LX_NOTES: u64 = 2;
 
@@ -773,3 +798,111 @@ pub const LX_PROC_KEYS_GROUPS_OFF: usize = 0x30000;
 pub const LX_PROC_KEYS_TEXT_OFF: usize = 0x31000;
 /// Most bytes of `/proc/keys` text.
 pub const LX_PROC_KEYS_TEXT_MAX: usize = 0xF000;
+
+// Server-object descriptors (Group 9, wave 4, step 2)
+// ----------------------------------------------------------------------------------------
+//
+// A descriptor whose object lives in linux-server (a POSIX message queue, a bpf map, ...).
+// The kernel keeps the descriptor table: the descriptor is a kernel object naming the
+// server's *slot*; `dup`, `fork`, close-on-exec and exit share and drop it as any other
+// descriptor, and when the last reference goes the server gets [`LX_NOTE_CLOSE`]. The
+// server keeps each object's readiness in its window ([`LX_OBJ_OFF`]): `poll`, `select` and
+// `epoll` read it without a call; when words change the server marks the slots in
+// [`LX_OBJ_CHANGED_OFF`] and rings `SYS_SVC_SIGNAL(ENDPOINT_LINUX_SERVER, LX_SIGNAL_OBJS)`,
+// and the kernel wakes the waiters.
+
+/// [`LxCall::obj_flags`] bit: `obj` is the object of the descriptor `args[1]` points to (its
+/// number in bits 32..62), not of `args[0]`.
+pub const LX_OBJ_FLAGS_AT1: u64 = 1 << 63;
+
+/// Number of server-object slots.
+pub const LX_OBJ_SLOTS: usize = 2048;
+/// [`LxCall::obj`]: no server object.
+pub const LX_OBJ_NONE: u64 = u64::MAX;
+/// Window offset of the readiness slots: slot `s` is 16 bytes at `LX_OBJ_OFF + 16 * s`:
+/// `[u32 poll bits (POLLIN, POLLOUT, POLLERR, POLLHUP, ...), u32 edge count (+1 whenever
+/// bits are added: edge-triggered epoll), u64 size (st_size)]`.
+pub const LX_OBJ_OFF: usize = 0x21000;
+/// Window offset of the changed-slot bitmap (`LX_OBJ_SLOTS` bits, u64 words): the server
+/// sets bit `s` (atomic or) after changing slot `s`; the kernel takes the words (atomic swap
+/// with 0) and wakes the objects' waiters.
+pub const LX_OBJ_CHANGED_OFF: usize = 0x29000;
+/// Window offset of the watched-slot bitmap (`LX_OBJ_SLOTS` bits): the kernel sets bit `s`
+/// (atomic or) the first time a task waits for slot `s` (`poll`, `select`, `epoll`) and never
+/// clears it; the server clears it when it hands the slot out again. The server rings the
+/// doorbell only for watched slots (an object nobody ever waited on costs no doorbell).
+/// Ordering: the kernel sets the bit before it reads the word; the server writes the word,
+/// then (after a full fence) reads the bit.
+pub const LX_OBJ_WATCHED_OFF: usize = 0x29100;
+/// `SYS_SVC_SIGNAL` bits from the server: readiness words changed.
+pub const LX_SIGNAL_OBJS: u64 = 1;
+
+/// Kind of a server object (told to the kernel at install, given back in [`LX_NOTE_CLOSE`]).
+pub const LX_OBJ_KIND_TEST: u32 = 1;
+/// A POSIX message queue descriptor.
+pub const LX_OBJ_KIND_MQ: u32 = 2;
+/// A bpf map.
+pub const LX_OBJ_KIND_BPF_MAP: u32 = 3;
+/// A bpf program.
+pub const LX_OBJ_KIND_BPF_PROG: u32 = 4;
+/// A bpf link.
+pub const LX_OBJ_KIND_BPF_LINK: u32 = 5;
+/// A bpf BTF object.
+pub const LX_OBJ_KIND_BPF_BTF: u32 = 6;
+
+/// `SYS_LX_OBJ` operation: `(request id, *LxObjDesc) -> fd`: installs a new descriptor for
+/// the server object the description names in the table of request `id`'s caller.
+pub const LX_OBJ_INSTALL: u64 = 0;
+/// `SYS_LX_OBJ` operation: `(request id, fd) -> slot | kind << 32 | nonblock << 62`: the
+/// server object behind descriptor `fd` of the caller (`-EBADF`: none of this server's).
+pub const LX_OBJ_FD: u64 = 1;
+/// `SYS_LX_OBJ` operation: `(slot, flags)`: sets the object's `O_NONBLOCK` (`mq_setattr`).
+pub const LX_OBJ_SETFL: u64 = 2;
+/// `SYS_LX_OBJ` operation: `(request id, fd) -> token`: keeps the caller's (kernel)
+/// descriptor `fd` for the server (glibc's `SIGEV_THREAD` netlink socket).
+pub const LX_OBJ_PIN: u64 = 3;
+/// `SYS_LX_OBJ` operation: `(token)`: lets a kept descriptor go.
+pub const LX_OBJ_UNPIN: u64 = 4;
+/// `SYS_LX_OBJ` operation: `(token, buf, len)`: queues `len` bytes as a notification
+/// message on a kept descriptor (a netlink socket).
+pub const LX_OBJ_NOTIFY: u64 = 5;
+/// `SYS_LX_OBJ` operation: `(request id, buf, len)`: the caller's `comm` (bpf's
+/// `get_current_comm`), NUL-padded to `len` (at most 16) bytes.
+pub const LX_OBJ_COMM: u64 = 6;
+/// `SYS_LX_OBJ` operation, **temporary** (until the VFS moves, step 6): `(request id, fd,
+/// buf) -> length`: the path of the caller's file descriptor `fd` (at most 4096 bytes; a bpf
+/// cgroup attachment names its cgroup by a directory descriptor).
+pub const LX_OBJ_FDPATH: u64 = 7;
+/// `SYS_LX_OBJ` operation: `(buf, len)`: the complete list of bpf device programs attached
+/// to cgroups, which the kernel runs itself on device opens and `mknod`s: entries of
+/// `[u32 cgroup length, cgroup path below /sys/fs/cgroup, u32 instruction count, the
+/// instructions (8 bytes each)]`. `-EINVAL` if one is refused (it uses maps, or fails the
+/// kernel's checks); the kernel then keeps its previous list.
+pub const LX_OBJ_BPF_DEVICE: u64 = 8;
+
+/// Most bytes of an object's name in [`LxObjDesc`].
+pub const LX_OBJ_NAME_MAX: usize = 104;
+
+/// The description of a new server object for [`LX_OBJ_INSTALL`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxObjDesc {
+    /// Its slot (`0..LX_OBJ_SLOTS`; the server initializes the readiness slot first).
+    pub slot: u32,
+    /// `LX_OBJ_KIND_*`.
+    pub kind: u32,
+    /// Linux `O_CLOEXEC` and `O_NONBLOCK` bits.
+    pub flags: u32,
+    /// `st_mode` (file type and permissions).
+    pub mode: u32,
+    /// `st_uid`.
+    pub uid: u32,
+    /// `st_gid`.
+    pub gid: u32,
+    /// Bytes of `name` used.
+    pub name_len: u32,
+    /// Unused (0).
+    pub pad: u32,
+    /// What `/proc/<pid>/fd/N` shows (`/name` for a message queue, `anon_inode:bpf-map`).
+    pub name: [u8; LX_OBJ_NAME_MAX],
+}

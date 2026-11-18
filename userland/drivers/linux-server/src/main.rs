@@ -29,10 +29,15 @@
 
 extern crate alloc;
 
+mod bpf;
 mod client;
 mod keys;
 mod lock;
+mod mqueue;
 mod notes;
+mod obj;
+mod sysv;
+mod timeout;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -101,6 +106,7 @@ fn main(args: &[&str]) {
         }
     };
     notes::init(srv.window().as_mut_ptr());
+    obj::init(srv.window().as_mut_ptr());
     if let Err(e) = sys::lx_ctl(LX_CTL_ONLINE) {
         println!("[linux-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -111,7 +117,12 @@ fn main(args: &[&str]) {
 /// The main thread: heartbeats, kernel requests and notifications.
 fn serve_endpoint(srv: &mut Server) -> ! {
     loop {
-        let timeout = if PENDING.lock().is_empty() { 100 } else { 1 };
+        timeout::update_clock();
+        let now = sys::uptime_ticks();
+        let timeout = match next_deadline(now) {
+            Some(d) => d.saturating_sub(now).clamp(1, 100),
+            None => 100,
+        };
         match sys::svc_recv_notify(srv.endpoint, timeout) {
             Ok((0, _)) => {}
             Ok((id, req)) => {
@@ -126,7 +137,17 @@ fn serve_endpoint(srv: &mut Server) -> ! {
         }
         notes::drain_all();
         complete_due();
+        obj::flush();
     }
+}
+
+/// Answers the blocked calls whose timeout passed and returns the earliest deadline still
+/// waiting (the main thread sleeps until then).
+pub fn next_deadline(now: u64) -> Option<u64> {
+    let null = if PENDING.lock().is_empty() { None } else { Some(now + 1) };
+    let mq = mqueue::tick(now);
+    let sv = sysv::tick(now);
+    [null, mq, sv].into_iter().flatten().min()
 }
 
 /// `/proc/keys` for the caller the kernel describes (see [`MSG_LX_PROC_KEYS`]).
@@ -166,6 +187,9 @@ fn complete_due() {
 /// A signal arrived for the caller of pending request `id`: a pending test call is
 /// answered `-EINTR` at once.
 pub fn interrupted(id: u64) {
+    if mqueue::interrupted(id) || sysv::interrupted(id) {
+        return;
+    }
     let found = {
         let mut p = PENDING.lock();
         let before = p.len();
@@ -209,10 +233,29 @@ extern "C" fn worker(_index: u64) -> ! {
 fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     notes::drain_to(c.note_seq);
     let cx = Cx::from_call(c, page);
-    match c.nr {
+    let r = match c.nr {
         LX_NULL_NR => null_call(&cx),
+        // read, write, readv, writev, ioctl on a server object
+        0 | 1 | 16 | 19 | 20 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
+        240..=245 => mqueue::dispatch(&cx),
+        64..=66 | 220 | 68..=71 => sysv::dispatch(&cx),
+        321 => (bpf::sys_bpf(&cx), 0),
         _ => (ENOSYS, 0),
+    };
+    obj::flush();
+    r
+}
+
+/// `read`, `write`, `readv`, `writev` and `ioctl` on the server object in `cx.c.obj`.
+fn object_io(cx: &Cx) -> i64 {
+    const EINVAL_: i64 = -22;
+    const ENOTTY: i64 = -25;
+    match (obj::kind_of(cx.c.obj as u32), cx.nr) {
+        (LX_OBJ_KIND_TEST, _) => obj::test_io(cx),
+        (LX_OBJ_KIND_MQ, 0) => mqueue::read(cx),
+        (_, 16) => ENOTTY,
+        _ => EINVAL_,
     }
 }
 
@@ -244,6 +287,8 @@ fn null_call(cx: &Cx) -> (i64, u64) {
                 Err(e) => (if e == 0 { EFAULT } else { e }, 0),
             }
         }
+        LX_NULL_OBJ => (obj::test_new(cx, cx.args[1]), 0),
+        LX_NULL_OBJ_CLOSES => (obj::TEST_CLOSES.load(Ordering::Relaxed) as i64, 0),
         _ => (EINVAL, 0),
     }
 }

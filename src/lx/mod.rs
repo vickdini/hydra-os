@@ -45,6 +45,8 @@
 
 pub mod copy;
 
+pub mod obj;
+
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -53,7 +55,7 @@ use spin::Mutex;
 use crate::arch::syscall::SyscallFrame;
 use crate::ipc::protocol::{
     LxCall, LxCopy, ENDPOINT_LINUX_SERVER, LX_COPY_OFF, LX_DATA_OFF, LX_DATA_SIZE, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
-    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
+    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
 };
 use crate::ipc::service::ContiguousFrames;
 use crate::task::TaskId;
@@ -61,6 +63,7 @@ use crate::task::TaskId;
 const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
 const EINTR: i64 = -4;
+const EBADF: i64 = -9;
 const EIO: i64 = -5;
 const EAGAIN: i64 = -11;
 const ENOMEM: i64 = -12;
@@ -76,12 +79,50 @@ const ENOSYS: i64 = -38;
 
 /// Linux system call numbers the table covers (the rest always run in the kernel).
 const TABLE_LEN: usize = 512;
-/// Per system call number: 1 if the server answers it.
+/// Per system call number: 0 if the kernel answers it; otherwise the server does, and the
+/// bits say what the call carries ([`T_SERVER`], [`T_FD0`], [`T_IPC`]).
 static TABLE: [AtomicU8; TABLE_LEN] = [const { AtomicU8::new(0) }; TABLE_LEN];
+/// Table bit: the server answers the call.
+const T_SERVER: u8 = 1;
+/// Table bit (Group 9): `args[0]` is a descriptor; the call carries its server object's slot
+/// ([`LxCall::obj`]) and holds the descriptor while it is in flight.
+const T_FD0: u8 = 2;
+/// Table bit (Group 9): the call carries the caller's IPC namespace.
+const T_IPC: u8 = 4;
+/// Table bit (Group 9): the call carries the caller's umask.
+const T_UMASK: u8 = 8;
+/// Table bit (Group 9): the u32 that `args[1]` points to is a descriptor (bpf's attribute
+/// block starts with one for the map element commands): its server object's slot goes in
+/// [`LxCall::obj`], and `obj_flags` gets [`LX_OBJ_FLAGS_AT1`] and the descriptor in bits 32..62
+/// (the server uses it only when its own reading of the attribute names the same one).
+const T_FDAT1: u8 = 16;
 /// [`LX_NULL_NR`] (outside the table) goes to the server.
 static NULL_TO_SERVER: AtomicBool = AtomicBool::new(false);
 /// The calls step 1 moved to the server: `add_key`, `request_key`, `keyctl`.
 pub const MOVED: [u64; 3] = [248, 249, 250];
+/// The calls step 2 moves (Group 9), with their table bits.
+pub const MOVED_STEP2: &[(u64, u8)] = &[
+    // mq_open, mq_unlink (by name, per IPC namespace)
+    (240, T_IPC | T_UMASK),
+    (241, T_IPC),
+    // mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr (on a queue descriptor)
+    (242, T_FD0),
+    (243, T_FD0),
+    (244, T_FD0),
+    (245, T_FD0),
+    // System V semaphores and messages (shared memory stays in the kernel): semget, semop,
+    // semctl, semtimedop, msgget, msgsnd, msgrcv, msgctl
+    (64, T_IPC),
+    (65, T_IPC),
+    (66, T_IPC),
+    (220, T_IPC),
+    (68, T_IPC),
+    (69, T_IPC),
+    (70, T_IPC),
+    (71, T_IPC),
+    // bpf (maps, programs, links: server objects; device programs come back to the kernel)
+    (321, T_FDAT1),
+];
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
 
@@ -102,7 +143,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -111,6 +152,9 @@ pub fn init() {
 pub fn set_forwarding(on: bool) {
     for nr in MOVED {
         TABLE[nr as usize].store(on as u8, Ordering::Release);
+    }
+    for &(nr, bits) in MOVED_STEP2 {
+        TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
     }
     NULL_TO_SERVER.store(on, Ordering::Release);
 }
@@ -146,6 +190,23 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
         Route::Server if !ONLINE.load(Ordering::Acquire) => Some(ENOSYS),
         Route::Server => Some(call(frame)),
     }
+}
+
+/// Forwards system call `nr` with `args` made on server object `dev` (a descriptor's
+/// device; `args[0]` is the descriptor): `read`, `write`, `readv`, `writev` and `ioctl` on
+/// it (wave 4, step 2). A stale object (its server went away) gives `-EBADF`.
+pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
+    let Some(o) = dev.as_server() else { return EBADF };
+    let Some(slot) = o.slot() else { return EBADF };
+    if !ONLINE.load(Ordering::Acquire) {
+        return EBADF;
+    }
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = args;
+    c.obj = slot;
+    c.obj_flags = o.flags();
+    call_ident(c, false)
 }
 
 // ----------------------------------------------------------------------
@@ -326,6 +387,42 @@ fn call(frame: &SyscallFrame) -> i64 {
     let mut c = LxCall::EMPTY;
     c.nr = frame.rax;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    let bits = if (c.nr as usize) < TABLE_LEN { TABLE[c.nr as usize].load(Ordering::Relaxed) } else { 0 };
+    // Group 9: the server object at args[0], held until the call is answered (a close on
+    // another thread cannot overtake the call)
+    let _held = if bits & T_FD0 != 0 {
+        obj::current_fd(c.args[0]).map(|(dev, slot, flags)| {
+            c.obj = slot;
+            c.obj_flags = flags;
+            dev
+        })
+    } else {
+        None
+    };
+    let _held1 = if bits & T_FDAT1 != 0 {
+        crate::compat::linux::vfs::copy_in(c.args[1], 4).ok().and_then(|b| {
+            let fd = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
+            obj::current_fd(fd).map(|(dev, slot, flags)| {
+                c.obj = slot;
+                c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                dev
+            })
+        })
+    } else {
+        None
+    };
+    if bits & T_IPC != 0 {
+        c.ipc_ns = crate::compat::linux::ns::ipc_ns();
+    }
+    if bits & T_UMASK != 0 {
+        c.umask = crate::task::with_current_fds_mut(|f| f.umask) as u64;
+    }
+    call_ident(c, true)
+}
+
+/// [`call`] with the call's number, arguments and object filled in: adds the caller's
+/// identity (and its groups when `groups`) and waits for the answer (under the kernel lock).
+fn call_ident(mut c: LxCall, groups: bool) -> i64 {
     let mut sched = crate::task::SCHEDULER.lock();
     let my_idx = sched.current_index();
     let me = sched.current_task_mut(|t| {
@@ -342,7 +439,7 @@ fn call(frame: &SyscallFrame) -> i64 {
     });
     drop(sched);
     let Some(me) = me else { return ENOSYS };
-    if c.nr != LX_NULL_NR {
+    if groups && c.nr != LX_NULL_NR {
         if let Some(p) = crate::compat::linux::proc::PROCS.lock().get(&c.tgid) {
             let n = p.groups.len().min(LX_GROUPS);
             c.groups[..n].copy_from_slice(&p.groups[..n]);
@@ -711,7 +808,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     // During a driver call (whose caller may hold kernel locks) the ordinary path waits it
     // out first; this path never waits for a lock such a caller could hold
+    // Calls that carry more than their arguments (a descriptor's server object, the IPC
+    // namespace, the umask: Group 9's table bits) take the ordinary path, whose lookups of
+    // the descriptor table and the process need the kernel lock
     if route(nr) != Route::Server
+        || ((nr as usize) < TABLE_LEN && TABLE[nr as usize].load(Ordering::Relaxed) & !T_SERVER != 0)
         || !ONLINE.load(Ordering::Acquire)
         || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
         || crate::task::scheduler::handoff_active()
@@ -755,6 +856,11 @@ pub fn delivery_maybe() -> bool {
 // ----------------------------------------------------------------------
 // Server side (native system calls of linux-server)
 // ----------------------------------------------------------------------
+
+/// The thread that made request `id` (served or pending), for the object primitives.
+fn client_of(id: u64) -> Option<u64> {
+    lx(|s| s.reqs.iter().find(|r| r.id == id && matches!(r.state, RState::Delivered | RState::Pending)).map(|r| r.client))
+}
 
 /// The calling task's ID and process, if it is linux-server.
 fn server_caller() -> Result<(u64, u64), i64> {
@@ -825,6 +931,7 @@ pub fn ctl(op: u64) -> i64 {
             }
             NOTES_HEAD.store(0, Ordering::Release);
             NOTES.store(base, Ordering::Release);
+            obj::online(win.as_mut_ptr() as u64);
             ONLINE.store(true, Ordering::Release);
             let n = lx(|s| s.workers.len());
             crate::kprintln!("[lx] linux-server online (process {}, {} workers)", tgid, n);
@@ -859,12 +966,18 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
             let wi = s.workers.iter().position(|w| w.task == me)?;
             s.workers[wi].idx = my_idx;
             let mut wake = (0u64, 0u64, 0usize);
+            let mut interrupted = 0u64;
             let cur = s.workers[wi].req;
             if flags & LX_REPLY_NONE == 0 && cur != NONE {
                 let r = &mut s.reqs[cur];
                 if r.state == RState::Delivered {
                     if flags & LX_REPLY_PENDING != 0 {
                         r.state = RState::Pending;
+                        // Group 9: a signal that came while the call was served is told now
+                        // (the caller already marked it and will not tell again)
+                        if r.interrupted {
+                            interrupted = r.id;
+                        }
                     } else {
                         r.state = RState::Done;
                         r.result = result;
@@ -891,10 +1004,13 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
             if !next {
                 s.workers[wi].idle = true;
             }
-            Some((wake, next, wi))
+            Some((wake, next, wi, interrupted))
         })
     });
-    let Some(((client, id, hint), next, wi)) = answered else { return EPERM };
+    let Some(((client, id, hint), next, wi, interrupted)) = answered else { return EPERM };
+    if interrupted != 0 {
+        note(LX_NOTE_INTERRUPT, interrupted, 0, 0);
+    }
     if client != 0 {
         // Straight back to the caller, unless a call was delivered to this worker meanwhile;
         // otherwise the caller is woken the ordinary way
@@ -1145,6 +1261,8 @@ static RECOVERING: AtomicBool = AtomicBool::new(false);
 pub fn on_signal(bits: u64) {
     if bits == crate::ipc::service::SIGNAL_GONE {
         server_gone();
+    } else if bits & crate::ipc::protocol::LX_SIGNAL_OBJS != 0 {
+        obj::on_doorbell();
     }
 }
 
@@ -1154,6 +1272,7 @@ fn server_gone() {
     let was_online = ONLINE.swap(false, Ordering::AcqRel);
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
+    obj::offline();
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
     let tgid = lx(|s| {

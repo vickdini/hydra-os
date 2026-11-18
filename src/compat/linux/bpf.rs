@@ -910,17 +910,15 @@ pub const DEV_CHAR: u32 = 2;
 /// Whether the calling process's cgroup programs allow `access` to device `kind`
 /// `major:minor` (`EPERM` if one refuses).
 pub fn device_check(kind: u32, major: u32, minor: u32, access: u32) -> Result<(), i64> {
-    if !ANY_DEVICE.load(Ordering::Relaxed) {
+    if !ANY_DEVICE.load(Ordering::Relaxed) && !SERVER_ANY_DEVICE.load(Ordering::Relaxed) {
         return Ok(());
     }
     let group = super::proc::PROCS.lock().get(&super::proc::current_ids().1).and_then(|p| p.cgroup.clone());
     let group = String::from(group.as_deref().unwrap_or(""));
-    let progs: Vec<Arc<Prog>> = ATTACHED
-        .lock()
-        .iter()
-        .filter(|a| a.attach_type == ATTACH_CGROUP_DEVICE && (a.cgroup.is_empty() || group == a.cgroup || group.starts_with(&alloc::format!("{}/", a.cgroup))))
-        .map(|a| a.prog.clone())
-        .collect();
+    let applies = |cg: &str| cg.is_empty() || group == cg || group.starts_with(&alloc::format!("{}/", cg));
+    let mut progs: Vec<Arc<Prog>> =
+        ATTACHED.lock().iter().filter(|a| a.attach_type == ATTACH_CGROUP_DEVICE && applies(&a.cgroup)).map(|a| a.prog.clone()).collect();
+    progs.extend(SERVER_DEVICE.lock().iter().filter(|(cg, _)| applies(cg)).map(|(_, p)| p.clone()));
     for p in progs {
         let mut ctx = Vec::with_capacity(12);
         ctx.extend_from_slice(&((access << 16) | kind).to_le_bytes());
@@ -931,6 +929,51 @@ pub fn device_check(kind: u32, major: u32, minor: u32, access: u32) -> Result<()
         }
     }
     Ok(())
+}
+
+/// The device programs linux-server attached (wave 4, step 2: bpf lives in the server, but
+/// device opens and `mknod`s are decided here, inside the kernel's open path, where it
+/// cannot ask the server): the server hands over the whole list whenever it changes.
+static SERVER_DEVICE: Mutex<Vec<(String, Arc<Prog>)>> = Mutex::new(Vec::new());
+static SERVER_ANY_DEVICE: AtomicBool = AtomicBool::new(false);
+
+/// Replaces the server's device programs with the list in `raw` (`LX_OBJ_BPF_DEVICE`:
+/// entries of `[u32 cgroup length, cgroup, u32 instruction count, instructions]`). Each
+/// program is checked again here; one that uses maps (they live in the server) or fails the
+/// checks refuses the whole list (`EINVAL`) and the previous list stays.
+pub fn set_server_device_programs(raw: &[u8]) -> i64 {
+    let mut list = Vec::new();
+    let mut at = 0usize;
+    let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
+        let s = raw.get(*at..*at + n)?;
+        *at += n;
+        Some(s)
+    };
+    while at < raw.len() {
+        let Some(l) = take(&mut at, 4) else { return EINVAL };
+        let l = u32::from_le_bytes(l.try_into().unwrap()) as usize;
+        let Some(cg) = take(&mut at, l) else { return EINVAL };
+        let cg = String::from_utf8_lossy(cg).into_owned();
+        let Some(n) = take(&mut at, 4) else { return EINVAL };
+        let n = u32::from_le_bytes(n.try_into().unwrap()) as usize;
+        if n == 0 || n > MAX_INSNS {
+            return EINVAL;
+        }
+        let Some(code) = take(&mut at, n * 8) else { return EINVAL };
+        let mut insns = decode(code);
+        // A map reference makes the check fail: the server's maps are not the kernel's
+        if insns.iter().any(|i| i.code == 0x18 && i.src != 0) {
+            return EINVAL;
+        }
+        let mut maps = Vec::new();
+        if check(&mut insns, &mut maps).is_err() {
+            return EINVAL;
+        }
+        list.push((cg, Arc::new(Prog { id: 0, kind: PROG_CGROUP_DEVICE, insns, maps, name: [0; 16], tag: [0; 8] })));
+    }
+    SERVER_ANY_DEVICE.store(!list.is_empty(), Ordering::Relaxed);
+    *SERVER_DEVICE.lock() = list;
+    0
 }
 
 // ----------------------------------------------------------------------

@@ -709,7 +709,137 @@ visibly slow.
 - **Restarting the desktop after a crash** re-runs the boot's `linux plasma` when SDDM
   had been started. It does not restore a desktop started by hand from the shell.
 
-## 12. A faster forwarding path (wave 4, Group 10, branch `mk-lxfast`)
+## 12. Step 2 as built (wave 4, Group 9, branch `mk-lxobj`)
+
+How it is used, in detail, is in [src/linux-server.md](src/linux-server.md) ("Server-object
+descriptors"). In short:
+- **Server-object descriptors** (section 7.1): a new kind of open file whose object lives in
+  linux-server. It is `FileDescriptor::Device` holding `lx::obj::ServerObject` (a server
+  *slot* and the server's generation) rather than a new `FileDescriptor` variant: `dup`,
+  `fork`, `SCM_RIGHTS`, close-on-exec and exit already share and drop `Device` descriptors
+  correctly, and `poll`, `select`, `epoll` and aio already ask them for readiness and wait
+  queues. The last reference going posts `LX_NOTE_CLOSE` to the server, exactly once.
+  `read`, `write`, `readv`, `writev` and `ioctl` on one are forwarded with their user
+  pointers; moved calls that take a descriptor carry its slot (`LxCall::obj`).
+- **Readiness words**: 16 bytes per slot in the server's window, read by the kernel's
+  `poll`/`select`/`epoll` without a call; a changed bitmap and the doorbell
+  (`SYS_SVC_SIGNAL`) wake the waiters; an edge count makes edge-triggered epoll exact; a
+  watched bitmap (set by the kernel when a task first waits on an object) lets the server
+  skip the doorbell for objects nobody waits on.
+- **New primitives**: `SYS_LX_OBJ` (60: install, descriptor lookup, flags, keeping a kernel
+  descriptor for the server, `comm`, the temporary `FDPATH`, the bpf device list) and
+  `SYS_LX_SIG` (61, `sig_post`).
+- **Blocking calls** answer `LX_REPLY_PENDING` and are completed by the call that unblocks
+  them, by the server's main thread at their timeout, by `EINTR` on a signal, or dropped at
+  their process's exit. The worker pool stays at 4 threads and never blocks; 16 blocked
+  receivers do not hold up other calls. (Kept from step 1, fixed here: a signal that arrived
+  while a call was being served was never told to the server if it then went pending.)
+- **Moved**: POSIX message queues (with `mq_notify` by `sig_post` and by glibc's
+  `SIGEV_THREAD` netlink socket, kept for the server by the kernel), System V semaphores and
+  message queues (with `SEM_UNDO` applied when the exit notification is taken, in order with
+  the calls), and `bpf`. Shared memory stays in the kernel until step 8. The in-kernel copies
+  stay for `lx=kernel`.
+
+### 12.1 bpf device programs: decided in the kernel
+
+`bpf::device_check` runs in the kernel's `open` and `mknod` paths (`vfs.rs`), with locks held
+and on every device open; asking the server there would put an IPC call into the VFS for every
+open of a device node. Instead, **the server hands the kernel the complete list of attached
+device programs** (`LX_OBJ_BPF_DEVICE`: each cgroup and its programs' instructions) whenever it
+changes (attach, detach, a link's last descriptor closed or `BPF_LINK_DETACH`), and the kernel
+checks each program again with its own checker and runs it with its own interpreter
+(`bpf::set_server_device_programs`; the interpreter is the in-kernel copy, which stays anyway
+for `lx=kernel`). The kernel cannot reach the server's maps, so a device program that uses maps
+is refused at attach (`EINVAL`); systemd's `DeviceAllow=` programs use none. When the server
+dies, the list is emptied with it. Seccomp filters are classic BPF in `seccomp.rs` (not
+`bpf.rs`) and stay in the kernel; no socket filter runs eBPF in Hydra, so nothing else needs
+the same treatment. Two kernel facts the server needs are temporary primitives: the path of a
+cgroup directory descriptor (`LX_OBJ_FDPATH`, until the VFS moves) and the caller's `comm`.
+
+### 12.2 Measured cost (KVM, 2 CPUs, same VM setup as section 3; µs, medians of 5 loops)
+
+Three runs of `tests/linux/lxbench.c` as root, one after the other on a quiet host:
+5027d87 (before), 70c2216 with `lx=kernel` (the in-kernel code, same build) and 70c2216
+forwarded. Run-to-run noise is about 10 % (compare the first two columns, both in the kernel).
+
+| Call | 5027d87 | 70c2216, lx=kernel | 70c2216, forwarded | Added per call (vs lx=kernel) | Budget |
+|---|---:|---:|---:|---:|---|
+| Forwarded null call (`lx_null`) | 3.46 | 0.56 (answered in the kernel) | 3.35 | +2.8 | ≤ +3.0 |
+| `mq_send` + `mq_receive`, 16 bytes (a pair) | 2.22 | 2.03 | 8.16 | +3.07 | ≤ +3.0 |
+| `semop`, uncontended | 1.41 | 1.20 | 4.13 | +2.93 | ≤ +3.0 |
+| `msgsnd` + `msgrcv`, 16 bytes (a pair) | 2.91 | 2.51 | 8.31 | +2.90 | ≤ +3.0 |
+| bpf array map lookup | 1.56 | 1.40 | 5.49 | +4.09 | ≤ +3.0 |
+| `poll` on a readable message queue | 1.17 | 1.00 | 1.00 | none (no call to the server) | |
+
+- **Where the time goes:** the forwarding itself (+2.8, as step 1 measured) plus one client
+  memory call per pointer the server must read or write (the message, the semaphore
+  operations; for a bpf lookup the attribute block, the key and the value: three). Before the
+  watched bitmap, each message also cost a doorbell (`mq_rtt` 9.55 → 8.16); before the trap
+  looked the bpf map descriptor up, a lookup cost one more primitive call.
+- **To meet the budget everywhere**, the client memory calls must go: Group 10's copy-in
+  table (wave 4, branch `mk-lxfast`) carries small pointer arguments in the syscall page. The
+  server already reads and writes through `Cx::copy_in`/`copy_out`, which use the table when
+  the kernel filled it, so after the merge only the table's entries are needed (`describe` arms
+  for 242, 243, 65/220, 69, 70 and bpf's element commands). Expected: about +2.8 to +3.0 per
+  call for all four.
+- **A blocked receive costs no worker**; the 16-receiver test runs 200 `keyctl` calls in a few
+  milliseconds with 16 threads blocked in `mq_receive`.
+
+**Calls that were not moved** (5027d87 → 70c2216 forwarded, same order of runs):
+
+| Call | Before | After |
+|---|---:|---:|
+| `getpid` | 0.163 | 0.160 |
+| `pread` 4 KiB cached | 1.22 | 1.16 |
+| `open`+`close` | 4.55 | 4.57 |
+| `stat` | 2.35 | 2.39 |
+| `fstat` | 1.15 | 1.10 |
+| pipe round trip | 25.7 | 25.4 |
+| futex round trip | 2.35 | 2.46 |
+| `mmap`+`munmap` 1 MiB | 2.71 | 2.53 |
+| `fork`+`exec`+`wait` | 2,027 | 2,033 |
+| `poll` on a readable pipe | 1.22 | 0.95 |
+| `epoll_wait` on a readable pipe | 1.50 | 1.28 |
+| `keyctl` (forwarded since step 1) | 3.63 | 3.41 |
+
+**KDE password-to-desktop** (`tools/lxbench/kde.sh`, screen settled after Enter): 70c2216
+39.8, 49.9 and 65.9 s; 5027d87 30.3 and 50.6 s, alternated. The host ran the other group's VMs
+at the same time and the spread (30 to 66 s) is far larger than any difference, so these runs
+do not measure step 2. What does: a profile of a whole login on 70c2216 (`linux prof`, 148
+different system calls made) shows **no moved call at all** during the login except 3
+`keyctl` (moved in step 1): the desktop does not use message queues, System V semaphores or
+messages, or bpf, so step 2 cannot slow it down (the 5 % budget is met by construction).
+Firefox, sound and Wine were checked working, not timed.
+
+None got slower beyond the noise. Non-server descriptors pay nothing new in `poll` and
+`epoll` (one more `match` arm for edge-triggered watches on devices); `read` and `write` on
+devices check one trait method.
+
+### 12.3 What step 3 (network sockets as net-server's client) can build on, and what it lacks
+
+- **Ready to use:** a socket becomes a server object (`LX_OBJ_INSTALL` from `socket`,
+  `accept`); calls taking the socket first (`connect`, `sendto`, `recvfrom`, `setsockopt`,
+  ...) carry its slot (`T_FD0`); `read`/`write`/`readv`/`writev`/`ioctl` are forwarded;
+  readiness words with the doorbell and exact edge-triggered epoll; blocking `accept`,
+  `recv` and `connect` answer pending and complete later, without tying up a worker; the
+  crash policy and the switch back need no change.
+- **Still missing:**
+  - **net-server's readiness reaching the words.** Today net-server rings the kernel's hook
+    for its own sockets. As linux-server's client, either net-server's doorbell becomes a
+    notification to linux-server, which copies the state into its words and rings the
+    kernel (two hops), or net-server writes the readiness words of linux-server's objects
+    itself (one hop, but a shared layout). To be decided in step 3.
+  - **More slots.** 2048 objects fit in the window today (32 KiB of words); a browser opens
+    hundreds of sockets, so step 3 may need a bigger or separate readiness area.
+  - **Copy-in table entries** for the socket calls (Group 10's table).
+  - **`timer_arm`.** The server's main thread sleeps until the earliest deadline and is woken
+    when a worker adds one; a kernel timer primitive would be cleaner for socket timeouts.
+  - **Byte transfers between a server object and a kernel file** (`sendfile`, `splice` with a
+    server object on either side) and `mmap` of a server object are not supported.
+  - **Passing server objects through Unix sockets** works today (the kernel passes the
+    descriptor), but needs a primitive once Unix sockets move (step 4).
+
+## 13. A faster forwarding path (wave 4, Group 10, branch `mk-lxfast`)
 
 Three independent parts, each in its own commits (`docs/src/linux-server.md` and
 `docs/src/arch/pcid.md` describe them as built):
@@ -727,7 +857,7 @@ Three independent parts, each in its own commits (`docs/src/linux-server.md` and
 3. **Global kernel pages:** the kernel half's TLB entries survive every CR3 write (CR4.PGE,
    G bit), with a boot self-test and an off switch (`noglobal`, `hydra_run --global-off`).
 
-### 12.1 Measured cost (KVM, 2 CPUs, same VM setup; µs, median of the runs' medians)
+### 13.1 Measured cost (KVM, 2 CPUs, same VM setup; µs, median of the runs' medians)
 
 Before = 5027d87, after = mk-lxfast 0d72ee7, both with the IPC probe compiled in (it is
 called only by its own benchmarks). Runs: before 3, after 3 (PCID on); 2 each (PCID off).
@@ -786,7 +916,7 @@ The host also ran other groups' VMs at times; single runs differ by up to 10 %.
   kernel gave 31.7, 31.7 and 36.1 s, so only side-by-side runs compare.)
 - **Not measured here:** apt-get, tar and the Firefox start (`work.sh`).
 
-### 12.2 What it means for the budget and for step 6a
+### 13.2 What it means for the budget and for step 6a
 
 | What | Budget (6.6) | Before | After |
 |---|---|---:|---:|
