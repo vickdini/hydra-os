@@ -1966,7 +1966,12 @@ impl Scheduler {
         // was woken before it yielded. Without the kernel lock (crate::lx's lock-free path)
         // another CPU may see it so
         let online = crate::arch::smp::online().min(crate::arch::smp::MAX_CPUS);
-        if (0..online).any(|c| c != me && self.cur[c] == idx && self.idle_of[c].is_some()) || crate::arch::percpu::leaving_elsewhere(t.id.0) {
+        // (only a task switched away from without the kernel lock can be resumed while its
+        // CPU is still leaving it: everyone else resumes under the lock that CPU holds until
+        // its trap epilogue is done; the mark is another CPU's cache line, read only then)
+        if (0..online).any(|c| c != me && self.cur[c] == idx && self.idle_of[c].is_some())
+            || (t.nobkl_wait && crate::arch::percpu::leaving_elsewhere(t.id.0))
+        {
             return false;
         }
         if let Some(c) = self.idle_of.iter().position(|i| *i == Some(t.id)) {
