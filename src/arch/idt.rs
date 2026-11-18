@@ -444,6 +444,8 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
     if ctx.vector == 32 {
         crate::arch::pit::on_timer_tick();
         crate::arch::pic::send_eoi(0);
+        // Group 13: linux-server's timers (timer_arm)
+        crate::lx::timer::on_tick();
     }
     // CPU time, at every tick: before the kernel lock, which another CPU may hold (the
     // scheduler lock is only tried; a tick finding it busy is counted by the next)

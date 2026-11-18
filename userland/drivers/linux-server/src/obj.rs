@@ -132,7 +132,13 @@ pub fn flush() {
 /// On an error the caller frees the slot and its own state.
 #[allow(clippy::too_many_arguments)]
 pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8]) -> Result<i64, i64> {
-    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX] };
+    install_tag(cx, slot, kind, flags, mode, uid, gid, name, 0)
+}
+
+/// [`install`] with the kernel's value `tag` (`LxObjDesc::tag`: an inode number, a pid).
+#[allow(clippy::too_many_arguments)]
+pub fn install_tag(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8], tag: u64) -> Result<i64, i64> {
+    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag };
     let n = name.len().min(LX_OBJ_NAME_MAX);
     d.name[..n].copy_from_slice(&name[..n]);
     d.name_len = n as u32;
@@ -153,6 +159,8 @@ pub fn closed(slot: u32, kind: u32) {
         }
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
         LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
+        LX_OBJ_KIND_EVENTFD => crate::eventfd::closed(slot),
+        LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W => crate::pipe::closed(slot),
         _ => {}
     }
     set_ready(slot, 0, 0);

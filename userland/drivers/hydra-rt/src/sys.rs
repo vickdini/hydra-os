@@ -34,6 +34,8 @@ const SYS_LX_READ_STR: u64 = 56;
 const SYS_LX_PROC_INFO: u64 = 57;
 const SYS_LX_OBJ: u64 = 60;
 const SYS_LX_SIG: u64 = 61;
+const SYS_LX_TIMER: u64 = 62;
+const SYS_LX_SIGTAKE: u64 = 63;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -268,6 +270,18 @@ pub fn lx_obj(op: u64, a: u64, b: u64, c: u64) -> Result<u64, i64> {
 /// `-ESRCH` if there is no such process.
 pub fn lx_sig(tgid: u64, sig: u32, code: i32, spid: u32, suid: u32, value: u64) -> Result<(), i64> {
     check(unsafe { syscall5(SYS_LX_SIG, tgid, sig as u64, code as i64 as u64, spid as u64 | (suid as u64) << 32, value) }).map(|_| ())
+}
+
+/// Linux server (Group 13): `timer_arm` and friends (`op`: [`crate::protocol::LX_TIMER_ARM`],
+/// `LX_TIMER_CANCEL`, `LX_TIMER_NOW`); returns the operation's value.
+pub fn lx_timer(op: u64, cookie: u64, ns: u64) -> i64 {
+    unsafe { syscall3(SYS_LX_TIMER, op, cookie, ns) }
+}
+
+/// Linux server (Group 13): `sig_take` (`SYS_LX_SIGTAKE`, signalfd); returns its value or the
+/// negative errno.
+pub fn lx_sigtake(op: u64, a: u64, b: u64, c: u64) -> i64 {
+    unsafe { syscall4(SYS_LX_SIGTAKE, op, a, b, c) }
 }
 
 /// Gives up the rest of the time slice.

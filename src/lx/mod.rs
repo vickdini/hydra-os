@@ -47,6 +47,8 @@ pub mod copy;
 
 pub mod obj;
 
+pub mod timer;
+
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -123,6 +125,19 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
     // bpf (maps, programs, links: server objects; device programs come back to the kernel)
     (321, T_FDAT1),
 ];
+/// The calls step 4 moves (wave 5, Group 13), with their table bits: eventfd, eventfd2.
+/// (Calls on a moved descriptor reach the server through the descriptor: `read`, `write`,
+/// `ioctl`, the socket calls; `socket`/`socketpair` by family.)
+pub const MOVED_STEP4: &[(u64, u8)] = &[(284, 0), (290, 0), (22, 0), (293, 0)];
+/// Step 4's descriptors are made by the server (`lx=kernel` turns it off with the rest).
+pub static STEP4: AtomicBool = AtomicBool::new(false);
+
+/// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
+/// are the server's: the kernel's dispatchers send the calls that make them there.
+pub fn step4() -> bool {
+    STEP4.load(Ordering::Relaxed) && ONLINE.load(Ordering::Acquire)
+}
+
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
 
@@ -143,7 +158,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, eventfd, pipes: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -153,9 +168,10 @@ pub fn set_forwarding(on: bool) {
     for nr in MOVED {
         TABLE[nr as usize].store(on as u8, Ordering::Release);
     }
-    for &(nr, bits) in MOVED_STEP2 {
+    for &(nr, bits) in MOVED_STEP2.iter().chain(MOVED_STEP4) {
         TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
     }
+    STEP4.store(on, Ordering::Release);
     NULL_TO_SERVER.store(on, Ordering::Release);
 }
 
@@ -196,6 +212,11 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
 /// device; `args[0]` is the descriptor): `read`, `write`, `readv`, `writev` and `ioctl` on
 /// it (wave 4, step 2). A stale object (its server went away) gives `-EBADF`.
 pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
+    call_obj_ino(nr, args, dev, 0)
+}
+
+/// [`call_obj`] with [`LxCall::ino`] (Group 13: the socket node of `bind`/`connect`).
+pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, ino: u64) -> i64 {
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return EBADF };
     if !ONLINE.load(Ordering::Acquire) {
@@ -206,7 +227,77 @@ pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::cha
     c.args = args;
     c.obj = slot;
     c.obj_flags = o.flags();
+    c.ino = ino;
     call_ident(c, false)
+}
+
+/// Forwards call `nr` with `args` (no descriptor object) on behalf of the current thread:
+/// the kernel's dispatchers route `socket`/`socketpair` by family and `pipe` this way, and
+/// kernel code asks for server objects with the `LX_KCALL_*` numbers (Group 13). The
+/// caller holds the kernel lock (an ordinary system call path).
+pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
+    if !ONLINE.load(Ordering::Acquire) {
+        return ENOSYS;
+    }
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = args;
+    call_ident(c, false)
+}
+
+/// A transfer between the server object `dev` and a kernel buffer (Group 13: `splice`,
+/// `sendfile`, io_uring, aio's eventfd): `read` (`out` is filled) or `write` (`data` is
+/// sent) of at most the copy area's size, never blocking: `-EAGAIN` when the object is
+/// not ready (the caller waits on its readiness itself). The server posts no `SIGPIPE`.
+/// The caller holds the kernel lock.
+pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+    use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
+    let Some(o) = dev.as_server() else { return EBADF };
+    let Some(slot) = o.slot() else { return EBADF };
+    if !ONLINE.load(Ordering::Acquire) {
+        return EBADF;
+    }
+    let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
+    let mut c = LxCall::EMPTY;
+    c.nr = if write { 1 } else { 0 };
+    c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, 0, 0, 0];
+    c.obj = slot;
+    c.obj_flags = o.flags() | LX_OBJ_FLAGS_KBUF | 0o4000;
+    let mut buf = copy::CopyBuf::EMPTY;
+    if write {
+        buf.data[..n].copy_from_slice(&data[..n]);
+        buf.used = n;
+        buf.hdr.in_off[1] = LX_DATA_OFF as u16;
+        buf.hdr.in_len[1] = n as u16;
+    } else {
+        buf.used = n;
+        buf.hdr.out_off[1] = LX_DATA_OFF as u16;
+        buf.hdr.out_cap[1] = n as u16;
+    }
+    let mut sched = crate::task::SCHEDULER.lock();
+    let my_idx = sched.current_index();
+    let me = sched.current_task_mut(|t| {
+        c.tid = t.id.0;
+        c.tgid = t.tgid;
+        c.uid = t.uid;
+        c.euid = t.euid;
+        c.suid = t.suid;
+        c.gid = t.gid;
+        c.egid = t.egid;
+        c.sgid = t.sgid;
+        c.caps = if t.caps.in_userns { 0 } else { t.caps.effective };
+        t.id.0
+    });
+    drop(sched);
+    let Some(me) = me else { return ENOSYS };
+    c.note_seq = notes_head();
+    let kout = if write { None } else { Some(&mut out[..n]) };
+    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, Some(&buf), true, kout));
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    r
 }
 
 // ----------------------------------------------------------------------
@@ -474,11 +565,12 @@ fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     }
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
-    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl))
+    x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl, None))
 }
 
-/// [`call_with`] with the copies made.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool) -> i64 {
+/// [`call_with`] with the copies made. `kout`: a kernel-buffer read ([`call_obj_kbuf`]):
+/// the output to `args[1]` goes there instead of to user memory.
+fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
     let placed = lx(|s| {
         // Checked under the table's lock: `server_gone` clears ONLINE before it takes the
         // lock, so a call placed here is either failed by it or refused now
@@ -540,7 +632,7 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
             QUEUED_CALLS.fetch_add(1, Ordering::Relaxed);
         }
     }
-    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl)
+    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl, kout)
 }
 
 /// Waits for the answer to request `id` (in `slot`), copies its output to the caller's
@@ -548,7 +640,8 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
 ///
 /// No wake-up is lost: the answer is marked under the table's lock and the caller woken
 /// after it, and the caller blocks only under the same lock after seeing no answer.
-fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool) -> i64 {
+fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
+    let mut kout = kout;
     loop {
         let done = lx(|s| {
             let r = &mut s.reqs[slot];
@@ -573,9 +666,20 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool)
             }
             // The output, from the slot's buffer (the request is still ours: nobody else
             // touches an answered request), then the slot goes
-            let r = match copy::copy_out(buf_of(slot), args) {
-                Ok(()) => v,
-                Err(e) => e,
+            let r = if let Some(k) = kout.as_deref_mut() {
+                // A kernel-buffer read: the bytes for args[1]
+                let b = buf_of(slot);
+                let n = (b.hdr.out_len[1] as usize).min(k.len());
+                if n > 0 {
+                    let o = b.hdr.out_off[1] as usize - LX_DATA_OFF;
+                    k[..n].copy_from_slice(&b.data[o..o + n]);
+                }
+                v
+            } else {
+                match copy::copy_out(buf_of(slot), args) {
+                    Ok(()) => v,
+                    Err(e) => e,
+                }
             };
             free_if(id, RState::Done);
             return r;
@@ -1307,9 +1411,17 @@ fn notes_head() -> u64 {
 /// Posts notification `kind` (`LX_NOTE_*`) with `a`, `b`, `c` to the server and wakes its
 /// main thread. Safe with the scheduler lock held (no allocation, a deferred wake only).
 pub fn note(kind: u64, a: u64, b: u64, c: u64) {
+    if note_quiet(kind, a, b, c) {
+        crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+    }
+}
+
+/// [`note`] without waking the main thread (the caller does, once for several); `false`
+/// when no server is online.
+pub fn note_quiet(kind: u64, a: u64, b: u64, c: u64) -> bool {
     let base = NOTES.load(Ordering::Acquire);
     if base == 0 {
-        return;
+        return false;
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let _g = NOTES_LOCK.lock();
@@ -1333,7 +1445,7 @@ pub fn note(kind: u64, a: u64, b: u64, c: u64) {
             }
         }
     });
-    crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+    true
 }
 
 // ----------------------------------------------------------------------
@@ -1360,6 +1472,7 @@ fn server_gone() {
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
     obj::offline();
+    timer::clear();
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
     let tgid = lx(|s| {

@@ -1194,6 +1194,14 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                             p.lock().add_writer();
                             return install(FileDescriptor::PipeWrite(p), flags);
                         }
+                        // Group 13: a pipe of linux-server: the server makes the new end
+                        FileDescriptor::Device(d)
+                            if (acc == O_RDONLY || acc == O_WRONLY)
+                                && matches!(d.as_server().map(|o| o.kind()), Some(crate::ipc::protocol::LX_OBJ_KIND_PIPE_R | crate::ipc::protocol::LX_OBJ_KIND_PIPE_W)) =>
+                        {
+                            let r = crate::lx::call_obj(crate::ipc::protocol::LX_KCALL_REOPEN, [target_fd as u64, flags as u64, 0, 0, 0, 0], &d);
+                            return if r < 0 { Err(r) } else { Ok(r as usize) };
+                        }
                         _ => {}
                     }
                 }
@@ -2819,6 +2827,15 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
         return Some(EBADF);
     }
     let fd = fd as usize;
+    // Group 13: F_SETPIPE_SZ / F_GETPIPE_SZ on a pipe of linux-server
+    if cmd == 1031 || cmd == 1032 {
+        if let Some(d) = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+            Some(FileDescriptor::Device(d)) if d.as_server().is_some() => Some(d.clone()),
+            _ => None,
+        }) {
+            return Some(crate::lx::call_obj(crate::ipc::protocol::LX_KCALL_FCNTL, [fd as u64, cmd, arg, 0, 0, 0], &d));
+        }
+    }
     Some(match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC if arg as usize >= super::limits::nofile() => EINVAL,
         F_DUPFD | F_DUPFD_CLOEXEC => crate::task::with_current_fds_mut(|fds| match fds.dup_from(fd, arg as usize) {

@@ -78,6 +78,33 @@ fn pipe_of(fd: u64) -> Option<(Arc<Mutex<PipeBuffer>>, bool)> {
     })
 }
 
+/// Group 13: a pipe end of linux-server (wave 5, step 4): its object and whether it is the
+/// write end.
+fn server_pipe_of(fd: u64) -> Option<(Arc<dyn super::chardev::CharDevice>, bool)> {
+    use crate::ipc::protocol::{LX_OBJ_KIND_PIPE_R, LX_OBJ_KIND_PIPE_W};
+    crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(FileDescriptor::Device(d)) => match d.as_server().map(|o| o.kind()) {
+            Some(LX_OBJ_KIND_PIPE_R) => Some((d.clone(), false)),
+            Some(LX_OBJ_KIND_PIPE_W) => Some((d.clone(), true)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// Either kind of pipe end: `Some(is the write end)`; for a server end, whether it is
+/// ready now (`POLLIN`/`POLLHUP` to read, `POLLOUT`/`POLLERR` to write).
+fn any_pipe(fd: u64) -> Option<(bool, bool)> {
+    if let Some((p, w)) = pipe_of(fd) {
+        let p = p.lock();
+        let ready = if w { p.available_write() > 0 } else { p.available_read() > 0 || p.writers_count() == 0 };
+        return Some((w, ready));
+    }
+    let (d, w) = server_pipe_of(fd)?;
+    let ev = d.poll_events();
+    Some((w, if w { ev & 0x000C != 0 } else { ev & 0x0019 != 0 }))
+}
+
 /// Reads a user `loff_t`.
 fn read_off(ptr: u64) -> Result<u64, i64> {
     let raw = copy_in(ptr, 8)?;
@@ -192,6 +219,23 @@ fn pipe_wait(nonblock: bool) -> Result<(), i64> {
 
 /// `tee(2)`: copies up to `len` bytes from pipe `inp` to pipe `out` without consuming them.
 fn tee(inp: u64, out: u64, len: u64, flags: u64) -> i64 {
+    // Group 13: two pipes of linux-server: the server copies (it answers -EAGAIN rather
+    // than waiting; a blocking tee waits here, as for the kernel's pipes)
+    if let (Some((src, false)), Some((dst, true))) = (server_pipe_of(inp), server_pipe_of(out)) {
+        let Some(out_slot) = dst.as_server().and_then(|o| o.slot()) else { return EBADF };
+        if len == 0 {
+            return 0;
+        }
+        loop {
+            let r = crate::lx::call_obj(276, [inp, out_slot, len, flags | SPLICE_F_NONBLOCK, 0, 0], &src);
+            if r != EAGAIN {
+                return r;
+            }
+            if let Err(e) = pipe_wait(flags & SPLICE_F_NONBLOCK != 0) {
+                return e;
+            }
+        }
+    }
     let (Some((src, false)), Some((dst, true))) = (pipe_of(inp), pipe_of(out)) else { return EINVAL };
     if Arc::ptr_eq(&src, &dst) {
         return EINVAL;
@@ -320,12 +364,13 @@ pub fn dispatch(frame: &mut SyscallFrame, num: u64) -> i64 {
         }
         // splice(fd_in, off_in*, fd_out, off_out*, len, flags): one end is a pipe
         275 => {
-            let in_pipe = pipe_of(a[0]);
-            let out_pipe = pipe_of(a[2]);
+            // (Group 13: either kind of pipe, the kernel's or linux-server's)
+            let in_pipe = any_pipe(a[0]);
+            let out_pipe = any_pipe(a[2]);
             if in_pipe.is_none() && out_pipe.is_none() {
                 return EINVAL;
             }
-            if matches!(in_pipe, Some((_, true))) || matches!(out_pipe, Some((_, false))) {
+            if matches!(in_pipe, Some((true, _))) || matches!(out_pipe, Some((false, _))) {
                 return EBADF;
             }
             if (in_pipe.is_some() && a[1] != 0) || (out_pipe.is_some() && a[3] != 0) {
@@ -335,18 +380,8 @@ pub fn dispatch(frame: &mut SyscallFrame, num: u64) -> i64 {
                 return 0;
             }
             let nonblock = a[5] & SPLICE_F_NONBLOCK != 0;
-            if nonblock {
-                if let Some((p, _)) = &in_pipe {
-                    let p = p.lock();
-                    if p.available_read() == 0 && p.writers_count() > 0 {
-                        return EAGAIN;
-                    }
-                }
-                if let Some((p, _)) = &out_pipe {
-                    if p.lock().available_write() == 0 {
-                        return EAGAIN;
-                    }
-                }
+            if nonblock && (matches!(in_pipe, Some((_, false))) || matches!(out_pipe, Some((_, false)))) {
+                return EAGAIN;
             }
             let mut offs = [None, None];
             for (i, p) in [a[1], a[3]].into_iter().enumerate() {
@@ -371,9 +406,9 @@ pub fn dispatch(frame: &mut SyscallFrame, num: u64) -> i64 {
         // tee(fd_in, fd_out, len, flags)
         276 => tee(a[0], a[1], a[2], a[3]),
         // vmsplice(fd, iov, nr_segs, flags): user memory into a pipe, or out of one
-        278 => match pipe_of(a[0]) {
-            Some((_, true)) => super::nested(frame, NR_WRITEV, [a[0], a[1], a[2], 0, 0, 0]),
-            Some((_, false)) => super::nested(frame, NR_READV, [a[0], a[1], a[2], 0, 0, 0]),
+        278 => match any_pipe(a[0]) {
+            Some((true, _)) => super::nested(frame, NR_WRITEV, [a[0], a[1], a[2], 0, 0, 0]),
+            Some((false, _)) => super::nested(frame, NR_READV, [a[0], a[1], a[2], 0, 0, 0]),
             None => EBADF,
         },
         _ => -38,

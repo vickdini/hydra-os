@@ -664,6 +664,11 @@ pub struct LxCall {
     pub ipc_ns: u64,
     /// The caller's umask.
     pub umask: u64,
+    // Group 13 (wave 5, step 4). Appended.
+    /// **Temporary** (until the VFS moves, step 6a): for `bind`/`connect` on a Unix socket
+    /// path name, the socket node's inode the kernel resolved (or created, for `bind`) in
+    /// the caller's context at trap time; a negative errno if that failed; 0 otherwise.
+    pub ino: u64,
 }
 
 impl LxCall {
@@ -689,6 +694,7 @@ impl LxCall {
         obj_flags: 0,
         ipc_ns: 0,
         umask: 0,
+        ino: 0,
     };
 }
 
@@ -905,4 +911,83 @@ pub struct LxObjDesc {
     pub pad: u32,
     /// What `/proc/<pid>/fd/N` shows (`/name` for a message queue, `anon_inode:bpf-map`).
     pub name: [u8; LX_OBJ_NAME_MAX],
+    /// Group 13: a value the kernel may read back from the descriptor (a pidfd's process;
+    /// a Unix socket's or pipe's inode number for `fstat`; 0: none).
+    pub tag: u64,
 }
+
+// Group 13 (wave 5, step 4): Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd
+// ----------------------------------------------------------------------------------------
+
+/// The read end of a pipe (or a FIFO opened for reading).
+pub const LX_OBJ_KIND_PIPE_R: u32 = 16;
+/// The write end of a pipe (or a FIFO opened for writing).
+pub const LX_OBJ_KIND_PIPE_W: u32 = 17;
+/// A Unix socket.
+pub const LX_OBJ_KIND_UNIX: u32 = 18;
+/// An eventfd.
+pub const LX_OBJ_KIND_EVENTFD: u32 = 19;
+/// A timerfd.
+pub const LX_OBJ_KIND_TIMERFD: u32 = 20;
+/// A signalfd.
+pub const LX_OBJ_KIND_SIGNALFD: u32 = 21;
+/// A pidfd.
+pub const LX_OBJ_KIND_PIDFD: u32 = 22;
+
+/// [`LxCall::obj_flags`] bit: a transfer the kernel makes with its own buffer (`splice`,
+/// `sendfile`, io_uring, aio's eventfd): `args[1]` is [`LX_KBUF_ADDR`], whose bytes are all in
+/// the copy area (in for a write, out for a read). The server must answer at once (never
+/// `LX_REPLY_PENDING`: `-EAGAIN` instead; the kernel waits on the readiness word) and posts
+/// no `SIGPIPE` (the kernel does).
+pub const LX_OBJ_FLAGS_KBUF: u64 = 1 << 61;
+/// `args[1]` of a kernel-buffer call: not a user address (a fallback to the client memory
+/// primitives fails with `-EFAULT`).
+pub const LX_KBUF_ADDR: u64 = 0xFFFF_FF80_0000_0000;
+
+/// `SYS_LX_OBJ` operation (descriptor passing, `SCM_RIGHTS`): `(request id, buf, n)`: keeps
+/// `n` descriptors of the caller for the server. `buf` (server memory) holds `n` entries of
+/// three u64: in `[0]` the descriptor; out `[1]` a token, `[2]` what it is:
+/// `slot | kind << 32 | 1 << 63` for one of this server's objects, 0 for a kernel
+/// descriptor. All or nothing (`-EBADF` names no entry).
+pub const LX_OBJ_TAKE: u64 = 9;
+/// `SYS_LX_OBJ` operation: `(request id, buf, n | flags << 32)`: installs kept descriptors
+/// in the caller's table (`flags`: `O_CLOEXEC`). Entries of two u64: in `[0]` a token, out
+/// `[1]` the new descriptor. Installed tokens are used up; on an error (`-EMFILE`) the
+/// entries not installed keep their tokens and their `[1]` is `u64::MAX`.
+pub const LX_OBJ_GIVE: u64 = 10;
+/// `SYS_LX_OBJ` operation: `(buf, n)`: lets `n` kept descriptors go (u64 tokens).
+pub const LX_OBJ_DROP: u64 = 11;
+/// `SYS_LX_OBJ` operation: `(slot)`: how many kernel references hold the server object in
+/// `slot` (descriptors, kept descriptors, calls in flight); 0 if none.
+pub const LX_OBJ_REFS: u64 = 12;
+
+/// Native system call `SYS_LX_TIMER` (62) operation: `(cookie, ns)`: notify
+/// [`LX_NOTE_TIMER`] once the kernel's monotonic clock reaches `ns` (re-arming a cookie
+/// replaces its deadline). Checked at every timer tick (10 ms).
+pub const LX_TIMER_ARM: u64 = 0;
+/// `SYS_LX_TIMER` operation: `(cookie)`: forget the timer.
+pub const LX_TIMER_CANCEL: u64 = 1;
+/// `SYS_LX_TIMER` operation: returns the kernel's monotonic clock (ns since boot).
+pub const LX_TIMER_NOW: u64 = 2;
+/// Notification: timer `a` (a cookie) armed for `b` expired.
+pub const LX_NOTE_TIMER: u64 = 6;
+/// Notification (signalfd): a signal in mask `b` became pending for thread `a` (0: for
+/// the process `c`).
+pub const LX_NOTE_SIGNAL: u64 = 7;
+
+/// Kernel to linux-server's main thread: the text of `/proc/net/unix`; the text goes to
+/// [`LX_PROC_KEYS_TEXT_OFF`] (reply `args[0]`: its length).
+pub const MSG_LX_PROC_NET_UNIX: u32 = 0xA002;
+
+/// Hydra-private call numbers the kernel forwards on behalf of the current Linux thread
+/// (not reachable from user mode: the table only routes numbers below 512 and
+/// [`LX_NULL_NR`]). `LX_KCALL_REOPEN(fd, access)`: opening `/proc/self/fd/N` of a pipe: a
+/// new descriptor for the same pipe (`args[1]`: `O_RDONLY` or `O_WRONLY`, plus
+/// `O_CLOEXEC`/`O_NONBLOCK`), object in [`LxCall::obj`].
+pub const LX_KCALL_REOPEN: u64 = 0x6780;
+/// `LX_KCALL_PIDFD(pid, flags)`: a new pidfd for process `pid` in the caller's table
+/// (`clone(CLONE_PIDFD)`, `SO_PEERPIDFD` of a kernel socket).
+pub const LX_KCALL_PIDFD: u64 = 0x6781;
+/// `LX_KCALL_FCNTL(fd, cmd, arg)`: `fcntl` commands of server objects
+/// (`F_GETPIPE_SZ`, `F_SETPIPE_SZ`).
+pub const LX_KCALL_FCNTL: u64 = 0x6782;
