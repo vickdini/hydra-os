@@ -802,6 +802,15 @@ forwarded. Run-to-run noise is about 10 % (compare the first two columns, both i
 | `epoll_wait` on a readable pipe | 1.50 | 1.28 |
 | `keyctl` (forwarded since step 1) | 3.63 | 3.41 |
 
+**KDE password-to-desktop** (`tools/lxbench/kde.sh`, screen settled after Enter): 70c2216
+39.8, 49.9 and 65.9 s; 5027d87 30.3 and 50.6 s, alternated. The host ran the other group's VMs
+at the same time and the spread (30 to 66 s) is far larger than any difference, so these runs
+do not measure step 2. What does: a profile of a whole login on 70c2216 (`linux prof`, 148
+different system calls made) shows **no moved call at all** during the login except 3
+`keyctl` (moved in step 1): the desktop does not use message queues, System V semaphores or
+messages, or bpf, so step 2 cannot slow it down (the 5 % budget is met by construction).
+Firefox, sound and Wine were checked working, not timed.
+
 None got slower beyond the noise. Non-server descriptors pay nothing new in `poll` and
 `epoll` (one more `match` arm for edge-triggered watches on devices); `read` and `write` on
 devices check one trait method.
