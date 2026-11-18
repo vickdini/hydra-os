@@ -15,7 +15,7 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 3 | PCID, Linux layer step 1 | Merged, pushed, deployed (5027d87) | 93,725 |
 | 4 | Linux layer step 2, faster forwarding | **Running**, started 2026-11-18 | |
 | 5–9 | Linux layer steps 3–8, plus the personality hook (wave 5) | Planned (below) | about 50,000 expected at the end |
-| 10–12 | Shared POSIX core, then FreeBSD and macOS programs | Planned (below) | |
+| 10–13 | Shared POSIX core, then FreeBSD and macOS programs | Planned (below); step 0 done in wave 4 | |
 
 - **Why the line count rose in wave 3:** step 1 added the forwarding machinery (`src/lx`, 946 lines) and PCID (`src/arch/pcid.rs`, 365 lines). It also keeps the in-kernel copy of each moved piece, as the switch back to the kernel (`lx=kernel`), until a later step deletes it.
 - **Today:** the Linux layer (`src/compat/linux`) is 51,444 lines, still mostly in the kernel. The ring-3 drivers and servers (`userland/drivers`) are 22,339 lines.
@@ -176,7 +176,7 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
 
 | Wave | Steps (design 7.2) | What moves | Needs first | Agent-days |
 |---|---|---|---|---:|
-| **5** | **3:** network sockets and netlink, as net-server's client<br>**4:** Unix sockets, pipes, event descriptors (in parallel: different files)<br>**Personality hook** (a small third group, see "Waves 10–12") | `inet`, `sockopt`, `rtnetlink`, `netlink` (about 2,900 lines); `unix`, `socket`, pipes, `eventfd`, `timerfd`, `signalfd`, `pidfd` (about 3,300); nothing moves for the hook | Wave 4's server-object descriptors | 4–5, 5–6 and 3–4 |
+| **5** | **3:** network sockets and netlink, as net-server's client<br>**4:** Unix sockets, pipes, event descriptors (in parallel: different files)<br>**Personality hook** (a small third group, see "Waves 10–13") | `inet`, `sockopt`, `rtnetlink`, `netlink` (about 2,900 lines); `unix`, `socket`, pipes, `eventfd`, `timerfd`, `signalfd`, `pidfd` (about 3,300); nothing moves for the hook | Wave 4's server-object descriptors | 4–5, 5–6 and 3–4 |
 | **6** | **5a:** sound<br>**5b:** terminals, DRM and input | `snd` (2,137); `tty`, `pty` (1,583); `drm`, `evdev` (2,309) | **Your decision:** where sound and the display go | 6–7 |
 | **7** | **6a:** VFS, mounts, pseudo files, the descriptor table (alone: the largest and riskiest step) | about 17,000 lines | **Your decision:** whether the VFS fast paths stay in the kernel | 12–14 |
 | **8** | **6b:** the rest of the file side<br>**7:** processes and signal policy (in parallel) | `io_uring`, `aio`, `inotify`, `fanotify`, `fuse`, `landlock`, `acl`, `abac` (about 7,150); `proc` policy, `process`, `execve`, `ns`, `limits`, timers, `admin` (about 5,900) | Step 6a | 5–6 and 7–8 |
@@ -190,7 +190,8 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
   - Tests: `apt-get update`, Firefox loading pages, download throughput before and after, and killing net-server and linux-server.
 - **Step 4:** pipes and Unix sockets carry D-Bus and Wayland, so their speed shows at once on the desktop. Budget: pipe and Unix round trips no slower than today.
 - **Temporary primitives:** step 4 adds two, path lookup for socket files and descriptor passing between processes. Step 6a removes them.
-- **Personality hook:** small kernel changes that prepare for programs from other systems (waves 11–12). It changes no behavior for Linux programs.
+- **Personality hook:** small kernel changes that prepare for programs from other systems (waves 11–13). It changes no behavior for Linux programs. Section-by-section design: [personality-design.md](personality-design.md) (about 1,070 kernel lines).
+  - **First:** today's kernel starts FreeBSD programs as Linux programs, and they crash at once (FreeBSD enters programs with a different stack layout). Until a FreeBSD front end exists, they must fail cleanly with `ENOEXEC`.
   - Each process gets a personality, chosen from its ELF marking (the OS/ABI byte and the ABI note) or by its loader. Linux stays the default.
   - The forwarding table is looked up per personality instead of being one global Linux table. The cost must stay one load per system call.
   - The trap returns results in the personality's convention. Linux returns a negative error number; the BSDs set the carry flag and return a positive error.
@@ -204,7 +205,7 @@ Each wave does one or two steps of section 7.2 of the design. Two habits carry t
 - If its fast paths stay in the kernel, the step is smaller, but the kernel keeps file-system code for good.
 - Wave 4's numbers will show which is realistic, so this decision is best made after wave 4.
 
-### Waves 10–12: programs from other systems (planned)
+### Waves 10–13: programs from other systems (planned)
 
 By the end of wave 9, `linux-server` owns the files, descriptors, sockets, pipes, processes and signal policy. It is then really a general POSIX server with a Linux front end. These waves use that to run FreeBSD and macOS programs **without Linux as an intermediary**: their calls go to a shared core, not through Linux system calls.
 
@@ -222,11 +223,15 @@ So one **BSD core** serves both, with a thin front end each. macOS adds Mach on 
 - its desktop programs use the same Wayland, Mesa and Qt stack as Linux. They can draw through the KDE compositor over a shared Unix socket, so graphics come almost free;
 - it has its own test suite (`kyua`) to measure progress.
 
+**Step 0 is done** (wave 4, Group 11): [personality-design.md](personality-design.md), with full tables of FreeBSD's 409 and macOS's 455 system calls and 62 Mach traps ([FreeBSD](personality-freebsd-syscalls.md), [macOS](personality-macos-syscalls.md), [error numbers](personality-errno.md)), scripts in `tools/personality/` and test programs in `tests/freebsd/` and `tests/macos/`. The estimates below are its revised ones.
+
 | Wave | What | Needs first | Agent-days (rough) |
 |---|---|---|---:|
-| **10** | **The core split:** `linux-server` becomes a shared POSIX core (VFS, descriptors, sockets, pipes, processes, signals) with Linux as one front end. No behavior change for Linux programs | Wave 9 | 5–7 |
-| **11** | **FreeBSD programs:** a FreeBSD front end, a `/freebsd` root from `base.txz`, then `pkg` and graphical programs | Waves 5 (hook) and 10 | 15–25 |
-| **12 and later** | **macOS programs (Intel builds only):** a macOS front end on the BSD core, a `mach-server` for Mach traps and ports, and a root of Darling's open-source frameworks | Wave 11 | large; graphics decide it |
+| **10** | **The core split:** `linux-server` becomes a shared POSIX core (VFS, descriptors, sockets, pipes, processes, signals) with Linux as one front end. No behavior change for Linux programs | Wave 9 | 6–8 |
+| **11a** | **FreeBSD programs, part 1:** the FreeBSD front end, the `/freebsd` root from `base.txz`, the dynamic linker (30 calls) and the base system's command-line tools | Waves 5 (hook) and 10 | 10–13 |
+| **11b** | **FreeBSD programs, part 2:** `kqueue`, threads, `sysctl` in full, `pkg`, graphical programs through the KDE compositor, and **Windows programs through FreeBSD's own Wine package** (Windows without Linux in the path) | Wave 11a | 11–15 |
+| **12** | **macOS command-line programs (Intel builds only):** a Mach-O loader, a macOS front end on the BSD core, a `mach-server` for Mach traps and ports (started from darlingserver), and a root of Darling's open-source frameworks | Wave 11 | 35–55 |
+| **13 and later** | **macOS graphical programs:** Darling's AppKit through its Wayland back end, CoreGraphics; Metal needs a Metal-on-Vulkan layer and a GPU driver | Wave 12 | not estimated |
 
 **Wave 11 detail, the FreeBSD front end:**
 - **Threads and locks:** `thr_new` and `_umtx_op`, mapped onto the kernel's existing thread and futex primitives.
@@ -238,14 +243,15 @@ So one **BSD core** serves both, with a thin front end each. macOS adds Mach on 
 - **Not included:** FreeBSD's own `zfs` and `zpool` tools. They talk to a kernel module, which Hydra's zfs-server does not provide.
 
 **Wave 12 detail, macOS:**
-- **The bottom layer:** Darling's frameworks are macOS code. Only their bottom layer (`libsystem_kernel`) talks to the system, so it is rebuilt to call Hydra's macOS front end and `mach-server` instead of Linux.
-- **Mach:** Hydra's IPC (endpoints, request IDs, page grants) is close to Mach's ports and out-of-line memory.
-- **Graphics are the hard part.** Darling's AppKit and CoreGraphics are incomplete. Without Linux in the path, they need back ends for Hydra's display server (wave 6). Metal needs a Metal-on-Vulkan layer and a GPU driver, which Hydra does not have. Command-line Mac programs are the realistic first goal.
+- **The bottom layer:** Darling's frameworks are macOS code. Its Linux-emulating bottom layer (about 39,000 lines) can be dropped, not rewritten: with a macOS personality, Apple's original system-call stubs work unchanged.
+- **Mach:** Hydra's IPC (endpoints, request IDs, page grants) is close to Mach's ports and out-of-line memory. `darlingserver` (with its XNU Mach code) is the natural start for `mach-server`, built as a FreeBSD-personality program after wave 11.
+- **Kernel pieces:** a Mach-O loader (about 1,200 lines), a commpage at its fixed address (which lies in Hydra's default stack area, so macOS programs get a lower stack top), the 4 GiB `__PAGEZERO` floor, TLS in `%gs`.
+- **Graphics are the hard part.** Darling's AppKit has a Wayland back end, so it could draw through the KDE compositor, but AppKit and CoreGraphics are incomplete, and its GUI pieces did not build in step 0 (they need newer compilers and libraries). Metal needs a Metal-on-Vulkan layer and a GPU driver, which Hydra does not have. Command-line Mac programs are the realistic first goal.
 - **Limits:**
   - only Intel or universal binaries run on x86_64 machines, and macOS 26 is the last macOS for Intel;
   - Apple's own frameworks cannot be shipped.
 
-**The same pattern applies to Windows programs.** A Wine back end that talks to the POSIX core or to Hydra directly, instead of through Linux system calls, would be a front end of the same kind. It is likely more useful than macOS, because Windows programs already run under Wine today.
+**Windows programs without Linux** come before macOS, in wave 11b: FreeBSD's own Wine package runs on the FreeBSD front end. Step 0 found this cheaper than a separate native Wine back end.
 
 **A shortcut, if FreeBSD programs are wanted sooner.** Translate FreeBSD calls into Linux calls inside `linux-server`, as FreeBSD's own "Linuxulator" does in the other direction. It works earlier, with only the wave 5 hook, but it puts Linux in the path, and the core split would throw most of it away. Use it only if a specific FreeBSD program is needed before wave 10.
 
