@@ -520,6 +520,8 @@ impl AddressSpace {
             }
             p3_entry.set_flags(p3_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
             if p3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                // Nothing user visible stays global (its TLB entry would outlive CR3 writes)
+                p3_entry.set_flags(p3_entry.flags() - PageTableFlags::GLOBAL);
                 crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
                 continue;
             }
@@ -533,7 +535,7 @@ impl AddressSpace {
             if p2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
                 // A 2 MiB page of the direct map (the heap): programs of the shared address
                 // space run code from it, as from the identity-mapped heap before
-                p2_entry.set_flags(p2_entry.flags() - PageTableFlags::NO_EXECUTE);
+                p2_entry.set_flags(p2_entry.flags() - PageTableFlags::NO_EXECUTE - PageTableFlags::GLOBAL);
                 crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
                 continue;
             }
@@ -543,7 +545,7 @@ impl AddressSpace {
             if !p1_entry.flags().contains(PageTableFlags::PRESENT) {
                 continue;
             }
-            p1_entry.set_flags(p1_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+            p1_entry.set_flags((p1_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE) - PageTableFlags::GLOBAL);
             crate::arch::smp::shootdown(None, Some(page.start_address().as_u64()));
         }
 
@@ -690,6 +692,91 @@ impl AddressSpace {
         Ok(Self {
             pml4_phys: new_pml4_phys,
         })
+    }
+
+    /// Marks every leaf mapping of the kernel half (PML4 entries 256..512: the direct map,
+    /// the kernel image, the boot stack) global (`PageTableFlags::GLOBAL`), so their TLB
+    /// entries survive CR3 writes (with `CR4.PGE`, see `arch::pcid::enable_global`). The
+    /// kernel half is the same in every address space (its PML4 entries point at shared
+    /// tables), which is what makes this correct. Entries reachable by user mode (`USER`
+    /// on the leaf: the legacy shared-address-space windows) are left alone: nothing user
+    /// visible is global. Called once at boot, on the boot processor, before any other
+    /// processor runs.
+    ///
+    /// # Returns
+    ///
+    /// How many entries were marked: (1 GiB, 2 MiB, 4 KiB).
+    pub fn mark_kernel_global(&self) -> (usize, usize, usize) {
+        let mut n = (0, 0, 0);
+        let leaf = |e: &mut PageTableEntry| {
+            let f = e.flags();
+            if f.contains(PageTableFlags::PRESENT) && !f.contains(PageTableFlags::USER_ACCESSIBLE) {
+                e.set_flags(f | PageTableFlags::GLOBAL);
+                true
+            } else {
+                false
+            }
+        };
+        // SAFETY: the kernel's own tables, reached through the direct map; one CPU runs
+        unsafe {
+            let p4 = self.table_at_mut(self.pml4_phys);
+            for i4 in 256..512 {
+                if !p4[i4].flags().contains(PageTableFlags::PRESENT) {
+                    continue;
+                }
+                let p3 = self.table_at_mut(p4[i4].addr());
+                for e3 in p3.iter_mut() {
+                    if !e3.flags().contains(PageTableFlags::PRESENT) {
+                        continue;
+                    }
+                    if e3.flags().contains(PageTableFlags::HUGE_PAGE) {
+                        n.0 += leaf(e3) as usize;
+                        continue;
+                    }
+                    let p2 = self.table_at_mut(e3.addr());
+                    for e2 in p2.iter_mut() {
+                        if !e2.flags().contains(PageTableFlags::PRESENT) {
+                            continue;
+                        }
+                        if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+                            n.1 += leaf(e2) as usize;
+                            continue;
+                        }
+                        let p1 = self.table_at_mut(e2.addr());
+                        for e1 in p1.iter_mut() {
+                            n.2 += leaf(e1) as usize;
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// The 4 KiB leaf entry of `va` if its tables exist (no huge page on the way).
+    ///
+    /// # Safety
+    ///
+    /// The caller changes the entry only as the TLB rules allow (`arch::smp::shootdown`).
+    pub unsafe fn leaf_entry(&self, va: u64) -> Option<&'static mut PageTableEntry> {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        let p4 = self.table_at_mut(self.pml4_phys);
+        let e4 = &p4[page.p4_index()];
+        if !e4.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        let p3: &'static mut PageTable = self.table_at_mut(e4.addr());
+        let e3 = &p3[page.p3_index()];
+        if !e3.flags().contains(PageTableFlags::PRESENT) || e3.flags().contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        let p2: &'static mut PageTable = self.table_at_mut(e3.addr());
+        let e2 = &p2[page.p2_index()];
+        if !e2.flags().contains(PageTableFlags::PRESENT) || e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        let p1: &'static mut PageTable = self.table_at_mut(e2.addr());
+        Some(&mut p1[page.p1_index()])
     }
 
     /// Creates a new isolated user address space with higher-half kernel mappings shared.

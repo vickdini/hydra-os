@@ -68,6 +68,28 @@
 //! - QEMU's `-fw_cfg name=opt/hydra/pcid,string=off`.
 //!
 //! Off, CR3 writes flush everything and shootdowns work as before PCID.
+//!
+//! ## Global kernel pages (wave 4)
+//!
+//! The kernel half of every address space is the same (the PML4 entries 256..512 point at
+//! shared tables), so its TLB entries need not be refilled after a CR3 write. With
+//! `CR4.PGE` and the G bit on the kernel half's leaf entries ([`enable_global`]), they are
+//! global: kept across every CR3 write, with or without PCID, and shared by all IDs.
+//!
+//! - **Flushing them:** only a change of the kernel's shared tables can make one stale, and
+//!   every such change goes through `shootdown(None, ..)`: `invlpg` (which drops a global
+//!   entry of that address) or, for everything, `INVPCID` type 2 (all contexts *including*
+//!   globals) or a toggle of `CR4.PGE`, on every CPU. A plain CR3 write never drops them.
+//! - **Never user visible:** entries with the USER bit are not marked, and
+//!   `make_user_accessible` clears G where it adds USER. The low half (the user area, the
+//!   identity slots) is never marked.
+//! - **Off switch:** the boot option `noglobal` (or `pge=off`), a file `\hydra\noglobal`
+//!   on the EFI partition, or QEMU's `-fw_cfg name=opt/hydra/pge,string=off`
+//!   (`tools/hydra_run.py --global-off`): then CR4.PGE stays clear and the G bits are
+//!   never set, exactly as before.
+//! - **Self-test:** `memory::vm::global_self_test` (boot, one CPU) checks that a global
+//!   entry survives a CR3 switch and that each kind of kernel shootdown removes it; a
+//!   failure turns global pages off again.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -90,6 +112,10 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static INVPCID: AtomicBool = AtomicBool::new(false);
 /// What turned PCID off on purpose (read before `ExitBootServices`).
 static OFF_BY: Mutex<Option<&'static str>> = Mutex::new(None);
+/// Whether CR4.PGE is on with the kernel half's leaf entries global.
+static GLOBAL: AtomicBool = AtomicBool::new(false);
+/// What turned global pages off on purpose (or why they are off).
+static GLOBAL_OFF_BY: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// Per CPU: slot `i` (ID `i`, 1..=4095) holds the root its entries belong to (0: none),
 /// possibly with [`STALE`].
@@ -166,6 +192,57 @@ pub fn discover() {
     } else if crate::fs::bootfs::file_exists("\\hydra\\nopcid") {
         *OFF_BY.lock() = Some("file \\hydra\\nopcid on the EFI partition");
     }
+    let fw = crate::arch::fwcfg::read_file_into("opt/hydra/pge", &mut cfg).map(|n| &cfg[..n]);
+    if fw.is_some_and(|v| v.starts_with(b"off")) {
+        *GLOBAL_OFF_BY.lock() = Some("QEMU fw_cfg opt/hydra/pge=off");
+    } else if crate::arch::iommu::load_options_say(&[b"pge=off", b"noglobal"]) {
+        *GLOBAL_OFF_BY.lock() = Some("boot option noglobal");
+    } else if crate::fs::bootfs::file_exists("\\hydra\\noglobal") {
+        *GLOBAL_OFF_BY.lock() = Some("file \\hydra\\noglobal on the EFI partition");
+    }
+}
+
+/// Whether the kernel half's pages are global (CR4.PGE on).
+#[inline(always)]
+pub fn global_enabled() -> bool {
+    GLOBAL.load(Ordering::Relaxed)
+}
+
+/// Marks the kernel half's leaf entries global and turns CR4.PGE on (see the module
+/// comment), unless an off switch says no. Called on the boot processor with the kernel's
+/// own tables loaded and the direct map on, before the other processors start (they copy
+/// this CPU's CR4) and before any program runs.
+pub fn enable_global() {
+    use x86_64::registers::control::Cr4;
+    if let Some(why) = *GLOBAL_OFF_BY.lock() {
+        crate::kprintln!("[pge] global kernel pages off: turned off by {}", why);
+        return;
+    }
+    let pml4 = read_cr3() & ADDR_MASK;
+    let space = crate::memory::paging::AddressSpace::from_pml4(x86_64::PhysAddr::new(pml4));
+    let (g1, g2, g4) = x86_64::instructions::interrupts::without_interrupts(|| {
+        let n = space.mark_kernel_global();
+        // On, and every cached entry (marked or not) flushed: a change of PGE flushes all
+        let cr4 = Cr4::read_raw();
+        unsafe {
+            Cr4::write_raw(cr4 & !(1 << 7));
+            Cr4::write_raw(cr4 | (1 << 7));
+        }
+        n
+    });
+    GLOBAL.store(true, Ordering::SeqCst);
+    crate::kprintln!("[pge] global kernel pages on: {} 1 GiB, {} 2 MiB and {} 4 KiB kernel entries kept across address-space switches", g1, g2, g4);
+}
+
+/// Turns global pages off again on the boot processor (the self-test failed), before the
+/// other processors start: CR4.PGE cleared (which flushes every entry; the G bits are then
+/// ignored by the CPU).
+pub fn disable_global(why: &'static str) {
+    use x86_64::registers::control::Cr4;
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe { Cr4::write_raw(Cr4::read_raw() & !(1 << 7)) });
+    GLOBAL.store(false, Ordering::SeqCst);
+    *GLOBAL_OFF_BY.lock() = Some(why);
+    crate::kprintln!("[pge] global kernel pages turned off: {}", why);
 }
 
 /// Turns PCID on on the boot processor, if the CPU has it and nothing turned it off.
@@ -347,13 +424,15 @@ pub fn without_invpcid<R>(f: impl FnOnce() -> R) -> R {
 
 /// One line about PCID and its counters since boot (all CPUs).
 pub fn summary() -> alloc::string::String {
+    let pge = if global_enabled() { "global kernel pages on" } else { "global kernel pages off" };
     if !enabled() {
         let why = OFF_BY.lock().unwrap_or("the CPU does not have it");
-        return alloc::format!("PCID off ({})", why);
+        return alloc::format!("PCID off ({}), {}", why, pge);
     }
     let sum = |f: fn(&Counters) -> &AtomicU64| COUNTERS.iter().map(|c| f(c).load(Ordering::Relaxed)).sum::<u64>();
     alloc::format!(
-        "PCID on (INVPCID {}): CR3 loads kept the TLB {} times, flushed a taken-over ID {} times, a stale ID {} times; {} remote slots marked stale, {} INVPCID single-ID flushes, {} all-ID flushes",
+        "{}; PCID on (INVPCID {}): CR3 loads kept the TLB {} times, flushed a taken-over ID {} times, a stale ID {} times; {} remote slots marked stale, {} INVPCID single-ID flushes, {} all-ID flushes",
+        pge,
         if INVPCID.load(Ordering::Relaxed) { "yes" } else { "no" },
         sum(|c| &c.hits),
         sum(|c| &c.misses),
