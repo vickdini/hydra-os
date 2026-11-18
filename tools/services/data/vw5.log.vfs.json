@@ -1,0 +1,184 @@
+{
+ "GCC": {
+  "sc": {
+   "61": 92,
+   "89": 64400,
+   "435": 90,
+   "257": 14154,
+   "262": 2469,
+   "0": 5247,
+   "59": 91,
+   "1": 434,
+   "10": 607,
+   "9": 3246,
+   "3": 5541,
+   "21": 694,
+   "80": 2,
+   "5": 5513,
+   "12": 1371,
+   "87": 30,
+   "217": 60,
+   "318": 126,
+   "8": 494,
+   "11": 198,
+   "14": 616,
+   "302": 333,
+   "16": 185,
+   "13": 602,
+   "17": 184,
+   "439": 30,
+   "158": 92,
+   "79": 92,
+   "72": 66,
+   "56": 1,
+   "218": 92,
+   "273": 93,
+   "98": 30,
+   "99": 90,
+   "334": 92,
+   "118": 1,
+   "33": 2,
+   "63": 1,
+   "52": 1,
+   "111": 1,
+   "120": 1
+  },
+  "fs": {
+   "lookup": 486,
+   "resolve": 24127,
+   "getattr": 6079,
+   "setattr": 64,
+   "read": 316,
+   "write": 433,
+   "create": 60,
+   "readlink": 56043,
+   "unlink": 32,
+   "readdir": 130,
+   "open_ref": 242,
+   "release": 212,
+   "sync_if_dirty": 3,
+   "getxattr": 91
+  },
+  "fd": {
+   "0": {
+    "file": 5247
+   },
+   "1": {
+    "file": 433,
+    "tty": 1
+   },
+   "3": {
+    "file": 5416,
+    "dir": 122,
+    "pseudo": 2,
+    "tty": 1
+   },
+   "5": {
+    "file": 5386,
+    "dir": 122,
+    "pseudo": 4,
+    "tty": 1
+   },
+   "8": {
+    "file": 494
+   },
+   "9": {
+    "file": 2080
+   },
+   "16": {
+    "pseudo": 182,
+    "tty": 3
+   },
+   "17": {
+    "file": 184
+   },
+   "72": {
+    "file": 62,
+    "pseudo": 3,
+    "tty": 1
+   },
+   "217": {
+    "dir": 60
+   },
+   "33": {
+    "pseudo": 2
+   }
+  },
+  "path": {
+   "257": {
+    "dev": 2,
+    "tmp": 90,
+    "abs": 13970,
+    "rel": 92
+   },
+   "262": {
+    "tmp": 92,
+    "abs": 2074,
+    "rel": 303
+   },
+   "21": {
+    "tmp": 30,
+    "abs": 664
+   },
+   "439": {
+    "abs": 30
+   },
+   "89": {
+    "tmp": 150,
+    "abs": 64250
+   },
+   "59": {
+    "abs": 91
+   },
+   "80": {
+    "tmp": 2
+   },
+   "87": {
+    "tmp": 30
+   }
+  },
+  "cache": {
+   "names": [
+    111340,
+    24613
+   ],
+   "attrs": [
+    57110,
+    6079
+   ],
+   "links": [
+    122,
+    56043
+   ]
+  },
+  "faults": {
+   "fault: present (CoW/upgrade)": 609,
+   "fault: anonymous (zero page)": 85107,
+   "fault: mapped object": 112568,
+   "fault: failed": 0,
+   "mapped file page read from the pool": 79,
+   "disk reads (0 blocks)": 0,
+   "other disk requests (166 blocks)": 50,
+   "vectored disk reads (0 blocks)": 0,
+   "wakeup IPIs (idle CPU kicks) sent": 483,
+   "other IPIs (TLB flushes) sent": 0
+  },
+  "fs_ms": {
+   "lookup": 5,
+   "resolve": 395,
+   "getattr": 42,
+   "setattr": 1,
+   "read": 5,
+   "write": 17,
+   "create": 3,
+   "readlink": 416,
+   "unlink": 1,
+   "readdir": 13,
+   "open_ref": 3,
+   "release": 5,
+   "sync_if_dirty": 87,
+   "getxattr": 1
+  },
+  "time_s": 8.298
+ }
+}

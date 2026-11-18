@@ -2412,7 +2412,12 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         proc::set_fs_peer(child, proc::current_ids().1);
     }
     if let Some(ptr) = pidfd_ptr {
-        let fd = pidfd::install(child, false) as i32;
+        // Group 13: pidfds are linux-server's (unless switched back)
+        let fd = if crate::lx::step4() {
+            crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_PIDFD, [child, 0, 0, 0, 0, 0]) as i32
+        } else {
+            pidfd::install(child, false) as i32
+        };
         if !crate::memory::vm::prefault_current(ptr, 4, true) {
             return -EFAULT;
         }

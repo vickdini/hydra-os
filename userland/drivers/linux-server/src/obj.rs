@@ -32,8 +32,42 @@ pub fn init(window: *mut u8) {
     BASE.store(window as u64, Ordering::Release);
 }
 
+/// Slots in use, and the most ever (Group 13: logged every 256, to size the window).
+static USED: AtomicU32 = AtomicU32::new(0);
+static PEAK: AtomicU32 = AtomicU32::new(0);
+
 /// A free slot for an object of `kind`, its readiness word cleared.
 pub fn alloc(kind: u32) -> Result<u32, i64> {
+    let r = alloc_slot(kind);
+    if r.is_ok() {
+        let n = USED.fetch_add(1, Ordering::Relaxed) + 1;
+        if n > PEAK.load(Ordering::Relaxed) {
+            PEAK.store(n, Ordering::Relaxed);
+            if n % 256 == 0 {
+                let mut kinds = [0u32; 32];
+                for &k in SLOTS.lock().iter() {
+                    kinds[(k as usize).min(31)] += 1;
+                }
+                hydra_rt::println!(
+                    "[linux-server] {} objects in use (pipe ends {}, unix {}, eventfd {}, timerfd {}, signalfd {}, pidfd {}, other {})",
+                    n,
+                    kinds[16] + kinds[17],
+                    kinds[18],
+                    kinds[19],
+                    kinds[20],
+                    kinds[21],
+                    kinds[22],
+                    n - (kinds[16] + kinds[17] + kinds[18] + kinds[19] + kinds[20] + kinds[21] + kinds[22])
+                );
+            }
+        }
+    } else {
+        hydra_rt::println!("[linux-server] out of object slots ({} in use)", USED.load(Ordering::Relaxed));
+    }
+    r
+}
+
+fn alloc_slot(kind: u32) -> Result<u32, i64> {
     let mut s = SLOTS.lock();
     let start = NEXT.load(Ordering::Relaxed) as usize;
     for k in 0..LX_OBJ_SLOTS {
@@ -63,7 +97,11 @@ pub fn kind_of(slot: u32) -> u32 {
 /// Lets slot `slot` go (its object ended).
 pub fn free(slot: u32) {
     if (slot as usize) < LX_OBJ_SLOTS {
-        SLOTS.lock()[slot as usize] = 0;
+        let mut s = SLOTS.lock();
+        if s[slot as usize] != 0 {
+            USED.fetch_sub(1, Ordering::Relaxed);
+        }
+        s[slot as usize] = 0;
     }
 }
 
@@ -132,7 +170,13 @@ pub fn flush() {
 /// On an error the caller frees the slot and its own state.
 #[allow(clippy::too_many_arguments)]
 pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8]) -> Result<i64, i64> {
-    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX] };
+    install_tag(cx, slot, kind, flags, mode, uid, gid, name, 0)
+}
+
+/// [`install`] with the kernel's value `tag` (`LxObjDesc::tag`: an inode number, a pid).
+#[allow(clippy::too_many_arguments)]
+pub fn install_tag(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8], tag: u64) -> Result<i64, i64> {
+    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag };
     let n = name.len().min(LX_OBJ_NAME_MAX);
     d.name[..n].copy_from_slice(&name[..n]);
     d.name_len = n as u32;
@@ -153,6 +197,12 @@ pub fn closed(slot: u32, kind: u32) {
         }
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
         LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
+        LX_OBJ_KIND_EVENTFD => crate::eventfd::closed(slot),
+        LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W | LX_OBJ_KIND_PIPE_RW => crate::pipe::closed(slot),
+        LX_OBJ_KIND_UNIX => crate::unix::closed(slot),
+        LX_OBJ_KIND_PIDFD => crate::pidfd::closed(slot),
+        LX_OBJ_KIND_SIGNALFD => crate::signalfd::closed(slot),
+        LX_OBJ_KIND_TIMERFD => crate::timerfd::closed(slot),
         LX_OBJ_KIND_INET => {
             crate::socket::closed(slot);
             crate::inet::closed(slot);

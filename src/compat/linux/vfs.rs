@@ -464,6 +464,107 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     Ok(ino)
 }
 
+/// FIFOs of the in-kernel code (`lx=kernel`), by node: the pipe while any end is open.
+static FIFOS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Weak<spin::Mutex<crate::fs::pipe::PipeBuffer>>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Group 13: `open` of FIFO node `ino` with the in-kernel pipes (`lx=kernel`): a reader
+/// waits for a writer and a writer for a reader, unless `O_NONBLOCK` (a writer then fails
+/// with `ENXIO` when there is no reader). `O_RDWR` gives the read end (the in-kernel
+/// descriptor has no end that does both; linux-server's has).
+fn open_fifo_kernel(ino: u64, flags: u32) -> Result<usize, i64> {
+    use crate::fs::pipe::PipeBuffer;
+    let acc = flags & O_ACCMODE;
+    let nonblock = flags & O_NONBLOCK != 0;
+    let pipe = {
+        let mut m = FIFOS.lock();
+        m.retain(|_, w| w.strong_count() > 0);
+        match m.get(&ino).and_then(|w| w.upgrade()) {
+            Some(p) => p,
+            None => {
+                let p = PipeBuffer::new();
+                {
+                    let mut b = p.lock();
+                    b.drop_reader();
+                    b.drop_writer();
+                }
+                m.insert(ino, alloc::sync::Arc::downgrade(&p));
+                p
+            }
+        }
+    };
+    let write = acc == O_WRONLY;
+    if write && nonblock && pipe.lock().readers_count() == 0 {
+        return Err(-6); // ENXIO
+    }
+    if write {
+        pipe.lock().add_writer();
+    } else {
+        pipe.lock().add_reader();
+    }
+    let desc = if write { FileDescriptor::PipeWrite(pipe.clone()) } else { FileDescriptor::PipeRead(pipe.clone()) };
+    if acc != 2 && !nonblock {
+        // Wait for the other side (a tick at a time)
+        loop {
+            let other = if write { pipe.lock().readers_count() } else { pipe.lock().writers_count() };
+            if other > 0 {
+                break;
+            }
+            if super::proc::signal_pending() {
+                if write {
+                    pipe.lock().drop_writer();
+                } else {
+                    pipe.lock().drop_reader();
+                }
+                return Err(super::proc::ERESTARTSYS);
+            }
+            crate::task::sleep_ticks(1);
+        }
+    }
+    if nonblock {
+        let mut b = pipe.lock();
+        if write {
+            b.write_nonblock = true;
+        } else {
+            b.read_nonblock = true;
+        }
+    }
+    let r = install(desc, flags);
+    if r.is_err() {
+        if write {
+            pipe.lock().drop_writer();
+        } else {
+            pipe.lock().drop_reader();
+        }
+    }
+    r
+}
+
+/// Group 13 (temporary, until the VFS moves: `vfs_resolve`): the socket node `connect`
+/// names, resolved for the caller: `ENOENT` if missing, `ECONNREFUSED` if it is not a
+/// socket, `EACCES` without write permission on it (as Linux).
+pub(crate) fn socket_node_for_connect(path: &[u8]) -> Result<u64, i64> {
+    const S_IFSOCK: u32 = 0o140000;
+    let (base, _) = base_dir(AT_FDCWD, path)?;
+    let ino = resolve(base, path, true)?;
+    let attr = ZfsClient::getattr(ino)?;
+    if attr.mode & 0o170000 != S_IFSOCK {
+        return Err(-111);
+    }
+    let c = creds();
+    if !may_access(&attr, c.euid, c.egid, 2) {
+        return Err(EACCES);
+    }
+    Ok(ino)
+}
+
+/// Group 13: removes the socket node `bind` made at `path` (the bind failed afterwards).
+pub(crate) fn unlink_socket_node(path: &[u8]) {
+    let Ok((base, _)) = base_dir(AT_FDCWD, path) else { return };
+    if let Ok((dir, name)) = resolve_parent(base, path) {
+        let _ = zfs(|s| s.unlink(dir, &name));
+    }
+}
+
 /// Resolves a user path to (inode, is a directory) for the caller.
 ///
 /// # Arguments
@@ -1194,6 +1295,14 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                             p.lock().add_writer();
                             return install(FileDescriptor::PipeWrite(p), flags);
                         }
+                        // Group 13: a pipe of linux-server: the server makes the new end
+                        FileDescriptor::Device(d)
+                            if (acc == O_RDONLY || acc == O_WRONLY)
+                                && matches!(d.as_server().map(|o| o.kind()), Some(crate::ipc::protocol::LX_OBJ_KIND_PIPE_R | crate::ipc::protocol::LX_OBJ_KIND_PIPE_W)) =>
+                        {
+                            let r = crate::lx::call_obj(crate::ipc::protocol::LX_KCALL_REOPEN, [target_fd as u64, flags as u64, 0, 0, 0, 0], &d);
+                            return if r < 0 { Err(r) } else { Ok(r as usize) };
+                        }
                         _ => {}
                     }
                 }
@@ -1334,6 +1443,15 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
             return Err(EACCES);
         }
         no_truncate = refused & super::landlock::TRUNCATE != 0;
+    }
+    // Group 13: a FIFO (`mkfifo` node) opens as a pipe end (before, it opened as an empty
+    // regular file: GNU make's jobserver FIFO busy-looped)
+    if ftype == S_IFIFO && flags & O_PATH == 0 {
+        if crate::lx::step4() {
+            let r = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_FIFO, [ino, flags as u64, 0, 0, 0, 0]);
+            return if r < 0 { Err(r) } else { Ok(r as usize) };
+        }
+        return open_fifo_kernel(ino, flags);
     }
     if ftype == S_IFCHR || ftype == 0o060000 {
         // Device control (cgroup bpf programs)
@@ -2819,6 +2937,15 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
         return Some(EBADF);
     }
     let fd = fd as usize;
+    // Group 13: F_SETPIPE_SZ / F_GETPIPE_SZ on a pipe of linux-server
+    if cmd == 1031 || cmd == 1032 {
+        if let Some(d) = crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
+            Some(FileDescriptor::Device(d)) if d.as_server().is_some() => Some(d.clone()),
+            _ => None,
+        }) {
+            return Some(crate::lx::call_obj(crate::ipc::protocol::LX_KCALL_FCNTL, [fd as u64, cmd, arg, 0, 0, 0], &d));
+        }
+    }
     Some(match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC if arg as usize >= super::limits::nofile() => EINVAL,
         F_DUPFD | F_DUPFD_CLOEXEC => crate::task::with_current_fds_mut(|fds| match fds.dup_from(fd, arg as usize) {

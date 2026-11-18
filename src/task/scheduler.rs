@@ -2844,7 +2844,8 @@ pub(crate) fn idle_task_entry() {
         // A precise sleep ends before the next tick: the timer only interrupts at ticks, so
         // wait for it here (spinning on the time stamp counter, interrupts enabled) and wake
         // it on time rather than at the tick
-        let due = super::HR_EARLIEST.load(core::sync::atomic::Ordering::Relaxed);
+        // (Group 13: linux-server's timers, `timer_arm`, are precise the same way)
+        let due = super::HR_EARLIEST.load(core::sync::atomic::Ordering::Relaxed).min(crate::lx::timer::next_due());
         if due != u64::MAX && x86_64::instructions::interrupts::are_enabled() {
             // Due within one tick period: the next timer interrupt may come after it (the
             // interrupts' phase is not the clock's tick boundaries)
@@ -2861,6 +2862,7 @@ pub(crate) fn idle_task_entry() {
                 }
                 crate::arch::smp::bkl_enter_idle();
                 if crate::arch::pit::now_ns() >= due {
+                    x86_64::instructions::interrupts::without_interrupts(crate::lx::timer::on_tick);
                     let woke = crate::task::SCHEDULER.try_lock().is_some_and(|mut s| s.hr_wake());
                     if woke {
                         crate::task::yield_now();

@@ -80,7 +80,7 @@ pub enum Arg {
 /// What the six arguments of a call are.
 pub type Desc = [Arg; 6];
 
-use Arg::{In, None as N, Out, Str};
+use Arg::{In, InOut, None as N, Out, Str};
 
 /// Strings of the key service (type, description, keyring name): Linux limits them to
 /// 4095 bytes plus the NUL.
@@ -123,13 +123,24 @@ static MSGRCV: Desc = [N, Out(fixed_plus_arg(8, 2)), N, N, N, N];
 /// bpf(cmd, attr, size): the attribute block in only (some commands write parts of it back
 /// themselves, which a copy-back of the whole block would overwrite)
 static BPF: Desc = [N, In(len_arg(2)), N, N, N, N];
+// Group 13 (step 4): timerfd_settime(fd, flags, new, old), timerfd_gettime(fd, cur),
+// signalfd4(fd, mask, size, flags)
+static TFD_SET: Desc = [N, N, In(fixed(32)), Out(fixed(32)), N, N];
+static TFD_GET: Desc = [N, Out(fixed(32)), N, N, N, N];
+static SIGNALFD: Desc = [N, In(fixed(8)), N, N, N, N];
+// read/write/readv/writev on a server object (forwarded only for those): the buffer, or the
+// iovec array (the server reads and writes the pieces themselves)
+static READ: Desc = [N, Out(len_arg(2)), N, N, N, N];
+static WRITE: Desc = [N, In(len_arg(2)), N, N, N, N];
+static IOVEC: Desc = [N, In(Len { fixed: 0, arg: 2, mul: 16 }), N, N, N, N];
+// (the socket calls' arms are Group 12's, below; recvmsg's msghdr is InOut: Group 13's
+// Unix sockets write it back whole)
 
 // Step 3's socket calls (Group 12; family-independent: Group 13's Unix sockets get the
 // same arms). A socket address goes out into 128 bytes of room (the server writes only
 // what the caller's `*addrlen` allows) and its length in/out as 4 bytes; a `msghdr` comes
 // whole (the server writes it back whole: `msg_namelen`, `msg_controllen`, `msg_flags`),
 // its iovecs and control data through the client memory calls.
-use Arg::InOut;
 /// Room for a socket address the server writes (`sockaddr_storage`).
 const SOCKADDR_OUT: Len = fixed(128);
 /// A `socklen_t`.
@@ -176,6 +187,12 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         69 => Some(&MSGSND),
         70 => Some(&MSGRCV),
         321 => Some(&BPF),
+        0 => Some(&READ),
+        1 => Some(&WRITE),
+        19 | 20 => Some(&IOVEC),
+        286 => Some(&TFD_SET),
+        287 => Some(&TFD_GET),
+        282 | 289 => Some(&SIGNALFD),
         // Sockets (step 3)
         42 | 49 => Some(&SOCK_ADDR_IN),
         43 | 288 | 51 | 52 => Some(&SOCK_ADDR_OUT),

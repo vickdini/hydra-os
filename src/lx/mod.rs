@@ -47,6 +47,8 @@ pub mod copy;
 
 pub mod obj;
 
+pub mod timer;
+
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -123,6 +125,19 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
     // bpf (maps, programs, links: server objects; device programs come back to the kernel)
     (321, T_FDAT1),
 ];
+/// The calls step 4 moves (wave 5, Group 13), with their table bits: eventfd, eventfd2.
+/// (Calls on a moved descriptor reach the server through the descriptor: `read`, `write`,
+/// `ioctl`, the socket calls; `socket`/`socketpair` by family.)
+pub const MOVED_STEP4: &[(u64, u8)] = &[(284, 0), (290, 0), (22, 0), (293, 0), (434, 0), (282, T_FD0), (289, T_FD0), (283, 0), (286, T_FD0), (287, T_FD0)];
+/// Step 4's descriptors are made by the server (`lx=kernel` turns it off with the rest).
+pub static STEP4: AtomicBool = AtomicBool::new(false);
+
+/// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
+/// are the server's: the kernel's dispatchers send the calls that make them there.
+pub fn step4() -> bool {
+    STEP4.load(Ordering::Relaxed) && ONLINE.load(Ordering::Acquire)
+}
+
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
 
@@ -171,6 +186,8 @@ pub const MOVED_FAMILIES: &[(u64, Target)] = &[
     (2, TARGET_LINUX),
     (10, TARGET_LINUX),
     (16, TARGET_LINUX),
+    // Group 13 (step 4): AF_UNIX
+    (1, TARGET_LINUX),
 ];
 /// `socket`, `socketpair`: routed by family.
 pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
@@ -178,6 +195,21 @@ pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
 /// recvfrom, sendmsg, recvmsg, shutdown, bind, listen, getsockname, getpeername,
 /// setsockopt, getsockopt, accept4, recvmmsg, sendmmsg.
 pub const BYFD_NUMBERS: &[u64] = &[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55, 288, 299, 307];
+/// Group 13: `read`, `write`, `readv`, `writev`, routed by descriptor like [`BYFD_NUMBERS`]
+/// but decided only by the lock-free test (when it cannot be made, the kernel's
+/// `vfs::stream_io` forwards a server object's call itself, under the kernel lock).
+pub const BYFD_IO_NUMBERS: [u64; 4] = [0, 1, 19, 20];
+/// Group 13, per CPU: the thread whose current `read`/`write` the lock-free entry found to
+/// be on a kernel descriptor (`forward` then skips the test; a stale mark only sends a
+/// call to the kernel's `vfs::stream_io`, which forwards a server object's call itself).
+static IO_KERNEL: [AtomicU64; crate::arch::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+
+/// Group 13: `bind` and `connect` on a Unix socket of the server go through the kernel's
+/// dispatcher first (`ServerObject::socket_call`): a path name's node is made or checked
+/// in the caller's context there (the temporary `vfs_resolve` of step 4).
+fn kernel_first(nr: u64, dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> bool {
+    (nr == 42 || nr == 49) && dev.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_UNIX)
+}
 
 /// Whether `socket`/`socketpair` of address family `family` go to the server.
 pub fn family_moved(family: u64) -> bool {
@@ -210,7 +242,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, AF_INET/AF_INET6/AF_NETLINK sockets: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, AF_INET/AF_INET6/AF_NETLINK/AF_UNIX sockets, eventfd, pipes, pidfd, signalfd, timerfd: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -220,9 +252,10 @@ pub fn set_forwarding(on: bool) {
     for nr in MOVED {
         TABLE[nr as usize].store(on as u8, Ordering::Release);
     }
-    for &(nr, bits) in MOVED_STEP2 {
+    for &(nr, bits) in MOVED_STEP2.iter().chain(MOVED_STEP4) {
         TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
     }
+    STEP4.store(on, Ordering::Release);
     // Socket routing (Group 12): the per-call bits only once some family moved, so that
     // nothing changes for the socket calls before
     let families = if on { MOVED_FAMILIES.iter().fold(0u64, |m, &(f, _)| m | 1 << f) } else { 0 };
@@ -236,6 +269,11 @@ pub fn set_forwarding(on: bool) {
     }
     for &nr in BYFD_NUMBERS {
         TABLE[nr as usize].store(if sockets { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
+    }
+    // Group 13: read, write, readv, writev on server objects (pipes, Unix sockets, eventfd,
+    // ...) take the lock-free path too; on any other descriptor they cost one bit test
+    for nr in BYFD_IO_NUMBERS {
+        TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
     NULL_TO_SERVER.store(on, Ordering::Release);
 }
@@ -287,7 +325,21 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
                     return None;
                 }
                 if bits & T_BYFD != 0 {
-                    let o = byfd_object(frame.rdi)?;
+                    let o = if BYFD_IO_NUMBERS.contains(&nr) {
+                        // (no locks for every read and write: the fast test or the kernel;
+                        // `fast_entry` may have made it already for this very call)
+                        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+                        let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+                        if tid != 0 && IO_KERNEL[cpu].swap(0, Ordering::Relaxed) == tid {
+                            return None;
+                        }
+                        x86_64::instructions::interrupts::without_interrupts(|| ident().and_then(|id| byfd_fast(&id, frame.rdi).ok().flatten()))?
+                    } else {
+                        byfd_object(frame.rdi)?
+                    };
+                    if kernel_first(nr, &o.0) {
+                        return None;
+                    }
                     return Some(call(frame, Some(o)));
                 }
             }
@@ -318,6 +370,22 @@ fn byfd_object(fd: u64) -> Option<(Arc<dyn crate::compat::linux::chardev::CharDe
 /// answers (`fd` holds no server object), `Ok(Some(object))` the server does, `Err(())` it
 /// cannot be told without waiting for a lock (the caller takes the ordinary path).
 fn byfd_fast(id: &Ident, fd: u64) -> Result<Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>, ()> {
+    // Group 13: a cached table whose bit is clear says "the kernel" without touching the
+    // table's reference count (every read and write of a kernel descriptor comes here). The
+    // cache is this thread's table while its identity is unchanged (exec and unshare bump
+    // the epoch), and the running thread holds that table, so its bits are alive.
+    {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*FDS.0[cpu].get() };
+        if e.0 == id.tid && e.1 == id.epoch && e.3 != 0 {
+            // SAFETY: see above
+            let maybe = unsafe { &*(e.3 as *const crate::fs::SrvPtr) }.get().is_some_and(|b| b.maybe(fd));
+            if !maybe {
+                return Ok(None);
+            }
+        }
+    }
     let (fds, srv) = cached_fds(id).ok_or(())?;
     // SAFETY: the bits live as long as the table, which `fds` holds
     let maybe = unsafe { &*srv }.get().is_some_and(|b| b.maybe(fd));
@@ -369,6 +437,11 @@ fn cached_fds(id: &Ident) -> Option<(crate::fs::SharedFdTable, *const crate::fs:
 /// device; `args[0]` is the descriptor): `read`, `write`, `readv`, `writev` and `ioctl` on
 /// it (wave 4, step 2). A stale object (its server went away) gives `-EBADF`.
 pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
+    call_obj_ino(nr, args, dev, 0)
+}
+
+/// [`call_obj`] with [`LxCall::ino`] (Group 13: the socket node of `bind`/`connect`).
+pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, ino: u64) -> i64 {
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return EBADF };
     if !ONLINE.load(Ordering::Acquire) {
@@ -379,7 +452,77 @@ pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::cha
     c.args = args;
     c.obj = slot;
     c.obj_flags = o.flags();
+    c.ino = ino;
     call_ident(c, false)
+}
+
+/// Forwards call `nr` with `args` (no descriptor object) on behalf of the current thread:
+/// the kernel's dispatchers route `socket`/`socketpair` by family and `pipe` this way, and
+/// kernel code asks for server objects with the `LX_KCALL_*` numbers (Group 13). The
+/// caller holds the kernel lock (an ordinary system call path).
+pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
+    if !ONLINE.load(Ordering::Acquire) {
+        return ENOSYS;
+    }
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = args;
+    call_ident(c, false)
+}
+
+/// A transfer between the server object `dev` and a kernel buffer (Group 13: `splice`,
+/// `sendfile`, io_uring, aio's eventfd): `read` (`out` is filled) or `write` (`data` is
+/// sent) of at most the copy area's size, never blocking: `-EAGAIN` when the object is
+/// not ready (the caller waits on its readiness itself). The server posts no `SIGPIPE`.
+/// The caller holds the kernel lock.
+pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+    use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
+    let Some(o) = dev.as_server() else { return EBADF };
+    let Some(slot) = o.slot() else { return EBADF };
+    if !ONLINE.load(Ordering::Acquire) {
+        return EBADF;
+    }
+    let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
+    let mut c = LxCall::EMPTY;
+    c.nr = if write { 1 } else { 0 };
+    c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, 0, 0, 0];
+    c.obj = slot;
+    c.obj_flags = o.flags() | LX_OBJ_FLAGS_KBUF | 0o4000;
+    let mut buf = copy::CopyBuf::EMPTY;
+    if write {
+        buf.data[..n].copy_from_slice(&data[..n]);
+        buf.used = n;
+        buf.hdr.in_off[1] = LX_DATA_OFF as u16;
+        buf.hdr.in_len[1] = n as u16;
+    } else {
+        buf.used = n;
+        buf.hdr.out_off[1] = LX_DATA_OFF as u16;
+        buf.hdr.out_cap[1] = n as u16;
+    }
+    let mut sched = crate::task::SCHEDULER.lock();
+    let my_idx = sched.current_index();
+    let me = sched.current_task_mut(|t| {
+        c.tid = t.id.0;
+        c.tgid = t.tgid;
+        c.uid = t.uid;
+        c.euid = t.euid;
+        c.suid = t.suid;
+        c.gid = t.gid;
+        c.egid = t.egid;
+        c.sgid = t.sgid;
+        c.caps = if t.caps.in_userns { 0 } else { t.caps.effective };
+        t.id.0
+    });
+    drop(sched);
+    let Some(me) = me else { return ENOSYS };
+    c.note_seq = notes_head();
+    let kout = if write { None } else { Some(&mut out[..n]) };
+    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, Some(&buf), true, kout));
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    r
 }
 
 // ----------------------------------------------------------------------
@@ -660,7 +803,7 @@ fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
     loop {
-        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl));
+        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl, None));
         // A net wait ended (Group 12): the same call again, at once
         if r != crate::ipc::protocol::LX_RETRY {
             return r;
@@ -771,8 +914,9 @@ pub fn net_event(handles: Option<&[u32]>) {
     }
 }
 
-/// [`call_with`] with the copies made.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool) -> i64 {
+/// [`call_with`] with the copies made. `kout`: a kernel-buffer read ([`call_obj_kbuf`]):
+/// the output to `args[1]` goes there instead of to user memory.
+fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
     let placed = lx(|s| {
         // Checked under the table's lock: `server_gone` clears ONLINE before it takes the
         // lock, so a call placed here is either failed by it or refused now
@@ -834,7 +978,7 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
             QUEUED_CALLS.fetch_add(1, Ordering::Relaxed);
         }
     }
-    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl)
+    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl, kout)
 }
 
 /// Waits for the answer to request `id` (in `slot`), copies its output to the caller's
@@ -842,7 +986,8 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
 ///
 /// No wake-up is lost: the answer is marked under the table's lock and the caller woken
 /// after it, and the caller blocks only under the same lock after seeing no answer.
-fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool) -> i64 {
+fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
+    let mut kout = kout;
     loop {
         let done = lx(|s| {
             let r = &mut s.reqs[slot];
@@ -867,9 +1012,20 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool)
             }
             // The output, from the slot's buffer (the request is still ours: nobody else
             // touches an answered request), then the slot goes
-            let r = match copy::copy_out(buf_of(slot), args) {
-                Ok(()) => v,
-                Err(e) => e,
+            let r = if let Some(k) = kout.as_deref_mut() {
+                // A kernel-buffer read: the bytes for args[1]
+                let b = buf_of(slot);
+                let n = (b.hdr.out_len[1] as usize).min(k.len());
+                if n > 0 {
+                    let o = b.hdr.out_off[1] as usize - LX_DATA_OFF;
+                    k[..n].copy_from_slice(&b.data[o..o + n]);
+                }
+                v
+            } else {
+                match copy::copy_out(buf_of(slot), args) {
+                    Ok(()) => v,
+                    Err(e) => e,
+                }
             };
             free_if(id, RState::Done);
             return r;
@@ -1118,6 +1274,22 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     // During a driver call (whose caller may hold kernel locks) the ordinary path waits it
     // out first; this path never waits for a lock such a caller could hold
+    // Group 13: read/write on a kernel descriptor, decided first and cheaply (this CPU's
+    // cached descriptor table of this thread, its server-object bit clear)
+    if nr <= 20 && BYFD_IO_NUMBERS.contains(&nr) {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*FDS.0[cpu].get() };
+        if tid != 0 && e.0 == tid && e.1 == crate::compat::linux::ident_epoch() && e.3 != 0 {
+            // SAFETY: the running thread holds that table (see `byfd_fast`)
+            let maybe = unsafe { &*(e.3 as *const crate::fs::SrvPtr) }.get().is_some_and(|b| b.maybe(frame.rdi));
+            if !maybe {
+                IO_KERNEL[cpu].store(tid, Ordering::Relaxed);
+                return None;
+            }
+        }
+    }
     if route(nr) != Route::Server
         || !ONLINE.load(Ordering::Acquire)
         || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
@@ -1126,6 +1298,33 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         return None;
     }
     let id = ident()?;
+    let bits = table_bits(nr);
+    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
+    // ordinary path, whose `forward` finds it the kernel's again (one more bit test).
+    // (Group 13: decided before the call is built: read and write on kernel descriptors
+    // pass here too)
+    if bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX {
+        return None;
+    }
+    let mut byfd = None;
+    if bits & T_BYFD != 0 {
+        match byfd_fast(&id, frame.rdi) {
+            Ok(Some((dev, _, _))) if kernel_first(nr, &dev) => {
+                drop_last(dev);
+                return None;
+            }
+            Ok(Some(o)) => byfd = Some(o),
+            Ok(None) => {
+                // (Group 13: `forward` need not test a read or write again)
+                if BYFD_IO_NUMBERS.contains(&nr) {
+                    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+                    IO_KERNEL[cpu].store(id.tid, Ordering::Relaxed);
+                }
+                return None;
+            }
+            Err(()) => return None,
+        }
+    }
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
@@ -1140,22 +1339,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     // What Group 9's calls carry besides their arguments (see `call`), gathered without
     // waiting for any lock a kernel-lock holder could hold: the descriptor table is taken
     // with `try_lock` (busy: the ordinary path), the IPC namespace comes with the identity
-    let bits = table_bits(nr);
     let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
-    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
-    // ordinary path, whose `forward` finds it the kernel's again (one more bit test)
-    if bits & T_FAMILY != 0 && family_target(c.args[0]) != TARGET_LINUX {
-        return None;
-    }
-    if bits & T_BYFD != 0 {
-        match byfd_fast(&id, c.args[0]) {
-            Ok(Some((dev, slot, flags))) => {
-                c.obj = slot;
-                c.obj_flags = flags;
-                held[0] = Some(dev);
-            }
-            Ok(None) | Err(()) => return None,
-        }
+    if let Some((dev, slot, flags)) = byfd {
+        c.obj = slot;
+        c.obj_flags = flags;
+        held[0] = Some(dev);
     }
     if bits & (T_FAMILY | T_BYFD) != 0 && id.net {
         c.obj_flags |= LX_OBJ_FLAGS_NETNS;
@@ -1524,6 +1712,20 @@ fn client_bytes(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, n: u64, write
     if !crate::memory::vm::is_user_range(addr, n) {
         return Err(EFAULT);
     }
+    // Group 13: a page a userfaultfd handler must supply first, as for the caller's own
+    // kernel accesses (`prefault_current`): wait for it, or EFAULT (UFFD_USER_MODE_ONLY)
+    if crate::compat::linux::userfaultfd::active() {
+        use crate::compat::linux::userfaultfd::{wait_fault, Waited};
+        loop {
+            let id = mm.lock().uffd_missing(addr);
+            let Some(id) = id else { break };
+            match wait_fault(id, addr & !0xFFF, write, true) {
+                Waited::Again => continue,
+                Waited::Proceed => break,
+                Waited::Refuse => return Err(EFAULT),
+            }
+        }
+    }
     let mut m = mm.lock();
     m.prefault(addr, n, write).map_err(|_| EFAULT)?;
     let phys = m.translate(addr).ok_or(EFAULT)?;
@@ -1640,9 +1842,17 @@ fn notes_head() -> u64 {
 /// Posts notification `kind` (`LX_NOTE_*`) with `a`, `b`, `c` to the server and wakes its
 /// main thread. Safe with the scheduler lock held (no allocation, a deferred wake only).
 pub fn note(kind: u64, a: u64, b: u64, c: u64) {
+    if note_quiet(kind, a, b, c) {
+        crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+    }
+}
+
+/// [`note`] without waking the main thread (the caller does, once for several); `false`
+/// when no server is online.
+pub fn note_quiet(kind: u64, a: u64, b: u64, c: u64) -> bool {
     let base = NOTES.load(Ordering::Acquire);
     if base == 0 {
-        return;
+        return false;
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let _g = NOTES_LOCK.lock();
@@ -1666,7 +1876,7 @@ pub fn note(kind: u64, a: u64, b: u64, c: u64) {
             }
         }
     });
-    crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+    true
 }
 
 // ----------------------------------------------------------------------
@@ -1696,6 +1906,7 @@ fn server_gone() {
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
     obj::offline();
+    timer::clear();
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
     let tgid = lx(|s| {
@@ -1881,6 +2092,24 @@ pub fn proc_keys_text() -> Option<alloc::string::String> {
         win[o..o + 4].copy_from_slice(&g.to_le_bytes());
     }
     let msg = crate::ipc::Message::with_args(MSG_LX_PROC_KEYS, [tid, tgid, euid as u64 | (egid as u64) << 32, caps]);
+    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
+        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
+        _ => 0,
+    };
+    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
+    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+}
+
+/// Group 13: `/proc/net/unix` from the server when Unix sockets are its own (`None`: the
+/// in-kernel table answers). A hand-off call, like `/proc/keys`.
+pub fn proc_net_unix_text() -> Option<alloc::string::String> {
+    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_NET_UNIX};
+    if !step4() {
+        return None;
+    }
+    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
+    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
+    let msg = crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]);
     let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
         Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
         _ => 0,

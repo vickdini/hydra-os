@@ -1103,6 +1103,140 @@ its timing (password to settled desktop 1 to 68 s in these runs, dominated by ho
 - Still missing for step 4: read/write/readv/writev on the lock-free path (`T_BYFD` for 0, 1,
   19, 20: the bitmap test makes it cheap for kernel descriptors), descriptor passing, and
   kernel-buffer I/O on server objects (Group 13).
+## 15. Step 4 as built (wave 5, Group 13, branch `mk-lxunix`)
+
+How it is used, in detail, is in [src/linux-server.md](src/linux-server.md) ("Unix sockets,
+pipes and event descriptors"). In short:
+- **Moved:** Unix sockets (`unix.rs` + `socket.rs` of the kernel, 2,175 lines), pipes
+  (`fs/pipe.rs`), `eventfd`, `timerfd`, `signalfd` and `pidfd` are linux-server's server
+  objects (server modules `unix.rs`, `pipe.rs`, `eventfd.rs`, `timerfd.rs`, `signalfd.rs`,
+  `pidfd.rs`, about 2,400 lines). The in-kernel code stays for `lx=kernel` (every moved call
+  goes back to it; the suite, 80 tests with the new `scmrights` and `fifo`, passes in both
+  modes: forwarded 80/80 three times in a row (suite_loop), `lx=kernel` 80/80, IOMMU 79/80
+  with only the known `lowmem`).
+- **Routing:** by number (`pipe*`, `eventfd*`, `timerfd_*`, `signalfd*`, `pidfd_open`), by
+  family (`socket`/`socketpair(AF_UNIX)`) and by descriptor (the socket calls, and `read`,
+  `write`, `readv`, `writev`) with Group 12's routing (`T_FAMILY`, `T_BYFD`), which this
+  branch carries (cherry-picked 973494e, and the `SYS_LX_COMPLETE` race fix of 317b604).
+  `read`/`write` on a kernel descriptor cost one bit test of the descriptor table's
+  server-object bitmap; on a server object they take the lock-free path with the copy table.
+- **New primitives:** `timer_arm` (native 62) and `sig_take` (native 63), as section 5.2
+  proposed; `timer_arm` fires on time (an idle CPU waits for the earliest deadline as for
+  precise sleeps). `pidfd` needed nothing new beyond the exit notification and a "does the
+  process run" question (`LX_OBJ_PROC`): the kernel reads the process back from the
+  descriptor for the calls that act on it (`pidfd_send_signal`, `pidfd_getfd`, `waitid`,
+  `setns`, `process_madvise` stay in the kernel).
+- **Temporary primitives (go with step 6a):** `vfs_resolve` is not a call the server makes
+  but a step the kernel takes in the caller's context before forwarding `bind`/`connect` on
+  a path name (`LxCall::ino`): the node is made or checked with the caller's root, working
+  directory, umask, credentials, ACLs and Landlock, which the server does not have yet.
+  Descriptor passing is `LX_OBJ_TAKE`/`GIVE`/`DROP` (below).
+- **FIFOs** (`mkfifo` nodes) opened as empty regular files before (GNU make's `-j` jobserver
+  FIFO then busy-looped, Group 16's finding); now the kernel's `open` of an `S_IFIFO` node,
+  after its permission checks, asks the server for a pipe end found by the node's inode
+  (`LX_KCALL_FIFO`; Linux's open semantics: a reader waits for a writer and the other way
+  round, `O_NONBLOCK`, `ENXIO`, `O_RDWR`), or with `lx=kernel` makes one of the kernel's
+  pipes (`vfs::open_fifo_kernel`). Suite test `fifo`.
+
+### 15.1 Descriptor passing for kernel-owned descriptors
+
+The descriptor table stays in the kernel, so the server must never own a descriptor. A
+`sendmsg` with `SCM_RIGHTS` makes the server ask the kernel to *keep* the named
+descriptors of the sender (`LX_OBJ_TAKE`): the kernel clones each table entry into a table
+of its own under a token, taking a reference exactly like `dup` (a kernel pipe end counts a
+reader or writer; a server object's last-reference rule is unchanged). The message in the
+server's queue holds only the tokens and, for each, whether it is one of the server's own
+objects (slot and kind). The receiving `recvmsg` asks the kernel to install the tokens in
+the receiver's table (`LX_OBJ_GIVE`, close-on-exec on request); the reference moves from the
+kept table to the receiver's table. Everything not delivered is let go (`LX_OBJ_DROP`): the
+descriptors that do not fit the control buffer (`MSG_CTRUNC`), those of a `read`/`recv`
+without a control buffer, and those queued on a socket that closes. So a regular file, a DRM
+device, a memfd (Wayland's buffers), a pipe end, an eventfd and any other server object
+travel the same way, and the kernel object keeps its identity (shared offsets, `dup`
+semantics, mappings).
+
+**Garbage collection.** A kept server object counts in the kernel's reference count, which
+the server can ask for (`LX_OBJ_REFS`). Sockets whose every kernel reference is a token in
+the server's own queues, and that no queue of a socket with other references can reach, are
+garbage (Linux's `unix_gc` rule); the server empties their queues, the kernel drops the
+tokens, and their last references go as ordinary closes. Sending a socket whose own queue
+holds a Unix socket is still refused (`ETOOMANYREFS`, the kernel's rule), which leaves only
+self-loops and listener queues for the collector.
+
+### 15.2 Measured cost (KVM, 2 CPUs; µs)
+
+`tests/linux/lxbench.c` as root (`scratch/bench13.sh`), on ca0b31d forwarded and with
+`lx=kernel` (the in-kernel code, same build), alternated twice (both runs given). The host
+ran other groups' VMs throughout; single runs differ by up to 25 %.
+
+| Call | `lx=kernel` | forwarded | Budget |
+|---|---:|---:|---|
+| pipe round trip (2 processes, 1 byte each way) | 31.7 / 25.2 | **27.1 / 22.0** | not slower: met |
+| Unix socket round trip | 32.5 / 25.8 | **24.9 / 22.0** | not slower: met |
+| eventfd round trip (2 processes; median of the earlier series, 3 runs each) | 30.2 | **23.9** | not slower: met |
+| `write`+`read` of an eventfd, one thread | 11.9 / 9.7 | **9.1 / 8.1** | |
+| `write`+`read` of 64 bytes through a pipe, one thread | 11.7 / 9.7 | **9.6 / 8.1** | |
+| `send`+`recv` of 64 bytes on a socketpair, one thread | 12.5 / 10.3 | **9.9 / 8.8** | |
+| `sendmsg` with one descriptor + `recvmsg` (Wayland-like) | 15.0 / 12.8 | 17.4 / 16.5 | +2.4 to +3.7 (two forwarded calls, three descriptor primitives) |
+| `timerfd_settime` | 0.98 / 0.79 | 4.96 / 4.60 | +3.8 to +4.0 (over the +3 per call budget: the server re-arms `timer_arm`, one more system call) |
+| `poll` on a readable eventfd (series) | 1.16 | 1.18 | not slower: met |
+| `lx_null` (forwarded null call) | 0.78 / 0.67 | 3.72 / 3.14 | |
+| **Calls not moved:** `getpid` | 0.18 / 0.16 | 0.17 / 0.16 | |
+| `pread` 4 KiB cached | 1.41 / 1.21 | 1.43 / 1.19 | |
+| `write` 64 bytes to `/dev/null` (pays the descriptor-kind bit test) | 1.18 / 1.01 | 1.24 / 1.07 | +5 % (within noise; +40 % before ca0b31d) |
+| `fstat` | 1.24 / 1.16 | 1.25 / 1.16 | |
+| `stat` | 2.67 / 2.29 | 2.59 / 2.32 | |
+| `open`+`close` | 5.34 / 4.66 | 5.97 / 4.42 | |
+
+- **Why the round trips got faster:** a blocked `read` of the in-kernel pipe sleeps on a
+  wait queue and is woken through the scheduler; forwarded, the reader's call is pending
+  in the server, the writer's forwarded call writes the bytes straight into the reader's
+  memory and completes it, and the writer's answer switches straight back (99.9 % of the
+  answers during a KDE login were direct switches). The one-thread write+read loops show
+  that the in-kernel calls themselves are not cheap here either (about 5 µs each).
+- **Over budget:** `timerfd_settime` (+4 µs) and descriptor passing (+3 µs per message
+  pair); neither is on the desktop's hot path (a KDE login makes 5 to 8 timerfds).
+- **KDE password to desktop** (`kderep.sh`, screen settled after Enter; busy host): see
+  15.3.
+
+### 15.3 The desktop: KDE, Firefox, sound, Wine, the crash policy
+
+- **KDE password to desktop** (`kderep.sh`: fresh boot, login, screen settled after Enter;
+  other groups' VMs ran throughout): before (the deployed 329aaf7 ISO) 35.9, 47.8, 32.3 s
+  (median 35.9); step 4 (34054e8) 33.8, 29.5, 26.6 s (median 29.5), run right after them.
+  An earlier set of five step-4 logins during heavy load (with my benchmark VMs beside
+  them): 56.3, 36.3, 41.1, 38.4, 66.3 s. Within the 5 % budget as far as this host can
+  tell (the spread between runs is far larger than any difference). A KDE login makes
+  about 48,000 forwarded calls; 99.9 % of the answers are direct switches.
+- **No crash** in 11 fresh logins (`signal N at` lines: none). Peak server objects: 512 to
+  768 after a login (Unix sockets ~300, eventfds ~200, pipe ends ~170, pidfds ~80), 1,024
+  while Wine ran (pipe ends 411), of 2,048 slots: enough today, tight for a busy session
+  (Firefox with many tabs, Wine); step 5 or 6a should enlarge the readiness area.
+- **Firefox** loads Wikipedia, **sound** plays (`pw-play`, the WAV has samples), **Wine**
+  prints "Microsoft Windows 10.0.19045", Ctrl+Alt+F1/F2 work. **Killing linux-server**
+  under KDE ends every Linux program (225 threads, 13 calls in flight failed with `EIO`),
+  SDDM comes back and a new login works.
+- **A kernel panic found on the way** (in wave 4 code, deployed): "page fault while the
+  faulting process's Mm is locked" at a Firefox start, twice in two runs. The lock-free copy
+  (`lx::copy::each_piece`) unlocks the address space before it clears its mark; a page
+  fault on another CPU could see the lock held and then no mark. `vm::fault_lock` now tries
+  the lock again in that case (b657fc3); step 4 made such copies frequent.
+
+### 15.4 What later steps can build on, and what is missing
+
+- **Step 5 (terminals, devices):** pseudo-terminal pairs can follow the pipe module (the
+  same blocking, readiness and kernel-buffer machinery). The descriptor-passing primitives
+  carry DRM and evdev descriptors already.
+- **Step 6a (VFS, descriptor table):** `vfs_resolve` (`LxCall::ino`, `unix::server_call`)
+  and `LX_OBJ_TAKE`/`GIVE`/`DROP` go: the server then resolves socket nodes and owns the
+  descriptors it passes; the FIFO open (`LX_KCALL_FIFO`) becomes the server's own.
+- **Missing or approximate:** unconnected datagram sends and autobind (as before);
+  `SO_RCVTIMEO`/`SO_SNDTIMEO` are accepted and ignored (as before; `timer_arm` can serve
+  them); a signalfd's `poll` answers for the process that made it; a blocking signalfd read
+  is looked at again every tick (signalfd is normally polled); the server's sockets share
+  one lock (serializes the server side of Unix socket calls on 2 CPUs).
+- **Slots:** 2048 server objects; linux-server logs its count every 256 (see the KDE runs
+  below).
 
 ## Appendix: reproducing the measurements
 

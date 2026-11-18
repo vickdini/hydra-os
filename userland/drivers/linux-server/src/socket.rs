@@ -139,6 +139,10 @@ fn refresh(slot: u32, event: bool) {
 
 /// `socket` (41) and `socketpair` (53): by address family.
 pub fn by_family(cx: &Cx) -> (i64, u64) {
+    // Group 13 (step 4): AF_UNIX
+    if cx.args[0] == 1 {
+        return crate::unix::create(cx);
+    }
     let r = match (cx.nr, cx.args[0]) {
         (41, 2 | 10) => crate::inet::socket(cx),
         (41, 16) => crate::netlink::socket(cx),
@@ -153,6 +157,10 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
     let slot = cx.c.obj as u32;
     if slot as usize >= LX_OBJ_SLOTS {
         return (ENOTSOCK, 0);
+    }
+    // Group 13 (step 4): Unix sockets keep their own waiters (`crate::unix`)
+    if crate::obj::kind_of(slot) == LX_OBJ_KIND_UNIX {
+        return crate::unix::call(cx);
     }
     let mut prog = Prog::new();
     loop {

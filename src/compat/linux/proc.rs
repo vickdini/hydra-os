@@ -1990,6 +1990,12 @@ pub struct TakenSignal {
 /// signal makes its next queued instance pending.
 pub fn take_signal_info(mask: u64) -> Option<TakenSignal> {
     let (tid, pid) = current_ids();
+    take_signal_info_of(tid, pid, mask)
+}
+
+/// [`take_signal_info`] for thread `tid` of process `pid` (Group 13: linux-server's
+/// `sig_take`, for a signalfd read it serves).
+pub fn take_signal_info_of(tid: u64, pid: u64, mask: u64) -> Option<TakenSignal> {
     let mut procs = PROCS.lock();
     let p = procs.get_mut(&pid)?;
     let t = p.threads.entry(tid).or_default();

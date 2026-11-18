@@ -37,8 +37,8 @@ use spin::Mutex;
 use crate::compat::linux::chardev::CharDevice;
 use crate::fs::FileDescriptor;
 use crate::ipc::protocol::{
-    LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_BPF_DEVICE, LX_OBJ_CHANGED_OFF, LX_OBJ_COMM, LX_OBJ_FD, LX_OBJ_FDPATH, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY, LX_OBJ_OFF, LX_OBJ_PIN,
-    LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_UNPIN, LX_OBJ_WATCHED_OFF,
+    LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_BPF_DEVICE, LX_OBJ_CHANGED_OFF, LX_OBJ_COMM, LX_OBJ_DROP, LX_OBJ_FD, LX_OBJ_FDPATH, LX_OBJ_GIVE, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY,
+    LX_OBJ_OFF, LX_OBJ_PIN, LX_OBJ_REFS, LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_TAKE, LX_OBJ_UNPIN, LX_OBJ_WATCHED_OFF,
 };
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 use crate::task::TaskId;
@@ -66,6 +66,8 @@ pub struct ObjShared {
     wq: Arc<WaitQueue>,
     /// `O_NONBLOCK` of the open file (shared by `dup`, as on Linux).
     nonblock: AtomicBool,
+    /// Group 13: the object itself, to count its references ([`LX_OBJ_REFS`]).
+    me: Mutex<alloc::sync::Weak<ServerObject>>,
 }
 
 /// The live objects by slot (to wake them, and to set their flags).
@@ -78,6 +80,11 @@ fn reg<R>(f: impl FnOnce(&mut [Option<Arc<ObjShared>>; LX_OBJ_SLOTS]) -> R) -> R
 /// Kernel descriptors kept for the server ([`LX_OBJ_PIN`]), by token.
 static PINS: Mutex<BTreeMap<u64, Arc<dyn CharDevice>>> = Mutex::new(BTreeMap::new());
 static NEXT_PIN: AtomicU64 = AtomicU64::new(1);
+/// Group 13: descriptors in flight in the server's Unix sockets ([`LX_OBJ_TAKE`]), by token.
+/// They hold their object as a descriptor would (a pipe end stays open while in flight).
+static KEPT: Mutex<BTreeMap<u64, FileDescriptor>> = Mutex::new(BTreeMap::new());
+/// Most descriptors kept at once (Linux limits what one user has in flight too).
+const MAX_KEPT: usize = 65536;
 
 /// An open server object (the device of a `FileDescriptor::Device`).
 pub struct ServerObject {
@@ -94,6 +101,11 @@ pub struct ServerObject {
     quiet: AtomicBool,
     /// Counted in [`super::WATCHED_NET`] (an Internet socket someone waited on).
     watched: AtomicBool,
+    /// Group 13: the server's value for the kernel (a pidfd's process, see `LxObjDesc::tag`).
+    tag: u64,
+    /// Group 13: a signalfd's signals (`LX_OBJ_SIGMASK`); its `poll` is answered here from
+    /// the process's (`tag`'s) pending signals, which posting a signal wakes.
+    sigmask: AtomicU64,
 }
 
 impl ServerObject {
@@ -105,6 +117,11 @@ impl ServerObject {
     /// `LX_OBJ_KIND_*`.
     pub fn kind(&self) -> u32 {
         self.kind
+    }
+
+    /// The server's value for the kernel (`LxObjDesc::tag`: a pidfd's process).
+    pub fn tag(&self) -> u64 {
+        self.tag
     }
 
     /// The object's status flags for a forwarded call (`O_NONBLOCK`).
@@ -154,13 +171,68 @@ impl Drop for ServerObject {
     }
 }
 
+impl ServerObject {
+    /// Group 13: a transfer between the object and a kernel buffer (`splice`, `sendfile`,
+    /// io_uring, aio). The server answers at once (`-EAGAIN` when not ready); a blocking
+    /// descriptor waits here on the readiness word, as a call made by the program would.
+    fn kernel_io(&self, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+        const EAGAIN: i64 = -11;
+        // POLLIN | POLLERR | POLLHUP for a read, POLLOUT | POLLERR for a write
+        let want = if write { 0x0004 | 0x0008 } else { 0x0001 | 0x0008 | 0x0010 };
+        let Some(dev) = self.shared.me.lock().upgrade() else { return EBADF };
+        let dev: Arc<dyn CharDevice> = dev;
+        let mut waits = WaitSet::new();
+        let mut registered = false;
+        loop {
+            let r = super::call_obj_kbuf(&dev, write, data, out);
+            if r != EAGAIN || self.nonblock() {
+                return r;
+            }
+            if !registered {
+                self.add_wait_queues(&mut waits);
+                registered = true;
+            }
+            waits.register();
+            if self.poll_events() & want != 0 {
+                continue;
+            }
+            if crate::compat::linux::proc::signal_pending() {
+                return crate::compat::linux::proc::ERESTARTSYS;
+            }
+            waits.wait(None);
+        }
+    }
+}
+
 impl CharDevice for ServerObject {
-    fn read(&self, _buf: &mut [u8]) -> i64 {
-        // Reads are forwarded before they get here (`vfs::stream_io`)
-        EBADF
+    fn read(&self, buf: &mut [u8]) -> i64 {
+        // Reads of programs are forwarded before they get here (`vfs::stream_io`); this is
+        // the kernel's own (Group 13: a kernel buffer, at most the copy area per call)
+        let n = buf.len().min(crate::ipc::protocol::LX_DATA_SIZE);
+        self.kernel_io(false, &[], &mut buf[..n])
+    }
+
+    fn write(&self, data: &[u8]) -> i64 {
+        // The kernel's own writes (Group 13): in pieces of the copy area's size
+        let mut done = 0usize;
+        while done < data.len() || data.is_empty() {
+            let n = (data.len() - done).min(crate::ipc::protocol::LX_DATA_SIZE);
+            let r = self.kernel_io(true, &data[done..done + n], &mut []);
+            if r < 0 {
+                return if done > 0 { done as i64 } else { r };
+            }
+            done += r as usize;
+            if r == 0 || data.is_empty() {
+                break;
+            }
+        }
+        done as i64
     }
 
     fn poll_events(&self) -> u32 {
+        if self.kind == crate::ipc::protocol::LX_OBJ_KIND_SIGNALFD && self.slot().is_some() {
+            return if crate::compat::linux::proc::pending_for(self.tag, self.sigmask.load(Ordering::Relaxed)) { 0x0001 } else { 0 };
+        }
         self.word().map_or(STALE, |w| w.0)
     }
 
@@ -205,7 +277,8 @@ impl CharDevice for ServerObject {
         st.st_uid = self.uid;
         st.st_gid = self.gid;
         st.st_nlink = 1;
-        st.st_ino = 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64;
+        // (Group 13: both ends of a pipe, and a socket, report the server's inode number)
+        st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
         st
@@ -215,7 +288,16 @@ impl CharDevice for ServerObject {
         Some(self)
     }
 
+    fn socket_call(&self, num: u64, a: [u64; 6]) -> Option<i64> {
+        // Group 13: socket calls on the server's sockets go to it
+        let me: Arc<dyn CharDevice> = self.shared.me.lock().upgrade()?;
+        Some(crate::compat::linux::unix::server_call(&me, num, a))
+    }
+
     fn edges(&self) -> Option<u64> {
+        if self.kind == crate::ipc::protocol::LX_OBJ_KIND_SIGNALFD {
+            return None;
+        }
         Some(self.word().map_or(u64::MAX - 1, |w| w.1 as u64))
     }
 }
@@ -251,6 +333,11 @@ pub(super) fn offline() {
     }
     let pins = core::mem::take(&mut *PINS.lock());
     drop(pins);
+    // Descriptors in flight in the server's sockets (Group 13)
+    let kept = core::mem::take(&mut *KEPT.lock());
+    for (_, d) in kept {
+        release_kept(d);
+    }
     // The server's bpf device programs went with it
     crate::compat::linux::bpf::set_server_device_programs(&[]);
 }
@@ -425,6 +512,60 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 None => EINVAL,
             }
         }
+        crate::ipc::protocol::LX_OBJ_SIGMASK => {
+            if a as usize >= LX_OBJ_SLOTS {
+                return EINVAL;
+            }
+            let o = reg(|r| r[a as usize].clone()).and_then(|s| s.me.lock().upgrade());
+            match o {
+                Some(o) => {
+                    o.sigmask.store(b, Ordering::Relaxed);
+                    0
+                }
+                None => EBADF,
+            }
+        }
+        crate::ipc::protocol::LX_OBJ_PROC => {
+            if !crate::compat::linux::proc::process_exists(a) {
+                return ESRCH;
+            }
+            if crate::compat::linux::proc::has_exited(a) {
+                2
+            } else {
+                1
+            }
+        }
+        LX_OBJ_TAKE => take(a, b, c),
+        LX_OBJ_GIVE => give(a, b, c),
+        LX_OBJ_DROP => {
+            if c != 0 || b > MAX_KEPT as u64 {
+                return EINVAL;
+            }
+            let raw = match crate::compat::linux::vfs::copy_in(a, b as usize * 8) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let gone: alloc::vec::Vec<FileDescriptor> = {
+                let mut kept = KEPT.lock();
+                raw.chunks_exact(8).filter_map(|t| kept.remove(&u64::from_le_bytes(t.try_into().unwrap()))).collect()
+            };
+            for d in gone {
+                release_kept(d);
+            }
+            0
+        }
+        LX_OBJ_REFS => {
+            if a as usize >= LX_OBJ_SLOTS {
+                return EINVAL;
+            }
+            match reg(|r| r[a as usize].clone()) {
+                Some(s) => {
+                    let n = s.me.lock().strong_count();
+                    n as i64
+                }
+                None => 0,
+            }
+        }
         LX_OBJ_NOTIFY => {
             if c > 4096 {
                 return EINVAL;
@@ -467,7 +608,11 @@ fn install(id: u64, desc: u64) -> i64 {
         Ok(f) => f,
         Err(e) => return e,
     };
-    let shared = Arc::new(ObjShared { wq: WaitQueue::new_shared(), nonblock: AtomicBool::new(d.flags & O_NONBLOCK != 0) });
+    let shared = Arc::new(ObjShared {
+        wq: WaitQueue::new_shared(),
+        nonblock: AtomicBool::new(d.flags & O_NONBLOCK != 0),
+        me: Mutex::new(alloc::sync::Weak::new()),
+    });
     let taken = reg(|r| {
         if r[slot].is_some() {
             return false;
@@ -489,7 +634,10 @@ fn install(id: u64, desc: u64) -> i64 {
         gid: d.gid,
         quiet: AtomicBool::new(false),
         watched: AtomicBool::new(false),
+        tag: d.tag,
+        sigmask: AtomicU64::new(0),
     });
+    *obj.shared.me.lock() = Arc::downgrade(&obj);
     let dev: Arc<dyn CharDevice> = obj.clone();
     let r = {
         let mut t = fds.lock();
@@ -528,4 +676,204 @@ pub fn sig_post(tgid: u64, sig: u64, code: u64, ids: u64, value: u64) -> i64 {
     }
     crate::compat::linux::proc::post_with_info(tgid, sig as u32, code as i32, ids as u32, (ids >> 32) as u32, value);
     0
+}
+
+// ----------------------------------------------------------------------
+// Descriptor passing (Group 13, wave 5, step 4)
+// ----------------------------------------------------------------------
+//
+// A Unix socket lives in the server, but what it carries (`SCM_RIGHTS`) may be any
+// descriptor: a regular file, a DRM device, a memfd (Wayland's buffers), another server
+// object. The server never holds descriptors itself: `LX_OBJ_TAKE` moves a reference to
+// each named descriptor of the sender into the kernel's `KEPT` table under a token (the
+// message carries the tokens); `LX_OBJ_GIVE` installs kept descriptors in the receiver's
+// table; `LX_OBJ_DROP` lets them go (a message dropped unread, a control buffer too small:
+// `MSG_CTRUNC`). A kept server object counts in `LX_OBJ_REFS`, so the server can tell
+// sockets alive only through their own queues.
+
+/// Takes another reference to `d` (a pipe end counts its readers and writers).
+fn hold(d: &FileDescriptor) {
+    match d {
+        FileDescriptor::PipeRead(p) => p.lock().add_reader(),
+        FileDescriptor::PipeWrite(p) => p.lock().add_writer(),
+        _ => {}
+    }
+}
+
+/// Lets a kept descriptor go (the reverse of [`hold`]).
+fn release_kept(d: FileDescriptor) {
+    match &d {
+        FileDescriptor::PipeRead(p) => p.lock().drop_reader(),
+        FileDescriptor::PipeWrite(p) => p.lock().drop_writer(),
+        _ => {}
+    }
+    drop(d);
+}
+
+/// What descriptor `d` is to the server: `slot | kind << 32 | 1 << 63` for one of its
+/// objects, 0 otherwise.
+fn describe(d: &FileDescriptor) -> u64 {
+    if let FileDescriptor::Device(dev) = d {
+        if let Some(o) = dev.as_server() {
+            if let Some(slot) = o.slot() {
+                return slot | (o.kind() as u64) << 32 | 1 << 63;
+            }
+        }
+    }
+    0
+}
+
+/// [`LX_OBJ_TAKE`]`(request id, buf, n)`.
+fn take(id: u64, buf: u64, n: u64) -> i64 {
+    if n == 0 || n > 512 {
+        return EINVAL;
+    }
+    let raw = match crate::compat::linux::vfs::copy_in(buf, n as usize * 24) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let fds = match client_fds(id) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let mut descs = alloc::vec::Vec::with_capacity(n as usize);
+    {
+        let t = fds.lock();
+        for e in raw.chunks_exact(24) {
+            let fd = u64::from_le_bytes(e[0..8].try_into().unwrap()) as i64;
+            match (fd >= 0).then(|| t.get(fd as usize)).flatten() {
+                Some(d) => descs.push(d.clone()),
+                None => return EBADF,
+            }
+        }
+    }
+    let mut out = raw;
+    {
+        let mut kept = KEPT.lock();
+        if kept.len() + descs.len() > MAX_KEPT {
+            return -109; // ETOOMANYREFS
+        }
+        for (i, d) in descs.into_iter().enumerate() {
+            hold(&d);
+            let token = NEXT_PIN.fetch_add(1, Ordering::Relaxed);
+            out[i * 24 + 8..i * 24 + 16].copy_from_slice(&token.to_le_bytes());
+            out[i * 24 + 16..i * 24 + 24].copy_from_slice(&describe(&d).to_le_bytes());
+            kept.insert(token, d);
+        }
+    }
+    crate::compat::linux::vfs::copy_out(buf, &out).map_or_else(|e| e, |()| 0)
+}
+
+/// [`LX_OBJ_GIVE`]`(request id, buf, n | flags << 32)`.
+fn give(id: u64, buf: u64, nf: u64) -> i64 {
+    let n = nf & 0xFFFF_FFFF;
+    let cloexec = (nf >> 32) as u32 & O_CLOEXEC != 0;
+    if n == 0 || n > 512 {
+        return EINVAL;
+    }
+    let mut raw = match crate::compat::linux::vfs::copy_in(buf, n as usize * 16) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let fds = match client_fds(id) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let mut err = 0;
+    for e in raw.chunks_exact_mut(16) {
+        let token = u64::from_le_bytes(e[0..8].try_into().unwrap());
+        e[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        if err != 0 {
+            continue;
+        }
+        let Some(d) = KEPT.lock().remove(&token) else {
+            err = EINVAL;
+            continue;
+        };
+        let mut t = fds.lock();
+        match t.alloc_fd(d.clone()) {
+            Ok(fd) => {
+                t.set_cloexec(fd, cloexec);
+                drop(t);
+                // (the kept reference moved into the table)
+                drop(d);
+                e[8..16].copy_from_slice(&(fd as u64).to_le_bytes());
+            }
+            Err(_) => {
+                drop(t);
+                KEPT.lock().insert(token, d);
+                err = EMFILE;
+            }
+        }
+    }
+    match crate::compat::linux::vfs::copy_out(buf, &raw) {
+        Ok(()) => err,
+        Err(e) => e,
+    }
+}
+
+/// `SYS_LX_SIGTAKE(id, mask, buf)` (native 63, Group 13): **sig_take**. Takes the lowest
+/// pending signal in `mask` of request `id`'s caller (its thread's first, then its
+/// process's) without delivering it, and writes its 128-byte `struct signalfd_siginfo` to
+/// `buf` (server memory). Returns 128, or 0 when none is pending.
+pub fn sig_take(id: u64, mask: u64, buf: u64, _unused: u64) -> i64 {
+    use crate::compat::linux::proc;
+    if let Err(e) = super::server_caller() {
+        return e;
+    }
+    let Some(tid) = super::client_of(id) else { return ESRCH };
+    let Some(tgid) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(tid), |t| t.tgid) else { return ESRCH };
+    let mask = mask & !((1 << 8) | (1 << 18)); // never SIGKILL or SIGSTOP
+    let Some(info) = proc::take_signal_info_of(tid, tgid, mask) else { return 0 };
+    let mut rec = [0u8; 128];
+    let sig = info.signo;
+    rec[0..4].copy_from_slice(&sig.to_le_bytes()); // ssi_signo
+    rec[8..12].copy_from_slice(&info.code.to_le_bytes()); // ssi_code
+    rec[12..16].copy_from_slice(&info.pid.to_le_bytes()); // ssi_pid
+    rec[16..20].copy_from_slice(&info.uid.to_le_bytes()); // ssi_uid
+    rec[44..48].copy_from_slice(&(info.value as u32).to_le_bytes()); // ssi_int
+    rec[48..56].copy_from_slice(&info.value.to_le_bytes()); // ssi_ptr
+    if sig == proc::SIGCHLD {
+        // Programs check ssi_code before reaping (util-linux script)
+        let (code, pid, status) = proc::sigchld_details(tgid);
+        rec[8..12].copy_from_slice(&code.to_le_bytes());
+        rec[12..16].copy_from_slice(&(pid as u32).to_le_bytes());
+        rec[40..44].copy_from_slice(&status.to_le_bytes()); // ssi_status
+    }
+    crate::compat::linux::vfs::copy_out(buf, &rec).map_or_else(|e| e, |()| 128)
+}
+
+// ----------------------------------------------------------------------
+// Writes the kernel makes later (Group 13): io_uring's registered eventfd
+// ----------------------------------------------------------------------
+
+/// Server objects to write a u64 to, and the kernel task that does it (the code posting
+/// an io_uring completion holds the ring's lock, so it cannot wait for the server).
+static LATER: Mutex<alloc::vec::Vec<(Arc<dyn CharDevice>, u64)>> = Mutex::new(alloc::vec::Vec::new());
+static LATER_WQ: WaitQueue = WaitQueue::new();
+static LATER_TASK: AtomicBool = AtomicBool::new(false);
+
+/// Writes `value` (8 bytes) to server object `dev` soon, from a kernel task.
+pub fn write_later(dev: Arc<dyn CharDevice>, value: u64) {
+    x86_64::instructions::interrupts::without_interrupts(|| LATER.lock().push((dev, value)));
+    if !LATER_TASK.swap(true, Ordering::AcqRel) {
+        crate::task::spawn("lx-later", later_task, crate::task::TaskPriority::Normal);
+    }
+    LATER_WQ.wake_all();
+}
+
+fn later_task() {
+    loop {
+        let mut waits = WaitSet::new();
+        waits.add(QueueRef::Static(&LATER_WQ));
+        waits.register();
+        let work = x86_64::instructions::interrupts::without_interrupts(|| core::mem::take(&mut *LATER.lock()));
+        if work.is_empty() {
+            waits.wait(None);
+            continue;
+        }
+        for (dev, v) in work {
+            let _ = dev.write(&v.to_ne_bytes());
+        }
+    }
 }
