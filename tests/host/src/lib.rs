@@ -398,6 +398,10 @@ pub mod compat {
                 fn as_mqueue(&self) -> Option<&crate::compat::linux::mqueue::MqHandle> {
                     None
                 }
+                /// *stub* (Group 13) No linux-server objects on the host.
+                fn as_server(&self) -> Option<&crate::lx::obj::ServerObject> {
+                    None
+                }
                 fn as_landlock(&self) -> Option<&crate::compat::linux::landlock::Ruleset> {
                     None
                 }
@@ -496,6 +500,12 @@ pub mod compat {
             pub(crate) fn path_exists(_path: &[u8]) -> bool {
                 false
             }
+            /// *stub* (Group 13) No socket nodes on the host.
+            pub(crate) fn socket_node_for_connect(_path: &[u8]) -> Result<u64, i64> {
+                Err(-2) // ENOENT
+            }
+            /// *stub* (Group 13)
+            pub(crate) fn unlink_socket_node(_path: &[u8]) {}
             pub(crate) fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
                 if ptr == 0 || !crate::memory::vm::prefault_current(ptr, data.len() as u64, true) {
                     return Err(EFAULT);
@@ -658,6 +668,33 @@ pub mod lx {
     /// *stub* No forwarding on the host.
     pub fn summary() -> alloc::string::String {
         alloc::string::String::new()
+    }
+    /// *stub* (Group 13) No server objects on the host: nothing is forwarded.
+    pub fn call_obj(_nr: u64, _args: [u64; 6], _dev: &alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
+        -9 // EBADF
+    }
+    /// *stub* (Group 13)
+    pub fn call_obj_ino(_nr: u64, _args: [u64; 6], _dev: &alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, _ino: u64) -> i64 {
+        -9 // EBADF
+    }
+    /// *stub* (Group 13) Step 4's descriptors are the kernel's on the host.
+    pub fn step4() -> bool {
+        false
+    }
+    /// *stub* (Group 13)
+    pub mod obj {
+        /// *stub* A linux-server object (none exist on the host).
+        pub struct ServerObject;
+        impl ServerObject {
+            /// *stub*
+            pub fn kind(&self) -> u32 {
+                0
+            }
+            /// *stub*
+            pub fn tag(&self) -> u64 {
+                0
+            }
+        }
     }
 }
 

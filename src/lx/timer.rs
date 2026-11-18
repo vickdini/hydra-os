@@ -69,7 +69,13 @@ pub fn sys_timer(op: u64, cookie: u64, ns: u64) -> i64 {
     }
 }
 
-/// Called at every timer tick (interrupts off): posts the timers whose deadline passed.
+/// The earliest deadline (`u64::MAX`: none), for the idle loop's precise wait.
+pub fn next_due() -> u64 {
+    NEXT.load(Ordering::Relaxed)
+}
+
+/// Called at every timer tick, and by an idle CPU at the earliest deadline (interrupts
+/// off): posts the timers whose deadline passed.
 pub fn on_tick() {
     let next = NEXT.load(Ordering::Acquire);
     if next == u64::MAX {

@@ -128,6 +128,11 @@ static BPF: Desc = [N, In(len_arg(2)), N, N, N, N];
 static TFD_SET: Desc = [N, N, In(fixed(32)), Out(fixed(32)), N, N];
 static TFD_GET: Desc = [N, Out(fixed(32)), N, N, N, N];
 static SIGNALFD: Desc = [N, In(fixed(8)), N, N, N, N];
+// read/write/readv/writev on a server object (forwarded only for those): the buffer, or the
+// iovec array (the server reads and writes the pieces themselves)
+static READ: Desc = [N, Out(len_arg(2)), N, N, N, N];
+static WRITE: Desc = [N, In(len_arg(2)), N, N, N, N];
+static IOVEC: Desc = [N, In(Len { fixed: 0, arg: 2, mul: 16 }), N, N, N, N];
 
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
@@ -152,6 +157,9 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         69 => Some(&MSGSND),
         70 => Some(&MSGRCV),
         321 => Some(&BPF),
+        0 => Some(&READ),
+        1 => Some(&WRITE),
+        19 | 20 => Some(&IOVEC),
         286 => Some(&TFD_SET),
         287 => Some(&TFD_GET),
         282 | 289 => Some(&SIGNALFD),

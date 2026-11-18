@@ -183,6 +183,10 @@ pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
 /// recvfrom, sendmsg, recvmsg, shutdown, bind, listen, getsockname, getpeername,
 /// setsockopt, getsockopt, accept4, recvmmsg, sendmmsg.
 pub const BYFD_NUMBERS: &[u64] = &[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55, 288, 299, 307];
+/// Group 13: `read`, `write`, `readv`, `writev`, routed by descriptor like [`BYFD_NUMBERS`]
+/// but decided only by the lock-free test (when it cannot be made, the kernel's
+/// `vfs::stream_io` forwards a server object's call itself, under the kernel lock).
+pub const BYFD_IO_NUMBERS: [u64; 4] = [0, 1, 19, 20];
 
 /// Group 13: `bind` and `connect` on a Unix socket of the server go through the kernel's
 /// dispatcher first (`ServerObject::socket_call`): a path name's node is made or checked
@@ -238,6 +242,11 @@ pub fn set_forwarding(on: bool) {
     for &nr in BYFD_NUMBERS {
         TABLE[nr as usize].store(if sockets { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
+    // Group 13: read, write, readv, writev on server objects (pipes, Unix sockets, eventfd,
+    // ...) take the lock-free path too; on any other descriptor they cost one bit test
+    for nr in BYFD_IO_NUMBERS {
+        TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
+    }
     NULL_TO_SERVER.store(on, Ordering::Release);
 }
 
@@ -288,7 +297,12 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
                     return None;
                 }
                 if bits & T_BYFD != 0 {
-                    let o = byfd_object(frame.rdi)?;
+                    let o = if BYFD_IO_NUMBERS.contains(&nr) {
+                        // (no locks for every read and write: the fast test or the kernel)
+                        x86_64::instructions::interrupts::without_interrupts(|| ident().and_then(|id| byfd_fast(&id, frame.rdi).ok().flatten()))?
+                    } else {
+                        byfd_object(frame.rdi)?
+                    };
                     if kernel_first(nr, &o.0) {
                         return None;
                     }
@@ -1097,6 +1111,25 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         return None;
     }
     let id = ident()?;
+    let bits = table_bits(nr);
+    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
+    // ordinary path, whose `forward` finds it the kernel's again (one more bit test).
+    // (Group 13: decided before the call is built: read and write on kernel descriptors
+    // pass here too)
+    if bits & T_FAMILY != 0 && !family_moved(frame.rdi) {
+        return None;
+    }
+    let mut byfd = None;
+    if bits & T_BYFD != 0 {
+        match byfd_fast(&id, frame.rdi) {
+            Ok(Some((dev, _, _))) if kernel_first(nr, &dev) => {
+                drop_last(dev);
+                return None;
+            }
+            Ok(Some(o)) => byfd = Some(o),
+            Ok(None) | Err(()) => return None,
+        }
+    }
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
@@ -1111,26 +1144,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     // What Group 9's calls carry besides their arguments (see `call`), gathered without
     // waiting for any lock a kernel-lock holder could hold: the descriptor table is taken
     // with `try_lock` (busy: the ordinary path), the IPC namespace comes with the identity
-    let bits = table_bits(nr);
     let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
-    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
-    // ordinary path, whose `forward` finds it the kernel's again (one more bit test)
-    if bits & T_FAMILY != 0 && !family_moved(c.args[0]) {
-        return None;
-    }
-    if bits & T_BYFD != 0 {
-        match byfd_fast(&id, c.args[0]) {
-            Ok(Some((dev, _, _))) if kernel_first(nr, &dev) => {
-                drop_last(dev);
-                return None;
-            }
-            Ok(Some((dev, slot, flags))) => {
-                c.obj = slot;
-                c.obj_flags = flags;
-                held[0] = Some(dev);
-            }
-            Ok(None) | Err(()) => return None,
-        }
+    if let Some((dev, slot, flags)) = byfd {
+        c.obj = slot;
+        c.obj_flags = flags;
+        held[0] = Some(dev);
     }
     if bits & T_IPC != 0 {
         c.ipc_ns = id.ipc_ns;
@@ -1478,6 +1496,20 @@ fn client_mm(id: u64) -> Result<Arc<Mutex<crate::memory::vm::Mm>>, i64> {
 fn client_bytes(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, n: u64, write: bool) -> Result<*mut u8, i64> {
     if !crate::memory::vm::is_user_range(addr, n) {
         return Err(EFAULT);
+    }
+    // Group 13: a page a userfaultfd handler must supply first, as for the caller's own
+    // kernel accesses (`prefault_current`): wait for it, or EFAULT (UFFD_USER_MODE_ONLY)
+    if crate::compat::linux::userfaultfd::active() {
+        use crate::compat::linux::userfaultfd::{wait_fault, Waited};
+        loop {
+            let id = mm.lock().uffd_missing(addr);
+            let Some(id) = id else { break };
+            match wait_fault(id, addr & !0xFFF, write, true) {
+                Waited::Again => continue,
+                Waited::Proceed => break,
+                Waited::Refuse => return Err(EFAULT),
+            }
+        }
     }
     let mut m = mm.lock();
     m.prefault(addr, n, write).map_err(|_| EFAULT)?;
