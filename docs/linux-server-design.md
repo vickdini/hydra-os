@@ -1088,7 +1088,53 @@ its timing (password to settled desktop 1 to 68 s in these runs, dominated by ho
 
 **Not measured:** Firefox page-load time side by side; the kill tests' recovery times.
 
-### 14.4 What step 4 (Unix sockets) can build on
+### 14.4 The latency fix after the merge: net waits (Group 12, after 0dc992e)
+
+The wake-up hop of 14.3 is gone:
+
+- **Net waits in the kernel.** A socket call that must wait on a net-server handle (no deadline,
+  nothing done yet) registers the handle with the kernel (`LX_OBJ_NETWAIT`, with the
+  readiness word its attempt saw, compared under the lock the hook takes: no lost wake-up)
+  and is answered "pending". The kernel's net-server doorbell hook completes it with
+  `LX_RETRY`, and the caller makes the same call again at once (`LX_CALL_RETRIED`; a connect
+  then waits for its handshake). A completion that comes before the "pending" answer uses
+  `Req::early`. Signals, a `shutdown` in another thread and process exits withdraw waits
+  (`LX_OBJ_NETCANCEL`). Waits with a deadline or a partly done send keep the main-thread
+  path.
+- **The relay only when needed.** net-server's doorbell reaches linux-server's main thread
+  only while it keeps waiting calls (`LX_OBJ_RELAY`) or an Internet socket is watched by
+  `poll`/`select`/`epoll` (counted per object in the kernel). Turning the relay on makes the
+  main thread catch up from net-server's event ring, so watched words are exact; the word of
+  a socket nobody polls may lag until its next call or its first watch.
+- **read/write on sockets** take the lock-free path (Group 13's `BYFD_IO_NUMBERS`, merged).
+
+| What (µs unless noted) | `lx=kernel` / 329aaf7 | before the fix (64fe9ec) | after (merge with step 4) |
+|---|---:|---:|---:|
+| TCP 1-byte ping-pong, 2 processes (`tcp_rtt`) | 88.0 | 144.5 | **108.6 (+23 %)** |
+| 16-byte send + receive, one thread (`tcp_sendrecv`) | 44.5 | 67.3 | **54.1 (+22 %)** |
+| `lolat` (netbench, 1-byte TCP round trips) | 87 | 126 | **119 (+37 %)** |
+| HTTP GET from a server in the guest (median) | 1,108 / 1,223 | 922 / 940 | **815 / 821 (faster)** |
+| 100 MB download (MB/s) | 14.8 / 13.6 / 13.8 | | 20.7 / 18.6 / 18.8 |
+| `apt-get update`, first / second (s) | 28.8 / 7.9 | | 26.0 / 9.4 |
+| UDP round trip to the host (median) | 580 | | 584 |
+| `getsockopt` | 1.11 | 4.00 | 4.57 |
+
+(Paired runs base4/new4 and lxm_krn/lxm_fwd on one evening; the host ran other VMs.)
+
+What is left on the ping-pong benchmarks is the forwarding itself: four forwarded calls per
+round trip (+2 to 2.5 µs each) and, per blocked receive, the attempt, the registration and
+the call made again (about 5 µs). Calls of a few µs each cannot be within 5 % of the kernel
+with a per-call forwarding cost; the user's budget allows 3 µs per forwarded call.
+
+**The slirp stall** (14.3): not fixed, and not caused by the asynchronous close (a
+`shutdown` before the close changes nothing). It concerns connections to QEMU's host
+(10.0.2.2, a server on the PC running QEMU): 500 ms per new connection with the sockets in
+linux-server (the base build hits it now and then). For what the user does under QEMU it
+makes no difference: 10 HTTP connections to archive.ubuntu.com take 0.04 to 1.0 s to
+connect on both builds alike (most about 0.5 s), and a DNS lookup takes about 480 ms on
+both. Those are QEMU user networking's own delays, the same before step 3.
+
+### 14.5 What step 4 (Unix sockets) can build on
 
 - The routing: add `1` to `lx::MOVED_FAMILIES` and the `AF_UNIX` arms in
   `linux-server/src/socket.rs` (`by_family`, `by_kind`); the copy-table arms are shared.

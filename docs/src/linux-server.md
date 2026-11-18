@@ -520,6 +520,17 @@ dropped when its process ends. No wake-up is lost: every slot has an event count
 before its waiters are tried again, and a call about to wait checks under the waiter list's
 lock that the count did not move since its attempt began.
 
+**Net waits** (kernel `src/lx`, "Net waits"): a blocked socket call without a deadline does
+not wait in linux-server. The worker registers the net-server handle it waits on
+(`SYS_LX_OBJ` `LX_OBJ_NETWAIT`, with the readiness word its attempt saw) and answers
+"pending"; the kernel's net-server doorbell hook completes it with `LX_RETRY` and the caller
+makes the same call again (`LX_CALL_RETRIED`), so a wake-up costs what it did when the
+sockets were the kernel's plus one forwarded call. `LX_OBJ_NETCANCEL` withdraws a wait
+(signals, `shutdown` in another thread, process exit). The doorbell reaches linux-server's
+main thread only while it keeps waiting calls (`LX_OBJ_RELAY`) or an Internet socket is
+watched by `poll`/`select`/`epoll`; turning the relay on makes it catch up from net-server's
+event ring.
+
 **Completing a call the worker has not answered yet** (kernel, `lx::complete`): another server
 thread may finish a waiting call before the worker's "pending" answer reaches the kernel (the
 main thread retried it at once). `SYS_LX_COMPLETE` on a call still being served now keeps the
