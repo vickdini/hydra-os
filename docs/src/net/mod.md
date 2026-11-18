@@ -80,8 +80,25 @@ of the new one even if the new server hands out the same numbers. New sockets wo
   flushed before each reply and after each round of received frames.
 - Before/after numbers: see the Group 2 report (branch `mk-net`).
 
-## Future clients
+## Two clients: the kernel and linux-server (wave 5, step 3)
 
-A ring-3 Linux server (wave 3) can be net-server's client directly: the same requests, its
-own data offset in the window (`allow_client` to attach it), and the doorbell delivered to it
-as a notification instead of a kernel hook.
+Since wave 5 (Group 12, branch `mk-lxnet`) the Linux programs' `AF_INET`/`AF_INET6`
+sockets live in the ring-3 `linux-server`, which is net-server's client directly
+(`userland/drivers/linux-server/src/netc.rs`); the kernel's `inet.rs` above is used only with
+`lx=kernel` and by the kernel's own helpers (`net::http_get`, `ping`, `resolve`).
+
+- **The window is shared:** the kernel uses `[0, NETS_KERNEL_DATA_LEN)` (64 KiB) of the data
+  area and the DNS name page at `0x2F000`; linux-server uses `NETS_LX_DATA_LEN` bytes at
+  `NETS_LX_DATA_OFF` (0x10000), as two regions its threads take for one request each.
+  `allow_client(0x28, 0x29)` lets it map the window.
+- **Client tags:** requests that make a handle carry the client's tag in `args[3]`
+  (`NETS_CLIENT_KERNEL` 0, `NETS_CLIENT_LX` 1); listeners and accepted connections take their
+  parent's. `MSG_NETS_CLIENT_RESET(tag)` closes all of a tag's handles: a restarted
+  linux-server sends it at start, so its predecessor's connections do not linger.
+- **The doorbell reaches both:** the kernel's hook (`client::on_signal`) wakes the kernel's
+  own sockets and raises `NOTIFY_LX_NET` for linux-server's main thread (`NOTIFY_LX_NET_GONE`
+  when net-server went away). Each client reads the event ring with a tail of its own.
+- **Receive capacity:** `MSG_NETS_UDP_RECV` and `MSG_NETS_ICMP_RECV` take a capacity in
+  `args[3]` (0: up to the data area's end, the kernel's old behaviour) and return the whole
+  length and the bytes copied, so a client's part of the window is never overrun.
+

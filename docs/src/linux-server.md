@@ -361,6 +361,77 @@ kernel's `src/compat/linux/keys.rs` with those replacing the kernel's internals;
 a spin lock that yields. A panic ends every thread of the server (`sys::exit_group`), which
 the crash policy then handles.
 
+## Network sockets (step 3, wave 5)
+
+Since wave 5 (Group 12, branch `mk-lxnet`) `AF_INET`, `AF_INET6` and `AF_NETLINK` sockets are
+server objects (kinds `LX_OBJ_KIND_INET` 7 and `LX_OBJ_KIND_NETLINK` 8), and linux-server is
+net-server's client directly ([net/mod.md](net/mod.md), "Two clients"). The kernel's
+`inet.rs`, `sockopt.rs`, `rtnetlink.rs` and `netlink.rs` stay for `lx=kernel`.
+
+```text
+ Linux program        kernel (src/lx)                      linux-server                     net-server
+ socket(AF_INET,..) -- T_FAMILY: family moved? -----------> socket.rs: by_family -> inet.rs
+ recv(fd, ..)       -- T_BYFD: fd a server object? -------> socket.rs: by_kind  -> inet.rs -- MSG_NETS_TCP_RECV -->
+ sendmsg(unix fd,..)-- T_BYFD: kernel descriptor ---> the kernel's dispatcher, as before
+ poll/epoll         <- readiness word (no call) <---------- obj::set_ready_ev  <- relay <-- event ring + doorbell
+```
+
+**Socket routing** (`src/lx/mod.rs`, block "Socket routing"; Group 13 uses it for `AF_UNIX`):
+- `socket` and `socketpair` carry `T_FAMILY`: the server answers iff the family in `args[0]`
+  is in `lx::MOVED_FAMILIES` (2, 10, 16 since step 3) and the server is online; otherwise the
+  kernel's dispatcher runs as before.
+- the calls on a socket descriptor (`BYFD_NUMBERS`: 42–52, 54, 55, 288, 299, 307) carry
+  `T_BYFD`: the server answers iff descriptor `args[0]` holds a server object (the call then
+  carries it as `T_FD0` calls do); a kernel socket, a file or a bad number goes to the kernel.
+- the test is cheap: each descriptor table keeps a lock-free bitmap of the descriptors that
+  hold a server object (`FdTable::srv_bits`, kept by every method that stores or removes one),
+  reached through a per-CPU cache of the caller's table (a `Weak`, valid while the caller's
+  identity epoch is). A call on a kernel descriptor costs one bit test and no lock.
+- `read`, `write`, `readv`, `writev` and `ioctl` on a socket keep the step-2 path
+  (`vfs::stream_io` -> `lx::call_obj`); `FIONBIO`, `FIOCLEX` and the interface queries
+  `SIOCGIF*` stay in the kernel (kernel descriptor state, and interface data any descriptor
+  may ask for).
+
+**Blocked calls** (`linux-server/src/socket.rs`): a call that must wait answers "pending"
+and is kept with what it did so far (bytes a stream send already sent, its deadline). It is
+tried again when its socket's readiness changes (net-server's events, relayed by the main
+thread) or something local happens (a `shutdown` in another thread, a message queue
+notification on a netlink socket), completed at its `SO_RCVTIMEO`/`SO_SNDTIMEO` deadline, by
+a signal (`ERESTARTSYS`, so `SA_RESTART` restarts it; `EINTR` with a timeout, as Linux), or
+dropped when its process ends. No wake-up is lost: every slot has an event count bumped
+before its waiters are tried again, and a call about to wait checks under the waiter list's
+lock that the count did not move since its attempt began.
+
+**Completing a call the worker has not answered yet** (kernel, `lx::complete`): another server
+thread may finish a waiting call before the worker's "pending" answer reaches the kernel (the
+main thread retried it at once). `SYS_LX_COMPLETE` on a call still being served now keeps the
+result (`Req::early`), and the "pending" answer then turns into it. Before this, the completion
+was refused and the caller slept forever (a TCP ping-pong between two processes hung within a
+few hundred round trips); step 2's blocked message-queue and System V calls had the same race.
+
+**Readiness:** linux-server relays net-server's readiness (design, section 14): the main thread
+takes net-server's event ring, maps the handles to its sockets, writes their objects'
+readiness words and rings the kernel's doorbell once; `poll`, `select` and `epoll`
+(edge-triggered too) read the words without a call.
+
+**Primitives added** (`SYS_LX_OBJ`): `LX_OBJ_NETCHECK` (16: Landlock's TCP port rules for the
+request's caller), `LX_OBJ_SIGTHREAD` (17: `SIGPIPE` to the calling thread). A socket call's
+`obj_flags` has `LX_OBJ_FLAGS_NETNS` when the caller is in a network namespace of its own.
+`/proc/net/tcp`, `tcp6`, `udp`, `udp6` come from the server (`MSG_LX_PROC_NET`, a hand-off
+request like `/proc/keys`), since only it knows which socket (inode, owner) holds a
+connection. glibc's `mq_notify(SIGEV_THREAD)` netlink socket is now the server's own: the
+notification is queued on it directly (`netlink::pin`/`deliver`).
+
+**Copy table:** the socket calls have `describe` arms (socket addresses in, 128 bytes of room
+out and the 4-byte length in/out, send/receive buffers, `setsockopt` values, 256 bytes for
+`getsockopt`, the 56-byte `msghdr` whole); they are family-independent.
+
+**Crash policy:** killing linux-server ends every Linux program (their sockets with them) and
+a restarted server first closes its predecessor's handles in net-server
+(`MSG_NETS_CLIENT_RESET`). Killing net-server makes every blocked socket call return an error
+(`ECONNRESET` for TCP, `ENETDOWN` for UDP/ICMP), their readiness words read `POLLERR|POLLHUP`,
+and new sockets go to the restarted net-server.
+
 ## Tests (step 2)
 
 - `tests/linux/srvobj_test.c` (suite test `srvobj`, run after `tlbstress` by
