@@ -2875,9 +2875,12 @@ pub(crate) fn idle_task_entry() {
                 }
                 crate::arch::smp::bkl_enter_idle();
                 if crate::arch::pit::now_ns() >= due {
-                    x86_64::instructions::interrupts::without_interrupts(crate::lx::timer::on_tick);
+                    // (Group 13: a linux-server timer that fired woke the server's main
+                    // thread through its wait queue: schedule now, or that wake-up would
+                    // wait in the queue until the next tick, 10 ms late)
+                    let posted = x86_64::instructions::interrupts::without_interrupts(crate::lx::timer::fire);
                     let woke = crate::task::SCHEDULER.try_lock().is_some_and(|mut s| s.hr_wake());
-                    if woke {
+                    if woke || posted {
                         crate::task::yield_now();
                     }
                 }
