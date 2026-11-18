@@ -776,9 +776,114 @@ pub struct FdTable {
     pub root_mnt: usize,
     /// See `root_mnt`.
     pub cwd_mnt: usize,
+    /// Which descriptors hold a server object (null until the first one comes): read without
+    /// the table's lock by the forwarding trap ([`SrvBits`]).
+    srv: SrvPtr,
+}
+
+/// Descriptors below this number have a bit each in [`SrvBits`]; above it one flag covers all.
+pub const SRV_LOW: usize = 1024;
+
+/// Which descriptors of one table hold a server object (wave 5, Group 12): `crate::lx` routes
+/// the socket calls on such a descriptor to linux-server and leaves every other descriptor's
+/// to the kernel. The forwarding trap reads it without the table's lock (only atomics); a
+/// set bit may be stale (the trap then looks under the lock), a server object never lacks its
+/// bit. Kept by every method that stores or removes a descriptor.
+pub struct SrvBits {
+    low: [core::sync::atomic::AtomicU64; SRV_LOW / 64],
+    /// Some descriptor at or above [`SRV_LOW`] held a server object (never cleared).
+    high: core::sync::atomic::AtomicBool,
+}
+
+impl SrvBits {
+    /// Whether descriptor `fd` may hold a server object (`false`: it surely does not).
+    pub fn maybe(&self, fd: u64) -> bool {
+        use core::sync::atomic::Ordering::Acquire;
+        if (fd as usize) < SRV_LOW {
+            self.low[fd as usize / 64].load(Acquire) & (1 << (fd % 64)) != 0
+        } else {
+            self.high.load(Acquire)
+        }
+    }
+}
+
+/// The table's [`SrvBits`], allocated with its first server object and freed with the table.
+pub struct SrvPtr(core::sync::atomic::AtomicPtr<SrvBits>);
+
+impl SrvPtr {
+    const fn new() -> Self {
+        Self(core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()))
+    }
+
+    /// The bits (`None`: the table never held a server object).
+    pub fn get(&self) -> Option<&SrvBits> {
+        let p = self.0.load(core::sync::atomic::Ordering::Acquire);
+        // SAFETY: set once from a leaked Box, freed only in `drop` (no reader then: readers
+        // hold the table)
+        (!p.is_null()).then(|| unsafe { &*p })
+    }
+
+    /// Marks descriptor `fd` as holding `desc` (with the table's lock held).
+    fn note(&self, fd: usize, desc: Option<&FileDescriptor>) {
+        use core::sync::atomic::Ordering::{AcqRel, Release};
+        let server = matches!(desc, Some(FileDescriptor::Device(d)) if d.as_server().is_some());
+        let bits = match self.get() {
+            Some(b) => b,
+            None if !server => return,
+            None => {
+                let b = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(SrvBits {
+                    low: [const { core::sync::atomic::AtomicU64::new(0) }; SRV_LOW / 64],
+                    high: core::sync::atomic::AtomicBool::new(false),
+                }));
+                self.0.store(b, Release);
+                // SAFETY: just made
+                unsafe { &*b }
+            }
+        };
+        if fd < SRV_LOW {
+            let w = &bits.low[fd / 64];
+            if server {
+                w.fetch_or(1 << (fd % 64), AcqRel);
+            } else {
+                w.fetch_and(!(1 << (fd % 64)), AcqRel);
+            }
+        } else if server {
+            bits.high.store(true, Release);
+        }
+    }
+}
+
+impl Clone for SrvPtr {
+    fn clone(&self) -> Self {
+        let n = Self::new();
+        if let Some(b) = self.get() {
+            let c = alloc::boxed::Box::new(SrvBits {
+                low: core::array::from_fn(|i| core::sync::atomic::AtomicU64::new(b.low[i].load(core::sync::atomic::Ordering::Acquire))),
+                high: core::sync::atomic::AtomicBool::new(b.high.load(core::sync::atomic::Ordering::Acquire)),
+            });
+            n.0.store(alloc::boxed::Box::into_raw(c), core::sync::atomic::Ordering::Release);
+        }
+        n
+    }
+}
+
+impl Drop for SrvPtr {
+    fn drop(&mut self) {
+        let p = *self.0.get_mut();
+        if !p.is_null() {
+            // SAFETY: from Box::into_raw, dropped once
+            drop(unsafe { alloc::boxed::Box::from_raw(p) });
+        }
+    }
 }
 
 impl FdTable {
+    /// The table's server-object bits, for the forwarding trap (`crate::lx`), which reads them
+    /// without the lock: the address stays valid while the table lives.
+    pub fn srv_bits(&self) -> &SrvPtr {
+        &self.srv
+    }
+
     /// Constructs a completely empty [`FdTable`] with no allocated descriptors (`const`-compatible).
     ///
     /// # Returns
@@ -794,6 +899,7 @@ impl FdTable {
             root_ino: 0,
             root_mnt: 0,
             cwd_mnt: 0,
+            srv: SrvPtr::new(),
         }
     }
 
@@ -860,6 +966,7 @@ impl FdTable {
         match free {
             Some(i) => {
                 self.ensure(i);
+                self.srv.note(i, Some(&desc));
                 self.fds[i] = Some(desc);
                 self.cloexec[i] = false;
                 Ok(i)
@@ -1063,6 +1170,7 @@ impl FdTable {
         }
         self.ensure(fd);
         self.cloexec[fd] = false;
+        self.srv.note(fd, desc.as_ref());
         core::mem::replace(&mut self.fds[fd], desc)
     }
 
@@ -1117,6 +1225,7 @@ impl FdTable {
             None => return Err("File descriptor not open (EBADF)"),
         };
         self.cloexec[fd] = false;
+        self.srv.note(fd, None);
         match desc {
             FileDescriptor::PipeRead(pipe) => {
                 pipe.lock().drop_reader();
@@ -1171,6 +1280,7 @@ impl FdTable {
         }
         let _ = self.close(newfd);
         self.ensure(newfd);
+        self.srv.note(newfd, Some(&desc));
         self.fds[newfd] = Some(desc);
         self.cloexec[newfd] = false;
         Ok(newfd)

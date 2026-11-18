@@ -326,6 +326,23 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 None => EINVAL,
             }
         }
+        // Group 12 (step 3): Landlock's TCP port rules and SIGPIPE, for the request's caller
+        crate::ipc::protocol::LX_OBJ_NETCHECK => {
+            let Some(client) = super::client_of(a) else { return ESRCH };
+            match crate::compat::linux::landlock::check_port_of(client, b as u16, c) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        crate::ipc::protocol::LX_OBJ_SIGTHREAD => {
+            let Some(client) = super::client_of(a) else { return ESRCH };
+            if !(1..=64).contains(&b) {
+                return EINVAL;
+            }
+            let tgid = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.tgid).unwrap_or(0);
+            crate::compat::linux::proc::post_thread(tgid, client, b as u32);
+            0
+        }
         LX_OBJ_COMM => {
             let Some(client) = super::client_of(a) else { return ESRCH };
             let tgid = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.tgid).unwrap_or(0);

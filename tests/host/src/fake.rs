@@ -219,6 +219,19 @@ impl Scheduler {
 }
 
 impl SchedulerGuard {
+    /// Runs `f` on task `id` (the current one or a sibling), as the kernel's scheduler does.
+    pub fn with_task_mut<R>(&mut self, id: TaskId, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
+        let mut f = Some(f);
+        let mut out = None;
+        self.for_each_task_mut(|t| {
+            if t.id == id {
+                if let Some(g) = f.take() {
+                    out = Some(g(t));
+                }
+            }
+        });
+        out
+    }
     pub fn for_each_task_mut(&mut self, mut f: impl FnMut(&mut Task)) {
         with_current_task_mut(|t| f(t));
         SIBLINGS.with_borrow_mut(|v| v.iter_mut().for_each(|t| f(t)));

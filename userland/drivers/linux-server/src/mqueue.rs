@@ -361,7 +361,11 @@ fn forget_open(slot: u32, qid: u64) {
 /// Lets a kept netlink socket go.
 fn unpin(n: &Option<(u64, Notify)>) {
     if let Some((_, Notify::Thread { token, .. })) = n {
-        let _ = sys::lx_obj(LX_OBJ_UNPIN, *token, 0, 0);
+        if *token & crate::netlink::PIN_BIT != 0 {
+            crate::netlink::unpin(*token);
+        } else {
+            let _ = sys::lx_obj(LX_OBJ_UNPIN, *token, 0, 0);
+        }
     }
 }
 
@@ -480,8 +484,13 @@ fn notify(target: u64, how: Notify, pid: u64, uid: u32) {
         }
         Notify::Thread { token, mut cookie } => {
             cookie[NOTIFY_COOKIE_LEN - 1] = NOTIFY_WOKENUP;
-            let _ = sys::lx_obj(LX_OBJ_NOTIFY, token, cookie.as_ptr() as u64, NOTIFY_COOKIE_LEN as u64);
-            let _ = sys::lx_obj(LX_OBJ_UNPIN, token, 0, 0);
+            if token & crate::netlink::PIN_BIT != 0 {
+                crate::netlink::deliver(token, &cookie);
+                crate::netlink::unpin(token);
+            } else {
+                let _ = sys::lx_obj(LX_OBJ_NOTIFY, token, cookie.as_ptr() as u64, NOTIFY_COOKIE_LEN as u64);
+                let _ = sys::lx_obj(LX_OBJ_UNPIN, token, 0, 0);
+            }
         }
         Notify::None => {}
     }
@@ -580,9 +589,13 @@ fn mq_notify(cx: &Cx) -> i64 {
                 Ok(c) => c,
                 Err(e) => return e,
             };
-            let token = match sys::lx_obj(LX_OBJ_PIN, cx.id, signo as u32 as u64, 0) {
-                Ok(t) => t,
-                Err(_) => return EBADF,
+            // Our own netlink socket (wave 5), or one the kernel keeps for us
+            let token = match crate::netlink::pin(cx, signo as u32 as u64) {
+                Some(t) => t,
+                None => match sys::lx_obj(LX_OBJ_PIN, cx.id, signo as u32 as u64, 0) {
+                    Ok(t) => t,
+                    Err(_) => return EBADF,
+                },
             };
             let mut cookie = [0u8; NOTIFY_COOKIE_LEN];
             cookie.copy_from_slice(&c);
