@@ -280,10 +280,16 @@ pub(super) fn on_doorbell() {
 /// length of a forwarded call), its slot and its flags. `None` if `fd` is not a server
 /// object of the server online now.
 pub(super) fn current_fd(fd: u64) -> Option<(Arc<dyn CharDevice>, u64, u64)> {
-    let dev = crate::task::with_current_fds_mut(|fds| match fds.get(fd as i32 as usize) {
-        Some(FileDescriptor::Device(d)) => Some(d.clone()),
-        _ => None,
-    })?;
+    crate::task::with_current_fds_mut(|fds| object_in(fds, fd))
+}
+
+/// [`current_fd`] in descriptor table `fds` (locked by the caller): the lock-free path of
+/// `crate::lx` takes the table's lock with `try_lock` and calls this.
+pub(super) fn object_in(fds: &crate::fs::FdTable, fd: u64) -> Option<(Arc<dyn CharDevice>, u64, u64)> {
+    let dev = match fds.get(fd as i32 as usize) {
+        Some(FileDescriptor::Device(d)) => d.clone(),
+        _ => return None,
+    };
     let (slot, flags) = {
         let o = dev.as_server()?;
         (o.slot()?, o.flags())

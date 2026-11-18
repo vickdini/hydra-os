@@ -655,6 +655,10 @@ pub mod ipc {
 pub mod lx {
     /// *stub* A notification for the Linux server.
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    /// *stub* No forwarding on the host.
+    pub fn summary() -> alloc::string::String {
+        alloc::string::String::new()
+    }
 }
 
 pub mod memory {

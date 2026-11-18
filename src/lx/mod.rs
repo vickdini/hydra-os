@@ -446,7 +446,15 @@ fn call_ident(mut c: LxCall, groups: bool) -> i64 {
             c.ngroups = n as u64;
         }
     }
-    call_with(me, my_idx, c, false)
+    // The waits of `call_with` need no kernel lock: let the worker's answer switch straight
+    // back to this thread even from a CPU without it (a thread blocked under the lock could
+    // only be woken through the scheduler), and take the lock again before going on
+    let r = call_with(me, my_idx, c, true);
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    r
 }
 
 /// Forwards call `c` (its identity filled in) of task `me` (at `my_idx`, a hint) and waits
@@ -742,6 +750,9 @@ struct Ident {
     caps: u64,
     ngroups: u64,
     groups: [u32; LX_GROUPS],
+    /// The process's IPC namespace (`ns::ipc_ns`: unshare, setns and execve bump the
+    /// identity epoch too).
+    ipc_ns: u64,
 }
 
 /// Per CPU, used only by that CPU with interrupts off.
@@ -749,7 +760,7 @@ struct IdentCache([UnsafeCell<Ident>; crate::arch::smp::MAX_CPUS]);
 // SAFETY: each CPU touches only its own entry, with interrupts off
 unsafe impl Sync for IdentCache {}
 static IDENT: IdentCache = IdentCache(
-    [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS] }) }; crate::arch::smp::MAX_CPUS],
+    [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0 }) }; crate::arch::smp::MAX_CPUS],
 );
 
 /// The calling thread's identity for a forwarded call, from this CPU's cache when nothing
@@ -772,13 +783,14 @@ fn ident() -> Option<Ident> {
     if !ok || crate::compat::linux::ptrace::is_traced(tid) {
         return None;
     }
-    let mut n = Ident { epoch, tid, tgid, ids, caps, ngroups: 0, groups: [0; LX_GROUPS] };
+    let mut n = Ident { epoch, tid, tgid, ids, caps, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0 };
     // (never waiting for the process table: see `fast_entry`)
     let procs = crate::compat::linux::proc::PROCS.try_lock()?;
     if let Some(p) = procs.get(&tgid) {
         let k = p.groups.len().min(LX_GROUPS);
         n.groups[..k].copy_from_slice(&p.groups[..k]);
         n.ngroups = k as u64;
+        n.ipc_ns = p.ns.ipc;
     }
     drop(procs);
     *e = n;
@@ -808,11 +820,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     // During a driver call (whose caller may hold kernel locks) the ordinary path waits it
     // out first; this path never waits for a lock such a caller could hold
-    // Calls that carry more than their arguments (a descriptor's server object, the IPC
-    // namespace, the umask: Group 9's table bits) take the ordinary path, whose lookups of
-    // the descriptor table and the process need the kernel lock
     if route(nr) != Route::Server
-        || ((nr as usize) < TABLE_LEN && TABLE[nr as usize].load(Ordering::Relaxed) & !T_SERVER != 0)
         || !ONLINE.load(Ordering::Acquire)
         || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
         || crate::task::scheduler::handoff_active()
@@ -831,13 +839,89 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         c.ngroups = id.ngroups;
         c.groups = id.groups;
     }
+    // What Group 9's calls carry besides their arguments (see `call`), gathered without
+    // waiting for any lock a kernel-lock holder could hold: the descriptor table is taken
+    // with `try_lock` (busy: the ordinary path), the IPC namespace comes with the identity
+    let bits = if (nr as usize) < TABLE_LEN { TABLE[nr as usize].load(Ordering::Relaxed) } else { 0 };
+    let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
+    if bits & T_IPC != 0 {
+        c.ipc_ns = id.ipc_ns;
+    }
+    if bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
+        // T_FDAT1: the descriptor is the first u32 of the attribute block at args[1]
+        let at1 = if bits & T_FDAT1 != 0 {
+            let mut b = [0u8; 4];
+            copy::read_user(c.args[1], &mut b).ok().map(|()| u32::from_le_bytes(b) as u64)
+        } else {
+            None
+        };
+        let fds = crate::task::SCHEDULER.lock().current_fds()?;
+        let Some(table) = fds.try_lock() else {
+            drop_last(fds);
+            return None;
+        };
+        if bits & T_UMASK != 0 {
+            c.umask = table.umask as u64;
+        }
+        if bits & T_FD0 != 0 {
+            if let Some((dev, slot, flags)) = obj::object_in(&table, c.args[0]) {
+                c.obj = slot;
+                c.obj_flags = flags;
+                held[0] = Some(dev);
+            }
+        }
+        if let Some(fd) = at1 {
+            if let Some((dev, slot, flags)) = obj::object_in(&table, fd) {
+                c.obj = slot;
+                c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                held[1] = Some(dev);
+            }
+        }
+        drop(table);
+        drop_last(fds);
+    }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     FAST_CALLS.fetch_add(1, Ordering::Relaxed);
-    Some(Fast::Call(call_with(id.tid, idx, c, true)))
+    let r = call_with(id.tid, idx, c, true);
+    // The server objects were held across the call (a close on another thread cannot
+    // overtake it); the last reference, if a close came meanwhile, goes under the lock
+    for h in held.into_iter().flatten() {
+        drop_last(h);
+    }
+    Some(Fast::Call(r))
+}
+
+/// Drops `a`, taking the kernel lock first when this is its last reference (its drop may
+/// close descriptors or post notifications as under the ordinary path).
+fn drop_last<T: ?Sized>(a: Arc<T>) {
+    if Arc::strong_count(&a) == 1 && !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+    }
+    drop(a);
 }
 
 /// Calls forwarded on the lock-free path since boot.
 pub static FAST_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Answers handed straight back to their caller (the direct switch), and answers whose
+/// caller had to be woken the ordinary way (it was not blocked yet, ran elsewhere, or had
+/// blocked under the kernel lock while the worker answered without it).
+pub static REPLY_DIRECT: AtomicU64 = AtomicU64::new(0);
+/// See [`REPLY_DIRECT`].
+pub static REPLY_WOKEN: AtomicU64 = AtomicU64::new(0);
+
+/// One line for `linux prof show`: how the forwarded calls went.
+pub fn summary() -> alloc::string::String {
+    alloc::format!(
+        "{} calls forwarded ({} on the lock-free path; {} straight to an idle worker, {} queued, {} failed); answers: {} switched straight back, {} woken the ordinary way",
+        DIRECT_CALLS.load(Ordering::Relaxed) + QUEUED_CALLS.load(Ordering::Relaxed),
+        FAST_CALLS.load(Ordering::Relaxed),
+        DIRECT_CALLS.load(Ordering::Relaxed),
+        QUEUED_CALLS.load(Ordering::Relaxed),
+        FAILED_CALLS.load(Ordering::Relaxed),
+        REPLY_DIRECT.load(Ordering::Relaxed),
+        REPLY_WOKEN.load(Ordering::Relaxed),
+    )
+}
 
 /// Whether the calling Linux thread, back from a call on the lock-free path, may have a
 /// signal to take or a stop to make (then `arch::syscall` delivers the ordinary way, under
@@ -1015,7 +1099,10 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
         // Straight back to the caller, unless a call was delivered to this worker meanwhile;
         // otherwise the caller is woken the ordinary way
         let switched = !next && x86_64::instructions::interrupts::without_interrupts(|| direct_to(client, hint, Some(&HAS_WORK[wi]), nobkl));
-        if !switched {
+        if switched {
+            REPLY_DIRECT.fetch_add(1, Ordering::Relaxed);
+        } else {
+            REPLY_WOKEN.fetch_add(1, Ordering::Relaxed);
             let mut sched = crate::task::SCHEDULER.lock();
             if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
                 // Its caller died meanwhile: nobody takes the answer

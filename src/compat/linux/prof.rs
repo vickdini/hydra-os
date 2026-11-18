@@ -375,6 +375,7 @@ pub fn show(top: usize) {
     }
     crate::println!("[prof] deepest kernel stack use of an ended task: {} bytes", crate::task::scheduler::MAX_KSTACK_USE.load(Relaxed));
     crate::println!("[prof] tlb: {}", crate::arch::pcid::summary());
+    crate::println!("[prof] lx: {}", crate::lx::summary());
     lat_show("wakeup -> ready", &LAT_PENDING);
     lat_show("ready -> running", &LAT_RUN);
     lat_show("kick -> halted CPU awake", &LAT_KICK);
