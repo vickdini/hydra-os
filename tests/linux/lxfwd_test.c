@@ -137,6 +137,47 @@ static void hammer(int procs) {
     for (;;) pause();
 }
 
+/* --- signals arriving during forwarded calls (wave 4): a 1 ms timer while 4 threads call --- */
+static volatile long sig_seen;
+static volatile int sig_stop;
+static void on_tick(int s) { (void)s; __sync_fetch_and_add(&sig_seen, 1); }
+static void *sig_worker(void *arg) {
+    long bad = 0, n = 0;
+    (void)arg;
+    while (!sig_stop) {
+        if (lx(0, 0, 0) != 0) bad++;
+        long r = syscall(SYS_keyctl, 0, -3, 0);
+        if (r < 0 && errno != EINTR) bad++;
+        n++;
+    }
+    return (void *)(bad * 1000000000L + n);
+}
+static int sigstress(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = on_tick;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGALRM, &sa, 0);
+    struct itimerval it = {{0, 1000}, {0, 1000}};
+    pthread_t t[4];
+    sig_stop = 0; sig_seen = 0;
+    for (long i = 0; i < 4; i++) pthread_create(&t[i], 0, sig_worker, 0);
+    setitimer(ITIMER_REAL, &it, 0);
+    uint64_t t0 = now_ms();
+    while (now_ms() - t0 < 3000) usleep(10000);
+    struct itimerval off = {{0, 0}, {0, 0}};
+    setitimer(ITIMER_REAL, &off, 0);
+    sig_stop = 1;
+    long bad = 0, calls = 0;
+    for (int i = 0; i < 4; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        bad += (long)r / 1000000000L;
+        calls += (long)r % 1000000000L;
+    }
+    printf("sigstress: %ld call pairs, %ld signals delivered, %ld bad answers\n", calls, sig_seen, bad);
+    return bad == 0 && sig_seen > 0 && calls > 1000;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     if (argc > 1 && !strcmp(argv[1], "hammer")) hammer(argc > 2 ? atoi(argv[2]) : 2);
@@ -178,7 +219,42 @@ int main(int argc, char **argv) {
         check(v == -1 && errno == EINTR && dt < 3000, "signal during a pending call: EINTR");
         printf("     (took %llu ms)\n", (unsigned long long)dt);
     }
+    /* The copy-in/copy-out table (wave 4): strings and buffers at page edges, bad pointers,
+     * more than fits in the syscall page. Linux's answers, forwarded or not. */
+    {
+        char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        munmap(m + 4096, 4096);
+        strcpy(m + 4096 - 5, "user"); /* the NUL is the page's last byte */
+        strcpy(m + 2000, "lxfwd-edge");
+        long k = syscall(SYS_add_key, m + 4096 - 5, m + 2000, "abc", 3, THREAD_KEYRING);
+        check(k > 0, "copy table: a string ending at an unmapped page");
+        check(syscall(SYS_add_key, "user", "lxfwd-bad", (void *)0x10, 4, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: bad payload pointer: EFAULT");
+        check(syscall(SYS_add_key, (void *)0x10, "x", "a", 1, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: bad string pointer: EFAULT");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 4093, 3) == 3 && !memcmp(m + 4093, "abc", 3),
+              "copy table: output ending at the end of a page");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 4094, 3) == -1 && errno == EFAULT,
+              "copy table: output crossing into an unmapped page: EFAULT");
+        char *huge = malloc(65536);
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, huge, 65536) == 3 && !memcmp(huge, "abc", 3),
+              "copy table: a short answer into a 64 KiB buffer");
+        static char big[3500], back[4000];
+        for (int i = 0; i < (int)sizeof big; i++) big[i] = (char)(i * 13 + 1);
+        long kb = syscall(SYS_add_key, "user", "lxfwd-big", big, sizeof big, THREAD_KEYRING);
+        long nb = syscall(SYS_keyctl, KEYCTL_READ, kb, back, sizeof back);
+        check(kb > 0 && nb == (long)sizeof big && !memcmp(back, big, sizeof big),
+              "copy table: a payload larger than the syscall page's copy area");
+        mprotect(m, 4096, PROT_READ);
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 100, 16) == -1 && errno == EFAULT,
+              "copy table: read-only output buffer: EFAULT");
+        syscall(SYS_keyctl, KEYCTL_UNLINK, k, THREAD_KEYRING);
+        syscall(SYS_keyctl, KEYCTL_UNLINK, kb, THREAD_KEYRING);
+        free(huge);
+        munmap(m, 4096);
+    }
     check(concurrency(4, 8), "4 processes x 8 threads: every forwarded call answered correctly");
+    check(sigstress(), "signals every millisecond during forwarded calls: no hang, no wrong answer");
     printf(fails ? "LXFWD TEST FAILED (%d)\n" : "LXFWD TEST PASSED\n", fails);
     return fails != 0;
 }

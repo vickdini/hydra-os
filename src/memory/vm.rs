@@ -696,6 +696,19 @@ impl Mm {
         }
     }
 
+    /// The physical address of user address `addr` if its page is present for user mode
+    /// now (and writable, for `write`), without faulting anything in: the copy-in table of
+    /// `crate::lx` copies through the direct map while holding this address space's lock,
+    /// and faults pages in the ordinary way only when this says no.
+    pub fn present_user(&mut self, addr: u64, write: bool) -> Option<PhysAddr> {
+        let entry = self.pte(addr, false)?;
+        let f = entry.flags();
+        if !f.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) || (write && !f.contains(PageTableFlags::WRITABLE)) {
+            return None;
+        }
+        Some(entry.addr() + (addr & (PAGE_SIZE - 1)))
+    }
+
     /// Unmaps every page in `[start, end)`, dropping frame references. Areas are untouched.
     ///
     /// # Arguments
@@ -1529,6 +1542,31 @@ impl Drop for Mm {
     }
 }
 
+/// Per CPU: the address space (a `*const Mutex<Mm>`, as a number; 0: none) whose lock the
+/// lock-free copy-in of `crate::lx` holds or is about to take. It holds it only for a short
+/// copy with interrupts off and never waits for anything meanwhile, so a fault handler
+/// finding the lock busy for that reason waits instead of reporting a recursive lock.
+pub static LX_COPY_MM: [core::sync::atomic::AtomicU64; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+
+/// The lock of address space `mm` for a fault handler: taken at once, or after waiting
+/// for another CPU's lock-free copy-in ([`LX_COPY_MM`]); `None` if someone else holds it.
+fn fault_lock(mm: &Mutex<Mm>) -> Option<spin::MutexGuard<'_, Mm>> {
+    let me = crate::arch::percpu::cpu();
+    let key = mm as *const Mutex<Mm> as u64;
+    loop {
+        if let Some(g) = mm.try_lock() {
+            return Some(g);
+        }
+        let copying = LX_COPY_MM.iter().enumerate().any(|(c, v)| c != me && v.load(Ordering::SeqCst) == key);
+        if !copying {
+            return None;
+        }
+        crate::arch::smp::serve_tlb();
+        core::hint::spin_loop();
+    }
+}
+
 /// Waits while `addr` is a missing page of a range registered with a userfaultfd, until its
 /// handler supplies it (`kernel`: an access by a system call). `false` if the descriptor
 /// refuses such accesses.
@@ -1540,7 +1578,7 @@ pub fn uffd_resolve_current(addr: u64, write: bool, kernel: bool) -> bool {
     }
     let mm = unsafe { &*ptr };
     loop {
-        let id = match mm.try_lock() {
+        let id = match fault_lock(mm) {
             Some(mut g) => g.uffd_missing(addr),
             None => return true,
         };
@@ -1576,7 +1614,7 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
         return None;
     }
     let mm = unsafe { &*ptr };
-    match mm.try_lock() {
+    match fault_lock(mm) {
         Some(mut guard) => {
             let t0 = crate::compat::linux::prof::start();
             // For the profile: whether the page was there already (copy-on-write, upgrade)
@@ -1830,6 +1868,100 @@ impl Drop for BufferObject {
             frame_ref_dec(*frame);
         }
     }
+}
+
+/// Global pages' self-test, run once at boot on the boot processor before the others start
+/// (see `arch::pcid`, "Global kernel pages"): a kernel-half page V is mapped global and read
+/// with the kernel's tables loaded, another address space is loaded, V's entry is pointed at
+/// another frame, and each kernel invalidation is tried before V is read again: nothing (the
+/// control: the old frame must still show, proof that the entry outlived the CR3 write),
+/// `shootdown(None, ..)` of the page and of everything, with and without `INVPCID`.
+///
+/// Returns a line for the boot log; `Err` if a stale entry was used after an invalidation.
+pub fn global_self_test() -> Result<alloc::string::String, alloc::string::String> {
+    use crate::arch::pcid;
+    use alloc::format;
+    // An unused kernel-half page below the kernel image (its tables are shared by every
+    // address space, as all of the kernel half's)
+    const V: u64 = 0xFFFF_FFFF_7FE0_0000;
+    if !pcid::global_enabled() {
+        return Ok("skipped (global pages off)".into());
+    }
+    let (f1, f2) = match (alloc_user_frame(), alloc_user_frame()) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err("no memory".into()),
+    };
+    let put = |f: PhysFrame<Size4KiB>, v: u64| unsafe {
+        core::ptr::write_volatile(crate::memory::frame_allocator::phys_to_virt(f.start_address().as_u64()) as *mut u64, v)
+    };
+    put(f1, 0x1111);
+    put(f2, 0x2222);
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::GLOBAL;
+    let space = {
+        let mut guard = super::paging::KERNEL_SPACE.lock();
+        let Some(space) = guard.as_mut() else { return Err("no kernel address space".into()) };
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        let page = x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(V));
+        unsafe { space.map_page(page, f1, flags, &mut alloc) }.map_err(|e| format!("cannot map the test page: {}", e))?;
+        super::paging::AddressSpace::from_pml4(space.pml4_physical_address())
+    };
+    // SAFETY: the test page's own entry, changed only here, with the shootdowns below
+    let Some(pte) = (unsafe { space.leaf_entry(V) }) else { return Err("no test entry".into()) };
+    let other = Mm::new().map_err(|e| format!("no memory ({})", e))?;
+    let ro = other.cr3();
+    let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let result = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut out = alloc::vec::Vec::new();
+        let mut tries: alloc::vec::Vec<(&str, &dyn Fn())> = alloc::vec![
+            ("control (no invalidation)", &|| {}),
+            ("kernel shootdown of the page", &|| crate::arch::smp::shootdown(None, Some(V))),
+            ("kernel shootdown of everything", &|| crate::arch::smp::shootdown(None, None)),
+        ];
+        if pcid::enabled() {
+            tries.push(("kernel shootdown of the page, without INVPCID", &|| pcid::without_invpcid(|| crate::arch::smp::shootdown(None, Some(V)))));
+            tries.push(("kernel shootdown of everything, without INVPCID", &|| pcid::without_invpcid(|| crate::arch::smp::shootdown(None, None))));
+        }
+        for (name, invalidate) in tries.iter() {
+            // V -> f1, cached (global) while the kernel's tables are loaded
+            pte.set_addr(f1.start_address(), flags);
+            crate::arch::smp::shootdown(None, Some(V));
+            pcid::load_cr3(orig);
+            let before = read();
+            // Another address space: V -> f2, then the invalidation under test
+            pcid::load_cr3(ro);
+            pte.set_addr(f2.start_address(), flags);
+            invalidate();
+            let after = read();
+            pcid::load_cr3(orig);
+            out.push((*name, before, after));
+        }
+        pte.set_unused();
+        crate::arch::smp::shootdown(None, Some(V));
+        out
+    });
+    drop(other);
+    frame_ref_dec(f1);
+    frame_ref_dec(f2);
+    let mut kept = false;
+    let mut bad = alloc::vec::Vec::new();
+    for (i, (name, before, after)) in result.iter().enumerate() {
+        if *before != 0x1111 {
+            bad.push(format!("{}: first read {:#x}", name, before));
+        } else if i == 0 {
+            kept = *after == 0x1111;
+        } else if *after != 0x2222 {
+            bad.push(format!("{}: read {:#x} (stale)", name, after));
+        }
+    }
+    if !bad.is_empty() {
+        return Err(bad.join("; "));
+    }
+    Ok(if kept {
+        "passed (a global entry outlived a CR3 switch, and every kernel shootdown removed it)".into()
+    } else {
+        "passed, but inconclusive: the CPU (or hypervisor) dropped the global entry by itself".into()
+    })
 }
 
 /// PCID self-test, run once at boot on the boot processor before the others start (see

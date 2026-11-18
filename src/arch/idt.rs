@@ -628,19 +628,21 @@ pub const YIELD_VECTOR: u64 = 0x81;
 pub const DIRECT_VECTOR: u64 = 0x82;
 
 /// The direct switch's handler (vector [`DIRECT_VECTOR`], from `asm_direct_switch`, which
-/// saves only the general registers): switches to the task `DIRECT_TO` names, prepared by
-/// `Scheduler::direct_handover` under the kernel lock this CPU holds. When that cannot be
-/// done here, `rax` comes back 1 and the caller yields the ordinary way.
+/// saves only the general registers): `Scheduler::direct_call` to the task `DIRECT_TO`
+/// names (hint `DIRECT_HINT`, guard `DIRECT_GUARD`), with or without the kernel lock. When
+/// that cannot be done here, nothing changed and `rax` comes back 1.
 #[no_mangle]
 extern "C" fn hydra_direct_switch_handler(ctx: &mut ExceptionContext) {
     let target = crate::task::scheduler::DIRECT_TO.swap(0, Ordering::Relaxed);
+    let hint = crate::task::scheduler::DIRECT_HINT.load(Ordering::Relaxed) as usize;
+    let guard = crate::task::scheduler::DIRECT_GUARD.swap(0, Ordering::Relaxed) as *const core::sync::atomic::AtomicBool;
     let mut switched = false;
     if target != 0 && crate::task::is_active() {
         // No FPU area: the switch moves none (see DIRECT_VECTOR)
         let prev = CURRENT_TRAP_FPU.swap(core::ptr::null_mut(), Ordering::AcqRel);
         loop {
             if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                switched = sched.direct_switch_nofpu(ctx, target - 1);
+                switched = sched.direct_call(ctx, target - 1, hint, guard);
                 break;
             }
             crate::arch::smp::serve_tlb();
@@ -1271,6 +1273,24 @@ global_asm!(
         pop rcx
         pop rax
         add rsp, 16
+        // The frame is on the stack of the task switched away from, which another CPU may
+        // resume once this CPU's LEAVING mark is gone (the lock-free forwarding path holds
+        // no kernel lock): move the iretq frame into this CPU's block, then clear the mark
+        mov gs:[{scratch}], rax
+        mov rax, [rsp]
+        mov gs:[{frame}], rax
+        mov rax, [rsp + 8]
+        mov gs:[{frame} + 8], rax
+        mov rax, [rsp + 16]
+        mov gs:[{frame} + 16], rax
+        mov rax, [rsp + 24]
+        mov gs:[{frame} + 24], rax
+        mov rax, [rsp + 32]
+        mov gs:[{frame} + 32], rax
+        mov rsp, gs:[0]
+        add rsp, {frame}
+        mov qword ptr gs:[{leaving}], 0
+        mov rax, gs:[{scratch}]
         iretq
 
     common_trap_handler:
@@ -1377,12 +1397,38 @@ global_asm!(
         pop rcx
         pop rax
 
+        // An NMI returning to kernel mode irets in place: it may have come in the middle
+        // of another epilogue's use of this CPU's frame block, and never switches tasks
+        cmp qword ptr [rsp], 2
+        jne 2f
+        test qword ptr [rsp + 24], 3
+        jnz 2f
+        add rsp, 16
+        iretq
+    2:
         // Clean up vector number and error code
         add rsp, 16
 
-        // To kernel mode: this CPU keeps the kernel lock (it goes on running kernel code)
+        // To kernel mode: this CPU keeps the kernel lock (it goes on running kernel code).
+        // The frame may be on the stack of a task switched away from: moved into this CPU's
+        // block first, then the LEAVING mark cleared (see arch::percpu), then iretq
         test qword ptr [rsp + 8], 3
         jnz 3f
+        mov gs:[{scratch}], rax
+        mov rax, [rsp]
+        mov gs:[{frame}], rax
+        mov rax, [rsp + 8]
+        mov gs:[{frame} + 8], rax
+        mov rax, [rsp + 16]
+        mov gs:[{frame} + 16], rax
+        mov rax, [rsp + 24]
+        mov gs:[{frame} + 24], rax
+        mov rax, [rsp + 32]
+        mov gs:[{frame} + 32], rax
+        mov rsp, gs:[0]
+        add rsp, {frame}
+        mov qword ptr gs:[{leaving}], 0
+        mov rax, gs:[{scratch}]
         iretq
     3:
         // To user mode. The frame may be on another task's kernel stack (the one switched
@@ -1402,6 +1448,7 @@ global_asm!(
         mov gs:[{frame} + 32], rax
         mov rsp, gs:[0]
         add rsp, {frame}
+        mov qword ptr gs:[{leaving}], 0
         mov rax, gs:[8]
         cmp rax, qword ptr [rip + hydra_bkl_owner]
         jne 4f
@@ -1414,4 +1461,5 @@ global_asm!(
     "#,
     scratch = const crate::arch::percpu::EXIT_SCRATCH,
     frame = const crate::arch::percpu::EXIT_FRAME,
+    leaving = const crate::arch::percpu::LEAVING,
 );

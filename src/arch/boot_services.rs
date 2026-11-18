@@ -183,6 +183,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::memory::paging::KERNEL_PML4.store(cr3_frame, core::sync::atomic::Ordering::SeqCst);
     // Hydra's tables hold the direct map of physical memory: use it from now on
     crate::memory::frame_allocator::enable_direct_map();
+    // Global kernel pages (wave 4): the kernel half's TLB entries survive CR3 writes
+    crate::arch::pcid::enable_global();
 
     // 7. Initialize and remap legacy 8259 dual-PIC (Master: IRQ 0..7 -> 32..39, Slave: IRQ 8..15 -> 40..47)
     crate::arch::pic::init();
@@ -231,6 +233,14 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         Err(e) => {
             crate::kprintln!("[pcid] SELF-TEST FAILED: {}", e);
             crate::arch::pcid::disable("its boot self-test failed");
+        }
+    }
+    // 9a'. Global kernel pages' self-test: kept across a CR3 switch, removed by shootdowns
+    match crate::memory::vm::global_self_test() {
+        Ok(s) => crate::kprintln!("[pge] self-test {}", s),
+        Err(e) => {
+            crate::kprintln!("[pge] SELF-TEST FAILED: {}", e);
+            crate::arch::pcid::disable_global("its boot self-test failed");
         }
     }
     // 9b. The other processors come online (and wait)

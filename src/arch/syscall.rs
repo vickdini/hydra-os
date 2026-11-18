@@ -437,6 +437,32 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         crate::arch::smp::bkl_exit();
         return;
     }
+    // Forwarded Linux calls and the Linux server's answers, without the kernel lock (wave 4:
+    // `crate::lx`, "The lock-free path"); anything slow on the way takes the lock itself
+    let nr = frame.rax;
+    if let Some(done) = crate::lx::fast_entry(frame) {
+        let (r, linux) = match done {
+            crate::lx::Fast::Call(r) => (r, true),
+            crate::lx::Fast::Reply(r) => (r, false),
+        };
+        frame.rax = r as u64;
+        // Retired meanwhile (another thread's exit_group, the crash policy): no return
+        if crate::task::current_retired() {
+            crate::arch::smp::bkl_enter();
+            crate::task::leave_retired();
+        }
+        // A signal or a stop for the caller: delivered the ordinary way, under the lock
+        if linux && crate::lx::delivery_maybe() {
+            crate::arch::smp::bkl_enter();
+            SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
+            x86_64::instructions::interrupts::enable();
+            crate::compat::linux::proc::deliver_on_syscall_return(frame, fpu, nr);
+        }
+        x86_64::instructions::interrupts::disable();
+        crate::arch::smp::flush_kick();
+        crate::arch::smp::bkl_exit();
+        return;
+    }
     // The kernel runs on one CPU at a time (see arch::smp): held until the return to user
     // mode (the syscall may block and resume on another CPU, which holds it then)
     crate::arch::smp::bkl_enter();

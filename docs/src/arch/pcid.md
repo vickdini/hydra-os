@@ -82,3 +82,18 @@ Before the other processors start, `memory::vm::tlb_self_test` builds two addres
 ## 7. Counters
 
 `linux prof show` prints one `[prof] tlb:` line: CR3 loads that kept the TLB, loads that took a slot over or found it stale, remote slots marked stale, `INVPCID` single-ID flushes and all-ID flushes.
+
+---
+
+## 8. Global kernel pages (wave 4)
+
+The kernel half (PML4 entries 256..512: the direct map, the kernel image, the boot stack) is the same in every address space: its PML4 entries point at shared tables. So its TLB entries need not be refilled after a CR3 write.
+
+- **On:** at boot, on the boot processor before the others start, `pcid::enable_global` marks every present leaf entry of the kernel half global (the G bit; `AddressSpace::mark_kernel_global`) and turns `CR4.PGE` on. The application processors copy the boot processor's CR4. Boot log: `[pge] global kernel pages on: 0 1 GiB, 2560 2 MiB and 1921 4 KiB kernel entries ...`.
+- **Effect:** global entries survive every CR3 write, with or without PCID, and are shared by all PCIDs (one TLB entry instead of one per address space).
+- **Flushing:** only a change of the kernel's shared tables can make a global entry stale, and every such change already goes through `shootdown(None, ..)`: `invlpg` of the address (which drops a global entry for it), or for everything `INVPCID` type 2 ("all contexts, globals included") or a toggle of `CR4.PGE`, on every CPU. A plain CR3 write, and `INVPCID` types 0, 1 and 3, never drop them, which is why user-space shootdowns are unchanged.
+- **Never user visible:** entries with the USER bit are not marked; `make_user_accessible` (the legacy shared-address-space windows) clears G wherever it adds USER. The low half (the user area, the identity slots) is never marked: the low address space freed for Wine stays as it was.
+- **New kernel mappings** (`map_page` of the kernel space) are not global; only the boot-time kernel half is.
+- **Off switches:** the boot option `noglobal` (or `pge=off`), a file `\hydra\noglobal` on the EFI partition, QEMU's `-fw_cfg name=opt/hydra/pge,string=off` (`tools/hydra_run.py --global-off`). Then CR4.PGE stays clear and no G bit is set, exactly as before.
+- **Self-test** (`memory::vm::global_self_test`, next to PCID's): a kernel-half test page is mapped global and read with the kernel's tables loaded, another address space is loaded, the entry is pointed at another frame, and each kernel invalidation is tried (with and without `INVPCID`). The control (no invalidation) must still show the old frame: proof the entry outlived the CR3 write. `[pge] self-test passed (a global entry outlived a CR3 switch, and every kernel shootdown removed it)`; a failure turns global pages off again for that boot.
+- `linux prof show`'s `[prof] tlb:` line says whether global pages are on.

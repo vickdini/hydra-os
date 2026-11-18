@@ -232,6 +232,8 @@ def main():
                     help="tell the kernel (fw_cfg opt/hydra/iommu=test) to allow the rogue-DMA test (`iommu dmatest`)")
     ap.add_argument("--iommu-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/iommu=off) not to use the IOMMU")
     ap.add_argument("--pcid-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pcid=off) not to use PCID (tagged TLB)")
+    ap.add_argument("--global-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pge=off) not to use global kernel pages")
+    ap.add_argument("--lx-kernel", action="store_true", help="tell the kernel (fw_cfg opt/hydra/lx=kernel) to answer the Linux calls moved to linux-server itself")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
     if a.iommu:
@@ -304,6 +306,10 @@ def main():
         args += ["-fw_cfg", "name=opt/hydra/iommu,string=off"]
     if a.pcid_off:
         args += ["-fw_cfg", "name=opt/hydra/pcid,string=off"]
+    if a.global_off:
+        args += ["-fw_cfg", "name=opt/hydra/pge,string=off"]
+    if a.lx_kernel:
+        args += ["-fw_cfg", "name=opt/hydra/lx,string=kernel"]
     disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
     if a.disk == "none":
         pass  # no pool disk (e.g. the pool on a USB stick given through HYDRA_QEMU_EXTRA)

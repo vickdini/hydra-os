@@ -641,6 +641,18 @@ impl AddressSpace {
         self.pml4
     }
 
+    pub const fn from_pml4(pml4: x86_64::PhysAddr) -> Self {
+        Self { pml4 }
+    }
+
+    /// Never called: the global-pages self-test returns early on the host.
+    ///
+    /// # Safety
+    /// Not reachable.
+    pub unsafe fn leaf_entry(&self, _va: u64) -> Option<&'static mut x86_64::structures::paging::page_table::PageTableEntry> {
+        None
+    }
+
     /// Never called: `KERNEL_SPACE` stays `None` on the host.
     ///
     /// # Safety

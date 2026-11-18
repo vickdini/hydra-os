@@ -215,6 +215,12 @@ static IDENT_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 static IDENT_CACHE: [[core::sync::atomic::AtomicU64; 10]; crate::arch::smp::MAX_CPUS] =
     [const { [const { core::sync::atomic::AtomicU64::new(0) }; 10] }; crate::arch::smp::MAX_CPUS];
 
+/// The identity epoch (see [`IDENT_EPOCH`]): `crate::lx`'s per-CPU caller identities are
+/// valid while it stays the same.
+pub fn ident_epoch() -> u64 {
+    IDENT_EPOCH.load(core::sync::atomic::Ordering::Acquire)
+}
+
 /// Something that the identity system calls answer may have changed (see [`IDENT_EPOCH`]).
 pub fn ident_changed() {
     IDENT_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
