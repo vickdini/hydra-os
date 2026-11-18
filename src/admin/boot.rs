@@ -53,6 +53,11 @@ pub fn discover() {
     if load_options_say(b"lx=kernel") {
         crate::lx::KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
     }
+    // The FreeBSD stub table of the personality hook (a test switch, `crate::personality`)
+    if load_options_say(b"persona=fbsd-stub") {
+        crate::personality::STUB_BY_BOOT_OPTION.store(true, Ordering::Release);
+    }
+    crate::personality::init();
     if let Some(by) = by {
         *EMERGENCY_BY.lock() = by;
         EMERGENCY_AT_BOOT.store(true, Ordering::Release);

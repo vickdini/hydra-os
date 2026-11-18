@@ -434,6 +434,15 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         crate::arch::smp::bkl_enter();
         crate::task::leave_retired();
     }
+    // The personality hook (wave 5): a task of a personality with its own table (FreeBSD
+    // with the stub table) goes there; Linux and native tasks have none (null) and go on
+    // exactly as before (`crate::personality`)
+    let table = crate::personality::CURRENT_TABLE.load(core::sync::atomic::Ordering::Relaxed);
+    if !table.is_null() {
+        // SAFETY: the tables are statics
+        crate::personality::syscall(frame, fpu, unsafe { &*table });
+        return;
+    }
     // Calls that only read the caller's identity, and private futex wakes, run without
     // the kernel lock
     if let Some(r) = crate::compat::linux::fast_syscall(frame) {
@@ -495,14 +504,12 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     crate::arch::smp::bkl_exit();
 }
 
-/// [`hydra_syscall_dispatcher`] under the kernel lock.
-fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
-    SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
-
-    // Release what exited processes held: no locks are held at syscall entry, except while
-    // a driver serves a call (its caller may hold the file system's lock, which releasing
-    // file mappings takes). Not in driver processes either: releasing files calls the file
-    // server, which may be the caller itself (ordinary processes do it soon enough)
+/// Releases what exited processes held: no locks are held at syscall entry, except while
+/// a driver serves a call (its caller may hold the file system's lock, which releasing
+/// file mappings takes). Not in driver processes either: releasing files calls the file
+/// server, which may be the caller itself (ordinary processes do it soon enough). Under the
+/// kernel lock, at the start of a call.
+pub(crate) fn reap_retired() {
     if !crate::task::scheduler::handoff_active() && crate::task::current_service().is_none() {
         crate::task::close_retired();
         // Process accounting records of processes that ended
@@ -510,6 +517,12 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
         crate::memory::vm::reap_retired_mms();
         crate::task::scheduler::reap_dead_tasks();
     }
+}
+
+/// [`hydra_syscall_dispatcher`] under the kernel lock.
+fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
+    SYSCALL_FPU.store(fpu, core::sync::atomic::Ordering::Release);
+    reap_retired();
 
     // Check if active task uses Linux ABI personality
     if crate::task::current_personality() == crate::task::TaskPersonality::Linux {

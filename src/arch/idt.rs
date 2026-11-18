@@ -738,7 +738,7 @@ fn kill_current_user_task(ctx: &mut ExceptionContext) {
 /// * `ctx` - CPU exception register context.
 /// * `sig` - POSIX signal number (e.g. SIGSEGV=11, SIGILL=4).
 fn kill_or_signal(ctx: &mut ExceptionContext, sig: u32) {
-    let linux = crate::task::current_personality() == crate::task::TaskPersonality::Linux;
+    let linux = crate::task::current_personality().is_posix();
     if linux && (ctx.cs & 3) == 3 {
         let fpu = CURRENT_TRAP_FPU.load(Ordering::Acquire);
         crate::compat::linux::proc::force_fault_signal(ctx, fpu, sig);
@@ -769,7 +769,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             // The call may have deleted the descriptor the caller's ss names
             crate::arch::segments::sanitize_frame(&mut ctx.cs, &mut ctx.ss, &mut ctx.rip);
         }
-        1 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
+        1 if (ctx.cs & 3) == 3 && crate::task::current_personality().is_posix() => {
             // #DB - a single step (trap flag) or a debugger's hardware breakpoint or
             // watchpoint: SIGTRAP. DR6 says which (kept for the debugger's PEEKUSER).
             let dr6 = crate::arch::debugregs::take_dr6();
@@ -787,7 +787,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             // #DB in the kernel: a user watchpoint touched by the kernel on the user's behalf
             crate::arch::debugregs::take_dr6();
         }
-        3 if (ctx.cs & 3) == 3 && crate::task::current_personality() == crate::task::TaskPersonality::Linux => {
+        3 if (ctx.cs & 3) == 3 && crate::task::current_personality().is_posix() => {
             // int3 in a Linux program: SIGTRAP (debuggers' breakpoints)
             kill_or_signal(ctx, 5);
         }
@@ -852,7 +852,7 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
             let user_space_fault = resolved.is_some();
 
             if (is_user || user_space_fault) && crate::task::is_active() {
-                let linux_user = is_user && crate::task::current_personality() == crate::task::TaskPersonality::Linux;
+                let linux_user = is_user && crate::task::current_personality().is_posix();
                 if linux_user {
                     let sig = if resolved == Some(Err(crate::memory::vm::FaultError::Bus)) { 7 } else { 11 };
                     if sig == 7 {

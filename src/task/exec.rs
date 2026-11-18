@@ -60,6 +60,11 @@ pub struct LinuxExecImage {
     pub entry: u64,
     /// Initial user stack pointer (`RSP`) pointing to `argc` at the base of the System V stack frame.
     pub rsp: u64,
+    /// The personality the program runs with (`crate::personality::choose`).
+    pub pers: crate::task::TaskPersonality,
+    /// Initial `rdi`: 0 for Linux; FreeBSD passes the address of `argc` there (its `_start`
+    /// and `_rtld_start` read it).
+    pub rdi: u64,
 }
 
 /// Credentials reported to the new process through the auxiliary vector.
@@ -329,6 +334,8 @@ fn cpuid_edx_leaf1() -> u64 {
 /// # Arguments
 ///
 /// * `exe` - Primary ELF executable source descriptor.
+/// * `pers` - The personality chosen for it (`crate::personality::choose`); its interpreter
+///   must have the same.
 /// * `exec_path` - Path string recorded for `AT_EXECFN`.
 /// * `argv` - Command-line argument strings.
 /// * `envp` - Environment variable strings (`KEY=VALUE`).
@@ -344,6 +351,7 @@ fn cpuid_edx_leaf1() -> u64 {
 /// Returns [`ElfError`] if parsing fails, the dynamic interpreter cannot be found, or VM mapping fails.
 pub fn load_linux_exec(
     exe: ElfSource,
+    pers: crate::task::TaskPersonality,
     exec_path: &str,
     argv: &[&str],
     envp: &[&str],
@@ -364,6 +372,9 @@ pub fn load_linux_exec(
     let (entry, interp_base) = match interp_path {
         Some(path) => {
             let interp_src = read_file(&path).ok_or(ElfError::InterpreterNotFound)?;
+            if !crate::personality::interp_agrees(pers, &interp_src.head, &path) {
+                return Err(ElfError::UnsupportedType);
+            }
             let interp = map_elf(&mut mm, &interp_src, None, &path)?;
             (interp.entry, interp.bias)
         }
@@ -376,11 +387,24 @@ pub fn load_linux_exec(
     mm.mmap(stack_base, STACK_SIZE, stack_prot, false, true, false, Backing::Anon)
         .map_err(|_| ElfError::AllocationFailed)?;
     mm.set_name(stack_base, stack_base + STACK_SIZE, Some("[stack]"));
+    // The personality's layout (design 2.6): FreeBSD gets its auxiliary vector numbers, its
+    // entry registers and the signal trampoline page instead of Linux's vDSO
+    let freebsd = pers == crate::task::TaskPersonality::FreeBsd;
     // The vDSO (clock_gettime and the like in user mode)
-    let vdso = crate::arch::vdso::map(&mut mm);
+    let vdso = if freebsd { map_freebsd_sigcode(&mut mm)?; None } else { crate::arch::vdso::map(&mut mm) };
 
     // --- Strings area at the top of the stack ---
     let mut strings: Vec<u8> = Vec::new();
+    // FreeBSD: AT_PAGESIZES' array (3 words) and `struct ps_strings` (4 words) first, where
+    // they are 8-byte aligned
+    const FB_PAGESIZES: usize = 0;
+    const FB_PS_STRINGS: usize = 24;
+    if freebsd {
+        strings.resize(56, 0);
+        for (i, v) in [PAGE_SIZE, 0x20_0000, 0x4000_0000].iter().enumerate() {
+            strings[FB_PAGESIZES + i * 8..FB_PAGESIZES + i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
     let push_str = |s: &[u8], strings: &mut Vec<u8>| -> usize {
         let off = strings.len();
         strings.extend_from_slice(s);
@@ -403,6 +427,57 @@ pub fn load_linux_exec(
     // The arguments' strings, then the environment's (contiguous: pushed in that order)
     let arg_end = envp_offs.first().copied().unwrap_or(execfn_off);
     mm.args = (strings_base, addr_of(arg_end), addr_of(execfn_off));
+
+    // FreeBSD's vector (`sys/sys/elf_common.h` numbers; its words that point into the
+    // argument block are known once the block's size is)
+    let fb_auxv = if freebsd {
+        use crate::personality::abi::freebsd_at as at;
+        let n = 1 + argv.len() + 1 + envp.len() + 1 + 2 * 31;
+        let sp = (strings_base - n as u64 * 8) & !0xF;
+        let (argv_at, envv_at) = (sp + 8, sp + 8 * (argv.len() as u64 + 2));
+        // struct ps_strings { char **ps_argvstr; u_int ps_nargvstr; char **ps_envstr; u_int ps_nenvstr; }
+        for (i, v) in [argv_at, argv.len() as u64, envv_at, envp.len() as u64].iter().enumerate() {
+            strings[FB_PS_STRINGS + i * 8..FB_PS_STRINGS + i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        let hdr = ElfBinary::parse(&exe.head)?.header();
+        let v: [(u64, u64); 31] = [
+            (at::PHDR, main.phdr),
+            (at::PHENT, 56),
+            (at::PHNUM, hdr.e_phnum as u64),
+            (at::PAGESZ, PAGE_SIZE),
+            (at::BASE, interp_base),
+            (at::FLAGS, 0),
+            (at::ENTRY, main.entry),
+            (at::UID, creds.uid as u64),
+            (at::EUID, creds.euid as u64),
+            (at::GID, creds.gid as u64),
+            (at::EGID, creds.egid as u64),
+            (at::EXECPATH, addr_of(execfn_off)),
+            (at::CANARY, addr_of(random_off)),
+            (at::CANARYLEN, 16),
+            (at::OSRELDATE, crate::personality::abi::FREEBSD_OSRELDATE),
+            (at::NCPUS, crate::arch::smp::online() as u64),
+            (at::PAGESIZES, addr_of(FB_PAGESIZES)),
+            (at::PAGESIZESLEN, 24),
+            (at::STACKPROT, stack_prot as u64),
+            (at::EHDRFLAGS, hdr.e_flags as u64),
+            (at::HWCAP, 0),
+            (at::HWCAP2, 0),
+            // No ELF_BSDF_SIGFASTBLK: rtld and libthr never use sigfastblock
+            (at::BSDFLAGS, 0),
+            (at::ARGC, argv.len() as u64),
+            (at::ARGV, argv_at),
+            (at::ENVC, envp.len() as u64),
+            (at::ENVV, envv_at),
+            (at::PS_STRINGS, addr_of(FB_PS_STRINGS)),
+            (at::USRSTACKBASE, STACK_TOP),
+            (at::USRSTACKLIM, STACK_SIZE),
+            (at::NULL, 0),
+        ];
+        Some(v)
+    } else {
+        None
+    };
 
     // --- argc / argv / envp / auxv words ---
     let mut words: Vec<u64> = Vec::new();
@@ -435,7 +510,11 @@ pub fn load_linux_exec(
         if let Some(v) = vdso { (crate::compat::linux::types::AT_SYSINFO_EHDR, v) } else { (1, 0) },
         (AT_NULL, 0),
     ];
-    for (key, val) in auxv {
+    let auxv: &[(u64, u64)] = match &fb_auxv {
+        Some(v) => v,
+        None => &auxv,
+    };
+    for &(key, val) in auxv {
         words.push(key);
         words.push(val);
         mm.auxv.extend_from_slice(&key.to_le_bytes());
@@ -451,5 +530,22 @@ pub fn load_linux_exec(
     block.extend_from_slice(&strings);
     mm.write_bytes(sp, &block).map_err(|_| ElfError::AllocationFailed)?;
 
-    Ok(LinuxExecImage { mm, entry, rsp: sp })
+    if freebsd {
+        // FreeBSD enters as if `_start` had been called: rsp = ((stack - 8) & ~15) + 8, and
+        // rdi = the stack (the address of argc) (`exec_setregs`, sys/amd64/amd64/exec_machdep.c)
+        return Ok(LinuxExecImage { mm, entry, rsp: ((sp - 8) & !0xF) + 8, pers, rdi: sp });
+    }
+    Ok(LinuxExecImage { mm, entry, rsp: sp, pers, rdi: 0 })
+}
+
+/// Maps FreeBSD's signal trampoline (`crate::personality::abi::FREEBSD_SIGCODE`) read-only and
+/// executable at its fixed address in a FreeBSD process.
+fn map_freebsd_sigcode(mm: &mut Mm) -> Result<(), ElfError> {
+    use crate::personality::abi::{FREEBSD_SIGCODE as SIGCODE, FREEBSD_SIGCODE_ADDR as SIGCODE_ADDR};
+    mm.mmap(SIGCODE_ADDR, PAGE_SIZE, PROT_READ | PROT_WRITE, false, true, false, Backing::Anon)
+        .map_err(|_| ElfError::AllocationFailed)?;
+    mm.write_bytes(SIGCODE_ADDR, &SIGCODE).map_err(|_| ElfError::AllocationFailed)?;
+    mm.mprotect(SIGCODE_ADDR, PAGE_SIZE, PROT_READ | PROT_EXEC).map_err(|_| ElfError::AllocationFailed)?;
+    mm.set_name(SIGCODE_ADDR, SIGCODE_ADDR + PAGE_SIZE, Some("[sigcode]"));
+    Ok(())
 }

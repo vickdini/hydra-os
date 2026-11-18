@@ -61,6 +61,8 @@ pub mod fs;
 pub mod ipc;
 /// Wave 3: forwarding Linux system calls to the ring-3 Linux server.
 pub mod lx;
+/// Wave 5: personalities (programs of other systems: FreeBSD, macOS), the hook.
+pub mod personality;
 /// Physical frame allocation, dynamic kernel heap, 4-level PML4 paging, and process virtual memory.
 pub mod memory;
 /// The emergency prompt: the tiny in-kernel console for when user space is broken (the console
