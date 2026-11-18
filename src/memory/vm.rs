@@ -1560,6 +1560,15 @@ fn fault_lock(mm: &Mutex<Mm>) -> Option<spin::MutexGuard<'_, Mm>> {
         }
         let copying = LX_COPY_MM.iter().enumerate().any(|(c, v)| c != me && v.load(Ordering::SeqCst) == key);
         if !copying {
+            // Group 13: a copier lets go of the lock before its mark, so the lock seen held
+            // a moment ago may be free now: only a lock still held without a mark is someone
+            // else's (the race made a desktop with Firefox panic once)
+            if let Some(g) = mm.try_lock() {
+                return Some(g);
+            }
+            if LX_COPY_MM.iter().enumerate().any(|(c, v)| c != me && v.load(Ordering::SeqCst) == key) {
+                continue;
+            }
             return None;
         }
         crate::arch::smp::serve_tlb();
@@ -1633,7 +1642,15 @@ pub fn handle_current_fault(addr: u64, write: bool, exec: bool) -> Option<Result
             }
             Some(r)
         }
-        None => panic!("page fault at {:#x} while the faulting process's Mm is locked", addr),
+        None => panic!(
+            "page fault at {:#x} while the faulting process's Mm is locked (tid {}, cpu {}, kernel lock owner {}, copy marks {:?}, mm {:#x})",
+            addr,
+            crate::task::CURRENT_TID.load(Ordering::Relaxed),
+            crate::arch::percpu::cpu(),
+            crate::arch::smp::bkl_owner(),
+            LX_COPY_MM.iter().map(|v| v.load(Ordering::Relaxed)).collect::<alloc::vec::Vec<_>>(),
+            ptr as u64
+        ),
     }
 }
 

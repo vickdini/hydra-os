@@ -424,7 +424,7 @@ main thread collects about once a second, before answering `/proc/net/unix`, and
 
 Events the server must know about go to a ring at the start of its service window
 (`LX_NOTES_OFF`): `LX_NOTE_FORK(parent, child)`, `LX_NOTE_EXEC(tid, tgid)`,
-`LX_NOTE_EXIT(tgid)` (the last thread ended), `LX_NOTE_INTERRUPT(request id)`. The kernel
+`LX_NOTE_EXIT(tgid)` (the last thread ended), `LX_NOTE_INTERRUPT(request id)`, `LX_NOTE_CLOSE(slot, kind)`, `LX_NOTE_TIMER(cookie, deadline)` (step 4). The kernel
 appends and rings the main thread (`NOTIFY_LX_NOTES`); the server takes them in order under
 one lock and advances the tail. Every call carries the ring position at the time it was made
 (`note_seq`), and a worker takes the ring up to there before serving the call: a child's
