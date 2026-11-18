@@ -28,10 +28,11 @@ scripts: [personality-freebsd-syscalls.md](personality-freebsd-syscalls.md),
   positive errno, sometimes a second value in `rdx`). Wave 5 can prove it with a tiny
   static FreeBSD program (`tests/freebsd/rawsys.c`, already written) whose calls reach a
   FreeBSD table. Estimate **3–4 agent-days**, as the plan says.
-- **Today a FreeBSD program is not refused, it is misread** (section 1.3): the loader ignores
-  the OS/ABI byte and runs it as a Linux program with Linux system call numbers. FreeBSD's
-  `write` (4) becomes Linux `stat`, its `exit` (1) becomes `write`, and a static FreeBSD
-  program loops forever. The hook must fix this first, even before FreeBSD works.
+- **Today a FreeBSD program is not refused, it is misread** (section 1.3, checked in one VM
+  run): the loader ignores the OS/ABI byte and starts it as a Linux program. Both a static
+  FreeBSD program and FreeBSD's dynamic linker crashed at once, because FreeBSD enters a
+  program with a different stack alignment and the stack pointer in `rdi`; their system
+  calls would have been read as Linux numbers. The hook must fix this first.
 - **FreeBSD against Linux (section 4):** of FreeBSD's **409 live system calls**, 125 map
   directly onto an existing Linux-layer operation, 117 need a layout or constant
   translation, 46 are new (kqueue, sysctl, `thr_*`, `_umtx_op`, Capsicum, jails, ...) and
@@ -121,23 +122,24 @@ scripts: [personality-freebsd-syscalls.md](personality-freebsd-syscalls.md),
   `syscall` instructions there; libc has 6 left, the dynamic linker 30). That is FreeBSD's
   equivalent of macOS's `libsystem_kernel`: one library is the whole kernel interface.
 
-### 1.3 What happens today with a FreeBSD program (read from the code)
+### 1.3 What happens today with a FreeBSD program (read from the code, then run once)
 
 `execve` never looks at `EI_OSABI` or the notes (`ElfBinary::parse` checks only class,
-data, machine, type and program headers). So:
-- **A dynamic FreeBSD program** in `/ubuntu`: the interpreter `/libexec/ld-elf.so.1` does
-  not exist there, and `execve` fails with `ENOENT` (`ElfError::InterpreterNotFound`).
-  This is the only "refusal", and it is an accident.
-- **The same program in a root that has `/libexec/ld-elf.so.1`** (a `/freebsd` root): the
-  kernel loads FreeBSD's dynamic linker as a Linux program. Its first system calls use
-  FreeBSD numbers that mean something else to Linux (FreeBSD `__sysctl` 202 is Linux
-  `futex`, `mmap` 477 is unassigned, `openat` 499 is unassigned, `issetugid` 253 is
-  `inotify_add_watch`...). It dies or misbehaves in unpredictable ways.
-- **A static FreeBSD program** like `rawsys`: `write` (4) runs as Linux `stat` on the
-  pointer 1 (`-EFAULT`), and `exit(1)` runs as Linux `write(1, NULL, 0)`, which succeeds,
-  so the program **spins forever**.
-- **The wave 5 hook must therefore start by recognising the marking,** and until a FreeBSD
-  table exists, refuse such programs with `ENOEXEC` instead of running them as Linux.
+data, machine, type and program headers). One VM run (KVM, 2 CPUs, an overlay of the main
+pool, the deployed wave 3 kernel, the binaries of section 4.6 copied into `/ubuntu/tmp`;
+script `scratch/vm_fbsd.sh`, not committed) showed what that means:
+
+| Case | What happened | Why |
+|---|---|---|
+| Static `rawsys` in `/ubuntu` | Loaded and started **as a Linux program**; killed at once by `SIGSEGV` (a `#GP` on `movaps` to the stack at `0x2011e2`) | FreeBSD enters a program with `rsp = ((stack - 8) & ~15) + 8`, as if a call had pushed a return address, and `rdi` = the stack pointer (`exec_setregs`, `sys/amd64/amd64/exec_machdep.c`). Linux enters with `rsp` 16-byte aligned. FreeBSD's `_start` is a C function and relies on the BSD alignment |
+| Dynamic `fbsdinfo` in `/ubuntu` | `cannot execute: required file not found` (`ENOENT`) | `/libexec/ld-elf.so.1` does not exist there: the only "refusal", and an accident |
+| Dynamic `fbsdinfo` in a root with FreeBSD's `ld-elf.so.1` | FreeBSD's dynamic linker loaded **as a Linux interpreter**; killed by `SIGSEGV` (read of address 0 in `_rtld_start`) | the linker reads the stack pointer from `rdi`, which Linux leaves 0 |
+
+Had either got further, its system calls would have been taken as Linux numbers (FreeBSD
+`write` 4 is Linux `stat`, `exit` 1 is Linux `write`, `__sysctl` 202 is Linux `futex`,
+`mmap` 477 and `openat` 499 are unassigned). **The wave 5 hook must therefore start by
+recognising the marking,** and until a FreeBSD table exists, refuse such programs with
+`ENOEXEC` instead of running them as Linux.
 
 ## 2. The hook (wave 5)
 
@@ -340,6 +342,7 @@ After the call, the trap holds a result `r` in the internal convention (Linux's:
 | Lowest mapping | `0x1_0000` | `0x1_0000` (FreeBSD forbids page 0 by default; no other floor) | **4 GiB** (`__PAGEZERO`): nothing is mapped below `0x1_0000_0000` |
 | Stack contents | `argc, argv, envp, auxv` | the same order, **FreeBSD `AT_*` numbers**, plus `struct ps_strings` at the stack top (`AT_PS_STRINGS`) | the main executable's Mach-O header address, `argc, argv, envp`, then the `apple[]` strings (`executable_path=`, `ptr_munge=`, `main_stack=`, `stack_guard=`, `malloc_entropy=`, `th_port=`...), no auxv |
 | Shared kernel page | vDSO (`AT_SYSINFO_EHDR`) | **shared page**: the signal trampoline (about 40 bytes), optionally `vdso_timekeep` (`AT_TIMEKEEP`); at `0x7FFF_FFFF_F000` | **commpage** at `0x7FFF_FFE0_0000`: signature, version, CPU capabilities, CPU counts, memory size, page shift (what Darling's `mldr` fills); later the time data |
+| Entry registers | `rsp` 16-byte aligned at `argc`; `rdx` = 0 (no `atexit` function) | **`rsp = ((stack - 8) & ~15) + 8`, `rdi` = the address of `argc`** (FreeBSD's `_start` and `_rtld_start` read it; checked: without it both crash) | `rsp` at the Mach-O header address, 16-byte aligned |
 | Interpreter | `PT_INTERP` (ld-linux) | `PT_INTERP` (`/libexec/ld-elf.so.1`) | `LC_LOAD_DYLINKER` (`/usr/lib/dyld`) |
 | TLS register | `%fs` | `%fs` (`sysarch(AMD64_SET_FSBASE)`) | **`%gs`** (machdep call 3, `thread_fast_set_cthread_self`); Hydra already keeps a user GS base per thread for Wine |
 
@@ -709,8 +712,9 @@ Group 11's build root with `clang-15 --target=x86_64-unknown-freebsd15.1
 | `fbsdkq` | kqueue: read/write filters with `data`, `EV_CLEAR`, `EV_ONESHOT`, timers, signals, `EVFILT_USER`, socketpairs, `EVFILT_PROC`, kqueue not inherited by `fork` | wave 11b |
 | `fbsdthr` | libthr: threads, mutexes, condition variables, semaphores, TLS, a `SA_SIGINFO` handler reading the FreeBSD `ucontext`, `sigaltstack`, `pthread_cancel` (`SIGTHR`) | wave 11a |
 
-They were only compiled and inspected (`readelf`), not run: there is no FreeBSD machine
-here, and Hydra cannot run them yet.
+They were compiled and inspected (`readelf`); `rawsys` and `fbsdinfo` were also started on
+today's Hydra in one VM run, which showed how they fail (section 1.3). There is no FreeBSD
+machine here to see them pass.
 
 **Milestones** (each one a test in the suite once reached):
 
@@ -1039,8 +1043,8 @@ service. Wave 5 reserves the bit (returns `ENOSYS` for it) so nothing else uses 
 
 ## 8. Risks and what was not verified
 
-- **Nothing here ran on Hydra or on FreeBSD.** The test programs were compiled and
-  inspected, not run. The classification of the 409 + 455 calls is by reading the tables,
+- **Nothing here ran on FreeBSD or macOS,** and on Hydra only the failure check of 1.3 ran.
+  The test programs' expected outputs are therefore unverified. The classification of the 409 + 455 calls is by reading the tables,
   headers and man pages, not by running programs; expect a few calls to move between
   classes when wave 11 implements them.
 - **Usage counts** are from dynamic imports of the base system; static binaries (`/rescue`)
