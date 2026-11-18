@@ -99,7 +99,8 @@ pub fn leaving_of(c: usize) -> u64 {
 #[inline]
 pub fn leaving_elsewhere(id: u64) -> bool {
     let me = cpu();
-    (0..MAX_CPUS).any(|c| {
+    // (only the CPUs online: each block is a cache line of its own CPU)
+    (0..super::smp::online().min(MAX_CPUS)).any(|c| {
         // SAFETY: a plain word of another CPU's block, written by that CPU alone
         c != me && unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PERCPU[c].leaving)) } == id + 1
     })

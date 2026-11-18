@@ -1965,9 +1965,8 @@ impl Scheduler {
         // moment ago). A task can be ready while its CPU still runs it: it blocked itself and
         // was woken before it yielded. Without the kernel lock (crate::lx's lock-free path)
         // another CPU may see it so
-        if crate::arch::percpu::leaving_elsewhere(t.id.0)
-            || (0..crate::arch::smp::MAX_CPUS).any(|c| c != me && self.idle_of[c].is_some() && self.cur[c] == idx)
-        {
+        let online = crate::arch::smp::online().min(crate::arch::smp::MAX_CPUS);
+        if (0..online).any(|c| c != me && self.cur[c] == idx && self.idle_of[c].is_some()) || crate::arch::percpu::leaving_elsewhere(t.id.0) {
             return false;
         }
         if let Some(c) = self.idle_of.iter().position(|i| *i == Some(t.id)) {
