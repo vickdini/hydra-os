@@ -1134,6 +1134,22 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     // During a driver call (whose caller may hold kernel locks) the ordinary path waits it
     // out first; this path never waits for a lock such a caller could hold
+    // Group 13: read/write on a kernel descriptor, decided first and cheaply (this CPU's
+    // cached descriptor table of this thread, its server-object bit clear)
+    if nr <= 20 && BYFD_IO_NUMBERS.contains(&nr) {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*FDS.0[cpu].get() };
+        if tid != 0 && e.0 == tid && e.1 == crate::compat::linux::ident_epoch() && e.3 != 0 {
+            // SAFETY: the running thread holds that table (see `byfd_fast`)
+            let maybe = unsafe { &*(e.3 as *const crate::fs::SrvPtr) }.get().is_some_and(|b| b.maybe(frame.rdi));
+            if !maybe {
+                IO_KERNEL[cpu].store(tid, Ordering::Relaxed);
+                return None;
+            }
+        }
+    }
     if route(nr) != Route::Server
         || !ONLINE.load(Ordering::Acquire)
         || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
