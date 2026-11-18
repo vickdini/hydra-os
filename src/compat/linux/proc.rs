@@ -2670,6 +2670,24 @@ pub fn force_fault_signal(ctx: &mut ExceptionContext, fpu: *mut FpuState, sig: u
             area.unwrap_or_default(),
             code
         );
+        // The registers and the stack around the fault (diagnosis of user-memory corruption)
+        crate::kprintln!(
+            "[linux]   rax {:#x} rbx {:#x} rcx {:#x} rdx {:#x} rsi {:#x} rdi {:#x} rbp {:#x}",
+            ctx.rax, ctx.rbx, ctx.rcx, ctx.rdx, ctx.rsi, ctx.rdi, ctx.rbp
+        );
+        crate::kprintln!(
+            "[linux]   r8 {:#x} r9 {:#x} r10 {:#x} r11 {:#x} r12 {:#x} r13 {:#x} r14 {:#x} r15 {:#x}",
+            ctx.r8, ctx.r9, ctx.r10, ctx.r11, ctx.r12, ctx.r13, ctx.r14, ctx.r15
+        );
+        let base = ctx.rsp.wrapping_sub(0x20) & !7;
+        if crate::memory::vm::prefault_current(base, 0xe0, false) {
+            for row in 0..7u64 {
+                let a = base + row * 0x20;
+                // SAFETY: the range was faulted in readable just above
+                let w: [u64; 4] = unsafe { core::ptr::read_unaligned(a as *const [u64; 4]) };
+                crate::kprintln!("[linux]   stack {:#x}: {:016x} {:016x} {:016x} {:016x}", a, w[0], w[1], w[2], w[3]);
+            }
+        }
         die(sig);
     }
     deliver_on_trap_return(ctx, fpu);
