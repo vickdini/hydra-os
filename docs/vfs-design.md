@@ -1,35 +1,46 @@
-# The VFS, mounts, pseudo files and the descriptor table: design (step 0 for wave 7)
+# The file system as a service of its own: VFS, mounts, pseudo files and the descriptor table (step 0 for wave 7)
 
-Microkernel wave 5, Group 16, 2026-11-18. Base: `host-unit-tests` 329aaf7. No code moves in this step. This document answers the open decision of [microkernel-plan.md](microkernel-plan.md) ("whether the VFS fast paths stay in the kernel for good") for step 6a of [linux-server-design.md](linux-server-design.md).
+Microkernel wave 5, Group 16, 2026-11-18. Base: `host-unit-tests` 329aaf7; revised on d0d38ab for the user's **decision 9** ([microkernel-plan.md](microkernel-plan.md), "Decisions"): *"I don't want to merge the file system with linux. They should be separate things in order to be resilient. In fact later on we'll also split linux into different services."* No code moves in this step. This document designs step 6a of [linux-server-design.md](linux-server-design.md) for that decision.
 
-**Who this is for:** the user (technical, not a kernel specialist) and the agents of wave 7.
+**Who this is for:** the user (technical, not a kernel specialist) and the agents of wave 7. Group 18 (wave 5, `docs/linux-services-design.md`) designs the routing to several servers and the calls between services; this document states what the file service needs from it (section 6) and uses its interface once it is written.
+
+**What changed from the first version.** The first version recommended putting the VFS inside linux-server ("B-lean"). The user rejected that. This version keeps the measurements (sections 1–3) and the descriptor-table conclusion, and redesigns the rest for a separate file service. Appendix B keeps the first version's option table for reference.
 
 ## 0. The answer in brief
 
-- **What was measured** (KVM, 2 CPUs, the same setup as the Linux design):
-  - the system calls of eight real workloads, sorted by the kind of call and the kind of descriptor (section 3.3);
-  - the cost of the VFS calls today, and of VFS-shaped calls answered by a stub in linux-server (a local prototype, not committed; section 3.2).
-- **The metadata-heavy tools are the only workloads that care.** They make **17,000 to 79,000 system calls a second** (warm `find /usr`: 79,000/s). Firefox's start and `apt-get install` make 2,000 to 4,000 a second and no option costs them more than 1 %. A KDE login makes about 14,000 a second for 25 s; it costs +0.5 % to +3.4 % depending on the option.
-- **Most of those calls are on descriptors, not paths.** A warm `find /usr` makes 84,900 calls: 60,300 of them are `fcntl`, `close` and `fstat` on directory descriptors, 11,600 `getdents64`, and only 11,700 path calls.
-- **Today's time is mostly zfs-server requests,** not system calls: the kernel's name cache (8,192 entries, emptied when full) hits only 13–56 % in a tree walk, and `find` makes 42,000 file-server requests (about 0.64 s of its 1.07 s).
-- **A forwarded VFS call costs more than a forwarded null call.** Measured with the stub: +2.0 µs for a call without pointers, **+4.2 µs for a path call** (the path in, a `struct stat` out), +4.7 µs for `getdents64`, +3.3 µs for a 4 KiB read. The copy-in/copy-out table costs 1–2 µs per pointer.
-- **The three options** (section 4):
-  - **A, everything out** (VFS, caches and the descriptor table in linux-server): warm `find` +227 ms. That is +21 % on this run's 1.07 s, but **+52 % on wave 4's 0.44 s**: over the 35 % budget.
-  - **B, out with kernel fast paths.** Measured in two forms:
-    - **B-lean:** the kernel keeps only the descriptor table as a table of handles and reads files by handle. Warm `find` +106 ms (+10 %, or +24 % on 0.44 s).
-    - **B-full:** B-lean plus a kernel name cache. Warm `find` +83 ms (+19 % on 0.44 s). It helps mainly `ls -lR` and the KDE login (+0.5 % instead of +2.6 %).
-  - **C, the VFS stays:** nothing added; the kernel keeps about 15,000 lines of file-system code for good.
-- **Recommendation: B-lean.**
-  - **What moves:** the whole VFS (path lookup and its caches, mounts, pseudo files, permission policy, `open`, every change) moves to linux-server.
-  - **What stays:** **the descriptor table stays in the kernel for good, as a table of handles** (what it already is for server objects since step 2), with file reads, `fstat`, `lseek`, `close`, `dup`, `fcntl` and `poll` on it answered there.
-  - No name cache in the kernel, so no cache-coherence protocol beyond per-file attributes.
-- **Two prerequisites decide whether wave 7 meets the budget,** whatever the option:
-  - **cheaper user-memory copies in the forwarding path** (1–2 µs per pointer today);
-  - **a fast call from linux-server to zfs-server.** A ring-3 server's call is Queued today: about 3 µs more per request, which would add 10–17 % to the metadata tools.
-  - Both are small, separate kernel tasks for wave 6.
-- **Wave 7** splits into five groups in parallel plus one closing group (section 10), about 21–23 agent-days in total (plus 6–8 for the prerequisites), 6–8 days of wall time.
+- **The shape (recommended):** a new ring-3 **vfs-server**, a service of its own beside zfs-server, linux-server and net-server.
+  - **vfs-server owns:**
+    - path lookup and the name, attribute and link caches;
+    - the mount tables and mount namespaces;
+    - permission policy (owner, mode, ACLs, and later Landlock and ABAC);
+    - `open`, every change (create, remove, rename, write, chmod, ...), directory listings, file locks;
+    - `tmpfs`.
+  - **zfs-server** stays the ZFS back end. vfs-server is its client for metadata.
+  - **`/proc`, `/sys` and `/dev` are not the file service's.** They are Linux views of process and device state, so they are mounted from the Linux services that own that state (linux-server today, later its process and device services). vfs-server only redirects lookups under those mounts.
+- **The kernel keeps the descriptor table as a table of handles,** and answers by handle, without any server:
+  - on files: `read`, `pread`, `readv`, `lseek`, `mmap`, `fstat`;
+  - on every descriptor: `close`, `dup`, `fcntl` (descriptor flags, `F_GETFL`), close-on-exec, `poll`/`select`/`epoll`.
 
-Section 9 lists the decisions, in plain words.
+  The process's **current directory, root and umask** are also kept in the kernel (cwd and root as handles).
+- **Routing:** the kernel sends file calls straight to vfs-server, not through linux-server: one hop, as before. Calls on a descriptor go to whoever owns it. A lookup under `/proc` costs one extra hop: vfs-server answers "redirect to linux-server", and the kernel forwards the call again in the same trap.
+- **Resilience, the point of the decision:**
+  - **If vfs-server crashes, Linux programs keep running.** Their open files, current directories and `mmap`s are kernel handles and page-cache mappings, so they survive. Reads of open files and `mmap`s keep working while the service is down. Calls that need the service wait for its restart, about a second.
+  - **What must be kept across the restart** (the mount tables, the file locks) lives in a kept-state object the kernel holds for the service. The caches are filled again from zfs-server.
+  - The only thing a program can see is a failed change: one that was in flight at the crash and cannot be known to have finished gets `EIO`.
+  - **If linux-server crashes,** every Linux program ends, as decided before (decision 6), but **vfs-server, its caches and the file system stay up**, and native programs keep their files.
+  - **If zfs-server crashes,** vfs-server retries on the restarted zfs-server, as the kernel does today.
+- **Cost:** the same number of forwarded calls as the first version's B-lean. The measured call counts and per-call costs give:
+  - warm `find` +10 % (+24 % on wave 4's faster baseline);
+  - `git status` +11 %, `tar` +4 %, a gcc build +4 %, a KDE login +2.6 %;
+  - Firefox and `apt-get` under 0.5 %.
+
+  The redirect for pseudo files adds under 0.1 % even in the KDE login. All within the budget (35 % for metadata tools, 5 % for the desktop).
+- **The hop to zfs-server decides the rest.**
+  - **With today's Queued calls between servers,** it adds another 6–17 % to the metadata tools: a warm `find` comes to +23 % (+55 % on the fast baseline, over budget).
+  - **With a direct server-to-server call** (about 2.5 µs, against today's 5.8 µs kernel-to-zfs-server Handoff), each file-server request gets cheaper than today, which pays for the forwarding. Net, against today: `find` −3 %, `git status` −7 %, `ls -lR` −10 %, KDE +1.3 %. That is before vfs-server's larger caches cut the number of requests.
+  - That call is **essential**, and it is Group 18's design.
+  - A cheaper copy of system-call arguments is the second prerequisite.
+- **Wave 7:** six groups in parallel and one closing group, about 25–29 agent-days, after the prerequisites (section 12). Section 11 has the decisions, in plain words.
 
 ## 1. What step 6a is about
 
@@ -48,16 +59,16 @@ Lines from `wc -l` at 329aaf7 (comments included).
 
 ### 1.2 What calls into it from elsewhere
 
-These are the couplings step 6a must cut, whichever option is chosen:
+These are the couplings step 6a must cut:
 
 | Caller | What it needs from the VFS | In step 6a |
 |---|---|---|
-| `execve` (`execve.rs`, `process.rs`, `task/exec.rs`) | Resolve the program and its interpreter by path, check exec permission, `#!` scripts, `/proc/self/exe` | Process policy moves only in step 7. Recommended: forward `execve` in 6a; the server resolves the files and calls a `task_exec` primitive (section 7.4) |
-| File `mmap` (`mm.rs`) | Descriptor to page-cache object | With a kernel descriptor table (B, C): unchanged. In A: forwarded, and the server calls `as_map` with the object |
-| Unix sockets (Group 13, wave 5) | Socket files: `bind` creates one, `connect` looks it up (`vfs_resolve`, temporary) | A function call inside linux-server; the primitive goes |
-| `bpf::device_check` (step 2) | Runs in the kernel's `open` and `mknod` | Moves with `open` into the server, which already holds the programs |
-| `inotify`/`fanotify`/`fuse` hooks in the ZFS client | Events and FUSE lookups from the path walk | They move in step 6b. Until then the server reports each event to the kernel (a temporary primitive), unless 6b runs in the same wave |
-| `/proc` | The process table, memory maps, CPU and memory statistics, signal state | Pseudo files move with the server and need **info primitives** for what only the kernel knows: `task_info(pid)`, `mm_maps(pid)`, `sys_stats()` |
+| `execve` (`execve.rs`, `process.rs`, `task/exec.rs`) | Resolve the program and its interpreter by path, check exec permission, `#!` scripts, `/proc/self/exe` | Process policy moves only in step 7. Recommended: forward `execve` to linux-server in 6a; it asks vfs-server to open the program and the interpreter, then calls a `task_exec` primitive (section 12, group 7-5) |
+| File `mmap` (`mm.rs`) | Descriptor to page-cache object | Unchanged: the descriptor table and the page cache stay in the kernel (section 7) |
+| Unix sockets (Group 13, wave 5) | Socket files: `bind` creates one, `connect` looks it up (`vfs_resolve`, temporary) | linux-server asks vfs-server (one server-to-server call); the primitive goes |
+| `bpf::device_check` (step 2) | Runs in the kernel's `open` and `mknod` | Moves with `open` into vfs-server. linux-server (which holds the programs) hands vfs-server the list, as it hands it to the kernel today |
+| `inotify`/`fanotify`/`fuse` hooks in the ZFS client | Events and FUSE lookups from the path walk | They move to vfs-server in step 6b. Until then vfs-server reports each event to the kernel's copies (a temporary primitive) |
+| `/proc` | The process table, memory maps, CPU and memory statistics, signal state | `/proc` becomes a file system served by linux-server (section 4.1). It needs **info primitives** for what only the kernel knows: `task_info(pid)`, `mm_maps(pid)`, `sys_stats()` |
 | Native programs (`arch/syscall.rs`: hydra-shell, the drivers) | The same `FdTable` type for their console, files and pipes | Unaffected: native processes keep a kernel table whatever happens on the Linux side |
 | Admin ops (`admin/linux.rs`) | Prepare files in the Linux root; run programs in a chroot | Native file access through the ZFS client (stays); the run op is a process op (step 7) |
 
@@ -130,7 +141,7 @@ What this shows:
   - It also copies twice: user to a kernel buffer to the syscall page, and back the same way.
   - Almost every VFS call has a pointer (a path, a `struct stat`, a buffer), so this matters more for step 6a than for the earlier steps.
 - **A buffer larger than the 3 KiB copy area costs a `SYS_LX_WRITE` instead,** about the same as through the page (`getdents64` 32 KiB: 4.7; 1 KiB: 5.2, within the noise).
-- **So a forwarded VFS call adds about +2.0 µs without pointers, +4.2 µs for a path call, +4.7 µs for `getdents64` and +3.3 µs for a 4 KiB read** (boot 1, the dearer case for the pointer calls; boot 3 gives 3.3, 3.3 and 3.4). These are the numbers section 5 uses, so its estimates lean pessimistic; with `fwd=2.4` (boot 3) A's `find` gains another 24 ms. With a cheaper copy (section 8.2) the pointer part could drop from about 2 µs to well under 1 µs.
+- **So a forwarded VFS call adds about +2.0 µs without pointers, +4.2 µs for a path call, +4.7 µs for `getdents64` and +3.3 µs for a 4 KiB read** (boot 1, the dearer case for the pointer calls; boot 3 gives 3.3, 3.3 and 3.4). These are the numbers section 9 uses, so its estimates lean pessimistic; with `fwd=2.4` (boot 3) A's `find` gains another 24 ms. With a cheaper copy (section 8.2) the pointer part could drop from about 2 µs to well under 1 µs.
 - **Against the per-call budget** (design 6.6: today + 3 µs per forward), `stat` would be 2.2 + 4.2 = 6.4 µs against a limit of 5.2: **missed by about 1 µs.** It is met only with the cheaper copy.
 
 ### 3.3 Real workloads: calls by kind
@@ -167,18 +178,305 @@ What the calls are, workload by workload (`tools/vfsbench/vfsparse.py` prints th
 2. **In the tools, descriptor calls outnumber path calls.** `find` makes 5 descriptor calls (`fcntl`, `close`, `fstat`, `getdents64`) for every path call. A kernel descriptor table saves more than a kernel name cache.
 3. **zfs-server requests are where today's time goes** (`find`: 0.64 s of 1.07 s; `ls -lR`: 3.9 of 7.9 s). A bigger cache in linux-server would win back more than forwarding loses, but only if linux-server reaches zfs-server as cheaply as the kernel does (section 8.2).
 
-## 4. The three options, precisely
+## 4. Where the file service lives: the shapes considered
+
+The measurements of section 3 say where the calls are. This section decides who owns what. All shapes keep in the kernel what the Linux design already keeps there (page cache, page faults, address spaces, ELF loader, the data half of the ZFS client), and all keep the descriptor table in the kernel as a table of handles (section 7).
+
+| | **F1. A new vfs-server (recommended)** | F2. The VFS inside zfs-server | F3. The VFS inside linux-server (first version's B-lean) |
+|---|---|---|---|
+| What it is | One new service: names, mounts, permissions, `open`, changes, locks, `tmpfs`. zfs-server stays the ZFS back end | zfs-server grows the VFS on top of its ZFS code: one file service | Rejected by decision 9 |
+| A path call | Kernel → vfs-server; on a cache miss vfs-server → zfs-server | Kernel → zfs-server; no second hop | Kernel → linux-server → zfs-server |
+| Cost of a cache miss | One server-to-server call (needs Group 18's direct call) | None (inside one process) | As F1 |
+| Fault isolation | A VFS bug (permissions, mount parsing, path walk) does not touch the ZFS code and the pool; a ZFS bug does not lose the mount tables and locks | One fault domain: a bug in either half takes both down, and a zfs-server restart is heavy (pool import state, ARC) | A Linux-layer fault ends the file system too: what decision 9 rejects |
+| Other file systems | `tmpfs`, FUSE (step 6b) and future ones (FAT for the ESP, ext4 for a FreeBSD or Linux root, a network file system) plug in as back ends of the same VFS | They would live in the ZFS process, or need a second VFS | |
+| Native programs and other personalities | Use the same vfs-server (FreeBSD and macOS front ends: waves 11–12) | Same | Would have to call into the Linux server |
+| Size | New: about 13,000 lines moved from the kernel (section 1.1) into a new program | Same lines, added to zfs-server's | |
+
+- **F1 is recommended.** It is what decision 9 asks for: the generic file service is separate from both the Linux layer and the ZFS implementation.
+- **F2's only gain is the second hop.** The direct server-to-server call removes most of that, and wave 7 needs the call anyway (linux-server already calls net-server, and will call vfs-server for `execve` and socket files).
+- **F2 is the fallback** if the direct call turns out too slow: section 9 shows what the hop costs either way.
+
+### 4.1 What is generic and what is Linux's
+
+| Piece | Where (F1) | Why |
+|---|---|---|
+| Path walk, `..`, symbolic links, `chroot`, mount crossing, `O_NOFOLLOW`/`RESOLVE_*` rules | vfs-server | Every personality walks paths the same way |
+| Name, attribute and link caches | vfs-server | They cache the back end |
+| Mount tables, mount namespaces, the mount API (`fsopen`, `open_tree`, ...) | vfs-server | Namespaces are file-system state. The Linux system-call *syntax* is decoded in vfs-server too: there is one VFS front end per personality call set, small, inside the service |
+| Permission policy: mode bits, ACLs; later Landlock and ABAC checks on paths | vfs-server | They decide file access. The caller's credentials come with each call (section 6) |
+| `open`, create, remove, rename, link, `chmod`/`chown`/`utimens`, `truncate`, xattrs, `getdents64`, `statfs`, `fsync` | vfs-server | |
+| Writes to regular files | vfs-server (through the page cache and zfs-server) | They change the size, times and set-ID bits, and make `inotify` events |
+| Record locks and `flock` (`locks.rs`) | vfs-server, with the lock table in its kept state (section 8) | Lock state must survive a vfs-server restart |
+| `tmpfs` (`/tmp`, `/run`, `/dev/shm`) | vfs-server | A memory file system: its file data stays in the kernel's page cache (anonymous objects), so it survives a restart too |
+| FIFOs (`mkfifo`) | The node in vfs-server; opening it returns a pipe object of the local-IPC service (linux-server, Group 13) | The pipe is IPC, the name is a file. Opening a FIFO is broken today (section 3.3: `make -j` spins) |
+| Unix socket files | The node in vfs-server; `bind`/`connect` by path: linux-server asks vfs-server (one server-to-server call) | Replaces Group 13's temporary `vfs_resolve` |
+| `/proc` (process and kernel state) | **linux-server** (later its process service) as a pseudo file system mounted at `/proc` | Its text comes from the process table, signals, memory maps: Linux state |
+| `/sys`, `/dev`, the udev database (`devices.rs`), `efivars` | **linux-server** (later the device service of wave 6: Group 15) | Views of devices; `/dev` nodes open device objects of their owners (DRM, input, sound, ttys) |
+| `inotify`, `fanotify` (step 6b) | vfs-server | Events come from the changes it makes |
+| FUSE (step 6b) | vfs-server, as a back end whose server is a user program | |
+
+## 5. How a call flows
+
+```text
+ Linux program                kernel                                   services
+  stat("/usr/bin/bash") ──> trap: route by number ──── forward ────> vfs-server: walk (cache), attributes
+                                                                      on a miss ──── direct call ──> zfs-server
+  open("/proc/self/stat") ─> trap ─────────────────── forward ────> vfs-server: "/proc is linux-server's"
+                              <────────────────────── redirect(linux-server, "self/stat") ┘
+                              same trap ────────────── forward ────> linux-server: a pseudo-file object
+  read(fd 5) on a file ────> trap: fd 5 is a file handle: page cache, no server
+  read(fd 6) on /proc ─────> trap: fd 6 is linux-server's object ── forward ──> linux-server
+  getdents64(fd 7, dir) ───> trap: fd 7 is vfs-server's ─────────── forward ──> vfs-server
+```
+
+- **One hop for every file call,** as in the first version: the kernel never sends a file call through linux-server.
+- **Two hops only for a lookup under a mount served by another service** (`/proc`, `/sys`, `/dev`, FUSE). Section 3.3 counts them: 4 in `find`, 250 in a Firefox start, 3,420 in a KDE login.
+- Once open, a pseudo file is an ordinary server object of linux-server: its reads go there directly (the step-2 mechanism).
+
+## 6. Routing, and what the file service needs from Group 18
+
+Written to NOTES.md (2026-11-18) for Group 18, who designs the kernel's routing to several servers and the calls between services:
+
+1. **Route by number:** the path calls go to vfs-server's endpoint:
+   - `open`/`openat`/`openat2`/`creat`;
+   - the `stat` family, `access`, `readlink`;
+   - `mkdir`, `mknod`, `unlink`, `rmdir`, `rename*`, `link`, `symlink`;
+   - `chmod`/`chown`/`utimensat`, `truncate`;
+   - xattrs by path, `statfs`, `chdir`, `chroot`, `mount` and the mount API.
+2. **Route by descriptor owner:** a call on a descriptor goes to the descriptor's owner. This is Group 12's `T_BYFD`, generalized from "server object or kernel" to "the owning endpoint":
+   - vfs-server owns directory descriptors and the change calls on file handles (`write`, `ftruncate`, `fchmod`, `fsync`, `getdents64`, `flock`, `fcntl` locks);
+   - the kernel answers the file-handle calls of section 7.
+3. **A redirect answer:** vfs-server may answer "served by endpoint E: the mount's object and the rest of the path", and the kernel forwards the same call to E within the same trap. The redirect counts toward a small loop limit.
+4. **What each forwarded call carries,** so that vfs-server keeps no per-process state:
+   - the credentials and groups (as `LxCall` today), the umask;
+   - the caller's **root and current directory as objects** (from the kernel task), and the object of an `*at` call's directory descriptor (`T_FD0`).
+5. **Calls between services:**
+   - vfs-server → zfs-server on every cache miss (warm `find`: 41,898 requests, `ls -lR`: 396,719, a KDE login: 99,466);
+   - linux-server → vfs-server (`execve`'s lookup, socket files, FIFOs);
+   - vfs-server → linux-server (none on the hot path).
+
+   They need Group 18's direct server-to-server call: today a ring-3 server's call is Queued (9–18 µs).
+6. **Kept state for restarts:** a memory object the kernel keeps for a service across its restarts (section 8). If Group 18 designs restart support for all services, vfs-server uses that.
+
+The forward to vfs-server is the same mechanism as the forward to linux-server (the direct switch, the lock-free entry, the copy-in/copy-out table). Its cost is what section 3.2 measured.
+
+## 7. The descriptor table: a kernel table of handles
+
+Decision 9 strengthens the case for keeping the table in the kernel. If it moved, it would have to move into *some* service. Every service would then depend on that one for every descriptor call, and its crash would end every program.
+
+**Handles.**
+- Each descriptor names an owner (an endpoint, or the kernel), an object (a slot), the owner's generation, and the open flags.
+- Two kinds carry kernel data:
+  - a **file handle**, which vfs-server installs at `open` of a regular file: the page-cache object, the offset, the open flags, and a copy of the file's attributes that vfs-server keeps current;
+  - a **directory handle:** the directory's object, and the cookie of the next `getdents64`.
+
+**Answered in the kernel, by handle, with no server:**
+
+| Call | On |
+|---|---|
+| `read`, `pread64`, `readv`, `preadv` | File handles (page cache; a miss reads from zfs-server as today) |
+| `lseek` | File and directory handles |
+| `mmap` of a file | File handles (as today) |
+| `fstat`, `statx`/`newfstatat` with `AT_EMPTY_PATH` | File and directory handles (cached attributes); server objects (as since step 2) |
+| `close`, `dup`, `dup2`, `dup3`, `fcntl(F_DUPFD*, F_GETFD, F_SETFD, F_GETFL)`, `close_range`, close-on-exec | Every descriptor; the owner hears of the last close (`LX_NOTE_CLOSE`, as for server objects) |
+| `poll`, `select`, `epoll_*` | Every descriptor (readiness words, as today) |
+| `fchdir` | Directory handles: the kernel task's cwd becomes that handle |
+
+**Forwarded to the owner:**
+- to vfs-server: `write`/`pwrite`/`writev` on files, `getdents64`, `ftruncate`, `fallocate`, `fsync`, `fchmod`/`fchown`, `flock`, the `fcntl` lock commands, and `F_SETFL` on files (append mode is enforced by vfs-server);
+- to the owning service: every call on a server object.
+
+**Kept in the kernel per process:** the root and current directory (directory handles) and the umask. They belong to the process, they survive a vfs-server restart, and they come with each call (section 6).
+
+**In the first version's measurements** this table is what saved the most. In `find` it answers 60,327 of 84,874 calls, and in the KDE login 28,435 calls on files and directories, 17,569 `poll`/`epoll` and 13,823 file reads.
+
+**Group 13's temporary primitives:**
+- `vfs_resolve` becomes a linux-server → vfs-server call;
+- descriptor passing (`SCM_RIGHTS`) stays, as the permanent "move a handle" primitive;
+- `LX_OBJ_FDPATH` and `LxCall::ino` go: the path of a handle is asked from its owner.
+
+## 8. Resilience: what happens when a service crashes
+
+### 8.1 vfs-server crashes
+
+| What a program has | What happens |
+|---|---|
+| Open regular files | **Survive.** The handle (page-cache object, offset, flags, attributes) is the kernel's. `read`, `pread`, `lseek`, `fstat` and `mmap` keep working while the service is down; a cache miss still reads from zfs-server |
+| Memory mappings of files | **Survive.** They are page-cache objects; page faults never involve vfs-server |
+| Current directory, root | **Survive.** They are kernel handles |
+| Open directories | **Survive.** The handle keeps the object and the `getdents64` cookie; the next `getdents64` waits for the restart |
+| Path calls and changes made while it is down | The caller waits (blocked in the kernel, like a queued call) until the new instance is online, about a second (linux-server restarts take that long today), then the call goes there. After a timeout (say 30 s) the call fails with `EIO` |
+| Calls in flight at the crash | Calls that change nothing (`stat`, `open` without `O_CREAT`/`O_TRUNC`, `readlink`, `getdents64`) are re-sent to the new instance. A change in flight (`rename`, `unlink`, `write`, create) gets `EIO`, because zfs-server may or may not have done it. The program sees an error, not its death |
+| Mount tables and namespaces, file locks | **Survive,** because vfs-server keeps them in a **kept-state object**: a memory object the kernel keeps for the service across restarts and hands to the next instance. The new instance checks it (a version and a checksum) before using it; if it is damaged, it starts from the boot mount table and the programs' locks are lost (they get `EIO` on unlock) |
+| `tmpfs` contents | **Survive.** The data are anonymous page-cache objects in the kernel, and the directory tree is in the kept state |
+| Caches | Lost and refilled from zfs-server: the first walks after a restart are slow |
+| `inotify`/`fanotify` watches (step 6b) | Kept in the kept state; events of the crash window may be lost, so watchers get `IN_Q_OVERFLOW` (programs handle it by rescanning) |
+
+What the restarted vfs-server must re-derive:
+- the object behind each live kernel handle: the kernel can list them, since each handle has the zfs object number and its generation;
+- the open-file reference counts zfs-server needs (`open_ref`): it sends them again from that list.
+
+### 8.2 linux-server crashes
+
+- Every Linux program ends (decision 6, unchanged until Group 18's split).
+- The kernel closes their handles, and vfs-server hears of the last closes.
+- **vfs-server, its caches, the mounts and zfs-server stay up.** Native programs (hydra-shell, the drivers) and, later, other personalities keep their files.
+- `/proc` and `/sys` are unavailable until linux-server is back: lookups under them wait or fail with `EIO`.
+
+### 8.3 zfs-server crashes
+
+- vfs-server's requests fail and are retried on the restarted zfs-server, as the kernel's are today (`ipc::service`: retried once). Page-cache misses in the kernel do the same.
+- Programs see a pause. A write that zfs-server never acknowledged gets `EIO`.
+
+### 8.4 What this needs that does not exist yet
+
+- **A kept-state object per service:** the supervisor keeps a memory object across the service's restarts and maps it into the next instance. Generic; Group 18 may make it the restart mechanism for every service.
+- **Waiting instead of failing:** calls to a service that is restarting wait for it (today's forwarding fails them with `ENOSYS` or `EIO`).
+- **A list of a service's live handles** (owner, object, generation) for the new instance.
+- **Handles that survive their owner's restart:** the generation check of step 2 must become "the same service, a new instance, objects revalidated" for vfs-server's handles, instead of "stale: `EBADF`".
+
+## 9. What it costs
+
+The same per-call costs as section 3.2:
+- path call +4.2 µs;
+- `getdents64` +4.7;
+- a write or other forwarded call +2.0;
+- reads and the table calls of section 7: 0.
+
+The redirect adds one forward (+2.4) to each pseudo-file lookup. "vfs-server" is F1 with no kernel name cache; "with a kernel name cache" is F1 plus the B-full cache of the first version (Appendix B.3), which would also answer `stat` during a vfs-server restart.
+
+**The hop to zfs-server** is shown separately, as the change per file-server request against today's kernel → zfs-server Handoff (5.8 µs empty round trip):
+- **Queued:** +3.2 µs, today's ring-3 call, CPU awake;
+- **direct:** about −3.3 µs, Group 18's target of about 2.5 µs;
+- **F2:** about −5.8 µs, no hop at all.
+
+| Workload (time today) | vfs-server | with a kernel name cache | zfs hop Queued | zfs hop direct | zfs hop removed (F2) |
+|---|---:|---:|---:|---:|---:|
+| Warm `find /usr` (1.07 s) | +106 ms (+10 %) | +83 ms (+8 %) | +134 ms (+13 %) | −138 ms (−13 %) | −243 ms (−23 %) |
+| same on wave 4's 0.44 s | +24 % | +19 % | +30 % | −31 % | −55 % |
+| `ls -lR /usr/share` (7.9 s) | +490 ms (+6 %) | +107 ms (+1 %) | +1,270 ms (+16 %) | −1,309 ms (−17 %) | −2,301 ms (−29 %) |
+| `git status` (0.58 s) | +63 ms (+11 %) | +33 ms (+6 %) | +98 ms (+17 %) | −101 ms (−18 %) | −178 ms (−31 %) |
+| `tar` (1.41 s) | +58 ms (+4 %) | +39 ms (+3 %) | +88 ms (+6 %) | −90 ms (−6 %) | −159 ms (−11 %) |
+| `make` of 30 C files (8.3 s) | +345 ms (+4.2 %) | +76 ms (+0.9 %) | +283 ms (+3.4 %) | −291 ms (−3.5 %) | −512 ms (−6 %) |
+| `apt-get install` (11.8 s) | +36 ms (+0.3 %) | +26 ms (+0.2 %) | +66 ms (+0.6 %) | −68 ms (−0.6 %) | −119 ms (−1 %) |
+| Firefox start (5.05 s) | +17 ms (+0.3 %) | +10 ms (+0.2 %) | +27 ms (+0.5 %) | −28 ms (−0.6 %) | −49 ms (−1 %) |
+| KDE login (about 25 s) | +657 ms (+2.6 %) | +134 ms (+0.5 %) | +318 ms (+1.3 %) | −328 ms (−1.3 %) | −577 ms (−2.3 %) |
+
+How to read it: the cost of a shape is its column plus one of the three zfs-hop columns.
+
+- **vfs-server with the direct call:** `find` −3 % against today (−7 % on the fast baseline), `git status` −7 %, KDE +1.3 %. **Within every budget.**
+- **vfs-server with Queued calls:** `find` +23 % (+55 % on the fast baseline), `git status` +28 %. **Over budget for `find`:** the direct call is a prerequisite.
+- **The redirect** costs 8 ms in the KDE login (0.03 %) and under 1 ms elsewhere.
+- **Fewer requests.** A cache in vfs-server that is larger than today's kernel one (8,192 names, emptied when full) would also cut the number of requests (`ls -lR` makes 205,000 `resolve` requests today). That gain is not in the table.
+- **Per call:** a forwarded `stat` costs 2.2 + 4.2 = 6.4 µs against the per-call budget of 5.2 (today + 3). The cheaper argument copy (section 10.2) is still needed to meet it.
+
+## 10. Recommendation
+
+### 10.1 F1: vfs-server, a file service of its own, with a kernel handle table
+
+1. **It is what decision 9 asks for.** The file system is neither in linux-server nor tied to the ZFS implementation:
+   - a crash of the Linux layer leaves the file system up;
+   - a crash of the file service leaves the programs running.
+2. **It costs what the first version's B-lean cost:** one hop per file call, and the same calls answered in the kernel. With a direct server-to-server call, the metadata tools may even get faster than today.
+3. **The kernel handle table is what makes restarts possible.** Open files, current directories and mappings live in the kernel, so a restarted vfs-server finds the programs as it left them.
+4. **`/proc`, `/sys` and `/dev` go to the Linux services that own their state,** mounted into the VFS. They are reached with one redirect, and only at lookup.
+
+### 10.2 Prerequisites (before or with wave 7)
+
+| | What | Why | Who |
+|---|---|---|---|
+| P1 | **Direct server-to-server call** (and grants for buffers) | Without it `find` is 55 % slower on the fast baseline; with it the tools may be faster than today | Group 18's design; built in wave 6 |
+| P2 | **Routing to several servers,** by number, by descriptor owner, with redirects (section 6) | Calls go straight to vfs-server | Group 18's design; built in wave 6 |
+| P3 | **Cheaper argument copies** in the forwarding path (fault fix-ups instead of a page walk per pointer) | Path calls +4.2 → about +2.5 µs: inside the per-call budget | Wave 6, 2–3 agent-days |
+| P4 | **Kept-state objects, waiting for a restarting service, live-handle lists** (section 8.4) | Restart without ending programs | Group 18's restart design, or wave 7 group 7-6 |
+| P5 | **Fix FIFO opens** (`make -j` spins today) | A bug; it shapes how FIFOs work later | Group 13 (wave 5) or wave 6 |
+
+## 11. Decisions for the user
+
+1. **Where does the file service live?**
+   - Recommended: **a new service, vfs-server,** next to zfs-server (which stays the ZFS back end). It owns names, mounts, permissions, opening and every change to files.
+   - The alternative, building the VFS into zfs-server, saves one call per cache miss, but a bug in either part then takes both down.
+2. **Should `/proc`, `/sys` and `/dev` belong to the Linux services, not to the file service?**
+   - Recommended: **yes.** They show processes and devices, which the Linux services own. The file service only points lookups there.
+   - The cost is one extra hop when such a file is opened (8 ms in a 25 s KDE login).
+3. **Does the descriptor table stay in the kernel, as a table of handles?**
+   - Recommended: **yes.** It answers most calls of the metadata tools without any service, and it is what lets programs keep their open files when the file service restarts.
+4. **When the file service crashes, should programs keep running?**
+   - Recommended: **yes.** Open files, current directories and memory mappings survive; file calls wait about a second for the restart.
+   - The price is that a change in flight at the crash (a rename, a write) returns an error to the program, and some kept state (mounts, locks) must be saved in a kept-state object.
+   - The simpler alternative is to end every program, as when linux-server crashes. That would undo much of the point of decision 9.
+5. **A fast call between services is a prerequisite.** Should Group 18's direct call be built in wave 6?
+   - Recommended: **yes.** Without it, a warm `find` would be about 23–55 % slower (over budget). With it, the metadata tools may get faster than today.
+6. **A kernel cache for `stat`?**
+   - Recommended: **not now.** It would bring the KDE login from +2.6 % to +0.5 % and keep `stat` working during a file-service restart, but it needs a coherence protocol between the kernel and vfs-server.
+   - Revisit if the budget is missed.
+7. **Splitting wave 7:** six groups in parallel, then one closing group (section 12), about 25–29 agent-days in 6–8 days of wall time.
+   - Recommended: **yes,** after the prerequisites of wave 6.
+
+## 12. Wave 7 plan (F1)
+
+### 12.1 Before wave 7 (wave 6)
+
+P1, P2 and P4 as Group 18 plans them; P3 (2–3 agent-days); P5 (Group 13, or 1 agent-day in wave 6).
+
+### 12.2 Wave 7: seven groups
+
+Each group owns its files. Shared files (the kernel routing table of P2, the copy table `src/lx/copy.rs`, the protocol file `src/ipc/protocol.rs`) get one marked block per group, planned in NOTES.md first, as in waves 4 and 5.
+
+| Group | What | Files owned | Depends on | Agent-days | Tests |
+|---|---|---|---|---:|---|
+| **7-1. vfs-server core** | The new program: endpoint, workers on the direct switch, the path walk, the name/attribute/link caches, zfs-server client (`allow_client`, its window range), mount crossing, the redirect answer | new `userland/drivers/vfs-server/` (`main`, `walk`, `cache`, `zfs`); `src/task/supervisor.rs` (its entry); `src/ipc/protocol.rs` (its block) | P1, P2 | 4–5 | A walk test comparing vfs-server's results with the kernel's for every path of the section-3.3 workloads; `fscache`, `xattr` |
+| **7-2. Path calls and kernel file handles** | `open*`, the stat family, `access`, `readlink`, creates, removes, `rename`, links, `chmod`/`chown`/`utimensat`, `truncate`, xattrs, `getdents64`, writes, `sendfile`/`copy_file_range` into vfs-server; the kernel side: file and directory handles, `obj_*` primitives, attribute updates, cwd/root/umask in the task | `vfs.rs`, `recent.rs`, `misc.rs`, `extra.rs`, `xfer.rs` → `vfs-server/src/calls/`; kernel: new `src/lx/fileh.rs`, `fs/fd.rs` (the new kinds only) | 7-1's interface (day 1) | 5–6 | `vfs`, `recent`, `batch1`–`3`, `stdfd`, `fsync`, `exelink`, `mmaptail`, `pagecache`, vfsbench, the section-3.3 workloads against the budget |
+| **7-3. Mounts, namespaces, `tmpfs`** | Mount tables, namespaces, the mount API, `pivot_root`, `chroot`, `tmpfs` (directory tree in the server, data in kernel anonymous objects) | `mount.rs` → `vfs-server/src/mount.rs`, `tmpfs.rs` | 7-1's interface | 3–4 | `mount`, `mountapi`, `nstest`, `pidns`, portals in KDE (Flatpak-style `/proc/<pid>/root`), the installer test |
+| **7-4. Pseudo file systems in linux-server** | `/proc`, `/sys`, `/dev`, the udev database, `efivars` as file systems served by linux-server and mounted in vfs-server; info primitives (`task_info`, `mm_maps`, `sys_stats`, `efivar`) | `fs.rs`, `devices.rs`, `efivars.rs`, `live.rs` → `linux-server/src/pseudo/`; kernel: new `src/lx/info.rs` | 7-1's redirect interface | 4 | `procinfo`, `proctest`, `procnet`, `cmdline`, `blockdev`, KDE and Firefox (they read `/proc` and `/sys`), `lsblk` |
+| **7-5. `execve`, socket files, FIFOs** | linux-server asks vfs-server to open the program, the interpreter and `#!` scripts; `task_exec`; Unix socket nodes by path and FIFOs through vfs-server (Group 13's `vfs_resolve` goes) | `execve.rs` (front half), `task/exec.rs` (primitive entry); `linux-server/src/{unix,pipe}.rs` (only the path parts) | 7-1's interface, P1 | 3 | `exelink`, `cmdline`, `crashexit`, `unixtest`, `make -j` (FIFO jobserver), fork+exec budget, a Wine start |
+| **7-6. Restart without ending programs** | Kept-state object (mount table, locks, `tmpfs` tree), waiting for a restarting service, re-sending idempotent calls, live-handle list and revalidation, the `open_ref` resync with zfs-server | `vfs-server/src/{kept,recover}.rs`, `locks.rs` → `vfs-server/src/locks.rs`; kernel: the restart parts of P4 (if Group 18 has not built them) | 7-1's interface, P4 | 3–4 | A new test: kill vfs-server while programs hold open files, mappings, a cwd, locks, and a `tmpfs` file; then everything still reads, `getcwd` works, locks hold, a change in flight gets `EIO`; kill it under KDE: the desktop keeps running |
+| **7-7. Closing** (after 7-2 to 7-6 merge) | `Vnode` and `File { path }` removed; `fs/fd.rs` down to the handle table; `LX_OBJ_FDPATH`, `LxCall::ino` removed; the in-kernel VFS copies deleted after deployment; budget measurement | `fs/fd.rs`, `src/lx/obj.rs`, `memfd.rs` | 7-2 to 7-6 | 3 | Full suite, `suite_loop` ×3, IOMMU suite, KDE ×5 fresh logins, Firefox, Wine, sound, the installer test, the full budget, kill tests for vfs-server, linux-server and zfs-server |
+
+- **Order:**
+  - Day 1: 7-1 writes the walk, cache and redirect interface into NOTES.md.
+  - 7-1 to 7-6 then run in parallel: they own different files.
+  - 7-7 follows their merge. The lead merges 7-1 first, then 7-2, then the rest.
+- **Total:** about 25–29 agent-days. Prerequisites: P3 2–3, P5 1, plus Group 18's P1/P2/P4.
+- **The switch back** (`lx=kernel`) keeps every moved call working in the kernel until 7-7 deletes the copies.
+- **Step 6b** (`io_uring`, `aio`, `inotify`, `fanotify`, FUSE, Landlock, ACLs, ABAC) follows in wave 8. Its file-side pieces go to vfs-server, and `io_uring`/`aio` to whichever service owns the descriptor.
+
+## 13. Not measured, and limits
+
+- **KVM, not the NUC.** Forwarding costs and zfs-server request costs on real hardware were never measured.
+- **Timings are noisy.** Five other groups' VMs shared the PC: the two boots of section 3.1 differ by up to 40 % on single calls, and a warm `find` took 0.81–1.35 s in three boots here against 0.44 s in wave 4 (same call counts each time). That is why section 9 shows both baselines. The counts, not the times, are the solid part.
+- **The prototype measures a stub,** not a server VFS. The server's real work for `open` or `stat` is assumed to cost what the kernel's costs today; a server-side cache could make it cheaper (fewer zfs-server requests) or dearer (user-space locks).
+- **Server-to-server calls were not measured.** Their cost is taken from the design's IPC numbers (Handoff 5.8 µs, Queued in a loop 9.0 µs) and, for the direct call, from Group 18's target (about 2.5 µs, like the direct switch to linux-server). The zfs-hop columns of section 9 are estimates, not measurements.
+- **Restarts were not tried.** Section 8's restart behaviour is a design; no prototype of a restartable vfs-server was built.
+- **The `git` repository was small** (3,851 files); a larger one would scale the counts, not change their mix.
+- **Not profiled:** Wine, dpkg on a large upgrade, a large compile.
+- **The no-PCID case** was not measured: wave 4's +2.2 µs per forward (against +2.0) would add about 10 % to every forwarding cost above.
+
+## Appendix A: reproducing the measurements
+
+- **Prototype build** (local only, never commit): `git apply tools/vfsbench/prototype.patch`, then build the drivers, the kernel and the ISO as usual. `git checkout -- src userland` removes it.
+- **vfsbench:** `gcc -O1 -w -pthread tests/linux/vfsbench.c -o esp/bin/vfsbench.elf` in WSL, then `make build`; `tools/vfsbench/bench.sh NAME` runs it in one VM (as root). The stub tests run only on the prototype build.
+- **Workloads:** `esp/bin/g16src.elf` is `vfsbench.elf` followed by a tar of 30 files of `tests/linux` plus a Makefile: the boot import copies only ELF files into `/bin`, and `work.sh` cuts the tar off the end. `tools/vfsbench/work.sh NAME [FIND LSLR GIT TAR GCC APT FF]` runs the workloads (`BENCH=1` runs vfsbench first; `REPO=...` picks what the git repository holds). It installs git, gcc and make in the overlay first.
+- **KDE:** boot with `scratch/kde_kde.sh NAME`, then with `kde_ctl.sh`: console `linux prof on`, back to SDDM, log in, wait 60 s, console `linux prof off` and `linux prof show 400` (section 3.3's run). `tools/vfsbench/kde.sh` (typed steps without the control mode) lost the console login twice.
+- **Tables:** `python tools/vfsbench/vfsparse.py LOG` (counts by kind; writes `LOG.vfs.json`), then `python tools/vfsbench/vfscost.py LOG.vfs.json` (the first version's option table, Appendix B; per-call costs can be overridden, e.g. `path=2.5`).
+- **Logs:** the logs of these runs are in `scratch/g16/logs/` of the worktree (git-ignored, not committed).
+
+## Appendix B: the first version's options (VFS inside linux-server), for reference
+
+The first version (commits 6595714–72fe6d5) compared three options with the VFS in linux-server. Decision 9 rejected the recommended one (B-lean). Its analysis is kept here because the costs carry over: F1's forwarded calls are B-lean's. Section numbers inside this appendix refer to the first version's layout.
+
+### B.1 The options
 
 All three keep in the kernel what section 5 of the Linux design already keeps: the page cache, page faults, address spaces, the ELF loader, and the data half of the ZFS client. They differ in what else stays.
 
-### A. Everything out
+#### A. Everything out
 
 - **linux-server owns:** path lookup and its caches, mounts, pseudo files, permission policy, the open-file objects, **and the descriptor table** of every Linux process (numbers to objects, close-on-exec, `dup`, `fork`'s copy, `poll`/`select`/`epoll`).
 - **The kernel keeps:** the page cache with `obj_*` primitives (`obj_file(ino)`, and `obj_read`/`obj_write` between the page cache and the client's memory), and `as_map` for file mappings.
 - **Every descriptor call is forwarded,** including `close`, `fcntl`, `fstat`, `dup`, `lseek`, `read` of cached data, and `poll`/`epoll_wait` on any descriptor.
 - **Kernel-owned objects** (memfd, DRM until wave 6 moves it, page-cache objects) are reached through handles the server holds: Group 9's `LX_OBJ_PIN`, turned around.
 
-### B. Out, with kernel-side read-only fast paths
+#### B. Out, with kernel-side read-only fast paths
 
 - **linux-server owns** the VFS as in A: path lookup, mounts, pseudo files, permissions, `open`, and every change.
 - **The kernel keeps the descriptor table as a table of handles,** which it already is for server objects since step 2. A descriptor names either:
@@ -193,15 +491,15 @@ All three keep in the kernel what section 5 of the Linux design already keeps: t
   - **B-lean** is the above.
   - **B-full** adds a kernel **name and attribute cache** that answers `stat`, `access` and `readlink` on a hit. The server fills and invalidates it (section 6).
 
-### C. The VFS stays in the kernel for good
+#### C. The VFS stays in the kernel for good
 
 - The kernel keeps path lookup, mounts, pseudo files, the caches and the descriptor table.
 - **What still moves** are the parts of 6a that are on no hot path and mostly self-contained: the udev database and `/sys` generation (`devices.rs`, which writes files into the Linux root), `efivars`, and the policy-only parts of the mount API.
 - **Steps 6b, 7 and 8 still happen.** FUSE, Landlock, ACLs and ABAC are tied to the VFS, so in C they would also stay (about 3,500 more lines).
 
-## 5. What each option costs
+### B.2 What each option cost
 
-### 5.1 Added time per workload
+#### B.2.1 Added time per workload
 
 From the counts of section 3.3 and the per-call costs of section 3.2 (`tools/vfsbench/vfscost.py`):
 - path calls +4.2 µs;
@@ -232,7 +530,7 @@ Against the budget (design 6.6; desktop, browser and network +5 %, metadata tool
 - **The name cache of B-full** saves 0.4 s in `ls -lR` (which calls `lgetxattr`, `statx` and `readlink` on every file) and 23–30 ms in `find` and `git status`. It costs a coherence protocol in the kernel (section 6). It also saves about 0.5 s of the KDE login's 0.65 s (131,000 `statx`, `access` and `readlink` calls). It is worth adding later only if a step misses the budget on a workload like `ls -lR` or the KDE login.
 - **The cheaper copy changes the picture.** If the copy table's per-pointer cost dropped from about 2 µs to 0.5 µs, path calls would add about 2.5 µs. A's `find` would then come to about +42 % on the fast baseline (+17 % on today's) and B-lean's to about +15 % (+6 %); the KDE login to +2.3 % (A) and +1.5 % (B-lean).
 
-### 5.2 The rest of the comparison
+#### B.2.2 The rest of the comparison
 
 | | A: everything out | B-lean (recommended) | B-full | C: the VFS stays |
 |---|---|---|---|---|
@@ -245,7 +543,7 @@ Against the budget (design 6.6; desktop, browser and network +5 %, metadata tool
 | **Agent-days (wave 7)** | 26–29: B-lean's work, plus moving the table, `poll`/`epoll`/`select`, kernel-object readiness to the server and the `mmap`/`ioctl`/`sendfile` forwards | **21–23** (section 10) | 24–26 | 3–5 |
 | **Main risks** | Misses the metadata budget; every `poll`/`epoll_wait` of the desktop becomes a forward; the largest change to `fork`, `exec` and exit | The handle table must stay correct for objects owned by two parties (kernel file handles, server objects); `execve` and `mmap` couplings | B-lean's, plus a coherence protocol whose bugs would be silent stale results | The kernel keeps 15,000 lines of file-system policy for good, against decision 1 ("the whole layer moves out") |
 
-## 6. Cache coherence (option B)
+### B.3 Cache coherence (option B-full)
 
 B-full keeps a copy of the server's state in the kernel, so it needs a protocol. B-lean needs only its attribute part.
 
@@ -278,9 +576,9 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 
 **When the server dies:** the kernel empties the caches (one generation bump), and server objects and file handles of the old generation fail (`EBADF`), as server objects already do. The crash policy then ends every Linux program anyway.
 
-## 7. The descriptor table and Group 13's temporary primitives
+### B.4 The descriptor table and Group 13's temporary primitives
 
-### 7.1 If the table moves (option A)
+#### B.4.1 If the table moves (option A)
 
 1. **The table moves whole, per process,** into linux-server:
    - descriptor numbers, close-on-exec flags and the `RLIMIT_NOFILE` check;
@@ -299,7 +597,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 5. **Native programs** keep the kernel's `FdTable` (they are not Linux tasks).
 6. **The switch back** (`lx=kernel`) needs both tables to exist side by side during the step; a process uses one or the other for its whole life.
 
-### 7.2 If the table stays as a table of handles (options B, C)
+#### B.4.2 If the table stays as a table of handles (options B, C)
 
 1. **`FileDescriptor` shrinks as the kinds move.** After waves 5 and 6 the variants left are:
    - `Device` (server objects and kernel devices);
@@ -309,7 +607,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 3. **`fs/fd.rs` keeps** `dup`, `close`, close-on-exec, `fork`'s copy and the server-object bitmap (Group 12's `srv_bits`), and loses every per-kind arm: about 1,260 lines down to 600.
 4. **`epoll`, `select` and `poll` stay in the kernel.** They are readiness mechanism over words, and the desktop calls them thousands of times a second (Firefox: 1,676 calls in a 5-second start).
 
-### 7.3 Group 13's temporary primitives (wave 5)
+#### B.4.3 Group 13's temporary primitives (wave 5)
 
 | Primitive | In A | In B |
 |---|---|---|
@@ -318,7 +616,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 | `LX_OBJ_FDPATH` (step 2, temporary) | Goes | Goes: the server knows the path of its own objects, and a file handle carries the server's open-file slot |
 | `LxCall::ino` (a socket node resolved at trap time) | Goes | Goes |
 
-### 7.4 `execve`, the working directory and `umask`
+#### B.4.4 `execve`, the working directory and `umask`
 
 - **The per-process "fs" record moves with the VFS in A and B:** `chdir`, `fchdir`, `chroot`, `getcwd`, `umask`, and the root and current directory per process (shared on `CLONE_FS`). The server keeps the record, created on `LX_NOTE_FORK`.
 - **`execve` resolves files.** Recommended:
@@ -326,9 +624,9 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
   - the rest of step 7 (the process table, the signal policy) still waits for wave 8.
 - **The other way, a kernel-to-server "resolve for exec" request,** would make the kernel wait for the server inside `execve`: possible, since `execve` holds no lock there, but it is a temporary primitive that step 7 would delete again.
 
-## 8. Recommendation
+### B.5 The first recommendation (rejected by decision 9)
 
-### 8.1 Option B-lean: the VFS moves out, the descriptor table stays as a table of handles
+#### B.5.1 Option B-lean: the VFS moves out, the descriptor table stays as a table of handles
 
 1. **It meets the budget,** with the two prerequisites below:
    - warm `find` about +10 % (+24 % on the faster baseline);
@@ -342,7 +640,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 5. **A costs more and gains little.** It forwards 60,000 more calls in `find` (+120 ms) and turns every `poll`/`epoll_wait` of the desktop into a forward. Its isolation gain over B-lean is a table of numbers.
 6. **C keeps 15,000 lines of file-system policy in the kernel for good,** and keeps FUSE, Landlock, ACLs and ABAC there with it. That goes against decision 1, and the measurements show it is not needed for speed.
 
-### 8.2 Two prerequisites (small kernel tasks; best in wave 6)
+#### B.5.2 Two prerequisites (small kernel tasks; best in wave 6)
 
 1. **Cheaper user-memory copies in the forwarding path** (`src/lx/copy.rs`, the trap's copy-in/copy-out).
    - Today each pointer argument costs 1–2 µs: the address-space lock, a page-table walk per piece, and two copies.
@@ -357,7 +655,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 
 **Worth doing at once, in any option: a larger kernel name cache.** Today's 8,192 entries, emptied when full, make `ls -lR` ask zfs-server 205,000 times. A cache that drops its oldest entries instead of emptying itself, sized at 64k entries, is a small change in `src/fs/zfs/mod.rs`. It would make today's kernel faster, and its logic moves to linux-server in wave 7. It also makes today's baseline faster, so the percentages above would grow a little.
 
-## 9. Decisions for the user
+### B.6 The first decision questions (superseded by section 11)
 
 1. **Does the VFS move out of the kernel?**
    - Recommended: **yes** (option B-lean). Path lookup, mounts, `/proc`, `/sys`, `/dev`, permissions and every file change go to linux-server.
@@ -380,9 +678,9 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
    - The other way is two waves: first the path calls and file handles, then mounts and pseudo files. That is slower, but each merge is smaller.
    - Recommended: **one wave, six groups,** because the groups own separate files and the interfaces are agreed in their first day.
 
-## 10. Wave 7 plan (option B-lean)
+### B.7 The first wave 7 plan (superseded by section 12)
 
-### 10.1 Before wave 7 (wave 6, beside step 5)
+#### B.7.1 Before wave 7 (wave 6, beside step 5)
 
 | Task | Files | Agent-days | Tests |
 |---|---|---:|---|
@@ -390,7 +688,7 @@ B-full keeps a copy of the server's state in the kernel, so it needs a protocol.
 | **P2. Server-to-server direct call** | `src/ipc/service.rs`, `src/task/scheduler.rs` (`direct_call`), `hydra-rt` | 3–4 | A probe from linux-server to zfs-server (as the step-0 probe), the IPC suite tests, net-server throughput, killing either server |
 | **P3. Larger kernel name and attribute caches** (drop the oldest instead of emptying) | `src/fs/zfs/mod.rs` | 1 | `fscache`, `vfs`, the vfsbench workloads before and after |
 
-### 10.2 Wave 7: six groups
+#### B.7.2 Wave 7: six groups
 
 The groups own separate files. Shared files are handled as in waves 4 and 5: each group writes its plan in NOTES.md first and adds its own marked block. Those shared files are the `src/lx/mod.rs` tables, linux-server's `main.rs` dispatch and `src/lx/copy.rs`.
 
@@ -411,27 +709,9 @@ The groups own separate files. Shared files are handled as in waves 4 and 5: eac
 - **The switch back** (`lx=kernel`) keeps every moved call working in the kernel until 7-6 deletes the in-kernel copies, as in every step.
 - **Steps 6b and 7 can start in wave 8** as planned. 6b's `inotify`/`fanotify`/`fuse` hooks get events from the server's walk; until they move, 7-2 reports each event to the kernel's copies through one temporary primitive (`LX_OBJ_FSEVENT`).
 
-### 10.3 If the user chooses another option
+#### B.7.3 If the user chooses another option
 
 - **A:** add a seventh group for the table move: `poll`/`select`/`epoll` into the server, kernel-object readiness to the server, forwarded `mmap`/`ioctl`/`sendfile`, `fork`/`exec`/exit table handling (5–6 agent-days). 7-6 then deletes `fs/fd.rs` for Linux tasks.
 - **B-full:** add the name cache and its coherence protocol to 7-1 (kernel side) and 7-2 (fills and forgets): about 3 agent-days more.
 - **C:** one group: P3, `devices.rs` and `efivars` to linux-server, the mount API's policy checks; 3–5 agent-days. Step 6b then shrinks to `io_uring`, `aio`, `inotify` and `fanotify` (FUSE, Landlock, ACLs and ABAC stay).
 
-## 11. Not measured, and limits
-
-- **KVM, not the NUC.** Forwarding costs and zfs-server request costs on real hardware were never measured.
-- **Timings are noisy.** Five other groups' VMs shared the PC: the two boots of section 3.1 differ by up to 40 % on single calls, and a warm `find` took 0.81–1.35 s in three boots here against 0.44 s in wave 4 (same call counts each time). That is why section 5.1 shows both baselines. The counts, not the times, are the solid part.
-- **The prototype measures a stub,** not a server VFS. The server's real work for `open` or `stat` is assumed to cost what the kernel's costs today; a server-side cache could make it cheaper (fewer zfs-server requests) or dearer (user-space locks).
-- **Server-to-server calls were not measured.** Their cost is taken from the design's IPC numbers: Handoff 5.8 µs, Queued in a loop 9.0 µs.
-- **The `git` repository was small** (3,851 files); a larger one would scale the counts, not change their mix.
-- **Not profiled:** Wine, dpkg on a large upgrade, a large compile.
-- **The no-PCID case** was not measured: wave 4's +2.2 µs per forward (against +2.0) would add about 10 % to every A and B number above.
-
-## Appendix: reproducing the measurements
-
-- **Prototype build** (local only, never commit): `git apply tools/vfsbench/prototype.patch`, then build the drivers, the kernel and the ISO as usual. `git checkout -- src userland` removes it.
-- **vfsbench:** `gcc -O1 -w -pthread tests/linux/vfsbench.c -o esp/bin/vfsbench.elf` in WSL, then `make build`; `tools/vfsbench/bench.sh NAME` runs it in one VM (as root). The stub tests run only on the prototype build.
-- **Workloads:** `esp/bin/g16src.elf` is a tar of 30 files of `tests/linux` plus a Makefile, named `.elf` because the boot import copies only `.elf` files into `/bin`. `tools/vfsbench/work.sh NAME [FIND LSLR GIT TAR GCC APT FF]` runs the workloads (`BENCH=1` runs vfsbench first; `REPO=...` picks what the git repository holds). It installs git, gcc and make in the overlay first.
-- **KDE:** `tools/vfsbench/kde.sh NAME ISO` (the ISO in `/opt/u2604/tmp/os16/`).
-- **Tables:** `python tools/vfsbench/vfsparse.py LOG` (counts by kind; writes `LOG.vfs.json`), then `python tools/vfsbench/vfscost.py LOG.vfs.json` (the table of section 5.1; per-call costs can be overridden, e.g. `path=2.5`).
-- **Logs:** the logs of these runs are in `scratch/g16/logs/` of the worktree (git-ignored, not committed).
