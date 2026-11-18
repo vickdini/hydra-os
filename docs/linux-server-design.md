@@ -970,8 +970,9 @@ pipes and event descriptors"). In short:
   (`fs/pipe.rs`), `eventfd`, `timerfd`, `signalfd` and `pidfd` are linux-server's server
   objects (server modules `unix.rs`, `pipe.rs`, `eventfd.rs`, `timerfd.rs`, `signalfd.rs`,
   `pidfd.rs`, about 2,400 lines). The in-kernel code stays for `lx=kernel` (every moved call
-  goes back to it, suite 78/79 there: only the new test's checks of features the old code
-  lacks fail).
+  goes back to it; the suite, 80 tests with the new `scmrights` and `fifo`, passes in both
+  modes: forwarded 80/80 three times in a row (suite_loop), `lx=kernel` 80/80, IOMMU 79/80
+  with only the known `lowmem`).
 - **Routing:** by number (`pipe*`, `eventfd*`, `timerfd_*`, `signalfd*`, `pidfd_open`), by
   family (`socket`/`socketpair(AF_UNIX)`) and by descriptor (the socket calls, and `read`,
   `write`, `readv`, `writev`) with Group 12's routing (`T_FAMILY`, `T_BYFD`), which this
