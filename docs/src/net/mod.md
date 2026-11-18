@@ -98,6 +98,8 @@ sockets live in the ring-3 `linux-server`, which is net-server's client directly
 - **The doorbell reaches both:** the kernel's hook (`client::on_signal`) wakes the kernel's
   own sockets and raises `NOTIFY_LX_NET` for linux-server's main thread (`NOTIFY_LX_NET_GONE`
   when net-server went away). Each client reads the event ring with a tail of its own.
+- **Hand-off calls:** linux-server's requests are hand-off calls (`SYS_SVC_CALL` timeout bit
+  `SVC_CALL_HANDOFF`, allowed only for linux-server calling net-server), as the kernel's are.
 - **Receive capacity:** `MSG_NETS_UDP_RECV` and `MSG_NETS_ICMP_RECV` take a capacity in
   `args[3]` (0: up to the data area's end, the kernel's old behaviour) and return the whole
   length and the bytes copied, so a client's part of the window is never overrun.
