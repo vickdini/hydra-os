@@ -1057,6 +1057,29 @@ ran other groups' VMs throughout; single runs differ by up to 25 %.
 - **KDE password to desktop** (`kderep.sh`, screen settled after Enter; busy host): see
   15.4.
 
+### 15.4 The desktop: KDE, Firefox, sound, Wine, the crash policy
+
+- **KDE password to desktop** (`kderep.sh`: fresh boot, login, screen settled after Enter;
+  other groups' VMs ran throughout): before (the deployed 329aaf7 ISO) 35.9, 47.8, 32.3 s
+  (median 35.9); step 4 (34054e8) 33.8, 29.5, 26.6 s (median 29.5), run right after them.
+  An earlier set of five step-4 logins during heavy load (with my benchmark VMs beside
+  them): 56.3, 36.3, 41.1, 38.4, 66.3 s. Within the 5 % budget as far as this host can
+  tell (the spread between runs is far larger than any difference). A KDE login makes
+  about 48,000 forwarded calls; 99.9 % of the answers are direct switches.
+- **No crash** in 11 fresh logins (`signal N at` lines: none). Peak server objects: 512 to
+  768 after a login (Unix sockets ~300, eventfds ~200, pipe ends ~170, pidfds ~80), 1,024
+  while Wine ran (pipe ends 411), of 2,048 slots: enough today, tight for a busy session
+  (Firefox with many tabs, Wine); step 5 or 6a should enlarge the readiness area.
+- **Firefox** loads Wikipedia, **sound** plays (`pw-play`, the WAV has samples), **Wine**
+  prints "Microsoft Windows 10.0.19045", Ctrl+Alt+F1/F2 work. **Killing linux-server**
+  under KDE ends every Linux program (225 threads, 13 calls in flight failed with `EIO`),
+  SDDM comes back and a new login works.
+- **A kernel panic found on the way** (in wave 4 code, deployed): "page fault while the
+  faulting process's Mm is locked" at a Firefox start, twice in two runs. The lock-free copy
+  (`lx::copy::each_piece`) unlocks the address space before it clears its mark; a page
+  fault on another CPU could see the lock held and then no mark. `vm::fault_lock` now tries
+  the lock again in that case (b657fc3); step 4 made such copies frequent.
+
 ### 15.3 What later steps can build on, and what is missing
 
 - **Step 5 (terminals, devices):** pseudo-terminal pairs can follow the pipe module (the
