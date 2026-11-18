@@ -902,6 +902,14 @@ mach-server hands its port to every macOS task it creates.
    from Apple; they cannot be shipped).
 5. Later, GUI: Darling's `TextEdit` (in its tree) on the KDE desktop through Wayland.
 
+**A macOS hook test, already built:** `tests/macos/rawmac.c` is the macOS counterpart of
+`rawsys`: no libSystem, raw calls with the class bits (`write`, `getpid`/`getppid`,
+`close(-1)` → carry flag + positive `EBADF`, and the Mach trap `task_self_trap` returning a
+port name). `tools/personality/build-macos-tests.sh` builds it with clang 15 and the `ld64`
+from Darling's build (`-static -e start`): the result is a 64-bit x86_64 `MH_EXECUTE`
+Mach-O file (magic `0xFEEDFACF`). It is the first program for wave 12's kernel part; real
+macOS refuses static executables, Hydra's loader need not.
+
 ### 5.5 The Darling build here
 
 (Filled in at the end of this step; see below.)
