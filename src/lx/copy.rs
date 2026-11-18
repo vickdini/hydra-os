@@ -123,6 +123,11 @@ static MSGRCV: Desc = [N, Out(fixed_plus_arg(8, 2)), N, N, N, N];
 /// bpf(cmd, attr, size): the attribute block in only (some commands write parts of it back
 /// themselves, which a copy-back of the whole block would overwrite)
 static BPF: Desc = [N, In(len_arg(2)), N, N, N, N];
+// Group 13 (step 4): timerfd_settime(fd, flags, new, old), timerfd_gettime(fd, cur),
+// signalfd4(fd, mask, size, flags)
+static TFD_SET: Desc = [N, N, In(fixed(32)), Out(fixed(32)), N, N];
+static TFD_GET: Desc = [N, Out(fixed(32)), N, N, N, N];
+static SIGNALFD: Desc = [N, In(fixed(8)), N, N, N, N];
 
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
@@ -147,6 +152,9 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         69 => Some(&MSGSND),
         70 => Some(&MSGRCV),
         321 => Some(&BPF),
+        286 => Some(&TFD_SET),
+        287 => Some(&TFD_GET),
+        282 | 289 => Some(&SIGNALFD),
         _ => None,
     }
 }

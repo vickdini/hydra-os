@@ -128,7 +128,7 @@ pub const MOVED_STEP2: &[(u64, u8)] = &[
 /// The calls step 4 moves (wave 5, Group 13), with their table bits: eventfd, eventfd2.
 /// (Calls on a moved descriptor reach the server through the descriptor: `read`, `write`,
 /// `ioctl`, the socket calls; `socket`/`socketpair` by family.)
-pub const MOVED_STEP4: &[(u64, u8)] = &[(284, 0), (290, 0), (22, 0), (293, 0)];
+pub const MOVED_STEP4: &[(u64, u8)] = &[(284, 0), (290, 0), (22, 0), (293, 0), (434, 0), (282, T_FD0), (289, T_FD0), (283, 0), (286, T_FD0), (287, T_FD0)];
 /// Step 4's descriptors are made by the server (`lx=kernel` turns it off with the rest).
 pub static STEP4: AtomicBool = AtomicBool::new(false);
 
@@ -158,7 +158,7 @@ pub fn init() {
     let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
     set_forwarding(!kernel);
     crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, eventfd, pipes: {}",
+        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, eventfd, pipes, Unix sockets, pidfd, signalfd, timerfd: {}",
         if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
     );
 }
@@ -1632,6 +1632,24 @@ pub fn proc_keys_text() -> Option<alloc::string::String> {
         win[o..o + 4].copy_from_slice(&g.to_le_bytes());
     }
     let msg = crate::ipc::Message::with_args(MSG_LX_PROC_KEYS, [tid, tgid, euid as u64 | (egid as u64) << 32, caps]);
+    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
+        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
+        _ => 0,
+    };
+    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
+    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+}
+
+/// Group 13: `/proc/net/unix` from the server when Unix sockets are its own (`None`: the
+/// in-kernel table answers). A hand-off call, like `/proc/keys`.
+pub fn proc_net_unix_text() -> Option<alloc::string::String> {
+    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_NET_UNIX};
+    if !step4() {
+        return None;
+    }
+    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
+    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
+    let msg = crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]);
     let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
         Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
         _ => 0,

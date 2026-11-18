@@ -21,6 +21,9 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/uio.h>
+#include <sys/timerfd.h>
+#include <sys/eventfd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -447,6 +450,119 @@ static double b_probe_queued(long n) { return probe_user(2, n); }
 static double b_probe_handoff_k(long n) { return probe_kernel(1, n); }
 static double b_probe_queued_k(long n) { return probe_kernel(2, n); }
 
+/* --- Group 13 (wave 5, step 4): eventfd, pipes and Unix sockets without a wake-up --- */
+static double b_eventfd_rw(long n) { /* write 1 then read it back, one thread */
+    int e = eventfd(0, 0);
+    uint64_t v = 1;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(e, &v, 8);
+        read(e, &v, 8);
+    }
+    double r = (double)(now() - t) / n;
+    close(e);
+    return r;
+}
+static double b_pipe_rw(long n) { /* write 64 bytes then read them, one thread */
+    int p[2];
+    char buf[64] = {0};
+    pipe(p);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(p[1], buf, 64);
+        read(p[0], buf, 64);
+    }
+    double r = (double)(now() - t) / n;
+    close(p[0]);
+    close(p[1]);
+    return r;
+}
+static double b_unix_rw(long n) { /* send 64 bytes then receive them, one thread */
+    int s[2];
+    char buf[64] = {0};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s)) return -1;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        send(s[0], buf, 64, 0);
+        recv(s[1], buf, 64, 0);
+    }
+    double r = (double)(now() - t) / n;
+    close(s[0]);
+    close(s[1]);
+    return r;
+}
+static double b_unix_msg_fd(long n) { /* sendmsg with one descriptor + recvmsg (Wayland-like) */
+    int s[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s)) return -1;
+    int e = eventfd(0, 0);
+    char byte = 'x', cb[CMSG_SPACE(sizeof(int))];
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        struct iovec iov = {&byte, 1};
+        struct msghdr m = {0};
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = cb;
+        m.msg_controllen = sizeof cb;
+        struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &e, sizeof(int));
+        sendmsg(s[0], &m, 0);
+        m.msg_controllen = sizeof cb;
+        if (recvmsg(s[1], &m, 0) != 1) return -1;
+        int got;
+        memcpy(&got, CMSG_DATA(CMSG_FIRSTHDR(&m)), sizeof(int));
+        close(got);
+    }
+    double r = (double)(now() - t) / n;
+    close(e);
+    close(s[0]);
+    close(s[1]);
+    return r;
+}
+static double b_poll_eventfd(long n) { /* poll on a readable eventfd */
+    int e = eventfd(1, 0);
+    struct pollfd p = {e, POLLIN, 0};
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) poll(&p, 1, 0);
+    double r = (double)(now() - t) / n;
+    close(e);
+    return r;
+}
+static double b_timerfd_set(long n) { /* timerfd_settime (arm 1 s ahead) */
+    int f = timerfd_create(CLOCK_MONOTONIC, 0);
+    struct itimerspec its = {{0, 0}, {1, 0}};
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) timerfd_settime(f, 0, &its, 0);
+    double r = (double)(now() - t) / n;
+    close(f);
+    return r;
+}
+static double b_eventfd_rtt(long n) { /* two processes ping-pong through two eventfds */
+    int a = eventfd(0, 0), b = eventfd(0, 0);
+    uint64_t v = 1;
+    pid_t p = fork();
+    if (p == 0) {
+        for (long i = 0; i < n; i++) {
+            if (read(a, &v, 8) != 8) _exit(1);
+            write(b, &v, 8);
+        }
+        _exit(0);
+    }
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(a, &v, 8);
+        if (read(b, &v, 8) != 8) return -1;
+    }
+    double r = (double)(now() - t) / n;
+    waitpid(p, 0, 0);
+    close(a);
+    close(b);
+    return r;
+}
+
 struct bench { const char *name; bench_fn fn; long n; int probe; };
 static struct bench benches[] = {
     {"getpid", b_getpid, 200000, 0},
@@ -483,6 +599,13 @@ static struct bench benches[] = {
     {"poll_pipe", b_poll_pipe, 100000, 0},
     {"epoll_pipe", b_epoll_pipe, 100000, 0},
     {"poll_mq", b_poll_mq, 100000, 0},
+    {"eventfd_rw", b_eventfd_rw, 100000, 0},
+    {"eventfd_rtt", b_eventfd_rtt, 20000, 0},
+    {"pipe_rw", b_pipe_rw, 100000, 0},
+    {"unix_rw", b_unix_rw, 100000, 0},
+    {"unix_msg_fd", b_unix_msg_fd, 50000, 0},
+    {"poll_eventfd", b_poll_eventfd, 100000, 0},
+    {"timerfd_set", b_timerfd_set, 100000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},

@@ -510,6 +510,7 @@ Seccomp:	{}
                 };
                 let pidfd = match desc {
                     crate::fs::FileDescriptor::PidFd(p) => Some(p.pid),
+                    crate::fs::FileDescriptor::Device(d) => d.as_server().filter(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_PIDFD).map(|o| o.tag()),
                     _ => None,
                 };
                 (pos, table.cloexec(fd), pidfd)
@@ -581,7 +582,7 @@ impl PseudoFile {
             PseudoFile::ProcLocks => read_slice(super::locks::proc_locks().as_bytes(), cursor, buf),
             PseudoFile::ProcNet(i) => {
                 let text = match PROC_NET[*i as usize] {
-                    "unix" => super::unix::proc_net_unix(),
+                    "unix" => crate::lx::proc_net_unix_text().unwrap_or_else(super::unix::proc_net_unix),
                     t => super::inet::proc_net(t).or_else(|| super::rtnetlink::proc_net_text(t)).unwrap_or_default(),
                 };
                 read_slice(text.as_bytes(), cursor, buf)

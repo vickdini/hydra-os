@@ -101,6 +101,9 @@ pub struct ServerObject {
     quiet: AtomicBool,
     /// Group 13: the server's value for the kernel (a pidfd's process, see `LxObjDesc::tag`).
     tag: u64,
+    /// Group 13: a signalfd's signals (`LX_OBJ_SIGMASK`); its `poll` is answered here from
+    /// the process's (`tag`'s) pending signals, which posting a signal wakes.
+    sigmask: AtomicU64,
 }
 
 impl ServerObject {
@@ -222,6 +225,9 @@ impl CharDevice for ServerObject {
     }
 
     fn poll_events(&self) -> u32 {
+        if self.kind == crate::ipc::protocol::LX_OBJ_KIND_SIGNALFD && self.slot().is_some() {
+            return if crate::compat::linux::proc::pending_for(self.tag, self.sigmask.load(Ordering::Relaxed)) { 0x0001 } else { 0 };
+        }
         self.word().map_or(STALE, |w| w.0)
     }
 
@@ -270,7 +276,16 @@ impl CharDevice for ServerObject {
         Some(self)
     }
 
+    fn socket_call(&self, num: u64, a: [u64; 6]) -> Option<i64> {
+        // Group 13: socket calls on the server's sockets go to it
+        let me: Arc<dyn CharDevice> = self.shared.me.lock().upgrade()?;
+        Some(crate::compat::linux::unix::server_call(&me, num, a))
+    }
+
     fn edges(&self) -> Option<u64> {
+        if self.kind == crate::ipc::protocol::LX_OBJ_KIND_SIGNALFD {
+            return None;
+        }
         Some(self.word().map_or(u64::MAX - 1, |w| w.1 as u64))
     }
 }
@@ -465,6 +480,29 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 None => EINVAL,
             }
         }
+        crate::ipc::protocol::LX_OBJ_SIGMASK => {
+            if a as usize >= LX_OBJ_SLOTS {
+                return EINVAL;
+            }
+            let o = reg(|r| r[a as usize].clone()).and_then(|s| s.me.lock().upgrade());
+            match o {
+                Some(o) => {
+                    o.sigmask.store(b, Ordering::Relaxed);
+                    0
+                }
+                None => EBADF,
+            }
+        }
+        crate::ipc::protocol::LX_OBJ_PROC => {
+            if !crate::compat::linux::proc::process_exists(a) {
+                return ESRCH;
+            }
+            if crate::compat::linux::proc::has_exited(a) {
+                2
+            } else {
+                1
+            }
+        }
         LX_OBJ_TAKE => take(a, b, c),
         LX_OBJ_GIVE => give(a, b, c),
         LX_OBJ_DROP => {
@@ -564,6 +602,7 @@ fn install(id: u64, desc: u64) -> i64 {
         gid: d.gid,
         quiet: AtomicBool::new(false),
         tag: d.tag,
+        sigmask: AtomicU64::new(0),
     });
     *obj.shared.me.lock() = Arc::downgrade(&obj);
     let dev: Arc<dyn CharDevice> = obj.clone();
@@ -740,14 +779,35 @@ fn give(id: u64, buf: u64, nf: u64) -> i64 {
     }
 }
 
-/// `SYS_LX_SIGTAKE(op, a, b, c)` (native 63, Group 13): **sig_take** for signalfd (see
-/// `crate::compat::linux::signalfd`'s server half).
-pub fn sig_take(op: u64, a: u64, b: u64, c: u64) -> i64 {
+/// `SYS_LX_SIGTAKE(id, mask, buf)` (native 63, Group 13): **sig_take**. Takes the lowest
+/// pending signal in `mask` of request `id`'s caller (its thread's first, then its
+/// process's) without delivering it, and writes its 128-byte `struct signalfd_siginfo` to
+/// `buf` (server memory). Returns 128, or 0 when none is pending.
+pub fn sig_take(id: u64, mask: u64, buf: u64, _unused: u64) -> i64 {
+    use crate::compat::linux::proc;
     if let Err(e) = super::server_caller() {
         return e;
     }
-    let _ = (op, a, b, c);
-    -38 // ENOSYS (not yet)
+    let Some(tid) = super::client_of(id) else { return ESRCH };
+    let Some(tgid) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(tid), |t| t.tgid) else { return ESRCH };
+    let mask = mask & !((1 << 8) | (1 << 18)); // never SIGKILL or SIGSTOP
+    let Some(info) = proc::take_signal_info_of(tid, tgid, mask) else { return 0 };
+    let mut rec = [0u8; 128];
+    let sig = info.signo;
+    rec[0..4].copy_from_slice(&sig.to_le_bytes()); // ssi_signo
+    rec[8..12].copy_from_slice(&info.code.to_le_bytes()); // ssi_code
+    rec[12..16].copy_from_slice(&info.pid.to_le_bytes()); // ssi_pid
+    rec[16..20].copy_from_slice(&info.uid.to_le_bytes()); // ssi_uid
+    rec[44..48].copy_from_slice(&(info.value as u32).to_le_bytes()); // ssi_int
+    rec[48..56].copy_from_slice(&info.value.to_le_bytes()); // ssi_ptr
+    if sig == proc::SIGCHLD {
+        // Programs check ssi_code before reaping (util-linux script)
+        let (code, pid, status) = proc::sigchld_details(tgid);
+        rec[8..12].copy_from_slice(&code.to_le_bytes());
+        rec[12..16].copy_from_slice(&(pid as u32).to_le_bytes());
+        rec[40..44].copy_from_slice(&status.to_le_bytes()); // ssi_status
+    }
+    crate::compat::linux::vfs::copy_out(buf, &rec).map_or_else(|e| e, |()| 128)
 }
 
 // ----------------------------------------------------------------------

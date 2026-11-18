@@ -1,0 +1,310 @@
+//! timerfd (`timerfd_create`, `timerfd_settime`, `timerfd_gettime`), moved here from the
+//! kernel's `src/compat/linux/timerfd.rs` (wave 5, step 4), on the kernel's `timer_arm`.
+//!
+//! A timer delivered through a descriptor: reading returns the expirations since the last
+//! read (waiting for the next one if there were none); `poll`/`epoll` see it readable once
+//! it expired. Each armed timer has one `timer_arm` deadline (`SYS_LX_TIMER`, cookie
+//! [`TIMER_TAG`] | slot): when it passes, the kernel's `LX_NOTE_TIMER` makes the descriptor
+//! readable and completes waiting reads; a periodic timer is armed again after each read.
+//! Time is the kernel's monotonic clock with the scheduler tick's resolution (10 ms), as
+//! before; `CLOCK_REALTIME` deadlines are converted when armed.
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+
+use hydra_rt::protocol::*;
+use hydra_rt::sys;
+
+use crate::client::Cx;
+use crate::fdio::kbuf;
+use crate::lock::YLock;
+
+const EAGAIN: i64 = -11;
+const EBADF: i64 = -9;
+const EINVAL: i64 = -22;
+const ERESTARTSYS: i64 = -512;
+
+const TFD_NONBLOCK: u64 = 0o4000;
+const TFD_CLOEXEC: u64 = 0o2000000;
+const TFD_TIMER_ABSTIME: u64 = 1;
+const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
+
+/// The `timer_arm` cookies of timerfds: this tag | the slot.
+pub const TIMER_TAG: u64 = 1 << 56;
+
+struct Tfd {
+    clock: u64,
+    /// The next expiry (monotonic ns), and the period (0: one-shot).
+    next: Option<u64>,
+    interval: u64,
+    /// Readers waiting: `(call, buffer)`.
+    readers: Vec<(LxCall, u64)>,
+}
+
+static T: YLock<BTreeMap<u32, Tfd>> = YLock::new(BTreeMap::new());
+
+fn now() -> u64 {
+    sys::lx_timer(LX_TIMER_NOW, 0, 0) as u64
+}
+
+/// Nanoseconds the real-time clock is ahead of the monotonic one.
+fn realtime_offset(mono: u64) -> i128 {
+    let (s, ns) = sys::clock();
+    s as i128 * 1_000_000_000 + ns as i128 - mono as i128
+}
+
+impl Tfd {
+    /// Expirations by `now`, moving `next` on (a periodic timer) or clearing it.
+    fn expirations(&mut self, now: u64) -> u64 {
+        match self.next {
+            Some(next) if now >= next => {
+                if self.interval == 0 {
+                    self.next = None;
+                    1
+                } else {
+                    let n = 1 + (now - next) / self.interval;
+                    self.next = Some(next + n * self.interval);
+                    n
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Arms the kernel timer for the next expiry and sets the readiness word.
+    fn arm(&self, slot: u32, now: u64) {
+        match self.next {
+            Some(n) if n > now => {
+                sys::lx_timer(LX_TIMER_ARM, TIMER_TAG | slot as u64, n);
+                crate::obj::set_ready(slot, 0, 0);
+            }
+            Some(_) => crate::obj::set_ready_ev(slot, 0x41, 0, true),
+            None => {
+                sys::lx_timer(LX_TIMER_CANCEL, TIMER_TAG | slot as u64, 0);
+                crate::obj::set_ready(slot, 0, 0);
+            }
+        }
+    }
+}
+
+fn timespec(b: &[u8]) -> Result<u64, i64> {
+    let s = i64::from_le_bytes(b[0..8].try_into().unwrap());
+    let ns = i64::from_le_bytes(b[8..16].try_into().unwrap());
+    if s < 0 || !(0..1_000_000_000).contains(&ns) {
+        return Err(EINVAL);
+    }
+    Ok(s as u64 * 1_000_000_000 + ns as u64)
+}
+
+fn itimerspec(interval: u64, value: u64) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    for (i, w) in [interval / 1_000_000_000, interval % 1_000_000_000, value / 1_000_000_000, value % 1_000_000_000].iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+    }
+    b
+}
+
+/// `timerfd_create(clock, flags)` (283).
+pub fn create(cx: &Cx) -> (i64, u64) {
+    let (clock, flags) = (cx.args[0], cx.args[1]);
+    // REALTIME, MONOTONIC, BOOTTIME, REALTIME_ALARM, BOOTTIME_ALARM
+    if !matches!(clock, 0 | 1 | 7 | 8 | 9) || flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
+        return (EINVAL, 0);
+    }
+    let slot = match crate::obj::alloc(LX_OBJ_KIND_TIMERFD) {
+        Ok(s) => s,
+        Err(e) => return (e, 0),
+    };
+    T.lock().insert(slot, Tfd { clock, next: None, interval: 0, readers: Vec::new() });
+    match crate::obj::install(cx, slot, LX_OBJ_KIND_TIMERFD, flags as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[timerfd]") {
+        Ok(fd) => (fd, 0),
+        Err(e) => {
+            T.lock().remove(&slot);
+            crate::obj::free(slot);
+            (e, 0)
+        }
+    }
+}
+
+fn slot_of(cx: &Cx) -> Result<u32, i64> {
+    if cx.c.obj == LX_OBJ_NONE || crate::obj::kind_of(cx.c.obj as u32) != LX_OBJ_KIND_TIMERFD {
+        return Err(EINVAL);
+    }
+    Ok(cx.c.obj as u32)
+}
+
+/// `timerfd_settime(fd, flags, new, old)` (286).
+pub fn settime(cx: &Cx) -> (i64, u64) {
+    let slot = match slot_of(cx) {
+        Ok(s) => s,
+        Err(e) => return (e, 0),
+    };
+    let flags = cx.args[1];
+    if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
+        return (EINVAL, 0);
+    }
+    let raw = match cx.copy_in(cx.args[2], 32) {
+        Ok(r) => r,
+        Err(e) => return (e, 0),
+    };
+    let (interval, value) = match (timespec(&raw[0..16]), timespec(&raw[16..32])) {
+        (Ok(i), Ok(v)) => (i, v),
+        _ => return (EINVAL, 0),
+    };
+    let now = now();
+    let mut done = Vec::new();
+    let old = {
+        let mut m = T.lock();
+        let Some(t) = m.get_mut(&slot) else { return (EBADF, 0) };
+        let old = itimerspec(t.interval, t.next.map_or(0, |n| n.saturating_sub(now).max(1)));
+        t.next = if value == 0 {
+            None
+        } else if flags & TFD_TIMER_ABSTIME != 0 {
+            Some(if t.clock == 0 || t.clock == 8 { (value as i128 - realtime_offset(now)).max(0) as u64 } else { value })
+        } else {
+            Some(now + value)
+        };
+        t.interval = interval;
+        t.arm(slot, now);
+        if t.next.is_some_and(|n| n <= now) {
+            serve_readers(t, now, &mut done);
+        }
+        old
+    };
+    finish(done);
+    if cx.args[3] != 0 {
+        if let Err(e) = cx.copy_out(cx.args[3], &old) {
+            return (e, 0);
+        }
+    }
+    (0, 0)
+}
+
+/// `timerfd_gettime(fd, cur)` (287).
+pub fn gettime(cx: &Cx) -> (i64, u64) {
+    let slot = match slot_of(cx) {
+        Ok(s) => s,
+        Err(e) => return (e, 0),
+    };
+    let now = now();
+    let cur = {
+        let m = T.lock();
+        let Some(t) = m.get(&slot) else { return (EBADF, 0) };
+        itimerspec(t.interval, t.next.map_or(0, |n| n.saturating_sub(now).max(1)))
+    };
+    match cx.copy_out(cx.args[1], &cur) {
+        Ok(()) => (0, 0),
+        Err(e) => (e, 0),
+    }
+}
+
+/// Completes the waiting readers of timer `t` (expired by `now`).
+fn serve_readers(t: &mut Tfd, now: u64, done: &mut Vec<(u64, i64)>) {
+    if t.readers.is_empty() {
+        return;
+    }
+    let n = t.expirations(now);
+    if n == 0 {
+        return;
+    }
+    // The first reader gets the count; the others wait for the next expiry
+    let (c, buf) = t.readers.remove(0);
+    let r = match sys::lx_write(c.id, buf, &n.to_ne_bytes()) {
+        Ok(()) => 8,
+        Err(e) => e,
+    };
+    done.push((c.id, r));
+}
+
+fn finish(done: Vec<(u64, i64)>) {
+    for (id, r) in done {
+        let _ = sys::lx_complete(id, r);
+    }
+}
+
+/// `read` on a timerfd (slot `cx.c.obj`).
+pub fn io(cx: &Cx) -> (i64, u64) {
+    if cx.nr != 0 {
+        return (EINVAL, 0);
+    }
+    if cx.args[2] < 8 {
+        return (EINVAL, 0);
+    }
+    let slot = cx.c.obj as u32;
+    let now = now();
+    let mut m = T.lock();
+    let Some(t) = m.get_mut(&slot) else { return (EBADF, 0) };
+    let n = t.expirations(now);
+    if n > 0 {
+        t.arm(slot, now);
+        drop(m);
+        return match cx.copy_out(cx.args[1], &n.to_ne_bytes()) {
+            Ok(()) => (8, 0),
+            Err(e) => (e, 0),
+        };
+    }
+    if cx.nonblock() || kbuf(cx) {
+        return (EAGAIN, 0);
+    }
+    t.readers.push((cx.c, cx.args[1]));
+    (0, LX_REPLY_PENDING)
+}
+
+/// `LX_NOTE_TIMER` for a timerfd: it expired.
+pub fn fired(cookie: u64) {
+    let slot = (cookie & 0xFFFF_FFFF) as u32;
+    let now = now();
+    let mut done = Vec::new();
+    {
+        let mut m = T.lock();
+        let Some(t) = m.get_mut(&slot) else { return };
+        match t.next {
+            // (an old deadline: the timer was set again since)
+            Some(n) if n > now => t.arm(slot, now),
+            Some(_) => {
+                crate::obj::set_ready_ev(slot, 0x41, 0, true);
+                serve_readers(t, now, &mut done);
+                if !done.is_empty() {
+                    t.arm(slot, now);
+                }
+            }
+            None => {}
+        }
+    }
+    finish(done);
+}
+
+/// A signal for the caller of pending call `id`: `true` if it was one of ours.
+pub fn interrupted(id: u64) -> bool {
+    let found = {
+        let mut m = T.lock();
+        let mut f = false;
+        for t in m.values_mut() {
+            let n = t.readers.len();
+            t.readers.retain(|(c, _)| c.id != id);
+            if t.readers.len() != n {
+                f = true;
+                break;
+            }
+        }
+        f
+    };
+    if found {
+        let _ = sys::lx_complete(id, ERESTARTSYS);
+    }
+    found
+}
+
+/// Process `tgid` ended: its waiting calls are gone.
+pub fn on_exit(tgid: u64) {
+    for t in T.lock().values_mut() {
+        t.readers.retain(|(c, _)| c.tgid != tgid);
+    }
+}
+
+/// The last descriptor of timerfd `slot` went away.
+pub fn closed(slot: u32) {
+    if T.lock().remove(&slot).is_some() {
+        sys::lx_timer(LX_TIMER_CANCEL, TIMER_TAG | slot as u64, 0);
+    }
+}

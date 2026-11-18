@@ -96,6 +96,8 @@ pub fn install(pid: u64, nonblock: bool) -> i64 {
 pub fn pid_of(fd: u64) -> Result<u64, i64> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(crate::fs::FileDescriptor::PidFd(p)) => Ok(p.pid),
+        // Group 13: a pidfd of linux-server names its process in the descriptor
+        Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_PIDFD) => Ok(d.as_server().unwrap().tag()),
         Some(_) => Err(EINVAL),
         None => Err(EBADF),
     })

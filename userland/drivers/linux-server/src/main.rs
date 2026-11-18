@@ -33,7 +33,9 @@ mod bpf;
 mod client;
 mod eventfd;
 mod fdio;
+mod pidfd;
 mod pipe;
+mod signalfd;
 mod keys;
 mod lock;
 mod mqueue;
@@ -41,6 +43,8 @@ mod notes;
 mod obj;
 mod sysv;
 mod timeout;
+mod timerfd;
+mod unix;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -61,6 +65,9 @@ const ENOSYS: i64 = -38;
 const WORKER_STACK: usize = 256 * 1024;
 /// Most workers.
 const MAX_WORKERS: usize = 16;
+
+/// When the main thread next collects Unix sockets in flight (ticks).
+static NEXT_GC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Workers that attached their syscall page.
 static ATTACHED: AtomicUsize = AtomicUsize::new(0);
@@ -132,6 +139,7 @@ fn serve_endpoint(srv: &mut Server) -> ! {
                 let reply = match req.label as u32 {
                     MSG_SUPERVISOR_PING => Message::new(MSG_SUPERVISOR_PONG as u64, [req.args[0], 1, 0, 0]),
                     MSG_LX_PROC_KEYS => proc_keys(srv, &req),
+                    MSG_LX_PROC_NET_UNIX => proc_net_unix(srv),
                     _ => Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0]),
                 };
                 let _ = sys::svc_reply(srv.endpoint, id, &reply);
@@ -140,6 +148,11 @@ fn serve_endpoint(srv: &mut Server) -> ! {
         }
         notes::drain_all();
         complete_due();
+        // Group 13: sockets alive only in unreadable queues, about once a second
+        if now >= NEXT_GC.load(Ordering::Relaxed) {
+            NEXT_GC.store(now + 100, Ordering::Relaxed);
+            unix::gc_tick();
+        }
         obj::flush();
     }
 }
@@ -150,7 +163,8 @@ pub fn next_deadline(now: u64) -> Option<u64> {
     let null = if PENDING.lock().is_empty() { None } else { Some(now + 1) };
     let mq = mqueue::tick(now);
     let sv = sysv::tick(now);
-    [null, mq, sv].into_iter().flatten().min()
+    let sf = signalfd::tick(now);
+    [null, mq, sv, sf].into_iter().flatten().min()
 }
 
 /// `/proc/keys` for the caller the kernel describes (see [`MSG_LX_PROC_KEYS`]).
@@ -173,6 +187,21 @@ fn proc_keys(srv: &mut Server, req: &Message) -> Message {
     Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
 }
 
+/// `/proc/net/unix` (Group 13), into the window like `/proc/keys`.
+fn proc_net_unix(srv: &mut Server) -> Message {
+    // Sockets closed before the reader asked are gone first (their ends may come in a
+    // second round: a socket let go from a closed socket's queue)
+    notes::drain_all();
+    unix::gc();
+    notes::drain_all();
+    notes::drain_all();
+    let text = unix::proc_net_unix();
+    let win = srv.window();
+    let len = text.len().min(LX_PROC_KEYS_TEXT_MAX);
+    win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
+    Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
+}
+
 /// Answers the pending test calls whose time has come.
 fn complete_due() {
     let now = sys::uptime_ticks();
@@ -190,7 +219,7 @@ fn complete_due() {
 /// A signal arrived for the caller of pending request `id`: a pending test call is
 /// answered `-EINTR` at once.
 pub fn interrupted(id: u64) {
-    if mqueue::interrupted(id) || sysv::interrupted(id) || pipe::interrupted(id) || eventfd::interrupted(id) {
+    if mqueue::interrupted(id) || sysv::interrupted(id) || pipe::interrupted(id) || eventfd::interrupted(id) || unix::interrupted(id) || signalfd::interrupted(id) || timerfd::interrupted(id) {
         return;
     }
     let found = {
@@ -243,6 +272,18 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
         // Group 13 (step 4): eventfd, pipes
         284 | 290 => eventfd::create(&cx),
         22 | 293 => pipe::create(&cx),
+        41 | 53 => unix::create(&cx),
+        // the socket calls on a descriptor (the kernel sends them for server objects)
+        42..=52 | 54 | 55 | 288 | 299 | 307 => match obj::kind_of(c.obj as u32) {
+            _ if c.obj == LX_OBJ_NONE => (-88, 0), // ENOTSOCK
+            LX_OBJ_KIND_UNIX => unix::call(&cx),
+            _ => (-88, 0),
+        },
+        434 | LX_KCALL_PIDFD => pidfd::open(&cx),
+        282 | 289 => signalfd::signalfd(&cx),
+        283 => timerfd::create(&cx),
+        286 => timerfd::settime(&cx),
+        287 => timerfd::gettime(&cx),
         248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
         240..=245 => mqueue::dispatch(&cx),
         64..=66 | 220 | 68..=71 => sysv::dispatch(&cx),
@@ -262,6 +303,9 @@ fn object_io(cx: &Cx) -> (i64, u64) {
         (LX_OBJ_KIND_MQ, 0) => (mqueue::read(cx), 0),
         (LX_OBJ_KIND_EVENTFD, _) => eventfd::io(cx),
         (LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W, _) => pipe::io(cx),
+        (LX_OBJ_KIND_UNIX, _) => unix::call(cx),
+        (LX_OBJ_KIND_SIGNALFD, 0) => signalfd::io(cx),
+        (LX_OBJ_KIND_TIMERFD, 0) => timerfd::io(cx),
         (_, 16) => (ENOTTY, 0),
         _ => (EINVAL_, 0),
     }

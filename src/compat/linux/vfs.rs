@@ -464,6 +464,32 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     Ok(ino)
 }
 
+/// Group 13 (temporary, until the VFS moves: `vfs_resolve`): the socket node `connect`
+/// names, resolved for the caller: `ENOENT` if missing, `ECONNREFUSED` if it is not a
+/// socket, `EACCES` without write permission on it (as Linux).
+pub(crate) fn socket_node_for_connect(path: &[u8]) -> Result<u64, i64> {
+    const S_IFSOCK: u32 = 0o140000;
+    let (base, _) = base_dir(AT_FDCWD, path)?;
+    let ino = resolve(base, path, true)?;
+    let attr = ZfsClient::getattr(ino)?;
+    if attr.mode & 0o170000 != S_IFSOCK {
+        return Err(-111);
+    }
+    let c = creds();
+    if !may_access(&attr, c.euid, c.egid, 2) {
+        return Err(EACCES);
+    }
+    Ok(ino)
+}
+
+/// Group 13: removes the socket node `bind` made at `path` (the bind failed afterwards).
+pub(crate) fn unlink_socket_node(path: &[u8]) {
+    let Ok((base, _)) = base_dir(AT_FDCWD, path) else { return };
+    if let Ok((dir, name)) = resolve_parent(base, path) {
+        let _ = zfs(|s| s.unlink(dir, &name));
+    }
+}
+
 /// Resolves a user path to (inode, is a directory) for the caller.
 ///
 /// # Arguments

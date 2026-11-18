@@ -960,6 +960,12 @@ pub const LX_OBJ_DROP: u64 = 11;
 /// `SYS_LX_OBJ` operation: `(slot)`: how many kernel references hold the server object in
 /// `slot` (descriptors, kept descriptors, calls in flight); 0 if none.
 pub const LX_OBJ_REFS: u64 = 12;
+/// `SYS_LX_OBJ` operation: `(pid)`: 1 if Linux process `pid` runs, 2 if it has exited (a
+/// zombie), `-ESRCH` if there is none (pidfd).
+pub const LX_OBJ_PROC: u64 = 13;
+/// `SYS_LX_OBJ` operation: `(slot, mask)`: the signals signalfd `slot` takes (the kernel
+/// answers `poll` on it from the process's pending signals).
+pub const LX_OBJ_SIGMASK: u64 = 14;
 
 /// Native system call `SYS_LX_TIMER` (62) operation: `(cookie, ns)`: notify
 /// [`LX_NOTE_TIMER`] once the kernel's monotonic clock reaches `ns` (re-arming a cookie
