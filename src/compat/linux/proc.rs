@@ -1472,12 +1472,32 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
     } else {
         None
     };
+    let old = match set_action(sig, new) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    if oact != 0 {
+        let mut b = [0u8; 32];
+        for (i, v) in [old.handler, old.flags, old.restorer, old.mask].iter().enumerate() {
+            b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        if !write_bytes(oact, &b) {
+            return EFAULT;
+        }
+    }
+    0
+}
+
+/// Sets the calling process's action for signal `sig` (1..=64, not `SIGKILL`/`SIGSTOP` when
+/// `new` is given; checked by the caller) to `new` (`None`: only read it); returns the old
+/// one. Shared by `rt_sigaction` and the other personalities' `sigaction`.
+pub fn set_action(sig: u32, new: Option<SigAction>) -> Result<SigAction, i64> {
     let (_, pid) = current_ids();
     let old = {
         let mut procs = PROCS.lock();
         let p = match procs.get_mut(&pid) {
             Some(p) => p,
-            None => return ESRCH,
+            None => return Err(ESRCH),
         };
         let old = p.actions[sig as usize];
         if let Some(a) = new {
@@ -1493,16 +1513,7 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
         }
         old
     };
-    if oact != 0 {
-        let mut b = [0u8; 32];
-        for (i, v) in [old.handler, old.flags, old.restorer, old.mask].iter().enumerate() {
-            b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
-        }
-        if !write_bytes(oact, &b) {
-            return EFAULT;
-        }
-    }
-    0
+    Ok(old)
 }
 
 /// Inspects and/or updates the calling thread's blocked signal mask.
@@ -2327,6 +2338,10 @@ pub fn force_seccomp_sigsys(nr: i32, ip: u64, errno: i32) {
 /// # Returns
 /// `true` on successful frame creation, `false` if stack memory could not be written.
 fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, old_mask: u64, cs: u16) -> bool {
+    // The personality hook (wave 5): a FreeBSD or macOS program gets its own system's frame
+    if let Some(other) = crate::personality::frame_builder() {
+        return other(regs, fpu, sig, act, old_mask, cs);
+    }
     let (tid, pid) = current_ids();
     let (alt_sp, alt_size) = PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).map(|t| (t.alt_sp, t.alt_size))).unwrap_or((0, 0));
     let on_alt = alt_size != 0 && regs.rsp > alt_sp && regs.rsp <= alt_sp + alt_size;
@@ -2417,6 +2432,22 @@ fn build_frame(regs: &mut UserRegs, fpu: &FpuState, sig: u32, act: &SigAction, o
     regs.rax = 0;
     regs.rflags &= !0x400; // clear DF
     true
+}
+
+/// The calling thread's alternate signal stack: base, size, and whether it is enabled (for
+/// the other personalities' frame builders, `crate::personality`).
+pub fn alt_stack() -> (u64, u64, bool) {
+    let (tid, pid) = current_ids();
+    PROCS.lock().get(&pid).and_then(|p| p.threads.get(&tid).map(|t| (t.alt_sp, t.alt_size, t.alt_size != 0))).unwrap_or((0, 0, false))
+}
+
+/// Sets the calling thread's blocked mask (internal numbers; `SIGKILL`/`SIGSTOP` stay
+/// unblocked): the other personalities' `sigreturn` (`crate::personality`).
+pub fn set_current_mask(mask: u64) {
+    let (tid, pid) = current_ids();
+    if let Some(t) = PROCS.lock().get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) {
+        t.mask = mask & !UNBLOCKABLE;
+    }
 }
 
 /// `fpstate` software-reserved bytes: the area is XSAVE state (Linux's FP_XSTATE_MAGIC1).

@@ -264,9 +264,22 @@ pub enum TaskPersonality {
     Hydra,
     /// Linux x86_64 ABI compatibility layer.
     Linux,
+    /// A FreeBSD program (wave 5 hook: only with the stub table, `persona=fbsd-stub`;
+    /// `crate::personality`).
+    FreeBsd,
+    /// A macOS program (reserved: Mach-O files are refused until wave 12).
+    MacOs,
 }
 
 impl TaskPersonality {
+    /// A program of the POSIX layer (Linux, FreeBSD, macOS): a process of the Linux
+    /// layer's process table, with signals, the crash policy of linux-server and so on.
+    /// Only native Hydra tasks are not.
+    #[inline]
+    pub fn is_posix(self) -> bool {
+        self != TaskPersonality::Hydra
+    }
+
     /// Returns a static string name for this OS personality.
     ///
     /// # Returns
@@ -276,6 +289,8 @@ impl TaskPersonality {
         match self {
             TaskPersonality::Hydra => "Hydra",
             TaskPersonality::Linux => "Linux",
+            TaskPersonality::FreeBsd => "FreeBSD",
+            TaskPersonality::MacOs => "macOS",
         }
     }
 }

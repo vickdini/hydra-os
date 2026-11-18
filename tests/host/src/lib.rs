@@ -63,6 +63,10 @@ pub mod arch {
         pub fn bkl_exit() {}
         /// *stub* No other CPU to wake on the host.
         pub fn flush_kick() {}
+        /// *stub* One CPU on the host.
+        pub fn online() -> usize {
+            1
+        }
         /// *mirror* of the kernel's CPU limit.
         pub const MAX_CPUS: usize = 16;
         /// *stub* No flush requests on the host.
@@ -650,6 +654,27 @@ pub mod ipc {
     pub mod protocol;
 }
 
+/// The personality hook (wave 5, `src/personality`): its pure tables, and no other
+/// personality's signal frames on the host.
+pub mod personality {
+    #[path = "../../../../src/personality/abi.rs"]
+    pub mod abi;
+    /// *stub* A frame builder of another personality.
+    pub type FrameFn = fn(&mut crate::compat::linux::proc_real::UserRegs, &crate::arch::idt::FpuState, u32, &crate::compat::linux::proc_real::SigAction, u64, u16) -> bool;
+    /// *stub* Host tasks are Linux tasks: Linux's frame.
+    pub fn frame_builder() -> Option<FrameFn> {
+        None
+    }
+    /// *mirror* of the kernel's check (without its log line).
+    pub fn interp_agrees(pers: crate::task::TaskPersonality, interp_head: &[u8], _interp: &str) -> bool {
+        let k = abi::classify(interp_head);
+        match pers {
+            crate::task::TaskPersonality::FreeBsd => k == abi::Kind::FreeBsd,
+            _ => k == abi::Kind::Linux,
+        }
+    }
+}
+
 /// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
 /// events it is told about go nowhere on the host.
 pub mod lx {
@@ -728,6 +753,25 @@ pub mod task {
     /// *stub*
     pub mod tcb {
         pub use crate::fake::Caps;
+    }
+    /// *mirror* of `src/task/tcb.rs`'s personalities.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TaskPersonality {
+        Hydra,
+        Linux,
+        FreeBsd,
+        MacOs,
+    }
+    impl TaskPersonality {
+        /// *mirror*
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                TaskPersonality::Hydra => "Hydra",
+                TaskPersonality::Linux => "Linux",
+                TaskPersonality::FreeBsd => "FreeBSD",
+                TaskPersonality::MacOs => "macOS",
+            }
+        }
     }
     /// *stub* The fake clock moves instead (nothing sleeps on the host).
     pub fn sleep_ticks(ticks: u64) {
