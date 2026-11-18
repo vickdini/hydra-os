@@ -962,6 +962,81 @@ calls switched straight back.
 So about +2.0 to +2.5 µs per forwarded call, as for the null call; `bpf` +3.3 (it also
 reads the attribute block's descriptor from user memory in the trap).
 
+## 15. Step 4 as built (wave 5, Group 13, branch `mk-lxunix`)
+
+How it is used, in detail, is in [src/linux-server.md](src/linux-server.md) ("Unix sockets,
+pipes and event descriptors"). In short:
+- **Moved:** Unix sockets (`unix.rs` + `socket.rs` of the kernel, 2,175 lines), pipes
+  (`fs/pipe.rs`), `eventfd`, `timerfd`, `signalfd` and `pidfd` are linux-server's server
+  objects (server modules `unix.rs`, `pipe.rs`, `eventfd.rs`, `timerfd.rs`, `signalfd.rs`,
+  `pidfd.rs`, about 2,400 lines). The in-kernel code stays for `lx=kernel` (every moved call
+  goes back to it, suite 78/79 there: only the new test's checks of features the old code
+  lacks fail).
+- **Routing:** by number (`pipe*`, `eventfd*`, `timerfd_*`, `signalfd*`, `pidfd_open`), by
+  family (`socket`/`socketpair(AF_UNIX)`) and by descriptor (the socket calls, and `read`,
+  `write`, `readv`, `writev`) with Group 12's routing (`T_FAMILY`, `T_BYFD`), which this
+  branch carries (cherry-picked 973494e, and the `SYS_LX_COMPLETE` race fix of 317b604).
+  `read`/`write` on a kernel descriptor cost one bit test of the descriptor table's
+  server-object bitmap; on a server object they take the lock-free path with the copy table.
+- **New primitives:** `timer_arm` (native 62) and `sig_take` (native 63), as section 5.2
+  proposed; `timer_arm` fires on time (an idle CPU waits for the earliest deadline as for
+  precise sleeps). `pidfd` needed nothing new beyond the exit notification and a "does the
+  process run" question (`LX_OBJ_PROC`): the kernel reads the process back from the
+  descriptor for the calls that act on it (`pidfd_send_signal`, `pidfd_getfd`, `waitid`,
+  `setns`, `process_madvise` stay in the kernel).
+- **Temporary primitives (go with step 6a):** `vfs_resolve` is not a call the server makes
+  but a step the kernel takes in the caller's context before forwarding `bind`/`connect` on
+  a path name (`LxCall::ino`): the node is made or checked with the caller's root, working
+  directory, umask, credentials, ACLs and Landlock, which the server does not have yet.
+  Descriptor passing is `LX_OBJ_TAKE`/`GIVE`/`DROP` (below). FIFOs (`mkfifo` nodes) were not
+  supported by the kernel before either and still are not (see 15.3).
+
+### 15.1 Descriptor passing for kernel-owned descriptors
+
+The descriptor table stays in the kernel, so the server must never own a descriptor. A
+`sendmsg` with `SCM_RIGHTS` makes the server ask the kernel to *keep* the named
+descriptors of the sender (`LX_OBJ_TAKE`): the kernel clones each table entry into a table
+of its own under a token, taking a reference exactly like `dup` (a kernel pipe end counts a
+reader or writer; a server object's last-reference rule is unchanged). The message in the
+server's queue holds only the tokens and, for each, whether it is one of the server's own
+objects (slot and kind). The receiving `recvmsg` asks the kernel to install the tokens in
+the receiver's table (`LX_OBJ_GIVE`, close-on-exec on request); the reference moves from the
+kept table to the receiver's table. Everything not delivered is let go (`LX_OBJ_DROP`): the
+descriptors that do not fit the control buffer (`MSG_CTRUNC`), those of a `read`/`recv`
+without a control buffer, and those queued on a socket that closes. So a regular file, a DRM
+device, a memfd (Wayland's buffers), a pipe end, an eventfd and any other server object
+travel the same way, and the kernel object keeps its identity (shared offsets, `dup`
+semantics, mappings).
+
+**Garbage collection.** A kept server object counts in the kernel's reference count, which
+the server can ask for (`LX_OBJ_REFS`). Sockets whose every kernel reference is a token in
+the server's own queues, and that no queue of a socket with other references can reach, are
+garbage (Linux's `unix_gc` rule); the server empties their queues, the kernel drops the
+tokens, and their last references go as ordinary closes. Sending a socket whose own queue
+holds a Unix socket is still refused (`ETOOMANYREFS`, the kernel's rule), which leaves only
+self-loops and listener queues for the collector.
+
+### 15.2 Measured cost (KVM, 2 CPUs; µs)
+
+(see the tables below; numbers filled in at the end of the wave)
+
+### 15.3 What later steps can build on, and what is missing
+
+- **Step 5 (terminals, devices):** pseudo-terminal pairs can follow the pipe module (the
+  same blocking, readiness and kernel-buffer machinery). The descriptor-passing primitives
+  carry DRM and evdev descriptors already.
+- **Step 6a (VFS, descriptor table):** `vfs_resolve` (`LxCall::ino`, `unix::server_call`)
+  and `LX_OBJ_TAKE`/`GIVE`/`DROP` go: the server then resolves socket nodes and owns the
+  descriptors it passes. FIFOs (`mkfifo`, open of an `S_IFIFO` node) are not supported, as
+  before step 4; with the VFS in the server they become a pipe found by inode.
+- **Missing or approximate:** unconnected datagram sends and autobind (as before);
+  `SO_RCVTIMEO`/`SO_SNDTIMEO` are accepted and ignored (as before; `timer_arm` can serve
+  them); a signalfd's `poll` answers for the process that made it; a blocking signalfd read
+  is looked at again every tick (signalfd is normally polled); the server's sockets share
+  one lock (serializes the server side of Unix socket calls on 2 CPUs).
+- **Slots:** 2048 server objects; linux-server logs its count every 256 (see the KDE runs
+  below).
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.

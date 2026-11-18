@@ -11,4 +11,4 @@ A=( "linux plasma" "~150" "!screendump $D/sddm.ppm"
 for i in $(seq 2 100); do A+=( "!screendump $D/f$(printf %03d $i).ppm" "~0.7" ); done
 A+=( "!sendkey ctrl-alt-f1" "~4" "@linux prof off" "~2" "@linux prof show 400" "~8"
      "@linux chroot /ubuntu /usr/bin/bash -c 'echo LXB-KDE-E\"\"ND'" )
-exec bash "$(dirname "$0")/vm.sh" $NAME $ISO 900 "--wait 400 --gap 0.3 --until LXB-KDE-END" "${A[@]}"
+exec bash "$(dirname "$0")/vm.sh" $NAME $ISO ${KDE_TO:-900} "--wait 400 --gap 0.3 --until LXB-KDE-END" "${A[@]}"

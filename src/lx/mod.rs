@@ -187,6 +187,10 @@ pub const BYFD_NUMBERS: &[u64] = &[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 5
 /// but decided only by the lock-free test (when it cannot be made, the kernel's
 /// `vfs::stream_io` forwards a server object's call itself, under the kernel lock).
 pub const BYFD_IO_NUMBERS: [u64; 4] = [0, 1, 19, 20];
+/// Group 13, per CPU: the thread whose current `read`/`write` the lock-free entry found to
+/// be on a kernel descriptor (`forward` then skips the test; a stale mark only sends a
+/// call to the kernel's `vfs::stream_io`, which forwards a server object's call itself).
+static IO_KERNEL: [AtomicU64; crate::arch::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 
 /// Group 13: `bind` and `connect` on a Unix socket of the server go through the kernel's
 /// dispatcher first (`ServerObject::socket_call`): a path name's node is made or checked
@@ -298,7 +302,13 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
                 }
                 if bits & T_BYFD != 0 {
                     let o = if BYFD_IO_NUMBERS.contains(&nr) {
-                        // (no locks for every read and write: the fast test or the kernel)
+                        // (no locks for every read and write: the fast test or the kernel;
+                        // `fast_entry` may have made it already for this very call)
+                        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+                        let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+                        if tid != 0 && IO_KERNEL[cpu].swap(0, Ordering::Relaxed) == tid {
+                            return None;
+                        }
                         x86_64::instructions::interrupts::without_interrupts(|| ident().and_then(|id| byfd_fast(&id, frame.rdi).ok().flatten()))?
                     } else {
                         byfd_object(frame.rdi)?
@@ -336,6 +346,22 @@ fn byfd_object(fd: u64) -> Option<(Arc<dyn crate::compat::linux::chardev::CharDe
 /// answers (`fd` holds no server object), `Ok(Some(object))` the server does, `Err(())` it
 /// cannot be told without waiting for a lock (the caller takes the ordinary path).
 fn byfd_fast(id: &Ident, fd: u64) -> Result<Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>, ()> {
+    // Group 13: a cached table whose bit is clear says "the kernel" without touching the
+    // table's reference count (every read and write of a kernel descriptor comes here). The
+    // cache is this thread's table while its identity is unchanged (exec and unshare bump
+    // the epoch), and the running thread holds that table, so its bits are alive.
+    {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*FDS.0[cpu].get() };
+        if e.0 == id.tid && e.1 == id.epoch && e.3 != 0 {
+            // SAFETY: see above
+            let maybe = unsafe { &*(e.3 as *const crate::fs::SrvPtr) }.get().is_some_and(|b| b.maybe(fd));
+            if !maybe {
+                return Ok(None);
+            }
+        }
+    }
     let (fds, srv) = cached_fds(id).ok_or(())?;
     // SAFETY: the bits live as long as the table, which `fds` holds
     let maybe = unsafe { &*srv }.get().is_some_and(|b| b.maybe(fd));
@@ -1132,7 +1158,15 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
                 return None;
             }
             Ok(Some(o)) => byfd = Some(o),
-            Ok(None) | Err(()) => return None,
+            Ok(None) => {
+                // (Group 13: `forward` need not test a read or write again)
+                if BYFD_IO_NUMBERS.contains(&nr) {
+                    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+                    IO_KERNEL[cpu].store(id.tid, Ordering::Relaxed);
+                }
+                return None;
+            }
+            Err(()) => return None,
         }
     }
     let mut c = LxCall::EMPTY;
