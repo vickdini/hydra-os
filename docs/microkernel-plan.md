@@ -13,9 +13,11 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 1 | IOMMU, retire compositor, concurrent IPC, shell part 1 | Merged, pushed (2c6bc80) | |
 | 2 | net-server, shell part 2, Linux-layer design | Merged, pushed, deployed (ecca368) | 91,702 |
 | 3 | PCID, Linux layer step 1 | Merged, pushed, deployed (5027d87) | 93,725 |
-| 4 | Linux layer step 2, faster forwarding, FreeBSD/macOS step 0 | Merged (e15cd6a), checked | 96,061 |
-| 5–9 | Linux layer steps 3–8, plus the personality hook (wave 5) | Planned (below) | about 50,000 expected at the end |
-| 10–13 | Shared POSIX core, then FreeBSD and macOS programs | Planned (below); step 0 done in wave 4 | |
+| 4 | Linux layer step 2, faster forwarding, FreeBSD/macOS step 0 | Merged, pushed, deployed (7ce83b7) | 96,061 |
+| 5 | Steps 3–4 (network, Unix sockets, pipes), personality hook, open bugs, designs for display/VFS/services | Merged, pushed, deployed 2026-11-19 (5440095) | |
+| 6 | Foundation for separate services: routing, direct calls, restarts, cheaper copies, memory objects, first split (lx-sec), open bugs | **Started 2026-11-19** (groups 19–25, below) | |
+| 7–10 | File service, device services, splitting the rest ([linux-services-design.md](linux-services-design.md) section 9) | Planned | |
+| 11+ | FreeBSD, then macOS programs, on the shared services | Planned; step 0 done in wave 4 | |
 
 - **Why the line count rose in wave 3:** step 1 added the forwarding machinery (`src/lx`, 946 lines) and PCID (`src/arch/pcid.rs`, 365 lines). It also keeps the in-kernel copy of each moved piece, as the switch back to the kernel (`lx=kernel`), until a later step deletes it.
 - **Today:** the Linux layer (`src/compat/linux`) is 51,444 lines, still mostly in the kernel. The ring-3 drivers and servers (`userland/drivers`) are 22,339 lines.
@@ -182,7 +184,25 @@ For the Linux-layer steps (waves 3 and later), section 7 of the design sets the 
 
 **Kernel size:** `src/` grew to 96,061 lines, because each moved piece's in-kernel copy stays as the `lx=kernel` switch back. Wave 5 deletes the copies of waves 3 and 4.
 
-### Waves 5–9: the rest of the Linux layer (planned)
+### Waves 6–10: separate services (replaces the table below, 2026-11-19)
+
+Decision 9 and the user's answers of 2026-11-19 (decisions 10–18) replace the one-server step plan below with [linux-services-design.md](linux-services-design.md) section 9. The table below is kept for history: wave 5 was done as written; its waves 6–9 rows are superseded.
+
+**Wave 6 (started 2026-11-19, base 5440095), seven groups:**
+
+| Group | Work | Worktree / branch |
+|---|---|---|
+| 19 (R1) | Routing core: service registry, per-service request tables, workers and readiness, the service runtime in `hydra-rt`, per-service switch back, a test service | E:\os-19, `mk-route` |
+| 20 (R2) | Direct call between services (syscalls 70/71), also to zfs-server and net-server; linux-server's net-server calls use it | E:\os-20, `mk-dcall` |
+| 21 (R3) | Restart support: kept state, the three crash classes, the 30 s ladder, re-sending safe calls | E:\os-21, `mk-restart` |
+| 22 (P3) | Cheaper argument copies (fault fix-up, copy straight into the syscall page) | E:\os-22, `mk-copy` |
+| 23 (M) | Memory objects: `mmap` of service objects, objects kept across a restart, sharing between services | E:\os-23, `mk-memobj` |
+| 24 (X1) | First split: keys and bpf into `lx-sec` (keys restart invisibly); merges last | E:\os-24, `mk-lxsec` |
+| 25 (B) | Open bugs: sound underruns, linux-server on 1 CPU, the 2,048-object limit, `timerfd_settime`/bpf lookup over budget, the slirp stall, the cold-cache polkit hang | E:\os-25, `mk-fixes2` |
+
+Merge order: 19 first; then 22, 23, 20, 21, 25; 24 last.
+
+### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
 - **Cleanup:** each wave deletes the in-kernel copies of the previous wave's moved code, once that wave has been deployed and used without problems.
@@ -316,11 +336,24 @@ These are not group work yet, but should not be forgotten:
      - every service needs its own crash and restart behavior.
    - Group 16's "B-lean" option, the VFS inside linux-server ([vfs-design.md](vfs-design.md)), is therefore rejected. The designs for waves 6 and 7 are being revised to match.
 
+### Made 2026-11-19 (the nine questions of [linux-services-design.md](linux-services-design.md) section 8, all as recommended)
+
+10. **The services:** the ten of section 2.1: vfs-server, lx-ipc, lx-net, display, input, sound, terminals, lx-sec, lx-proc, and linux-server for what is left. Display, input and sound are separate services (Group 15's revised design), which also settles where sound and the display go.
+11. **Process identity stays in the kernel:** credentials, the process tree, process groups and sessions, PID translation, namespace ids, limits, cwd/root/umask and the descriptor table (about 2,500 more kernel lines than first planned).
+12. **Crash behavior:** the classes of section 5.2. vfs-server, lx-net, keys and lx-proc restart invisibly; lx-ipc, the device services and bpf fail only their own objects; a second crash within 30 s drops one class. Decision 6 stays only for linux-server while it hosts unsplit pieces.
+13. **Routing:** the kernel sends each call straight to the owning service, never through linux-server.
+14. **Direct calls between services** are built in wave 6, to Linux services and to zfs-server and net-server.
+15. **First split as proof:** keys and bpf (lx-sec) in wave 6.
+16. **Order:** wave 6 foundation, wave 7 the file service, wave 8 the device services plus splitting lx-net and lx-ipc out.
+17. **A switch back per service** (for example `lx.vfs=kernel`), next to `lx=kernel`.
+18. **FreeBSD and macOS later:** each service learns those systems' calls itself; no separate shared "POSIX core" wave first.
+
+Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts right after wave 5's deploy.
+
 ### Still open, and when they are needed
 
 | Decision | Needed before | Notes |
 |---|---|---|
-| Where sound and the display go | Wave 6 (step 5) | A display/input server serving Linux programs, and later native ones too, is the design's suggestion |
-| How the separate file-system service is shaped (what it owns, what stays in the kernel, crash behavior) | Wave 7 (step 6a) | The VFS is a service of its own (decision 9); Group 16 revises [vfs-design.md](vfs-design.md) |
-| How the Linux layer is split into services, and how the kernel routes calls to several servers | Before wave 6 (its foundation is wave 6's work) | Decision 9; step 0 done in wave 5 (Group 18): [linux-services-design.md](linux-services-design.md), nine questions in its section 8 |
-| Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 10 (the core split) | The wave 5 hook is cheap and serves all of them; the FreeBSD shortcut is only worth it for a specific program needed early |
+| Group 16's remaining VFS questions ([vfs-design.md](vfs-design.md)) | Wave 7 | The shape (F1, vfs-server next to zfs-server) follows from decision 9 |
+| Group 15's remaining device questions ([display-input-design.md](display-input-design.md)) | Wave 8 | |
+| Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 11 | Decision 18 sets the shape; the wave 5 hook serves all of them |
