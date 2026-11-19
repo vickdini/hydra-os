@@ -673,7 +673,13 @@ pub fn supervisor_init() {
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::lx::on_signal);
         // wave6 G24 begin: lx-sec (keys and bpf): its going away fails only its own calls in
         // flight and its bpf objects; keys calls wait for the restart (Transparent, Group 21)
-        sup.services.push(ServiceDescriptor::new("lx_sec", crate::ipc::protocol::ENDPOINT_LX_SEC, LX_SEC_ELF, lx_sec_args, no_grants));
+        sup.services.push(
+            ServiceDescriptor::new("lx_sec", crate::ipc::protocol::ENDPOINT_LX_SEC, LX_SEC_ELF, lx_sec_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_SEC,
+                crate::lx::restart::RestartClass::Transparent,
+                "sec",
+            ),
+        );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SEC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SEC }>);
         // wave6 G24 end
         // wave6 G19 begin: the test service (a second Linux service; its going away fails

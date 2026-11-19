@@ -62,12 +62,15 @@ fn main(args: &[&str]) {
     };
     svcrt::notes::init(svc.window().as_mut_ptr(), on_note);
     svcrt::objs::init(svc.area, ENDPOINT_LX_SEC);
-    // What the previous instance kept: keyrings, and the device programs the kernel holds
-    let (keys, devices) = restore();
+    // What the previous instance kept: the keyrings before the first call comes
+    let keys = restore();
     if let Err(e) = svc.online() {
         println!("[lx-sec] cannot go online: {}", e);
         sys::exit_group(1);
     }
+    // ... and the device programs the kernel held, handed over again right after going
+    // online (going online without adopting objects ends the old instance's list)
+    let devices = if kept::get().is_some() { bpf::restore_devices() } else { 0 };
     if keys + devices > 0 {
         println!("[lx-sec] restarted: {} keys and {} device programs kept", keys, devices);
     }
@@ -87,25 +90,31 @@ fn main(args: &[&str]) {
     }
 }
 
-/// Maps the kept-state object and takes back what it holds: `(keys, device programs)`.
-fn restore() -> (usize, usize) {
-    // wave6 G24: the kept-state object comes with Group 21's restart support
-    // (`LX_SVC_KEPT`); without it lx-sec keeps nothing across a restart
-    let Some((base, size)) = kept_object() else { return (0, 0) };
+/// Maps the kept-state object and takes back the keyrings it holds (their number).
+fn restore() -> usize {
+    let Some((base, size)) = kept_object() else { return 0 };
     // SAFETY: the kernel mapped the object for this process's life
     match unsafe { kept::Kept::open(base, size) } {
         Some(k) => kept::set(k),
         None => {
             println!("[lx-sec] kept-state object too small ({} bytes, {} needed)", size, kept::SIZE);
-            return (0, 0);
+            return 0;
         }
     }
-    (keys::restore(), bpf::restore_devices())
+    keys::restore()
 }
 
-/// The kept-state object: `(address, size)`.
+/// The kept-state object (`LX_SVC_KEPT`: zeroed the first time, the same memory for every
+/// later instance until the restart ladder resets it): `(address, size)`.
 fn kept_object() -> Option<(*mut u8, usize)> {
-    None
+    let size = (kept::SIZE + 0xFFF) & !0xFFF;
+    match sys::lx_svc_kept(size) {
+        Ok(p) => Some((p, size)),
+        Err(e) => {
+            println!("[lx-sec] no kept-state object ({}): keys will not survive a restart", e);
+            None
+        }
+    }
 }
 
 /// One notification: process events for the keyrings, last closes of bpf descriptors.
