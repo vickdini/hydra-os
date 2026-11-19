@@ -692,6 +692,9 @@ pub mod personality {
 /// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
 /// events it is told about go nowhere on the host.
 pub mod lx {
+    // wave6 G21: the restart decisions (classes, ladder, idempotent marks)
+    #[path = "../../../../src/lx/restart_policy.rs"]
+    pub mod restart_policy;
     /// *stub* A notification for the Linux server.
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
     /// *stub* No forwarding on the host.
@@ -832,3 +835,7 @@ pub mod video {
     #[path = "../../../../src/video/font.rs"]
     pub mod font;
 }
+
+/// wave6 G21: hydra-rt's kept-state format (plain `core`).
+#[path = "../../../userland/drivers/hydra-rt/src/kept.rs"]
+pub mod kept;

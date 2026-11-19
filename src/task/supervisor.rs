@@ -100,6 +100,10 @@ pub struct ServiceDescriptor {
     pub max_unanswered_pings: u32,
     /// Tick of the last answered heartbeat.
     pub last_heartbeat_tick: u64,
+    /// Wave 6 (Group 21): the Linux service id (`LXS_*`) this program serves, 0 for drivers
+    /// and native servers. A Linux service's restarts follow its restart class and the
+    /// ladder (`crate::lx::restart`).
+    pub lx_svc: u8,
 }
 
 impl ServiceDescriptor {
@@ -123,7 +127,17 @@ impl ServiceDescriptor {
             unanswered_pings: 0,
             max_unanswered_pings: 3,
             last_heartbeat_tick: 0,
+            lx_svc: 0,
         }
+    }
+
+    /// Marks the service as Linux service `svc` with restart class `class` (the default; a
+    /// boot word or QEMU's fw_cfg `opt/hydra/restart.<name>` may set another).
+    fn linux_service(mut self, svc: u8, class: crate::lx::restart::RestartClass, name: &str) -> Self {
+        self.lx_svc = svc;
+        crate::lx::restart::configure(svc, class);
+        crate::lx::restart::fw_cfg(svc, name);
+        self
     }
 }
 
@@ -543,6 +557,13 @@ impl Supervisor {
     fn reincarnate(&mut self, idx: usize) -> Result<TaskId, &'static str> {
         self.retire(idx);
         let svc = &mut self.services[idx];
+        // A Linux service: the ladder may have given it up (a third crash within 30 s of a
+        // restart; decided when its endpoint went, in `retire`)
+        if svc.lx_svc != 0 && !crate::lx::restart::may_restart(svc.lx_svc) {
+            svc.state = ServiceState::Faulted;
+            crate::kprintln!("[supervisor] '{}' crashed three times within 30 s of its restarts; not restarting it (its calls fail with EIO)", svc.name);
+            return Err("restart ladder: given up");
+        }
         if svc.restart_count >= svc.max_restarts {
             svc.state = ServiceState::Faulted;
             crate::kprintln!("[supervisor] '{}' failed {} times; not restarting it", svc.name, svc.restart_count);
@@ -596,6 +617,9 @@ impl Supervisor {
             }
         }
         self.retire(idx);
+        if self.services[idx].lx_svc != 0 {
+            crate::lx::restart::started_by_hand(self.services[idx].lx_svc);
+        }
         self.launch(idx)
     }
 }
@@ -637,13 +661,15 @@ pub fn supervisor_init() {
         // The Linux server (wave 3): the Linux system calls the kernel forwards
         // (`crate::lx`); its going away runs the crash policy (the endpoint's hook)
         crate::lx::init();
-        sup.services.push(ServiceDescriptor::new(
-            "linux_server",
-            crate::ipc::protocol::ENDPOINT_LINUX_SERVER,
-            LINUX_SERVER_ELF,
-            linux_server_args,
-            no_grants,
-        ));
+        // (wave 6: Linux service 1; EndLinux, the user's decision 6, while it hosts pieces
+        // with unkept state)
+        sup.services.push(
+            ServiceDescriptor::new("linux_server", crate::ipc::protocol::ENDPOINT_LINUX_SERVER, LINUX_SERVER_ELF, linux_server_args, no_grants).linux_service(
+                crate::lx::restart::SVC_LINUX,
+                crate::lx::restart::RestartClass::EndLinux,
+                "linux",
+            ),
+        );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::lx::on_signal);
         // wave6 G24 begin: lx-sec (keys and bpf): its going away fails only its own calls in
         // flight and its bpf objects; keys calls wait for the restart (Transparent, Group 21)
@@ -652,7 +678,11 @@ pub fn supervisor_init() {
         // wave6 G24 end
         // wave6 G19 begin: the test service (a second Linux service; its going away fails
         // only its own calls and objects)
-        sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants));
+        sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants).linux_service(
+            crate::ipc::protocol::LXS_TEST,
+            crate::lx::restart::RestartClass::Transparent, // wave6 G21: the kill tests' Transparent service
+            "test",
+        ));
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_SVC_TEST, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_SVC_TEST }>);
         // wave6 G19 end
         sup.services.push(ServiceDescriptor::new(
@@ -862,6 +892,10 @@ pub fn restart_service_by_name(name: &str) -> Result<TaskId, &'static str> {
     let id = {
         let mut sup = SUPERVISOR.lock();
         sup.services[idx].restart_count = 0; // a deliberate restart resets the failure count
+        // A Linux service: not a crash for the ladder
+        if sup.services[idx].lx_svc != 0 {
+            crate::lx::restart::deliberate(sup.services[idx].lx_svc);
+        }
         sup.reincarnate(idx)?
     };
     await_registration(endpoint, id);
