@@ -197,14 +197,26 @@ pub fn deliberate(svc: u8) {
     DOWN[idx(svc)].store(false, Ordering::Release);
 }
 
-/// `service start` of a service the ladder gave up: a fresh ladder.
+/// `service start` of a service (one the ladder gave up, or stopped): a fresh ladder, and
+/// its callers wait for the new instance from now on (its old objects stay stale).
 pub fn started_by_hand(svc: u8) {
-    state(|s| {
-        let v = &mut s[idx(svc)];
+    let i = idx(svc);
+    let now = now_ms();
+    let waiting = state(|s| {
+        let v = &mut s[i];
         v.ladder.reset();
-        v.phase = Phase::Up;
+        if v.phase != Phase::Down {
+            return false;
+        }
+        v.phase = Phase::Restarting;
+        v.since_ms = now;
+        v.last = Some(Decision { class: RestartClass::FailObjects, reset_kept: false, restart: true });
+        true
     });
-    DOWN[idx(svc)].store(false, Ordering::Release);
+    DOWN[i].store(false, Ordering::Release);
+    if waiting {
+        RESTARTING[i].store(true, Ordering::Release);
+    }
 }
 
 // ----------------------------------------------------------------------

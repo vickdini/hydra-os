@@ -1,9 +1,13 @@
 /* restart_test: what Linux programs see when a Linux service restarts (wave 6, Group 21).
  *
- *   restart_test SECONDS   8 threads make forwarded calls for SECONDS seconds while the
+ *   restart_test SECONDS [svc]
+ *                          8 threads make forwarded calls for SECONDS seconds while the
  *                          service is killed from the console (hydra-shell `service kill`);
  *                          each kind of call is counted: ok, EIO, other errors; and the
  *                          longest call. Prints one line per kind every 2 s and a summary.
+ *                          Without `svc`: linux-server's test call; with `svc`: the test
+ *                          service (svc-test, LX_TEST_NR 0x6711), whose kept counter and
+ *                          adopted objects are checked too (Transparent).
  *
  * The calls (Hydra's test call 0x6710 = LX_NULL_NR, keys, a test object, a pipe):
  *   null   op 0 (return 0)          idempotent: a Transparent restart re-sends it -> never EIO
@@ -19,6 +23,13 @@
  *   obj/pipe: errors after the kill (the server does not adopt); the program lives.
  *   The longest call is about the restart time (1-3 s).
  * FailObjects (a second kill within 30 s): calls in flight get EIO, then new calls work.
+ *
+ * With `svc` (svc-test as Transparent): null/pend as above (op 0, op 2 answering 4242);
+ * copy = op 5; keyid = op 20 KEPT_INC (adds 1 to the service's kept counter: not idempotent,
+ *   EIO only if the crash hits while it is served); obj = read of a test object (op 1): the
+ *   service adopts its objects, so the object keeps working; pipe as above.
+ *   At the end: the kept counter (op 21) must equal the successful increments, plus at most
+ *   the increments that got EIO (they may or may not have counted).
  * Build: gcc -O1 -w -pthread restart_test.c -o restart
  */
 #define _GNU_SOURCE
@@ -34,6 +45,8 @@
 #include <unistd.h>
 
 #define LX_NULL 0x6710
+#define LX_TEST 0x6711
+static int svcmode;
 #define KEYCTL_GET_KEYRING_ID 0
 #define KEY_SPEC_PROCESS_KEYRING -2
 
@@ -71,21 +84,27 @@ static void *thr(void *arg) {
         long r;
         switch (k) {
         case K_NULL:
-            r = syscall(LX_NULL, 0, 0, 0);
+            r = svcmode ? syscall(LX_TEST, 0, 0, 0) : syscall(LX_NULL, 0, 0, 0);
             count(k, r, r == 0, t0);
             break;
         case K_PEND:
-            r = syscall(LX_NULL, 1, 300, 0);
-            count(k, r, r == 42, t0);
+            r = svcmode ? syscall(LX_TEST, 2, 300, 0) : syscall(LX_NULL, 1, 300, 0);
+            count(k, r, r == (svcmode ? 4242 : 42), t0);
             break;
         case K_COPY:
             memset(buf, 7, sizeof buf);
-            r = syscall(LX_NULL, 2, buf, sizeof buf);
+            r = svcmode ? syscall(LX_TEST, 5, buf, sizeof buf) : syscall(LX_NULL, 2, buf, sizeof buf);
             count(k, r, r == (long)sizeof buf && buf[0] == 8 && buf[63] == 8, t0);
             break;
         case K_KEYID:
-            r = syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID, KEY_SPEC_PROCESS_KEYRING, 1);
-            count(k, r, r > 0, t0);
+            if (svcmode) {
+                r = syscall(LX_TEST, 20, 0, 0);
+                count(k, r, r > 0, t0);
+                usleep(1000);
+            } else {
+                r = syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID, KEY_SPEC_PROCESS_KEYRING, 1);
+                count(k, r, r > 0, t0);
+            }
             break;
         case K_OBJ:
             r = read(objfd, buf, sizeof buf);
@@ -116,8 +135,13 @@ static void report(const char *tag) {
 
 int main(int argc, char **argv) {
     int secs = argc > 1 ? atoi(argv[1]) : 30;
+    svcmode = argc > 2 && !strcmp(argv[2], "svc");
+    if (svcmode) names[K_KEYID] = "kinc";
     setvbuf(stdout, 0, _IOLBF, 0);
-    objfd = syscall(LX_NULL, 3, 0, 0);
+    long kept0 = svcmode ? syscall(LX_TEST, 21, 0, 0) : 0;
+    if (svcmode) printf("kept counter at start: %ld
+", kept0);
+    objfd = svcmode ? syscall(LX_TEST, 1, 0, 0) : syscall(LX_NULL, 3, 0, 0);
     if (objfd < 0) printf("no test object (errno %d)\n", errno);
     else write(objfd, "r", 1); /* readable */
     if (pipe(pipefd) < 0) printf("no pipe (errno %d)\n", errno);
@@ -134,8 +158,18 @@ int main(int argc, char **argv) {
     stop = 1;
     for (int i = 0; i < 8; i++) pthread_join(t[i], 0);
     report("final");
-    int bad = cnt[K_NULL].eio + cnt[K_NULL].other + cnt[K_NULL].wrong + cnt[K_PEND].eio + cnt[K_PEND].other + cnt[K_PEND].wrong + cnt[K_KEYID].other + cnt[K_KEYID].eio
-              + cnt[K_COPY].wrong;
+    int bad = cnt[K_NULL].eio + cnt[K_NULL].other + cnt[K_NULL].wrong + cnt[K_PEND].eio + cnt[K_PEND].other + cnt[K_PEND].wrong + cnt[K_KEYID].other + cnt[K_COPY].wrong;
+    if (!svcmode) bad += cnt[K_KEYID].eio;
+    if (svcmode) {
+        long kept1 = syscall(LX_TEST, 21, 0, 0);
+        long lo = kept0 + cnt[K_KEYID].ok, hi = lo + cnt[K_KEYID].eio;
+        int ok = kept1 >= lo && kept1 <= hi;
+        printf("kept counter at end: %ld (expected %ld..%ld): %s
+", kept1, lo, hi, ok ? "INTACT" : "WRONG");
+        if (!ok) bad++;
+        if (cnt[K_OBJ].other) { printf("adopted object failed %ld times
+", cnt[K_OBJ].other); bad++; }
+    }
     printf("RESTART TEST DONE: %s (null/pend/keyid errors %d)\n", bad ? "ERRORS" : "CLEAN", bad);
     return 0;
 }
