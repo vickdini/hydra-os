@@ -50,6 +50,10 @@ static NET_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 /// The Linux server program (wave 3: the Linux system calls moved out of the kernel).
 static LINUX_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/linux-server"));
 /// The sound driver program (Intel High Definition Audio).
+// wave6 G19 begin
+/// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
+static SVC_TEST_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/svc-test"));
+// wave6 G19 end
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
 
 /// Operational state of a supervised service.
@@ -247,6 +251,14 @@ fn net_server_args() -> Option<Vec<String>> {
 fn linux_server_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=4")])
 }
+
+// wave6 G19 begin
+/// svc-test: always started (small: two workers); it exits by itself when no service id
+/// names its endpoint (`lx.test=linux`).
+fn svc_test_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+// wave6 G19 end
 
 /// e1000 driver: its 128 KiB register window.
 ///
@@ -647,6 +659,15 @@ pub fn supervisor_init() {
             ),
         );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::lx::on_signal);
+        // wave6 G19 begin: the test service (a second Linux service; its going away fails
+        // only its own calls and objects)
+        sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants).linux_service(
+            crate::ipc::protocol::LXS_TEST,
+            crate::lx::restart::RestartClass::Transparent, // wave6 G21: the kill tests' Transparent service
+            "test",
+        ));
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_SVC_TEST, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_SVC_TEST }>);
+        // wave6 G19 end
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,

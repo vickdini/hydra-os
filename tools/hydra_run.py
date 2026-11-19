@@ -236,6 +236,7 @@ def main():
     ap.add_argument("--lx-kernel", action="store_true", help="tell the kernel (fw_cfg opt/hydra/lx=kernel) to answer the Linux calls moved to linux-server itself")
     # wave6 G21: a Linux service's restart class (fw_cfg opt/hydra/restart.NAME)
     ap.add_argument("--restart", action="append", default=[], metavar="NAME=CLASS", help="restart class of Linux service NAME (linux, sec, test, ...): transparent, failobjects or endlinux")
+    ap.add_argument("--lx", default=None, help="wave 6: per-service switch-back words for fw_cfg opt/hydra/lx, joined by '+', e.g. 'sec=kernel+ipc=kernel' or 'test=linux'")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
     if a.iommu:
@@ -312,6 +313,8 @@ def main():
         args += ["-fw_cfg", "name=opt/hydra/pge,string=off"]
     if a.lx_kernel:
         args += ["-fw_cfg", "name=opt/hydra/lx,string=kernel"]
+    elif a.lx:
+        args += ["-fw_cfg", "name=opt/hydra/lx,string=" + a.lx]
     for w in a.restart:
         name, _, cls = w.partition("=")
         args += ["-fw_cfg", f"name=opt/hydra/restart.{name},string={cls}"]

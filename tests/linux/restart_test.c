@@ -139,8 +139,7 @@ int main(int argc, char **argv) {
     if (svcmode) names[K_KEYID] = "kinc";
     setvbuf(stdout, 0, _IOLBF, 0);
     long kept0 = svcmode ? syscall(LX_TEST, 21, 0, 0) : 0;
-    if (svcmode) printf("kept counter at start: %ld
-", kept0);
+    if (svcmode) printf("kept counter at start: %ld\n", kept0);
     objfd = svcmode ? syscall(LX_TEST, 1, 0, 0) : syscall(LX_NULL, 3, 0, 0);
     if (objfd < 0) printf("no test object (errno %d)\n", errno);
     else write(objfd, "r", 1); /* readable */
@@ -164,11 +163,9 @@ int main(int argc, char **argv) {
         long kept1 = syscall(LX_TEST, 21, 0, 0);
         long lo = kept0 + cnt[K_KEYID].ok, hi = lo + cnt[K_KEYID].eio;
         int ok = kept1 >= lo && kept1 <= hi;
-        printf("kept counter at end: %ld (expected %ld..%ld): %s
-", kept1, lo, hi, ok ? "INTACT" : "WRONG");
+        printf("kept counter at end: %ld (expected %ld..%ld): %s\n", kept1, lo, hi, ok ? "INTACT" : "WRONG");
         if (!ok) bad++;
-        if (cnt[K_OBJ].other) { printf("adopted object failed %ld times
-", cnt[K_OBJ].other); bad++; }
+        if (cnt[K_OBJ].other) { printf("adopted object failed %ld times\n", cnt[K_OBJ].other); bad++; }
     }
     printf("RESTART TEST DONE: %s (null/pend/keyid errors %d)\n", bad ? "ERRORS" : "CLEAN", bad);
     return 0;

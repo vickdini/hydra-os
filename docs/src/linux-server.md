@@ -48,7 +48,7 @@ Step 1 forwards `add_key` (248), `request_key` (249), `keyctl` (250) and Hydra's
 the kernel) and `bpf` (321), listed in `lx::MOVED_STEP2`. While linux-server is not online the
 forwarded calls fail with `ENOSYS`.
 
-Each table entry is a byte of flags: the server answers the call (`T_SERVER`), `args[0]` is a
+Each table entry was a byte of flags (wave 6 widened it to a u32 that also names the service, below): the server answers the call (`T_SERVER`), `args[0]` is a
 descriptor whose server object the call carries (`T_FD0`: `LxCall::obj`), and the call
 carries the caller's IPC namespace and umask (`T_IPC`).
 
@@ -57,6 +57,83 @@ carries the caller's IPC namespace and umask (`T_IPC`).
 options. The kernel's copy of `keys.rs` then answers, exactly as before step 1; the test call
 returns 0 from the kernel. The boot log says which: `[lx] add_key, request_key, keyctl:
 forwarded to linux-server` or `... in the kernel (switched back: lx=kernel)`.
+
+## Several services (wave 6, Group 19)
+
+Since decision 9 the Linux layer becomes several ring-3 services instead of one linux-server
+(`docs/linux-services-design.md`, section 3). Wave 6 builds the routing core; every piece moved
+so far still runs in linux-server, which *co-locates* them.
+
+**Service ids and the registry** (`src/lx/svc.rs`). A service id (`SvcId`, `LXS_*` in
+`ipc/protocol.rs`) names a Linux-facing service: `LXS_LINUX` 1, `LXS_VFS` 2, `LXS_NET` 3,
+`LXS_IPC` 4, `LXS_PROC` 5, `LXS_DISPLAY` 6, `LXS_INPUT` 7, `LXS_SOUND` 8, `LXS_TTY` 9,
+`LXS_SEC` 10, `LXS_TEST` 11. The registry `SVC[id]` gives each id its endpoint, its *host* and
+its mode. Several ids may name one endpoint: net, ipc, proc and sec name linux-server's 0x29
+today. A **host** (`svc::Host`) is the runtime state of one serving process: its request table
+and lock, workers, `req_done`/`has_work` flags, notification ring, object area and counters.
+It is named by the lowest id of its endpoint (linux-server: 1, the test service: 11), made when
+its first worker attaches and never freed. When a process goes online on endpoint E it becomes
+the host of every id whose endpoint is E, so splitting a piece out means: give its id another
+endpoint (one line, `DEFAULT_ENDPOINTS`) and start a program there.
+
+**The route entry** is a u32 per number (`TABLE[512]`, plus `PRIV[128]` for Hydra's private
+numbers `0x6700..0x677F`, so the test calls route the same way): bits 0..7 the flags of waves
+4–5, bits 8..11 the service, bits 12..15 `T_FSCTX` (carry process group, session and
+namespace ids), `T_IDEMPOTENT`, `T_BYARG`, `T_REDIR`. `lx::route(nr)` and `lx::entry(nr)`
+stay one load. A call finds its service:
+
+1. by number: the entry's service (keys and bpf: sec; mq_*, System V, pipes, eventfd,
+   signalfd, timerfd, pidfd: ipc; the test call: test);
+2. by family (`T_FAMILY`): `FAMILY_SVC[family]` (AF_UNIX: ipc; AF_INET, AF_INET6,
+   AF_NETLINK: net);
+3. by descriptor (`T_BYFD`): the server object records its host (`ServerObject::svc`);
+4. by device major: `MAJOR_SVC[major]`, claimed by a service (`LX_SVC_CLAIM_MAJOR`); the
+   kernel's `open` of such a character node forwards `LX_KCALL_DEVOPEN` (`LxCall::dev`), the
+   service installs a descriptor, and that object becomes the opened file;
+5. by redirect: a worker answers `LX_REPLY_REDIRECT` with `result = svc | tail << 32` and the
+   object in its page's `LxCall::redir_obj`; the kernel forwards the same call (same copies)
+   to that service in the same trap (`redir_obj`, `redir_tail`, `redirs`), at most 4 times,
+   then `-ELOOP`.
+
+`fast_entry` picks the host and then does exactly what it did for the one server; each host
+has its own request-table lock. Request ids carry the host (`id = host << 56 | sequence`), so
+`SYS_LX_COMPLETE`, client memory and the `LX_OBJ_*` operations find the right table, and a
+service can only name its own requests.
+
+**Objects.** Each host has its own 8192 slots (2048 before; Wine used about half) in an
+*object area* of its own (33 pages, outside the 256 KiB window, mapped with
+`LX_CTL_OBJAREA`); `LX_OBJ_OFF` and the two bitmaps are offsets in that area. The doorbell
+hook finds the host by endpoint (`lx::on_signal_for::<EP>`). poll, select and epoll read the
+word of whichever host owns each descriptor. `SCM_RIGHTS` of another service's object passes
+through a Unix socket as a kernel descriptor (the kernel keeps it, `LX_OBJ_TAKE`/`GIVE`).
+
+**Notifications.** One ring per host, in its window. FORK, EXEC and EXIT go to every host that
+subscribed (`LX_SVC_SUBSCRIBE`; linux-server is subscribed to all); INTERRUPT goes to the
+request's host, CLOSE to the object's, TIMER to the host that armed it.
+
+**When a service dies.** linux-server: decision 6 as before (every Linux program ends, the
+login screen comes back). Any other service: its calls in flight fail with `EIO`, calls made
+while it is gone fail with `ENOSYS`, its objects poll `POLLERR|POLLHUP` and their calls fail
+with `EBADF`; no program is ended, and the supervisor restarts it (wave 6's Group 21 adds the
+restart classes).
+
+**Switching back, per service** (decision 17): `lx=kernel` (everything), `lx.<name>=kernel`
+(that service's calls go back to the in-kernel code: e.g. `lx.sec=kernel` for keys and bpf),
+`lx.<name>=linux` (a split service runs inside linux-server again), as boot-entry words or in
+fw_cfg `opt/hydra/lx` (words joined by `+`; `tools/hydra_run.py --lx sec=kernel+ipc=kernel`).
+The boot log has one line per service.
+
+**The service runtime** (`hydra-rt/src/svcrt.rs`): the worker loop, the start-up
+(`svcrt::start`: workers, endpoint, object area, subscription; then `online()`), the main
+thread's receive loop (`Service::recv`), the call being served (`Cx`, moved from linux-server's
+`client.rs`), `redirect`, a small object allocator (`objs`) and a ring reader (`notes`).
+linux-server and the test service run on it.
+
+**The test service** (`userland/drivers/svc-test`, endpoint 0x32, `LXS_TEST`): the call
+`0x6711` (`LX_TEST_NR`: null, new object, pending, redirect to linux-server, who, copy,
+redirect loop), its own object kind, and character major 240. Test: `tests/linux/svcroute_test.c`
+(`svcroute`, in the suite; `svcroute load S` is the kill test's load, `svcroute bench N` the
+cost of a forwarded null call to the second service).
 
 ## The syscall page and the worker loop
 

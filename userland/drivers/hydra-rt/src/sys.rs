@@ -32,6 +32,7 @@ const SYS_LX_READ: u64 = 54;
 const SYS_LX_WRITE: u64 = 55;
 const SYS_LX_READ_STR: u64 = 56;
 const SYS_LX_PROC_INFO: u64 = 57;
+const SYS_LX_SVC: u64 = 72;
 const SYS_LX_OBJ: u64 = 60;
 const SYS_LX_SIG: u64 = 61;
 const SYS_LX_TIMER: u64 = 62;
@@ -282,6 +283,15 @@ pub fn lx_timer(op: u64, cookie: u64, ns: u64) -> i64 {
 /// negative errno.
 pub fn lx_sigtake(op: u64, a: u64, b: u64, c: u64) -> i64 {
     unsafe { syscall4(SYS_LX_SIGTAKE, op, a, b, c) }
+}
+
+/// A service's registry operation (`SYS_LX_SVC`, wave 6: [`crate::protocol::LX_SVC_SUBSCRIBE`],
+/// `LX_SVC_CLAIM_MAJOR`, `LX_SVC_WHOAMI`, ...); returns its non-negative result.
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_svc(op: u64, a: u64, b: u64, c: u64) -> Result<u64, i64> {
+    check(unsafe { syscall4(SYS_LX_SVC, op, a, b, c) }).map(|v| v as u64)
 }
 
 /// Gives up the rest of the time slice.
@@ -559,7 +569,7 @@ pub fn svc_call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<M
 /// # Errors
 /// `-EINVAL` (size), `-EBUSY` (another size than the existing object's), `-ENOMEM`.
 pub fn lx_svc_kept(size: usize) -> Result<*mut u8, i64> {
-    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_KEPT, size as u64, 0, 0) }).map(|a| a as *mut u8)
+    check(unsafe { syscall4(SYS_LX_SVC, crate::protocol::LX_SVC_KEPT, size as u64, 0, 0) }).map(|a| a as *mut u8)
 }
 
 /// Linux service: the live objects of this service from slot `start` on (a restarted
@@ -568,7 +578,7 @@ pub fn lx_svc_kept(size: usize) -> Result<*mut u8, i64> {
 /// # Errors
 /// Returns the negative errno.
 pub fn lx_svc_list(out: &mut [crate::protocol::LxSvcObj], start: u32) -> Result<usize, i64> {
-    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_LIST, out.as_mut_ptr() as u64, out.len() as u64, start as u64) }).map(|n| n as usize)
+    check(unsafe { syscall4(SYS_LX_SVC, crate::protocol::LX_SVC_LIST, out.as_mut_ptr() as u64, out.len() as u64, start as u64) }).map(|n| n as usize)
 }
 
 /// Linux service: the object in `slot` cannot be rebound (it goes stale).
@@ -576,7 +586,7 @@ pub fn lx_svc_list(out: &mut [crate::protocol::LxSvcObj], start: u32) -> Result<
 /// # Errors
 /// Returns the negative errno.
 pub fn lx_svc_dead(slot: u32) -> Result<(), i64> {
-    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_DEAD, slot as u64, 0, 0) }).map(|_| ())
+    check(unsafe { syscall4(SYS_LX_SVC, crate::protocol::LX_SVC_DEAD, slot as u64, 0, 0) }).map(|_| ())
 }
 
 /// Linux service: adopt every listed object not marked dead (a Transparent restart; call
@@ -585,7 +595,7 @@ pub fn lx_svc_dead(slot: u32) -> Result<(), i64> {
 /// # Errors
 /// `-EINVAL` when there is nothing to adopt (a first start, or not a Transparent restart).
 pub fn lx_svc_adopt() -> Result<(), i64> {
-    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_ADOPT, 0, 0, 0) }).map(|_| ())
+    check(unsafe { syscall4(SYS_LX_SVC, crate::protocol::LX_SVC_ADOPT, 0, 0, 0) }).map(|_| ())
 }
 
 /// Linux service: `configured class | current class << 4 | crashes << 8 | kept new << 24`
@@ -594,6 +604,6 @@ pub fn lx_svc_adopt() -> Result<(), i64> {
 /// # Errors
 /// Returns the negative errno.
 pub fn lx_svc_info() -> Result<u64, i64> {
-    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_INFO, 0, 0, 0) }).map(|v| v as u64)
+    check(unsafe { syscall4(SYS_LX_SVC, crate::protocol::LX_SVC_INFO, 0, 0, 0) }).map(|v| v as u64)
 }
 // wave6 G21 end

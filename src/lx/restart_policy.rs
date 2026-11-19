@@ -162,6 +162,8 @@ pub fn stale_errno(kind: u32) -> i64 {
 
 /// Hydra's test call (`LX_NULL_NR`).
 const LX_NULL_NR: u64 = 0x6710;
+/// The test service's call (`LX_TEST_NR`).
+const LX_TEST_NR: u64 = 0x6711;
 
 /// Whether call `nr` with arguments `args` may be sent again to a restarted service after
 /// the old instance died **while serving it** (design 5.1, point 3): only calls that change
@@ -181,6 +183,9 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         // Hydra's test call: 0 return, 1 pending, 4 count closes. (2 changes the caller's
         // buffer through the client memory primitives; 3 makes an object)
         LX_NULL_NR => matches!(args[0], 0 | 1 | 4),
+        // The test service's call (wave 6): 0 null, 2 pending, 4 who, 7 closes, 21 kept
+        // counter (1 makes an object, 3/6 redirect, 5 changes the caller's buffer, 20 adds 1)
+        LX_TEST_NR => matches!(args[0], 0 | 2 | 4 | 7 | 21),
         // keyctl: the commands that only read, and the two that create only when asked to
         // (Group 24: lx-sec commits every change to its kept state before it answers, so a
         // GET_KEYRING_ID that created a keyring finds it the second time)

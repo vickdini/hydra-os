@@ -358,13 +358,13 @@ pub fn wait_online(svc: u8, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
     }
 }
 
-/// A forwarded call of `svc` (number `nr`, arguments `args`, its request id was `old_id`)
-/// got `r` from a dead Transparent instance ([`LX_RESEND`], [`LX_RESEND_MAYBE`]): `Ok(())`
-/// once it may be sent again (the service is back), or the error to return.
-pub fn resend(svc: u8, r: i64, nr: u64, args: &[u64; 6], old_id: u64, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
-    // Descriptors the dead instance installed for this request (its answer was lost): the
+/// A forwarded call of `svc` (number `nr`, arguments `args`; [`install_mark`] taken when the
+/// call began) got `r` from a dead Transparent instance ([`LX_RESEND`], [`LX_RESEND_MAYBE`]):
+/// `Ok(())` once it may be sent again (the service is back), or the error to return.
+pub fn resend(svc: u8, r: i64, nr: u64, args: &[u64; 6], mark: u64, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
+    // Descriptors the dead instance installed for this call (its answer was lost): the
     // program never learned their numbers; the new instance installs its own
-    close_installed(old_id);
+    close_installed(mark);
     if let Err(e) = restart_policy::after_crash(r, nr, args) {
         FAILED.fetch_add(1, Ordering::Relaxed);
         return Err(e);
@@ -375,28 +375,36 @@ pub fn resend(svc: u8, r: i64, nr: u64, args: &[u64; 6], old_id: u64, is_online:
 }
 
 // ----------------------------------------------------------------------
-// Descriptors installed for a request whose answer was lost
+// Descriptors installed for a call whose answer was lost
 // ----------------------------------------------------------------------
 
-/// `(request id, caller thread, descriptor)` of recent installs, for [`close_installed`]
-/// (a ring: only installs of the last few moments before a crash matter).
+/// `(install number + 1, caller thread, descriptor)` of recent installs, for
+/// [`close_installed`] (a ring: only installs of the last moments before a crash matter).
 static INSTALLS: Mutex<[(u64, u64, i32); 64]> = Mutex::new([(0, 0, -1); 64]);
+/// Installs since boot.
 static INSTALL_NEXT: AtomicU64 = AtomicU64::new(0);
 
-/// `LX_OBJ_INSTALL` put descriptor `fd` in the table of request `id`'s caller `client`.
-pub fn installed(id: u64, client: u64, fd: i32) {
-    let n = INSTALL_NEXT.fetch_add(1, Ordering::Relaxed) as usize % 64;
-    x86_64::instructions::interrupts::without_interrupts(|| INSTALLS.lock()[n] = (id, client, fd));
+/// The install count now: taken when a forwarded call begins; installs for its caller from
+/// then on belong to that call (a thread makes one call at a time).
+#[inline]
+pub fn install_mark() -> u64 {
+    INSTALL_NEXT.load(Ordering::Relaxed)
 }
 
-/// Closes the descriptors installed for request `id` (the calling thread is its caller).
-fn close_installed(id: u64) {
+/// `LX_OBJ_INSTALL` put descriptor `fd` in the table of thread `client` (a request's caller).
+pub fn installed(client: u64, fd: i32) {
+    let n = INSTALL_NEXT.fetch_add(1, Ordering::Relaxed);
+    x86_64::instructions::interrupts::without_interrupts(|| INSTALLS.lock()[n as usize % 64] = (n + 1, client, fd));
+}
+
+/// Closes the descriptors installed for the calling thread since install count `mark`.
+fn close_installed(mark: u64) {
     let me = crate::task::CURRENT_TID.load(Ordering::Acquire);
     let mut fds = [-1i32; 8];
     let mut n = 0;
     x86_64::instructions::interrupts::without_interrupts(|| {
         for e in INSTALLS.lock().iter_mut() {
-            if e.0 == id && e.1 == me && e.2 >= 0 && n < fds.len() {
+            if e.0 > mark && e.1 == me && e.2 >= 0 && n < fds.len() {
                 fds[n] = e.2;
                 n += 1;
                 *e = (0, 0, -1);
@@ -422,17 +430,18 @@ fn close_installed(id: u64) {
 /// `SYS_LX_SVC` ops 16..23 for the calling service `svc` (found by the caller from its
 /// registered endpoint).
 pub fn svc_op(svc: u8, op: u64, a: u64, b: u64, c: u64) -> i64 {
+    let Some(x) = super::svc::host(svc) else { return EPERM };
     if svc == 0 || svc as usize >= MAX_SVC {
         return EPERM;
     }
     match op {
         LX_SVC_KEPT => kept(svc, a),
-        LX_SVC_LIST => list(svc, a, b, c),
+        LX_SVC_LIST => list(x, a, b, c),
         LX_SVC_DEAD => {
             if a as usize >= crate::ipc::protocol::LX_OBJ_SLOTS {
                 return EINVAL;
             }
-            super::obj::mark_dead(a as usize);
+            super::obj::mark_dead(x, a as usize);
             0
         }
         LX_SVC_ADOPT => {
@@ -487,13 +496,13 @@ fn kept(svc: u8, size: u64) -> i64 {
 
 /// [`LX_SVC_LIST`]: the live objects of service `svc` from slot `start` on, written to the
 /// caller's `buf` (`cap` entries).
-fn list(_svc: u8, buf: u64, cap: u64, start: u64) -> i64 {
+fn list(x: &super::svc::Host, buf: u64, cap: u64, start: u64) -> i64 {
     let cap = cap.min(crate::ipc::protocol::LX_OBJ_SLOTS as u64) as usize;
     if cap == 0 {
         return 0;
     }
     let mut out: alloc::vec::Vec<LxSvcObj> = alloc::vec::Vec::with_capacity(cap);
-    super::obj::list_live(start as usize, cap, &mut out);
+    super::obj::list_live(x, start as usize, cap, &mut out);
     let n = out.len();
     // SAFETY: LxSvcObj is plain integers; the slice covers exactly the n entries
     let bytes = unsafe { core::slice::from_raw_parts(out.as_ptr() as *const u8, n * core::mem::size_of::<LxSvcObj>()) };
@@ -528,13 +537,4 @@ pub fn summary() -> alloc::string::String {
         }
     });
     out
-}
-
-/// The Linux service the calling process serves (0: none): today only linux-server (Group
-/// 19's registry finds any service by its registered endpoint).
-pub fn caller_svc() -> u8 {
-    match crate::task::with_current_task_mut(|t| t.service).flatten() {
-        Some(crate::ipc::protocol::ENDPOINT_LINUX_SERVER) => SVC_LINUX,
-        _ => 0,
-    }
 }
