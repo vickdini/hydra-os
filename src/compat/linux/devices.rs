@@ -1416,8 +1416,11 @@ fn sound_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64) -> Result<(), i64> {
     };
     let capture = super::snd::has_dir(1);
     // PipeWire's settings for Hydra:
-    // - no realtime module: it asks RTKit for realtime threads over D-Bus; Hydra has no
-    //   working RTKit, and the call blocked the audio thread for D-Bus's 25 s timeout;
+    // - the realtime module without RTKit: Hydra has no working RTKit (the D-Bus call
+    //   blocked the audio thread for D-Bus's 25 s timeout), so the module only uses the
+    //   real-time limit (RLIMIT_RTPRIO) the file below grants, as Ubuntu's RTKit would. Its
+    //   audio threads then run at Hydra's high priority: at normal priority they waited
+    //   behind Firefox's threads for 50 ms and more, and the card ran dry ~3 times a second;
     // - cycles of at least 1024 frames (21 ms), for the server and for PulseAudio clients
     //   (Wine, Firefox): shorter ones underran under load (gaps of silence in Wine's sound)
     for (conf, extra) in [
@@ -1428,7 +1431,13 @@ fn sound_tree(t: &mut Tree, s: &mut ZfsServer, usec: u64) -> Result<(), i64> {
     ] {
         let mut text = alloc::format!("# Written by Hydra (see src/compat/linux/devices.rs, sound_tree)
 context.properties = {{
-    module.rt = false
+    module.rt = true
+    module.rt.args = {{
+        nice.level = -11
+        rt.prio = 88
+        rtportal.enabled = false
+        rtkit.enabled = false
+    }}
 {}}}
 ", extra);
         if conf == "pipewire-pulse" {
@@ -1448,6 +1457,16 @@ context.properties = {{
             }
         }
     }
+    // Real-time priority for every user's threads (PipeWire's audio threads; RTKit grants
+    // it on Ubuntu). pam_limits applies it at the login.
+    t.file(
+        s,
+        "/etc/security/limits.d/50-hydra-sound.conf",
+        "# Written by Hydra (see src/compat/linux/devices.rs, sound_tree): every user may run
+# real-time threads (PipeWire's audio threads), as RTKit allows on Ubuntu
+*   -   rtprio  95
+",
+    )?;
     let pci = alloc::format!("/sys/devices/pci0000:00/{}", slot);
     let (sub_vendor, sub_device) = (subsys as u16, (subsys >> 16) as u16);
     t.file(
