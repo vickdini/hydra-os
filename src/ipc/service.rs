@@ -1251,9 +1251,12 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
         // its event wait: a request, a notification or the deadline resumes it)
         let switched = match back {
             Some(b) if !crate::task::scheduler::handoff_active() => {
-                use crate::task::scheduler::{DIRECT_EVENT, DIRECT_GUARD, DIRECT_HINT, DIRECT_TO};
+                use crate::task::scheduler::{DIRECT_GUARD, DIRECT_HINT, DIRECT_TO};
                 DIRECT_TO.store(b.caller + 1, Ordering::Relaxed);
-                DIRECT_HINT.store((b.idx | DIRECT_EVENT) as u64, Ordering::Relaxed);
+                // Only a caller still blocked by its own direct switch (it came to this CPU
+                // with its call); one that fell back to waiting on its queue is woken the
+                // ordinary way, on the CPU it waits on (no migrations to and fro)
+                DIRECT_HINT.store(b.idx as u64, Ordering::Relaxed);
                 DIRECT_GUARD.store(0, Ordering::Relaxed);
                 let failed: u64;
                 // SAFETY: as in `switch_to_parked`
