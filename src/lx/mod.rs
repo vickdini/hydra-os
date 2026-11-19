@@ -1521,7 +1521,39 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         }
         return None;
     }
-    if bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
+    // wave6 G24 begin: bpf (T_FDAT1 alone): the map's descriptor through this CPU's cached
+    // descriptor table (`byfd_fast`), as the by-descriptor calls do, instead of the
+    // scheduler's lock and the table's lock on every map lookup
+    let fdat1_only = bits & (T_FD0 | T_FDAT1 | T_UMASK) == T_FDAT1;
+    if fdat1_only {
+        let mut head = [0u8; sec::ATTR_HEAD];
+        sec::bpf_clear(&mut c);
+        let n = sec::attr_len(&c);
+        if copy::read_user(c.args[1], &mut head[..n]).is_ok() {
+            let fd = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as u64;
+            match byfd_fast(&id, fd) {
+                Ok(Some((dev, slot, flags, h))) => {
+                    if h == x.id {
+                        c.obj = slot;
+                        c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                        if let Some(o) = dev.as_server() {
+                            sec::bpf_prepare(&mut c, &head, o.kind(), o.tag());
+                        }
+                    }
+                    held[1] = Some(dev);
+                }
+                Ok(None) => {}
+                Err(()) => {
+                    for h in held.into_iter().flatten() {
+                        drop_last(h);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+    // wave6 G24 end
+    if !fdat1_only && bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
         // T_FDAT1: the descriptor is the first u32 of the attribute block at args[1]
         // wave6 G24: bpf's spare argument words cleared, and the block's head read (`sec.rs`)
         let mut head = [0u8; sec::ATTR_HEAD];
