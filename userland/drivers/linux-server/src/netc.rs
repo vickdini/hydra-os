@@ -167,13 +167,34 @@ impl Drop for Region {
 // ----------------------------------------------------------------------
 
 /// One request: the reply's words, or its negative errno (`ENETDOWN` without net-server).
+///
+/// wave6 G20: a queued call, no longer a hand-off (wave 5's `SVC_CALL_HANDOFF`): with
+/// net-server waiting for requests, the kernel switches straight to it and its answer
+/// straight back (the direct path of `SYS_SVC_CALL`), without stopping the other CPUs.
 fn request(label: u32, args: [u64; 4]) -> Result<[u64; 4], i64> {
     base().ok_or(ENETDOWN)?;
-    match sys::svc_call(ENDPOINT_NET_SERVER, Message::new(label as u64, args), SVC_CALL_HANDOFF) {
+    match sys::svc_call(ENDPOINT_NET_SERVER, Message::new(label as u64, args), 0) {
         Ok(r) if (r.args[0] as i64) < 0 => Err(r.args[0] as i64),
         Ok(r) => Ok(r.args),
         Err(_) => Err(ENETDOWN),
     }
+}
+
+/// wave6 G20: `n` null calls to net-server (its heartbeat), as hand-off calls when
+/// `handoff` (wave 5's way), else queued (the direct path); the nanoseconds they took in
+/// all, or a negative errno.
+pub fn ping_rtt(n: u64, handoff: bool) -> i64 {
+    if base().is_none() {
+        return ENETDOWN;
+    }
+    let flags = if handoff { SVC_CALL_HANDOFF } else { 0 };
+    let t0 = sys::lx_timer(LX_TIMER_NOW, 0, 0);
+    for i in 0..n {
+        if let Err(e) = sys::svc_call(ENDPOINT_NET_SERVER, Message::new(MSG_SUPERVISOR_PING as u64, [i, 0, 0, 0]), flags) {
+            return e;
+        }
+    }
+    sys::lx_timer(LX_TIMER_NOW, 0, 0) - t0
 }
 
 /// A request on handle `h` (in `args[0]`).

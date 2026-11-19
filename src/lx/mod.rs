@@ -45,6 +45,8 @@
 
 pub mod copy;
 
+pub mod dcall; // wave6 G20
+
 pub mod obj;
 
 pub mod timer;
@@ -1264,6 +1266,16 @@ pub enum Fast {
 /// filter, or a worker's `SYS_LX_REPLY_RECV`. `None`: the ordinary path.
 pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     let nr = frame.rax;
+    // wave6 G20 begin: a worker's direct call to another service (`dcall`), on this path
+    // too (Linux's msgsnd, the same number, goes on below)
+    if nr == crate::arch::syscall::SYS_SVC_DCALL {
+        let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+        if is_worker(tid) {
+            let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
+            return Some(Fast::Reply(dcall::dcall(tid, idx, [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9], true)));
+        }
+    }
+    // wave6 G20 end
     if nr == crate::arch::syscall::SYS_LX_REPLY_RECV {
         let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
         if is_worker(tid) {

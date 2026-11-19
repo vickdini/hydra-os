@@ -685,8 +685,16 @@ fn main(args: &[&str]) {
         ENDPOINT_NET_SERVER,
         if nic::is_present() { "network card and loopback" } else { "loopback only (no network card)" }
     );
+    // wave6 G20: an answer not given yet: it goes with the next wait, in one system call
+    // (`svccall::reply_recv`), so a caller on the kernel's direct path gets the CPU back
+    // just as this server parks, and its next request finds it parked
+    let mut answer: Option<(u64, Message)> = None;
     loop {
-        let poll_nic = match sys::svc_recv_notify(ENDPOINT_NET_SERVER, wait_ticks(&st)) {
+        let got = match answer.take() {
+            Some((id, r)) => hydra_rt::svccall::reply_recv(ENDPOINT_NET_SERVER, id, &r, wait_ticks(&st)),
+            None => sys::svc_recv_notify(ENDPOINT_NET_SERVER, wait_ticks(&st)),
+        };
+        let poll_nic = match got {
             // The card's interrupt, or the timeout (then the card is polled only now and
             // then: its interrupt may not work)
             Ok((0, m)) => {
@@ -701,14 +709,20 @@ fn main(args: &[&str]) {
             }
             Ok((id, m)) => {
                 if m.label == MSG_SUPERVISOR_PING as u64 {
-                    let _ = sys::svc_reply(ENDPOINT_NET_SERVER, id, &Message::new(MSG_SUPERVISOR_PONG as u64, [m.args[0], 1, 0, 0]));
+                    answer = Some((id, Message::new(MSG_SUPERVISOR_PONG as u64, [m.args[0], 1, 0, 0]))); // wave6 G20
                     continue;
                 }
                 if let Some(r) = handle(&mut st, id, &m) {
                     // Frames it caused go out, and its readiness is visible, before the answer
                     nic::flush();
                     publish(&mut st);
-                    let _ = sys::svc_reply(ENDPOINT_NET_SERVER, id, &r);
+                    // wave6 G20: the round that followed the answer comes before it now
+                    // (loopback frames are delivered before the caller goes on), and the
+                    // answer goes with the next wait
+                    background(&mut st, false);
+                    publish(&mut st);
+                    answer = Some((id, r));
+                    continue;
                 }
                 false
             }

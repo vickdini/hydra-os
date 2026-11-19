@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod blockunits;
 pub mod heap;
 pub mod port;
+pub mod svccall;
 pub mod sys;
 
 /// Message codes shared with the kernel (one source: the kernel's `ipc/protocol.rs`).

@@ -275,6 +275,10 @@ pub static DIRECT_GUARD: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::P
 /// The task this CPU is about to switch away from blocked at a lock-free point of
 /// `crate::lx` (its `Task::nobkl_wait`): set right before the switch, taken by it.
 pub static BLOCK_NOBKL: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
+/// wave6 G20: bit of [`DIRECT_HINT`] (and of `direct_call`'s `hint`): the target may be
+/// parked in an event wait (a classic server waiting in `SYS_SVC_RECV`), see
+/// [`Scheduler::direct_call`].
+pub const DIRECT_EVENT: usize = 1 << 62;
 /// Each CPU's current task's index in the task table (a hint for code without the lock).
 pub static CURRENT_IDX: crate::arch::percpu::PerCpuU64 = crate::arch::percpu::PerCpuU64::new(0);
 
@@ -1769,16 +1773,25 @@ impl Scheduler {
     /// the ordinary way.
     ///
     /// `hint` is where `target` was last seen in the task table.
+    ///
+    /// wave6 G20: with [`DIRECT_EVENT`] set in `hint`, `target` may also be parked in an
+    /// event wait (blocked or sleeping with `event_wait`: a classic server in
+    /// `SYS_SVC_RECV`, `crate::ipc::service`); its event wait ends here.
     pub fn direct_call(&mut self, ctx: &mut ExceptionContext, target: u64, hint: usize, guard: *const core::sync::atomic::AtomicBool) -> bool {
         let me = crate::arch::percpu::cpu();
         if !self.initialized || self.cur[me] >= self.tasks.len() || self.resume_first.is_some() || self.handoff_top().is_some() {
             return false;
         }
         let curr_idx = self.cur[me];
+        // wave6 G20 begin: an event-waiting target, when asked for
+        let event = hint & DIRECT_EVENT != 0;
+        let hint = hint & !DIRECT_EVENT;
+        // wave6 G20 end
         let Some(next_idx) = self.index_of(target, hint) else { return false };
         let t = &self.tasks[next_idx];
+        let parked = t.state == TaskState::Blocked || (event && t.event_wait && matches!(t.state, TaskState::Sleeping { .. })); // wave6 G20
         if next_idx == curr_idx
-            || t.state != TaskState::Blocked
+            || !parked
             || t.regs.cs & 3 != 0
             || (!t.nobkl_wait && !crate::arch::smp::bkl_held())
             || self.running_anywhere(next_idx)
@@ -1789,11 +1802,26 @@ impl Scheduler {
         if !guard.is_null() && unsafe { (*guard).load(core::sync::atomic::Ordering::SeqCst) } {
             return false;
         }
-        self.tasks[next_idx].state = TaskState::Ready;
-        if !self.can_run(next_idx, me) {
-            self.tasks[next_idx].state = TaskState::Blocked;
+        // wave6 G20 begin: a current task parked in an event wait (a classic server in
+        // `SYS_SVC_RECV` handing the CPU back to its caller) stays in it; one woken meanwhile
+        // (ready again) does not switch, so the wake-up is not lost
+        let keep = self.tasks[curr_idx].event_wait && matches!(self.tasks[curr_idx].state, TaskState::Blocked | TaskState::Sleeping { .. });
+        if self.tasks[curr_idx].state == TaskState::Ready {
             return false;
         }
+        // wave6 G20 end
+        let was = self.tasks[next_idx].state; // wave6 G20
+        self.tasks[next_idx].state = TaskState::Ready;
+        if !self.can_run(next_idx, me) {
+            self.tasks[next_idx].state = was; // wave6 G20
+            return false;
+        }
+        // wave6 G20 begin: its event wait is over (a later wake-up must not find it marked)
+        if event {
+            self.tasks[next_idx].event_wait = false;
+            self.tasks[next_idx].wake_ns = 0;
+        }
+        // wave6 G20 end
         // Save the current task, as `schedule` does (step 3); it blocks
         let current_cr3 = Cr3::read().0.start_address().as_u64();
         let kernel_cr3 = self.kernel_cr3;
@@ -1804,7 +1832,9 @@ impl Scheduler {
         if curr_task.mode == PrivilegeMode::User {
             crate::arch::segments::save(&mut curr_task.segs);
         }
-        curr_task.state = TaskState::Blocked;
+        if !keep {
+            curr_task.state = TaskState::Blocked;
+        }
         let slice = curr_task.timeslice_remaining.max(1);
         curr_task.timeslice_remaining = 0;
         if crate::arch::smp::kick_pending() {

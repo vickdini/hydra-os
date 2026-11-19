@@ -528,6 +528,24 @@ static double b_poll_tcp(long n) { /* poll on a readable TCP socket (its readine
     return r;
 }
 
+/* --- calls between services (wave 6, group 20): linux-server times n calls itself --- */
+static double svc_inside(long op, long n, long arg) {
+    long ns = syscall(LX_NULL_NR, op, n, arg);
+    return ns < 0 ? -1 : (double)ns / n;
+}
+/* linux-server -> net-server null call (its heartbeat): queued (the direct path when
+ * net-server waits), and as wave 5's hand-off call */
+static double b_svc_rtt(long n) { return svc_inside(5, n, 0); }
+static double b_svc_rtt_handoff(long n) { return svc_inside(5, n, 1); }
+/* SYS_SVC_DCALL null call from a linux-server worker to service 11 (the test service; 1 =
+ * linux-server itself, another worker, when no test service runs) */
+static double b_dcall_rtt(long n) {
+    const char *e = getenv("DCALL_SVC");
+    if (e) return svc_inside(6, n, strtol(e, 0, 0));
+    double r = svc_inside(6, n, 11);
+    return r >= 0 ? r : svc_inside(6, n, 1);
+}
+
 /* --- forwarding probe (kernel built with --features g6-probe) --- */
 static int probe_ok(void) { return syscall(PROBE_NR, 0, 0, 0) == 0; }
 static double b_probe_null(long n) {
@@ -712,6 +730,9 @@ static struct bench benches[] = {
     {"udp_rtt", b_udp_rtt, 10000, 0},
     {"getsockopt", b_getsockopt, 100000, 0},
     {"poll_tcp", b_poll_tcp, 100000, 0},
+    {"svc_rtt", b_svc_rtt, 20000, 0},
+    {"svc_rtt_handoff", b_svc_rtt_handoff, 20000, 0},
+    {"dcall_rtt", b_dcall_rtt, 20000, 0},
     {"probe_null", b_probe_null, 200000, 1},
     {"probe_handoff", b_probe_handoff, 20000, 1},
     {"probe_queued", b_probe_queued, 20000, 1},

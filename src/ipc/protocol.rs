@@ -1076,3 +1076,42 @@ pub const LX_OBJ_RELAY: u64 = 20;
 /// The answer to a forwarded call that means "make the same call again" (a net wait ended):
 /// handled by the kernel's forwarding, never seen by a Linux program (not an errno).
 pub const LX_RETRY: i64 = -4097;
+
+// ----------------------------------------------------------------------
+// wave6 G20 begin: calls between services (design 4.2; Group 20)
+// ----------------------------------------------------------------------
+
+/// [`LX_NULL_NR`] operation (wave 6, Group 20): linux-server makes `arg1` null calls to
+/// net-server (`MSG_SUPERVISOR_PING`) and returns the nanoseconds they took in all.
+/// `arg2` bit 0: as hand-off calls ([`SVC_CALL_HANDOFF`], wave 5's way), else queued (the
+/// direct path when net-server is parked).
+pub const LX_NULL_SVC_RTT: u64 = 5;
+/// [`LX_NULL_NR`] operation (wave 6, Group 20): linux-server makes `arg1` direct calls
+/// (`SYS_SVC_DCALL`, op [`LX_DCALL_OP_NULL`]) to service `arg2` and returns the nanoseconds
+/// they took in all.
+pub const LX_NULL_DCALL_RTT: u64 = 6;
+/// `SYS_SVC_RECV` flag (`arg2`, next to [`RECV_NOTIFY`]): first answer the request whose ID
+/// is in `r10` with the message at `arg1` (as `SYS_SVC_REPLY`), then receive into the same
+/// message, in one system call. A caller on the direct path gets the CPU back when the
+/// server parks to wait (`ipc::service::reply_recv`).
+pub const RECV_REPLY: u64 = 1 << 61;
+/// The `nr` of a direct call between services (`SYS_SVC_DCALL`) in the callee's `LxCall`:
+/// `args = [op, in, out, in_len, out_cap, from_svc]` (`lx::dcall`).
+pub const LX_DCALL_NR: u64 = 0x6800;
+/// The null operation of a direct call: answered at once (allowed between any two
+/// services: it cannot wait).
+pub const LX_DCALL_OP_NULL: u64 = 0;
+/// Test operation of a direct call (linux-server, the test service): the input back as the
+/// output; the result is its length.
+pub const LX_DCALL_OP_ECHO: u64 = 1;
+/// Test operation of a direct call: the result is the process id the call carries (the
+/// program the caller served: delegation).
+pub const LX_DCALL_OP_WHO: u64 = 2;
+/// [`LX_NULL_NR`] operation (wave 6, Group 20): one direct call from linux-server to
+/// service `arg1`, operation `arg2`, input the 8 bytes of `arg3`; returns the result (for
+/// [`LX_DCALL_OP_ECHO`]: the 8 bytes that came back).
+pub const LX_NULL_DCALL: u64 = 7;
+/// Notification kind: a post from another service (`SYS_SVC_POST`): `a` = from svc | op <<
+/// 32 | target svc << 56, `b`, `c` = up to 16 bytes of data.
+pub const LX_NOTE_POST: u64 = 8;
+// wave6 G20 end
