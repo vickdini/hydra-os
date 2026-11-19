@@ -722,3 +722,44 @@ removes those); `poll` on a server object costs no more than in the kernel (sect
 design). `keyctl` through the server costs 3.5 µs with PCID
 (0.7 µs in the kernel). Calls that were not moved are unchanged. Two threads forwarding at
 once are not faster than one: the kernel lock still serializes the kernel part of each call.
+
+## lx-sec: keys and bpf in a service of their own (wave 6, X1)
+
+The first piece split out of linux-server (design `docs/linux-services-design.md`, table 9.1
+row X1): `add_key`, `request_key`, `keyctl`, `/proc/keys` and `bpf` are served by the
+program `userland/drivers/lx-sec` (service id `LXS_SEC`, endpoint `0x31`), on the service
+runtime (`hydra_rt::svcrt`). The supervisor starts it as `lx_sec`.
+
+- **One source.** `keys.rs`, `bpf.rs` and `kept.rs` live in `lx-sec/src`; linux-server
+  builds the same files (`#[path]`), so `lx.sec=linux` (fw_cfg `opt/hydra/lx`, or
+  `tools/hydra_run.py --lx sec=linux`) puts keys and bpf back into linux-server, and
+  `lx.sec=kernel` sends them to the in-kernel code. lx-sec exits at start when no service id
+  names its endpoint.
+- **Restart class Transparent** (Group 21). When lx-sec dies, key calls wait for the new
+  instance (the call being served at the crash is re-sent if it is a read-only one,
+  otherwise it gets `EIO`).
+- **Kept keyrings.** The key table is written to the service's kept-state object
+  (`LX_SVC_KEPT`) whenever a call or a process event changed it, before the answer leaves
+  the worker (`keys.rs`: the lock guard writes it when the table is dirty). The object holds
+  two halves per blob; a new copy goes into the half not in use, with its length, sequence
+  and FNV checksum, and a word then names it current (`kept.rs`), so a crash in the middle
+  leaves the previous copy whole. A new instance reads the table back before it goes online
+  and drops the thread, process and session anchors of processes that ended meanwhile (their
+  exit notification went to the dead instance).
+- **bpf is FailObjects.** Maps, programs and links of the old instance are gone: lx-sec does
+  not adopt objects, so their descriptors fail `EBADF` (`LX_OBJ_FD` answers the stale errno).
+  The device programs the kernel was handed (`LX_OBJ_BPF_DEVICE`) are kept too and handed
+  over again right after the new instance goes online, attached as by `BPF_PROG_ATTACH`
+  (`BPF_PROG_DETACH` on their cgroup removes them), so device control does not lapse.
+- **bpf map element commands through the syscall page** (`src/lx/sec.rs`). Their key and
+  value pointers sit inside the attribute block. The `T_FDAT1` step reads the block's first
+  24 bytes; for a bpf map object it puts the key and value pointers into bpf's unused
+  argument words `args[3]`/`args[4]` (cleared first for every bpf call) and their lengths in
+  `args[5]`, from the object's tag (`key_size | user_value_size << 32`, set by lx-sec when it
+  installs the map's descriptor). The copy table then copies them like any argument, and the
+  server's `Cx::copy_in`/`copy_out` find them in the page. The map's descriptor is found
+  through the per-CPU cached descriptor table (`byfd_fast`), not the scheduler's lock.
+- **Tests:** the suite's `keys`, `keyparent`, `bpf`; `tests/linux/lxsec_test.c`
+  (`keep`/`check`: keys kept across a kill; `hammer N S`: key calls while lx-sec is killed;
+  `bpfhold`: an old map gives `EBADF`, a new one works; `devset`/`devcheck`: a device
+  program still enforced after a restart, then detached).
