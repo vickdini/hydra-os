@@ -1887,6 +1887,108 @@ impl Drop for BufferObject {
     }
 }
 
+// wave6 G23 begin: memory objects (`crate::lx::mem`)
+
+/// A memory object: pages a service shares with programs and with other services (the
+/// design's `obj_anon` and `obj_dma`, `docs/display-input-design.md` section 6). Its size
+/// is fixed at creation. Whoever maps it or holds a handle to it keeps it alive (an
+/// `Arc`), not the service that made it: mappings outlive their service.
+pub struct MemObject {
+    /// Size in pages.
+    pages: u64,
+    store: MemStore,
+}
+
+/// Where a [`MemObject`]'s pages come from.
+enum MemStore {
+    /// Zero-filled pages, each allocated on first use (sparse, as memfd).
+    Anon(Mutex<BTreeMap<u64, PhysFrame<Size4KiB>>>),
+    /// Physically contiguous frames at `base` (DMA memory), present for the object's
+    /// whole life. `owned`: the object holds one reference per frame (dropped with it);
+    /// otherwise the frames belong to someone who outlives every mapping (a kernel
+    /// driver's rings). `on_drop` runs first (the IOMMU forgets the range).
+    Frames { base: u64, owned: bool, on_drop: Option<Box<dyn Fn(u64, u64) + Send + Sync>> },
+}
+
+impl MemObject {
+    /// A new anonymous object of `pages` zeroed pages (allocated when first touched).
+    pub fn anon(pages: u64) -> Arc<Self> {
+        Arc::new(Self { pages, store: MemStore::Anon(Mutex::new(BTreeMap::new())) })
+    }
+
+    /// An object over the contiguous frames `[base, base + pages * 4096)`. With `owned`,
+    /// the object takes over one reference per frame and drops it at its end, after
+    /// `on_drop(base, bytes)`.
+    pub fn frames(base: u64, pages: u64, owned: bool, on_drop: Option<Box<dyn Fn(u64, u64) + Send + Sync>>) -> Arc<Self> {
+        Arc::new(Self { pages, store: MemStore::Frames { base, owned, on_drop } })
+    }
+
+    /// Size in pages.
+    pub fn pages(&self) -> u64 {
+        self.pages
+    }
+
+    /// The physical address of the first page, for contiguous (DMA) objects.
+    pub fn phys_base(&self) -> Option<u64> {
+        match &self.store {
+            MemStore::Frames { base, .. } => Some(*base),
+            MemStore::Anon(_) => None,
+        }
+    }
+
+    /// Pages that hold a frame now.
+    pub fn resident(&self) -> u64 {
+        match &self.store {
+            MemStore::Anon(m) => m.lock().len() as u64,
+            MemStore::Frames { .. } => self.pages,
+        }
+    }
+}
+
+impl MappedObject for MemObject {
+    fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
+        if pgoff >= self.pages {
+            return None;
+        }
+        match &self.store {
+            MemStore::Anon(m) => {
+                let mut m = m.lock();
+                if let Some(&f) = m.get(&pgoff) {
+                    return Some(f);
+                }
+                let f = alloc_user_frame()?;
+                m.insert(pgoff, f);
+                Some(f)
+            }
+            MemStore::Frames { base, .. } => Some(PhysFrame::containing_address(PhysAddr::new(base + pgoff * PAGE_SIZE))),
+        }
+    }
+}
+
+impl Drop for MemObject {
+    fn drop(&mut self) {
+        let pages = self.pages;
+        match &mut self.store {
+            MemStore::Anon(m) => {
+                for (_, f) in core::mem::take(&mut *m.lock()) {
+                    frame_ref_dec(f);
+                }
+            }
+            MemStore::Frames { base, owned, on_drop } => {
+                if let Some(f) = on_drop.take() {
+                    f(*base, pages * PAGE_SIZE);
+                }
+                if *owned {
+                    for i in 0..pages {
+                        frame_ref_dec(PhysFrame::containing_address(PhysAddr::new(*base + i * PAGE_SIZE)));
+                    }
+                }
+            }
+        }
+    }
+}
+// wave6 G23 end
+
 /// Global pages' self-test, run once at boot on the boot processor before the others start
 /// (see `arch::pcid`, "Global kernel pages"): a kernel-half page V is mapped global and read
 /// with the kernel's tables loaded, another address space is loaded, V's entry is pointed at

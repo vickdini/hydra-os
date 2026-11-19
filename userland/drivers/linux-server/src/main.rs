@@ -298,6 +298,11 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     let cx = Cx::from_call(c, page);
     let r = match c.nr {
         LX_NULL_NR => null_call(&cx),
+        // wave6 G23: mmap of a server object (only the test object has memory so far)
+        9 if c.obj != LX_OBJ_NONE => match obj::kind_of(c.obj as u32) {
+            LX_OBJ_KIND_TEST => (obj::test_mmap(&cx), 0),
+            _ => (-19, 0), // ENODEV
+        },
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one
         0 | 1 | 16 | 19 | 20 | 276 | LX_KCALL_REOPEN | LX_KCALL_FCNTL if c.obj != LX_OBJ_NONE => object_io(&cx),
         // Sockets (wave 5, step 3; AF_UNIX step 4): socket/socketpair by family, the rest by

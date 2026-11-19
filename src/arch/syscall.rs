@@ -131,6 +131,10 @@ pub const SYS_LX_SIG: u64 = 61;
 pub const SYS_LX_TIMER: u64 = 62;
 /// Linux server (Group 13, wave 5): `sig_take` for signalfd (`crate::lx::obj::sig_take`).
 pub const SYS_LX_SIGTAKE: u64 = 63;
+// wave6 G23 begin
+/// Memory objects (`crate::lx::mem`): `(op, a, b, c, d)`, the `LX_MEM_*` operations.
+pub const SYS_LX_MEM: u64 = 64;
+// wave6 G23 end
 
 /// [`SYS_SVC_CALL_GRANT`]'s argument block (as `hydra_rt::sys::GrantCall`): the request
 /// (the reply replaces it), the timeout in ticks (0: the default), and the ranges lent.
@@ -1085,6 +1089,12 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             drop(stats);
             crate::lx::obj::sig_take(arg0, arg1, _arg2, frame.r10)
         }
+        // wave6 G23 begin
+        SYS_LX_MEM => {
+            drop(stats);
+            crate::lx::mem::sys_mem(arg0, arg1, _arg2, frame.r10, frame.r8)
+        }
+        // wave6 G23 end
         // Group 4: the admin interface of the Ring 3 shell (authorized console only)
         crate::admin::proto::SYS_ADMIN => {
             drop(stats);

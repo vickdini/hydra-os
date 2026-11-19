@@ -194,6 +194,7 @@ pub fn closed(slot: u32, kind: u32) {
     match kind {
         LX_OBJ_KIND_TEST => {
             TEST_CLOSES.fetch_add(1, Ordering::Relaxed);
+            test_mem_closed(slot);
         }
         LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
         LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
@@ -230,6 +231,8 @@ pub fn test_new(cx: &Cx, flags: u64) -> i64 {
         Ok(s) => s,
         Err(e) => return e,
     };
+    // wave6 G23: bit 32 of the flags: the object's memory is a kept memory object
+    test_mem_new(slot, flags & 1 << 32 != 0);
     match install(cx, slot, LX_OBJ_KIND_TEST, flags as u32 & 0o2004000, 0o100600, cx.c.euid, cx.c.egid, b"anon_inode:[hydra-test]") {
         Ok(fd) => fd,
         Err(e) => {
@@ -271,6 +274,156 @@ pub fn test_io(cx: &Cx) -> i64 {
             set_ready(slot, ready, 0);
             len as i64
         }
+        16 => test_ioctl(slot, cx.args[1], cx.args[2]),
         _ => -25, // ENOTTY
     }
 }
+
+// wave6 G23 begin: the test object's memory (memory objects, `srvmap` test)
+
+/// Size of a test object's memory.
+const TEST_MEM: u64 = 64 * 1024;
+/// The kept test memory's key.
+const TEST_KEPT_KEY: u64 = 0x5352_564D_4150; // "SRVMAP"
+
+/// A test object's memory: the handle (0: not made yet), our own view, kept or not.
+#[derive(Clone, Copy)]
+struct TestMem {
+    slot: u32,
+    handle: u32,
+    addr: u64,
+    kept: bool,
+}
+
+static TEST_MEMS: YLock<alloc::vec::Vec<TestMem>> = YLock::new(alloc::vec::Vec::new());
+
+fn test_mem_new(slot: u32, kept: bool) {
+    let mut m = TEST_MEMS.lock();
+    m.retain(|t| t.slot != slot);
+    m.push(TestMem { slot, handle: 0, addr: 0, kept });
+}
+
+/// The test object's memory, made (and mapped here) on first use.
+fn test_mem(slot: u32) -> Result<TestMem, i64> {
+    let mut m = TEST_MEMS.lock();
+    let Some(t) = m.iter_mut().find(|t| t.slot == slot) else { return Err(-22) };
+    if t.handle == 0 {
+        let (obj, existed) = if t.kept { hydra_rt::mem::MemObj::kept(TEST_KEPT_KEY, TEST_MEM)? } else { (hydra_rt::mem::MemObj::anon(TEST_MEM)?, false) };
+        let addr = obj.map(0, TEST_MEM, hydra_rt::mem::PROT_RW)? as u64;
+        if t.kept {
+            hydra_rt::println!("[linux-server] srvmap: kept test memory (handle {}, {})", obj.handle(), if existed { "existed: contents kept" } else { "new" });
+        }
+        t.handle = obj.into_raw();
+        t.addr = addr;
+    }
+    Ok(*t)
+}
+
+fn test_mem_drop(t: &TestMem) {
+    if t.addr != 0 {
+        let _ = hydra_rt::mem::unmap(t.addr as *mut u8, TEST_MEM);
+    }
+    if t.handle != 0 {
+        drop(hydra_rt::mem::MemObj::from_raw(t.handle));
+    }
+}
+
+fn test_mem_closed(slot: u32) {
+    let t = {
+        let mut m = TEST_MEMS.lock();
+        let i = m.iter().position(|t| t.slot == slot);
+        i.map(|i| m.swap_remove(i))
+    };
+    if let Some(t) = t {
+        test_mem_drop(&t);
+    }
+}
+
+/// `mmap` of a test object: its memory, from the page `offset` names.
+pub fn test_mmap(cx: &Cx) -> i64 {
+    let slot = cx.c.obj as u32;
+    let (len, offset) = (cx.args[1], cx.args[5]);
+    if offset % 4096 != 0 || len == 0 || offset.checked_add(len).map_or(true, |e| e > TEST_MEM) {
+        return -22;
+    }
+    match test_mem(slot) {
+        Ok(t) => hydra_rt::mem::lx_mmap_answer(t.handle, offset / 4096, false),
+        Err(e) => e,
+    }
+}
+
+/// `ioctl` on a test object: the server's side of the memory. `0x4D50` peek (`arg` = byte
+/// offset; returns the u32 there), `0x4D51` poke (`arg` = offset | value << 32), `0x4D52`
+/// drop (the server lets go of its handle and view: only programs' mappings hold the memory),
+/// `0x4D53` share (the object goes to a second handle through `LX_MEM_SHARE` with ourselves,
+/// which is mapped and written: `arg` as poke), `0x4D54` info (pages | flags << 48).
+fn test_ioctl(slot: u32, cmd: u64, arg: u64) -> i64 {
+    let off = (arg & 0xFFFF_FFFF) & !3;
+    if off >= TEST_MEM {
+        return -22;
+    }
+    match cmd {
+        0x4D50 | 0x4D51 | 0x4D53 | 0x4D54 => {
+            let t = match test_mem(slot) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            let p = (t.addr + off) as *mut u32;
+            match cmd {
+                // SAFETY: inside our 64 KiB view of the memory
+                0x4D50 => unsafe { core::ptr::read_volatile(p) as i64 },
+                0x4D51 => {
+                    unsafe { core::ptr::write_volatile(p, (arg >> 32) as u32) };
+                    0
+                }
+                0x4D53 => {
+                    let me = hydra_rt::mem::MemObj::from_raw(t.handle);
+                    let r = me.share(ENDPOINT_LINUX_SERVER);
+                    let _ = me.into_raw();
+                    let h = match r {
+                        Ok(h) => h,
+                        Err(e) => return e,
+                    };
+                    let second = hydra_rt::mem::MemObj::from_raw(h);
+                    let q = match second.map(0, TEST_MEM, hydra_rt::mem::PROT_RW) {
+                        Ok(q) => q,
+                        Err(e) => return e,
+                    };
+                    // SAFETY: inside the second 64 KiB view
+                    unsafe { core::ptr::write_volatile(q.add(off as usize) as *mut u32, (arg >> 32) as u32) };
+                    let _ = hydra_rt::mem::unmap(q, TEST_MEM);
+                    drop(second);
+                    h as i64
+                }
+                _ => {
+                    let me = hydra_rt::mem::MemObj::from_raw(t.handle);
+                    let r = me.info();
+                    // (the handle stays ours)
+                    let _ = me.into_raw();
+                    match r {
+                        Ok((pages, kept, dma)) => (pages | (kept as u64) << 48 | (dma as u64) << 49) as i64,
+                        Err(e) => e,
+                    }
+                }
+            }
+        }
+        0x4D52 => {
+            let t = {
+                let mut m = TEST_MEMS.lock();
+                match m.iter_mut().find(|t| t.slot == slot) {
+                    Some(t) => {
+                        let old = *t;
+                        t.handle = 0;
+                        t.addr = 0;
+                        old
+                    }
+                    None => return -22,
+                }
+            };
+            test_mem_drop(&t);
+            0
+        }
+        _ => -25, // ENOTTY
+    }
+}
+// wave6 G23 end

@@ -36,6 +36,8 @@ const SYS_LX_OBJ: u64 = 60;
 const SYS_LX_SIG: u64 = 61;
 const SYS_LX_TIMER: u64 = 62;
 const SYS_LX_SIGTAKE: u64 = 63;
+// wave6 G23
+const SYS_LX_MEM: u64 = 64;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -283,6 +285,14 @@ pub fn lx_timer(op: u64, cookie: u64, ns: u64) -> i64 {
 pub fn lx_sigtake(op: u64, a: u64, b: u64, c: u64) -> i64 {
     unsafe { syscall4(SYS_LX_SIGTAKE, op, a, b, c) }
 }
+
+// wave6 G23 begin
+/// Memory objects (`SYS_LX_MEM`, see [`crate::mem`]): operation `op` (`LX_MEM_*`); returns
+/// its value or the negative errno.
+pub fn lx_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
+    unsafe { syscall5(SYS_LX_MEM, op, a, b, c, d) }
+}
+// wave6 G23 end
 
 /// Gives up the rest of the time slice.
 pub fn yield_now() {

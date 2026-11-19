@@ -1076,3 +1076,52 @@ pub const LX_OBJ_RELAY: u64 = 20;
 /// The answer to a forwarded call that means "make the same call again" (a net wait ended):
 /// handled by the kernel's forwarding, never seen by a Linux program (not an errno).
 pub const LX_RETRY: i64 = -4097;
+
+// wave6 G23 begin: memory objects (`SYS_LX_MEM`, native syscall 64; kernel side `crate::lx::mem`)
+/// `SYS_LX_MEM` operation: `(size, flags, key) -> handle`: a new anonymous memory object of
+/// `size` bytes (rounded up to pages), zero-filled, pages allocated on first touch. With
+/// [`LX_MEM_KEPT`] it is a *kept* object: owned by the service registry, found again by
+/// `(service, key)` after a restart (`key` 0 is reserved); the result then has
+/// [`LX_MEM_EXISTED`] set when the object already existed (its contents survived).
+pub const LX_MEM_ANON: u64 = 1;
+/// `SYS_LX_MEM` operation: `(size, *dev_addr) -> handle`: physically contiguous, pinned,
+/// zeroed memory the caller's device may reach (as `SYS_DMA_ALLOC`, at most 16 MiB); its
+/// device address is stored at `dev_addr` (if not 0).
+pub const LX_MEM_DMA: u64 = 2;
+/// `SYS_LX_MEM` operation: `(handle, offset, len, prot) -> addr`: maps `len` bytes of the
+/// object from byte `offset` (page-aligned) into the caller, shared.
+pub const LX_MEM_MAP: u64 = 3;
+/// `SYS_LX_MEM` operation: `(addr, len)`: unmaps a range of the caller.
+pub const LX_MEM_UNMAP: u64 = 4;
+/// `SYS_LX_MEM` operation: `(handle)`: drops the caller's handle (mappings stay).
+pub const LX_MEM_CLOSE: u64 = 5;
+/// `SYS_LX_MEM` operation: `(handle, peer endpoint) -> the peer's handle`: the design's
+/// `LX_SVC_SHARE`: the same object in another service's table (the caller tells the peer
+/// the number itself).
+pub const LX_MEM_SHARE: u64 = 6;
+/// `SYS_LX_MEM` operation: `(handle) -> pages | flags << 48` (bit 48: kept, bit 49: DMA).
+pub const LX_MEM_INFO: u64 = 7;
+/// `SYS_LX_MEM` operation: `(key)`: the caller's service drops its kept object `key`.
+pub const LX_MEM_UNKEEP: u64 = 8;
+/// [`LX_MEM_ANON`] flag: a kept object.
+pub const LX_MEM_KEPT: u64 = 1;
+/// [`LX_MEM_ANON`] result bit: the kept object existed already.
+pub const LX_MEM_EXISTED: i64 = 1 << 32;
+/// Largest anonymous memory object (1 GiB).
+pub const LX_MEM_MAX: u64 = 1 << 30;
+/// Most handles one service holds at once.
+pub const LX_MEM_HANDLES: usize = 4096;
+
+/// A service's answer to a forwarded `mmap` (nr 9) of one of its objects: map the memory
+/// object `handle` (in the answering service's table), starting at object page `pgoff`;
+/// `read_only` refuses a writable shared mapping (`EACCES`). Negative answers are errnos.
+pub const fn lx_mmap_answer(handle: u32, pgoff: u64, read_only: bool) -> i64 {
+    ((handle as u64 & 0x7FFF) | (read_only as u64) << 15 | (pgoff & 0x7FFF_FFFF_FFFF) << 16) as i64
+}
+
+/// The parts of an [`lx_mmap_answer`]: `(handle, pgoff, read_only)`.
+pub const fn lx_mmap_parts(answer: i64) -> (u32, u64, bool) {
+    let a = answer as u64;
+    ((a & 0x7FFF) as u32, a >> 16 & 0x7FFF_FFFF_FFFF, a >> 15 & 1 == 1)
+}
+// wave6 G23 end

@@ -47,6 +47,10 @@ pub mod copy;
 
 pub mod obj;
 
+// wave6 G23 begin
+pub mod mem;
+// wave6 G23 end
+
 pub mod timer;
 
 use alloc::sync::Arc;
