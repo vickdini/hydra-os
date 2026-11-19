@@ -20,7 +20,7 @@ use core::sync::atomic::{fence, Ordering};
 /// "LXSECKPT".
 const MAGIC: u64 = 0x5450_4B43_4553_584C;
 /// Bumped when the layout or a blob's encoding changes (an older kept object is dropped).
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// "No half active".
 const NONE: u32 = u32::MAX;
 
@@ -53,10 +53,16 @@ pub struct Kept {
 unsafe impl Send for Kept {}
 unsafe impl Sync for Kept {}
 
-/// FNV-1a, 64 bits.
+/// A 64-bit checksum, eight bytes per step (FNV-1a's constants on words; the length is
+/// mixed in): enough to tell a torn or stale copy, cheap enough for every key change.
 pub fn checksum(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in data {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ data.len() as u64;
+    let mut words = data.chunks_exact(8);
+    for w in &mut words {
+        h ^= u64::from_le_bytes(w.try_into().unwrap());
+        h = h.wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29);
+    }
+    for &b in words.remainder() {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }

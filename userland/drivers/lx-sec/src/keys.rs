@@ -214,14 +214,19 @@ static KEPT_FULL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64:
 /// Writes the table to the kept object (when there is one).
 fn persist(ks: &Keys) {
     let Some(k) = crate::kept::get() else { return };
-    let data = encode(ks);
-    if !k.write(crate::kept::KEYS, &data) && KEPT_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0 {
-        hydra_rt::println!("[lx-sec] keys: {} bytes do not fit the kept state; a restart would lose the newest keys", data.len());
+    // One buffer for every write (only used under the key table's lock)
+    static SCRATCH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    let mut buf = SCRATCH.lock();
+    let mut e = crate::kept::Enc { buf: core::mem::take(&mut *buf) };
+    e.buf.clear();
+    encode(ks, &mut e);
+    if !k.write(crate::kept::KEYS, &e.buf) && KEPT_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0 {
+        hydra_rt::println!("[lx-sec] keys: {} bytes do not fit the kept state; a restart would lose the newest keys", e.buf.len());
     }
+    *buf = e.buf;
 }
 
-fn encode(ks: &Keys) -> Vec<u8> {
-    let mut e = crate::kept::Enc::default();
+fn encode(ks: &Keys, e: &mut crate::kept::Enc) {
     e.u32(ks.next);
     e.u32(ks.keys.len() as u32);
     for (&s, k) in &ks.keys {
@@ -273,7 +278,6 @@ fn encode(ks: &Keys) -> Vec<u8> {
         e.u32(u);
         e.i32(r);
     }
-    e.buf
 }
 
 #[allow(dead_code)]
@@ -853,7 +857,10 @@ fn add_key(cx: &Cx, type_ptr: u64, desc_ptr: u64, payload_ptr: u64, plen: u64, r
                 if !ks.payload_fits(e, payload.len()) {
                     return EDQUOT;
                 }
-                ks.km(e).payload = payload;
+                // (the same payload again changes nothing: no kept-state write)
+                if ks.keys[&e].payload != payload {
+                    ks.km(e).payload = payload;
+                }
                 return e as i64;
             }
         }
@@ -981,7 +988,9 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             if !ks.payload_fits(s, payload.len()) {
                 return Err(EDQUOT);
             }
-            ks.km(s).payload = payload;
+            if ks.keys[&s].payload != payload {
+                ks.km(s).payload = payload;
+            }
             Ok(0)
         }
         // KEYCTL_REVOKE
