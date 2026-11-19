@@ -998,13 +998,13 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     if server == 0 || !crate::task::is_active() {
         return Err(ENODEV);
     }
-    let (me, my_idx) = {
-        let s = crate::task::SCHEDULER.lock();
-        (s.current_task_id().0, s.current_index())
+    let (me, my_idx, my_service) = {
+        let mut s = crate::task::SCHEDULER.lock();
+        let idx = s.current_index();
+        (s.current_task_id().0, idx, s.current_task_mut(|t| t.service).flatten())
     };
     let owner = slot_owner(svc);
     // A server calling its own service would wait for itself
-    let my_service = crate::task::current_service();
     if me == server || my_service.is_some_and(|s| s == owner.endpoint) {
         return Err(EDEADLK);
     }
@@ -1047,7 +1047,8 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     }
     // wave6 G20: straight to a server thread parked in `recv`; otherwise (or when that
     // cannot be done) the server is woken the ordinary way
-    if !(direct && switch_to_parked(owner, i)) {
+    let switched = direct && switch_to_parked(owner, i);
+    if !switched {
         owner.recv_wq.wake_all();
     }
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
@@ -1062,6 +1063,10 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
             } else {
                 crate::task::yield_now();
             }
+        }
+        // wave6 G20: back from the direct switch with the answer (the usual case): no wait
+        CallMode::Queued if switched && REQ_ANSWERED[i].load(Ordering::Acquire) => {
+            QUEUED_CALLER[i].store(0, Ordering::Release);
         }
         CallMode::Queued => {
             let done = || requests(|t| t[i].id != id || matches!(t[i].state, ReqState::Replied | ReqState::Failed));

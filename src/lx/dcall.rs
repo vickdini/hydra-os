@@ -204,6 +204,11 @@ pub fn summary() -> alloc::string::String {
 /// The host id of the calling process (its first service: the one a call from it is from;
 /// 0: not a Linux service's process).
 fn my_svc() -> SvcId {
+    // A worker (the common caller): its host, without a lock
+    let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+    if let Some(h) = svc::worker_host(tid) {
+        return h;
+    }
     crate::task::current_service().and_then(svc::host_by_endpoint).unwrap_or(0)
 }
 
@@ -231,6 +236,17 @@ fn identity(c: &mut LxCall, me: u64, mine: SvcId) -> u64 {
         Some((r, client)) => (r, client),
         None => (0, me),
     };
+    // The program's identity as this CPU's forwarding cache holds it (the forwarded call
+    // that the worker serves came through this cache, usually on this CPU), still valid
+    if let Some(id) = super::ident_of(who) {
+        c.tid = id.tid;
+        c.tgid = id.tgid;
+        [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] = id.ids;
+        c.caps = id.caps;
+        c.ngroups = id.ngroups;
+        c.groups = id.groups;
+        return on_behalf;
+    }
     let found = crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(who), |t| {
         (t.id.0, t.tgid, [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid], if t.caps.in_userns { 0 } else { t.caps.effective })
     });

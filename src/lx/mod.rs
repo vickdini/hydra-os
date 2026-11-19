@@ -1323,6 +1323,19 @@ static IDENT: IdentCache = IdentCache(
     [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0, net: false }) }; crate::arch::smp::MAX_CPUS],
 );
 
+// wave6 G20 begin
+/// Thread `tid`'s identity from this CPU's cache, if it is there and still valid (a direct
+/// call made for the program whose call a worker serves, `dcall`).
+fn ident_of(tid: u64) -> Option<Ident> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*IDENT.0[cpu].get() };
+        (tid != 0 && e.tid == tid && e.epoch == crate::compat::linux::ident_epoch()).then_some(*e)
+    })
+}
+// wave6 G20 end
+
 /// The calling thread's identity for a forwarded call, from this CPU's cache when nothing
 /// changed since it was filled; `None` for a thread the lock-free path does not serve (not
 /// a Linux thread, a seccomp filter, a tracer). Interrupts off.
