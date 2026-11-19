@@ -854,8 +854,8 @@ pub fn process_exists(pid: u64) -> bool {
     PROCS.lock().contains_key(&pid)
 }
 
-/// Returns `true` if process `pid` has exited (a zombie, or already reaped). Never blocks: reports
-/// `false` while the table is busy (callers re-check after the next wakeup).
+/// Returns `true` if process `pid` has exited (a zombie, or already reaped). Never waits long:
+/// reports `false` if the table stays busy (its holder may be the caller).
 ///
 /// # Arguments
 /// * `pid` - Process ID to query.
@@ -863,10 +863,22 @@ pub fn process_exists(pid: u64) -> bool {
 /// # Returns
 /// `true` if the process has exited or does not exist, `false` if running or table busy.
 pub fn has_exited(pid: u64) -> bool {
-    match PROCS.try_lock() {
-        Some(p) => p.get(&pid).map_or(true, |p| p.zombie),
-        None => false,
+    // The table is busy only briefly: wait a little for it rather than answer "running" at
+    // once (a pidfd poll that re-checks after the exit's wakeup and sees "running" sleeps
+    // for ever: the wakeup does not come again)
+    for _ in 0..1 << 16 {
+        if let Some(p) = PROCS.try_lock() {
+            return p.get(&pid).map_or(true, |p| p.zombie);
+        }
+        core::hint::spin_loop();
     }
+    false
+}
+
+/// [`has_exited`] for a caller that holds no process-table lock: waits for the table, so
+/// the answer is never a busy table's "running".
+pub fn has_exited_locked(pid: u64) -> bool {
+    PROCS.lock().get(&pid).map_or(true, |p| p.zombie)
 }
 
 /// Returns the `(sid, pgid)` session and process group of `pid`.

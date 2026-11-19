@@ -1288,6 +1288,43 @@ ran other groups' VMs throughout; single runs differ by up to 25 %.
 - **Slots:** 2048 server objects; linux-server logs its count every 256 (see the KDE runs
   below).
 
+### 15.5 The installer's "Restart now" (2026-11-19)
+
+The lead saw one live session where "Restart now" sent logind's `Reboot` and then nothing
+happened (logind logged the call, no further line). In this group's runs the restart worked
+every time: 18 complete installer runs (the stick pulled 2 s before, right before or 0.3 s
+after the click; the click 30 s or 4 min after the install; 1 to 4 VMs at once) and 6 live
+sessions rebooted from krunner. Two pidfd races were found on the way and fixed; either
+leaves a pidfd unreadable for ever, which hangs a GLib child watch:
+
+- **linux-server `pidfd::open_for`** read the process's state before listing the new
+  pidfd; an exit in between (the `LX_NOTE_EXIT` drained by another thread) found no pidfd
+  to mark. The pidfd is now listed first, with an "exited" flag that `on_exit` sets and the
+  word is published from, both under the table's lock.
+- **The kernel's `LX_OBJ_PROC`** used `proc::has_exited`, which answers "running" when the
+  process table is busy; it now uses `has_exited_locked`. `has_exited` itself (the in-kernel
+  pidfd's poll with `lx=kernel`) waits briefly for a busy table instead of answering at once.
+
+Test `pidfdrace` (`tests/linux/pidfdrace_test.c`): 3000 children ending 0 to ~1 ms after
+`pidfd_open`, while two threads fork and reap; every pidfd must be readable within 3 s.
+It passes before and after the fix (the windows are a few instructions wide), so it guards
+the behaviour rather than reproducing the hang.
+
+A different way the restart can hang, reproduced 3 times: when files the restart needs
+are no longer cached after the stick is gone (forced with readers of `/usr` while the stick
+is pulled), polkitd's check fails on them (`/etc/passwd` reads give `EIO`; the access rule's
+helper `/usr/libexec/hydra-access-check` cannot be started) and logind's `Reboot`, which
+waits for polkit without a timeout, never ends; the installer's `dbus-send` gives up
+after 25 s and its fallback `reboot` cannot start from the missing stick either. In the
+lead's log no disk read failed after the `Reboot` line, so that is not what happened
+there. The installer would avoid it by asking polkit once (`CanReboot`) when the copy has
+finished, before the stick may be pulled, which brings the same files into memory.
+
+Tools (in the ignored `scratch/` of the `E:\os-13` worktree): `instrep.sh` (the installer
+flow on an overlay of the live stick, the stick pulled through QMP, console and NMI dump if
+QEMU still runs 150 s after the click), `livestress.sh` (the cold-cache case), `live13.sh`
+with `ESP=` (a stick overlay booting another kernel).
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.

@@ -20,8 +20,8 @@ const EINVAL: i64 = -22;
 const PIDFD_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u32 = 0o2000000;
 
-/// Slot -> process.
-static PIDFDS: YLock<BTreeMap<u32, u64>> = YLock::new(BTreeMap::new());
+/// Slot -> (process, exited).
+static PIDFDS: YLock<BTreeMap<u32, (u64, bool)>> = YLock::new(BTreeMap::new());
 
 /// Whether process `pid` exists (`Some(exited)`), from the kernel.
 fn state(pid: u64) -> Option<bool> {
@@ -34,13 +34,28 @@ fn state(pid: u64) -> Option<bool> {
 
 /// A new pidfd for process `pid` in the caller's table (always close-on-exec, as Linux).
 pub fn open_for(cx: &Cx, pid: u64, flags: u64) -> i64 {
-    let Some(exited) = state(pid) else { return ESRCH };
+    if state(pid).is_none() {
+        return ESRCH;
+    }
     let slot = match crate::obj::alloc(LX_OBJ_KIND_PIDFD) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    PIDFDS.lock().insert(slot, pid);
-    crate::obj::set_ready(slot, if exited { 0x41 } else { 0 }, 0);
+    // Listed before the process's state is read: an exit from now on finds the pidfd
+    // ([`on_exit`]), an earlier one shows in the state. (Reading the state first lost the
+    // exit of a process that ended in between: its pidfd never became readable, and a
+    // GLib child watch on it waited for ever.)
+    PIDFDS.lock().insert(slot, (pid, false));
+    // (gone meanwhile: reaped, so it exited)
+    let exited = state(pid).unwrap_or(true);
+    {
+        let mut m = PIDFDS.lock();
+        if let Some(e) = m.get_mut(&slot) {
+            e.1 |= exited;
+            // Under the lock, as `on_exit` publishes: the word ends up as the flag says
+            crate::obj::set_ready(slot, if e.1 { 0x41 } else { 0 }, 0);
+        }
+    }
     let f = O_CLOEXEC | (flags & PIDFD_NONBLOCK) as u32;
     match crate::obj::install_tag(cx, slot, LX_OBJ_KIND_PIDFD, f, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[pidfd]", pid) {
         Ok(fd) => fd,
@@ -64,9 +79,10 @@ pub fn open(cx: &Cx) -> (i64, u64) {
 
 /// Process `tgid` ended: its pidfds become readable.
 pub fn on_exit(tgid: u64) {
-    let m = PIDFDS.lock();
-    for (&slot, &pid) in m.iter() {
-        if pid == tgid {
+    let mut m = PIDFDS.lock();
+    for (&slot, e) in m.iter_mut() {
+        if e.0 == tgid {
+            e.1 = true;
             crate::obj::set_ready_ev(slot, 0x41, 0, true);
         }
     }

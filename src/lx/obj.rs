@@ -529,7 +529,8 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             if !crate::compat::linux::proc::process_exists(a) {
                 return ESRCH;
             }
-            if crate::compat::linux::proc::has_exited(a) {
+            // (locked: the server's pidfd must not take an exited process for a running one)
+            if crate::compat::linux::proc::has_exited_locked(a) {
                 2
             } else {
                 1
