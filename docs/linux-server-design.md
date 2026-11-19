@@ -1340,6 +1340,62 @@ flow on an overlay of the live stick, the stick pulled through QMP, console and 
 QEMU still runs 150 s after the click), `livestress.sh` (the cold-cache case), `live13.sh`
 with `ESP=` (a stick overlay booting another kernel).
 
+## 16. Open bugs fixed or explained in wave 6 (Group 25, branch `mk-fixes2`)
+
+### 16.1 The cold-cache restart (15.5) after 5440095
+
+5440095 gave logind's polkit check of `Reboot`/`PowerOff` a reply timeout (120 s
+interactive, 25 s otherwise). It never fired: hydra-logind polls the bus socket itself, and
+libdbus runs a pending call's timeout only through the application's timeout functions,
+which it had not installed. Group 13's `livestress` on an overlay of the deployed live stick
+(stick pulled, `/usr` read to empty the cache) still hung: logind logged `Reboot`, polkit
+could not answer, and nothing followed for 240 s. hydra-logind now installs
+`dbus_connection_set_timeout_functions`, polls no longer than the next timeout and runs the
+due ones (38cbf49). Test: polkitd stopped with `SIGSTOP`, a non-interactive `Reboot` from
+`dbus-send` as the user: "Error org.freedesktop.DBus.Error.Failed: polkit did not answer"
+after 25 s (before: no answer). In one of the two stick runs the `Reboot` never reached
+logind at all: krunner, which started the test script, was killed by `SIGBUS` when the
+stick went (a page of `libQt6Network` not in memory), so that case remains possible for a
+program whose own files are gone; the installer reads what it needs before the stick is
+pulled (5440095).
+
+### 16.2 `timerfd_settime` (15.2: +3.8 to +4.0 µs)
+
+The server made two native calls besides the forwarding: `LX_TIMER_NOW` for the clock and
+`LX_TIMER_ARM`. Now (5e42aec) it reads the monotonic and wall clocks from the vDSO's clock
+page, mapped read-only into the server by `SYS_LX_TIMER(LX_TIMER_VVAR)` (layout `LxVvar` in
+`ipc/protocol.rs`), and arms the kernel timer lazily: a deadline moved later, or a stopped
+timer, keeps the kernel deadline it has; when that fires, the server arms the real one (or
+nothing). Only an earlier deadline needs `LX_TIMER_ARM`.
+
+`lxbench timerfd_set` (arm 1 s ahead; KVM, 2 CPUs, other groups' VMs running; µs, median of
+the run; `lx_null` of the same run beside it):
+
+| Build | timerfd_set | lx_null | over `lx=kernel` (0.91) |
+|---|---:|---:|---:|
+| base (ba75050), 3 runs | 5.25 / 4.90 / 4.17 | 3.40 / 3.43 / 3.00 | +4.3 / +4.0 / +3.3 |
+| this branch, 2 runs | 3.57 / 3.49 | 2.89 / 3.44 | **+2.7 / +2.6** |
+| `lx=kernel` (same ISO) | 0.91 | 0.73 | |
+
+A third run of the branch was disturbed by the host (getpid 389 ns instead of 160-190 ns)
+and is left out. `timerfd_settime` now costs about one forwarded null call.
+
+### 16.3 The slirp stall (14.4)
+
+Explained there: QEMU's main loop is not woken when slirp opens a socket to the PC; 702 ms
+per connection to 10.0.2.2, 2.8 ms with a pinger beside it. Not Hydra.
+
+### 16.4 linux-server on one CPU
+
+With `--smp 1` linux-server exited "only 0 of 4 workers attached": the supervisor waits for
+its registration in a driver call (hand-off) to the main thread, the scheduler runs that
+call's server first whenever it is ready, and the main thread waited for its workers with
+`yield_now`, so it was always ready and the workers never ran. `sleep_ms(1)` in that loop
+fixes it (tested on 1 CPU: linux-server online with 4 workers; scmrights, fifo, socktest,
+unixtest, epollet pass; lxfwd fails only its `sigstress` bar of 200 timer signals in 3 s).
+The loop moved into `hydra-rt/src/svcrt.rs` in wave 6 (Group 19's), so the fix is left to
+Group 19 (NOTES.md).
+
 ## Appendix: reproducing the measurements
 
 - **Benchmark program:** `tests/linux/lxbench.c`. Build it with `gcc -O1 -w -pthread tests/linux/lxbench.c -o esp/bin/lxbench.elf` in WSL, then `make build`.
