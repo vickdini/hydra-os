@@ -1051,6 +1051,9 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     if !switched {
         owner.recv_wq.wake_all();
     }
+    // wave6 G20: the server is busy on another CPU (it answers in microseconds): wait for
+    // the answer spinning a little, rather than sleep and be woken across CPUs
+    let switched = switched || (direct && spin_for_answer(i));
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
     let mut interrupted = false;
     match mode {
@@ -1279,6 +1282,46 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
         }
     });
 }
+
+/// How long a direct caller whose server is busy on another CPU spins for its answer.
+const SPIN_NS: u64 = 40_000;
+
+/// Spins (without the kernel lock, interrupts on) until request `slot` is answered, at most
+/// [`SPIN_NS`]; whether it was. The kernel lock is taken again before returning.
+fn spin_for_answer(slot: usize) -> bool {
+    if crate::arch::smp::online() < 2 {
+        return false;
+    }
+    let end = crate::arch::pit::now_ns() + SPIN_NS;
+    let held = crate::arch::smp::bkl_held();
+    if held {
+        crate::arch::smp::bkl_exit();
+    }
+    let was = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::enable();
+    let mut answered = false;
+    while crate::arch::pit::now_ns() < end {
+        if REQ_ANSWERED[slot].load(Ordering::Acquire) {
+            answered = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !was {
+        x86_64::instructions::interrupts::disable();
+    }
+    if held {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    if answered {
+        DIRECT_SPUN.fetch_add(1, Ordering::Relaxed);
+    }
+    answered
+}
+
+/// Direct-path calls answered while their caller spun ([`spin_for_answer`]).
+pub static DIRECT_SPUN: AtomicU64 = AtomicU64::new(0);
 
 /// The answer to direct caller `caller` (at `idx`, a hint) is marked: makes it ready and
 /// gives it this CPU now; the calling server stays ready (`RECV_YIELD`).
