@@ -710,6 +710,16 @@ pub mod lx {
     pub fn step4() -> bool {
         false
     }
+    /// *stub* (wave 6, Group 23) No server objects on the host, so no service memory.
+    pub mod mem {
+        /// *stub* An mmap of a server object (none exist on the host).
+        pub fn server_mmap(
+            _dev: &alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>,
+            _args: [u64; 6],
+        ) -> Result<(alloc::sync::Arc<dyn crate::memory::vm::MappedObject>, i64, u64), i64> {
+            Err(-19) // ENODEV
+        }
+    }
     /// *stub* (Group 13)
     pub mod obj {
         /// *stub* A linux-server object (none exist on the host).
