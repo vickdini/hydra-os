@@ -1138,6 +1138,21 @@ makes no difference: 10 HTTP connections to archive.ubuntu.com take 0.04 to 1.0 
 connect on both builds alike (most about 0.5 s), and a DNS lookup takes about 480 ms on
 both. Those are QEMU user networking's own delays, the same before step 3.
 
+**The slirp stall explained (wave 6, Group 25).** It is QEMU's user networking, not
+net-server and not Hydra's TCP. When the guest's SYN reaches slirp (in the vCPU thread),
+slirp opens a non-blocking socket to the host and connects it, but nothing wakes QEMU's main
+loop, which sleeps in `poll` with the old list of sockets (the test VMs run with
+`-display none` and KVM, so the main loop has no other reason to wake). Only the next event
+lets it see the new socket as connected and send the SYN-ACK. Any guest packet that slirp
+answers itself wakes the loop: `tests/linux/tcpconn_test.c` (`tcpconn 10.0.2.2 PORT 20 [PINGMS]`,
+20 connections to an HTTP server on the PC, 300 ms apart) gave **702 ms per connection**
+(median; 19 of 20 between 701 and 709 ms), then **2.8 ms** (median, at most 11 ms) with a
+thread pinging 10.0.2.2 every 10 ms, then 702 ms again without the pings, in one VM. A
+DNS lookup through 10.0.2.3 waits the same way (its reply arrives on a new host socket).
+On real hardware there is no slirp. A QEMU with a window should hit it far less (its display
+refresh wakes the main loop about every 30 ms; not measured). Nothing in Hydra to fix; benchmarks that open connections
+to the PC should run a pinger beside them or use a server in the guest.
+
 ### 14.5 What step 4 (Unix sockets) can build on
 
 - The routing: add `1` to `lx::MOVED_FAMILIES` and the `AF_UNIX` arms in
