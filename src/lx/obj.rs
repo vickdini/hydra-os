@@ -327,6 +327,17 @@ impl CharDevice for ServerObject {
         Some(self)
     }
 
+    fn deliver_notification(&self, data: &[u8]) -> bool {
+        // wave6 G19: an in-kernel message queue's SIGEV_THREAD cookie for a netlink socket of
+        // the network service (only the IPC service switched back to the kernel)
+        if self.kind != crate::ipc::protocol::LX_OBJ_KIND_NETLINK {
+            return false;
+        }
+        let Some(me) = self.shared.me.lock().upgrade() else { return false };
+        let me: Arc<dyn CharDevice> = me;
+        super::call_obj_deliver(&me, data) >= 0
+    }
+
     fn socket_call(&self, num: u64, a: [u64; 6]) -> Option<i64> {
         // Group 13: socket calls on the server's sockets go to it
         let me: Arc<dyn CharDevice> = self.shared.me.lock().upgrade()?;

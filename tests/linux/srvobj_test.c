@@ -202,7 +202,8 @@ static void test_mqueue(void) {
     epoll_ctl(ep, EPOLL_CTL_ADD, q, &e);
     check(epoll_wait(ep, &e, 1, 0) == 1, "EPOLLET: readable at once");
     /* (The in-kernel queues, lx=kernel, are level-triggered: more reports than Linux) */
-    if (server) check(epoll_wait(ep, &e, 1, 50) == 0, "EPOLLET: no second report without a new message");
+    /* (Hydra's routing query 0x6713: whether mq_open goes to a service, or the kernel) */
+    if (server && syscall(0x6713, 240, 0) > 0) check(epoll_wait(ep, &e, 1, 50) == 0, "EPOLLET: no second report without a new message");
     mq_send(q, "b", 2, 1);
     check(epoll_wait(ep, &e, 1, 0) == 1, "EPOLLET: reported again for a new message");
     char buf[64];

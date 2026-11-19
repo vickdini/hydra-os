@@ -253,6 +253,12 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
         22 | 293 => pipe::create(&cx),
         434 | LX_KCALL_PIDFD => pidfd::open(&cx),
         LX_KCALL_FIFO => pipe::fifo_open(&cx),
+        // wave 6 (Group 19): an in-kernel message queue's notification for one of our netlink
+        // sockets (only the IPC service switched back)
+        LX_KCALL_NLDELIVER if c.obj != LX_OBJ_NONE => match cx.copy_in(cx.args[1], (cx.args[2] as usize).min(64)) {
+            Ok(d) => (netlink::deliver_slot(c.obj as u32, &d), 0),
+            Err(e) => (e, 0),
+        },
         282 | 289 => signalfd::signalfd(&cx),
         283 => timerfd::create(&cx),
         286 => timerfd::settime(&cx),

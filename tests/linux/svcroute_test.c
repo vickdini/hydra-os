@@ -210,6 +210,11 @@ static int checks(void) {
     check(tcall(T_CLOSES, 0, 0) == closes0 + 1, "svc-test hears of its object's last close once");
     close(a);
 
+    /* the caller's context travels with a T_FSCTX call */
+    setpgid(0, 0);
+    r = syscall(0x6712);
+    check(r == ((long)getsid(0) << 32 | getpgrp()), "the caller's process group and session travel with the call (T_FSCTX)");
+
     /* 4. redirects */
     r = tcall(T_REDIRECT, 0x11, 3);
     check(r == 0x5114, "a call redirected from svc-test to linux-server (object and tail carried)");
@@ -356,7 +361,12 @@ static int load(int secs) {
     char b[64];
     int rr = read(o, b, sizeof b);
     printf("old object after the kill: read %d errno %d; epoll_wait saw events %#x\n", rr, rr < 0 ? errno : 0, ep_rev);
-    int ok = l_err == 0 && t_err > 0 && ep_rev > 0;
+    long again = tcall(T_NULL, 0, 0);
+    printf("a test call after the restart: %ld\n", again);
+    /* the kill must show (a call in flight failed, or one made while the service was gone),
+     * the blocked epoll_wait woke with EPOLLERR|EPOLLHUP, the old object is dead, linux-server
+     * never failed, and the restarted service answers */
+    int ok = l_err == 0 && t_err + p_err > 0 && ep_rev > 0 && (ep_rev & 0x18) && rr < 0 && again == 0;
     printf("SVCKILL %s (test calls failed %ld, pending failed %ld, linux-server failed %ld, test calls after the restart %ld)\n", ok ? "PASSED" : "FAILED", t_err, p_err, l_err, after_ok);
     return ok ? 0 : 1;
 }

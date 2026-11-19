@@ -127,6 +127,8 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
     let r = match c.nr {
         LX_TEST_NR => test_call(&cx),
+        // The caller's context, as the kernel filled it for a `T_FSCTX` entry
+        LX_TEST_CTX_NR => ((c.pgid as i64) | (c.sid as i64) << 32, 0),
         LX_KCALL_DEVOPEN => (new_object(&cx, c.dev, c.args[1]), 0),
         0 | 1 | 16 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
         _ => (ENOSYS, 0),
