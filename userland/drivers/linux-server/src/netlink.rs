@@ -144,6 +144,16 @@ pub fn deliver(token: u64, data: &[u8]) {
     }
 }
 
+/// wave6 G19: queues `data` on the netlink socket in slot `slot` (an in-kernel message
+/// queue's `SIGEV_THREAD` cookie) and wakes its receivers: 0, or `-EBADF`.
+pub fn deliver_slot(slot: u32, data: &[u8]) -> i64 {
+    let Some(s) = sock_of(slot) else { return -9 };
+    s.replies.lock().push_back(data.to_vec());
+    refresh(slot);
+    crate::socket::poke(slot);
+    0
+}
+
 /// Lets a kept socket go.
 pub fn unpin(token: u64) {
     PINS.lock().remove(&token);

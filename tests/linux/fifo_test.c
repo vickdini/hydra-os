@@ -99,9 +99,9 @@ int main(void) {
     close(nw);
 
     // O_RDWR (linux-server's FIFOs)
-    long srv = syscall(0x6710, 3, 0);
-    if (srv > 2) {
-        close(srv);
+    // (Hydra's routing query 0x6713: which service answers pipe(2); 0 = the kernel)
+    long srv = syscall(0x6713, 22, 0);
+    if (srv > 0) {
         int rw = open(f, O_RDWR);
         check(rw >= 0 && write(rw, "rw", 2) == 2 && read(rw, buf, 2) == 2 && !memcmp(buf, "rw", 2), "O_RDWR does not wait and reads what it wrote");
         close(rw);

@@ -184,7 +184,7 @@ pub const MOVED_STEP4: &[(u64, u32, SvcId)] = &[
     (287, T_FD0, LXS_IPC),
 ];
 /// Hydra's private test calls: linux-server's ([`LX_NULL_NR`]) and the test service's.
-pub const MOVED_PRIV: &[(u64, u32, SvcId)] = &[(LX_NULL_NR, 0, LXS_LINUX), (LX_TEST_NR, 0, LXS_TEST)];
+pub const MOVED_PRIV: &[(u64, u32, SvcId)] = &[(LX_NULL_NR, 0, LXS_LINUX), (LX_TEST_NR, 0, LXS_TEST), (crate::ipc::protocol::LX_TEST_CTX_NR, T_FSCTX, LXS_TEST)];
 /// Step 4's descriptors are made by the server (`lx=kernel` or `lx.ipc=kernel` turn it off).
 pub static STEP4: AtomicBool = AtomicBool::new(false);
 
@@ -411,6 +411,22 @@ pub fn by_args(nr: u64, args: &[u64; 6]) -> Option<Target> {
     (s != 0 && h != 0).then_some(Target { svc: s, host: h })
 }
 
+/// [`LX_ROUTE_NR`](crate::ipc::protocol::LX_ROUTE_NR)`(nr, family)`: the service that answers
+/// Linux call `nr` now (by family for `socket`/`socketpair`), 0 for the kernel (a call routed
+/// by its descriptor: the service of its objects is not known from the number: 0).
+fn route_query(nr: u64, family: u64) -> i64 {
+    let e = entry(nr);
+    if e == 0 || e & T_BYFD != 0 {
+        return 0;
+    }
+    let s = if e & T_FAMILY != 0 { family_svc(family) } else { entry_svc(e) };
+    if s != 0 && svc::online(s) {
+        s as i64
+    } else {
+        0
+    }
+}
+
 /// Whether the key calls go to a service (so `/proc/keys` must come from it too).
 pub fn keys_forwarded() -> bool {
     route(250) == Route::Server
@@ -424,7 +440,13 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
     let e = entry(nr);
     if e == 0 {
-        return if nr == LX_NULL_NR { Some(0) } else { None };
+        return if nr == LX_NULL_NR {
+            Some(0)
+        } else if nr == crate::ipc::protocol::LX_ROUTE_NR {
+            Some(route_query(frame.rdi, frame.rsi))
+        } else {
+            None
+        };
     }
     if e & T_FAMILY != 0 {
         // Routed per call (Group 12): a family whose service is not online is the kernel's
@@ -628,13 +650,25 @@ pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::l
 /// not ready (the caller waits on its readiness itself). The server posts no `SIGPIPE`.
 /// The caller holds the kernel lock.
 pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+    call_obj_kbuf_nr(dev, if write { 1 } else { 0 }, write, data, out)
+}
+
+/// Group 19: queues `data` on the server's netlink socket `dev` as a received message (an
+/// in-kernel message queue's `SIGEV_THREAD` notification for a socket of the network
+/// service, when only the IPC service was switched back to the kernel).
+pub fn call_obj_deliver(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, data: &[u8]) -> i64 {
+    call_obj_kbuf_nr(dev, crate::ipc::protocol::LX_KCALL_NLDELIVER, true, data, &mut [])
+}
+
+/// [`call_obj_kbuf`] with call number `nr`.
+fn call_obj_kbuf_nr(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
     use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return EBADF };
     let Some(x) = svc::host(o.svc()).filter(|x| x.is_online()) else { return EBADF };
     let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
     let mut c = LxCall::EMPTY;
-    c.nr = if write { 1 } else { 0 };
+    c.nr = nr;
     c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, 0, 0, 0];
     c.obj = slot;
     c.obj_flags = o.flags() | LX_OBJ_FLAGS_KBUF | 0o4000;

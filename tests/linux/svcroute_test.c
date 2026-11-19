@@ -210,6 +210,11 @@ static int checks(void) {
     check(tcall(T_CLOSES, 0, 0) == closes0 + 1, "svc-test hears of its object's last close once");
     close(a);
 
+    /* the caller's context travels with a T_FSCTX call */
+    setpgid(0, 0);
+    r = syscall(0x6712);
+    check(r == ((long)getsid(0) << 32 | getpgrp()), "the caller's process group and session travel with the call (T_FSCTX)");
+
     /* 4. redirects */
     r = tcall(T_REDIRECT, 0x11, 3);
     check(r == 0x5114, "a call redirected from svc-test to linux-server (object and tail carried)");

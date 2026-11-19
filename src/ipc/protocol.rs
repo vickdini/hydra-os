@@ -1237,6 +1237,18 @@ pub const LX_TEST_WHO: u64 = 4;
 pub const LX_TEST_COPY: u64 = 5;
 /// [`LX_TEST_NR`]: redirect to itself `arg1` times more (a loop: `-ELOOP` beyond the limit).
 pub const LX_TEST_REDIR_LOOP: u64 = 6;
+/// A second test call of the test service, whose entry carries the caller's context
+/// (`T_FSCTX`): it answers `pgid | sid << 32` as the kernel gave them in the call.
+pub const LX_TEST_CTX_NR: u64 = 0x6712;
+/// Hydra's routing query, answered by the kernel itself: `(nr, family)` -> the service id
+/// that answers Linux call `nr` now (for `socket`/`socketpair`: of address family `family`),
+/// 0 if the kernel does. Tests use it to tell which pieces are forwarded (the per-service
+/// switch-back words, decision 17).
+pub const LX_ROUTE_NR: u64 = 0x6713;
+/// `LX_KCALL_NLDELIVER` (on a netlink socket object, `LxCall::obj`): queue the bytes of a
+/// kernel buffer (`args[1]` = `LX_KBUF_ADDR`, `args[2]` bytes) on the socket as a received
+/// message (an in-kernel message queue's `SIGEV_THREAD` cookie for glibc).
+pub const LX_KCALL_NLDELIVER: u64 = 0x6785;
 /// Kind of the test service's objects.
 pub const LX_OBJ_KIND_SVCTEST: u32 = 30;
 /// The character major the test service claims (Linux's "local/experimental" range).
