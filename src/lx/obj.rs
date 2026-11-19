@@ -19,6 +19,9 @@
 //!   changes words it marks the slots in a bitmap ([`LX_OBJ_CHANGED_OFF`]) and rings its
 //!   doorbell (`SYS_SVC_SIGNAL`, [`LX_SIGNAL_OBJS`]): [`on_doorbell`] wakes the waiters of
 //!   each marked object. The word's edge count makes edge-triggered epoll exact.
+//! - **Per service** (wave 6, Group 19): each host (`super::svc::Host`) has its own slots,
+//!   generation and object area; an object records its host (`ServerObject::svc`), and calls
+//!   on it go there.
 //! - **A restarted server** starts a new generation: objects of the old one poll as
 //!   `POLLERR | POLLHUP`, their calls fail with `EBADF`, and their closes are not told to
 //!   the new server. (Under the crash policy every Linux program ends anyway.)
@@ -34,9 +37,11 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
+use super::svc::Host;
 use crate::compat::linux::chardev::CharDevice;
 use crate::fs::FileDescriptor;
 use crate::ipc::protocol::{
+    SvcId, LX_OBJ_AREA_PAGES,
     LxObjDesc, LX_NOTE_CLOSE, LX_OBJ_BPF_DEVICE, LX_OBJ_CHANGED_OFF, LX_OBJ_COMM, LX_OBJ_DROP, LX_OBJ_FD, LX_OBJ_FDPATH, LX_OBJ_GIVE, LX_OBJ_INSTALL, LX_OBJ_NAME_MAX, LX_OBJ_NOTIFY,
     LX_OBJ_OFF, LX_OBJ_PIN, LX_OBJ_REFS, LX_OBJ_SETFL, LX_OBJ_SLOTS, LX_OBJ_TAKE, LX_OBJ_UNPIN, LX_OBJ_WATCHED_OFF,
 };
@@ -55,10 +60,8 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// `POLLERR | POLLHUP`: what a stale object (its server is gone) reports.
 const STALE: u32 = 0x0018;
 
-/// The server's generation: +1 each time a server goes online.
+/// Generations of every host come from one counter (an object's generation is unique).
 static GEN: AtomicU64 = AtomicU64::new(0);
-/// Kernel address of the server's window (0: no server online).
-static WINDOW: AtomicU64 = AtomicU64::new(0);
 
 /// What the kernel and every descriptor of one object share.
 pub struct ObjShared {
@@ -70,19 +73,42 @@ pub struct ObjShared {
     me: Mutex<alloc::sync::Weak<ServerObject>>,
 }
 
-/// The live objects by slot (to wake them, and to set their flags).
-static REG: Mutex<[Option<Arc<ObjShared>>; LX_OBJ_SLOTS]> = Mutex::new([const { None }; LX_OBJ_SLOTS]);
-
-fn reg<R>(f: impl FnOnce(&mut [Option<Arc<ObjShared>>; LX_OBJ_SLOTS]) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| f(&mut REG.lock()))
+/// One host's server objects (`super::svc::Host::objs`).
+pub struct HostObjs {
+    /// The host's generation: new each time it goes online.
+    gen: AtomicU64,
+    /// Kernel address of the host's object area (0: the host is offline).
+    area: AtomicU64,
+    /// The object area's pages (made once, kept across restarts).
+    frames: Mutex<Option<Arc<crate::ipc::service::ContiguousFrames>>>,
+    /// The live objects by slot (to wake them, and to set their flags).
+    reg: Mutex<alloc::vec::Vec<Option<Arc<ObjShared>>>>,
+    /// Kernel descriptors kept for the service ([`LX_OBJ_PIN`]), by token.
+    pins: Mutex<BTreeMap<u64, Arc<dyn CharDevice>>>,
+    /// Group 13: descriptors in flight in the service's Unix sockets ([`LX_OBJ_TAKE`]), by
+    /// token. They hold their object as a descriptor would (a pipe end stays open while in
+    /// flight).
+    kept: Mutex<BTreeMap<u64, FileDescriptor>>,
 }
 
-/// Kernel descriptors kept for the server ([`LX_OBJ_PIN`]), by token.
-static PINS: Mutex<BTreeMap<u64, Arc<dyn CharDevice>>> = Mutex::new(BTreeMap::new());
+impl HostObjs {
+    /// No objects, no area.
+    pub fn new() -> Self {
+        Self { gen: AtomicU64::new(0), area: AtomicU64::new(0), frames: Mutex::new(None), reg: Mutex::new(alloc::vec::Vec::new()), pins: Mutex::new(BTreeMap::new()), kept: Mutex::new(BTreeMap::new()) }
+    }
+}
+
+impl Default for HostObjs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn reg<R>(x: &Host, f: impl FnOnce(&mut alloc::vec::Vec<Option<Arc<ObjShared>>>) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| f(&mut x.objs.reg.lock()))
+}
+
 static NEXT_PIN: AtomicU64 = AtomicU64::new(1);
-/// Group 13: descriptors in flight in the server's Unix sockets ([`LX_OBJ_TAKE`]), by token.
-/// They hold their object as a descriptor would (a pipe end stays open while in flight).
-static KEPT: Mutex<BTreeMap<u64, FileDescriptor>> = Mutex::new(BTreeMap::new());
 /// Most descriptors kept at once (Linux limits what one user has in flight too).
 const MAX_KEPT: usize = 65536;
 
@@ -90,6 +116,8 @@ const MAX_KEPT: usize = 65536;
 pub struct ServerObject {
     slot: u32,
     kind: u32,
+    /// The host whose slot it is (wave 6, Group 19).
+    svc: SvcId,
     gen: u64,
     shared: Arc<ObjShared>,
     name: String,
@@ -110,8 +138,22 @@ pub struct ServerObject {
 
 impl ServerObject {
     /// The server's slot for the object, if the object belongs to the server online now.
+    #[inline]
     pub fn slot(&self) -> Option<u64> {
-        (self.gen == GEN.load(Ordering::Acquire) && WINDOW.load(Ordering::Acquire) != 0).then_some(self.slot as u64)
+        let x = super::svc::host(self.svc)?;
+        (self.gen == x.objs.gen.load(Ordering::Acquire) && x.objs.area.load(Ordering::Acquire) != 0).then_some(self.slot as u64)
+    }
+
+    /// The host whose object it is (`LXS_*`: the id of the serving process).
+    pub fn svc(&self) -> SvcId {
+        self.svc
+    }
+
+    /// The kernel address of the object area of the object's host, if the object is live.
+    fn area(&self) -> Option<u64> {
+        let x = super::svc::host(self.svc)?;
+        let a = x.objs.area.load(Ordering::Acquire);
+        (self.gen == x.objs.gen.load(Ordering::Acquire) && a != 0).then_some(a)
     }
 
     /// `LX_OBJ_KIND_*`.
@@ -135,13 +177,9 @@ impl ServerObject {
 
     /// `(poll bits, edge count, size)` from the readiness word; `None` if stale.
     fn word(&self) -> Option<(u32, u32, u64)> {
-        self.slot()?;
-        let base = WINDOW.load(Ordering::Acquire);
-        if base == 0 {
-            return None;
-        }
+        let base = self.area()?;
         let p = (base + LX_OBJ_OFF as u64 + 16 * self.slot as u64) as *const u32;
-        // SAFETY: the slot lies in the server's window, mapped while the server is online
+        // SAFETY: the slot lies in the host's object area, which is never freed
         unsafe {
             let ready = core::ptr::read_volatile(p);
             let edges = core::ptr::read_volatile(p.add(1));
@@ -153,20 +191,21 @@ impl ServerObject {
 
 impl Drop for ServerObject {
     fn drop(&mut self) {
-        if self.gen != GEN.load(Ordering::Acquire) {
+        let Some(x) = super::svc::host(self.svc) else { return };
+        if self.gen != x.objs.gen.load(Ordering::Acquire) {
             return;
         }
         if self.watched.load(Ordering::Acquire) {
             let _ = super::WATCHED_NET.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1)));
         }
         let slot = self.slot as usize;
-        reg(|r| {
-            if r[slot].as_ref().is_some_and(|s| Arc::ptr_eq(s, &self.shared)) {
+        reg(x, |r| {
+            if r.get(slot).and_then(|s| s.as_ref()).is_some_and(|s| Arc::ptr_eq(s, &self.shared)) {
                 r[slot] = None;
             }
         });
         if !self.quiet.load(Ordering::Acquire) {
-            super::note(LX_NOTE_CLOSE, self.slot as u64, self.kind as u64, 0);
+            super::note_to(self.svc, LX_NOTE_CLOSE, self.slot as u64, self.kind as u64, 0);
         }
     }
 }
@@ -240,10 +279,9 @@ impl CharDevice for ServerObject {
         waits.add(QueueRef::Shared(self.shared.wq.clone()));
         // Someone waits for this object: the server rings the doorbell for it from now on
         // (set before the caller reads the readiness word)
-        let base = WINDOW.load(Ordering::Acquire);
-        if base != 0 && self.slot().is_some() {
+        if let Some(base) = self.area() {
             let words = (base + LX_OBJ_WATCHED_OFF as u64) as *const AtomicU64;
-            // SAFETY: the bitmap lies in the window, mapped while the server is online
+            // SAFETY: the bitmap lies in the host's object area
             unsafe { (*words.add(self.slot as usize / 64)).fetch_or(1 << (self.slot % 64), Ordering::SeqCst) };
             // An Internet socket: net-server's events must reach its word from now on (the
             // main thread catches up on what it missed and rings the doorbell)
@@ -302,26 +340,53 @@ impl CharDevice for ServerObject {
     }
 }
 
-/// The server went online with its window at kernel address `window`: a new generation of
-/// objects, with empty readiness slots.
-pub(super) fn online(window: u64) {
-    // SAFETY: the slots and the bitmap lie in the 256 KiB window
+/// Host `x` went online: a new generation of objects, with empty readiness slots in its
+/// object area (made now if it has none). Returns 0, or `-ENOMEM`.
+pub(super) fn online(x: &Host) -> i64 {
+    let Some(base) = area_of(x) else { return -12 };
+    // SAFETY: the slots and the bitmaps lie in the object area
     unsafe {
-        core::ptr::write_bytes((window + LX_OBJ_OFF as u64) as *mut u8, 0, 16 * LX_OBJ_SLOTS);
-        core::ptr::write_bytes((window + LX_OBJ_CHANGED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
-        core::ptr::write_bytes((window + LX_OBJ_WATCHED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
+        core::ptr::write_bytes((base + LX_OBJ_OFF as u64) as *mut u8, 0, 16 * LX_OBJ_SLOTS);
+        core::ptr::write_bytes((base + LX_OBJ_CHANGED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
+        core::ptr::write_bytes((base + LX_OBJ_WATCHED_OFF as u64) as *mut u8, 0, LX_OBJ_SLOTS / 8);
     }
-    GEN.fetch_add(1, Ordering::AcqRel);
-    WINDOW.store(window, Ordering::Release);
+    reg(x, |r| {
+        r.clear();
+        r.resize(LX_OBJ_SLOTS, None);
+    });
+    x.objs.gen.store(GEN.fetch_add(1, Ordering::AcqRel) + 1, Ordering::Release);
+    x.objs.area.store(base, Ordering::Release);
+    0
 }
 
-/// The server went away: every object goes stale and its waiters wake (they see
+/// The kernel address of host `x`'s object area, made the first time.
+fn area_of(x: &Host) -> Option<u64> {
+    let mut f = x.objs.frames.lock();
+    if f.is_none() {
+        *f = Some(crate::ipc::service::ContiguousFrames::allocate(LX_OBJ_AREA_PAGES)?);
+    }
+    f.as_ref().map(|c| crate::memory::frame_allocator::phys_to_virt(c.base) as u64)
+}
+
+/// `LX_CTL_OBJAREA`: maps host `x`'s object area into the calling process; its address.
+pub(super) fn map_area(x: &Host) -> i64 {
+    if area_of(x).is_none() {
+        return -12;
+    }
+    let Some(frames) = x.objs.frames.lock().clone() else { return -12 };
+    match crate::ipc::service::map_into_current(frames, LX_OBJ_AREA_PAGES) {
+        Ok(a) => a as i64,
+        Err(e) => e,
+    }
+}
+
+/// Host `x` went away: every object of it goes stale and its waiters wake (they see
 /// `POLLERR | POLLHUP`); kept descriptors are let go.
-pub(super) fn offline() {
-    WINDOW.store(0, Ordering::Release);
-    GEN.fetch_add(1, Ordering::AcqRel);
+pub(super) fn offline(x: &Host) {
+    x.objs.area.store(0, Ordering::Release);
+    x.objs.gen.store(GEN.fetch_add(1, Ordering::AcqRel) + 1, Ordering::Release);
     let mut woken: alloc::vec::Vec<Arc<ObjShared>> = alloc::vec::Vec::new();
-    reg(|r| {
+    reg(x, |r| {
         for s in r.iter_mut() {
             if let Some(o) = s.take() {
                 woken.push(o);
@@ -331,40 +396,42 @@ pub(super) fn offline() {
     for o in &woken {
         o.wq.wake_all();
     }
-    let pins = core::mem::take(&mut *PINS.lock());
+    let pins = core::mem::take(&mut *x.objs.pins.lock());
     drop(pins);
-    // Descriptors in flight in the server's sockets (Group 13)
-    let kept = core::mem::take(&mut *KEPT.lock());
+    // Descriptors in flight in the service's sockets (Group 13)
+    let kept = core::mem::take(&mut *x.objs.kept.lock());
     for (_, d) in kept {
         release_kept(d);
     }
-    // The server's bpf device programs went with it
-    crate::compat::linux::bpf::set_server_device_programs(&[]);
+    // The bpf device programs went with the service that hosts bpf
+    if super::svc::host_of(crate::ipc::protocol::LXS_SEC) == x.id {
+        crate::compat::linux::bpf::set_server_device_programs(&[]);
+    }
 }
 
-/// The doorbell ([`LX_SIGNAL_OBJS`]): wakes the waiters of every object the server marked
-/// in the changed bitmap.
+/// The doorbell ([`LX_SIGNAL_OBJS`]) of host `x`: wakes the waiters of every object the
+/// service marked in the changed bitmap.
 ///
 /// [`LX_SIGNAL_OBJS`]: crate::ipc::protocol::LX_SIGNAL_OBJS
-pub(super) fn on_doorbell() {
-    let base = WINDOW.load(Ordering::Acquire);
+pub(super) fn on_doorbell(x: &Host) {
+    let base = x.objs.area.load(Ordering::Acquire);
     if base == 0 {
         return;
     }
     let words = (base + LX_OBJ_CHANGED_OFF as u64) as *const AtomicU64;
     let mut wake: alloc::vec::Vec<Arc<WaitQueue>> = alloc::vec::Vec::new();
     for i in 0..LX_OBJ_SLOTS / 64 {
-        // SAFETY: the bitmap lies in the window; the server sets bits with atomic or
+        // SAFETY: the bitmap lies in the object area; the service sets bits with atomic or
         let w = unsafe { (*words.add(i)).swap(0, Ordering::AcqRel) };
         if w == 0 {
             continue;
         }
-        reg(|r| {
+        reg(x, |r| {
             let mut bits = w;
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                if let Some(o) = &r[i * 64 + b] {
+                if let Some(Some(o)) = r.get(i * 64 + b) {
                     wake.push(o.wq.clone());
                 }
             }
@@ -378,22 +445,22 @@ pub(super) fn on_doorbell() {
 /// The server object at descriptor `fd` of the calling thread: the descriptor (held for the
 /// length of a forwarded call), its slot and its flags. `None` if `fd` is not a server
 /// object of the server online now.
-pub(super) fn current_fd(fd: u64) -> Option<(Arc<dyn CharDevice>, u64, u64)> {
+pub(super) fn current_fd(fd: u64) -> Option<super::HeldObj> {
     crate::task::with_current_fds_mut(|fds| object_in(fds, fd))
 }
 
 /// [`current_fd`] in descriptor table `fds` (locked by the caller): the lock-free path of
 /// `crate::lx` takes the table's lock with `try_lock` and calls this.
-pub(super) fn object_in(fds: &crate::fs::FdTable, fd: u64) -> Option<(Arc<dyn CharDevice>, u64, u64)> {
+pub(super) fn object_in(fds: &crate::fs::FdTable, fd: u64) -> Option<super::HeldObj> {
     let dev = match fds.get(fd as i32 as usize) {
         Some(FileDescriptor::Device(d)) => d.clone(),
         _ => return None,
     };
-    let (slot, flags) = {
+    let (slot, flags, svc) = {
         let o = dev.as_server()?;
-        (o.slot()?, o.flags())
+        (o.slot()?, o.flags(), o.svc)
     };
-    Some((dev, slot, flags))
+    Some((dev, slot, flags, svc))
 }
 
 /// The descriptor table of request `id`'s caller.
@@ -405,11 +472,20 @@ fn client_fds(id: u64) -> Result<crate::fs::SharedFdTable, i64> {
 /// `SYS_LX_OBJ(op, a, b, c)`: the server's operations on its objects (see the `LX_OBJ_*`
 /// constants in `ipc/protocol.rs`).
 pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
-    if let Err(e) = super::server_caller() {
-        return e;
+    let h = match super::server_caller() {
+        Ok((_, _, h)) => h,
+        Err(e) => return e,
+    };
+    let Some(x) = super::svc::host(h) else { return ESRCH };
+    // The operations naming a request: only the service's own (Group 19)
+    use crate::ipc::protocol::{LX_OBJ_NETCANCEL, LX_OBJ_NETCHECK, LX_OBJ_NETWAIT, LX_OBJ_SIGTHREAD};
+    if matches!(op, LX_OBJ_INSTALL | LX_OBJ_FD | LX_OBJ_NETCHECK | LX_OBJ_NETWAIT | LX_OBJ_NETCANCEL | LX_OBJ_SIGTHREAD | LX_OBJ_COMM | LX_OBJ_FDPATH | LX_OBJ_PIN | LX_OBJ_TAKE | LX_OBJ_GIVE)
+        && crate::ipc::protocol::lx_req_svc(a) != h
+    {
+        return ESRCH;
     }
     match op {
-        LX_OBJ_INSTALL => install(a, b),
+        LX_OBJ_INSTALL => install(x, a, b),
         LX_OBJ_FD => {
             let fds = match client_fds(a) {
                 Ok(f) => f,
@@ -420,7 +496,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Some(_) => return EINVAL,
                 None => return EBADF,
             };
-            match dev.as_server().and_then(|o| o.slot().map(|s| (s, o.kind(), o.nonblock()))) {
+            match dev.as_server().filter(|o| o.svc == h).and_then(|o| o.slot().map(|s| (s, o.kind(), o.nonblock()))) {
                 Some((slot, kind, nb)) => (slot | (kind as u64) << 32 | (nb as u64) << 62) as i64,
                 None => EINVAL,
             }
@@ -484,7 +560,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             if a as usize >= LX_OBJ_SLOTS {
                 return EINVAL;
             }
-            match reg(|r| r[a as usize].clone()) {
+            match reg(x, |r| r.get(a as usize).cloned().flatten()) {
                 Some(s) => {
                     s.nonblock.store(b as u32 & O_NONBLOCK != 0, Ordering::Relaxed);
                     0
@@ -502,11 +578,11 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 _ => return EBADF,
             };
             let token = NEXT_PIN.fetch_add(1, Ordering::Relaxed);
-            PINS.lock().insert(token, dev);
+            x.objs.pins.lock().insert(token, dev);
             token as i64
         }
         LX_OBJ_UNPIN => {
-            let d = PINS.lock().remove(&a);
+            let d = x.objs.pins.lock().remove(&a);
             match d {
                 Some(_) => 0,
                 None => EINVAL,
@@ -516,7 +592,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             if a as usize >= LX_OBJ_SLOTS {
                 return EINVAL;
             }
-            let o = reg(|r| r[a as usize].clone()).and_then(|s| s.me.lock().upgrade());
+            let o = reg(x, |r| r.get(a as usize).cloned().flatten()).and_then(|s| s.me.lock().upgrade());
             match o {
                 Some(o) => {
                     o.sigmask.store(b, Ordering::Relaxed);
@@ -536,8 +612,8 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 1
             }
         }
-        LX_OBJ_TAKE => take(a, b, c),
-        LX_OBJ_GIVE => give(a, b, c),
+        LX_OBJ_TAKE => take(x, a, b, c),
+        LX_OBJ_GIVE => give(x, a, b, c),
         LX_OBJ_DROP => {
             if c != 0 || b > MAX_KEPT as u64 {
                 return EINVAL;
@@ -547,7 +623,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Err(e) => return e,
             };
             let gone: alloc::vec::Vec<FileDescriptor> = {
-                let mut kept = KEPT.lock();
+                let mut kept = x.objs.kept.lock();
                 raw.chunks_exact(8).filter_map(|t| kept.remove(&u64::from_le_bytes(t.try_into().unwrap()))).collect()
             };
             for d in gone {
@@ -559,7 +635,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             if a as usize >= LX_OBJ_SLOTS {
                 return EINVAL;
             }
-            match reg(|r| r[a as usize].clone()) {
+            match reg(x, |r| r.get(a as usize).cloned().flatten()) {
                 Some(s) => {
                     let n = s.me.lock().strong_count();
                     n as i64
@@ -575,7 +651,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Ok(d) => d,
                 Err(e) => return e,
             };
-            let dev = PINS.lock().get(&a).cloned();
+            let dev = x.objs.pins.lock().get(&a).cloned();
             match dev {
                 Some(d) => {
                     d.deliver_notification(&data);
@@ -590,7 +666,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
 
 /// [`LX_OBJ_INSTALL`]: a new descriptor for the object `desc` (in the server's memory)
 /// describes, in the table of request `id`'s caller.
-fn install(id: u64, desc: u64) -> i64 {
+fn install(x: &Host, id: u64, desc: u64) -> i64 {
     let raw = match crate::compat::linux::vfs::copy_in(desc, core::mem::size_of::<LxObjDesc>()) {
         Ok(r) => r,
         Err(_) => return EFAULT,
@@ -601,8 +677,8 @@ fn install(id: u64, desc: u64) -> i64 {
     if slot >= LX_OBJ_SLOTS || d.name_len as usize > LX_OBJ_NAME_MAX {
         return EINVAL;
     }
-    let gen = GEN.load(Ordering::Acquire);
-    if WINDOW.load(Ordering::Acquire) == 0 {
+    let gen = x.objs.gen.load(Ordering::Acquire);
+    if x.objs.area.load(Ordering::Acquire) == 0 {
         return EINVAL;
     }
     let fds = match client_fds(id) {
@@ -614,8 +690,8 @@ fn install(id: u64, desc: u64) -> i64 {
         nonblock: AtomicBool::new(d.flags & O_NONBLOCK != 0),
         me: Mutex::new(alloc::sync::Weak::new()),
     });
-    let taken = reg(|r| {
-        if r[slot].is_some() {
+    let taken = reg(x, |r| {
+        if r.get(slot).is_none_or(|s| s.is_some()) {
             return false;
         }
         r[slot] = Some(shared.clone());
@@ -627,6 +703,7 @@ fn install(id: u64, desc: u64) -> i64 {
     let obj = Arc::new(ServerObject {
         slot: d.slot,
         kind: d.kind,
+        svc: x.id,
         gen,
         shared,
         name: String::from_utf8_lossy(&d.name[..d.name_len as usize]).into_owned(),
@@ -711,11 +788,11 @@ fn release_kept(d: FileDescriptor) {
     drop(d);
 }
 
-/// What descriptor `d` is to the server: `slot | kind << 32 | 1 << 63` for one of its
-/// objects, 0 otherwise.
-fn describe(d: &FileDescriptor) -> u64 {
+/// What descriptor `d` is to host `h`: `slot | kind << 32 | 1 << 63` for one of its
+/// objects, 0 otherwise (a kernel descriptor, or another service's object).
+fn describe(d: &FileDescriptor, h: SvcId) -> u64 {
     if let FileDescriptor::Device(dev) = d {
-        if let Some(o) = dev.as_server() {
+        if let Some(o) = dev.as_server().filter(|o| o.svc == h) {
             if let Some(slot) = o.slot() {
                 return slot | (o.kind() as u64) << 32 | 1 << 63;
             }
@@ -725,7 +802,7 @@ fn describe(d: &FileDescriptor) -> u64 {
 }
 
 /// [`LX_OBJ_TAKE`]`(request id, buf, n)`.
-fn take(id: u64, buf: u64, n: u64) -> i64 {
+fn take(x: &Host, id: u64, buf: u64, n: u64) -> i64 {
     if n == 0 || n > 512 {
         return EINVAL;
     }
@@ -750,7 +827,7 @@ fn take(id: u64, buf: u64, n: u64) -> i64 {
     }
     let mut out = raw;
     {
-        let mut kept = KEPT.lock();
+        let mut kept = x.objs.kept.lock();
         if kept.len() + descs.len() > MAX_KEPT {
             return -109; // ETOOMANYREFS
         }
@@ -758,7 +835,7 @@ fn take(id: u64, buf: u64, n: u64) -> i64 {
             hold(&d);
             let token = NEXT_PIN.fetch_add(1, Ordering::Relaxed);
             out[i * 24 + 8..i * 24 + 16].copy_from_slice(&token.to_le_bytes());
-            out[i * 24 + 16..i * 24 + 24].copy_from_slice(&describe(&d).to_le_bytes());
+            out[i * 24 + 16..i * 24 + 24].copy_from_slice(&describe(&d, x.id).to_le_bytes());
             kept.insert(token, d);
         }
     }
@@ -766,7 +843,7 @@ fn take(id: u64, buf: u64, n: u64) -> i64 {
 }
 
 /// [`LX_OBJ_GIVE`]`(request id, buf, n | flags << 32)`.
-fn give(id: u64, buf: u64, nf: u64) -> i64 {
+fn give(x: &Host, id: u64, buf: u64, nf: u64) -> i64 {
     let n = nf & 0xFFFF_FFFF;
     let cloexec = (nf >> 32) as u32 & O_CLOEXEC != 0;
     if n == 0 || n > 512 {
@@ -787,7 +864,7 @@ fn give(id: u64, buf: u64, nf: u64) -> i64 {
         if err != 0 {
             continue;
         }
-        let Some(d) = KEPT.lock().remove(&token) else {
+        let Some(d) = x.objs.kept.lock().remove(&token) else {
             err = EINVAL;
             continue;
         };
@@ -802,7 +879,7 @@ fn give(id: u64, buf: u64, nf: u64) -> i64 {
             }
             Err(_) => {
                 drop(t);
-                KEPT.lock().insert(token, d);
+                x.objs.kept.lock().insert(token, d);
                 err = EMFILE;
             }
         }
