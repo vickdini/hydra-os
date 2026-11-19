@@ -157,9 +157,11 @@ struct Keys {
     user: BTreeMap<u32, (i32, i32)>,
     /// Persistent keyrings by uid
     persistent: BTreeMap<u32, i32>,
+    /// Changed since the kept copy was last written ([`KGuard`] writes it when the lock goes).
+    dirty: bool,
 }
 
-static KEYS: Mutex<Keys> = Mutex::new(Keys {
+static KEYS: KeysLock = KeysLock(Mutex::new(Keys {
     keys: BTreeMap::new(),
     next: 0,
     thread: BTreeMap::new(),
@@ -168,14 +170,210 @@ static KEYS: Mutex<Keys> = Mutex::new(Keys {
     reqkey_dest: BTreeMap::new(),
     user: BTreeMap::new(),
     persistent: BTreeMap::new(),
-});
+    dirty: false,
+}));
+
+/// The key table's lock: a guard whose table changed writes the kept copy when it goes, so
+/// every answer and every notification leaves the keyrings kept (keys restart invisibly,
+/// `docs/linux-services-design.md` 2.1).
+struct KeysLock(Mutex<Keys>);
+
+struct KGuard<'a>(crate::lock::YGuard<'a, Keys>);
+
+impl KeysLock {
+    fn lock(&self) -> KGuard<'_> {
+        KGuard(self.0.lock())
+    }
+}
+
+impl core::ops::Deref for KGuard<'_> {
+    type Target = Keys;
+    fn deref(&self) -> &Keys {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for KGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Keys {
+        &mut self.0
+    }
+}
+
+impl Drop for KGuard<'_> {
+    fn drop(&mut self) {
+        if self.0.dirty {
+            self.0.dirty = false;
+            persist(&self.0);
+        }
+    }
+}
+
+/// Key writes to the kept copy that did not fit (the copy then stays at the last that did).
+static KEPT_FULL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Writes the table to the kept object (when there is one).
+fn persist(ks: &Keys) {
+    let Some(k) = crate::kept::get() else { return };
+    let data = encode(ks);
+    if !k.write(crate::kept::KEYS, &data) && KEPT_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0 {
+        hydra_rt::println!("[lx-sec] keys: {} bytes do not fit the kept state; a restart would lose the newest keys", data.len());
+    }
+}
+
+fn encode(ks: &Keys) -> Vec<u8> {
+    let mut e = crate::kept::Enc::default();
+    e.u32(ks.next);
+    e.u32(ks.keys.len() as u32);
+    for (&s, k) in &ks.keys {
+        e.i32(s);
+        e.u8(match k.ktype {
+            Type::User => 0,
+            Type::Logon => 1,
+            Type::BigKey => 2,
+            Type::Keyring => 3,
+        });
+        e.u8(k.revoked as u8 | (k.invalid as u8) << 1 | (k.expiry.is_some() as u8) << 2);
+        e.u32(k.uid);
+        e.u32(k.gid);
+        e.u32(k.perm);
+        e.u64(k.expiry.unwrap_or(0));
+        e.bytes(k.desc.as_bytes());
+        e.bytes(&k.payload);
+        e.u32(k.ring.len() as u32);
+        for &r in &k.ring {
+            e.i32(r);
+        }
+    }
+    e.u32(ks.thread.len() as u32);
+    for (&t, &(g, r)) in &ks.thread {
+        e.u64(t);
+        e.u64(g);
+        e.i32(r);
+    }
+    for m in [&ks.process, &ks.session] {
+        e.u32(m.len() as u32);
+        for (&g, &r) in m {
+            e.u64(g);
+            e.i32(r);
+        }
+    }
+    e.u32(ks.reqkey_dest.len() as u32);
+    for (&t, &v) in &ks.reqkey_dest {
+        e.u64(t);
+        e.i32(v);
+    }
+    e.u32(ks.user.len() as u32);
+    for (&u, &(a, b)) in &ks.user {
+        e.u32(u);
+        e.i32(a);
+        e.i32(b);
+    }
+    e.u32(ks.persistent.len() as u32);
+    for (&u, &r) in &ks.persistent {
+        e.u32(u);
+        e.i32(r);
+    }
+    e.buf
+}
+
+#[allow(dead_code)]
+fn decode(b: &[u8]) -> Option<Keys> {
+    let mut d = crate::kept::Dec::new(b);
+    let mut ks = Keys {
+        keys: BTreeMap::new(),
+        next: d.u32()?,
+        thread: BTreeMap::new(),
+        process: BTreeMap::new(),
+        session: BTreeMap::new(),
+        reqkey_dest: BTreeMap::new(),
+        user: BTreeMap::new(),
+        persistent: BTreeMap::new(),
+        dirty: false,
+    };
+    for _ in 0..d.u32()? {
+        let s = d.i32()?;
+        let ktype = match d.u8()? {
+            0 => Type::User,
+            1 => Type::Logon,
+            2 => Type::BigKey,
+            3 => Type::Keyring,
+            _ => return None,
+        };
+        let f = d.u8()?;
+        let (uid, gid, perm, exp) = (d.u32()?, d.u32()?, d.u32()?, d.u64()?);
+        let desc = String::from(core::str::from_utf8(d.bytes()?).ok()?);
+        let payload = d.bytes()?.to_vec();
+        let n = d.u32()? as usize;
+        let mut ring = Vec::with_capacity(n.min(4096));
+        for _ in 0..n {
+            ring.push(d.i32()?);
+        }
+        let key = Key { ktype, desc, payload, ring, uid, gid, perm, expiry: (f & 4 != 0).then_some(exp), revoked: f & 1 != 0, invalid: f & 2 != 0 };
+        ks.keys.insert(s, key);
+    }
+    for _ in 0..d.u32()? {
+        let (t, g, r) = (d.u64()?, d.u64()?, d.i32()?);
+        ks.thread.insert(t, (g, r));
+    }
+    for m in [&mut ks.process, &mut ks.session] {
+        for _ in 0..d.u32()? {
+            let (g, r) = (d.u64()?, d.i32()?);
+            m.insert(g, r);
+        }
+    }
+    for _ in 0..d.u32()? {
+        let (t, v) = (d.u64()?, d.i32()?);
+        ks.reqkey_dest.insert(t, v);
+    }
+    for _ in 0..d.u32()? {
+        let (u, a, b) = (d.u32()?, d.i32()?, d.i32()?);
+        ks.user.insert(u, (a, b));
+    }
+    for _ in 0..d.u32()? {
+        let (u, r) = (d.u32()?, d.i32()?);
+        ks.persistent.insert(u, r);
+    }
+    d.done().then_some(ks)
+}
+
+/// A restart: the keyrings the previous instance kept come back. Thread, process and
+/// session anchors of processes that ended meanwhile (their exit notification went to the
+/// dead instance) go, with the keys only they reached. Returns the number of keys.
+#[allow(dead_code)] // lx-sec only (linux-server keeps nothing)
+pub fn restore() -> usize {
+    let Some(k) = crate::kept::get() else { return 0 };
+    let Some(data) = k.read(crate::kept::KEYS) else { return 0 };
+    let Some(mut table) = decode(data) else {
+        hydra_rt::println!("[lx-sec] keys: the kept copy does not decode; starting without keys");
+        k.clear(crate::kept::KEYS);
+        return 0;
+    };
+    let alive = |tgid: u64| hydra_rt::sys::lx_proc_info(tgid).is_ok();
+    table.thread.retain(|_, (g, _)| alive(*g));
+    table.process.retain(|g, _| alive(*g));
+    table.session.retain(|g, _| alive(*g));
+    table.reqkey_dest.retain(|t, _| alive(*t));
+    table.collect();
+    table.dirty = true;
+    let n = table.keys.len();
+    let mut ks = KEYS.lock();
+    *ks = table;
+    n
+}
 
 fn now() -> u64 {
     crate::client::now_ms()
 }
 
 impl Keys {
+    /// Key `serial` to change (it must exist): marks the table changed.
+    fn km(&mut self, serial: i32) -> &mut Key {
+        self.dirty = true;
+        self.keys.get_mut(&serial).unwrap()
+    }
+
     fn alloc(&mut self, key: Key) -> i32 {
+        self.dirty = true;
         // Serials look random to callers (as on Linux) but are unique and positive
         loop {
             self.next = self.next.wrapping_mul(1_103_515_245).wrapping_add(12_345 + (now() as u32 & 0xff));
@@ -222,6 +420,7 @@ impl Keys {
                 return *r;
             }
         }
+        self.dirty = true;
         let perm = (ALL << POS) | ((VIEW | READ | WRITE | SEARCH | LINK | SETATTR) << USR);
         let user = self.new_keyring(format!("_uid.{}", uid), uid, u32::MAX, perm);
         let ses = self.new_keyring(format!("_uid_ses.{}", uid), uid, u32::MAX, perm);
@@ -249,6 +448,7 @@ impl Keys {
                     return Err(ENOKEY);
                 }
                 let r = self.new_keyring(String::from("_tid"), c.uid, c.gid, perm);
+                self.dirty = true;
                 self.thread.insert(c.tid, (c.tgid, r));
                 Ok(r)
             }
@@ -260,6 +460,7 @@ impl Keys {
                     return Err(ENOKEY);
                 }
                 let r = self.new_keyring(String::from("_pid"), c.uid, c.gid, perm);
+                self.dirty = true;
                 self.process.insert(c.tgid, r);
                 Ok(r)
             }
@@ -272,6 +473,7 @@ impl Keys {
                     return Ok(self.user_rings(c.uid).1);
                 }
                 let r = self.new_keyring(String::from("_ses"), c.uid, c.gid, (ALL << POS) | ((VIEW | READ) << USR));
+                self.dirty = true;
                 self.session.insert(c.tgid, r);
                 Ok(r)
             }
@@ -390,7 +592,7 @@ impl Keys {
             .copied()
             .filter(|&o| o != key && self.keys.get(&o).map_or(false, |k| k.ktype == kt && k.desc == kd))
             .collect();
-        let r = self.keys.get_mut(&ring).unwrap();
+        let r = self.km(ring);
         r.ring.retain(|o| !same.contains(o));
         if !r.ring.contains(&key) {
             r.ring.push(key);
@@ -472,10 +674,18 @@ impl Keys {
                 roots.extend(k.ring.iter().copied());
             }
         }
+        let before = self.keys.len();
         self.keys.retain(|s, _| live.contains(s));
-        for k in self.keys.values_mut() {
-            k.ring.retain(|s| live.contains(s));
+        if self.keys.len() != before {
+            self.dirty = true;
         }
+        let mut cut = false;
+        for k in self.keys.values_mut() {
+            let n = k.ring.len();
+            k.ring.retain(|s| live.contains(s));
+            cut |= k.ring.len() != n;
+        }
+        self.dirty |= cut;
     }
 }
 
@@ -509,6 +719,7 @@ pub fn on_fork(parent_tgid: u64, child_tgid: u64) {
     let mut ks = KEYS.lock();
     if let Some(s) = ks.session_of(parent_tgid) {
         ks.session.insert(child_tgid, s);
+        ks.dirty = true;
     }
 }
 
@@ -516,6 +727,7 @@ pub fn on_fork(parent_tgid: u64, child_tgid: u64) {
 pub fn on_exec(tid: u64, tgid: u64) {
     let mut ks = KEYS.lock();
     if ks.thread.remove(&tid).is_some() | ks.process.remove(&tgid).is_some() {
+        ks.dirty = true;
         ks.collect();
     }
 }
@@ -529,6 +741,7 @@ pub fn on_exit(tgid: u64) {
     ks.process.remove(&tgid);
     ks.session.remove(&tgid);
     if ks.thread.len() + ks.process.len() + ks.session.len() != before {
+        ks.dirty = true;
         ks.collect();
     }
 }
@@ -640,7 +853,7 @@ fn add_key(cx: &Cx, type_ptr: u64, desc_ptr: u64, payload_ptr: u64, plen: u64, r
                 if !ks.payload_fits(e, payload.len()) {
                     return EDQUOT;
                 }
-                ks.keys.get_mut(&e).unwrap().payload = payload;
+                ks.km(e).payload = payload;
                 return e as i64;
             }
         }
@@ -749,6 +962,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
                 }
             };
             ks.session.insert(c.tgid, ring);
+            ks.dirty = true;
             ks.collect();
             Ok(ring as i64)
         }
@@ -767,7 +981,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             if !ks.payload_fits(s, payload.len()) {
                 return Err(EDQUOT);
             }
-            ks.keys.get_mut(&s).unwrap().payload = payload;
+            ks.km(s).payload = payload;
             Ok(0)
         }
         // KEYCTL_REVOKE
@@ -777,7 +991,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             if ks.check(&c, s, WRITE).is_err() && ks.check(&c, s, SETATTR).is_err() {
                 return Err(EACCES);
             }
-            ks.keys.get_mut(&s).unwrap().revoked = true;
+            ks.km(s).revoked = true;
             Ok(0)
         }
         // KEYCTL_CHOWN
@@ -785,7 +999,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             let (uid, gid) = (a3 as u32, a4 as u32);
             let mut ks = KEYS.lock();
             let s = ks.get(&c, id, true, SETATTR)?;
-            let k = ks.keys.get_mut(&s).unwrap();
+            let k = ks.km(s);
             if uid != u32::MAX && uid != k.uid && !c.admin {
                 return Err(EACCES);
             }
@@ -808,7 +1022,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             }
             let mut ks = KEYS.lock();
             let s = ks.get(&c, id, true, SETATTR)?;
-            let k = ks.keys.get_mut(&s).unwrap();
+            let k = ks.km(s);
             if k.uid != c.uid && !c.admin {
                 return Err(EACCES);
             }
@@ -831,7 +1045,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             let mut ks = KEYS.lock();
             let s = ks.get(&c, id, true, WRITE)?;
             ks.ring_of(s)?;
-            ks.keys.get_mut(&s).unwrap().ring.clear();
+            ks.km(s).ring.clear();
             ks.collect();
             Ok(0)
         }
@@ -850,7 +1064,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             let key = ks.lookup(&c, id, false)?;
             let ring = ks.get(&c, a3 as i32, false, WRITE)?;
             ks.ring_of(ring)?;
-            let r = ks.keys.get_mut(&ring).unwrap();
+            let r = ks.km(ring);
             let before = r.ring.len();
             r.ring.retain(|&s| s != key);
             if r.ring.len() == before {
@@ -907,6 +1121,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             let old = ks.reqkey_dest.get(&c.tid).copied().unwrap_or(0);
             if v != -1 {
                 ks.reqkey_dest.insert(c.tid, v);
+                ks.dirty = true;
             }
             Ok(old as i64)
         }
@@ -914,7 +1129,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
         15 => {
             let mut ks = KEYS.lock();
             let s = ks.get(&c, id, true, SETATTR)?;
-            ks.keys.get_mut(&s).unwrap().expiry = if a3 == 0 { None } else { Some(now() + a3.saturating_mul(1000)) };
+            ks.km(s).expiry = if a3 == 0 { None } else { Some(now() + a3.saturating_mul(1000)) };
             Ok(0)
         }
         // KEYCTL_ASSUME_AUTHORITY
@@ -956,6 +1171,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
                 return Err(EPERM);
             }
             ks.session.insert(ppid, s);
+            ks.dirty = true;
             Ok(0)
         }
         // KEYCTL_INVALIDATE
@@ -965,10 +1181,11 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             if ks.check(&c, s, SEARCH).is_err() && !c.admin {
                 return Err(EACCES);
             }
-            ks.keys.get_mut(&s).unwrap().invalid = true;
+            ks.km(s).invalid = true;
             for k in ks.keys.values_mut() {
                 k.ring.retain(|&o| o != s);
             }
+            ks.dirty = true;
             ks.collect();
             Ok(0)
         }
@@ -987,6 +1204,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
                     let perm = (ALL << POS) | ((VIEW | READ | SEARCH) << USR);
                     let r = ks.new_keyring(format!("_persistent.{}", uid), uid, u32::MAX, perm);
                     ks.persistent.insert(uid, r);
+                    ks.dirty = true;
                     r
                 }
             };
@@ -1019,7 +1237,7 @@ fn keyctl_inner(cx: &Cx, op: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> Result<
             }
             ks.link(to, key)?;
             if from != to {
-                ks.keys.get_mut(&from).unwrap().ring.retain(|&s| s != key);
+                ks.km(from).ring.retain(|&s| s != key);
             }
             Ok(0)
         }

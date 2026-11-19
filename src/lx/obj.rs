@@ -316,7 +316,8 @@ impl CharDevice for ServerObject {
         st.st_gid = self.gid;
         st.st_nlink = 1;
         // (Group 13: both ends of a pipe, and a socket, report the server's inode number)
-        st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
+        // wave6 G24: a bpf map's tag is its key and value sizes, not an inode number
+        st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD && self.kind != crate::ipc::protocol::LX_OBJ_KIND_BPF_MAP { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
         st

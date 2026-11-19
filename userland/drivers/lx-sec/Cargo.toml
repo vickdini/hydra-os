@@ -1,0 +1,9 @@
+[package]
+name = "lx-sec"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra lx-sec: the Linux key retention service and bpf, a Linux service of its own (wave 6)"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

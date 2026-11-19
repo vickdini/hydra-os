@@ -3,7 +3,7 @@
 # Built by the kernel's build.rs (target/drivers); `cargo build --release` here works too.
 [workspace]
 resolver = "2"
-members = ["hydra-rt", "ata-driver", "ahci-driver", "e1000-driver", "net-server", "usb-driver", "zfs-server", "hda-driver", "hydra-shell", "admin-probe", "linux-server", "svc-test"]
+members = ["hydra-rt", "ata-driver", "ahci-driver", "e1000-driver", "net-server", "usb-driver", "zfs-server", "hda-driver", "hydra-shell", "admin-probe", "linux-server", "svc-test", "lx-sec"]
 
 [workspace.dependencies]
 hydra-rt = { path = "hydra-rt" }
