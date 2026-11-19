@@ -990,16 +990,17 @@ fn sched_setattr(pid: u64, uattr: u64, flags: u64) -> i64 {
             if attr.priority != 0 || !(-20..=19).contains(&attr.nice) {
                 return EINVAL;
             }
-            if attr.nice < old.nice && !privileged {
+            if attr.nice < old.nice && attr.nice < super::limits::min_nice() && !privileged {
                 return EPERM;
             }
         }
-        // SCHED_FIFO, SCHED_RR
+        // SCHED_FIFO, SCHED_RR: without CAP_SYS_NICE up to RLIMIT_RTPRIO, as
+        // sched_setscheduler (PipeWire's realtime module uses either)
         1 | 2 => {
             if !(1..=99).contains(&attr.priority) {
                 return EINVAL;
             }
-            if !privileged {
+            if !privileged && attr.priority as u64 > super::limits::rtprio_limit() {
                 return EPERM;
             }
         }
@@ -1108,6 +1109,13 @@ fn apply_priority(tid: u64, a: &SchedAttr) {
             t.priority = p;
         }
     });
+}
+
+/// Sets thread `tid`'s scheduler priority from its recorded attributes again (after a
+/// temporary raise, `snd`'s driver thread).
+pub(crate) fn reapply_priority(tid: u64) {
+    let a = SCHED.lock().get(&tid).copied().unwrap_or_default();
+    apply_priority(tid, &a);
 }
 
 /// A new thread inherits its creator's attributes; with reset-on-fork, a real-time policy
