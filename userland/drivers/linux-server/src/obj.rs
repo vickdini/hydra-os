@@ -231,8 +231,9 @@ pub fn test_new(cx: &Cx, flags: u64) -> i64 {
         Ok(s) => s,
         Err(e) => return e,
     };
-    // wave6 G23: bit 32 of the flags: the object's memory is a kept memory object
-    test_mem_new(slot, flags & 1 << 32 != 0);
+    // wave6 G23: bit 32 of the flags: the object's memory is a kept memory object; bit 33:
+    // DMA memory
+    test_mem_new(slot, flags & 1 << 32 != 0, flags & 1 << 33 != 0);
     match install(cx, slot, LX_OBJ_KIND_TEST, flags as u32 & 0o2004000, 0o100600, cx.c.euid, cx.c.egid, b"anon_inode:[hydra-test]") {
         Ok(fd) => fd,
         Err(e) => {
@@ -293,14 +294,15 @@ struct TestMem {
     handle: u32,
     addr: u64,
     kept: bool,
+    dma: bool,
 }
 
 static TEST_MEMS: YLock<alloc::vec::Vec<TestMem>> = YLock::new(alloc::vec::Vec::new());
 
-fn test_mem_new(slot: u32, kept: bool) {
+fn test_mem_new(slot: u32, kept: bool, dma: bool) {
     let mut m = TEST_MEMS.lock();
     m.retain(|t| t.slot != slot);
-    m.push(TestMem { slot, handle: 0, addr: 0, kept });
+    m.push(TestMem { slot, handle: 0, addr: 0, kept, dma });
 }
 
 /// The test object's memory, made (and mapped here) on first use.
@@ -308,7 +310,13 @@ fn test_mem(slot: u32) -> Result<TestMem, i64> {
     let mut m = TEST_MEMS.lock();
     let Some(t) = m.iter_mut().find(|t| t.slot == slot) else { return Err(-22) };
     if t.handle == 0 {
-        let (obj, existed) = if t.kept { hydra_rt::mem::MemObj::kept(TEST_KEPT_KEY, TEST_MEM)? } else { (hydra_rt::mem::MemObj::anon(TEST_MEM)?, false) };
+        let (obj, existed) = if t.kept {
+            hydra_rt::mem::MemObj::kept(TEST_KEPT_KEY, TEST_MEM)?
+        } else if t.dma {
+            (hydra_rt::mem::MemObj::dma(TEST_MEM)?.0, false)
+        } else {
+            (hydra_rt::mem::MemObj::anon(TEST_MEM)?, false)
+        };
         let addr = obj.map(0, TEST_MEM, hydra_rt::mem::PROT_RW)? as u64;
         if t.kept {
             hydra_rt::println!("[linux-server] srvmap: kept test memory (handle {}, {})", obj.handle(), if existed { "existed: contents kept" } else { "new" });

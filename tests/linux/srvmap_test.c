@@ -213,7 +213,21 @@ int main(int argc, char **argv) {
         munmap((void *)p2, MEM);
     }
 
-    /* 10. many objects, mapped and dropped (no leak of handles) */
+    /* 10. DMA memory (obj_dma): contiguous, pinned; mapped like any other */
+    int fd3 = newobj(1ULL << 33);
+    volatile uint32_t *p3 = mmap(0, MEM, PROT_READ | PROT_WRITE, MAP_SHARED, fd3, 0);
+    check(p3 != MAP_FAILED, "map a DMA object");
+    if (p3 != MAP_FAILED) {
+        long di = syscall(SYS_ioctl, fd3, INFO, 0UL);
+        check(di >= 0 && (di >> 49 & 1) && (di & 0xFFFFFFFFFFFFL) == MEM / 4096, "info: DMA memory, 16 pages");
+        check(p3[0] == 0 && p3[MEM / 4 - 1] == 0, "DMA memory starts zeroed");
+        p3[MEM / 4 - 1] = 0xabcdef01;
+        check(peek(fd3, MEM - 4) == (long)0xabcdef01, "the server sees a write to DMA memory");
+        munmap((void *)p3, MEM);
+    }
+    close(fd3);
+
+    /* 11. many objects, mapped and dropped (no leak of handles) */
     int ok = 1;
     for (int i = 0; i < 300 && ok; i++) {
         int f = newobj(0);
