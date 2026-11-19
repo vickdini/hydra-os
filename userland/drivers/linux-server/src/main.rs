@@ -52,10 +52,10 @@ mod timerfd;
 mod unix;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 
 use hydra_rt::protocol::*;
-use hydra_rt::{println, sys, Message, Server};
+use hydra_rt::{println, svcrt, sys, Message, Server};
 
 use crate::client::{Caller, Cx};
 use crate::lock::YLock;
@@ -66,69 +66,32 @@ const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 
-/// Stack of each worker thread.
-const WORKER_STACK: usize = 256 * 1024;
-/// Most workers.
-const MAX_WORKERS: usize = 16;
-
 /// When the main thread next collects Unix sockets in flight (ticks).
 static NEXT_GC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// Workers that attached their syscall page.
-static ATTACHED: AtomicUsize = AtomicUsize::new(0);
 
 /// Pending test calls ([`LX_NULL_PENDING`]): `(request ID, tick due)`, answered by the main
 /// thread.
 static PENDING: YLock<Vec<(u64, u64)>> = YLock::new(Vec::new());
 
 fn main(args: &[&str]) {
-    let workers = args
-        .iter()
-        .find_map(|a| a.strip_prefix("workers="))
-        .and_then(|n| n.parse::<usize>().ok())
-        .unwrap_or(4)
-        .clamp(1, MAX_WORKERS);
-    for i in 0..workers {
-        let stack = match sys::map_anon(WORKER_STACK) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("[linux-server] no memory for worker {}: {}", i, e);
-                sys::exit_group(1);
-            }
-        };
-        // 16-byte aligned, minus the return address a call would have pushed
-        let top = stack + WORKER_STACK as u64 - 8;
-        if let Err(e) = unsafe { sys::thread_create(worker, top, i as u64) } {
-            println!("[linux-server] cannot start worker {}: {}", i, e);
-            sys::exit_group(1);
-        }
-    }
-    // Every worker attached before the endpoint is registered (the supervisor waits for
-    // the registration; calls are forwarded from LX_CTL_ONLINE on)
-    let deadline = sys::uptime_ticks() + 500;
-    while ATTACHED.load(Ordering::Acquire) < workers {
-        if sys::uptime_ticks() > deadline {
-            println!("[linux-server] only {} of {} workers attached", ATTACHED.load(Ordering::Acquire), workers);
-            sys::exit_group(1);
-        }
-        sys::yield_now();
-    }
-    let mut srv = match Server::register(ENDPOINT_LINUX_SERVER) {
+    // The service runtime (wave 6, `hydra_rt::svcrt`): workers, endpoint, object area
+    let cfg = svcrt::Config { name: "linux-server", endpoint: ENDPOINT_LINUX_SERVER, workers: svcrt::workers_arg(args, 4), subscribe: None };
+    let mut svc = match svcrt::start(&cfg, serve) {
         Ok(s) => s,
         Err(e) => {
-            println!("[linux-server] cannot register: {}", e);
+            println!("[linux-server] cannot start: {}", e);
             sys::exit_group(1);
         }
     };
-    notes::init(srv.window().as_mut_ptr());
-    obj::init(srv.window().as_mut_ptr());
+    notes::init(svc.window().as_mut_ptr());
+    obj::init(svc.area);
     // What a previous linux-server left in net-server (its sockets) goes (wave 5)
     netc::reset();
-    if let Err(e) = sys::lx_ctl(LX_CTL_ONLINE) {
+    if let Err(e) = svc.online() {
         println!("[linux-server] cannot go online: {}", e);
         sys::exit_group(1);
     }
-    serve_endpoint(&mut srv)
+    serve_endpoint(&mut svc.srv)
 }
 
 /// The main thread: heartbeats, kernel requests and notifications.
@@ -264,34 +227,6 @@ pub fn interrupted(id: u64) {
     }
 }
 
-/// A worker thread: attaches its syscall page and serves forwarded calls forever.
-extern "C" fn worker(_index: u64) -> ! {
-    let page = match sys::lx_ctl(LX_CTL_ATTACH) {
-        Ok(p) => p,
-        Err(e) => {
-            println!("[linux-server] worker cannot attach: {}", e);
-            sys::exit_group(1);
-        }
-    };
-    ATTACHED.fetch_add(1, Ordering::AcqRel);
-    let call = page as *const LxCall;
-    let mut answer = (0i64, LX_REPLY_NONE);
-    loop {
-        match sys::lx_reply_recv(answer.0, answer.1) {
-            Ok(()) => {
-                // SAFETY: the kernel filled the page before returning; it is ours alone
-                let c = unsafe { core::ptr::read_volatile(call) };
-                answer = serve(&c, page as *mut u8);
-            }
-            Err(e) => {
-                // The kernel no longer knows this worker (the server is being replaced)
-                println!("[linux-server] worker: reply_recv failed: {}", e);
-                sys::exit_group(1);
-            }
-        }
-    }
-}
-
 /// Serves one forwarded call (in syscall page `page`): `(result, SYS_LX_REPLY_RECV flags)`.
 fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     notes::drain_to(c.note_seq);
@@ -303,6 +238,8 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
             LX_OBJ_KIND_TEST => (obj::test_mmap(&cx), 0),
             _ => (-19, 0), // ENODEV
         },
+        // wave 6 (Group 19): a test call the test service redirected here
+        LX_TEST_NR if c.redir_obj != 0 => (0x5000 + c.redir_obj as i64 + 0x100 * c.redirs as i64 + c.redir_tail as i64, 0),
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one
         0 | 1 | 16 | 19 | 20 | 276 | LX_KCALL_REOPEN | LX_KCALL_FCNTL if c.obj != LX_OBJ_NONE => object_io(&cx),
         // Sockets (wave 5, step 3; AF_UNIX step 4): socket/socketpair by family, the rest by

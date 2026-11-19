@@ -9,6 +9,12 @@
  *   srvmap keep-write    a kept object (survives a restart of linux-server): writes a stamp
  *   srvmap keep-check    after the restart: the stamp must still be there
  *   srvmap hold N        maps the object and keeps using it for N seconds (kill-test load)
+ *   srvmap svchold N     maps an object of the test service svc-test and keeps using it for
+ *                        N seconds; kill svc-test meanwhile (`service kill svc_test`): the
+ *                        mapping must keep working after the service is gone
+ *
+ * With svc-test running (wave 6, Group 19's second service) the checks also map its
+ * objects and share an object of linux-server with it (LX_MEM_SHARE between two services).
  *
  * With the forwarding switched back to the kernel (lx=kernel) there is no server: the test
  * says so and passes.
@@ -86,6 +92,49 @@ static int keep(int write) {
     return fails != 0;
 }
 
+#define LX_TEST 0x6711
+#define LX_TEST_OBJ 1
+#define ENDPOINT_SVC_TEST 0x32
+static int svcobj(void) { return syscall(LX_TEST, LX_TEST_OBJ, 0, 0); }
+
+/* A mapping of a service's object outlives the service */
+static int svchold(int secs) {
+    int fd = svcobj();
+    if (fd <= 2) {
+        printf("no svc-test: SRVMAP SVCHOLD SKIPPED\n");
+        return 0;
+    }
+    volatile uint32_t *p = mmap(0, MEM, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL mmap of a svc-test object: %d\nSRVMAP SVCHOLD FAILED\n", errno);
+        return 1;
+    }
+    p[0] = 0x600d;
+    int seen = peek(fd, 0) == 0x600d;
+    printf("SVCHOLD READY (server sees our write: %s)\n", seen ? "yes" : "no");
+    time_t end = time(0) + secs;
+    unsigned long n = 0, after = 0;
+    int gone = 0, bad = 0;
+    while (time(0) < end) {
+        for (int i = 0; i < MEM / 4; i += 1024) p[i] = n;
+        for (int i = 0; i < MEM / 4; i += 1024) bad |= p[i] != n;
+        n++;
+        if (n % 200 == 0 && !gone) {
+            long r = peek(fd, 0);
+            if (r < 0) {
+                gone = 1;
+                printf("the service is gone (ioctl: %s); the mapping keeps working\n", strerror(errno));
+            }
+        }
+        if (gone) after++;
+        usleep(1000);
+    }
+    printf("%lu rounds, %lu after the service went, memory %s\n", n, after, bad ? "CHANGED" : "intact");
+    int ok = seen && gone && after > 0 && !bad;
+    printf(ok ? "SRVMAP SVCHOLD PASSED\n" : "SRVMAP SVCHOLD FAILED (seen %d gone %d bad %d)\n", seen, gone, bad);
+    return !ok;
+}
+
 static int hold(int secs) {
     int fd = newobj(0);
     if (fd <= 2) return 1;
@@ -114,6 +163,7 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "keep-write")) return keep(1);
     if (argc > 1 && !strcmp(argv[1], "keep-check")) return keep(0);
     if (argc > 1 && !strcmp(argv[1], "hold")) return hold(argc > 2 ? atoi(argv[2]) : 30);
+    if (argc > 1 && !strcmp(argv[1], "svchold")) return svchold(argc > 2 ? atoi(argv[2]) : 30);
 
     int fd = newobj(0);
     if (fd <= 2) { /* lx=kernel: the kernel answers the test call with 0 */
@@ -243,6 +293,33 @@ int main(int argc, char **argv) {
         close(f);
     }
     check(ok, "300 objects mapped, written and closed");
+
+    /* 12. a second service (svc-test): its objects map too, and an object of linux-server
+     * shared with it (LX_MEM_SHARE) is written by it */
+    int sfd = svcobj();
+    if (sfd > 2) {
+        volatile uint32_t *s = mmap(0, MEM, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+        check(s != MAP_FAILED, "mmap of a svc-test object");
+        if (s != MAP_FAILED) {
+            s[10] = 0x12345678;
+            check(peek(sfd, 40) == 0x12345678, "svc-test sees the program's write");
+            check(poke(sfd, 44, 0x87654321) == 0 && s[11] == 0x87654321, "the program sees svc-test's write");
+            munmap((void *)s, MEM);
+        }
+        int lfd = newobj(0);
+        volatile uint32_t *l = mmap(0, MEM, PROT_READ | PROT_WRITE, MAP_SHARED, lfd, 0);
+        long ph = syscall(SYS_ioctl, lfd, 0x4D55, (unsigned long)ENDPOINT_SVC_TEST);
+        check(l != MAP_FAILED && ph > 0, "linux-server shares its object with svc-test");
+        if (l != MAP_FAILED && ph > 0) {
+            check(syscall(SYS_ioctl, sfd, 0x4D55, (unsigned long)ph | 0xabcd1234UL << 32) == 0, "svc-test maps the shared handle and writes");
+            check(l[4] == 0xabcd1234 && peek(lfd, 16) == (long)0xabcd1234, "the program and linux-server see svc-test's write");
+        }
+        if (l != MAP_FAILED) munmap((void *)l, MEM);
+        close(lfd);
+        close(sfd);
+    } else {
+        printf("(no svc-test: the second-service checks are skipped)\n");
+    }
 
     printf(fails ? "SRVMAP TEST FAILED (%d)\n" : "SRVMAP TEST PASSED\n", fails);
     return fails != 0;

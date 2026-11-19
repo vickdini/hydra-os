@@ -415,6 +415,17 @@ fn test_ioctl(slot: u32, cmd: u64, arg: u64) -> i64 {
                 }
             }
         }
+        // Share with service endpoint `arg`: the peer's handle number
+        0x4D55 => {
+            let t = match test_mem(slot) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            let me = hydra_rt::mem::MemObj::from_raw(t.handle);
+            let r = me.share(arg as u32);
+            let _ = me.into_raw();
+            r.map_or_else(|e| e, |h| h as i64)
+        }
         0x4D52 => {
             let t = {
                 let mut m = TEST_MEMS.lock();

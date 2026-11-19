@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::ipc::protocol::{
-    lx_mmap_parts, ENDPOINT_LINUX_SERVER, LX_MEM_ANON, LX_MEM_CLOSE, LX_MEM_DMA, LX_MEM_EXISTED, LX_MEM_HANDLES, LX_MEM_INFO, LX_MEM_KEPT, LX_MEM_MAP, LX_MEM_MAX, LX_MEM_SHARE, LX_MEM_UNKEEP,
+    lx_mmap_parts, LX_MEM_ANON, LX_MEM_CLOSE, LX_MEM_DMA, LX_MEM_EXISTED, LX_MEM_HANDLES, LX_MEM_INFO, LX_MEM_KEPT, LX_MEM_MAP, LX_MEM_MAX, LX_MEM_SHARE, LX_MEM_UNKEEP,
     LX_MEM_UNMAP,
 };
 pub use crate::memory::vm::MemObject;
@@ -91,20 +91,18 @@ fn kept<R>(f: impl FnOnce(&mut Vec<KeptObj>) -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(|| f(&mut KEPT.lock()))
 }
 
-// wave6 G23: the two places that need Group 19's service registry. Until it merges there is
-// one Linux service, linux-server (svc LXS_LINUX = 1, endpoint 0x29), owner of every server
-// object.
+// The two places that use Group 19's service registry (`super::svc`).
 
-/// The service id whose kept objects a process serving `endpoint` makes: the lowest
-/// registry id that names `endpoint` (co-located services share their process).
+/// The service id whose kept objects a process serving `endpoint` makes: the host id of
+/// that process (co-located services share their process, and its kept objects).
 fn svc_of_endpoint(endpoint: u32) -> Option<u8> {
-    (endpoint == ENDPOINT_LINUX_SERVER).then_some(1)
+    super::svc::host_by_endpoint(endpoint)
 }
 
 /// The endpoint of the service that owns server object `dev` (whose table holds the handle
-/// its `mmap` answer names).
-fn owner_endpoint(_dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> u32 {
-    ENDPOINT_LINUX_SERVER
+/// its `mmap` answer names): the object's host.
+fn owner_endpoint(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> u32 {
+    dev.as_server().map_or(0, |o| super::svc::endpoint_of(o.svc()))
 }
 
 /// Puts `obj` into `endpoint`'s table; returns its handle (1..=[`LX_MEM_HANDLES`]).

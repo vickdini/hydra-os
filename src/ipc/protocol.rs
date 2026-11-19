@@ -689,6 +689,46 @@ pub struct LxCall {
     /// path name, the socket node's inode the kernel resolved (or created, for `bind`) in
     /// the caller's context at trap time; a negative errno if that failed; 0 otherwise.
     pub ino: u64,
+    // wave6 G19 begin: routing to several services (docs/linux-services-design.md 3.8). Appended.
+    /// The caller's personality (Group 14's; 0 = Linux).
+    pub pers: u32,
+    /// The logical service the call was routed to ([`LXS_LINUX`], [`LXS_SEC`], ...): a process
+    /// hosting several services (co-located) may dispatch by it.
+    pub svc: u32,
+    /// A second result (Group 14's, for BSD/macOS `fork`/`pipe`; unused yet).
+    pub result2: u64,
+    /// The caller's root and current directory as kernel directory-handle keys (0 until the
+    /// kernel has directory handles, wave 7).
+    pub root: u64,
+    /// See [`LxCall::root`].
+    pub cwd: u64,
+    /// The caller's process group and session (entries with `T_FSCTX`).
+    pub pgid: u32,
+    /// See [`LxCall::pgid`].
+    pub sid: u32,
+    /// The caller's mount, network, PID and user namespace ids (entries with `T_FSCTX`).
+    pub mnt_ns: u32,
+    /// See [`LxCall::mnt_ns`].
+    pub net_ns: u32,
+    /// See [`LxCall::mnt_ns`].
+    pub pid_ns: u32,
+    /// See [`LxCall::mnt_ns`].
+    pub user_ns: u32,
+    /// The device number of a forwarded device `open` ([`LX_KCALL_DEVOPEN`]).
+    pub dev: u64,
+    /// The object a redirect named ([`LX_REPLY_REDIRECT`]); 0 if the call was not redirected.
+    pub redir_obj: u64,
+    /// Where the redirected service's part of a path starts (the redirect's `tail`).
+    pub redir_tail: u32,
+    /// How many times this call was redirected.
+    pub redirs: u32,
+    /// Group 20: the request a call between services is made for (delegation).
+    pub on_behalf: u64,
+    /// Group 20: the calling service of a call between services.
+    pub from_svc: u32,
+    /// Group 20: the operation of a call between services.
+    pub dcall_op: u32,
+    // wave6 G19 end
 }
 
 impl LxCall {
@@ -715,6 +755,24 @@ impl LxCall {
         ipc_ns: 0,
         umask: 0,
         ino: 0,
+        pers: 0,
+        svc: 0,
+        result2: 0,
+        root: 0,
+        cwd: 0,
+        pgid: 0,
+        sid: 0,
+        mnt_ns: 0,
+        net_ns: 0,
+        pid_ns: 0,
+        user_ns: 0,
+        dev: 0,
+        redir_obj: 0,
+        redir_tail: 0,
+        redirs: 0,
+        on_behalf: 0,
+        from_svc: 0,
+        dcall_op: 0,
     };
 }
 
@@ -778,6 +836,10 @@ const _: () = assert!(LX_COPY_OFF + core::mem::size_of::<LxCopy>() <= LX_DATA_OF
 pub const LX_REPLY_PENDING: u64 = 1;
 /// `SYS_LX_REPLY_RECV` flag: no answer (the worker's first call).
 pub const LX_REPLY_NONE: u64 = 2;
+/// `SYS_LX_REPLY_RECV` flag (wave 6, Group 19): a redirect: `result` = target service id
+/// `| tail << 32`, the object in the page's [`LxCall::redir_obj`]. The kernel forwards the same
+/// call to that service in the same trap.
+pub const LX_REPLY_REDIRECT: u64 = 4;
 
 /// `SYS_LX_CTL` operation: register the calling thread as a worker; returns the address of
 /// its syscall page.
@@ -788,6 +850,9 @@ pub const LX_CTL_ONLINE: u64 = 1;
 /// `SYS_LX_CTL` operation: wake the server's main thread ([`NOTIFY_LX_NOTES`]), which then
 /// looks at its timed work (a worker queued some).
 pub const LX_CTL_WAKE: u64 = 2;
+/// `SYS_LX_CTL` operation (wave 6, Group 19): maps the calling service's object area
+/// (readiness slots and bitmaps, [`LX_OBJ_OFF`]) into it and returns its address.
+pub const LX_CTL_OBJAREA: u64 = 3;
 
 /// Notification ring in the server's window: u64 words at this offset: `[0]` head (the
 /// kernel's next sequence number), `[1]` tail (the server's: everything before it is
@@ -844,25 +909,28 @@ pub const LX_PROC_KEYS_TEXT_MAX: usize = 0xF000;
 /// number in bits 32..62), not of `args[0]`.
 pub const LX_OBJ_FLAGS_AT1: u64 = 1 << 63;
 
-/// Number of server-object slots.
-pub const LX_OBJ_SLOTS: usize = 2048;
+/// Number of server-object slots of one service (wave 6, Group 19: was 2048; Wine used half).
+pub const LX_OBJ_SLOTS: usize = 8192;
 /// [`LxCall::obj`]: no server object.
 pub const LX_OBJ_NONE: u64 = u64::MAX;
-/// Window offset of the readiness slots: slot `s` is 16 bytes at `LX_OBJ_OFF + 16 * s`:
+/// Offset of the readiness slots **in the service's object area** (wave 6, Group 19: no longer
+/// in the window; `LX_CTL_OBJAREA` maps the area): slot `s` is 16 bytes at `LX_OBJ_OFF + 16 * s`:
 /// `[u32 poll bits (POLLIN, POLLOUT, POLLERR, POLLHUP, ...), u32 edge count (+1 whenever
 /// bits are added: edge-triggered epoll), u64 size (st_size)]`.
-pub const LX_OBJ_OFF: usize = 0x21000;
-/// Window offset of the changed-slot bitmap (`LX_OBJ_SLOTS` bits, u64 words): the server
+pub const LX_OBJ_OFF: usize = 0;
+/// Object-area offset of the changed-slot bitmap (`LX_OBJ_SLOTS` bits, u64 words): the server
 /// sets bit `s` (atomic or) after changing slot `s`; the kernel takes the words (atomic swap
 /// with 0) and wakes the objects' waiters.
-pub const LX_OBJ_CHANGED_OFF: usize = 0x29000;
-/// Window offset of the watched-slot bitmap (`LX_OBJ_SLOTS` bits): the kernel sets bit `s`
+pub const LX_OBJ_CHANGED_OFF: usize = 16 * LX_OBJ_SLOTS;
+/// Object-area offset of the watched-slot bitmap (`LX_OBJ_SLOTS` bits): the kernel sets bit `s`
 /// (atomic or) the first time a task waits for slot `s` (`poll`, `select`, `epoll`) and never
 /// clears it; the server clears it when it hands the slot out again. The server rings the
 /// doorbell only for watched slots (an object nobody ever waited on costs no doorbell).
 /// Ordering: the kernel sets the bit before it reads the word; the server writes the word,
 /// then (after a full fence) reads the bit.
-pub const LX_OBJ_WATCHED_OFF: usize = 0x29100;
+pub const LX_OBJ_WATCHED_OFF: usize = LX_OBJ_CHANGED_OFF + LX_OBJ_SLOTS / 8;
+/// Pages of a service's object area (the readiness slots and both bitmaps).
+pub const LX_OBJ_AREA_PAGES: u64 = ((LX_OBJ_WATCHED_OFF + LX_OBJ_SLOTS / 8 + 4095) / 4096) as u64;
 /// `SYS_SVC_SIGNAL` bits from the server: readiness words changed.
 pub const LX_SIGNAL_OBJS: u64 = 1;
 
@@ -1125,3 +1193,111 @@ pub const fn lx_mmap_parts(answer: i64) -> (u32, u64, bool) {
     ((a & 0x7FFF) as u32, a >> 16 & 0x7FFF_FFFF_FFFF, a >> 15 & 1 == 1)
 }
 // wave6 G23 end
+// ----------------------------------------------------------------------------------------
+// wave6 G19 begin: services (wave 6, Group 19, docs/linux-services-design.md section 3)
+// ----------------------------------------------------------------------------------------
+//
+// The kernel routes each forwarded call to the service that owns it. A service id names a
+// Linux-facing service; several ids may be served by one process (co-located: their
+// registry entries name the same endpoint). Request ids carry the id of the process's
+// table (`id = host << 56 | sequence`).
+
+/// A service id (0: the kernel).
+pub type SvcId = u8;
+/// The kernel (not forwarded).
+pub const LXS_KERNEL: SvcId = 0;
+/// linux-server: everything not split out yet.
+pub const LXS_LINUX: SvcId = 1;
+/// vfs-server (wave 7).
+pub const LXS_VFS: SvcId = 2;
+/// Internet and netlink sockets.
+pub const LXS_NET: SvcId = 3;
+/// Unix sockets, pipes, FIFOs, eventfd, timerfd, signalfd, pidfd, POSIX and System V IPC.
+pub const LXS_IPC: SvcId = 4;
+/// Process and signal policy, `/proc`.
+pub const LXS_PROC: SvcId = 5;
+/// Display (DRM).
+pub const LXS_DISPLAY: SvcId = 6;
+/// Input (evdev).
+pub const LXS_INPUT: SvcId = 7;
+/// Sound (ALSA).
+pub const LXS_SOUND: SvcId = 8;
+/// Terminals.
+pub const LXS_TTY: SvcId = 9;
+/// Keys and bpf (lx-sec).
+pub const LXS_SEC: SvcId = 10;
+/// The test service (`userland/drivers/svc-test`).
+pub const LXS_TEST: SvcId = 11;
+/// Size of the registry.
+pub const LXS_MAX: usize = 16;
+/// The services' names (boot words `lx.<name>=kernel|linux`, logs).
+pub const LXS_NAMES: [&str; LXS_MAX] = ["kernel", "linux", "vfs", "net", "ipc", "proc", "display", "input", "sound", "tty", "sec", "test", "s12", "s13", "s14", "s15"];
+
+/// Endpoint of vfs-server (wave 7).
+pub const ENDPOINT_VFS_SERVER: u32 = 0x2D;
+/// Endpoint of lx-net, once split out.
+pub const ENDPOINT_LX_NET: u32 = 0x2E;
+/// Endpoint of lx-ipc, once split out.
+pub const ENDPOINT_LX_IPC: u32 = 0x2F;
+/// Endpoint of lx-proc, once split out.
+pub const ENDPOINT_LX_PROC: u32 = 0x30;
+/// Endpoint of lx-sec (keys, bpf), once split out.
+pub const ENDPOINT_LX_SEC: u32 = 0x31;
+/// Endpoint of the test service.
+pub const ENDPOINT_SVC_TEST: u32 = 0x32;
+
+/// Request ids: bits 56..63 hold the id of the table (the serving process's host id).
+pub const LX_REQ_SVC_SHIFT: u32 = 56;
+
+/// The host id of request `id`.
+pub const fn lx_req_svc(id: u64) -> SvcId {
+    (id >> LX_REQ_SVC_SHIFT) as SvcId
+}
+
+/// Most redirects of one call (then `-ELOOP`).
+pub const LX_REDIR_MAX: u32 = 4;
+/// Internal result of a redirected call (never seen by a program).
+pub const LX_REDIRECTED: i64 = -4100;
+
+/// `LX_KCALL_DEVOPEN(rdev, flags)`: `open` of a character device whose major a service
+/// claimed ([`LX_SVC_CLAIM_MAJOR`]), with [`LxCall::dev`] = `rdev`: the service installs a
+/// descriptor ([`LX_OBJ_INSTALL`]) and answers its number.
+pub const LX_KCALL_DEVOPEN: u64 = 0x6784;
+
+/// The test service's call (a Hydra-private number, routed to [`LXS_TEST`]). `arg0` is the
+/// operation: [`LX_TEST_NULL`], [`LX_TEST_OBJ`], ...
+pub const LX_TEST_NR: u64 = 0x6711;
+/// [`LX_TEST_NR`]: return 0 at once.
+pub const LX_TEST_NULL: u64 = 0;
+/// [`LX_TEST_NR`]: a new test object (`arg1`: `O_CLOEXEC`/`O_NONBLOCK`); returns its descriptor.
+/// Writing `r`/`w`/`c` makes it readable / writable / clears both; reading gives `svc-test N`.
+pub const LX_TEST_OBJ: u64 = 1;
+/// [`LX_TEST_NR`]: answer later (pending): `arg1` ms, then [`LX_TEST_PENDING_RESULT`].
+pub const LX_TEST_PENDING: u64 = 2;
+/// The answer of [`LX_TEST_PENDING`].
+pub const LX_TEST_PENDING_RESULT: i64 = 4242;
+/// [`LX_TEST_NR`]: redirect to linux-server (`arg1` = object, `arg2` = tail): linux-server's
+/// answer to a redirected [`LX_TEST_NR`] is `0x5000 + redir_obj + 0x100 * redirs + redir_tail`.
+pub const LX_TEST_REDIRECT: u64 = 3;
+/// [`LX_TEST_NR`]: which process serves it (the test service's process id).
+pub const LX_TEST_WHO: u64 = 4;
+/// [`LX_TEST_NR`]: add 1 to each of `arg2` bytes at `arg1` of the caller (client memory).
+pub const LX_TEST_COPY: u64 = 5;
+/// [`LX_TEST_NR`]: redirect to itself `arg1` times more (a loop: `-ELOOP` beyond the limit).
+pub const LX_TEST_REDIR_LOOP: u64 = 6;
+/// Kind of the test service's objects.
+pub const LX_OBJ_KIND_SVCTEST: u32 = 30;
+/// The character major the test service claims (Linux's "local/experimental" range).
+pub const SVC_TEST_MAJOR: u64 = 240;
+
+/// Native system call 72 `SYS_LX_SVC(op, a, b, c)`: a service's registry operations.
+/// `(mask)`: the process events (bit k = notification kind k: FORK 1, EXEC 2, EXIT 3) the
+/// calling service wants in its ring.
+pub const LX_SVC_SUBSCRIBE: u64 = 0;
+/// `SYS_LX_SVC`: `(major, svc)`: `open` of a character device of `major` goes to service
+/// `svc` (one hosted by the caller; 0: the caller's own).
+pub const LX_SVC_CLAIM_MAJOR: u64 = 1;
+/// `SYS_LX_SVC`: the calling process's host id.
+pub const LX_SVC_WHOAMI: u64 = 2;
+// (ops 3-7: Group 20; 16-23: Group 21)
+// wave6 G19 end

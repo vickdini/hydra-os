@@ -32,6 +32,7 @@ const SYS_LX_READ: u64 = 54;
 const SYS_LX_WRITE: u64 = 55;
 const SYS_LX_READ_STR: u64 = 56;
 const SYS_LX_PROC_INFO: u64 = 57;
+const SYS_LX_SVC: u64 = 72;
 const SYS_LX_OBJ: u64 = 60;
 const SYS_LX_SIG: u64 = 61;
 const SYS_LX_TIMER: u64 = 62;
@@ -293,6 +294,14 @@ pub fn lx_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
     unsafe { syscall5(SYS_LX_MEM, op, a, b, c, d) }
 }
 // wave6 G23 end
+/// A service's registry operation (`SYS_LX_SVC`, wave 6: [`crate::protocol::LX_SVC_SUBSCRIBE`],
+/// `LX_SVC_CLAIM_MAJOR`, `LX_SVC_WHOAMI`, ...); returns its non-negative result.
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_svc(op: u64, a: u64, b: u64, c: u64) -> Result<u64, i64> {
+    check(unsafe { syscall4(SYS_LX_SVC, op, a, b, c) }).map(|v| v as u64)
+}
 
 /// Gives up the rest of the time slice.
 pub fn yield_now() {
