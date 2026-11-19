@@ -237,6 +237,24 @@ for every piece:
 `linux prof show`'s `[prof] lx:` line ends with the copies' faults fixed up and pages
 faulted in.
 
+Measured with `tests/linux/cpbench.c` (every case timed in short interleaved bursts, so the
+host's noise hits all alike; the fastest burst of 300, ns per call; Group 16's stub calls of
+`tools/vfsbench/prototype.patch` built in; three VMs each, base ba75050 and wave 6,
+alternating, 2026-11-19, a busy host):
+
+| Call | Over the null forward, base | Wave 6 |
+|---|---:|---:|
+| `stat` stub (a 14-byte path in, 144 bytes out) | +678 .. +964 | **+418 .. +462** |
+| `read` stub, 256 bytes out | +572 .. +849 | +369 .. +435 |
+| `read` stub, 4 KiB out (through `SYS_LX_WRITE`) | +1119 .. +1512 | +903 .. +991 |
+| `add_key` (two strings and 16 bytes in, plus the key work) | +2533 .. +2965 | +2195 .. +2267 |
+| `keyctl` DESCRIBE (256 bytes out, plus the key work) | +2184 .. +2682 | +1954 .. +2065 |
+| the null forward over `getpgrp` | +1944 .. +2228 | +1997 .. +2017 |
+
+So a path call (`stat` stub) adds +2.43 .. +2.46 µs over `getpgrp` (base +2.62 .. +3.19):
+inside Group 16's target of +2.5 µs. What is left of the pointer cost is mostly the server's
+own work (the stub's lookup allocates the path).
+
 ## Client memory
 
 | Primitive | Number | What it does |
