@@ -20,6 +20,7 @@ pub mod heap;
 pub mod port;
 pub mod svccall;
 pub mod sys;
+pub mod svcrt;
 
 /// Message codes shared with the kernel (one source: the kernel's `ipc/protocol.rs`).
 #[path = "../../../../src/ipc/protocol.rs"]

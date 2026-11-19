@@ -56,22 +56,12 @@
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::ipc::protocol::{LxCall, LX_DCALL_NR, LX_DCALL_OP_NULL, LX_GROUPS, LX_NOTE_POST};
+use crate::ipc::protocol::{
+    LxCall, SvcId, LXS_DISPLAY, LXS_INPUT, LXS_IPC, LXS_LINUX, LXS_MAX, LXS_NET, LXS_PROC, LXS_SEC, LXS_SOUND, LXS_TEST, LXS_TTY, LXS_VFS, LX_DCALL_NR,
+    LX_DCALL_OP_NULL, LX_GROUPS, LX_NOTE_POST,
+};
 
-// Until Group 19's registry is merged: its service ids (`ipc::protocol`, `LXS_*`)
-type SvcId = u8;
-const LXS_LINUX: SvcId = 1;
-const LXS_VFS: SvcId = 2;
-const LXS_NET: SvcId = 3;
-const LXS_IPC: SvcId = 4;
-const LXS_PROC: SvcId = 5;
-const LXS_DISPLAY: SvcId = 6;
-const LXS_INPUT: SvcId = 7;
-const LXS_SOUND: SvcId = 8;
-const LXS_TTY: SvcId = 9;
-const LXS_SEC: SvcId = 10;
-const LXS_TEST: SvcId = 11;
-const LXS_MAX: usize = 16;
+use super::svc;
 
 use super::copy;
 
@@ -211,44 +201,32 @@ pub fn summary() -> alloc::string::String {
 // The calls
 // ----------------------------------------------------------------------
 
-/// The service id of the calling process (0: not a Linux service).
+/// The host id of the calling process (its first service: the one a call from it is from;
+/// 0: not a Linux service's process).
 fn my_svc() -> SvcId {
-    match crate::task::current_service() {
-        Some(crate::ipc::protocol::ENDPOINT_LINUX_SERVER) => LXS_LINUX,
-        Some(ep) => svc_of_endpoint(ep),
-        None => 0,
+    crate::task::current_service().and_then(svc::host_by_endpoint).unwrap_or(0)
+}
+
+/// Service `target`'s host when it serves calls now (`None`: in the kernel, or not running).
+fn target_host(target: SvcId) -> Option<&'static svc::Host> {
+    if svc::mode(target) == svc::SvcMode::Kernel {
+        return None;
     }
+    svc::host(svc::host_of(target)).filter(|x| x.is_online())
 }
 
-/// The service id a process with endpoint `ep` serves (0: none).
-fn svc_of_endpoint(ep: u32) -> SvcId {
-    // Before the registry (Group 19): only linux-server is a Linux service
-    if ep == crate::ipc::protocol::ENDPOINT_LINUX_SERVER {
-        LXS_LINUX
-    } else {
-        0
-    }
-}
-
-/// Whether service `svc` is served now, and by the calling process.
-fn target_state(svc: SvcId) -> (bool, bool) {
-    // Before the registry: every Linux service is co-located in linux-server
-    let online = svc == LXS_LINUX && super::is_online();
-    (online, crate::task::current_service() == Some(crate::ipc::protocol::ENDPOINT_LINUX_SERVER))
-}
-
-/// The identity a dcall made by thread `me` carries: the program it serves a request for
-/// (`(request, its caller)`), else its own.
-fn identity(c: &mut LxCall, me: u64) -> u64 {
+/// The identity a dcall made by thread `me` (of host `mine`) carries: the program it serves
+/// a request for (`(request, its caller)`), else its own.
+fn identity(c: &mut LxCall, me: u64, mine: SvcId) -> u64 {
     // The request the calling worker serves, if any
-    let serving = super::lx(|s| {
+    let serving = svc::host(mine).and_then(|x| x.lx(|s| {
         let w = s.workers.iter().find(|w| w.task == me)?;
         if w.req == super::NONE {
             return None;
         }
         let r = &s.reqs[w.req];
         matches!(r.state, super::RState::Delivered).then_some((r.id, r.client))
-    });
+    }));
     let (on_behalf, who) = match serving {
         Some((r, client)) => (r, client),
         None => (0, me),
@@ -300,18 +278,19 @@ pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     if in_len > size || out_cap > size || in_len + out_cap > size || (in_len > 0 && inp == 0) || (out_cap > 0 && out == 0) {
         return EINVAL;
     }
-    let (online, own) = target_state(target);
-    if !online {
-        return ENOSYS;
-    }
+    let Some(x) = target_host(target) else { return ENOSYS };
     // A pool never waits for itself: a call to its own process needs an idle worker now
-    if own && !super::lx(|s| s.workers.iter().any(|w| w.idle)) {
+    if x.id == from && !x.lx(|s| s.workers.iter().any(|w| w.idle)) {
         return EAGAIN;
     }
     let mut c = LxCall::EMPTY;
     c.nr = LX_DCALL_NR;
     c.args = [op, if in_len > 0 { inp } else { 0 }, if out_cap > 0 { out } else { 0 }, in_len, out_cap, from as u64];
-    let on_behalf = identity(&mut c, me);
+    c.svc = target as u32;
+    c.from_svc = from as u32;
+    c.dcall_op = op as u32;
+    let on_behalf = identity(&mut c, me, from);
+    c.on_behalf = on_behalf;
     let mut buf = copy::CopyBuf::EMPTY;
     if let Err(e) = copy::fill(&mut buf, &DCALL_DESC, &c.args) {
         return if e == 0 { EFAULT } else { e };
@@ -320,11 +299,14 @@ pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     if in_len > 0 && buf.hdr.in_off[1] == 0 {
         return EFAULT;
     }
-    c.note_seq = super::notes_head();
+    c.note_seq = x.notes_head();
     DCALLS.fetch_add(1, Ordering::Relaxed);
     // The delegation holds while the call lasts (it is in force before the callee runs)
     let deleg = on_behalf != 0 && deleg_add(me, on_behalf);
-    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(me, idx, c, Some(&buf), nobkl, None));
+    let mut redir = (0, 0);
+    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, idx, c, Some(&buf), nobkl, None, &mut redir));
+    // (a redirect answer is not a dcall's: the callee answers itself)
+    let r = if r == crate::ipc::protocol::LX_REDIRECTED { EINVAL } else { r };
     if deleg {
         deleg_end(me);
     }
@@ -351,14 +333,28 @@ pub fn post(a: [u64; 6]) -> i64 {
     if len > 0 && copy::read_user(data, &mut w[..len as usize]).is_err() {
         return EFAULT;
     }
-    if !target_state(target).0 {
-        return ENOSYS;
-    }
+    let Some(x) = target_host(target) else { return ENOSYS };
     POSTS.fetch_add(1, Ordering::Relaxed);
     let w0 = u64::from_le_bytes(w[..8].try_into().unwrap());
     let w1 = u64::from_le_bytes(w[8..].try_into().unwrap());
-    super::note(LX_NOTE_POST, from as u64 | op << 32 | (target as u64) << 56, w0, w1);
+    super::note_to(x.id, LX_NOTE_POST, from as u64 | op << 32 | (target as u64) << 56, w0, w1);
     0
+}
+
+/// Whether the calling thread (a worker) serves a dcall made on behalf of request `id`, so
+/// it may use `id` as its own (client memory, installing a descriptor; design 4.3).
+pub(super) fn may_use(id: u64) -> bool {
+    let me = crate::task::CURRENT_TID.load(Ordering::Acquire);
+    let Some(x) = svc::worker_host(me).and_then(svc::host) else { return false };
+    let dcall_caller = x.lx(|s| {
+        let w = s.workers.iter().find(|w| w.task == me)?;
+        if w.req == super::NONE {
+            return None;
+        }
+        let r = &s.reqs[w.req];
+        matches!(r.state, super::RState::Delivered | super::RState::Pending).then_some(r.client)
+    });
+    dcall_caller.is_some_and(|d| delegated(d, id))
 }
 
 /// Ops 3-7 of `SYS_LX_SVC` (72): 3 `LX_SVC_ALLOW` (kernel only: `-EPERM` from programs),

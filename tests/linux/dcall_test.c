@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LX_NULL_NR 0x6710
@@ -28,6 +29,8 @@
 #define DOP_NULL 0
 #define DOP_ECHO 1
 #define DOP_WHO 2
+#define DOP_PEEK 3
+#define DOP_SLOW 4
 #define LXS_LINUX 1
 #define LXS_TEST 11
 
@@ -51,7 +54,23 @@ static void *loop_thread(void *x) {
     return 0;
 }
 
+/* "kill" mode: slow calls to the test service for `secs` seconds while someone kills it;
+ * every call must end (0, or EIO / ENOSYS while it is away), none may hang */
+static int kill_mode(int secs) {
+    time_t end = time(0) + secs;
+    long n = 0, ok = 0, eio = 0, enosys = 0, other = 0;
+    while (time(0) < end) {
+        long r = dc(LXS_TEST, DOP_SLOW, 50);
+        n++;
+        if (r == 0) ok++; else if (r == -EIO) eio++; else if (r == -ENOSYS) enosys++; else { other++; printf("kill mode: result %ld\n", r); }
+    }
+    printf("kill mode: %ld calls: %ld ok, %ld EIO, %ld ENOSYS, %ld other\n", n, ok, eio, enosys, other);
+    printf(other == 0 && ok > 0 ? "DCALL-KILL-OK\n" : "DCALL-KILL-FAILED\n");
+    return other != 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 2 && !strcmp(argv[1], "kill")) return kill_mode(atoi(argv[2]));
     long r = dc(LXS_LINUX, DOP_NULL, 0);
     CHECK(r == 0, "null dcall to linux-server: %ld", r);
     r = dc(LXS_LINUX, DOP_ECHO, 0x1234);
@@ -68,6 +87,9 @@ int main(int argc, char **argv) {
         CHECK(r == 0x1122334455667788L, "echo through the test service: %#lx", r);
         r = dc(LXS_TEST, DOP_WHO, 0);
         CHECK(r == getpid(), "delegation: callee saw process %ld, we are %d", r, getpid());
+        static volatile long secret = 0x0badcafe12345L;
+        r = dc(LXS_TEST, DOP_PEEK, (long)&secret);
+        CHECK(r == secret, "delegation: callee read %#lx from our memory, expected %#lx", r, secret);
     } else {
         r = dc(LXS_LINUX, DOP_WHO, 0);
         /* the null op is the only one allowed to itself */

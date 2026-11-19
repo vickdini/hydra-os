@@ -135,6 +135,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "svc-test"
+version = "0.1.0"
+dependencies = [
+ "hydra-rt",
+ "spin",
+]
+
+[[package]]
 name = "usb-driver"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,9 @@
+[package]
+name = "svc-test"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra's test service (wave 6): a second Linux service with calls and objects of its own"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

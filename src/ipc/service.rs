@@ -493,7 +493,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 9] = [
+static SERVICES: [Service; 15] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -504,6 +504,15 @@ static SERVICES: [Service; 9] = [
     Service::new(crate::ipc::protocol::ENDPOINT_NET_SERVER),
     // Wave 3 (Group 7): the Linux server's main thread (its workers use `crate::lx`)
     Service::new(crate::ipc::protocol::ENDPOINT_LINUX_SERVER),
+    // wave6 G19 begin: the Linux services' endpoints (vfs-server, lx-net, lx-ipc, lx-proc,
+    // lx-sec once split out; the test service)
+    Service::new(crate::ipc::protocol::ENDPOINT_VFS_SERVER),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_NET),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_IPC),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_PROC),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_SEC),
+    Service::new(crate::ipc::protocol::ENDPOINT_SVC_TEST),
+    // wave6 G19 end
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).
@@ -1070,7 +1079,12 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
                     break;
                 }
                 // Woken by the reply (or the server's end); a look every 100 ms meanwhile
-                crate::task::wait::wait(Some(deadline.min(now + 10)));
+                // (wave6 G20: a direct caller waits where the direct switch may resume it)
+                if direct {
+                    wait_clobbered(Some(deadline.min(now + 10)));
+                } else {
+                    crate::task::wait::wait(Some(deadline.min(now + 10)));
+                }
             }
             REQ_WQ[i].unregister();
             QUEUED_CALLER[i].store(0, Ordering::Release);
@@ -1256,6 +1270,23 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
             let _ = svc.parked.compare_exchange(mark, 0, Ordering::AcqRel, Ordering::Acquire);
         }
     });
+}
+
+/// `wait::wait`, with a yield that declares every register clobbered: a task waiting here
+/// may be resumed by the direct switch (which moves no FPU state).
+fn wait_clobbered(deadline: Option<u64>) {
+    if !crate::task::is_active() || !crate::arch::pit::is_active() {
+        crate::task::wait::wait(deadline);
+        return;
+    }
+    if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+        return;
+    }
+    let sleeping = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().event_wait_current(deadline));
+    if sleeping {
+        // SAFETY: the yield vector switches tasks and comes back here
+        unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+    }
 }
 
 /// A direct caller whose answer is marked, not woken yet ([`reply_recv`]).

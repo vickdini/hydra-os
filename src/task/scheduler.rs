@@ -509,7 +509,8 @@ impl Scheduler {
         let Some(ep) = self.tasks[idx].service else { return false };
         // The Linux server's worker threads may hold its state lock that its main thread,
         // serving a kernel request (`/proc/keys`), waits for (wave 3, `crate::lx`)
-        if ep == crate::ipc::protocol::ENDPOINT_LINUX_SERVER {
+        // (wave6 G19: every Linux service's process, not only linux-server's)
+        if ep == crate::ipc::protocol::ENDPOINT_LINUX_SERVER || crate::lx::svc::host_by_endpoint(ep).is_some() {
             let tgid = self.tasks[idx].tgid;
             if self.handoffs.iter().flatten().any(|h| self.tasks.iter().any(|t| t.id.0 == h.server && t.tgid == tgid)) {
                 return true;

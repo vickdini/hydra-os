@@ -53,6 +53,10 @@ pub fn discover() {
     if load_options_say(b"lx=kernel") {
         crate::lx::KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
     }
+    // wave6 G19: the per-service switch-back words (`lx.<name>=kernel|linux`)
+    if let Some((text, n)) = load_options_text() {
+        crate::lx::set_boot_words(&text[..n]);
+    }
     // The FreeBSD stub table of the personality hook (a test switch, `crate::personality`)
     if load_options_say(b"persona=fbsd-stub") {
         crate::personality::STUB_BY_BOOT_OPTION.store(true, Ordering::Release);
@@ -66,17 +70,21 @@ pub fn discover() {
 
 /// Whether the boot entry's load options contain `word` (lower case).
 fn load_options_say(word: &[u8]) -> bool {
-    let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) else {
-        return false;
-    };
-    let Some(opts) = img.load_options_as_bytes() else { return false };
+    let Some((text, n)) = load_options_text() else { return false };
+    text[..n].windows(word.len()).any(|w| w == word)
+}
+
+/// The boot entry's load options as lower-case ASCII (and how many bytes of it).
+fn load_options_text() -> Option<([u8; 512], usize)> {
+    let img = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok()?;
+    let opts = img.load_options_as_bytes()?;
     let mut text = [0u8; 512];
     let mut n = 0;
     for c in opts.chunks_exact(2).take(text.len()) {
         text[n] = if c[1] == 0 { c[0].to_ascii_lowercase() } else { b'?' };
         n += 1;
     }
-    text[..n].windows(word.len()).any(|w| w == word)
+    Some((text, n))
 }
 
 /// After the bare-metal transition, starts the KDE desktop (`linux plasma`) at once, unless

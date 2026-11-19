@@ -234,6 +234,7 @@ def main():
     ap.add_argument("--pcid-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pcid=off) not to use PCID (tagged TLB)")
     ap.add_argument("--global-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pge=off) not to use global kernel pages")
     ap.add_argument("--lx-kernel", action="store_true", help="tell the kernel (fw_cfg opt/hydra/lx=kernel) to answer the Linux calls moved to linux-server itself")
+    ap.add_argument("--lx", default=None, help="wave 6: per-service switch-back words for fw_cfg opt/hydra/lx, joined by '+', e.g. 'sec=kernel+ipc=kernel' or 'test=linux'")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
     if a.iommu:
@@ -310,6 +311,8 @@ def main():
         args += ["-fw_cfg", "name=opt/hydra/pge,string=off"]
     if a.lx_kernel:
         args += ["-fw_cfg", "name=opt/hydra/lx,string=kernel"]
+    elif a.lx:
+        args += ["-fw_cfg", "name=opt/hydra/lx,string=" + a.lx]
     disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
     if a.disk == "none":
         pass  # no pool disk (e.g. the pool on a USB stick given through HYDRA_QEMU_EXTRA)
