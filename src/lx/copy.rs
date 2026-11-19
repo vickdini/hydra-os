@@ -20,10 +20,12 @@
 //! - Output is copied after an immediate answer only; a copy-out that faults turns the
 //!   result into `-EFAULT`.
 //!
-//! The user memory is reached through the kernel's direct map while the caller's address
-//! space lock is held (so another thread cannot unmap it meanwhile), and only pages present
-//! now are used; a missing page is faulted in the ordinary way ([`fault_in`]) and the copy
-//! tried again.
+//! Wave 6 (Group 22): the user memory is copied straight through the caller's own address
+//! space, with fault fix-ups in the trap ([`try_copy`], `arch::idt::uaccess_fixup`), not
+//! through the direct map under the address-space lock. The copy-in is made when the call
+//! is placed, under the request table's lock, straight into the idle worker's syscall page
+//! ([`fill`]); a page not there yet is faulted in the ordinary way ([`fault_in`]) with that
+//! lock let go, and the call placed again.
 
 use crate::ipc::protocol::{LxCopy, LX_DATA_OFF, LX_DATA_SIZE};
 
@@ -208,7 +210,8 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
 }
 
 /// The copies of one call: the header for the page and the copy area's bytes (offset
-/// `LX_DATA_OFF` of the page is `data[0]`).
+/// `LX_DATA_OFF` of the page is `data[0]`). Used for calls that wait in the queue (their
+/// bytes wait with them), for kernel-buffer calls, and for the output after the answer.
 #[repr(C)]
 pub struct CopyBuf {
     /// The page's [`LxCopy`].
@@ -223,34 +226,44 @@ impl CopyBuf {
     /// No copies.
     pub const EMPTY: Self = Self { hdr: LxCopy::EMPTY, used: 0, data: [0; LX_DATA_SIZE] };
 
-    /// Room for `n` bytes in the copy area: its page offset.
-    fn take(&mut self, n: usize) -> Option<u16> {
-        if n == 0 || self.used + n > LX_DATA_SIZE {
-            return None;
-        }
-        let off = LX_DATA_OFF + self.used;
-        self.used += n;
-        Some(off as u16)
-    }
-
-    /// The copy area at page offset `off`.
-    fn at(&mut self, off: u16, n: usize) -> &mut [u8] {
-        let o = off as usize - LX_DATA_OFF;
-        &mut self.data[o..o + n]
-    }
-
     /// Bytes in use from the start of the copy area (what [`super::deliver`] copies).
     pub fn used_bytes(&self) -> &[u8] {
         &self.data[..self.used]
     }
 }
 
-/// Copies call `args`' pointer arguments that `desc` describes into `buf` (empty before).
+/// Where a call's copies come from.
+#[derive(Clone, Copy)]
+pub enum Src<'a> {
+    /// None (no table entry).
+    None,
+    /// Made already, in kernel memory (`lx::call_obj_kbuf`).
+    Kernel(&'a CopyBuf),
+    /// The caller's memory, as this table entry describes: copied when the call is placed.
+    User(&'static Desc),
+}
+
+/// Why [`fill`] stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillErr {
+    /// A bad pointer: the call fails with `-EFAULT`.
+    Fault,
+    /// The page at user address `.0` (and the `.1` bytes from there that the argument still
+    /// needs) is not there yet: fault it in ([`fault_in`]) and fill again.
+    Missing(u64, u64),
+}
+
+/// Copies call `args`' pointer arguments that `desc` describes into a copy area `data` (the
+/// worker's page from `LX_DATA_OFF`, or a [`CopyBuf`]'s) and sets `hdr` (empty before).
+/// Returns the bytes of `data` in use.
 ///
-/// # Errors
-///
-/// `-EFAULT` for a non-NULL input pointer that faults.
-pub fn fill(buf: &mut CopyBuf, desc: &Desc, args: &[u64; 6]) -> Result<(), i64> {
+/// Wave 6, Group 22: this runs under the request table's lock, straight into the worker's
+/// syscall page. The user memory is read through the caller's own address space with fault
+/// fix-ups ([`try_copy`]), so nothing here waits or faults pages in: a page not there yet is
+/// reported as [`FillErr::Missing`], and the caller faults it in after letting the lock go
+/// and fills again. A NULL pointer is never copied.
+pub fn fill(hdr: &mut LxCopy, data: &mut [u8; LX_DATA_SIZE], desc: &Desc, args: &[u64; 6]) -> Result<usize, FillErr> {
+    let mut used = 0usize;
     for (i, d) in desc.iter().enumerate() {
         let ptr = args[i];
         if ptr == 0 {
@@ -260,47 +273,61 @@ pub fn fill(buf: &mut CopyBuf, desc: &Desc, args: &[u64; 6]) -> Result<(), i64> 
             Arg::None => {}
             Arg::Str(max) => {
                 // The string and its NUL, within its limit and what is left
-                let room = (max as usize).min(LX_DATA_SIZE - buf.used);
+                let room = (max as usize).min(LX_DATA_SIZE - used);
                 if room == 0 {
                     continue;
                 }
-                let off = (LX_DATA_OFF + buf.used) as u16;
-                let found = read_user_str(ptr, buf.at(off, room))?;
-                if let Some(n) = found {
-                    buf.used += n + 1;
-                    buf.hdr.in_off[i] = off;
-                    buf.hdr.in_len[i] = n as u16;
+                let off = LX_DATA_OFF + used;
+                match try_str(ptr, &mut data[used..used + room]) {
+                    StrCopy::Found(n) => {
+                        used += n + 1;
+                        hdr.in_off[i] = off as u16;
+                        hdr.in_len[i] = n as u16;
+                    }
+                    StrCopy::NoNul => {}
+                    StrCopy::Bad => return Err(FillErr::Fault),
+                    StrCopy::Missing(at) => return Err(FillErr::Missing(at, 1)),
                 }
             }
             Arg::In(len) | Arg::InOut(len) => {
                 let Some(n) = len.of(args) else { continue };
-                if n == 0 {
+                if n == 0 || used + n > LX_DATA_SIZE {
                     continue;
                 }
-                let Some(off) = buf.take(n) else { continue };
-                read_user(ptr, buf.at(off, n))?;
-                buf.hdr.in_off[i] = off;
-                buf.hdr.in_len[i] = n as u16;
+                let off = LX_DATA_OFF + used;
+                if !user_ok(ptr, n) {
+                    return Err(FillErr::Fault);
+                }
+                // SAFETY: `ptr..ptr + n` is user memory (checked) of the current address
+                // space; `data[used..used + n]` is within the copy area
+                let left = unsafe { try_copy(data.as_mut_ptr().add(used), ptr as *const u8, n) };
+                if left != 0 {
+                    let done = (n - left) as u64;
+                    return Err(FillErr::Missing(ptr + done, n as u64 - done));
+                }
+                used += n;
+                hdr.in_off[i] = off as u16;
+                hdr.in_len[i] = n as u16;
                 if matches!(*d, Arg::InOut(_)) {
-                    buf.hdr.out_off[i] = off;
-                    buf.hdr.out_cap[i] = n as u16;
+                    hdr.out_off[i] = off as u16;
+                    hdr.out_cap[i] = n as u16;
                 }
             }
             Arg::Out(len) => {
                 // As much space as is left, up to the buffer's length: a short answer still
                 // fits when the buffer is large
-                let want = match len.of(args) {
-                    Some(n) => n,
-                    None => LX_DATA_SIZE,
-                };
-                let n = want.min(LX_DATA_SIZE - buf.used);
-                let Some(off) = buf.take(n) else { continue };
-                buf.hdr.out_off[i] = off;
-                buf.hdr.out_cap[i] = n as u16;
+                let want = len.of(args).unwrap_or(LX_DATA_SIZE);
+                let n = want.min(LX_DATA_SIZE - used);
+                if n == 0 {
+                    continue;
+                }
+                hdr.out_off[i] = (LX_DATA_OFF + used) as u16;
+                hdr.out_cap[i] = n as u16;
+                used += n;
             }
         }
     }
-    Ok(())
+    Ok(used)
 }
 
 /// Takes the output the server wrote (`out_len` of the page's header, `page_data` = the
@@ -340,8 +367,140 @@ pub fn has_output(buf: &CopyBuf) -> bool {
 }
 
 // ----------------------------------------------------------------------
-// User memory of the calling task
+// User memory of the calling task (wave 6, Group 22: copies with fault fix-ups)
 // ----------------------------------------------------------------------
+//
+// The forwarding path runs in the caller's own address space (its CR3), so the kernel
+// copies straight from and to the user addresses, as Linux's `copy_from_user` does: no
+// address-space lock, no page-table walk, no kernel lock. The copying instructions sit in
+// the small routines below. A page fault on one of them (a page not there yet, a bad
+// pointer, a read-only page written) does not go to the ordinary fault handler: the trap
+// entry finds the instruction in its fix-up table (`arch::idt::uaccess_fixup`) and resumes
+// at the routine's fix-up label, which returns how far the copy got. The caller then faults
+// the page in the ordinary way ([`fault_in`]: demand paging, copy-on-write, file pages,
+// under the kernel lock) and tries again; a page that cannot be faulted in is `-EFAULT`.
+//
+// The addresses are checked to be user addresses first ([`user_ok`]): the routines would
+// copy kernel memory just as well. Supervisor write protection (CR0.WP) is on, so a write
+// to a read-only (copy-on-write) user page faults as it would from user mode.
+
+core::arch::global_asm!(
+    r#"
+    .text
+    // hydra_uaccess_copy(dst rdi, src rsi, n rdx) -> rax = bytes NOT copied (0: all)
+    .global hydra_uaccess_copy
+    hydra_uaccess_copy:
+        mov rcx, rdx
+    .global hydra_uaccess_copy_insn
+    hydra_uaccess_copy_insn:
+        rep movsb
+    .global hydra_uaccess_copy_insn_end
+    hydra_uaccess_copy_insn_end:
+        xor eax, eax
+        ret
+    // Its fix-up: a fault on `rep movsb` resumes here, rcx = the bytes left
+    .global hydra_uaccess_copy_fix
+    hydra_uaccess_copy_fix:
+        mov rax, rcx
+        ret
+
+    // hydra_uaccess_str(dst rdi, src rsi, max rdx) -> rax = the string's length without
+    // its NUL (the NUL copied too), -1 = no NUL within max bytes, -2 - k = a fault at src + k
+    .global hydra_uaccess_str
+    hydra_uaccess_str:
+        xor ecx, ecx
+    2:
+        cmp rcx, rdx
+        jae 3f
+    .global hydra_uaccess_str_insn
+    hydra_uaccess_str_insn:
+        movzx eax, byte ptr [rsi + rcx]
+    .global hydra_uaccess_str_insn_end
+    hydra_uaccess_str_insn_end:
+        mov byte ptr [rdi + rcx], al
+        test eax, eax
+        jz 4f
+        inc rcx
+        jmp 2b
+    4:
+        mov rax, rcx
+        ret
+    3:
+        mov rax, -1
+        ret
+    // Its fix-up: rcx = the offset of the byte that faulted
+    .global hydra_uaccess_str_fix
+    hydra_uaccess_str_fix:
+        mov rax, -2
+        sub rax, rcx
+        ret
+    "#
+);
+
+extern "sysv64" {
+    fn hydra_uaccess_copy(dst: *mut u8, src: *const u8, n: usize) -> usize;
+    fn hydra_uaccess_str(dst: *mut u8, src: *const u8, max: usize) -> isize;
+}
+
+/// Copies `n` bytes from `src` to `dst`, one side being user memory of the current address
+/// space: the bytes NOT copied (0: all) when a page faults.
+///
+/// # Safety
+///
+/// The kernel side must be valid for `n` bytes; the user side must be a user range
+/// ([`user_ok`]).
+#[inline]
+pub unsafe fn try_copy(dst: *mut u8, src: *const u8, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    // SAFETY: as the caller promises; a fault is fixed up (see above)
+    unsafe { hydra_uaccess_copy(dst, src, n) }
+}
+
+/// What [`try_str`] found.
+enum StrCopy {
+    /// The string's length without its NUL (the NUL copied too).
+    Found(usize),
+    /// No NUL within the room.
+    NoNul,
+    /// Not a user address.
+    Bad,
+    /// The page at this user address is not there yet.
+    Missing(u64),
+}
+
+/// Copies the NUL-terminated user string at `addr` into `dst`, one page at a time (pages
+/// after the NUL are never touched: the string may end just before an unmapped page).
+fn try_str(addr: u64, dst: &mut [u8]) -> StrCopy {
+    let max = dst.len();
+    let mut o = 0usize;
+    while o < max {
+        let Some(at) = addr.checked_add(o as u64) else { return StrCopy::Bad };
+        let n = (4096 - (at & 0xFFF) as usize).min(max - o);
+        if !user_ok(at, n) {
+            return StrCopy::Bad;
+        }
+        // SAFETY: `at..at + n` is a user range; `dst[o..o + n]` is ours
+        let r = unsafe { hydra_uaccess_str(dst.as_mut_ptr().add(o), at as *const u8, n) };
+        if r >= 0 {
+            return StrCopy::Found(o + r as usize);
+        }
+        if r == -1 {
+            o += n;
+            continue;
+        }
+        return StrCopy::Missing(at + (-2 - r) as u64);
+    }
+    StrCopy::NoNul
+}
+
+/// `len` bytes at `addr` are user memory of the calling task, which has an address space of
+/// its own (the loaded one; legacy tasks share the kernel's and get nothing copied).
+#[inline]
+fn user_ok(addr: u64, len: usize) -> bool {
+    crate::memory::vm::is_user_range(addr, len as u64) && !crate::memory::vm::CURRENT_MM.load(core::sync::atomic::Ordering::Relaxed).is_null()
+}
 
 /// Locks `m`, serving TLB flush requests while waiting: its holder may be waiting for this
 /// CPU's flush (interrupts are off here), as with the scheduler's lock.
@@ -357,80 +516,17 @@ pub fn lock_serving<T>(m: &spin::Mutex<T>) -> spin::MutexGuard<'_, T> {
     }
 }
 
-/// Runs `f(kernel address, bytes)` on each piece of `len` bytes at user address `addr`
-/// (within one page each), with the calling task's address space locked and every page
-/// present (writable, for `write`). A missing page is faulted in ([`fault_in`]) once.
-/// `f` returns `false` to stop early.
-fn each_piece(addr: u64, len: usize, write: bool, mut f: impl FnMut(*mut u8, usize) -> bool) -> Result<(), i64> {
-    if len == 0 {
-        return Ok(());
-    }
-    if !crate::memory::vm::is_user_range(addr, len as u64) {
-        return Err(EFAULT);
-    }
-    let mm = crate::memory::vm::CURRENT_MM.load(core::sync::atomic::Ordering::Acquire);
-    if mm.is_null() {
-        return Err(EFAULT);
-    }
-    // SAFETY: the current task's address space, alive while it runs
-    let mm = unsafe { &*mm };
-    let mut done = 0usize;
-    let mut faulted = false;
-    // Announced before the lock is taken, withdrawn after it is released: a fault handler
-    // on another CPU finding the lock busy then waits (memory::vm::LX_COPY_MM)
-    let marker = &crate::memory::vm::LX_COPY_MM[crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1)];
-    struct Unmark<'a>(&'a core::sync::atomic::AtomicU64);
-    impl Drop for Unmark<'_> {
-        fn drop(&mut self) {
-            self.0.store(0, core::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    while done < len {
-        let at = addr + done as u64;
-        let n = (4096 - (at & 0xFFF) as usize).min(len - done);
-        // Without the kernel lock, never wait for an address-space lock: its holder may be in a
-        // driver call (a page fault reading a file) that needs this CPU's patience under the
-        // ordinary rules; take the kernel lock and wait out driver calls first
-        marker.store(mm as *const spin::Mutex<crate::memory::vm::Mm> as u64, core::sync::atomic::Ordering::SeqCst);
-        let unmark = Unmark(marker);
-        let mut m = match mm.try_lock() {
-            Some(g) => g,
-            None => {
-                // (under the kernel lock no fault handler runs meanwhile: no mark needed)
-                marker.store(0, core::sync::atomic::Ordering::SeqCst);
-                if !crate::arch::smp::bkl_held() {
-                    crate::arch::smp::bkl_enter();
-                    crate::task::scheduler::wait_out_handoff();
-                }
-                lock_serving(mm)
-            }
-        };
-        let Some(phys) = m.present_user(at, write) else {
-            drop(m);
-            drop(unmark);
-            if faulted || !fault_in(at, n as u64, write) {
-                return Err(EFAULT);
-            }
-            faulted = true;
-            continue;
-        };
-        faulted = false;
-        let p = crate::memory::frame_allocator::phys_to_virt(phys.as_u64());
-        let more = f(p, n);
-        drop(m);
-        drop(unmark);
-        if !more {
-            return Ok(());
-        }
-        done += n;
-    }
-    Ok(())
-}
+/// Pages faulted in for the copies ([`fault_in`]).
+pub static FAULT_INS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Faults `len` bytes at user address `addr` of the calling task in, the ordinary way (it
 /// may read a file: under the kernel lock, outside other tasks' driver calls, interrupts
 /// on while it runs). The kernel lock, if taken here, stays until the return to user mode.
 pub fn fault_in(addr: u64, len: u64, write: bool) -> bool {
+    FAULT_INS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if crate::memory::vm::CURRENT_MM.load(core::sync::atomic::Ordering::Acquire).is_null() {
+        return false;
+    }
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
         crate::task::scheduler::wait_out_handoff();
@@ -444,54 +540,64 @@ pub fn fault_in(addr: u64, len: u64, write: bool) -> bool {
     ok
 }
 
+/// Copies `n` bytes between the kernel and user address `addr` (`write`: to it), faulting
+/// pages in as needed: `copy(done)` copies from byte `done` on and returns the bytes left.
+fn with_faults(addr: u64, n: usize, write: bool, mut copy: impl FnMut(usize) -> usize) -> Result<(), i64> {
+    if n == 0 {
+        return Ok(());
+    }
+    if !user_ok(addr, n) {
+        return Err(EFAULT);
+    }
+    let mut done = 0usize;
+    // The page faulted in last: when it faults again at once, it cannot be had
+    let mut last = u64::MAX;
+    loop {
+        let left = copy(done);
+        if left == 0 {
+            return Ok(());
+        }
+        done = n - left;
+        let at = addr + done as u64;
+        if at & !0xFFF == last || !fault_in(at, left as u64, write) {
+            return Err(EFAULT);
+        }
+        last = at & !0xFFF;
+    }
+}
+
 /// Copies `dst.len()` bytes at user address `addr` of the calling task into `dst`.
 pub fn read_user(addr: u64, dst: &mut [u8]) -> Result<(), i64> {
-    let mut o = 0;
-    each_piece(addr, dst.len(), false, |p, n| {
-        // SAFETY: a present page of the caller, reached through the direct map, locked
-        unsafe { core::ptr::copy_nonoverlapping(p as *const u8, dst.as_mut_ptr().add(o), n) };
-        o += n;
-        true
-    })
+    let n = dst.len();
+    let p = dst.as_mut_ptr();
+    // SAFETY: `dst` is ours; the user range is checked by `with_faults`
+    with_faults(addr, n, false, |done| unsafe { try_copy(p.add(done), (addr + done as u64) as *const u8, n - done) })
 }
 
 /// Writes `src` to user address `addr` of the calling task.
 pub fn write_user(addr: u64, src: &[u8]) -> Result<(), i64> {
-    let mut o = 0;
-    each_piece(addr, src.len(), true, |p, n| {
-        // SAFETY: as in `read_user`, the page writable
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(o), p, n) };
-        o += n;
-        true
-    })
+    let n = src.len();
+    let p = src.as_ptr();
+    // SAFETY: as in `read_user`
+    with_faults(addr, n, true, |done| unsafe { try_copy((addr + done as u64) as *mut u8, p.add(done), n - done) })
 }
 
 /// Reads the NUL-terminated string at user address `addr` into `dst` (the NUL too):
 /// `Some(length without the NUL)`, or `None` when there is no NUL within `dst.len()` bytes.
 /// Pages after the NUL are never touched.
 pub fn read_user_str(addr: u64, dst: &mut [u8]) -> Result<Option<usize>, i64> {
-    let mut o = 0;
-    let mut found = None;
-    let max = dst.len();
-    // One page at a time: the string may end just before an unmapped page
-    while o < max && found.is_none() {
-        let at = match addr.checked_add(o as u64) {
-            Some(a) => a,
-            None => return Err(EFAULT),
-        };
-        let n = (4096 - (at & 0xFFF) as usize).min(max - o);
-        each_piece(at, n, false, |p, k| {
-            // SAFETY: as in `read_user`
-            let src = unsafe { core::slice::from_raw_parts(p as *const u8, k) };
-            let end = src.iter().position(|&b| b == 0);
-            let take = end.map_or(k, |e| e + 1);
-            dst[o..o + take].copy_from_slice(&src[..take]);
-            if let Some(e) = end {
-                found = Some(o + e);
+    let mut last = u64::MAX;
+    loop {
+        match try_str(addr, dst) {
+            StrCopy::Found(n) => return Ok(Some(n)),
+            StrCopy::NoNul => return Ok(None),
+            StrCopy::Bad => return Err(EFAULT),
+            StrCopy::Missing(at) => {
+                if at & !0xFFF == last || !fault_in(at, 1, false) {
+                    return Err(EFAULT);
+                }
+                last = at & !0xFFF;
             }
-            o += take;
-            true
-        })?;
+        }
     }
-    Ok(found)
 }

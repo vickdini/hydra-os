@@ -119,7 +119,7 @@ one).
 | The request table, the worker list, the copy buffers | The table's spin lock (`LX`; interrupts off; TLB flush requests served while waiting) |
 | Task states and the switch | The scheduler lock, once per switch (`Scheduler::direct_call`) |
 | The caller's identity (IDs, capabilities, groups) | A per-CPU cache, valid while `compat::linux`'s identity epoch is unchanged |
-| The copy-in table's user memory | The caller's address-space lock (taken with `try_lock`; when busy, the kernel lock first) |
+| The copy-in table's user memory | Nothing (wave 6): copied straight through the caller's own address space with fault fix-ups; a page not there yet is faulted in under the kernel lock, the table's lock let go |
 
 **Why no answer or wake-up is lost:**
 - an answer, a failure, or a delivery to a worker is marked under the table's lock, and
@@ -210,6 +210,32 @@ operation). Today: `add_key`, `request_key`, `keyctl` operations 1, 2, 6, 10, 11
 client.rs`) look in the page first (the pointer must equal an argument the kernel copied, or
 gave output room to) and fall back to the primitives by themselves. Moving a call to the
 table means adding its arm to `describe`; the code serving it does not change.
+
+**Cheaper copies (wave 6, Group 22).** The forwarding path runs in the caller's own
+address space, so the kernel copies straight from and to the user addresses, as Linux's
+`copy_from_user` does, instead of locking the address space and walking the page tables
+for every piece:
+- the copying instructions are two small assembly routines in `src/lx/copy.rs`
+  (`hydra_uaccess_copy`: `rep movsb`; `hydra_uaccess_str`: a byte loop up to the NUL);
+- a page fault on one of them never reaches the ordinary page-fault handler: the trap entry
+  (`hydra_exception_handler`, before it takes any lock) finds the faulting instruction in
+  the fix-up table (`arch::idt::uaccess_fixup`) and resumes at the routine's fix-up label,
+  which returns how far the copy got;
+- the caller then faults the page in the ordinary way (`copy::fault_in`: demand paging,
+  copy-on-write, file pages, under the kernel lock) and tries again; a page that cannot be
+  faulted in, or faults again at once, is `-EFAULT`. Pointers are checked to be user
+  addresses first (`is_user_range`); supervisor write protection (CR0.WP) makes a write to a
+  read-only (copy-on-write) page fault as from user mode;
+- the copy-in is made when the call is placed (`lx::place`), under the request table's
+  lock, **straight into the idle worker's syscall page** (an idle worker reads its page only
+  after `deliver`); a queued call's bytes go into its slot's buffer, as before. When a page
+  is missing nothing has changed yet: the lock is let go, the page faulted in, and the call
+  placed again;
+- output still goes page → the slot's buffer (under the lock, when the worker answers: the
+  page is reused at once) → the caller's memory (the same fix-up copy).
+
+`linux prof show`'s `[prof] lx:` line ends with the copies' faults fixed up and pages
+faulted in.
 
 ## Client memory
 
