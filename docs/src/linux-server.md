@@ -201,15 +201,27 @@ a *direct path* (`src/ipc/service.rs`, section "The direct path"):
 3. The server answers with **`SYS_SVC_RECV` + `RECV_REPLY`** (answer request `r10`, then
    receive: `hydra_rt::svccall::reply_recv`). When it finds nothing more to do it parks and,
    in the same step, hands the CPU straight back to the caller; the next call finds it
-   parked. net-server's loop does this (its background round now comes before the answer,
-   so loopback frames are delivered before the caller goes on). A server that still answers
-   with `SYS_SVC_REPLY` wakes the caller and parks at its next `recv`.
+   parked. net-server's loop does this. When it has loopback frames to deliver right after
+   an answer it uses **`RECV_YIELD`** instead (`svccall::reply_yield`): the caller gets the
+   CPU at once and net-server stays ready for its round, which may run on the other CPU
+   meanwhile (as after wave 5's hand-off reply). A server that still answers with
+   `SYS_SVC_REPLY` wakes the caller and parks at its next `recv`.
+4. The server's switch back goes only to a caller still blocked by its own direct switch;
+   a caller that fell back to waiting on its queue is woken where it waits (no migrations).
+5. A caller whose server is busy on the other CPU spins (kernel lock let go, at most
+   40 µs) for the answer instead of sleeping and being woken across CPUs.
 
 Whenever a step cannot be done (no parked thread, a hand-off in progress, the server just
 woken on the other CPU) the call is an ordinary queued one; nothing is lost (the answer is
 marked under the request table's lock before the caller is woken, and the caller's switch
 checks that mark under the scheduler lock). Kernel callers keep `Handoff`/`Queued` as they
-were. linux-server's net-server calls are queued calls now (wave 5's `SVC_CALL_HANDOFF` is
+were.
+
+Measured (KVM, 2 CPUs): linux-server -> net-server null call 3.76 µs (wave 5's hand-off in
+the same build: 5.88); TCP and UDP ping-pong 20-40 % faster than before, 100 MB download as
+fast or faster; bulk TCP over 127.0.0.1 (`netbench lo`) about 14 % slower than with
+hand-off calls (the calls of the sender and the receiver now overlap on two CPUs and
+contend for net-server's one thread). linux-server's net-server calls are queued calls now (wave 5's `SVC_CALL_HANDOFF` is
 no longer used by it; the bit still works).
 
 **A direct call to a Linux service**, `SYS_SVC_DCALL` (70) `(svc, op, in, in_len, out,
