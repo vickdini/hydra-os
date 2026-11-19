@@ -6,6 +6,9 @@
 //! notification ring and rings its main thread. The cookie is the server's own (a timerfd,
 //! a blocked call's timeout, ...); arming a cookie again replaces its deadline.
 //!
+//! `LX_TIMER_VVAR` (wave 6, Group 25) maps the clock's state page (the vDSO's `[vvar]`) into
+//! the server, read-only: it reads the clock as the vDSO does, without a system call.
+//!
 //! Deadlines are checked at every timer tick ([`on_tick`], 10 ms), the resolution of every
 //! other timer in the kernel. The tick only compares the earliest deadline with the clock
 //! ([`NEXT`]); the list is taken with `try_lock` (a busy list waits for the next tick).
@@ -14,10 +17,11 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::ipc::protocol::{LX_NOTE_TIMER, LX_TIMER_ARM, LX_TIMER_CANCEL, LX_TIMER_NOW};
+use crate::ipc::protocol::{LX_NOTE_TIMER, LX_TIMER_ARM, LX_TIMER_CANCEL, LX_TIMER_NOW, LX_TIMER_VVAR};
 
 const EINVAL: i64 = -22;
 const ENOSPC: i64 = -28;
+const ENOMEM: i64 = -12;
 
 /// Most timers armed at once.
 const MAX_TIMERS: usize = 8192;
@@ -65,6 +69,13 @@ pub fn sys_timer(op: u64, cookie: u64, ns: u64) -> i64 {
             0
         }),
         LX_TIMER_NOW => crate::arch::pit::now_ns() as i64,
+        // Wave 6 (Group 25): the clock's state page, so the server reads the clock without
+        // a system call (timerfd_settime made two: the clock and the arm)
+        LX_TIMER_VVAR => {
+            let Some(mm) = crate::task::with_current_task_mut(|t| t.mm.clone()).flatten() else { return EINVAL };
+            let r = crate::arch::vdso::map_vvar(&mut mm.lock()).map_or(ENOMEM, |a| a as i64);
+            r
+        }
         _ => EINVAL,
     }
 }

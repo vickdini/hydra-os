@@ -8,9 +8,17 @@
 //! readable and completes waiting reads; a periodic timer is armed again after each read.
 //! Time is the kernel's monotonic clock with the scheduler tick's resolution (10 ms), as
 //! before; `CLOCK_REALTIME` deadlines are converted when armed.
+//!
+//! Wave 6 (Group 25): `timerfd_settime` costs no system call of its own in the common case.
+//! The clock is read from the kernel's clock page (`LX_TIMER_VVAR`, the vDSO's `[vvar]`),
+//! and the kernel timer is armed lazily: a timer moved later (an event loop pushing its
+//! timeout on) or stopped keeps the kernel deadline it has; when that earlier deadline
+//! fires, [`fired`] arms the real one (or nothing). Only a deadline earlier than the armed
+//! one, or the first, needs `LX_TIMER_ARM`.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use hydra_rt::protocol::*;
 use hydra_rt::sys;
@@ -37,18 +45,73 @@ struct Tfd {
     /// The next expiry (monotonic ns), and the period (0: one-shot).
     next: Option<u64>,
     interval: u64,
+    /// The kernel timer's deadline as armed (it may be earlier than `next`, or the timer
+    /// stopped: see the module's comment); `None`: not armed (or it fired).
+    armed: Option<u64>,
     /// Readers waiting: `(call, buffer)`.
     readers: Vec<(LxCall, u64)>,
 }
 
 static T: YLock<BTreeMap<u32, Tfd>> = YLock::new(BTreeMap::new());
 
+/// The kernel's clock page ([`LxVvar`]): 0 not mapped yet, 1 not available.
+static VVAR: AtomicU64 = AtomicU64::new(0);
+
+fn vvar() -> Option<&'static LxVvar> {
+    let mut a = VVAR.load(Ordering::Acquire);
+    if a == 0 {
+        let r = sys::lx_timer(LX_TIMER_VVAR, 0, 0);
+        a = if r > 0 { r as u64 } else { 1 };
+        VVAR.store(a, Ordering::Release);
+    }
+    // SAFETY: the kernel mapped the page read-only for the life of the process
+    (a > 1).then(|| unsafe { &*(a as *const LxVvar) })
+}
+
+/// The monotonic clock and the wall clock's offset from it (read as the vDSO does).
+fn clock_page(v: &LxVvar) -> (u64, i64) {
+    loop {
+        // SAFETY: plain reads of the kernel's page
+        let s = unsafe { core::ptr::read_volatile(&v.seq) };
+        if s & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        let (base, frac, base_tsc, mult, wall) = unsafe {
+            (
+                core::ptr::read_volatile(&v.base_ns),
+                core::ptr::read_volatile(&v.base_frac),
+                core::ptr::read_volatile(&v.base_tsc),
+                core::ptr::read_volatile(&v.mult),
+                core::ptr::read_volatile(&v.wall_ns),
+            )
+        };
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        if unsafe { core::ptr::read_volatile(&v.seq) } != s {
+            continue;
+        }
+        if mult == 0 {
+            return (base, wall);
+        }
+        let total = tsc.saturating_sub(base_tsc) as u128 * mult as u128 + frac as u128;
+        return (base + (total >> 32) as u64, wall);
+    }
+}
+
 fn now() -> u64 {
-    sys::lx_timer(LX_TIMER_NOW, 0, 0) as u64
+    match vvar() {
+        Some(v) => clock_page(v).0,
+        None => sys::lx_timer(LX_TIMER_NOW, 0, 0) as u64,
+    }
 }
 
 /// Nanoseconds the real-time clock is ahead of the monotonic one.
 fn realtime_offset(mono: u64) -> i128 {
+    if let Some(v) = vvar() {
+        return clock_page(v).1 as i128;
+    }
     let (s, ns) = sys::clock();
     s as i128 * 1_000_000_000 + ns as i128 - mono as i128
 }
@@ -71,18 +134,20 @@ impl Tfd {
         }
     }
 
-    /// Arms the kernel timer for the next expiry and sets the readiness word.
-    fn arm(&self, slot: u32, now: u64) {
+    /// Arms the kernel timer for the next expiry (unless it is armed for that time or
+    /// earlier already) and sets the readiness word. A stopped timer keeps its kernel
+    /// timer, which [`fired`] then ignores.
+    fn arm(&mut self, slot: u32, now: u64) {
         match self.next {
             Some(n) if n > now => {
-                sys::lx_timer(LX_TIMER_ARM, TIMER_TAG | slot as u64, n);
+                if self.armed.is_none_or(|a| a > n) {
+                    sys::lx_timer(LX_TIMER_ARM, TIMER_TAG | slot as u64, n);
+                    self.armed = Some(n);
+                }
                 crate::obj::set_ready(slot, 0, 0);
             }
             Some(_) => crate::obj::set_ready_ev(slot, 0x41, 0, true),
-            None => {
-                sys::lx_timer(LX_TIMER_CANCEL, TIMER_TAG | slot as u64, 0);
-                crate::obj::set_ready(slot, 0, 0);
-            }
+            None => crate::obj::set_ready(slot, 0, 0),
         }
     }
 }
@@ -115,7 +180,7 @@ pub fn create(cx: &Cx) -> (i64, u64) {
         Ok(s) => s,
         Err(e) => return (e, 0),
     };
-    T.lock().insert(slot, Tfd { clock, next: None, interval: 0, readers: Vec::new() });
+    T.lock().insert(slot, Tfd { clock, next: None, interval: 0, armed: None, readers: Vec::new() });
     match crate::obj::install(cx, slot, LX_OBJ_KIND_TIMERFD, flags as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[timerfd]") {
         Ok(fd) => (fd, 0),
         Err(e) => {
@@ -258,6 +323,8 @@ pub fn fired(cookie: u64) {
     {
         let mut m = T.lock();
         let Some(t) = m.get_mut(&slot) else { return };
+        // The kernel timer fired: it is armed no more (arming it again is always safe)
+        t.armed = None;
         match t.next {
             // (an old deadline: the timer was set again since)
             Some(n) if n > now => t.arm(slot, now),

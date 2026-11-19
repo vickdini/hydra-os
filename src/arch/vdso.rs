@@ -94,6 +94,19 @@ pub fn map(mm: &mut Mm) -> Option<u64> {
     Some(base + PAGE)
 }
 
+/// Maps only the [vvar] page (read-only) into `mm`: linux-server's clock
+/// (`LX_TIMER_VVAR`, wave 6 Group 25).
+///
+/// # Returns
+/// The page's address, or `None` if it could not be mapped.
+pub fn map_vvar(mm: &mut Mm) -> Option<u64> {
+    let p = pages()?;
+    let base = mm.mmap(0, PAGE, PROT_READ, true, false, false, Backing::Object { obj: p, pgoff: 0 }).ok()?;
+    mm.deny_write(base, base + PAGE);
+    mm.set_name(base, base + PAGE, Some("[vvar]"));
+    Some(base)
+}
+
 /// Writes the clock's state to [vvar] (the timer tick, setting the wall clock): readers
 /// retry while the sequence counter is odd or changed.
 pub fn publish() {
