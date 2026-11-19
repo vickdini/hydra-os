@@ -56,8 +56,8 @@ static long poke(int fd, unsigned off, uint32_t v) { return syscall(SYS_ioctl, f
 
 static int keep(int write) {
     int fd = newobj(KEPT_FLAG);
-    if (fd < 0) {
-        printf("no server object (%s): SRVMAP KEEP SKIPPED\n", strerror(errno));
+    if (fd <= 2) {
+        printf("no server object (%d): SRVMAP KEEP SKIPPED\n", fd);
         return 0;
     }
     long info = syscall(SYS_ioctl, fd, INFO, 0UL);
@@ -88,7 +88,7 @@ static int keep(int write) {
 
 static int hold(int secs) {
     int fd = newobj(0);
-    if (fd < 0) return 1;
+    if (fd <= 2) return 1;
     volatile uint32_t *p = mmap(0, MEM, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p == MAP_FAILED) return 1;
     printf("HOLDING\n");
@@ -116,8 +116,8 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "hold")) return hold(argc > 2 ? atoi(argv[2]) : 30);
 
     int fd = newobj(0);
-    if (fd < 0) {
-        printf("no server test object (%s; lx=kernel?): SRVMAP TEST PASSED (skipped)\n", strerror(errno));
+    if (fd <= 2) { /* lx=kernel: the kernel answers the test call with 0 */
+        printf("no server test object (%d; lx=kernel?): SRVMAP TEST PASSED (skipped)\n", fd);
         return 0;
     }
     long closes0 = closes();
