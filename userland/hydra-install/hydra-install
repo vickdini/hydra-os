@@ -20,6 +20,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 
@@ -910,6 +911,8 @@ class Wizard(QMainWindow):
         err = bytes(self.proc.readAllStandardError()).decode(errors="replace")
         ok = code == 0 and "DONE" in self.out.split() and not self.error
         if ok:
+            if not TEST:
+                self.warm_restart_files()
             self.done.success(self.notes)
         else:
             if not self.error:
@@ -930,8 +933,26 @@ class Wizard(QMainWindow):
                     n = int(p[1])
         return n
 
+    def warm_restart_files(self):
+        """Loads what "Restart now" needs while the stick is surely still in: the 5.7 GB copy
+        pushes polkitd's and the access helper's files out of the cache, and if the stick is
+        pulled before the click, polkit cannot answer (G13, wave 5). CanReboot runs the same
+        polkit check; reading the reboot binary keeps the fallback startable."""
+        try:
+            subprocess.run(["dbus-send", "--system", "--print-reply", "--dest=org.freedesktop.login1",
+                            "/org/freedesktop/login1", "org.freedesktop.login1.Manager.CanReboot"],
+                           capture_output=True, timeout=30)
+            path = shutil.which("reboot")
+            if path:
+                with open(os.path.realpath(path), "rb") as f:
+                    while f.read(1 << 20):
+                        pass
+        except Exception:
+            pass
+
     def restart(self):
-        r = subprocess.run(["dbus-send", "--system", "--print-reply", "--dest=org.freedesktop.login1",
+        r = subprocess.run(["dbus-send", "--system", "--print-reply", "--reply-timeout=150000",
+                            "--dest=org.freedesktop.login1",
                             "/org/freedesktop/login1", "org.freedesktop.login1.Manager.Reboot", "boolean:true"],
                            capture_output=True)
         if r.returncode != 0:

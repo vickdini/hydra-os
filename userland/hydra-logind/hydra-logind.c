@@ -1414,10 +1414,15 @@ static void power_decided(DBusPendingCall *pc, void *data) {
     DBusMessage *r = dbus_pending_call_steal_reply(pc);
     int challenge;
     int ok = polkit_result(r, &challenge);
+    /* No reply at all (polkit stuck, e.g. its files unreadable): say so instead of "denied" */
+    int no_answer = r && dbus_message_is_error(r, DBUS_ERROR_NO_REPLY);
+    if (no_answer)
+        logmsg("power: polkit did not answer");
     if (r)
         dbus_message_unref(r);
-    DBusMessage *reply = ok ? dbus_message_new_method_return(pr->call)
-                            : error(pr->call, DBUS_ERROR_ACCESS_DENIED, "Not authorized to shut down the system");
+    DBusMessage *reply = ok         ? dbus_message_new_method_return(pr->call)
+                         : no_answer ? error(pr->call, DBUS_ERROR_FAILED, "polkit did not answer")
+                                     : error(pr->call, DBUS_ERROR_ACCESS_DENIED, "Not authorized to shut down the system");
     dbus_connection_send(bus, reply, NULL);
     dbus_message_unref(reply);
     dbus_message_unref(pr->call);
@@ -1437,7 +1442,11 @@ static DBusMessage *power(DBusMessage *m, const char *what, int how) {
     power_action(m, what, action, sizeof action);
     DBusMessage *q = polkit_check(m, action, interactive);
     DBusPendingCall *pc = NULL;
-    if (!dbus_connection_send_with_reply(bus, q, &pc, DBUS_TIMEOUT_INFINITE) || !pc) {
+    /* Never wait forever: a polkit that cannot answer (G13: its files unreadable after the
+     * install stick is pulled) left Reboot hanging. Interactive checks may wait for a
+     * password dialog, so they get longer. */
+    int timeout_ms = interactive ? 120000 : 25000;
+    if (!dbus_connection_send_with_reply(bus, q, &pc, timeout_ms) || !pc) {
         dbus_message_unref(q);
         return error(m, DBUS_ERROR_FAILED, "polkit is not available");
     }
