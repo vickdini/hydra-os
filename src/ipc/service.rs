@@ -1277,6 +1277,28 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
     });
 }
 
+/// The answer to direct caller `caller` (at `idx`, a hint) is marked: makes it ready and
+/// gives it this CPU now; the calling server stays ready (`RECV_YIELD`).
+fn hand_back(caller: u64, idx: usize) {
+    use crate::task::scheduler::{DIRECT_HINT, DIRECT_TO};
+    let ready = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut s = crate::task::SCHEDULER.lock();
+        s.apply_wakes();
+        s.unblock_task(crate::task::TaskId(caller))
+            || s.with_task_mut(crate::task::TaskId(caller), |t| t.state == crate::task::TaskState::Ready).unwrap_or(false)
+    });
+    if !ready || crate::task::scheduler::handoff_active() {
+        return;
+    }
+    DIRECT_BACK.fetch_add(1, Ordering::Relaxed);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        DIRECT_TO.store(caller + 1, Ordering::Relaxed);
+        DIRECT_HINT.store(idx as u64, Ordering::Relaxed);
+        // The yield vector's direct switch (this task stays ready), or an ordinary pass
+        crate::task::yield_now();
+    });
+}
+
 /// `wait::wait`, with a yield that declares every register clobbered: a task waiting here
 /// may be resumed by the direct switch (which moves no FPU state).
 fn wait_clobbered(deadline: Option<u64>) {
@@ -1712,6 +1734,26 @@ pub fn reply(endpoint: u32, id: u64, answer: Message) -> Result<(), i64> {
 /// classic server's half of the direct path: the next call finds it parked at once).
 pub fn reply_recv(endpoint: u32, id: u64, answer: Message, flags: u64) -> Result<(u64, Message), i64> {
     let svc = slot_owner(own_service(endpoint)?);
+    // `RECV_YIELD`: the server has more to do right away (net-server: loopback frames to
+    // deliver): the caller gets the CPU now and the server stays ready to go on (on another
+    // CPU, or after the caller), without receiving
+    if flags & crate::ipc::protocol::RECV_YIELD != 0 {
+        match mark_reply(svc, id, answer)? {
+            Some((slot, caller, CallMode::Queued, true, idx)) => {
+                REQ_WQ[slot].wake_all();
+                hand_back(caller, idx);
+            }
+            Some((slot, _, CallMode::Queued, false, _)) => {
+                REQ_WQ[slot].wake_all();
+            }
+            Some((_, caller, CallMode::Handoff, _, _)) => {
+                x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
+                crate::task::yield_now();
+            }
+            None => {}
+        }
+        return Ok((0, Message::with_args(crate::ipc::protocol::MSG_SVC_NOTIFY, [0, 0, 0, 0])));
+    }
     let back = match mark_reply(svc, id, answer)? {
         Some((slot, caller, CallMode::Queued, true, idx)) => Some(Back { caller, idx, slot }),
         Some((slot, caller, mode, _, _)) => {

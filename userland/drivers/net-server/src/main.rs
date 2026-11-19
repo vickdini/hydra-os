@@ -716,13 +716,18 @@ fn main(args: &[&str]) {
                     // Frames it caused go out, and its readiness is visible, before the answer
                     nic::flush();
                     publish(&mut st);
-                    // wave6 G20: the round that followed the answer comes before it now
-                    // (loopback frames are delivered before the caller goes on), and the
-                    // answer goes with the next wait
-                    background(&mut st, false);
-                    publish(&mut st);
-                    answer = Some((id, r));
-                    continue;
+                    // wave6 G20: loopback frames to deliver: the answer first, the caller
+                    // goes on at once and this server stays ready for its round (which may
+                    // run on the other CPU meanwhile: bulk loopback transfers overlap);
+                    // otherwise the round, then the answer goes with the next wait
+                    if stack::loopback_pending() {
+                        let _ = hydra_rt::svccall::reply_yield(ENDPOINT_NET_SERVER, id, &r);
+                    } else {
+                        background(&mut st, false);
+                        publish(&mut st);
+                        answer = Some((id, r));
+                        continue;
+                    }
                 }
                 false
             }

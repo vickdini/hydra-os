@@ -1163,6 +1163,10 @@ pub const LX_NULL_DCALL_RTT: u64 = 6;
 /// message, in one system call. A caller on the direct path gets the CPU back when the
 /// server parks to wait (`ipc::service::reply_recv`).
 pub const RECV_REPLY: u64 = 1 << 61;
+/// With [`RECV_REPLY`]: answer only, without receiving (returns ID 0 with no bits): the
+/// caller gets the CPU at once and the server stays ready to go on with work it has right
+/// away (net-server's loopback frames), on another CPU or after the caller.
+pub const RECV_YIELD: u64 = 1 << 60;
 /// The `nr` of a direct call between services (`SYS_SVC_DCALL`) in the callee's `LxCall`:
 /// `args = [op, in, out, in_len, out_cap, from_svc]` (`lx::dcall`).
 pub const LX_DCALL_NR: u64 = 0x6800;

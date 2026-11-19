@@ -7,7 +7,7 @@
 //!   worker sees an `LxCall` with `nr == LX_DCALL_NR` (see [`DcallArgs`]).
 //! - [`post`]: a one-way event to another service's notification ring (`SYS_SVC_POST`, 71).
 
-use crate::protocol::{LxCall, RECV_NOTIFY, RECV_REPLY};
+use crate::protocol::{LxCall, RECV_NOTIFY, RECV_REPLY, RECV_YIELD};
 use crate::Message;
 
 const SYS_SVC_RECV: u64 = 25;
@@ -47,6 +47,19 @@ pub fn reply_recv(endpoint: u32, id: u64, reply: &Message, timeout_ticks: u64) -
         return Err(r);
     }
     Ok((r as u64, m))
+}
+
+/// Answers request `id` of `endpoint` with `reply` and gives the CPU to its caller at once;
+/// this thread stays ready and goes on (it has more to do right away), without receiving.
+pub fn reply_yield(endpoint: u32, id: u64, reply: &Message) -> Result<(), i64> {
+    let mut m = *reply;
+    // SAFETY: the kernel reads the answer from `m`
+    let r = unsafe { syscall6(SYS_SVC_RECV, [endpoint as u64, &mut m as *mut Message as u64, RECV_NOTIFY | RECV_REPLY | RECV_YIELD, id, 0, 0]) };
+    if r < 0 {
+        Err(r)
+    } else {
+        Ok(())
+    }
 }
 
 /// Calls service `svc` (an `LXS_*` id) with operation `op`, input `input` and room for output
