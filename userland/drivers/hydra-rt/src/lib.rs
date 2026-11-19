@@ -17,6 +17,7 @@ extern crate alloc;
 
 pub mod blockunits;
 pub mod heap;
+pub mod kept; // wave6 G21: kept state across a service restart
 pub mod port;
 pub mod sys;
 

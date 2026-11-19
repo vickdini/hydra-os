@@ -1085,6 +1085,13 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             drop(stats);
             crate::lx::obj::sig_take(arg0, arg1, _arg2, frame.r10)
         }
+        // wave6 G21 begin: a Linux service's restart primitives (`SYS_LX_SVC` ops 16..23;
+        // Group 19 owns the number's other ops)
+        crate::ipc::protocol::SYS_LX_SVC_R3 if (16..24).contains(&arg0) => {
+            drop(stats);
+            crate::lx::restart::svc_op(crate::lx::restart::caller_svc(), arg0, arg1, _arg2, frame.r10)
+        }
+        // wave6 G21 end
         // Group 4: the admin interface of the Ring 3 shell (authorized console only)
         crate::admin::proto::SYS_ADMIN => {
             drop(stats);

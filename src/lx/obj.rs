@@ -68,6 +68,11 @@ pub struct ObjShared {
     nonblock: AtomicBool,
     /// Group 13: the object itself, to count its references ([`LX_OBJ_REFS`]).
     me: Mutex<alloc::sync::Weak<ServerObject>>,
+    // wave6 G21 begin: restart support (`super::restart`)
+    /// A restarted (Transparent) service's new instance could not rebind it (`LX_SVC_DEAD`):
+    /// stale from then on, like an object of a dead instance.
+    dead: AtomicBool,
+    // wave6 G21 end
 }
 
 /// The live objects by slot (to wake them, and to set their flags).
@@ -106,12 +111,17 @@ pub struct ServerObject {
     /// Group 13: a signalfd's signals (`LX_OBJ_SIGMASK`); its `poll` is answered here from
     /// the process's (`tag`'s) pending signals, which posting a signal wakes.
     sigmask: AtomicU64,
+    // wave6 G21 begin
+    /// The service's key for the object (`LxObjDesc::key`), given back by `LX_SVC_LIST`
+    /// to a restarted instance so it can rebind the object.
+    key: u64,
+    // wave6 G21 end
 }
 
 impl ServerObject {
     /// The server's slot for the object, if the object belongs to the server online now.
     pub fn slot(&self) -> Option<u64> {
-        (self.gen == GEN.load(Ordering::Acquire) && WINDOW.load(Ordering::Acquire) != 0).then_some(self.slot as u64)
+        (self.gen == GEN.load(Ordering::Acquire) && WINDOW.load(Ordering::Acquire) != 0 && !self.shared.dead.load(Ordering::Relaxed)).then_some(self.slot as u64)
     }
 
     /// `LX_OBJ_KIND_*`.
@@ -158,6 +168,10 @@ impl Drop for ServerObject {
         }
         if self.watched.load(Ordering::Acquire) {
             let _ = super::WATCHED_NET.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1)));
+        }
+        // wave6 G21: an object the new instance gave up (its slot may be in use again)
+        if self.shared.dead.load(Ordering::Acquire) {
+            return;
         }
         let slot = self.slot as usize;
         reg(|r| {
@@ -341,6 +355,48 @@ pub(super) fn offline() {
     // The server's bpf device programs went with it
     crate::compat::linux::bpf::set_server_device_programs(&[]);
 }
+
+// wave6 G21 begin: restart support (`super::restart`, design 5.1 point 4)
+
+/// A Transparent service's new instance went online after adopting the old one's objects
+/// (`LX_SVC_ADOPT`): the objects keep their generation and readiness words (the window
+/// outlives the process), and their waiters wake to read the words again.
+pub(super) fn online_adopt(window: u64) {
+    WINDOW.store(window, Ordering::Release);
+    let woken: alloc::vec::Vec<Arc<ObjShared>> = reg(|r| r.iter().flatten().cloned().collect());
+    for o in &woken {
+        o.wq.wake_all();
+    }
+}
+
+/// `LX_SVC_DEAD(slot)`: the new instance cannot rebind the object in `slot`: it goes stale
+/// (its calls fail with its kind's error, it polls `POLLERR | POLLHUP`), and the new
+/// instance may use the slot again (the old object's end is not told to it).
+pub(super) fn mark_dead(slot: usize) {
+    if let Some(o) = reg(|r| r[slot].take()) {
+        o.dead.store(true, Ordering::Release);
+        o.wq.wake_all();
+    }
+}
+
+/// `LX_SVC_LIST`: the live objects from slot `start` on (at most `cap`), as
+/// `(slot, kind, key)`.
+pub(super) fn list_live(start: usize, cap: usize, out: &mut alloc::vec::Vec<crate::ipc::protocol::LxSvcObj>) {
+    let live: alloc::vec::Vec<(usize, Arc<ObjShared>)> =
+        reg(|r| r.iter().enumerate().skip(start).filter_map(|(i, s)| s.as_ref().map(|s| (i, s.clone()))).take(cap).collect());
+    for (slot, s) in live {
+        // (an object whose last descriptor is going right now has no ServerObject any more)
+        let Some(o) = s.me.lock().upgrade() else { continue };
+        out.push(crate::ipc::protocol::LxSvcObj { slot: slot as u32, kind: o.kind, key: o.key });
+    }
+}
+
+/// The error a call on `dev`, a server object of a dead instance, gives (design 5.2,
+/// FailObjects: per kind).
+pub fn stale_errno(dev: &ServerObject) -> i64 {
+    super::restart_policy::stale_errno(dev.kind)
+}
+// wave6 G21 end
 
 /// The doorbell ([`LX_SIGNAL_OBJS`]): wakes the waiters of every object the server marked
 /// in the changed bitmap.
@@ -605,14 +661,14 @@ fn install(id: u64, desc: u64) -> i64 {
     if WINDOW.load(Ordering::Acquire) == 0 {
         return EINVAL;
     }
-    let fds = match client_fds(id) {
-        Ok(f) => f,
-        Err(e) => return e,
-    };
+    // (the caller found once: wave6 G21 remembers the install by it)
+    let Some(client) = super::client_of(id) else { return ESRCH };
+    let Some(fds) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.fds.clone()) else { return ESRCH };
     let shared = Arc::new(ObjShared {
         wq: WaitQueue::new_shared(),
         nonblock: AtomicBool::new(d.flags & O_NONBLOCK != 0),
         me: Mutex::new(alloc::sync::Weak::new()),
+        dead: AtomicBool::new(false),
     });
     let taken = reg(|r| {
         if r[slot].is_some() {
@@ -637,6 +693,7 @@ fn install(id: u64, desc: u64) -> i64 {
         watched: AtomicBool::new(false),
         tag: d.tag,
         sigmask: AtomicU64::new(0),
+        key: d.key,
     });
     *obj.shared.me.lock() = Arc::downgrade(&obj);
     let dev: Arc<dyn CharDevice> = obj.clone();
@@ -651,7 +708,11 @@ fn install(id: u64, desc: u64) -> i64 {
         }
     };
     match r {
-        Ok(fd) => fd as i64,
+        Ok(fd) => {
+            // wave6 G21: remembered in case the answer is lost in a restart
+            super::restart::installed(id, client, fd as i32);
+            fd as i64
+        }
         Err(e) => {
             // The server frees the slot itself when the install fails
             obj.quiet.store(true, Ordering::Release);

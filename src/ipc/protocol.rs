@@ -937,6 +937,10 @@ pub struct LxObjDesc {
     /// Group 13: a value the kernel may read back from the descriptor (a pidfd's process;
     /// a Unix socket's or pipe's inode number for `fstat`; 0: none).
     pub tag: u64,
+    /// wave6 G21: the service's own key for the object (never read by the kernel), given
+    /// back by `LX_SVC_LIST` so that a restarted instance can rebind the object (design
+    /// 5.1: vfs-server's objset/object/generation, lx-net's net-server handle, ...).
+    pub key: u64,
 }
 
 // Group 13 (wave 5, step 4): Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd
@@ -1076,3 +1080,39 @@ pub const LX_OBJ_RELAY: u64 = 20;
 /// The answer to a forwarded call that means "make the same call again" (a net wait ended):
 /// handled by the kernel's forwarding, never seen by a Linux program (not an errno).
 pub const LX_RETRY: i64 = -4097;
+
+// wave6 G21 begin: restart support (`crate::lx::restart`, design section 5)
+// ----------------------------------------------------------------------------------------
+
+/// Native system call (Group 18's design: `SYS_LX_SVC`, Group 19 owns the number and ops
+/// 0-15): a Linux service's operations on its own service. Group 21's ops are 16-23.
+pub const SYS_LX_SVC_R3: u64 = 72;
+/// `SYS_LX_SVC` op: `(size) -> address`: maps the calling service's kept-state object
+/// (created zeroed the first time, and again after the ladder reset it), at most 2 MiB.
+/// Whether it is new: [`LX_SVC_INFO`] bit 24.
+pub const LX_SVC_KEPT: u64 = 16;
+/// `SYS_LX_SVC` op: `(buf, cap, start) -> n`: the live objects of the calling service from
+/// slot `start` on, as [`LxSvcObj`] entries (at most `cap`).
+pub const LX_SVC_LIST: u64 = 17;
+/// `SYS_LX_SVC` op: `(slot)`: the restarted instance cannot rebind that object: it goes
+/// stale (its calls fail with its kind's error, it polls `POLLERR | POLLHUP`).
+pub const LX_SVC_DEAD: u64 = 18;
+/// `SYS_LX_SVC` op: adopt every listed object not marked dead (Transparent restarts; before
+/// `LX_CTL_ONLINE`; without it every old object goes stale at `LX_CTL_ONLINE`).
+pub const LX_SVC_ADOPT: u64 = 19;
+/// `SYS_LX_SVC` op: `-> configured class | current class << 4 | crashes << 8 (16 bits) |
+/// kept-state new << 24` (classes: 0 Transparent, 1 FailObjects, 2 EndLinux).
+pub const LX_SVC_INFO: u64 = 20;
+
+/// One entry of [`LX_SVC_LIST`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LxSvcObj {
+    /// The object's slot.
+    pub slot: u32,
+    /// `LX_OBJ_KIND_*`.
+    pub kind: u32,
+    /// The key the service gave it at install ([`LxObjDesc::key`]).
+    pub key: u64,
+}
+// wave6 G21 end

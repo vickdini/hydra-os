@@ -549,3 +549,51 @@ pub fn svc_call(endpoint: u32, request: Message, timeout_ticks: u64) -> Result<M
     check(unsafe { syscall3(SYS_SVC_CALL, endpoint as u64, &mut m as *mut Message as u64, timeout_ticks) })?;
     Ok(m)
 }
+
+// wave6 G21 begin: restart support (`SYS_LX_SVC` ops 16..23, kernel `lx::restart`)
+
+/// Linux service: maps this service's kept-state object of `size` bytes (at most 2 MiB),
+/// zeroed the first time and after the restart ladder reset it; the same memory for every
+/// later instance. Check it with [`crate::kept::Kept::open`] before use.
+///
+/// # Errors
+/// `-EINVAL` (size), `-EBUSY` (another size than the existing object's), `-ENOMEM`.
+pub fn lx_svc_kept(size: usize) -> Result<*mut u8, i64> {
+    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_KEPT, size as u64, 0, 0) }).map(|a| a as *mut u8)
+}
+
+/// Linux service: the live objects of this service from slot `start` on (a restarted
+/// instance rebinds them), into `out`; returns how many.
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_svc_list(out: &mut [crate::protocol::LxSvcObj], start: u32) -> Result<usize, i64> {
+    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_LIST, out.as_mut_ptr() as u64, out.len() as u64, start as u64) }).map(|n| n as usize)
+}
+
+/// Linux service: the object in `slot` cannot be rebound (it goes stale).
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_svc_dead(slot: u32) -> Result<(), i64> {
+    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_DEAD, slot as u64, 0, 0) }).map(|_| ())
+}
+
+/// Linux service: adopt every listed object not marked dead (a Transparent restart; call
+/// before `LX_CTL_ONLINE`).
+///
+/// # Errors
+/// `-EINVAL` when there is nothing to adopt (a first start, or not a Transparent restart).
+pub fn lx_svc_adopt() -> Result<(), i64> {
+    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_ADOPT, 0, 0, 0) }).map(|_| ())
+}
+
+/// Linux service: `configured class | current class << 4 | crashes << 8 | kept new << 24`
+/// (classes: 0 Transparent, 1 FailObjects, 2 EndLinux).
+///
+/// # Errors
+/// Returns the negative errno.
+pub fn lx_svc_info() -> Result<u64, i64> {
+    check(unsafe { syscall4(crate::protocol::SYS_LX_SVC_R3, crate::protocol::LX_SVC_INFO, 0, 0, 0) }).map(|v| v as u64)
+}
+// wave6 G21 end

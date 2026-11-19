@@ -234,6 +234,8 @@ def main():
     ap.add_argument("--pcid-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pcid=off) not to use PCID (tagged TLB)")
     ap.add_argument("--global-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pge=off) not to use global kernel pages")
     ap.add_argument("--lx-kernel", action="store_true", help="tell the kernel (fw_cfg opt/hydra/lx=kernel) to answer the Linux calls moved to linux-server itself")
+    # wave6 G21: a Linux service's restart class (fw_cfg opt/hydra/restart.NAME)
+    ap.add_argument("--restart", action="append", default=[], metavar="NAME=CLASS", help="restart class of Linux service NAME (linux, sec, test, ...): transparent, failobjects or endlinux")
     ap.add_argument("commands", nargs="*")
     a = ap.parse_args()
     if a.iommu:
@@ -310,6 +312,9 @@ def main():
         args += ["-fw_cfg", "name=opt/hydra/pge,string=off"]
     if a.lx_kernel:
         args += ["-fw_cfg", "name=opt/hydra/lx,string=kernel"]
+    for w in a.restart:
+        name, _, cls = w.partition("=")
+        args += ["-fw_cfg", f"name=opt/hydra/restart.{name},string={cls}"]
     disk_format = 'qcow2' if a.disk.endswith('.qcow2') else 'raw'
     if a.disk == "none":
         pass  # no pool disk (e.g. the pool on a USB stick given through HYDRA_QEMU_EXTRA)

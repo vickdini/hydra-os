@@ -49,6 +49,26 @@ pub mod obj;
 
 pub mod timer;
 
+// wave6 G21 begin: restart support for every service (design section 5)
+pub mod restart;
+pub mod restart_policy;
+
+/// The service the single request table serves today (Group 19's registry generalizes it).
+const SVC: u8 = restart::SVC_LINUX;
+
+/// Whether a forwarded call should be made: the server is online, or it is restarting and
+/// its callers wait for it (Transparent and FailObjects; never for EndLinux).
+#[inline]
+fn gate() -> bool {
+    ONLINE.load(Ordering::Acquire) || restart::restarting(SVC)
+}
+
+/// The internal answer of [`call_and_wait`] when the server is not online but restarting:
+/// the caller waits for it ([`restart::wait_online`]) and makes the call then. (-4100 is
+/// Group 19's `LX_REDIRECTED`.)
+const LX_OFFLINE: i64 = -4101;
+// wave6 G21 end
+
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -135,7 +155,8 @@ pub static STEP4: AtomicBool = AtomicBool::new(false);
 /// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
 /// are the server's: the kernel's dispatchers send the calls that make them there.
 pub fn step4() -> bool {
-    STEP4.load(Ordering::Relaxed) && ONLINE.load(Ordering::Acquire)
+    // (wave6 G21: also while the server restarts: the calls wait for it)
+    STEP4.load(Ordering::Relaxed) && gate()
 }
 
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
@@ -321,7 +342,8 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
             if bits & (T_FAMILY | T_BYFD) != 0 {
                 // Routed per call (Group 12): while no server is online, sockets are the
                 // kernel's (and no descriptor holds a live server object)
-                if !ONLINE.load(Ordering::Acquire) || (bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX) {
+                // (wave6 G21: a restarting server's callers wait for it: `gate`)
+                if !gate() || (bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX) {
                     return None;
                 }
                 if bits & T_BYFD != 0 {
@@ -343,8 +365,9 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
                     return Some(call(frame, Some(o)));
                 }
             }
-            if !ONLINE.load(Ordering::Acquire) {
-                return Some(ENOSYS);
+            if !gate() {
+                // (wave6 G21: a service the ladder gave up fails with EIO)
+                return Some(if restart::down(SVC) { EIO } else { ENOSYS });
             }
             Some(call(frame, None))
         }
@@ -443,8 +466,10 @@ pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::cha
 /// [`call_obj`] with [`LxCall::ino`] (Group 13: the socket node of `bind`/`connect`).
 pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, ino: u64) -> i64 {
     let Some(o) = dev.as_server() else { return EBADF };
-    let Some(slot) = o.slot() else { return EBADF };
-    if !ONLINE.load(Ordering::Acquire) {
+    // (wave6 G21: an object of a dead instance fails with its kind's error; a restarting
+    // server's live objects wait for it)
+    let Some(slot) = o.slot() else { return obj::stale_errno(o) };
+    if !gate() {
         return EBADF;
     }
     let mut c = LxCall::EMPTY;
@@ -461,7 +486,7 @@ pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux:
 /// kernel code asks for server objects with the `LX_KCALL_*` numbers (Group 13). The
 /// caller holds the kernel lock (an ordinary system call path).
 pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
-    if !ONLINE.load(Ordering::Acquire) {
+    if !gate() {
         return ENOSYS;
     }
     let mut c = LxCall::EMPTY;
@@ -478,8 +503,8 @@ pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
 pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
     use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
     let Some(o) = dev.as_server() else { return EBADF };
-    let Some(slot) = o.slot() else { return EBADF };
-    if !ONLINE.load(Ordering::Acquire) {
+    let Some(slot) = o.slot() else { return obj::stale_errno(o) };
+    if !gate() {
         return EBADF;
     }
     let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
@@ -515,9 +540,19 @@ pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, w
     });
     drop(sched);
     let Some(me) = me else { return ENOSYS };
-    c.note_seq = notes_head();
-    let kout = if write { None } else { Some(&mut out[..n]) };
-    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, Some(&buf), true, kout));
+    let mut r;
+    loop {
+        c.note_seq = notes_head();
+        let kout = if write { None } else { Some(&mut out[..n]) };
+        let mut id = 0;
+        r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, Some(&buf), true, kout, &mut id));
+        // wave6 G21: the server restarts (see `call_with`)
+        match after_restart(r, &c, id) {
+            Ok(()) => continue,
+            Err(e) => r = e,
+        }
+        break;
+    }
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
         crate::task::scheduler::wait_out_handoff();
@@ -803,16 +838,38 @@ fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
     loop {
-        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl, None));
+        let mut id = 0;
+        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl, None, &mut id));
         // A net wait ended (Group 12): the same call again, at once
         if r != crate::ipc::protocol::LX_RETRY {
-            return r;
+            // wave6 G21: the server is restarting: wait for it, then send the call (again)
+            match after_restart(r, &c, id) {
+                Ok(()) => {
+                    c.note_seq = notes_head();
+                    continue;
+                }
+                Err(e) => return e,
+            }
         }
         NET_RETRIES.fetch_add(1, Ordering::Relaxed);
         c.note_seq = notes_head();
         c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
     }
 }
+
+// wave6 G21 begin
+/// What a caller does with answer `r` of call `c` (request `old_id`) when the server went
+/// away or is restarting (`docs/linux-services-design.md` 5.1): `Ok(())` make the call
+/// again (the server is back); `Err(v)` return `v` (every ordinary answer is `Err(r)`).
+fn after_restart(r: i64, c: &LxCall, old_id: u64) -> Result<(), i64> {
+    let online = || ONLINE.load(Ordering::Acquire);
+    match r {
+        LX_OFFLINE => restart::wait_online(SVC, &online),
+        restart::LX_RESEND | restart::LX_RESEND_MAYBE => restart::resend(SVC, r, c.nr, &c.args, old_id, &online),
+        _ => Err(r),
+    }
+}
+// wave6 G21 end
 
 // ----------------------------------------------------------------------
 // Net waits (Group 12, wave 5): blocked socket calls woken by net-server's doorbell
@@ -916,12 +973,20 @@ pub fn net_event(handles: Option<&[u32]>) {
 
 /// [`call_with`] with the copies made. `kout`: a kernel-buffer read ([`call_obj_kbuf`]):
 /// the output to `args[1]` goes there instead of to user memory.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
+/// (wave6 G21) `id_out`: the request's id, for [`after_restart`].
+fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>, id_out: &mut u64) -> i64 {
     let placed = lx(|s| {
         // Checked under the table's lock: `server_gone` clears ONLINE before it takes the
         // lock, so a call placed here is either failed by it or refused now
         if !ONLINE.load(Ordering::Acquire) {
-            return Err(ENOSYS);
+            // (wave6 G21: a restarting server's caller waits for it; one given up: EIO)
+            return Err(if restart::restarting(SVC) {
+                LX_OFFLINE
+            } else if restart::down(SVC) {
+                EIO
+            } else {
+                ENOSYS
+            });
         }
         let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Err(EAGAIN) };
         let id = s.next_id;
@@ -961,6 +1026,7 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
             return e;
         }
     };
+    *id_out = id;
     match target {
         Some((w, hint)) => {
             DIRECT_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -1424,7 +1490,7 @@ pub fn summary() -> alloc::string::String {
         FAILED_CALLS.load(Ordering::Relaxed),
         REPLY_DIRECT.load(Ordering::Relaxed),
         REPLY_WOKEN.load(Ordering::Relaxed),
-    )
+    ) + "; " + &restart::summary() // wave6 G21
 }
 
 /// Whether the calling Linux thread, back from a call on the lock-free path, may have a
@@ -1519,8 +1585,20 @@ pub fn ctl(op: u64) -> i64 {
             }
             NOTES_HEAD.store(0, Ordering::Release);
             NOTES.store(base, Ordering::Release);
-            obj::online(win.as_mut_ptr() as u64);
+            // wave6 G21 begin: a Transparent restart's new instance adopted the old objects:
+            // they stay; otherwise the old objects go stale (a new generation)
+            if restart::adopting(SVC) {
+                obj::online_adopt(win.as_mut_ptr() as u64);
+            } else {
+                if restart::keeps_objects(SVC) {
+                    obj::offline();
+                }
+                obj::online(win.as_mut_ptr() as u64);
+            }
             ONLINE.store(true, Ordering::Release);
+            // Callers waiting for the restart go on
+            restart::online(SVC);
+            // wave6 G21 end
             let n = lx(|s| s.workers.len());
             crate::kprintln!("[lx] linux-server online (process {}, {} workers)", tgid, n);
             0
@@ -1899,13 +1977,21 @@ pub fn on_signal(bits: u64) {
 /// The server went away: the calls in flight fail at once with `-EIO`, its remaining
 /// threads end, and the crash policy runs ([`recover_task`]).
 fn server_gone() {
+    // wave6 G21 begin: how this going-away is handled (the restart class and the ladder),
+    // decided before ONLINE is cleared so that no caller sees "offline, not restarting"
+    let decision = restart::gone(SVC);
+    let class = decision.class;
+    // wave6 G21 end
     let was_online = ONLINE.swap(false, Ordering::AcqRel);
     netwaits(|w| w.clear());
     RELAY_SERVER.store(false, Ordering::Release);
     WATCHED_NET.store(0, Ordering::Release);
     NOTES.store(0, Ordering::Release);
     NOTES_HEAD.store(0, Ordering::Release);
-    obj::offline();
+    // wave6 G21: a Transparent restart keeps the objects for the new instance to adopt
+    if class != restart::RestartClass::Transparent || !decision.restart {
+        obj::offline();
+    }
     timer::clear();
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
@@ -1919,8 +2005,14 @@ fn server_gone() {
         for (i, r) in s.reqs.iter_mut().enumerate() {
             if matches!(r.state, RState::Queued | RState::Delivered | RState::Pending) {
                 REQ_DONE[i].store(true, Ordering::SeqCst);
+                // wave6 G21: a Transparent restart's callers send their calls again (all
+                // that had no effect yet; one being served only if it is idempotent)
+                r.result = match (class, decision.restart, r.state) {
+                    (restart::RestartClass::Transparent, true, RState::Delivered) => restart::LX_RESEND_MAYBE,
+                    (restart::RestartClass::Transparent, true, _) => restart::LX_RESEND,
+                    _ => EIO,
+                };
                 r.state = RState::Failed;
-                r.result = EIO;
                 clients[n] = r.client;
                 n += 1;
             }
@@ -1940,14 +2032,16 @@ fn server_gone() {
         }
     };
     crate::kprintln!(
-        "[lx] linux-server (process {}) went away: {} calls in flight failed with EIO, {} of its threads ended",
+        "[lx] linux-server (process {}) went away: {} calls in flight {}, {} of its threads ended",
         tgid,
         n,
+        if class == restart::RestartClass::Transparent && decision.restart { "wait to be sent again" } else { "failed with EIO" },
         threads
     );
     // The user's decision 6: every Linux program ends and the desktop comes back at the
-    // login screen once the supervisor has restarted the server
-    if (was_online || tgid != 0) && !RECOVERING.swap(true, Ordering::AcqRel) {
+    // login screen once the supervisor has restarted the server (wave6 G21: only for the
+    // EndLinux class; the others keep the programs)
+    if class == restart::RestartClass::EndLinux && (was_online || tgid != 0) && !RECOVERING.swap(true, Ordering::AcqRel) {
         crate::task::spawn("lx-recover", recover_task, crate::task::TaskPriority::Normal);
     }
 }
