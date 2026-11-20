@@ -2782,6 +2782,14 @@ pub fn force_fault_signal(ctx: &mut ExceptionContext, fpu: *mut FpuState, sig: u
 /// # Returns
 /// Does not return (`!`).
 pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
+    let (regs, fpu, cs) = restore_sigframe(frame);
+    unsafe { return_to_user(&regs, &fpu, cs) }
+}
+
+/// The context `rt_sigreturn` returns to: the registers, FPU state and code segment saved
+/// in the signal frame at `frame.rsp` (checked and sanitised), the restored signal mask
+/// already in place, and a signal deliverable now already delivered on it.
+pub(crate) fn restore_sigframe(frame: &SyscallFrame) -> (UserRegs, FpuState, u16) {
     let uc = frame.rsp; // the handler's `ret` popped pretcode, so rsp points at the ucontext
     let mut raw = [0u8; 304];
     if !prefault_current(uc, 304, false) {
@@ -2867,7 +2875,7 @@ pub fn sys_rt_sigreturn(frame: &SyscallFrame) -> ! {
             Action::Trace(..) | Action::None => {}
         }
     }
-    unsafe { return_to_user(&regs, &fpu, cs) }
+    (regs, fpu, cs)
 }
 
 /// Returns to user mode with every register (including `rcx`/`r11`) taken from `regs`
@@ -2947,6 +2955,8 @@ pub unsafe fn return_to_user(regs: &UserRegs, fpu: &FpuState, cs: u16) -> ! {
 const WNOHANG: u64 = 1;
 /// `wait4` / `waitid` option flag: also report stopped children (`WUNTRACED` / `WSTOPPED`).
 const WUNTRACED: u64 = 2;
+/// `waitid` option flag: report children that exited (`WEXITED`; implied for `wait4`).
+const WEXITED: u64 = 4;
 /// `wait4` / `waitid` option flag: also report continued children (`WCONTINUED`).
 const WCONTINUED: u64 = 8;
 /// `waitid` option flag: leave the child in a waitable state without reaping it (`WNOWAIT`).
@@ -3010,8 +3020,12 @@ fn reap(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
         if matches(c, me, my_pgid, sel) {
             any = true;
             if c.zombie {
-                found = Some((c.pid, c.exit_status.unwrap_or(0), 0));
-                break;
+                // waitid without WEXITED (only stops or continues) leaves exited children
+                if options & WEXITED != 0 {
+                    found = Some((c.pid, c.exit_status.unwrap_or(0), 0));
+                    break;
+                }
+                continue;
             }
             if options & WUNTRACED != 0 && c.stopped && !c.stop_reported {
                 found = Some((c.pid, wait_status_stopped(c.stop_sig), 1));
@@ -3095,7 +3109,8 @@ fn wait_loop(sel: i64, options: u64) -> Result<Option<(u64, i32)>, i64> {
 /// # Returns
 /// Process ID of the child on success, `0` if `WNOHANG` and no change, or a negative Linux error code.
 pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage: u64) -> i64 {
-    match wait_loop(pid, options) {
+    // wait4 always reports exits (Linux adds WEXITED)
+    match wait_loop(pid, options | WEXITED) {
         Ok(Some((pid, status))) => {
             if status_ptr != 0 && !write_bytes(status_ptr, &status.to_le_bytes()) {
                 return EFAULT;

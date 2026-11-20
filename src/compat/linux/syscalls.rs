@@ -227,3 +227,48 @@ pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_MEMFD_CREATE: u64 = 319;
 /// `statx(dirfd, pathname, flags, mask, statxbuf)` — retrieves extended file status information.
 pub const SYS_STATX: u64 = 332;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The numbers against Linux's `arch/x86/entry/syscalls/syscall_64.tbl` (common/64
+    /// entries), written out independently of the constants above.
+    #[test]
+    fn numbers_match_linux_x86_64() {
+        let table: &[(u64, u64)] = &[
+            (SYS_READ, 0), (SYS_WRITE, 1), (SYS_OPEN, 2), (SYS_CLOSE, 3), (SYS_STAT, 4), (SYS_FSTAT, 5),
+            (SYS_LSTAT, 6), (SYS_POLL, 7), (SYS_LSEEK, 8), (SYS_MMAP, 9), (SYS_MPROTECT, 10), (SYS_MUNMAP, 11),
+            (SYS_BRK, 12), (SYS_RT_SIGACTION, 13), (SYS_RT_SIGPROCMASK, 14), (SYS_RT_SIGRETURN, 15),
+            (SYS_IOCTL, 16), (SYS_PREAD64, 17), (SYS_PWRITE64, 18), (SYS_READV, 19), (SYS_WRITEV, 20),
+            (SYS_ACCESS, 21), (SYS_PIPE, 22), (SYS_SELECT, 23), (SYS_SCHED_YIELD, 24), (SYS_MREMAP, 25),
+            (SYS_MSYNC, 26), (SYS_MINCORE, 27), (SYS_MADVISE, 28), (SYS_DUP, 32), (SYS_DUP2, 33),
+            (SYS_NANOSLEEP, 35), (SYS_GETPID, 39), (SYS_SOCKET, 41), (SYS_CONNECT, 42), (SYS_ACCEPT, 43),
+            (SYS_SENDTO, 44), (SYS_RECVFROM, 45), (SYS_SENDMSG, 46), (SYS_RECVMSG, 47), (SYS_SHUTDOWN, 48),
+            (SYS_BIND, 49), (SYS_LISTEN, 50), (SYS_GETSOCKNAME, 51), (SYS_GETPEERNAME, 52),
+            (SYS_SOCKETPAIR, 53), (SYS_CLONE, 56), (SYS_FORK, 57), (SYS_VFORK, 58), (SYS_EXECVE, 59),
+            (SYS_EXIT, 60), (SYS_WAIT4, 61), (SYS_KILL, 62), (SYS_UNAME, 63), (SYS_FCNTL, 72), (SYS_FSYNC, 74),
+            (SYS_FTRUNCATE, 77), (SYS_GETDENTS, 78), (SYS_GETCWD, 79), (SYS_CHDIR, 80), (SYS_MKDIR, 83),
+            (SYS_RMDIR, 84), (SYS_UNLINK, 87), (SYS_READLINK, 89), (SYS_GETTIMEOFDAY, 96), (SYS_GETUID, 102),
+            (SYS_GETGID, 104), (SYS_SETUID, 105), (SYS_SETGID, 106), (SYS_GETEUID, 107), (SYS_GETEGID, 108),
+            (SYS_SETREUID, 113), (SYS_SETREGID, 114), (SYS_GETGROUPS, 115), (SYS_SETGROUPS, 116),
+            (SYS_SETRESUID, 117), (SYS_GETRESUID, 118), (SYS_SETRESGID, 119), (SYS_GETRESGID, 120),
+            (SYS_CAPGET, 125), (SYS_CAPSET, 126), (SYS_ARCH_PRCTL, 158), (SYS_GETTID, 186), (SYS_FUTEX, 202),
+            (SYS_EPOLL_CREATE, 213), (SYS_SET_TID_ADDRESS, 218), (SYS_CLOCK_GETTIME, 228),
+            (SYS_EXIT_GROUP, 231), (SYS_EPOLL_WAIT, 232), (SYS_EPOLL_CTL, 233), (SYS_OPENAT, 257),
+            (SYS_MKDIRAT, 258), (SYS_NEWFSTATAT, 262), (SYS_UNLINKAT, 263), (SYS_READLINKAT, 267),
+            (SYS_PPOLL, 271), (SYS_EPOLL_PWAIT, 281), (SYS_EVENTFD, 284), (SYS_ACCEPT4, 288),
+            (SYS_EVENTFD2, 290), (SYS_EPOLL_CREATE1, 291), (SYS_DUP3, 292), (SYS_PIPE2, 293),
+            (SYS_GETRANDOM, 318), (SYS_MEMFD_CREATE, 319), (SYS_STATX, 332),
+        ];
+        assert_eq!(table.len(), 106, "every constant of this file");
+        for (i, &(ours, linux)) in table.iter().enumerate() {
+            assert_eq!(ours, linux, "entry {i}");
+        }
+        // No two names share a number
+        let mut nums: alloc::vec::Vec<u64> = table.iter().map(|e| e.0).collect();
+        nums.sort_unstable();
+        nums.dedup();
+        assert_eq!(nums.len(), table.len());
+    }
+}
