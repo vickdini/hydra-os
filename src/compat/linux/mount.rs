@@ -366,7 +366,8 @@ pub fn exec_flags() -> (bool, bool) {
 /// Whether the last lookup ended in a tmpfs (for `statfs`).
 pub fn last_is_tmpfs() -> bool {
     let Some((_, mnt, id)) = NOTES.lock().get(&tid()).copied() else { return false };
-    id != 0 && table(id).and_then(|t| t.lock().get(mnt).map(|m| matches!(m.kind, Kind::Tree { tmpfs: Some(_) }))).unwrap_or(false)
+    // (as last_flags: a note from another namespace than the caller's now says nothing)
+    id != 0 && id == current_ns_id() && table(id).and_then(|t| t.lock().get(mnt).map(|m| matches!(m.kind, Kind::Tree { tmpfs: Some(_) }))).unwrap_or(false)
 }
 
 /// Where Hydra serves the files of a named file system type.

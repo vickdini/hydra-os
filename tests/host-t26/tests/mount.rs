@@ -160,6 +160,11 @@ fn tmpfs_mounts() {
     assert_eq!(read_u64(b), 0x0102_1994);
     // Mount info
     assert!(info().contains(" /tmp rw,nosuid - tmpfs tmpfs rw"));
+    // Bug found by this crate (fixed): back in the initial namespace, the stale note of
+    // the last lookup made statfs of pool files report tmpfs
+    let ns = lx::proc::with(task::SELF_PID, |p| core::mem::replace(&mut p.ns.mnt, 0));
+    assert!(!mount::last_is_tmpfs());
+    lx::proc::with(task::SELF_PID, |p| p.ns.mnt = ns);
     // Unmounting removes the tree
     close(fd);
     assert_eq!(umount("/tmp", 0), 0);

@@ -76,6 +76,7 @@ fn forget_kernel_state() {
         lx::fuse::ns0_remove(m.conn.root());
     }
     lx::locks::process_exited(task::SELF_PID);
+    lx::mount::forget_thread(task::SELF_PID);
     lx::aio::forget_process(task::SELF_PID);
 }
 
