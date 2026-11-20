@@ -5,6 +5,7 @@ pub mod common;
 
 mod execve;
 mod extra;
+mod futex;
 mod ldt;
 mod limits;
 mod ns;

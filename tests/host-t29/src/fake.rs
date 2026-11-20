@@ -60,6 +60,9 @@ thread_local! {
     pub static ON_WAIT: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
     /// How many waits ran.
     pub static WAITS: Cell<usize> = const { Cell::new(0) };
+    /// Scripted steps: each wait takes the next one (before [`ON_WAIT`]); a step may switch
+    /// tasks and even wait itself (taking the following step).
+    pub static WAIT_STEPS: RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> = RefCell::new(std::collections::VecDeque::new());
     /// Sleeps taken through `task::sleep_ticks`.
     pub static SLEEPS: Cell<u64> = const { Cell::new(0) };
     /// Whether the fake CPU saves FPU state with XSAVE (`idt::use_xsave`).
@@ -90,6 +93,11 @@ thread_local! {
     pub static WRITE_ERROR: Cell<&'static str> = const { Cell::new("I/O error") };
     /// The working directory (`vfs::base_dir` with `AT_FDCWD`).
     pub static CWD: RefCell<String> = RefCell::new(String::from("/"));
+}
+
+/// Queues a scripted step for the next wait (see [`WAIT_STEPS`]).
+pub fn step(f: impl FnOnce() + 'static) {
+    WAIT_STEPS.with_borrow_mut(|q| q.push_back(Box::new(f)));
 }
 
 /// Records a stub call.
@@ -142,6 +150,7 @@ pub fn reset() {
     SPIN_WAITS.set(false);
     ON_WAIT.with_borrow_mut(|h| *h = None);
     WAITS.set(0);
+    WAIT_STEPS.with_borrow_mut(|q| q.clear());
     ONLINE_CPUS.set(1);
     SLEEPS.set(0);
     XSAVE.set(false);
@@ -688,6 +697,14 @@ pub mod wait {
 
     fn waited(deadline: Option<u64>) {
         WAITS.set(WAITS.get() + 1);
+        // A scripted step first: it runs as whoever it names, and the current task comes back
+        let step = WAIT_STEPS.with_borrow_mut(|q| q.pop_front());
+        if let Some(s) = step {
+            let me = CURRENT.get();
+            s();
+            CURRENT.set(me);
+            return;
+        }
         let hook = ON_WAIT.with_borrow_mut(|h| h.take());
         if let Some(mut h) = hook {
             h();
