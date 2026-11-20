@@ -182,6 +182,75 @@ call's hand-off is in progress, ...), nothing changes and the worker is woken th
 way. There is no machine-wide stop: the direct switch is an ordinary switch between two
 tasks of one CPU, and other CPUs and other processes keep running.
 
+## Calls between services (wave 6, Group 20)
+
+Design: `docs/linux-services-design.md` sections 4.2–4.4. Two mechanisms, both built on the
+direct switch above.
+
+**A call to a classic server** (net-server, zfs-server, a driver: one server thread in
+`SYS_SVC_RECV`) uses `SYS_SVC_CALL` as before; its queued calls from ring-3 servers now take
+a *direct path* (`src/ipc/service.rs`, section "The direct path"):
+
+1. A server thread waiting in `recv` is *parked*: it blocked at a point where the compiler
+   keeps nothing in vector registers, so vector 0x82 (no FPU state moved) may resume it.
+   `Service::parked` names it.
+2. The caller places its request as before and switches straight to the parked thread
+   (`switch_to_parked`): the scheduler's `direct_call` resumes a target in an *event wait*
+   when asked (`DIRECT_EVENT`) and ends its event wait. The server returns to its program
+   with the request at once.
+3. The server answers with **`SYS_SVC_RECV` + `RECV_REPLY`** (answer request `r10`, then
+   receive: `hydra_rt::svccall::reply_recv`). When it finds nothing more to do it parks and,
+   in the same step, hands the CPU straight back to the caller; the next call finds it
+   parked. net-server's loop does this. When it has loopback frames to deliver right after
+   an answer it uses **`RECV_YIELD`** instead (`svccall::reply_yield`): the caller gets the
+   CPU at once and net-server stays ready for its round, which may run on the other CPU
+   meanwhile (as after wave 5's hand-off reply). A server that still answers with
+   `SYS_SVC_REPLY` wakes the caller and parks at its next `recv`.
+4. The server's switch back goes only to a caller still blocked by its own direct switch;
+   a caller that fell back to waiting on its queue is woken where it waits (no migrations).
+5. A caller whose server is busy on the other CPU spins (kernel lock let go, at most
+   40 µs) for the answer instead of sleeping and being woken across CPUs.
+
+Whenever a step cannot be done (no parked thread, a hand-off in progress, the server just
+woken on the other CPU) the call is an ordinary queued one; nothing is lost (the answer is
+marked under the request table's lock before the caller is woken, and the caller's switch
+checks that mark under the scheduler lock). Kernel callers keep `Handoff`/`Queued` as they
+were.
+
+Measured (KVM, 2 CPUs): linux-server -> net-server null call 3.76 µs (wave 5's hand-off in
+the same build: 5.88); TCP and UDP ping-pong 20-40 % faster than before, 100 MB download as
+fast or faster; bulk TCP over 127.0.0.1 (`netbench lo`) about 14 % slower than with
+hand-off calls (the calls of the sender and the receiver now overlap on two CPUs and
+contend for net-server's one thread). linux-server's net-server calls are queued calls now (wave 5's `SVC_CALL_HANDOFF` is
+no longer used by it; the bit still works).
+
+**A direct call to a Linux service**, `SYS_SVC_DCALL` (70) `(svc, op, in, in_len, out,
+out_cap)` (`src/lx/dcall.rs`, `hydra_rt::svccall::dcall`): a forwarded call that comes from a
+service. The kernel builds an `LxCall` with `nr = LX_DCALL_NR` (0x6800), `args = [op, in, out,
+in_len, out_cap, from]`, `svc`, `from_svc`, `dcall_op`, `on_behalf`; copies `in` into the
+target worker's copy area; and uses the target host's request table and its direct switch.
+The callee answers with `SYS_LX_REPLY_RECV` (pending answers and `SYS_LX_COMPLETE` work as
+for Linux calls); up to `out_cap` bytes it leaves for `out` come back. Workers make it on the
+lock-free path (`fast_entry`); other service threads through the ordinary path.
+
+- **Delegation:** a worker's dcall made while it serves request R carries R's caller's
+  identity (from this CPU's identity cache, or the task) and `on_behalf = R`. While the dcall
+  is being served, the callee may use R in `SYS_LX_READ`/`WRITE` and `LX_OBJ_INSTALL`/`FD`
+  (`dcall::may_use`). The caller cannot choose either.
+- **Call order** (no cycles): by rank, test 1 < vfs 2 < {ipc, net, display, input, sound,
+  tty, sec} 3 < proc 4 < linux 5; only downward edges are allowed (`-EPERM` otherwise), plus
+  what the supervisor adds with `dcall::allow`. The null operation is allowed on every edge.
+  A call to the caller's own process needs an idle worker there (`-EAGAIN`), so a pool never
+  waits for itself.
+- **Posts:** `SYS_SVC_POST` (71) `(svc, op, data, len <= 16)` appends `LX_NOTE_POST` (8) to the
+  target host's ring and wakes its main thread.
+- **When the callee dies**, its calls in flight fail with `-EIO` (`server_gone`), as all
+  forwarded calls.
+
+Tests: `tests/linux/dcall_test.c` (null, echo, delegation, refused edges, two threads; `dct
+kill S`: slow calls while svc-test is killed), lxbench `svc_rtt`, `svc_rtt_handoff`,
+`dcall_rtt` (linux-server times the calls itself: `LX_NULL_NR` ops 5–7).
+
 ## Without the kernel lock (wave 4)
 
 Since wave 4 (Group 10, branch `mk-lxfast`) a forwarded call and the worker's answer run

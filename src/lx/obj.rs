@@ -492,6 +492,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     use crate::ipc::protocol::{LX_OBJ_NETCANCEL, LX_OBJ_NETCHECK, LX_OBJ_NETWAIT, LX_OBJ_SIGTHREAD};
     if matches!(op, LX_OBJ_INSTALL | LX_OBJ_FD | LX_OBJ_NETCHECK | LX_OBJ_NETWAIT | LX_OBJ_NETCANCEL | LX_OBJ_SIGTHREAD | LX_OBJ_COMM | LX_OBJ_FDPATH | LX_OBJ_PIN | LX_OBJ_TAKE | LX_OBJ_GIVE)
         && crate::ipc::protocol::lx_req_svc(a) != h
+        && !(matches!(op, LX_OBJ_INSTALL | LX_OBJ_FD) && super::dcall::may_use(a)) // wave6 G20: delegation
     {
         return ESRCH;
     }

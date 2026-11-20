@@ -519,6 +519,7 @@ pub fn svc_ctl(op: u64, a: u64, b: u64, _c: u64) -> i64 {
         }
         LX_SVC_WHOAMI => h as i64,
         // wave6 G20 begin: ops 3-7
+        3..=7 => super::dcall::svc_op(op, a, b, _c),
         // wave6 G20 end
         // wave6 G21 begin: ops 16-23
         // wave6 G21 end

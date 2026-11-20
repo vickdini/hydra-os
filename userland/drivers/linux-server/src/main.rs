@@ -238,6 +238,7 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
             LX_OBJ_KIND_TEST => (obj::test_mmap(&cx), 0),
             _ => (-19, 0), // ENODEV
         },
+        LX_DCALL_NR => dcall_serve(&cx), // wave6 G20
         // wave 6 (Group 19): a test call the test service redirected here
         LX_TEST_NR if c.redir_obj != 0 => (0x5000 + c.redir_obj as i64 + 0x100 * c.redirs as i64 + c.redir_tail as i64, 0),
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one
@@ -318,6 +319,52 @@ fn null_call(cx: &Cx) -> (i64, u64) {
         }
         LX_NULL_OBJ => (obj::test_new(cx, cx.args[1]), 0),
         LX_NULL_OBJ_CLOSES => (obj::TEST_CLOSES.load(Ordering::Relaxed) as i64, 0),
+        // wave6 G20: the round trip of a call to net-server (the direct path's probe)
+        LX_NULL_SVC_RTT => (netc::ping_rtt(cx.args[1], cx.args[2] & 1 != 0), 0),
+        // wave6 G20: `arg1` direct calls (null) to service `arg2`, timed
+        LX_NULL_DCALL_RTT => {
+            let t0 = sys::lx_timer(LX_TIMER_NOW, 0, 0);
+            for _ in 0..cx.args[1] {
+                let r = hydra_rt::svccall::dcall(cx.args[2] as u8, LX_DCALL_OP_NULL, &[], &mut []);
+                if r < 0 {
+                    return (r, 0);
+                }
+            }
+            (sys::lx_timer(LX_TIMER_NOW, 0, 0) - t0, 0)
+        }
+        // wave6 G20: one direct call to service `arg1`, operation `arg2`, input the 8 bytes
+        // of `arg3`; the result (op 1 echo: the 8 bytes back as the result)
+        LX_NULL_DCALL => {
+            let mut out = [0u8; 8];
+            let r = hydra_rt::svccall::dcall(cx.args[1] as u8, cx.args[2], &cx.args[3].to_le_bytes(), &mut out);
+            if cx.args[2] == LX_DCALL_OP_ECHO && r == 8 {
+                (u64::from_le_bytes(out) as i64, 0)
+            } else {
+                (r, 0)
+            }
+        }
+        _ => (EINVAL, 0),
+    }
+}
+
+/// wave6 G20: a direct call from another service (or another worker of ours): the null
+/// operation, an echo of the input, the identity the kernel passed (delegation).
+fn dcall_serve(cx: &Cx) -> (i64, u64) {
+    let a = hydra_rt::svccall::DcallArgs::of(&cx.c);
+    match a.op {
+        LX_DCALL_OP_NULL => (0, 0),
+        LX_DCALL_OP_ECHO => {
+            let data = match cx.copy_in(a.input, a.input_len) {
+                Ok(d) => d,
+                Err(e) => return (e, 0),
+            };
+            let n = data.len().min(a.output_cap);
+            match cx.copy_out(a.output, &data[..n]) {
+                Ok(()) => (n as i64, 0),
+                Err(e) => (e, 0),
+            }
+        }
+        LX_DCALL_OP_WHO => (cx.c.tgid as i64, 0),
         _ => (EINVAL, 0),
     }
 }

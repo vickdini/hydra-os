@@ -304,6 +304,11 @@ struct Request {
     abandoned: bool,
     /// Pages lent to the server for this request (an index into [`GRANTS`] plus one; 0: none).
     grant: u8,
+    /// wave6 G20: the caller takes the direct path (a ring-3 server's queued call): the
+    /// answer hands the CPU straight back to it (see "The direct path").
+    direct: bool,
+    /// wave6 G20: where the caller is in the scheduler's task table (a hint).
+    caller_idx: usize,
 }
 
 impl Request {
@@ -319,6 +324,8 @@ impl Request {
         mode: CallMode::Handoff,
         abandoned: false,
         grant: 0,
+        direct: false,
+        caller_idx: 0,
     };
 }
 
@@ -405,6 +412,10 @@ pub struct Service {
     /// they came through (0: none, the service has its own). The USB driver serves the USB
     /// disks this way next to its input endpoint.
     primary: u32,
+    /// wave6 G20: a server thread parked in `recv` where the direct path may switch to it
+    /// (its task ID plus one; 0: none), and where it is in the task table (a hint).
+    parked: AtomicU64,
+    parked_idx: AtomicU64,
 }
 
 impl Service {
@@ -425,6 +436,8 @@ impl Service {
             notify: AtomicU64::new(0),
             irq_forward: AtomicU32::new(0),
             signal_hook: core::sync::atomic::AtomicUsize::new(0),
+            parked: AtomicU64::new(0),
+            parked_idx: AtomicU64::new(0),
         }
     }
 }
@@ -819,6 +832,7 @@ pub fn unregister(endpoint: u32) {
             alias.server.store(0, Ordering::Release);
         }
         let owner = slot_owner(svc).endpoint;
+        slot_owner(svc).parked.store(0, Ordering::Release); // wave6 G20
         let mut ended: [(usize, u64, CallMode); MAX_REQUESTS] = [(0, 0, CallMode::Queued); MAX_REQUESTS];
         let mut n = 0;
         let mut grants: [u8; MAX_REQUESTS] = [0; MAX_REQUESTS];
@@ -839,6 +853,7 @@ pub fn unregister(endpoint: u32) {
                 }
                 r.state = ReqState::Failed;
                 r.error = ESRCH;
+                REQ_ANSWERED[i].store(true, Ordering::SeqCst); // wave6 G20
                 ended[n] = (i, r.caller, r.mode);
                 n += 1;
             }
@@ -851,7 +866,12 @@ pub fn unregister(endpoint: u32) {
                 CallMode::Handoff => {
                     x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller))
                 }
-                CallMode::Queued => REQ_WQ[i].wake_all(),
+                CallMode::Queued => {
+                    REQ_WQ[i].wake_all();
+                    // wave6 G20: a direct caller may be blocked by its switch, not waiting on
+                    // the queue (no effect on one that waits on it)
+                    x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().unblock_task(crate::task::TaskId(caller)));
+                }
             }
         }
         // Its kernel client forgets what the server held (net-server: sockets)
@@ -980,12 +1000,18 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
     if server == 0 || !crate::task::is_active() {
         return Err(ENODEV);
     }
-    let me = crate::task::SCHEDULER.lock().current_task_id().0;
+    let (me, my_idx, my_service) = {
+        let mut s = crate::task::SCHEDULER.lock();
+        let idx = s.current_index();
+        (s.current_task_id().0, idx, s.current_task_mut(|t| t.service).flatten())
+    };
     let owner = slot_owner(svc);
     // A server calling its own service would wait for itself
-    if me == server || crate::task::current_service().is_some_and(|s| s == owner.endpoint) {
+    if me == server || my_service.is_some_and(|s| s == owner.endpoint) {
         return Err(EDEADLK);
     }
+    // wave6 G20: a ring-3 server's queued call takes the direct path
+    let direct = mode == CallMode::Queued && my_service.is_some() && DIRECT_ON.load(Ordering::Relaxed);
     // The pages lent with it, pinned for as long as the server may use them
     let gidx = match grant {
         Some(spec) => make_grant(spec, owner.endpoint)?,
@@ -1006,7 +1032,10 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
             mode,
             abandoned: false,
             grant: gidx,
+            direct,
+            caller_idx: my_idx,
         };
+        REQ_ANSWERED[i].store(false, Ordering::SeqCst); // wave6 G20
         Some(i)
     });
     let Some(i) = slot else {
@@ -1018,7 +1047,15 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
         QUEUED_OWNER[i].store(owner.endpoint, Ordering::Release);
         QUEUED_CALLER[i].store(me + 1, Ordering::Release);
     }
-    owner.recv_wq.wake_all();
+    // wave6 G20: straight to a server thread parked in `recv`; otherwise (or when that
+    // cannot be done) the server is woken the ordinary way
+    let switched = direct && switch_to_parked(owner, i);
+    if !switched {
+        owner.recv_wq.wake_all();
+    }
+    // wave6 G20: the server is busy on another CPU (it answers in microseconds): wait for
+    // the answer spinning a little, rather than sleep and be woken across CPUs
+    let switched = switched || (direct && spin_for_answer(i));
     let deadline = crate::arch::pit::ticks() + timeout_ticks;
     let mut interrupted = false;
     match mode {
@@ -1031,6 +1068,10 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
             } else {
                 crate::task::yield_now();
             }
+        }
+        // wave6 G20: back from the direct switch with the answer (the usual case): no wait
+        CallMode::Queued if switched && REQ_ANSWERED[i].load(Ordering::Acquire) => {
+            QUEUED_CALLER[i].store(0, Ordering::Release);
         }
         CallMode::Queued => {
             let done = || requests(|t| t[i].id != id || matches!(t[i].state, ReqState::Replied | ReqState::Failed));
@@ -1048,7 +1089,12 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
                     break;
                 }
                 // Woken by the reply (or the server's end); a look every 100 ms meanwhile
-                crate::task::wait::wait(Some(deadline.min(now + 10)));
+                // (wave6 G20: a direct caller waits where the direct switch may resume it)
+                if direct {
+                    wait_clobbered(Some(deadline.min(now + 10)));
+                } else {
+                    crate::task::wait::wait(Some(deadline.min(now + 10)));
+                }
             }
             REQ_WQ[i].unregister();
             QUEUED_CALLER[i].store(0, Ordering::Release);
@@ -1092,6 +1138,246 @@ fn call_once_with(endpoint: u32, request: Message, timeout_ticks: u64, mode: Cal
             Err(ETIMEDOUT)
         }
         r => r,
+    }
+}
+
+// ----------------------------------------------------------------------
+// The direct path (wave 6, Group 20)
+// ----------------------------------------------------------------------
+//
+// A queued call from a ring-3 server (linux-server asking net-server, zfs-server asking
+// the disk driver outside a hand-off) used to wake the target's server thread through
+// the scheduler, often on the other CPU, and be woken the same way by the answer: two
+// scheduler round trips. A hand-off avoids them but stops every other CPU's system calls
+// for the call's length. The direct path does neither:
+//
+// - a server thread waiting in `recv` is *parked* ([`Service::parked`]): it blocked at a
+//   point where the compiler keeps nothing in vector registers ([`park_wait`]), so the
+//   direct-switch vector (0x82, no FPU state moved) may resume it;
+// - the caller places its request as before and, if a server thread is parked, switches
+//   straight to it on this CPU ([`switch_to_parked`]): the caller blocks, the server runs
+//   now with the caller's timeslice, takes the request and returns to its program;
+// - a server that answers and waits in one system call (`reply_recv`, net-server) parks
+//   and hands the CPU straight back to the caller in the same step; a server that answers
+//   with `reply` wakes the caller and parks at its next `recv`
+//
+// Whenever a step cannot be done this way (no parked thread, a hand-off in progress, the
+// server just woken on another CPU) the call goes on exactly as a queued one: the server
+// is woken through its queue, the caller waits on its request's queue with its deadline.
+// No wake-up is lost: the answer is marked ([`REQ_ANSWERED`], under the request table's
+// lock) before the caller is woken, and the caller's switch does not block it once the
+// mark is set (the scheduler checks it under its lock).
+
+/// Per request slot: answered or failed (the guard of its caller's direct switch).
+static REQ_ANSWERED: [core::sync::atomic::AtomicBool; MAX_REQUESTS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_REQUESTS];
+/// The direct path is on (a test switch: off, every call goes the queued way).
+pub static DIRECT_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// Calls switched straight to a parked server thread since boot.
+pub static DIRECT_SWITCHED: AtomicU64 = AtomicU64::new(0);
+/// Direct-path calls whose server had to be woken the ordinary way.
+pub static DIRECT_WOKEN: AtomicU64 = AtomicU64::new(0);
+/// Answers that handed the CPU straight back to their caller.
+pub static DIRECT_BACK: AtomicU64 = AtomicU64::new(0);
+
+/// One line for the counters: how the direct path went.
+pub fn direct_summary() -> alloc::string::String {
+    alloc::format!(
+        "direct path {}: {} calls switched straight to the server, {} woken the ordinary way; {} answers handed straight back",
+        if DIRECT_ON.load(Ordering::Relaxed) { "on" } else { "off" },
+        DIRECT_SWITCHED.load(Ordering::Relaxed),
+        DIRECT_WOKEN.load(Ordering::Relaxed),
+        DIRECT_BACK.load(Ordering::Relaxed)
+    )
+}
+
+/// Switches straight to `svc`'s parked server thread, which then takes request `slot` (see
+/// the section). The calling task blocks until it is resumed (by the answer, usually).
+///
+/// # Returns
+///
+/// `false` at once, with nothing changed, when it cannot be done (the caller then wakes the
+/// server through its queue).
+fn switch_to_parked(svc: &Service, slot: usize) -> bool {
+    use crate::task::scheduler::{DIRECT_EVENT, DIRECT_GUARD, DIRECT_HINT, DIRECT_TO};
+    let p = svc.parked.load(Ordering::Acquire);
+    if p == 0 || crate::task::scheduler::handoff_active() {
+        DIRECT_WOKEN.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let hint = svc.parked_idx.load(Ordering::Relaxed) as usize | DIRECT_EVENT;
+    let failed: u64 = x86_64::instructions::interrupts::without_interrupts(|| {
+        DIRECT_TO.store(p, Ordering::Relaxed);
+        DIRECT_HINT.store(hint as u64, Ordering::Relaxed);
+        DIRECT_GUARD.store(&REQ_ANSWERED[slot] as *const core::sync::atomic::AtomicBool as u64, Ordering::Relaxed);
+        let failed: u64;
+        // SAFETY: vector 0x82 switches to the parked thread and comes back here when this
+        // task runs again (rax 0), or returns at once with rax 1. Every register the
+        // compiler could keep a value in is declared clobbered (no FPU state is moved)
+        unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
+        failed
+    });
+    if failed == 0 {
+        DIRECT_SWITCHED.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        DIRECT_WOKEN.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+}
+
+/// Waits in `recv` as `wait::wait` does, parked for the direct path: the yield declares
+/// every register clobbered, so the direct switch may resume the thread.
+fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
+    if !crate::task::is_active() || !crate::arch::pit::is_active() || !DIRECT_ON.load(Ordering::Relaxed) {
+        wake_back(back);
+        crate::task::wait::wait(deadline);
+        return;
+    }
+    if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+        wake_back(back);
+        return;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let (me, idx, sleeping) = {
+            let mut s = crate::task::SCHEDULER.lock();
+            let (me, idx) = (s.current_task_id().0, s.current_index());
+            (me, idx, s.event_wait_current(deadline))
+        };
+        if !sleeping {
+            wake_back(back);
+            return;
+        }
+        let mark = me + 1;
+        let ours = svc.parked.compare_exchange(0, mark, Ordering::AcqRel, Ordering::Acquire).is_ok();
+        if ours {
+            svc.parked_idx.store(idx as u64, Ordering::Relaxed);
+        }
+        // Parked: the answered caller gets this CPU straight away (this thread stays in
+        // its event wait: a request, a notification or the deadline resumes it)
+        let switched = match back {
+            Some(b) if !crate::task::scheduler::handoff_active() => {
+                use crate::task::scheduler::{DIRECT_GUARD, DIRECT_HINT, DIRECT_TO};
+                DIRECT_TO.store(b.caller + 1, Ordering::Relaxed);
+                // Only a caller still blocked by its own direct switch (it came to this CPU
+                // with its call); one that fell back to waiting on its queue is woken the
+                // ordinary way, on the CPU it waits on (no migrations to and fro)
+                DIRECT_HINT.store(b.idx as u64, Ordering::Relaxed);
+                DIRECT_GUARD.store(0, Ordering::Relaxed);
+                let failed: u64;
+                // SAFETY: as in `switch_to_parked`
+                unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
+                if failed == 0 {
+                    DIRECT_BACK.fetch_add(1, Ordering::Relaxed);
+                }
+                failed == 0
+            }
+            _ => false,
+        };
+        if !switched {
+            wake_back(back);
+            // Still parked, unless a wake-up came meanwhile (then the yield is only a pass)
+            // SAFETY: the yield vector switches tasks and comes back here
+            unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+        }
+        if ours {
+            let _ = svc.parked.compare_exchange(mark, 0, Ordering::AcqRel, Ordering::Acquire);
+        }
+    });
+}
+
+/// How long a direct caller whose server is busy on another CPU spins for its answer.
+const SPIN_NS: u64 = 40_000;
+
+/// Spins (without the kernel lock, interrupts on) until request `slot` is answered, at most
+/// [`SPIN_NS`]; whether it was. The kernel lock is taken again before returning.
+fn spin_for_answer(slot: usize) -> bool {
+    if crate::arch::smp::online() < 2 {
+        return false;
+    }
+    let end = crate::arch::pit::now_ns() + SPIN_NS;
+    let held = crate::arch::smp::bkl_held();
+    if held {
+        crate::arch::smp::bkl_exit();
+    }
+    let was = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::enable();
+    let mut answered = false;
+    while crate::arch::pit::now_ns() < end {
+        if REQ_ANSWERED[slot].load(Ordering::Acquire) {
+            answered = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !was {
+        x86_64::instructions::interrupts::disable();
+    }
+    if held {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    if answered {
+        DIRECT_SPUN.fetch_add(1, Ordering::Relaxed);
+    }
+    answered
+}
+
+/// Direct-path calls answered while their caller spun ([`spin_for_answer`]).
+pub static DIRECT_SPUN: AtomicU64 = AtomicU64::new(0);
+
+/// The answer to direct caller `caller` (at `idx`, a hint) is marked: makes it ready and
+/// gives it this CPU now; the calling server stays ready (`RECV_YIELD`).
+fn hand_back(caller: u64, idx: usize) {
+    use crate::task::scheduler::{DIRECT_HINT, DIRECT_TO};
+    let ready = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut s = crate::task::SCHEDULER.lock();
+        s.apply_wakes();
+        s.unblock_task(crate::task::TaskId(caller))
+            || s.with_task_mut(crate::task::TaskId(caller), |t| t.state == crate::task::TaskState::Ready).unwrap_or(false)
+    });
+    if !ready || crate::task::scheduler::handoff_active() {
+        return;
+    }
+    DIRECT_BACK.fetch_add(1, Ordering::Relaxed);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        DIRECT_TO.store(caller + 1, Ordering::Relaxed);
+        DIRECT_HINT.store(idx as u64, Ordering::Relaxed);
+        // The yield vector's direct switch (this task stays ready), or an ordinary pass
+        crate::task::yield_now();
+    });
+}
+
+/// `wait::wait`, with a yield that declares every register clobbered: a task waiting here
+/// may be resumed by the direct switch (which moves no FPU state).
+fn wait_clobbered(deadline: Option<u64>) {
+    if !crate::task::is_active() || !crate::arch::pit::is_active() {
+        crate::task::wait::wait(deadline);
+        return;
+    }
+    if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
+        return;
+    }
+    let sleeping = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().event_wait_current(deadline));
+    if sleeping {
+        // SAFETY: the yield vector switches tasks and comes back here
+        unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+    }
+}
+
+/// A direct caller whose answer is marked, not woken yet ([`reply_recv`]).
+#[derive(Clone, Copy)]
+struct Back {
+    caller: u64,
+    idx: usize,
+    slot: usize,
+}
+
+/// Wakes `back`'s caller the ordinary way (it waits on its request's queue, or is blocked
+/// by its direct switch).
+fn wake_back(back: Option<Back>) {
+    if let Some(b) = back {
+        REQ_WQ[b.slot].wake_all();
+        x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().unblock_task(crate::task::TaskId(b.caller)));
     }
 }
 
@@ -1410,8 +1696,15 @@ pub fn recv(endpoint: u32) -> Result<(u64, Message), i64> {
 /// bits in `args[0]`; requests come first), and the low bits are a timeout in ticks (0:
 /// none) after which it returns ID 0 with no bits.
 pub fn recv_with(endpoint: u32, flags: u64) -> Result<(u64, Message), i64> {
-    use crate::ipc::protocol::{MSG_SVC_NOTIFY, RECV_NOTIFY};
     let svc = slot_owner(own_service(endpoint)?);
+    recv_back(svc, flags, None)
+}
+
+/// [`recv_with`] on `svc` (the slot owner); `back`: a direct caller just answered (wave6
+/// G20, [`reply_recv`]) that gets the CPU when this thread parks, or is woken the ordinary
+/// way as soon as this thread has something else to do.
+fn recv_back(svc: &'static Service, flags: u64, mut back: Option<Back>) -> Result<(u64, Message), i64> {
+    use crate::ipc::protocol::{MSG_SVC_NOTIFY, RECV_NOTIFY};
     let notifications = flags & RECV_NOTIFY != 0;
     let timeout = flags & !RECV_NOTIFY;
     let deadline = (notifications && timeout != 0).then(|| crate::arch::pit::ticks() + timeout);
@@ -1430,20 +1723,23 @@ pub fn recv_with(endpoint: u32, flags: u64) -> Result<(u64, Message), i64> {
         });
         if let Some(req) = got {
             svc.recv_wq.unregister();
+            wake_back(back.take()); // wave6 G20
             return Ok(req);
         }
         if notifications {
             let bits = svc.notify.swap(0, Ordering::AcqRel);
             if bits != 0 {
                 svc.recv_wq.unregister();
+                wake_back(back.take()); // wave6 G20
                 return notification(bits);
             }
             if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {
                 svc.recv_wq.unregister();
+                wake_back(back.take()); // wave6 G20
                 return notification(0);
             }
         }
-        crate::task::wait::wait(deadline);
+        park_wait(svc, deadline, back.take()); // wave6 G20 (was `wait::wait`)
         if crate::compat::linux::proc::signal_pending() {
             svc.recv_wq.unregister();
             return Err(EINTR);
@@ -1459,6 +1755,73 @@ pub fn recv_with(endpoint: u32, flags: u64) -> Result<(u64, Message), i64> {
 /// - `-EINVAL`: No such request taken by this service and unanswered.
 pub fn reply(endpoint: u32, id: u64, answer: Message) -> Result<(), i64> {
     let svc = slot_owner(own_service(endpoint)?);
+    // (Task 0, the boot task, is a caller like any other)
+    let Some((i, caller, mode, direct, caller_idx)) = mark_reply(svc, id, answer)? else { return Ok(()) };
+    match mode {
+        CallMode::Handoff => {
+            x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
+            crate::task::yield_now();
+        }
+        CallMode::Queued => {
+            REQ_WQ[i].wake_all();
+            // wave6 G20: a direct caller may be blocked by its switch (not on the queue).
+            // It is only woken: this server goes on to its next `recv` and parks, so the
+            // caller's next call finds it parked (a server that answers and waits in one
+            // call, `reply_recv`, hands the CPU straight back instead)
+            if direct {
+                wake_back(Some(Back { caller, idx: caller_idx, slot: i }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// wave6 G20: `SYS_SVC_RECV` with [`crate::ipc::protocol::RECV_REPLY`]: answers request `id`
+/// with `answer` as [`reply`] does, then waits for the next request as [`recv_with`] does,
+/// in one system call. A direct caller gets the CPU back when this thread parks (the
+/// classic server's half of the direct path: the next call finds it parked at once).
+pub fn reply_recv(endpoint: u32, id: u64, answer: Message, flags: u64) -> Result<(u64, Message), i64> {
+    let svc = slot_owner(own_service(endpoint)?);
+    // `RECV_YIELD`: the server has more to do right away (net-server: loopback frames to
+    // deliver): the caller gets the CPU now and the server stays ready to go on (on another
+    // CPU, or after the caller), without receiving
+    if flags & crate::ipc::protocol::RECV_YIELD != 0 {
+        match mark_reply(svc, id, answer)? {
+            Some((slot, caller, CallMode::Queued, true, idx)) => {
+                REQ_WQ[slot].wake_all();
+                hand_back(caller, idx);
+            }
+            Some((slot, _, CallMode::Queued, false, _)) => {
+                REQ_WQ[slot].wake_all();
+            }
+            Some((_, caller, CallMode::Handoff, _, _)) => {
+                x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
+                crate::task::yield_now();
+            }
+            None => {}
+        }
+        return Ok((0, Message::with_args(crate::ipc::protocol::MSG_SVC_NOTIFY, [0, 0, 0, 0])));
+    }
+    let back = match mark_reply(svc, id, answer)? {
+        Some((slot, caller, CallMode::Queued, true, idx)) => Some(Back { caller, idx, slot }),
+        Some((slot, caller, mode, _, _)) => {
+            match mode {
+                CallMode::Handoff => {
+                    x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
+                    crate::task::yield_now();
+                }
+                CallMode::Queued => REQ_WQ[slot].wake_all(),
+            }
+            None
+        }
+        None => None,
+    };
+    recv_back(svc, flags & !crate::ipc::protocol::RECV_REPLY, back)
+}
+
+/// Marks request `id` of `svc` answered (see [`reply`]): `None` when its caller gave up,
+/// else `(slot, caller, mode, direct, caller's index)`.
+fn mark_reply(svc: &Service, id: u64, answer: Message) -> Result<Option<(usize, u64, CallMode, bool, usize)>, i64> {
     let found = requests(|t| {
         let i = if id != 0 {
             t.iter().position(|r| r.id == id && r.owner == svc.endpoint && r.state == ReqState::Delivered)
@@ -1478,21 +1841,13 @@ pub fn reply(endpoint: u32, id: u64, answer: Message) -> Result<(), i64> {
         }
         r.state = ReqState::Replied;
         r.reply = answer;
-        Some((i, Some((r.caller, r.mode)), g))
+        REQ_ANSWERED[i].store(true, Ordering::SeqCst); // wave6 G20
+        Some((i, Some((r.caller, r.mode, r.direct, r.caller_idx)), g))
     });
     let Some((i, waiting, grant)) = found else { return Err(EINVAL) };
     // The server is done with the lent pages
     release_grant(grant);
-    // (Task 0, the boot task, is a caller like any other)
-    let Some((caller, mode)) = waiting else { return Ok(()) };
-    match mode {
-        CallMode::Handoff => {
-            x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff_of(caller));
-            crate::task::yield_now();
-        }
-        CallMode::Queued => REQ_WQ[i].wake_all(),
-    }
-    Ok(())
+    Ok(waiting.map(|(caller, mode, direct, idx)| (i, caller, mode, direct, idx)))
 }
 
 /// Maps physical device memory into the driver's address space if permitted by supervisor grants.

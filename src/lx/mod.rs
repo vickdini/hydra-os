@@ -54,6 +54,8 @@
 
 pub mod copy;
 
+pub mod dcall; // wave6 G20
+
 pub mod obj;
 
 // wave6 G23 begin
@@ -1399,6 +1401,19 @@ static IDENT: IdentCache = IdentCache(
     [const { UnsafeCell::new(Ident { epoch: 0, tid: 0, tgid: 0, ids: [0; 6], caps: 0, ngroups: 0, groups: [0; LX_GROUPS], ipc_ns: 0, net: false }) }; crate::arch::smp::MAX_CPUS],
 );
 
+// wave6 G20 begin
+/// Thread `tid`'s identity from this CPU's cache, if it is there and still valid (a direct
+/// call made for the program whose call a worker serves, `dcall`).
+fn ident_of(tid: u64) -> Option<Ident> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        // SAFETY: this CPU's own entry, interrupts off
+        let e = unsafe { &*IDENT.0[cpu].get() };
+        (tid != 0 && e.tid == tid && e.epoch == crate::compat::linux::ident_epoch()).then_some(*e)
+    })
+}
+// wave6 G20 end
+
 /// The calling thread's identity for a forwarded call, from this CPU's cache when nothing
 /// changed since it was filled; `None` for a thread the lock-free path does not serve (not
 /// a Linux thread, a seccomp filter, a tracer). Interrupts off.
@@ -1448,6 +1463,16 @@ pub enum Fast {
 /// filter, or a worker's `SYS_LX_REPLY_RECV`. `None`: the ordinary path.
 pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     let nr = frame.rax;
+    // wave6 G20 begin: a worker's direct call to another service (`dcall`), on this path
+    // too (Linux's msgsnd, the same number, goes on below)
+    if nr == crate::arch::syscall::SYS_SVC_DCALL {
+        let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
+        if svc::worker_host(tid).is_some() {
+            let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
+            return Some(Fast::Reply(dcall::dcall(tid, idx, [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9], true)));
+        }
+    }
+    // wave6 G20 end
     if nr == crate::arch::syscall::SYS_LX_REPLY_RECV {
         let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
         if let Some(x) = svc::worker_host(tid).and_then(svc::host) {
@@ -2028,7 +2053,10 @@ pub enum MemOp {
 /// string with no NUL within `len` bytes.
 pub fn client_mem(op: MemOp, id: u64, addr: u64, len: u64, buf: u64) -> i64 {
     if let Err(e) = server_for(id) {
-        return e;
+        // wave6 G20: or a request a dcall this thread serves was made for (delegation)
+        if !dcall::may_use(id) {
+            return e;
+        }
     }
     if len > MAX_COPY {
         return EINVAL;

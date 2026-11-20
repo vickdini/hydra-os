@@ -135,6 +135,12 @@ pub const SYS_LX_SIGTAKE: u64 = 63;
 /// Memory objects (`crate::lx::mem`): `(op, a, b, c, d)`, the `LX_MEM_*` operations.
 pub const SYS_LX_MEM: u64 = 64;
 // wave6 G23 end
+// wave6 G20 begin
+/// Calls between services (`crate::lx::dcall`): a direct call to another Linux service.
+pub const SYS_SVC_DCALL: u64 = 70;
+/// A one-way post to another Linux service's notification ring.
+pub const SYS_SVC_POST: u64 = 71;
+// wave6 G20 end
 // wave6 G19 begin
 /// `SYS_LX_SVC(op, a, b, c)` (wave 6, Group 19): a Linux service's registry operations
 /// (`LX_SVC_*`, `crate::lx::svc::svc_ctl`).
@@ -943,7 +949,14 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             // arg0: endpoint, arg1: where to store the request (`WireMessage`), arg2: 0, or
             // `RECV_NOTIFY` | timeout in ticks (notifications come back as ID 0)
             // Returns the request's ID (the reply names it)
-            match crate::ipc::service::recv_with(arg0 as u32, _arg2) {
+            // wave6 G20: with `RECV_REPLY`, first the answer (the message at arg1) to the
+            // request whose ID is in r10 (`ipc::service::reply_recv`)
+            let got = if _arg2 & crate::ipc::protocol::RECV_REPLY != 0 {
+                load_wire_message(arg1).and_then(|m| crate::ipc::service::reply_recv(arg0 as u32, frame.r10, m, _arg2))
+            } else {
+                crate::ipc::service::recv_with(arg0 as u32, _arg2)
+            };
+            match got {
                 Ok((id, m)) => match store_wire_message(arg1, m) {
                     0 => id as i64,
                     e => e,
@@ -1090,6 +1103,26 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             drop(stats);
             crate::lx::timer::sys_timer(arg0, arg1, _arg2)
         }
+        // wave6 G20 begin: calls between services (workers come in through `lx::fast_entry`)
+        SYS_SVC_DCALL => {
+            drop(stats);
+            let (me, idx) = {
+                let s = crate::task::SCHEDULER.lock();
+                (s.current_task_id().0, s.current_index())
+            };
+            // The wait needs no kernel lock (as a forwarded call's); taken again after it
+            let r = crate::lx::dcall::dcall(me, idx, [arg0, arg1, _arg2, frame.r10, frame.r8, frame.r9], true);
+            if !crate::arch::smp::bkl_held() {
+                crate::arch::smp::bkl_enter();
+                crate::task::scheduler::wait_out_handoff();
+            }
+            r
+        }
+        SYS_SVC_POST => {
+            drop(stats);
+            crate::lx::dcall::post([arg0, arg1, _arg2, frame.r10, 0, 0])
+        }
+        // wave6 G20 end
         SYS_LX_SIGTAKE => {
             drop(stats);
             crate::lx::obj::sig_take(arg0, arg1, _arg2, frame.r10)

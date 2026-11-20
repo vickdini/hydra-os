@@ -130,6 +130,7 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
         LX_TEST_NR => test_call(&cx),
         // The caller's context, as the kernel filled it for a `T_FSCTX` entry
         LX_TEST_CTX_NR => ((c.pgid as i64) | (c.sid as i64) << 32, 0),
+        LX_DCALL_NR => dcall_serve(&cx), // wave6 G20
         LX_KCALL_DEVOPEN => (new_object(&cx, c.dev, c.args[1]), 0),
         0 | 1 | 16 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
         9 if c.obj != LX_OBJ_NONE => (obj_mmap(&cx), 0), // wave6 G23
@@ -138,6 +139,45 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     objs::flush();
     r
 }
+
+// wave6 G20 begin
+/// A direct call from another service (`SYS_SVC_DCALL`): the test operations of
+/// `LX_DCALL_OP_*` (null, echo, who, peek, slow).
+fn dcall_serve(cx: &Cx) -> Answer {
+    let a = hydra_rt::svccall::DcallArgs::of(&cx.c);
+    match a.op {
+        LX_DCALL_OP_NULL => (0, 0),
+        LX_DCALL_OP_ECHO => {
+            let data = match cx.copy_in(a.input, a.input_len) {
+                Ok(d) => d,
+                Err(e) => return (e, 0),
+            };
+            let n = data.len().min(a.output_cap);
+            match cx.copy_out(a.output, &data[..n]) {
+                Ok(()) => (n as i64, 0),
+                Err(e) => (e, 0),
+            }
+        }
+        LX_DCALL_OP_WHO => (cx.c.tgid as i64, 0),
+        LX_DCALL_OP_PEEK => {
+            // 8 bytes at the address in the input, read from the program the call is for
+            let Ok(d) = cx.copy_in(a.input, 8) else { return (EINVAL, 0) };
+            let addr = u64::from_le_bytes(d[..8].try_into().unwrap_or([0; 8]));
+            let mut v = [0u8; 8];
+            match sys::lx_read(cx.c.on_behalf, addr, &mut v) {
+                Ok(()) => (u64::from_le_bytes(v) as i64 & i64::MAX, 0),
+                Err(e) => (e, 0),
+            }
+        }
+        LX_DCALL_OP_SLOW => {
+            let Ok(d) = cx.copy_in(a.input, 8) else { return (EINVAL, 0) };
+            sys::sleep_ms(u64::from_le_bytes(d[..8].try_into().unwrap_or([0; 8])).min(10_000));
+            (0, 0)
+        }
+        _ => (EINVAL, 0),
+    }
+}
+// wave6 G20 end
 
 /// [`LX_TEST_NR`].
 fn test_call(cx: &Cx) -> Answer {

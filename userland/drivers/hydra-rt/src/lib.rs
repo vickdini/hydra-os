@@ -20,6 +20,7 @@ pub mod heap;
 // wave6 G23
 pub mod mem;
 pub mod port;
+pub mod svccall;
 pub mod sys;
 pub mod svcrt;
 
