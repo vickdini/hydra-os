@@ -46,3 +46,6 @@ pub(crate) fn drop_area(x: &Host) {
     reset_objs(x);
     *x.objs.frames.lock() = None;
 }
+
+#[path = "lx_obj_more.rs"]
+mod more;
