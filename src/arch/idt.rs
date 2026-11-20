@@ -446,6 +446,63 @@ pub fn uaccess_fixup(rip: u64, debug: bool) -> Option<u64> {
 }
 // wave6 G22 end
 
+use crate::console::SerialOnly;
+/// Writes a line straight to the serial port, without the console lock (a fault report from
+/// a CPU whose console lock or scheduler lock another CPU may wait on).
+macro_rules! emerg {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write as _;
+        let _ = writeln!(SerialOnly, $($arg)*);
+    }};
+}
+
+/// The words around a kernel fault's stack pointer and the registers, straight to the serial
+/// port (no lock: the fault may have come under the scheduler lock), for a fault whose
+/// instruction pointer is not code (a return address that was overwritten).
+fn kernel_fault_stack(ctx: &ExceptionContext) {
+    emerg!(
+        "[!]   rax {:#x} rbx {:#x} rcx {:#x} rdx {:#x} rsi {:#x} rdi {:#x} rbp {:#x} r8 {:#x} r12 {:#x} r13 {:#x} r14 {:#x} r15 {:#x} anchor {:#x}",
+        ctx.rax, ctx.rbx, ctx.rcx, ctx.rdx, ctx.rsi, ctx.rdi, ctx.rbp, ctx.r8, ctx.r12, ctx.r13, ctx.r14, ctx.r15,
+        crate::arch::syscall::hydra_syscall_dispatcher as *const () as usize
+    );
+    // The current task's own kernel stack (64 KiB below the TSS top): the words that look
+    // like kernel code addresses, lowest first (the call chain that went deep)
+    let top = crate::arch::gdt::privilege_stack();
+    if top >> 47 == 0x1_FFFF && top > 0x10000 {
+        let text_lo = crate::arch::relocate::KERNEL_BASE + 0x1000;
+        let text_hi = crate::arch::relocate::KERNEL_BASE + 0x40_0000;
+        let mut a = if ctx.rsp < top && top - ctx.rsp < 0x4_0000 { ctx.rsp & !7 } else { top - 0x10000 };
+        // (the stack the CPU is really on: from rsp up to 4 KiB above)
+        let mut r = ctx.rsp & !7;
+        while r < (ctx.rsp & !7) + 0x1000 {
+            let w = unsafe { core::ptr::read_volatile(r as *const u64) };
+            if w >= text_lo && w < text_hi {
+                emerg!("[!]   onstack {:x} at {:x}", w - crate::arch::relocate::KERNEL_BASE + 0x1_0000_0000, r);
+            }
+            r += 8;
+        }
+        while a < top {
+            // SAFETY: the current task's kernel stack (mapped, allocated); read only
+            let w = unsafe { core::ptr::read_volatile(a as *const u64) };
+            if w >= text_lo && w < text_hi {
+                emerg!("[!]   chain {:x} at {:x}", w - crate::arch::relocate::KERNEL_BASE + 0x1_0000_0000, a);
+            }
+            a += 8;
+        }
+    }
+    let base = (ctx.rsp & !7).wrapping_sub(0x100);
+    if base >> 47 != 0x1_FFFF {
+        return;
+    }
+    for row in 0..24u64 {
+        let a = base + row * 32;
+        // SAFETY: kernel stack memory near the faulting stack pointer (mapped: the CPU just
+        // used it); read only
+        let w: [u64; 4] = unsafe { core::array::from_fn(|i| core::ptr::read_volatile((a + i as u64 * 8) as *const u64)) };
+        emerg!("[!]   {:#x}: {:#018x} {:#018x} {:#018x} {:#018x}", a, w[0], w[1], w[2], w[3]);
+    }
+}
+
 /// Where each CPU was when the last NMI arrived (`rip`, `cs`), for the task dump.
 pub static NMI_AT: [[core::sync::atomic::AtomicU64; 2]; crate::arch::smp::MAX_CPUS] =
     [const { [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)] }; crate::arch::smp::MAX_CPUS];
@@ -933,6 +990,20 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 return;
             }
 
+            // First straight to the serial port: the report below goes through the current
+            // task's descriptors (the scheduler lock), which a fault under that lock never gets
+            emerg!(
+                "[!] KERNEL PAGE FAULT: cr2 {:#x} rip {:#x} err {:#x} rsp {:#x} cpu {} task {} stack top {:#x} (scheduler lock held: {})",
+                fault_addr,
+                ctx.rip,
+                ctx.error_code,
+                ctx.rsp,
+                crate::arch::percpu::cpu(),
+                crate::task::CURRENT_TID.load(Ordering::Relaxed),
+                crate::arch::gdt::privilege_stack(),
+                crate::task::SCHEDULER.is_locked()
+            );
+            kernel_fault_stack(ctx);
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: PAGE FAULT (#PF)");
@@ -968,6 +1039,9 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 return;
             }
 
+            // (straight to the serial port first, as for #PF)
+            emerg!("[!] KERNEL #GP: rip {:#x} err {:#x} rsp {:#x} cpu {} task {} stack top {:#x} (scheduler lock held: {})", ctx.rip, ctx.error_code, ctx.rsp, crate::arch::percpu::cpu(), crate::task::CURRENT_TID.load(Ordering::Relaxed), crate::arch::gdt::privilege_stack(), crate::task::SCHEDULER.is_locked());
+            kernel_fault_stack(ctx);
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: GENERAL PROTECTION FAULT (#GP)");
@@ -1021,6 +1095,8 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                 return;
             }
 
+            emerg!("[!] KERNEL #UD: rip {:#x} rsp {:#x} cpu {} task {} stack top {:#x} (scheduler lock held: {})", ctx.rip, ctx.rsp, crate::arch::percpu::cpu(), crate::task::CURRENT_TID.load(Ordering::Relaxed), crate::arch::gdt::privilege_stack(), crate::task::SCHEDULER.is_locked());
+            kernel_fault_stack(ctx);
             set_color(Color::LightRed, Color::Black);
             println!("\n============================================================");
             println!(" [!] CPU EXCEPTION: INVALID OPCODE (#UD)");

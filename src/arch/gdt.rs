@@ -185,6 +185,21 @@ pub fn set_privilege_stack(stack_top: VirtAddr) {
     }
 }
 
+/// The calling CPU's `privilege_stack_table[0]` (the current task's kernel stack top), read
+/// without a lock (for fault reports).
+pub fn privilege_stack() -> u64 {
+    let cpu = crate::arch::percpu::cpu();
+    let ap = if cpu == 0 { core::ptr::null_mut() } else { AP_TSS[cpu].load(core::sync::atomic::Ordering::Acquire) };
+    // SAFETY: a plain read of this CPU's TSS field
+    unsafe {
+        if ap.is_null() {
+            core::ptr::read_volatile(core::ptr::addr_of!(TSS.privilege_stack_table[0])).as_u64()
+        } else {
+            core::ptr::read_volatile(core::ptr::addr_of!((*ap).privilege_stack_table[0])).as_u64()
+        }
+    }
+}
+
 /// Returns a static reference to the kernel, user, and TSS `Selectors`.
 ///
 /// # Returns

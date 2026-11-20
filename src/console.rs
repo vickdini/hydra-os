@@ -456,6 +456,16 @@ impl core::fmt::Write for FixedBuf {
     }
 }
 
+/// A `fmt::Write` straight to the serial port, without the console lock (fault reports).
+pub struct SerialOnly;
+impl core::fmt::Write for SerialOnly {
+    /// Sends `s` to `COM1`.
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        serial_write(s);
+        Ok(())
+    }
+}
+
 /// Mirrors console output to the `COM1` (`0x3F8`) serial port so kernel logs survive after
 /// UEFI Boot Services exit.
 ///
