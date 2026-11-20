@@ -47,42 +47,65 @@
 
 extern crate alloc;
 
+// The kernel's modules. The host tests (`tests/host-t34`) compile this file as a module of
+// their own crate, which brings its own (real files and stubs): there it has none of these.
+#[cfg(not(target_os = "uefi"))]
+use crate::{admin, arch, console, fs, memory, task, video};
+
 /// Hardware architecture abstraction layer for `x86_64` CPUs and legacy PC peripherals.
+#[cfg(target_os = "uefi")]
 pub mod admin; // group 4: the admin interface for the Ring 3 shell
+#[cfg(target_os = "uefi")]
 pub mod arch;
 /// Object-capability security model, access rights bitmasks, and per-task CSpace tables.
+#[cfg(target_os = "uefi")]
 pub mod capability;
 /// Thread-safe formatted text output over UEFI SimpleTextOutput and the GOP framebuffer console.
 #[macro_use]
+#[cfg(target_os = "uefi")]
 pub mod console;
 /// Virtual File System (VFS) descriptors, anonymous pipes, and the OpenZFS microkernel file server.
+#[cfg(target_os = "uefi")]
 pub mod fs;
 /// Inter-Process Communication (IPC) message structures and bounded wait-queue endpoints.
+#[cfg(target_os = "uefi")]
 pub mod ipc;
 /// Wave 3: forwarding Linux system calls to the ring-3 Linux server.
+#[cfg(target_os = "uefi")]
 pub mod lx;
 /// Wave 5: personalities (programs of other systems: FreeBSD, macOS), the hook.
+#[cfg(target_os = "uefi")]
 pub mod personality;
 /// Physical frame allocation, dynamic kernel heap, 4-level PML4 paging, and process virtual memory.
+#[cfg(target_os = "uefi")]
 pub mod memory;
 /// The emergency prompt: the tiny in-kernel console for when user space is broken (the console
 /// shell is the ring-3 `hydra-shell`, started by `admin::boot`).
+#[cfg(target_os = "uefi")]
 pub mod shell;
 /// Sleep-capable kernel synchronization primitives (wait queues, mutexes, semaphores, condvars, channels).
+#[cfg(target_os = "uefi")]
 pub mod sync;
 /// System call ABI definitions, statistics, and userland wrapper routines.
+#[cfg(target_os = "uefi")]
 pub mod syscall;
 /// Preemptive round-robin task scheduler, Task Control Blocks (TCB), and ELF64 binary loader.
+#[cfg(target_os = "uefi")]
 pub mod task;
 /// The emergency text console on the UEFI GOP framebuffer, its bitmap font, and the boot splash.
+#[cfg(target_os = "uefi")]
 pub mod video;
 /// Intel 82540EM (e1000) Gigabit Ethernet driver and full TCP/UDP/IPv4/DNS/DHCP/HTTP network stack.
+#[cfg(target_os = "uefi")]
 pub mod net;
 /// Lossless DEFLATE (RFC 1951) and GZIP (RFC 1952) decompression routines for package extraction.
+#[cfg(target_os = "uefi")]
 pub mod compress;
 /// Archive parsers (`ar`, `tar`, `.deb`) and Debian/Ubuntu root filesystem provisioning.
+#[cfg(target_os = "uefi")]
 pub mod pkg;
 /// Operating system personality and binary compatibility layers (Linux `x86_64` ABI emulation).
+#[cfg(target_os = "uefi")]
 pub mod compat;
 
 
@@ -91,8 +114,8 @@ use uefi::prelude::*;
 use uefi::proto::console::text::Color;
 use x86_64::VirtAddr;
 
-use capability::{table::CapabilityTable, CapType, Capability, Rights};
-use ipc::{Endpoint, Message};
+use crate::capability::{table::CapabilityTable, CapType, Capability, Rights};
+use crate::ipc::{Endpoint, Message};
 
 /// Bare-metal kernel panic handler invoked on unrecoverable runtime faults or assertions.
 ///
@@ -106,25 +129,34 @@ use ipc::{Endpoint, Message};
 /// # Returns
 ///
 /// This function never returns (`!`). It disables interrupts and halts the CPU indefinitely.
-#[panic_handler]
+#[cfg_attr(target_os = "uefi", panic_handler)]
 fn panic(_info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
-    // Straight to COM1 first: no locks and no allocation (the panic may be an
-    // allocation failure, or happen while the console is locked)
+    report_panic(_info);
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// What a kernel panic shows: the message on COM1 first (no locks and no allocation: the
+/// panic may be an allocation failure, or happen while the console is locked) with the
+/// heap's state, then on the console, taken back from the boot logo or a desktop session.
+///
+/// # Arguments
+///
+/// * `info` - The panic (its location and message).
+pub fn report_panic(info: &(impl core::fmt::Display + core::fmt::Debug)) {
     {
         use core::fmt::Write;
         let mut com1 = crate::arch::raw_serial::RawSerial;
-        let _ = write!(com1, "\n[!] KERNEL PANIC: {}\n", _info);
+        let _ = write!(com1, "\n[!] KERNEL PANIC: {}\n", info);
         if let Some(h) = crate::memory::heap::try_stats() {
             let _ = write!(com1, "[!] heap: {} KiB used, {} KiB free of {} KiB\n", h.used_bytes / 1024, h.free_bytes / 1024, h.total_bytes / 1024);
         }
     }
     video::splash::panic_reveal();
     console::set_color(Color::LightRed, Color::Black);
-    println!("\n[!] KERNEL PANIC: {:?}", _info);
-    loop {
-        x86_64::instructions::hlt();
-    }
+    println!("\n[!] KERNEL PANIC: {:?}", info);
 }
 
 /// Native UEFI application entry point (`efi_main`) and kernel bootstrap orchestrator.
@@ -140,7 +172,7 @@ fn panic(_info: &PanicInfo) -> ! {
 /// # Returns
 ///
 /// Returns [`Status::SUCCESS`] if the shell ever terminates normally (in practice, the kernel runs until poweroff).
-#[entry]
+#[cfg_attr(target_os = "uefi", entry)]
 fn main() -> Status {
     // First of all, before anything stores a pointer: the image moves to the higher half
     // (out of the low addresses programs need, wherever the firmware loaded it)
@@ -149,7 +181,7 @@ fn main() -> Status {
 }
 
 /// The kernel's boot sequence, in the higher half (see [`arch::relocate`]).
-fn boot() -> ! {
+pub fn boot() -> ! {
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
     // The Hydra logo instead of boot messages, unless the boot entry asks for them
@@ -182,9 +214,7 @@ fn boot() -> ! {
     println!("[+] IDT loaded successfully (256 gates, double-fault IST stack attached).");
 
     // Test CPU exception dispatch with non-fatal breakpoint trap
-    unsafe {
-        core::arch::asm!("int3");
-    }
+    x86_64::instructions::interrupts::int3();
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] CPU exception dispatch verified: resumed cleanly from #BP trap.");
 

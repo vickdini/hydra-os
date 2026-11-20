@@ -40,9 +40,18 @@ const MAX_QUICK_EXITS: u32 = 3;
 pub fn discover() {
     let mut cfg = [0u8; 16];
     let fw = crate::arch::fwcfg::read_file_into("opt/hydra/boot", &mut cfg).map(|n| &cfg[..n]);
+    let opts = load_options_text();
+    discover_with(fw, opts.as_ref().map(|(text, n)| &text[..*n]));
+}
+
+/// The decisions of [`discover`], from QEMU's `opt/hydra/boot` fw_cfg value (`fw`) and the
+/// boot entry's load options as lower-case ASCII (`opts`, see [`options_text`]).
+pub fn discover_with(fw: Option<&[u8]>, opts: Option<&[u8]>) {
+    // Whether the load options contain `word` (lower case)
+    let say = |word: &[u8]| opts.is_some_and(|text| text.windows(word.len()).any(|w| w == word));
     let by = if fw.is_some_and(|v| v.starts_with(b"emergency")) {
         Some("QEMU fw_cfg opt/hydra/boot=emergency")
-    } else if load_options_say(b"emergency") {
+    } else if say(b"emergency") {
         Some("boot option 'emergency'")
     } else if crate::fs::bootfs::file_exists("\\hydra\\emergency") {
         Some("file \\hydra\\emergency on the EFI partition")
@@ -50,15 +59,15 @@ pub fn discover() {
         None
     };
     // The Linux calls moved to linux-server go back to the in-kernel code (`crate::lx`)
-    if load_options_say(b"lx=kernel") {
+    if say(b"lx=kernel") {
         crate::lx::KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
     }
     // wave6 G19: the per-service switch-back words (`lx.<name>=kernel|linux`)
-    if let Some((text, n)) = load_options_text() {
-        crate::lx::set_boot_words(&text[..n]);
+    if let Some(text) = opts {
+        crate::lx::set_boot_words(text);
     }
     // The FreeBSD stub table of the personality hook (a test switch, `crate::personality`)
-    if load_options_say(b"persona=fbsd-stub") {
+    if say(b"persona=fbsd-stub") {
         crate::personality::STUB_BY_BOOT_OPTION.store(true, Ordering::Release);
     }
     crate::personality::init();
@@ -68,23 +77,23 @@ pub fn discover() {
     }
 }
 
-/// Whether the boot entry's load options contain `word` (lower case).
-fn load_options_say(word: &[u8]) -> bool {
-    let Some((text, n)) = load_options_text() else { return false };
-    text[..n].windows(word.len()).any(|w| w == word)
-}
-
 /// The boot entry's load options as lower-case ASCII (and how many bytes of it).
 fn load_options_text() -> Option<([u8; 512], usize)> {
     let img = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok()?;
     let opts = img.load_options_as_bytes()?;
+    Some(options_text(opts))
+}
+
+/// UCS-2 load options `opts` as lower-case ASCII (other characters as `?`), at most 512
+/// characters: the text and its length.
+pub fn options_text(opts: &[u8]) -> ([u8; 512], usize) {
     let mut text = [0u8; 512];
     let mut n = 0;
     for c in opts.chunks_exact(2).take(text.len()) {
         text[n] = if c[1] == 0 { c[0].to_ascii_lowercase() } else { b'?' };
         n += 1;
     }
-    Some((text, n))
+    (text, n)
 }
 
 /// After the bare-metal transition, starts the KDE desktop (`linux plasma`) at once, unless

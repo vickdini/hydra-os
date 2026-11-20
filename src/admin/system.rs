@@ -328,7 +328,7 @@ pub fn fault_test(what: u64, secs: u64) -> Result<(), Failure> {
         }
         FAULT_PANIC => panic!("Manual kernel panic triggered by user from shell."),
         FAULT_TRAP => {
-            unsafe { core::arch::asm!("int3") };
+            x86_64::instructions::interrupts::int3();
             Ok(())
         }
         _ => Err(Errno(EINVAL)),
