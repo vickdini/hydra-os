@@ -36,6 +36,19 @@ const PIT_CMD_CHANNEL0_SQUARE_WAVE: u8 = 0x36;
 
 /// Timer interrupts so far (they measure the time stamp counter's rate).
 static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// The time stamp counter.
+#[cfg(target_os = "uefi")]
+#[inline(always)]
+unsafe fn rdtsc() -> u64 {
+    core::arch::x86_64::_rdtsc()
+}
+
+/// Host build (unit tests): a fake counter that moves on at every read.
+#[cfg(not(target_os = "uefi"))]
+unsafe fn rdtsc() -> u64 {
+    crate::host::rdtsc()
+}
 /// The clock's anchor, read consistently: `(nanoseconds since boot, their 32-bit fraction,
 /// time stamp counter value there, nanoseconds per cycle in 32.32 fixed point (0: not
 /// measured yet))`. The vDSO computes [`now_ns`] from it in user mode.
@@ -92,7 +105,7 @@ pub fn init(frequency_hz: u32) {
         let seq = CLOCK_SEQ.load(Ordering::Relaxed);
         CLOCK_SEQ.store(seq | 1, Ordering::Release);
         core::sync::atomic::fence(Ordering::SeqCst);
-        BASE_TSC.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
+        BASE_TSC.store(unsafe { rdtsc() }, Ordering::Relaxed);
         MULT.store(mult, Ordering::Relaxed);
         CALIBRATED.store(true, Ordering::Relaxed);
         core::sync::atomic::fence(Ordering::SeqCst);
@@ -122,7 +135,7 @@ fn calibrate_tsc() -> u64 {
         Port::<u8>::new(PIT_COMMAND_PORT).write(0xB0);
         Port::<u8>::new(0x42).write(latch as u8);
         Port::<u8>::new(0x42).write((latch >> 8) as u8);
-        let t0 = core::arch::x86_64::_rdtsc();
+        let t0 = rdtsc();
         let mut spins = 0u64;
         let mut done = true;
         while gate.read() & 0x20 == 0 {
@@ -132,7 +145,7 @@ fn calibrate_tsc() -> u64 {
                 break;
             }
         }
-        let t1 = core::arch::x86_64::_rdtsc();
+        let t1 = rdtsc();
         gate.write(saved);
         (t0, t1, done)
     };
@@ -154,7 +167,7 @@ fn calibrate_tsc() -> u64 {
 pub fn on_timer_tick() {
     // The time stamp counter at this tick, and the long-run cycles per tick (all cycles
     // since the first tick over the ticks since: bursts of late ticks do not skew it)
-    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    let now = unsafe { rdtsc() };
     let first = FIRST_TICK_TSC.load(Ordering::Relaxed);
     let ticks = TICKS.load(Ordering::Relaxed) + 1;
     TICKS.store(ticks, Ordering::Relaxed);
@@ -220,7 +233,7 @@ pub fn now_ns() -> u64 {
     if mult == 0 {
         return base;
     }
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc = unsafe { rdtsc() };
     let total = tsc.saturating_sub(base_tsc) as u128 * mult as u128 + frac as u128;
     base + (total >> 32) as u64
 }
@@ -362,8 +375,8 @@ pub fn sleep_ms(ms: u64) {
         // Fallback to RDTSC spin-loop if PIT interrupts are not active
         let nanos = (ms as u128) * 1_000_000;
         let cycles = (nanos as u64).saturating_mul(2);
-        let start = unsafe { core::arch::x86_64::_rdtsc() };
-        while unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start) < cycles {
+        let start = unsafe { rdtsc() };
+        while unsafe { rdtsc() }.wrapping_sub(start) < cycles {
             core::hint::spin_loop();
         }
     }

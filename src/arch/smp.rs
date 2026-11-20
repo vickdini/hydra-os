@@ -468,6 +468,17 @@ pub fn kick_cpu(cpu: usize) {
     }
 }
 
+/// Host build (unit tests): CPUs `0..n` online and serving flush requests, local APIC ids
+/// equal to their numbers (what `start_aps` and `ap_main` set up on the machine).
+#[cfg(not(target_os = "uefi"))]
+pub fn host_bring_online(n: usize) {
+    for c in 0..MAX_CPUS {
+        LIVE[c].store(c < n, Ordering::SeqCst);
+        CPU_APIC[c].store(if c < n { c as u32 } else { u32::MAX }, Ordering::SeqCst);
+    }
+    ONLINE.store(n, Ordering::SeqCst);
+}
+
 /// Number of CPUs online.
 pub fn online() -> usize {
     ONLINE.load(Ordering::Acquire)
@@ -511,7 +522,7 @@ fn lapic_read(reg: u64) -> u32 {
     if x2apic() {
         return unsafe { super::syscall::rdmsr(x2_msr(reg)) } as u32;
     }
-    unsafe { core::ptr::read_volatile((LAPIC_BASE.load(Ordering::Relaxed) + reg) as *const u32) }
+    mmio_read32(LAPIC_BASE.load(Ordering::Relaxed) + reg)
 }
 
 fn lapic_write(reg: u64, v: u32) {
@@ -519,7 +530,28 @@ fn lapic_write(reg: u64, v: u32) {
         unsafe { super::syscall::wrmsr(x2_msr(reg), v as u64) };
         return;
     }
-    unsafe { core::ptr::write_volatile((LAPIC_BASE.load(Ordering::Relaxed) + reg) as *mut u32, v) }
+    mmio_write32(LAPIC_BASE.load(Ordering::Relaxed) + reg, v)
+}
+
+#[cfg(target_os = "uefi")]
+fn mmio_read32(a: u64) -> u32 {
+    unsafe { core::ptr::read_volatile(a as *const u32) }
+}
+
+#[cfg(target_os = "uefi")]
+fn mmio_write32(a: u64, v: u32) {
+    unsafe { core::ptr::write_volatile(a as *mut u32, v) }
+}
+
+// Host build (unit tests): a modelled local APIC
+#[cfg(not(target_os = "uefi"))]
+fn mmio_read32(a: u64) -> u32 {
+    crate::host::mmio_read32(a)
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn mmio_write32(a: u64, v: u32) {
+    crate::host::mmio_write32(a, v)
 }
 
 /// Sends interrupt command `low` (vector, delivery mode...) to local APIC `apic` from the
@@ -535,11 +567,23 @@ fn write_icr(apic: u32, low: u32) {
     }
 }
 
+/// Whether the CPU has x2APIC mode (CPUID 1, ECX bit 21).
+#[cfg(target_os = "uefi")]
+fn cpu_has_x2apic() -> bool {
+    core::arch::x86_64::__cpuid(1).ecx & (1 << 21) != 0
+}
+
+/// Host build (unit tests): what the test thread's CPU reports.
+#[cfg(not(target_os = "uefi"))]
+fn cpu_has_x2apic() -> bool {
+    crate::host::X2APIC.get()
+}
+
 /// Switches the calling CPU's local APIC to x2APIC mode when the CPU has it (CPUID 1
 /// ECX bit 21). The per-CPU block must be set up (its index is read from it).
 fn enable_x2apic() {
     const IA32_APIC_BASE: u32 = 0x1B;
-    if core::arch::x86_64::__cpuid(1).ecx & (1 << 21) == 0 {
+    if !cpu_has_x2apic() {
         return;
     }
     unsafe {
@@ -583,18 +627,26 @@ unsafe fn rd64(p: u64) -> u64 {
     core::ptr::read_unaligned(p as *const u64)
 }
 
+/// Two executable pages below 1 MiB from the firmware.
+#[cfg(target_os = "uefi")]
+fn low_pages() -> Option<u64> {
+    uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0x9_F000), uefi::boot::MemoryType::LOADER_CODE, 2)
+        .ok()
+        .map(|p| p.as_ptr() as u64)
+}
+
+/// Host build (unit tests): what the test thread's firmware gives.
+#[cfg(not(target_os = "uefi"))]
+fn low_pages() -> Option<u64> {
+    crate::host::LOW_PAGES.get()
+}
+
 /// Reads the processors from the ACPI MADT and reserves the start-up pages. Called before
 /// `ExitBootServices`.
 pub fn discover() {
     // The default register address until the MADT says otherwise (it practically never does)
     BSP_APIC.store(apic_id(), Ordering::Relaxed);
-    let rsdp = uefi::system::with_config_table(|t| {
-        t.iter()
-            .find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID)
-            .or_else(|| t.iter().find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI_GUID))
-            .map(|e| e.address as u64)
-    });
-    let Some(rsdp) = rsdp else {
+    let Some(rsdp) = super::iommu::acpi_rsdp() else {
         crate::kprintln!("[smp] no ACPI tables: one CPU");
         return;
     };
@@ -643,9 +695,9 @@ pub fn discover() {
     ids.truncate(MAX_CPUS);
     // Executable pages below 1 MiB for the start-up code (real mode runs there)
     if ids.len() > 1 {
-        match uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0x9_F000), uefi::boot::MemoryType::LOADER_CODE, 2) {
-            Ok(p) => TRAMPOLINE.store(p.as_ptr() as u64, Ordering::Relaxed),
-            Err(_) => crate::kprintln!("[smp] no memory below 1 MiB for the start-up code: one CPU"),
+        match low_pages() {
+            Some(p) => TRAMPOLINE.store(p, Ordering::Relaxed),
+            None => crate::kprintln!("[smp] no memory below 1 MiB for the start-up code: one CPU"),
         }
     }
     BSP_APIC.store(apic_id(), Ordering::Relaxed);

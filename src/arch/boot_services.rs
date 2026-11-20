@@ -69,6 +69,37 @@ pub fn is_hardware_takeover_complete() -> bool {
     *TAKEOVER_DONE.lock()
 }
 
+/// The physical ranges the kernel keeps reachable in every address space's low 512 GiB
+/// (step 3a of the takeover): every non-free region of the final memory map (in the
+/// higher half, below 2 GiB only device memory), the heap when it is not in the direct
+/// map, always [2 GiB, 4 GiB), the 64 KiB around the boot stack `sp`, and the
+/// framebuffer `fb`. `entries` are (type, start, pages).
+pub fn kernel_low_ranges(
+    entries: impl Iterator<Item = (uefi::boot::MemoryType, u64, u64)>,
+    high: bool,
+    heap: Option<(u64, u64)>,
+    sp: u64,
+    fb: Option<u64>,
+) -> alloc::vec::Vec<(u64, u64)> {
+    use uefi::boot::MemoryType as T;
+    let mut ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+    for (ty, start, pages) in entries {
+        let device = matches!(ty, T::MMIO | T::MMIO_PORT_SPACE);
+        if ty != T::CONVENTIONAL && !(high && !device && start < (2 << 30)) {
+            ranges.push((start, start + pages * 4096));
+        }
+    }
+    if let Some(h) = heap {
+        ranges.push(h);
+    }
+    ranges.push((2 << 30, 4 << 30));
+    ranges.push((sp & !0xFFFF, (sp | 0xFFFF) + 1));
+    if let Some(fb) = fb {
+        ranges.push((fb, fb + 1));
+    }
+    ranges
+}
+
 /// Takes full hardware ownership from UEFI firmware and initializes all bare-metal kernel subsystems.
 ///
 /// Performs the following ordered sequence:
@@ -127,25 +158,11 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         // services, ACPI tables, reserved RAM) only with the kernel's tables loaded
         // (power::firmware_call): below 2 GiB, the low window, only device memory counts
         let high = crate::arch::relocate::image_phys().is_some();
-        let mut ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
-        for d in memory_map.entries() {
-            use uefi::boot::MemoryType as T;
-            let device = matches!(d.ty, T::MMIO | T::MMIO_PORT_SPACE);
-            if d.ty != T::CONVENTIONAL && !(high && !device && d.phys_start < (2 << 30)) {
-                ranges.push((d.phys_start, d.phys_start + d.page_count * 4096));
-            }
-        }
-        if !crate::memory::heap::in_direct_map() {
-            ranges.push(crate::memory::heap::range());
-        }
-        ranges.push((2 << 30, 4 << 30));
+        let heap = (!crate::memory::heap::in_direct_map()).then(crate::memory::heap::range);
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
-        ranges.push((sp & !0xFFFF, (sp | 0xFFFF) + 1));
-        if let Some(info) = crate::video::get_video_info() {
-            let fb = info.base_ptr as u64;
-            ranges.push((fb, fb + 1));
-        }
+        let fb = crate::video::get_video_info().map(|info| info.base_ptr as u64);
+        let ranges = kernel_low_ranges(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)), high, heap, sp, fb);
         crate::memory::vm::init_low_layout(&ranges);
         let kept: alloc::vec::Vec<usize> = (1..512).filter(|&i| crate::memory::vm::kernel_low_slot(i)).collect();
         crate::kprintln!(

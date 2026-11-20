@@ -37,10 +37,10 @@ pub fn info() -> BootInfo {
     INFO.lock().clone().unwrap_or_default()
 }
 
-/// Asks the firmware where the kernel came from and reads the Hydra flag files of the boot
-/// volume. Only before `ExitBootServices`.
-pub fn detect() {
-    let mut info = BootInfo::default();
+/// The GPT partition GUID of the device path the image was loaded from, if any.
+#[cfg(target_os = "uefi")]
+fn firmware_boot_part() -> Option<[u8; 16]> {
+    let mut part = None;
     if let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) {
         if let Some(dev) = img.device() {
             let path = unsafe {
@@ -54,16 +54,40 @@ pub fn detect() {
                     let (ty, sub) = node.full_type();
                     // MEDIA_DEVICE_PATH (4), MEDIA_HARDDRIVE_DP (1): partition number,
                     // start, size, signature[16], MBR type (2: GPT), signature type (2: GUID)
-                    let d = node.data();
-                    if ty.0 == 4 && sub.0 == 1 && d.len() >= 38 && d[36] == 2 && d[37] == 2 {
-                        let mut g = [0u8; 16];
-                        g.copy_from_slice(&d[20..36]);
-                        info.boot_part = Some(g);
+                    if let Some(g) = gpt_partition(ty.0, sub.0, node.data()) {
+                        part = Some(g);
                     }
                 }
             }
         }
     }
+    part
+}
+
+/// Host build (unit tests): the test thread's boot partition.
+#[cfg(not(target_os = "uefi"))]
+fn firmware_boot_part() -> Option<[u8; 16]> {
+    crate::host::BOOT_PART.get()
+}
+
+/// The partition GUID of a device path node, if it is a GPT hard-drive node:
+/// MEDIA_DEVICE_PATH (4), MEDIA_HARDDRIVE_DP (1): partition number, start, size,
+/// signature[16], MBR type (2: GPT), signature type (2: GUID).
+pub fn gpt_partition(ty: u8, sub: u8, d: &[u8]) -> Option<[u8; 16]> {
+    if ty == 4 && sub == 1 && d.len() >= 38 && d[36] == 2 && d[37] == 2 {
+        let mut g = [0u8; 16];
+        g.copy_from_slice(&d[20..36]);
+        Some(g)
+    } else {
+        None
+    }
+}
+
+/// Asks the firmware where the kernel came from and reads the Hydra flag files of the boot
+/// volume. Only before `ExitBootServices`.
+pub fn detect() {
+    let mut info = BootInfo::default();
+    info.boot_part = firmware_boot_part();
     info.live = crate::fs::bootfs::read_boot_file("\\hydra\\live").is_ok() || crate::fs::bootfs::file_exists("\\hydra\\live");
     info.setup_conf = crate::fs::bootfs::read_boot_file("\\hydra\\setup.conf").ok();
     crate::kprintln!(

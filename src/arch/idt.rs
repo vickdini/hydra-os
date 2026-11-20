@@ -131,20 +131,11 @@ impl InterruptDescriptorTable {
 
     /// Loads this IDT into the CPU using the `lidt` assembly instruction.
     pub fn load(&self) {
-        #[repr(C, packed)]
-        struct Idtr {
-            limit: u16,
-            base: u64,
-        }
-
-        let idtr = Idtr {
+        let idtr = x86_64::structures::DescriptorTablePointer {
             limit: (core::mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
-            base: self as *const _ as u64,
+            base: x86_64::VirtAddr::from_ptr(self),
         };
-
-        unsafe {
-            core::arch::asm!("lidt [{}]", in(reg) &idtr, options(nostack, preserves_flags));
-        }
+        unsafe { x86_64::instructions::tables::lidt(&idtr) };
     }
 }
 
@@ -514,6 +505,12 @@ pub static NMI_AT: [[core::sync::atomic::AtomicU64; 2]; crate::arch::smp::MAX_CP
 /// * `fpu` - Pointer to the saved FXSAVE64 register area.
 #[no_mangle]
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
+    exception_handler(ctx, fpu)
+}
+
+/// The body of [`hydra_exception_handler`] (a Rust function: the host tests call it, and
+/// their stand-ins for the kernel's halt unwind through it).
+pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     // wave6 G22 begin: a fault in a user-memory copy of the forwarding path resumes at the
     // copy's fix-up (before anything that takes a lock: the copy may run without the kernel
     // lock, under the request table's lock); a user watchpoint hit by such a copy is cleared
@@ -587,7 +584,7 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
         // taken now and put back for the handler
         let cr2 = x86_64::registers::control::Cr2::read_raw();
         crate::task::scheduler::wait_out_handoff();
-        unsafe { core::arch::asm!("mov cr2, {}", in(reg) cr2, options(nostack, preserves_flags)) };
+        unsafe { write_cr2(cr2) };
     }
     let prev_fpu = CURRENT_TRAP_FPU.swap(fpu, Ordering::AcqRel);
     // A tick from user mode: deliver pending signals before the tick may switch away. A
@@ -690,7 +687,7 @@ pub fn xsave_size() -> usize {
 /// CPUs, some emulated ones) FXSAVE stays in use.
 pub fn enable_xsave(boot_processor: bool) {
     use x86_64::registers::control::{Cr4, Cr4Flags};
-    let id1 = core::arch::x86_64::__cpuid(1);
+    let id1 = cpuid(1, 0);
     let has_xsave = id1.ecx & (1 << 26) != 0;
     let has_avx = id1.ecx & (1 << 28) != 0;
     if boot_processor {
@@ -702,13 +699,13 @@ pub fn enable_xsave(boot_processor: bool) {
         if has_avx {
             xsetbv(0b111);
             // The area for these components must fit an FpuState
-            let size = core::arch::x86_64::__cpuid_count(0xD, 0).ebx;
+            let size = cpuid(0xD, 0).ebx;
             if size as usize <= FPU_AREA {
                 mask = 0b111;
             }
         }
         xsetbv(mask);
-        let size = core::arch::x86_64::__cpuid_count(0xD, 0).ebx;
+        let size = cpuid(0xD, 0).ebx;
         XCR0.store(mask, Ordering::Relaxed);
         XSAVE_SIZE.store(size, Ordering::Relaxed);
         USE_XSAVE.store(1, Ordering::Release);
@@ -719,10 +716,40 @@ pub fn enable_xsave(boot_processor: bool) {
 }
 
 /// Sets XCR0 (the enabled XSAVE components) on the calling CPU (CR4.OSXSAVE must be set).
+#[cfg(target_os = "uefi")]
 fn xsetbv(mask: u64) {
     unsafe {
         core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") mask as u32, in("edx") (mask >> 32) as u32, options(nostack, preserves_flags));
     }
+}
+
+/// CPUID `leaf`, `sub`-leaf.
+#[cfg(target_os = "uefi")]
+fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
+    core::arch::x86_64::__cpuid_count(leaf, sub)
+}
+
+/// Puts back CR2 (the faulting address) after a wait that may have changed CPUs.
+#[cfg(target_os = "uefi")]
+unsafe fn write_cr2(v: u64) {
+    core::arch::asm!("mov cr2, {}", in(reg) v, options(nostack, preserves_flags));
+}
+
+// Host build (unit tests): the test thread's fake CPU (XCR0 as MSR-like state, CPUID
+// answers, CR2 in the shim)
+#[cfg(not(target_os = "uefi"))]
+fn xsetbv(mask: u64) {
+    crate::host::XCR0.set(mask)
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
+    crate::host::cpuid(leaf, sub)
+}
+
+#[cfg(not(target_os = "uefi"))]
+unsafe fn write_cr2(v: u64) {
+    x86_64::hw::set_cr(2, v)
 }
 
 impl FpuState {
@@ -759,6 +786,11 @@ pub const DIRECT_VECTOR: u64 = 0x82;
 /// that cannot be done here, nothing changed and `rax` comes back 1.
 #[no_mangle]
 extern "C" fn hydra_direct_switch_handler(ctx: &mut ExceptionContext) {
+    direct_switch_handler(ctx)
+}
+
+/// The body of [`hydra_direct_switch_handler`] (a Rust function, for the host tests).
+pub fn direct_switch_handler(ctx: &mut ExceptionContext) {
     let target = crate::task::scheduler::DIRECT_TO.swap(0, Ordering::Relaxed);
     let hint = crate::task::scheduler::DIRECT_HINT.load(Ordering::Relaxed) as usize;
     let guard = crate::task::scheduler::DIRECT_GUARD.swap(0, Ordering::Relaxed) as *const core::sync::atomic::AtomicBool;

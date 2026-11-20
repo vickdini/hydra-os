@@ -49,6 +49,7 @@ pub struct Report {
 
 /// One backdoor call: `(eax, ebx, ecx, edx)` after `in eax, dx` with the magic in EAX,
 /// `arg` in EBX and `cmd` in ECX. RBX is reserved by the compiler, so it is swapped in.
+#[cfg(target_os = "uefi")]
 fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
     let (eax, ecx, edx): (u32, u32, u32);
     let mut rbx = arg as u64;
@@ -72,8 +73,20 @@ fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
 }
 
 /// Whether Hydra runs under a hypervisor (CPUID leaf 1, ECX bit 31).
+#[cfg(target_os = "uefi")]
 fn under_hypervisor() -> bool {
     core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0
+}
+
+// Host build (unit tests): a scripted backdoor and hypervisor bit (the test thread's)
+#[cfg(not(target_os = "uefi"))]
+fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
+    crate::host::vmware_call(cmd, arg)
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn under_hypervisor() -> bool {
+    crate::host::HYPERVISOR.get()
 }
 
 /// Switches the device to absolute mode. `false` if there is none or it refuses.

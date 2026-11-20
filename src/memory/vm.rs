@@ -1989,6 +1989,30 @@ impl Drop for MemObject {
 }
 // wave6 G23 end
 
+/// Reads the word at `v` through the loaded page tables (and the TLB).
+#[cfg(target_os = "uefi")]
+unsafe fn read_mapped(v: u64) -> u64 {
+    core::ptr::read_volatile(v as *const u64)
+}
+
+/// Host build (unit tests): a walk of the loaded tables (the test thread's fake CR3), with
+/// no TLB.
+#[cfg(not(target_os = "uefi"))]
+unsafe fn read_mapped(v: u64) -> u64 {
+    const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+    let mut table = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    for shift in [39u64, 30, 21, 12] {
+        let e = core::ptr::read_volatile(crate::memory::frame_allocator::phys_to_virt(table + ((v >> shift) & 511) * 8) as *const u64);
+        assert!(e & 1 != 0, "page fault at {:#x}", v);
+        if shift == 12 || (shift != 39 && e & 0x80 != 0) {
+            let mask = (1u64 << shift) - 1;
+            return core::ptr::read_volatile(crate::memory::frame_allocator::phys_to_virt((e & ADDR & !mask) | (v & mask)) as *const u64);
+        }
+        table = e & ADDR;
+    }
+    unreachable!()
+}
+
 /// Global pages' self-test, run once at boot on the boot processor before the others start
 /// (see `arch::pcid`, "Global kernel pages"): a kernel-half page V is mapped global and read
 /// with the kernel's tables loaded, another address space is loaded, V's entry is pointed at
@@ -2029,7 +2053,7 @@ pub fn global_self_test() -> Result<alloc::string::String, alloc::string::String
     let other = Mm::new().map_err(|e| format!("no memory ({})", e))?;
     let ro = other.cr3();
     let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let read = || unsafe { read_mapped(V) };
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut out = alloc::vec::Vec::new();
         let mut tries: alloc::vec::Vec<(&str, &dyn Fn())> = alloc::vec![
@@ -2120,7 +2144,7 @@ pub fn tlb_self_test() -> Result<alloc::string::String, alloc::string::String> {
     }
     let (ra, rb) = (a.cr3(), b.cr3());
     let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let read = || unsafe { read_mapped(V) };
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut out = alloc::vec::Vec::new();
         let tries: [(&str, &dyn Fn()); 8] = [

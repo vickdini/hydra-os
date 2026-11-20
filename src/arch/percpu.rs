@@ -76,6 +76,7 @@ pub fn init_this_cpu(cpu: usize) {
 }
 
 /// The calling CPU's index.
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 pub fn cpu() -> usize {
     let v: u64;
@@ -83,10 +84,23 @@ pub fn cpu() -> usize {
     v as usize
 }
 
+/// Host build (unit tests): the CPU the test thread plays; `gs` is the host's own.
+#[cfg(not(target_os = "uefi"))]
+pub fn cpu() -> usize {
+    crate::host::cpu()
+}
+
 /// Records that the calling CPU is leaving task `id`'s kernel stack (see [`PerCpu::leaving`]).
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 pub fn set_leaving(id: u64) {
     unsafe { core::arch::asm!("mov qword ptr gs:[{o}], {v}", o = const LEAVING, v = in(reg) id + 1, options(nostack, preserves_flags)) };
+}
+
+/// Host build (unit tests): the same word, reached through the array instead of `gs`.
+#[cfg(not(target_os = "uefi"))]
+pub fn set_leaving(id: u64) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(PERCPU[cpu()].leaving), id + 1) };
 }
 
 /// CPU `c`'s LEAVING mark (task ID plus one; 0: none), for the task dump.
@@ -107,9 +121,23 @@ pub fn leaving_elsewhere(id: u64) -> bool {
 }
 
 /// Sets the kernel stack the calling CPU's next `syscall` from user mode switches to.
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 pub fn set_kernel_rsp(rsp: u64) {
     unsafe { core::arch::asm!("mov qword ptr gs:[16], {}", in(reg) rsp, options(nostack, preserves_flags)) };
+}
+
+/// Host build (unit tests): the same word, reached through the array instead of `gs`.
+#[cfg(not(target_os = "uefi"))]
+pub fn set_kernel_rsp(rsp: u64) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(PERCPU[cpu()].kernel_rsp), rsp) };
+}
+
+/// Host build (unit tests): CPU `c`'s kernel stack for the next `syscall`.
+#[cfg(not(target_os = "uefi"))]
+pub fn kernel_rsp_of(c: usize) -> u64 {
+    // SAFETY: a plain word of a CPU's block
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PERCPU[c].kernel_rsp)) }
 }
 
 /// One `u64` per CPU; the methods act on the calling CPU's.

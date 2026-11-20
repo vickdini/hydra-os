@@ -254,6 +254,7 @@ impl UserDesc {
 
 // ---- Segment registers ----
 
+#[cfg(target_os = "uefi")]
 macro_rules! read_seg {
     ($name:ident, $reg:literal) => {
         #[inline]
@@ -264,28 +265,68 @@ macro_rules! read_seg {
         }
     };
 }
+// Host build (unit tests): the segment registers of the test thread's fake CPU
+#[cfg(not(target_os = "uefi"))]
+macro_rules! read_seg {
+    ($name:ident, $reg:literal) => {
+        fn $name() -> u16 {
+            crate::host::read_seg($reg)
+        }
+    };
+}
 read_seg!(read_ds, "ds");
 read_seg!(read_es, "es");
 read_seg!(read_fs, "fs");
 read_seg!(read_gs, "gs");
 
 /// Loads `ds`. The selector must be null or [`loadable`].
+#[cfg(target_os = "uefi")]
 unsafe fn load_ds(s: u16) {
     core::arch::asm!("mov ds, {0:x}", in(reg) s, options(nostack, preserves_flags));
 }
 /// Loads `es`. The selector must be null or [`loadable`].
+#[cfg(target_os = "uefi")]
 unsafe fn load_es(s: u16) {
     core::arch::asm!("mov es, {0:x}", in(reg) s, options(nostack, preserves_flags));
 }
 /// Loads `fs` (and with a non-null selector, the FS base from its descriptor).
+#[cfg(target_os = "uefi")]
 unsafe fn load_fs(s: u16) {
     core::arch::asm!("mov fs, {0:x}", in(reg) s, options(nostack, preserves_flags));
 }
 /// Loads the user's `gs` (Linux's `load_gs_index`): the load sets the active GS base,
 /// which in the kernel is the per-CPU block, so it happens between two `swapgs`. With
 /// interrupts off; an NMI in between would see the user's GS base.
+#[cfg(target_os = "uefi")]
 unsafe fn load_gs(s: u16) {
     core::arch::asm!("swapgs", "mov gs, {0:x}", "swapgs", in(reg) s, options(nostack, preserves_flags));
+}
+/// Loads the LDT register (0: none).
+#[cfg(target_os = "uefi")]
+unsafe fn lldt(sel: u16) {
+    core::arch::asm!("lldt {0:x}", in(reg) sel, options(nostack, preserves_flags));
+}
+// Host build (unit tests): the registers of the test thread's fake CPU; a selector load
+// also resets the hidden base, as the CPU does
+#[cfg(not(target_os = "uefi"))]
+unsafe fn load_ds(s: u16) {
+    crate::host::load_seg("ds", s)
+}
+#[cfg(not(target_os = "uefi"))]
+unsafe fn load_es(s: u16) {
+    crate::host::load_seg("es", s)
+}
+#[cfg(not(target_os = "uefi"))]
+unsafe fn load_fs(s: u16) {
+    crate::host::load_seg("fs", s)
+}
+#[cfg(not(target_os = "uefi"))]
+unsafe fn load_gs(s: u16) {
+    crate::host::load_seg("gs", s)
+}
+#[cfg(not(target_os = "uefi"))]
+unsafe fn lldt(sel: u16) {
+    crate::host::load_seg("ldtr", sel)
 }
 
 /// The descriptor selector `sel` names on this CPU (its GDT, or the LDT it loaded).
@@ -382,7 +423,7 @@ fn install_ldt(ldt: Option<&Ldt>) {
     }
     unsafe {
         if p.is_null() {
-            core::arch::asm!("lldt {0:x}", in(reg) 0u16, options(nostack, preserves_flags));
+            lldt(0);
         } else {
             // 16-byte system descriptor: type 2 (LDT), present, DPL 0
             let base = p as u64;
@@ -390,7 +431,7 @@ fn install_ldt(ldt: Option<&Ldt>) {
             (*g).0[LDT_ENTRY] =
                 (limit & 0xffff) | (base & 0xff_ffff) << 16 | 2 << 40 | 1 << 47 | ((limit >> 16) & 0xf) << 48 | ((base >> 24) & 0xff) << 56;
             (*g).0[LDT_ENTRY + 1] = base >> 32;
-            core::arch::asm!("lldt {0:x}", in(reg) LDT_SEL, options(nostack, preserves_flags));
+            lldt(LDT_SEL);
         }
     }
     CPU_LDT_LEN[cpu].store(n, Ordering::Relaxed);

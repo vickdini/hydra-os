@@ -306,6 +306,7 @@ pub fn set_kernel_rsp(rsp: u64) {
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
+#[cfg(target_os = "uefi")]
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
@@ -334,6 +335,7 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
+#[cfg(target_os = "uefi")]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
@@ -344,6 +346,24 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
         in("edx") high,
         options(nostack, preserves_flags)
     );
+}
+
+/// Host build (unit tests): the test thread's fake MSRs.
+///
+/// # Safety
+/// Always safe on the host; `unsafe` to match the kernel's signature.
+#[cfg(not(target_os = "uefi"))]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    crate::host::rdmsr(msr)
+}
+
+/// Host build (unit tests): the test thread's fake MSRs.
+///
+/// # Safety
+/// Always safe on the host; `unsafe` to match the kernel's signature.
+#[cfg(not(target_os = "uefi"))]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    crate::host::wrmsr(msr, value)
 }
 
 /// Configures CPU Model-Specific Registers for fast x86_64 hardware system calls.
@@ -444,6 +464,12 @@ fn store_wire_message(ptr: u64, msg: crate::ipc::Message) -> i64 {
 /// * `fpu` - Raw pointer to the saved userland FPU/SSE state buffer.
 #[no_mangle]
 pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
+    syscall_dispatch(frame, fpu)
+}
+
+/// The body of [`hydra_syscall_dispatcher`] (a Rust function: the host tests call it, and
+/// their stand-ins for calls that never return unwind through it).
+pub fn syscall_dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
     // A task retired while it ran here (another thread's exit_group) makes no more calls
     if crate::task::current_retired() {
         crate::arch::smp::bkl_enter();
@@ -465,7 +491,7 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
         // A timer tick that arrived meanwhile (interrupts are off here) is taken now, in
         // kernel mode, so its time counts as the call's (system time) rather than the
         // program's; the tick may have taken the kernel lock, which is not kept
-        unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
+        take_pending_interrupt();
         crate::arch::smp::bkl_exit();
         return;
     }
@@ -517,6 +543,20 @@ pub extern "C" fn hydra_syscall_dispatcher(frame: &mut SyscallFrame, fpu: *mut c
     // A wakeup kick the call deferred: the woken task needs another CPU now
     crate::arch::smp::flush_kick();
     crate::arch::smp::bkl_exit();
+}
+
+/// Opens the interrupt window for one instruction (`sti; nop; cli`): an interrupt that
+/// arrived while they were off is taken now.
+#[cfg(target_os = "uefi")]
+fn take_pending_interrupt() {
+    unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
+}
+
+/// Host build (unit tests): the window on the test thread's fake CPU.
+#[cfg(not(target_os = "uefi"))]
+fn take_pending_interrupt() {
+    x86_64::instructions::interrupts::enable();
+    x86_64::instructions::interrupts::disable();
 }
 
 /// Releases what exited processes held: no locks are held at syscall entry, except while

@@ -40,7 +40,9 @@ const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 /// Global allocator for Hydra kernel (`extern crate alloc`).
-#[global_allocator]
+// (the host build of the unit tests keeps the host's allocator: there, this heap is tested
+// as a value, not used)
+#[cfg_attr(target_os = "uefi", global_allocator)]
 static KERNEL_HEAP: SizeClassHeap = SizeClassHeap::new();
 
 /// Block sizes served from free lists (powers of two, each block aligned to its size).
@@ -232,6 +234,13 @@ unsafe impl core::alloc::GlobalAlloc for SizeClassHeap {
             None => HEAP_ALLOCATOR.dealloc(ptr, layout),
         }
     }
+}
+
+/// Host build (unit tests): the kernel's size-class heap, which the host does not use as
+/// its allocator.
+#[cfg(not(target_os = "uefi"))]
+pub fn kernel_heap() -> &'static SizeClassHeap {
+    &KERNEL_HEAP
 }
 
 /// Tracks whether the global kernel heap has been initialized.
@@ -525,4 +534,38 @@ pub fn self_test() -> Result<(), &'static str> {
     }
 
     Ok(())
+}
+
+// Host unit tests of the free-block checks (compiled out of the kernel, where
+// `POISON_FREE` is off and nothing calls them)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[repr(align(64))]
+    struct Block([u8; 64]);
+
+    #[test]
+    fn poisoned_blocks_check_out() {
+        let mut b = Block([0; 64]);
+        let p = b.0.as_mut_ptr();
+        unsafe {
+            *(p as *mut u64) = 0; // end of the list
+            poison(p, 64);
+            assert!((8..64).all(|i| *p.add(i) == POISON));
+            assert!(check_free_block(p, 64));
+            // Written after being freed: reported (contents repaired by the new owner),
+            // the link still followed
+            *p.add(20) = 0x42;
+            assert!(check_free_block(p, 64));
+            let out = crate::console::take_serial();
+            assert!(out.contains("written at offset 20"), "{out}");
+            assert!(out.contains("anchor="));
+            // A link outside the heap: not followed
+            *p.add(20) = POISON;
+            *(p as *mut u64) = 0x1234_5678;
+            assert!(!check_free_block(p, 64));
+            assert!(crate::console::take_serial().contains("(link 0x12345678, bad)"));
+        }
+    }
 }

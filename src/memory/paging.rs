@@ -494,13 +494,7 @@ impl AddressSpace {
         }
 
         // Temporarily clear CR0.WP (bit 16) so the kernel can modify page table structures
-        core::arch::asm!(
-            "mov {tmp}, cr0",
-            "btr {tmp}, 16",
-            "mov cr0, {tmp}",
-            tmp = out(reg) _,
-            options(nostack, preserves_flags),
-        );
+        write_protect(false);
 
         let start_page = Page::<Size4KiB>::containing_address(virt_start);
         let end_page = Page::<Size4KiB>::containing_address(virt_start + (size as u64).saturating_sub(1));
@@ -550,13 +544,7 @@ impl AddressSpace {
         }
 
         // Re-enable CR0.WP (bit 16) to restore supervisor write protection
-        core::arch::asm!(
-            "mov {tmp}, cr0",
-            "bts {tmp}, 16",
-            "mov cr0, {tmp}",
-            tmp = out(reg) _,
-            options(nostack, preserves_flags),
-        );
+        write_protect(true);
 
         Ok(())
     }
@@ -832,6 +820,22 @@ impl AddressSpace {
             pml4_phys: new_pml4_phys,
         })
     }
+}
+
+/// Sets (`true`) or clears CR0.WP, supervisor write protection.
+#[cfg(target_os = "uefi")]
+unsafe fn write_protect(on: bool) {
+    if on {
+        core::arch::asm!("mov {tmp}, cr0", "bts {tmp}, 16", "mov cr0, {tmp}", tmp = out(reg) _, options(nostack, preserves_flags));
+    } else {
+        core::arch::asm!("mov {tmp}, cr0", "btr {tmp}, 16", "mov cr0, {tmp}", tmp = out(reg) _, options(nostack, preserves_flags));
+    }
+}
+
+/// Host build (unit tests): counted on the test thread's fake CPU.
+#[cfg(not(target_os = "uefi"))]
+unsafe fn write_protect(on: bool) {
+    crate::host::wp(on)
 }
 
 /// Marks a memory region as user-accessible in the active/kernel PML4 page tables.

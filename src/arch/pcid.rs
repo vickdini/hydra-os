@@ -161,6 +161,7 @@ fn slot_of(pml4: u64) -> usize {
     (((pml4 >> 12).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % SLOTS as u64) as usize + 1
 }
 
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 fn read_cr3() -> u64 {
     let v: u64;
@@ -168,6 +169,7 @@ fn read_cr3() -> u64 {
     v
 }
 
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 unsafe fn write_cr3(v: u64) {
     core::arch::asm!("mov cr3, {}", in(reg) v, options(nostack, preserves_flags));
@@ -175,10 +177,27 @@ unsafe fn write_cr3(v: u64) {
 
 /// `INVPCID` of `kind` (0: one address of `pcid`, 1: all of `pcid`, 2: everything,
 /// global entries too).
+#[cfg(target_os = "uefi")]
 #[inline(always)]
 unsafe fn invpcid(kind: u64, pcid: u64, addr: u64) {
     let desc: [u64; 2] = [pcid, addr];
     core::arch::asm!("invpcid {}, [{}]", in(reg) kind, in(reg) desc.as_ptr(), options(nostack, preserves_flags));
+}
+
+// Host build (unit tests): CR3 of the test thread's fake CPU; INVPCIDs are recorded
+#[cfg(not(target_os = "uefi"))]
+fn read_cr3() -> u64 {
+    crate::host::read_cr3()
+}
+
+#[cfg(not(target_os = "uefi"))]
+unsafe fn write_cr3(v: u64) {
+    crate::host::write_cr3(v)
+}
+
+#[cfg(not(target_os = "uefi"))]
+unsafe fn invpcid(kind: u64, pcid: u64, addr: u64) {
+    crate::host::invpcid(kind, pcid, addr)
 }
 
 /// Reads the off switches. Called while the firmware's boot services still run.
@@ -254,6 +273,11 @@ pub fn init() {
     let has_pcid = leaf1.ecx & (1 << 17) != 0;
     let max = __cpuid(0).eax;
     let has_invpcid = max >= 7 && __cpuid_count(7, 0).ebx & (1 << 10) != 0;
+    init_with(has_pcid, has_invpcid);
+}
+
+/// [`init`] with the CPU's answers given: whether it has PCID and INVPCID.
+pub fn init_with(has_pcid: bool, has_invpcid: bool) {
     if !has_pcid {
         crate::kprintln!("[pcid] PCID off: the CPU does not have it (every address-space switch flushes the TLB)");
         return;
