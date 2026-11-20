@@ -49,6 +49,10 @@ static E1000_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR
 static NET_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/net-server"));
 /// The Linux server program (wave 3: the Linux system calls moved out of the kernel).
 static LINUX_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/linux-server"));
+// wave6 G24 begin
+/// lx-sec (wave 6: keys and bpf, a Linux service of their own, `userland/drivers/lx-sec`).
+static LX_SEC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-sec"));
+// wave6 G24 end
 /// The sound driver program (Intel High Definition Audio).
 // wave6 G19 begin
 /// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
@@ -251,6 +255,14 @@ fn net_server_args() -> Option<Vec<String>> {
 fn linux_server_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=4")])
 }
+
+// wave6 G24 begin
+/// lx-sec: always started (two workers); it exits by itself when no service id names its
+/// endpoint (`lx.sec=linux`, `lx.sec=kernel`, `lx=kernel`).
+fn lx_sec_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+// wave6 G24 end
 
 // wave6 G19 begin
 /// svc-test: always started (small: two workers); it exits by itself when no service id
@@ -659,6 +671,17 @@ pub fn supervisor_init() {
             ),
         );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::lx::on_signal);
+        // wave6 G24 begin: lx-sec (keys and bpf): its going away fails only its own calls in
+        // flight and its bpf objects; keys calls wait for the restart (Transparent, Group 21)
+        sup.services.push(
+            ServiceDescriptor::new("lx_sec", crate::ipc::protocol::ENDPOINT_LX_SEC, LX_SEC_ELF, lx_sec_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_SEC,
+                crate::lx::restart::RestartClass::Transparent,
+                "sec",
+            ),
+        );
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SEC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SEC }>);
+        // wave6 G24 end
         // wave6 G19 begin: the test service (a second Linux service; its going away fails
         // only its own calls and objects)
         sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants).linux_service(

@@ -314,7 +314,7 @@ pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     // The delegation holds while the call lasts (it is in force before the callee runs)
     let deleg = on_behalf != 0 && deleg_add(me, on_behalf);
     let mut redir = (0, 0);
-    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, idx, c, copy::Src::User(&DCALL_DESC), nobkl, None, &mut redir));
+    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, idx, c, copy::Src::User(DCALL_DESC), nobkl, None, &mut redir));
     // (a redirect answer is not a dcall's: the callee answers itself)
     let r = if r == crate::ipc::protocol::LX_REDIRECTED { EINVAL } else { r };
     if deleg {

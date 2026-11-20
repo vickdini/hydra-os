@@ -61,6 +61,9 @@ pub mod obj;
 // wave6 G23 begin
 pub mod mem;
 // wave6 G23 end
+// wave6 G24: lx-sec's kernel side (bpf map element copies)
+pub mod sec;
+
 pub mod svc;
 
 pub mod timer;
@@ -870,11 +873,17 @@ fn call(frame: &SyscallFrame, s: SvcId, byfd: Option<HeldObj>) -> i64 {
         None
     };
     let _held1 = if bits & T_FDAT1 != 0 {
-        crate::compat::linux::vfs::copy_in(c.args[1], 4).ok().and_then(|b| {
+        // wave6 G24: bpf's spare argument words cleared; the attribute block's head read
+        // (the key and value pointers of a map element command, `sec.rs`)
+        sec::bpf_clear(&mut c);
+        crate::compat::linux::vfs::copy_in(c.args[1], sec::attr_len(&c)).ok().and_then(|b| {
             let fd = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
             obj::current_fd(fd).filter(|o| o.3 == hid).map(|(dev, slot, flags, _)| {
                 c.obj = slot;
                 c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                if let Some(o) = dev.as_server() {
+                    sec::bpf_prepare(&mut c, &b, o.kind(), o.tag());
+                }
                 dev
             })
         })
@@ -942,7 +951,7 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
     // call is placed, straight into the worker's page (`place`; a bad one fails there; a
     // redirect or a retry copies them again from the caller's memory)
     let copies = match copy::describe(c.nr, &c.args) {
-        Some(desc) => copy::Src::User(desc),
+        Some(desc) => copy::Src::User(sec::bpf_desc(*desc, c.nr, &c.args)), // (wave6 G24: bpf key/value)
         None => copy::Src::None,
     };
     // wave6 G22 end
@@ -1140,7 +1149,7 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
     let (hdr, used) = match copies {
         copy::Src::None => (LxCopy::EMPTY, 0),
         copy::Src::Kernel(b) => (b.hdr, b.used),
-        copy::Src::User(desc) => {
+        copy::Src::User(ref desc) => {
             let data = match wi {
                 Some(wi) => s.workers[wi].data_mut(),
                 None => &mut x.buf(slot).data,
@@ -1643,11 +1652,46 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         }
         return None;
     }
-    if bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
+    // wave6 G24 begin: bpf (T_FDAT1 alone): the map's descriptor through this CPU's cached
+    // descriptor table (`byfd_fast`), as the by-descriptor calls do, instead of the
+    // scheduler's lock and the table's lock on every map lookup
+    let fdat1_only = bits & (T_FD0 | T_FDAT1 | T_UMASK) == T_FDAT1;
+    if fdat1_only {
+        let mut head = [0u8; sec::ATTR_HEAD];
+        sec::bpf_clear(&mut c);
+        let n = sec::attr_len(&c);
+        if copy::read_user(c.args[1], &mut head[..n]).is_ok() {
+            let fd = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as u64;
+            match byfd_fast(&id, fd) {
+                Ok(Some((dev, slot, flags, h))) => {
+                    if h == x.id {
+                        c.obj = slot;
+                        c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                        if let Some(o) = dev.as_server() {
+                            sec::bpf_prepare(&mut c, &head, o.kind(), o.tag());
+                        }
+                    }
+                    held[1] = Some(dev);
+                }
+                Ok(None) => {}
+                Err(()) => {
+                    for h in held.into_iter().flatten() {
+                        drop_last(h);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+    // wave6 G24 end
+    if !fdat1_only && bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
         // T_FDAT1: the descriptor is the first u32 of the attribute block at args[1]
+        // wave6 G24: bpf's spare argument words cleared, and the block's head read (`sec.rs`)
+        let mut head = [0u8; sec::ATTR_HEAD];
         let at1 = if bits & T_FDAT1 != 0 {
-            let mut b = [0u8; 4];
-            copy::read_user(c.args[1], &mut b).ok().map(|()| u32::from_le_bytes(b) as u64)
+            sec::bpf_clear(&mut c);
+            let n = sec::attr_len(&c);
+            copy::read_user(c.args[1], &mut head[..n]).ok().map(|()| u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as u64)
         } else {
             None
         };
@@ -1673,6 +1717,10 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
                 if h == x.id {
                     c.obj = slot;
                     c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                    // wave6 G24
+                    if let Some(o) = dev.as_server() {
+                        sec::bpf_prepare(&mut c, &head, o.kind(), o.tag());
+                    }
                 }
                 held[1] = Some(dev);
             }

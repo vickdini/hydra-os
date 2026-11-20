@@ -2468,6 +2468,38 @@ pub fn set_current_mask(mask: u64) {
     }
 }
 
+// wave6 G24 begin: the signal mask of `pselect6` (GNU make 4.4's jobserver waits in
+// `pselect` with SIGCHLD unblocked only there; without the mask make -j2 waited for ever)
+
+/// Makes `mask` the calling thread's blocked mask for a wait (`pselect6`); returns the mask
+/// to put back with [`end_temp_mask`].
+pub fn temp_mask(mask: u64) -> Option<u64> {
+    let (tid, pid) = current_ids();
+    let mut procs = PROCS.lock();
+    let t = procs.get_mut(&pid)?.threads.get_mut(&tid)?;
+    let old = t.mask;
+    t.mask = mask & !UNBLOCKABLE;
+    Some(old)
+}
+
+/// Ends a wait's temporary mask. When a signal the temporary mask lets through will run a
+/// handler, the old mask comes back after that handler (as for `rt_sigsuspend`: the handler
+/// runs under the temporary mask, as on Linux); otherwise it comes back now.
+pub fn end_temp_mask(old: u64) {
+    let (tid, pid) = current_ids();
+    let mut procs = PROCS.lock();
+    let Some(p) = procs.get_mut(&pid) else { return };
+    let Some((t_pending, t_mask)) = p.threads.get(&tid).map(|t| (t.pending, t.mask)) else { return };
+    let ready = (p.pending | t_pending) & !(t_mask & !UNBLOCKABLE);
+    let handled = (1..p.actions.len() as u32).any(|s| s <= 64 && ready & bit(s) != 0 && p.actions[s as usize].handler > SIG_IGN);
+    if handled {
+        SUSPEND_RESTORE.lock().insert(tid, old);
+    } else if let Some(t) = p.threads.get_mut(&tid) {
+        t.mask = old;
+    }
+}
+// wave6 G24 end
+
 /// `fpstate` software-reserved bytes: the area is XSAVE state (Linux's FP_XSTATE_MAGIC1).
 const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
 /// After the XSAVE state in a signal frame (Linux's FP_XSTATE_MAGIC2).

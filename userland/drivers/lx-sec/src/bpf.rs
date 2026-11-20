@@ -210,8 +210,14 @@ fn install(cx: &Cx, obj: Obj) -> i64 {
         Err(e) => return e,
     };
     let (kind, shown) = (obj.kind(), obj.shown());
+    // A map's key and value sizes go with its descriptor: the kernel then copies a map
+    // element command's key and value through the syscall page (`src/lx/sec.rs`)
+    let tag = match &obj {
+        Obj::Map(m) => m.key_size as u64 | (m.user_value_size() as u64) << 32,
+        _ => 0,
+    };
     SLOTS.lock().insert(slot, obj);
-    match crate::obj::install(cx, slot, kind, 0o2000000, 0o600, 0, 0, shown) {
+    match crate::obj::install_tag(cx, slot, kind, 0o2000000, 0o600, 0, 0, shown, tag) {
         Ok(fd) => fd,
         Err(e) => {
             SLOTS.lock().remove(&slot);
@@ -913,9 +919,71 @@ fn push_devices() -> i64 {
         buf.extend_from_slice(&a.prog.raw);
     }
     match sys::lx_obj(LX_OBJ_BPF_DEVICE, buf.as_ptr() as u64, buf.len() as u64, 0) {
-        Ok(_) => 0,
+        Ok(_) => {
+            // The list the kernel now holds is kept: a restarted lx-sec sends it again
+            // ([`restore_devices`]) instead of replacing it with an empty one
+            if let Some(k) = crate::kept::get() {
+                if !k.write(crate::kept::DEVICES, &buf) {
+                    k.clear(crate::kept::DEVICES);
+                }
+            }
+            0
+        }
         Err(e) => e,
     }
+}
+
+/// A restart: the device programs the previous instance had handed to the kernel are
+/// attached again (as by `BPF_PROG_ATTACH`, so `BPF_PROG_DETACH` on their cgroup removes
+/// them; their instructions as kept, which use no maps) and the list is sent to the kernel
+/// again. Every other bpf object of the old instance is gone (FailObjects: its descriptors
+/// fail `EBADF`). Returns the number of programs.
+#[allow(dead_code)] // lx-sec only (linux-server keeps nothing)
+pub fn restore_devices() -> usize {
+    let Some(k) = crate::kept::get() else { return 0 };
+    let Some(raw) = k.read(crate::kept::DEVICES) else { return 0 };
+    let mut list = Vec::new();
+    let mut at = 0usize;
+    while at < raw.len() {
+        match parse_device(raw, &mut at) {
+            Some(e) => list.push(e),
+            None => {
+                hydra_rt::println!("[lx-sec] bpf: the kept device programs do not decode; not restored");
+                k.clear(crate::kept::DEVICES);
+                return 0;
+            }
+        }
+    }
+    let n = list.len();
+    for (cg, raw) in list {
+        let insns = decode(&raw);
+        let mut tag = [0u8; 8];
+        for (i, b) in raw.iter().enumerate() {
+            tag[i % 8] = tag[i % 8].rotate_left(3) ^ *b;
+        }
+        let p = Arc::new(Prog { id: new_id(), kind: PROG_CGROUP_DEVICE, insns, maps: Vec::new(), name: [0; 16], tag, raw });
+        PROGS.lock().insert(p.id, Arc::downgrade(&p));
+        ATTACHED.lock().push(Attached { cgroup: cg, attach_type: ATTACH_CGROUP_DEVICE, prog: p, link: 0 });
+    }
+    if n > 0 && push_devices() < 0 {
+        hydra_rt::println!("[lx-sec] bpf: the kernel refused the kept device programs");
+    }
+    n
+}
+
+/// One entry of the device list (`[u32 cgroup length, cgroup, u32 count, instructions]`).
+#[allow(dead_code)]
+fn parse_device(raw: &[u8], at: &mut usize) -> Option<(String, Vec<u8>)> {
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let s = raw.get(*at..at.checked_add(n)?)?;
+        *at += n;
+        Some(s)
+    };
+    let l = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let cg = String::from_utf8_lossy(take(l)?).into_owned();
+    let n = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let code = take(n.checked_mul(8)?)?.to_vec();
+    Some((cg, code))
 }
 
 /// Nanoseconds of the real-time clock, for `ktime_get_ns` (the helpers only need a clock

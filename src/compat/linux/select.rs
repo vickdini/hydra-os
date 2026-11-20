@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
+const EINTR: i64 = -4;
 
 const POLLIN: u32 = 0x001;
 const POLLOUT: u32 = 0x004;
@@ -211,5 +212,34 @@ pub fn sys_pselect6(a: [u64; 6]) -> i64 {
             None => return EFAULT,
         }
     };
-    do_select(a[0], a[1], a[2], a[3], timeout)
+    // wave6 G24 begin: the signal mask (`a[5]` points to `{ const sigset_t *ss; size_t len }`),
+    // in force during the wait only. A signal ends the wait with EINTR, never a restart (as
+    // Linux's ERESTARTNOHAND once a handler runs): a restarted pselect would block again
+    // under the program's own mask (make -j2 waited for ever)
+    let mask = if a[5] == 0 {
+        None
+    } else {
+        match read_pair(a[5]) {
+            Some((0, _)) => None,
+            Some((ss, 8)) => {
+                if !crate::memory::vm::prefault_current(ss as u64, 8, false) {
+                    return EFAULT;
+                }
+                // SAFETY: the 8 bytes were just made present
+                Some(unsafe { *(ss as u64 as *const u64) })
+            }
+            Some(_) => return EINVAL,
+            None => return EFAULT,
+        }
+    };
+    let old = mask.and_then(super::proc::temp_mask);
+    let r = do_select(a[0], a[1], a[2], a[3], timeout);
+    if let Some(old) = old {
+        super::proc::end_temp_mask(old);
+        if r == super::proc::ERESTARTSYS {
+            return EINTR;
+        }
+    }
+    r
+    // wave6 G24 end
 }

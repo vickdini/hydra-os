@@ -97,6 +97,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lx-sec"
+version = "0.1.0"
+dependencies = [
+ "hydra-rt",
+ "spin",
+]
+
+[[package]]
 name = "net-server"
 version = "0.1.0"
 dependencies = [

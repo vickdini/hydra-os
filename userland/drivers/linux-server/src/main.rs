@@ -29,6 +29,9 @@
 
 extern crate alloc;
 
+// wave6 G24: keys and bpf live in lx-sec (their own service); linux-server builds the same
+// files and serves them when `lx.sec=linux` co-locates them back here (no kept state here)
+#[path = "../../lx-sec/src/bpf.rs"]
 mod bpf;
 mod client;
 mod eventfd;
@@ -37,6 +40,10 @@ mod pidfd;
 mod pipe;
 mod signalfd;
 mod inet;
+#[path = "../../lx-sec/src/kept.rs"]
+#[allow(dead_code)]
+mod kept;
+#[path = "../../lx-sec/src/keys.rs"]
 mod keys;
 mod lock;
 mod mqueue;

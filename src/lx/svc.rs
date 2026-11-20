@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, 
 use spin::Mutex;
 
 use crate::ipc::protocol::{
-    LxCall, SvcId, ENDPOINT_DISPLAY_DEV, ENDPOINT_LINUX_SERVER, ENDPOINT_SVC_TEST, ENDPOINT_VFS_SERVER, LXS_DISPLAY, LXS_INPUT, LXS_IPC, LXS_LINUX, LXS_MAX, LXS_NAMES,
+    LxCall, SvcId, ENDPOINT_DISPLAY_DEV, ENDPOINT_LINUX_SERVER, ENDPOINT_LX_SEC, ENDPOINT_SVC_TEST, ENDPOINT_VFS_SERVER, LXS_DISPLAY, LXS_INPUT, LXS_IPC, LXS_LINUX, LXS_MAX, LXS_NAMES,
     LXS_NET, LXS_PROC, LXS_SEC, LXS_SOUND, LXS_TEST, LXS_TTY, LXS_VFS, LX_NOTE_EXEC, LX_NOTE_EXIT, LX_NOTE_FORK, LX_SVC_CLAIM_MAJOR, LX_SVC_SUBSCRIBE, LX_SVC_WHOAMI,
 };
 use crate::ipc::service::ContiguousFrames;
@@ -80,7 +80,8 @@ const DEFAULT_ENDPOINTS: [(SvcId, u32); 11] = [
     (LXS_INPUT, 0x2A),
     (LXS_SOUND, 0x2B),
     (LXS_TTY, 0x2C),
-    (LXS_SEC, ENDPOINT_LINUX_SERVER),
+    // wave6 G24: keys and bpf in their own service, lx-sec (`lx.sec=linux` puts them back)
+    (LXS_SEC, ENDPOINT_LX_SEC),
     (LXS_TEST, ENDPOINT_SVC_TEST),
 ];
 

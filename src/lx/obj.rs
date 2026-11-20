@@ -330,7 +330,8 @@ impl CharDevice for ServerObject {
         st.st_gid = self.gid;
         st.st_nlink = 1;
         // (Group 13: both ends of a pipe, and a socket, report the server's inode number)
-        st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
+        // wave6 G24: a bpf map's tag is its key and value sizes, not an inode number
+        st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD && self.kind != crate::ipc::protocol::LX_OBJ_KIND_BPF_MAP { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
         st
@@ -566,8 +567,13 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Some(_) => return EINVAL,
                 None => return EBADF,
             };
-            match dev.as_server().filter(|o| o.svc == h).and_then(|o| o.slot().map(|s| (s, o.kind(), o.nonblock()))) {
-                Some((slot, kind, nb)) => (slot | (kind as u64) << 32 | (nb as u64) << 62) as i64,
+            match dev.as_server().filter(|o| o.svc == h) {
+                Some(o) => match o.slot() {
+                    Some(slot) => (slot | (o.kind() as u64) << 32 | (o.nonblock() as u64) << 62) as i64,
+                    // wave6 G24: an object of this service's previous instance (not adopted):
+                    // its per-kind error (a bpf map after an lx-sec restart: EBADF)
+                    None => stale_errno(o),
+                },
                 None => EINVAL,
             }
         }

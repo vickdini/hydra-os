@@ -240,7 +240,8 @@ pub enum Src<'a> {
     /// Made already, in kernel memory (`lx::call_obj_kbuf`).
     Kernel(&'a CopyBuf),
     /// The caller's memory, as this table entry describes: copied when the call is placed.
-    User(&'static Desc),
+    /// (By value: lx-sec's bpf element commands add entries per call, `sec::bpf_desc`.)
+    User(Desc),
 }
 
 /// Why [`fill`] stopped.
