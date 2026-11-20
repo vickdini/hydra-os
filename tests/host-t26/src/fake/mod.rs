@@ -55,6 +55,7 @@ impl Drop for Env {
 /// Starts a test: serialises it against the others and resets every fake.
 pub fn setup() -> Env {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    forget_kernel_state();
     COUNTERS.with_borrow_mut(|c| c.clear());
     arch::reset();
     memory::reset();
@@ -65,6 +66,17 @@ pub fn setup() -> Env {
     task::reset();
     firmware::reset();
     Env { _guard: guard }
+}
+
+/// Clears what earlier tests left in the kernel files' global tables (through their own
+/// calls), so each test starts from an empty system.
+fn forget_kernel_state() {
+    use crate::compat::linux as lx;
+    for m in lx::fuse::ns0_snapshot() {
+        lx::fuse::ns0_remove(m.conn.root());
+    }
+    lx::locks::process_exited(task::SELF_PID);
+    lx::aio::forget_process(task::SELF_PID);
 }
 
 /// A NUL-terminated copy of `s` that stays alive for the test: its address is a "user

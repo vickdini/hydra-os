@@ -175,7 +175,15 @@ fn conn_of(ino: u64) -> Result<Arc<Conn>, i64> {
 
 impl Conn {
     fn new() -> Arc<Self> {
-        let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed) & 0x3FFF;
+        let mut all = CONNS.lock();
+        // A number no live connection has: the numbers wrap after 16384 opens, and an old
+        // connection's inodes must never lead to a new one's nodes
+        let id = loop {
+            let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed) & 0x3FFF;
+            if !all.contains_key(&id) {
+                break id;
+            }
+        };
         let c = Arc::new(Conn {
             id,
             st: Mutex::new(State {
@@ -199,7 +207,7 @@ impl Conn {
             mounted: AtomicBool::new(false),
             owner: Mutex::new((0, 0, false)),
         });
-        CONNS.lock().insert(id, c.clone());
+        all.insert(id, c.clone());
         c
     }
 
@@ -390,8 +398,13 @@ pub struct FuseDev {
 
 impl Drop for FuseDev {
     fn drop(&mut self) {
-        // The daemon is gone: its file system answers ENOTCONN
+        // The daemon is gone: its file system answers ENOTCONN, and the connection leaves
+        // the table (its number may be given again; its inodes find nothing)
         self.conn.abort();
+        let mut all = CONNS.lock();
+        if all.get(&self.conn.id).is_some_and(|c| Arc::ptr_eq(c, &self.conn)) {
+            all.remove(&self.conn.id);
+        }
     }
 }
 

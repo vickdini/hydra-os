@@ -19,6 +19,7 @@ extern crate alloc;
 
 pub mod fake;
 pub mod testkit;
+pub mod testkit_fuse;
 
 /// Tests that reach `pub(crate)` items of the kernel files.
 #[cfg(test)]
