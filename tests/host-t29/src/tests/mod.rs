@@ -10,6 +10,7 @@ mod futex;
 mod ldt;
 mod limits;
 mod ns;
+mod other;
 mod proc;
 mod process;
 mod ptrace;
