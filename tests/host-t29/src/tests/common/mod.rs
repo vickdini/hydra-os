@@ -132,7 +132,22 @@ pub use crate::fake::{Task, TaskState};
 pub fn setup() -> std::sync::MutexGuard<'static, ()> {
     let g = fake::setup();
     linux::proc::PROCS.lock().clear();
+    crate::memory::vm::set_current_mm(None);
     g
+}
+
+/// Runs `f` with an (empty) address space loaded as the current one: user pointers are
+/// checked against it, so null and kernel pointers fail with EFAULT before anything is
+/// touched (never pass an address inside user space: the host would dereference it).
+pub fn with_current_mm(f: impl FnOnce()) {
+    global_frames();
+    let mm = std::sync::Arc::new(spin::Mutex::new(crate::memory::vm::Mm::new().unwrap()));
+    crate::memory::vm::set_current_mm(Some(&mm));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    crate::memory::vm::set_current_mm(None);
+    if let Err(e) = r {
+        std::panic::resume_unwind(e);
+    }
 }
 
 /// A root Linux process `pid` (one thread, `tid == pid`), child of `ppid`, registered in
