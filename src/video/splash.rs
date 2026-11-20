@@ -56,35 +56,48 @@ pub fn is_active() -> bool {
 /// the boot entry asks for them (`debug`, `verbose`, `nosplash`) or QEMU's `opt/hydra/boot`
 /// is `debug` or `shell`. Allocates nothing (the heap is not set up yet).
 pub fn decide() {
-    let mut want = true;
     // The boot entry's load options (UTF-16)
+    let mut opts = None;
     if let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) {
-        if let Some(opts) = img.load_options_as_bytes() {
-            let mut text = [0u8; 256];
-            let mut n = 0;
-            for c in opts.chunks_exact(2) {
-                if n == text.len() {
-                    break;
-                }
-                text[n] = if c[1] == 0 { c[0].to_ascii_lowercase() } else { b'?' };
-                n += 1;
-            }
-            let text = &text[..n];
-            for word in [&b"debug"[..], b"verbose", b"nosplash"] {
-                if text.windows(word.len()).any(|w| w == word) {
-                    want = false;
-                }
+        opts = img.load_options_as_bytes().map(options_text);
+    }
+    let mut buf = [0u8; 16];
+    let fw = crate::arch::fwcfg::read_file_into("opt/hydra/boot", &mut buf).map(|n| &buf[..n]);
+    QUIET.store(wants_splash(opts.as_ref().map(|(text, n)| &text[..*n]), fw), Ordering::Relaxed);
+}
+
+/// UCS-2 load options `opts` as lower-case ASCII (other characters as `?`), at most 256
+/// characters: the text and its length.
+pub fn options_text(opts: &[u8]) -> ([u8; 256], usize) {
+    let mut text = [0u8; 256];
+    let mut n = 0;
+    for c in opts.chunks_exact(2) {
+        if n == text.len() {
+            break;
+        }
+        text[n] = if c[1] == 0 { c[0].to_ascii_lowercase() } else { b'?' };
+        n += 1;
+    }
+    (text, n)
+}
+
+/// Whether the logo replaces the boot messages, given the boot entry's load options as
+/// lower-case ASCII (`opts`) and QEMU's `opt/hydra/boot` fw_cfg value (`fw`).
+pub fn wants_splash(opts: Option<&[u8]>, fw: Option<&[u8]>) -> bool {
+    let mut want = true;
+    if let Some(text) = opts {
+        for word in [&b"debug"[..], b"verbose", b"nosplash"] {
+            if text.windows(word.len()).any(|w| w == word) {
+                want = false;
             }
         }
     }
-    let mut buf = [0u8; 16];
-    if let Some(n) = crate::arch::fwcfg::read_file_into("opt/hydra/boot", &mut buf) {
-        let v = &buf[..n];
+    if let Some(v) = fw {
         if v.starts_with(b"debug") || v.starts_with(b"shell") {
             want = false;
         }
     }
-    QUIET.store(want, Ordering::Relaxed);
+    want
 }
 
 /// Shows the logo, once the framebuffer console exists ([`super::init_gop`]): the console

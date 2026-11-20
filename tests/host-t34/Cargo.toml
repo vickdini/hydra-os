@@ -1,0 +1,22 @@
+[package]
+name = "hydra_hosttests_t34"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 34's host unit tests: the admin interface, the framebuffer console, the network glue, the console, the emergency prompt, the boot glue"
+build = "build.rs"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+uefi = "0.41.0"
+uefi-raw = "0.17"
+patina_lzma_rs = { version = "0.3.2", default-features = false }
+# The real x86_64 crate with the privileged instructions replaced (see shim/x86_64/src/lib.rs)
+x86_64 = { package = "x86_64_shim", path = "shim/x86_64" }

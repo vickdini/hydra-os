@@ -71,23 +71,25 @@ pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
 
     let mode_info = gop.current_mode_info();
     let (width, height) = mode_info.resolution();
-    let stride = mode_info.stride();
-    let pixel_format = mode_info.pixel_format();
+    let mut fb = gop.frame_buffer();
+    let info = mode_info_for(fb.as_mut_ptr(), fb.size(), width, height, mode_info.stride(), mode_info.pixel_format());
+    install(info);
+    Ok(info)
+}
 
+/// The mode parameters of a framebuffer at `base_ptr` (`size` bytes) of `width`x`height`
+/// pixels, `stride` pixels per line, in `pixel_format`.
+pub fn mode_info_for(base_ptr: *mut u8, size: usize, width: usize, height: usize, stride: usize, pixel_format: PixelFormat) -> VideoModeInfo {
     let is_bgr = match pixel_format {
         PixelFormat::Bgr => true,
         PixelFormat::Rgb => false,
         _ => false,
     };
 
-    let mut fb = gop.frame_buffer();
-    let base_ptr = fb.as_mut_ptr();
-    let size = fb.size();
-
     let text_cols = width / super::font::FONT_WIDTH;
     let text_rows = height / super::font::FONT_HEIGHT;
 
-    let info = VideoModeInfo {
+    VideoModeInfo {
         base_ptr,
         size,
         width,
@@ -96,8 +98,13 @@ pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
         is_bgr,
         text_cols,
         text_rows,
-    };
+    }
+}
 
+/// Maps the framebuffer of `info` into Hydra's kernel page table (once it exists) and
+/// makes it the autonomous video console.
+pub fn install(info: VideoModeInfo) {
+    let (base_ptr, size) = (info.base_ptr, info.size);
     // Map the hardware framebuffer into Hydra's autonomous kernel page table
     let page_count = (size + 4095) / 4096;
     let start_phys = PhysAddr::new(base_ptr as u64);
@@ -126,8 +133,6 @@ pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
     let framebuffer = Framebuffer::new(info);
     let console = VideoConsole::new(framebuffer);
     *VIDEO_CONSOLE.lock() = Some(console);
-
-    Ok(info)
 }
 
 /// Returns the detected video mode information if GOP is active.

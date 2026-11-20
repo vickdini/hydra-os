@@ -294,6 +294,10 @@ fn test(disk: u64, count: u64) {
         Ok(t) => t,
         Err(e) => return crate::println!("usbdisk: disk {}: error {}", disk, e),
     };
+    // Three places of at least one block each (a smaller disk made `clamp` panic)
+    if total < 3 {
+        return crate::println!("usbdisk: disk {}: too small for the test ({} blocks)", disk, total);
+    }
     let count = count.clamp(1, total / 3);
     let mut saved = alloc::vec![0u8; (count * 4096) as usize];
     let mut buf = alloc::vec![0u8; (count * 4096) as usize];
