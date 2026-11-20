@@ -208,3 +208,21 @@ thread_local! {
     /// Whether CPUID reports x2APIC mode.
     pub static X2APIC: Cell<bool> = const { Cell::new(false) };
 }
+
+thread_local! {
+    /// `arch::relocate`'s firmware pages run out.
+    pub static RELOC_NO_MEMORY: Cell<bool> = const { Cell::new(false) };
+    /// The end of RAM in the firmware's memory map.
+    pub static RAM_TOP: Cell<u64> = const { Cell::new(0) };
+}
+
+thread_local! {
+    /// XCR0 as `xsetbv` left it.
+    pub static XCR0: Cell<u64> = const { Cell::new(0) };
+    /// CPUID answers: (leaf, sub) -> (eax, ebx, ecx, edx); absent leaves give zeros.
+    pub static CPUID: RefCell<BTreeMap<(u32, u32), (u32, u32, u32, u32)>> = const { RefCell::new(BTreeMap::new()) };
+}
+pub fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
+    let (eax, ebx, ecx, edx) = CPUID.with_borrow(|c| c.get(&(leaf, sub)).copied().unwrap_or((0, 0, 0, 0)));
+    core::arch::x86_64::CpuidResult { eax, ebx, ecx, edx }
+}

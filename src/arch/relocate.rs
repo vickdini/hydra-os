@@ -51,10 +51,49 @@ const WRITABLE: u64 = 2;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// A zeroed page from the firmware (boot loader data: never handed to the frame allocator).
+#[cfg(target_os = "uefi")]
 fn page() -> Option<u64> {
     let p = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1).ok()?;
     unsafe { core::ptr::write_bytes(p.as_ptr(), 0, 4096) };
     Some(p.as_ptr() as u64)
+}
+
+/// Host build (unit tests): a zeroed frame of the frame allocator, unless the test thread
+/// says the firmware is out of memory.
+#[cfg(not(target_os = "uefi"))]
+fn page() -> Option<u64> {
+    if crate::host::RELOC_NO_MEMORY.get() {
+        return None;
+    }
+    crate::memory::frame_allocator::FRAME_ALLOCATOR.lock().allocate_zeroed_frame().map(|f| f.start_address().as_u64())
+}
+
+/// The end of RAM in the firmware's memory map (at least 4 GiB).
+#[cfg(target_os = "uefi")]
+fn ram_top() -> Option<u64> {
+    use uefi::mem::memory_map::MemoryMap;
+    let map = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA).ok()?;
+    Some(map.entries().filter(|d| is_ram(d.ty)).map(|d| d.phys_start + d.page_count * 4096).max().unwrap_or(0).max(4 << 30))
+}
+
+/// Host build (unit tests): the test thread's end of RAM.
+#[cfg(not(target_os = "uefi"))]
+fn ram_top() -> Option<u64> {
+    Some(crate::host::RAM_TOP.get().max(4 << 30))
+}
+
+/// The kernel stack for the higher half, from the firmware.
+#[cfg(target_os = "uefi")]
+fn stack_pages() -> Option<u64> {
+    uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, (STACK_SIZE / 4096) as usize)
+        .ok()
+        .map(|p| p.as_ptr() as u64)
+}
+
+/// Host build (unit tests): none (what follows switches the real CPU's tables).
+#[cfg(not(target_os = "uefi"))]
+fn stack_pages() -> Option<u64> {
+    None
 }
 
 /// Maps the 4 KiB page `va` to `pa` (present, writable, executable) in the tables rooted at
@@ -75,7 +114,7 @@ fn map(pml4: u64, va: u64, pa: u64) -> Option<()> {
 }
 
 /// Whether the firmware's memory type `ty` is RAM (what the direct map covers).
-fn is_ram(ty: uefi::boot::MemoryType) -> bool {
+pub fn is_ram(ty: uefi::boot::MemoryType) -> bool {
     use uefi::boot::MemoryType as T;
     matches!(
         ty,
@@ -98,11 +137,7 @@ fn is_ram(ty: uefi::boot::MemoryType) -> bool {
 /// The heap is reached there from the start (so it is in every address space whatever
 /// its physical address), and every frame later.
 fn direct_map(pml4: u64) -> Option<()> {
-    use uefi::mem::memory_map::MemoryMap;
-    let top = {
-        let map = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA).ok()?;
-        map.entries().filter(|d| is_ram(d.ty)).map(|d| d.phys_start + d.page_count * 4096).max().unwrap_or(0).max(4 << 30)
-    };
+    let top = ram_top()?;
     let gib = (top + (1 << 30) - 1) >> 30;
     let base_idx = (crate::memory::frame_allocator::DIRECT_MAP_BASE >> 39) & 511;
     if gib > 255 * 512 {
@@ -207,14 +242,9 @@ pub fn go_high(next: fn() -> !) {
                 return;
             }
         }
-        let Ok(stack) = uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages,
-            uefi::boot::MemoryType::LOADER_DATA,
-            (STACK_SIZE / 4096) as usize,
-        ) else {
+        let Some(stack) = stack_pages() else {
             return;
         };
-        let stack = stack.as_ptr() as u64;
         for off in (0..STACK_SIZE).step_by(4096) {
             if map(pml4, STACK_BOTTOM + off, stack + off).is_none() {
                 return;
