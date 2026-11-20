@@ -232,9 +232,10 @@ impl SharedEndpoint {
                     return;
                 }
                 ep.send_waiters.enqueue(current_id);
+                block_in_lock();
             }
             // Yield CPU while waiting for buffer space
-            crate::task::block_current();
+            crate::task::yield_now();
         }
     }
 
@@ -256,9 +257,10 @@ impl SharedEndpoint {
                     return msg;
                 }
                 ep.recv_waiters.enqueue(current_id);
+                block_in_lock();
             }
             // Yield CPU while waiting for an incoming message
-            crate::task::block_current();
+            crate::task::yield_now();
         }
     }
 
@@ -320,6 +322,17 @@ impl SharedEndpoint {
     }
 }
 
+/// Marks the calling task blocked while the endpoint's lock is still held (its caller then
+/// yields): a waker that comes between the unlock and the yield finds it blocked and makes
+/// it ready, instead of finding it running and dropping it from the queue, which lost the
+/// wake-up (Group 31's find, test wave). Lock order: endpoint, then scheduler (as `wake_one`
+/// under the endpoint's lock).
+fn block_in_lock() {
+    if crate::task::is_active() {
+        crate::task::SCHEDULER.lock().block_current();
+    }
+}
+
 /// System-wide shared IPC endpoints (IDs 0..63) accessible across all tasks.
 pub static SYSTEM_ENDPOINTS: [SharedEndpoint; 64] = [
     SharedEndpoint::new(0), SharedEndpoint::new(1), SharedEndpoint::new(2), SharedEndpoint::new(3),
@@ -363,3 +376,8 @@ pub fn get_system_endpoint(id: u32) -> Option<&'static SharedEndpoint> {
         None
     }
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/ipc_endpoint.rs"]
+pub(crate) mod tests;

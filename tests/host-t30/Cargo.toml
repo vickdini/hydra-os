@@ -1,0 +1,18 @@
+[package]
+name = "hydra_hosttests_t30"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 30 (test wave): host tests of the lx forwarding core (src/lx) and IPC (src/ipc)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+# The real x86_64 crate with privileged instructions faked (see shim/x86_64/src/lib.rs)
+x86_64 = { package = "x86_64_shim", path = "shim/x86_64" }

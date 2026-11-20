@@ -528,3 +528,8 @@ pub fn svc_ctl(op: u64, a: u64, b: u64, _c: u64) -> i64 {
         _ => EINVAL,
     }
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_svc.rs"]
+pub(crate) mod tests;

@@ -1209,12 +1209,9 @@ fn switch_to_parked(svc: &Service, slot: usize) -> bool {
         DIRECT_TO.store(p, Ordering::Relaxed);
         DIRECT_HINT.store(hint as u64, Ordering::Relaxed);
         DIRECT_GUARD.store(&REQ_ANSWERED[slot] as *const core::sync::atomic::AtomicBool as u64, Ordering::Relaxed);
-        let failed: u64;
-        // SAFETY: vector 0x82 switches to the parked thread and comes back here when this
-        // task runs again (rax 0), or returns at once with rax 1. Every register the
-        // compiler could keep a value in is declared clobbered (no FPU state is moved)
-        unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
-        failed
+        // Vector 0x82 switches to the parked thread and comes back here when this task
+        // runs again (0), or returns at once with 1
+        int82()
     });
     if failed == 0 {
         DIRECT_SWITCHED.fetch_add(1, Ordering::Relaxed);
@@ -1263,9 +1260,7 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
                 // ordinary way, on the CPU it waits on (no migrations to and fro)
                 DIRECT_HINT.store(b.idx as u64, Ordering::Relaxed);
                 DIRECT_GUARD.store(0, Ordering::Relaxed);
-                let failed: u64;
-                // SAFETY: as in `switch_to_parked`
-                unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
+                let failed = int82();
                 if failed == 0 {
                     DIRECT_BACK.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1276,8 +1271,7 @@ fn park_wait(svc: &Service, deadline: Option<u64>, back: Option<Back>) {
         if !switched {
             wake_back(back);
             // Still parked, unless a wake-up came meanwhile (then the yield is only a pass)
-            // SAFETY: the yield vector switches tasks and comes back here
-            unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+            int81();
         }
         if ours {
             let _ = svc.parked.compare_exchange(mark, 0, Ordering::AcqRel, Ordering::Acquire);
@@ -1359,9 +1353,45 @@ fn wait_clobbered(deadline: Option<u64>) {
     }
     let sleeping = x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().event_wait_current(deadline));
     if sleeping {
-        // SAFETY: the yield vector switches tasks and comes back here
-        unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+        int81();
     }
+}
+
+/// The yield vector (`int 0x81`) with every register the compiler could keep a value in
+/// declared clobbered: a task resumed here needs no FPU state (the direct switch moves none).
+/// Inlined, so the clobbers apply where it is called.
+#[cfg(target_os = "uefi")]
+#[inline(always)]
+pub(crate) fn int81() {
+    // SAFETY: the yield vector switches tasks and comes back here
+    unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+}
+
+/// Host tests (test wave, Group 30): the simulated scheduler's yield.
+#[cfg(not(target_os = "uefi"))]
+pub(crate) fn int81() {
+    crate::host::yield_vector()
+}
+
+/// The direct-switch vector (`int 0x82`, `Scheduler::direct_call`, the target and guard in
+/// `DIRECT_TO`/`DIRECT_HINT`/`DIRECT_GUARD`): 0 when this task runs again after the switch,
+/// 1 at once when it could not be done. Every register is declared clobbered, as for
+/// [`int81`]. Inlined, so the clobbers apply where it is called.
+#[cfg(target_os = "uefi")]
+#[inline(always)]
+pub(crate) fn int82() -> u64 {
+    let failed: u64;
+    // SAFETY: vector 0x82 switches to the target and comes back here when this task runs
+    // again (rax 0), or returns at once with rax 1. Every register the compiler could keep
+    // a value in is declared clobbered (no FPU state is moved)
+    unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
+    failed
+}
+
+/// Host tests (test wave, Group 30): the simulated scheduler's direct switch.
+#[cfg(not(target_os = "uefi"))]
+pub(crate) fn int82() -> u64 {
+    crate::host::direct_vector()
 }
 
 /// A direct caller whose answer is marked, not woken yet ([`reply_recv`]).
@@ -2215,3 +2245,8 @@ pub fn release_irqs(id: u64) {
         }
     }
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/ipc_service.rs"]
+pub(crate) mod tests;
