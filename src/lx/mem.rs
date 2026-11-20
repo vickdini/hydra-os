@@ -390,3 +390,8 @@ pub fn summary() -> alloc::string::String {
     }
     s
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_mem.rs"]
+pub(crate) mod tests;

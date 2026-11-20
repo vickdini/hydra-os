@@ -140,3 +140,8 @@ pub(super) fn clear(h: u8) {
         set_next(t);
     });
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_timer.rs"]
+pub(crate) mod tests;

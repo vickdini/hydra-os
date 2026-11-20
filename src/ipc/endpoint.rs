@@ -363,3 +363,8 @@ pub fn get_system_endpoint(id: u32) -> Option<&'static SharedEndpoint> {
         None
     }
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/ipc_endpoint.rs"]
+pub(crate) mod tests;

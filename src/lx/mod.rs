@@ -2575,3 +2575,8 @@ pub fn proc_net_unix_text() -> Option<alloc::string::String> {
     }
     Some(window_text(LXS_IPC, crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]), |_| {}).unwrap_or_default())
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_mod.rs"]
+pub(crate) mod tests;

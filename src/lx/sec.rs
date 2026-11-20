@@ -110,3 +110,8 @@ pub fn bpf_desc(mut desc: Desc, nr: u64, args: &[u64; 6]) -> Desc {
     desc[4] = value;
     desc
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_sec.rs"]
+pub(crate) mod tests;

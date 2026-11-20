@@ -616,3 +616,8 @@ pub fn read_user_str(addr: u64, dst: &mut [u8]) -> Result<Option<usize>, i64> {
         }
     }
 }
+
+// Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/lx_copy.rs"]
+pub(crate) mod tests;
