@@ -1378,8 +1378,8 @@ fn lx_yield(nobkl: bool) {
     if nobkl {
         crate::task::scheduler::BLOCK_NOBKL.store(1, Ordering::Relaxed);
     }
-    // SAFETY: the yield vector switches tasks and comes back here
-    unsafe { core::arch::asm!("int 0x81", clobber_abi("sysv64")) };
+    // The yield vector switches tasks and comes back here
+    crate::ipc::service::int81();
     crate::task::scheduler::BLOCK_NOBKL.store(0, Ordering::Relaxed);
 }
 
@@ -1404,10 +1404,9 @@ fn direct_to(target: u64, hint: usize, guard: Option<&'static AtomicBool>, nobkl
     if nobkl {
         BLOCK_NOBKL.store(1, Ordering::Relaxed);
     }
-    let failed: u64;
-    // SAFETY: vector 0x82 switches to `target` and comes back here when this task runs
-    // again (rax 0), or returns at once with rax 1
-    unsafe { core::arch::asm!("int 0x82", inout("rax") 0u64 => failed, clobber_abi("sysv64")) };
+    // Vector 0x82 switches to `target` and comes back here when this task runs again (0),
+    // or returns at once with 1
+    let failed = crate::ipc::service::int82();
     BLOCK_NOBKL.store(0, Ordering::Relaxed);
     failed == 0
 }

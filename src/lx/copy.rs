@@ -385,6 +385,7 @@ pub fn has_output(buf: &CopyBuf) -> bool {
 // copy kernel memory just as well. Supervisor write protection (CR0.WP) is on, so a write
 // to a read-only (copy-on-write) user page faults as it would from user mode.
 
+#[cfg(target_os = "uefi")]
 core::arch::global_asm!(
     r#"
     .text
@@ -438,9 +439,22 @@ core::arch::global_asm!(
     "#
 );
 
+#[cfg(target_os = "uefi")]
 extern "sysv64" {
     fn hydra_uaccess_copy(dst: *mut u8, src: *const u8, n: usize) -> usize;
     fn hydra_uaccess_str(dst: *mut u8, src: *const u8, max: usize) -> isize;
+}
+
+/// Host tests (test wave, Group 30): the routines' simulation (pages marked missing fault).
+#[cfg(not(target_os = "uefi"))]
+unsafe fn hydra_uaccess_copy(dst: *mut u8, src: *const u8, n: usize) -> usize {
+    crate::host::uaccess_copy(dst, src, n)
+}
+
+/// See the other `hydra_uaccess_copy`.
+#[cfg(not(target_os = "uefi"))]
+unsafe fn hydra_uaccess_str(dst: *mut u8, src: *const u8, max: usize) -> isize {
+    crate::host::uaccess_str(dst, src, max)
 }
 
 /// Copies `n` bytes from `src` to `dst`, one side being user memory of the current address
