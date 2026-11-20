@@ -193,9 +193,11 @@ pub fn privilege_stack() -> u64 {
     // SAFETY: a plain read of this CPU's TSS field
     unsafe {
         if ap.is_null() {
-            core::ptr::read_volatile(core::ptr::addr_of!(TSS.privilege_stack_table[0])).as_u64()
+            // (unaligned: the TSS is packed, the field at offset 4; a volatile read of it
+            // was undefined behaviour, caught by the host tests' debug checks)
+            core::ptr::read_unaligned(core::ptr::addr_of!(TSS.privilege_stack_table[0])).as_u64()
         } else {
-            core::ptr::read_volatile(core::ptr::addr_of!((*ap).privilege_stack_table[0])).as_u64()
+            core::ptr::read_unaligned(core::ptr::addr_of!((*ap).privilege_stack_table[0])).as_u64()
         }
     }
 }
@@ -239,6 +241,27 @@ pub fn load_for_ap(cpu: usize) {
 /// Reloads CS, the data segments and TR with the selectors of a freshly loaded GDT.
 fn reload_segments(s: &Selectors) {
     unsafe {
+        load_segment_registers(s);
+        // Load Task Register (TR) with TSS selector
+        x86_64::instructions::tables::load_tss(s.tss_selector);
+    }
+}
+
+/// CS by a far return, SS, and null in DS, ES, FS and GS.
+#[cfg(not(target_os = "uefi"))]
+unsafe fn load_segment_registers(s: &Selectors) {
+    // Host build (unit tests): the test thread's fake CPU
+    crate::host::load_seg("cs", s.kernel_code_selector.0);
+    crate::host::load_seg("ss", s.kernel_data_selector.0);
+    for r in ["ds", "es", "fs", "gs"] {
+        crate::host::load_seg(r, 0);
+    }
+}
+
+/// CS by a far return, SS, and null in DS, ES, FS and GS.
+#[cfg(target_os = "uefi")]
+unsafe fn load_segment_registers(s: &Selectors) {
+    {
         // Far return to reload CS with kernel code selector (0x08)
         core::arch::asm!(
             "push {sel}",
@@ -264,7 +287,5 @@ fn reload_segments(s: &Selectors) {
             null = in(reg) 0u16,
             options(preserves_flags),
         );
-        // Load Task Register (TR) with TSS selector
-        x86_64::instructions::tables::load_tss(s.tss_selector);
     }
 }

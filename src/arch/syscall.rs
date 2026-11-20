@@ -306,6 +306,7 @@ pub fn set_kernel_rsp(rsp: u64) {
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
+#[cfg(target_os = "uefi")]
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
@@ -334,6 +335,7 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
+#[cfg(target_os = "uefi")]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
@@ -344,6 +346,24 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
         in("edx") high,
         options(nostack, preserves_flags)
     );
+}
+
+/// Host build (unit tests): the test thread's fake MSRs.
+///
+/// # Safety
+/// Always safe on the host; `unsafe` to match the kernel's signature.
+#[cfg(not(target_os = "uefi"))]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    crate::host::rdmsr(msr)
+}
+
+/// Host build (unit tests): the test thread's fake MSRs.
+///
+/// # Safety
+/// Always safe on the host; `unsafe` to match the kernel's signature.
+#[cfg(not(target_os = "uefi"))]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    crate::host::wrmsr(msr, value)
 }
 
 /// Configures CPU Model-Specific Registers for fast x86_64 hardware system calls.

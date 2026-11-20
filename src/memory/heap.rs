@@ -40,7 +40,9 @@ const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 /// Global allocator for Hydra kernel (`extern crate alloc`).
-#[global_allocator]
+// (the host build of the unit tests keeps the host's allocator: there, this heap is tested
+// as a value, not used)
+#[cfg_attr(target_os = "uefi", global_allocator)]
 static KERNEL_HEAP: SizeClassHeap = SizeClassHeap::new();
 
 /// Block sizes served from free lists (powers of two, each block aligned to its size).
