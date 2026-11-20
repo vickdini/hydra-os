@@ -3,6 +3,7 @@
 
 pub mod common;
 
+mod dispatch;
 mod execve;
 mod extra;
 mod futex;

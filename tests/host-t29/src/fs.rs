@@ -223,17 +223,24 @@ pub mod fd {
     pub use super::{FileDescriptor, OpenFile, MAX_FDS};
     pub const EFBIG_MSG: &str = "File too large";
     pub const ENOSPC_MSG: &str = "No space left on device";
-    /// *mirror* of the kernel's error-message mapping (the messages the fakes use).
+    /// *mirror* of the kernel's `IO_ERRORS` table (EFBIG is not in it).
     pub fn io_errno(e: &str) -> Option<i64> {
-        match e {
-            EFBIG_MSG => Some(-27),
-            ENOSPC_MSG => Some(-28),
-            "Bad file descriptor" => Some(-9),
-            "Broken pipe" => Some(-32),
-            "Resource temporarily unavailable" => Some(-11),
-            "Illegal seek" => Some(-29),
-            _ => None,
-        }
+        const IO_ERRORS: [(i64, &str); 13] = [
+            (-1, "Operation not permitted"),
+            (-9, "Bad file descriptor"),
+            (-2, "No such file or directory"),
+            (-4, "Interrupted system call"),
+            (-11, "Resource temporarily unavailable"),
+            (-13, "Permission denied"),
+            (-22, "Invalid argument"),
+            (-28, ENOSPC_MSG),
+            (-30, "Read-only file system"),
+            (-95, "Operation not supported"),
+            (-107, "Transport endpoint is not connected"),
+            (-122, "Disk quota exceeded"),
+            (-5, "Input/output error"),
+        ];
+        IO_ERRORS.iter().find(|x| x.1 == e).map(|x| x.0)
     }
 }
 

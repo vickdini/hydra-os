@@ -641,7 +641,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_stat(filename: const char*, statbuf: struct stat*)
             let path_ptr = arg0 as *const u8;
             let stat_ptr = arg1 as *mut LinuxStat;
-            if stat_ptr.is_null() {
+            if !user_ok(arg1, core::mem::size_of::<LinuxStat>() as u64, true) {
                 return -EFAULT;
             }
             let path = match read_user_string(path_ptr) {
@@ -676,7 +676,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_fstat(fd: int, statbuf: struct stat*)
             let fd = arg0 as usize;
             let stat_ptr = arg1 as *mut LinuxStat;
-            if stat_ptr.is_null() {
+            if !user_ok(arg1, core::mem::size_of::<LinuxStat>() as u64, true) {
                 return -EFAULT;
             }
 
@@ -1043,7 +1043,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         SYS_PIPE | SYS_PIPE2 => {
             // sys_pipe(pipefd: int[2])
             let pipefd_ptr = arg0 as *mut [i32; 2];
-            if pipefd_ptr.is_null() {
+            if !user_ok(arg0, 8, true) {
                 return -EFAULT;
             }
 
@@ -1137,7 +1137,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let addr_ptr = arg1 as *const LinuxSockaddrUn;
             let addrlen = arg2 as usize;
 
-            if addr_ptr.is_null() || addrlen < 2 {
+            if addrlen < 2 || !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, false) {
                 return -EFAULT;
             }
 
@@ -1210,12 +1210,12 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 Err(err) => return err,
             };
 
-            if !addr_ptr.is_null() {
+            if !addr_ptr.is_null() && user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, true) {
                 unsafe {
                     let mut un = LinuxSockaddrUn::default();
                     un.sun_family = AF_UNIX as u16;
                     *addr_ptr = un;
-                    if !addrlen_ptr.is_null() {
+                    if user_ok(arg2, 4, true) {
                         *addrlen_ptr = 2; // sizeof(sun_family)
                     }
                 }
@@ -1233,7 +1233,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let addr_ptr = arg1 as *const LinuxSockaddrUn;
             let addrlen = arg2 as usize;
 
-            if addr_ptr.is_null() || addrlen < 2 {
+            if addrlen < 2 || !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, false) {
                 return -EFAULT;
             }
 
@@ -1267,7 +1267,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let _protocol = arg2 as u32;
             let sv_ptr = arg3 as *mut [i32; 2];
 
-            if sv_ptr.is_null() {
+            if !user_ok(arg3, 8, true) {
                 return -EFAULT;
             }
 
@@ -1312,6 +1312,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if count == 0 {
                 return 0;
             }
+            if !user_ok(arg1, count as u64, false) {
+                return -EFAULT;
+            }
             let slice = unsafe { core::slice::from_raw_parts(ptr, count) };
             let res = crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
@@ -1337,6 +1340,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             if count == 0 {
                 return 0;
             }
+            if !user_ok(arg1, count as u64, true) {
+                return -EFAULT;
+            }
             let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
             crate::task::with_current_fds_mut(|fds| {
                 if let Some(desc) = fds.get_mut(fd) {
@@ -1356,10 +1362,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_sendmsg(sockfd: int, msg: const struct msghdr*, flags: int)
             let fd = arg0 as usize;
             let msg_ptr = arg1 as *const LinuxMsghdr;
-            if msg_ptr.is_null() {
+            if !user_ok(arg1, core::mem::size_of::<LinuxMsghdr>() as u64, false) {
                 return -EFAULT;
             }
             let msg = unsafe { *msg_ptr };
+            if !msghdr_ok(&msg, false) {
+                return -EFAULT;
+            }
 
             // 1. Process SCM_RIGHTS ancillary data if present
             if !msg.msg_control.is_null() && msg.msg_controllen >= 16 {
@@ -1413,10 +1422,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_recvmsg(sockfd: int, msg: struct msghdr*, flags: int)
             let fd = arg0 as usize;
             let msg_ptr = arg1 as *mut LinuxMsghdr;
-            if msg_ptr.is_null() {
+            if !user_ok(arg1, core::mem::size_of::<LinuxMsghdr>() as u64, true) {
                 return -EFAULT;
             }
             let msg = unsafe { *msg_ptr };
+            if !msghdr_ok(&msg, true) {
+                return -EFAULT;
+            }
 
             // 1. Receive incoming ancillary data (SCM_RIGHTS) if requested
             if !msg.msg_control.is_null() && msg.msg_controllen >= 20 {
@@ -1501,7 +1513,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let addr_ptr = arg1 as *mut LinuxSockaddrUn;
             let addrlen_ptr = arg2 as *mut u32;
 
-            if addr_ptr.is_null() || addrlen_ptr.is_null() {
+            if !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, true) || !user_ok(arg2, 4, true) {
                 return -EFAULT;
             }
 
@@ -1534,7 +1546,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         SYS_NANOSLEEP => {
             // sys_nanosleep(req: const struct timespec*, rem: struct timespec*)
             let req_ptr = arg0 as *const LinuxTimespec;
-            if req_ptr.is_null() {
+            if !user_ok(arg0, 16, false) {
                 return -EFAULT;
             }
             let req = unsafe { *req_ptr };
@@ -1576,7 +1588,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         SYS_UNAME => {
             // sys_uname(buf: struct utsname*)
             let buf_ptr = arg0 as *mut LinuxUtsname;
-            if buf_ptr.is_null() {
+            if !user_ok(arg0, core::mem::size_of::<LinuxUtsname>() as u64, true) {
                 return -EFAULT;
             }
             let mut u = LinuxUtsname::default();
@@ -1633,7 +1645,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_getcwd(buf: char*, size: size_t)
             let buf_ptr = arg0 as *mut u8;
             let size = arg1 as usize;
-            if buf_ptr.is_null() || size == 0 {
+            if size == 0 || !user_ok(arg0, size.min(2) as u64, true) {
                 return -EFAULT;
             }
             let cwd = b"/\0";
@@ -1808,9 +1820,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let Some(ids) = crate::task::with_current_task_mut(|t| [t.uid, t.euid, t.suid]) else { return -EFAULT };
             let ids = ids.map(|id| ns::id_for_caller(id, false));
             unsafe {
-                if !ruid_p.is_null() { *ruid_p = ids[0]; }
-                if !euid_p.is_null() { *euid_p = ids[1]; }
-                if !suid_p.is_null() { *suid_p = ids[2]; }
+                if user_ok(ruid_p as u64, 4, true) { *ruid_p = ids[0]; }
+                if user_ok(euid_p as u64, 4, true) { *euid_p = ids[1]; }
+                if user_ok(suid_p as u64, 4, true) { *suid_p = ids[2]; }
             }
             0
         }
@@ -1843,9 +1855,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let Some(ids) = crate::task::with_current_task_mut(|t| [t.gid, t.egid, t.sgid]) else { return -EFAULT };
             let ids = ids.map(|id| ns::id_for_caller(id, true));
             unsafe {
-                if !rgid_p.is_null() { *rgid_p = ids[0]; }
-                if !egid_p.is_null() { *egid_p = ids[1]; }
-                if !sgid_p.is_null() { *sgid_p = ids[2]; }
+                if user_ok(rgid_p as u64, 4, true) { *rgid_p = ids[0]; }
+                if user_ok(egid_p as u64, 4, true) { *egid_p = ids[1]; }
+                if user_ok(sgid_p as u64, 4, true) { *sgid_p = ids[2]; }
             }
             0
         }
@@ -1856,7 +1868,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             crate::task::with_current_task_mut(|t| {
                 let is_root = t.euid == 0;
                 let cap_mask = if is_root { 0xFFFF_FFFFu32 } else { 0u32 };
-                if !datap.is_null() {
+                if user_ok(arg1, 12, true) {
                     unsafe {
                         *datap = cap_mask;
                         *datap.add(1) = cap_mask;
@@ -1956,7 +1968,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_newfstatat(dirfd: int, pathname: const char*, statbuf: struct stat*, flags: int)
             let path_ptr = arg1 as *const u8;
             let stat_ptr = arg2 as *mut LinuxStat;
-            if stat_ptr.is_null() {
+            if !user_ok(arg2, core::mem::size_of::<LinuxStat>() as u64, true) {
                 return -EFAULT;
             }
             let path = match read_user_string(path_ptr) {
@@ -1991,7 +2003,10 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             // sys_getrandom(buf: void*, buflen: size_t, flags: unsigned int)
             let buf_ptr = arg0 as *mut u8;
             let buflen = arg1 as usize;
-            if buf_ptr.is_null() && buflen > 0 {
+            if buflen == 0 {
+                return 0; // (a slice from a null pointer is undefined behaviour)
+            }
+            if !user_ok(arg0, buflen as u64, true) {
                 return -EFAULT;
             }
             let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buflen) };
@@ -2009,6 +2024,8 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 let ts_ptr = arg2 as *const LinuxTimespec;
                 if ts_ptr.is_null() {
                     None
+                } else if !user_ok(arg2, 16, false) {
+                    return -EFAULT;
                 } else {
                     let ts = unsafe { *ts_ptr };
                     if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
@@ -2027,7 +2044,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                 Some(ns) => ns.div_ceil(1_000_000).min(i32::MAX as u64) as i64,
             };
 
-            if fds_ptr.is_null() && nfds > 0 {
+            if nfds > 0 && !user_ok(arg0, (nfds as u64).saturating_mul(8), true) {
                 return -EFAULT;
             }
             let deadline = timeout.map(|ns| crate::arch::pit::now_ns().saturating_add(ns));
@@ -2124,6 +2141,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             let ev_ptr = arg3 as *const LinuxEpollEvent;
 
             let ev = if !ev_ptr.is_null() && op != EPOLL_CTL_DEL {
+                if !user_ok(arg3, core::mem::size_of::<LinuxEpollEvent>() as u64, false) {
+                    return -EFAULT;
+                }
                 Some(unsafe { core::ptr::read_unaligned(ev_ptr) })
             } else {
                 None
@@ -2165,6 +2185,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 
             if events_ptr.is_null() || maxevents <= 0 {
                 return -EINVAL;
+            }
+            if !user_ok(arg1, maxevents as u64 * core::mem::size_of::<LinuxEpollEvent>() as u64, true) {
+                return -EFAULT;
             }
 
             let epoll_arc = crate::task::with_current_fds_mut(|fds| {
@@ -2270,6 +2293,31 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 
 const ERANGE: i64 = 34;
 
+/// Whether `len` bytes of the caller's memory at `ptr` may be read (or written): never
+/// null, and faulted in. The calls below dereference user pointers directly after it.
+fn user_ok(ptr: u64, len: u64, write: bool) -> bool {
+    ptr != 0 && crate::memory::vm::prefault_current(ptr, len, write)
+}
+
+/// Whether the control buffer, the iovec array and every buffer of a `msghdr` may be
+/// accessed (`write`: received into).
+fn msghdr_ok(msg: &LinuxMsghdr, write: bool) -> bool {
+    if !msg.msg_control.is_null() && !user_ok(msg.msg_control as u64, msg.msg_controllen as u64, write) {
+        return false;
+    }
+    if msg.msg_iov.is_null() || msg.msg_iovlen == 0 {
+        return true;
+    }
+    let n = msg.msg_iovlen as u64;
+    if !user_ok(msg.msg_iov as u64, n.saturating_mul(core::mem::size_of::<LinuxIovec>() as u64), false) {
+        return false;
+    }
+    (0..msg.msg_iovlen).all(|i| {
+        let iov = unsafe { *msg.msg_iov.add(i) };
+        iov.iov_len == 0 || user_ok(iov.iov_base, iov.iov_len, write)
+    })
+}
+
 /// Reads a NUL-terminated C string from user space (up to 4096 bytes).
 ///
 /// # Arguments
@@ -2286,6 +2334,10 @@ fn read_user_string(ptr: *const u8) -> Option<String> {
     let mut bytes = Vec::new();
     let mut offset = 0;
     while offset < 4096 {
+        let at = ptr as u64 + offset as u64;
+        if (offset == 0 || at % 4096 == 0) && !crate::memory::vm::prefault_current(at, 1, false) {
+            return None;
+        }
         let b = unsafe { *ptr.add(offset) };
         if b == 0 {
             break;
