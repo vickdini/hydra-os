@@ -2,7 +2,10 @@
 
 #![allow(dead_code)]
 
+pub mod acpi;
+pub mod pci;
 pub mod ps2;
+pub mod vtd;
 
 
 

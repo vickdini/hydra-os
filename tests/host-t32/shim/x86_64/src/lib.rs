@@ -61,6 +61,8 @@ pub mod hw {
         pub static FLUSHED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
         /// Full flushes on this thread.
         pub static FLUSHED_ALL: Cell<usize> = const { Cell::new(0) };
+        /// Control register writes on this thread: (register, value).
+        pub static CR_WRITES: RefCell<Vec<(usize, u64)>> = const { RefCell::new(Vec::new()) };
     }
 
     /// The interrupt flag of this thread's fake CPU.
@@ -134,7 +136,9 @@ pub mod hw {
     pub fn cr(i: usize) -> u64 {
         CR.with_borrow(|c| c[i])
     }
+    /// Sets a control register as a write by the kernel would (logged in [`CR_WRITES`]).
     pub fn set_cr(i: usize, v: u64) {
+        CR_WRITES.with_borrow_mut(|w| w.push((i, v)));
         CR.with_borrow_mut(|c| c[i] = v)
     }
 }

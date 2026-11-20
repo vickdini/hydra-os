@@ -165,3 +165,46 @@ pub fn vmware_call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
         None => (0x564D_5868, arg, cmd, 0x5658),
     }
 }
+
+thread_local! {
+    /// The ACPI RSDP the test thread's firmware hands over.
+    pub static RSDP: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Pages below 1 MiB for the SMP start-up code.
+    pub static LOW_PAGES: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The image's UEFI load options (UCS-2).
+    pub static LOAD_OPTIONS: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    /// Memory-mapped device registers: (address, Some(written) / None for a read) -> read value.
+    pub static MMIO: RefCell<Option<Box<dyn FnMut(u64, Option<u32>) -> u32>>> = RefCell::new(None);
+}
+pub fn load_options() -> Option<Vec<u8>> {
+    LOAD_OPTIONS.with_borrow(|o| o.clone())
+}
+/// Sets the load options from ASCII text (stored as UCS-2, as the firmware does).
+pub fn set_load_options(s: &str) {
+    LOAD_OPTIONS.with_borrow_mut(|o| *o = Some(s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()));
+}
+fn mmio(a: u64, w: Option<u32>) -> Option<u32> {
+    let h = MMIO.with_borrow_mut(|h| h.take());
+    let mut f = h?;
+    let r = f(a, w);
+    MMIO.with_borrow_mut(|s| {
+        if s.is_none() {
+            *s = Some(f)
+        }
+    });
+    Some(r)
+}
+/// An MMIO read: the thread's device model, or plain memory without one.
+pub fn mmio_read32(a: u64) -> u32 {
+    mmio(a, None).unwrap_or_else(|| unsafe { core::ptr::read_volatile(a as *const u32) })
+}
+pub fn mmio_write32(a: u64, v: u32) {
+    if mmio(a, Some(v)).is_none() {
+        unsafe { core::ptr::write_volatile(a as *mut u32, v) }
+    }
+}
+
+thread_local! {
+    /// Whether CPUID reports x2APIC mode.
+    pub static X2APIC: Cell<bool> = const { Cell::new(false) };
+}

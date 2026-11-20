@@ -193,12 +193,25 @@ fn flush_range(phys: u64, len: u64) {
     unsafe { core::arch::x86_64::_mm_mfence() };
 }
 
+#[cfg(target_os = "uefi")]
 fn r32(u: &Unit, off: u64) -> u32 {
     unsafe { core::ptr::read_volatile((u.regs + off) as *const u32) }
 }
 
+#[cfg(target_os = "uefi")]
 fn w32(u: &Unit, off: u64, v: u32) {
     unsafe { core::ptr::write_volatile((u.regs + off) as *mut u32, v) }
+}
+
+// Host build (unit tests): the registers of a modelled remapping unit
+#[cfg(not(target_os = "uefi"))]
+fn r32(u: &Unit, off: u64) -> u32 {
+    crate::host::mmio_read32(u.regs + off)
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn w32(u: &Unit, off: u64, v: u32) {
+    crate::host::mmio_write32(u.regs + off, v)
 }
 
 fn r64(u: &Unit, off: u64) -> u64 {
@@ -259,10 +272,24 @@ fn flush_iotlb(u: &Unit, did: Option<u16>) -> bool {
 
 /// Words of the boot entry's load options (lower case), without allocating much.
 pub(crate) fn load_options_say(words: &[&[u8]]) -> bool {
-    let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) else {
-        return false;
-    };
-    let Some(opts) = img.load_options_as_bytes() else { return false };
+    load_options().is_some_and(|opts| options_say(&opts, words))
+}
+
+/// The image's load options (UCS-2), if it has any.
+#[cfg(target_os = "uefi")]
+fn load_options() -> Option<Vec<u8>> {
+    let img = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok()?;
+    img.load_options_as_bytes().map(|o| o.to_vec())
+}
+
+/// Host build (unit tests): the test thread's load options.
+#[cfg(not(target_os = "uefi"))]
+fn load_options() -> Option<Vec<u8>> {
+    crate::host::load_options()
+}
+
+/// Whether the load options `opts` (UCS-2) contain one of `words` (lower case, ASCII).
+fn options_say(opts: &[u8], words: &[&[u8]]) -> bool {
     let text: Vec<u8> = opts.chunks_exact(2).take(512).map(|c| if c[1] == 0 { c[0].to_ascii_lowercase() } else { b'?' }).collect();
     words.iter().any(|w| text.windows(w.len()).any(|x| x == *w))
 }
@@ -282,13 +309,7 @@ pub fn discover() {
     if fw.is_some_and(|v| v.starts_with(b"test")) {
         TEST.store(true, Ordering::Relaxed);
     }
-    let rsdp = uefi::system::with_config_table(|t| {
-        t.iter()
-            .find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID)
-            .or_else(|| t.iter().find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI_GUID))
-            .map(|e| e.address as u64)
-    });
-    let Some(rsdp) = rsdp else { return };
+    let Some(rsdp) = acpi_rsdp() else { return };
     unsafe {
         let rd32 = |p: u64| core::ptr::read_unaligned(p as *const u32);
         let rd64 = |p: u64| core::ptr::read_unaligned(p as *const u64);
@@ -315,6 +336,23 @@ pub fn discover() {
             break;
         }
     }
+}
+
+/// The ACPI RSDP from the firmware's configuration table (ACPI 2 preferred).
+#[cfg(target_os = "uefi")]
+pub(crate) fn acpi_rsdp() -> Option<u64> {
+    uefi::system::with_config_table(|t| {
+        t.iter()
+            .find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID)
+            .or_else(|| t.iter().find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI_GUID))
+            .map(|e| e.address as u64)
+    })
+}
+
+/// Host build (unit tests): the test thread's ACPI tables.
+#[cfg(not(target_os = "uefi"))]
+pub(crate) fn acpi_rsdp() -> Option<u64> {
+    crate::host::RSDP.get()
 }
 
 /// Whether DMA remapping is on.
