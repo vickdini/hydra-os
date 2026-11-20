@@ -1,0 +1,18 @@
+[package]
+name = "hydra_hosttests_t27"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host unit tests of Group 27's kernel files: Linux sockets, network, polling, timers, io_uring"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+# The real x86_64 crate with no-op TLB flushes (see shim/x86_64/src/lib.rs)
+x86_64 = { package = "x86_64_shim", path = "shim/x86_64" }
