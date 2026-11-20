@@ -919,9 +919,11 @@ fn align8(n: usize) -> usize {
 ///
 /// Vector of extracted [`FileDescriptor`] handles, or negative Linux errno on error.
 fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
-    let mut fds = Vec::new();
+    // In flight until returned: an error part-way releases the references taken so far
+    // (a pipe end must not stay open for ever; test wave, Group 27)
+    let mut fds = InFlight(Vec::new());
     if ptr == 0 || len < 16 {
-        return Ok(fds);
+        return Ok(Vec::new());
     }
     let buf = copy_in(ptr, len as usize)?;
     let mut off = 0;
@@ -943,8 +945,8 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
                     FileDescriptor::PipeWrite(pipe) => pipe.lock().add_writer(),
                     _ => {}
                 }
-                fds.push(desc);
-                if fds.len() > MAX_FDS {
+                fds.0.push(desc);
+                if fds.0.len() > MAX_FDS {
                     return Err(EINVAL);
                 }
             }
@@ -952,7 +954,7 @@ fn parse_control(ptr: u64, len: u64) -> Result<Vec<FileDescriptor>, i64> {
         // SCM_CREDENTIALS: the kernel attaches the sender's real credentials anyway
         off += align8(clen);
     }
-    Ok(fds)
+    Ok(core::mem::take(&mut fds.0))
 }
 
 /// Drops a descriptor that was in flight in a message and never installed.
@@ -995,15 +997,25 @@ fn build_control(ptr: u64, cap: usize, fds: Vec<FileDescriptor>, cred: Option<Uc
         for extra in fds.split_off(room.min(fds.len())) {
             release_in_flight(extra); // closed: no room for it in the receiver's buffer
         }
-        for desc in fds {
-            let fd = crate::task::with_current_fds_mut(|t| match t.alloc_fd(desc) {
+        // Not yet installed: in flight (a full descriptor table releases the rest; test
+        // wave, Group 27)
+        let mut todo = InFlight(fds);
+        todo.0.reverse();
+        while let Some(desc) = todo.0.pop() {
+            let fd = crate::task::with_current_fds_mut(|t| match t.alloc_fd(desc.clone()) {
                 Ok(n) => {
                     t.set_cloexec(n, cloexec);
                     Ok(n as i32)
                 }
                 Err(_) => Err(EMFILE),
-            })?;
-            nums.push(fd);
+            });
+            match fd {
+                Ok(fd) => nums.push(fd),
+                Err(e) => {
+                    release_in_flight(desc);
+                    return Err(e);
+                }
+            }
         }
         if !nums.is_empty() {
             let clen = 16 + 4 * nums.len();
