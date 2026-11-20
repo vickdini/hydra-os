@@ -119,6 +119,18 @@ pub struct UserNs {
     parent: Option<Arc<UserNs>>,
 }
 
+impl Drop for UserNs {
+    /// A namespace that is gone no longer counts against the limits above it (Linux's
+    /// `dec_user_namespaces` when a namespace is freed).
+    fn drop(&mut self) {
+        let mut up = self.parent.clone();
+        while let Some(a) = up {
+            a.children.fetch_sub(1, Ordering::Relaxed);
+            up = a.parent.clone();
+        }
+    }
+}
+
 /// A process's namespaces. `None`/0 means the initial namespace.
 #[derive(Clone, Default)]
 pub struct Ns {
