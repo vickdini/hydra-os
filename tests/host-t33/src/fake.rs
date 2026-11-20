@@ -21,8 +21,9 @@ thread_local! {
     pub static USER_RANGES: RefCell<Vec<(u64, usize)>> = RefCell::new(Vec::new());
     /// Make `make_user_accessible` fail with this message.
     pub static PAGING_ERROR: Cell<Option<&'static str>> = const { Cell::new(None) };
-    /// The current task's descriptor table (the kernel's real `FdTable`).
-    pub static FDS: RefCell<crate::fs::FdTable> = RefCell::new(crate::fs::FdTable::new_default());
+    /// The current task's descriptor table (the kernel's real `FdTable`). Leaked: a table
+    /// dropped at thread exit would close files after the fakes they call are gone.
+    pub static FDS: &'static RefCell<crate::fs::FdTable> = Box::leak(Box::new(RefCell::new(crate::fs::FdTable::new_default())));
     /// Milliseconds slept (`pit::sleep_ms`, `task::sleep_ms`).
     pub static SLEPT_MS: Cell<u64> = const { Cell::new(0) };
     /// Kernel console output captured (`println!`).
@@ -80,7 +81,7 @@ pub fn reset() {
     WAKES.set(0);
     USER_RANGES.with_borrow_mut(|v| v.clear());
     PAGING_ERROR.set(None);
-    FDS.with_borrow_mut(|f| *f = crate::fs::FdTable::new_default());
+    FDS.with(|f| *f.borrow_mut() = crate::fs::FdTable::new_default());
     SLEPT_MS.set(0);
     console_take();
     klog_take();
@@ -312,7 +313,17 @@ pub fn seccomp_stop(frame: &mut crate::arch::syscall::SyscallFrame, data: u16) -
 }
 
 pub fn with_current_fds_mut<R>(f: impl FnOnce(&mut crate::fs::FdTable) -> R) -> R {
-    FDS.with_borrow_mut(f)
+    FDS.with(|t| f(&mut t.borrow_mut()))
+}
+
+/// The current task's descriptor table, read-only.
+pub fn fds<R>(f: impl FnOnce(&crate::fs::FdTable) -> R) -> R {
+    FDS.with(|t| f(&t.borrow()))
+}
+
+/// The current task's descriptor table.
+pub fn fds_mut<R>(f: impl FnOnce(&mut crate::fs::FdTable) -> R) -> R {
+    with_current_fds_mut(f)
 }
 
 // ------------------------------------------------------------- wait queues

@@ -59,7 +59,7 @@ fn open(a: A, pid: i64, cpu: i64, group: i64, flags: u64) -> i64 {
 }
 
 fn dev(fd: i64) -> Arc<dyn hydra_hosttests_t33::compat::linux::chardev::CharDevice> {
-    match fake::FDS.with_borrow(|t| t.get(fd as usize).cloned()) {
+    match fake::fds(|t| t.get(fd as usize).cloned()) {
         Some(FileDescriptor::Device(d)) => d,
         _ => panic!("not a device"),
     }
@@ -144,11 +144,11 @@ fn attribute_and_permission_checks() {
     assert_eq!(open(A::sw(TASK_CLOCK), 0, -1, 1, 0), -22, "stdout is not a perf event");
     assert_eq!(open(A::sw(TASK_CLOCK), 0, -1, 900, 0), -9);
     let null = Arc::new(NullDev);
-    let nfd = fake::FDS.with_borrow_mut(|t| t.alloc_fd(FileDescriptor::Device(null)).unwrap());
+    let nfd = fake::fds_mut(|t| t.alloc_fd(FileDescriptor::Device(null)).unwrap());
     assert_eq!(open(A::sw(TASK_CLOCK), 0, -1, nfd as i64, 0), -22, "a device that is not perf");
     // FD_CLOEXEC, and EMFILE
     let fd = open(A::sw(TASK_CLOCK), 0, -1, -1, 8);
-    assert!(fake::FDS.with_borrow(|t| t.cloexec(fd as usize)));
+    assert!(fake::fds(|t| t.cloexec(fd as usize)));
     hydra_hosttests_t33::compat::linux::NOFILE.set(fd as usize + 1);
     assert_eq!(open(A::sw(TASK_CLOCK), 0, -1, -1, 0), -24);
     assert!(perf::active());
