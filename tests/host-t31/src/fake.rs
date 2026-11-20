@@ -486,4 +486,6 @@ pub fn reset() {
     *BKL_EXIT_HOOK.lock().unwrap() = None;
     task::HR_EARLIEST.store(u64::MAX, Ordering::SeqCst);
     task::STARTED.store(false, Ordering::SeqCst);
+    *task::SUPERVISOR.lock() = task::Supervisor::new();
+    crate::fs::zfs::POOL_ON_USB.store(false, Ordering::SeqCst);
 }
