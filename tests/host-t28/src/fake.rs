@@ -917,6 +917,13 @@ pub mod zfs {
                 if d.mode & 0o170000 != 0o040000 {
                     return Err(-20);
                 }
+                // "." and ".." as the ZPL answers them
+                if name == b"." {
+                    return Ok(dir);
+                }
+                if name == b".." {
+                    return Ok(fs.inodes.iter().find(|(_, n)| n.entries.values().any(|&c| c == dir)).map_or(ROOT_INO, |(&i, _)| i));
+                }
                 d.entries.get(name).copied().ok_or(-2)
             })
         }

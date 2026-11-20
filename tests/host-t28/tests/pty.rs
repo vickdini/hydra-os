@@ -2,8 +2,8 @@
 //! discipline, locking, controlling terminals, hangup, the pty ioctls, stat/chmod of
 //! `/dev/pts/N`, and end-of-file/EIO when one side closes.
 //!
-//! Pairs live in one global table: each test uses its own session ids, and never
-//! assumes which slave number it gets.
+//! Pairs live in one global table: tests hold `common::serial()` (a number freed by one
+//! test would otherwise be taken by another) and never assume which number they get.
 
 mod common;
 
@@ -52,6 +52,7 @@ fn read_all(f: &PtyFile) -> Vec<u8> {
 
 #[test]
 fn makedev_and_paths() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     assert_eq!(makedev(PTMX_MAJOR, PTMX_MINOR), 0x502);
     assert_eq!(pty::slave_index("/dev/pts/12"), Some(12));
     assert_eq!(pty::slave_index("/dev/pts/x"), None);
@@ -60,6 +61,7 @@ fn makedev_and_paths() {
 
 #[test]
 fn master_and_slave_exchange_data() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     fake::IDS.set((501, 501));
     let (m, n) = pair();
     assert_eq!(m.pty.index, n);
@@ -98,6 +100,7 @@ fn master_and_slave_exchange_data() {
 
 #[test]
 fn locked_slaves_cannot_open() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let m = pty::open_master(0, false);
     let mut n = [0u32];
     ioctl(&m, TIOCGPTN, n.as_mut_ptr() as u64);
@@ -113,6 +116,7 @@ fn locked_slaves_cannot_open() {
 
 #[test]
 fn poll_events_of_both_ends() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     assert_eq!(m.poll_events(), 0x4);
     let s = pty::open_slave(n, true, true).unwrap();
@@ -129,6 +133,7 @@ fn poll_events_of_both_ends() {
 
 #[test]
 fn closing_the_master_ends_the_slave() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let s = pty::open_slave(n, true, true).unwrap();
     drop(m);
@@ -144,6 +149,7 @@ fn closing_the_master_ends_the_slave() {
 
 #[test]
 fn slave_writers_wait_when_the_master_does_not_read() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let s = pty::open_slave(n, true, true).unwrap();
     let chunk = vec![b'x'; 16 * 1024];
@@ -169,6 +175,7 @@ fn slave_writers_wait_when_the_master_does_not_read() {
 
 #[test]
 fn blocking_reads() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let s = pty::open_slave(n, false, true).unwrap();
     m.set_nonblock(false);
@@ -189,6 +196,7 @@ fn blocking_reads() {
 
 #[test]
 fn signals_go_to_the_foreground_group() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     fake::IDS.set((610, 610));
     fake::SESSIONS.with_borrow_mut(|m| m.insert(610, (610, 611)));
     let (m, n) = pair();
@@ -231,6 +239,7 @@ fn signals_go_to_the_foreground_group() {
 
 #[test]
 fn signals_without_a_foreground_group_are_dropped() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let _s = pty::open_slave(n, true, true).unwrap();
     fake::take_group_signals();
@@ -243,6 +252,7 @@ fn signals_without_a_foreground_group_are_dropped() {
 
 #[test]
 fn tiocsctty_takes_the_terminal() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     fake::IDS.set((630, 630));
     fake::SESSIONS.with_borrow_mut(|m| m.insert(630, (630, 631)));
     let (m, n) = pair();
@@ -258,6 +268,7 @@ fn tiocsctty_takes_the_terminal() {
 
 #[test]
 fn packet_mode_and_peer() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let mut v = [0u32];
     assert_eq!(ioctl(&m, TIOCPKT, v.as_mut_ptr() as u64), 0);
@@ -289,6 +300,7 @@ fn packet_mode_and_peer() {
 
 #[test]
 fn leaving_canonical_mode_wakes_readers() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let (m, n) = pair();
     let s = pty::open_slave(n, true, true).unwrap();
     m.write(b"abc");
@@ -310,6 +322,7 @@ fn leaving_canonical_mode_wakes_readers() {
 
 #[test]
 fn stat_and_chmod_of_slave_nodes() {
+    let _g = common::serial(); // slave numbers are reused across the global table
     let ptmx = pty::stat_path("/dev/ptmx").unwrap().unwrap();
     assert_eq!((ptmx.st_mode, ptmx.st_rdev, ptmx.st_dev, ptmx.st_ino), (0o020666, 0x502, PTS_DEV, 2));
     for d in ["/dev/pts", "/dev/pts/"] {
