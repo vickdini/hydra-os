@@ -816,7 +816,8 @@ impl DrmFile {
             return Err(EINVAL);
         }
         let bo = self.bo(handle)?;
-        if width == 0 || height == 0 || pitch < width * 4 || offset as u64 + pitch as u64 * height as u64 > bo.size {
+        // (In 64 bits: `width * 4` wrapped in 32, and a 4-byte pitch passed for 2^30 pixels)
+        if width == 0 || height == 0 || (pitch as u64) < width as u64 * 4 || offset as u64 + pitch as u64 * height as u64 > bo.size {
             return Err(EINVAL);
         }
         Ok(with_kms(|k| {
@@ -1068,7 +1069,7 @@ impl DrmFile {
                     } else {
                         k.fbs.get(&fb_id).cloned().ok_or(ENOENT)?
                     };
-                    if x + k.width > fb.width || y + k.height > fb.height {
+                    if x as u64 + k.width as u64 > fb.width as u64 || y as u64 + k.height as u64 > fb.height as u64 {
                         return Err(ENOSPC);
                     }
                     k.take_screen()?;
