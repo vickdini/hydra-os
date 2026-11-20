@@ -31,5 +31,12 @@ kept thin: the logic around it was moved into testable functions.
 | `src/memory/frame_allocator.rs` | `init_memory_from_uefi` | firmware memory map |
 | `src/arch/power.rs` | the last line of `power_off`/`reboot` (`uefi::runtime::reset`) | runs, and panics on the host (no runtime services): the tests catch that |
 | `src/arch/pit.rs` | `calibrate_tsc`'s give-up after 50 million polls | would poll the fake port 50 million times (seconds, and the port log) |
-| `src/arch/iommu.rs` | `flush_range` and `Mem::flushed` with a non-coherent unit | `clflush` runs on host memory; only the coherent path's result is checkable |
-| `src/memory/heap.rs` | `check_free_block`, `poison` behind `POISON_FREE` (off) | unreachable in the kernel build; tested by the unit tests inside heap.rs |
+
+## boot_services.rs below 70 %
+
+`take_hardware_ownership` is the takeover sequence itself (about 90 of the file's 122
+counted lines): after the framebuffer check it calls `ExitBootServices`, then switches the
+real CPU's tables and turns on the direct map, which the test process cannot survive. Its
+pieces are tested where they live (smp/iommu/pcid discovery, gdt, idt, paging, pcid, pic,
+pit, rtc, keyboard, mouse, syscall, vm self-tests), and its only computation was moved
+into `kernel_low_ranges` (tested). Testable lines of the file: all covered.
