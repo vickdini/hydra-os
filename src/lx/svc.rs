@@ -251,6 +251,20 @@ impl Worker {
     pub fn call_mut(&self) -> *mut LxCall {
         crate::memory::frame_allocator::phys_to_virt(self.page.base) as *mut LxCall
     }
+
+    // wave6 G22 begin
+    /// Its syscall page's copy area (the copy-in table fills it straight from the caller's
+    /// memory while the worker is idle: it reads the page only after `deliver`).
+    #[allow(clippy::mut_from_ref)]
+    pub fn data_mut(&self) -> &mut [u8; crate::ipc::protocol::LX_DATA_SIZE] {
+        // SAFETY: the page is the worker's own and stays allocated while it is in the table;
+        // the copy area lies within it; only the request table's lock holder writes it
+        unsafe {
+            &mut *((crate::memory::frame_allocator::phys_to_virt(self.page.base) as *mut u8).add(crate::ipc::protocol::LX_DATA_OFF)
+                as *mut [u8; crate::ipc::protocol::LX_DATA_SIZE])
+        }
+    }
+    // wave6 G22 end
 }
 
 /// A host's request table (under [`Host::table`]).

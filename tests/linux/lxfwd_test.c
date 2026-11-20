@@ -16,6 +16,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -255,6 +256,90 @@ int main(int argc, char **argv) {
         syscall(SYS_keyctl, KEYCTL_UNLINK, kb, THREAD_KEYRING);
         free(huge);
         munmap(m, 4096);
+    }
+    /* Wave 6 (Group 22): the copies go straight through the caller's address space with
+     * fault fix-ups. Pages not faulted in yet (anonymous, file, copy-on-write after fork),
+     * faults in the middle of a copy, bad and kernel pointers. Linux's answers, forwarded or
+     * not. */
+    {
+        char *m = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        static char back[4000], zero[3000];
+        /* Input from two pages never touched (they read as zeros) */
+        long k = syscall(SYS_add_key, "user", "g22-fresh", m + 4096 - 1000, 3000, THREAD_KEYRING);
+        check(k > 0 && syscall(SYS_keyctl, KEYCTL_READ, k, back, sizeof back) == 3000 && !memcmp(back, zero, 3000),
+              "copy table: input from pages not faulted in yet");
+        /* Output into two pages never touched */
+        memset(back, 1, sizeof back);
+        long n = syscall(SYS_keyctl, KEYCTL_READ, k, m + 3 * 4096 - 1500, 3000);
+        check(n == 3000 && !memcmp(m + 3 * 4096 - 1500, zero, 3000), "copy table: output into pages not faulted in yet");
+        /* Strings from a page never touched (empty: refused) and from one written */
+        char *s = mmap(0, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        check(syscall(SYS_add_key, s, "x", "a", 1, THREAD_KEYRING) == -1 && errno == EINVAL,
+              "copy table: an empty type from a page never touched: EINVAL");
+        memset(s + 4096 - 4, 'q', 10);
+        s[4096 + 6] = 0;
+        check(syscall(SYS_add_key, s + 4096 - 4, "x", "a", 1, THREAD_KEYRING) == -1 && errno == ENODEV,
+              "copy table: a string across two pages (unknown type: ENODEV)");
+        /* Faults in the middle of a copy: input and output crossing into an unmapped page, a
+         * string running into one without its NUL; kernel and non-canonical pointers */
+        munmap(m + 2 * 4096, 4096);
+        m[2 * 4096 - 200] = 1;
+        check(syscall(SYS_add_key, "user", "g22-cross", m + 2 * 4096 - 100, 200, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: input crossing into an unmapped page: EFAULT");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, m + 2 * 4096 - 100, 3000) == -1 && errno == EFAULT,
+              "copy table: output crossing into an unmapped page after 100 bytes: EFAULT");
+        memset(m + 2 * 4096 - 64, 'z', 64);
+        check(syscall(SYS_add_key, "user", m + 2 * 4096 - 64, "a", 1, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: a string running into an unmapped page: EFAULT");
+        check(syscall(SYS_add_key, "user", (void *)0xffff800000001000ul, "a", 1, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: a kernel string pointer: EFAULT");
+        check(syscall(SYS_add_key, "user", "g22-k", (void *)0xffff800000001000ul, 16, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: a kernel payload pointer: EFAULT");
+        check(syscall(SYS_add_key, "user", "g22-nc", (void *)0x8000000000000000ul, 16, THREAD_KEYRING) == -1 && errno == EFAULT,
+              "copy table: a non-canonical pointer: EFAULT");
+        check(syscall(SYS_keyctl, KEYCTL_READ, k, (void *)0xffff800000001000ul, 16) == -1 && errno == EFAULT,
+              "copy table: a kernel output pointer: EFAULT");
+        /* Output into a copy-on-write page after fork: the child keeps its own bytes */
+        char *c = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        memset(c, 'p', 4096);
+        int pfd[2];
+        pipe(pfd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            char x;
+            read(pfd[0], &x, 1);
+            _exit(c[10] == 'p' ? 0 : 1);
+        }
+        long kc = syscall(SYS_add_key, "user", "g22-cow", "COWCOWCOW", 9, THREAD_KEYRING);
+        n = syscall(SYS_keyctl, KEYCTL_READ, kc, c + 5, 9);
+        write(pfd[1], "x", 1);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        check(n == 9 && !memcmp(c + 5, "COWCOWCOW", 9) && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "copy table: output into a copy-on-write page after fork");
+        /* Input from a file mapping not read yet; output into a private file mapping */
+        int fd = open("/tmp/g22-map", O_RDWR | O_CREAT | O_TRUNC, 0644);
+        char line[64];
+        memset(line, 'f', sizeof line);
+        for (int i = 0; i < 64; i++) write(fd, line, sizeof line);
+        char *f = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        long kf = syscall(SYS_add_key, "user", "g22-file", f + 100, 64, THREAD_KEYRING);
+        check(kf > 0 && syscall(SYS_keyctl, KEYCTL_READ, kf, back, 64) == 64 && !memcmp(back, line, 64),
+              "copy table: input from a file page not read yet");
+        n = syscall(SYS_keyctl, KEYCTL_READ, kc, f + 200, 9);
+        char disk[9];
+        pread(fd, disk, 9, 200);
+        check(n == 9 && !memcmp(f + 200, "COWCOWCOW", 9) && !memcmp(disk, line, 9),
+              "copy table: output into a private file mapping (the file unchanged)");
+        close(fd);
+        unlink("/tmp/g22-map");
+        long ids[] = {k, kc, kf};
+        for (int i = 0; i < 3; i++)
+            if (ids[i] > 0) syscall(SYS_keyctl, KEYCTL_UNLINK, ids[i], THREAD_KEYRING);
+        munmap(m, 4 * 4096);
+        munmap(s, 2 * 4096);
+        munmap(c, 4096);
+        munmap(f, 4096);
     }
     check(concurrency(4, 8), "4 processes x 8 threads: every forwarded call answered correctly");
     check(sigstress(), "signals every millisecond during forwarded calls: no hang, no wrong answer");

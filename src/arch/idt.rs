@@ -409,6 +409,43 @@ pub fn reload_with_kernel_cs(cs: u16) {
     idt.load();
 }
 
+// wave6 G22 begin: the fix-up table of the user-memory copies (`crate::lx::copy`)
+extern "sysv64" {
+    fn hydra_uaccess_copy_insn();
+    fn hydra_uaccess_copy_insn_end();
+    fn hydra_uaccess_copy_fix();
+    fn hydra_uaccess_str_insn();
+    fn hydra_uaccess_str_insn_end();
+    fn hydra_uaccess_str_fix();
+}
+
+/// The instructions that touch user memory on the kernel's behalf (`[start, end)`) and where
+/// a fault on one resumes: the user-memory copies of `crate::lx::copy`, as Linux's exception
+/// table. A fault there never goes to the ordinary page-fault handler.
+static UACCESS_FIXUPS: [(unsafe extern "sysv64" fn(), unsafe extern "sysv64" fn(), unsafe extern "sysv64" fn()); 2] = [
+    (hydra_uaccess_copy_insn, hydra_uaccess_copy_insn_end, hydra_uaccess_copy_fix),
+    (hydra_uaccess_str_insn, hydra_uaccess_str_insn_end, hydra_uaccess_str_fix),
+];
+
+/// Faults counted by [`uaccess_fixup`] (page faults resumed at a fix-up).
+pub static UACCESS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The fix-up address for a fault at kernel instruction `rip`, if it is a user-memory copy
+/// (`debug`: a watchpoint, not counted).
+pub fn uaccess_fixup(rip: u64, debug: bool) -> Option<u64> {
+    for &(start, end, fix) in UACCESS_FIXUPS.iter() {
+        // A watchpoint (a trap) reports the instruction after the access: the end counts
+        if rip >= start as usize as u64 && (rip < end as usize as u64 || (debug && rip == end as usize as u64)) {
+            if !debug {
+                UACCESS_FAULTS.fetch_add(1, Ordering::Relaxed);
+            }
+            return Some(fix as usize as u64);
+        }
+    }
+    None
+}
+// wave6 G22 end
+
 /// Where each CPU was when the last NMI arrived (`rip`, `cs`), for the task dump.
 pub static NMI_AT: [[core::sync::atomic::AtomicU64; 2]; crate::arch::smp::MAX_CPUS] =
     [const { [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)] }; crate::arch::smp::MAX_CPUS];
@@ -420,6 +457,20 @@ pub static NMI_AT: [[core::sync::atomic::AtomicU64; 2]; crate::arch::smp::MAX_CP
 /// * `fpu` - Pointer to the saved FXSAVE64 register area.
 #[no_mangle]
 extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
+    // wave6 G22 begin: a fault in a user-memory copy of the forwarding path resumes at the
+    // copy's fix-up (before anything that takes a lock: the copy may run without the kernel
+    // lock, under the request table's lock); a user watchpoint hit by such a copy is cleared
+    if (ctx.cs & 3) == 0 && (ctx.vector == 14 || ctx.vector == 1) {
+        if let Some(fix) = uaccess_fixup(ctx.rip, ctx.vector == 1) {
+            if ctx.vector == 14 {
+                ctx.rip = fix;
+            } else {
+                crate::arch::debugregs::take_dr6();
+            }
+            return;
+        }
+    }
+    // wave6 G22 end
     // An NMI (QEMU's `nmi` monitor command, on every CPU): note where this CPU was and ask
     // for a task dump (at the next tick); nothing else, it may arrive anywhere
     // A TLB flush request: served without the kernel lock (its sender holds it)

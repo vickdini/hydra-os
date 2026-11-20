@@ -706,7 +706,7 @@ fn call_obj_kbuf_nr(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr
     c.note_seq = x.notes_head();
     let kout = if write { None } else { Some(&mut out[..n]) };
     let mut redir = (0, 0);
-    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, Some(&buf), true, kout, &mut redir));
+    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, copy::Src::Kernel(&buf), true, kout, &mut redir));
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
         crate::task::scheduler::wait_out_handoff();
@@ -736,10 +736,10 @@ pub fn is_online() -> bool {
     svc::online(LXS_LINUX)
 }
 
-/// Delivers request `slot` of host `x` (its call is `call`, its copies `copies`) to worker
-/// `wi`: the call goes into the worker's syscall page, with the copy header (empty without
-/// copies) and the copied-in bytes.
-fn deliver(x: &Host, s: &mut svc::Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&copy::CopyBuf>) {
+/// Delivers request `slot` of host `x` (its call is `call`, its copy header `hdr`) to
+/// worker `wi`: the call goes into the worker's syscall page, with the copy header (empty
+/// without copies) and the copied-in bytes `data` (`None`: already in the page, Group 22).
+fn deliver(x: &Host, s: &mut svc::Lx, slot: usize, wi: usize, call: &LxCall, hdr: &LxCopy, data: Option<&[u8]>) {
     s.reqs[slot].state = RState::Delivered;
     let w = &mut s.workers[wi];
     let page = w.call_mut() as *mut u8;
@@ -747,16 +747,11 @@ fn deliver(x: &Host, s: &mut svc::Lx, slot: usize, wi: usize, call: &LxCall, cop
     // the header and the copy area lie within it
     unsafe {
         core::ptr::write_volatile(w.call_mut(), *call);
-        let hdr = page.add(LX_COPY_OFF) as *mut LxCopy;
-        match copies {
-            Some(b) => {
-                let mut h = b.hdr;
-                h.out_len = [0; 6];
-                core::ptr::write_volatile(hdr, h);
-                let data = b.used_bytes();
-                core::ptr::copy_nonoverlapping(data.as_ptr(), page.add(LX_DATA_OFF), data.len().min(LX_DATA_SIZE));
-            }
-            None => core::ptr::write_volatile(hdr, LxCopy::EMPTY),
+        let mut h = *hdr;
+        h.out_len = [0; 6];
+        core::ptr::write_volatile(page.add(LX_COPY_OFF) as *mut LxCopy, h);
+        if let Some(data) = data {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), page.add(LX_DATA_OFF), data.len().min(LX_DATA_SIZE));
         }
     }
     w.idle = false;
@@ -770,8 +765,9 @@ fn take_queued(x: &Host, s: &mut svc::Lx, wi: usize) -> bool {
     match next {
         Some(slot) => {
             let call = s.calls[slot];
-            let copies = if s.reqs[slot].has_copy { Some(&*x.buf(slot)) } else { None };
-            deliver(x, s, slot, wi, &call, copies);
+            let b = &*x.buf(slot);
+            let (hdr, data) = if s.reqs[slot].has_copy { (b.hdr, Some(b.used_bytes())) } else { (LxCopy::EMPTY, None) };
+            deliver(x, s, slot, wi, &call, &hdr, data);
             true
         }
         None => false,
@@ -902,16 +898,14 @@ fn call_ident(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
 fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     let mut x = x;
     c.note_seq = x.notes_head();
-    // The copy-in table: the call's pointer arguments, copied now (a bad one fails here)
-    let mut copies = None;
-    let mut buf;
-    if let Some(desc) = copy::describe(c.nr, &c.args) {
-        buf = copy::CopyBuf::EMPTY;
-        if let Err(e) = copy::fill(&mut buf, desc, &c.args) {
-            return e;
-        }
-        copies = Some(&buf);
-    }
+    // wave6 G22 begin: the copy-in table: the call's pointer arguments are copied when the
+    // call is placed, straight into the worker's page (`place`; a bad one fails there; a
+    // redirect or a retry copies them again from the caller's memory)
+    let copies = match copy::describe(c.nr, &c.args) {
+        Some(desc) => copy::Src::User(desc),
+        None => copy::Src::None,
+    };
+    // wave6 G22 end
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
     loop {
@@ -1054,47 +1048,94 @@ pub fn net_event(handles: Option<&[u32]>) {
 }
 
 
-/// [`call_with`] with the copies made, to host `x`. `kout`: a kernel-buffer read
-/// ([`call_obj_kbuf`]): the output to `args[1]` goes there instead of to user memory.
-/// `redir`: set to the redirect's `(result word, object)` when the answer is
-/// [`LX_REDIRECTED`].
+// wave6 G22 begin
+/// Places call `c` of task `me` in host `x`'s request table `s`: a free slot, an id, and an
+/// idle worker that takes it at once (its page gets the call, and the user copies straight
+/// from the caller's memory), or the queue (the copies wait in the slot's buffer). `Err`:
+/// the copies need a page faulted in first, or a pointer is bad (nothing changed);
+/// `Ok(Err)`: the call cannot be placed.
+#[allow(clippy::type_complexity)]
+fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copies: copy::Src<'_>) -> Result<Result<(usize, u64, Option<(u64, usize)>), i64>, copy::FillErr> {
+    // Checked under the table's lock: `server_gone` clears `online` before it takes the
+    // lock, so a call placed here is either failed by it or refused now
+    if !x.online.load(Ordering::Acquire) {
+        return Ok(Err(ENOSYS));
+    }
+    let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Ok(Err(EAGAIN)) };
+    // An idle worker takes it at once
+    let wi = s.workers.iter().position(|w| w.idle);
+    // The copies first (nothing is changed yet when they fail): user memory straight into
+    // the idle worker's page (it reads the page only once the call is delivered), or into
+    // the free slot's buffer (nobody else uses a free slot's buffer)
+    let (hdr, used) = match copies {
+        copy::Src::None => (LxCopy::EMPTY, 0),
+        copy::Src::Kernel(b) => (b.hdr, b.used),
+        copy::Src::User(desc) => {
+            let data = match wi {
+                Some(wi) => s.workers[wi].data_mut(),
+                None => &mut x.buf(slot).data,
+            };
+            let mut h = LxCopy::EMPTY;
+            let n = copy::fill(&mut h, data, desc, &c.args)?;
+            (h, n)
+        }
+    };
+    let has_copy = !matches!(copies, copy::Src::None);
+    let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
+    s.next_id += 1;
+    c.id = id;
+    s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy, early: false, redir: (0, 0) };
+    x.req_done[slot].store(false, Ordering::SeqCst);
+    if has_copy {
+        let kept = x.buf(slot);
+        kept.hdr = hdr;
+        kept.used = used;
+    }
+    let target = match wi {
+        Some(wi) => {
+            let data = if let copy::Src::Kernel(b) = copies { Some(b.used_bytes()) } else { None };
+            deliver(x, s, slot, wi, c, &hdr, data);
+            Some((s.workers[wi].task, s.workers[wi].idx))
+        }
+        None => {
+            s.calls[slot] = *c;
+            // Its bytes wait with it (the caller's memory is not reachable from the worker
+            // that takes it); user copies are there already
+            if let copy::Src::Kernel(b) = copies {
+                x.buf(slot).data[..b.used].copy_from_slice(b.used_bytes());
+            }
+            None
+        }
+    };
+    Ok(Ok((slot, id, target)))
+}
+// wave6 G22 end
+
+/// [`call_with`] with its copies `copies` (user copies are made when the call is placed),
+/// to host `x`. `kout`: a kernel-buffer read ([`call_obj_kbuf`]): the output to `args[1]`
+/// goes there instead of to user memory. `redir`: set to the redirect's `(result word,
+/// object)` when the answer is [`LX_REDIRECTED`].
 #[allow(clippy::too_many_arguments)]
-fn call_and_wait(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>, redir: &mut (u64, u64)) -> i64 {
-    let placed = x.lx(|s| {
-        // Checked under the table's lock: `server_gone` clears `online` before it takes the
-        // lock, so a call placed here is either failed by it or refused now
-        if !x.online.load(Ordering::Acquire) {
-            return Err(ENOSYS);
-        }
-        let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Err(EAGAIN) };
-        let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
-        s.next_id += 1;
-        c.id = id;
-        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some(), early: false, redir: (0, 0) };
-        x.req_done[slot].store(false, Ordering::SeqCst);
-        if let Some(b) = copies {
-            let kept = x.buf(slot);
-            kept.hdr = b.hdr;
-            kept.used = b.used;
-        }
-        // An idle worker takes it at once
-        let target = match s.workers.iter().position(|w| w.idle) {
-            Some(wi) => {
-                deliver(x, s, slot, wi, &c, copies);
-                Some((s.workers[wi].task, s.workers[wi].idx))
-            }
-            None => {
-                s.calls[slot] = c;
-                // Its bytes wait with it (the caller's stack is not reachable from the
-                // worker that takes it)
-                if let Some(b) = copies {
-                    x.buf(slot).data[..b.used].copy_from_slice(b.used_bytes());
+fn call_and_wait(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, copies: copy::Src<'_>, nobkl: bool, kout: Option<&mut [u8]>, redir: &mut (u64, u64)) -> i64 {
+    // wave6 G22 begin: a page of a pointer argument not there yet is faulted in with the
+    // table's lock let go, and the call placed again (a page that faults again at once, or
+    // that cannot be faulted in, is a bad pointer)
+    let mut last_missing = u64::MAX;
+    let mut tries = 0;
+    let placed = loop {
+        match x.lx(|s| place(x, s, me, my_idx, &mut c, copies)) {
+            Ok(p) => break p,
+            Err(copy::FillErr::Missing(at, len)) => {
+                tries += 1;
+                if tries > 16 || at & !0xFFF == last_missing || !copy::fault_in(at, len, false) {
+                    return EFAULT;
                 }
-                None
+                last_missing = at & !0xFFF;
             }
-        };
-        Ok((slot, id, target))
-    });
+            Err(copy::FillErr::Fault) => return EFAULT,
+        }
+    };
+    // wave6 G22 end
     let (slot, id, target) = match placed {
         Ok(p) => p,
         Err(e) => {
@@ -1600,8 +1641,19 @@ pub fn summary() -> alloc::string::String {
         REPLY_DIRECT.load(Ordering::Relaxed),
         REPLY_WOKEN.load(Ordering::Relaxed),
         per
+    ) + &copy_summary()
+}
+
+// wave6 G22 begin
+/// The user copies' faults: resumed at a fix-up, and pages faulted in for the copies.
+fn copy_summary() -> alloc::string::String {
+    alloc::format!(
+        "; copies: {} faults fixed up, {} fault-ins",
+        crate::arch::idt::UACCESS_FAULTS.load(Ordering::Relaxed),
+        copy::FAULT_INS.load(Ordering::Relaxed)
     )
 }
+// wave6 G22 end
 
 /// Whether the calling Linux thread, back from a call on the lock-free path, may have a
 /// signal to take or a stop to make (then `arch::syscall` delivers the ordinary way, under
