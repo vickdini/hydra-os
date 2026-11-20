@@ -431,11 +431,31 @@ pub mod task {
         let r = std::panic::catch_unwind(entry);
         super::WAITS.set(start);
         super::WAIT_HOOK.with_borrow_mut(|h| *h = None);
-        match r {
-            Ok(()) => {}
-            Err(e) => {
-                let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
-                assert_eq!(msg, DAEMON_STOP, "the daemon panicked");
+        finish_daemon(r);
+    }
+
+    /// Runs a daemon's loop, calling `step(n)` at its `n`th sleep; it stops when `step`
+    /// returns `false` (or returns on its own). Assertions in `step` fail the test.
+    pub fn run_daemon_steps(entry: fn(), mut step: impl FnMut(usize) -> bool + 'static) {
+        super::on_wait(move |n| {
+            if !step(n) {
+                panic!("{}", DAEMON_STOP);
+            }
+        });
+        let start = super::WAITS.get();
+        super::WAITS.set(0);
+        let r = std::panic::catch_unwind(entry);
+        super::WAITS.set(start);
+        super::WAIT_HOOK.with_borrow_mut(|h| *h = None);
+        finish_daemon(r);
+    }
+
+    /// A daemon run ended: fine if it returned or was stopped; any other panic goes on.
+    fn finish_daemon(r: std::thread::Result<()>) {
+        if let Err(e) = r {
+            let stopped = e.downcast_ref::<String>().is_some_and(|m| m == DAEMON_STOP);
+            if !stopped {
+                std::panic::resume_unwind(e);
             }
         }
     }
