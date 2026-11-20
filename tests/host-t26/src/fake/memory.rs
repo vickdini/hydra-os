@@ -24,6 +24,10 @@ pub mod vm {
     pub const BAD_BELOW: u64 = 0x10000;
 
     pub fn prefault_current(addr: u64, len: u64, _write: bool) -> bool {
+        // As the kernel's: nothing to fault in for no bytes
+        if len == 0 {
+            return true;
+        }
         if addr < BAD_BELOW {
             return false;
         }
