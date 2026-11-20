@@ -235,6 +235,57 @@ Hydra runs Mozilla's unmodified Firefox build from Mozilla's own APT repository 
 Hydra writes \texttt{/etc/firefox/policies/policies.json} once when Firefox is installed: it turns off the built-in updater (\texttt{apt} updates Firefox), telemetry, and the questions a new profile asks first.
 
 % ==============================================================================
+\section{Hosting Chromium and Brave: Multi-Process Architecture and Sandboxing}
+\label{sec:hosting_brave}
+% ==============================================================================
+
+While Firefox implements its own multi-process architecture (e10s) and internal crypto bundles, the Chromium project—which underpins Google Chrome, Brave, Microsoft Edge, and Electron—relies on an even more demanding combination of Linux kernel interfaces. Hosting **Brave Browser** natively on Hydra requires satisfying four distinct subsystem requirements:
+
+\subsection{Process Hierarchy and Privilege Separation}
+Chromium structures execution across specialized process types:
+\begin{enumerate}
+    \item \textbf{Browser Process:} Coordinates the user interface, tab lifecycle, network downloads, and disk storage. It runs with standard user credentials and possesses capability tokens to open files and Unix domain sockets.
+    \item \textbf{Renderer Processes:} Execute Web IDL bindings, HTML/CSS DOM tree construction, and the V8 JavaScript/Wasm engine. Each origin tab runs in an isolated renderer process confined within a strict PID and network namespace.
+    \item \textbf{GPU / Compositor Process:} Consolidates render layers into graphical frames. In virtualized or non-discrete GPU environments, Chromium relies on Google's \textbf{SwiftShader} CPU-based Vulkan rasterizer (\texttt{libvk\_swiftshader.so}).
+    \item \textbf{Crashpad Handler:} An out-of-process exception server that attaches to child threads using \texttt{ptrace} or \texttt{tgkill} to generate diagnostic minidumps when assertions fail.
+\end{enumerate}
+
+\subsection{POSIX Shared Memory and Zero-Copy Compositing}
+High-throughput graphics between the unprivileged Renderer processes and the GPU Compositor cannot afford data copying through the kernel. Chromium allocates memory frames via \texttt{memfd\_create(2)} or by opening anonymous temporary files in \texttt{/dev/shm}. 
+
+Hydra guarantees that \texttt{/dev/shm} is mounted with POSIX sticky permissions (\texttt{01777}):
+\begin{lstlisting}[language=Rust, caption={Hydra POSIX Shared Memory Initialization}]
+// Ensure /dev/shm exists with mode 1777 (world-writable + sticky)
+let shm = t.dir(s, "/dev/shm")?;
+let _ = s.setattr(shm, crate::fs::zfs::zpl::SetAttr {
+    mode: Some(0o1777),
+    ..Default::default()
+});
+let _ = t.link(s, "/run/shm", "/dev/shm");
+\end{lstlisting}
+The sticky bit (\texttt{S\_ISVTX}) ensures that while any process may create temporary shared memory segments in \texttt{/dev/shm}, unprivileged renderers cannot delete or modify the shared frames of other processes or users.
+
+\subsection{Network Link-State Monitoring via Netlink}
+Unlike standalone command-line tools that poll network status on demand, Chromium instantiates an asynchronous address tracker (\texttt{net/base/address\_tracker\_linux.cc}). On standard Linux systems, this tracker opens a routing netlink socket:
+\begin{equation}
+\text{fd} = \text{socket}(\text{AF\_NETLINK}, \text{SOCK\_RAW}, \text{NETLINK\_ROUTE});
+\end{equation}
+The socket subscribes to \texttt{RTMGRP\_IPV4\_IFADDR} and \texttt{RTMGRP\_LINK} multicast groups to detect when network adapters connect or disconnect. In Hydra's compatibility subsystem, \texttt{NETLINK\_ROUTE} sockets dump the link and address configuration of loopback (\texttt{lo}) and the Intel e1000 Gigabit adapter (\texttt{eth0}). If a process is executing inside a sandboxed network namespace, Hydra filters the dump to present only \texttt{lo}, faithfully reflecting the sandbox boundary.
+
+\subsection{Cryptographic NSS Database Initialization}
+Brave uses Mozilla Network Security Services (NSS) for PKI certificate validation and HTTPS session management. NSS stores security tokens in an on-disk SQLite database (\texttt{sql:/home/hydra/.local/share/pki/nssdb}). 
+
+During startup, NSS initializes its internal softoken cryptographic module (\texttt{libsoftokn3.so}), which dynamically loads \texttt{libfreeblpriv3.so} and verifies matching \texttt{.chk} cryptographic checksum signatures. Hydra ensures that user database directories are created with strict permissions (\texttt{0700}, owned by UID/GID 1000) and provides native POSIX byte-range file locking via \texttt{fcntl(F\_SETLK)}:
+\begin{equation}
+\text{FileLock}(\text{offset}, \text{len}) = \begin{cases}
+    \text{Granted} & \text{if no conflicting exclusive lock exists} \\
+    \text{EAGAIN} & \text{if non-blocking and locked by another PID}
+\end{cases}
+\end{equation}
+
+By providing genuine POSIX shared memory, routing netlink dumps, and transactional record locking, Hydra enables modern Chromium-based browsers like Brave to execute seamlessly under the Wayland display compositor.
+
+% ==============================================================================
 \section{Summary}
 \label{sec:summary_chap7}
 % ==============================================================================
