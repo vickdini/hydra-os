@@ -935,6 +935,8 @@ pub mod net {
         pub send_cap: Option<usize>,
         /// Error a send reports.
         pub send_err: Option<i64>,
+        /// Results of the next sends, before the rules above.
+        pub send_script: VecDeque<Result<usize, i64>>,
         /// (local port, remote ip, remote port).
         pub endpoints: Option<(u16, [u8; 4], u16)>,
         pub local_ip: Option<[u8; 4]>,
@@ -954,6 +956,7 @@ pub mod net {
                 sent: Vec::new(),
                 send_cap: None,
                 send_err: None,
+                send_script: VecDeque::new(),
                 endpoints: Some((40000, [10, 0, 2, 2], 80)),
                 local_ip: Some([10, 0, 2, 15]),
                 poll: None,
@@ -1059,8 +1062,10 @@ pub mod net {
         NET.with_borrow_mut(f)
     }
 
+    /// Logs a call (quietly nothing during thread teardown, when sockets still in the
+    /// descriptor table close after the fake server is gone).
     fn log(s: String) {
-        with(|n| n.log.push(s));
+        let _ = NET.try_with(|n| n.borrow_mut().log.push(s));
     }
 
     fn new_id(n: &mut NetState) -> u32 {
@@ -1147,6 +1152,12 @@ pub mod net {
     pub fn tcp_send(id: u32, data: &[u8]) -> Result<usize, i64> {
         with(|n| {
             let t = n.tcp.get_mut(&id).ok_or(ECONNRESET)?;
+            if let Some(r) = t.send_script.pop_front() {
+                if let Ok(k) = r {
+                    t.sent.extend_from_slice(&data[..k]);
+                }
+                return r;
+            }
             if let Some(e) = t.send_err {
                 return Err(e);
             }
