@@ -19,6 +19,7 @@ pub mod blockunits;
 pub mod heap;
 // wave6 G23
 pub mod mem;
+pub mod kept; // wave6 G21: kept state across a service restart
 pub mod port;
 pub mod svccall;
 pub mod sys;

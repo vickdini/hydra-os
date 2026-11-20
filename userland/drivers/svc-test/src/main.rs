@@ -17,6 +17,9 @@
 //! - [`LX_TEST_WHO`]: this process's id;
 //! - [`LX_TEST_COPY`]: adds 1 to each of `arg2` bytes at `arg1` (client memory);
 //! - [`LX_TEST_REDIR_LOOP`]: redirects to itself for ever (the kernel stops it: `-ELOOP`).
+//! - (Group 21) [`LX_TEST_KEPT_INC`] / [`LX_TEST_KEPT_GET`]: a counter in the service's kept
+//!   state (it survives a restart); the service's objects are adopted by a Transparent
+//!   restart (`LX_SVC_LIST` / `LX_SVC_ADOPT`), so they keep working.
 
 #![no_std]
 #![no_main]
@@ -45,6 +48,75 @@ static OBJECTS: spin::Mutex<BTreeMap<u32, u64>> = spin::Mutex::new(BTreeMap::new
 /// Objects closed since start (their last descriptor went).
 static CLOSES: AtomicU64 = AtomicU64::new(0);
 
+// wave6 G21 begin: kept state (restart support)
+/// The kept-state area (`hydra_rt::kept`): record 0 holds the counter.
+static KEPT: spin::Mutex<Option<hydra_rt::kept::Kept>> = spin::Mutex::new(None);
+/// The kept layout's version.
+const KEPT_LAYOUT: u32 = 1;
+
+/// Maps and checks the kept state, before going online.
+fn kept_init() {
+    let size = hydra_rt::kept::Kept::size_for(4, 16);
+    match sys::lx_svc_kept(size) {
+        Ok(p) => {
+            // SAFETY: the kernel mapped `size` bytes at `p` for this process alone
+            let (k, a) = unsafe { hydra_rt::kept::Kept::open(p, size, KEPT_LAYOUT, 16) };
+            let n = k.get(0).map_or(0, |b| u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8])));
+            println!("[svc-test] kept state: {} (counter {}, {} bad records)", if a.fresh { "new" } else { "adopted" }, n, a.bad_records);
+            *KEPT.lock() = Some(k);
+        }
+        Err(e) => println!("[svc-test] no kept state: {}", e),
+    }
+}
+
+/// [`LX_TEST_KEPT_INC`] (`add` = 1) and [`LX_TEST_KEPT_GET`] (0): the counter afterwards.
+fn kept_counter(add: u64) -> i64 {
+    let mut g = KEPT.lock();
+    let Some(k) = g.as_mut() else { return ENOSYS };
+    let n = k.get(0).map_or(0, |b| u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))) + add;
+    if add != 0 {
+        // Committed before the answer leaves (a crash after this: the caller gets EIO, the
+        // count stays)
+        k.put(0, &n.to_le_bytes());
+    }
+    n as i64
+}
+
+/// A Transparent restart: the old instance's test objects are taken again (their slot, their
+/// device number from the key, their readiness word in the kept object area).
+fn adopt_objects() {
+    let mut found: Vec<LxSvcObj> = Vec::new();
+    let mut buf = [LxSvcObj::default(); 64];
+    let mut start = 0u32;
+    while let Ok(n) = sys::lx_svc_list(&mut buf, start) {
+        if n == 0 {
+            break;
+        }
+        found.extend_from_slice(&buf[..n]);
+        start = buf[n - 1].slot + 1;
+    }
+    if found.is_empty() {
+        return;
+    }
+    for o in &found {
+        if o.kind != LX_OBJ_KIND_SVCTEST {
+            let _ = sys::lx_svc_dead(o.slot);
+        }
+    }
+    if sys::lx_svc_adopt().is_err() {
+        return; // not a Transparent restart: the kernel makes them stale
+    }
+    let mut n = 0;
+    for o in found.iter().filter(|o| o.kind == LX_OBJ_KIND_SVCTEST) {
+        if objs::reserve(o.slot) {
+            OBJECTS.lock().insert(o.slot, o.key);
+            n += 1;
+        }
+    }
+    println!("[svc-test] adopted {} objects of the previous instance", n);
+}
+// wave6 G21 end
+
 fn main(args: &[&str]) {
     // With `lx.test=linux` (or `kernel`) no service id names this endpoint: nothing to serve
     // (exiting without registering: the supervisor does not restart it)
@@ -62,6 +134,9 @@ fn main(args: &[&str]) {
     };
     svcrt::notes::init(svc.window().as_mut_ptr(), on_note);
     objs::init(svc.area, ENDPOINT_SVC_TEST);
+    // wave6 G21: kept state and the old instance's objects, before going online
+    kept_init();
+    adopt_objects();
     if let Err(e) = svc.online() {
         println!("[svc-test] cannot go online: {}", e);
         sys::exit_group(1);
@@ -211,6 +286,9 @@ fn test_call(cx: &Cx) -> Answer {
             }
         }
         7 => (CLOSES.load(Ordering::Relaxed) as i64, 0),
+        // wave6 G21
+        LX_TEST_KEPT_INC => (kept_counter(1), 0),
+        LX_TEST_KEPT_GET => (kept_counter(0), 0),
         _ => (EINVAL, 0),
     }
 }
@@ -224,7 +302,8 @@ fn new_object(cx: &Cx, dev: u64, flags: u64) -> i64 {
     };
     OBJECTS.lock().insert(slot, dev);
     let (mode, name): (u32, &[u8]) = if dev != 0 { (0o020600, b"/dev/svctest") } else { (0o100600, b"anon_inode:[svc-test]") };
-    match objs::install(cx, slot, LX_OBJ_KIND_SVCTEST, flags as u32 & 0o2004000, mode, name, 0) {
+    // (wave6 G21: the key is the device number, for a restarted instance)
+    match objs::install_keyed(cx, slot, LX_OBJ_KIND_SVCTEST, flags as u32 & 0o2004000, mode, name, 0, dev) {
         Ok(fd) => {
             // Writable from the start
             objs::set(slot, 0x104, 0);

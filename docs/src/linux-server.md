@@ -655,6 +655,47 @@ emergency prompt stay up.*
 `service kill linux_server` and `service restart linux_server` in hydra-shell run the same
 path.
 
+## Restart support for every service (wave 6, Group 21)
+
+Since wave 6 the crash policy above is one of three **restart classes**, chosen per Linux
+service (`src/lx/restart.rs`, decisions in `src/lx/restart_policy.rs`,
+`docs/linux-services-design.md` section 5):
+
+| Class | When the service dies | Default for |
+|---|---|---|
+| **EndLinux** | Decision 6, as above: every Linux program ends, the login screen returns | linux-server (while it hosts pieces with unkept state) |
+| **FailObjects** | Calls in flight fail with `EIO`; the old instance's objects fail with a per-kind error (pipes `EPIPE`, sockets `ECONNRESET`, device objects `ENODEV`, others `EBADF`) and poll `POLLERR\|POLLHUP`; **new calls wait** for the new instance; programs live | services the supervisor does not configure |
+| **Transparent** | Callers wait (at most 30 s; a signal ends the wait with `ERESTARTSYS`); calls that were queued or answered "pending" are sent again; calls being served are sent again only if `restart_policy::idempotent(nr, args)` says so, the others get `EIO`; objects the new instance adopts keep working | lx-sec (keys), later vfs-server, lx-net, lx-proc |
+
+- **The ladder:** a second crash within 30 s of a restart is handled one class lower
+  (Transparent becomes FailObjects) and drops the kept state; a third stops restarting the
+  service (its calls fail with `EIO`) until `service start` (callers then wait for it again).
+  EndLinux keeps its restarts (the supervisor's own limit). `service restart` is not a crash.
+- **How callers wait and re-send:** `server_gone` asks `restart::gone(svc)` first; for
+  Transparent it completes the requests in flight with the internal results `LX_RESEND`
+  (queued, pending) or `LX_RESEND_MAYBE` (being served). The caller's loop in `call_with`
+  (next to Group 12's `LX_RETRY`) waits in `restart::wait_online` and sends **its own copy**
+  of the call again (same copy-in bytes). A call made while the service is down gets the
+  internal `LX_OFFLINE` and waits the same way. Descriptors the dead instance installed for a
+  request whose answer was lost are closed before the call is sent again.
+- **Kept state** (`SYS_LX_SVC` op `LX_SVC_KEPT(size)`, at most 2 MiB): memory owned by the
+  kernel, not the process; the first instance gets it zeroed, later instances the same
+  pages; the ladder drops it. hydra-rt's `kept::Kept` is a checked record format
+  (magic, layout version, two copies per record with CRC-32C: a torn write leaves the old
+  value). No pointers in kept state.
+- **Revalidation:** a Transparent service's new instance gets the `(slot, kind, key)` of
+  every live object (`LX_SVC_LIST`; `key` = `LxObjDesc::key`, chosen at install), marks the
+  ones it cannot rebind dead (`LX_SVC_DEAD`) and adopts the rest (`LX_SVC_ADOPT`) before
+  `LX_CTL_ONLINE`; adopted objects keep their readiness words. A service that does not adopt
+  gets FailObjects for its objects.
+- **The class per service:** the supervisor entry (`ServiceDescriptor::linux_service(svc,
+  class, name)`); for tests or as the user's policy, QEMU fw_cfg `opt/hydra/restart.<name>` =
+  `transparent|failobjects|endlinux` (`tools/hydra_run.py --restart NAME=CLASS`).
+- **Counters:** `linux prof show`'s `[prof] lx:` line ends with "restarts: N calls waited, N
+  sent again, N failed" and each service's class, crashes and phase.
+- **Test:** `tests/linux/restart_test.c` (`restart SECONDS [svc]`: 8 threads of calls while
+  the service is killed from the console); host tests `tests/host/tests/restart.rs`.
+
 ## The server program
 
 Step 2 added `obj.rs` (slots, readiness words, the doorbell, the test object), `timeout.rs`

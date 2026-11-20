@@ -176,7 +176,7 @@ pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, g
 /// [`install`] with the kernel's value `tag` (`LxObjDesc::tag`: an inode number, a pid).
 #[allow(clippy::too_many_arguments)]
 pub fn install_tag(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8], tag: u64) -> Result<i64, i64> {
-    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag };
+    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag, key: 0 }; // wave6 G21: key (LX_SVC_LIST)
     let n = name.len().min(LX_OBJ_NAME_MAX);
     d.name[..n].copy_from_slice(&name[..n]);
     d.name_len = n as u32;

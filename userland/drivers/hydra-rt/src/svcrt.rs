@@ -469,6 +469,17 @@ pub mod objs {
         Err(ENFILE)
     }
 
+    /// Takes slot `slot` again (an object a restarted instance adopts): its readiness word
+    /// stays. `false` if it is in use already.
+    pub fn reserve(slot: u32) -> bool {
+        if slot as usize >= LX_OBJ_SLOTS {
+            return false;
+        }
+        let b = 1u64 << (slot % 64);
+        USED[slot as usize / 64].fetch_or(b, Ordering::AcqRel) & b == 0
+    }
+    // wave6 G21 end
+
     /// Lets slot `slot` go.
     pub fn free(slot: u32) {
         if (slot as usize) < LX_OBJ_SLOTS {
@@ -521,7 +532,15 @@ pub mod objs {
     /// Installs a descriptor for the object in slot `slot` in the caller's table; returns it.
     #[allow(clippy::too_many_arguments)]
     pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, name: &[u8], tag: u64) -> Result<i64, i64> {
-        let mut d = LxObjDesc { slot, kind, flags, mode, uid: cx.c.euid, gid: cx.c.egid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag };
+        install_keyed(cx, slot, kind, flags, mode, name, tag, 0)
+    }
+
+    // wave6 G21 begin: restart support
+    /// [`install`] with the service's key for the object (`LxObjDesc::key`: what a restarted
+    /// instance gets back from `LX_SVC_LIST` to rebind it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_keyed(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, name: &[u8], tag: u64, key: u64) -> Result<i64, i64> {
+        let mut d = LxObjDesc { slot, kind, flags, mode, uid: cx.c.euid, gid: cx.c.egid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag, key };
         let n = name.len().min(LX_OBJ_NAME_MAX);
         d.name[..n].copy_from_slice(&name[..n]);
         d.name_len = n as u32;
