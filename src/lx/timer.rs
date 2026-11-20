@@ -4,7 +4,8 @@
 //! (`arch::pit::now_ns`): `SYS_LX_TIMER(LX_TIMER_ARM, cookie, ns)`. When the deadline
 //! passes, the kernel posts [`LX_NOTE_TIMER`]`(cookie, deadline)` to the server's
 //! notification ring and rings its main thread. The cookie is the server's own (a timerfd,
-//! a blocked call's timeout, ...); arming a cookie again replaces its deadline.
+//! a blocked call's timeout, ...); arming a cookie again replaces its deadline. Each service
+//! (host, wave 6) has its own cookies; a timer goes to the ring of the host that armed it.
 //!
 //! Deadlines are checked at every timer tick ([`on_tick`], 10 ms), the resolution of every
 //! other timer in the kernel. The tick only compares the earliest deadline with the clock
@@ -22,10 +23,11 @@ const ENOSPC: i64 = -28;
 /// Most timers armed at once.
 const MAX_TIMERS: usize = 8192;
 
-/// The armed timers: `(deadline, cookie)` in order, and each cookie's deadline.
+/// The armed timers: `(deadline, host, cookie)` in order, and each `(host, cookie)`'s
+/// deadline.
 struct Timers {
-    by_time: BTreeMap<(u64, u64), ()>,
-    by_cookie: BTreeMap<u64, u64>,
+    by_time: BTreeMap<(u64, u8, u64), ()>,
+    by_cookie: BTreeMap<(u8, u64), u64>,
 }
 
 static TIMERS: Mutex<Timers> = Mutex::new(Timers { by_time: BTreeMap::new(), by_cookie: BTreeMap::new() });
@@ -40,26 +42,27 @@ fn set_next(t: &Timers) {
     NEXT.store(t.by_time.keys().next().map_or(u64::MAX, |k| k.0), Ordering::Release);
 }
 
-/// `SYS_LX_TIMER(op, cookie, ns)` (native 62), for linux-server only.
+/// `SYS_LX_TIMER(op, cookie, ns)` (native 62), for the services.
 pub fn sys_timer(op: u64, cookie: u64, ns: u64) -> i64 {
-    if let Err(e) = super::server_caller() {
-        return e;
-    }
+    let h = match super::server_caller() {
+        Ok((_, _, h)) => h,
+        Err(e) => return e,
+    };
     match op {
         LX_TIMER_ARM => with(|t| {
-            if let Some(old) = t.by_cookie.insert(cookie, ns) {
-                t.by_time.remove(&(old, cookie));
+            if let Some(old) = t.by_cookie.insert((h, cookie), ns) {
+                t.by_time.remove(&(old, h, cookie));
             } else if t.by_cookie.len() > MAX_TIMERS {
-                t.by_cookie.remove(&cookie);
+                t.by_cookie.remove(&(h, cookie));
                 return ENOSPC;
             }
-            t.by_time.insert((ns, cookie), ());
+            t.by_time.insert((ns, h, cookie), ());
             set_next(t);
             0
         }),
         LX_TIMER_CANCEL => with(|t| {
-            if let Some(old) = t.by_cookie.remove(&cookie) {
-                t.by_time.remove(&(old, cookie));
+            if let Some(old) = t.by_cookie.remove(&(h, cookie)) {
+                t.by_time.remove(&(old, h, cookie));
                 set_next(t);
             }
             0
@@ -93,28 +96,36 @@ pub fn fire() -> bool {
     // Another CPU changes the list: the next tick looks again
     let Some(mut t) = TIMERS.try_lock() else { return false };
     let mut fired = 0;
-    while let Some((&(at, cookie), _)) = t.by_time.iter().next() {
+    let mut hosts = 0u32;
+    while let Some((&(at, h, cookie), _)) = t.by_time.iter().next() {
         if at > now || fired >= 64 {
             break;
         }
-        t.by_time.remove(&(at, cookie));
-        t.by_cookie.remove(&cookie);
-        super::note_quiet(LX_NOTE_TIMER, cookie, at, 0);
+        t.by_time.remove(&(at, h, cookie));
+        t.by_cookie.remove(&(h, cookie));
+        if let Some(x) = super::svc::host(h) {
+            super::note_quiet_to(x, LX_NOTE_TIMER, cookie, at, 0);
+            hosts |= 1 << h;
+        }
         fired += 1;
     }
     set_next(&t);
     drop(t);
-    if fired > 0 {
-        crate::ipc::service::notify(crate::ipc::protocol::ENDPOINT_LINUX_SERVER, crate::ipc::protocol::NOTIFY_LX_NOTES);
+    for h in 0..32u8 {
+        if hosts & (1 << h) != 0 {
+            if let Some(x) = super::svc::host(h) {
+                crate::ipc::service::notify(x.endpoint.load(Ordering::Relaxed), crate::ipc::protocol::NOTIFY_LX_NOTES);
+            }
+        }
     }
     fired > 0
 }
 
-/// The server went away: its timers go with it.
-pub(super) fn clear() {
+/// Host `h`'s process went away: its timers go with it.
+pub(super) fn clear(h: u8) {
     with(|t| {
-        t.by_time.clear();
-        t.by_cookie.clear();
+        t.by_time.retain(|k, _| k.1 != h);
+        t.by_cookie.retain(|k, _| k.0 != h);
         set_next(t);
     });
 }

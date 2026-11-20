@@ -43,24 +43,37 @@
 //! inside it). The other entry points (`SYS_LX_CTL`, `SYS_LX_COMPLETE`, client memory, the
 //! crash policy) still run under the kernel lock, and take the same locks.
 
+//!
+//! ## Several services (wave 6, Group 19)
+//!
+//! Since decision 9 the forwarded calls go to *several* services ([`svc`]): each table entry
+//! names a service id, and each serving process (a *host*) has its own request table,
+//! workers, notification ring and object area. linux-server is the host of every piece not
+//! split out yet; the test service (`svc-test`) is a second host. The direct switch and the
+//! lock-free path work per host exactly as they did for the one server.
+
 pub mod copy;
 
 pub mod obj;
+
+pub mod svc;
 
 pub mod timer;
 
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::ipc::protocol::{
-    LxCall, LxCopy, ENDPOINT_LINUX_SERVER, LX_COPY_OFF, LX_DATA_OFF, LX_DATA_SIZE, LX_CALL_INTERRUPTED, LX_CTL_ATTACH, LX_CTL_ONLINE, LX_CTL_WAKE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF,
-    LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_OBJ_FLAGS_NETNS, LX_REPLY_NONE, LX_REPLY_PENDING, NOTIFY_LX_NOTES,
+    lx_req_svc, LxCall, LxCopy, SvcId, LXS_IPC, LXS_LINUX, LXS_NET, LXS_SEC, LXS_TEST, LX_CALL_INTERRUPTED, LX_COPY_OFF, LX_CTL_ATTACH, LX_CTL_OBJAREA, LX_CTL_ONLINE, LX_CTL_WAKE,
+    LX_DATA_OFF, LX_DATA_SIZE, LX_GROUPS, LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF, LX_NOTE_INTERRUPT, LX_NULL_NR, LX_OBJ_FLAGS_AT1, LX_OBJ_FLAGS_NETNS, LX_OBJ_NONE,
+    LX_REDIRECTED, LX_REDIR_MAX, LX_REPLY_NONE, LX_REPLY_PENDING, LX_REPLY_REDIRECT, LX_REQ_SVC_SHIFT, LX_TEST_NR, NOTIFY_LX_NOTES,
 };
 use crate::ipc::service::ContiguousFrames;
 use crate::task::TaskId;
+use svc::{Host, RState, Req, Worker, MAX_REQS, MAX_WORKERS, NONE};
 
 const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
@@ -74,6 +87,11 @@ const EBUSY: i64 = -16;
 const EINVAL: i64 = -22;
 const ENAMETOOLONG: i64 = -36;
 const ENOSYS: i64 = -38;
+const ELOOP: i64 = -40;
+
+/// A server object at a descriptor, held for the length of a forwarded call: the device,
+/// its slot, its flags, and the host whose slot it is.
+pub(crate) type HeldObj = (Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64, SvcId);
 
 // ----------------------------------------------------------------------
 // The forwarding table
@@ -81,113 +99,155 @@ const ENOSYS: i64 = -38;
 
 /// Linux system call numbers the table covers (the rest always run in the kernel).
 const TABLE_LEN: usize = 512;
-/// Per system call number: 0 if the kernel answers it; otherwise the server does, and the
-/// bits say what the call carries ([`T_SERVER`], [`T_FD0`], [`T_IPC`]).
-static TABLE: [AtomicU8; TABLE_LEN] = [const { AtomicU8::new(0) }; TABLE_LEN];
-/// Table bit: the server answers the call.
-const T_SERVER: u8 = 1;
-/// Table bit (Group 9): `args[0]` is a descriptor; the call carries its server object's slot
+/// The first Hydra-private number with an entry ([`PRIV`]).
+pub const PRIV_BASE: u64 = 0x6700;
+/// Hydra-private numbers with an entry: `PRIV_BASE..PRIV_BASE + PRIV_LEN`.
+const PRIV_LEN: usize = 128;
+/// Per Linux system call number: 0 if the kernel answers it; otherwise a service does: the
+/// entry's bits say which (`T_SVC_SHIFT`) and what the call carries.
+static TABLE: [AtomicU32; TABLE_LEN] = [const { AtomicU32::new(0) }; TABLE_LEN];
+/// The entries of Hydra's private numbers (the test calls [`LX_NULL_NR`], [`LX_TEST_NR`]).
+static PRIV: [AtomicU32; PRIV_LEN] = [const { AtomicU32::new(0) }; PRIV_LEN];
+/// Entry bit: a service answers the call ("not the kernel").
+pub const T_SERVER: u32 = 1;
+/// Entry bit (Group 9): `args[0]` is a descriptor; the call carries its server object's slot
 /// ([`LxCall::obj`]) and holds the descriptor while it is in flight.
-const T_FD0: u8 = 2;
-/// Table bit (Group 9): the call carries the caller's IPC namespace.
-const T_IPC: u8 = 4;
-/// Table bit (Group 9): the call carries the caller's umask.
-const T_UMASK: u8 = 8;
-/// Table bit (Group 9): the u32 that `args[1]` points to is a descriptor (bpf's attribute
+pub const T_FD0: u32 = 2;
+/// Entry bit (Group 9): the call carries the caller's IPC namespace.
+pub const T_IPC: u32 = 4;
+/// Entry bit (Group 9): the call carries the caller's umask.
+pub const T_UMASK: u32 = 8;
+/// Entry bit (Group 9): the u32 that `args[1]` points to is a descriptor (bpf's attribute
 /// block starts with one for the map element commands): its server object's slot goes in
 /// [`LxCall::obj`], and `obj_flags` gets [`LX_OBJ_FLAGS_AT1`] and the descriptor in bits 32..62
 /// (the server uses it only when its own reading of the attribute names the same one).
-const T_FDAT1: u8 = 16;
-/// [`LX_NULL_NR`] (outside the table) goes to the server.
-static NULL_TO_SERVER: AtomicBool = AtomicBool::new(false);
-/// The calls step 1 moved to the server: `add_key`, `request_key`, `keyctl`.
-pub const MOVED: [u64; 3] = [248, 249, 250];
-/// The calls step 2 moves (Group 9), with their table bits.
-pub const MOVED_STEP2: &[(u64, u8)] = &[
+pub const T_FDAT1: u32 = 16;
+/// Entry bit (Group 12): `socket`/`socketpair`: the service is the family's ([`FAMILY_SVC`]).
+pub const T_FAMILY: u32 = 32;
+/// Entry bit (Group 12): the service is the owner of the server object at descriptor
+/// `args[0]` (which the call then carries, as with [`T_FD0`]); otherwise the kernel.
+pub const T_BYFD: u32 = 64;
+/// Entry bits 8..11: the service that answers a call routed by its number.
+pub const T_SVC_SHIFT: u32 = 8;
+/// See [`T_SVC_SHIFT`].
+pub const T_SVC_MASK: u32 = 0xF00;
+/// Entry bit (wave 6): the call carries the caller's context: process group, session,
+/// namespace ids (and root and cwd once the kernel has directory handles).
+pub const T_FSCTX: u32 = 0x1000;
+/// Entry bit (wave 6): the call may be sent again to a restarted service (defined; Group 21
+/// decides with its own reviewed list at crash time).
+pub const T_IDEMPOTENT: u32 = 0x2000;
+/// Entry bit (wave 6, reserved): the service is decided by an argument (bits 16..31).
+pub const T_BYARG: u32 = 0x4000;
+/// Entry bit (wave 6, informational): the answer may be a redirect (any forwarded call may).
+pub const T_REDIR: u32 = 0x8000;
+
+/// The calls step 1 moved to the server: `add_key`, `request_key`, `keyctl` (keys: lx-sec).
+pub const MOVED: &[(u64, u32, SvcId)] = &[(248, 0, LXS_SEC), (249, 0, LXS_SEC), (250, 0, LXS_SEC)];
+/// The calls step 2 moved (Group 9), with their entry bits and service.
+pub const MOVED_STEP2: &[(u64, u32, SvcId)] = &[
     // mq_open, mq_unlink (by name, per IPC namespace)
-    (240, T_IPC | T_UMASK),
-    (241, T_IPC),
+    (240, T_IPC | T_UMASK, LXS_IPC),
+    (241, T_IPC, LXS_IPC),
     // mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr (on a queue descriptor)
-    (242, T_FD0),
-    (243, T_FD0),
-    (244, T_FD0),
-    (245, T_FD0),
+    (242, T_FD0, LXS_IPC),
+    (243, T_FD0, LXS_IPC),
+    (244, T_FD0, LXS_IPC),
+    (245, T_FD0, LXS_IPC),
     // System V semaphores and messages (shared memory stays in the kernel): semget, semop,
     // semctl, semtimedop, msgget, msgsnd, msgrcv, msgctl
-    (64, T_IPC),
-    (65, T_IPC),
-    (66, T_IPC),
-    (220, T_IPC),
-    (68, T_IPC),
-    (69, T_IPC),
-    (70, T_IPC),
-    (71, T_IPC),
+    (64, T_IPC, LXS_IPC),
+    (65, T_IPC, LXS_IPC),
+    (66, T_IPC, LXS_IPC),
+    (220, T_IPC, LXS_IPC),
+    (68, T_IPC, LXS_IPC),
+    (69, T_IPC, LXS_IPC),
+    (70, T_IPC, LXS_IPC),
+    (71, T_IPC, LXS_IPC),
     // bpf (maps, programs, links: server objects; device programs come back to the kernel)
-    (321, T_FDAT1),
+    (321, T_FDAT1, LXS_SEC),
 ];
-/// The calls step 4 moves (wave 5, Group 13), with their table bits: eventfd, eventfd2.
-/// (Calls on a moved descriptor reach the server through the descriptor: `read`, `write`,
-/// `ioctl`, the socket calls; `socket`/`socketpair` by family.)
-pub const MOVED_STEP4: &[(u64, u8)] = &[(284, 0), (290, 0), (22, 0), (293, 0), (434, 0), (282, T_FD0), (289, T_FD0), (283, 0), (286, T_FD0), (287, T_FD0)];
-/// Step 4's descriptors are made by the server (`lx=kernel` turns it off with the rest).
+/// The calls step 4 moved (wave 5, Group 13): eventfd, eventfd2, pipe, pipe2, pidfd_open,
+/// signalfd, signalfd4, timerfd_create, timerfd_settime, timerfd_gettime. (Calls on a moved
+/// descriptor reach the service through the descriptor: `read`, `write`, `ioctl`, the socket
+/// calls; `socket`/`socketpair` by family.)
+pub const MOVED_STEP4: &[(u64, u32, SvcId)] = &[
+    (284, 0, LXS_IPC),
+    (290, 0, LXS_IPC),
+    (22, 0, LXS_IPC),
+    (293, 0, LXS_IPC),
+    (434, 0, LXS_IPC),
+    (282, T_FD0, LXS_IPC),
+    (289, T_FD0, LXS_IPC),
+    (283, 0, LXS_IPC),
+    (286, T_FD0, LXS_IPC),
+    (287, T_FD0, LXS_IPC),
+];
+/// Hydra's private test calls: linux-server's ([`LX_NULL_NR`]) and the test service's.
+pub const MOVED_PRIV: &[(u64, u32, SvcId)] = &[(LX_NULL_NR, 0, LXS_LINUX), (LX_TEST_NR, 0, LXS_TEST), (crate::ipc::protocol::LX_TEST_CTX_NR, T_FSCTX, LXS_TEST)];
+/// Step 4's descriptors are made by the server (`lx=kernel` or `lx.ipc=kernel` turn it off).
 pub static STEP4: AtomicBool = AtomicBool::new(false);
 
 /// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
-/// are the server's: the kernel's dispatchers send the calls that make them there.
+/// are the service's: the kernel's dispatchers send the calls that make them there.
 pub fn step4() -> bool {
-    STEP4.load(Ordering::Relaxed) && ONLINE.load(Ordering::Acquire)
+    STEP4.load(Ordering::Relaxed) && svc::online(LXS_IPC)
 }
 
 /// The boot entry asked for the in-kernel code (`lx=kernel`).
 pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
+/// Everything is answered in the kernel (`lx=kernel`).
+static ALL_KERNEL: AtomicBool = AtomicBool::new(false);
+/// The boot entry's `lx` words (`lx.<name>=kernel|linux`), kept for [`init`].
+static BOOT_WORDS: Mutex<([u8; 256], usize)> = Mutex::new(([0; 256], 0));
+
+/// Whether `lx=kernel` sent every moved call back to the kernel.
+pub fn all_kernel() -> bool {
+    ALL_KERNEL.load(Ordering::Relaxed)
+}
+
+/// The boot entry's option text (`admin::boot`): its words starting with `lx` are kept for
+/// [`init`] (the per-service switch-back words, decision 17).
+pub fn set_boot_words(text: &[u8]) {
+    let mut w = BOOT_WORDS.lock();
+    for word in text.split(|c| matches!(c, b' ' | b'\t' | 0)) {
+        if word.starts_with(b"lx") && w.1 + word.len() < w.0.len() {
+            let n = w.1;
+            w.0[n..n + word.len()].copy_from_slice(word);
+            w.0[n + word.len()] = b' ';
+            w.1 += word.len() + 1;
+        }
+    }
+}
 
 // ----------------------------------------------------------------------
 // Socket routing (Group 12, wave 5): by address family and by descriptor kind
 // ----------------------------------------------------------------------
 //
 // The socket calls cannot be routed by their number alone: `socket(AF_INET, ..)` belongs
-// to the server once Internet sockets moved, `socket(AF_UNIX, ..)` to the kernel until Unix
-// sockets move; `sendmsg(fd, ..)` belongs to whoever owns `fd`. Two table bits say so:
+// to the network service, `socket(AF_UNIX, ..)` to the IPC service, `socket(AF_PACKET, ..)`
+// to the kernel; `sendmsg(fd, ..)` belongs to whoever owns `fd`. Two entry bits say so:
 //
-// - [`T_FAMILY`] (`socket`, `socketpair`): the server answers iff the address family in
-//   `args[0]` is in [`FAMILIES`] (filled from [`MOVED_FAMILIES`]) and the server is online;
-//   otherwise the kernel's dispatcher runs as before.
-// - [`T_BYFD`] (the calls on a socket descriptor, [`BYFD_NUMBERS`]): the server answers iff
-//   descriptor `args[0]` holds a server object; the call then carries the object exactly as
-//   with [`T_FD0`]. Any other descriptor (a kernel socket, a file, a bad number) goes to the
-//   kernel, which answers as before. The test is cheap: the descriptor table's lock-free
+// - [`T_FAMILY`] (`socket`, `socketpair`): the service is [`FAMILY_SVC`]`[args[0]]` (filled
+//   from [`MOVED_FAMILIES`]) if it is online; otherwise the kernel's dispatcher runs.
+// - [`T_BYFD`] (the calls on a socket descriptor, [`BYFD_NUMBERS`]): the owner of the server
+//   object at descriptor `args[0]` answers; any other descriptor (a kernel socket, a file, a
+//   bad number) goes to the kernel. The test is cheap: the descriptor table's lock-free
 //   bitmap of server objects (`FdTable::srv_bits`), reached through a per-CPU cache, so a
 //   call on a kernel descriptor costs a bit test and no lock.
-//
-// [`route`] still says `Server` for these numbers; [`forward`] and [`fast_entry`] make the
-// per-call decision. The server dispatches the same way (`linux-server/src/socket.rs`: by
-// family, then by the object's kind).
 
-/// Table bit (Group 12): `socket`/`socketpair`: the server answers iff the family in
-/// `args[0]` moved ([`FAMILIES`]).
-const T_FAMILY: u8 = 32;
-/// Table bit (Group 12): the server answers iff descriptor `args[0]` holds a server object
-/// (which the call then carries, as with [`T_FD0`]); otherwise the kernel.
-const T_BYFD: u8 = 64;
-/// The address families whose `socket`/`socketpair` go to a server (bit `f` = family `f`).
+/// The address families whose `socket`/`socketpair` go to a service (bit `f` = family `f`).
 static FAMILIES: AtomicU64 = AtomicU64::new(0);
-/// Per address family: the server that answers its `socket`/`socketpair` (a [`Target`];
-/// 0 while it is the kernel's). Only [`TARGET_LINUX`] exists today; a later step that
-/// splits the Linux layer into several services gives a family another target here
-/// (decision 9) without changing the routing itself.
-static FAMILY_TARGET: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
-/// A routing target: which server answers (0: the kernel).
-pub type Target = u8;
-/// The target linux-server (endpoint `ENDPOINT_LINUX_SERVER`).
-pub const TARGET_LINUX: Target = 1;
-/// The address families that moved to a server, with their target: one line per step.
-pub const MOVED_FAMILIES: &[(u64, Target)] = &[
+/// Per address family: the service that answers its `socket`/`socketpair` (0: the kernel).
+pub static FAMILY_SVC: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+/// The address families that moved, with their service.
+pub const MOVED_FAMILIES: &[(u64, SvcId)] = &[
     // Group 12 (step 3): AF_INET, AF_INET6, AF_NETLINK
-    (2, TARGET_LINUX),
-    (10, TARGET_LINUX),
-    (16, TARGET_LINUX),
+    (2, LXS_NET),
+    (10, LXS_NET),
+    (16, LXS_NET),
     // Group 13 (step 4): AF_UNIX
-    (1, TARGET_LINUX),
+    (1, LXS_IPC),
 ];
 /// `socket`, `socketpair`: routed by family.
 pub const BYFAMILY_NUMBERS: [u64; 2] = [41, 53];
@@ -211,15 +271,16 @@ fn kernel_first(nr: u64, dev: &Arc<dyn crate::compat::linux::chardev::CharDevice
     (nr == 42 || nr == 49) && dev.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_UNIX)
 }
 
-/// Whether `socket`/`socketpair` of address family `family` go to the server.
+/// Whether `socket`/`socketpair` of address family `family` go to a service.
 pub fn family_moved(family: u64) -> bool {
     family < 64 && FAMILIES.load(Ordering::Relaxed) & (1 << family) != 0
 }
 
-/// The server that answers `socket`/`socketpair` of address family `family` (0: the kernel).
-pub fn family_target(family: u64) -> Target {
+/// The service that answers `socket`/`socketpair` of address family `family` (0: the kernel).
+#[inline]
+pub fn family_svc(family: u64) -> SvcId {
     if family_moved(family) {
-        FAMILY_TARGET[family as usize].load(Ordering::Relaxed)
+        FAMILY_SVC[family as usize].load(Ordering::Relaxed)
     } else {
         0
     }
@@ -230,37 +291,68 @@ pub fn family_target(family: u64) -> Target {
 pub enum Route {
     /// The in-kernel code (as before the move).
     Kernel,
-    /// linux-server.
+    /// A service.
     Server,
 }
 
-/// Sets up the forwarding table at boot: the moved calls go to the server, unless QEMU's
-/// fw_cfg `opt/hydra/lx` is `kernel` or the boot entry has the option word `lx=kernel`.
+/// Where one call goes: the service it was routed to, and the host serving that service.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Target {
+    /// The service (`LXS_*`).
+    pub svc: SvcId,
+    /// The host (the process's table).
+    pub host: SvcId,
+}
+
+/// Sets up the registry and the forwarding table at boot: the moved calls go to their
+/// services, unless QEMU's fw_cfg `opt/hydra/lx` or the boot entry's words send all of them
+/// (`kernel`, `lx=kernel`) or some (`lx.<name>=kernel`) back to the in-kernel code, or
+/// co-locate a split service in linux-server again (`lx.<name>=linux`).
 pub fn init() {
-    let mut cfg = [0u8; 16];
-    let fw = crate::arch::fwcfg::read_file_into("opt/hydra/lx", &mut cfg).map(|n| &cfg[..n]);
-    let kernel = fw.is_some_and(|v| v.starts_with(b"kernel")) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
+    let mut words = [0u8; 400];
+    let mut n = 0;
+    let mut cfg = [0u8; 128];
+    if let Some(k) = crate::arch::fwcfg::read_file_into("opt/hydra/lx", &mut cfg) {
+        words[..k].copy_from_slice(&cfg[..k]);
+        words[k] = b' ';
+        n = k + 1;
+    }
+    {
+        let b = BOOT_WORDS.lock();
+        let k = b.1.min(words.len() - n);
+        words[n..n + k].copy_from_slice(&b.0[..k]);
+        n += k;
+    }
+    let kernel = svc::init(&words[..n]) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
+    ALL_KERNEL.store(kernel, Ordering::Release);
     set_forwarding(!kernel);
     crate::kprintln!(
         "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, AF_INET/AF_INET6/AF_NETLINK/AF_UNIX sockets, eventfd, pipes, pidfd, signalfd, timerfd: {}",
-        if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to linux-server" }
+        if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to their services" }
     );
+    svc::log_lines(kernel);
 }
 
-/// Routes the moved calls to the server (`true`) or to the in-kernel code.
+/// Routes the moved calls to their services (`true`; a service switched back with
+/// `lx.<name>=kernel` stays in the kernel) or all to the in-kernel code.
 pub fn set_forwarding(on: bool) {
-    for nr in MOVED {
-        TABLE[nr as usize].store(on as u8, Ordering::Release);
+    let ent = |bits: u32, s: SvcId| if on && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
+    for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4) {
+        TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
-    for &(nr, bits) in MOVED_STEP2.iter().chain(MOVED_STEP4) {
-        TABLE[nr as usize].store(if on { T_SERVER | bits } else { 0 }, Ordering::Release);
+    for &(nr, bits, s) in MOVED_PRIV {
+        PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
     }
-    STEP4.store(on, Ordering::Release);
+    STEP4.store(on && svc::mode(LXS_IPC) == svc::SvcMode::Forward, Ordering::Release);
     // Socket routing (Group 12): the per-call bits only once some family moved, so that
     // nothing changes for the socket calls before
-    let families = if on { MOVED_FAMILIES.iter().fold(0u64, |m, &(f, _)| m | 1 << f) } else { 0 };
-    for &(f, t) in MOVED_FAMILIES {
-        FAMILY_TARGET[f as usize].store(if on { t } else { 0 }, Ordering::Release);
+    let mut families = 0u64;
+    for &(f, s) in MOVED_FAMILIES {
+        let v = if on && svc::mode(s) == svc::SvcMode::Forward { s } else { 0 };
+        FAMILY_SVC[f as usize].store(v, Ordering::Release);
+        if v != 0 {
+            families |= 1 << f;
+        }
     }
     FAMILIES.store(families, Ordering::Release);
     let sockets = families != 0;
@@ -271,91 +363,130 @@ pub fn set_forwarding(on: bool) {
         TABLE[nr as usize].store(if sockets { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
     // Group 13: read, write, readv, writev on server objects (pipes, Unix sockets, eventfd,
-    // ...) take the lock-free path too; on any other descriptor they cost one bit test
+    // the test service's objects, ...) take the lock-free path too; on any other descriptor
+    // they cost one bit test
     for nr in BYFD_IO_NUMBERS {
         TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
-    NULL_TO_SERVER.store(on, Ordering::Release);
 }
 
-/// The table byte of system call `nr` (0: the kernel answers it).
+/// The entry of system call `nr` (0: the kernel answers it). One load.
 #[inline]
-fn table_bits(nr: u64) -> u8 {
+pub fn entry(nr: u64) -> u32 {
     if (nr as usize) < TABLE_LEN {
         TABLE[nr as usize].load(Ordering::Relaxed)
+    } else if nr.wrapping_sub(PRIV_BASE) < PRIV_LEN as u64 {
+        PRIV[(nr - PRIV_BASE) as usize].load(Ordering::Relaxed)
     } else {
         0
     }
 }
 
-/// Where system call `nr` is answered.
+/// The service an entry names for a call routed by its number.
+#[inline]
+pub fn entry_svc(e: u32) -> SvcId {
+    ((e & T_SVC_MASK) >> T_SVC_SHIFT) as SvcId
+}
+
+/// Where system call `nr` is answered (the one function that turns a number into a route).
+#[inline]
 pub fn route(nr: u64) -> Route {
-    let server = if (nr as usize) < TABLE_LEN {
-        TABLE[nr as usize].load(Ordering::Relaxed) != 0
-    } else {
-        nr == LX_NULL_NR && NULL_TO_SERVER.load(Ordering::Relaxed)
-    };
-    if server {
+    if entry(nr) != 0 {
         Route::Server
     } else {
         Route::Kernel
     }
 }
 
-/// Whether the key calls go to the server (so `/proc/keys` must come from it too).
+/// Where call `nr` with `args` of the calling thread goes, when it is decided by its number
+/// or its family (`None`: the kernel; a call routed by its descriptor is decided with the
+/// descriptor table, see [`forward`] and [`fast_entry`]).
+pub fn by_args(nr: u64, args: &[u64; 6]) -> Option<Target> {
+    let e = entry(nr);
+    if e == 0 || e & T_BYFD != 0 {
+        return None;
+    }
+    let s = if e & T_FAMILY != 0 { family_svc(args[0]) } else { entry_svc(e) };
+    let h = svc::host_of(s);
+    (s != 0 && h != 0).then_some(Target { svc: s, host: h })
+}
+
+/// [`LX_ROUTE_NR`](crate::ipc::protocol::LX_ROUTE_NR)`(nr, family)`: the service that answers
+/// Linux call `nr` now (by family for `socket`/`socketpair`), 0 for the kernel (a call routed
+/// by its descriptor: the service of its objects is not known from the number: 0).
+fn route_query(nr: u64, family: u64) -> i64 {
+    let e = entry(nr);
+    if e == 0 || e & T_BYFD != 0 {
+        return 0;
+    }
+    let s = if e & T_FAMILY != 0 { family_svc(family) } else { entry_svc(e) };
+    if s != 0 && svc::online(s) {
+        s as i64
+    } else {
+        0
+    }
+}
+
+/// Whether the key calls go to a service (so `/proc/keys` must come from it too).
 pub fn keys_forwarded() -> bool {
     route(250) == Route::Server
 }
 
 /// The forwarding trap, called for every Linux system call after `seccomp`, holding no
-/// locks: `Some(result)` if the call was answered here (by the server, or Hydra's test call
+/// locks: `Some(result)` if the call was answered here (by a service, or Hydra's test call
 /// in the kernel), `None` if the kernel's dispatcher answers it.
 #[inline]
 pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
-    match route(nr) {
-        Route::Kernel if nr == LX_NULL_NR => Some(0),
-        Route::Kernel => None,
-        Route::Server => {
-            let bits = table_bits(nr);
-            if bits & (T_FAMILY | T_BYFD) != 0 {
-                // Routed per call (Group 12): while no server is online, sockets are the
-                // kernel's (and no descriptor holds a live server object)
-                if !ONLINE.load(Ordering::Acquire) || (bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX) {
-                    return None;
-                }
-                if bits & T_BYFD != 0 {
-                    let o = if BYFD_IO_NUMBERS.contains(&nr) {
-                        // (no locks for every read and write: the fast test or the kernel;
-                        // `fast_entry` may have made it already for this very call)
-                        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
-                        let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
-                        if tid != 0 && IO_KERNEL[cpu].swap(0, Ordering::Relaxed) == tid {
-                            return None;
-                        }
-                        x86_64::instructions::interrupts::without_interrupts(|| ident().and_then(|id| byfd_fast(&id, frame.rdi).ok().flatten()))?
-                    } else {
-                        byfd_object(frame.rdi)?
-                    };
-                    if kernel_first(nr, &o.0) {
-                        return None;
-                    }
-                    return Some(call(frame, Some(o)));
-                }
-            }
-            if !ONLINE.load(Ordering::Acquire) {
-                return Some(ENOSYS);
-            }
-            Some(call(frame, None))
-        }
+    let e = entry(nr);
+    if e == 0 {
+        return if nr == LX_NULL_NR {
+            Some(0)
+        } else if nr == crate::ipc::protocol::LX_ROUTE_NR {
+            Some(route_query(frame.rdi, frame.rsi))
+        } else {
+            None
+        };
     }
+    if e & T_FAMILY != 0 {
+        // Routed per call (Group 12): a family whose service is not online is the kernel's
+        let s = family_svc(frame.rdi);
+        if s == 0 || !svc::online(s) {
+            return None;
+        }
+        return Some(call(frame, s, None));
+    }
+    if e & T_BYFD != 0 {
+        let o = if BYFD_IO_NUMBERS.contains(&nr) {
+            // (no locks for every read and write: the fast test or the kernel; `fast_entry`
+            // may have made it already for this very call)
+            let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+            let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+            if tid != 0 && IO_KERNEL[cpu].swap(0, Ordering::Relaxed) == tid {
+                return None;
+            }
+            x86_64::instructions::interrupts::without_interrupts(|| ident().and_then(|id| byfd_fast(&id, frame.rdi).ok().flatten()))?
+        } else {
+            byfd_object(frame.rdi)?
+        };
+        if kernel_first(nr, &o.0) {
+            return None;
+        }
+        let h = o.3;
+        return Some(call(frame, h, Some(o)));
+    }
+    let s = entry_svc(e);
+    if !svc::online(s) {
+        return Some(ENOSYS);
+    }
+    Some(call(frame, s, None))
 }
 
 /// The server object at descriptor `fd` of the calling thread (for a [`T_BYFD`] call on the
 /// path under the kernel lock), `None` if `fd` holds anything else: through this CPU's
 /// cached table and its bitmap when the identity cache serves the thread, otherwise with
 /// the table's lock.
-fn byfd_object(fd: u64) -> Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)> {
+fn byfd_object(fd: u64) -> Option<HeldObj> {
     let fast = x86_64::instructions::interrupts::without_interrupts(|| {
         let id = ident()?;
         byfd_fast(&id, fd).ok()
@@ -367,9 +498,9 @@ fn byfd_object(fd: u64) -> Option<(Arc<dyn crate::compat::linux::chardev::CharDe
 }
 
 /// The lock-free decision for a [`T_BYFD`] call (interrupts off): `Ok(None)` the kernel
-/// answers (`fd` holds no server object), `Ok(Some(object))` the server does, `Err(())` it
+/// answers (`fd` holds no server object), `Ok(Some(object))` its owner does, `Err(())` it
 /// cannot be told without waiting for a lock (the caller takes the ordinary path).
-fn byfd_fast(id: &Ident, fd: u64) -> Result<Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>, ()> {
+fn byfd_fast(id: &Ident, fd: u64) -> Result<Option<HeldObj>, ()> {
     // Group 13: a cached table whose bit is clear says "the kernel" without touching the
     // table's reference count (every read and write of a kernel descriptor comes here). The
     // cache is this thread's table while its identity is unchanged (exec and unshare bump
@@ -433,9 +564,11 @@ fn cached_fds(id: &Ident) -> Option<(crate::fs::SharedFdTable, *const crate::fs:
     Some((fds, srv as *const crate::fs::SrvPtr))
 }
 
+
 /// Forwards system call `nr` with `args` made on server object `dev` (a descriptor's
 /// device; `args[0]` is the descriptor): `read`, `write`, `readv`, `writev` and `ioctl` on
-/// it (wave 4, step 2). A stale object (its server went away) gives `-EBADF`.
+/// it (wave 4, step 2), to the object's owner. A stale object (its server went away) gives
+/// `-EBADF`.
 pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
     call_obj_ino(nr, args, dev, 0)
 }
@@ -444,16 +577,24 @@ pub fn call_obj(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::cha
 pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, ino: u64) -> i64 {
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return EBADF };
-    if !ONLINE.load(Ordering::Acquire) {
-        return EBADF;
-    }
+    let Some(x) = svc::host(o.svc()).filter(|x| x.is_online()) else { return EBADF };
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = args;
     c.obj = slot;
     c.obj_flags = o.flags();
     c.ino = ino;
-    call_ident(c, false)
+    c.svc = x.id as u32;
+    call_ident(x, c, false)
+}
+
+/// The service of a call the kernel's dispatchers forward themselves ([`call_plain`]).
+fn plain_svc(nr: u64, args: &[u64; 6]) -> SvcId {
+    match nr {
+        41 | 53 => family_svc(args[0]),
+        crate::ipc::protocol::LX_KCALL_REOPEN | crate::ipc::protocol::LX_KCALL_PIDFD | crate::ipc::protocol::LX_KCALL_FCNTL | crate::ipc::protocol::LX_KCALL_FIFO => LXS_IPC,
+        _ => entry_svc(entry(nr)),
+    }
 }
 
 /// Forwards call `nr` with `args` (no descriptor object) on behalf of the current thread:
@@ -461,13 +602,46 @@ pub fn call_obj_ino(nr: u64, args: [u64; 6], dev: &Arc<dyn crate::compat::linux:
 /// kernel code asks for server objects with the `LX_KCALL_*` numbers (Group 13). The
 /// caller holds the kernel lock (an ordinary system call path).
 pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
-    if !ONLINE.load(Ordering::Acquire) {
-        return ENOSYS;
-    }
+    let s = plain_svc(nr, &args);
+    let Some(x) = svc::host(svc::host_of(s)).filter(|x| x.is_online()) else { return ENOSYS };
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = args;
-    call_ident(c, false)
+    c.svc = s as u32;
+    call_ident(x, c, false)
+}
+
+/// Group 19: `open` of character device `rdev` whose major a service claimed
+/// (`LX_SVC_CLAIM_MAJOR`): the service installs a descriptor of its own for the caller
+/// (`LX_KCALL_DEVOPEN`, [`LxCall::dev`]) and the kernel takes that descriptor's object as the
+/// opened device. `None`: no service claims the major (the kernel's drivers decide).
+pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::linux::chardev::CharDevice>, i64>> {
+    let major = (rdev >> 8) & 0xFFF;
+    let s = svc::major_svc(major);
+    if s == 0 {
+        return None;
+    }
+    let x = svc::host(svc::host_of(s))?;
+    let mut c = LxCall::EMPTY;
+    c.nr = crate::ipc::protocol::LX_KCALL_DEVOPEN;
+    c.args = [rdev, flags as u64, 0, 0, 0, 0];
+    c.dev = rdev;
+    c.svc = s as u32;
+    let fd = call_ident(x, c, true);
+    if fd < 0 {
+        return Some(Err(fd));
+    }
+    // The descriptor the service installed: its object becomes the opened file (the
+    // caller installs it again with the open's own flags)
+    let taken = crate::task::with_current_fds_mut(|t| t.set_fd(fd as usize, None));
+    match taken {
+        Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some() => Some(Ok(d)),
+        Some(other) => {
+            drop(other);
+            Some(Err(EIO))
+        }
+        None => Some(Err(EIO)),
+    }
 }
 
 /// A transfer between the server object `dev` and a kernel buffer (Group 13: `splice`,
@@ -476,18 +650,29 @@ pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
 /// not ready (the caller waits on its readiness itself). The server posts no `SIGPIPE`.
 /// The caller holds the kernel lock.
 pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+    call_obj_kbuf_nr(dev, if write { 1 } else { 0 }, write, data, out)
+}
+
+/// Group 19: queues `data` on the server's netlink socket `dev` as a received message (an
+/// in-kernel message queue's `SIGEV_THREAD` notification for a socket of the network
+/// service, when only the IPC service was switched back to the kernel).
+pub fn call_obj_deliver(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, data: &[u8]) -> i64 {
+    call_obj_kbuf_nr(dev, crate::ipc::protocol::LX_KCALL_NLDELIVER, true, data, &mut [])
+}
+
+/// [`call_obj_kbuf`] with call number `nr`.
+fn call_obj_kbuf_nr(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
     use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return EBADF };
-    if !ONLINE.load(Ordering::Acquire) {
-        return EBADF;
-    }
+    let Some(x) = svc::host(o.svc()).filter(|x| x.is_online()) else { return EBADF };
     let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
     let mut c = LxCall::EMPTY;
-    c.nr = if write { 1 } else { 0 };
+    c.nr = nr;
     c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, 0, 0, 0];
     c.obj = slot;
     c.obj_flags = o.flags() | LX_OBJ_FLAGS_KBUF | 0o4000;
+    c.svc = x.id as u32;
     let mut buf = copy::CopyBuf::EMPTY;
     if write {
         buf.data[..n].copy_from_slice(&data[..n]);
@@ -515,145 +700,43 @@ pub fn call_obj_kbuf(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, w
     });
     drop(sched);
     let Some(me) = me else { return ENOSYS };
-    c.note_seq = notes_head();
+    c.note_seq = x.notes_head();
     let kout = if write { None } else { Some(&mut out[..n]) };
-    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, Some(&buf), true, kout));
+    let mut redir = (0, 0);
+    let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, Some(&buf), true, kout, &mut redir));
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
         crate::task::scheduler::wait_out_handoff();
+    }
+    // (a kernel-buffer transfer is never redirected)
+    if r == LX_REDIRECTED {
+        return EIO;
     }
     r
 }
 
 // ----------------------------------------------------------------------
-// Requests and workers
+// Requests and workers (one table per host, `svc::Host`)
 // ----------------------------------------------------------------------
 
-/// Most worker threads.
-const MAX_WORKERS: usize = 16;
-/// Calls in flight at once (queued, served, or pending).
-const MAX_REQS: usize = 128;
-/// No request.
-const NONE: usize = usize::MAX;
-
-/// Where a request is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RState {
-    Free,
-    /// Waiting for a worker.
-    Queued,
-    /// In a worker's syscall page, being served.
-    Delivered,
-    /// Answered "pending": its caller sleeps until `SYS_LX_COMPLETE`.
-    Pending,
-    /// Answered; the caller takes the result.
-    Done,
-    /// Ended without an answer (the server went away).
-    Failed,
-}
-
-/// One forwarded call (small: the table is searched on every call; the call itself waits
-/// in [`Lx::calls`] only while it is queued).
-#[derive(Clone, Copy)]
-struct Req {
-    state: RState,
-    id: u64,
-    /// The calling thread.
-    client: u64,
-    /// Where the caller is in the scheduler's task table (a hint).
-    client_idx: usize,
-    result: i64,
-    /// A signal arrived for the caller while the call was in the server.
-    interrupted: bool,
-    /// The call has copies ([`copy::describe`]): its header (and, while queued, its bytes)
-    /// are in [`BUFS`] at the same index.
-    has_copy: bool,
-    /// Group 12: `SYS_LX_COMPLETE` came while the call was still being served (the server
-    /// kept it as waiting and another of its threads finished it before the worker's
-    /// "pending" answer reached the kernel): `result` holds the answer, and the "pending"
-    /// answer turns into it.
-    early: bool,
-}
-
-impl Req {
-    const FREE: Self = Self { state: RState::Free, id: 0, client: 0, client_idx: 0, result: 0, interrupted: false, has_copy: false, early: false };
-}
-
-/// The copies of each request slot (the copy-in/copy-out table, [`copy`]): the header
-/// always, the copied-in bytes while the call is queued, the output after the answer. A
-/// slot's buffer belongs to whoever holds the request: written under the request table's
-/// lock while the call is placed, delivered or answered, read by the caller alone once it
-/// saw the answer (the slot is freed after that). Kernel memory, so a caller that dies with
-/// its call in the server leaves nothing dangling.
-struct CopyBufs([UnsafeCell<copy::CopyBuf>; MAX_REQS]);
-// SAFETY: see the type: every access is ordered by the request table's lock
-unsafe impl Sync for CopyBufs {}
-static BUFS: CopyBufs = CopyBufs([const { UnsafeCell::new(copy::CopyBuf::EMPTY) }; MAX_REQS]);
-
-/// Request slot `slot`'s copy buffer (see [`CopyBufs`] for who may use it when).
-#[allow(clippy::mut_from_ref)]
-fn buf_of(slot: usize) -> &'static mut copy::CopyBuf {
-    // SAFETY: see CopyBufs
-    unsafe { &mut *BUFS.0[slot].get() }
-}
-
-/// A worker thread of the server.
-struct Worker {
-    task: u64,
-    /// Its syscall page.
-    page: Arc<ContiguousFrames>,
-    /// Waiting in `SYS_LX_REPLY_RECV` for a call (blocked).
-    idle: bool,
-    /// The request it serves (an index into `reqs`; [`NONE`]).
-    req: usize,
-    /// Where it is in the scheduler's task table (a hint).
-    idx: usize,
-}
-
-impl Worker {
-    /// Its syscall page, through the kernel's direct map.
-    fn call_mut(&self) -> *mut LxCall {
-        crate::memory::frame_allocator::phys_to_virt(self.page.base) as *mut LxCall
-    }
-}
-
-struct Lx {
-    /// The server process the workers belong to (0: none).
-    server_tgid: u64,
-    workers: alloc::vec::Vec<Worker>,
-    reqs: [Req; MAX_REQS],
-    /// The calls of queued requests (same index).
-    calls: [LxCall; MAX_REQS],
-    next_id: u64,
-}
-
-static LX: Mutex<Lx> = Mutex::new(Lx { server_tgid: 0, workers: alloc::vec::Vec::new(), reqs: [Req::FREE; MAX_REQS], calls: [LxCall::EMPTY; MAX_REQS], next_id: 1 });
-
-/// Runs `f` on the request table with interrupts off (serving TLB flush requests while
-/// waiting for the lock: the lock-free path takes it without the kernel lock).
-fn lx<R>(f: impl FnOnce(&mut Lx) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| f(&mut copy::lock_serving(&LX)))
-}
-
-/// The server's workers are attached and its endpoint registered: calls are forwarded.
-static ONLINE: AtomicBool = AtomicBool::new(false);
-
-/// Calls forwarded since boot: handed to a worker directly, and queued.
+/// Calls forwarded since boot: handed to a worker directly, and queued (every host).
 pub static DIRECT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// See [`DIRECT_CALLS`].
 pub static QUEUED_CALLS: AtomicU64 = AtomicU64::new(0);
-/// Calls that failed because the server went away.
+/// Calls that failed because their service went away.
 pub static FAILED_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Calls redirected to another service.
+pub static REDIRECTS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether linux-server is serving forwarded calls.
 pub fn is_online() -> bool {
-    ONLINE.load(Ordering::Acquire)
+    svc::online(LXS_LINUX)
 }
 
-/// Delivers request `slot` (its call is `call`, its copies `copies`) to worker `wi`: the
-/// call goes into the worker's syscall page, with the copy header (empty without copies)
-/// and the copied-in bytes.
-fn deliver(s: &mut Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&copy::CopyBuf>) {
+/// Delivers request `slot` of host `x` (its call is `call`, its copies `copies`) to worker
+/// `wi`: the call goes into the worker's syscall page, with the copy header (empty without
+/// copies) and the copied-in bytes.
+fn deliver(x: &Host, s: &mut svc::Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&copy::CopyBuf>) {
     s.reqs[slot].state = RState::Delivered;
     let w = &mut s.workers[wi];
     let page = w.call_mut() as *mut u8;
@@ -675,51 +758,71 @@ fn deliver(s: &mut Lx, slot: usize, wi: usize, call: &LxCall, copies: Option<&co
     }
     w.idle = false;
     w.req = slot;
-    HAS_WORK[wi].store(true, Ordering::SeqCst);
+    x.has_work[wi].store(true, Ordering::SeqCst);
 }
 
-/// Gives worker `wi` the oldest queued request, if any.
-fn take_queued(s: &mut Lx, wi: usize) -> bool {
+/// Gives worker `wi` of host `x` the oldest queued request, if any.
+fn take_queued(x: &Host, s: &mut svc::Lx, wi: usize) -> bool {
     let next = s.reqs.iter().enumerate().filter(|(_, r)| r.state == RState::Queued).min_by_key(|(_, r)| r.id).map(|(i, _)| i);
     match next {
         Some(slot) => {
             let call = s.calls[slot];
-            let copies = if s.reqs[slot].has_copy { Some(&*buf_of(slot)) } else { None };
-            deliver(s, slot, wi, &call, copies);
+            let copies = if s.reqs[slot].has_copy { Some(&*x.buf(slot)) } else { None };
+            deliver(x, s, slot, wi, &call, copies);
             true
         }
         None => false,
     }
 }
 
-/// Frees request `id` if it is still in the table in state `state` (its caller died).
-fn free_if(id: u64, state: RState) {
-    lx(|s| {
+/// Frees request `id` of host `x` if it is still in the table in state `state` (its caller
+/// died, or took its answer).
+fn free_if(x: &Host, id: u64, state: RState) {
+    x.lx(|s| {
         if let Some(r) = s.reqs.iter_mut().find(|r| r.id == id && r.state == state) {
             *r = Req::FREE;
         }
     });
 }
 
-/// Forwards the current Linux system call to the server and waits for the answer (the
-/// path under the kernel lock, for callers the lock-free path does not take: traced tasks,
-/// seccomp filters, tracing on).
-fn call(frame: &SyscallFrame, byfd: Option<(Arc<dyn crate::compat::linux::chardev::CharDevice>, u64, u64)>) -> i64 {
+/// Fills the context of a [`T_FSCTX`] call (process group, session, namespace ids) from
+/// the process table; `false` if it is busy and `wait` is not allowed.
+fn fill_ctx(c: &mut LxCall, wait: bool) -> bool {
+    let procs = if wait { Some(crate::compat::linux::proc::PROCS.lock()) } else { crate::compat::linux::proc::PROCS.try_lock() };
+    let Some(procs) = procs else { return false };
+    if let Some(p) = procs.get(&c.tgid) {
+        c.pgid = p.pgid as u32;
+        c.sid = p.sid as u32;
+        c.mnt_ns = p.ns.mnt as u32;
+        c.net_ns = p.ns.net as u32;
+        c.pid_ns = p.ns.pid as u32;
+        c.user_ns = p.ns.user.is_some() as u32;
+    }
+    true
+}
+
+/// Forwards the current Linux system call to service `s` (a host id when `byfd` names the
+/// object) and waits for the answer (the path under the kernel lock, for callers the
+/// lock-free path does not take: traced tasks, seccomp filters, tracing on).
+fn call(frame: &SyscallFrame, s: SvcId, byfd: Option<HeldObj>) -> i64 {
     let mut c = LxCall::EMPTY;
     c.nr = frame.rax;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
-    let bits = table_bits(c.nr);
+    c.svc = s as u32;
+    let bits = entry(c.nr);
+    let hid = if byfd.is_some() { s } else { svc::host_of(s) };
+    let Some(x) = svc::host(hid) else { return ENOSYS };
     // Group 9: the server object at args[0], held until the call is answered (a close on
     // another thread cannot overtake the call); Group 12: a T_BYFD call's, found already
     if bits & (T_FAMILY | T_BYFD) != 0 && crate::compat::linux::ns::net_isolated() {
         c.obj_flags |= LX_OBJ_FLAGS_NETNS;
     }
-    let _held = if let Some((dev, slot, flags)) = byfd {
+    let _held = if let Some((dev, slot, flags, _)) = byfd {
         c.obj = slot;
         c.obj_flags |= flags;
         Some(dev)
     } else if bits & T_FD0 != 0 {
-        obj::current_fd(c.args[0]).map(|(dev, slot, flags)| {
+        obj::current_fd(c.args[0]).filter(|o| o.3 == hid).map(|(dev, slot, flags, _)| {
             c.obj = slot;
             c.obj_flags = flags;
             dev
@@ -730,7 +833,7 @@ fn call(frame: &SyscallFrame, byfd: Option<(Arc<dyn crate::compat::linux::charde
     let _held1 = if bits & T_FDAT1 != 0 {
         crate::compat::linux::vfs::copy_in(c.args[1], 4).ok().and_then(|b| {
             let fd = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
-            obj::current_fd(fd).map(|(dev, slot, flags)| {
+            obj::current_fd(fd).filter(|o| o.3 == hid).map(|(dev, slot, flags, _)| {
                 c.obj = slot;
                 c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
                 dev
@@ -745,12 +848,17 @@ fn call(frame: &SyscallFrame, byfd: Option<(Arc<dyn crate::compat::linux::charde
     if bits & T_UMASK != 0 {
         c.umask = crate::task::with_current_fds_mut(|f| f.umask) as u64;
     }
-    call_ident(c, true)
+    if bits & T_FSCTX != 0 {
+        c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
+        fill_ctx(&mut c, true);
+    }
+    call_ident(x, c, true)
 }
 
 /// [`call`] with the call's number, arguments and object filled in: adds the caller's
-/// identity (and its groups when `groups`) and waits for the answer (under the kernel lock).
-fn call_ident(mut c: LxCall, groups: bool) -> i64 {
+/// identity (and its groups when `groups`) and waits for host `x`'s answer (under the
+/// kernel lock).
+fn call_ident(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
     let mut sched = crate::task::SCHEDULER.lock();
     let my_idx = sched.current_index();
     let me = sched.current_task_mut(|t| {
@@ -777,7 +885,7 @@ fn call_ident(mut c: LxCall, groups: bool) -> i64 {
     // The waits of `call_with` need no kernel lock: let the worker's answer switch straight
     // back to this thread even from a CPU without it (a thread blocked under the lock could
     // only be woken through the scheduler), and take the lock again before going on
-    let r = call_with(me, my_idx, c, true);
+    let r = call_with(x, me, my_idx, c, true);
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
         crate::task::scheduler::wait_out_handoff();
@@ -785,11 +893,12 @@ fn call_ident(mut c: LxCall, groups: bool) -> i64 {
     r
 }
 
-/// Forwards call `c` (its identity filled in) of task `me` (at `my_idx`, a hint) and waits
-/// for the answer. `nobkl`: the lock-free path ([`fast_entry`]), whose waits do not need
-/// the kernel lock.
-fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
-    c.note_seq = notes_head();
+/// Forwards call `c` (its identity filled in) of task `me` (at `my_idx`, a hint) to host
+/// `x` and waits for the answer, following redirects to other services. `nobkl`: the
+/// lock-free path ([`fast_entry`]), whose waits do not need the kernel lock.
+fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
+    let mut x = x;
+    c.note_seq = x.notes_head();
     // The copy-in table: the call's pointer arguments, copied now (a bad one fails here)
     let mut copies = None;
     let mut buf;
@@ -803,14 +912,41 @@ fn call_with(me: u64, my_idx: usize, mut c: LxCall, nobkl: bool) -> i64 {
     // Interrupts stay off from handing the call over until the answer is taken: nothing on
     // this CPU may come between (the yields switch with them off, and they come back so)
     loop {
-        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(me, my_idx, c, copies, nobkl, None));
+        let mut redir = (0u64, 0u64);
+        let r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, copies, nobkl, None, &mut redir));
         // A net wait ended (Group 12): the same call again, at once
-        if r != crate::ipc::protocol::LX_RETRY {
-            return r;
+        if r == crate::ipc::protocol::LX_RETRY {
+            NET_RETRIES.fetch_add(1, Ordering::Relaxed);
+            c.note_seq = x.notes_head();
+            c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
+            continue;
         }
-        NET_RETRIES.fetch_add(1, Ordering::Relaxed);
-        c.note_seq = notes_head();
-        c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
+        // A redirect (Group 19): the same call, with the same copies, to the service named
+        if r == LX_REDIRECTED {
+            if c.redirs >= LX_REDIR_MAX {
+                return ELOOP;
+            }
+            let s = (redir.0 & 0xFF) as SvcId;
+            if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
+                return ENOSYS;
+            }
+            let Some(nx) = svc::host(svc::host_of(s)).filter(|h| h.is_online()) else { return ENOSYS };
+            if nx.id != x.id {
+                // (an object slot means nothing to another host)
+                c.obj = LX_OBJ_NONE;
+            }
+            c.svc = s as u32;
+            c.redir_obj = redir.1;
+            c.redir_tail = (redir.0 >> 32) as u32;
+            c.redirs += 1;
+            x = nx;
+            c.note_seq = x.notes_head();
+            REDIRECTS.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        // wave6 G21 begin: LX_RESEND / LX_RESEND_MAYBE (restart::resend)
+        // wave6 G21 end
+        return r;
     }
 }
 
@@ -844,7 +980,7 @@ pub fn relay_wanted() -> bool {
 
 /// The relay is wanted again: the main thread takes the events it missed now.
 pub fn relay_on() {
-    crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, crate::ipc::protocol::NOTIFY_LX_NET);
+    crate::ipc::service::notify(svc::endpoint_of(LXS_NET), crate::ipc::protocol::NOTIFY_LX_NET);
 }
 
 /// `LX_OBJ_RELAY(on)`: linux-server keeps calls that need the relay (`on`) or none any more.
@@ -914,30 +1050,34 @@ pub fn net_event(handles: Option<&[u32]>) {
     }
 }
 
-/// [`call_with`] with the copies made. `kout`: a kernel-buffer read ([`call_obj_kbuf`]):
-/// the output to `args[1]` goes there instead of to user memory.
-fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
-    let placed = lx(|s| {
-        // Checked under the table's lock: `server_gone` clears ONLINE before it takes the
+
+/// [`call_with`] with the copies made, to host `x`. `kout`: a kernel-buffer read
+/// ([`call_obj_kbuf`]): the output to `args[1]` goes there instead of to user memory.
+/// `redir`: set to the redirect's `(result word, object)` when the answer is
+/// [`LX_REDIRECTED`].
+#[allow(clippy::too_many_arguments)]
+fn call_and_wait(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::CopyBuf>, nobkl: bool, kout: Option<&mut [u8]>, redir: &mut (u64, u64)) -> i64 {
+    let placed = x.lx(|s| {
+        // Checked under the table's lock: `server_gone` clears `online` before it takes the
         // lock, so a call placed here is either failed by it or refused now
-        if !ONLINE.load(Ordering::Acquire) {
+        if !x.online.load(Ordering::Acquire) {
             return Err(ENOSYS);
         }
         let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Err(EAGAIN) };
-        let id = s.next_id;
+        let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
         s.next_id += 1;
         c.id = id;
-        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some(), early: false };
-        REQ_DONE[slot].store(false, Ordering::SeqCst);
+        s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy: copies.is_some(), early: false, redir: (0, 0) };
+        x.req_done[slot].store(false, Ordering::SeqCst);
         if let Some(b) = copies {
-            let kept = buf_of(slot);
+            let kept = x.buf(slot);
             kept.hdr = b.hdr;
             kept.used = b.used;
         }
         // An idle worker takes it at once
         let target = match s.workers.iter().position(|w| w.idle) {
             Some(wi) => {
-                deliver(s, slot, wi, &c, copies);
+                deliver(x, s, slot, wi, &c, copies);
                 Some((s.workers[wi].task, s.workers[wi].idx))
             }
             None => {
@@ -945,7 +1085,7 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
                 // Its bytes wait with it (the caller's stack is not reachable from the
                 // worker that takes it)
                 if let Some(b) = copies {
-                    buf_of(slot).data[..b.used].copy_from_slice(b.used_bytes());
+                    x.buf(slot).data[..b.used].copy_from_slice(b.used_bytes());
                 }
                 None
             }
@@ -956,40 +1096,45 @@ fn call_and_wait(me: u64, my_idx: usize, mut c: LxCall, copies: Option<&copy::Co
         Ok(p) => p,
         Err(e) => {
             if e == EAGAIN {
-                crate::kprintln!("[lx] too many calls in flight");
+                crate::kprintln!("[lx] too many calls in flight ({})", crate::ipc::protocol::LXS_NAMES[x.id as usize]);
             }
+            // wave6 G21 begin: a service restarting: wait for it (restart::wait_online)
+            // wave6 G21 end
             return e;
         }
     };
     match target {
         Some((w, hint)) => {
             DIRECT_CALLS.fetch_add(1, Ordering::Relaxed);
+            x.direct.fetch_add(1, Ordering::Relaxed);
             // The direct switch: this thread blocks, the worker runs next on this CPU. When
             // that cannot be done (the worker is still running, or blocked outside the
             // lock-free path, ...), the worker is woken the ordinary way; a worker still
             // running finds the call under the table's lock before it would block
             // (not if the answer came already: a worker running on another CPU may have
             // taken the call and answered it before this thread got here)
-            if !direct_to(w, hint, Some(&REQ_DONE[slot]), nobkl) {
+            if !direct_to(w, hint, Some(&x.req_done[slot]), nobkl) {
                 crate::task::SCHEDULER.lock().unblock_task(TaskId(w));
             }
         }
         None => {
             QUEUED_CALLS.fetch_add(1, Ordering::Relaxed);
+            x.queued.fetch_add(1, Ordering::Relaxed);
         }
     }
-    wait_for(slot, id, &c.args, (c.tid, c.tgid), nobkl, kout)
+    wait_for(x, slot, id, &c.args, (c.tid, c.tgid), nobkl, kout, redir)
 }
 
-/// Waits for the answer to request `id` (in `slot`), copies its output to the caller's
-/// pointers `args` (the copy-out table), and frees it.
+/// Waits for the answer to request `id` (in `slot` of host `x`), copies its output to the
+/// caller's pointers `args` (the copy-out table), and frees it.
 ///
 /// No wake-up is lost: the answer is marked under the table's lock and the caller woken
 /// after it, and the caller blocks only under the same lock after seeing no answer.
-fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool, kout: Option<&mut [u8]>) -> i64 {
+#[allow(clippy::too_many_arguments)]
+fn wait_for(x: &'static Host, slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool, kout: Option<&mut [u8]>, redir: &mut (u64, u64)) -> i64 {
     let mut kout = kout;
     loop {
-        let done = lx(|s| {
+        let done = x.lx(|s| {
             let r = &mut s.reqs[slot];
             if r.id != id {
                 return Some((EIO, false));
@@ -997,7 +1142,12 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
             match r.state {
                 RState::Done | RState::Failed => {
                     let v = r.result;
-                    let out = r.state == RState::Done && r.has_copy && copy::has_output(buf_of(slot));
+                    if v == LX_REDIRECTED && r.state == RState::Done {
+                        *redir = r.redir;
+                        *r = Req::FREE;
+                        return Some((v, false));
+                    }
+                    let out = r.state == RState::Done && r.has_copy && copy::has_output(x.buf(slot));
                     if !out {
                         *r = Req::FREE;
                     }
@@ -1014,7 +1164,7 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
             // touches an answered request), then the slot goes
             let r = if let Some(k) = kout.as_deref_mut() {
                 // A kernel-buffer read: the bytes for args[1]
-                let b = buf_of(slot);
+                let b = x.buf(slot);
                 let n = (b.hdr.out_len[1] as usize).min(k.len());
                 if n > 0 {
                     let o = b.hdr.out_off[1] as usize - LX_DATA_OFF;
@@ -1022,12 +1172,12 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
                 }
                 v
             } else {
-                match copy::copy_out(buf_of(slot), args) {
+                match copy::copy_out(x.buf(slot), args) {
                     Ok(()) => v,
                     Err(e) => e,
                 }
             };
-            free_if(id, RState::Done);
+            free_if(x, id, RState::Done);
             return r;
         }
         // A signal: a call not taken yet is withdrawn; one being served is marked (the
@@ -1037,7 +1187,7 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
             if !crate::arch::smp::bkl_held() {
                 crate::arch::smp::bkl_enter();
             }
-            let what = lx(|s| {
+            let what = x.lx(|s| {
                 let r = &mut s.reqs[slot];
                 if r.id != id {
                     return Some(EIO);
@@ -1067,14 +1217,14 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
                 }
             });
             match what {
-                Some(0) => note(LX_NOTE_INTERRUPT, id, 0, 0),
+                Some(0) => note_to(x.id, LX_NOTE_INTERRUPT, id, 0, 0),
                 Some(v) => return v,
                 None => {}
             }
         }
         // Block, unless the answer came meanwhile (checked under the lock the answer is
         // marked under)
-        let blocked = lx(|s| {
+        let blocked = x.lx(|s| {
             let r = &s.reqs[slot];
             if r.id != id || matches!(r.state, RState::Done | RState::Failed) {
                 return false;
@@ -1095,6 +1245,7 @@ fn wait_for(slot: usize, id: u64, args: &[u64; 6], who: (u64, u64), nobkl: bool,
         }
     }
 }
+
 
 /// Gives up the CPU (the task blocked itself first). Every register the compiler could keep
 /// a value in across it is declared clobbered, so a task resumed here needs no FPU state:
@@ -1149,7 +1300,7 @@ fn direct_to(target: u64, hint: usize, guard: Option<&'static AtomicBool>, nobkl
 // a Linux thread without a tracer or seccomp filter, and for every `SYS_LX_REPLY_RECV`.
 //
 // What protects what:
-// - the request table and the worker list: the table's spin lock ([`LX`], interrupts off,
+// - the request table and the worker list: the host's table lock (`Host::table`, interrupts off,
 //   TLB requests served while waiting);
 // - task states and the switch itself: the scheduler lock, taken once per switch (in the
 //   direct-switch vector, `Scheduler::direct_call`);
@@ -1162,7 +1313,7 @@ fn direct_to(target: u64, hint: usize, guard: Option<&'static AtomicBool>, nobkl
 // lock and the waiter woken after it; a waiter blocks only under that lock after seeing
 // nothing (so the wake finds it blocked), or through the direct switch, which blocks the
 // switching task only if a flag set under the table's lock is still clear when the
-// scheduler lock is held: a worker's `HAS_WORK` (a call was delivered to it), a caller's
+// scheduler lock is held: a worker's `has_work` (a call was delivered to it), a caller's
 // `REQ_DONE` (its call was answered: on two CPUs a worker may take and answer it before
 // the caller gets to the switch). A caller also looks for a signal after blocking, under
 // the scheduler lock (a signal posted just before only marks a running thread).
@@ -1174,20 +1325,8 @@ fn direct_to(target: u64, hint: usize, guard: Option<&'static AtomicBool>, nobkl
 // before it yielded). Anything slow (a page to fault in, a signal, a dying task) takes the
 // kernel lock first.
 
-/// The thread IDs of the workers (0: none), readable without the table's lock: the system
-/// call entry tells `SYS_LX_REPLY_RECV` (native call 52) from a Linux `getpeername` (52).
-static WORKER_TIDS: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
-/// Per request slot: the call was answered (or failed). The caller's direct switch to the
-/// worker does not happen once this is set: on two CPUs a worker may take and answer the
-/// call before its caller gets to the switch (the same rule as [`HAS_WORK`]).
-static REQ_DONE: [AtomicBool; MAX_REQS] = [const { AtomicBool::new(false) }; MAX_REQS];
-/// Per worker: a call was delivered to it that it has not taken yet (see the section).
-static HAS_WORK: [AtomicBool; MAX_WORKERS] = [const { AtomicBool::new(false) }; MAX_WORKERS];
-
-/// Whether thread `tid` is one of the server's workers.
-fn is_worker(tid: u64) -> bool {
-    tid != 0 && WORKER_TIDS.iter().any(|t| t.load(Ordering::Relaxed) == tid)
-}
+// (The per-host flags `Host::req_done`, `Host::has_work` and `Host::worker_tids`, and the
+// cross-host worker list `svc::worker_host`, are in `svc.rs`.)
 
 /// A CPU's cached identity of the Linux thread it runs (see [`ident`]).
 #[derive(Clone, Copy)]
@@ -1251,6 +1390,7 @@ fn ident() -> Option<Ident> {
     Some(n)
 }
 
+
 /// What [`fast_entry`] did.
 pub enum Fast {
     /// A forwarded Linux call, answered: deliver signals on the way out.
@@ -1266,9 +1406,9 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     let nr = frame.rax;
     if nr == crate::arch::syscall::SYS_LX_REPLY_RECV {
         let tid = crate::task::CURRENT_TID.load(Ordering::Acquire);
-        if is_worker(tid) {
+        if let Some(x) = svc::worker_host(tid).and_then(svc::host) {
             let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
-            return Some(Fast::Reply(reply_recv_as(tid, idx, frame.rdi as i64, frame.rsi, true)));
+            return Some(Fast::Reply(reply_recv_as(x, tid, idx, frame.rdi as i64, frame.rsi, true)));
         }
         return None;
     }
@@ -1290,30 +1430,31 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
             }
         }
     }
-    if route(nr) != Route::Server
-        || !ONLINE.load(Ordering::Acquire)
-        || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed)
-        || crate::task::scheduler::handoff_active()
-    {
+    let bits = entry(nr);
+    if bits == 0 || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed) || crate::task::scheduler::handoff_active() {
         return None;
     }
     let id = ident()?;
-    let bits = table_bits(nr);
-    // Group 12: socket calls routed per call (see "Socket routing"); a kernel one takes the
-    // ordinary path, whose `forward` finds it the kernel's again (one more bit test).
-    // (Group 13: decided before the call is built: read and write on kernel descriptors
-    // pass here too)
-    if bits & T_FAMILY != 0 && family_target(frame.rdi) != TARGET_LINUX {
-        return None;
-    }
+    // Which service: by family, by descriptor, or by number (Groups 12 and 19). (Group 13:
+    // decided before the call is built: read and write on kernel descriptors pass here too)
     let mut byfd = None;
-    if bits & T_BYFD != 0 {
+    let (s, hid) = if bits & T_FAMILY != 0 {
+        let s = family_svc(frame.rdi);
+        if s == 0 {
+            return None;
+        }
+        (s, svc::host_of(s))
+    } else if bits & T_BYFD != 0 {
         match byfd_fast(&id, frame.rdi) {
-            Ok(Some((dev, _, _))) if kernel_first(nr, &dev) => {
+            Ok(Some((dev, _, _, _))) if kernel_first(nr, &dev) => {
                 drop_last(dev);
                 return None;
             }
-            Ok(Some(o)) => byfd = Some(o),
+            Ok(Some(o)) => {
+                let h = o.3;
+                byfd = Some(o);
+                (h, h)
+            }
             Ok(None) => {
                 // (Group 13: `forward` need not test a read or write again)
                 if BYFD_IO_NUMBERS.contains(&nr) {
@@ -1324,7 +1465,16 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
             }
             Err(()) => return None,
         }
-    }
+    } else {
+        let s = entry_svc(bits);
+        (s, svc::host_of(s))
+    };
+    let Some(x) = svc::host(hid).filter(|x| x.is_online()) else {
+        if let Some(o) = byfd {
+            drop_last(o.0);
+        }
+        return None;
+    };
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
@@ -1332,7 +1482,8 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     c.tgid = id.tgid;
     [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] = id.ids;
     c.caps = id.caps;
-    if nr != LX_NULL_NR {
+    c.svc = s as u32;
+    if nr != LX_NULL_NR && nr != LX_TEST_NR {
         c.ngroups = id.ngroups;
         c.groups = id.groups;
     }
@@ -1340,7 +1491,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     // waiting for any lock a kernel-lock holder could hold: the descriptor table is taken
     // with `try_lock` (busy: the ordinary path), the IPC namespace comes with the identity
     let mut held: [Option<Arc<dyn crate::compat::linux::chardev::CharDevice>>; 2] = [None, None];
-    if let Some((dev, slot, flags)) = byfd {
+    if let Some((dev, slot, flags, _)) = byfd {
         c.obj = slot;
         c.obj_flags = flags;
         held[0] = Some(dev);
@@ -1350,6 +1501,12 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     if bits & T_IPC != 0 {
         c.ipc_ns = id.ipc_ns;
+    }
+    if bits & T_FSCTX != 0 && !fill_ctx(&mut c, false) {
+        for h in held.into_iter().flatten() {
+            drop_last(h);
+        }
+        return None;
     }
     if bits & (T_FD0 | T_FDAT1 | T_UMASK) != 0 {
         // T_FDAT1: the descriptor is the first u32 of the attribute block at args[1]
@@ -1368,16 +1525,20 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
             c.umask = table.umask as u64;
         }
         if bits & T_FD0 != 0 {
-            if let Some((dev, slot, flags)) = obj::object_in(&table, c.args[0]) {
-                c.obj = slot;
-                c.obj_flags = flags;
+            if let Some((dev, slot, flags, h)) = obj::object_in(&table, c.args[0]) {
+                if h == x.id {
+                    c.obj = slot;
+                    c.obj_flags = flags;
+                }
                 held[0] = Some(dev);
             }
         }
         if let Some(fd) = at1 {
-            if let Some((dev, slot, flags)) = obj::object_in(&table, fd) {
-                c.obj = slot;
-                c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+            if let Some((dev, slot, flags, h)) = obj::object_in(&table, fd) {
+                if h == x.id {
+                    c.obj = slot;
+                    c.obj_flags = flags | LX_OBJ_FLAGS_AT1 | (fd & 0x3FFF_FFFF) << 32;
+                }
                 held[1] = Some(dev);
             }
         }
@@ -1386,7 +1547,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     FAST_CALLS.fetch_add(1, Ordering::Relaxed);
-    let r = call_with(id.tid, idx, c, true);
+    let r = call_with(x, id.tid, idx, c, true);
     // The server objects were held across the call (a close on another thread cannot
     // overtake it); the last reference, if a close came meanwhile, goes under the lock
     for h in held.into_iter().flatten() {
@@ -1415,15 +1576,27 @@ pub static REPLY_WOKEN: AtomicU64 = AtomicU64::new(0);
 
 /// One line for `linux prof show`: how the forwarded calls went.
 pub fn summary() -> alloc::string::String {
+    let mut per = alloc::string::String::new();
+    for x in svc::hosts() {
+        per.push_str(&alloc::format!(
+            "; {}: {} direct, {} queued, {} failed",
+            crate::ipc::protocol::LXS_NAMES[x.id as usize],
+            x.direct.load(Ordering::Relaxed),
+            x.queued.load(Ordering::Relaxed),
+            x.failed.load(Ordering::Relaxed)
+        ));
+    }
     alloc::format!(
-        "{} calls forwarded ({} on the lock-free path; {} straight to an idle worker, {} queued, {} failed); answers: {} switched straight back, {} woken the ordinary way",
+        "{} calls forwarded ({} on the lock-free path; {} straight to an idle worker, {} queued, {} failed, {} redirected); answers: {} switched straight back, {} woken the ordinary way{}",
         DIRECT_CALLS.load(Ordering::Relaxed) + QUEUED_CALLS.load(Ordering::Relaxed),
         FAST_CALLS.load(Ordering::Relaxed),
         DIRECT_CALLS.load(Ordering::Relaxed),
         QUEUED_CALLS.load(Ordering::Relaxed),
         FAILED_CALLS.load(Ordering::Relaxed),
+        REDIRECTS.load(Ordering::Relaxed),
         REPLY_DIRECT.load(Ordering::Relaxed),
         REPLY_WOKEN.load(Ordering::Relaxed),
+        per
     )
 }
 
@@ -1442,71 +1615,98 @@ pub fn delivery_maybe() -> bool {
 }
 
 // ----------------------------------------------------------------------
-// Server side (native system calls of linux-server)
+// Server side (native system calls of the services)
 // ----------------------------------------------------------------------
 
 /// The thread that made request `id` (served or pending), for the object primitives.
 fn client_of(id: u64) -> Option<u64> {
-    lx(|s| s.reqs.iter().find(|r| r.id == id && matches!(r.state, RState::Delivered | RState::Pending)).map(|r| r.client))
+    let x = svc::host(lx_req_svc(id))?;
+    x.lx(|s| s.reqs.iter().find(|r| r.id == id && matches!(r.state, RState::Delivered | RState::Pending)).map(|r| r.client))
 }
 
-/// The calling task's ID and process, if it is linux-server.
-fn server_caller() -> Result<(u64, u64), i64> {
-    server_caller_at().map(|(id, tgid, _)| (id, tgid))
+/// The calling task's ID, process and host id, if it is a service's process.
+fn server_caller() -> Result<(u64, u64, SvcId), i64> {
+    server_caller_at().map(|(id, tgid, h, _)| (id, tgid, h))
 }
 
 /// [`server_caller`], with the task's index in the scheduler's table.
-fn server_caller_at() -> Result<(u64, u64, usize), i64> {
-    let mut sched = crate::task::SCHEDULER.lock();
-    let idx = sched.current_index();
-    sched.current_task_mut(|t| (t.service == Some(ENDPOINT_LINUX_SERVER)).then_some((t.id.0, t.tgid, idx))).flatten().ok_or(EPERM)
+fn server_caller_at() -> Result<(u64, u64, SvcId, usize), i64> {
+    let (me, tgid, ep, idx) = {
+        let mut sched = crate::task::SCHEDULER.lock();
+        let idx = sched.current_index();
+        sched.current_task_mut(|t| t.service.map(|ep| (t.id.0, t.tgid, ep, idx))).flatten().ok_or(EPERM)?
+    };
+    let h = svc::host_by_endpoint(ep).ok_or(EPERM)?;
+    Ok((me, tgid, h, idx))
 }
 
-/// `SYS_LX_CTL`: [`LX_CTL_ATTACH`] registers the calling thread as a worker and returns its
-/// syscall page's address; [`LX_CTL_ONLINE`] starts forwarding (every worker attached, the
-/// endpoint registered).
+/// The calling service's host, if request `id` is one of its own (`-ESRCH` otherwise).
+fn server_for(id: u64) -> Result<&'static Host, i64> {
+    let (_, _, h) = server_caller()?;
+    if lx_req_svc(id) != h {
+        return Err(ESRCH);
+    }
+    svc::host(h).ok_or(ESRCH)
+}
+
+/// `SYS_LX_CTL`: [`LX_CTL_ATTACH`] registers the calling thread as a worker of its service
+/// and returns its syscall page's address; [`LX_CTL_OBJAREA`] maps the service's object
+/// area; [`LX_CTL_ONLINE`] starts forwarding (every worker attached, the endpoint
+/// registered); [`LX_CTL_WAKE`] wakes the service's main thread.
 pub fn ctl(op: u64) -> i64 {
-    let (me, tgid) = match server_caller() {
+    let (me, tgid, h) = match server_caller() {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let ep = svc::endpoint_of(h);
     match op {
         LX_CTL_ATTACH => {
+            let x = svc::host_or_make(h, ep);
             // A new server process: the state of one that went away goes
-            let old = lx(|s| s.server_tgid);
+            let old = x.lx(|s| s.server_tgid);
             if old != 0 && old != tgid {
                 let alive = crate::task::SCHEDULER.lock().with_process(old, |_| ()).is_some();
                 if alive {
                     return EBUSY;
                 }
-                lx(|s| {
+                x.lx(|s| {
                     s.workers.clear();
                     s.server_tgid = 0;
-                    for t in WORKER_TIDS.iter() {
+                    for t in x.worker_tids.iter() {
                         t.store(0, Ordering::Release);
                     }
                 });
+                svc::drop_workers(h);
             }
             let Some(page) = ContiguousFrames::allocate(1) else { return ENOMEM };
             let addr = match crate::ipc::service::map_into_current(page.clone(), 1) {
                 Ok(a) => a,
                 Err(e) => return e,
             };
-            lx(|s| {
+            let r = x.lx(|s| {
                 if s.workers.len() >= MAX_WORKERS {
                     return EBUSY;
                 }
                 s.server_tgid = tgid;
                 let idx = crate::task::SCHEDULER.lock().current_index();
-                WORKER_TIDS[s.workers.len()].store(me, Ordering::Release);
-                HAS_WORK[s.workers.len()].store(false, Ordering::Release);
+                x.worker_tids[s.workers.len()].store(me, Ordering::Release);
+                x.has_work[s.workers.len()].store(false, Ordering::Release);
                 s.workers.push(Worker { task: me, page, idle: false, req: NONE, idx });
                 addr as i64
-            })
+            });
+            if r >= 0 {
+                svc::add_worker(me, h);
+            }
+            r
+        }
+        LX_CTL_OBJAREA => {
+            let x = svc::host_or_make(h, ep);
+            obj::map_area(x)
         }
         LX_CTL_ONLINE => {
-            let Some(win) = crate::ipc::service::window(ENDPOINT_LINUX_SERVER) else { return EINVAL };
-            if lx(|s| s.server_tgid != tgid || s.workers.is_empty()) {
+            let Some(x) = svc::host(h) else { return EINVAL };
+            let Some(win) = crate::ipc::service::window(ep) else { return EINVAL };
+            if x.lx(|s| s.server_tgid != tgid || s.workers.is_empty()) {
                 return EINVAL;
             }
             // An empty notification ring
@@ -1517,16 +1717,19 @@ pub fn ctl(op: u64) -> i64 {
                     core::ptr::write_volatile((base as *mut u64).add(i), 0);
                 }
             }
-            NOTES_HEAD.store(0, Ordering::Release);
-            NOTES.store(base, Ordering::Release);
-            obj::online(win.as_mut_ptr() as u64);
-            ONLINE.store(true, Ordering::Release);
-            let n = lx(|s| s.workers.len());
-            crate::kprintln!("[lx] linux-server online (process {}, {} workers)", tgid, n);
+            x.notes_head.store(0, Ordering::Release);
+            x.notes.store(base, Ordering::Release);
+            if obj::online(x) != 0 {
+                return ENOMEM;
+            }
+            svc::take_ids(h, ep);
+            x.online.store(true, Ordering::Release);
+            let n = x.lx(|s| s.workers.len());
+            crate::kprintln!("[lx] {} online (process {}, endpoint {:#x}, {} workers)", crate::ipc::protocol::LXS_NAMES[h as usize], tgid, ep, n);
             0
         }
         LX_CTL_WAKE => {
-            crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+            crate::ipc::service::notify(ep, NOTIFY_LX_NOTES);
             0
         }
         _ => EINVAL,
@@ -1535,28 +1738,32 @@ pub fn ctl(op: u64) -> i64 {
 
 /// `SYS_LX_REPLY_RECV`: answers the call the calling worker serves with `result` (unless
 /// `flags` has [`LX_REPLY_NONE`]; [`LX_REPLY_PENDING`]: the call goes on, answered later by
-/// [`complete`]), then waits for the next call, which is in the worker's syscall page when
-/// this returns 0. The answer hands the CPU straight back to its caller when this worker
-/// has nothing else to do (the direct switch). (The path under the kernel lock; workers
-/// normally come in through [`fast_entry`].)
+/// [`complete`]; [`LX_REPLY_REDIRECT`]: the call goes to another service), then waits for
+/// the next call, which is in the worker's syscall page when this returns 0. The answer
+/// hands the CPU straight back to its caller when this worker has nothing else to do (the
+/// direct switch). (The path under the kernel lock; workers normally come in through
+/// [`fast_entry`].)
 pub fn reply_recv(result: i64, flags: u64) -> i64 {
-    let (me, my_idx) = match server_caller_at() {
-        Ok((me, _, idx)) => (me, idx),
+    let (me, h, my_idx) = match server_caller_at() {
+        Ok((me, _, h, idx)) => (me, h, idx),
         Err(e) => return e,
     };
-    reply_recv_as(me, my_idx, result, flags, false)
+    let Some(x) = svc::host(h) else { return EPERM };
+    reply_recv_as(x, me, my_idx, result, flags, false)
 }
 
-/// [`reply_recv`] for worker `me` (at `my_idx`, a hint); `nobkl`: the lock-free path.
-fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -> i64 {
+/// [`reply_recv`] for worker `me` of host `x` (at `my_idx`, a hint); `nobkl`: the lock-free
+/// path.
+fn reply_recv_as(x: &'static Host, me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -> i64 {
     let answered = x86_64::instructions::interrupts::without_interrupts(|| {
-        lx(|s| {
+        x.lx(|s| {
             let wi = s.workers.iter().position(|w| w.task == me)?;
             s.workers[wi].idx = my_idx;
             let mut wake = (0u64, 0u64, 0usize);
             let mut interrupted = 0u64;
             let cur = s.workers[wi].req;
             if flags & LX_REPLY_NONE == 0 && cur != NONE {
+                let page = s.workers[wi].call_mut();
                 let r = &mut s.reqs[cur];
                 if r.state == RState::Delivered {
                     if flags & LX_REPLY_PENDING != 0 && !r.early {
@@ -1566,32 +1773,40 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
                         if r.interrupted {
                             interrupted = r.id;
                         }
+                    } else if flags & LX_REPLY_REDIRECT != 0 && !r.early {
+                        // Group 19: the caller sends the call on to the service named
+                        r.state = RState::Done;
+                        r.result = LX_REDIRECTED;
+                        // SAFETY: the worker's page (see `deliver`)
+                        r.redir = (result as u64, unsafe { core::ptr::read_volatile(&(*page).redir_obj) });
+                        x.req_done[cur].store(true, Ordering::SeqCst);
+                        wake = (r.client, r.id, r.client_idx);
                     } else {
                         r.state = RState::Done;
                         if !r.early {
                             r.result = result;
                         }
-                        REQ_DONE[cur].store(true, Ordering::SeqCst);
+                        x.req_done[cur].store(true, Ordering::SeqCst);
                         wake = (r.client, r.id, r.client_idx);
                         // The output the server left in the page (copy-out table; a call
                         // completed early wrote its output itself)
                         if r.has_copy && !r.early {
-                            let page = s.workers[wi].call_mut() as *const u8;
+                            let page = page as *const u8;
                             // SAFETY: the worker's page (see `deliver`); the header and copy
                             // area lie within it
                             let (out_len, data) = unsafe {
                                 let h = core::ptr::read_volatile(page.add(LX_COPY_OFF) as *const LxCopy);
                                 (h.out_len, core::slice::from_raw_parts(page.add(LX_DATA_OFF), LX_DATA_SIZE))
                             };
-                            copy::take_output(buf_of(cur), &out_len, data);
+                            copy::take_output(x.buf(cur), &out_len, data);
                         }
                     }
                 }
             }
             s.workers[wi].req = NONE;
-            HAS_WORK[wi].store(false, Ordering::SeqCst);
+            x.has_work[wi].store(false, Ordering::SeqCst);
             // A call waiting in the queue comes next; otherwise this worker goes idle
-            let next = take_queued(s, wi);
+            let next = take_queued(x, s, wi);
             if !next {
                 s.workers[wi].idle = true;
             }
@@ -1600,12 +1815,12 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
     });
     let Some(((client, id, hint), next, wi, interrupted)) = answered else { return EPERM };
     if interrupted != 0 {
-        note(LX_NOTE_INTERRUPT, interrupted, 0, 0);
+        note_to(x.id, LX_NOTE_INTERRUPT, interrupted, 0, 0);
     }
     if client != 0 {
         // Straight back to the caller, unless a call was delivered to this worker meanwhile;
         // otherwise the caller is woken the ordinary way
-        let switched = !next && x86_64::instructions::interrupts::without_interrupts(|| direct_to(client, hint, Some(&HAS_WORK[wi]), nobkl));
+        let switched = !next && x86_64::instructions::interrupts::without_interrupts(|| direct_to(client, hint, Some(&x.has_work[wi]), nobkl));
         if switched {
             REPLY_DIRECT.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -1614,31 +1829,31 @@ fn reply_recv_as(me: u64, my_idx: usize, result: i64, flags: u64, nobkl: bool) -
             if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
                 // Its caller died meanwhile: nobody takes the answer
                 drop(sched);
-                free_if(id, RState::Done);
+                free_if(x, id, RState::Done);
             }
         }
     }
     if next {
         return 0;
     }
-    wait_work(me, nobkl)
+    wait_work(x, me, nobkl)
 }
 
-/// Waits (blocked) until a call is delivered to worker `me`, or one is queued. The worker
-/// blocks only under the table's lock after seeing nothing, so a delivery (marked under the
-/// same lock, the worker woken after it) is never missed.
-fn wait_work(me: u64, nobkl: bool) -> i64 {
+/// Waits (blocked) until a call is delivered to worker `me` of host `x`, or one is queued.
+/// The worker blocks only under the table's lock after seeing nothing, so a delivery
+/// (marked under the same lock, the worker woken after it) is never missed.
+fn wait_work(x: &'static Host, me: u64, nobkl: bool) -> i64 {
     loop {
         let st = x86_64::instructions::interrupts::without_interrupts(|| {
-            lx(|s| {
+            x.lx(|s| {
                 let Some(wi) = s.workers.iter().position(|w| w.task == me) else { return Err(ESRCH) };
                 if s.workers[wi].req != NONE {
                     s.workers[wi].idle = false;
-                    HAS_WORK[wi].store(false, Ordering::SeqCst);
+                    x.has_work[wi].store(false, Ordering::SeqCst);
                     return Ok(true);
                 }
-                if take_queued(s, wi) {
-                    HAS_WORK[wi].store(false, Ordering::SeqCst);
+                if take_queued(x, s, wi) {
+                    x.has_work[wi].store(false, Ordering::SeqCst);
                     return Ok(true);
                 }
                 s.workers[wi].idle = true;
@@ -1657,17 +1872,19 @@ fn wait_work(me: u64, nobkl: bool) -> i64 {
     }
 }
 
-/// `SYS_LX_COMPLETE`: answers pending request `id` with `result` (any server thread).
+/// `SYS_LX_COMPLETE`: answers pending request `id` with `result` (any thread of the
+/// service the request belongs to).
 pub fn complete(id: u64, result: i64) -> i64 {
-    if let Err(e) = server_caller() {
-        return e;
+    if let Err(e) = server_for(id) {
+        return if e == ESRCH { EINVAL } else { e };
     }
     complete_as_kernel(id, result)
 }
 
-/// [`complete`] without the check that the server calls it (the net-server doorbell hook).
+/// [`complete`] without the check that the service calls it (the net-server doorbell hook).
 fn complete_as_kernel(id: u64, result: i64) -> i64 {
-    let client = lx(|s| {
+    let Some(x) = svc::host(lx_req_svc(id)) else { return EINVAL };
+    let client = x.lx(|s| {
         // Still being served (its "pending" answer not given yet): kept for that answer
         if let Some(r) = s.reqs.iter_mut().find(|r| r.id == id && r.state == RState::Delivered && !r.early) {
             r.early = true;
@@ -1675,7 +1892,7 @@ fn complete_as_kernel(id: u64, result: i64) -> i64 {
             return Some(0);
         }
         let slot = s.reqs.iter().position(|r| r.id == id && r.state == RState::Pending)?;
-        REQ_DONE[slot].store(true, Ordering::SeqCst);
+        x.req_done[slot].store(true, Ordering::SeqCst);
         let r = &mut s.reqs[slot];
         r.state = RState::Done;
         r.result = result;
@@ -1688,7 +1905,7 @@ fn complete_as_kernel(id: u64, result: i64) -> i64 {
     let mut sched = crate::task::SCHEDULER.lock();
     if !sched.unblock_task(TaskId(client)) && !sched.is_task_alive(TaskId(client)) {
         drop(sched);
-        free_if(id, RState::Done);
+        free_if(x, id, RState::Done);
     }
     0
 }
@@ -1702,9 +1919,10 @@ const MAX_COPY: u64 = 1 << 20;
 
 /// The address space of the caller of request `id` (being served or pending).
 fn client_mm(id: u64) -> Result<Arc<Mutex<crate::memory::vm::Mm>>, i64> {
-    let client = lx(|s| s.reqs.iter().find(|r| r.id == id && matches!(r.state, RState::Delivered | RState::Pending)).map(|r| r.client)).ok_or(ESRCH)?;
+    let client = client_of(id).ok_or(ESRCH)?;
     crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.mm.clone()).flatten().ok_or(ESRCH)
 }
+
 
 /// The kernel address of `n` bytes at `addr` of address space `mm` (within one page),
 /// faulted in as the client would (writable when `write`).
@@ -1743,17 +1961,18 @@ pub enum MemOp {
     ReadStr,
 }
 
+
 /// `SYS_LX_READ` / `SYS_LX_WRITE` / `SYS_LX_READ_STR`: copies `len` bytes (at most `len` for
 /// a string) between `addr` in the address space of request `id`'s caller and `buf` in the
-/// server.
+/// service.
 ///
 /// # Returns
 ///
 /// The bytes copied (a string's length), `-EFAULT` for a bad address on either side,
-/// `-ESRCH` if `id` is not a call the server is serving, `-ENAMETOOLONG` for a string with
-/// no NUL within `len` bytes.
+/// `-ESRCH` if `id` is not a call the calling service is serving, `-ENAMETOOLONG` for a
+/// string with no NUL within `len` bytes.
 pub fn client_mem(op: MemOp, id: u64, addr: u64, len: u64, buf: u64) -> i64 {
-    if let Err(e) = server_caller() {
+    if let Err(e) = server_for(id) {
         return e;
     }
     if len > MAX_COPY {
@@ -1824,40 +2043,41 @@ pub fn proc_info(tgid: u64, out: u64) -> i64 {
 }
 
 // ----------------------------------------------------------------------
-// Notifications
+// Notifications (one ring per host, in its window)
 // ----------------------------------------------------------------------
 
-/// Kernel address of the notification ring's header in the server's window (0: offline).
-static NOTES: AtomicU64 = AtomicU64::new(0);
-/// Posting is serialized (the posters run under the kernel lock already; this keeps it so).
-static NOTES_LOCK: Mutex<()> = Mutex::new(());
-/// A copy of the ring's head (a forwarded call reads it without touching the window).
-static NOTES_HEAD: AtomicU64 = AtomicU64::new(0);
-
-/// The ring position: what has been posted so far.
-fn notes_head() -> u64 {
-    NOTES_HEAD.load(Ordering::Acquire)
-}
-
-/// Posts notification `kind` (`LX_NOTE_*`) with `a`, `b`, `c` to the server and wakes its
-/// main thread. Safe with the scheduler lock held (no allocation, a deferred wake only).
+/// Posts process event `kind` (`LX_NOTE_FORK`, `EXEC`, `EXIT`) with `a`, `b`, `c` to every
+/// host that subscribed to it and wakes their main threads. Safe with the scheduler lock
+/// held (no allocation, a deferred wake only).
 pub fn note(kind: u64, a: u64, b: u64, c: u64) {
-    if note_quiet(kind, a, b, c) {
-        crate::ipc::service::notify(ENDPOINT_LINUX_SERVER, NOTIFY_LX_NOTES);
+    for x in svc::hosts() {
+        if kind < 64 && x.subs.load(Ordering::Relaxed) & (1 << kind) != 0 && note_quiet_to(x, kind, a, b, c) {
+            crate::ipc::service::notify(x.endpoint.load(Ordering::Relaxed), NOTIFY_LX_NOTES);
+        }
     }
 }
 
-/// [`note`] without waking the main thread (the caller does, once for several); `false`
-/// when no server is online.
-pub fn note_quiet(kind: u64, a: u64, b: u64, c: u64) -> bool {
-    let base = NOTES.load(Ordering::Acquire);
+/// Posts notification `kind` to host `h` only (an interrupt, a close, a timer) and wakes
+/// its main thread.
+pub fn note_to(h: SvcId, kind: u64, a: u64, b: u64, c: u64) {
+    if let Some(x) = svc::host(h) {
+        if note_quiet_to(x, kind, a, b, c) {
+            crate::ipc::service::notify(x.endpoint.load(Ordering::Relaxed), NOTIFY_LX_NOTES);
+        }
+    }
+}
+
+/// [`note_to`] without waking the main thread (the caller does, once for several); `false`
+/// when the host is not online.
+pub(crate) fn note_quiet_to(x: &Host, kind: u64, a: u64, b: u64, c: u64) -> bool {
+    let base = x.notes.load(Ordering::Acquire);
     if base == 0 {
         return false;
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
-        let _g = NOTES_LOCK.lock();
+        let _g = x.notes_lock.lock();
         let w = base as *mut u64;
-        // SAFETY: the ring (header and entries) lies in the server's 256 KiB window
+        // SAFETY: the ring (header and entries) lies in the host's 256 KiB window
         unsafe {
             let head = core::ptr::read_volatile(w);
             let tail = core::ptr::read_volatile(w.add(1));
@@ -1872,7 +2092,7 @@ pub fn note_quiet(kind: u64, a: u64, b: u64, c: u64) -> bool {
                 core::ptr::write_volatile(e.add(3), c);
                 core::sync::atomic::fence(Ordering::Release);
                 core::ptr::write_volatile(w, head + 1);
-                NOTES_HEAD.store(head + 1, Ordering::Release);
+                x.notes_head.store(head + 1, Ordering::Release);
             }
         }
     });
@@ -1883,42 +2103,54 @@ pub fn note_quiet(kind: u64, a: u64, b: u64, c: u64) -> bool {
 // The crash policy
 // ----------------------------------------------------------------------
 
-/// A recovery after a crash is in progress.
-static RECOVERING: AtomicBool = AtomicBool::new(false);
-
-/// The hook of the server's endpoint (`ipc::service::set_signal_hook`): called with
-/// `SIGNAL_GONE` when the server went away (it died, hung, or was restarted by hand).
+/// The hook of linux-server's endpoint (`ipc::service::set_signal_hook`).
 pub fn on_signal(bits: u64) {
+    on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LINUX_SERVER }>(bits)
+}
+
+/// The hook of service endpoint `EP`: called with `SIGNAL_GONE` when its process went away
+/// (it died, hung, or was restarted by hand), or with [`LX_SIGNAL_OBJS`] (the doorbell:
+/// readiness words changed).
+///
+/// [`LX_SIGNAL_OBJS`]: crate::ipc::protocol::LX_SIGNAL_OBJS
+pub fn on_signal_for<const EP: u32>(bits: u64) {
+    let Some(h) = svc::host_by_endpoint(EP) else { return };
     if bits == crate::ipc::service::SIGNAL_GONE {
-        server_gone();
+        server_gone(h);
     } else if bits & crate::ipc::protocol::LX_SIGNAL_OBJS != 0 {
-        obj::on_doorbell();
+        if let Some(x) = svc::host(h) {
+            obj::on_doorbell(x);
+        }
     }
 }
 
-/// The server went away: the calls in flight fail at once with `-EIO`, its remaining
-/// threads end, and the crash policy runs ([`recover_task`]).
-fn server_gone() {
-    let was_online = ONLINE.swap(false, Ordering::AcqRel);
-    netwaits(|w| w.clear());
-    RELAY_SERVER.store(false, Ordering::Release);
-    WATCHED_NET.store(0, Ordering::Release);
-    NOTES.store(0, Ordering::Release);
-    NOTES_HEAD.store(0, Ordering::Release);
-    obj::offline();
-    timer::clear();
+/// Host `h`'s process went away: the calls in flight fail at once with `-EIO`, its remaining
+/// threads end, and its crash policy runs: for linux-server every Linux program ends
+/// ([`recover_task`], decision 6); for any other service only its own objects fail.
+fn server_gone(h: SvcId) {
+    let Some(x) = svc::host(h) else { return };
+    let was_online = x.online.swap(false, Ordering::AcqRel);
+    if svc::host_of(LXS_NET) == h {
+        netwaits(|w| w.clear());
+        RELAY_SERVER.store(false, Ordering::Release);
+        WATCHED_NET.store(0, Ordering::Release);
+    }
+    x.notes.store(0, Ordering::Release);
+    x.notes_head.store(0, Ordering::Release);
+    obj::offline(x);
+    timer::clear(h);
     let mut clients = [0u64; MAX_REQS];
     let mut n = 0;
-    let tgid = lx(|s| {
+    let tgid = x.lx(|s| {
         let tgid = s.server_tgid;
         s.server_tgid = 0;
         s.workers.clear();
-        for t in WORKER_TIDS.iter() {
+        for t in x.worker_tids.iter() {
             t.store(0, Ordering::Release);
         }
         for (i, r) in s.reqs.iter_mut().enumerate() {
             if matches!(r.state, RState::Queued | RState::Delivered | RState::Pending) {
-                REQ_DONE[i].store(true, Ordering::SeqCst);
+                x.req_done[i].store(true, Ordering::SeqCst);
                 r.state = RState::Failed;
                 r.result = EIO;
                 clients[n] = r.client;
@@ -1927,7 +2159,9 @@ fn server_gone() {
         }
         tgid
     });
+    svc::drop_workers(h);
     FAILED_CALLS.fetch_add(n as u64, Ordering::Relaxed);
+    x.failed.fetch_add(n as u64, Ordering::Relaxed);
     let threads = {
         let mut sched = crate::task::SCHEDULER.lock();
         for &c in &clients[..n] {
@@ -1940,14 +2174,18 @@ fn server_gone() {
         }
     };
     crate::kprintln!(
-        "[lx] linux-server (process {}) went away: {} calls in flight failed with EIO, {} of its threads ended",
+        "[lx] {} (process {}) went away: {} calls in flight failed with EIO, {} of its threads ended",
+        crate::ipc::protocol::LXS_NAMES[h as usize],
         tgid,
         n,
         threads
     );
-    // The user's decision 6: every Linux program ends and the desktop comes back at the
-    // login screen once the supervisor has restarted the server
-    if (was_online || tgid != 0) && !RECOVERING.swap(true, Ordering::AcqRel) {
+    // wave6 G21 begin: restart::gone(h) decides the class (Transparent / FailObjects / EndLinux)
+    // wave6 G21 end
+    // The user's decision 6 for linux-server: every Linux program ends and the desktop comes
+    // back at the login screen once the supervisor has restarted the server. Any other
+    // service (FailObjects): its objects went stale above, its callers got EIO; programs live
+    if h == LXS_LINUX && (was_online || tgid != 0) && !x.recovering.swap(true, Ordering::AcqRel) {
         crate::task::spawn("lx-recover", recover_task, crate::task::TaskPriority::Normal);
     }
 }
@@ -1973,32 +2211,36 @@ fn recover_task() {
     } else {
         crate::kprintln!("[lx] linux-server is back");
     }
-    RECOVERING.store(false, Ordering::Release);
+    if let Some(x) = svc::host(LXS_LINUX) {
+        x.recovering.store(false, Ordering::Release);
+    }
     crate::task::exit();
 }
 
 /// Called by the supervisor every second: a worker thread that died alone (killed by hand)
-/// would leave its calls unanswered, so the whole server is ended and restarted.
+/// would leave its calls unanswered, so the whole service is ended and restarted.
 pub fn watch() {
-    if !is_online() {
-        return;
-    }
-    let (tgid, workers, n) = lx(|s| {
-        let mut w = [0u64; MAX_WORKERS];
-        for (i, x) in s.workers.iter().enumerate() {
-            w[i] = x.task;
+    for x in svc::hosts() {
+        if !x.is_online() {
+            continue;
         }
-        (s.server_tgid, w, s.workers.len())
-    });
-    let mut sched = crate::task::SCHEDULER.lock();
-    if let Some(dead) = workers[..n].iter().find(|&&t| !sched.is_task_alive(TaskId(t))) {
-        crate::kprintln!("[lx] linux-server worker {} died: ending the server (process {})", dead, tgid);
-        sched.kill_group(tgid);
+        let (tgid, workers, n) = x.lx(|s| {
+            let mut w = [0u64; MAX_WORKERS];
+            for (i, k) in s.workers.iter().enumerate() {
+                w[i] = k.task;
+            }
+            (s.server_tgid, w, s.workers.len())
+        });
+        let mut sched = crate::task::SCHEDULER.lock();
+        if let Some(dead) = workers[..n].iter().find(|&&t| !sched.is_task_alive(TaskId(t))) {
+            crate::kprintln!("[lx] {} worker {} died: ending the service (process {})", crate::ipc::protocol::LXS_NAMES[x.id as usize], dead, tgid);
+            sched.kill_group(tgid);
+        }
     }
 }
 
-/// The forwarding state for the task dump (QEMU's `nmi`): each worker, each call in flight,
-/// each CPU's LEAVING mark and the kernel lock's owner. Never waits for a lock.
+/// The forwarding state for the task dump (QEMU's `nmi`): each host's workers and calls in
+/// flight, each CPU's LEAVING mark and the kernel lock's owner. Never waits for a lock.
 pub fn dump() {
     use alloc::format;
     let w = crate::console::serial_write;
@@ -2011,43 +2253,56 @@ pub fn dump() {
         DIRECT_CALLS.load(Ordering::Relaxed),
         QUEUED_CALLS.load(Ordering::Relaxed)
     ));
-    let Some(s) = LX.try_lock() else {
-        w("[lx] request table locked\n");
-        return;
-    };
-    for (i, x) in s.workers.iter().enumerate() {
-        w(&format!("[lx] worker {} task {} idle {} req {} has_work {}\n", i, x.task, x.idle, x.req as i64, HAS_WORK[i].load(Ordering::Relaxed)));
-    }
-    for (i, r) in s.reqs.iter().enumerate() {
-        if r.state != RState::Free {
-            w(&format!("[lx] req slot {} id {} {:?} client {} result {}\n", i, r.id, r.state, r.client, r.result));
+    for x in svc::hosts() {
+        let name = crate::ipc::protocol::LXS_NAMES[x.id as usize];
+        let Some(s) = x.table.try_lock() else {
+            w(&format!("[lx] {}: request table locked\n", name));
+            continue;
+        };
+        w(&format!("[lx] {}: online {}\n", name, x.is_online()));
+        for (i, k) in s.workers.iter().enumerate() {
+            w(&format!("[lx] {} worker {} task {} idle {} req {} has_work {}\n", name, i, k.task, k.idle, k.req as i64, x.has_work[i].load(Ordering::Relaxed)));
+        }
+        for (i, r) in s.reqs.iter().enumerate() {
+            if r.state != RState::Free {
+                w(&format!("[lx] {} req slot {} id {:#x} {:?} client {} result {}\n", name, i, r.id, r.state, r.client, r.result));
+            }
         }
     }
 }
 
-/// `(online, workers, idle workers, calls in flight, direct, queued, failed)`, for the
-/// `service` diagnostics.
+/// `(online, workers, idle workers, calls in flight, direct, queued, failed)` of
+/// linux-server, for the `service` diagnostics.
 pub fn stats() -> (bool, usize, usize, usize, u64, u64, u64) {
-    let (w, idle, inflight) = lx(|s| (s.workers.len(), s.workers.iter().filter(|w| w.idle).count(), s.reqs.iter().filter(|r| r.state != RState::Free).count()));
-    (
-        is_online(),
-        w,
-        idle,
-        inflight,
-        DIRECT_CALLS.load(Ordering::Relaxed),
-        QUEUED_CALLS.load(Ordering::Relaxed),
-        FAILED_CALLS.load(Ordering::Relaxed),
-    )
+    let Some(x) = svc::host(LXS_LINUX) else { return (false, 0, 0, 0, 0, 0, 0) };
+    let (w, idle, inflight) = x.lx(|s| (s.workers.len(), s.workers.iter().filter(|w| w.idle).count(), s.reqs.iter().filter(|r| r.state != RState::Free).count()));
+    (x.is_online(), w, idle, inflight, x.direct.load(Ordering::Relaxed), x.queued.load(Ordering::Relaxed), x.failed.load(Ordering::Relaxed))
 }
 
 // ----------------------------------------------------------------------
-// Kernel requests to the server's main thread
+// Kernel requests to a service's main thread
 // ----------------------------------------------------------------------
 
-/// `/proc/net/tcp`, `tcp6`, `udp` or `udp6` (Group 12): from linux-server, whose sockets
-/// they list, once Internet sockets moved; `None` while they are the kernel's.
+/// A hand-off request `msg` to the main thread of service `s`'s process, whose answer is
+/// text in its window (`/proc/keys`, `/proc/net/*`); `prep` fills the window first.
+fn window_text(s: SvcId, msg: crate::ipc::Message, prep: impl FnOnce(&mut [u8])) -> Option<alloc::string::String> {
+    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF};
+    let ep = svc::endpoint_of(s);
+    let _window = crate::ipc::service::hold_window(ep);
+    let win = crate::ipc::service::window(ep)?;
+    prep(win);
+    let len = match crate::ipc::service::call(ep, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
+        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
+        _ => return None,
+    };
+    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
+    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+}
+
+/// `/proc/net/tcp`, `tcp6`, `udp` or `udp6` (Group 12): from the network service, whose
+/// sockets they list, once Internet sockets moved; `None` while they are the kernel's.
 pub fn proc_net_text(file: &str) -> Option<alloc::string::String> {
-    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_NET};
+    use crate::ipc::protocol::MSG_LX_PROC_NET;
     let code = match file {
         "tcp" => 0,
         "tcp6" => 1,
@@ -2055,65 +2310,44 @@ pub fn proc_net_text(file: &str) -> Option<alloc::string::String> {
         "udp6" => 3,
         _ => return None,
     };
-    if !family_moved(2) || !is_online() {
+    if !family_moved(2) || !svc::online(LXS_NET) {
         return None;
     }
     let isolated = crate::compat::linux::ns::net_isolated() as u64;
-    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
-    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
-    let msg = crate::ipc::Message::with_args(MSG_LX_PROC_NET, [code, isolated, 0, 0]);
-    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
-        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
-        _ => return None,
-    };
-    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
-    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+    window_text(LXS_NET, crate::ipc::Message::with_args(MSG_LX_PROC_NET, [code, isolated, 0, 0]), |_| {})
 }
 
-/// `/proc/keys` for the calling Linux thread, from the server when the key calls are
+/// `/proc/keys` for the calling Linux thread, from the key service when the key calls are
 /// forwarded (`None`: the in-kernel table answers). A hand-off call: the reader may hold
 /// its descriptor table's lock.
 pub fn proc_keys_text() -> Option<alloc::string::String> {
-    use crate::ipc::protocol::{LX_PROC_KEYS_GROUPS_OFF, LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_KEYS};
+    use crate::ipc::protocol::{LX_PROC_KEYS_GROUPS_OFF, MSG_LX_PROC_KEYS};
     if !keys_forwarded() {
         return None;
     }
-    if !is_online() {
+    if !svc::online(LXS_SEC) {
         return Some(alloc::string::String::new());
     }
     let (tid, tgid, euid, egid, caps) = crate::task::with_current_task_mut(|t| (t.id.0, t.tgid, t.euid, t.egid, if t.caps.in_userns { 0 } else { t.caps.effective }))?;
     let groups: alloc::vec::Vec<u32> = crate::compat::linux::proc::PROCS.lock().get(&tgid).map(|p| p.groups.clone()).unwrap_or_default();
-    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
-    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
-    let n = groups.len().min(1000);
-    win[LX_PROC_KEYS_GROUPS_OFF..LX_PROC_KEYS_GROUPS_OFF + 4].copy_from_slice(&(n as u32).to_le_bytes());
-    for (i, g) in groups[..n].iter().enumerate() {
-        let o = LX_PROC_KEYS_GROUPS_OFF + 4 + i * 4;
-        win[o..o + 4].copy_from_slice(&g.to_le_bytes());
-    }
     let msg = crate::ipc::Message::with_args(MSG_LX_PROC_KEYS, [tid, tgid, euid as u64 | (egid as u64) << 32, caps]);
-    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
-        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
-        _ => 0,
-    };
-    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
-    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+    let text = window_text(LXS_SEC, msg, |win| {
+        let n = groups.len().min(1000);
+        win[LX_PROC_KEYS_GROUPS_OFF..LX_PROC_KEYS_GROUPS_OFF + 4].copy_from_slice(&(n as u32).to_le_bytes());
+        for (i, g) in groups[..n].iter().enumerate() {
+            let o = LX_PROC_KEYS_GROUPS_OFF + 4 + i * 4;
+            win[o..o + 4].copy_from_slice(&g.to_le_bytes());
+        }
+    });
+    Some(text.unwrap_or_default())
 }
 
-/// Group 13: `/proc/net/unix` from the server when Unix sockets are its own (`None`: the
-/// in-kernel table answers). A hand-off call, like `/proc/keys`.
+/// Group 13: `/proc/net/unix` from the IPC service when Unix sockets are its own (`None`:
+/// the in-kernel table answers). A hand-off call, like `/proc/keys`.
 pub fn proc_net_unix_text() -> Option<alloc::string::String> {
-    use crate::ipc::protocol::{LX_PROC_KEYS_TEXT_MAX, LX_PROC_KEYS_TEXT_OFF, MSG_LX_PROC_NET_UNIX};
+    use crate::ipc::protocol::MSG_LX_PROC_NET_UNIX;
     if !step4() {
         return None;
     }
-    let _window = crate::ipc::service::hold_window(ENDPOINT_LINUX_SERVER);
-    let win = crate::ipc::service::window(ENDPOINT_LINUX_SERVER)?;
-    let msg = crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]);
-    let len = match crate::ipc::service::call(ENDPOINT_LINUX_SERVER, msg, crate::ipc::service::CALL_TIMEOUT_TICKS) {
-        Ok(r) if (r.args[0] as i64) >= 0 => (r.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX),
-        _ => 0,
-    };
-    let text = &win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len];
-    Some(alloc::string::String::from_utf8_lossy(text).into_owned())
+    Some(window_text(LXS_IPC, crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]), |_| {}).unwrap_or_default())
 }

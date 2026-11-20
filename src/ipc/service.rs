@@ -480,7 +480,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 9] = [
+static SERVICES: [Service; 15] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -491,6 +491,15 @@ static SERVICES: [Service; 9] = [
     Service::new(crate::ipc::protocol::ENDPOINT_NET_SERVER),
     // Wave 3 (Group 7): the Linux server's main thread (its workers use `crate::lx`)
     Service::new(crate::ipc::protocol::ENDPOINT_LINUX_SERVER),
+    // wave6 G19 begin: the Linux services' endpoints (vfs-server, lx-net, lx-ipc, lx-proc,
+    // lx-sec once split out; the test service)
+    Service::new(crate::ipc::protocol::ENDPOINT_VFS_SERVER),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_NET),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_IPC),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_PROC),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_SEC),
+    Service::new(crate::ipc::protocol::ENDPOINT_SVC_TEST),
+    // wave6 G19 end
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).

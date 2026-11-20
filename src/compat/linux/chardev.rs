@@ -267,6 +267,10 @@ pub trait CharDevice: Send + Sync {
 pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     let nonblock = flags & 0o4000 != 0;
+    // wave6 G19: a major a Linux service claimed: its `open` goes to that service
+    if let Some(r) = crate::lx::dev_open(rdev, flags) {
+        return Some(r);
+    }
     match major {
         226 => Some(super::drm::open(minor, nonblock)),
         13 => Some(super::evdev::open(minor, nonblock)),
