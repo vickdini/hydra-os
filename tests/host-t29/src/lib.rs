@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod fake;
+pub mod host;
 
 /// *stub* Kernel console output; discarded on the host.
 #[macro_export]
