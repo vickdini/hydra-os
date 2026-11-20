@@ -589,3 +589,48 @@ fn a_full_request_table_refuses_the_call() {
         }
     });
 }
+
+// ----------------------------------------------------------------------
+// Requests whose caller died before taking their end
+// ----------------------------------------------------------------------
+
+#[test]
+fn slots_of_callers_killed_after_a_crash_are_reclaimed_when_the_table_is_full() {
+    let sim = world();
+    let s = start(&sim, LXS_TEST, 300, 1, true, handler(|_| (0, LX_REPLY_PENDING)));
+    // Three programs wait in pending calls
+    for t in 101..104 {
+        sim.spawn(Task::linux(t, t), || {
+            crate::world::bkl_enter();
+            let _ = forward(&frame(LX_TEST_NR, [LX_TEST_PENDING, 0, 0, 0, 0, 0]));
+            unreachable!("killed in its call");
+        });
+    }
+    sim.run_others();
+    assert_eq!(s.x.lx(|t| t.reqs.iter().filter(|r| r.state == RState::Pending).count()), 3);
+    // The service dies (its calls fail), and the programs are killed before they run
+    // again (EndLinux's recovery ends every Linux program: a blocked thread dies at once)
+    server_gone(LXS_TEST);
+    for t in 101..104 {
+        sim.with_task(t, |t| t.state = crate::task::TaskState::Dead);
+    }
+    // Nobody will take those three ends: their slots stay Failed
+    assert_eq!(s.x.lx(|t| t.reqs.iter().filter(|r| r.state == RState::Failed).count()), 3);
+    // The new instance; every other slot taken by live calls
+    let s2 = start(&sim, LXS_TEST, 400, 1, true, handler(|_| (9, 0)));
+    s2.x.lx(|t| {
+        for (i, r) in t.reqs.iter_mut().enumerate() {
+            if r.state == RState::Free {
+                *r = svc::Req { state: RState::Pending, id: 5000 + i as u64, client: 100, ..svc::Req::FREE };
+            }
+        }
+    });
+    // A full table frees the dead callers' slots instead of refusing the call
+    assert_eq!(test_call(LX_TEST_NULL, 0, 0), 9);
+    assert_eq!(s2.x.lx(|t| t.reqs.iter().filter(|r| r.state == RState::Failed).count()), 0);
+    s2.x.lx(|t| {
+        for r in t.reqs.iter_mut() {
+            *r = svc::Req::FREE;
+        }
+    });
+}

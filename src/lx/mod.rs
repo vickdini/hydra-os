@@ -1140,7 +1140,7 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
             ENOSYS
         }));
     }
-    let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free) else { return Ok(Err(EAGAIN)) };
+    let Some(slot) = s.reqs.iter().position(|r| r.state == RState::Free).or_else(|| reclaim(s)) else { return Ok(Err(EAGAIN)) };
     // An idle worker takes it at once
     let wi = s.workers.iter().position(|w| w.idle);
     // The copies first (nothing is changed yet when they fail): user memory straight into
@@ -1189,6 +1189,23 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
     Ok(Ok((slot, id, target)))
 }
 // wave6 G22 end
+
+/// A full request table (test wave, Group 30): frees the requests whose caller died before
+/// it took their end, and returns the first slot freed. Nobody else frees those: a call
+/// failed by its service's crash, or answered, whose caller was then killed before it ran
+/// again (a blocked thread retired by `kill_linux_tasks` dies at once, its `wait_for` never
+/// runs). Without this, each linux-server crash leaked one slot per program it ended.
+fn reclaim(s: &mut svc::Lx) -> Option<usize> {
+    let sched = crate::task::SCHEDULER.lock();
+    let mut first = None;
+    for (i, r) in s.reqs.iter_mut().enumerate() {
+        if matches!(r.state, RState::Failed | RState::Done) && !sched.is_task_alive(TaskId(r.client)) {
+            *r = Req::FREE;
+            first.get_or_insert(i);
+        }
+    }
+    first
+}
 
 /// [`call_with`] with its copies `copies` (user copies are made when the call is placed),
 /// to host `x`. `kout`: a kernel-buffer read ([`call_obj_kbuf`]): the output to `args[1]`
