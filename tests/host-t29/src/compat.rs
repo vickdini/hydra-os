@@ -408,16 +408,30 @@ pub mod linux_host {
             }
             Ok(p)
         }
-        /// The base directory of a lookup: `/` for absolute paths, the working directory
-        /// (`fake::CWD`) otherwise.
+        /// *mirror* of the kernel's: `/` for absolute paths, the working directory for
+        /// `AT_FDCWD`, an open file's inode and path for a `Vnode` descriptor.
         pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
             if path.first() == Some(&b'/') {
                 return Ok((0, String::from("/")));
             }
             if dirfd as i32 == -100 {
-                return Ok((0, crate::fake::CWD.with_borrow(|c| c.clone())));
+                return Ok(crate::task::with_current_fds_mut(|f| (f.cwd_ino, f.cwd_path.clone())));
             }
-            Err(-9) // EBADF
+            let fd = dirfd as i32;
+            let found = crate::task::with_current_fds_mut(|f| {
+                if fd < 0 {
+                    return Err(-9);
+                }
+                match f.get(fd as usize) {
+                    Some(crate::fs::FileDescriptor::Vnode(v)) => {
+                        let v = v.lock();
+                        Ok((v.ino, v.path.clone()))
+                    }
+                    Some(_) => Err(-20), // ENOTDIR
+                    None => Err(-9),     // EBADF
+                }
+            });
+            found
         }
         /// Plain path join.
         pub(crate) fn join_path(base: &str, path: &[u8]) -> String {
@@ -446,10 +460,11 @@ pub mod linux_host {
         pub(crate) fn proc_root() -> u64 {
             0
         }
-        /// Lookup in `fake::INODE_PATHS` by the joined absolute path.
+        /// Lookup in `fake::INODE_PATHS`: "<base>:<name>" first (one component below a
+        /// directory inode), then the path as given.
         pub(crate) fn resolve(base: u64, path: &[u8], _follow: bool) -> Result<u64, i64> {
             let p = String::from_utf8_lossy(path).into_owned();
-            crate::fake::INODE_PATHS.with_borrow(|m| m.get(&p).copied().ok_or(-2))
+            crate::fake::INODE_PATHS.with_borrow(|m| m.get(&alloc::format!("{base}:{p}")).or_else(|| m.get(&p)).copied().ok_or(-2))
         }
         pub(crate) fn served_by_name(_abs: &str) -> bool {
             false

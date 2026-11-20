@@ -45,6 +45,8 @@ thread_local! {
     pub static ZFS_FILES: RefCell<BTreeMap<String, Vec<u8>>> = const { RefCell::new(BTreeMap::new()) };
     /// Inode mode and contents for the inode-level `ZfsClient` calls.
     pub static INODES: RefCell<BTreeMap<u64, (u32, Vec<u8>)>> = const { RefCell::new(BTreeMap::new()) };
+    /// Owner (uid, gid) of an inode (`ZfsClient::getattr`; root when absent).
+    pub static INODE_OWNERS: RefCell<BTreeMap<u64, (u32, u32)>> = const { RefCell::new(BTreeMap::new()) };
     /// Path -> inode, for `vfs::resolve`.
     pub static INODE_PATHS: RefCell<BTreeMap<String, u64>> = const { RefCell::new(BTreeMap::new()) };
     /// Tasks woken through the scheduler.
@@ -130,6 +132,7 @@ pub fn reset() {
     ZFS_FILES.with_borrow_mut(|m| m.clear());
     INODES.with_borrow_mut(|m| m.clear());
     INODE_PATHS.with_borrow_mut(|m| m.clear());
+    INODE_OWNERS.with_borrow_mut(|m| m.clear());
     WOKEN.with_borrow_mut(|v| v.clear());
     UNBLOCKED.with_borrow_mut(|v| v.clear());
     SPIN_WAITS.set(false);
@@ -765,7 +768,8 @@ impl ZfsClient {
     pub fn getattr(ino: u64) -> Result<crate::fs::zfs::fsproto::Attr, i64> {
         INODES.with_borrow(|m| {
             let (mode, d) = m.get(&ino).ok_or(-2i64)?;
-            Ok(crate::fs::zfs::fsproto::Attr { ino, size: d.len() as u64, mode: *mode, ..Default::default() })
+            let (uid, gid) = INODE_OWNERS.with_borrow(|o| o.get(&ino).copied().unwrap_or((0, 0)));
+            Ok(crate::fs::zfs::fsproto::Attr { ino, size: d.len() as u64, mode: *mode, uid, gid, ..Default::default() })
         })
     }
     pub fn read_at(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
