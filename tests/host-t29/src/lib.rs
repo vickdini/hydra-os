@@ -68,3 +68,6 @@ pub mod ipc {
     #[path = "../../../../src/ipc/protocol.rs"]
     pub mod protocol;
 }
+
+#[cfg(test)]
+mod tests;

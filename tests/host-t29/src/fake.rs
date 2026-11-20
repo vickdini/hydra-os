@@ -425,8 +425,9 @@ impl SchedulerGuard {
     pub fn with_task<R>(&self, id: TaskId, f: impl FnOnce(&Task) -> R) -> Option<R> {
         TASKS.with_borrow(|v| v.iter().find(|t| t.id == id).map(f))
     }
+    /// Every live task (as the kernel's: dead ones are skipped).
     pub fn for_each_task_mut(&mut self, mut f: impl FnMut(&mut Task)) {
-        TASKS.with_borrow_mut(|v| v.iter_mut().for_each(|t| f(t)));
+        TASKS.with_borrow_mut(|v| v.iter_mut().filter(|t| t.state != TaskState::Dead).for_each(|t| f(t)));
     }
     pub fn for_each_task(&self, mut f: impl FnMut(&Task)) {
         TASKS.with_borrow(|v| v.iter().for_each(|t| f(t)));
@@ -505,10 +506,9 @@ impl SchedulerGuard {
         WOKEN.with_borrow_mut(|v| v.push(id.0));
         true
     }
+    /// The first live task of process `tgid` (as the kernel's).
     pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
-        TASKS.with_borrow(|v| {
-            v.iter().find(|t| t.tgid == tgid && t.id.0 == tgid).or_else(|| v.iter().find(|t| t.tgid == tgid)).map(f)
-        })
+        TASKS.with_borrow(|v| v.iter().find(|t| t.tgid == tgid && t.state != TaskState::Dead).map(f))
     }
 }
 

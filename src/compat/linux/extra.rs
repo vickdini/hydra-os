@@ -188,6 +188,15 @@ fn adjtimex(clock: u64, buf: u64) -> i64 {
         if !may_set_time() {
             return EPERM;
         }
+        // Checked before anything changes (Linux's timekeeping_validate_timex): a bad tick
+        // or clock step fails the whole call
+        if modes & ADJ_TICK != 0 && !(9000..=11000).contains(&get(&t, 88)) {
+            return EINVAL;
+        }
+        let frac_max = if modes & ADJ_NANO != 0 { 1_000_000_000 } else { 1_000_000 };
+        if modes & ADJ_SETOFFSET != 0 && !(0..frac_max).contains(&get(&t, 80)) {
+            return EINVAL;
+        }
         let mut n = NTP.lock();
         if modes & ADJ_SETOFFSET != 0 {
             // Step the clock by `time` (seconds and micro- or nanoseconds)
@@ -220,14 +229,14 @@ fn adjtimex(clock: u64, buf: u64) -> i64 {
             n.constant = get(&t, 48);
         }
         if modes & ADJ_TICK != 0 {
-            let tick = get(&t, 88);
-            if !(9000..=11000).contains(&tick) {
-                return EINVAL;
-            }
-            n.tick = tick;
+            n.tick = get(&t, 88);
         }
+        // The TAI offset comes in `constant`, as on Linux (0..=MAX_TAI_OFFSET, else ignored)
         if modes & ADJ_TAI != 0 {
-            n.tai = get(&t, 8) as i32;
+            let tai = get(&t, 48);
+            if (0..=100_000).contains(&tai) {
+                n.tai = tai as i32;
+            }
         }
         let _ = ADJ_MICRO;
     }
@@ -392,9 +401,16 @@ fn target_pid(pid: u64) -> Result<u64, i64> {
     let sys = super::ns::pid_from_caller(pid as u64);
     if super::proc::PROCS.lock().get(&sys).map_or(true, |p| p.zombie) {
         // Maybe a thread ID: its process
-        return crate::task::SCHEDULER.lock().with_process(sys, |t| t.tgid).ok_or(ESRCH);
+        return with_thread(sys, |t| t.tgid).ok_or(ESRCH);
     }
     Ok(sys)
+}
+
+/// `f` of the live thread `tid`: any thread, not only the first of a process (which is what
+/// the scheduler's `with_process` finds).
+fn with_thread<R>(tid: u64, f: impl FnOnce(&crate::task::Task) -> R) -> Option<R> {
+    let mut sched = crate::task::SCHEDULER.lock();
+    sched.with_task_mut(crate::task::TaskId(tid), |t| (t.state != crate::task::TaskState::Dead).then(|| f(t))).flatten()
 }
 
 /// Ptrace-style access check (`PTRACE_MODE_ATTACH_REALCREDS`): same real, effective and
@@ -839,7 +855,7 @@ fn kcmp(pid1: u64, pid2: u64, kind: u64, idx1: u64, idx2: u64) -> i64 {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    let info = |tid: u64| crate::task::SCHEDULER.lock().with_process(tid, |t| (t.tgid, t.fds.clone(), t.mm.clone()));
+    let info = |tid: u64| with_thread(tid, |t| (t.tgid, t.fds.clone(), t.mm.clone()));
     let (Some((ga, fa, ma)), Some((gb, fb, mb))) = (info(a), info(b)) else { return ESRCH };
     for g in [ga, gb] {
         if let Err(e) = may_access(g) {
@@ -916,7 +932,7 @@ fn sched_target(pid: u64) -> Result<u64, i64> {
         return Ok(super::proc::current_ids().0);
     }
     let tid = super::ns::pid_from_caller(pid as u64);
-    if crate::task::SCHEDULER.lock().with_process(tid, |_| ()).is_none() {
+    if with_thread(tid, |_| ()).is_none() {
         return Err(ESRCH);
     }
     Ok(tid)
@@ -1019,7 +1035,7 @@ fn sched_setattr(pid: u64, uattr: u64, flags: u64) -> i64 {
     // Another user's thread needs CAP_SYS_NICE
     let (me, them) = (
         crate::task::with_current_task_mut(|t| t.euid).unwrap_or(u32::MAX),
-        crate::task::SCHEDULER.lock().with_process(tid, |t| t.uid).unwrap_or(u32::MAX),
+        with_thread(tid, |t| t.uid).unwrap_or(u32::MAX),
     );
     if me != them && me != 0 && !privileged {
         return EPERM;
@@ -1041,8 +1057,8 @@ fn sched_getattr(pid: u64, uattr: u64, size: u64, flags: u64) -> i64 {
         let mut all = SCHED.lock();
         // Drop the records of threads that are gone
         if all.len() > 64 {
-            let sched = crate::task::SCHEDULER.lock();
-            all.retain(|t, _| sched.with_process(*t, |_| ()).is_some());
+            let mut sched = crate::task::SCHEDULER.lock();
+            all.retain(|t, _| sched.with_task_mut(crate::task::TaskId(*t), |x| x.state != crate::task::TaskState::Dead) == Some(true));
         }
         all.get(&tid).copied().unwrap_or_default()
     };

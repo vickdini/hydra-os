@@ -2,11 +2,9 @@
 //! priorities (nice, scheduling policy and parameters, I/O priority), CPU affinity, the
 //! mlock family and `/proc/<pid>/limits`.
 
-mod common;
-
-use common::*;
-use hydra_hosttests_t29::compat::linux::limits;
-use hydra_hosttests_t29::memory::vm::{Mm, PROT_READ, PROT_WRITE, USER_SPACE_START};
+use super::common::*;
+use crate::compat::linux::limits;
+use crate::memory::vm::{Mm, PROT_READ, PROT_WRITE, USER_SPACE_START};
 use std::sync::Arc;
 
 const EPERM: i64 = -1;
@@ -99,7 +97,7 @@ fn nofile_and_fsize_follow_the_current_process() {
     assert_eq!(set(RLIMIT_FSIZE, 100, 200), 0);
     assert_eq!(limits::fsize(), 100);
     // While the scheduler lock is held (callers may hold it): the defaults
-    let g = hydra_hosttests_t29::task::SCHEDULER.lock();
+    let g = crate::task::SCHEDULER.lock();
     assert_eq!(limits::nofile(), 1024);
     assert_eq!(limits::fsize(), INF);
     drop(g);
@@ -262,7 +260,7 @@ fn sched_set_and_get() {
     assert_eq!(limits::sched_getparam(9999, mptr(&mut out)), ESRCH);
     assert_eq!(limits::sched_getscheduler(9999), ESRCH);
     // A real-time thread runs at Hydra's high priority
-    assert_eq!(fake::task(560, |t| t.priority), Some(hydra_hosttests_t29::fake::TaskPriority::High));
+    assert_eq!(fake::task(560, |t| t.priority), Some(crate::fake::TaskPriority::High));
 }
 
 #[test]
@@ -316,7 +314,7 @@ fn io_priorities() {
 
 /// The current process gets an address space with `n` read-write pages at `base`.
 fn map_pages(pid: u64, base: u64, n: u64) -> Arc<spin::Mutex<Mm>> {
-    common::global_frames();
+    global_frames();
     let mm = Arc::new(spin::Mutex::new(Mm::new().unwrap()));
     let r = linux::mm::sys_mmap(&mm, base, n * 4096, (PROT_READ | PROT_WRITE) as u64, 0x22 | 0x10, -1, 0);
     assert_eq!(r as u64, base);

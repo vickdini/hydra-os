@@ -15,7 +15,7 @@ pub const GLOBAL_SIZE: u64 = 64 << 20;
 /// Hand the global frame allocator its memory, once per test binary. Code
 /// such as `memory::vm` allocates page tables and user pages from it.
 pub fn global_frames() {
-    use hydra_hosttests_t29::memory::frame_allocator::{FRAME_ALLOCATOR, PAGE_SIZE};
+    use crate::memory::frame_allocator::{FRAME_ALLOCATOR, PAGE_SIZE};
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         let arena = Arena::at(GLOBAL_BASE, GLOBAL_SIZE);
@@ -111,22 +111,22 @@ pub struct LowLayout;
 impl LowLayout {
     /// The kernel keeps the 1 GiB slots that `ranges` touch.
     pub fn kernel_at(ranges: &[(u64, u64)]) -> LowLayout {
-        hydra_hosttests_t29::memory::vm::init_low_layout(ranges);
+        crate::memory::vm::init_low_layout(ranges);
         LowLayout
     }
 }
 
 impl Drop for LowLayout {
     fn drop(&mut self) {
-        hydra_hosttests_t29::memory::vm::init_low_layout(&[(GIB, hydra_hosttests_t29::memory::vm::USER_SPACE_START)]);
+        crate::memory::vm::init_low_layout(&[(GIB, crate::memory::vm::USER_SPACE_START)]);
     }
 }
 
 // ---------------------------------------------------------------- Group 29 helpers
 
-pub use hydra_hosttests_t29::compat::linux;
-pub use hydra_hosttests_t29::fake;
-pub use hydra_hosttests_t29::fake::{Task, TaskState};
+pub use crate::compat::linux;
+pub use crate::fake;
+pub use crate::fake::{Task, TaskState};
 
 /// Serialises the test, resets the fakes and empties the kernel's process table.
 pub fn setup() -> std::sync::MutexGuard<'static, ()> {
