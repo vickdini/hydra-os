@@ -16,6 +16,10 @@ use std::sync::Mutex as StdMutex;
 
 #[path = "lx_mod_calls.rs"]
 mod calls;
+#[path = "lx_mod_objs.rs"]
+pub(crate) mod objs;
+#[path = "lx_mod_server.rs"]
+mod server;
 
 // ----------------------------------------------------------------------
 // The harness
