@@ -219,6 +219,8 @@ pub fn advance(ns: u64) {
         s.clock_ns += ns;
         s.on_sleep.take()
     });
+    // A kernel loop that never ends in a test: fail instead of spinning forever
+    assert!(with(|s| s.clock_ns) < 36_000_000_000_000, "the fake clock passed 10 hours: a kernel loop does not end");
     if let Some(mut h) = hook {
         with(|s| h(s));
         with(|s| {

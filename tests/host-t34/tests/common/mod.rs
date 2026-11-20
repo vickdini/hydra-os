@@ -339,3 +339,10 @@ pub fn fake_net() -> std::rc::Rc<std::cell::RefCell<NetState>> {
     });
     st
 }
+
+/// [`status`] from inside a sleep hook (the fake machine is borrowed there).
+pub fn status_in(st: &fake::State, i: usize, v: u64) {
+    let base = st.windows[&k::ipc::protocol::ENDPOINT_NET_SERVER];
+    let o = k::ipc::protocol::NETS_STATUS_OFF + i * 8;
+    unsafe { core::ptr::write_unaligned((base + o) as *mut u64, v) };
+}

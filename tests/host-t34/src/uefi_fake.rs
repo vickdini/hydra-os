@@ -196,6 +196,7 @@ pub fn reset() {
         mode.cursor_column = 0;
         mode.cursor_row = 0;
         mode.attribute = 0x0F;
+        mode.mode = 0;
     }
     take();
 }
@@ -207,4 +208,9 @@ pub fn place_cursor(col: usize, row: usize) {
         mode.cursor_column = col as i32;
         mode.cursor_row = row as i32;
     }
+}
+
+/// Sets the firmware console's current mode number (-1: none).
+pub fn set_mode_number(mode: i32) {
+    unsafe { (*core::ptr::addr_of_mut!(MODE)).mode = mode };
 }

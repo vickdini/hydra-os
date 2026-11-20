@@ -432,3 +432,27 @@ fn usb_speed_test_errors() {
     storage::usbdisk(&[USBDISK_SPEED, 0, 1, 0]).must();
     assert_eq!(fake::take_out(), "usbdisk: error 0\n");
 }
+
+#[test]
+fn usb_write_test_notices_data_that_does_not_come_back() {
+    let _g = setup();
+    // The disk drops the third write (the restore of the first place)
+    block_driver(ENDPOINT_USB_DISK, 30);
+    let inner = RefCell::new(fake::with(|s| s.handler.take()).unwrap());
+    let writes = RefCell::new(0);
+    fake::with(|s| {
+        s.handler = Some(Box::new(move |e, m, k| {
+            if m.label == MSG_BLOCK_WRITE {
+                *writes.borrow_mut() += 1;
+                if *writes.borrow() == 3 {
+                    return Ok(k::ipc::Message::with_args(MSG_BLOCK_REPLY, [0, m.args[1], 0, 0]));
+                }
+            }
+            (inner.borrow_mut())(e, m, k)
+        }))
+    });
+    storage::usbdisk(&[USBDISK_TEST, 0, 1, 0]).must();
+    let out = fake::take_out();
+    assert!(out.contains("usbdisk: the original data at 0 did not come back"), "{}", out);
+    assert!(out.contains("FAILED, 1 bytes differ"), "{}", out);
+}

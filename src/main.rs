@@ -159,6 +159,33 @@ pub fn report_panic(info: &(impl core::fmt::Display + core::fmt::Debug)) {
     println!("\n[!] KERNEL PANIC: {:?}", info);
 }
 
+/// Boot step 3b: reports the framebuffer GOP gave (`info`) and puts the boot logo on it.
+pub fn framebuffer_online(info: &video::VideoModeInfo) {
+    console::set_color(Color::LightGreen, Color::Black);
+    println!("[+] Hardware Linear Framebuffer Online:");
+    println!("    - Resolution:   {}x{} (32 bpp)", info.width, info.height);
+    println!("    - Stride/Pitch: {} pixels/line ({} bytes)", info.stride, info.stride * 4);
+    println!(
+        "    - Pixel Format: {}",
+        if info.is_bgr {
+            "BGR888 (Little-Endian)"
+        } else {
+            "RGB888"
+        }
+    );
+    println!(
+        "    - Video RAM:    {:#x} ({} MiB)",
+        info.base_ptr as u64,
+        info.size / (1024 * 1024)
+    );
+    println!(
+        "    - Text Matrix:  {} columns x {} rows (8x16 font)",
+        info.text_cols, info.text_rows
+    );
+    println!("    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4");
+    video::splash::start();
+}
+
 /// Native UEFI application entry point (`efi_main`) and kernel bootstrap orchestrator.
 ///
 /// Executes the staged initialization sequence for the Hydra Microkernel:
@@ -368,31 +395,7 @@ pub fn boot() -> ! {
     arch::boottime::mark("framebuffer console");
     println!("\n[*] Step 3b: Initializing UEFI GOP Framebuffer & Standalone Console...");
     match video::init_gop() {
-        Ok(info) => {
-            console::set_color(Color::LightGreen, Color::Black);
-            println!("[+] Hardware Linear Framebuffer Online:");
-            println!("    - Resolution:   {}x{} (32 bpp)", info.width, info.height);
-            println!("    - Stride/Pitch: {} pixels/line ({} bytes)", info.stride, info.stride * 4);
-            println!(
-                "    - Pixel Format: {}",
-                if info.is_bgr {
-                    "BGR888 (Little-Endian)"
-                } else {
-                    "RGB888"
-                }
-            );
-            println!(
-                "    - Video RAM:    {:#x} ({} MiB)",
-                info.base_ptr as u64,
-                info.size / (1024 * 1024)
-            );
-            println!(
-                "    - Text Matrix:  {} columns x {} rows (8x16 font)",
-                info.text_cols, info.text_rows
-            );
-            println!("    - VMM Mapping:  Identity-mapped in Hydra Autonomous PML4");
-            video::splash::start();
-        }
+        Ok(info) => framebuffer_online(&info),
         Err(e) => {
             console::set_color(Color::Yellow, Color::Black);
             println!("[-] GOP not available: {} (fallback to UEFI text console)", e);
