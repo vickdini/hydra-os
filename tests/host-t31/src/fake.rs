@@ -485,4 +485,5 @@ pub fn reset() {
     }
     *BKL_EXIT_HOOK.lock().unwrap() = None;
     task::HR_EARLIEST.store(u64::MAX, Ordering::SeqCst);
+    task::STARTED.store(false, Ordering::SeqCst);
 }
