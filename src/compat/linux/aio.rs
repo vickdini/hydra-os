@@ -270,7 +270,8 @@ fn io_getevents(frame: &SyscallFrame, ctx: u64, min_nr: u64, nr: u64, events: u6
             let Some(c) = all.get(&ctx) else { break Err(EINVAL) };
             (c.done.len() as u64, !c.polls.is_empty())
         };
-        if ready >= min_nr.max(1) || (min_nr == 0 && deadline.is_some_and(|d| crate::arch::pit::ticks() >= d)) {
+        // At least min_nr done (none asked for: at once, as on Linux)
+        if ready >= min_nr.max(1) || min_nr == 0 {
             break Ok(());
         }
         if deadline.is_some_and(|d| crate::arch::pit::ticks() >= d) {

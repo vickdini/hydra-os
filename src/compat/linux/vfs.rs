@@ -1042,6 +1042,10 @@ fn stat_at(dirfd: i64, path_ptr: u64, flags: u64) -> Result<super::types::LinuxS
         }
         return fstat_fd(dirfd as i32).ok_or(EBADF)?;
     }
+    // Linux: a component longer than NAME_MAX is ENAMETOOLONG (as user_path checks)
+    if path.split(|&b| b == b'/').any(|c| c.len() > 255) {
+        return Err(-36);
+    }
     let (base, base_path) = base_dir(dirfd, &path)?;
     let abs = join_path(&base_path, &path);
     if let Some(st) = super::pty::stat_path(&abs) {

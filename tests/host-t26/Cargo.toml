@@ -1,0 +1,17 @@
+[package]
+name = "hydra_hosttests_t26"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side unit tests of the Linux file layer (VFS, mounts, FUSE, notify, locks): test wave group 26"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+uefi = "0.41.0"
