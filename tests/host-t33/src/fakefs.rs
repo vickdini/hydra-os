@@ -153,11 +153,17 @@ pub fn pool() -> u64 {
     ROOT_INO
 }
 
-/// Runs `f` on the shared file system (for setting up and checking state).
+/// Runs `f` on the shared file system (for setting up and checking state). Changes made
+/// here bypass the kernel client, so its caches are emptied afterwards.
 pub fn with_fs<R>(f: impl FnOnce(&mut FakeFs) -> R) -> R {
     pool();
-    let mut g = FS.lock().unwrap_or_else(|e| e.into_inner());
-    f(g.as_mut().unwrap())
+    let r = {
+        let mut g = FS.lock().unwrap_or_else(|e| e.into_inner());
+        f(g.as_mut().unwrap())
+    };
+    crate::fs::zfs::forget_names();
+    crate::fs::zfs::forget_all_attrs();
+    r
 }
 
 /// A fresh directory `/<name>` for one test (removed first if a previous run left it).

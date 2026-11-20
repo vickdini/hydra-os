@@ -54,7 +54,7 @@ pub fn read_from_boot_volume(root: &mut uefi::proto::media::file::Directory) {
     let Some(mut file) = handle.into_regular_file() else { return };
     let mut info_buf = [0u8; 256];
     let size = file.get_info::<FileInfo>(&mut info_buf).map(|i| i.file_size() as usize).unwrap_or(0);
-    if size == 0 || size > MAX_SIZE {
+    if !usable_size(size) {
         crate::kprintln!("[firstboot] {} has an unusable size ({} bytes): ignored", ESP_PATH, size);
         return;
     }
@@ -77,6 +77,17 @@ pub fn read_from_boot_volume(root: &mut uefi::proto::media::file::Directory) {
         size,
         if deleted { ", deleted from the ESP" } else { "; could not delete it from the ESP" }
     );
+    stage(data);
+}
+
+/// Whether a settings file of `size` bytes is worth reading (empty or huge ones are not).
+pub fn usable_size(size: usize) -> bool {
+    size != 0 && size <= MAX_SIZE
+}
+
+/// Keeps settings read from the ESP until [`import_into_pool`] writes them, and marks this
+/// boot as the first after an installation ([`setup_pending`]).
+pub fn stage(data: Vec<u8>) {
     *STAGED.lock() = Some(data);
     PENDING.store(true, Ordering::Release);
 }
