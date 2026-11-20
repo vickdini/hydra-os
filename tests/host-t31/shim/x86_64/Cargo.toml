@@ -1,0 +1,9 @@
+[package]
+name = "x86_64_shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The x86_64 crate with privileged TLB instructions replaced, for host tests"
+
+[dependencies]
+real = { package = "x86_64", version = "0.15", default-features = false, features = ["instructions"] }
