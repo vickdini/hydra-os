@@ -555,16 +555,20 @@ pub fn current_mm() -> Option<Arc<Mutex<Mm>>> {
 /// # Arguments
 ///
 /// * `fd` - File descriptor index.
+/// * `pgoff` - The mapping's page offset in the file.
+/// * `args` - The `mmap` call's arguments (a service's object gets them all).
 ///
 /// # Returns
 ///
-/// * `Ok((obj, write_err))`: the object backing the descriptor, and what a shared mapping
+/// * `Ok((obj, write_err, pgoff))`: the object backing the descriptor, what a shared mapping
 ///   of it gets for asking to write: 0 if it may (Linux's `VM_MAYWRITE`), `-EACCES` if the
 ///   descriptor was not opened for writing, `-EPERM` for a memfd sealed against writes.
+///   and the object page that maps at the mapping's start (`pgoff` but for a service's
+///   object, whose service says where).
 /// * `Err(-EBADF)` if descriptor is invalid.
 /// * `Err(-EACCES)` if descriptor is not readable.
 /// * `Err(-ENODEV)` if underlying resource does not support memory mapping.
-fn fd_object(fd: usize, pgoff: u64) -> Result<(Arc<dyn MappedObject>, i64), i64> {
+fn fd_object(fd: usize, pgoff: u64, args: &[u64; 6]) -> Result<(Arc<dyn MappedObject>, i64, u64), i64> {
     const O_ACCMODE: u32 = 0o3;
     const O_RDONLY: u32 = 0o0;
     const F_SEAL_WRITE: u32 = 0x0008;
@@ -579,7 +583,7 @@ fn fd_object(fd: usize, pgoff: u64) -> Result<(Arc<dyn MappedObject>, i64), i64>
             } else {
                 0
             };
-            Ok((memfd, err))
+            Ok((memfd, err, pgoff))
         }
         crate::fs::FileDescriptor::Vnode(f) => {
             let (ino, readable, writable) = {
@@ -589,17 +593,21 @@ fn fd_object(fd: usize, pgoff: u64) -> Result<(Arc<dyn MappedObject>, i64), i64>
             if !readable {
                 return Err(-EACCES);
             }
-            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }))
+            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }, pgoff))
         }
         crate::fs::FileDescriptor::File { path, readable, writable, .. } => {
             if !readable {
                 return Err(-EACCES);
             }
             let ino = ZfsClient::resolve(0, path.as_bytes(), true).map_err(|_| -ENODEV)?;
-            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }))
+            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }, pgoff))
         }
+        // wave6 G23 begin: a service's object: the service names one of its memory
+        // objects and where in it the mapping starts (`crate::lx::mem::server_mmap`)
+        crate::fs::FileDescriptor::Device(d) if d.as_server().is_some() => crate::lx::mem::server_mmap(&d, *args),
+        // wave6 G23 end
         // A device's mmap_object decides for itself what may be mapped
-        crate::fs::FileDescriptor::Device(d) => Ok((d.mmap_object_at(pgoff)?, 0)),
+        crate::fs::FileDescriptor::Device(d) => Ok((d.mmap_object_at(pgoff)?, 0, pgoff)),
         _ => Err(-ENODEV),
     }
 }
@@ -640,8 +648,8 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
         if fd < 0 {
             return -EBADF;
         }
-        match fd_object(fd as usize, offset / PAGE_SIZE) {
-            Ok((obj, write_err)) => {
+        match fd_object(fd as usize, offset / PAGE_SIZE, &[addr, len, prot, flags, fd as i64 as u64, offset]) {
+            Ok((obj, write_err, pgoff)) => {
                 // A shared mapping writes the file itself, so as Linux: only through a
                 // descriptor that may write it, now (EACCES/EPERM) or after mprotect
                 // (no VM_MAYWRITE). A private mapping writes its own copies.
@@ -651,7 +659,7 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
                     }
                     may_write = false;
                 }
-                Backing::Object { obj, pgoff: offset / PAGE_SIZE }
+                Backing::Object { obj, pgoff }
             }
             Err(e) => return e,
         }

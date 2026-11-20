@@ -17,6 +17,8 @@ extern crate alloc;
 
 pub mod blockunits;
 pub mod heap;
+// wave6 G23
+pub mod mem;
 pub mod port;
 pub mod sys;
 pub mod svcrt;

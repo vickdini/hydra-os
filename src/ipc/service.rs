@@ -810,6 +810,8 @@ pub fn signal(endpoint: u32, bits: u64) -> Result<(), i64> {
 ///
 /// * `endpoint` - Service endpoint to detach.
 pub fn unregister(endpoint: u32) {
+    // wave6 G23: its memory-object handles go (objects others map or hold live on)
+    crate::lx::mem::service_gone(endpoint);
     if let Some(svc) = service(endpoint) {
         let server = svc.server.swap(0, Ordering::AcqRel);
         // The endpoints its process also served go with it

@@ -233,6 +233,11 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     let cx = Cx::from_call(c, page);
     let r = match c.nr {
         LX_NULL_NR => null_call(&cx),
+        // wave6 G23: mmap of a server object (only the test object has memory so far)
+        9 if c.obj != LX_OBJ_NONE => match obj::kind_of(c.obj as u32) {
+            LX_OBJ_KIND_TEST => (obj::test_mmap(&cx), 0),
+            _ => (-19, 0), // ENODEV
+        },
         // wave 6 (Group 19): a test call the test service redirected here
         LX_TEST_NR if c.redir_obj != 0 => (0x5000 + c.redir_obj as i64 + 0x100 * c.redirs as i64 + c.redir_tail as i64, 0),
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one

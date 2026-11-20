@@ -808,3 +808,94 @@ fn memory_usage_counts_mapped_bytes_and_resident_pages() {
         assert_eq!(mm.memory_usage(), (0, 0, 0));
     });
 }
+
+// ------------------------------------------- memory objects (wave 6, Group 23)
+
+#[test]
+fn mem_object_anon_pages_on_first_touch() {
+    with_mm(|_| {
+        let before = used();
+        let obj = MemObject::anon(4);
+        assert_eq!(obj.pages(), 4);
+        assert_eq!(obj.resident(), 0, "no frame before a page is touched");
+        assert_eq!(used(), before);
+        let f = obj.get_page(2).unwrap();
+        assert_eq!(obj.get_page(2), Some(f), "the same frame each time");
+        assert_eq!(obj.resident(), 1);
+        assert!(obj.get_page(4).is_none(), "nothing past the end");
+        assert_eq!(obj.phys_base(), None);
+        drop(obj);
+        assert_eq!(used(), before, "the object's frames go with it");
+    });
+}
+
+#[test]
+fn mem_object_shared_between_address_spaces_outlives_its_maker() {
+    with_mm(|a| {
+        let obj = MemObject::anon(2);
+        let o: Arc<dyn MappedObject> = obj.clone();
+        a.mmap(A, 2 * P, RW, true, true, false, Backing::Object { obj: o.clone(), pgoff: 0 }).unwrap();
+        let mut b = Mm::new().unwrap();
+        // b maps the second page only (an mmap answer with pgoff 1)
+        b.mmap(A, P, RW, true, true, false, Backing::Object { obj: o, pgoff: 1 }).unwrap();
+        // The "service" lets go of its handle: the mappings hold the object
+        drop(obj);
+        a.write_bytes(A + P + 8, b"from a").unwrap();
+        b.handle_fault(A, false, false).unwrap();
+        assert_eq!(read(&mut b, A + 8, 6), b"from a");
+        b.write_bytes(A + 100, b"from b").unwrap();
+        assert_eq!(read(a, A + P + 100, 6), b"from b");
+        // A fork of b shares the object's page too
+        let mut c = b.fork().unwrap();
+        c.write_bytes(A + 200, b"from c").unwrap();
+        assert_eq!(read(a, A + P + 200, 6), b"from c");
+        drop(c);
+        drop(b);
+        assert_eq!(read(a, A + P + 8, 6), b"from a", "still there after the others went");
+    });
+}
+
+#[test]
+fn mem_object_private_mapping_copies_on_write() {
+    with_mm(|mm| {
+        let obj = MemObject::anon(1);
+        let o: Arc<dyn MappedObject> = obj.clone();
+        mm.mmap(A, P, RW, true, true, false, Backing::Object { obj: o.clone(), pgoff: 0 }).unwrap();
+        mm.write_bytes(A, b"shared").unwrap();
+        let b2 = A + 0x10_0000;
+        mm.mmap(b2, P, RW, false, true, false, Backing::Object { obj: o, pgoff: 0 }).unwrap();
+        mm.handle_fault(b2, false, false).unwrap();
+        assert_eq!(read(mm, b2, 6), b"shared");
+        mm.write_bytes(b2, b"privat").unwrap();
+        assert_eq!(read(mm, A, 6), b"shared", "a private write does not reach the object");
+    });
+}
+
+#[test]
+fn mem_object_frames_owned_and_borrowed() {
+    with_mm(|_| {
+        let before = used();
+        let first = FRAME_ALLOCATOR.lock().allocate_contiguous_frames(3).unwrap();
+        let base = first.start_address().as_u64();
+        {
+            let mut fa = FRAME_ALLOCATOR.lock();
+            for i in 0..3 {
+                fa.adopt(x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(base + i * P)));
+            }
+        }
+        // Borrowed: the object never frees them
+        let borrowed = MemObject::frames(base, 3, false, None);
+        assert_eq!(borrowed.phys_base(), Some(base));
+        assert_eq!(borrowed.get_page(1).unwrap().start_address().as_u64(), base + P);
+        assert!(borrowed.get_page(3).is_none());
+        assert_eq!(borrowed.resident(), 3);
+        drop(borrowed);
+        assert!(used() > before, "borrowed frames stay allocated");
+        // Owned: the object frees them at its end, after its hook
+        static HOOK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let owned = MemObject::frames(base, 3, true, Some(Box::new(|b, len| HOOK.store(b + len, Ordering::SeqCst))));
+        drop(owned);
+        assert_eq!(HOOK.load(Ordering::SeqCst), base + 3 * P, "the drop hook saw the range");
+        assert_eq!(used(), before, "owned frames go with the object");
+    });
+}

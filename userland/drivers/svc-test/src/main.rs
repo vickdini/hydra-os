@@ -88,6 +88,7 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     match kind {
         LX_NOTE_CLOSE if b == LX_OBJ_KIND_SVCTEST as u64 => {
             OBJECTS.lock().remove(&(a as u32));
+            mem_closed(a as u32); // wave6 G23
             objs::set(a as u32, 0, 0);
             objs::free(a as u32);
             CLOSES.fetch_add(1, Ordering::Relaxed);
@@ -131,6 +132,7 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
         LX_TEST_CTX_NR => ((c.pgid as i64) | (c.sid as i64) << 32, 0),
         LX_KCALL_DEVOPEN => (new_object(&cx, c.dev, c.args[1]), 0),
         0 | 1 | 16 if c.obj != LX_OBJ_NONE => (object_io(&cx), 0),
+        9 if c.obj != LX_OBJ_NONE => (obj_mmap(&cx), 0), // wave6 G23
         _ => (ENOSYS, 0),
     };
     objs::flush();
@@ -227,6 +229,89 @@ fn object_io(cx: &Cx) -> i64 {
             objs::set(slot, ready, 0);
             len as i64
         }
+        16 => mem_ioctl(slot, cx.args[1], cx.args[2]), // wave6 G23
         _ => ENOTTY,
     }
 }
+
+// wave6 G23 begin: memory objects (Group 23): a test object's 64 KiB of memory, mapped by
+// programs (`srvmap`); killing this service leaves their mappings working.
+
+/// Size of a test object's memory.
+const MEM: u64 = 64 * 1024;
+
+/// Per slot: our handle and our own view of its memory.
+static MEMS: spin::Mutex<BTreeMap<u32, (u32, u64)>> = spin::Mutex::new(BTreeMap::new());
+
+fn mem_of(slot: u32) -> Result<(u32, u64), i64> {
+    let mut m = MEMS.lock();
+    if let Some(&x) = m.get(&slot) {
+        return Ok(x);
+    }
+    let obj = hydra_rt::mem::MemObj::anon(MEM)?;
+    let addr = obj.map(0, MEM, hydra_rt::mem::PROT_RW)? as u64;
+    let x = (obj.into_raw(), addr);
+    m.insert(slot, x);
+    Ok(x)
+}
+
+fn mem_closed(slot: u32) {
+    let x = MEMS.lock().remove(&slot);
+    if let Some((h, addr)) = x {
+        let _ = hydra_rt::mem::unmap(addr as *mut u8, MEM);
+        drop(hydra_rt::mem::MemObj::from_raw(h));
+    }
+}
+
+/// `mmap` of a test object: its memory.
+fn obj_mmap(cx: &Cx) -> i64 {
+    let (len, offset) = (cx.args[1], cx.args[5]);
+    if offset % 4096 != 0 || len == 0 || offset.checked_add(len).map_or(true, |e| e > MEM) {
+        return EINVAL;
+    }
+    match mem_of(cx.c.obj as u32) {
+        Ok((h, _)) => hydra_rt::mem::lx_mmap_answer(h, offset / 4096, false),
+        Err(e) => e,
+    }
+}
+
+/// `ioctl` on a test object's memory: `0x4D50` peek (`arg` = offset), `0x4D51` poke
+/// (`arg` = offset | value << 32), `0x4D55` write `arg >> 32` at offset 16 through handle
+/// `arg & 0xFFFF` that another service shared with us (then let it go).
+fn mem_ioctl(slot: u32, cmd: u64, arg: u64) -> i64 {
+    let off = (arg & 0xFFFF_FFFF) & !3;
+    match cmd {
+        0x4D50 | 0x4D51 if off < MEM => {
+            let (_, addr) = match mem_of(slot) {
+                Ok(x) => x,
+                Err(e) => return e,
+            };
+            let p = (addr + off) as *mut u32;
+            // SAFETY: inside our 64 KiB view
+            unsafe {
+                if cmd == 0x4D50 {
+                    core::ptr::read_volatile(p) as i64
+                } else {
+                    core::ptr::write_volatile(p, (arg >> 32) as u32);
+                    0
+                }
+            }
+        }
+        0x4D55 => {
+            let shared = hydra_rt::mem::MemObj::from_raw((arg & 0xFFFF) as u32);
+            let q = match shared.map(0, 4096, hydra_rt::mem::PROT_RW) {
+                Ok(q) => q,
+                Err(e) => {
+                    let _ = shared.into_raw();
+                    return e;
+                }
+            };
+            // SAFETY: inside the one page just mapped
+            unsafe { core::ptr::write_volatile(q.add(16) as *mut u32, (arg >> 32) as u32) };
+            let _ = hydra_rt::mem::unmap(q, 4096);
+            0
+        }
+        _ => EINVAL,
+    }
+}
+// wave6 G23 end
