@@ -7,3 +7,6 @@ pub(crate) fn reset() {
     TABLES.lock().clear();
     KEPT.lock().clear();
 }
+
+#[path = "lx_mem_t.rs"]
+mod t;

@@ -737,7 +737,7 @@ pub mod compat {
             const EFAULT: i64 = -14;
             /// Host memory is user memory; null and bad pages fault.
             pub fn copy_in(ptr: u64, len: usize) -> Result<alloc::vec::Vec<u8>, i64> {
-                if ptr == 0 || !crate::fake::prefault(ptr, len as u64) {
+                if ptr < 0x10000 || !crate::fake::prefault(ptr, len as u64) {
                     return Err(EFAULT);
                 }
                 let mut v = alloc::vec![0u8; len];
@@ -746,7 +746,7 @@ pub mod compat {
                 Ok(v)
             }
             pub fn copy_out(ptr: u64, data: &[u8]) -> Result<(), i64> {
-                if ptr == 0 || !crate::fake::prefault(ptr, data.len() as u64) {
+                if ptr < 0x10000 || !crate::fake::prefault(ptr, data.len() as u64) {
                     return Err(EFAULT);
                 }
                 // SAFETY: tests pass host buffers

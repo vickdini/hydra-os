@@ -13,3 +13,6 @@ pub(crate) fn reset() {
     DCALLS_REFUSED.store(0, Ordering::Release);
     POSTS.store(0, Ordering::Release);
 }
+
+#[path = "lx_dcall_t.rs"]
+mod t;

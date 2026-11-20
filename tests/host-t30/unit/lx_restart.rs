@@ -30,3 +30,6 @@ pub(crate) fn set_down(svc: u8, on: bool) {
 pub(crate) fn set_restarting(svc: u8, on: bool) {
     RESTARTING[idx(svc)].store(on, Ordering::Release);
 }
+
+#[path = "lx_restart_t.rs"]
+mod t;

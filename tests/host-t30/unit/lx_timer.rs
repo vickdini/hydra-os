@@ -10,3 +10,6 @@ pub(crate) fn reset() {
         set_next(t);
     });
 }
+
+#[path = "lx_timer_t.rs"]
+mod t;

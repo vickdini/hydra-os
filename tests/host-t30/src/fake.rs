@@ -188,7 +188,8 @@ pub fn uaccess_str(dst: *mut u8, src: *const u8, max: usize) -> isize {
 
 /// `prefault_current`: a missing page comes in unless it is bad.
 pub fn prefault(addr: u64, len: u64) -> bool {
-    if addr == 0 {
+    // (the first 64 KiB are never mapped)
+    if addr < 0x10000 {
         return false;
     }
     let bad = BAD.lock().unwrap();
