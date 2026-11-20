@@ -258,31 +258,36 @@ pub mod fs {
 
     /// *stub*
     pub mod client {
-        /// *stub* (never called: `with_server` fails first)
+        /// *stub* The parent of `path`: the root, and the last component.
         pub fn resolve_parent_in(
             _s: &mut crate::fs::zfs::ZfsServer,
             _root: u64,
             _base: u64,
-            _path: &[u8],
+            path: &[u8],
         ) -> Result<(u64, alloc::vec::Vec<u8>), i64> {
-            Err(-5)
+            let name = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
+            Ok((1, name.to_vec()))
         }
     }
 
     pub mod zfs {
-        /// *stub* No pool on the host: the server is never reached.
+        /// *stub* The pool, when [`crate::fake::ZFS_MKNOD`] provides one.
         pub struct ZfsServer;
         impl ZfsServer {
             pub fn unlink(&mut self, _dir: u64, _name: &[u8]) -> Result<(), i64> {
-                Err(-5)
+                Err(-2)
             }
             pub fn mknod(&mut self, _dir: u64, _name: &[u8], _mode: u32, _rdev: u64, _uid: u32, _gid: u32) -> Result<u64, i64> {
-                Err(-5)
+                crate::fake::ZFS_MKNOD.get().ok_or(-5)
             }
         }
-        /// *stub* Fails with `EIO`, as the kernel's does before the pool is mounted.
-        pub fn with_server<R>(_f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
-            Err(-5)
+        /// *stub* Fails with `EIO`, as the kernel's does before the pool is mounted, unless
+        /// a test provides a pool.
+        pub fn with_server<R>(f: impl FnOnce(&mut ZfsServer) -> Result<R, i64>) -> Result<R, i64> {
+            if crate::fake::ZFS_MKNOD.get().is_none() {
+                return Err(-5);
+            }
+            f(&mut ZfsServer)
         }
     }
 }

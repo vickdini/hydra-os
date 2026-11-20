@@ -58,6 +58,9 @@ thread_local! {
     pub static NESTED_CALLS: RefCell<Vec<(u64, [u64; 6])>> = const { RefCell::new(Vec::new()) };
     /// Frames still allowed to be allocated (`None`: no limit).
     pub static FRAME_BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+    /// The pool for `kernel_listen`: `Some(inode)` makes `fs::zfs::with_server` run and
+    /// its `mknod` hand out that inode (`None`: no pool, `EIO`).
+    pub static ZFS_MKNOD: Cell<Option<u64>> = const { Cell::new(None) };
     /// Frames allocated and not yet freed, by this thread.
     pub static FRAMES_LIVE: Cell<i64> = const { Cell::new(0) };
 }
@@ -86,6 +89,11 @@ pub fn reset() {
     NESTED_CALLS.with_borrow_mut(|v| v.clear());
     FRAME_BUDGET.set(None);
     fd::FDS.with_borrow_mut(|f| *f = fd::Fds::default());
+    vfs::SOCKET_NODES.with_borrow_mut(|m| m.clear());
+    vfs::PATHS.with_borrow_mut(|m| m.clear());
+    vfs::NO_ACCESS.with_borrow_mut(|m| m.clear());
+    vfs::UNLINKED.with_borrow_mut(|m| m.clear());
+    ZFS_MKNOD.set(None);
     net::NET.with_borrow_mut(|n| *n = net::NetState::default());
     proc::reset();
     task::reset();
@@ -806,13 +814,15 @@ pub mod vfs {
     thread_local! {
         /// Socket nodes in the "file system": path -> inode.
         pub static SOCKET_NODES: RefCell<BTreeMap<Vec<u8>, u64>> = const { RefCell::new(BTreeMap::new()) };
-        /// Paths that exist (any kind of file).
+        /// Other files that exist (not sockets).
         pub static PATHS: RefCell<BTreeSet<Vec<u8>>> = const { RefCell::new(BTreeSet::new()) };
-        /// Next inode `make_socket_node` hands out.
-        pub static NEXT_NODE: Cell<u64> = const { Cell::new(7000) };
+        /// Socket nodes the caller may not write to (`connect` gives `EACCES`).
+        pub static NO_ACCESS: RefCell<BTreeSet<Vec<u8>>> = const { RefCell::new(BTreeSet::new()) };
         /// Socket nodes unlinked.
         pub static UNLINKED: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     }
+    /// Inode numbers of new nodes: unique across tests (socket names are global).
+    static NEXT_NODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(7000);
 
     /// *mirror* of the kernel's credential snapshot.
     pub(crate) struct Creds {
@@ -825,29 +835,37 @@ pub mod vfs {
         let (euid, egid) = CREDS.get();
         Creds { uid: euid, gid: egid, euid, egid }
     }
-    /// The lookup key of a socket path: its node's inode key (`ENOENT` without one).
+    /// *mirror* of the kernel's: the node's key when the path exists, else the path's.
     pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
-        SOCKET_NODES.with_borrow(|m| m.get(path).map(|&ino| socket_ino_key(ino))).ok_or(-2)
+        if let Some(ino) = SOCKET_NODES.with_borrow(|m| m.get(path).copied()) {
+            return Ok(socket_ino_key(ino));
+        }
+        let mut key = b"/:".to_vec();
+        key.extend_from_slice(path);
+        Ok(key)
     }
     /// Verbatim from the kernel.
     pub(crate) fn socket_ino_key(ino: u64) -> Vec<u8> {
         format!("ino:{}", ino).into_bytes()
     }
-    /// Creates a socket node (`EADDRINUSE` if the path exists).
+    /// Creates a socket node (`EEXIST` if the path exists, as `mknod`).
     pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
-        if PATHS.with_borrow(|p| p.contains(path)) || SOCKET_NODES.with_borrow(|m| m.contains_key(path)) {
-            return Err(-98);
+        if path_exists(path) {
+            return Err(-17);
         }
-        let ino = NEXT_NODE.get();
-        NEXT_NODE.set(ino + 1);
+        let ino = NEXT_NODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         SOCKET_NODES.with_borrow_mut(|m| m.insert(path.to_vec(), ino));
         Ok(ino)
     }
     pub(crate) fn path_exists(path: &[u8]) -> bool {
         PATHS.with_borrow(|p| p.contains(path)) || SOCKET_NODES.with_borrow(|m| m.contains_key(path))
     }
+    /// *mirror* of the kernel's checks: a socket node the caller may write to.
     pub(crate) fn socket_node_for_connect(path: &[u8]) -> Result<u64, i64> {
         if let Some(ino) = SOCKET_NODES.with_borrow(|m| m.get(path).copied()) {
+            if NO_ACCESS.with_borrow(|n| n.contains(path)) {
+                return Err(-13);
+            }
             return Ok(ino);
         }
         Err(if PATHS.with_borrow(|p| p.contains(path)) { -111 } else { -2 })
