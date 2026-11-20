@@ -548,10 +548,11 @@ pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
                     }
                 }
                 Some(None) => {
-                    // End-of-file marker: ends this read (0 bytes if nothing before it)
-                    if n == 0 {
-                        t.ready.pop_front();
-                    }
+                    // End-of-file marker (^D): ends this read, 0 bytes if nothing came
+                    // before it. Used up either way, as on Linux: a ^D after a partial
+                    // line only pushes the line out (left queued, the next reader saw a
+                    // second end-of-file)
+                    t.ready.pop_front();
                     break;
                 }
                 None => break,

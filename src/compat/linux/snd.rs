@@ -338,7 +338,9 @@ fn notify(numid: u32) {
     let id = elem_id(numid);
     let mut subs = SUBSCRIBERS.lock();
     subs.retain(|w| w.strong_count() > 0);
-    for f in subs.iter().filter_map(|w| w.upgrade()) {
+    // Only files that subscribed (SUBSCRIBE_EVENTS), as on Linux: the others reported
+    // POLLIN for events they never asked for
+    for f in subs.iter().filter_map(|w| w.upgrade()).filter(|f| f.subscribed.load(Ordering::Relaxed)) {
         let mut ev = [0u8; 72];
         ev[4..8].copy_from_slice(&1u32.to_le_bytes()); // SNDRV_CTL_EVENT_MASK_VALUE
         ev[8..72].copy_from_slice(&id);
@@ -1690,7 +1692,12 @@ impl PcmFile {
             return self.drop_stream();
         }
         if state == ST_PREPARED {
-            let empty = { self.stream().avail(0) >= self.stream().hw.map_or(0, |h| h.buffer_size) };
+            // (One guard: the first `self.stream()` of the old `a.avail() >= b.hw` lived to the
+            // end of the expression, and the second spun on the same lock for ever)
+            let empty = {
+                let s = self.stream();
+                s.avail(0) >= s.hw.map_or(0, |h| h.buffer_size)
+            };
             if empty {
                 self.stream().state = ST_SETUP;
                 return 0;
