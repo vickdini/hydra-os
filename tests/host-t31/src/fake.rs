@@ -49,6 +49,8 @@ pub static FS_BASE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CP
 pub static BKL_HELD: AtomicBool = AtomicBool::new(true);
 /// `smp::bkl_exit` calls.
 pub static BKL_EXITS: AtomicUsize = AtomicUsize::new(0);
+/// Hook run by `smp::bkl_exit` (lets a test end a wait that drops the kernel lock).
+pub static BKL_EXIT_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 /// `smp::bkl_enter`/`bkl_enter_idle` calls.
 pub static BKL_ENTERS: AtomicUsize = AtomicUsize::new(0);
 /// `smp::kick_idle` calls.
@@ -452,10 +454,35 @@ pub fn reset() {
         let mut s = task::SCHEDULER.lock();
         *s = task::scheduler::Scheduler::new();
         s.apply_wakes(); // drains the deferred wakeups (no task to wake)
+        // Clears the lock-free hand-off and deferred-call flags the last test may have left
+        s.begin_handoff(u64::MAX, 0);
+        s.end_handoff(u64::MAX);
     }
+    KICK_IDLE.store(0, Ordering::SeqCst);
+    task::PREEMPT_POINTS.on(0).store(0, Ordering::SeqCst);
     for c in 0..MAX_CPUS {
         task::CURRENT_RETIRED[c].store(false, Ordering::SeqCst);
         task::CURRENT_TID.on(c).store(0, Ordering::SeqCst);
+        task::PREEMPT_POINTS.on(c).store(0, Ordering::SeqCst);
+        task::CURRENT_SYSCALL.on(c).store(u64::MAX, Ordering::SeqCst);
+        task::CURRENT_SYSCALL_ARGS[0].on(c).store(0, Ordering::SeqCst);
+        task::CURRENT_SYSCALL_ARGS[1].on(c).store(0, Ordering::SeqCst);
+        task::CURRENT_KSTACK[0].on(c).store(0, Ordering::SeqCst);
+        task::CURRENT_KSTACK[1].on(c).store(0, Ordering::SeqCst);
+        task::TICK_DEFERRED.on(c).store(0, Ordering::SeqCst);
+        task::TICK_YIELD.on(c).store(0, Ordering::SeqCst);
+        task::scheduler::DIRECT_TO.on(c).store(0, Ordering::SeqCst);
+        task::scheduler::DIRECT_HINT.on(c).store(0, Ordering::SeqCst);
+        task::scheduler::DIRECT_GUARD.on(c).store(0, Ordering::SeqCst);
+        task::scheduler::BLOCK_NOBKL.on(c).store(0, Ordering::SeqCst);
+        task::scheduler::CURRENT_IDX.on(c).store(0, Ordering::SeqCst);
+        for k in 0..3 {
+            task::scheduler::CPU_TIMES[c][k].store(0, Ordering::SeqCst);
+        }
     }
+    for l in task::scheduler::LOAD_AVG.iter() {
+        l.store(0, Ordering::SeqCst);
+    }
+    *BKL_EXIT_HOOK.lock().unwrap() = None;
     task::HR_EARLIEST.store(u64::MAX, Ordering::SeqCst);
 }

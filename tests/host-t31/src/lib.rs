@@ -180,6 +180,10 @@ pub mod arch {
         }
         pub fn bkl_exit() {
             fake::BKL_EXITS.fetch_add(1, Ordering::SeqCst);
+            let hook = *fake::BKL_EXIT_HOOK.lock().unwrap();
+            if let Some(h) = hook {
+                h();
+            }
         }
         pub fn bkl_enter() {
             fake::BKL_ENTERS.fetch_add(1, Ordering::SeqCst);
