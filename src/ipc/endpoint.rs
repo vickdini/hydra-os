@@ -232,9 +232,10 @@ impl SharedEndpoint {
                     return;
                 }
                 ep.send_waiters.enqueue(current_id);
+                block_in_lock();
             }
             // Yield CPU while waiting for buffer space
-            crate::task::block_current();
+            crate::task::yield_now();
         }
     }
 
@@ -256,9 +257,10 @@ impl SharedEndpoint {
                     return msg;
                 }
                 ep.recv_waiters.enqueue(current_id);
+                block_in_lock();
             }
             // Yield CPU while waiting for an incoming message
-            crate::task::block_current();
+            crate::task::yield_now();
         }
     }
 
@@ -317,6 +319,17 @@ impl SharedEndpoint {
     /// Flushes all pending messages from the endpoint queue and resets circular buffer state.
     pub fn reset(&self) {
         self.0.lock().reset();
+    }
+}
+
+/// Marks the calling task blocked while the endpoint's lock is still held (its caller then
+/// yields): a waker that comes between the unlock and the yield finds it blocked and makes
+/// it ready, instead of finding it running and dropping it from the queue, which lost the
+/// wake-up (Group 31's find, test wave). Lock order: endpoint, then scheduler (as `wake_one`
+/// under the endpoint's lock).
+fn block_in_lock() {
+    if crate::task::is_active() {
+        crate::task::SCHEDULER.lock().block_current();
     }
 }
 

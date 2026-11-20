@@ -899,6 +899,11 @@ pub mod task {
         if !is_active() {
             return TaskId(0);
         }
+        // A timer tick right here (tests ask for it): the others run first
+        if crate::world::PREEMPT_BEFORE_BLOCK.load(Ordering::Acquire) > 0 {
+            crate::world::PREEMPT_BEFORE_BLOCK.fetch_sub(1, Ordering::AcqRel);
+            yield_now();
+        }
         let id = SCHEDULER.lock().block_current();
         yield_now();
         id

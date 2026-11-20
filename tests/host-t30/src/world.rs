@@ -24,6 +24,10 @@ use crate::fs::SharedFdTable;
 use crate::memory::vm::Mm;
 use crate::task::{TaskId, TaskPersonality, TaskState};
 
+/// Preemptions to make in `task::block_current` before it blocks (a timer tick that lets
+/// the other tasks run between a waiter's enqueue and its block).
+pub static PREEMPT_BEFORE_BLOCK: AtomicU64 = AtomicU64::new(0);
+
 /// The fake clock, in nanoseconds since boot (a tick is 10 ms).
 pub static NOW_NS: AtomicU64 = AtomicU64::new(0);
 pub const TICK_NS: u64 = 10_000_000;
@@ -604,6 +608,7 @@ impl Sim {
         crate::task::scheduler::HANDOFF_ACTIVE.store(false, Ordering::Release);
         crate::task::scheduler::DIRECT_TO.store(0, Ordering::Release);
         crate::task::scheduler::BLOCK_NOBKL.store(0, Ordering::Release);
+        PREEMPT_BEFORE_BLOCK.store(0, Ordering::Release);
         crate::fake::reset();
         Sim { _serial: serial }
     }
