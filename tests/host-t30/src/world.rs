@@ -28,6 +28,13 @@ use crate::task::{TaskId, TaskPersonality, TaskState};
 /// the other tasks run between a waiter's enqueue and its block).
 pub static PREEMPT_BEFORE_BLOCK: AtomicU64 = AtomicU64::new(0);
 
+/// Preemptions to make in `smp::bkl_exit` (a timer tick in a loop that waits for another
+/// CPU with interrupts on: the others run).
+pub static PREEMPT_IN_BKL_EXIT: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds the clock moves at each read (0: only when every task sleeps), for code that
+/// spins on the clock.
+pub static CLOCK_STEP_NS: AtomicU64 = AtomicU64::new(0);
+
 /// The fake clock, in nanoseconds since boot (a tick is 10 ms).
 pub static NOW_NS: AtomicU64 = AtomicU64::new(0);
 pub const TICK_NS: u64 = 10_000_000;
@@ -540,6 +547,10 @@ pub fn bkl_enter() {
 }
 pub fn bkl_exit() {
     BKL.with(|b| b.set(false));
+    if PREEMPT_IN_BKL_EXIT.load(Ordering::Acquire) > 0 {
+        PREEMPT_IN_BKL_EXIT.fetch_sub(1, Ordering::AcqRel);
+        crate::task::yield_now();
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -609,6 +620,8 @@ impl Sim {
         crate::task::scheduler::DIRECT_TO.store(0, Ordering::Release);
         crate::task::scheduler::BLOCK_NOBKL.store(0, Ordering::Release);
         PREEMPT_BEFORE_BLOCK.store(0, Ordering::Release);
+        PREEMPT_IN_BKL_EXIT.store(0, Ordering::Release);
+        CLOCK_STEP_NS.store(0, Ordering::Release);
         crate::fake::reset();
         Sim { _serial: serial }
     }
@@ -690,6 +703,19 @@ impl Sim {
     /// Lets every other ready task run until it blocks (the calling task yields).
     pub fn run_others(&self) {
         yield_cpu();
+    }
+
+    /// Lets the other tasks run several rounds (each round: every ready task until it
+    /// blocks or yields).
+    pub fn settle(&self) {
+        for _ in 0..20 {
+            yield_cpu();
+        }
+    }
+
+    /// The running task sleeps `ticks` (the others run; the clock moves to deadlines).
+    pub fn sleep(&self, ticks: u64) {
+        crate::task::wait::wait(Some(crate::arch::pit::ticks() + ticks));
     }
 
     /// Moves the fake clock forward by `ticks`.

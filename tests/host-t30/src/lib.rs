@@ -107,7 +107,8 @@ pub mod arch {
             crate::world::NOW_NS.load(Ordering::Acquire) / crate::world::TICK_NS
         }
         pub fn now_ns() -> u64 {
-            crate::world::NOW_NS.load(Ordering::Acquire)
+            let step = crate::world::CLOCK_STEP_NS.load(Ordering::Relaxed);
+            crate::world::NOW_NS.fetch_add(step, Ordering::AcqRel) + step
         }
         pub fn frequency_hz() -> u64 {
             100
@@ -953,11 +954,19 @@ pub mod task {
 
     pub mod supervisor {
         /// The test's answer for `endpoint` (`fake::Rec::revive`), recorded.
+        /// A successful revival waits for the new server to register (as
+        /// `await_registration`): the other tasks run meanwhile.
         pub fn revive(endpoint: u32) -> bool {
-            crate::fake::rec(|r| {
+            let ok = crate::fake::rec(|r| {
                 r.revived.push(endpoint);
                 r.revive.get(&endpoint).copied().unwrap_or(false)
-            })
+            });
+            if ok {
+                for _ in 0..5 {
+                    crate::task::yield_now();
+                }
+            }
+            ok
         }
     }
 
