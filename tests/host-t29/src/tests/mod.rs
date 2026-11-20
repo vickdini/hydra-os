@@ -8,5 +8,6 @@ mod extra;
 mod ldt;
 mod limits;
 mod ns;
+mod proc;
 mod process;
 mod ptrace;

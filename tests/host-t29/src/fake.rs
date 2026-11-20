@@ -60,6 +60,10 @@ thread_local! {
     pub static ON_WAIT: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
     /// How many waits ran.
     pub static WAITS: Cell<usize> = const { Cell::new(0) };
+    /// Sleeps taken through `task::sleep_ticks`.
+    pub static SLEEPS: Cell<u64> = const { Cell::new(0) };
+    /// Whether the fake CPU saves FPU state with XSAVE (`idt::use_xsave`).
+    pub static XSAVE: Cell<bool> = const { Cell::new(false) };
     /// CPUs online (`smp::online`).
     pub static ONLINE_CPUS: Cell<usize> = const { Cell::new(1) };
     /// The CPU's FS and GS bases (`segments::set_fs_base` / `current_bases`).
@@ -139,6 +143,8 @@ pub fn reset() {
     ON_WAIT.with_borrow_mut(|h| *h = None);
     WAITS.set(0);
     ONLINE_CPUS.set(1);
+    SLEEPS.set(0);
+    XSAVE.set(false);
     FS_GS.set((0, 0));
     LX_FORWARD.with_borrow_mut(|m| m.clear());
     PROC_LINKS.with_borrow_mut(|m| m.clear());

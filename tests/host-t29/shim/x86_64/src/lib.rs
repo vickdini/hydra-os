@@ -48,3 +48,22 @@ pub mod instructions {
         }
     }
 }
+
+/// The faulting address a test sets for the next `Cr2::read_raw` (reading CR2 is privileged).
+pub static CR2: AtomicUsize = AtomicUsize::new(0);
+
+pub mod registers {
+    pub use real::registers::*;
+
+    pub mod control {
+        pub use real::registers::control::*;
+
+        /// Host stand-in for CR2: the value in [`crate::CR2`].
+        pub struct Cr2;
+        impl Cr2 {
+            pub fn read_raw() -> u64 {
+                crate::CR2.load(super::super::Ordering::Relaxed) as u64
+            }
+        }
+    }
+}

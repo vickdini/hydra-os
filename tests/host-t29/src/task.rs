@@ -38,8 +38,25 @@ impl TaskPersonality {
     }
 }
 /// *stub* The fake clock moves instead (nothing sleeps on the host).
+/// *stub* The fake clock moves, and the test's wait hook (`fake::ON_WAIT`) runs: kernel loops
+/// that poll with a sleep (a stopped process, `rt_sigsuspend`) see what it changes. Without
+/// a hook, a sleep loop that would never end fails the test.
 pub fn sleep_ticks(ticks: u64) {
     crate::fake::TICKS.set(crate::fake::TICKS.get() + ticks);
+    crate::fake::SLEEPS.set(crate::fake::SLEEPS.get() + 1);
+    let hook = crate::fake::ON_WAIT.with_borrow_mut(|h| h.take());
+    match hook {
+        Some(mut h) => {
+            h();
+            crate::fake::ON_WAIT.with_borrow_mut(|slot| {
+                if slot.is_none() {
+                    *slot = Some(h)
+                }
+            });
+        }
+        None if crate::fake::SLEEPS.get() > 100_000 => panic!("fake sleep: a sleep loop that never ends"),
+        None => {}
+    }
 }
 pub fn sleep_ms(ms: u64) {
     crate::fake::TICKS.set(crate::fake::TICKS.get() + ms);

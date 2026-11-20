@@ -105,14 +105,15 @@ pub mod idt {
             self.0[512] |= 0b011;
         }
     }
+    /// *stub* XSAVE in use when a test says so (`fake::XSAVE`): an 832-byte area, x87+SSE+AVX.
     pub fn use_xsave() -> bool {
-        false
+        crate::fake::XSAVE.get()
     }
     pub fn xsave_size() -> usize {
-        512
+        if crate::fake::XSAVE.get() { 832 } else { 512 }
     }
     pub fn xcr0() -> u64 {
-        0
+        if crate::fake::XSAVE.get() { 7 } else { 0 }
     }
 }
 pub mod rtc {
