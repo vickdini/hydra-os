@@ -630,9 +630,9 @@ pub mod linux_stubs {
         IDENT_CHANGES.set(IDENT_CHANGES.get() + 1);
     }
 
-    /// *stub* The calls that change identity (setuid family) as the kernel lists them.
+    /// *mirror* of the kernel's list of calls that change identity.
     pub fn changes_identity(nr: u64) -> bool {
-        matches!(nr, 105 | 106 | 113 | 114 | 117 | 119 | 122 | 123)
+        matches!(nr, 59 | 322 | 101 | 105 | 106 | 113 | 114 | 116 | 117 | 119 | 122 | 123 | 126 | 157 | 272 | 308 | 317)
     }
 
     /// *stub* The Linux dispatcher: records the call, answers from [`LINUX_RESULTS`].

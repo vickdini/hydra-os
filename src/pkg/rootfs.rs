@@ -188,15 +188,17 @@ fn install_entry(
     let existing = s.lookup(parent, &leaf).ok();
     let ino = match kind {
         b'5' => {
-            sum.dirs += 1;
-            match existing {
+            let ino = match existing {
                 Some(ino) if s.getattr(ino)?.is_dir() => ino,
                 Some(_) => {
                     s.unlink(parent, &leaf)?;
                     s.mkdir(parent, &leaf, perm, uid, gid)?
                 }
                 None => s.mkdir(parent, &leaf, perm, uid, gid)?,
-            }
+            };
+            // Counted once it is there (an entry that fails is counted as skipped only)
+            sum.dirs += 1;
+            ino
         }
         _ => {
             if let Some(old) = existing {
@@ -208,32 +210,35 @@ fn install_entry(
             }
             match kind {
                 b'0' | 0 | b'7' => {
-                    sum.files += 1;
-                    sum.bytes += data.len() as u64;
                     let ino = s.create(parent, &leaf, perm, uid, gid)?;
                     if !data.is_empty() {
                         s.write(ino, 0, data)?;
                     }
+                    sum.files += 1;
+                    sum.bytes += data.len() as u64;
                     ino
                 }
                 b'1' => {
-                    sum.hardlinks += 1;
+                    // (a link to a later entry fails here first and is retried: counted once)
                     let target = resolve_in(s, root, root, link, false)?;
                     s.link(target, parent, &leaf)?;
+                    sum.hardlinks += 1;
                     return Ok(());
                 }
                 b'2' => {
+                    let ino = s.symlink(parent, &leaf, link, uid, gid)?;
                     sum.symlinks += 1;
-                    s.symlink(parent, &leaf, link, uid, gid)?
+                    ino
                 }
                 b'3' | b'4' | b'6' => {
-                    sum.devices += 1;
                     let fmt = match kind {
                         b'3' => S_IFCHR,
                         b'4' => S_IFBLK,
                         _ => S_IFIFO,
                     };
-                    s.mknod(parent, &leaf, fmt | perm, rdev, uid, gid)?
+                    let ino = s.mknod(parent, &leaf, fmt | perm, rdev, uid, gid)?;
+                    sum.devices += 1;
+                    ino
                 }
                 _ => {
                     sum.skipped += 1;
