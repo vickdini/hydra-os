@@ -99,7 +99,9 @@ pub fn start(cfg: &Config, serve: ServeFn) -> Result<Service, i64> {
             println!("[{}] only {} of {} workers attached", cfg.name, ATTACHED.load(Ordering::Acquire), cfg.workers);
             return Err(-11);
         }
-        sys::yield_now();
+        // (wave6 G25: a sleep, not a yield: on one CPU a yield back to this thread never lets
+        // the workers it waits for run)
+        sys::sleep_ms(1);
     }
     let srv = Server::register(cfg.endpoint)?;
     let area = sys::lx_ctl(LX_CTL_OBJAREA)? as *mut u8;
