@@ -990,16 +990,17 @@ fn sched_setattr(pid: u64, uattr: u64, flags: u64) -> i64 {
             if attr.priority != 0 || !(-20..=19).contains(&attr.nice) {
                 return EINVAL;
             }
-            if attr.nice < old.nice && !privileged {
+            if attr.nice < old.nice && attr.nice < super::limits::min_nice() && !privileged {
                 return EPERM;
             }
         }
-        // SCHED_FIFO, SCHED_RR
+        // SCHED_FIFO, SCHED_RR: without CAP_SYS_NICE up to RLIMIT_RTPRIO, as
+        // sched_setscheduler (PipeWire's realtime module uses either)
         1 | 2 => {
             if !(1..=99).contains(&attr.priority) {
                 return EINVAL;
             }
-            if !privileged {
+            if !privileged && attr.priority as u64 > super::limits::rtprio_limit() {
                 return EPERM;
             }
         }
@@ -1089,15 +1090,32 @@ pub(crate) fn sched_set(tid: u64, policy: u32, nice: i32, priority: u32, reset: 
     apply_priority(tid, &a);
 }
 
-/// Steers Hydra's scheduler: the idle policy and nice 10 or more run at low priority.
+/// Steers Hydra's scheduler: real-time policies (`SCHED_FIFO`, `SCHED_RR`,
+/// `SCHED_DEADLINE`) and nice -10 or less run at high priority (ahead of every normal task,
+/// like Hydra's own services: PipeWire's audio thread must run within a few milliseconds of
+/// its timer, or the sound card runs dry), the idle policy and nice 10 or more at low.
+/// Only Linux threads change; Hydra's services keep their own priority.
 fn apply_priority(tid: u64, a: &SchedAttr) {
     use crate::task::TaskPriority;
-    let p = if a.policy == 5 || (matches!(a.policy, 0 | 3) && a.nice >= 10) { TaskPriority::Low } else { TaskPriority::Normal };
+    let p = if matches!(a.policy, 1 | 2 | 6) || (matches!(a.policy, 0 | 3) && a.nice <= -10) {
+        TaskPriority::High
+    } else if a.policy == 5 || (matches!(a.policy, 0 | 3) && a.nice >= 10) {
+        TaskPriority::Low
+    } else {
+        TaskPriority::Normal
+    };
     crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| {
-        if matches!(t.priority, TaskPriority::Low | TaskPriority::Normal) {
+        if t.personality.is_posix() && matches!(t.priority, TaskPriority::Low | TaskPriority::Normal | TaskPriority::High) {
             t.priority = p;
         }
     });
+}
+
+/// Sets thread `tid`'s scheduler priority from its recorded attributes again (after a
+/// temporary raise, `snd`'s driver thread).
+pub(crate) fn reapply_priority(tid: u64) {
+    let a = SCHED.lock().get(&tid).copied().unwrap_or_default();
+    apply_priority(tid, &a);
 }
 
 /// A new thread inherits its creator's attributes; with reset-on-fork, a real-time policy
@@ -1116,4 +1134,6 @@ pub(crate) fn sched_inherit(parent: u64, child: u64) {
         a.flags &= !1;
     }
     SCHED.lock().insert(child, a);
+    // The new task took its creator's scheduler priority; reset-on-fork may have lowered it
+    apply_priority(child, &a);
 }

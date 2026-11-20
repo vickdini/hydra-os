@@ -247,6 +247,22 @@ Measured with the hooks (section 2) and read from the code.
   PipeWire's timing on Hydra) lets it run dry about once a second. The sound plays (the WAV
   has the samples), with short gaps. This was not investigated further here; wave 6's sound
   group should measure it before and after its move (and may find the cause on the way).
+- **Wave 6 (Group 25): the cause, and a partial fix.** Kernel probes at each underrun
+  (`snd.rs`, not committed) showed PipeWire's data thread, the one that drives the card
+  (`SYNC_PTR`), ready to run but waiting 50-250 ms for a CPU behind Firefox's threads, at
+  normal priority. PipeWire asks RTKit (through the desktop portal) to make that thread
+  real-time; Hydra has no RTKit, so it never is. With a quiet desktop there is only one
+  underrun, about 1.1 s into each stream (PipeWire's write stops for 100-400 ms at the same
+  point every time; not investigated). ffa9349 raises the thread that drives a stream to
+  the scheduler's high priority while it holds the device open. Test
+  (`scratch/g25/sndrun.sh` in E:\os-25: KDE, Firefox loading Wikipedia while `pw-play`
+  plays a 40 s sine from `tests/linux/sinegen.c`; `tools/wavgaps.py` counts silent stretches
+  in QEMU's WAV): underruns 21, 21, 17 before,
+  11 after (one run); silent gaps in the WAV 24 before and after. With the thread at high
+  priority the probes found it running at each later underrun, woken late: what is left is
+  probably in its wake-ups and system calls (its timerfd and eventfds are linux-server objects,
+  served by the same four workers as Firefox's calls), not the CPU. A sound service of its
+  own (wave 7) should give the audio thread's calls priority.
 - The **audio hot path never reaches hda-driver**: the position is read from a page the
   controller writes. Moving the ALSA layer keeps that property in every option, as long as
   the page is mapped into whichever server owns the ALSA layer.

@@ -1072,6 +1072,31 @@ pub const LX_TIMER_ARM: u64 = 0;
 pub const LX_TIMER_CANCEL: u64 = 1;
 /// `SYS_LX_TIMER` operation: returns the kernel's monotonic clock (ns since boot).
 pub const LX_TIMER_NOW: u64 = 2;
+// wave6 G25 begin
+/// `SYS_LX_TIMER` operation: maps the clock's read-only state page (the vDSO's `[vvar]`,
+/// layout [`LxVvar`]) into the caller and returns its address: the server reads the
+/// monotonic clock without a system call.
+pub const LX_TIMER_VVAR: u64 = 3;
+
+/// The clock's state page ([`LX_TIMER_VVAR`]; the vDSO's `[vvar]`): under sequence counter
+/// `seq` (odd: being written), monotonic ns = `base_ns` + ((TSC - `base_tsc`) * `mult` +
+/// `base_frac`) >> 32 (`mult` 0: `base_ns`); wall clock = monotonic + `wall_ns`.
+#[repr(C)]
+pub struct LxVvar {
+    /// Sequence counter (odd while the kernel writes).
+    pub seq: u64,
+    /// Monotonic ns at `base_tsc`.
+    pub base_ns: u64,
+    /// Fraction of a ns at `base_tsc` (32 bits).
+    pub base_frac: u64,
+    /// TSC at `base_ns`.
+    pub base_tsc: u64,
+    /// ns per TSC tick (32.32 fixed point; 0: no TSC).
+    pub mult: u64,
+    /// Wall clock minus monotonic clock (ns).
+    pub wall_ns: i64,
+}
+// wave6 G25 end
 /// Notification: timer `a` (a cookie) armed for `b` expired.
 pub const LX_NOTE_TIMER: u64 = 6;
 /// Notification (signalfd): a signal in mask `b` became pending for thread `a` (0: for

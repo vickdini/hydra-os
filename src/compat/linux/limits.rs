@@ -301,6 +301,17 @@ pub fn getpriority(which: u64, who: u64) -> i64 {
     }
 }
 
+/// The calling process's `RLIMIT_RTPRIO` (soft): the highest real-time priority it may set
+/// without `CAP_SYS_NICE` (`sched_setattr`, wave 6 Group 25).
+pub(crate) fn rtprio_limit() -> u64 {
+    get(super::proc::current_ids().1).limits[RLIMIT_RTPRIO].0
+}
+
+/// The lowest nice the calling process may set without `CAP_SYS_NICE` (`RLIMIT_NICE`).
+pub(crate) fn min_nice() -> i32 {
+    20 - get(super::proc::current_ids().1).limits[RLIMIT_NICE].0.min(40) as i32
+}
+
 /// `setpriority(which, who, prio)`.
 pub fn setpriority(which: u64, who: u64, prio: u64) -> i64 {
     let nice = (prio as i64 as i32).clamp(-20, 19);

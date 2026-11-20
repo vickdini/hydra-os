@@ -1408,6 +1408,71 @@ struct power_request {
     int how;
 };
 
+/* libdbus's timeouts (a pending call's reply timeout): this program polls the bus itself,
+ * so it must run them, or a call that is never answered waits for ever (wave 6, G25: the
+ * 120 s polkit timeout of Reboot never fired). */
+#define MAX_TIMEOUTS 32
+static struct {
+    DBusTimeout *t;
+    long long due;
+} timeouts[MAX_TIMEOUTS];
+
+static long long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
+}
+
+static dbus_bool_t add_timeout(DBusTimeout *t, void *data) {
+    (void)data;
+    for (int i = 0; i < MAX_TIMEOUTS; i++)
+        if (!timeouts[i].t) {
+            timeouts[i].t = t;
+            timeouts[i].due = now_ms() + dbus_timeout_get_interval(t);
+            return TRUE;
+        }
+    logmsg("too many D-Bus timeouts");
+    return FALSE;
+}
+
+static void remove_timeout(DBusTimeout *t, void *data) {
+    (void)data;
+    for (int i = 0; i < MAX_TIMEOUTS; i++)
+        if (timeouts[i].t == t)
+            timeouts[i].t = NULL;
+}
+
+static void toggle_timeout(DBusTimeout *t, void *data) {
+    (void)data;
+    for (int i = 0; i < MAX_TIMEOUTS; i++)
+        if (timeouts[i].t == t)
+            timeouts[i].due = now_ms() + dbus_timeout_get_interval(t);
+}
+
+/* Milliseconds until the next enabled timeout, at most `limit`. */
+static int next_timeout(int limit) {
+    long long now = now_ms();
+    for (int i = 0; i < MAX_TIMEOUTS; i++)
+        if (timeouts[i].t && dbus_timeout_get_enabled(timeouts[i].t)) {
+            long long left = timeouts[i].due - now;
+            if (left < limit)
+                limit = left < 0 ? 0 : (int)left;
+        }
+    return limit;
+}
+
+/* Runs the timeouts that are due (a pending call then gets its "no reply" error). */
+static void run_timeouts(void) {
+    long long now = now_ms();
+    for (int i = 0; i < MAX_TIMEOUTS; i++) {
+        DBusTimeout *t = timeouts[i].t;
+        if (t && dbus_timeout_get_enabled(t) && timeouts[i].due <= now) {
+            timeouts[i].due = now + dbus_timeout_get_interval(t);
+            dbus_timeout_handle(t);
+        }
+    }
+}
+
 /* polkit has decided on a PowerOff/Reboot/Halt request. */
 static void power_decided(DBusPendingCall *pc, void *data) {
     struct power_request *pr = data;
@@ -1927,6 +1992,7 @@ int main(int argc, char **argv) {
         logmsg("cannot connect to the system bus: %s", err.message);
         return 1;
     }
+    dbus_connection_set_timeout_functions(bus, add_timeout, remove_timeout, toggle_timeout, NULL, NULL);
     int r = dbus_bus_request_name(bus, BUS_NAME, DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
     if (r != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
         logmsg("cannot own %s: %s", BUS_NAME, dbus_error_is_set(&err) ? err.message : "name taken");
@@ -1973,8 +2039,9 @@ int main(int argc, char **argv) {
                 owner[n++] = i;
             }
         /* Every 30 s: sessions outside their allowed hours end */
-        if (poll(p, n, 30000) < 0 && errno != EINTR)
+        if (poll(p, n, next_timeout(30000)) < 0 && errno != EINTR)
             break;
+        run_timeouts();
         static time_t last_check;
         time_t t = time(NULL);
         if (t - last_check >= 30) {

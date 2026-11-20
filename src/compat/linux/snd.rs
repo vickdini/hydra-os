@@ -125,6 +125,42 @@ static SYNC_TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 /// Wakes the position task when a stream starts.
 static TASK_WQ: WaitQueue = WaitQueue::new();
 
+/// The thread that drives each direction's stream (`SYNC_PTR`, `START`), raised to the
+/// scheduler's high priority while it holds the device open (0: none). PipeWire runs the
+/// card from a timer in its data thread, which must run within a few milliseconds of it:
+/// at normal priority, behind Firefox's threads, it ran 50-250 ms late and the card ran
+/// dry 1-3 times a second (wave 6, G25). On Ubuntu RTKit makes that thread real-time;
+/// PipeWire asks RTKit through the desktop portal, which Hydra does not serve, so the
+/// device does it for the thread that drives it.
+static DRIVER: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+
+/// Makes the calling thread direction `dir`'s driver: high priority (a Linux thread at
+/// normal priority only), the previous driver back to its own priority.
+fn boost_caller(dir: usize) {
+    let me = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+    let old = DRIVER[dir].load(Ordering::Relaxed);
+    if me == 0 || old == me {
+        return;
+    }
+    DRIVER[dir].store(me, Ordering::Relaxed);
+    if old != 0 {
+        super::extra::reapply_priority(old);
+    }
+    crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(me), |t| {
+        if t.personality.is_posix() && t.priority == crate::task::TaskPriority::Normal {
+            t.priority = crate::task::TaskPriority::High;
+        }
+    });
+}
+
+/// The device of direction `dir` was closed: its driver thread gets its own priority back.
+fn unboost(dir: usize) {
+    let old = DRIVER[dir].swap(0, Ordering::Relaxed);
+    if old != 0 {
+        super::extra::reapply_priority(old);
+    }
+}
+
 /// What the driver reported about the card.
 #[derive(Clone)]
 struct Card {
@@ -1518,6 +1554,7 @@ impl PcmFile {
         if flags & 1 != 0 {
             self.sync();
         }
+        boost_caller(self.dir);
         {
             let mut s = self.stream();
             if flags & 2 == 0 {
@@ -1606,6 +1643,7 @@ impl PcmFile {
             crate::kprintln!("[snd] the driver could not start the stream: {}", e);
             return EIO;
         }
+        boost_caller(self.dir);
         let mut s = self.stream();
         s.state = ST_RUNNING;
         s.last_pos = 0;
@@ -1821,6 +1859,7 @@ impl Drop for PcmFile {
         if was {
             let _ = trigger(self.dir, false);
         }
+        unboost(self.dir);
         SND_WQ.wake_all();
     }
 }
