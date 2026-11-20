@@ -86,15 +86,21 @@ fn kernel_lock_basics() {
     // ...waiting with interrupts on while another CPU has it
     host::set_cpu(2);
     assert!(smp::bkl_try_enter());
-    let t = std::thread::spawn(|| {
+    let ready = Arc::new(AtomicBool::new(false));
+    let r2 = ready.clone();
+    let t = std::thread::spawn(move || {
         host::set_cpu(3);
         hw::set_if(false);
+        r2.store(true, SeqCst);
         smp::bkl_enter_idle();
         let on = hw::if_flag();
         smp::bkl_exit();
         on
     });
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    while !ready.load(SeqCst) {
+        std::hint::spin_loop();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
     smp::bkl_exit();
     assert!(t.join().unwrap(), "interrupts enabled while waiting");
     // Interrupts as they were around enter/exit
