@@ -10,7 +10,7 @@ Welcome to the technical documentation for **Hydra OS**. Every source code file 
 docs/
 ├── README.md                      # This Index
 ├── DOCUMENTATION_STANDARD.md      # Rustdoc-compatible source code documentation standard
-├── build.md                       # Build automation script (build.rs)
+├── build.md                       # Build script (build_drivers.rs: the ring-3 driver programs)
 └── src/
     ├── main.md                    # Kernel entry point & bootstrap orchestrator (src/main.rs)
     ├── console.md                 # Thread-safe console & formatting macros (src/console.rs)
@@ -22,8 +22,6 @@ docs/
     │   ├── gdt.md                 # Global Descriptor Table, TSS & Rings (src/arch/gdt.rs)
     │   ├── idt.md                 # Interrupt Descriptor Table & Exception Gates (src/arch/idt.rs)
     │   ├── cpu.md                 # Control registers & CPU diagnostics (src/arch/cpu.rs)
-    │   └── x86_64/
-    │       └── boot.md            # Legacy BIOS boot assembly (header.asm, main.asm, main64.asm)
     ├── memory/
     │   ├── mod.md                 # Memory management module root (src/memory/mod.rs)
     │   ├── frame_allocator.md     # Physical memory manager & 4 KiB frames (src/memory/frame_allocator.rs)
@@ -70,7 +68,7 @@ docs/
 | **IPC Root** | [`src/ipc/mod.rs`](file:///d:/os/src/ipc/mod.rs) | [docs/src/ipc/mod.md](file:///d:/os/docs/src/ipc/mod.md) | Inter-process communication module export. |
 | **Driver Supervisor** | [`src/task/supervisor.rs`](file:///d:/os/src/task/supervisor.rs) | [docs/src/task/supervisor.md](file:///d:/os/docs/src/task/supervisor.md) | MINIX 3-style driver reincarnation server, on-the-spot crash revival, heartbeats. |
 | **Personalities** | [`src/personality/`](../src/personality) | [docs/src/personality.md](src/personality.md) | Wave 5 hook for programs of other systems: ENOEXEC for FreeBSD/Mach-O, per-personality system call tables through a per-CPU pointer, BSD result convention, FreeBSD signal frames and exec layout (stub table behind `persona=fbsd-stub`). |
-| **Build Automation**| [`build.rs`](file:///d:/os/build.rs) | [docs/build.md](file:///d:/os/docs/build.md) | NASM assembly build script and link configuration. |
+| **Build Automation**| [`build_drivers.rs`](file:///d:/os/build_drivers.rs) | [docs/build.md](file:///d:/os/docs/build.md) | Builds the ring-3 driver programs the kernel embeds. |
 | **Legacy Boot** | [`src/arch/x86_64/boot/`](file:///d:/os/src/arch/x86_64/boot) | [docs/src/arch/x86_64/boot.md](file:///d:/os/docs/src/arch/x86_64/boot.md) | Multiboot2 header and 32-bit to 64-bit assembly trampoline. |
 
 ---

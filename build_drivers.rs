@@ -3,8 +3,6 @@
 //! Builds the driver and server programs in `userland/drivers` (static native ELFs for
 //! `x86_64-unknown-none`) into `target/drivers`, from where the kernel embeds them as boot
 //! modules with `include_bytes!` (see `src/task/supervisor.rs`).
-//!
-//! (`build.rs` assembles the legacy Multiboot2 entry and is not used by UEFI builds.)
 
 use std::env;
 use std::process::Command;
