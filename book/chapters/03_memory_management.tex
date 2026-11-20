@@ -413,6 +413,49 @@ During kernel development and testing, silent heap corruption represents a letha
 \end{itemize}
 
 % ==============================================================================
+\section{Memory Objects Subsystem: \texttt{SYS\_LX\_MEM} and Cross-Service Sharing}
+\label{sec:memory_objects_subsystem}
+% ==============================================================================
+
+In a microkernel multi-server operating system, isolated services frequently require shared physical memory without routing every data transfer through intermediate kernel copies. For example, the display server needs to share DRM dumb buffers with Wayland client applications; the audio driver shares DMA ring buffers with user-space mixers; and the virtual file system shares in-memory pipe buffers and mount tables.
+
+To manage cross-service memory securely, Hydra introduces the **Memory Objects Subsystem**:
+
+\subsection{The Memory Object Interface (\texttt{SYS\_LX\_MEM})}
+Native system call 64, \texttt{SYS\_LX\_MEM(op, a, b, c, d)}, provides capability-controlled object lifecycle operations available strictly to registered services:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Operation} & \textbf{Arguments} & \textbf{Semantics and Architectural Function} \\
+\midrule
+\texttt{LX\_MEM\_ANON} & \texttt{size, flags, key} & Allocates a new demand-paged anonymous memory object. With \texttt{LX\_MEM\_KEPT}, the memory survives service restarts. \\
+\texttt{LX\_MEM\_DMA} & \texttt{size, *dev\_addr} & Allocates physically contiguous, pinned memory within the caller's IOMMU domain. \\
+\texttt{LX\_MEM\_MAP} & \texttt{handle, off, len, prot} & Maps pages into the caller's address space; displayed as \texttt{[hydra-mem]} in \texttt{/proc/<pid>/maps}. \\
+\texttt{LX\_MEM\_UNMAP} & \texttt{addr, len} & Unmaps a mapped virtual region from the caller. \\
+\texttt{LX\_MEM\_SHARE} & \texttt{handle, peer\_ep} & Transfers an object handle into another service's capability table without copying underlying physical frames. \\
+\texttt{LX\_MEM\_INFO} & \texttt{handle} & Queries object dimensions, page counts, and DMA/kept flags. \\
+\bottomrule
+\end{tabularx}
+\caption{Operations Supported by the Hydra Memory Object Subsystem (\texttt{SYS\_LX\_MEM}).}
+\label{tab:mem_objects}
+\end{table}
+
+\subsection{Service-Backed Memory Mapping (\texttt{server\_mmap})}
+When a userland application invokes the standard Linux \texttt{mmap(2)} system call on a descriptor owned by a service (such as a DRM framebuffer descriptor \texttt{/dev/dri/card0}):
+\begin{enumerate}
+    \item The Linux compatibility layer identifies the descriptor as a \texttt{ServerObject} and forwards the request to the owning service worker via \texttt{lx::mem::server\_mmap}.
+    \item The service inspects the request and replies with an encoded descriptor word containing the memory object handle, page offset, and read-only flags:
+    \begin{equation}
+    \text{Answer} = \text{Handle} \mid (\text{ReadOnly} \ll 15) \mid (\text{PageOffset} \ll 16)
+    \end{equation}
+    \item The kernel retrieves the memory object from the service's handle table and inserts the physical frames directly into the user application's page tables.
+    \item If mapped with \texttt{MAP\_SHARED}, updates to the memory region are immediately visible across both processes. If mapped with \texttt{MAP\_PRIVATE}, writes trigger Copy-on-Write frame duplication.
+\end{enumerate}
+
+% ==============================================================================
 \section{Summary}
 \label{sec:summary_chap3}
 % ==============================================================================

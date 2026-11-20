@@ -307,6 +307,16 @@ In Hydra, the microkernel and all userland servers are written from scratch in \
     \item \textbf{Explicit \texttt{unsafe} Boundaries:} In an operating system kernel, interacting with physical hardware necessarily requires dereferencing raw pointers, manipulating control registers (\texttt{CR0}, \texttt{CR3}, \texttt{CR4}), and loading segment registers. In Rust, these operations are strictly sequestered inside clearly marked \texttt{unsafe} blocks. Over 95\% of Hydra's codebase is verified safe by the compiler.
 \end{enumerate}
 
+\subsection{Elimination of Assembly Baggage: 100\% Pure Rust UEFI Architecture}
+In historical operating system development, bootstrap code was almost universally authored in assembly language (e.g., real-mode 16-bit x86 reset vectors, A20 gate enabling, and 32-bit GDT Protected Mode transitions via Multiboot or BIOS MBR sectors). 
+
+Hydra departs decisively from this paradigm by establishing a \textbf{100\% Pure Rust Bare-Metal Architecture}:
+\begin{enumerate}
+    \item \textbf{Firmware-Native Entry:} Hydra targets the bare-metal \texttt{x86\_64-unknown-uefi} specification. The bootloader is a native PE32+ application (\texttt{bootx64.efi}) whose entry point (\texttt{efi\_main}) is executed directly by the 64-bit UEFI firmware in Long Mode with flat 4-level paging and hardware graphics (GOP) already enabled.
+    \item \textbf{Purge of Legacy BIOS/Multiboot2 Paths:} Legacy 16-bit real-mode bootstrap stubs, external NASM assembly files (\texttt{header.asm}, \texttt{main.asm}, \texttt{main64.asm}), prebuilt object files, and custom linker scripts (\texttt{linker.ld}) have been completely eliminated from the codebase. The only assembly remaining in Hydra comprises small, highly targeted inline \texttt{asm!} and \texttt{global\_asm!} blocks within Rust source files for low-level CPU control (e.g., \texttt{syscall} entries, exception stubs, and user-copy fault fix-up labels).
+    \item \textbf{Integrated Driver Staging (\texttt{build\_drivers.rs}):} Cargo's build script compiles the Ring~3 isolated driver binaries (\texttt{x86\_64-unknown-none} static ELFs) into \texttt{target/drivers/}. The kernel supervisor embeds these binaries directly into the kernel executable using \texttt{include\_bytes!}, guaranteeing that all isolated service binaries are available at cold boot without requiring external initial ramdisks (initrd).
+\end{enumerate}
+
 % ==============================================================================
 \section{Summary}
 \label{sec:summary_chap1}

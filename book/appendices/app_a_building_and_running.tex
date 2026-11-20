@@ -254,3 +254,38 @@ Hydra features a completely headless test automation pipeline executed via \text
     \item \texttt{[+] Milestone 5: Linux Compatibility ABI Operational (glibc/musl)}
 \end{enumerate}
 If all milestones are reached within a 30-second timeout, the test runner signals success (exit code 0) and issues an ACPI poweroff command via the serial port.
+
+% ==============================================================================
+\section{Host-Based Unit Testing and LLVM Source Line Coverage}
+\label{sec:host_coverage_deep}
+% ==============================================================================
+
+While full integration tests inside QEMU and VirtualBox validate end-to-end hardware interaction, running hypervisors for every incremental change introduces substantial testing latency. To achieve rapid feedback, Hydra implements a comprehensive **Host Unit Testing Framework**:
+
+\subsection{Testing Microkernel Logic on the Host}
+Subsystem logic that does not depend directly on physical CPU control registers (such as OpenZFS Merkle tree traversal, Fletcher-4 checksum algorithms, capability token validation, scheduler stride arithmetic, and ELF binary parsing) is isolated into host-compilable unit test crates located under \texttt{tests/host/} and \texttt{tests/host-*}.
+
+These tests compile against the host machine's native target (e.g., \texttt{x86\_64-pc-windows-msvc} or \texttt{x86\_64-unknown-linux-gnu}), executing in fractions of a second.
+
+\subsection{Automated Line Coverage Automation (\texttt{tools/host\_coverage.py})}
+To verify that all microkernel code paths, error handlers, and edge cases are thoroughly exercised, Hydra incorporates an automated line-coverage analysis tool: \texttt{tools/host\_coverage.py}.
+
+\begin{lstlisting}[language=bash, caption={Running Microkernel Line Coverage Analysis}]
+# Execute host test suite with LLVM instrumented coverage
+python tools/host_coverage.py --files
+
+# Export machine-readable JSON coverage report
+python tools/host_coverage.py --json coverage.json
+\end{lstlisting}
+
+The coverage pipeline performs the following steps:
+\begin{enumerate}
+    \item Invokes \texttt{cargo test} across every host test crate with the LLVM source-based coverage flag:
+    \begin{equation}
+    \texttt{RUSTFLAGS} = \texttt{"-C instrument-coverage"}
+    \end{equation}
+    Each crate builds into its own isolated target directory (\texttt{<crate>/target/cov}) to prevent cache invalidation of production builds.
+    \item Executes the compiled test binaries, collecting raw \texttt{.profraw} execution profiles.
+    \item Invokes \texttt{llvm-profdata} to merge disparate profile files into a single consolidated index.
+    \item Uses \texttt{llvm-cov report} to extract exact per-file and per-subsystem line coverage percentages across \texttt{src/}, identifying untested branches and unhandled error conditions before bare-metal deployment.
+\end{enumerate}

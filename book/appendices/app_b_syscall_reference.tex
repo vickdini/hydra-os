@@ -194,3 +194,31 @@ This appendix provides an exhaustive, classified reference of the Linux System C
 \caption{Linux Event Multiplexing, Signal, and Timing System Calls Supported in Hydra.}
 \label{tab:syscall_event}
 \end{table}
+
+% ==============================================================================
+\section{Hydra Native Microkernel and Direct Service Calls}
+\label{sec:ref_native_syscalls}
+% ==============================================================================
+
+In addition to standard Linux ABI emulation, Hydra defines a collection of native microkernel system calls designed for high-performance service orchestration, memory sharing, and fault-tolerant driver recovery:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{rllX}
+\toprule
+\textbf{Syscall} & \textbf{Name} & \textbf{Arguments (RDI..R9)} & \textbf{Semantics and Description} \\
+\midrule
+64 & \texttt{SYS\_LX\_MEM} & \texttt{op, a, b, c, d} & Memory object manipulation: \texttt{LX\_MEM\_ANON}, \texttt{LX\_MEM\_DMA}, \texttt{LX\_MEM\_MAP}, \texttt{LX\_MEM\_SHARE}, and \texttt{LX\_MEM\_KEPT}. \\
+70 & \texttt{SYS\_SVC\_DCALL} & \texttt{target, op, in, in\_len, out, out\_cap} & Direct synchronous inter-service RPC with immediate worker thread switch and automatic delegation. \\
+71 & \texttt{SYS\_SVC\_POST} & \texttt{target, op, data, len} & Asynchronous 16-byte event notification appended to the target service's ring buffer. \\
+\midrule
+-- & \texttt{LX\_SVC\_LIST} & \texttt{buf, cap} & Queries active object handles previously owned by a crashed driver instance. \\
+-- & \texttt{LX\_SVC\_DEAD} & \texttt{slot} & Marks a crashed object handle permanently dead, returning \texttt{-EIO} to callers. \\
+-- & \texttt{LX\_SVC\_ADOPT} & \texttt{slot, new\_key} & Rebinds an active object handle to a newly launched replacement service instance. \\
+-- & \texttt{LX\_SVC\_INFO} & \texttt{slot, info\_ptr} & Queries metadata, generation numbers, and readiness state of a service object. \\
+\bottomrule
+\end{tabularx}
+\caption{Hydra Native Microkernel Service Orchestration and Recovery Calls.}
+\label{tab:syscall_native}
+\end{table}

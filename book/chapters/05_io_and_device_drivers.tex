@@ -272,6 +272,42 @@ To allow unmodified modern graphical desktop environments (such as the **KWin Wa
 \end{itemize}
 
 % ==============================================================================
+\section{Service Registry, Restart Classes, and Kept-State Adoption}
+\label{sec:service_restart_architecture}
+% ==============================================================================
+
+While running device drivers in Ring~3 guarantees that an unhandled CPU exception cannot corrupt kernel memory, naive driver restarts can easily leave dependent applications hanging or operating on stale handles. Hydra resolves this through a comprehensive **Service Lifecycle and Recovery Framework**:
+
+\subsection{The Service Registry and Route Identifiers}
+Every isolated driver and system server registers with the kernel supervisor, receiving a unique \texttt{u32} route identifier. The kernel maintains per-host routing tables that map route IDs to active endpoint handles and worker thread pools, enabling dynamic redirection of hardware I/O requests when a driver undergoes live restart.
+
+\subsection{Driver Restart Classes}
+Not all drivers maintain the same degree of state. Hydra partitions recovery policies into three formal **Restart Classes**:
+\begin{enumerate}
+    \item \textbf{Transparent Restart:} Used for stateless drivers or services with full state preservation. Client applications making requests during a crash transparently wait (up to 30 seconds) while the supervisor launches a replacement driver instance. Once the new instance is online, queued idempotent operations are resent automatically.
+    \item \textbf{FailObjects Restart:} Calls in flight fail with \texttt{-EIO}, and handles referencing old device resources receive a stale error (e.g., \texttt{-ENODEV}). However, the calling processes remain alive, and subsequent open calls successfully bind to the newly launched driver instance.
+    \item \textbf{EndLinux Restart:} Reserved for non-recoverable supervisor failures, triggering session teardown and returning to the display manager.
+\end{enumerate}
+
+To protect against infinite crash loops (e.g., a driver crashing on the exact same packet or sector), Hydra enforces **The Restart Ladder**: a second crash within 30 seconds drops the service down one restart class and purges cached state. A third crash stops restarting the service and alerts the administrator.
+
+\subsection{Kept State and Object Adoption}
+Drivers marked for transparent recovery maintain crucial operational state in **Kept State Buffers** (\texttt{LX\_SVC\_KEPT}):
+\begin{equation}
+\text{StateCheck}(\text{Buffer}) = \text{Checksum32}(\text{Header}) \land \text{Version} == \text{Expected}
+\end{equation}
+Because the memory is owned by the kernel rather than the process's page table, the state buffer survives the crash. When the replacement driver spawns, it queries the kernel via \texttt{LX\_SVC\_LIST}, \texttt{LX\_SVC\_DEAD}, and \texttt{LX\_SVC\_ADOPT}:
+\begin{itemize}
+    \item \texttt{LX\_SVC\_LIST}: Returns the \texttt{(slot, kind, key)} tuples of all active device objects previously owned by the deceased instance.
+    \item \texttt{LX\_SVC\_ADOPT}: Rebinds healthy device descriptors to the new driver instance without altering userland file descriptor numbers or invalidating page mappings.
+\end{itemize}
+
+\subsection{The Security Server (\texttt{lx-sec}) and Kept Keyrings}
+To ensure that Linux user authentication tokens, encryption keys, and seccomp-bpf filters survive driver and compatibility layer restarts, Hydra introduces a dedicated security service: \textbf{\texttt{lx-sec}}. 
+
+Session keyrings and compiled BPF bytecode are maintained in compact, checksummed kept-state buffers. Even if the network driver or file system service restarts, authenticated user sessions remain valid, eliminating unexpected desktop logout events.
+
+% ==============================================================================
 \section{Summary}
 \label{sec:summary_chap5}
 % ==============================================================================

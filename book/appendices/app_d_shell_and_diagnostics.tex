@@ -198,11 +198,22 @@ errors: No known data errors
 \label{sec:kernel_panic_triage}
 % ==============================================================================
 
-When a fatal hardware fault or software assertion failure occurs in Ring~0, Hydra immediately invokes the kernel panic handler (\texttt{src/console.rs}). The system executes the following triage pipeline:
+When a fatal hardware fault or software assertion failure occurs in Ring~0, Hydra immediately invokes the kernel panic handler (\texttt{src/console.rs}). 
+
+\subsection{Lockless Emergency Serial Reporting (\texttt{SerialOnly})}
+In multi-threaded SMP environments, a lethal kernel trap (such as a Page Fault \texttt{\#PF}, General Protection Fault \texttt{\#GP}, or Invalid Opcode \texttt{\#UD}) can occur while the current CPU core is already holding the global scheduler lock or the console lock. In standard operating systems, attempting to acquire the console spinlock during the panic routine produces an immediate deadlock, leaving other cores spinning indefinitely with no visible diagnostic output.
+
+Hydra eliminates this deadlock vulnerability through a dual-path panic triage architecture:
+\begin{enumerate}
+    \item \textbf{Immediate Lockless Serial Dump (\texttt{console::SerialOnly}):} Before attempting to acquire any spinlocks or allocate display memory, the CPU trap handler routes panic formatting directly through \texttt{SerialOnly}. This transmits the faulting Task ID, stack top address, saved registers, and call chain straight to the 16550 UART serial port (\texttt{COM1}, \texttt{0x3F8}) without touching a single lock.
+    \item \textbf{Privilege Stack Triage (\texttt{gdt::privilege\_stack}):} If the fault occurred inside an interrupt or exception stub, the CPU automatically switches to the dedicated Known Good IST stack defined in the Task State Segment (TSS), ensuring that stack overflows cannot inhibit panic reporting.
+    \item \textbf{Console Framebuffer Fallback:} Once the serial dump has been safely dispatched, the kernel attempts a non-blocking \texttt{try\_lock} on the UEFI GOP console, rendering high-contrast diagnostic registers on the physical screen for bare-metal engineers.
+\end{enumerate}
+
+\subsection{Architectural Register and Call-Chain Inspection}
+The emergency dump outputs complete machine state:
 \begin{enumerate}
     \item Disables local CPU interrupts immediately using the \texttt{cli} instruction.
-    \item Acquires the emergency console lock, bypassing standard spinlock contention.
-    \item Resets the UEFI GOP linear framebuffer to a clean high-contrast black canvas.
     \item Dumps all architectural registers:
     \begin{itemize}
         \item Instruction Pointer (\texttt{RIP}) and Code Segment (\texttt{CS});
@@ -212,6 +223,5 @@ When a fatal hardware fault or software assertion failure occurs in Ring~0, Hydr
         \item General Registers: \texttt{RAX}, \texttt{RBX}, \texttt{RCX}, \texttt{RDX}, \texttt{RSI}, \texttt{RDI}, \texttt{R8}--\texttt{R15}.
     \end{itemize}
     \item Performs a frame-pointer walk starting from \texttt{RBP}, printing up to 16 call stack frames with symbol offsets.
-    \item Emits the complete diagnostic dump simultaneously across the high-speed 16550 UART serial port (\texttt{COM1}) for capture by automated hypervisor loggers.
     \item Enters an infinite processor halt loop: \texttt{loop \{ core::arch::x86\_64::hlt(); \}}.
 \end{enumerate}

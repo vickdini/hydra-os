@@ -607,6 +607,60 @@ The auxiliary vector communicates runtime information from the kernel to the dyn
 \end{itemize}
 
 % ==============================================================================
+\section{Direct Service Calls: \texttt{SYS\_SVC\_DCALL}, Delegation, and Fault-Tolerant Copies}
+\label{sec:direct_service_calls}
+% ==============================================================================
+
+While classic microkernels rely exclusively on message queues or traditional send/receive rendezvous primitives, multi-server architectures hosting complex Linux personalities encounter performance bottlenecks when services must communicate with each other. For example, when the Linux compatibility server (\texttt{linux-server}) processes a file system operation, it must query the virtual file system service (\texttt{vfs-server}) or security service (\texttt{lx-sec}).
+
+To eliminate unnecessary scheduling delays and multiple intermediate copies, Hydra implements **Direct Service Calls**:
+
+\subsection{The Direct Call Mechanism (\texttt{SYS\_SVC\_DCALL})}
+Native system call 70, \texttt{SYS\_SVC\_DCALL(target, op, in, in\_len, out, out\_cap)}, provides synchronous, direct execution transfer between isolated services:
+\begin{enumerate}
+    \item \textbf{Direct Worker Handoff:} The kernel constructs an \texttt{LxCall} control block, copies up to 3~KiB of input directly from the caller's memory into the target service worker's pre-mapped syscall page, and immediately switches CPU execution to an idle worker thread of the target service.
+    \item \textbf{Direct Reply Switch:} When the callee completes the operation, it invokes \texttt{SYS\_LX\_REPLY\_RECV}, which transfers execution directly back to the calling service, returning up to \texttt{out\_cap} bytes of output without traversing intermediate scheduler wait queues.
+    \item \textbf{Asynchronous Posts (\texttt{SYS\_SVC\_POST}):} For fire-and-forget event signaling (such as device notifications or socket wakeups), native call 71 (\texttt{SYS\_SVC\_POST}) appends a 16-byte tuple to the target service's ring buffer and wakes its main listener thread.
+\end{enumerate}
+
+\subsection{Security Delegation (\texttt{on\_behalf})}
+A major vulnerability in naive microkernel RPC design is privilege confusion: if service $A$ makes a request to service $B$ on behalf of an unprivileged user process $P$, service $B$ must not execute the request with service $A$'s elevated privileges.
+
+Hydra enforces automatic **Delegation**:
+\begin{equation}
+\text{CalleeContext}(B) \longleftarrow \text{Identity}(P) \quad [\text{Thread, Process, Credentials, Groups}]
+\end{equation}
+The kernel automatically records $P$ as the \texttt{on\_behalf} principal in the callee's call context. While the call is active, service $B$ can access descriptors and memory belonging to $P$, but cannot forge requests or escalate permissions.
+
+\subsection{Fault-Tolerant Cross-Address-Space Copies}
+When copying data across userland address spaces, a malicious or buggy application might pass an unmapped or unaligned virtual pointer. In traditional kernels, page faulting in kernel mode risks an unhandled panic.
+
+Hydra implements **Assembly User-Copy Fix-Up Windows**:
+\begin{lstlisting}[language=Rust, caption={User-Copy Fault Fix-Up Pattern}]
+// Assembly routine with registered fix-up exception handler
+unsafe {
+    core::arch::asm!(
+        "1: mov {tmp}, [{src}]",
+        "2: mov [{dst}], {tmp}",
+        "3:",
+        ".section .fixup, \"ax\"",
+        "4: mov {res}, -14", // -EFAULT
+        "   jmp 3b",
+        ".previous",
+        ".section __ex_table, \"a\"",
+        "   .quad 1b, 4b",
+        "   .quad 2b, 4b",
+        ".previous",
+        src = in(reg) user_src,
+        dst = in(reg) worker_dst,
+        tmp = out(reg) _,
+        res = inout(reg) 0 => result,
+    );
+}
+\end{lstlisting}
+If the source user address triggers a Page Fault (\#PF), the CPU trap handler consults the kernel's \texttt{\_\_ex\_table}. Rather than panicking, the instruction pointer is safely redirected to the fix-up stub, returning \texttt{-EFAULT} cleanly to the caller.
+
+% ==============================================================================
 \section{Summary}
 \label{sec:summary_chap2}
 % ==============================================================================
