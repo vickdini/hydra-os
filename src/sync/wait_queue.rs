@@ -50,6 +50,23 @@ impl WaitQueue {
         }
     }
 
+    /// Enqueues the current task `id` and marks it `TaskState::Blocked` in the same step.
+    ///
+    /// Call it with the lock that guards this queue held, then release that lock and
+    /// yield ([`crate::task::yield_now`]). A waker takes the same lock before
+    /// [`Self::wake_one`], so it always finds the task blocked: enqueueing, unlocking and
+    /// only then blocking lost a wakeup that came in between (the waker's
+    /// `unblock_task` failed on the still running task and dropped it from the queue,
+    /// which then slept forever).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The [`TaskId`] of the calling (current) task.
+    pub fn enqueue_blocked(&mut self, id: TaskId) {
+        self.enqueue(id);
+        task::SCHEDULER.lock().block_current();
+    }
+
     /// Enqueues the currently executing task and transitions it to `TaskState::Blocked`.
     ///
     /// The caller yields the CPU immediately and will not be scheduled until awakened

@@ -68,10 +68,11 @@ impl Semaphore {
                 if self.permits.load(Ordering::Acquire) > 0 {
                     continue;
                 }
-                wq.enqueue(TaskId(current_id));
+                // Blocked before the queue lock goes: a release in between wakes it
+                wq.enqueue_blocked(TaskId(current_id));
             }
 
-            task::block_current();
+            task::yield_now();
         }
     }
 

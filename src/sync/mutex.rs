@@ -89,11 +89,12 @@ impl<T> Mutex<T> {
                     self.owner.store(current_id, Ordering::Relaxed);
                     return MutexGuard { mutex: self };
                 }
-                wq.enqueue(TaskId(current_id));
+                // Blocked before the queue lock goes: an unlock in between wakes it
+                wq.enqueue_blocked(TaskId(current_id));
             }
 
             // Deschedule calling thread
-            task::block_current();
+            task::yield_now();
         }
     }
 
