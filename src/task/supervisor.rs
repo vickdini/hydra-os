@@ -532,13 +532,28 @@ impl Supervisor {
     /// * `idx` - Service index in `services`.
     fn retire(&mut self, idx: usize) {
         let svc = &mut self.services[idx];
-        if let Some(old) = svc.task_id.take() {
+        let old = svc.task_id.take();
+        let old_tgid = old.and_then(|o| crate::task::SCHEDULER.lock().with_task_mut(o, |t| t.tgid));
+        if let Some(old) = old {
             if is_task_alive(old) {
                 let _ = kill(old);
             }
             service::release_irqs(old.0);
         }
-        service::unregister(svc.endpoint_id);
+        // Only its own registration: another service may serve the endpoint (the AHCI and
+        // IDE drivers offer the disk endpoint; starting the one that stood back must not
+        // take the disk away from the other)
+        // (a live server of another process; any thread of its own process may have
+        // registered)
+        let server = service::server_of(svc.endpoint_id);
+        let foreign = server != 0
+            && crate::task::SCHEDULER
+                .lock()
+                .with_task_mut(TaskId(server), |t| t.state != crate::task::TaskState::Dead && Some(t.tgid) != old_tgid)
+                .unwrap_or(false);
+        if !foreign {
+            service::unregister(svc.endpoint_id);
+        }
     }
 
     /// Replaces service `idx`'s process with a new one, unless it failed too often.

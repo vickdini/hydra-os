@@ -114,8 +114,21 @@ pub fn tick_on_return() {
     }
     x86_64::instructions::interrupts::without_interrupts(|| {
         TICK_YIELD.store(1, core::sync::atomic::Ordering::Relaxed);
-        unsafe { core::arch::asm!("int 0x81") };
+        raise_yield();
     });
+}
+
+/// Raises the yield vector (`int 0x81`), whose handler runs the scheduler's pass. (Host
+/// unit tests build this file for their own target: there the vector is
+/// `crate::arch::idt::host_yield`, the tests' stand-in.)
+#[inline(always)]
+fn raise_yield() {
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        core::arch::asm!("int 0x81")
+    };
+    #[cfg(not(target_os = "uefi"))]
+    crate::arch::idt::host_yield();
 }
 
 /// First two arguments of [`CURRENT_SYSCALL`] (for the task dump).
@@ -432,9 +445,7 @@ pub fn yield_now() {
     if !is_active() {
         return;
     }
-    unsafe {
-        core::arch::asm!("int 0x81");
-    }
+    raise_yield();
 }
 
 /// Transitions the calling task to `TaskState::Blocked` and yields the CPU immediately.

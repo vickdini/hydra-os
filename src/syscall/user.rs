@@ -26,16 +26,21 @@ use crate::arch::syscall::*;
 /// Executing an arbitrary system call can modify hardware/CPU state or terminate the process.
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "syscall",
-        in("rax") num,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack)
-    );
-    ret
+    #[cfg(not(target_os = "uefi"))]
+    return crate::arch::syscall::host_syscall(num, [0, 0, 0]);
+    #[cfg(target_os = "uefi")]
+    {
+        let ret: i64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack)
+        );
+        ret
+    }
 }
 
 /// Invokes an x86_64 system call with 1 argument.
@@ -53,17 +58,22 @@ pub unsafe fn syscall0(num: u64) -> i64 {
 /// The caller must ensure arguments represent valid pointers or values for the invoked syscall.
 #[inline(always)]
 pub unsafe fn syscall1(num: u64, arg0: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack)
-    );
-    ret
+    #[cfg(not(target_os = "uefi"))]
+    return crate::arch::syscall::host_syscall(num, [arg0, 0, 0]);
+    #[cfg(target_os = "uefi")]
+    {
+        let ret: i64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") arg0,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack)
+        );
+        ret
+    }
 }
 
 /// Invokes an x86_64 system call with 2 arguments.
@@ -82,18 +92,23 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> i64 {
 /// The caller must ensure arguments represent valid pointers or values for the invoked syscall.
 #[inline(always)]
 pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack)
-    );
-    ret
+    #[cfg(not(target_os = "uefi"))]
+    return crate::arch::syscall::host_syscall(num, [arg0, arg1, 0]);
+    #[cfg(target_os = "uefi")]
+    {
+        let ret: i64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack)
+        );
+        ret
+    }
 }
 
 /// Invokes an x86_64 system call with 3 arguments.
@@ -113,19 +128,24 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> i64 {
 /// The caller must ensure arguments represent valid pointers or values for the invoked syscall.
 #[inline(always)]
 pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack)
-    );
-    ret
+    #[cfg(not(target_os = "uefi"))]
+    return crate::arch::syscall::host_syscall(num, [arg0, arg1, arg2]);
+    #[cfg(target_os = "uefi")]
+    {
+        let ret: i64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack)
+        );
+        ret
+    }
 }
 
 // ---------------------------------------------------------------------------

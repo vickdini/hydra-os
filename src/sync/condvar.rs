@@ -55,18 +55,20 @@ impl CondVar {
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
         let current_id = task::SCHEDULER.lock().current_task_id().0;
 
-        // 1. Enqueue current task in condition variable wait-queue
+        // 1. Enqueue current task in condition variable wait-queue, blocked at once: a
+        // notify after the mutex is released below then always finds it blocked (enqueued
+        // but still running, its wakeup was dropped and it slept forever)
         {
             let mut wq = self.waiters.lock();
-            wq.enqueue(TaskId(current_id));
+            wq.enqueue_blocked(TaskId(current_id));
         }
 
         // 2. Extract mutex reference and drop guard to release lock
         let mutex_ref: &'a Mutex<T> = guard.mutex;
         drop(guard);
 
-        // 3. Block current task until notified
-        task::block_current();
+        // 3. Yield until notified
+        task::yield_now();
 
         // 4. Re-acquire the mutex upon waking
         mutex_ref.lock()

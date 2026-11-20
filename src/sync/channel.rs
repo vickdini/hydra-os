@@ -75,11 +75,13 @@ impl<T> Channel<T> {
                     return;
                 }
                 // Buffer is full: enqueue sender
-                self.send_waiters.lock().enqueue(TaskId(current_id));
+                // (blocked under the buffer lock: a receiver frees space and wakes it only
+                // after taking that lock)
+                self.send_waiters.lock().enqueue_blocked(TaskId(current_id));
             }
 
             // Block sender until space is available
-            task::block_current();
+            task::yield_now();
         }
     }
 
@@ -120,11 +122,12 @@ impl<T> Channel<T> {
                     return item;
                 }
                 // Buffer is empty: enqueue receiver
-                self.recv_waiters.lock().enqueue(TaskId(current_id));
+                // (blocked under the buffer lock, as for senders)
+                self.recv_waiters.lock().enqueue_blocked(TaskId(current_id));
             }
 
             // Block receiver until data arrives
-            task::block_current();
+            task::yield_now();
         }
     }
 
