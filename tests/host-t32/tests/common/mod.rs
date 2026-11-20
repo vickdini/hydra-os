@@ -126,3 +126,22 @@ impl Drop for LowLayout {
         hydra_hosttests_t32::memory::vm::init_low_layout(&[(GIB, hydra_hosttests_t32::memory::vm::USER_SPACE_START)]);
     }
 }
+
+/// Boot page tables in the global frames (a PML4 whose entry 0 has a PDPT, as the
+/// firmware's), made once per binary; loads them into this thread's fake CR3 (address
+/// spaces are made from the active tables). Returns the PML4.
+pub fn boot_cr3() -> u64 {
+    use hydra_hosttests_t32::memory::frame_allocator::FRAME_ALLOCATOR;
+    use x86_64::structures::paging::{PageTable, PageTableFlags as F};
+    global_frames();
+    static PML4: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let pml4 = *PML4.get_or_init(|| {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        let p = fa.allocate_zeroed_frame().unwrap().start_address().as_u64();
+        let d = fa.allocate_zeroed_frame().unwrap().start_address().as_u64();
+        unsafe { (&mut *(p as *mut PageTable))[0].set_addr(x86_64::PhysAddr::new(d), F::PRESENT | F::WRITABLE) };
+        p
+    });
+    x86_64::hw::set_cr(3, pml4);
+    pml4
+}

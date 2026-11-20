@@ -319,8 +319,13 @@ pub mod task {
         rec!("task::exit_group");
         panic!("task::exit_group")
     }
-    pub fn spawn(name: &'static str, _entry: fn(), _prio: TaskPriority) -> TaskId {
+    thread_local! {
+        /// Entry points of the tasks spawned on this thread (tests may run them).
+        pub static SPAWNED: RefCell<Vec<fn()>> = const { RefCell::new(Vec::new()) };
+    }
+    pub fn spawn(name: &'static str, entry: fn(), _prio: TaskPriority) -> TaskId {
         rec!("task::spawn {}", name);
+        SPAWNED.with_borrow_mut(|s| s.push(entry));
         TaskId(99)
     }
     pub fn update_cr3(cr3: u64) {

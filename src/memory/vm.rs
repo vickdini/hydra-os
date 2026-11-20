@@ -1989,6 +1989,18 @@ impl Drop for MemObject {
 }
 // wave6 G23 end
 
+/// Reads the word at `v` through the loaded page tables (and the TLB).
+#[cfg(target_os = "uefi")]
+unsafe fn read_mapped(v: u64) -> u64 {
+    core::ptr::read_volatile(v as *const u64)
+}
+
+/// Host build (unit tests): a walk of the test thread's fake CR3 (no TLB).
+#[cfg(not(target_os = "uefi"))]
+unsafe fn read_mapped(v: u64) -> u64 {
+    crate::host::read_mapped(v)
+}
+
 /// Global pages' self-test, run once at boot on the boot processor before the others start
 /// (see `arch::pcid`, "Global kernel pages"): a kernel-half page V is mapped global and read
 /// with the kernel's tables loaded, another address space is loaded, V's entry is pointed at
@@ -2029,7 +2041,7 @@ pub fn global_self_test() -> Result<alloc::string::String, alloc::string::String
     let other = Mm::new().map_err(|e| format!("no memory ({})", e))?;
     let ro = other.cr3();
     let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let read = || unsafe { read_mapped(V) };
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut out = alloc::vec::Vec::new();
         let mut tries: alloc::vec::Vec<(&str, &dyn Fn())> = alloc::vec![
@@ -2120,7 +2132,7 @@ pub fn tlb_self_test() -> Result<alloc::string::String, alloc::string::String> {
     }
     let (ra, rb) = (a.cr3(), b.cr3());
     let orig = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    let read = || unsafe { core::ptr::read_volatile(V as *const u64) };
+    let read = || unsafe { read_mapped(V) };
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let mut out = alloc::vec::Vec::new();
         let tries: [(&str, &dyn Fn()); 8] = [

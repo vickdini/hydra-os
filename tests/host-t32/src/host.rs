@@ -226,3 +226,18 @@ pub fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
     let (eax, ebx, ecx, edx) = CPUID.with_borrow(|c| c.get(&(leaf, sub)).copied().unwrap_or((0, 0, 0, 0)));
     core::arch::x86_64::CpuidResult { eax, ebx, ecx, edx }
 }
+
+thread_local! {
+    /// The GPT partition the image was loaded from (`bootdisk`).
+    pub static BOOT_PART: Cell<Option<[u8; 16]>> = const { Cell::new(None) };
+}
+
+/// A load through the test thread's fake CR3: the page-table walk (no TLB), then the word.
+pub fn read_mapped(v: u64) -> u64 {
+    let pml4 = x86_64::hw::cr(3) & 0x000F_FFFF_FFFF_F000;
+    let s = crate::memory::paging::AddressSpace::from_pml4(x86_64::PhysAddr::new(pml4));
+    match unsafe { s.translate_addr(x86_64::VirtAddr::new(v)) } {
+        Some(p) => unsafe { core::ptr::read_volatile(p.as_u64() as *const u64) },
+        None => panic!("page fault at {v:#x}: not mapped under CR3 {pml4:#x}"),
+    }
+}
