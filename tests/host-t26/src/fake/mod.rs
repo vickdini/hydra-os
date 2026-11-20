@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 pub mod arch;
 pub mod fd;
+pub mod firmware;
 pub mod linux;
 pub mod lx;
 pub mod memfs;
@@ -62,6 +63,7 @@ pub fn setup() -> Env {
     linux::reset();
     lx::reset();
     task::reset();
+    firmware::reset();
     Env { _guard: guard }
 }
 
