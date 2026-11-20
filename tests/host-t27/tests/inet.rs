@@ -1176,6 +1176,59 @@ fn proc_net_tables() {
 }
 
 #[test]
+fn proc_net_tcp_states() {
+    fake::reset();
+    let (_c, id) = connected(false);
+    for (st, num) in [
+        (TcpState::Established, "01"),
+        (TcpState::SynSent, "02"),
+        (TcpState::SynReceived, "03"),
+        (TcpState::FinWait1, "04"),
+        (TcpState::FinWait2, "05"),
+        (TcpState::TimeWait, "06"),
+        (TcpState::Closed, "07"),
+        (TcpState::CloseWait, "08"),
+        (TcpState::LastAck, "09"),
+        (TcpState::Closing, "0B"),
+    ] {
+        net::with(|n| n.tcp.get_mut(&id).unwrap().state = st);
+        let tcp = inet::proc_net("tcp").unwrap();
+        let row = tcp.lines().nth(1).unwrap();
+        assert_eq!(row.split_whitespace().nth(3), Some(num), "{st:?}: {row}");
+    }
+}
+
+#[test]
+fn mmsg_all_succeed_and_unopenable_endpoints() {
+    fake::reset();
+    let u = socket(AF_INET, DGRAM, 0);
+    let id = last_udp();
+    let dest = sin([10, 0, 2, 3], 53);
+    let a = *b"one";
+    let iova = [(ptr(&a), 3u64)];
+    let mut v = [MMsgHdr { hdr: MsgHdr { name: ptr(&dest), namelen: 16, iov: ptr(&iova), iovlen: 1, ..Default::default() }, ..Default::default() }];
+    assert_eq!(call(307, [u, mptr(&mut v[0]), 1, 0, 0, 0]), 1);
+    net::with(|n| n.udp.get_mut(&id).unwrap().rx.push_back(([1, 1, 1, 1], 1, b"r".to_vec(), 0)));
+    let mut b = [0u8; 4];
+    let iovb = [(mptr(&mut b), 4u64)];
+    let mut r = [MMsgHdr { hdr: MsgHdr { iov: ptr(&iovb), iovlen: 1, ..Default::default() }, ..Default::default() }];
+    assert_eq!(call(299, [u, mptr(&mut r[0]), 1, 0, 0, 0]), 1);
+    assert_eq!(r[0].len, 1);
+    // A UDP socket whose endpoint cannot be opened: sending and receiving fail
+    net::with(|n| n.udp_open_err = Some(-12));
+    let w = socket(AF_INET, DGRAM, 0);
+    net::with(|n| n.udp_open_err = Some(-12));
+    assert_eq!(sendto(w, b"x", 0, Some(&dest)), -12);
+    net::with(|n| n.udp_open_err = Some(-12));
+    assert_eq!(recvfrom(w, &mut b, 0).0, -12);
+    // An IPv6 bind whose address cannot be read
+    let s6 = socket(AF_INET6, STREAM, 0);
+    let mut bad = [0u8; 28];
+    fake::bad_ptr(mptr(&mut bad), 28);
+    assert_eq!(call(49, [s6, mptr(&mut bad), 28, 0, 0, 0]), EFAULT);
+}
+
+#[test]
 fn proc_net_dev() {
     fake::reset();
     net::with(|n| n.counters = [((100, 2), (100, 2)), ((5000, 40), (600, 7))]);

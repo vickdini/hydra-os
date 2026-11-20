@@ -361,6 +361,40 @@ fn the_stream_buffer_limit() {
 }
 
 #[test]
+fn a_peer_closing_during_a_send() {
+    fake::reset();
+    let (a, b) = pair(STREAM);
+    let mut _peer = Some(obj(b));
+    close(b);
+    fake::on_wait(move |_| {
+        _peer = None; // the reader goes away while the writer waits for room
+    });
+    let big = vec![3u8; LIMIT + 100];
+    assert_eq!(obj(a).write(&big), LIMIT as i64, "what was queued before it went");
+    assert!(obj(a).kernel_accept().is_none(), "not a listener");
+}
+
+#[test]
+fn bad_addresses_and_short_data() {
+    fake::reset();
+    let s = socket(STREAM);
+    assert_eq!(bind(s, &[1u8]), EINVAL, "too short to bind");
+    assert_eq!(call(49, [s, 0, 10, 0, 0, 0]), EFAULT);
+    let (a, b) = pair(STREAM | NONBLOCK);
+    let mut sa = [0u8; 16];
+    let mut bad_len = 16u32;
+    fake::bad_ptr(mptr(&mut bad_len), 4);
+    assert_eq!(call(52, [a, mptr(&mut sa), mptr(&mut bad_len), 0, 0, 0]), EFAULT);
+    // Fewer bytes than the iovecs hold: the later ones stay untouched
+    send(a, b"abc", 0);
+    let (mut x, mut y, mut z) = ([0u8; 4], [9u8; 4], [9u8; 4]);
+    let iov = [(mptr(&mut x), 4u64), (mptr(&mut y), 4u64), (mptr(&mut z), 4u64)];
+    let mut msg = MsgHdr { iov: ptr(&iov), iovlen: 3, ..Default::default() };
+    assert_eq!(call(47, [b, mptr(&mut msg), 0, 0, 0, 0]), 3);
+    assert_eq!((&x[..3], y, z), (&b"abc"[..], [9; 4], [9; 4]));
+}
+
+#[test]
 fn blocking_receive() {
     fake::reset();
     let (a, b) = pair(STREAM);

@@ -143,6 +143,7 @@ fn sends_go_nowhere_and_receives_never_return() {
     d.add_wait_queues(&mut w);
     assert_eq!(w.queue_count(), 0);
     assert_eq!(d.rdev(), 0);
+    assert!(d.path().starts_with("socket:["));
     // Blocking: only a signal ends the wait
     d.set_nonblock(false);
     assert!(!d.nonblock());

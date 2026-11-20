@@ -344,6 +344,11 @@ fn setup_errors() {
     fake::FRAME_BUDGET.set(Some(1));
     let mut p = params(0, 0);
     assert_eq!(setup(4, &mut p), ENOMEM);
+    let live = fake::FRAMES_LIVE.get();
+    fake::FRAME_BUDGET.set(Some(2));
+    let mut p = params(0, 0);
+    assert_eq!(setup(256, &mut p), ENOMEM, "three ring pages needed, two there");
+    assert_eq!(fake::FRAMES_LIVE.get(), live, "the two taken were given back");
     fake::FRAME_BUDGET.set(None);
     fake::fd::FDS.with_borrow_mut(|f| f.limit = 3);
     let before = fake::FRAMES_LIVE.get();

@@ -13,6 +13,7 @@ pub fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 /// Runs `f`, expecting the fake's "would block" panic.
 pub fn blocks<R>(f: impl FnOnce() -> R) -> bool {
+    fake::quiet_expected_panics();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match r {
         Ok(_) => false,

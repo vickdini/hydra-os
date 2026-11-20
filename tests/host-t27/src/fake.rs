@@ -99,6 +99,22 @@ pub fn reset() {
     task::reset();
 }
 
+/// Keeps the panics tests raise on purpose (a daemon stopped, an operation that would
+/// block) out of the test output; every other panic is printed as usual.
+pub fn quiet_expected_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = info.payload().downcast_ref::<String>().map(|s| s.as_str()).or_else(|| info.payload().downcast_ref::<&str>().copied()).unwrap_or("");
+            if msg == task::DAEMON_STOP || msg.contains(wait::WOULD_BLOCK) {
+                return;
+            }
+            default(info);
+        }));
+    });
+}
+
 /// Installs a sleep hook (see [`WAIT_HOOK`]).
 pub fn on_wait(f: impl FnMut(usize) + 'static) {
     WAIT_HOOK.with_borrow_mut(|h| *h = Some(Box::new(f)));
@@ -429,6 +445,7 @@ pub mod task {
     /// Runs a daemon's loop for `rounds` sleeps (each moves the clock to its deadline), then
     /// stops it (a panic it cannot catch, raised from its next sleep).
     pub fn run_daemon(entry: fn(), rounds: usize) {
+        super::quiet_expected_panics();
         super::on_wait(move |n| {
             if n > rounds {
                 panic!("{}", DAEMON_STOP);
@@ -445,6 +462,7 @@ pub mod task {
     /// Runs a daemon's loop, calling `step(n)` at its `n`th sleep; it stops when `step`
     /// returns `false` (or returns on its own). Assertions in `step` fail the test.
     pub fn run_daemon_steps(entry: fn(), mut step: impl FnMut(usize) -> bool + 'static) {
+        super::quiet_expected_panics();
         super::on_wait(move |n| {
             if !step(n) {
                 panic!("{}", DAEMON_STOP);
