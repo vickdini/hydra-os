@@ -52,6 +52,45 @@ fn firmware<R>(f: impl FnOnce() -> R) -> R {
     crate::memory::paging::with_kernel_tables(f)
 }
 
+/// The firmware's variable services: the UEFI runtime ([`Runtime`]); host tests put a
+/// model of their own ([`set_services`]), so the file logic runs without firmware.
+pub trait VarServices: Sync {
+    /// `GetVariable`: the data's length and the attributes, or the status (and the size
+    /// needed when the buffer is too small).
+    fn get(&self, name: &CStr16, vendor: &VariableVendor, buf: &mut [u8]) -> Result<(usize, u32), (Status, Option<usize>)>;
+    /// `SetVariable` (no data: delete).
+    fn set(&self, name: &CStr16, vendor: &VariableVendor, attrs: VariableAttributes, data: &[u8]) -> Result<(), Status>;
+    /// `GetNextVariableName`: the name after `name` (in place), or the status (and the size
+    /// needed when the name buffer is too small).
+    fn next(&self, name: &mut [u16], vendor: &mut VariableVendor) -> Result<(), (Status, Option<usize>)>;
+}
+
+/// The UEFI runtime services (hardware: only the calls themselves).
+struct Runtime;
+
+impl VarServices for Runtime {
+    fn get(&self, name: &CStr16, vendor: &VariableVendor, buf: &mut [u8]) -> Result<(usize, u32), (Status, Option<usize>)> {
+        uefi::runtime::get_variable(name, vendor, buf).map(|(d, a)| (d.len(), a.bits())).map_err(|e| (e.status(), *e.data()))
+    }
+    fn set(&self, name: &CStr16, vendor: &VariableVendor, attrs: VariableAttributes, data: &[u8]) -> Result<(), Status> {
+        uefi::runtime::set_variable(name, vendor, attrs, data).map_err(|e| e.status())
+    }
+    fn next(&self, name: &mut [u16], vendor: &mut VariableVendor) -> Result<(), (Status, Option<usize>)> {
+        uefi::runtime::get_next_variable_key(name, vendor).map_err(|e| (e.status(), *e.data()))
+    }
+}
+
+static SERVICES: Mutex<&'static dyn VarServices> = Mutex::new(&Runtime);
+
+/// Replaces the firmware's variable services (host tests).
+pub fn set_services(s: &'static dyn VarServices) {
+    *SERVICES.lock() = s;
+}
+
+fn services() -> &'static dyn VarServices {
+    *SERVICES.lock()
+}
+
 fn errno(s: Status) -> i64 {
     match s {
         Status::NOT_FOUND => ENOENT,
@@ -84,7 +123,7 @@ pub fn get(name: &str, guid: &Guid) -> Result<(u32, Vec<u8>), i64> {
     let vendor = VariableVendor(*guid);
     let mut buf = alloc::vec![0u8; 1024];
     loop {
-        let r = firmware(|| uefi::runtime::get_variable(cname, &vendor, &mut buf).map(|(d, a)| (d.len(), a.bits())).map_err(|e| (e.status(), *e.data())));
+        let r = firmware(|| services().get(cname, &vendor, &mut buf));
         match r {
             Ok((n, attrs)) => {
                 buf.truncate(n);
@@ -103,7 +142,7 @@ pub fn set(name: &str, guid: &Guid, attrs: u32, data: &[u8]) -> Result<(), i64> 
     let cname = CStr16::from_str_with_buf(name, &mut wide).map_err(|_| EINVAL)?;
     let vendor = VariableVendor(*guid);
     let attrs = VariableAttributes::from_bits_retain(attrs);
-    firmware(|| uefi::runtime::set_variable(cname, &vendor, attrs, data)).map_err(|e| errno(e.status()))
+    firmware(|| services().set(cname, &vendor, attrs, data)).map_err(errno)
 }
 
 /// Every variable's name and vendor (`None`: the firmware has no variable services now).
@@ -112,7 +151,7 @@ pub fn list() -> Option<Vec<(String, Guid)>> {
     let mut name = alloc::vec![0u16; 512];
     let mut vendor = VariableVendor(Guid::from_bytes([0; 16]));
     loop {
-        let r = firmware(|| uefi::runtime::get_next_variable_key(&mut name, &mut vendor).map_err(|e| (e.status(), *e.data())));
+        let r = firmware(|| services().next(&mut name, &mut vendor));
         match r {
             Ok(()) => {
                 let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
