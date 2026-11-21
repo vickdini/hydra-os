@@ -291,6 +291,49 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
 }
 
 // ----------------------------------------------------------------------
+// Calls vfs-server would send straight back
+// ----------------------------------------------------------------------
+
+/// The `LX_FS_*` bits with which vfs-server sends call `nr` back to the kernel whatever
+/// its arguments (`calls/ctxt.rs` `check` and the calls' own masks): the kernel then answers
+/// at once, without the round trip. vfs-server checks them again.
+pub fn kernel_mask(nr: u64) -> u32 {
+    let always = LX_FS_FOREIGN | LX_FS_MOUNTS;
+    always
+        | match nr {
+            // access, faccessat, faccessat2: ABAC may take away what the modes allow
+            21 | 269 | 439 => LX_FS_ABAC,
+            // getdents64, getdents
+            217 | 78 => LX_FS_FANOTIFY,
+            // open, openat (and creat, openat2 if claimed)
+            2 | 257 | 85 | 437 => LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC,
+            // the changes: their events and checks are the kernel's
+            90 | 268 | 452 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 132 | 235 | 261 | 83 | 258 | 133 | 259 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 86 | 265 | 188
+            | 189 | 190 | 197 | 198 | 199 => LX_FS_INOTIFY | LX_FS_FANOTIFY | LX_FS_LANDLOCK | LX_FS_ABAC,
+            _ => 0,
+        }
+}
+
+/// Calls the kernel kept because of each `LX_FS_*` bit (bit `i`: `KEPT_BY[i]`).
+pub static KEPT_BY: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+/// Whether call `c` is the kernel's at once (counted by reason).
+fn kernel_only(c: &LxCall) -> bool {
+    let hit = c.fs_flags & kernel_mask(c.nr);
+    let mounts = c.root_mnt != 0 || c.cwd_mnt != 0;
+    if hit == 0 && !mounts {
+        return false;
+    }
+    for (i, k) in KEPT_BY.iter().enumerate() {
+        if hit & (1 << i) != 0 {
+            k.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    KEPT.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+// ----------------------------------------------------------------------
 // Forwarding (both paths)
 // ----------------------------------------------------------------------
 
@@ -367,6 +410,9 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         }
     };
     c.fs_flags |= fs_flags_global(&c);
+    if kernel_only(&c) {
+        return None;
+    }
     let r = super::call_ident_raw(x, c, true);
     drop(held);
     outcome(r)
@@ -409,6 +455,13 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         Err(()) => return None,
     };
     c.fs_flags |= fs_flags_global(&c);
+    if kernel_only(&c) {
+        for h in held.into_iter().flatten() {
+            super::drop_last(h);
+        }
+        set_mark(id.tid, nr);
+        return None;
+    }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     super::FAST_CALLS.fetch_add(1, Ordering::Relaxed);
     let r = super::call_with(x, id.tid, idx, c, true);
@@ -701,10 +754,16 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
 /// `[prof] vfs:` line of `linux prof show`.
 pub fn summary() -> String {
     alloc::format!(
-        "vfs: served {} to kernel {} kept {} notes {}",
+        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {}",
         SERVED.load(Ordering::Relaxed),
         TO_KERNEL_CALLS.load(Ordering::Relaxed),
         KEPT.load(Ordering::Relaxed),
+        KEPT_BY[0].load(Ordering::Relaxed),
+        KEPT_BY[1].load(Ordering::Relaxed),
+        KEPT_BY[2].load(Ordering::Relaxed),
+        KEPT_BY[3].load(Ordering::Relaxed),
+        KEPT_BY[4].load(Ordering::Relaxed),
+        KEPT_BY[5].load(Ordering::Relaxed),
         NOTES.load(Ordering::Relaxed)
     )
 }
