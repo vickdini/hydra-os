@@ -223,6 +223,12 @@ def work(a, repo, who):
 
 
 def main():
+    # Gemini's answers contain characters the Windows console code page cannot print
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", help="diff base (commit or branch)")
     ap.add_argument("--head", help="diff head (commit or branch), default HEAD")
