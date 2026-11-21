@@ -99,11 +99,16 @@ fn main(args: &[&str]) {
     RING.store(win as u64 + LX_NOTES_OFF as u64, Ordering::Release);
     svcrt::notes::init(win, on_note);
     svcrt::objs::init(svc.area, ENDPOINT_VFS_SERVER);
+    // The first request of this instance has no parameters (`FS_ROOT`), and it is made before
+    // any call can come: a request of a previous instance that zfs-server may still be
+    // serving finishes first (it writes its reply into our part of the window), so no later
+    // request's bytes are overwritten by that stale reply
+    let root = zfs::root();
     if let Err(e) = svc.online() {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
     }
-    match zfs::root() {
+    match root {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
     }

@@ -1022,7 +1022,9 @@ fn main(args: &[&str]) {
             None => sys::svc_recv(ENDPOINT_ZFS_SERVER),
         };
         match got {
-            Ok((0, _)) | Err(_) => {}
+            Ok((0, _)) => {}
+            // (never spin on a failing receive)
+            Err(_) => sys::sleep_ms(1),
             Ok((id, m)) => {
                 let r = if m.label == hydra_rt::protocol::MSG_SUPERVISOR_PING as u64 {
                     Message::new(hydra_rt::protocol::MSG_SUPERVISOR_PONG as u64, [m.args[0], 1, 0, 0])
@@ -1045,7 +1047,7 @@ fn vfs_window() -> Option<&'static mut [u8]> {
     static VFS_WINDOW: AtomicU64 = AtomicU64::new(0);
     let mut a = VFS_WINDOW.load(Ordering::Acquire);
     if a == 0 {
-        a = sys::svc_attach(hydra_rt::protocol::ENDPOINT_VFS_SERVER).ok()?;
+        a = sys::svc_attach(hydra_rt::protocol::ENDPOINT_VFS_SERVER).ok().filter(|&a| a != 0)?;
         VFS_WINDOW.store(a, Ordering::Release);
     }
     // SAFETY: the mapped 256 KiB window, used by this (single-threaded) server only while it
