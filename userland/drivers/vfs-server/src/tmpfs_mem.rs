@@ -7,8 +7,13 @@
 //! the data never passes through the server on those paths.
 //!
 //! The server reaches the data through short-lived windows: [`MemObj::map`] of the pages a
-//! request touches (at most [`WINDOW`] at a time), the copy, [`unmap`]. The key of an
-//! object is its handle number in the server's table.
+//! request touches (at most [`WINDOW`] at a time), the copy, [`unmap`].
+//!
+//! **Kept across restarts** (wave7 G7-6): each object is a *kept* memory object
+//! (`LX_MEM_KEPT`) whose key is the file's data key ([`DATA_NEXT`], counted from
+//! [`crate::kept::DATA_KEY_BASE`] and saved in the kept state), not a handle number: a new
+//! instance of the server takes the same objects back by key ([`MemStore::adopt`]) and the
+//! files keep their data.
 //!
 //! The copies use raw pointers, never Rust references, over the window: programs may map
 //! the same pages and change them at any time (shared memory, as between processes).
@@ -17,11 +22,11 @@
 //! `LX_MEM_HANDLES` (4096) handles, so at most that many tmpfs files can hold data; there
 //! is no call that frees pages inside an object, so a truncation **zeroes** the cut range
 //! instead of freeing it, which touches (and so allocates) the holes in that range: a large
-//! sparse file cut down costs memory until `LX_MEM_TRUNC` exists; the handles go when the
-//! service ends (`service_gone`), so the data does not yet survive a restart of
-//! vfs-server. A request that fails in a later window leaves the earlier windows done.
+//! sparse file cut down costs memory until `LX_MEM_TRUNC` exists. A request that fails in a
+//! later window leaves the earlier windows done.
 
 use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use hydra_rt::mem::{unmap, MemObj, PROT_READ, PROT_RW};
 
@@ -34,6 +39,11 @@ pub static STORE: crate::lock::YLock<MemStore> = crate::lock::YLock::new(MemStor
 pub const WINDOW: u64 = 1 << 20;
 const EINVAL: i64 = -22;
 const EBADF: i64 = -9;
+
+// wave7 G7-6 begin
+/// The next data key (kept state's `data_next`).
+pub static DATA_NEXT: AtomicU64 = AtomicU64::new(crate::kept::DATA_KEY_BASE);
+// wave7 G7-6 end
 
 /// The memory objects of every tmpfs file with data, by handle number.
 #[derive(Default)]
@@ -50,6 +60,16 @@ impl MemStore {
     pub fn handle(&self, key: u64) -> Option<u32> {
         self.objs.get(&key).map(|o| o.handle())
     }
+
+    // wave7 G7-6 begin
+    /// Takes over the kept object of data key `key` (a restarted server); whether it existed
+    /// (if not, a new zeroed one stands in: the file reads zeros).
+    pub fn adopt(&mut self, key: u64) -> Result<bool, i64> {
+        let (o, existed) = MemObj::kept(key, MAX_FILE)?;
+        self.objs.insert(key, o);
+        Ok(existed)
+    }
+    // wave7 G7-6 end
 
     /// Number of objects held.
     pub fn len(&self) -> usize {
@@ -83,10 +103,19 @@ impl MemStore {
 
 impl DataStore for MemStore {
     fn create(&mut self) -> Result<u64, i64> {
-        let o = MemObj::anon(MAX_FILE)?;
-        let key = o.handle() as u64;
-        self.objs.insert(key, o);
-        Ok(key)
+        // wave7 G7-6: a kept object under a new data key (one left by a crash under that key
+        // holds old data: it is let go and the next key taken)
+        for _ in 0..4 {
+            let key = DATA_NEXT.fetch_add(1, Ordering::Relaxed);
+            let (o, existed) = MemObj::kept(key, MAX_FILE)?;
+            if existed {
+                let _ = MemObj::unkeep(key);
+                continue;
+            }
+            self.objs.insert(key, o);
+            return Ok(key);
+        }
+        Err(-28) // ENOSPC
     }
 
     fn write(&mut self, key: u64, off: u64, data: &[u8]) -> Result<(), i64> {
@@ -110,7 +139,10 @@ impl DataStore for MemStore {
     }
 
     fn free(&mut self, key: u64) {
-        // Dropping the handle closes it; programs' mappings keep their pages
-        self.objs.remove(&key);
+        // Dropping the handle closes it; programs' mappings keep their pages (wave7 G7-6:
+        // and the kept registry lets it go)
+        if self.objs.remove(&key).is_some() {
+            let _ = MemObj::unkeep(key);
+        }
     }
 }

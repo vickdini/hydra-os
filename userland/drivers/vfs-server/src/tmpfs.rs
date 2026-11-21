@@ -1348,3 +1348,22 @@ impl TmpfsSet {
 }
 
 const TMPFS_SET_MAGIC: u32 = 0x544d_5053; // "TMPS"
+
+// wave7 G7-6 begin: kept state (the data objects a restarted server takes over)
+impl Tmpfs {
+    /// The data keys of the files of this instance (each once: a key is never shared).
+    pub fn data_keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes.values().filter_map(|n| match n.kind {
+            Kind::File { data } if data != 0 => Some(data),
+            _ => None,
+        })
+    }
+}
+
+impl TmpfsSet {
+    /// The data keys of every instance.
+    pub fn data_keys(&self) -> Vec<u64> {
+        self.all.values().flat_map(|t| t.data_keys()).collect()
+    }
+}
+// wave7 G7-6 end

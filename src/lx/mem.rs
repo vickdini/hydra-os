@@ -31,6 +31,7 @@
 //!
 //! [`ServerObject`]: super::obj::ServerObject
 
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -54,8 +55,11 @@ const EACCES: i64 = -13;
 
 /// Largest DMA object (as `SYS_DMA_ALLOC`).
 const DMA_MAX: u64 = 16 * 1024 * 1024;
-/// Most kept objects per service.
-const KEPT_MAX: usize = 64;
+// wave7 G7-6 begin: vfs-server keeps one object per tmpfs file with data (its kept state)
+/// Most kept objects per service: as many as a service has handles, plus room for its own
+/// kept state (64 was wave 6's limit, too small for tmpfs files).
+const KEPT_MAX: usize = LX_MEM_HANDLES + 64;
+// wave7 G7-6 end
 
 /// One handle: the object and what `LX_MEM_INFO` reports about it.
 #[derive(Clone)]
@@ -74,20 +78,21 @@ struct Table {
 
 static TABLES: Mutex<Vec<Table>> = Mutex::new(Vec::new());
 
-/// A kept object: `(service id, key)`.
-struct KeptObj {
-    svc: u8,
-    key: u64,
-    obj: Arc<MemObject>,
-}
+// wave7 G7-6 begin: the kept registry by `(service id, key)` (a map: thousands per service)
+/// The kept objects, by `(service id, key)`.
+static KEPT: Mutex<BTreeMap<(u8, u64), Arc<MemObject>>> = Mutex::new(BTreeMap::new());
 
-static KEPT: Mutex<Vec<KeptObj>> = Mutex::new(Vec::new());
+/// The keys of service `svc` in the registry.
+fn svc_range(svc: u8) -> core::ops::RangeInclusive<(u8, u64)> {
+    (svc, 0)..=(svc, u64::MAX)
+}
+// wave7 G7-6 end
 
 fn tables<R>(f: impl FnOnce(&mut Vec<Table>) -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(|| f(&mut TABLES.lock()))
 }
 
-fn kept<R>(f: impl FnOnce(&mut Vec<KeptObj>) -> R) -> R {
+fn kept<R>(f: impl FnOnce(&mut BTreeMap<(u8, u64), Arc<MemObject>>) -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(|| f(&mut KEPT.lock()))
 }
 
@@ -222,13 +227,13 @@ fn dma(endpoint: u32, size: u64) -> Result<Arc<MemObject>, i64> {
 pub fn kept_get_or_create(svc: u8, idx: u64, size: u64) -> Result<(Arc<MemObject>, bool), i64> {
     let fresh = anon(size)?;
     kept(|k| {
-        if let Some(o) = k.iter().find(|o| o.svc == svc && o.key == idx) {
-            return Ok((o.obj.clone(), false));
+        if let Some(o) = k.get(&(svc, idx)) {
+            return Ok((o.clone(), false));
         }
-        if k.iter().filter(|o| o.svc == svc).count() >= KEPT_MAX {
+        if k.range(svc_range(svc)).count() >= KEPT_MAX {
             return Err(ENOMEM);
         }
-        k.push(KeptObj { svc, key: idx, obj: fresh.clone() });
+        k.insert((svc, idx), fresh.clone());
         Ok((fresh.clone(), true))
     })
 }
@@ -236,17 +241,9 @@ pub fn kept_get_or_create(svc: u8, idx: u64, size: u64) -> Result<(Arc<MemObject
 /// Forgets every kept object of service `svc` (restart support's ladder reset: the kept
 /// state is suspect). Mappings of them keep their pages until they go.
 pub fn drop_kept(svc: u8) {
-    let gone: Vec<KeptObj> = kept(|k| {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < k.len() {
-            if k[i].svc == svc {
-                out.push(k.swap_remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        out
+    let gone: Vec<Arc<MemObject>> = kept(|k| {
+        let keys: Vec<(u8, u64)> = k.range(svc_range(svc)).map(|(key, _)| *key).collect();
+        keys.iter().filter_map(|key| k.remove(key)).collect()
     });
     if !gone.is_empty() {
         crate::kprintln!("[lx-mem] service {}: {} kept objects dropped", svc, gone.len());
@@ -255,7 +252,7 @@ pub fn drop_kept(svc: u8) {
 
 /// Service `svc` drops its kept object `key`.
 fn unkeep(svc: u8, key: u64) -> i64 {
-    let gone = kept(|k| k.iter().position(|o| o.svc == svc && o.key == key).map(|i| k.swap_remove(i)));
+    let gone = kept(|k| k.remove(&(svc, key)));
     match gone {
         Some(_) => 0,
         None => EINVAL,
@@ -264,7 +261,7 @@ fn unkeep(svc: u8, key: u64) -> i64 {
 
 /// `(key, pages, resident pages)` of each kept object of service `svc`.
 pub fn kept_list(svc: u8) -> Vec<(u64, u64, u64)> {
-    let objs: Vec<(u64, Arc<MemObject>)> = kept(|k| k.iter().filter(|o| o.svc == svc).map(|o| (o.key, o.obj.clone())).collect());
+    let objs: Vec<(u64, Arc<MemObject>)> = kept(|k| k.range(svc_range(svc)).map(|(key, o)| (key.1, o.clone())).collect());
     objs.iter().map(|(key, o)| (*key, o.pages(), o.resident())).collect()
 }
 

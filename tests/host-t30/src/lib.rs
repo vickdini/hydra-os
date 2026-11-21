@@ -820,6 +820,11 @@ pub mod compat {
             pub fn ipc_ns() -> u64 {
                 crate::fake::IPC_NS.load(core::sync::atomic::Ordering::Acquire)
             }
+            /// wave7 G7-6: as the kernel's (the fake process table's live namespaces).
+            pub fn live_mntns() -> alloc::vec::Vec<u64> {
+                let set: alloc::collections::BTreeSet<u64> = super::proc::PROCS.lock().values().filter(|p| !p.zombie).map(|p| p.ns.mnt).collect();
+                set.into_iter().collect()
+            }
         }
 
         pub mod userfaultfd {

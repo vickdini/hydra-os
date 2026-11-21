@@ -847,3 +847,12 @@ pub fn gone_if_empty(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box
     }
 }
 // wave7 G7-3 end
+
+// wave7 G7-6 begin: a restarted vfs-server resyncs its kept mount tables
+/// The mount namespaces with a live process (sorted, each once; 0 is the initial one), for
+/// `LX_FH_NSLIST`.
+pub fn live_mntns() -> alloc::vec::Vec<u64> {
+    let set: alloc::collections::BTreeSet<u64> = super::proc::PROCS.lock().values().filter(|p| !p.zombie).map(|p| p.ns.mnt).collect();
+    set.into_iter().collect()
+}
+// wave7 G7-6 end

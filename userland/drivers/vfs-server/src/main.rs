@@ -13,8 +13,11 @@
 //! file calls themselves come with Group 7-2 (`calls/`), the mount tables with 7-3.
 //!
 //! ## Restarts
-//! The caches are refilled from zfs-server; nothing else is kept yet (7-6 adds the kept
-//! state: mount tables, locks, the `tmpfs` tree). Calls made while it restarts wait for it.
+//! The caches are refilled from zfs-server. The mount tables of every namespace and the
+//! `tmpfs` trees (their data in kept memory objects) are kept across restarts (Group 7-6:
+//! [`kept`], [`recover`]). Open files, mappings, the cwd and root are kernel handles and
+//! survive by design; while the server is down the kernel answers its calls, calls it was
+//! serving are sent again if they change nothing, a change in flight fails with `EIO`.
 
 #![no_std]
 #![no_main]
@@ -37,6 +40,11 @@ mod mtab;
 mod tmpfs;
 mod tmpfs_mem;
 // wave7 G7-3 end
+// wave7 G7-6 begin: kept state across restarts
+mod kept;
+mod locks;
+mod recover;
+// wave7 G7-6 end
 mod perm;
 mod walk;
 mod zfs;
@@ -115,6 +123,23 @@ fn main(args: &[&str]) {
     // request's bytes are overwritten by that stale reply
     // (until it is answered: going online earlier would let a worker's request be
     // overwritten; zfs-server may still be starting at boot)
+    // wave7 G7-6 begin: what the previous instance kept (before any call can come)
+    match recover::open() {
+        recover::Found::Fresh => println!("[vfs-server] no kept state: boot mount table"),
+        recover::Found::Restored { gen, spaces, tmpfs, files, missing, freed } => println!(
+            "[vfs-server] restart {}: kept state of generation {} taken back: {} mount tables, {} tmpfs instances, {} tmpfs files with data ({} missing, {} left by the crash freed)",
+            recover::restarts(),
+            gen,
+            spaces,
+            tmpfs,
+            files,
+            missing,
+            freed
+        ),
+        recover::Found::Damaged => println!("[vfs-server] kept state damaged (both slots fail their checks): boot mount table"),
+        recover::Found::NoKept(e) => println!("[vfs-server] no kept-state objects ({}): nothing will survive a restart", e),
+    }
+    // wave7 G7-6 end
     let mut root = zfs::root();
     for _ in 0..120 {
         if root.is_ok() {
@@ -129,6 +154,12 @@ fn main(args: &[&str]) {
     }
     // wave7 G7-3: the pool root of the boot table, once zfs-server answers (else again below)
     let mut root_known = root.map(mount::set_pool_root).unwrap_or(false);
+    // wave7 G7-6: namespaces made or gone while no instance was online
+    let (dropped, added) = recover::resync();
+    if dropped + added > 0 {
+        println!("[vfs-server] mount namespaces resynced: {} tables dropped, {} added", dropped, added);
+    }
+    recover::save();
     match root {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
@@ -165,6 +196,8 @@ fn take_notes(seq: u64) {
             // wave7 G7-3: lost namespace notes: only the initial table is sure now
             mount::forget_namespaces(&mut *tmpfs_mem::STORE.lock());
             *seen = dropped;
+            // wave7 G7-6
+            recover::save();
         }
     }
     if seq == u64::MAX {
@@ -179,6 +212,8 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
     if kind == LX_NOTE_MNTNS {
         mount::on_mntns(a, b, &mut *tmpfs_mem::STORE.lock());
+        // wave7 G7-6
+        recover::save();
         return;
     }
     if kind == LX_NOTE_FSCHANGE {
@@ -204,6 +239,8 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
         return a;
     }
     let r = match c.nr {
+        // wave7 G7-6: the kept-state test hook
+        LX_VFS_WALK_NR if cx.args[2] & LX_VFS_KTEST != 0 => recover::ktest(&cx, cx.args[0], cx.args[3]),
         LX_VFS_WALK_NR => return walk_call(&cx, page),
         LX_DCALL_NR => dcall(&cx),
         _ => ENOSYS,
