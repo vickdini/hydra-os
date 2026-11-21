@@ -297,6 +297,13 @@ pub mod pkg;
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    /// *stub* wave7 G7-2: the kernel's changes noted for vfs-server (recorded).
+    pub mod fileh {
+        pub static CHANGED: std::sync::Mutex<alloc::vec::Vec<u64>> = std::sync::Mutex::new(alloc::vec::Vec::new());
+        pub fn kernel_changed(ino: u64) {
+            CHANGED.lock().unwrap_or_else(|e| e.into_inner()).push(ino);
+        }
+    }
     pub fn summary() -> alloc::string::String {
         alloc::string::String::from("lx: host")
     }

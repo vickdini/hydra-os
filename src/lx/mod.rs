@@ -55,6 +55,8 @@
 pub mod copy;
 
 pub mod dcall; // wave6 G20
+// wave7 G7-2: path calls and the kernel's file handles (the file service)
+pub mod fileh;
 
 pub mod obj;
 
@@ -400,6 +402,8 @@ pub fn set_forwarding(on: bool) {
     for nr in BYFD_IO_NUMBERS {
         TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
+    // wave7 G7-2: the file service's calls (those vfs-server claimed)
+    fileh::apply(on);
 }
 
 /// The entry of system call `nr` (0: the kernel answers it). One load.
@@ -480,6 +484,22 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
             None
         };
     }
+    // wave7 G7-2 begin: the file service's calls (`fileh`), and a service's redirect to
+    // the kernel
+    if e & fileh::T_VFS != 0 {
+        return fileh::forward(frame);
+    }
+    let r = forward_svc(frame, nr, e)?;
+    if r == fileh::LX_TO_KERNEL {
+        return None;
+    }
+    Some(r)
+}
+
+/// [`forward`] for the calls of every other service.
+#[inline]
+fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
+    // wave7 G7-2 end
     if e & T_FAMILY != 0 {
         // Routed per call (Group 12): a family whose service is not online is the kernel's
         let s = family_svc(frame.rdi);
@@ -900,13 +920,22 @@ fn call(frame: &SyscallFrame, s: SvcId, byfd: Option<HeldObj>) -> i64 {
         c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
         fill_ctx(&mut c, true);
     }
-    call_ident(x, c, true)
+    call_ident_raw(x, c, true) // (wave7 G7-2: a redirect to the kernel goes back to `forward`)
 }
 
 /// [`call`] with the call's number, arguments and object filled in: adds the caller's
 /// identity (and its groups when `groups`) and waits for host `x`'s answer (under the
 /// kernel lock).
-fn call_ident(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
+fn call_ident(x: &'static Host, c: LxCall, groups: bool) -> i64 {
+    // wave7 G7-2: the kernel's own callers have no kernel code to fall back to
+    match call_ident_raw(x, c, groups) {
+        fileh::LX_TO_KERNEL => ENOSYS,
+        r => r,
+    }
+}
+
+/// [`call_ident`], with a redirect to the kernel returned as [`fileh::LX_TO_KERNEL`].
+fn call_ident_raw(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
     let mut sched = crate::task::SCHEDULER.lock();
     let my_idx = sched.current_index();
     let me = sched.current_task_mut(|t| {
@@ -975,6 +1004,10 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 return ELOOP;
             }
             let s = (redir.0 & 0xFF) as SvcId;
+            // wave7 G7-2: service 0: the kernel's own code answers the call
+            if s == 0 {
+                return fileh::LX_TO_KERNEL;
+            }
             if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
                 return ENOSYS;
             }
@@ -1595,6 +1628,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         return None;
     }
     let id = ident()?;
+    // wave7 G7-2 begin: the file service's calls (`fileh`)
+    if bits & fileh::T_VFS != 0 {
+        return fileh::fast(&id, frame).map(Fast::Call);
+    }
+    // wave7 G7-2 end
     // Which service: by family, by descriptor, or by number (Groups 12 and 19). (Group 13:
     // decided before the call is built: read and write on kernel descriptors pass here too)
     let mut byfd = None;
@@ -1752,6 +1790,10 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     for h in held.into_iter().flatten() {
         drop_last(h);
     }
+    // wave7 G7-2: redirected to the kernel: the ordinary path (`forward` asks again)
+    if r == fileh::LX_TO_KERNEL {
+        return None;
+    }
     Some(Fast::Call(r))
 }
 
@@ -1798,6 +1840,7 @@ pub fn summary() -> alloc::string::String {
         per
     ) + "; " + &restart::summary() // wave6 G21
         + &copy_summary()
+        + "; " + &fileh::summary() // wave7 G7-2
 }
 
 // wave6 G22 begin

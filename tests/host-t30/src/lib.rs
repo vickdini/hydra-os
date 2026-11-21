@@ -475,9 +475,39 @@ pub mod fs {
         }
     }
 
-    /// *stub* A file's vnode (only its path is read).
+    /// *stub* A file's vnode (an open file: what `lx::fileh` reads and sets).
+    #[derive(Default)]
     pub struct Vnode {
         pub path: String,
+        pub ino: u64,
+        pub offset: u64,
+        pub flags: u32,
+        pub mnt: usize,
+        pub is_dir: bool,
+        pub foreign: Option<(u64, u64, usize)>,
+    }
+    impl Vnode {
+        /// *stub* `OpenFile::new` (the open reference is recorded).
+        pub fn new(ino: u64, flags: u32, path: String) -> Arc<spin::Mutex<Self>> {
+            crate::fake::rec(|r| r.open_refs.push(ino));
+            Arc::new(spin::Mutex::new(Self { path, ino, flags, ..Self::default() }))
+        }
+    }
+    /// *stub* `fs/fd.rs`: the open file type.
+    pub mod fd {
+        pub type OpenFile = super::Vnode;
+    }
+    /// *stub* The ZFS client's cache hooks (`lx::fileh`'s `LX_FH_CHANGED`): recorded.
+    pub mod zfs {
+        pub fn forget_names() {
+            crate::fake::rec(|r| r.fs_forgot.push((u64::MAX, 1)));
+        }
+        pub fn forget_all_attrs() {
+            crate::fake::rec(|r| r.fs_forgot.push((u64::MAX, 2)));
+        }
+        pub fn forget_attr_of(ino: u64) {
+            crate::fake::rec(|r| r.fs_forgot.push((ino, 3)));
+        }
     }
 
     /// *stub* The descriptor variants the code under test matches on.
@@ -529,12 +559,28 @@ pub mod fs {
         pub umask: u32,
         pub max: usize,
         srv: SrvPtr,
+        pub root_ino: u64,
+        pub root_mnt: usize,
+        pub cwd_ino: u64,
+        pub cwd_mnt: usize,
+        pub cwd_path: String,
     }
     pub type SharedFdTable = Arc<spin::Mutex<FdTable>>;
 
     impl FdTable {
         pub fn new() -> Self {
-            Self { fds: alloc::vec::Vec::new(), cloexec: Default::default(), umask: 0o022, max: 1024, srv: SrvPtr { bits: SrvBits { low: Default::default(), high: AtomicBool::new(false) }, used: AtomicBool::new(false) } }
+            Self {
+                fds: alloc::vec::Vec::new(),
+                cloexec: Default::default(),
+                umask: 0o022,
+                max: 1024,
+                srv: SrvPtr { bits: SrvBits { low: Default::default(), high: AtomicBool::new(false) }, used: AtomicBool::new(false) },
+                root_ino: 0,
+                root_mnt: 0,
+                cwd_ino: 0,
+                cwd_mnt: 0,
+                cwd_path: String::from("/"),
+            }
         }
         pub fn srv_bits(&self) -> &SrvPtr {
             &self.srv
@@ -675,6 +721,9 @@ pub mod compat {
                 pub exited: bool,
                 /// Pending signals of the process (bit `s - 1`), for `pending_for`/`take`.
                 pub pending: u64,
+                /// wave7 G7-2: `lx::fileh`'s `pivot_root` walk.
+                pub pid: u64,
+                pub zombie: bool,
             }
             pub static PROCS: spin::Mutex<BTreeMap<u64, Process>> = spin::Mutex::new(BTreeMap::new());
 
@@ -798,7 +847,32 @@ pub mod compat {
             }
         }
 
+        /// *stub* The switches `lx::fileh` reads (`fake::FS_FLAGS` bits: landlock 1,
+        /// fanotify 2, inotify 4, abac 8, FUSE mounts 16).
+        pub mod fanotify {
+            pub fn active() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 2 != 0
+            }
+        }
+        pub mod inotify {
+            pub fn active() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 4 != 0
+            }
+        }
+        pub mod abac {
+            pub fn active() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 8 != 0
+            }
+        }
+        pub mod fuse {
+            pub fn ns0_any() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 16 != 0
+            }
+        }
         pub mod landlock {
+            pub fn active() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 1 != 0
+            }
             pub fn check_port_of(_tid: u64, _port: u16, _want: u64) -> Result<(), i64> {
                 crate::fake::rec(|r| match r.landlock { Some(e) => Err(e), None => Ok(()) })
             }
@@ -820,6 +894,9 @@ pub mod compat {
         }
 
         pub mod mm {
+            pub fn cache_truncated(ino: u64, size: u64) {
+                crate::fake::rec(|r| r.fs_truncated.push((ino, size)));
+            }
             pub fn sys_munmap(_mm: &spin::Mutex<crate::memory::vm::Mm>, addr: u64, len: u64) -> i64 {
                 crate::fake::rec(|r| r.munmaps.push((addr, len)));
                 0
