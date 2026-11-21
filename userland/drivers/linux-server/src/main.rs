@@ -51,6 +51,10 @@ mod netc;
 mod netlink;
 mod notes;
 mod obj;
+// wave7 G7-4 begin: /proc and /sys (the pseudo file systems), on the kernel's protocol
+mod pseudo;
+pub(crate) use hydra_rt::protocol as proto;
+// wave7 G7-4 end
 mod socket;
 mod sockopt;
 mod sysv;
@@ -91,6 +95,7 @@ fn main(args: &[&str]) {
         }
     };
     notes::init(svc.window().as_mut_ptr());
+    pseudo::init(args); // wave7 G7-4
     obj::init(svc.area);
     // What a previous linux-server left in net-server (its sockets) goes (wave 5)
     netc::reset();
@@ -246,13 +251,15 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
             _ => (-19, 0), // ENODEV
         },
         LX_DCALL_NR => dcall_serve(&cx), // wave6 G20
+        // wave7 G7-4: a path call the file service redirected here (`/proc`, `/sys`)
+        n if c.redirs != 0 && pseudo::is_path_call(n) => pseudo::redirected(&cx),
         // wave 6 (Group 19): a test call the test service redirected here
         LX_TEST_NR if c.redir_obj != 0 => (0x5000 + c.redir_obj as i64 + 0x100 * c.redirs as i64 + c.redir_tail as i64, 0),
         // wave7 G7-1: vfs-server's walk test call it redirected here (a path under `/proc`,
         // `/sys`, `/dev`): `0x10000 * service + 0x100 * object + tail` (tail's low byte)
         LX_VFS_WALK_NR if c.redirs != 0 => (0x10000 * c.svc as i64 + 0x100 * (c.redir_obj & 0xFF) as i64 + (c.redir_tail & 0xFF) as i64, 0),
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one
-        0 | 1 | 16 | 19 | 20 | 276 | LX_KCALL_REOPEN | LX_KCALL_FCNTL if c.obj != LX_OBJ_NONE => object_io(&cx),
+        0 | 1 | 16 | 19 | 20 | 276 | LX_KCALL_REOPEN | LX_KCALL_FCNTL | LX_KCALL_PSEEK | LX_KCALL_PREAD if c.obj != LX_OBJ_NONE => object_io(&cx), // (wave7 G7-4: PSEEK, PREAD)
         // Sockets (wave 5, step 3; AF_UNIX step 4): socket/socketpair by family, the rest by
         // object kind
         41 | 53 => socket::by_family(&cx),
@@ -288,6 +295,7 @@ fn object_io(cx: &Cx) -> (i64, u64) {
     const ENOTTY: i64 = -25;
     match (obj::kind_of(cx.c.obj as u32), cx.nr) {
         (LX_OBJ_KIND_TEST, _) => (obj::test_io(cx), 0),
+        (LX_OBJ_KIND_PSEUDO, _) => pseudo::io(cx), // wave7 G7-4
         (LX_OBJ_KIND_MQ, 0) => (mqueue::read(cx), 0),
         (LX_OBJ_KIND_INET | LX_OBJ_KIND_NETLINK | LX_OBJ_KIND_UNIX, _) => socket::by_kind(cx),
         (LX_OBJ_KIND_EVENTFD, _) => eventfd::io(cx),

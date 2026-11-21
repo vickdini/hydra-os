@@ -83,7 +83,8 @@ pub fn find(c: &LxCall, who: &Ctx, path: &[u8], follow: bool) -> Result<(Node, A
     let start = start(c, path)?;
     match walk::walk(&BE, who, start, path, if follow { 0 } else { walk::NOFOLLOW })? {
         Walked::Found { node, attr } => Ok((node, attr)),
-        Walked::Redirect(_) => Err(KERNEL),
+        // wave7 G7-4: `/proc` and `/sys` go to linux-server (the answer makes the redirect)
+        Walked::Redirect(r) => Err(super::pseudo_redirect(&r)),
     }
 }
 

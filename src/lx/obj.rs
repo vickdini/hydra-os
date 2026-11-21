@@ -334,8 +334,42 @@ impl CharDevice for ServerObject {
         st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD && self.kind != crate::ipc::protocol::LX_OBJ_KIND_BPF_MAP { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
+        // wave7 G7-4: a pseudo file of linux-server: its file system's device (the `tag` is
+        // the inode number its `stat` reports, the key the device)
+        if self.kind == crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+            st.st_ino = self.tag;
+            st.st_dev = self.key;
+        }
         st
     }
+
+    // wave7 G7-4 begin: `lseek` and `pread64` on a pseudo file go to its server
+    fn seek(&self, offset: i64, whence: u32) -> Option<i64> {
+        if self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+            return None;
+        }
+        let dev: Arc<dyn CharDevice> = self.shared.me.lock().upgrade()?;
+        Some(super::call_obj_pseudo(&dev, crate::ipc::protocol::LX_KCALL_PSEEK, offset as u64, whence as u64, &mut []))
+    }
+
+    fn pread(&self, buf: &mut [u8], offset: u64) -> Option<i64> {
+        if self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+            return None;
+        }
+        let dev: Arc<dyn CharDevice> = self.shared.me.lock().upgrade()?;
+        let n = buf.len().min(crate::ipc::protocol::LX_DATA_SIZE);
+        // (into a kernel buffer first: the answer is copied while interrupts are off)
+        let mut tmp = alloc::vec![0u8; n];
+        let r = super::call_obj_pseudo(&dev, crate::ipc::protocol::LX_KCALL_PREAD, offset, 0, &mut tmp);
+        if r > 0 {
+            // (never more than was asked for, whatever the server answered)
+            let k = (r as usize).min(n);
+            buf[..k].copy_from_slice(&tmp[..k]);
+            return Some(k as i64);
+        }
+        Some(r)
+    }
+    // wave7 G7-4 end
 
     fn as_server(&self) -> Option<&ServerObject> {
         Some(self)
@@ -554,6 +588,10 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         && !(matches!(op, LX_OBJ_INSTALL | LX_OBJ_FD) && super::dcall::may_use(a)) // wave6 G20: delegation
     {
         return ESRCH;
+    }
+    // wave7 G7-4: the info primitives (`info`, ops 56..=61)
+    if super::info::glue::is_info(op) {
+        return super::info::glue::ctl(h, op, a, b, c);
     }
     // wave7 G7-2: the file service's handle operations (`fileh`, ops 32..)
     if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 16).contains(&op) {

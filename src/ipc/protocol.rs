@@ -1731,3 +1731,245 @@ pub const LX_NOTE_MNTNS: u64 = 10;
 /// See [`LX_NOTE_MNTNS`].
 pub const LX_MNTNS_GONE: u64 = u64::MAX;
 // wave7 G7-3 end
+// wave7 G7-4 begin: pseudo file systems served by linux-server (`/proc`, `/sys`), and the
+// kernel's info primitives for them (`crate::lx::info`)
+// ----------------------------------------------------------------------------------------
+/// Redirect object of a `devpts` mount (see [`LX_VFS_PSEUDO_PROC`]; served by [`LXS_LINUX`]).
+pub const LX_VFS_PSEUDO_DEVPTS: u64 = 4;
+/// Redirect object of a `cgroup2` (or `cgroup`) mount.
+pub const LX_VFS_PSEUDO_CGROUP: u64 = 5;
+/// Redirect object of an `mqueue` mount.
+pub const LX_VFS_PSEUDO_MQUEUE: u64 = 6;
+/// Redirect object of a `binfmt_misc` mount.
+pub const LX_VFS_PSEUDO_BINFMT: u64 = 7;
+/// Redirect object of a `securityfs` mount.
+pub const LX_VFS_PSEUDO_SECURITYFS: u64 = 8;
+/// Redirect object of a `debugfs` mount.
+pub const LX_VFS_PSEUDO_DEBUGFS: u64 = 9;
+/// Redirect object of a `tracefs` mount.
+pub const LX_VFS_PSEUDO_TRACEFS: u64 = 10;
+/// Redirect object of a `pstore` mount.
+pub const LX_VFS_PSEUDO_PSTORE: u64 = 11;
+/// Redirect object of a `bpf` mount.
+pub const LX_VFS_PSEUDO_BPF: u64 = 12;
+/// Redirect object of a `configfs` mount.
+pub const LX_VFS_PSEUDO_CONFIGFS: u64 = 13;
+/// Redirect object of a `fusectl` mount.
+pub const LX_VFS_PSEUDO_FUSECTL: u64 = 14;
+/// Redirect object of an `efivarfs` mount.
+pub const LX_VFS_PSEUDO_EFIVARFS: u64 = 15;
+/// The file system types the Linux services serve: `(type, service, redirect object)`
+/// (what vfs-server's mount factory answers for a mount of that type; its root is "/").
+pub const LX_VFS_PSEUDO_TYPES: &[(&str, SvcId, u64)] = &[
+    ("proc", LXS_PROC, LX_VFS_PSEUDO_PROC),
+    ("sysfs", LXS_LINUX, LX_VFS_PSEUDO_SYS),
+    ("devtmpfs", LXS_LINUX, LX_VFS_PSEUDO_DEV),
+    ("devpts", LXS_LINUX, LX_VFS_PSEUDO_DEVPTS),
+    ("cgroup2", LXS_LINUX, LX_VFS_PSEUDO_CGROUP),
+    ("cgroup", LXS_LINUX, LX_VFS_PSEUDO_CGROUP),
+    ("mqueue", LXS_LINUX, LX_VFS_PSEUDO_MQUEUE),
+    ("binfmt_misc", LXS_LINUX, LX_VFS_PSEUDO_BINFMT),
+    ("securityfs", LXS_LINUX, LX_VFS_PSEUDO_SECURITYFS),
+    ("debugfs", LXS_LINUX, LX_VFS_PSEUDO_DEBUGFS),
+    ("tracefs", LXS_LINUX, LX_VFS_PSEUDO_TRACEFS),
+    ("pstore", LXS_LINUX, LX_VFS_PSEUDO_PSTORE),
+    ("bpf", LXS_LINUX, LX_VFS_PSEUDO_BPF),
+    ("configfs", LXS_LINUX, LX_VFS_PSEUDO_CONFIGFS),
+    ("fusectl", LXS_LINUX, LX_VFS_PSEUDO_FUSECTL),
+    ("efivarfs", LXS_LINUX, LX_VFS_PSEUDO_EFIVARFS),
+];
+
+/// Server object kind (linux-server): an open pseudo file (`/proc`, `/sys`): its text is
+/// made at open; `lseek` and `pread64` reach the server as [`LX_KCALL_PSEEK`] and
+/// [`LX_KCALL_PREAD`]. Its install's `tag` is the inode number and `key` the device number
+/// `fstat` reports.
+pub const LX_OBJ_KIND_PSEUDO: u32 = 24;
+/// The kernel's call on a pseudo-file object: `lseek(obj, offset, whence)` (`args[3]`,
+/// `args[4]`); the answer is the new position.
+pub const LX_KCALL_PSEEK: u64 = 0x6786;
+/// The kernel's call on a pseudo-file object: `pread64` at offset `args[3]` into the
+/// kernel buffer (`args[1]`, `args[2]` bytes); the answer is the length read.
+pub const LX_KCALL_PREAD: u64 = 0x6787;
+/// The `st_dev` of `/proc` pseudo-file objects (and what linux-server's `stat` reports for
+/// its `/proc` files).
+pub const LX_PSEUDO_DEV_PROC: u64 = 22;
+/// See [`LX_PSEUDO_DEV_PROC`]: `/sys`.
+pub const LX_PSEUDO_DEV_SYS: u64 = 23;
+
+/// `SYS_LX_OBJ` operation (linux-server's host only): `(request id, pid | tid << 32, *out)`:
+/// fills an [`LxTaskInfo`] for process `pid` as the request's caller names it (0: the
+/// caller itself), thread `tid` (0: the process's main thread). `-ESRCH`: no such process
+/// or thread.
+pub const LX_INFO_TASK: u64 = 56;
+/// `SYS_LX_OBJ` operation: `(*out, what)`: fills an [`LxSysInfo`]; the memory fields only
+/// with [`LX_INFO_SYS_MEM`] in `what` (they cost a walk of the page cache), the CPU times,
+/// load and task counts only with [`LX_INFO_SYS_CPU`].
+pub const LX_INFO_SYS: u64 = 57;
+/// See [`LX_INFO_SYS`].
+pub const LX_INFO_SYS_MEM: u64 = 1;
+/// See [`LX_INFO_SYS`].
+pub const LX_INFO_SYS_CPU: u64 = 2;
+/// [`LX_INFO_TASK`]: in the `pid | tid << 32` word, leave out the memory figures (`vsize`,
+/// `rss_*`: a walk of the page tables).
+pub const LX_INFO_TASK_NOMEM: u64 = 1 << 63;
+/// `SYS_LX_OBJ` operation: `(request id, pid | len << 32, buf)`: the arguments of process
+/// `pid` (0: the caller) as `/proc/<pid>/cmdline` shows them (by Linux's rules: the whole argument
+/// area, or up to the first NUL after a `setproctitle`). Answers the full length; writes at
+/// most `len` bytes.
+pub const LX_INFO_ARGS: u64 = 58;
+/// `SYS_LX_OBJ` operation: `(request id, pid | len << 32, buf)`: the memory areas of process
+/// `pid` (0: the caller) as [`LxMapEntry`] records, each followed by its name and padded to 8
+/// bytes. Answers the full length (records that do not fit are left out whole); `-EACCES`
+/// when the caller may not see them (the `ptrace` read rule).
+pub const LX_INFO_MAPS: u64 = 59;
+/// `SYS_LX_OBJ` operation: `(buf, n)`: the system-wide IDs of the Linux processes (for
+/// callers in the first PID namespace; the others' `/proc` is the kernel's) (u64 each, at most
+/// `n`, ascending); answers how many there are.
+pub const LX_INFO_PIDS: u64 = 60;
+/// `SYS_LX_OBJ` operation: `(name, name_len | len << 32, buf)`: the UEFI variable of efivarfs file
+/// name `name` (`<Name>-<vendor GUID>`): the 4-byte attributes, then the data. Answers the
+/// full length; writes at most `len` bytes.
+pub const LX_INFO_EFIVAR: u64 = 61;
+/// The CPUs [`LxSysInfo`] has room for.
+pub const LX_INFO_CPUS: usize = 16;
+/// The PID namespace levels [`LxTaskInfo`] has room for.
+pub const LX_INFO_NS: usize = 4;
+
+/// What [`LX_INFO_TASK`] tells about a process and one of its threads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LxTaskInfo {
+    /// Process ID, as the caller sees it.
+    pub pid: u64,
+    /// Thread ID, as the caller sees it.
+    pub tid: u64,
+    /// Parent process ID (0: none).
+    pub ppid: u64,
+    /// Process group.
+    pub pgid: u64,
+    /// Session.
+    pub sid: u64,
+    /// The tracing process (0: none).
+    pub tracer: u64,
+    /// `R` (a thread runs or can run), `S` (all wait) or `Z` (exited, not reaped).
+    pub state: u64,
+    /// Live threads.
+    pub threads: u64,
+    /// Start time, in clock ticks since boot.
+    pub start: u64,
+    /// User CPU time, in clock ticks.
+    pub utime: u64,
+    /// System CPU time, in clock ticks.
+    pub stime: u64,
+    /// Waited-for children's user CPU time, in clock ticks.
+    pub cutime: u64,
+    /// Waited-for children's system CPU time, in clock ticks.
+    pub cstime: u64,
+    /// Nice value of the thread (-20..19).
+    pub nice: i64,
+    /// Virtual memory size, in bytes.
+    pub vsize: u64,
+    /// Resident anonymous pages.
+    pub rss_anon: u64,
+    /// Resident file pages.
+    pub rss_file: u64,
+    /// Locked memory, in KiB.
+    pub locked_kib: u64,
+    /// Real, effective and saved user IDs, then the same for groups.
+    pub ids: [u32; 6],
+    /// `no_new_privs`.
+    pub nnp: u32,
+    /// Seccomp mode (0, 1 strict, 2 filter).
+    pub seccomp: u32,
+    /// How many of `ns_inits` are used.
+    pub ns_depth: u64,
+    /// The init process of each PID namespace the process is in below the first (outermost
+    /// first): in that namespace that process is 1.
+    pub ns_inits: [u64; LX_INFO_NS],
+    /// The executable's file name, at most 15 bytes, NUL-padded (`comm`).
+    pub comm: [u8; 16],
+}
+
+/// What [`LX_INFO_SYS`] tells about the system.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LxSysInfo {
+    /// Time since boot, in nanoseconds.
+    pub now_ns: u64,
+    /// CPUs online.
+    pub ncpu: u64,
+    /// Per CPU: user, system and idle time, in clock ticks.
+    pub cpu: [[u64; 3]; LX_INFO_CPUS],
+    /// Load averages over 1, 5 and 15 minutes (fixed point, 11 fraction bits).
+    pub load: [u64; 3],
+    /// Tasks running or ready to run.
+    pub running: u64,
+    /// Tasks.
+    pub tasks: u64,
+    /// The highest process ID in use.
+    pub last_pid: u64,
+    /// Processes.
+    pub procs: u64,
+    /// Boot time, in seconds since the epoch.
+    pub boot_time: u64,
+    /// Usable memory, in KiB.
+    pub mem_total: u64,
+    /// Free memory, in KiB.
+    pub mem_free: u64,
+    /// The kernel's page cache, in KiB.
+    pub cached: u64,
+    /// The part of the page cache that can be given back, in KiB.
+    pub reclaimable: u64,
+    /// Swap, in KiB.
+    pub swap_total: u64,
+    /// Free swap, in KiB.
+    pub swap_free: u64,
+}
+
+impl Default for LxSysInfo {
+    fn default() -> Self {
+        Self {
+            now_ns: 0,
+            ncpu: 0,
+            cpu: [[0; 3]; LX_INFO_CPUS],
+            load: [0; 3],
+            running: 0,
+            tasks: 0,
+            last_pid: 0,
+            procs: 0,
+            boot_time: 0,
+            mem_total: 0,
+            mem_free: 0,
+            cached: 0,
+            reclaimable: 0,
+            swap_total: 0,
+            swap_free: 0,
+        }
+    }
+}
+
+/// One memory area in [`LX_INFO_MAPS`]'s answer (its name follows, `name_len` bytes, and the
+/// record is padded to 8 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LxMapEntry {
+    /// First address.
+    pub start: u64,
+    /// Address after the last.
+    pub end: u64,
+    /// Offset in the mapped object, in bytes.
+    pub offset: u64,
+    /// [`LX_MAP_R`], [`LX_MAP_W`], [`LX_MAP_X`], [`LX_MAP_SHARED`].
+    pub flags: u32,
+    /// Length of the name that follows (0: none).
+    pub name_len: u32,
+}
+/// [`LxMapEntry::flags`]: readable.
+pub const LX_MAP_R: u32 = 1;
+/// [`LxMapEntry::flags`]: writable.
+pub const LX_MAP_W: u32 = 2;
+/// [`LxMapEntry::flags`]: executable.
+pub const LX_MAP_X: u32 = 4;
+/// [`LxMapEntry::flags`]: shared.
+pub const LX_MAP_SHARED: u32 = 8;
+// wave7 G7-4 end

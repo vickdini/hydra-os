@@ -681,6 +681,13 @@ pub mod compat {
                 fn socket_call(&self, _num: u64, _a: [u64; 6]) -> Option<i64> {
                     None
                 }
+                // wave7 G7-4: positions (a pseudo file of linux-server)
+                fn pread(&self, _buf: &mut [u8], _offset: u64) -> Option<i64> {
+                    None
+                }
+                fn seek(&self, _offset: i64, _whence: u32) -> Option<i64> {
+                    None
+                }
             }
         }
 
@@ -695,6 +702,8 @@ pub mod compat {
                 pub st_ino: u64,
                 pub st_size: i64,
                 pub st_blksize: i64,
+                /// wave7 G7-4: a pseudo file's device.
+                pub st_dev: u64,
             }
         }
 

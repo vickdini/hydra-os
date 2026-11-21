@@ -56,6 +56,41 @@ pub const CLAIMED: &[u64] = &[
 /// Calls served here but claimed only on request (`calls=...`): getdents64, getdents.
 pub const EXTRA: &[u64] = &[217, 78];
 
+// wave7 G7-4 begin: redirects to the Linux services' pseudo file systems
+/// Calls redirected to linux-server (`/proc`, `/sys`) since start.
+pub static TO_PSEUDO: AtomicU64 = AtomicU64::new(0);
+/// `pseudo=0` among the program's arguments: `/proc` and `/sys` stay the kernel's.
+static PSEUDO_OFF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The tag of a [`pseudo_redirect`] error (bits 60..64 = 0b1001; `KERNEL` is `i64::MIN`).
+const PSEUDO_TAG: u64 = 0x9 << 60;
+
+/// The error a walk that ended in a served mount answers: a redirect to linux-server for
+/// `/proc` and `/sys` (when the rest of the path is the argument's suffix), else [`KERNEL`].
+/// [`answer`] makes the redirect, for the calls linux-server serves.
+pub fn pseudo_redirect(r: &crate::walk::Redirect) -> i64 {
+    use crate::proto::{LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
+    let obj = r.obj & 0xFFFF_FFFF;
+    match r.tail {
+        Some(t) if !PSEUDO_OFF.load(Ordering::Relaxed) && (r.svc == LXS_PROC || r.svc == LXS_LINUX) && (obj == LX_VFS_PSEUDO_PROC || obj == LX_VFS_PSEUDO_SYS) && t < 1 << 20 => {
+            (PSEUDO_TAG | (r.svc as u64) << 48 | obj << 36 | t as u64) as i64
+        }
+        _ => KERNEL,
+    }
+}
+
+/// The redirect a [`pseudo_redirect`] error names: `(service, object, tail)`.
+fn pseudo_of(e: i64) -> Option<(u8, u64, u32)> {
+    let v = e as u64;
+    (e != KERNEL && v >> 60 == PSEUDO_TAG >> 60).then(|| (((v >> 48) & 0xFF) as u8, (v >> 36) & 0xFFF, (v & 0xF_FFFF) as u32))
+}
+
+/// Calls linux-server serves under `/proc` and `/sys` (stat family, access, readlink,
+/// open); the others go to the kernel straight away.
+fn pseudo_served(nr: u64) -> bool {
+    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257)
+}
+// wave7 G7-4 end
+
 /// Calls answered here, and sent back to the kernel, since start.
 pub static SERVED: AtomicU64 = AtomicU64::new(0);
 /// See [`SERVED`].
@@ -64,6 +99,9 @@ pub static TO_KERNEL: AtomicU64 = AtomicU64::new(0);
 /// Claims every call of [`CLAIMED`] (once online; `calls=0` among the program's arguments
 /// leaves them all to the kernel). `calls=4,6,...`: only these (also [`EXTRA`]). Returns how many the kernel took.
 pub fn claim_all(args: &[&str]) -> usize {
+    if args.iter().any(|a| *a == "pseudo=0") {
+        PSEUDO_OFF.store(true, Ordering::Relaxed); // wave7 G7-4
+    }
     if args.iter().any(|a| *a == "calls=0") {
         return 0;
     }
@@ -98,6 +136,20 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
 
 /// The answer for result `r` (`Err(KERNEL)`: the kernel's code answers the call).
 pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
+    // wave7 G7-4: a walk into `/proc` or `/sys`: linux-server serves the call
+    if let Err(e) = r {
+        if let Some((svc, obj, tail)) = pseudo_of(e) {
+            if pseudo_served(cx.nr) {
+                let n = TO_PSEUDO.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || (n >= 1024 && n.is_power_of_two()) {
+                    hydra_rt::println!("[vfs-server] {} calls redirected to linux-server (/proc, /sys)", n);
+                }
+                return svcrt::redirect(cx.page(), svc, obj, tail);
+            }
+            TO_KERNEL.fetch_add(1, Ordering::Relaxed);
+            return svcrt::redirect(cx.page(), 0, 0, 0);
+        }
+    }
     match r {
         Err(KERNEL) => {
             TO_KERNEL.fetch_add(1, Ordering::Relaxed);
