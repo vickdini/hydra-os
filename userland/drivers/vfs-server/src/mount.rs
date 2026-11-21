@@ -46,7 +46,7 @@
 //! Not here (yet): propagation between namespaces (flags are kept and listed, nothing
 //! propagates, as in the kernel copy), id-mapped mounts, overlayfs.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -57,6 +57,7 @@ pub const ENOENT: i64 = -2;
 pub const E2BIG: i64 = -7;
 pub const EBADF: i64 = -9;
 pub const EFAULT: i64 = -14;
+pub const EAGAIN: i64 = -11;
 pub const EBUSY: i64 = -16;
 pub const ENODEV: i64 = -19;
 pub const ENOTDIR: i64 = -20;
@@ -148,6 +149,9 @@ pub struct Mount {
     pub sb_opts: String,
     /// The mount point path in the namespace (from its root).
     pub path: String,
+    /// When it was put where it is (mounted or moved), in its table's clock: of several
+    /// mounts on one place, the latest covers the others.
+    pub stamp: u64,
 }
 
 /// A resolved path argument: the path in the namespace's view (normalized, absolute), the
@@ -205,6 +209,12 @@ pub struct Redirect {
     pub mnt: MntIdx,
     /// The path inside the serving service's tree (absolute).
     pub path: String,
+    /// The mount's root in that tree (the serving service keeps `..` and symbolic links
+    /// at or below it, and answers "out" for the rest).
+    pub fs_root: String,
+    /// `Some(rest)` when `..` climbs out of the mount: the walk continues at
+    /// [`MountNs::up`] with `rest` (it starts with `..`); `path` is then the mount root.
+    pub leave: Option<String>,
 }
 
 /// Makes new file systems for [`MountTables::mount_new`]: the caller's part of a mount
@@ -216,6 +226,12 @@ pub trait FsFactory {
     /// The service serving file system type `fstype`, its object for a new mount of it,
     /// and the path in its tree the mount shows (`None`: no service serves it).
     fn served(&self, fstype: &str) -> Option<(SvcId, u64, String)>;
+    /// `MS_REMOUNT` of `tmpfs` instance `n` with new mount data (`size=`, `nr_inodes=`):
+    /// applied, or refused (then nothing changes).
+    fn remount_tmpfs(&mut self, n: u32, data: &str) -> Result<(), i64> {
+        let _ = (n, data);
+        Ok(())
+    }
 }
 
 /// Who asks: the caller's mount namespace and effective capabilities and ids.
@@ -241,7 +257,8 @@ pub fn fs_magic(fstype: &str) -> u64 {
         "zfs" => 0x2fc1_2fc1,
         "proc" => 0x9fa0,
         "sysfs" => 0x6265_6572,
-        "tmpfs" | "devtmpfs" | "ramfs" => 0x0102_1994,
+        "tmpfs" | "devtmpfs" => 0x0102_1994,
+        "ramfs" => 0x8584_58f6,
         "devpts" => 0x1cd1,
         "cgroup2" => 0x6367_7270,
         "mqueue" => 0x1980_2202,
@@ -308,6 +325,13 @@ pub struct MountNs {
     pub mounts: Vec<Option<Mount>>,
     /// The root mount.
     pub root: MntIdx,
+    /// The clock that stamps mounts ([`Mount::stamp`]).
+    pub clock: u64,
+    /// The flags of unmounted slots: a lazily unmounted mount (`MNT_DETACH`) keeps them
+    /// for the descriptors and directories still in it.
+    pub gone: BTreeMap<MntIdx, u64>,
+    /// Mounts marked by a first `umount2(MNT_EXPIRE)` (not kept across a restart).
+    pub expiring: BTreeSet<MntIdx>,
 }
 
 impl MountNs {
@@ -320,9 +344,15 @@ impl MountNs {
         self.mounts.get_mut(i.wrapping_sub(1)).and_then(|m| m.as_mut())
     }
 
-    fn push(&mut self, m: Mount) -> MntIdx {
+    fn push(&mut self, mut m: Mount) -> MntIdx {
+        m.stamp = self.tick();
         self.mounts.push(Some(m));
         self.mounts.len()
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 
     /// The live mounts with their indices, in table order.
@@ -337,6 +367,9 @@ impl MountNs {
 
     /// Indices of `i` and every mount below it (`i` first).
     pub fn subtree(&self, i: MntIdx) -> Vec<MntIdx> {
+        if self.get(i).is_none() {
+            return Vec::new();
+        }
         let mut out = vec![i];
         let mut k = 0;
         while k < out.len() {
@@ -355,7 +388,7 @@ impl MountNs {
     /// latest one when several were mounted on it). The walk asks again on the found
     /// mount's root, since mounts stack.
     pub fn child_at(&self, parent: MntIdx, ino: u64) -> Option<MntIdx> {
-        self.live().filter(|(_, m)| !m.by_name && m.parent == parent && m.mountpoint == ino && parent != 0).map(|(i, _)| i).last()
+        self.live().filter(|(_, m)| !m.by_name && m.parent == parent && m.mountpoint == ino && parent != 0).max_by_key(|(_, m)| m.stamp).map(|(i, _)| i)
     }
 
     /// `..` at the root of mount `i`: the parent mount and the object mounted on (`None` at
@@ -375,7 +408,7 @@ impl MountNs {
         self.live()
             .filter(|(_, m)| m.by_name)
             .filter_map(|(i, m)| rebase(&abs, &m.path, "/").map(|rest| (i, m.path.len(), rest)))
-            .max_by_key(|(i, len, _)| (*len, *i))
+            .max_by_key(|(i, len, _)| (*len, self.get(*i).map_or(0, |m| m.stamp)))
             .map(|(i, _, rest)| (i, rest))
     }
 
@@ -384,12 +417,27 @@ impl MountNs {
     pub fn redirect(&self, i: MntIdx, rest: &str) -> Option<Redirect> {
         let m = self.get(i)?;
         let Backend::Remote { svc, obj } = m.backend else { return None };
-        Some(Redirect { svc, obj, mnt: i, path: normalize(&format!("{}/{}", m.fs_root, rest)) })
+        // `rest` is walked lexically inside the mount: a `..` at its root leaves it
+        let comps: Vec<&str> = rest.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+        let mut inside: Vec<&str> = Vec::new();
+        let mut leave = None;
+        for (k, c) in comps.iter().enumerate() {
+            if *c == ".." {
+                if inside.pop().is_none() {
+                    leave = Some(comps[k..].join("/"));
+                    break;
+                }
+            } else {
+                inside.push(c);
+            }
+        }
+        let path = if leave.is_some() { normalize(&m.fs_root) } else { normalize(&format!("{}/{}", m.fs_root, inside.join("/"))) };
+        Some(Redirect { svc, obj, mnt: i, path, fs_root: m.fs_root.clone(), leave })
     }
 
-    /// The per-mount flags of mount `i` (0 if none).
+    /// The per-mount flags of mount `i` (those it had when unmounted, for a gone one).
     pub fn flags_of(&self, i: MntIdx) -> u64 {
-        self.get(i).map_or(0, |m| m.flags)
+        self.get(i).map_or_else(|| self.gone.get(&i).copied().unwrap_or(0), |m| m.flags)
     }
 
     /// `0`, or `EROFS` when mount `i` is read-only (checked by every change after the walk).
@@ -417,8 +465,12 @@ impl MountNs {
                 return Some(loc.mnt);
             }
         }
-        // Mounts the walk does not enter by object: served by name or by another service
-        self.live().filter(|(_, m)| (m.by_name || matches!(m.backend, Backend::Remote { .. })) && m.path == loc.path).map(|(i, _)| i).last()
+        // Mounts the walk does not enter by object (served by name or by another service),
+        // on the mount the walk ended in (a mount covering their parent hides them)
+        self.live()
+            .filter(|(_, m)| (m.by_name || matches!(m.backend, Backend::Remote { .. })) && m.path == loc.path && (loc.mnt == 0 || m.parent == loc.mnt))
+            .max_by_key(|(_, m)| m.stamp)
+            .map(|(i, _)| i)
     }
 
     /// Group 7-1's `Mounts::covering`: the mount that covers object `ino` of mount `mnt`,
@@ -426,6 +478,7 @@ impl MountNs {
     pub fn covering(&self, mnt: MntIdx, ino: u64) -> Option<MntIdx> {
         let mut top = self.child_at(mnt, ino)?;
         for _ in 0..self.mounts.len() {
+            // (a served mount has no root object here: what stacks on it is by name)
             let root = self.get(top)?.root;
             match self.child_at(top, root) {
                 Some(next) if next != top && root != 0 => top = next,
@@ -440,8 +493,9 @@ impl MountNs {
     pub fn pseudo_at_root(&self, name: &[u8]) -> Option<(SvcId, u64)> {
         self.live()
             .filter(|(_, m)| m.by_name && m.path.len() == name.len() + 1 && m.path.as_bytes()[1..] == *name)
-            .filter_map(|(_, m)| if let Backend::Remote { svc, obj } = m.backend { Some((svc, obj)) } else { None })
-            .last()
+            .filter(|(_, m)| matches!(m.backend, Backend::Remote { .. }))
+            .max_by_key(|(_, m)| m.stamp)
+            .and_then(|(_, m)| if let Backend::Remote { svc, obj } = m.backend { Some((svc, obj)) } else { None })
     }
 
     /// The `tmpfs` instances this table mounts.
@@ -454,9 +508,37 @@ impl MountNs {
         self.live().filter(|(_, m)| m.backend == Backend::Pool && m.root != 0).map(|(_, m)| m.root).collect()
     }
 
+    /// The table's structure (for kept state read back): a live root without a parent, every
+    /// other mount's parent live, no cycles, stamps not ahead of the clock.
+    pub fn check(&self) -> Result<(), i64> {
+        let root = self.get(self.root).ok_or(EINVAL)?;
+        if root.parent != 0 {
+            return Err(EINVAL);
+        }
+        for (i, m) in self.live() {
+            if m.stamp > self.clock || self.gone.contains_key(&i) {
+                return Err(EINVAL);
+            }
+            if i == self.root {
+                continue;
+            }
+            // Up the parents to the root, in at most as many steps as there are mounts
+            let mut p = m.parent;
+            let mut steps = 0;
+            while p != self.root {
+                p = self.get(p).ok_or(EINVAL)?.parent;
+                steps += 1;
+                if steps > self.mounts.len() {
+                    return Err(EINVAL);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The deepest live mount whose path is at or above `path` (for parents of new mounts).
     fn deepest_at(&self, path: &str) -> MntIdx {
-        self.live().filter(|(_, m)| rebase(path, &m.path, "/").is_some()).max_by_key(|(i, m)| (m.path.len(), *i)).map_or(0, |(i, _)| i)
+        self.live().filter(|(_, m)| rebase(path, &m.path, "/").is_some()).max_by_key(|(_, m)| (m.path.len(), m.stamp)).map_or(0, |(i, _)| i)
     }
 }
 
@@ -479,7 +561,9 @@ pub struct InitialMount {
 /// `linux_svc` (Group 7-1's boot table: `LXS_PROC` and `LXS_LINUX`); and `/run` listed as a `tmpfs`
 /// that shows the pool's directory (as the kernel lists it today). `lookup` gives the
 /// pool object at a path (0 if none); with `by_name` the served ones are mounted by name
-/// (the initial namespace), else on those objects.
+/// (the initial namespace), else on those objects — except `/sys/fs/cgroup` and `/dev/pts`,
+/// whose parents are served mounts: they are always by name (their mount points are not
+/// pool objects).
 pub fn standard_layout(proc_svc: SvcId, linux_svc: SvcId, by_name: bool, lookup: &dyn Fn(&str) -> u64) -> Vec<InitialMount> {
     let mut out = Vec::new();
     for (path, fstype, source, fs_root) in [
@@ -491,7 +575,7 @@ pub fn standard_layout(proc_svc: SvcId, linux_svc: SvcId, by_name: bool, lookup:
     ] {
         out.push(InitialMount {
             path: String::from(path),
-            mountpoint: if by_name { 0 } else { lookup(path) },
+            mountpoint: if by_name || path.matches('/').count() > 1 { 0 } else { lookup(path) },
             backend: Backend::Remote { svc: if fstype == "proc" { proc_svc } else { linux_svc }, obj: 0 },
             root: 0,
             fs_root: String::from(fs_root),
@@ -532,6 +616,13 @@ impl Default for MountTables {
     }
 }
 
+/// Takes the next number of a counter (starting again at `first` after `u32::MAX`).
+fn bump(c: &mut u32, first: u32) -> u32 {
+    let v = *c;
+    *c = c.checked_add(1).unwrap_or(first);
+    v
+}
+
 /// The mount object of a served file system type: `(backend, root, fs_root, dev)`.
 type Made = (Backend, u64, String, u32);
 
@@ -541,15 +632,11 @@ impl MountTables {
     }
 
     fn new_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        bump(&mut self.next_id, 100)
     }
 
     fn new_dev(&mut self) -> u32 {
-        let d = self.next_dev;
-        self.next_dev += 1;
-        d
+        bump(&mut self.next_dev, 1)
     }
 
     /// Namespace `ns`'s table.
@@ -564,7 +651,7 @@ impl MountTables {
     /// Makes namespace `ns`'s table: the pool's `root` at `/`, then `extra` (parents found
     /// by path). Replaces a table that was there.
     pub fn install(&mut self, ns: NsId, root: u64, extra: &[InitialMount]) -> Effects {
-        let mut t = MountNs { mounts: Vec::new(), root: 1 };
+        let mut t = MountNs { mounts: Vec::new(), root: 1, ..MountNs::default() };
         let pool_dev = self.new_dev();
         let id = self.new_id();
         t.push(Mount {
@@ -582,6 +669,7 @@ impl MountTables {
             source: String::from("hydrapool/root"),
             sb_opts: String::new(),
             path: String::from("/"),
+            stamp: 0,
         });
         for m in extra {
             let path = normalize(&m.path);
@@ -603,6 +691,7 @@ impl MountTables {
                 source: m.source.clone(),
                 sb_opts: String::new(),
                 path,
+                stamp: 0,
             });
         }
         let mut fx = Effects { hold: t.pool_roots(), ..Effects::default() };
@@ -642,8 +731,7 @@ impl MountTables {
         let remote_parent: Vec<bool> = copy.mounts.iter().map(|m| m.as_ref().is_some_and(|m| matches!(copy.get(m.parent).map(|p| p.backend), Some(Backend::Remote { .. })))).collect();
         for (i, m) in copy.mounts.iter_mut().enumerate() {
             let Some(m) = m else { continue };
-            m.id = self.next_id;
-            self.next_id += 1;
+            m.id = bump(&mut self.next_id, 100);
             if m.by_name && !remote_parent[i] {
                 let ino = lookup(&m.path);
                 if ino != 0 {
@@ -666,6 +754,9 @@ impl MountTables {
         for t in tables {
             fx.merge(self.forget(t));
         }
+        // (two dead tables may have mounted the same instance)
+        fx.tmpfs_gone.sort_unstable();
+        fx.tmpfs_gone.dedup();
         fx
     }
 
@@ -675,7 +766,11 @@ impl MountTables {
     #[allow(clippy::too_many_arguments)]
     pub fn mount(&mut self, c: &Caller, src: Option<&Loc>, target: &Loc, fs: Option<&str>, source_name: Option<&str>, flags: u64, data: Option<&str>, f: &mut dyn FsFactory) -> Result<Effects, i64> {
         may_admin(c, self.ns0_fixed)?;
-        if flags & PROPAGATION != 0 && flags & (MS_BIND | MS_MOVE | MS_REMOUNT) == 0 {
+        if flags & PROPAGATION != 0 {
+            // One propagation type, alone (as Linux: no bind, move or remount with it)
+            if (flags & PROPAGATION).count_ones() != 1 || flags & (MS_BIND | MS_MOVE | MS_REMOUNT) != 0 {
+                return Err(EINVAL);
+            }
             self.set_propagation(c.ns, target, flags & PROPAGATION, flags & MS_REC != 0)?;
             return Ok(Effects::default());
         }
@@ -685,11 +780,21 @@ impl MountTables {
             if flags & MS_BIND != 0 {
                 // Only the per-mount flags change
                 t.get_mut(idx).ok_or(EINVAL)?.flags = flags & PER_MOUNT;
-            } else {
-                let m = t.get_mut(idx).ok_or(EINVAL)?;
-                m.flags = flags & PER_MOUNT;
-                if let Some(d) = data.filter(|d| !d.is_empty()) {
-                    m.sb_opts = String::from(d);
+                return Ok(Effects::default());
+            }
+            let (backend, dev) = t.get(idx).map(|m| (m.backend, m.dev)).ok_or(EINVAL)?;
+            let data = data.filter(|d| !d.is_empty());
+            if let (Backend::Tmpfs(n), Some(d)) = (backend, data) {
+                f.remount_tmpfs(n, d)?;
+            }
+            let t = self.ns_mut(c.ns)?;
+            t.get_mut(idx).ok_or(EINVAL)?.flags = flags & PER_MOUNT;
+            // The superblock's options: every mount of it, in every namespace
+            if let Some(d) = data {
+                for m in self.spaces.values_mut().flat_map(|t| t.mounts.iter_mut().flatten()) {
+                    if m.dev == dev {
+                        m.sb_opts = String::from(d);
+                    }
                 }
             }
             return Ok(Effects::default());
@@ -708,7 +813,7 @@ impl MountTables {
     /// Sets propagation `prop` on the mount at `target` (and below it with `recursive`).
     pub fn set_propagation(&mut self, ns: NsId, target: &Loc, prop: u64, recursive: bool) -> Result<(), i64> {
         let t = self.ns_mut(ns)?;
-        let at = t.mount_at(target).unwrap_or(target.mnt);
+        let at = t.mount_at(target).ok_or(EINVAL)?;
         let all = if recursive { t.subtree(at) } else { vec![at] };
         for i in all {
             if let Some(m) = t.get_mut(i) {
@@ -757,6 +862,7 @@ impl MountTables {
             source: String::from(source),
             sb_opts: String::from(data),
             path: target.path.clone(),
+            stamp: 0,
         });
         Ok((idx, Effects::default()))
     }
@@ -778,8 +884,7 @@ impl MountTables {
         // Binding a remote file system's file: the redirect starts at its path there
         let root = if matches!(s.backend, Backend::Remote { .. }) { 0 } else { src.ino };
         let parent = if target.mnt != 0 { target.mnt } else { t.deepest_at(&target.path) };
-        let id = next_id;
-        next_id += 1;
+        let id = bump(&mut next_id, 100);
         let new = t.push(Mount {
             id,
             parent,
@@ -788,7 +893,9 @@ impl MountTables {
             root,
             fs_root,
             propagation: 0,
-            flags: flags & PER_MOUNT,
+            // As Linux: a bind keeps the source mount's flags (MS_BIND | MS_REMOUNT
+            // changes them)
+            flags: s.flags,
             path: target.path.clone(),
             ..s
         });
@@ -809,8 +916,7 @@ impl MountTables {
                 if m.backend == Backend::Pool && m.root != 0 {
                     hold.push(m.root);
                 }
-                let id = next_id;
-                next_id += 1;
+                let id = bump(&mut next_id, 100);
                 let copy = t.push(Mount { id, parent, path, propagation: 0, ..m });
                 map.insert(i, copy);
             }
@@ -821,13 +927,18 @@ impl MountTables {
 
     /// `MS_MOVE`: the mount at `src` (and what is below it) moves to `target`.
     pub fn move_mount(&mut self, ns: NsId, src: &Loc, target: &Loc) -> Result<(), i64> {
+        if src.is_dir != target.is_dir {
+            return Err(ENOTDIR);
+        }
         let t = self.ns_mut(ns)?;
         let smnt = t.mount_at(src).ok_or(EINVAL)?;
         if smnt == t.root {
             return Err(EINVAL);
         }
         let moved = t.subtree(smnt);
-        if moved.contains(&target.mnt) {
+        // The new parent, found before any path changes
+        let parent = if target.mnt != 0 { target.mnt } else { t.deepest_at(&target.path) };
+        if moved.contains(&parent) {
             return Err(EINVAL); // into itself
         }
         let spath = t.get(smnt).map(|m| m.path.clone()).ok_or(EINVAL)?;
@@ -838,11 +949,12 @@ impl MountTables {
                 }
             }
         }
-        let parent = if target.mnt != 0 { target.mnt } else { t.deepest_at(&target.path) };
+        let stamp = t.tick();
         let m = t.get_mut(smnt).ok_or(EINVAL)?;
         m.mountpoint = target.ino;
         m.by_name = target.ino == 0;
         m.parent = parent;
+        m.stamp = stamp;
         Ok(())
     }
 
@@ -852,16 +964,28 @@ impl MountTables {
         if flags & !(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) != 0 {
             return Err(EINVAL);
         }
+        if flags & MNT_EXPIRE != 0 && flags & (MNT_FORCE | MNT_DETACH) != 0 {
+            return Err(EINVAL);
+        }
         let t = self.ns_mut(c.ns)?;
         let idx = t.mount_at(target).filter(|i| *i != t.root).ok_or(EINVAL)?;
         let gone = t.subtree(idx);
         if gone.len() > 1 && flags & MNT_DETACH == 0 {
             return Err(EBUSY);
         }
+        // MNT_EXPIRE: a first call marks the mount, a second one unmounts it (as Linux,
+        // without the check for use in between: the server does not see the accesses)
+        if flags & MNT_EXPIRE != 0 && !t.expiring.remove(&idx) {
+            t.expiring.insert(idx);
+            return Err(EAGAIN);
+        }
         let mut fx = Effects::default();
         let mut tmpfs = Vec::new();
         for i in gone {
-            if let Some(m) = t.mounts[i - 1].take() {
+            let taken = t.mounts.get_mut(i.wrapping_sub(1)).and_then(|s| s.take());
+            if let Some(m) = taken {
+                t.gone.insert(i, m.flags);
+                t.expiring.remove(&i);
                 match m.backend {
                     Backend::Pool if m.root != 0 => fx.release.push(m.root),
                     Backend::Tmpfs(n) => tmpfs.push(n),
@@ -885,9 +1009,10 @@ impl MountTables {
         let t = self.ns_mut(c.ns)?;
         let old = t.root;
         let old_root = t.get(old).map(|m| m.root).ok_or(EINVAL)?;
-        let nmnt = new_root.mnt;
-        if t.get(nmnt).map_or(true, |m| m.root != new_root.ino) || nmnt == old {
-            return Err(EINVAL); // new_root must be a mount, not the current root
+        // new_root must be a mount point (of a pool or tmpfs tree), not the current root
+        let nmnt = t.mount_at(new_root).filter(|i| t.get(*i).is_some_and(|m| !matches!(m.backend, Backend::Remote { .. }))).ok_or(EINVAL)?;
+        if nmnt == old {
+            return Err(EINVAL);
         }
         let put_rel = rebase(&put_old.path, &new_root.path, "/").ok_or(EINVAL)?;
         // put_old must be reachable from new_root through the mounts below it
@@ -906,16 +1031,21 @@ impl MountTables {
                 _ => normalize(&format!("{}/{}", put_rel, m.path)),
             };
         }
+        let stamp = t.tick();
         let m = t.get_mut(old).ok_or(EINVAL)?;
         m.mountpoint = put_old.ino;
+        m.by_name = put_old.ino == 0;
         m.parent = put_old.mnt;
         m.path = put_rel;
+        m.stamp = stamp;
         let n = t.get_mut(nmnt).ok_or(EINVAL)?;
         n.mountpoint = 0;
+        n.by_name = false;
         n.parent = 0;
         n.path = String::from("/");
+        let new_root_obj = n.root;
         t.root = nmnt;
-        Ok(Pivot { old_root: (old, old_root), new_root: (nmnt, new_root.ino) })
+        Ok(Pivot { old_root: (old, old_root), new_root: (nmnt, new_root_obj) })
     }
 
     /// Sets `set` and clears `clear` (per-mount `MS_*` flags), and sets propagation `prop`
@@ -945,8 +1075,12 @@ impl MountTables {
         let mut out = String::new();
         for (_, m) in t.live() {
             let parent = t.get(m.parent).map_or(m.id, |p| p.id);
-            let prop = if m.propagation & MS_SHARED != 0 { format!(" shared:{}", m.dev) } else { String::new() };
-            out.push_str(&format!("{} {} 0:{} {} {} {}{} - {} {} {}\n", m.id, parent, m.dev, m.fs_root, m.path, mount_opts(m.flags), prop, m.fstype, m.source, super_opts(m)));
+            let prop = match m.propagation {
+                p if p & MS_SHARED != 0 => format!(" shared:{}", m.dev),
+                p if p & MS_UNBINDABLE != 0 => String::from(" unbindable"),
+                _ => String::new(), // private, or a slave with no master (nothing propagates)
+            };
+            out.push_str(&format!("{} {} 0:{} {} {} {}{} - {} {} {}\n", m.id, parent, m.dev, escape(&m.fs_root), escape(&m.path), mount_opts(m.flags), prop, m.fstype, escape(&m.source), super_opts(m)));
         }
         Some(out)
     }
@@ -956,7 +1090,13 @@ impl MountTables {
         let t = self.ns(ns)?;
         let mut out = String::new();
         for (_, m) in t.live() {
-            out.push_str(&format!("{} {} {} {} 0 0\n", m.source, m.path, m.fstype, super_opts(m)));
+            // (the mount's options, then the file system's, as Linux lists them)
+            let mut opts = mount_opts(m.flags);
+            if !m.sb_opts.is_empty() {
+                opts.push(',');
+                opts.push_str(&m.sb_opts);
+            }
+            out.push_str(&format!("{} {} {} {} 0 0\n", escape(&m.source), escape(&m.path), m.fstype, opts));
         }
         Some(out)
     }
@@ -989,7 +1129,7 @@ impl MountTables {
     /// `bufsize`.
     pub fn statmount(&self, ns: NsId, mnt_id: u64, mask: u64, bufsize: usize) -> Result<Vec<u8>, i64> {
         let t = self.ns(ns).ok_or(EINVAL)?;
-        let (_, m) = t.live().find(|(_, m)| UNIQUE_BASE + m.id as u64 == mnt_id).ok_or(ENOENT)?;
+        let (_, m) = t.live().find(|(i, m)| UNIQUE_BASE + m.id as u64 == mnt_id || mnt_id == LSMT_ROOT && *i == t.root).ok_or(ENOENT)?;
         let parent = t.get(m.parent).map_or(m.id, |p| p.id);
         let out = statmount_buf(m, parent, ns, mask);
         if bufsize < out.len() {
@@ -1012,6 +1152,12 @@ impl MountTables {
         for (id, t) in &self.spaces {
             e.u64(*id);
             e.u64(t.root as u64);
+            e.u64(t.clock);
+            e.u32(t.gone.len() as u32);
+            for (i, f) in &t.gone {
+                e.u64(*i as u64);
+                e.u64(*f);
+            }
             e.u32(t.mounts.len() as u32);
             for slot in &t.mounts {
                 match slot {
@@ -1039,11 +1185,22 @@ impl MountTables {
         for _ in 0..n {
             let id = d.u64()?;
             let root = d.u64()? as usize;
+            let clock = d.u64()?;
+            let ngone = d.u32()? as usize;
+            if ngone > d.remaining() / 16 {
+                return Err(EINVAL);
+            }
+            let mut gone = BTreeMap::new();
+            for _ in 0..ngone {
+                let i = d.u64()? as usize;
+                gone.insert(i, d.u64()?);
+            }
             let count = d.u32()? as usize;
             if count > d.remaining() {
                 return Err(EINVAL);
             }
-            let mut mounts = Vec::with_capacity(count);
+            // (no allocation from the count: each slot is read and checked first)
+            let mut mounts = Vec::new();
             for _ in 0..count {
                 mounts.push(match d.u8()? {
                     0 => None,
@@ -1051,10 +1208,8 @@ impl MountTables {
                     _ => return Err(EINVAL),
                 });
             }
-            let t = MountNs { mounts, root };
-            if t.get(root).is_none() {
-                return Err(EINVAL);
-            }
+            let t = MountNs { mounts, root, clock, gone, expiring: BTreeSet::new() };
+            t.check()?;
             spaces.insert(id, t);
         }
         if !d.done() {
@@ -1074,6 +1229,21 @@ pub fn mount_opts(flags: u64) -> String {
         }
     }
     opts
+}
+
+/// `s` as `/proc` shows names: space, tab, newline and backslash as octal escapes.
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            ' ' => out.push_str("\\040"),
+            '\t' => out.push_str("\\011"),
+            '\n' => out.push_str("\\012"),
+            '\\' => out.push_str("\\134"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The superblock options (`rw`/`ro` and the file system's own).
@@ -1129,7 +1299,7 @@ fn statmount_buf(m: &Mount, parent: u32, ns: NsId, mask: u64) -> Vec<u8> {
         p32(&mut out, 60, parent);
         p64(&mut out, 64, ms_to_attr(m.flags));
         let shared = m.propagation & MS_SHARED != 0;
-        p64(&mut out, 72, if shared { MS_SHARED } else { MS_PRIVATE });
+        p64(&mut out, 72, if m.propagation & PROPAGATION != 0 { m.propagation & PROPAGATION } else { MS_PRIVATE });
         p64(&mut out, 80, if shared { m.dev as u64 } else { 0 });
         done |= STATMOUNT_MNT_BASIC;
     }
@@ -1202,6 +1372,11 @@ pub const MOUNT_ATTR_IDMAP: u64 = 0x10_0000;
 pub const MOUNT_ATTR_NOSYMFOLLOW: u64 = 0x20_0000;
 pub const MOUNT_ATTR_ALL: u64 = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_ATIME | MOUNT_ATTR_NODIRATIME | MOUNT_ATTR_IDMAP | MOUNT_ATTR_NOSYMFOLLOW;
 
+/// Whether the atime field of `attr` is one of Linux's three modes.
+fn atime_ok(attr: u64) -> bool {
+    matches!(attr & MOUNT_ATTR_ATIME, MOUNT_ATTR_RELATIME | MOUNT_ATTR_NOATIME | MOUNT_ATTR_STRICTATIME)
+}
+
 /// `MOUNT_ATTR_*` as per-mount `MS_*` flags.
 pub fn attr_to_ms(attr: u64) -> u64 {
     let mut f = 0;
@@ -1257,8 +1432,10 @@ pub enum Spec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detached {
     pub spec: Spec,
-    /// Per-mount `MS_*` flags and propagation, applied when it is attached.
+    /// Per-mount `MS_*` flags, applied when it is attached: a new file system's flags; for a
+    /// clone, the flags to set on the source's (and `clear` the ones to clear).
     pub flags: u64,
+    pub clear: u64,
     pub propagation: u64,
     /// Where it was attached (then `move_mount` moves it).
     pub attached: Option<String>,
@@ -1312,8 +1489,9 @@ pub enum ConfigOut {
 /// (already copied in; `None` for a null pointer).
 pub fn fsconfig(c: &mut FsCtx, cmd: u64, key: Option<&str>, value: Option<&str>, aux: u64) -> Result<ConfigOut, i64> {
     match cmd {
+        FSCONFIG_SET_FLAG | FSCONFIG_SET_STRING | FSCONFIG_SET_PATH | FSCONFIG_SET_PATH_EMPTY if c.created && c.reconfigure.is_none() => Err(EBUSY),
         FSCONFIG_SET_FLAG => {
-            let k = key.ok_or(EINVAL)?;
+            let k = key.filter(|k| !k.is_empty() && !k.contains(',')).ok_or(EINVAL)?;
             if value.is_some() || aux != 0 {
                 return Err(EINVAL);
             }
@@ -1324,9 +1502,13 @@ pub fn fsconfig(c: &mut FsCtx, cmd: u64, key: Option<&str>, value: Option<&str>,
             }
             Ok(ConfigOut::Done)
         }
+        // (a path's dirfd, `aux`, is the caller's: it passes the resolved path as `value`)
         FSCONFIG_SET_STRING | FSCONFIG_SET_PATH | FSCONFIG_SET_PATH_EMPTY => {
-            let k = key.ok_or(EINVAL)?;
+            let k = key.filter(|k| !k.is_empty() && !k.contains(',')).ok_or(EINVAL)?;
             let v = value.ok_or(EINVAL)?;
+            if v.contains(',') {
+                return Err(EINVAL);
+            }
             if cmd == FSCONFIG_SET_STRING && aux != 0 {
                 return Err(EINVAL);
             }
@@ -1352,6 +1534,9 @@ pub fn fsconfig(c: &mut FsCtx, cmd: u64, key: Option<&str>, value: Option<&str>,
             Ok(ConfigOut::Done)
         }
         FSCONFIG_CMD_RECONFIGURE => {
+            if key.is_some() || value.is_some() || aux != 0 {
+                return Err(EINVAL);
+            }
             let path = c.reconfigure.clone().ok_or(EINVAL)?;
             Ok(ConfigOut::Reconfigure { path, ro: c.ro })
         }
@@ -1361,7 +1546,7 @@ pub fn fsconfig(c: &mut FsCtx, cmd: u64, key: Option<&str>, value: Option<&str>,
 
 /// `fsmount(fs_fd, flags, attr_flags)`: the detached mount of a created context.
 pub fn fsmount(c: &mut FsCtx, flags: u64, attr: u64) -> Result<Detached, i64> {
-    if flags & !FSOPEN_CLOEXEC != 0 || attr & !MOUNT_ATTR_ALL != 0 || attr & MOUNT_ATTR_IDMAP != 0 {
+    if flags & !FSOPEN_CLOEXEC != 0 || attr & !MOUNT_ATTR_ALL != 0 || attr & MOUNT_ATTR_IDMAP != 0 || !atime_ok(attr) {
         return Err(EINVAL);
     }
     if !c.created || c.reconfigure.is_some() {
@@ -1375,7 +1560,7 @@ pub fn fsmount(c: &mut FsCtx, flags: u64, attr: u64) -> Result<Detached, i64> {
     if c.ro {
         ms |= MS_RDONLY;
     }
-    Ok(Detached { spec: Spec::New { fs: c.fs.clone(), source: c.source.clone(), data: c.options.join(",") }, flags: ms, propagation: 0, attached: None })
+    Ok(Detached { spec: Spec::New { fs: c.fs.clone(), source: c.source.clone(), data: c.options.join(",") }, flags: ms, clear: 0, propagation: 0, attached: None })
 }
 
 pub const OPEN_TREE_CLONE: u64 = 1;
@@ -1399,7 +1584,7 @@ pub fn open_tree_flags(flags: u64) -> Result<bool, i64> {
 
 /// `open_tree` with `OPEN_TREE_CLONE` of the located `source`.
 pub fn open_tree_clone(source: &Loc, flags: u64) -> Detached {
-    Detached { spec: Spec::Clone { source: source.path.clone(), recursive: flags & AT_RECURSIVE != 0 }, flags: 0, propagation: 0, attached: None }
+    Detached { spec: Spec::Clone { source: source.path.clone(), recursive: flags & AT_RECURSIVE != 0 }, flags: 0, clear: 0, propagation: 0, attached: None }
 }
 
 pub const MOVE_MOUNT_F_SYMLINKS: u64 = 1;
@@ -1423,7 +1608,7 @@ pub fn move_mount_flags(flags: u64) -> Result<(), i64> {
 pub enum Attach {
     Move { from: String },
     New { fs: String, source: Option<String>, data: String, flags: u64 },
-    Bind { source: String, recursive: bool, flags: u64 },
+    Bind { source: String, recursive: bool, flags: u64, clear: u64 },
 }
 
 impl Detached {
@@ -1432,7 +1617,7 @@ impl Detached {
         match (&self.attached, &self.spec) {
             (Some(at), _) => Attach::Move { from: at.clone() },
             (None, Spec::New { fs, source, data }) => Attach::New { fs: fs.clone(), source: source.clone(), data: data.clone(), flags: self.flags },
-            (None, Spec::Clone { source, recursive }) => Attach::Bind { source: source.clone(), recursive: *recursive, flags: self.flags },
+            (None, Spec::Clone { source, recursive }) => Attach::Bind { source: source.clone(), recursive: *recursive, flags: self.flags, clear: self.clear },
         }
     }
 }
@@ -1453,8 +1638,14 @@ pub fn parse_mount_attr(raw: &[u8], flags: u64) -> Result<(u64, u64, u64), i64> 
         return Err(E2BIG);
     }
     let field = |i: usize| u64::from_le_bytes(raw[i * 8..i * 8 + 8].try_into().unwrap());
-    let (attr_set, attr_clr, prop) = (field(0), field(1), field(2));
-    if (attr_set | attr_clr) & !MOUNT_ATTR_ALL != 0 || (attr_set | attr_clr) & MOUNT_ATTR_IDMAP != 0 {
+    let (attr_set, attr_clr, prop, userns_fd) = (field(0), field(1), field(2), field(3));
+    if (attr_set | attr_clr) & !MOUNT_ATTR_ALL != 0 || (attr_set | attr_clr) & MOUNT_ATTR_IDMAP != 0 || userns_fd != 0 {
+        return Err(EINVAL);
+    }
+    // As Linux: the atime field is cleared whole or not at all, set only when cleared, and
+    // set to one of the three modes
+    let clr_atime = attr_clr & MOUNT_ATTR_ATIME;
+    if (clr_atime != 0 && clr_atime != MOUNT_ATTR_ATIME) || (attr_set & MOUNT_ATTR_ATIME != 0 && clr_atime == 0) || !atime_ok(attr_set) {
         return Err(EINVAL);
     }
     if prop != 0 && !matches!(prop, MS_PRIVATE | MS_SHARED | MS_SLAVE | MS_UNBINDABLE) {
@@ -1473,6 +1664,7 @@ pub fn parse_mount_attr(raw: &[u8], flags: u64) -> Result<(u64, u64, u64), i64> 
 /// [`Detached`]: `mount_setattr` on a mount not yet attached (kept until it is).
 pub fn setattr_detached(d: &mut Detached, set: u64, clear: u64, prop: u64) {
     d.flags = (d.flags & !clear) | set;
+    d.clear = (d.clear | clear) & !set;
     if prop != 0 {
         d.propagation = prop;
     }
@@ -1483,7 +1675,7 @@ pub fn setattr_detached(d: &mut Detached, set: u64, clear: u64, prop: u64) {
 // ----------------------------------------------------------------------
 
 const MOUNT_MAGIC: u32 = 0x4d4e_5433; // "MNT3"
-const MOUNT_VERSION: u32 = 1;
+const MOUNT_VERSION: u32 = 2;
 
 fn encode_mount(e: &mut Enc, m: &Mount) {
     e.u32(m.id);
@@ -1511,6 +1703,7 @@ fn encode_mount(e: &mut Enc, m: &Mount) {
     e.str(&m.source);
     e.str(&m.sb_opts);
     e.str(&m.path);
+    e.u64(m.stamp);
 }
 
 fn decode_mount(d: &mut Dec) -> Result<Mount, i64> {
@@ -1539,6 +1732,7 @@ fn decode_mount(d: &mut Dec) -> Result<Mount, i64> {
         source: d.str()?,
         sb_opts: d.str()?,
         path: d.str()?,
+        stamp: d.u64()?,
     })
 }
 
@@ -1562,6 +1756,8 @@ impl Enc {
         self.u64(v as u64);
     }
     pub fn bytes(&mut self, b: &[u8]) {
+        // (nothing kept is near 4 GiB; a longer string would not fit the length field)
+        assert!(b.len() <= u32::MAX as usize);
         self.u32(b.len() as u32);
         self.buf.extend_from_slice(b);
     }
