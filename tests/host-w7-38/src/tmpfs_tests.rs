@@ -38,7 +38,8 @@ impl DataStore for Store {
         }
         Ok(())
     }
-    fn truncate(&mut self, key: u64, size: u64) -> Result<(), i64> {
+    fn truncate(&mut self, key: u64, size: u64, old: u64) -> Result<(), i64> {
+        assert!(size < old);
         let o = self.objs.get_mut(&key).ok_or(-9i64)?;
         o.truncate(size as usize);
         Ok(())

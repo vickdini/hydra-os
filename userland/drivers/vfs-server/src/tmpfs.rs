@@ -91,8 +91,9 @@ pub trait DataStore {
     fn write(&mut self, key: u64, off: u64, data: &[u8]) -> Result<(), i64>;
     /// Fills `buf` from byte `off` (zeros where nothing was written).
     fn read(&mut self, key: u64, off: u64, buf: &mut [u8]) -> Result<(), i64>;
-    /// Bytes from `size` on read as zeros again (pages past it may be freed).
-    fn truncate(&mut self, key: u64, size: u64) -> Result<(), i64>;
+    /// The file shrank from `old` to `size` bytes: bytes from `size` on must read as zeros
+    /// again when the file grows later (pages past it may be freed).
+    fn truncate(&mut self, key: u64, size: u64, old: u64) -> Result<(), i64>;
     /// The object is no longer needed.
     fn free(&mut self, key: u64);
 }
@@ -781,7 +782,7 @@ impl Tmpfs {
             return Err(ENOSPC);
         }
         if size < old && data != 0 {
-            store.truncate(data, size)?;
+            store.truncate(data, size, old)?;
         }
         self.used_pages = self.used_pages + np - op;
         let n = self.node_mut(ino)?;
