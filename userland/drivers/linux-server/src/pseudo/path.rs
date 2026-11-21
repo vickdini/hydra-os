@@ -54,6 +54,9 @@ pub enum File {
     Cpuinfo,
     /// `/sys/devices/system/cpu/{online,possible,present}`.
     CpuRange,
+    /// `/sys/firmware/efi/efivars/<Name>-<GUID>`: a UEFI variable (the file name is the
+    /// tail's last component).
+    Efivar,
     /// `/proc/<who>/<file>`, or `/proc/<who>/task/<tid>/<file>` (`tid` != 0).
     Pid {
         /// The process.
@@ -68,7 +71,7 @@ pub enum File {
 impl File {
     /// The file system the file is in: `true` for `/sys`.
     pub fn in_sys(&self) -> bool {
-        matches!(self, File::CpuRange)
+        matches!(self, File::CpuRange | File::Efivar)
     }
 }
 
@@ -131,12 +134,24 @@ pub fn components(tail: &[u8]) -> Option<alloc::vec::Vec<&str>> {
     Some(v)
 }
 
-/// A decimal number of at most 10 digits (no sign, no leading `+`).
+/// Whether `name` has the shape of an efivarfs file name: `<Name>-<GUID>` (a GUID of 36
+/// characters, hex digits and dashes at 8, 13, 18, 23).
+pub fn efivar_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.len() < 38 || b[b.len() - 37] != b'-' {
+        return false;
+    }
+    let g = &b[b.len() - 36..];
+    g.iter().enumerate().all(|(i, &c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() })
+}
+
+/// A decimal number of at most 10 digits (no sign, no leading `+`) that fits in 31 bits
+/// (process and thread IDs travel in 32-bit halves of the info primitives' words).
 fn number(s: &str) -> Option<u64> {
     if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    s.parse().ok()
+    s.parse().ok().filter(|&n: &u64| n <= i32::MAX as u64)
 }
 
 fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {
@@ -155,13 +170,15 @@ fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {
 /// `trailing`: the path ended with `/` (a file then is the kernel's: `ENOTDIR` rules).
 pub fn classify(obj: u64, tail: &[u8]) -> Target {
     let Some(c) = components(tail) else { return Target::Kernel };
-    let trailing = tail.last() == Some(&b'/');
+    // (a path ending in `/` or `/.` must name a directory: the kernel's rules)
+    let trailing = tail.last() == Some(&b'/') || tail.ends_with(b"/.") || tail == b".";
     let file = |f: File| if trailing { Target::Kernel } else { Target::File(f) };
     match obj & 0xFFFF_FFFF {
         LX_VFS_PSEUDO_PROC => {}
         LX_VFS_PSEUDO_SYS => {
             return match c.as_slice() {
                 ["devices", "system", "cpu", "online" | "possible" | "present"] => file(File::CpuRange),
+                ["firmware", "efi", "efivars", name] if efivar_name(name) => file(File::Efivar),
                 _ => Target::Kernel,
             };
         }

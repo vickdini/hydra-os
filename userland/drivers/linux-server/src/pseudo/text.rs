@@ -182,7 +182,8 @@ pub fn maps(data: &[u8]) -> Vec<u8> {
     while at + hdr <= data.len() {
         // SAFETY: `hdr` bytes are there; `LxMapEntry` is plain integers
         let e: LxMapEntry = unsafe { core::ptr::read_unaligned(data[at..].as_ptr() as *const LxMapEntry) };
-        let name_end = (at + hdr + e.name_len as usize).min(data.len());
+        let name_len = (e.name_len as usize).min(4095);
+        let name_end = (at + hdr + name_len).min(data.len());
         let name = &data[at + hdr..name_end];
         let c = |bit: u32, ch: char| if e.flags & bit != 0 { ch } else { '-' };
         let mut line = alloc::format!(
@@ -195,7 +196,7 @@ pub fn maps(data: &[u8]) -> Vec<u8> {
             if e.flags & LX_MAP_SHARED != 0 { 's' } else { 'p' },
             e.offset
         );
-        if e.name_len != 0 {
+        if name_len != 0 {
             while line.len() < 72 {
                 line.push(' ');
             }
@@ -204,7 +205,7 @@ pub fn maps(data: &[u8]) -> Vec<u8> {
         }
         line.push('\n');
         out.push_str(&line);
-        at += (hdr + e.name_len as usize + 7) & !7;
+        at += (hdr + name_len + 7) & !7;
     }
     out.into_bytes()
 }

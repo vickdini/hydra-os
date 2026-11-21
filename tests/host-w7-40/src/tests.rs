@@ -213,7 +213,7 @@ fn classify_sys_and_other_mounts() {
     assert_eq!(s("devices/system/cpu"), Target::Kernel);
     assert_eq!(s("class/drm/card0/uevent"), Target::Kernel);
     assert_eq!(s("fs/cgroup/cgroup.procs"), Target::Kernel);
-    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Target::Kernel);
+    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Target::File(File::Efivar));
     // /dev and anything else: the kernel
     assert_eq!(classify(LX_VFS_PSEUDO_DEV, b"null"), Target::Kernel);
     assert_eq!(classify(LX_VFS_PSEUDO_DEVPTS, b"0"), Target::Kernel);
@@ -420,4 +420,41 @@ fn maps_text_matches_the_kernels_layout() {
     assert_eq!(l[3], "00010000-00011000 ---p 00000000 00:00 0");
     // a cut record at the end is ignored, never read past the data
     assert_eq!(text::maps(&data[..10]), b"");
+}
+
+#[test]
+fn classify_efivars_files() {
+    let s = |t: &str| classify(LX_VFS_PSEUDO_SYS, t.as_bytes());
+    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Target::File(File::Efivar));
+    assert!(File::Efivar.in_sys());
+    // the directory, a bad GUID, a short name, a trailing slash: the kernel
+    for t in [
+        "firmware/efi/efivars",
+        "firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8",
+        "firmware/efi/efivars/Boot0000-8be4df61x93ca-11d2-aa0d-00e098032b8c",
+        "firmware/efi/efivars/Boot0000_8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        "firmware/efi/efivars/-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        "firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c/",
+        "firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032g8c",
+    ] {
+        assert_eq!(s(t), Target::Kernel, "{}", t);
+    }
+    assert!(path::efivar_name("X-00000000-0000-0000-0000-000000000000"));
+    assert!(!path::efivar_name("00000000-0000-0000-0000-000000000000"));
+}
+
+#[test]
+fn classify_rejects_big_ids_and_dot_endings() {
+    // IDs above 31 bits never reach the info primitives (they would spill into the other half)
+    assert_eq!(p("2147483647/stat"), Target::File(File::Pid { who: Who::Pid(2147483647), tid: 0, file: PidFile::Stat }));
+    assert_eq!(p("2147483648/stat"), Target::Kernel);
+    assert_eq!(p("9999999999/stat"), Target::Kernel);
+    assert_eq!(p("1/task/4294967296/stat"), Target::Kernel);
+    // `/.` at the end: must be a directory (ENOTDIR for a file, the kernel's rules)
+    assert_eq!(p("version/."), Target::Kernel);
+    assert_eq!(p("self/."), Target::Kernel);
+    assert_eq!(p("self/stat/."), Target::Kernel);
+    assert_eq!(p("."), Target::Kernel);
+    // `.` in the middle is fine
+    assert_eq!(p("./self/./stat"), Target::File(File::Pid { who: Who::Caller, tid: 0, file: PidFile::Stat }));
 }

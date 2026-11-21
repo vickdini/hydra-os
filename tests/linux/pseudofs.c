@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -332,6 +333,32 @@ int main(int argc, char **argv) {
         fd = open("/dev/null", O_RDWR);
         CHECK(fd >= 0 && write(fd, "x", 1) == 1, "/dev/null");
         close(fd);
+    }
+
+    // ---- an efivars file (UEFI variable): by path (linux-server, from the firmware) and the
+    // snapshot file in the pool (through a descriptor of the directory)
+    {
+        DIR *dd = opendir("/sys/firmware/efi/efivars");
+        struct dirent *e;
+        int done = 0;
+        while (dd && (e = readdir(dd)) && !done) {
+            if (e->d_name[0] == '.' || strlen(e->d_name) < 38) continue;
+            char path[512];
+            snprintf(path, sizeof path, "/sys/firmware/efi/efivars/%s", e->d_name);
+            int fd = open(path, O_RDONLY);
+            struct stat est;
+            long edev = fd >= 0 && fstat(fd, &est) == 0 ? (long)est.st_dev : -1;
+            int na = fd >= 0 ? slurp(fd, a, sizeof a) : -1;
+            close(fd);
+            fd = openat(dirfd(dd), e->d_name, O_RDONLY);
+            int nb = fd >= 0 ? slurp(fd, b, sizeof b) : -1;
+            close(fd);
+            CHECK(na > 4 && na == nb && !memcmp(a, b, na), "efivar %s: %d vs %d bytes", e->d_name, na, nb);
+            printf("efivar %s: %d bytes, st_dev %ld (23: linux-server)\n", e->d_name, na, edev);
+            done = 1;
+        }
+        if (dd) closedir(dd);
+        if (!done) printf("no efivars to compare\n");
     }
 
     // ---- many opens and closes (slots are given back)

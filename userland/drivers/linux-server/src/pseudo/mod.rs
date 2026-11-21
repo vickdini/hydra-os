@@ -74,6 +74,8 @@ pub fn init(args: &[&str]) {
 struct Open {
     /// What it is (a `/proc/<pid>` file names its process by system-wide ID).
     file: File,
+    /// The path below the mount (an efivars file's name).
+    tail: Vec<u8>,
     /// The text as made at open (or at the last read from 0).
     text: Vec<u8>,
     /// The position of `read`.
@@ -121,7 +123,9 @@ pub fn redirected(cx: &Cx) -> Answer {
     let Some(tail) = p.get(c.redir_tail as usize..) else { return kernel(cx) };
     let obj = c.redir_obj & 0xFFFF_FFFF;
     let target = path::classify(obj, tail);
-    if target == Target::Kernel {
+    // (an efivars file exists in the pool too: its stat and access are the kernel's; only
+    // a read-only open is served here)
+    if target == Target::Kernel || (target == Target::File(File::Efivar) && !matches!(cx.nr, 2 | 257)) {
         return kernel(cx);
     }
     let r = match cx.nr {
@@ -250,8 +254,25 @@ fn buffer(op: u64, id: u64, pid: u64) -> Result<Vec<u8>, i64> {
 }
 
 /// The text of `file` for the caller of request `id`.
-fn make(id: u64, file: File) -> Result<Vec<u8>, i64> {
+fn make(id: u64, file: File, tail: &[u8]) -> Result<Vec<u8>, i64> {
     Ok(match file {
+        File::Efivar => {
+            // (the attributes and the data, as efivarfs shows them)
+            let name = tail.rsplit(|&b| b == b'/').find(|c| !c.is_empty()).unwrap_or(b"");
+            let mut cap = 1024usize;
+            loop {
+                let mut v = alloc::vec![0u8; cap];
+                let n = sys::lx_obj(LX_INFO_EFIVAR, name.as_ptr() as u64, name.len() as u64 | (cap as u64) << 32, v.as_mut_ptr() as u64)? as usize;
+                if n <= cap {
+                    v.truncate(n);
+                    break v;
+                }
+                if n > 1 << 20 {
+                    return Err(EINVAL);
+                }
+                cap = n;
+            }
+        }
         File::Static(t) => t.to_vec(),
         File::Version => text::VERSION.to_vec(),
         File::Uptime | File::Loadavg | File::Stat => {
@@ -291,7 +312,7 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
         return None;
     }
     // Errors (no such process, maps of another user's process) are the kernel's to answer
-    let text = make(cx.id, file).ok()?;
+    let text = make(cx.id, file, tail).ok()?;
     // The process by its system-wide ID from now on (reads may come from another process)
     let mut shown = alloc::string::String::from(if file.in_sys() { "/sys/" } else { "/proc/" });
     shown.push_str(&alloc::string::String::from_utf8_lossy(tail));
@@ -303,14 +324,14 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     }
     let slot = crate::obj::alloc(LX_OBJ_KIND_PSEUDO).ok()?;
     let size = text.len() as u64;
-    OPENS.lock().insert(slot, Open { file, text, pos: 0 });
+    OPENS.lock().insert(slot, Open { file, tail: tail.to_vec(), text, pos: 0 });
     crate::obj::set_ready(slot, READY, size.max(GEN_SIZE));
     let dev = if file.in_sys() { LX_PSEUDO_DEV_SYS } else { LX_PSEUDO_DEV_PROC };
     let mut d = LxObjDesc {
         slot,
         kind: LX_OBJ_KIND_PSEUDO,
         flags: (flags & (O_NONBLOCK | O_CLOEXEC)) as u32,
-        mode: S_IFREG | 0o444,
+        mode: S_IFREG | if file == File::Efivar { 0o644 } else { 0o444 },
         uid: 0,
         gid: 0,
         name_len: 0,
@@ -337,11 +358,11 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
 /// remakes the text first when `at` is 0 and `fresh`.
 fn read_at(cx: &Cx, slot: u32, at: u64, iov: &crate::fdio::Iov, fresh: bool) -> i64 {
     if fresh && at == 0 {
-        let file = match OPENS.lock().get(&slot) {
-            Some(o) => o.file,
+        let (file, tail) = match OPENS.lock().get(&slot) {
+            Some(o) => (o.file, o.tail.clone()),
             None => return EBADF,
         };
-        if let Ok(t) = make(cx.id, file) {
+        if let Ok(t) = make(cx.id, file, &tail) {
             if let Some(o) = OPENS.lock().get_mut(&slot) {
                 o.text = t;
             }
@@ -351,7 +372,7 @@ fn read_at(cx: &Cx, slot: u32, at: u64, iov: &crate::fdio::Iov, fresh: bool) -> 
         let g = OPENS.lock();
         let Some(o) = g.get(&slot) else { return EBADF };
         let start = (at as usize).min(o.text.len());
-        let end = (start + iov.total()).min(o.text.len());
+        let end = start.saturating_add(iov.total()).min(o.text.len());
         o.text[start..end].to_vec()
     };
     match iov.scatter(cx, &chunk) {
@@ -389,8 +410,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                 let Some(o) = g.get(&slot) else { return (EBADF, 0) };
                 match whence {
                     0 => off,
-                    1 => o.pos as i64 + off,
-                    2 => o.text.len() as i64 + off,
+                    1 => (o.pos as i64).checked_add(off).unwrap_or(-1),
+                    2 => (o.text.len() as i64).checked_add(off).unwrap_or(-1),
                     _ => -1,
                 }
             };
@@ -399,8 +420,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
             } else {
                 if new == 0 {
                     // (a rewind reads fresh text, as seq_file does)
-                    let file = OPENS.lock().get(&slot).map(|o| o.file);
-                    if let Some(Ok(t)) = file.map(|f| make(cx.id, f)) {
+                    let file = OPENS.lock().get(&slot).map(|o| (o.file, o.tail.clone()));
+                    if let Some(Ok(t)) = file.map(|(f, tail)| make(cx.id, f, &tail)) {
                         if let Some(o) = OPENS.lock().get_mut(&slot) {
                             o.text = t;
                         }
