@@ -188,7 +188,16 @@ fn forget_attr(ino: u64) {
         ATTR_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         c.remove(&ino);
     });
+    // wave7 G7-2: the file service's caches follow the kernel's changes
+    crate::lx::fileh::kernel_changed(ino);
 }
+
+// wave7 G7-2 begin
+/// Forgets the attributes of `ino`: the file service changed it (`lx::fileh`).
+pub fn forget_attr_of(ino: u64) {
+    forget_attr(ino);
+}
+// wave7 G7-2 end
 
 /// Forgets every object's attributes (a change whose objects are not all known here: a
 /// name removed or moved changes the link count of the object it named).
@@ -1002,6 +1011,9 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        // wave7 G7-2: the file service forgets exactly these (link counts, the directory)
+        crate::lx::fileh::kernel_changed(ino);
+        crate::lx::fileh::kernel_changed(dir);
         r
     }
 
@@ -1027,6 +1039,11 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        // wave7 G7-2
+        crate::lx::fileh::kernel_changed(dir);
+        if let Some(g) = gone {
+            crate::lx::fileh::kernel_changed(g);
+        }
         // The page cache no longer keeps the file (and its space) alive
         if let (Ok(()), Some(ino)) = (&r, gone) {
             crate::compat::linux::mm::cache_forget(ino);
@@ -1048,6 +1065,7 @@ impl ZfsServer {
             self.window = None;
             return fuse::rmdir(dir, name);
         }
+        let gone = self.lookup(dir, name).ok();
         let r = self.request(FS_RMDIR, |w| {
             w.u64(dir);
             w.bytes(name);
@@ -1055,6 +1073,11 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        // wave7 G7-2
+        crate::lx::fileh::kernel_changed(dir);
+        if let Some(g) = gone {
+            crate::lx::fileh::kernel_changed(g);
+        }
         r
     }
 
@@ -1076,6 +1099,7 @@ impl ZfsServer {
         }
         // A file the rename replaces
         let replaced = self.lookup(ddir, dname).ok();
+        let moved = self.lookup(sdir, sname).ok();
         let r = self.request(FS_RENAME, |w| {
             w.u64(sdir);
             w.bytes(sname);
@@ -1085,6 +1109,10 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        // wave7 G7-2
+        for i in [Some(sdir), Some(ddir), replaced, moved].into_iter().flatten() {
+            crate::lx::fileh::kernel_changed(i);
+        }
         if let (Ok(()), Some(ino)) = (&r, replaced) {
             crate::compat::linux::mm::cache_forget(ino);
         }
@@ -1240,6 +1268,7 @@ impl ZfsServer {
         })
         .map(|r| r.0);
         forget_names();
+        crate::lx::fileh::kernel_changed(0); // wave7 G7-2
         r
     }
 
@@ -1306,6 +1335,7 @@ impl ZfsServer {
         .map(|_| ());
         forget_all_attrs();
         forget_names();
+        crate::lx::fileh::kernel_changed(0); // wave7 G7-2
         r
     }
 }

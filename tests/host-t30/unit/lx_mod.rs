@@ -33,6 +33,7 @@ pub(crate) fn reset_all() {
     mem::tests::reset();
     dcall::tests::reset();
     obj::tests::reset();
+    fileh::tests::reset(); // wave7 G7-2
     crate::ipc::service::tests::reset();
     netwaits(|w| w.clear());
     RELAY_SERVER.store(false, Ordering::Release);

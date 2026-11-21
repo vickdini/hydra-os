@@ -15,6 +15,12 @@ use std::sync::Mutex;
 pub struct Rec {
     /// `kprintln!` lines.
     pub log: Vec<String>,
+    /// wave7 G7-2: `OpenFile::new`'s open references (inodes).
+    pub open_refs: Vec<u64>,
+    /// wave7 G7-2: the ZFS client's caches forgotten: `(ino, 1 names | 2 all attrs | 3 attrs)`.
+    pub fs_forgot: Vec<(u64, u32)>,
+    /// wave7 G7-2: page-cache truncations `(ino, size)`.
+    pub fs_truncated: Vec<(u64, u64)>,
     /// `iommu::map_dma` / `unmap_dma` calls: `(map?, endpoint, phys, len)`.
     pub dma: Vec<(bool, u32, u64, u64)>,
     /// Make the next `map_dma` calls fail (count).
@@ -75,6 +81,8 @@ pub static EPOCH: AtomicU64 = AtomicU64::new(1);
 pub static TRACED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 /// `ns::net_isolated`, `ns::ipc_ns`.
 pub static NET_ISOLATED: AtomicBool = AtomicBool::new(false);
+/// wave7 G7-2: `lx::fileh`'s switches (landlock 1, fanotify 2, inotify 4, abac 8, FUSE mounts 16).
+pub static FS_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 pub static IPC_NS: AtomicU64 = AtomicU64::new(0);
 /// `smp::online()`.
 pub static ONLINE_CPUS: AtomicUsize = AtomicUsize::new(1);

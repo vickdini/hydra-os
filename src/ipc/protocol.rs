@@ -729,6 +729,35 @@ pub struct LxCall {
     /// Group 20: the operation of a call between services.
     pub dcall_op: u32,
     // wave6 G19 end
+    // wave7 G7-2 begin: the file service's call context (`crate::lx::fileh`). Appended.
+    /// The mount of the caller's root ([`LxCall::root`] is its inode) and of its current
+    /// directory ([`LxCall::cwd`]); filled for calls routed to the file service.
+    pub root_mnt: u32,
+    /// See [`LxCall::root_mnt`].
+    pub cwd_mnt: u32,
+    /// The object at the call's descriptor argument: the directory descriptor of an `*at`
+    /// call, or the descriptor of a call on a handle (its inode; [`LxCall::at_kind`] says
+    /// which kind it is).
+    pub at_ino: u64,
+    /// The mount of [`LxCall::at_ino`].
+    pub at_mnt: u32,
+    /// [`LX_AT_CWD`], [`LX_AT_FILE`], [`LX_AT_DIR`] or [`LX_AT_OTHER`].
+    pub at_kind: u32,
+    /// The second directory descriptor (`renameat`, `linkat`): inode, mount, kind.
+    pub at2_ino: u64,
+    /// See [`LxCall::at2_ino`].
+    pub at2_mnt: u32,
+    /// See [`LxCall::at2_ino`].
+    pub at2_kind: u32,
+    /// For a call on a handle ([`LX_AT_FILE`]/[`LX_AT_DIR`]): its offset (a directory's
+    /// `getdents64` cookie).
+    pub fh_off: u64,
+    /// For a call on a handle: its open flags (access mode, `O_APPEND`, `O_NONBLOCK`,
+    /// `O_PATH`, `O_DIRECTORY`).
+    pub fh_flags: u32,
+    /// `LX_FS_*`: the caller's state the file service cannot see itself.
+    pub fs_flags: u32,
+    // wave7 G7-2 end
 }
 
 impl LxCall {
@@ -773,6 +802,19 @@ impl LxCall {
         on_behalf: 0,
         from_svc: 0,
         dcall_op: 0,
+        // wave7 G7-2 begin
+        root_mnt: 0,
+        cwd_mnt: 0,
+        at_ino: 0,
+        at_mnt: 0,
+        at_kind: 0,
+        at2_ino: 0,
+        at2_mnt: 0,
+        at2_kind: 0,
+        fh_off: 0,
+        fh_flags: 0,
+        fs_flags: 0,
+        // wave7 G7-2 end
     };
 }
 
@@ -1430,6 +1472,157 @@ pub const LX_SVC_WHOAMI: u64 = 2;
 // (ops 3-7: Group 20; 16-23: Group 21)
 // wave6 G19 end
 
+// wave7 G7-2 begin: path calls and the kernel's file handles (`crate::lx::fileh`;
+// docs/vfs-design.md sections 5-7)
+/// [`LxCall::at_kind`]: no descriptor (`AT_FDCWD`, or the call takes none): relative paths
+/// start at the current directory ([`LxCall::cwd`]).
+pub const LX_AT_CWD: u32 = 0;
+/// [`LxCall::at_kind`]: a file handle on the pool (a regular file, link, device node: the
+/// kernel's `Vnode`).
+pub const LX_AT_FILE: u32 = 1;
+/// [`LxCall::at_kind`]: a directory handle on the pool.
+pub const LX_AT_DIR: u32 = 2;
+/// [`LxCall::at_kind`]: a descriptor that is not a file-service object (a pipe, a socket, a
+/// pseudo file of `/proc`, a FUSE file), or no descriptor at that number: the kernel
+/// decides (the service answers "redirect to the kernel").
+pub const LX_AT_OTHER: u32 = 3;
+/// [`LxCall::fs_flags`]: the caller is restricted by Landlock.
+pub const LX_FS_LANDLOCK: u32 = 1;
+/// [`LxCall::fs_flags`]: fanotify watches exist (opens and changes make events).
+pub const LX_FS_FANOTIFY: u32 = 2;
+/// [`LxCall::fs_flags`]: the caller's root or current directory is not a plain pool
+/// directory (reached through `/proc/<pid>/root`, a pseudo file system, FUSE, tmpfs).
+pub const LX_FS_FOREIGN: u32 = 4;
+/// [`LxCall::fs_flags`]: the caller's mount namespace has mounts the service does not know
+/// yet (until group 7-3 moves the mount tables: any namespace but the initial one).
+pub const LX_FS_MOUNTS: u32 = 8;
+/// [`LxCall::fs_flags`]: ABAC rules are loaded (paths are noted and checked).
+pub const LX_FS_ABAC: u32 = 16;
+/// [`LxCall::fs_flags`]: inotify watches exist (changes make events in the kernel).
+pub const LX_FS_INOTIFY: u32 = 32;
+
+/// `SYS_LX_REPLY_RECV` with [`LX_REPLY_REDIRECT`] and this result (service 0): the kernel's
+/// own code answers the call, in the same trap. The service must not have changed anything.
+pub const LX_REDIRECT_KERNEL: i64 = 0;
+
+/// `SYS_LX_OBJ` operation (file service): `(id, *LxFhDesc)`: a new handle in request `id`'s
+/// caller's descriptor table; returns the descriptor.
+pub const LX_FH_INSTALL: u64 = 32;
+/// `SYS_LX_OBJ` operation: `(id, fd, pos)`: sets the offset (a directory's `getdents64`
+/// cookie) of the handle at descriptor `fd` of request `id`'s caller.
+pub const LX_FH_SEEK: u64 = 33;
+/// `SYS_LX_OBJ` operation: `(ino, what, *LxFhChange)`: the service changed object `ino`
+/// (or names) through zfs-server: the kernel's caches follow (`LX_FHC_*` in `what`).
+pub const LX_FH_CHANGED: u64 = 34;
+/// `SYS_LX_OBJ` operation: `(id, *LxFhDesc)`: request `id`'s caller's current directory
+/// becomes the directory the descriptor names (its shown path is made as for an install).
+pub const LX_FH_CHDIR: u64 = 35;
+/// `SYS_LX_OBJ` operation: `(nr, on)`: the service answers Linux call `nr` (on = 1) or no
+/// longer (0). Path calls and calls on handles go to the file service only for the numbers
+/// it claimed.
+pub const LX_FH_CLAIM: u64 = 36;
+/// `SYS_LX_OBJ` operation: `(id, fd, *LxFhInfo)`: the handle at descriptor `fd` of request
+/// `id`'s caller (for a descriptor inside a call's structure).
+pub const LX_FH_INFO: u64 = 37;
+/// `SYS_LX_OBJ` operation (for group 7-3's `chroot`): `(id, *LxFhDesc)`: request `id`'s
+/// caller's root becomes the directory the descriptor names.
+pub const LX_FH_CHROOT: u64 = 38;
+/// `SYS_LX_OBJ` operation (for group 7-3's `pivot_root`): `(ns, *[old ino, old mnt, new ino,
+/// new mnt])`: every process of mount namespace `ns` whose root or current directory is
+/// the old directory moves to the new one; returns how many tables changed.
+pub const LX_FH_REROOT: u64 = 39;
+
+/// [`LX_FH_CHANGED`] `what`: names changed (created, removed, renamed, linked): forget
+/// every cached lookup.
+pub const LX_FHC_NAMES: u64 = 1;
+/// [`LX_FH_CHANGED`] `what`: the object's attributes changed: forget them.
+pub const LX_FHC_ATTR: u64 = 2;
+/// [`LX_FH_CHANGED`] `what`: the object was truncated to [`LxFhChange::size`]: the page
+/// cache drops what lies past it.
+pub const LX_FHC_TRUNC: u64 = 4;
+/// [`LX_FH_CHANGED`] `what`: every object's attributes may have changed (a name removed or
+/// moved changes link counts).
+pub const LX_FHC_ALL_ATTRS: u64 = 16;
+/// [`LX_FH_CHANGED`] `what`: the object lost its last name (unlinked or replaced): the page
+/// cache stops keeping it.
+pub const LX_FHC_GONE: u64 = 32;
+
+/// Notification to the file service: the kernel changed object `a` (a write, a truncation,
+/// its own fallback paths, a name made, removed or moved in directory `a`): forget its
+/// attributes, its link target and the names in it (the kernel notes every directory and
+/// object a name change touched); `a` = 0: forget every lookup and attribute. A full ring
+/// (its `dropped` counter grew) means: forget everything.
+pub const LX_NOTE_FSCHANGE: u64 = 9;
+
+/// Longest shown path of a handle ([`LxFhDesc::path`]).
+pub const LX_FH_PATH_MAX: usize = 1024;
+
+/// What [`LX_FH_INSTALL`] and [`LX_FH_CHDIR`] make.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxFhDesc {
+    /// The object.
+    pub ino: u64,
+    /// Its mount (0: none).
+    pub mnt: u32,
+    /// Open flags kept with the handle (access mode, `O_APPEND`, `O_NONBLOCK`,
+    /// `O_DIRECTORY`, `O_PATH`) plus `O_CLOEXEC` for the descriptor.
+    pub flags: u32,
+    /// 1: a directory.
+    pub is_dir: u32,
+    /// How the shown path (`/proc/self/fd`) is made: [`LX_FHP_ABS`] (`path` is absolute),
+    /// [`LX_FHP_CWD`] (relative to the caller's current directory) or [`LX_FHP_AT`]
+    /// (relative to descriptor `at_fd`).
+    pub path_kind: u32,
+    /// See [`LxFhDesc::path_kind`].
+    pub at_fd: i32,
+    /// Bytes used of `path`.
+    pub path_len: u32,
+    /// Reserved for tmpfs handles (group 7-3: the memory object holding the file's data);
+    /// 0 now.
+    pub mem: u32,
+    /// The path.
+    pub path: [u8; LX_FH_PATH_MAX],
+}
+
+impl LxFhDesc {
+    /// A descriptor of nothing (every field zero).
+    pub const EMPTY: Self = Self { ino: 0, mnt: 0, flags: 0, is_dir: 0, path_kind: 0, at_fd: 0, path_len: 0, mem: 0, path: [0; LX_FH_PATH_MAX] };
+}
+
+/// [`LxFhDesc::path_kind`]: the path is absolute (in the caller's root).
+pub const LX_FHP_ABS: u32 = 0;
+/// [`LxFhDesc::path_kind`]: relative to the current directory.
+pub const LX_FHP_CWD: u32 = 1;
+/// [`LxFhDesc::path_kind`]: relative to descriptor `at_fd`.
+pub const LX_FHP_AT: u32 = 2;
+
+/// [`LX_FH_CHANGED`]'s third argument (may be NULL when `what` has no [`LX_FHC_TRUNC`]).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LxFhChange {
+    /// The new size ([`LX_FHC_TRUNC`]).
+    pub size: u64,
+}
+
+/// What [`LX_FH_INFO`] tells about a handle.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LxFhInfo {
+    /// The object.
+    pub ino: u64,
+    /// Its offset.
+    pub off: u64,
+    /// Its mount.
+    pub mnt: u32,
+    /// [`LX_AT_FILE`], [`LX_AT_DIR`] or [`LX_AT_OTHER`].
+    pub kind: u32,
+    /// Its open flags.
+    pub flags: u32,
+    /// Reserved.
+    pub pad: u32,
+}
+// wave7 G7-2 end
 // wave7 G7-1 begin: vfs-server, the file service (wave 7, docs/vfs-design.md sections 5-6)
 // ----------------------------------------------------------------------------------------
 //
@@ -1527,4 +1720,5 @@ pub struct LxVfsWalkIn {
     pub groups: [u32; LX_GROUPS],
 }
 
+// (`LX_NOTE_FSCHANGE`, which vfs-server takes, is in 7-2's block `wave7 G7-2`.)
 // wave7 G7-1 end

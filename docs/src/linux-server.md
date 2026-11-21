@@ -876,3 +876,50 @@ runtime (`hydra_rt::svcrt`). The supervisor starts it as `lx_sec`.
   (`keep`/`check`: keys kept across a kill; `hammer N S`: key calls while lx-sec is killed;
   `bpfhold`: an old map gives `EBADF`, a new one works; `devset`/`devcheck`: a device
   program still enforced after a restart, then detached).
+
+## The file service's calls (wave 7, Group 7-2)
+
+Design: `docs/vfs-design.md` sections 5-7. vfs-server (`userland/drivers/vfs-server`,
+`LXS_VFS`, endpoint 0x2D; core by Group 7-1) answers the path calls and the metadata calls on
+open files; the kernel keeps the descriptor table as a table of handles (`src/lx/fileh.rs`).
+
+- **A handle is the kernel's `FileDescriptor::Vnode`** (`OpenFile`: pool object = page-cache
+  object, offset or `getdents64` cookie, open flags, mount, shown path). vfs-server keeps no
+  per-open state: `open` makes the handle with `LX_FH_INSTALL` and forgets it; a call on a
+  handle carries its data (`LxCall::at_ino`, `fh_off`, `fh_flags`). `read`, `pread`, `lseek`,
+  `mmap`, `fstat`, **writes**, `close`, `dup`, `fcntl` and `poll` stay in the kernel and work
+  while vfs-server is down.
+- **Claims:** vfs-server claims each number it serves at start-up (`SYS_LX_OBJ(LX_FH_CLAIM,
+  nr, 1)`); only claimed numbers get a routing entry (bit `fileh::T_VFS`). `calls=0` /
+  `calls=4,6,...` among vfs-server's arguments narrow that; `lx.vfs=kernel` and `lx=kernel`
+  zero the entries. Claimed today (32): stat, lstat, newfstatat, statx, access, faccessat,
+  faccessat2, readlink, readlinkat, statfs, open, openat; chmod,
+  fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate, utimensat; mkdir,
+  mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename, renameat, renameat2.
+  `getdents64`/`getdents` are served (`calls/dir.rs`) but not claimed by default: a warm
+  `find /usr` took 0.87-0.93 s with them against the kernel's 0.46-0.52 s, 0.44-0.48 s without
+  (`calls=...` claims them for tests). The kernel also keeps a call vfs-server would send
+  straight back (`fileh::kernel_mask`: foreign roots, mounts, per call Landlock, fanotify,
+  inotify, ABAC), without the round trip.
+- **The context** each call carries (`fileh::fill`, both forwarding paths): root and working
+  directory (inode and mount), umask, the directory descriptors of `*at` calls
+  (`at_kind`: AT_FDCWD, file, directory, other), namespaces (`T_FSCTX`) and `fs_flags`
+  (Landlock, fanotify, inotify, ABAC, a root/cwd outside the pool or under `/proc`, `/sys`,
+  `/dev`, a mount namespace of its own or FUSE mounts).
+- **Redirect to the kernel:** a worker answers `LX_REPLY_REDIRECT` with service 0 and the
+  kernel's own code answers the same call in the same trap (for any service). vfs-server
+  does so before changing anything for what it does not serve yet: walks into `/proc`,
+  `/sys`, `/dev`; descriptors that are not pool handles; the `fs_flags` cases; opens that
+  create or truncate, `O_PATH`, `O_TMPFILE`, devices, FIFOs, sockets; changes while inotify
+  or fanotify watches exist (their events come from the kernel's ZFS client); a new object in a
+  directory with xattrs (default ACLs); `utimensat` with "now".
+- **Coherence.** Both sides work on the same pool and keep each other's caches current:
+  vfs-server tells the kernel what it changed (`LX_FH_CHANGED`: forget names / attributes,
+  page cache cut at a size or dropped for an unlinked file); the kernel posts
+  `LX_NOTE_FSCHANGE(ino or 0)` to vfs-server's ring for every change it makes (from
+  `fs/zfs`'s forget functions), which a worker takes before its next call.
+- **vfs-server not online** (not started, crashed, switched back): the kernel answers.
+- Other operations: `LX_FH_SEEK` (a handle's cookie), `LX_FH_INFO`, `LX_FH_CHDIR`,
+  `LX_FH_CHROOT` and `LX_FH_REROOT` (for 7-3's `chroot`/`pivot_root`).
+- Tests: host-t30 `lx::fileh` (25), `tests/host-w7-37` (result layouts, decisions); the QEMU
+  suite with vfs-server serving.

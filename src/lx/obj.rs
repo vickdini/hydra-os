@@ -555,6 +555,10 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     {
         return ESRCH;
     }
+    // wave7 G7-2: the file service's handle operations (`fileh`, ops 32..)
+    if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 16).contains(&op) {
+        return super::fileh::ctl(h, op, a, b, c);
+    }
     match op {
         LX_OBJ_INSTALL => install(x, a, b),
         LX_OBJ_FD => {
