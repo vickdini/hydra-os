@@ -206,13 +206,13 @@ fn read_write_and_descriptors() {
     assert_eq!(sc(0, [3, mptr(&mut buf), 0, 0, 0, 0]), 0);
     assert_eq!(sc(0, [99, mptr(&mut buf), 5, 0, 0, 0]), EBADF);
     // Write-only: EBADF on read
-    install(4, FileDescriptor::File { path: "/tmp/o".into(), cursor: 0, readable: false, writable: true, append: false, shown: None });
+    install(4, FileDescriptor::File { path: "/tmp/o".into(), cursor: crate::fs::FileCursor::new(0), readable: false, writable: true, append: false, shown: None });
     assert_eq!(sc(0, [4, mptr(&mut buf), 5, 0, 0, 0]), EBADF);
     assert_eq!(sc(1, [4, ptr(b"abc"), 3, 0, 0, 0]), 3);
     assert_eq!(sc(1, [4, 0, 3, 0, 0, 0]), EFAULT);
     assert_eq!(sc(1, [4, ptr(b"abc"), 0, 0, 0, 0]), 0);
     assert_eq!(sc(1, [99, ptr(b"abc"), 3, 0, 0, 0]), EBADF);
-    install(5, FileDescriptor::File { path: "/etc/x".into(), cursor: 0, readable: true, writable: false, append: false, shown: None });
+    install(5, FileDescriptor::File { path: "/etc/x".into(), cursor: crate::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None });
     assert_eq!(sc(1, [5, ptr(b"abc"), 3, 0, 0, 0]), EBADF, "read-only");
     // Files of the file system (Vnode), outside the table's lock
     fake::INODES.with_borrow_mut(|m| m.insert(60, (0o100644, b"inode data".to_vec())));

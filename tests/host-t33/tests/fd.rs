@@ -78,7 +78,7 @@ fn ends(p: &Arc<Mutex<PipeBuffer>>) -> (usize, usize) {
 }
 
 fn file(path: &str, readable: bool, writable: bool, append: bool) -> FileDescriptor {
-    FileDescriptor::File { path: path.into(), cursor: 0, readable, writable, append, shown: None }
+    FileDescriptor::File { path: path.into(), cursor: hydra_hosttests_t33::fs::FileCursor::new(0), readable, writable, append, shown: None }
 }
 
 // ---------------------------------------------------------------- open files
@@ -674,7 +674,7 @@ fn dup_of_a_pipe_is_the_same_open_file() {
 /// copies the path (a new buffer, so a new id) and the cursor (not shared, unlike Linux's
 /// shared file offset after dup).
 #[test]
-#[ignore = "BUG: a dup of a by-path File descriptor gets a new object_id and its own cursor (held by value)"]
+// (wave7 G7-7: fixed — the cursor is shared, `fs::FileCursor`)
 fn dup_of_a_path_file_shares_the_open_file() {
     setup();
     let mut t = FdTable::new_default();
@@ -685,4 +685,58 @@ fn dup_of_a_path_file_shares_the_open_file() {
     t.get_mut(a).unwrap().read(&mut buf).unwrap();
     t.get_mut(b).unwrap().read(&mut buf).unwrap();
     assert_eq!(&buf, b"versio", "the dup continues where the original stopped");
+}
+
+// wave7 G7-7 review: the shared offset of a by-path description
+#[test]
+fn a_shared_offset_moves_in_whole_steps() {
+    use hydra_hosttests_t33::fs::FileCursor;
+    let c = FileCursor::new(10);
+    let d = c.clone();
+    assert_eq!(c.id(), d.id());
+    assert!(c == d && c != FileCursor::new(10));
+    // SEEK_CUR: before the start EINVAL, past i64::MAX EOVERFLOW, the offset kept
+    assert_eq!(d.seek_by(-11), Err(-22));
+    assert_eq!(d.seek_by(i64::MAX), Err(-75));
+    assert_eq!(c.get(), 10);
+    assert_eq!(d.seek_by(5), Ok(15));
+    assert_eq!(c.get(), 15);
+    // An I/O moves it by what it did, or to where it says (append)
+    assert_eq!(c.io(|pos| -> Result<_, ()> { assert_eq!(pos, 15); Ok((3, None)) }), Ok(3));
+    assert_eq!(d.get(), 18);
+    assert_eq!(d.io(|_| -> Result<_, ()> { Ok((2, Some(100))) }), Ok(2));
+    assert_eq!(c.get(), 100);
+    // A failed I/O leaves it
+    assert_eq!(c.io(|_| -> Result<(usize, Option<usize>), i32> { Err(7) }), Err(7));
+    assert_eq!(c.get(), 100);
+    // Never past i64::MAX
+    c.set(usize::MAX);
+    assert_eq!(c.get(), i64::MAX as usize);
+    assert_eq!(c.advance(10), i64::MAX as usize);
+    // Readers sharing it in parallel never get the same offset
+    let c = FileCursor::new(0);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hs: Vec<_> = (0..4)
+        .map(|_| {
+            let c = c.clone();
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                for _ in 0..500 {
+                    c.io(|pos| -> Result<_, ()> {
+                        seen.lock().unwrap().push(pos);
+                        Ok((1, None))
+                    })
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    for h in hs {
+        h.join().unwrap();
+    }
+    let mut v = seen.lock().unwrap().clone();
+    v.sort();
+    v.dedup();
+    assert_eq!(v.len(), 2000);
+    assert_eq!(c.get(), 2000);
 }

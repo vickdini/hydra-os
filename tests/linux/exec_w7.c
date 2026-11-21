@@ -212,9 +212,9 @@ static void fifo_tests(void) {
     close(r);
     int rw = open(D "/ff", O_RDWR);
     CHECK(rw >= 0, "O_RDWR: %d", errno);
-    // (with lx=kernel the in-kernel FIFO's O_RDWR end only reads: a round trip is
-    // checked only when the write goes through)
-    if (write(rw, "x", 1) == 1) CHECK(read(rw, b, 1) == 1 && b[0] == 'x', "O_RDWR round trip");
+    // (wave7 G7-7: lx=kernel's in-kernel O_RDWR end writes too now)
+    CHECK(write(rw, "x", 1) == 1 && read(rw, b, 1) == 1 && b[0] == 'x', "O_RDWR round trip");
+    CHECK(fstat(rw, &st) == 0 && S_ISFIFO(st.st_mode), "fstat of the O_RDWR end");
     close(rw);
     // a blocking reader waits for the writer
     pid_t pid = fork();
@@ -222,7 +222,6 @@ static void fifo_tests(void) {
         usleep(100000);
         int fw = open(D "/ff", O_WRONLY);
         write(fw, "late", 4);
-        usleep(300000); /* (lx=kernel's in-kernel FIFO open only sees a writer still open) */
         close(fw);
         _exit(0);
     }

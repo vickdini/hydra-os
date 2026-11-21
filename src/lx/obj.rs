@@ -599,7 +599,8 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     }
     // wave7 G7-2: the file service's handle operations (`fileh`, ops 32..; wave7 G7-6: up to
     // 51, 7-6's 48..=51)
-    if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 20).contains(&op) {
+    // wave7 G7-7: and 7-7's LX_FH_MNTTAB (53)
+    if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 20).contains(&op) || op == crate::ipc::protocol::LX_FH_MNTTAB {
         return super::fileh::ctl(h, op, a, b, c);
     }
     match op {

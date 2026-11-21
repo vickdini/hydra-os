@@ -705,6 +705,18 @@ pub mod lx {
     pub fn summary() -> alloc::string::String {
         alloc::string::String::new()
     }
+    /// *stub* wave7 G7-7: the `[prof] vfs:` and `[prof] execve` lines.
+    pub mod fileh {
+        pub fn summary() -> alloc::string::String {
+            alloc::string::String::new()
+        }
+    }
+    /// *stub* See [`fileh`].
+    pub mod xexec {
+        pub fn summary() -> alloc::string::String {
+            alloc::string::String::new()
+        }
+    }
     /// *stub* (Group 13) No server objects on the host: nothing is forwarded.
     pub fn call_obj(_nr: u64, _args: [u64; 6], _dev: &alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>) -> i64 {
         -9 // EBADF

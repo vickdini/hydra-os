@@ -505,7 +505,7 @@ Seccomp:	{}
                 let table = fds.lock();
                 let desc = table.get(fd)?;
                 let pos = match desc {
-                    crate::fs::FileDescriptor::File { cursor, .. } => *cursor as u64,
+                    crate::fs::FileDescriptor::File { cursor, .. } => cursor.get() as u64,
                     _ => 0,
                 };
                 let pidfd = match desc {

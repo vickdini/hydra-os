@@ -1,5 +1,9 @@
 //! *stub* `crate::fs`: descriptors, the descriptor table and the ZFS client, faked.
 
+/// wave7 G7-7: the real shared offset of by-path descriptors.
+#[path = "../../../src/fs/cursor.rs"]
+pub mod cursor;
+pub use cursor::FileCursor;
 use alloc::string::String;
 use alloc::sync::Arc;
 use spin::Mutex;
@@ -73,13 +77,13 @@ pub enum FileDescriptor {
     TimerFd(Arc<FakeObj>),
     Inotify(Arc<FakeObj>),
     Device(Arc<dyn crate::compat::linux::chardev::CharDevice>),
-    File { path: String, cursor: usize, readable: bool, writable: bool, append: bool, shown: Option<String> },
+    File { path: String, cursor: FileCursor, readable: bool, writable: bool, append: bool, shown: Option<String> },
 }
 
 impl FileDescriptor {
     /// A plain path-addressed file.
     pub fn file(path: &str) -> FileDescriptor {
-        FileDescriptor::File { path: path.into(), cursor: 0, readable: true, writable: true, append: false, shown: None }
+        FileDescriptor::File { path: path.into(), cursor: FileCursor::new(0), readable: true, writable: true, append: false, shown: None }
     }
 
     /// *mirror* of the kernel's identity of the open file description.
@@ -101,7 +105,7 @@ impl FileDescriptor {
             FileDescriptor::PidFd(a) => of(a),
             FileDescriptor::Pty(a) | FileDescriptor::SignalFd(a) | FileDescriptor::TimerFd(a) | FileDescriptor::Inotify(a) => of(a),
             FileDescriptor::Device(a) => of(a),
-            FileDescriptor::File { path, .. } => path.as_ptr() as usize,
+            FileDescriptor::File { cursor, .. } => cursor.id(),
         }
     }
 
@@ -117,12 +121,12 @@ impl FileDescriptor {
                 }
                 let n = crate::fake::ZFS_FILES.with_borrow(|m| {
                     let d = m.get(path.as_str()).map(|d| d.as_slice()).unwrap_or(&[]);
-                    let start = (*cursor).min(d.len());
+                    let start = cursor.get().min(d.len());
                     let n = buf.len().min(d.len() - start);
                     buf[..n].copy_from_slice(&d[start..start + n]);
                     n
                 });
-                *cursor += n;
+                cursor.advance(n);
                 Ok(n)
             }
             FileDescriptor::Vnode(f) => {
@@ -155,14 +159,15 @@ impl FileDescriptor {
                 crate::fake::ZFS_FILES.with_borrow_mut(|m| {
                     let d = m.entry(path.clone()).or_default();
                     if *append {
-                        *cursor = d.len();
+                        cursor.set(d.len());
                     }
-                    let end = *cursor + data.len();
+                    let at = cursor.get();
+                    let end = at + data.len();
                     if d.len() < end {
                         d.resize(end, 0);
                     }
-                    d[*cursor..end].copy_from_slice(data);
-                    *cursor = end;
+                    d[at..end].copy_from_slice(data);
+                    cursor.set(end);
                 });
                 Ok(data.len())
             }
@@ -186,11 +191,11 @@ impl FileDescriptor {
     pub fn pread(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, &'static str> {
         match self {
             FileDescriptor::File { cursor, .. } => {
-                let saved = *cursor;
-                *cursor = offset;
+                let saved = cursor.get();
+                cursor.set(offset);
                 let r = self.read(buf);
                 if let FileDescriptor::File { cursor, .. } = self {
-                    *cursor = saved;
+                    cursor.set(saved);
                 }
                 r
             }
@@ -204,11 +209,11 @@ impl FileDescriptor {
     pub fn pwrite(&mut self, data: &[u8], offset: usize) -> Result<usize, &'static str> {
         match self {
             FileDescriptor::File { cursor, .. } => {
-                let saved = *cursor;
-                *cursor = offset;
+                let saved = cursor.get();
+                cursor.set(offset);
                 let r = self.write(data);
                 if let FileDescriptor::File { cursor, .. } = self {
-                    *cursor = saved;
+                    cursor.set(saved);
                 }
                 r
             }

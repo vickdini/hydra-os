@@ -59,7 +59,8 @@ fn target(cx: &Cx, who: &Ctx, ptr: u64, follow: bool, empty_ok: bool) -> Result<
     ctxt::find(c, who, &path, follow)
 }
 
-/// Applies `set` to `n` (attributes `a` before) through zfs-server.
+/// Applies `set` to `n` (attributes `a` before) through zfs-server (the caller checked that
+/// `n`'s mount is writable: [`attrs`]).
 fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
     // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
     if let (Some(_), None) = (set.size, set.mode) {
@@ -105,6 +106,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 _ => (0, a[1], true),
             };
             let (n, at) = target(cx, &who, ptr, true, empty)?;
+            ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
                 return Err(EPERM);
             }
@@ -120,6 +122,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             };
             let (uid, gid) = (uid as u32, gid as u32);
             let (n, at) = target(cx, &who, ptr, follow, empty)?;
+            ctxt::writable(c, n)?; // wave7 G7-7
             if !chown_ok(&who, &at, uid, gid) {
                 return Err(EPERM);
             }
@@ -138,6 +141,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 return Err(EINVAL);
             }
             let (n, at) = target(cx, &who, a[0], true, false)?;
+            ctxt::writable(c, n)?; // wave7 G7-7
             let acl = ctxt::acl_of(n, &at)?;
             if !ctxt::may_access(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE) {
                 return Err(EPERM);
@@ -153,6 +157,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 return Err(EINVAL);
             }
             let n = ctxt::handle(c)?;
+            ctxt::writable(c, n)?; // wave7 G7-7
             let at = ctxt::BE.getattr(n)?;
             setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
         }
@@ -173,6 +178,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             };
             let (atime, mtime) = (ts(0)?, ts(16)?);
             let (n, at) = target(cx, &who, a[1], a[3] & ctxt::AT_SYMLINK_NOFOLLOW == 0, true)?;
+            ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
                 return Err(EPERM);
             }
@@ -190,12 +196,17 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
 /// on the directory. `create`: the call makes the name.
 fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Parent, i64> {
     let start = ctxt::start(c, path)?;
-    let p = match walk::walk_parent(&ctxt::BE, who, start, path)? {
+    let p = match walk::walk_parent(&ctxt::walker(c)?, who, start, path)? {
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
     if !p.dir_attr.is_dir() {
         return Err(ENOTDIR);
+    }
+    // wave7 G7-7: a read-only mount, or a mount point to remove: the kernel's
+    ctxt::writable(c, p.dir)?;
+    if let Some(ch) = p.child {
+        ctxt::not_mountpoint(c, ch)?;
     }
     if p.name != b"." && p.name != b".." {
         match p.child {
@@ -330,14 +341,23 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
     c2.at_kind = c.at2_kind;
     c2.at_ino = c.at2_ino;
     c2.at_mnt = c.at2_mnt;
-    let src = match walk::walk_parent(&ctxt::BE, &who, ctxt::start(c, &op)?, &op)? {
+    let src = match walk::walk_parent(&ctxt::walker(c)?, &who, ctxt::start(c, &op)?, &op)? {
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
-    let dst = match walk::walk_parent(&ctxt::BE, &who, ctxt::start(&c2, &np)?, &np)? {
+    let dst = match walk::walk_parent(&ctxt::walker(c)?, &who, ctxt::start(&c2, &np)?, &np)? {
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
+    // wave7 G7-7: across mounts (EXDEV), in a read-only one, or a mount point: the kernel's
+    if src.dir.mnt != dst.dir.mnt {
+        return Err(KERNEL);
+    }
+    ctxt::writable(c, src.dir)?;
+    for ch in [src.child, dst.child].into_iter().flatten() {
+        ctxt::not_mountpoint(c, ch)?;
+    }
+
     for d in [&src, &dst] {
         if !d.dir_attr.is_dir() {
             return Err(ENOTDIR);

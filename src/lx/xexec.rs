@@ -68,7 +68,8 @@ fn context<R>(c: &mut LxCall, sh: Shape, more: impl FnOnce(&crate::fs::FdTable) 
         let h = fileh::fill(c, t, sh, true).ok()??;
         Some((h, more(t)?))
     })?;
-    c.fs_flags |= fileh::fs_flags_global(c);
+    let f = fileh::fs_flags_global(c); // (wave7 G7-7: it also sets `mnt_gen`)
+    c.fs_flags |= f;
     Some((held, r))
 }
 

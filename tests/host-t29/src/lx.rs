@@ -66,4 +66,14 @@ pub mod xexec {
         crate::fake::rec(alloc::format!("xexec::front({dirfd},{},{flags})", alloc::string::String::from_utf8_lossy(path)));
         crate::fake::EXEC_FRONT.with_borrow(|m| m.clone())
     }
+    /// *stub* wave7 G7-7: the `[prof] execve` line.
+    pub fn summary() -> alloc::string::String {
+        alloc::string::String::new()
+    }
+}
+/// *stub* wave7 G7-7: the `[prof] vfs:` line.
+pub mod fileh {
+    pub fn summary() -> alloc::string::String {
+        alloc::string::String::new()
+    }
 }

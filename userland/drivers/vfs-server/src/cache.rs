@@ -73,9 +73,11 @@ impl<K: Ord, V> Map<K, V> {
         self.clock += 1;
         self.m.insert(k, (v, self.clock));
         if self.m.len() > cap.saturating_add(cap / 8) {
+            // (strictly newer than `keep` ticks: at most `keep` entries stay, also for a cap
+            // below 8 — wave7 G7-7)
             let keep = (cap - cap / 8) as u64;
             let now = self.clock;
-            self.m.retain(|_, e| now.saturating_sub(e.1) <= keep);
+            self.m.retain(|_, e| now.saturating_sub(e.1) < keep);
         }
     }
 }
@@ -126,6 +128,14 @@ const LINK_HIT: usize = 4;
 const LINK_MISS: usize = 5;
 const STALE: usize = 6;
 const FLUSH: usize = 7;
+
+/// The key of node `n` (wave7 G7-7): names, attributes and link targets are the pool
+/// object's, whichever mount it is seen through (a bind mount shows the same objects), so
+/// the caches keep them by object only and a change made through one mount is seen through
+/// every other. (tmpfs nodes never reach these caches.)
+fn key(n: Node) -> Node {
+    Node::new(0, n.ino)
+}
 
 /// A generation read before a zfs-server request (see [`Cache::begin`]).
 #[derive(Clone, Copy, Debug)]
@@ -209,13 +219,16 @@ impl Cache {
     /// What `name` in `dir` is: `Some(Some(object))`, `Some(None)` (known not to exist), or
     /// `None` (not known).
     pub fn name(&self, dir: Node, name: &[u8]) -> Option<Option<Node>> {
+        let mnt = dir.mnt;
+        let dir = key(dir);
         let mut g = self.inner.lock();
         let dg = g.dirgen.get(&dir).copied().unwrap_or(0);
         let c = g.name_clock + 1;
         let r = match g.names.get_mut(&(dir, name_hash(name))) {
             Some(e) if e.name == name && e.dirgen == dg => {
                 e.used = c;
-                Some(e.target)
+                // (a lookup stays in its directory's mount)
+                Some(e.target.map(|t| Node::new(mnt, t.ino)))
             }
             _ => None,
         };
@@ -229,6 +242,7 @@ impl Cache {
 
     /// Remembers that `name` in `dir` is `target` (`None`: does not exist).
     pub fn put_name(&self, t: Ticket, dir: Node, name: &[u8], target: Option<Node>) {
+        let (dir, target) = (key(dir), target.map(key));
         let cap = self.cap();
         let mut g = self.inner.lock();
         if !self.fresh(t) {
@@ -240,13 +254,13 @@ impl Cache {
         g.names.insert((dir, name_hash(name)), NameEnt { name: name.to_vec(), target, dirgen, used });
         if g.names.len() > cap.saturating_add(cap / 8) {
             let keep = (cap - cap / 8) as u64;
-            g.names.retain(|_, e| used.saturating_sub(e.used) <= keep);
+            g.names.retain(|_, e| used.saturating_sub(e.used) < keep);
         }
     }
 
     /// The attributes of `n`, if known.
     pub fn attr(&self, n: Node) -> Option<Attr> {
-        let r = self.inner.lock().attrs.get(&n).copied();
+        let r = self.inner.lock().attrs.get(&key(n)).copied();
         self.count(if r.is_some() { ATTR_HIT } else { ATTR_MISS });
         r
     }
@@ -256,13 +270,13 @@ impl Cache {
         let cap = self.cap();
         let mut g = self.inner.lock();
         if self.fresh(t) {
-            g.attrs.put(n, a, cap);
+            g.attrs.put(key(n), a, cap);
         }
     }
 
     /// The target of symbolic link `n`, if known.
     pub fn link(&self, n: Node) -> Option<Vec<u8>> {
-        let r = self.inner.lock().links.get(&n).cloned();
+        let r = self.inner.lock().links.get(&key(n)).cloned();
         self.count(if r.is_some() { LINK_HIT } else { LINK_MISS });
         r
     }
@@ -272,13 +286,13 @@ impl Cache {
         let cap = self.cap();
         let mut g = self.inner.lock();
         if self.fresh(t) {
-            g.links.put(n, target.to_vec(), cap);
+            g.links.put(key(n), target.to_vec(), cap);
         }
     }
 
     /// The access ACL of `n`: `Some(None)` known to have none, `None` not known.
     pub fn acl(&self, n: Node) -> Option<Option<Vec<u8>>> {
-        self.inner.lock().acls.get(&n).cloned()
+        self.inner.lock().acls.get(&key(n)).cloned()
     }
 
     /// Remembers the access ACL of `n`.
@@ -286,7 +300,7 @@ impl Cache {
         let cap = self.cap() / 16;
         let mut g = self.inner.lock();
         if self.fresh(t) {
-            g.acls.put(n, acl.map(|a| a.to_vec()), cap.max(16));
+            g.acls.put(key(n), acl.map(|a| a.to_vec()), cap.max(16));
         }
     }
 
@@ -298,7 +312,7 @@ impl Cache {
     pub fn forget_name(&self, dir: Node, name: &[u8]) {
         let mut g = self.inner.lock();
         self.changed();
-        g.names.remove(&(dir, name_hash(name)));
+        g.names.remove(&(key(dir), name_hash(name)));
     }
 
     /// Forgets every name in `dir`.
@@ -306,7 +320,7 @@ impl Cache {
         let cap = self.cap();
         let mut g = self.inner.lock();
         self.changed();
-        Self::bump_dir(&mut g, dir, cap);
+        Self::bump_dir(&mut g, key(dir), cap);
     }
 
     /// Moves `dir`'s generation on (its names become stale). The generations are kept only
@@ -324,15 +338,15 @@ impl Cache {
     pub fn forget_attr(&self, n: Node) {
         let mut g = self.inner.lock();
         self.changed();
-        g.attrs.m.remove(&n);
-        g.acls.m.remove(&n);
+        g.attrs.m.remove(&key(n));
+        g.acls.m.remove(&key(n));
     }
 
     /// Forgets the link target of `n`.
     pub fn forget_link(&self, n: Node) {
         let mut g = self.inner.lock();
         self.changed();
-        g.links.m.remove(&n);
+        g.links.m.remove(&key(n));
     }
 
     /// Forgets everything about object `ino` in every mount (a change the kernel made: it

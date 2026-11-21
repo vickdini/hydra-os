@@ -640,6 +640,11 @@ pub mod console {
 pub mod fs {
     use alloc::sync::Arc;
 
+    /// wave7 G7-7: the real shared offset of by-path descriptors.
+    #[path = "../../../../../src/fs/cursor.rs"]
+    pub mod cursor;
+    pub use cursor::FileCursor;
+
     /// *stub* The FAT boot volume: files set per thread.
     pub mod bootfs {
         use std::cell::RefCell;
@@ -687,7 +692,7 @@ pub mod fs {
     /// *stub* The descriptor variants the native system calls make.
     #[derive(Clone)]
     pub enum FileDescriptor {
-        File { path: String, cursor: u64, readable: bool, writable: bool, append: bool, shown: Option<u64> },
+        File { path: String, cursor: FileCursor, readable: bool, writable: bool, append: bool, shown: Option<u64> },
         PipeRead(Arc<PipeBuffer>),
         PipeWrite(Arc<PipeBuffer>),
         /// A test descriptor: writes collect here, reads give these bytes; `fail` makes both fail.

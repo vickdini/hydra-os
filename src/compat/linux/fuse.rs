@@ -601,6 +601,7 @@ pub fn ns0_snapshot() -> Vec<Ns0Mount> {
 /// Records a FUSE mount of the initial namespace.
 pub fn ns0_add(m: Ns0Mount) {
     NS0.lock().push(m);
+    super::mount::bump(0); // wave7 G7-7: vfs-server's copy follows
 }
 
 /// Unmounts the initial namespace's FUSE mount whose root is `root`; the daemon's reads
@@ -610,6 +611,7 @@ pub fn ns0_remove(root: u64) -> bool {
     let Some(i) = l.iter().position(|m| m.conn.root() == root) else { return false };
     let m = l.remove(i);
     drop(l);
+    super::mount::bump(0); // wave7 G7-7: vfs-server's copy follows
     m.conn.abort();
     true
 }

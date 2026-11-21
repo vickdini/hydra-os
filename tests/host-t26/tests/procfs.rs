@@ -328,7 +328,7 @@ fn live_cmdline_from_memory() {
 #[test]
 fn fdinfo() {
     let _e = setup();
-    let f = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: 77, readable: true, writable: true, append: false, shown: None });
+    let f = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(77), readable: true, writable: true, append: false, shown: None });
     task::with_current_fds_mut(|t| t.set_cloexec(f as usize, true));
     assert_eq!(pid_text(&format!("self/fdinfo/{}", f)).unwrap(), "pos:\t77\nflags:\t02000002\nmnt_id:\t2069\n");
     // A pidfd of a live process, then of a gone one

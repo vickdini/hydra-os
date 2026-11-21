@@ -887,6 +887,34 @@ pub mod compat {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 8 != 0
             }
         }
+        /// *stub* wave7 G7-7: the mount tables' generations and the file service's view
+        /// (`fake::MNT_TABLES`: `(ns, generation, root mount, mounts)`; the initial namespace
+        /// has generation 0 unless listed).
+        pub mod mount {
+            pub const VFS_HOLE: u32 = 0;
+            pub const VFS_TREE: u32 = 1;
+            pub const VFS_TMPFS: u32 = 2;
+            pub const VFS_KERNEL: u32 = 3;
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+            pub struct VfsMount {
+                pub kind: u32,
+                pub flags: u32,
+                pub parent: u32,
+                pub mountpoint: u64,
+                pub root: u64,
+            }
+            pub fn vfs_gen(ns: u64) -> Option<u64> {
+                let t = crate::fake::MNT_TABLES.lock();
+                match t.iter().find(|e| e.0 == ns) {
+                    Some(e) => Some(e.1),
+                    None if ns == 0 => Some(0),
+                    None => None,
+                }
+            }
+            pub fn vfs_table(ns: u64) -> Result<(u64, u32, alloc::vec::Vec<VfsMount>), i64> {
+                crate::fake::MNT_TABLES.lock().iter().find(|e| e.0 == ns).map(|e| (e.1, e.2, e.3.clone())).ok_or(-3)
+            }
+        }
         pub mod fuse {
             pub fn ns0_any() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 16 != 0

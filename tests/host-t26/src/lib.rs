@@ -76,6 +76,10 @@ pub mod fs {
     pub mod gpt;
 
     pub use crate::fake::fd;
+    /// wave7 G7-7: the real shared offset of by-path descriptors.
+    #[path = "../../../../src/fs/cursor.rs"]
+    pub mod cursor;
+    pub use cursor::FileCursor;
     pub use crate::fake::zfs_client::ZfsClient;
     pub use fd::{FdTable, FileDescriptor, SharedFdTable, MAX_FDS};
     pub use pipe::PipeBuffer;

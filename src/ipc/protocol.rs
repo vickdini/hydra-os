@@ -758,6 +758,12 @@ pub struct LxCall {
     /// `LX_FS_*`: the caller's state the file service cannot see itself.
     pub fs_flags: u32,
     // wave7 G7-2 end
+    // wave7 G7-7 begin: the mounts step. Appended.
+    /// The generation of the caller's mount table (`crate::compat::linux::mount::vfs_gen`):
+    /// the file service walks with its copy of that table ([`LX_FH_MNTTAB`]) once its copy is
+    /// at least this new. 0: the initial namespace without mounts.
+    pub mnt_gen: u64,
+    // wave7 G7-7 end
 }
 
 impl LxCall {
@@ -815,6 +821,7 @@ impl LxCall {
         fh_flags: 0,
         fs_flags: 0,
         // wave7 G7-2 end
+        mnt_gen: 0, // wave7 G7-7
     };
 }
 
@@ -2122,3 +2129,50 @@ pub const LX_OBJ_FLAGS_VFSCTX: u64 = 1 << 59;
 /// coherent with pages written through shared mappings). Returns the count.
 pub const LX_FH_READ: u64 = 52;
 // wave7 G7-5 end
+// wave7 G7-7 begin: the mounts step (vfs-server's copy of the kernel's mount tables)
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_MNTTAB(ns, buf, cap)` writes mount
+/// namespace `ns`'s table to `buf`: an [`LxMntHead`] and then at most `cap` [`LxMntRec`]s (one
+/// per slot, 1-based as the kernel's mount indices). Returns the number of slots;
+/// `-ESRCH` for a namespace the kernel does not know, `-EOPNOTSUPP` for one the file service
+/// cannot walk (the kernel answers its calls).
+pub const LX_FH_MNTTAB: u64 = 53;
+/// The head of an [`LX_FH_MNTTAB`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct LxMntHead {
+    /// The table's generation (as [`LxCall::mnt_gen`]).
+    pub gen: u64,
+    /// The namespace's root mount (1-based; 0 for the initial namespace: the pool's own tree).
+    pub root: u32,
+    /// Slots in the table.
+    pub n: u32,
+}
+/// One mount of an [`LX_FH_MNTTAB`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct LxMntRec {
+    /// `LX_MNT_*`.
+    pub kind: u32,
+    /// Its `MS_*` flags (`MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC`, ...).
+    pub flags: u32,
+    /// The mount it is on (1-based; 0: none).
+    pub parent: u32,
+    /// Reserved (0).
+    pub pad: u32,
+    /// The directory it covers (an object of `parent`).
+    pub mountpoint: u64,
+    /// Its root object.
+    pub root: u64,
+}
+/// [`LxMntRec::kind`]: an empty slot, or a mount the walk does not see (a named one the
+/// kernel serves where it is: proc at `/proc`, ...).
+pub const LX_MNT_HOLE: u32 = 0;
+/// [`LxMntRec::kind`]: a tree of the pool (a bind mount, the namespace's root).
+pub const LX_MNT_TREE: u32 = 1;
+/// [`LxMntRec::kind`]: a tmpfs (a pool tree the kernel made; `statfs` differs).
+pub const LX_MNT_TMPFS: u32 = 2;
+/// [`LxMntRec::kind`]: a mount the kernel serves below its mount point (FUSE, a named mount
+/// the kernel serves by another path): the walk answers "redirect to the kernel" there.
+pub const LX_MNT_KERNEL: u32 = 3;
+// wave7 G7-7 end
+

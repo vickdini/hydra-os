@@ -264,12 +264,16 @@ fn up(be: &dyn Backend, cx: &Ctx, mut cur: Node) -> Result<Node, i64> {
         if cur == cx.root {
             return Ok(cur);
         }
-        if cur.mnt == 0 {
-            return be.lookup(cur, b"..");
-        }
+        // (mount 0 is asked too: after a pivot_root a table may put it under another —
+        // wave7 G7-7)
         match m.mount(cx.ns, cur.mnt) {
+            // The root of a mount with nothing below it (a namespace's root): `..` stays, as
+            // at the top of Linux's tree
+            Some(info) if info.root == cur && info.mountpoint == cur => return Ok(cur),
             Some(info) if info.root == cur => cur = info.mountpoint,
             Some(_) => return be.lookup(cur, b".."),
+            // The own tree of mount 0
+            None if cur.mnt == 0 => return be.lookup(cur, b".."),
             // A mount this namespace does not have (gone, or another namespace's): never
             // climb the tree below it (a bind mount's `..` would leave its root)
             None => return Err(ESTALE),
@@ -330,7 +334,18 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             continue;
         }
         if comp == b".." {
+            // `..` at the caller's root stays there, as `/` does (it does not enter a mount on
+            // top of the root, as the kernel's walk — wave7 G7-7)
+            if cur == root {
+                continue;
+            }
             let parent = up(be, cx, cur)?;
+            // (`sub/..` back at the root is the root itself, as `/..` is: no entering a mount
+            // on top of it — 7-7 review)
+            if parent == root {
+                cur = root;
+                continue;
+            }
             // (the parent may be covered by a mount made after the walk's start went below it)
             cur = match enter(be, cx, parent)? {
                 Ok(n) => n,
@@ -438,10 +453,15 @@ pub fn walk_parent(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8]) -> Res
                     Some(t) if t as usize >= d.len() => r.tail = Some(name_at as u32),
                     Some(_) => {}
                     None => {
-                        if !r.text.is_empty() {
+                        if !r.text.is_empty() && !r.text.ends_with(b"/") {
                             r.text.push(b'/');
                         }
                         r.text.extend_from_slice(name);
+                        // (the argument's trailing `/` goes with the name: the other service
+                        // checks that it is a directory — wave7 G7-7)
+                        if end < path.len() {
+                            r.text.push(b'/');
+                        }
                     }
                 }
                 return Ok(ParentWalked::Redirect(r));

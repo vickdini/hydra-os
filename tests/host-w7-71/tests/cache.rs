@@ -21,11 +21,45 @@ fn names_positive_and_negative() {
     c.put_name(t, n(2), b"nope", None);
     assert_eq!(c.name(n(2), b"usr"), Some(Some(n(5))));
     assert_eq!(c.name(n(2), b"nope"), Some(None));
-    // Same name, other directory / other mount: not known
+    // Same name, other directory: not known
     assert_eq!(c.name(n(3), b"usr"), None);
-    assert_eq!(c.name(Node::new(1, 2), b"usr"), None);
+    // The same directory through another mount (a bind): the same object, in that mount
+    // (wave7 G7-7: the caches keep pool objects by object)
+    assert_eq!(c.name(Node::new(1, 2), b"usr"), Some(Some(Node::new(1, 5))));
     let s = c.stats();
-    assert_eq!((s.name_hits, s.name_misses), (2, 3));
+    assert_eq!((s.name_hits, s.name_misses), (3, 2));
+}
+
+// wave7 G7-7
+#[test]
+fn a_change_through_one_mount_is_seen_through_every_other() {
+    let c = Cache::new(100);
+    let t = c.begin();
+    let (a, b) = (Node::new(0, 2), Node::new(3, 2));
+    c.put_name(t, a, b"x", Some(Node::new(0, 9)));
+    c.put_attr(t, Node::new(0, 9), attr(9, 1));
+    c.put_link(t, Node::new(0, 9), b"tgt");
+    assert_eq!(c.attr(Node::new(3, 9)).map(|a| a.size), Some(1));
+    assert_eq!(c.link(Node::new(3, 9)).as_deref(), Some(&b"tgt"[..]));
+    c.forget_name(b, b"x");
+    assert_eq!(c.name(a, b"x"), None);
+    c.put_name(c.begin(), a, b"y", None);
+    c.forget_dir(b);
+    assert_eq!(c.name(a, b"y"), None);
+    c.forget_attr(Node::new(3, 9));
+    assert!(c.attr(Node::new(0, 9)).is_none());
+    c.forget_link(Node::new(5, 9));
+    assert_eq!(c.link(Node::new(0, 9)), None);
+}
+
+// wave7 G7-7: the size bound is strict (no `cap + 1` left after an eviction)
+#[test]
+fn eviction_leaves_at_most_the_kept_part() {
+    let c = Cache::new(16);
+    for i in 0..200u64 {
+        c.put_attr(c.begin(), n(1000 + i), attr(1000 + i, 0));
+        assert!(c.len().1 <= 16 + 2, "{} entries after {}", c.len().1, i);
+    }
 }
 
 #[test]
