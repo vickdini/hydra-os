@@ -6,10 +6,14 @@
 //                                         each: average and median latency (us)
 //   netbench udp HOST PORT N              N UDP echo round trips (a host echo server)
 //   netbench lo MB                        TCP over 127.0.0.1 (fork: sender and receiver)
-//   netbench lolat N                      N TCP round trips of 1 byte over 127.0.0.1
+//   netbench lolat N                      N TCP round trips of 1 byte over 127.0.0.1 (a
+//                                         connection reset by a net-server restart prints
+//                                         "CONNECTION-RESET" and exits 3: expected)
 //
 // Prints one line "NETBENCH <mode> ..." per run. Build: gcc -O1 -w -pthread.
 #include <arpa/inet.h>
+#include <errno.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -172,7 +176,23 @@ int main(int argc, char **argv) {
         char b = 'x';
         double t0 = now_us();
         for (int i = 0; i < count; i++) {
-            if (write(c, &b, 1) != 1 || read(c, &b, 1) != 1) { printf("NETBENCH lolat FAILED at %d\n", i); return 1; }
+            errno = 0;
+            ssize_t w = write(c, &b, 1);
+            ssize_t r = w == 1 ? read(c, &b, 1) : -1;
+            if (w != 1 || r != 1) {
+                int e = errno;
+                /* A net-server restart resets every TCP connection (net-server holds them;
+                 * docs/linux-services-design.md 2.3: "connections reset, downloads fail
+                 * cleanly"): a reset, a broken pipe or an end of file is that, no failure */
+                if (e == ECONNRESET || e == EPIPE || e == ENOTCONN || e == ECONNABORTED || (w == 1 && r == 0)) {
+                    printf("NETBENCH lolat CONNECTION-RESET at %d (%s): expected when net-server restarts\n", i, r == 0 ? "end of file" : strerror(e));
+                    kill(p, SIGKILL);
+                    waitpid(p, 0, 0);
+                    return 3;
+                }
+                printf("NETBENCH lolat FAILED at %d (write %ld read %ld: %s)\n", i, (long)w, (long)r, strerror(e));
+                return 1;
+            }
         }
         double dt = now_us() - t0;
         close(c);

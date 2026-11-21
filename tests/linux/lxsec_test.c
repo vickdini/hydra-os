@@ -82,6 +82,13 @@ static int check(void) {
 
 static volatile long h_calls, h_errs, h_long, h_stop;
 
+/* The first errors, one line each (which call, its result and errno): tells a call lost in
+ * a restart (EIO) from a key the restart lost (ENOKEY) */
+static void herr(const char *what, long r, int e) {
+    static volatile long n;
+    if (__sync_fetch_and_add(&n, 1) < 8) printf("HAMMER-ERR %s r=%ld errno=%d (%s) at %lu ms\n", what, r, e, strerror(e), (unsigned long)now_ms());
+}
+
 static void *hammer_thread(void *arg) {
     (void)arg;
     char desc[64], buf[16];
@@ -90,11 +97,15 @@ static void *hammer_thread(void *arg) {
         snprintf(desc, sizeof desc, "lxsec-h-%d-%ld", gettid(), i);
         long id = add_key("user", desc, "hammer", 6, THREAD_KEYRING);
         int err = id <= 0;
+        if (err) herr("add_key", id, errno);
         if (!err) {
-            err |= syscall(SYS_keyctl, KEYCTL_READ, id, buf, sizeof buf) != 6;
-            err |= syscall(SYS_keyctl, KEYCTL_UNLINK, id, THREAD_KEYRING) != 0;
+            long r = syscall(SYS_keyctl, KEYCTL_READ, id, buf, sizeof buf);
+            if (r != 6) { err = 1; herr("read", r, errno); }
+            r = syscall(SYS_keyctl, KEYCTL_UNLINK, id, THREAD_KEYRING);
+            if (r != 0) { err = 1; herr("unlink", r, errno); }
         }
-        err |= syscall(SYS_keyctl, KEYCTL_SEARCH, USER_KEYRING, "user", "lxsec-kept", 0) <= 0;
+        long s = syscall(SYS_keyctl, KEYCTL_SEARCH, USER_KEYRING, "user", "lxsec-kept", 0);
+        if (s <= 0) { err = 1; herr("search", s, errno); }
         if (err) __sync_fetch_and_add(&h_errs, 1);
         __sync_fetch_and_add(&h_calls, 4);
         long d = (long)(now_ms() - t0);
