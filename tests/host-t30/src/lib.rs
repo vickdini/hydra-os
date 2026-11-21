@@ -702,6 +702,11 @@ pub mod compat {
             use alloc::collections::BTreeMap;
             use alloc::vec::Vec;
 
+            /// *stub* A thread's process (wave 7, Group 7-3's chroot peers): itself.
+            pub fn tgid_of(tid: u64) -> Option<u64> {
+                Some(tid)
+            }
+
             /// *stub* A process's namespaces (as the forwarding core reads them).
             #[derive(Default, Clone)]
             pub struct Ns {
@@ -785,6 +790,9 @@ pub mod compat {
 
         pub mod vfs {
             const EFAULT: i64 = -14;
+            /// *stub* vfs-server's chroot moves the caller's CLONE_FS peers (wave 7, Group
+            /// 7-3): no peers on the host.
+            pub fn chroot_peers(_pid: u64, _root: u64, _root_mnt: usize) {}
             /// Host memory is user memory; null and bad pages fault.
             pub fn copy_in(ptr: u64, len: usize) -> Result<alloc::vec::Vec<u8>, i64> {
                 if ptr < 0x10000 || !crate::fake::prefault(ptr, len as u64) {
