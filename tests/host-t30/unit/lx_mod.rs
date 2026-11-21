@@ -496,3 +496,43 @@ fn calls_queue_when_every_worker_is_busy() {
     assert!(REPLY_WOKEN.load(Ordering::Relaxed) >= 1);
     s.x.lx(|t| assert!(t.reqs.iter().all(|r| r.state == RState::Free)));
 }
+
+// wave7 G7-1 begin: vfs-server's walk test call
+#[test]
+fn the_vfs_walk_call_routes_to_vfs_server_with_its_context() {
+    let _sim = world();
+    let e = entry(LX_VFS_WALK_NR);
+    assert_eq!(entry_svc(e), LXS_VFS);
+    assert_ne!(e & T_FSCTX, 0);
+    // Its copies: the path in, the answer out
+    assert!(copy::describe(LX_VFS_WALK_NR, &[0; 6]).is_some());
+    // The root and working directory: object numbers, or "in a mount" (u64::MAX)
+    let mut c = LxCall::EMPTY;
+    crate::task::with_current_fds_mut(|f| {
+        f.root_ino = 77;
+        f.cwd_ino = 78;
+    });
+    vfs_ctx(&mut c);
+    assert_eq!((c.root, c.cwd), (77, 78));
+    crate::task::with_current_fds_mut(|f| f.cwd_mnt = 2);
+    vfs_ctx(&mut c);
+    assert_eq!((c.root, c.cwd), (77, u64::MAX));
+    crate::task::with_current_fds_mut(|f| {
+        f.root_mnt = 1;
+        f.cwd_mnt = 0;
+        f.cwd_ino = 0;
+    });
+    vfs_ctx(&mut c);
+    assert_eq!((c.root, c.cwd), (u64::MAX, 0));
+    // lx.vfs=kernel: back to the kernel (which does not know the number: ENOSYS)
+    svc::init(b"lx.vfs=kernel");
+    set_forwarding(true);
+    assert_eq!(entry(LX_VFS_WALK_NR), 0);
+    svc::tests::reset();
+    svc::init(b"");
+    set_forwarding(false);
+    assert_eq!(entry(LX_VFS_WALK_NR), 0);
+    set_forwarding(true);
+    assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
+}
+// wave7 G7-1 end

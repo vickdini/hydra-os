@@ -979,18 +979,30 @@ fn main(args: &[&str]) {
     // requests: only the bytes the kernel encoded (args[0]; all before the event area
     // when it does not say)
     let mut req: Vec<u8> = Vec::with_capacity(EVENT_OFFSET);
-    server.serve(|srv, msg| {
-        let window = srv.window();
+    let mut handle = |srv: &mut Server, msg: &Message| -> Message {
+        // wave7 G7-1 begin: vfs-server's requests are in its own window (attached here
+        // the first time), the kernel's in this server's
+        let vfs = msg.args[1] == FS_CLIENT_VFS;
+        let (window, base, data_end, events_end): (&mut [u8], usize, usize, usize) = if vfs {
+            match vfs_window() {
+                Some(w) => (w, FS_VFS_OFF, FS_VFS_EVENTS, FS_VFS_END),
+                None => return Message::new(FS_REPLY as u64, [EIO as u64, 0, 0, 0]),
+            }
+        } else {
+            (srv.window(), 0, EVENT_OFFSET, EVENT_OFFSET + EVENT_SPACE)
+        };
+        let room = data_end - base;
         let len = match msg.args[0] as usize {
-            0 => EVENT_OFFSET,
-            n => n.min(EVENT_OFFSET),
+            0 => room,
+            n => n.min(room),
         };
         req.clear();
-        req.extend_from_slice(&window[..len.min(window.len())]);
+        req.extend_from_slice(&window[base..base + len]);
         compat::linux::inotify::take();
-        let (status, value, len) = serve(msg.label as u32, &req, &mut window[..EVENT_OFFSET]);
+        let (status, value, len) = serve(msg.label as u32, &req, &mut window[base..data_end]);
         let events = compat::linux::inotify::take();
-        let mut w = Writer::new(&mut window[EVENT_OFFSET..EVENT_OFFSET + EVENT_SPACE]);
+        let mut w = Writer::new(&mut window[data_end..events_end]);
+        // wave7 G7-1 end
         let mut sent = 0u64;
         for e in &events {
             if !w.event(e) {
@@ -999,8 +1011,48 @@ fn main(args: &[&str]) {
             sent += 1;
         }
         Message::new(FS_REPLY as u64, [status as u64, value, len as u64, sent])
-    })
+    };
+    // wave7 G7-1 begin: the answer goes with the next wait (`reply_recv`, one system call):
+    // a caller on the kernel's direct path (vfs-server) gets the CPU back as this server
+    // parks, and its next request finds it parked (Group 20's note for wave 7)
+    let mut answer: Option<(u64, Message)> = None;
+    loop {
+        let got = match answer.take() {
+            Some((id, r)) => hydra_rt::svccall::reply_recv(ENDPOINT_ZFS_SERVER, id, &r, 0),
+            None => sys::svc_recv(ENDPOINT_ZFS_SERVER),
+        };
+        match got {
+            Ok((0, _)) | Err(_) => {}
+            Ok((id, m)) => {
+                let r = if m.label == hydra_rt::protocol::MSG_SUPERVISOR_PING as u64 {
+                    Message::new(hydra_rt::protocol::MSG_SUPERVISOR_PONG as u64, [m.args[0], 1, 0, 0])
+                } else {
+                    handle(&mut server, &m)
+                };
+                answer = Some((id, r));
+            }
+        }
+    }
+    // wave7 G7-1 end
 }
+
+// wave7 G7-1 begin
+/// vfs-server's window (its requests to this server), attached the first time one comes
+/// (the supervisor allows it: `allow_client(ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER)`). The
+/// window outlives vfs-server's restarts, so the mapping stays valid.
+fn vfs_window() -> Option<&'static mut [u8]> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static VFS_WINDOW: AtomicU64 = AtomicU64::new(0);
+    let mut a = VFS_WINDOW.load(Ordering::Acquire);
+    if a == 0 {
+        a = sys::svc_attach(hydra_rt::protocol::ENDPOINT_VFS_SERVER).ok()?;
+        VFS_WINDOW.store(a, Ordering::Release);
+    }
+    // SAFETY: the mapped 256 KiB window, used by this (single-threaded) server only while it
+    // serves one of vfs-server's requests
+    Some(unsafe { core::slice::from_raw_parts_mut(a as *mut u8, FS_VFS_END) })
+}
+// wave7 G7-1 end
 
 /// Attaches the disk driver's window and imports the pool.
 ///

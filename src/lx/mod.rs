@@ -216,6 +216,21 @@ pub const MOVED_STEP4: &[(u64, u32, SvcId)] = &[
 ];
 /// Hydra's private test calls: linux-server's ([`LX_NULL_NR`]) and the test service's.
 pub const MOVED_PRIV: &[(u64, u32, SvcId)] = &[(LX_NULL_NR, 0, LXS_LINUX), (LX_TEST_NR, 0, LXS_TEST), (crate::ipc::protocol::LX_TEST_CTX_NR, T_FSCTX, LXS_TEST)];
+// wave7 G7-1 begin
+/// vfs-server's private numbers: its walk test call (the caller's context; the root and
+/// working directory filled by [`vfs_ctx`] until Group 7-2's fill covers them).
+pub const MOVED_PRIV_VFS: &[(u64, u32, SvcId)] = &[(crate::ipc::protocol::LX_VFS_WALK_NR, T_FSCTX, crate::ipc::protocol::LXS_VFS)];
+
+/// The caller's root and working directory for vfs-server (`LxCall::root`/`cwd`): their
+/// object numbers in the root's own tree (0: the pool root), `u64::MAX` when they lie in a
+/// mount (7-3's tables). Temporary: Group 7-2's fill replaces it.
+fn vfs_ctx(c: &mut LxCall) {
+    crate::task::with_current_fds_mut(|f| {
+        c.root = if f.root_mnt != 0 { u64::MAX } else { f.root_ino };
+        c.cwd = if f.cwd_mnt != 0 { u64::MAX } else { f.cwd_ino };
+    });
+}
+// wave7 G7-1 end
 /// Step 4's descriptors are made by the server (`lx=kernel` or `lx.ipc=kernel` turn it off).
 pub static STEP4: AtomicBool = AtomicBool::new(false);
 
@@ -372,7 +387,8 @@ pub fn set_forwarding(on: bool) {
     for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
-    for &(nr, bits, s) in MOVED_PRIV {
+    for &(nr, bits, s) in MOVED_PRIV.iter().chain(MOVED_PRIV_VFS) {
+        // (wave7 G7-1: + vfs-server's)
         PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
     }
     STEP4.store(on && svc::mode(LXS_IPC) == svc::SvcMode::Forward, Ordering::Release);
@@ -900,6 +916,11 @@ fn call(frame: &SyscallFrame, s: SvcId, byfd: Option<HeldObj>) -> i64 {
         c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
         fill_ctx(&mut c, true);
     }
+    // wave7 G7-1 begin
+    if c.nr == crate::ipc::protocol::LX_VFS_WALK_NR {
+        vfs_ctx(&mut c);
+    }
+    // wave7 G7-1 end
     call_ident(x, c, true)
 }
 
@@ -1589,6 +1610,10 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
                 return None;
             }
         }
+    }
+    // wave7 G7-1: vfs-server's walk test call takes the locked path (its root/cwd fill)
+    if nr == crate::ipc::protocol::LX_VFS_WALK_NR {
+        return None;
     }
     let bits = entry(nr);
     if bits == 0 || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed) || crate::task::scheduler::handoff_active() {
