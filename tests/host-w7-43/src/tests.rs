@@ -354,3 +354,14 @@ fn a_reader_says_how_much_is_left() {
     r.u64();
     assert_eq!(r.remaining(), 0);
 }
+
+// 7-7 review: a pool tree mounted on something the kernel serves is not walked from
+#[test]
+fn a_tree_on_a_kernel_mount_is_the_kernels() {
+    let t = tree();
+    let recs = alloc::vec![rec(LX_MNT_TREE, 0, 0, 0, ROOT), rec(LX_MNT_KERNEL, 0, 1, t.doc, 1 << 62), rec(LX_MNT_TREE, 0, 2, (1 << 62) + 5, t.data)];
+    let v = kmounts::parse(5, &LxMntHead { gen: 1, root: 1, n: 3 }, &recs).unwrap();
+    assert!(v.walkable(Node::new(1, t.etc)));
+    assert!(!v.walkable(Node::new(2, t.etc)));
+    assert!(!v.walkable(Node::new(3, t.data)));
+}

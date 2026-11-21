@@ -74,7 +74,21 @@ impl View {
         if self.ns == 0 {
             return n.mnt == 0;
         }
-        self.rec(n.mnt as u32).is_some_and(|r| r.kind == LX_MNT_TREE || r.kind == LX_MNT_TMPFS)
+        // (and every mount below it a pool tree too: `..` out of a mount on something the
+        // kernel serves would leave the pool — 7-7 review)
+        let mut m = n.mnt as u32;
+        for _ in 0..64 {
+            match self.rec(m) {
+                Some(r) if r.kind == LX_MNT_TREE || r.kind == LX_MNT_TMPFS => {
+                    if r.parent == 0 {
+                        return true;
+                    }
+                    m = r.parent;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// Whether directory `n` is the mount point of any mount (listed or not): it cannot be
@@ -150,7 +164,11 @@ fn pull(ns: u32) -> Result<View, i64> {
     let mut cap = 64usize;
     for _ in 0..4 {
         let mut buf = alloc::vec![0u8; head_len + cap * rec_len];
-        let n = hydra_rt::sys::lx_obj(LX_FH_MNTTAB, ns as u64, buf.as_mut_ptr() as u64, cap as u64)? as usize;
+        // (any error: the kernel answers the call — never the primitive's errno to the caller)
+        let n = hydra_rt::sys::lx_obj(LX_FH_MNTTAB, ns as u64, buf.as_mut_ptr() as u64, cap as u64).map_err(|_| crate::calls::KERNEL)? as usize;
+        if n > u16::MAX as usize {
+            return Err(crate::calls::KERNEL);
+        }
         if n > cap {
             cap = n + 8;
             continue;
