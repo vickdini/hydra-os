@@ -79,12 +79,16 @@ pub struct Interner {
     names: Vec<String>,
     ids: BTreeMap<String, u32>,
     temp: u32,
+    /// The temporary IDs given out since [`Interner::forget_temps`]: one string, one ID, so
+    /// two equal unknown values of one query match each other (as enforcement, where both
+    /// would be interned, sees them)
+    temps: BTreeMap<String, u32>,
 }
 
 impl Interner {
     /// An empty interner (ID 0 is the empty string).
     pub fn new() -> Self {
-        let mut i = Interner { names: Vec::new(), ids: BTreeMap::new(), temp: 0 };
+        let mut i = Interner { names: Vec::new(), ids: BTreeMap::new(), temp: 0, temps: BTreeMap::new() };
         i.intern("");
         i
     }
@@ -101,15 +105,27 @@ impl Interner {
         self.ids.insert(String::from(s), id);
         Some(id)
     }
-    /// The ID of `s` if known, else a temporary ID that equals nothing else.
+    /// The ID of `s` if known, else a temporary ID that equals no interned string (the same
+    /// one for the same string until [`Interner::forget_temps`]).
     pub fn lookup(&mut self, s: &str) -> u32 {
-        match self.ids.get(s) {
-            Some(&id) => id,
-            None => {
-                self.temp = self.temp.wrapping_add(1) & (TEMP_BASE - 1);
-                TEMP_BASE | self.temp
-            }
+        if let Some(&id) = self.ids.get(s) {
+            return id;
         }
+        if let Some(&id) = self.temps.get(s) {
+            return id;
+        }
+        // (bounded: a query has at most a few hundred values; never more than this kept)
+        if self.temps.len() >= 4096 {
+            self.temps.clear();
+        }
+        self.temp = self.temp.wrapping_add(1) & (TEMP_BASE - 1);
+        let id = TEMP_BASE | self.temp;
+        self.temps.insert(String::from(s), id);
+        id
+    }
+    /// Forgets the temporary IDs (a new query starts).
+    pub fn forget_temps(&mut self) {
+        self.temps.clear();
     }
     /// The text of ID `id`.
     pub fn name(&self, id: u32) -> &str {
