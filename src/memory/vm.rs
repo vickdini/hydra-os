@@ -1097,6 +1097,23 @@ impl Mm {
         Ok(())
     }
 
+    // wave7 G7-4 begin
+    /// The mappings as [`maps_text`](Self::maps_text) lists them, for `LX_INFO_MAPS`
+    /// (`crate::lx::info`): start, end, offset in bytes, protection, shared, name.
+    pub fn maps_entries(&self) -> alloc::vec::Vec<(u64, u64, u64, u32, bool, Option<Arc<str>>)> {
+        self.vmas
+            .values()
+            .map(|v| {
+                let off = match &v.backing {
+                    Backing::Object { pgoff, .. } => pgoff * PAGE_SIZE,
+                    Backing::Anon => 0,
+                };
+                (v.start, v.end, off, v.prot, v.shared, v.name.clone())
+            })
+            .collect()
+    }
+    // wave7 G7-4 end
+
     /// The mappings as `/proc/<pid>/maps` lists them.
     pub fn maps_text(&self) -> alloc::string::String {
         use core::fmt::Write;

@@ -204,6 +204,7 @@ pub fn closed(slot: u32, kind: u32) {
         LX_OBJ_KIND_PIDFD => crate::pidfd::closed(slot),
         LX_OBJ_KIND_SIGNALFD => crate::signalfd::closed(slot),
         LX_OBJ_KIND_TIMERFD => crate::timerfd::closed(slot),
+        LX_OBJ_KIND_PSEUDO => crate::pseudo::closed(slot), // wave7 G7-4
         LX_OBJ_KIND_INET => {
             crate::socket::closed(slot);
             crate::inet::closed(slot);

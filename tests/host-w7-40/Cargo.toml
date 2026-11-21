@@ -1,0 +1,15 @@
+[package]
+name = "hydra_hosttests_w7_40"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7-4's host unit tests: the kernel's info primitives (src/lx/info.rs) and linux-server's pseudo file systems (userland/drivers/linux-server/src/pseudo: path, text)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]

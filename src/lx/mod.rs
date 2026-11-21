@@ -57,6 +57,8 @@ pub mod copy;
 pub mod dcall; // wave6 G20
 // wave7 G7-2: path calls and the kernel's file handles (the file service)
 pub mod fileh;
+// wave7 G7-4: the info primitives for the pseudo file systems in linux-server
+pub mod info;
 
 pub mod obj;
 
@@ -734,6 +736,20 @@ pub fn call_obj_deliver(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>
 
 /// [`call_obj_kbuf`] with call number `nr`.
 fn call_obj_kbuf_nr(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8]) -> i64 {
+    call_obj_kbuf_x(dev, nr, write, data, out, [0; 3])
+}
+
+// wave7 G7-4 begin
+/// The kernel's `lseek` ([`LX_KCALL_PSEEK`](crate::ipc::protocol::LX_KCALL_PSEEK): `a` =
+/// offset, `b` = whence) or `pread64` ([`LX_KCALL_PREAD`](crate::ipc::protocol::LX_KCALL_PREAD):
+/// into `out`, `a` = offset) on linux-server's pseudo-file object `dev`.
+pub fn call_obj_pseudo(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, a: u64, b: u64, out: &mut [u8]) -> i64 {
+    call_obj_kbuf_x(dev, nr, false, &[], out, [a, b, 0])
+}
+// wave7 G7-4 end
+
+/// [`call_obj_kbuf_nr`] with arguments 3..6 (wave7 G7-4).
+fn call_obj_kbuf_x(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8], extra: [u64; 3]) -> i64 {
     use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};
     let Some(o) = dev.as_server() else { return EBADF };
     let Some(slot) = o.slot() else { return obj::stale_errno(o) };
@@ -741,7 +757,7 @@ fn call_obj_kbuf_nr(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr
     let n = if write { data.len() } else { out.len() }.min(LX_DATA_SIZE);
     let mut c = LxCall::EMPTY;
     c.nr = nr;
-    c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, 0, 0, 0];
+    c.args = [u64::MAX, LX_KBUF_ADDR, n as u64, extra[0], extra[1], extra[2]];
     c.obj = slot;
     c.obj_flags = o.flags() | LX_OBJ_FLAGS_KBUF | 0o4000;
     c.svc = x.id as u32;
@@ -1029,8 +1045,10 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
             if s == 0 {
                 return fileh::LX_TO_KERNEL;
             }
+            // wave7 G7-4: a redirect to a service the kernel answers (`lx.proc=kernel`, `lx=kernel`):
+            // nothing happened in the redirecting service, so the kernel's own code answers
             if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
-                return ENOSYS;
+                return fileh::LX_TO_KERNEL;
             }
             let Some(nx) = svc::host(svc::host_of(s)).filter(|h| host_usable(h)) else { return ENOSYS };
             if nx.id != x.id {

@@ -232,7 +232,7 @@ pub fn is_proc_dir(path: &str) -> bool {
 /// argument area; or, when the program overwrote the area's final NUL (setproctitle), the
 /// text up to the first NUL, which may run on into the environment. `None` when the process
 /// has no address space or its exec did not record the area.
-fn live_cmdline(pid: u64) -> Option<alloc::vec::Vec<u8>> {
+pub(crate) fn live_cmdline(pid: u64) -> Option<alloc::vec::Vec<u8>> {
     let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
     let (start, end, env_end) = mm.lock().args;
     if start == 0 || end <= start {
