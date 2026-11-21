@@ -50,6 +50,13 @@ const MSG_NOSIGNAL: u64 = 0x4000;
 const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
 const CAP_NET_RAW: u64 = 1 << 13;
 
+/// `inet.rs` keeps one global socket list (`SOCKETS`) while the scripted net-server is per
+/// thread: tests running in parallel would see each other's sockets, so they run one at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn call(num: u64, a: [u64; 6]) -> i64 {
     dispatch(num, a).expect("an AF_INET call")
 }
@@ -184,6 +191,7 @@ fn connected(nonblock: bool) -> (u64, u32) {
 
 #[test]
 fn socket_types_and_protocols() {
+    let _serial = serial();
     fake::reset();
     assert_eq!(dispatch(41, [1, STREAM, 0, 0, 0, 0]), None, "AF_UNIX is not ours");
     assert_eq!(dispatch(42, [3, 0, 0, 0, 0, 0]), None, "not an inet descriptor");
@@ -216,6 +224,7 @@ fn socket_types_and_protocols() {
 
 #[test]
 fn closing_releases_the_server_handles() {
+    let _serial = serial();
     fake::reset();
     fake::CAPS.set(Some(CAP_NET_RAW));
     let raw = socket(AF_INET, RAW, 1);
@@ -241,6 +250,7 @@ fn closing_releases_the_server_handles() {
 
 #[test]
 fn ipv4_address_parsing() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     assert_eq!(call(42, [u, 0, 1, 0, 0, 0]), EINVAL, "too short");
@@ -266,6 +276,7 @@ fn ipv4_address_parsing() {
 
 #[test]
 fn ipv6_address_parsing_and_formatting() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     let u = socket(AF_INET6, DGRAM, 0);
@@ -318,6 +329,7 @@ fn ipv6_address_parsing_and_formatting() {
 
 #[test]
 fn blocking_connect_waits_for_the_handshake() {
+    let _serial = serial();
     fake::reset();
     let fd = socket(AF_INET, STREAM, 0);
     fake::on_wait(|_| {
@@ -334,6 +346,7 @@ fn blocking_connect_waits_for_the_handshake() {
 
 #[test]
 fn refused_and_interrupted_connects() {
+    let _serial = serial();
     fake::reset();
     let fd = socket(AF_INET, STREAM, 0);
     fake::on_wait(|_| {
@@ -377,6 +390,7 @@ fn bytes(v: &[i64]) -> Vec<u8> {
 
 #[test]
 fn non_blocking_connect() {
+    let _serial = serial();
     fake::reset();
     let fd = socket(AF_INET, STREAM | NONBLOCK, 0);
     assert_eq!(connect(fd, &sin([10, 0, 2, 2], 80)), EINPROGRESS);
@@ -400,6 +414,7 @@ fn non_blocking_connect() {
 
 #[test]
 fn connect_rules() {
+    let _serial = serial();
     fake::reset();
     // AF_UNSPEC on a stream socket
     let fd = socket(AF_INET, STREAM, 0);
@@ -424,6 +439,7 @@ fn connect_rules() {
 
 #[test]
 fn waits_poll_without_a_queue() {
+    let _serial = serial();
     fake::reset();
     let fd = socket(AF_INET, STREAM, 0);
     net::with(|n| n.running = false);
@@ -444,6 +460,7 @@ fn waits_poll_without_a_queue() {
 
 #[test]
 fn tcp_send_and_receive() {
+    let _serial = serial();
     fake::reset();
     let (fd, id) = connected(false);
     let s = obj(fd);
@@ -474,6 +491,7 @@ fn tcp_send_and_receive() {
 
 #[test]
 fn tcp_blocking_receive() {
+    let _serial = serial();
     fake::reset();
     let (fd, id) = connected(false);
     let s = obj(fd);
@@ -501,6 +519,7 @@ fn tcp_blocking_receive() {
 
 #[test]
 fn tcp_send_in_pieces_and_errors() {
+    let _serial = serial();
     fake::reset();
     let (fd, id) = connected(false);
     let s = obj(fd);
@@ -544,6 +563,7 @@ fn tcp_send_in_pieces_and_errors() {
 
 #[test]
 fn shutdown() {
+    let _serial = serial();
     fake::reset();
     let (fd, id) = connected(false);
     assert_eq!(call(48, [fd, 1, 0, 0, 0, 0]), 0);
@@ -567,6 +587,7 @@ fn shutdown() {
 
 #[test]
 fn tcp_bind() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     let fd = socket(AF_INET, STREAM, 0);
@@ -593,6 +614,7 @@ fn tcp_bind() {
 
 #[test]
 fn ipv6_bind_families() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     let fd = socket(AF_INET6, STREAM, 0);
@@ -620,6 +642,7 @@ fn ipv6_bind_families() {
 
 #[test]
 fn udp_bind() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -649,6 +672,7 @@ fn udp_bind() {
 
 #[test]
 fn listen_and_backlogs() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     assert_eq!(call(50, [u, 5, 0, 0, 0, 0]), EOPNOTSUPP);
@@ -681,6 +705,7 @@ fn listen_and_backlogs() {
 
 #[test]
 fn accept_connections() {
+    let _serial = serial();
     fake::reset();
     let l = socket(AF_INET, STREAM | NONBLOCK, 0);
     assert_eq!(call(43, [l, 0, 0, 0, 0, 0]), EINVAL, "not listening");
@@ -729,6 +754,7 @@ fn accept_connections() {
 
 #[test]
 fn accept_on_ipv6_reports_mapped_peers() {
+    let _serial = serial();
     fake::reset();
     let l = socket(AF_INET6, STREAM, 0);
     assert_eq!(call(50, [l, 8, 0, 0, 0, 0]), 0);
@@ -745,6 +771,7 @@ fn accept_on_ipv6_reports_mapped_peers() {
 
 #[test]
 fn udp_datagrams() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -793,6 +820,7 @@ fn udp_datagrams() {
 
 #[test]
 fn udp_names_and_queues() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     let u = socket(AF_INET, DGRAM, 0);
@@ -817,6 +845,7 @@ fn udp_names_and_queues() {
 
 #[test]
 fn ping_sockets() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     let p = socket(AF_INET, DGRAM, 1);
@@ -855,6 +884,7 @@ fn ping_sockets() {
 
 #[test]
 fn raw_sockets_and_icmp_filters() {
+    let _serial = serial();
     fake::reset();
     fake::CAPS.set(Some(CAP_NET_RAW));
     let r = socket(AF_INET, RAW, 1);
@@ -905,6 +935,7 @@ fn raw_sockets_and_icmp_filters() {
 
 #[test]
 fn socket_option_calls() {
+    let _serial = serial();
     fake::reset();
     let fd = socket(AF_INET, STREAM, 0);
     assert_eq!(call(54, [fd, 1, 2, 0, -1i64 as u64, 0]), EINVAL, "negative length");
@@ -977,6 +1008,7 @@ struct MMsgHdr {
 
 #[test]
 fn sendmsg_gathers_iovecs() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -1003,6 +1035,7 @@ fn sendmsg_gathers_iovecs() {
 
 #[test]
 fn recvmsg_scatters_and_reports() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -1040,6 +1073,7 @@ fn recvmsg_scatters_and_reports() {
 
 #[test]
 fn recvmsg_control_messages() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -1095,6 +1129,7 @@ fn recvmsg_control_messages() {
 
 #[test]
 fn sendmmsg_and_recvmmsg() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -1129,6 +1164,7 @@ fn sendmmsg_and_recvmmsg() {
 
 #[test]
 fn proc_net_tables() {
+    let _serial = serial();
     fake::reset();
     net::eth_up();
     assert_eq!(inet::proc_net("raw"), None);
@@ -1177,6 +1213,7 @@ fn proc_net_tables() {
 
 #[test]
 fn proc_net_tcp_states() {
+    let _serial = serial();
     fake::reset();
     let (_c, id) = connected(false);
     for (st, num) in [
@@ -1200,6 +1237,7 @@ fn proc_net_tcp_states() {
 
 #[test]
 fn mmsg_all_succeed_and_unopenable_endpoints() {
+    let _serial = serial();
     fake::reset();
     let u = socket(AF_INET, DGRAM, 0);
     let id = last_udp();
@@ -1230,6 +1268,7 @@ fn mmsg_all_succeed_and_unopenable_endpoints() {
 
 #[test]
 fn proc_net_dev() {
+    let _serial = serial();
     fake::reset();
     net::with(|n| n.counters = [((100, 2), (100, 2)), ((5000, 40), (600, 7))]);
     let dev = inet::proc_net("dev").unwrap();
