@@ -142,6 +142,45 @@ fn size_is_bounded_and_recent_entries_stay() {
 }
 
 #[test]
+fn misses_do_not_age_entries_and_huge_caps_do_not_overflow() {
+    let c = Cache::new(64);
+    let t = c.begin();
+    for i in 0..64u64 {
+        c.put_attr(t, n(i), attr(i, 0));
+    }
+    // Many misses, then one more fill: nothing is dropped for the misses
+    for i in 1000..100_000u64 {
+        assert!(c.attr(n(i)).is_none());
+    }
+    for i in 0..8u64 {
+        let t = c.begin();
+        c.put_attr(t, n(500 + i), attr(500 + i, 0));
+    }
+    assert_eq!(c.len().1, 72, "all kept: within cap + cap/8");
+    let big = Cache::new(usize::MAX);
+    let t = big.begin();
+    big.put_attr(t, n(1), attr(1, 0));
+    big.put_name(t, n(1), b"x", None);
+    assert!(big.attr(n(1)).is_some());
+}
+
+#[test]
+fn directory_generations_are_bounded() {
+    let c = Cache::new(16);
+    let t = c.begin();
+    c.put_name(t, n(1), b"keep", Some(n(2)));
+    for d in 100..116u64 {
+        c.forget_dir(n(d));
+    }
+    // The 17th directory generation: every name goes, the table starts over
+    c.forget_dir(n(200));
+    assert_eq!(c.name(n(1), b"keep"), None);
+    let t = c.begin();
+    c.put_name(t, n(100), b"a", Some(n(3)));
+    assert_eq!(c.name(n(100), b"a"), Some(Some(n(3))));
+}
+
+#[test]
 fn colliding_names_do_not_answer_for_each_other() {
     // Find two names with one hash is impractical; instead check the stored name is compared
     let c = Cache::new(100);

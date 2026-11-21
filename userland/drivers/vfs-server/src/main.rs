@@ -283,6 +283,9 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         let base = ctx_node(w.base)?;
         let mut who = Ctx::new(w.uid, w.gid, w.caps, root);
         who.ns = w.mnt_ns as u32;
+        for &g in &w.groups[..(w.ngroups as usize).min(LX_GROUPS)] {
+            who = who.with_group(g);
+        }
         let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0 };
         let mut o = LxVfsWalkOut::default();
         match walk::walk(&be, &who, Start::At(base), path, if w.flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })? {

@@ -124,8 +124,10 @@ pub trait Backend {
     fn getattr(&self, n: Node) -> Result<Attr, i64>;
     /// The target of symbolic link `n`.
     fn readlink(&self, n: Node) -> Result<Vec<u8>, i64>;
-    /// The access ACL of `n` (`system.posix_acl_access`), if it has one.
-    fn acl(&self, n: Node) -> Option<Vec<u8>>;
+    /// The access ACL of `n` (`system.posix_acl_access`), if it has one (an error when it
+    /// cannot be read: the walk fails rather than decide by the mode bits, which an ACL may
+    /// restrict).
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64>;
     /// The mount tables.
     fn mounts(&self) -> &dyn Mounts;
 }
@@ -241,7 +243,7 @@ fn search(be: &dyn Backend, cx: &Ctx, dir: Node) -> Result<Attr, i64> {
     if cx.has_cap(CAP_DAC_READ_SEARCH) || cx.has_cap(CAP_DAC_OVERRIDE) {
         return Ok(a);
     }
-    let acl = if perm::needs_acl(cx, &a, MAY_EXEC) { be.acl(dir) } else { None };
+    let acl = if perm::needs_acl(cx, &a, MAY_EXEC) { be.acl(dir)? } else { None };
     if perm::may(cx, &a, acl.as_deref(), MAY_EXEC) {
         Ok(a)
     } else {

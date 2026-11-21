@@ -61,21 +61,21 @@ impl<K: Ord, V> Map<K, V> {
     }
 
     fn get(&mut self, k: &K) -> Option<&V> {
-        self.clock += 1;
-        let c = self.clock;
-        self.m.get_mut(k).map(|e| {
-            e.1 = c;
-            &e.0
-        })
+        // (only hits move the clock: a burst of misses ages nothing)
+        let c = self.clock + 1;
+        let e = self.m.get_mut(k)?;
+        self.clock = c;
+        e.1 = c;
+        Some(&e.0)
     }
 
     fn put(&mut self, k: K, v: V, cap: usize) {
         self.clock += 1;
         self.m.insert(k, (v, self.clock));
-        if self.m.len() > cap + cap / 8 {
+        if self.m.len() > cap.saturating_add(cap / 8) {
             let keep = (cap - cap / 8) as u64;
             let now = self.clock;
-            self.m.retain(|_, e| e.1 + keep >= now);
+            self.m.retain(|_, e| now.saturating_sub(e.1) <= keep);
         }
     }
 }
@@ -210,8 +210,7 @@ impl Cache {
     pub fn name(&self, dir: Node, name: &[u8]) -> Option<Option<Node>> {
         let mut g = self.inner.lock();
         let dg = g.dirgen.get(&dir).copied().unwrap_or(0);
-        g.name_clock += 1;
-        let c = g.name_clock;
+        let c = g.name_clock + 1;
         let r = match g.names.get_mut(&(dir, name_hash(name))) {
             Some(e) if e.name == name && e.dirgen == dg => {
                 e.used = c;
@@ -219,6 +218,9 @@ impl Cache {
             }
             _ => None,
         };
+        if r.is_some() {
+            g.name_clock = c;
+        }
         drop(g);
         self.count(if r.is_some() { NAME_HIT } else { NAME_MISS });
         r
@@ -235,9 +237,9 @@ impl Cache {
         g.name_clock += 1;
         let used = g.name_clock;
         g.names.insert((dir, name_hash(name)), NameEnt { name: name.to_vec(), target, dirgen, used });
-        if g.names.len() > cap + cap / 8 {
+        if g.names.len() > cap.saturating_add(cap / 8) {
             let keep = (cap - cap / 8) as u64;
-            g.names.retain(|_, e| e.used + keep >= used);
+            g.names.retain(|_, e| used.saturating_sub(e.used) <= keep);
         }
     }
 
@@ -300,8 +302,20 @@ impl Cache {
 
     /// Forgets every name in `dir`.
     pub fn forget_dir(&self, dir: Node) {
+        let cap = self.cap();
         let mut g = self.inner.lock();
         self.changed();
+        Self::bump_dir(&mut g, dir, cap);
+    }
+
+    /// Moves `dir`'s generation on (its names become stale). The generations are kept only
+    /// while there are fewer than `cap` of them: beyond that every name goes at once.
+    fn bump_dir(g: &mut Inner, dir: Node, cap: usize) {
+        if g.dirgen.len() >= cap && !g.dirgen.contains_key(&dir) {
+            g.names.clear();
+            g.dirgen.clear();
+            return;
+        }
         *g.dirgen.entry(dir).or_insert(0) += 1;
     }
 
@@ -324,6 +338,7 @@ impl Cache {
     /// names objects by number only): attributes, ACL, link target, and the names in it.
     pub fn forget_object(&self, ino: u64) {
         let mut g = self.inner.lock();
+        let g = &mut *g;
         self.changed();
         let nodes: Vec<Node> = g.attrs.m.keys().chain(g.links.m.keys()).filter(|n| n.ino == ino).copied().collect();
         for n in nodes {
@@ -333,9 +348,10 @@ impl Cache {
         }
         g.acls.m.retain(|n, _| n.ino != ino);
         // Names in it (in whichever mount): their directory generation moves on
-        let dirs: Vec<Node> = g.names.keys().filter(|k| k.0.ino == ino).map(|k| k.0).collect();
+        let dirs: alloc::collections::BTreeSet<Node> = g.names.keys().filter(|k| k.0.ino == ino).map(|k| k.0).collect();
+        let cap = self.cap();
         for d in dirs {
-            *g.dirgen.entry(d).or_insert(0) += 1;
+            Self::bump_dir(g, d, cap);
         }
     }
 

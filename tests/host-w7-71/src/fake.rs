@@ -56,6 +56,8 @@ pub struct Fake {
     /// Requests answered (lookup, getattr, readlink, acl).
     pub requests: Cell<u64>,
     pub mounts: FakeMounts,
+    /// Reading an ACL fails (EIO).
+    pub acl_fails: Cell<bool>,
 }
 
 fn attr(ino: u64, mode: u32, uid: u32, gid: u32) -> Attr {
@@ -65,7 +67,7 @@ fn attr(ino: u64, mode: u32, uid: u32, gid: u32) -> Attr {
 impl Fake {
     /// A file system with just the root (mode 0755, root's).
     pub fn new() -> Self {
-        let f = Fake { objs: RefCell::new(BTreeMap::new()), next: Cell::new(ROOT + 1), requests: Cell::new(0), mounts: FakeMounts::default() };
+        let f = Fake { objs: RefCell::new(BTreeMap::new()), next: Cell::new(ROOT + 1), requests: Cell::new(0), mounts: FakeMounts::default(), acl_fails: Cell::new(false) };
         f.objs.borrow_mut().insert(ROOT, Obj { attr: attr(ROOT, S_IFDIR | 0o755, 0, 0), kind: Kind::Dir(BTreeMap::new(), ROOT), acl: None });
         f
     }
@@ -159,9 +161,12 @@ impl Backend for Fake {
             _ => Err(EINVAL),
         }
     }
-    fn acl(&self, n: Node) -> Option<Vec<u8>> {
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
         self.count();
-        self.objs.borrow().get(&n.ino).and_then(|o| o.acl.clone())
+        if self.acl_fails.get() {
+            return Err(-5);
+        }
+        Ok(self.objs.borrow().get(&n.ino).and_then(|o| o.acl.clone()))
     }
     fn mounts(&self) -> &dyn Mounts {
         &self.mounts
@@ -214,15 +219,15 @@ impl Backend for Cached<'_> {
         self.cache.put_link(t, n, &l);
         Ok(l)
     }
-    fn acl(&self, n: Node) -> Option<Vec<u8>> {
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
         if let Some(a) = self.cache.acl(n) {
-            return a;
+            return Ok(a);
         }
         let t = self.cache.begin();
-        let a = self.fs.acl(n);
+        let a = self.fs.acl(n)?;
         self.cache.put_acl(t, n, a.as_deref());
         let _ = ENODATA;
-        a
+        Ok(a)
     }
     fn mounts(&self) -> &dyn Mounts {
         self.fs.mounts()

@@ -78,6 +78,6 @@ impl Ctx {
     /// Whether the caller holds capability `cap` (a bit number), or is root (the kernel's
     /// rule: euid 0 passes the discretionary checks).
     pub fn has_cap(&self, cap: u32) -> bool {
-        self.uid == 0 || self.caps & (1 << cap) != 0
+        self.uid == 0 || (cap < 64 && self.caps & (1 << cap) != 0)
     }
 }

@@ -225,6 +225,12 @@ fn search_permission_by_acl() {
     t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x04, 0, 0), (0x08, 1, 77), (0x10, 7, 0), (0x20, 0, 0)]));
     assert_eq!(w(&t, &user_cx(9, 9).with_group(77), "/tmp/acl/f"), Ok(f));
     assert_eq!(w(&t, &user_cx(9, 9), "/tmp/acl/f"), Err(EACCES));
+    // An ACL that cannot be read fails the walk (the mode bits could allow more)
+    t.fs.acl_fails.set(true);
+    assert_eq!(w(&t, &user_cx(9, 9).with_group(77), "/tmp/acl/f"), Err(-5));
+    // ... unless the caller passes anyway (root), or the directory has no extended attributes
+    assert_eq!(w(&t, &root_cx(), "/tmp/acl/f"), Ok(f));
+    assert_eq!(w(&t, &user_cx(9, 9), "/usr/bin/bash"), Ok(t.bash));
 }
 
 #[test]
