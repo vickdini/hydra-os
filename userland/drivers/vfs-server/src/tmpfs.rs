@@ -29,7 +29,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::mount::{seal, unseal, Dec, Enc};
+use crate::mtab::{seal, unseal, Dec, Enc};
 
 pub const EPERM: i64 = -1;
 pub const ENOENT: i64 = -2;

@@ -1,7 +1,7 @@
 //! Mount tables: namespaces, mount/bind/move/umount, pivot_root, the walk's questions,
 //! listings, the new mount API's rules, kept state.
 
-use crate::mount::*;
+use crate::mtab::*;
 
 const LINUX: SvcId = 1;
 const PROC: SvcId = 5;

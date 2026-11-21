@@ -1,6 +1,6 @@
 //! tmpfs: the tree, data through a fake store, limits, kept state.
 
-use crate::mount::{seal, unseal};
+use crate::mtab::{seal, unseal};
 use crate::tmpfs::*;
 use std::collections::BTreeMap;
 
@@ -782,11 +782,11 @@ fn set_numbers_and_duplicates() {
     let body = unseal(0x544d_5053, 1, &kept).unwrap().to_vec();
     let mut twice = body.clone();
     let one = {
-        let mut d = crate::mount::Dec::new(&body[8..]);
+        let mut d = crate::mtab::Dec::new(&body[8..]);
         d.bytes().unwrap()
     };
     twice[4..8].copy_from_slice(&2u32.to_le_bytes());
-    let mut e = crate::mount::Enc::default();
+    let mut e = crate::mtab::Enc::default();
     e.bytes(&one);
     twice.extend_from_slice(&e.buf);
     assert_eq!(TmpfsSet::decode(&seal(0x544d_5053, 1, &twice)), Err(EINVAL));
