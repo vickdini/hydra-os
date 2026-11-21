@@ -245,6 +245,10 @@ fn dcall_host(target: SvcId) -> Result<&'static svc::Host, i64> {
         wait_for(x)?;
         return Ok(x);
     }
+    // (it may have come back between the two looks)
+    if x.is_online() {
+        return Ok(x);
+    }
     Err(if super::restart::down(x.id) { EIO } else { ENOSYS })
 }
 

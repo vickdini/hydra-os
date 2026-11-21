@@ -840,6 +840,10 @@ pub fn unregister(endpoint: u32) {
 ///
 /// `false` if another server is registered now (nothing was done).
 pub fn unregister_if(endpoint: u32, expected: u64) -> bool {
+    // (none registered: nothing to clear, and a server registering now must not be torn down)
+    if expected == 0 {
+        return false;
+    }
     let Some(svc) = service(endpoint) else { return true };
     if svc.server.compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return false;

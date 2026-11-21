@@ -542,11 +542,14 @@ impl Supervisor {
             // Every thread of it ends (not only the first one: its other threads would keep
             // serving, keep their interrupt lines, or register the endpoint again), and every
             // interrupt line one of them claimed is let go
-            let mut threads: Vec<u64> = alloc::vec![old.0];
+            // (room made before the scheduler's lock: no allocation under it; a service has
+            // far fewer threads than this, more are only not looked at for their lines)
+            let mut threads: Vec<u64> = Vec::with_capacity(256);
+            threads.push(old.0);
             x86_64::instructions::interrupts::without_interrupts(|| {
                 let mut sched = crate::task::SCHEDULER.lock();
                 sched.for_each_task_mut(|t| {
-                    if t.tgid == tgid && t.id != old {
+                    if t.tgid == tgid && t.id != old && threads.len() < threads.capacity() {
                         threads.push(t.id.0);
                     }
                 });
