@@ -131,7 +131,7 @@ impl TmpfsOpts {
                     } else {
                         // Rounded up to whole pages, as on Linux
                         let b = parse_size(v)?;
-                        b.div_ceil(PAGE) * PAGE
+                        b.checked_add(PAGE - 1).ok_or(EINVAL)? / PAGE * PAGE
                     }
                 }
                 "nr_blocks" => o.size = parse_size(v)?.checked_mul(PAGE).ok_or(EINVAL)?,
@@ -367,9 +367,12 @@ impl Tmpfs {
 
     /// The entry `name` of directory `dir` (`.` and `..` included).
     pub fn lookup(&self, dir: u64, name: &[u8]) -> Result<u64, i64> {
-        let Kind::Dir { entries, parent, .. } = &self.node(dir)?.kind else { return Err(ENOTDIR) };
+        let d = self.node(dir)?;
+        let Kind::Dir { entries, parent, .. } = &d.kind else { return Err(ENOTDIR) };
         match name {
             b"." => Ok(dir),
+            // (a removed directory's parent may be gone too)
+            b".." if d.nlink == 0 && !self.nodes.contains_key(parent) => Err(ENOENT),
             b".." => Ok(*parent),
             _ => {
                 if name.len() > NAME_MAX {
@@ -463,7 +466,7 @@ impl Tmpfs {
     pub fn mknod(&mut self, dir: u64, name: &[u8], mode: u32, rdev: u64, uid: u32, gid: u32, now: Ts) -> Result<u64, i64> {
         let (kind, mode) = match mode & S_IFMT {
             0 | S_IFREG => (Kind::File { data: 0 }, S_IFREG | (mode & 0o7777)),
-            S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK => (Kind::Special, mode),
+            S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK => (Kind::Special, mode & (S_IFMT | 0o7777)),
             S_IFDIR => return Err(EPERM),
             _ => return Err(EINVAL),
         };
@@ -521,7 +524,11 @@ impl Tmpfs {
             return Err(EEXIST);
         }
         check_name(name)?;
-        let Kind::Dir { entries, .. } = &self.node(dir)?.kind else { return Err(ENOTDIR) };
+        let d = self.node(dir)?;
+        let Kind::Dir { entries, .. } = &d.kind else { return Err(ENOTDIR) };
+        if d.nlink == 0 {
+            return Err(ENOENT); // a removed directory
+        }
         if entries.contains_key(name) {
             return Err(EEXIST);
         }
@@ -588,9 +595,10 @@ impl Tmpfs {
         Ok(())
     }
 
-    /// Whether directory `a` is `b` or below it.
+    /// Whether directory `a` is `b` or below it (`true` too if the parents do not end:
+    /// the caller refuses then).
     fn is_within(&self, mut a: u64, b: u64) -> bool {
-        for _ in 0..4096 {
+        for _ in 0..=self.nodes.len() {
             if a == b {
                 return true;
             }
@@ -599,7 +607,7 @@ impl Tmpfs {
                 _ => return false,
             }
         }
-        false
+        true
     }
 
     fn is_dir(&self, ino: u64) -> bool {
@@ -625,6 +633,8 @@ impl Tmpfs {
         if [oname, nname].iter().any(|n| *n == b"." || *n == b"..") {
             return Err(EBUSY);
         }
+        self.node(odir)?;
+        self.node(ndir)?;
         if !self.is_dir(ndir) || !self.is_dir(odir) {
             return Err(ENOTDIR);
         }
@@ -643,6 +653,13 @@ impl Tmpfs {
             let dst_dir = self.is_dir(dst);
             if (src_dir && self.is_within(ndir, src)) || (dst_dir && self.is_within(odir, dst)) {
                 return Err(EINVAL);
+            }
+            // A directory for a non-directory: the receiving parent gains a link
+            if odir != ndir && src_dir != dst_dir {
+                let gains = if src_dir { ndir } else { odir };
+                if self.node(gains)?.nlink >= LINK_MAX {
+                    return Err(EMLINK);
+                }
             }
             self.replace_entry(odir, oname, dst, now)?;
             self.replace_entry(ndir, nname, src, now)?;
@@ -698,6 +715,9 @@ impl Tmpfs {
         } else {
             if src_dir && self.is_within(ndir, src) {
                 return Err(EINVAL);
+            }
+            if src_dir && odir != ndir && self.node(ndir)?.nlink >= LINK_MAX {
+                return Err(EMLINK);
             }
             self.add_entry(ndir, nname, src, now);
         }
@@ -1088,6 +1108,9 @@ impl Tmpfs {
             return Err(EINVAL);
         }
         let mut used = 0;
+        // Every live directory but the root is listed by its parent (checked in one pass)
+        let mut live_dirs = Vec::new();
+        let mut listed_dirs = alloc::collections::BTreeSet::new();
         for (ino, n) in &self.nodes {
             if *ino >= self.next_ino {
                 return Err(EINVAL);
@@ -1097,16 +1120,18 @@ impl Tmpfs {
                     if n.mode & S_IFMT != S_IFDIR || !self.is_dir(*parent) && n.nlink > 0 {
                         return Err(EINVAL);
                     }
-                    let listed = |p: &u64| matches!(self.nodes.get(p).map(|n| &n.kind), Some(Kind::Dir { entries, .. }) if entries.values().any(|e| e.0 == *ino));
-                    if *ino != ROOT && n.nlink > 0 && !listed(parent) {
-                        return Err(EINVAL);
+                    if *ino != ROOT && n.nlink > 0 {
+                        live_dirs.push(*ino);
                     }
                     for (name, (child, seq)) in entries {
                         if !self.nodes.contains_key(child) || order.get(seq) != Some(name) || seq >= next_seq {
                             return Err(EINVAL);
                         }
-                        if self.is_dir(*child) && self.parent(*child) != Ok(*ino) {
-                            return Err(EINVAL);
+                        if self.is_dir(*child) {
+                            if self.parent(*child) != Ok(*ino) {
+                                return Err(EINVAL);
+                            }
+                            listed_dirs.insert(*child);
                         }
                     }
                     if order.len() != entries.len() {
@@ -1118,7 +1143,7 @@ impl Tmpfs {
                 Kind::Special => {}
             }
         }
-        if used != self.used_pages {
+        if used != self.used_pages || live_dirs.iter().any(|d| !listed_dirs.contains(d)) {
             return Err(EINVAL);
         }
         Ok(())

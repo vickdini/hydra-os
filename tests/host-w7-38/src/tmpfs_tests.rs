@@ -593,3 +593,54 @@ fn set_create_reap_and_kept() {
     assert_eq!(c, 3, "instance numbers are not reused");
     assert_eq!(set.reap(&|_| true, &mut s), Vec::<u32>::new());
 }
+
+#[test]
+fn review_fixes() {
+    let mut t = fs();
+    let mut s = Store::default();
+    // A huge size= is refused, not wrapped to "no limit"
+    assert_eq!(TmpfsOpts::parse("size=18446744073709551615", 0, 0, MEM), Err(EINVAL));
+    // No link into a removed (still open) directory
+    let p = t.mkdir(ROOT, b"p", 0o755, 0, 0, T0).unwrap();
+    let d = t.mkdir(p, b"d", 0o755, 0, 0, T0).unwrap();
+    let f = t.mknod(ROOT, b"f", 0o644, 0, 0, 0, T0).unwrap();
+    t.open(d).unwrap();
+    t.rmdir(p, b"d", &mut s, T1).unwrap();
+    assert_eq!(t.link(f, d, b"x", T1), Err(ENOENT));
+    // Its parent removed too: `..` is gone
+    assert_eq!(t.lookup(d, b".."), Ok(p));
+    t.rmdir(ROOT, b"p", &mut s, T1).unwrap();
+    assert_eq!(t.lookup(d, b".."), Err(ENOENT));
+    assert_eq!(t.lookup(d, b"."), Ok(d));
+    t.release(d, &mut s);
+    // Stray mode bits are not kept
+    let q = t.mknod(ROOT, b"q", 0o1000000 | S_IFIFO | 0o644, 0, 0, 0, T0).unwrap();
+    assert_eq!(t.getattr(q).unwrap().mode, S_IFIFO | 0o644);
+    // Missing directories are ENOENT, files ENOTDIR
+    assert_eq!(t.rename(99, b"f", ROOT, b"g", 0, &mut s, T1), Err(ENOENT));
+    assert_eq!(t.rename(ROOT, b"f", 99, b"g", 0, &mut s, T1), Err(ENOENT));
+    assert_eq!(t.rename(ROOT, b"f", f, b"g", 0, &mut s, T1), Err(ENOTDIR));
+    t.check().unwrap();
+}
+
+#[test]
+fn directory_link_limit_on_rename() {
+    let mut t = Tmpfs::new(1, TmpfsOpts { mode: 0o755, uid: 0, gid: 0, size: 0, nr_inodes: 0 }, T0);
+    let mut s = Store::default();
+    let full = t.mkdir(ROOT, b"full", 0o755, 0, 0, T0).unwrap();
+    for i in 0..(LINK_MAX - 2) {
+        t.mkdir(full, format!("{i}").as_bytes(), 0o755, 0, 0, T0).unwrap();
+    }
+    assert_eq!(t.getattr(full).unwrap().nlink, LINK_MAX);
+    assert_eq!(t.mkdir(full, b"one-more", 0o755, 0, 0, T0), Err(EMLINK));
+    t.mkdir(ROOT, b"d", 0o755, 0, 0, T0).unwrap();
+    assert_eq!(t.rename(ROOT, b"d", full, b"d", 0, &mut s, T1), Err(EMLINK));
+    // Exchanging a directory for a file across parents also adds a link
+    t.mknod(full, b"file", 0o644, 0, 0, 0, T0).unwrap();
+    assert_eq!(t.rename(ROOT, b"d", full, b"file", RENAME_EXCHANGE, &mut s, T1), Err(EMLINK));
+    assert_eq!(t.rename(full, b"file", ROOT, b"d", RENAME_EXCHANGE, &mut s, T1), Err(EMLINK));
+    // Within one directory nothing changes in the counts
+    t.mknod(ROOT, b"g", 0o644, 0, 0, 0, T0).unwrap();
+    t.rename(ROOT, b"d", ROOT, b"g", RENAME_EXCHANGE, &mut s, T1).unwrap();
+    t.check().unwrap();
+}
