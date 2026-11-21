@@ -11,6 +11,7 @@ docs/
 ├── README.md                      # This Index
 ├── DOCUMENTATION_STANDARD.md      # Rustdoc-compatible source code documentation standard
 ├── build.md                       # Build script (build_drivers.rs: the ring-3 driver programs)
+├── testing.md                     # Host unit-test crates, coverage tool, system tests
 └── src/
     ├── main.md                    # Kernel entry point & bootstrap orchestrator (src/main.rs)
     ├── console.md                 # Thread-safe console & formatting macros (src/console.rs)
@@ -69,6 +70,7 @@ docs/
 | **Driver Supervisor** | [`src/task/supervisor.rs`](file:///d:/os/src/task/supervisor.rs) | [docs/src/task/supervisor.md](file:///d:/os/docs/src/task/supervisor.md) | MINIX 3-style driver reincarnation server, on-the-spot crash revival, heartbeats. |
 | **Personalities** | [`src/personality/`](../src/personality) | [docs/src/personality.md](src/personality.md) | Wave 5 hook for programs of other systems: ENOEXEC for FreeBSD/Mach-O, per-personality system call tables through a per-CPU pointer, BSD result convention, FreeBSD signal frames and exec layout (stub table behind `persona=fbsd-stub`). |
 | **Build Automation**| [`build_drivers.rs`](file:///d:/os/build_drivers.rs) | [docs/build.md](file:///d:/os/docs/build.md) | Builds the ring-3 driver programs the kernel embeds. |
+| **Testing**| `tests/host*`, `tools/host_coverage.py` | [docs/testing.md](file:///d:/os/docs/testing.md) | Host unit tests of every kernel file, coverage, the QEMU suite. |
 | **Legacy Boot** | [`src/arch/x86_64/boot/`](file:///d:/os/src/arch/x86_64/boot) | [docs/src/arch/x86_64/boot.md](file:///d:/os/docs/src/arch/x86_64/boot.md) | Multiboot2 header and 32-bit to 64-bit assembly trampoline. |
 
 ---
