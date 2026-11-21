@@ -951,7 +951,9 @@ impl Tmpfs {
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(ERANGE);
         }
-        let ns_len = [&b"user."[..], b"trusted.", b"security."].iter().find(|p| name.starts_with(p)).map(|p| p.len()).ok_or(EOPNOTSUPP)?;
+        // (and the POSIX ACLs, whose meaning is the permission checks')
+        let acl = name == b"system.posix_acl_access" || name == b"system.posix_acl_default";
+        let ns_len = if acl { 0 } else { [&b"user."[..], b"trusted.", b"security."].iter().find(|p| name.starts_with(p)).map(|p| p.len()).ok_or(EOPNOTSUPP)? };
         if name.len() == ns_len {
             return Err(EINVAL); // a name space without a name
         }
