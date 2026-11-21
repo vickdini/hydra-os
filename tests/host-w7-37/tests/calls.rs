@@ -229,3 +229,22 @@ fn call_arguments() {
     assert_eq!(access_args(269, &a), (11, 12, 0));
     assert_eq!(access_args(439, &a), (11, 12, 13));
 }
+
+#[test]
+fn the_kernels_chown_and_sticky_rules() {
+    let none = |_g: u32| false;
+    let in27 = |g: u32| g == 27;
+    assert!(chown_ok(0, 5, 5, 7, 7, none));
+    // the owner may change the group to one of its own, not the owner
+    assert!(chown_ok(1000, 1000, 100, u32::MAX, 27, in27));
+    assert!(!chown_ok(1000, 1000, 100, u32::MAX, 28, in27));
+    assert!(!chown_ok(1000, 1000, 100, 1001, u32::MAX, in27));
+    assert!(chown_ok(1000, 1000, 100, 1000, 100, none));
+    assert!(!chown_ok(1001, 1000, 100, u32::MAX, u32::MAX, none));
+    // sticky: only root, the directory's owner or the entry's owner
+    assert!(!sticky_denied(0o41777, 0, 5, 0));
+    assert!(!sticky_denied(0o40777, 0, 5, 6));
+    assert!(sticky_denied(0o41777, 0, 5, 6));
+    assert!(!sticky_denied(0o41777, 6, 5, 6));
+    assert!(!sticky_denied(0o41777, 0, 6, 6));
+}

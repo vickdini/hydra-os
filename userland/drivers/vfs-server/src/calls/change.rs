@@ -83,14 +83,9 @@ fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
     r.map(|_| 0)
 }
 
-/// `chown`'s rule (the kernel's `chown_ok`).
+/// `chown`'s rule ([`rules::chown_ok`]).
 fn chown_ok(who: &Ctx, a: &Attr, uid: u32, gid: u32) -> bool {
-    if who.uid == 0 {
-        return true;
-    }
-    let uid_ok = uid == u32::MAX || uid == a.uid;
-    let gid_ok = gid == u32::MAX || gid == a.gid || who.in_group(gid);
-    who.uid == a.uid && uid_ok && gid_ok
+    rules::chown_ok(who.uid, a.uid, a.gid, uid, gid, |g| who.in_group(g))
 }
 
 /// `chmod`, `fchmodat`, `fchmod`, `chown`, `lchown`, `fchownat`, `fchown`, `truncate`,
@@ -216,12 +211,12 @@ fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Pare
     Ok(p)
 }
 
-/// The kernel's sticky-directory rule: may `euid` not remove `entry` from `dir`?
+/// The kernel's sticky-directory rule ([`rules::sticky_denied`]).
 fn sticky_denied(dir: &Attr, entry: Node, euid: u32) -> Result<bool, i64> {
     if euid == 0 || dir.mode & 0o1000 == 0 || dir.uid == euid {
         return Ok(false);
     }
-    Ok(ctxt::BE.getattr(entry)?.uid != euid)
+    Ok(rules::sticky_denied(dir.mode, dir.uid, ctxt::BE.getattr(entry)?.uid, euid))
 }
 
 /// After a change of names in `dirs`: vfs-server's caches and the kernel's.

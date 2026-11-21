@@ -148,3 +148,20 @@ pub fn access_args(nr: u64, a: &[u64; 6]) -> (u64, u32, u64) {
         _ => (a[1], a[2] as u32, a[3]),
     }
 }
+
+/// `chown`'s rule (the kernel's `chown_ok`) for caller `euid` (`in_group(g)`: its effective or
+/// a supplementary group) on an object owned by `ouid`/`ogid`; `u32::MAX` keeps a value.
+pub fn chown_ok(euid: u32, ouid: u32, ogid: u32, uid: u32, gid: u32, in_group: impl Fn(u32) -> bool) -> bool {
+    if euid == 0 {
+        return true;
+    }
+    let uid_ok = uid == u32::MAX || uid == ouid;
+    let gid_ok = gid == u32::MAX || gid == ogid || in_group(gid);
+    euid == ouid && uid_ok && gid_ok
+}
+
+/// The kernel's sticky-directory rule: may `euid` not remove an entry owned by `entry_uid`
+/// from a directory of mode `dmode` owned by `duid`?
+pub fn sticky_denied(dmode: u32, duid: u32, entry_uid: u32, euid: u32) -> bool {
+    euid != 0 && dmode & 0o1000 != 0 && duid != euid && entry_uid != euid
+}
