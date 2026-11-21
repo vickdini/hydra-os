@@ -64,6 +64,10 @@ fn chroot(cx: &Cx) -> Result<i64, i64> {
     let who = ctxt::caller(c)?;
     let path = ctxt::path(cx, cx.args[0], false)?;
     let (node, attr) = ctxt::find(c, &who, &path, true)?;
+    // (a directory inside another mount: the kernel's, until handles carry mounts)
+    if node.mnt != 0 {
+        return Err(calls::KERNEL);
+    }
     if !attr.is_dir() {
         return Err(ENOTDIR);
     }

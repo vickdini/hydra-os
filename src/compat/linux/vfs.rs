@@ -2800,12 +2800,17 @@ fn sys_chroot(ptr: u64) -> i64 {
 
 // wave7 G7-3 begin: vfs-server's chroot (through LX_FH_CHROOT)
 /// The processes sharing process `pid`'s root (`CLONE_FS`) take the root `(root, root_mnt)`
-/// too, as [`sys_chroot`] does for its caller's peers.
+/// too: the whole group (`pid`, the process it shares with, and every process sharing with
+/// either: siblings cloned from one parent included).
 pub fn chroot_peers(pid: u64, root: u64, root_mnt: usize) {
     let peers: Vec<u64> = {
         let procs = super::proc::PROCS.lock();
         let mine = procs.get(&pid).map_or(0, |p| p.fs_peer);
-        procs.values().filter(|p| !p.zombie && p.pid != pid && (p.pid == mine || p.fs_peer == pid)).map(|p| p.pid).collect()
+        procs
+            .values()
+            .filter(|p| !p.zombie && p.pid != pid && (p.pid == mine || p.fs_peer == pid || (mine != 0 && p.fs_peer == mine)))
+            .map(|p| p.pid)
+            .collect()
     };
     for p in peers {
         let fds = crate::task::SCHEDULER.lock().with_process(p, |t| t.fds.clone());

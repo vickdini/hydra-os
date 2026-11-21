@@ -41,13 +41,14 @@ pub mod obj {
     }
 }
 /// *stub* `crate::lx::svc` (wave 7, Group 7-3's namespace notes ask who hosts vfs-server):
-/// nothing hosts anything on the host.
+/// nothing hosts anything, unless a test sets `fake::set_ret("lx::vfs_host", host)` (then
+/// vfs-server, endpoint 0x2D, hosts the file service on that host).
 pub mod svc {
     pub fn host_of(_svc: crate::ipc::protocol::SvcId) -> crate::ipc::protocol::SvcId {
-        0
+        crate::fake::ret("lx::vfs_host") as crate::ipc::protocol::SvcId
     }
     pub fn endpoint_of(_svc: crate::ipc::protocol::SvcId) -> u32 {
-        0
+        if crate::fake::ret("lx::vfs_host") != 0 { crate::ipc::protocol::ENDPOINT_VFS_SERVER } else { 0 }
     }
 }
 /// *stub* A notification for one host (recorded).

@@ -398,3 +398,46 @@ fn for_child_without_new_pid_namespace() {
     assert_eq!(c.pid, 0);
     assert!(c.pid_inits.is_empty());
 }
+
+/// wave 7, Group 7-3: the mount namespace notes for vfs-server (LX_NOTE_MNTNS = 10).
+#[test]
+fn mount_namespace_notes() {
+    let _g = setup();
+    const GONE: u64 = u64::MAX;
+    // No vfs-server: nothing posted
+    user_proc(790, 0);
+    caps(790, CAP_SYS_ADMIN);
+    assert_eq!(sys_unshare(CLONE_NEWNS), 0);
+    assert!(!fake::called("lx::note_to("));
+    // vfs-server hosts the file service: made (from the initial one)
+    fake::set_ret("lx::vfs_host", 2);
+    user_proc(791, 0);
+    caps(791, CAP_SYS_ADMIN);
+    fake::take_calls();
+    assert_eq!(sys_unshare(CLONE_NEWNS), 0);
+    let a = ns_of(791).mnt;
+    assert_eq!(fake::take_calls().iter().filter(|c| c.starts_with("lx::note_to(")).cloned().collect::<Vec<_>>(), vec![format!("lx::note_to(2,10,{a},0,0)")]);
+    // Unsharing again: the new one made from `a`, and `a` gone (nobody else in it)
+    assert_eq!(sys_unshare(CLONE_NEWNS), 0);
+    let b = ns_of(791).mnt;
+    let notes: Vec<String> = fake::take_calls().into_iter().filter(|c| c.starts_with("lx::note_to(")).collect();
+    assert_eq!(notes, vec![format!("lx::note_to(2,10,{b},{a},0)"), format!("lx::note_to(2,10,{a},{GONE},0)")]);
+    // A clone into a new one: made from the parent's
+    spawn_as(792, 791, 0, 0);
+    after_clone(792, CLONE_NEWNS);
+    let c = ns_of(792).mnt;
+    assert!(fake::take_calls().contains(&format!("lx::note_to(2,10,{c},{b},0)")));
+    // Leaving with others still in it: not gone; the last one leaving: gone
+    spawn_as(793, 791, 0, 0);
+    ns::mntns_left(b);
+    assert!(!fake::called("lx::note_to("), "791 and 793 are still in it");
+    linux::proc::PROCS.lock().get_mut(&791).unwrap().zombie = true;
+    linux::proc::PROCS.lock().get_mut(&793).unwrap().zombie = true;
+    ns::mntns_left(b);
+    assert_eq!(fake::take_calls().into_iter().filter(|c| c.starts_with("lx::note_to(")).collect::<Vec<_>>(), vec![format!("lx::note_to(2,10,{b},{GONE},0)")]);
+    // The initial namespace is never reported
+    ns::mntns_left(0);
+    ns::note_mntns(0, 5);
+    assert!(!fake::called("lx::note_to("));
+    fake::set_ret("lx::vfs_host", 0);
+}

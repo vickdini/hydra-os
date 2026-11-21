@@ -93,6 +93,9 @@ fn main(args: &[&str]) {
         CACHE.set_cap(n);
     }
     let cfg = svcrt::Config { name: "vfs-server", endpoint: ENDPOINT_VFS_SERVER, workers: svcrt::workers_arg(args, 4), subscribe: None };
+    // wave7 G7-3: the initial namespace's mount table, before any worker or note can ask
+    // (the pool root is set when zfs-server answers)
+    mount::install_boot(0);
     let mut svc = match svcrt::start(&cfg, serve) {
         Ok(s) => s,
         Err(e) => {
@@ -109,8 +112,8 @@ fn main(args: &[&str]) {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
     }
-    // wave7 G7-3: the initial namespace's mount table (the boot answers until a change)
-    mount::install_boot(zfs::root().unwrap_or(0));
+    // wave7 G7-3: the pool root of the boot table, once zfs-server answers (else again below)
+    let mut root_known = zfs::root().map(mount::set_pool_root).unwrap_or(false);
     match zfs::root() {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
@@ -125,6 +128,10 @@ fn main(args: &[&str]) {
             Event::Notify(_) | Event::Idle => {}
         }
         take_notes(u64::MAX);
+        // wave7 G7-3
+        if !root_known {
+            root_known = zfs::root().map(mount::set_pool_root).unwrap_or(false);
+        }
     }
 }
 
@@ -139,6 +146,8 @@ fn take_notes(seq: u64) {
         let mut seen = DROPPED_SEEN.lock();
         if dropped != *seen {
             CACHE.forget_all();
+            // wave7 G7-3: lost namespace notes: only the initial table is sure now
+            mount::forget_namespaces(&mut *tmpfs_mem::STORE.lock());
             *seen = dropped;
         }
     }

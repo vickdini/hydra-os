@@ -105,7 +105,11 @@ fn redirected(ns: u32, path: &str) -> (SvcId, u64) {
 
 #[test]
 fn the_walk_over_the_tables() {
-    mount::install_boot(2);
+    // The boot table before zfs-server answers: its root is set later
+    mount::install_boot(0);
+    assert!(!mount::set_pool_root(0));
+    assert!(mount::set_pool_root(2));
+    assert_eq!(MTAB.lock().as_ref().unwrap().ns(0).unwrap().get(1).unwrap().root, 2);
     // The boot answers (as 7-1's BootMounts)
     assert_eq!(redirected(0, "/proc/self/stat"), (LXS_PROC, LX_VFS_PSEUDO_PROC));
     assert_eq!(redirected(0, "/dev/null").0, LXS_LINUX);
@@ -214,4 +218,47 @@ fn the_walk_over_the_tables() {
     assert!(TMPFS.lock().as_ref().unwrap().get(n).is_none(), "no namespace mounts it: gone");
     mount::on_mntns(0, crate::proto::LX_MNTNS_GONE, &mut store);
     assert!(MTAB.lock().as_ref().unwrap().ns(0).is_some(), "never the initial one");
+
+    // Review fixes. Mount 0 of the walk is index 1 for good: after a pivot_root onto a
+    // tmpfs, a handle on mount 0 still names the pool, and the tmpfs keeps its number
+    mount::on_mntns(10, 0, &mut store);
+    let caller10 = Caller { ns: 10, caps: CAP_SYS_ADMIN, euid: 0, egid: 0 };
+    let tm10 = {
+        let mut g = MTAB.lock();
+        let t = g.as_mut().unwrap();
+        t.ns0_fixed = false;
+        t.mount(&caller10, None, &Loc::new("/tmp", 20, 1, true), Some("tmpfs"), None, 0, None, &mut Factory).unwrap();
+        t.ns(10).unwrap().child_at(1, 20).unwrap()
+    };
+    // /tmp/old in the tmpfs (the walk would have found it), then the pivot
+    let n10 = mount::tmpfs_of(10, tm10 as u16).unwrap();
+    {
+        let mut g = TMPFS.lock();
+        g.as_mut().unwrap().get_mut(n10).unwrap().mkdir(1, b"old", 0o755, 0, 0, (1, 0)).unwrap();
+    }
+    {
+        let mut g = MTAB.lock();
+        let t = g.as_mut().unwrap();
+        t.pivot_root(&caller10, &Loc::new("/tmp", 1, tm10, true), &Loc::new("/tmp/old", 2, tm10, true)).unwrap();
+        assert_eq!(t.ns(10).unwrap().root, tm10);
+    }
+    assert_eq!(mount::tmpfs_of(10, 0), None, "mount 0 is still the pool");
+    assert_eq!(mount::tmpfs_of(10, tm10 as u16), Some(n10));
+    assert_eq!(mount::TABLES.mount(10, 0), None, "the own tree: never climbed out of");
+    let mut cx10 = cx(10);
+    cx10.root = Node::new(tm10 as u16, 1);
+    match walk::walk(&Pool::new(10), &cx10, Start::Root, b"/old", 0).unwrap() {
+        Walked::Found { node, .. } => assert_eq!(node, Node::new(tm10 as u16, 2)),
+        Walked::Redirect(_) => panic!("redirected"),
+    }
+    // A "made" note for an id whose table is still there (its "gone" note was lost): the
+    // stale table is replaced by a fresh copy
+    mount::on_mntns(10, 0, &mut store);
+    assert_eq!(MTAB.lock().as_ref().unwrap().ns(10).unwrap().root, 1, "a fresh copy of the initial table");
+    // Lost notes: every namespace but the initial one is forgotten, their tmpfs reaped
+    mount::on_mntns(11, 10, &mut store);
+    mount::forget_namespaces(&mut store);
+    let g = MTAB.lock();
+    let t = g.as_ref().unwrap();
+    assert_eq!(t.spaces.keys().copied().collect::<Vec<_>>(), vec![0]);
 }

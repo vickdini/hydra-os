@@ -4,8 +4,11 @@
 //! and the `tmpfs_*` functions are the walk's back end for nodes in tmpfs mounts
 //! ([`crate::be`] routes them here by the node's mount).
 //!
-//! - The walk numbers a namespace's root mount 0 (its "own tree"); the tables number mounts
-//!   from 1. [`to_idx`]/[`to_walk`] translate.
+//! - The walk's mount 0 (the "own tree": the pool at `/`) is table index 1, the mount every
+//!   table starts with (copies keep indices). It is fixed: a `pivot_root` that moves the
+//!   namespace's root elsewhere does not renumber handles that name mount 0.
+//!   [`to_idx`]/[`to_walk`] translate; indices above 16 bits are never handed to the walk
+//!   (tables stop at [`crate::mtab::MAX_MOUNTS`]).
 //! - A namespace the server has not heard of uses the initial namespace's table.
 //! - While only the boot table exists ([`SIMPLE`]), the answers come without the lock and
 //!   are those of 7-1's [`BootMounts`]: `proc`, `sys` and `dev` by name under every root.
@@ -61,6 +64,39 @@ pub fn install_boot(pool_root: u64) {
     *TMPFS.lock() = Some(TmpfsSet::new());
 }
 
+/// Sets the pool's root object in every table whose `/` still has none (`install_boot`
+/// ran before zfs-server answered; called again until it does). Whether it is known now.
+pub fn set_pool_root(root: u64) -> bool {
+    let mut g = MTAB.lock();
+    let Some(t) = g.as_mut() else { return false };
+    if root == 0 {
+        return false;
+    }
+    for ns in t.spaces.values_mut() {
+        ns.set_first_root(root);
+    }
+    true
+}
+
+/// The kernel's note ring lost entries (`dropped` moved): namespace notes may be among
+/// them, so the tables of every namespace but the initial one are dropped (calls of an
+/// unknown namespace use the initial table, as before its note) and their tmpfs instances
+/// go once nothing holds them.
+pub fn forget_namespaces(store: &mut dyn tmpfs::DataStore) {
+    let gone = {
+        let mut g = MTAB.lock();
+        let Some(t) = g.as_mut() else { return };
+        t.collect(&[]).tmpfs_gone
+    };
+    if !gone.is_empty() {
+        let m = MTAB.lock();
+        let mounted = |n: u32| m.as_ref().is_some_and(|t| t.tmpfs_in_use(n));
+        if let Some(s) = TMPFS.lock().as_mut() {
+            s.reap(&mounted, store);
+        }
+    }
+}
+
 /// A table changed: the walk asks the tables from now on.
 pub fn changed() {
     SIMPLE.store(false, Ordering::Release);
@@ -72,13 +108,18 @@ fn table(t: &MountTables, ns: u32) -> Option<&MountNs> {
 }
 
 /// The walk's mount number `m` as a table index (the walk's 0 is the namespace's root).
-fn to_idx(t: &MountNs, m: u16) -> MntIdx {
-    if m == 0 { t.root } else { m as MntIdx }
+fn to_idx(_t: &MountNs, m: u16) -> MntIdx {
+    if m == 0 { 1 } else { m as MntIdx }
 }
 
 /// A table index as the walk's mount number.
-fn to_walk(t: &MountNs, i: MntIdx) -> u16 {
-    if i == t.root { 0 } else { i as u16 }
+fn to_walk(_t: &MountNs, i: MntIdx) -> Option<u16> {
+    match i {
+        1 => Some(0),
+        // (index 0 is "no mount"; nothing above 16 bits reaches the walk)
+        0 => None,
+        i => u16::try_from(i).ok(),
+    }
 }
 
 /// The mount tables as the walk asks them.
@@ -98,24 +139,25 @@ impl Mounts for TableMounts {
         let g = MTAB.lock();
         let t = table(g.as_ref()?, ns)?;
         let i = t.covering(to_idx(t, at.mnt), at.ino)?;
-        Some(to_walk(t, i)).filter(|w| *w != 0 && (*w as MntIdx) == i)
+        to_walk(t, i).filter(|w| *w != 0)
     }
 
     fn mount(&self, ns: u32, m: u16) -> Option<MountInfo> {
-        if SIMPLE.load(Ordering::Acquire) {
+        // (mount 0 is the own tree: never a mount the walk climbs out of, as in BootMounts)
+        if m == 0 || SIMPLE.load(Ordering::Acquire) {
             return None;
         }
         let g = MTAB.lock();
         let t = table(g.as_ref()?, ns)?;
         let i = to_idx(t, m);
         let mt = t.get(i)?;
-        let parent = if mt.parent == 0 { 0 } else { to_walk(t, mt.parent) };
+        let parent = if mt.parent == 0 { 0 } else { to_walk(t, mt.parent)? };
         let kind = match mt.backend {
             mtab::Backend::Pool => MountKind::Zfs,
             mtab::Backend::Tmpfs(n) => MountKind::Tmpfs(n),
             mtab::Backend::Remote { svc, obj } => MountKind::Redirect { svc, obj },
         };
-        Some(MountInfo { parent, mountpoint: Node::new(parent, mt.mountpoint), root: Node::new(to_walk(t, i), mt.root), kind })
+        Some(MountInfo { parent, mountpoint: Node::new(parent, mt.mountpoint), root: Node::new(to_walk(t, i)?, mt.root), kind })
     }
 
     fn pseudo_at_root(&self, ns: u32, name: &[u8]) -> Option<(SvcId, u64)> {
@@ -201,6 +243,11 @@ pub fn on_mntns(new: u64, from: u64, store: &mut dyn tmpfs::DataStore) {
     }
     // A namespace made from one the server never heard of copies the initial one
     let src = if t.ns(from).is_some() { from } else { 0 };
+    // A table already there under this id is stale (its "gone" note was lost): replaced
+    if t.ns(new).is_some() && new != 0 {
+        let fx = t.drop_ns(new);
+        drop(fx); // (its tmpfs instances: reaped with the next one that goes)
+    }
     if t.copy_ns(src, new, &|_| 0).is_ok() {
         changed();
     }

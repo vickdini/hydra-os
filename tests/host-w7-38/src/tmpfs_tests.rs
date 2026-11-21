@@ -79,7 +79,9 @@ fn opts_defaults_and_parse() {
     assert_eq!(TmpfsOpts::parse("size=1G", 0, 0, MEM).unwrap().size, 1 << 30);
     assert_eq!(TmpfsOpts::parse("size=0", 0, 0, MEM).unwrap().size, 0, "0: no limit");
     assert_eq!(TmpfsOpts::parse(" mode=700 , ,", 0, 0, MEM).unwrap().mode, 0o700);
-    for bad in ["size=x", "size=0%", "size=101%", "mode=9", "uid=-1", "gid=a", "nr_inodes=1q", "size=99999999999999999g"] {
+    assert_eq!(TmpfsOpts::parse("size=0%", 0, 0, MEM).unwrap().size, 0, "0%: no limit, as Linux");
+    assert_eq!(TmpfsOpts::parse("", 0, 0, MEM + 4097).unwrap().size % 4096, 0, "the default is whole pages");
+    for bad in ["size=x", "size=101%", "mode=9", "uid=-1", "gid=a", "nr_inodes=1q", "size=99999999999999999g"] {
         assert_eq!(TmpfsOpts::parse(bad, 0, 0, MEM), Err(EINVAL), "{bad}");
     }
 }
@@ -795,4 +797,36 @@ fn set_numbers_and_duplicates() {
     let f = t.mknod(ROOT, b"f", 0o644, 0, 0, 0, T0).unwrap();
     n(&mut t, f).open = u32::MAX;
     assert_eq!(t.open(f), Err(ENFILE));
+}
+
+#[test]
+fn review_tmpfs_fixes() {
+    let mut t = fs();
+    let mut s = Store::default();
+    // mkdir in a file: ENOTDIR (before any link count); in nothing: ENOENT
+    let f = t.mknod(ROOT, b"f", 0o644, 0, 0, 0, T0).unwrap();
+    assert_eq!(t.mkdir(f, b"d", 0o755, 0, 0, T0), Err(ENOTDIR));
+    assert_eq!(t.mkdir(999, b"d", 0o755, 0, 0, T0), Err(ENOENT));
+    // A size limit near the top of u64 does not wrap
+    let mut big = Tmpfs::new(2, TmpfsOpts { mode: 0o755, uid: 0, gid: 0, size: u64::MAX, nr_inodes: 0 }, T0);
+    let g = big.mknod(ROOT, b"g", 0o644, 0, 0, 0, T0).unwrap();
+    big.write(g, 0, b"x", &mut s, T1).unwrap();
+    let _ = t.write(f, 0, b"y", &mut s, T1);
+    // Restored trees: a directory whose next cookie is below 2, a symlink whose size is not
+    // its length or holds a NUL, an xattr name with a NUL, duplicate xattr keys
+    let l = t.symlink(ROOT, b"l", b"abc", 0, 0, T0).unwrap();
+    t.setxattr(f, b"user.k", b"v", 0, T0).unwrap();
+    let good = t.encode();
+    assert!(Tmpfs::decode(&good).is_ok());
+    for (what, damage) in [
+        ("next cookie", Box::new(|t: &mut Tmpfs| if let Kind::Dir { next_seq, entries, order, .. } = &mut t.nodes.get_mut(&ROOT).unwrap().kind { entries.clear(); order.clear(); *next_seq = 1; }) as Box<dyn Fn(&mut Tmpfs)>),
+        ("symlink size", Box::new(move |t: &mut Tmpfs| t.nodes.get_mut(&l).unwrap().size = 9)),
+        ("symlink NUL", Box::new(move |t: &mut Tmpfs| t.nodes.get_mut(&l).unwrap().kind = Kind::Symlink(b"a\0c".to_vec()))),
+        ("xattr NUL", Box::new(move |t: &mut Tmpfs| { t.nodes.get_mut(&f).unwrap().xattrs.insert(b"user.\0".to_vec(), b"v".to_vec()); })),
+        ("xattr total", Box::new(move |t: &mut Tmpfs| { t.nodes.get_mut(&f).unwrap().xattrs.insert(b"user.big".to_vec(), vec![0u8; 65536]); })),
+    ] {
+        let mut bad = Tmpfs::decode(&good).unwrap();
+        damage(&mut bad);
+        assert_eq!(bad.check(), Err(EINVAL), "{what}");
+    }
 }

@@ -305,6 +305,11 @@ pub fn after_clone(child: u64, flags: u64) {
             PID_NS_INIT.lock().insert(p.ns.pid, p.ns.pid_inits.clone());
         }
         child_mnt = p.ns.mnt;
+        // wave7 G7-3: posted with the process table held, so it is ordered with every
+        // "gone" note (all are posted under this lock)
+        if flags & CLONE_NEWNS != 0 {
+            note_mntns(child_mnt, parent_mnt);
+        }
     }
     if flags & CLONE_NEWNS != 0 {
         // The child's own copy of the mount table
@@ -312,7 +317,6 @@ pub fn after_clone(child: u64, flags: u64) {
         if let Some(fds) = fds {
             super::mount::copy_ns(parent_mnt, child_mnt, &fds);
         }
-        note_mntns(child_mnt, parent_mnt); // wave7 G7-3
     }
     if user.is_some() {
         let id = crate::task::TaskId(child);
@@ -391,14 +395,18 @@ pub fn sys_unshare(flags: u64) -> i64 {
         apply_new(&mut p.ns, ns_flags, true);
         new_mnt = p.ns.mnt;
     }
+    // wave7 G7-3: vfs-server copies the table; the old namespace may be empty now (both
+    // posted with the process table held: ordered with every other namespace note)
+    if ns_flags & CLONE_NEWNS != 0 {
+        let procs = super::proc::PROCS.lock();
+        note_mntns(new_mnt, old_mnt);
+        gone_if_empty(&procs, old_mnt);
+    }
     if ns_flags & CLONE_NEWNS != 0 {
         let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone());
         if let Some(fds) = fds {
             super::mount::copy_ns(old_mnt, new_mnt, &fds);
         }
-        // wave7 G7-3: vfs-server copies the table; the old namespace may be empty now
-        note_mntns(new_mnt, old_mnt);
-        mntns_left(old_mnt);
     }
     if user.is_some() {
         crate::task::with_current_task_mut(|t| t.caps.enter_userns());
@@ -827,7 +835,14 @@ pub fn note_mntns(new: u64, from: u64) {
 /// in it, vfs-server drops its table. (Exits: `proc::thread_exited`, which holds the
 /// process table.)
 pub fn mntns_left(ns: u64) {
-    if ns != 0 && !super::proc::PROCS.lock().values().any(|p| !p.zombie && p.ns.mnt == ns) {
+    let procs = super::proc::PROCS.lock();
+    gone_if_empty(&procs, ns);
+}
+
+/// With the process table `procs` held (so the note is ordered with every other namespace
+/// note): when no live process is left in mount namespace `ns`, tells vfs-server.
+pub fn gone_if_empty(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, ns: u64) {
+    if ns != 0 && !procs.values().any(|p| !p.zombie && p.ns.mnt == ns) {
         note_mntns(ns, crate::ipc::protocol::LX_MNTNS_GONE);
     }
 }

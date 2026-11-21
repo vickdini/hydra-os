@@ -211,11 +211,15 @@ fn tmpfs_mount_stack_and_umount() {
     assert_eq!(t.ns(7).unwrap().covering(1, 20), Some(j), "the top of the stack");
     assert_eq!(t.ns(7).unwrap().covering(j, 1), None);
     assert_eq!(t.ns(7).unwrap().covering(1, 30), None);
-    assert_eq!(t.ns(7).unwrap().mount_at(&top), Some(i));
-    // Busy: /tmp has a mount below it
-    assert_eq!(t.umount(&c, &top, 0), Err(EBUSY));
-    let fx = t.umount(&c, &Loc::new("/tmp", 1, j, true), 0).unwrap();
+    // The mount at /tmp is the top of the stack (as Linux: umount takes the top one)
+    assert_eq!(t.ns(7).unwrap().mount_at(&top), Some(j));
+    let fx = t.umount(&c, &top, 0).unwrap();
     assert_eq!(fx.tmpfs_gone, vec![2]);
+    assert_eq!(t.ns(7).unwrap().mount_at(&top), Some(i));
+    // Busy: a mount below it
+    let (k, _) = t.mount_new(&c, &Loc::new("/tmp/in", 5, i, true), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    assert_eq!(t.umount(&c, &top, 0), Err(EBUSY));
+    t.umount(&c, &Loc::new("/tmp/in", 1, k, true), 0).unwrap();
     let fx = t.umount(&c, &top, MNT_FORCE).unwrap();
     assert_eq!(fx.tmpfs_gone, vec![1]);
     assert_eq!(t.ns(7).unwrap().child_at(1, 20), None);
@@ -436,7 +440,12 @@ fn propagation_flags_are_listed() {
     assert_eq!(t.set_propagation(99, &dir("/usr", 1), MS_SLAVE, false), Err(EINVAL));
     let root = Loc::new("/", 1, 1, true);
     assert_eq!(t.mount(&c, None, &root, None, None, MS_SHARED | MS_PRIVATE, None, &mut f), Err(EINVAL));
-    assert_eq!(t.mount(&c, Some(&root), &dir("/mnt", 1), None, None, MS_PRIVATE | MS_BIND, None, &mut f), Err(EINVAL));
+    // (Linux's order: MS_BIND before a propagation change, so this is a bind)
+    t.mount(&c, Some(&root), &dir("/mnt", 1), None, None, MS_PRIVATE | MS_BIND, None, &mut f).unwrap();
+    assert!(t.ns(7).unwrap().child_at(1, 40).is_some());
+    // MS_MOVE with a propagation type: the propagation change (Linux checks it first)
+    t.mount(&c, Some(&dir("/usr", 1)), &root, None, None, MS_SLAVE | MS_MOVE, None, &mut f).unwrap();
+    assert_eq!(t.ns(7).unwrap().get(1).unwrap().propagation, MS_SLAVE);
     // Slave (no master: nothing shown) and unbindable
     t.mount(&c, None, &root, None, None, MS_SLAVE, None, &mut f).unwrap();
     assert!(!t.mountinfo(7).unwrap().lines().next().unwrap().contains("shared"));
@@ -506,7 +515,7 @@ fn listmount_and_statmount() {
         String::from_utf8(b[at..at + end].to_vec()).unwrap()
     };
     assert_eq!(u32_at(0) as usize, b.len());
-    assert_eq!(u64_at(8), all);
+    assert_eq!(u64_at(8), all & !STATMOUNT_PROPAGATE_FROM, "no propagation source: no bit");
     assert_eq!(u64_at(24), 0x9fa0);
     assert_eq!(u64_at(40), ids[1]);
     assert_eq!(u64_at(48), root);
@@ -634,7 +643,7 @@ fn new_mount_api_flow() {
     assert_eq!(fsmount(&mut p, 0, 0), Err(EINVAL));
     fsconfig(&mut p, FSCONFIG_SET_FLAG, Some("rw"), None, 0).unwrap();
     assert_eq!(fsconfig(&mut p, FSCONFIG_CMD_RECONFIGURE, Some("k"), None, 0), Err(EINVAL));
-    assert_eq!(fsconfig(&mut p, FSCONFIG_CMD_RECONFIGURE, None, None, 0), Ok(ConfigOut::Reconfigure { path: "/mnt".into(), ro: false }));
+    assert_eq!(fsconfig(&mut p, FSCONFIG_CMD_RECONFIGURE, None, None, 0), Ok(ConfigOut::Reconfigure { path: "/mnt".into(), ro: false, data: String::new() }));
     assert_eq!(fspick(t.ns(7).unwrap(), &dir("/usr", 1)), Err(EINVAL));
     // open_tree and move_mount rules
     assert_eq!(open_tree_flags(0), Ok(false));
@@ -730,13 +739,21 @@ fn kept_state_reader_checks_structure() {
 fn redirects_stay_inside_their_mount() {
     let t = tables();
     let ns = t.ns(0).unwrap();
+    // The rest as it is: the serving service walks `..` and symbolic links itself
     let r = ns.redirect(6, "a/./../b//c").unwrap();
-    assert_eq!((r.path.as_str(), r.leave), ("/pts/b/c", None));
+    assert_eq!((r.path.as_str(), r.leave, r.fs_root.as_str()), ("/pts/a/./../b//c", None, "/pts"));
+    let r = ns.redirect(2, "self/cwd/..").unwrap();
+    assert_eq!(r.path, "/self/cwd/..", "not /self: cwd is a link");
+    // Only a leading `..` leaves the mount without a walk
     let r = ns.redirect(6, "../null").unwrap();
-    assert_eq!((r.path.as_str(), r.leave.as_deref()), ("/pts", Some("../null")), "`..` at the mount root leaves it");
-    let r = ns.redirect(6, "x/../../../y").unwrap();
-    assert_eq!(r.leave.as_deref(), Some("../../y"));
+    assert_eq!((r.path.as_str(), r.leave.as_deref()), ("/pts", Some("../null")));
+    assert_eq!(ns.redirect(6, "/..").unwrap().leave.as_deref(), Some(".."));
+    assert_eq!(ns.redirect(6, "x/../../../y").unwrap().leave, None, "the service decides");
     assert_eq!(ns.redirect(2, "").unwrap().path, "/");
+    assert_eq!(ns.redirect(6, "/").unwrap().path, "/pts");
+    // by_name matches only walked paths (no `..`)
+    assert_eq!(ns.by_name("/proc/self/cwd/.."), None);
+    assert_eq!(ns.by_name("/proc/./self").map(|v| v.0), Some(2));
 }
 
 #[test]
@@ -897,4 +914,135 @@ fn kept_tables_with_cycles_are_refused() {
     // And the good one, with gone flags of an unmounted slot, comes back whole
     t.umount(&c, &Loc::new("/tmp", 1, i, true), 0).unwrap();
     assert_eq!(MountTables::decode(&t.encode()).unwrap(), t);
+}
+
+// ----------------------------------------------------------------------
+// The lead's pre-merge review (Gemini), checked fixes
+// ----------------------------------------------------------------------
+
+#[test]
+fn review_mount_at_takes_the_top_of_a_stack() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let c = root_caller(7);
+    // A tmpfs on /mnt, then proc on top of its root (served: not entered by object)
+    let (tm, _) = t.mount_new(&c, &dir("/mnt", 1), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    let on_root = Loc::new("/mnt", 1, tm, true);
+    let (pr, _) = t.mount_new(&c, &Loc::new("/mnt", 0, tm, true), "proc", "proc", 0, "", &mut f).unwrap();
+    assert_eq!(t.ns(7).unwrap().get(pr).unwrap().parent, tm);
+    assert_eq!(t.ns(7).unwrap().mount_at(&on_root), Some(pr), "the served mount on top, not the tmpfs");
+    let fx = t.umount(&c, &on_root, 0).unwrap();
+    assert_eq!(fx, Effects::default());
+    assert_eq!(t.ns(7).unwrap().mount_at(&on_root), Some(tm));
+}
+
+#[test]
+fn review_pseudo_at_root_is_hidden_by_a_newer_mount() {
+    let mut t = MountTables::new();
+    t.install(0, 1, &standard_layout(PROC, LINUX, true, &pool));
+    t.ns0_fixed = false;
+    assert_eq!(t.ns(0).unwrap().pseudo_at_root(b"proc"), Some((PROC, 0)));
+    let mut f = Factory::default();
+    // A tmpfs mounted on the pool's /proc directory: the walk must find the tmpfs
+    t.mount_new(&root_caller(0), &dir("/proc", 1), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    assert_eq!(t.ns(0).unwrap().pseudo_at_root(b"proc"), None);
+    assert_eq!(t.ns(0).unwrap().pseudo_at_root(b"dev"), Some((LINUX, 0)));
+}
+
+#[test]
+fn review_detached_tmpfs_still_reports_tmpfs() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let c = root_caller(7);
+    let (i, _) = t.mount_new(&c, &dir("/tmp", 1), "tmpfs", "tmpfs", MS_RDONLY, "", &mut f).unwrap();
+    let (b, _) = t.mount_new(&c, &dir("/mnt", 1), "proc", "proc", 0, "", &mut f).unwrap();
+    t.umount(&c, &Loc::new("/tmp", 1, i, true), MNT_DETACH).unwrap();
+    t.umount(&c, &Loc::new("/mnt", 0, b, true), 0).unwrap();
+    let ns = t.ns(7).unwrap();
+    assert!(ns.is_tmpfs(i) && !ns.is_tmpfs(b));
+    assert_eq!(ns.flags_of(i), MS_RDONLY, "the marker is not a flag");
+    assert_eq!(MountTables::decode(&t.encode()).unwrap(), t);
+}
+
+#[test]
+fn review_mount_count_limit() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let c = root_caller(7);
+    let mut n = t.ns(7).unwrap().mounts.len();
+    while n < MAX_MOUNTS {
+        t.mount_new(&c, &dir("/mnt", 1), "proc", "proc", 0, "", &mut f).unwrap();
+        n += 1;
+    }
+    assert_eq!(t.mount_new(&c, &dir("/mnt", 1), "proc", "proc", 0, "", &mut f).map(|_| ()), Err(ENOSPC));
+    assert_eq!(t.bind(7, &dir("/usr", 1), &dir("/mnt2", 1), 0), Err(ENOSPC));
+}
+
+#[test]
+fn review_copy_clears_expire_marks_and_converts_only_below_the_pool() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let c = root_caller(7);
+    let (i, _) = t.mount_new(&c, &dir("/tmp", 1), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    assert_eq!(t.umount(&c, &Loc::new("/tmp", 1, i, true), MNT_EXPIRE), Err(EAGAIN));
+    t.copy_ns(7, 8, &pool).unwrap();
+    assert_eq!(t.umount(&root_caller(8), &Loc::new("/tmp", 1, i, true), MNT_EXPIRE), Err(EAGAIN), "a first expire in the copy only marks");
+    // A by-name mount below a tmpfs stays by name in a copy
+    let ghost = Loc::new("/tmp/pts", 0, i, true);
+    let (g, _) = t.mount_new(&c, &ghost, "devpts", "devpts", 0, "", &mut f).unwrap();
+    t.copy_ns(7, 9, &|_| 55).unwrap();
+    assert!(t.ns(9).unwrap().get(g).unwrap().by_name);
+}
+
+#[test]
+fn review_set_attrs_masks() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let c = root_caller(7);
+    let (i, _) = t.mount_new(&c, &dir("/tmp", 1), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    let at = Loc::new("/tmp", 1, i, true);
+    t.set_attrs(7, &at, MS_RDONLY | MS_BIND | MS_MOVE, 0, false, 0).unwrap();
+    assert_eq!(t.ns(7).unwrap().flags_of(i), MS_RDONLY, "only per-mount flags");
+    assert_eq!(t.set_attrs(7, &at, 0, 0, false, MS_SHARED | MS_PRIVATE), Err(EINVAL));
+    assert_eq!(t.set_attrs(7, &at, 0, 0, false, MS_RDONLY), Err(EINVAL));
+    t.set_attrs(7, &at, 0, 0, false, MS_SLAVE).unwrap();
+}
+
+#[test]
+fn review_fspick_passes_its_options() {
+    let mut t = tables();
+    let mut f = Factory::default();
+    let (i, _) = t.mount_new(&root_caller(7), &dir("/tmp", 1), "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
+    let mut p = fspick(t.ns(7).unwrap(), &Loc::new("/tmp", 1, i, true)).unwrap();
+    fsconfig(&mut p, FSCONFIG_SET_STRING, Some("size"), Some("2m"), 0).unwrap();
+    assert_eq!(fsconfig(&mut p, FSCONFIG_CMD_RECONFIGURE, None, None, 0), Ok(ConfigOut::Reconfigure { path: "/tmp".into(), ro: false, data: "size=2m".into() }));
+}
+
+#[test]
+fn review_decode_checks() {
+    let t = tables();
+    // Namespace 0 missing
+    let mut no0 = t.clone();
+    no0.spaces.remove(&0);
+    assert_eq!(MountTables::decode(&no0.encode()), Err(EINVAL));
+    // The same namespace twice (written by hand: a map cannot hold it)
+    let bytes = t.encode();
+    let body = unseal(0x4d4e_5433, 2, &bytes).unwrap().to_vec();
+    let mut twice = body.clone();
+    let count = u32::from_le_bytes(twice[9..13].try_into().unwrap());
+    let first = 13;
+    let ns_rest = &body[first..];
+    // (two tables: 0 and 7; write table 7 again as a third)
+    let one = MountTables::decode(&seal(0x4d4e_5433, 2, &body)).unwrap();
+    let mut only7 = one.clone();
+    only7.spaces.remove(&0);
+    let b7 = unseal(0x4d4e_5433, 2, &only7.encode()).unwrap()[13..].to_vec();
+    twice[9..13].copy_from_slice(&(count + 1).to_le_bytes());
+    twice.extend_from_slice(&b7);
+    let _ = ns_rest;
+    assert_eq!(MountTables::decode(&seal(0x4d4e_5433, 2, &twice)), Err(EINVAL));
+    // Counters behind the IDs in use
+    let mut behind = body.clone();
+    behind[0..4].copy_from_slice(&100u32.to_le_bytes());
+    assert_eq!(MountTables::decode(&seal(0x4d4e_5433, 2, &behind)), Err(EINVAL));
 }

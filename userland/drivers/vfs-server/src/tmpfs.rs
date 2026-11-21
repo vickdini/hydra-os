@@ -121,17 +121,18 @@ impl TmpfsOpts {
     /// ignored). The root belongs to the mounter `(euid, egid)` unless they say otherwise.
     /// Defaults, as on Linux: half of `mem` and half as many inodes as `mem` has pages.
     pub fn parse(data: &str, euid: u32, egid: u32, mem: u64) -> Result<TmpfsOpts, i64> {
-        let mut o = TmpfsOpts { mode: 0o1777, uid: euid, gid: egid, size: mem / 2, nr_inodes: mem / PAGE / 2 };
+        let mut o = TmpfsOpts { mode: 0o1777, uid: euid, gid: egid, size: mem / 2 / PAGE * PAGE, nr_inodes: mem / PAGE / 2 };
         for opt in data.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let (k, v) = opt.split_once('=').unwrap_or((opt, ""));
             match k {
                 "size" => {
                     o.size = if let Some(p) = v.strip_suffix('%') {
                         let pct: u64 = p.parse().map_err(|_| EINVAL)?;
-                        if pct == 0 || pct > 100 {
+                        if pct > 100 {
                             return Err(EINVAL);
                         }
-                        ((mem as u128 * pct as u128 / 100) as u64).div_ceil(PAGE) * PAGE
+                        // (0%: no limit, as `size=0`; rounded up to whole pages)
+                        ((mem as u128 * pct as u128 / 100) as u64).checked_add(PAGE - 1).ok_or(EINVAL)? / PAGE * PAGE
                     } else {
                         // Rounded up to whole pages, as on Linux
                         let b = parse_size(v)?;
@@ -361,6 +362,11 @@ impl Tmpfs {
         self.nodes.get_mut(&ino).ok_or(ENOENT)
     }
 
+    /// Whether `more` pages would pass `size=` (checked arithmetic).
+    fn over_limit(&self, more: u64) -> bool {
+        self.opts.size != 0 && self.used_pages.checked_add(more).is_none_or(|u| u > self.opts.size / PAGE)
+    }
+
     /// Number of inodes in use.
     pub fn inodes(&self) -> usize {
         self.nodes.len()
@@ -496,6 +502,9 @@ impl Tmpfs {
 
     /// `mkdir`.
     pub fn mkdir(&mut self, dir: u64, name: &[u8], mode: u32, uid: u32, gid: u32, now: Ts) -> Result<u64, i64> {
+        if !self.is_dir(dir) {
+            return Err(if self.nodes.contains_key(&dir) { ENOTDIR } else { ENOENT });
+        }
         if self.node(dir)?.nlink >= LINK_MAX {
             return Err(EMLINK);
         }
@@ -818,7 +827,7 @@ impl Tmpfs {
         let Kind::File { data } = n.kind else { return Err(if matches!(n.kind, Kind::Dir { .. }) { EISDIR } else { EINVAL }) };
         let old = n.size;
         let (op, np) = (pages(old), pages(size));
-        if np > op && self.opts.size != 0 && (self.used_pages + np - op) * PAGE > self.opts.size {
+        if np > op && self.over_limit(np - op) {
             return Err(ENOSPC);
         }
         if size < old && data != 0 {
@@ -848,7 +857,7 @@ impl Tmpfs {
         let old = n.size;
         let new_size = old.max(end);
         let (op, np) = (pages(old), pages(new_size));
-        if np > op && self.opts.size != 0 && (self.used_pages + np - op) * PAGE > self.opts.size {
+        if np > op && self.over_limit(np - op) {
             return Err(ENOSPC);
         }
         let data = if data == 0 {
@@ -1089,10 +1098,9 @@ impl Tmpfs {
                         let name = d.bytes()?;
                         let child = d.u64()?;
                         let seq = d.u64()?;
-                        if order.insert(seq, name.clone()).is_some() {
+                        if order.insert(seq, name.clone()).is_some() || entries.insert(name, (child, seq)).is_some() {
                             return Err(EINVAL);
                         }
-                        entries.insert(name, (child, seq));
                     }
                     Kind::Dir { entries, order, next_seq, parent }
                 }
@@ -1118,7 +1126,9 @@ impl Tmpfs {
             let mut xattrs = BTreeMap::new();
             for _ in 0..nx {
                 let k = d.bytes()?;
-                xattrs.insert(k, d.bytes()?);
+                if xattrs.insert(k, d.bytes()?).is_some() {
+                    return Err(EINVAL);
+                }
             }
             let open = d.u32()?;
             if nodes.insert(ino, Node { kind, mode, uid, gid, nlink, size, rdev, atime: ts[0], mtime: ts[1], ctime: ts[2], btime: ts[3], xattrs, open }).is_some() {
@@ -1143,6 +1153,19 @@ impl Tmpfs {
             Kind::Dir { parent, .. } if *parent == ROOT && root.nlink >= 2 => {}
             _ => return Err(EINVAL),
         }
+        // Extended attributes: valid names, within the size bound
+        for n in self.nodes.values() {
+            let mut total = 0usize;
+            for (k, v) in &n.xattrs {
+                if k.is_empty() || k.len() > NAME_MAX || k.contains(&0) || v.len() > XATTR_SIZE_MAX {
+                    return Err(EINVAL);
+                }
+                total += k.len() + v.len();
+            }
+            if total > XATTR_SIZE_MAX {
+                return Err(EINVAL);
+            }
+        }
         // Entries per inode, and subdirectories per directory
         let mut refs: BTreeMap<u64, u64> = BTreeMap::new();
         let mut used = 0u64;
@@ -1154,7 +1177,7 @@ impl Tmpfs {
             let ty = n.mode & S_IFMT;
             match &n.kind {
                 Kind::Dir { entries, order, next_seq, .. } => {
-                    if ty != S_IFDIR || order.len() != entries.len() {
+                    if ty != S_IFDIR || order.len() != entries.len() || *next_seq < 2 {
                         return Err(EINVAL);
                     }
                     for (name, (child, seq)) in entries {
@@ -1171,10 +1194,10 @@ impl Tmpfs {
                     if ty != S_IFREG || n.size > MAX_FILE || (*data != 0 && !keys.insert(*data)) {
                         return Err(EINVAL);
                     }
-                    used += pages(n.size);
+                    used = used.checked_add(pages(n.size)).ok_or(EINVAL)?;
                 }
                 Kind::Symlink(t) => {
-                    if ty != S_IFLNK || t.is_empty() || t.len() > SYMLINK_MAX {
+                    if ty != S_IFLNK || t.is_empty() || t.len() > SYMLINK_MAX || t.contains(&0) || n.size != t.len() as u64 {
                         return Err(EINVAL);
                     }
                 }
