@@ -3,18 +3,23 @@
     python tools/gemini_review.py --base 7b31b39 --head mk-vfs-core [--path src] [--focus "locking in walk.rs"]
     python tools/gemini_review.py --diff-file some.diff
     python tools/gemini_review.py --files scratch/hang.log src/task/scheduler.rs --question "..."
+    (add --who NAME to label the caller on the status page)
 
 What it does:
   1. Puts the material (a git diff, or the given files) INTO THE PROMPT, in chunks of about
      24,000 characters (a Windows command line holds 32,767), split at file boundaries, so
      Gemini needs no tools at all.
-  2. Runs `agy -p` from an EMPTY work folder (%LOCALAPPDATA%\\hydra-gemini-review), in plan
-     mode, sandboxed; print mode denies every tool that would need a confirmation.
-  3. Prints Gemini's answer per chunk.
+  2. Runs `agy -p` from an empty work folder of its own (%LOCALAPPDATA%/hydra-gemini-review/<pid>),
+     in plan mode, sandboxed; print mode denies every tool that would need a confirmation.
+  3. Prints Gemini's answer per chunk, and appends what it is doing (start, each part, end) to
+     %LOCALAPPDATA%/hydra-gemini-review/activity.jsonl, which the agents status page shows.
+
+The diff and the files are taken from the git repository you run it in (a worktree reviews
+its own branch). `--who` names the caller (default: that repository's folder name).
 
 Gemini sends what it reads to Google (the user agreed to this for Hydra on 2026-11-21).
 Its findings are suggestions: check each one against the code before acting on it.
-Needs Antigravity's CLI (C:\\Users\\<you>\\.gemini\\bin\\agy.exe), signed in.
+Needs Antigravity's CLI (C:/Users/<you>/.gemini/bin/agy.exe), signed in.
 """
 import argparse
 import json
@@ -22,9 +27,12 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WORK = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "hydra-gemini-review")
+BASE_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "hydra-gemini-review")
+WORK = os.path.join(BASE_DIR, str(os.getpid()))
+ACTIVITY = os.path.join(BASE_DIR, "activity.jsonl")
 AGY = os.path.join(os.path.expanduser("~"), ".gemini", "bin", "agy.exe" if os.name == "nt" else "agy")
 GIT = r"C:\Program Files\Git\cmd\git.exe" if os.name == "nt" and os.path.exists(r"C:\Program Files\Git\cmd\git.exe") else "git"
 
@@ -53,6 +61,30 @@ question, say so in one line. Do not plan, write or change anything; answer only
 
 === MATERIAL PART {part}/{parts} ===
 {body}"""
+
+
+def log(**ev):
+    """Appends one event to the activity log (best effort; the status page reads it)."""
+    ev["ts"] = time.time()
+    ev["pid"] = os.getpid()
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        with open(ACTIVITY, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev) + "\n")
+    except OSError:
+        pass
+
+
+def repo_root():
+    """The git repository the caller is in (falls back to this script's repository)."""
+    try:
+        out = subprocess.check_output([GIT, "rev-parse", "--show-toplevel"], text=True,
+                                      stderr=subprocess.DEVNULL).strip()
+        if out:
+            return os.path.normpath(out)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return ROOT
 
 
 def chunks_of(sections):
@@ -95,20 +127,75 @@ def fresh_workdir():
         json.dump(SESSION, f)
 
 
-def run_agy(prompt, model, timeout):
+def run_agy(prompt, model, timeout, part, parts):
     if not os.path.exists(AGY):
-        sys.exit(f"Antigravity CLI not found at {AGY}")
+        print(f"Antigravity CLI not found at {AGY}", file=sys.stderr)
+        return 3
     args = [AGY, "-p", prompt, "--mode", "plan", "--sandbox",
             "--settings", os.path.join(WORK, "session.json"), "--print-timeout", f"{timeout}s"]
     if model:
         args += ["--model", model]
-    p = subprocess.run(args, cwd=WORK, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    out = (p.stdout or "").strip()
-    err = (p.stderr or "").strip()
-    if "auto-denied" in out + err:
+    log(event="part", part=part, parts=parts)
+    t0 = time.time()
+    try:
+        p = subprocess.run(args, cwd=WORK, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout + 120)
+        out, err, rc = (p.stdout or "").strip(), (p.stderr or "").strip(), p.returncode
+    except subprocess.TimeoutExpired:
+        out, err, rc = "", f"Gemini did not finish within {timeout + 120} s (stopped)", 124
+    # agy's own message when a tool was refused (not Gemini's answer text)
+    denied = out.startswith("jetski: no output produced") or "auto-denied" in err
+    log(event="part_done", part=part, parts=parts, rc=rc, seconds=round(time.time() - t0),
+        answer=(out or err)[:600], denied=denied)
+    if denied:
         print("note: Gemini tried to use a tool (denied); the answer may be missing or incomplete", file=sys.stderr)
     print(out if out else err, flush=True)
-    return p.returncode
+    if out and err:
+        print(err, file=sys.stderr)
+    return rc
+
+
+def work(a, repo, who):
+    if a.files:
+        sections = []
+        for f in a.files:
+            src = f if os.path.isabs(f) else os.path.join(repo, f)
+            text = open(src, encoding="utf-8", errors="replace").read()
+            sections.append("\n----- FILE " + os.path.relpath(src, repo) + " -----\n" + text + "\n")
+        parts = chunks_of(sections)
+        log(event="start", who=who, mode="question", repo=repo, what=", ".join(a.files)[:300],
+            question=(a.question or "")[:300], parts=len(parts))
+        rc = 0
+        for n, body in enumerate(parts, 1):
+            print(f"===== Gemini, part {n}/{len(parts)} =====", flush=True)
+            q = a.question or "What is wrong here?"
+            rc |= run_agy(QUESTION_PROMPT.format(part=n, parts=len(parts), question=q, body=body),
+                          a.model, a.timeout, n, len(parts))
+        return rc
+
+    if a.diff_file:
+        diff = open(a.diff_file, encoding="utf-8", errors="replace").read()
+        what = a.diff_file
+    else:
+        if not a.base:
+            print("give --base (and --head) or --diff-file", file=sys.stderr)
+            return 2
+        rng = f"{a.base}..{a.head or 'HEAD'}"
+        diff = subprocess.check_output([GIT, "-C", repo, "diff", "-U8", rng, "--"] + a.path,
+                                       text=True, encoding="utf-8", errors="replace")
+        what = rng + (" -- " + " ".join(a.path) if a.path else "")
+    if not diff.strip():
+        print("empty diff", file=sys.stderr)
+        return 2
+    focus = ("\nAlso look in particular at: " + a.focus) if a.focus else ""
+    parts = chunks_of(split_diff(diff))
+    log(event="start", who=who, mode="review", repo=repo, what=what[:300], focus=a.focus[:200], parts=len(parts))
+    rc = 0
+    for n, body in enumerate(parts, 1):
+        print(f"===== Gemini, part {n}/{len(parts)} =====", flush=True)
+        rc |= run_agy(REVIEW_PROMPT.format(part=n, parts=len(parts), focus=focus, body=body),
+                      a.model, a.timeout, n, len(parts))
+    return rc
 
 
 def main():
@@ -122,39 +209,19 @@ def main():
     ap.add_argument("--question", default="", help="question mode: what to ask about --files")
     ap.add_argument("--model", default="", help="Gemini model id (`agy models`); default: agy's")
     ap.add_argument("--timeout", type=int, default=900, help="seconds Gemini may take per part")
+    ap.add_argument("--who", default="", help="who is asking (shown on the status page)")
     a = ap.parse_args()
 
+    repo = repo_root()
+    who = a.who or os.path.basename(repo)
     fresh_workdir()
-    if a.files:
-        sections = []
-        for f in a.files:
-            src = f if os.path.isabs(f) else os.path.join(ROOT, f)
-            text = open(src, encoding="utf-8", errors="replace").read()
-            sections.append("\n----- FILE " + os.path.relpath(src, ROOT) + " -----\n" + text + "\n")
-        parts = chunks_of(sections)
-        rc = 0
-        for n, body in enumerate(parts, 1):
-            print(f"===== Gemini, part {n}/{len(parts)} =====", flush=True)
-            q = a.question or "What is wrong here?"
-            rc |= run_agy(QUESTION_PROMPT.format(part=n, parts=len(parts), question=q, body=body), a.model, a.timeout)
-        sys.exit(rc)
-
-    if a.diff_file:
-        diff = open(a.diff_file, encoding="utf-8", errors="replace").read()
-    else:
-        if not a.base:
-            sys.exit("give --base (and --head) or --diff-file")
-        rng = f"{a.base}..{a.head or 'HEAD'}"
-        diff = subprocess.check_output([GIT, "-C", ROOT, "diff", "-U8", rng, "--"] + a.path,
-                                       text=True, encoding="utf-8", errors="replace")
-    if not diff.strip():
-        sys.exit("empty diff")
-    focus = ("\nAlso look in particular at: " + a.focus) if a.focus else ""
-    parts = chunks_of(split_diff(diff))
-    rc = 0
-    for n, body in enumerate(parts, 1):
-        print(f"===== Gemini, part {n}/{len(parts)} =====", flush=True)
-        rc |= run_agy(REVIEW_PROMPT.format(part=n, parts=len(parts), focus=focus, body=body), a.model, a.timeout)
+    t_start = time.time()
+    rc = 1
+    try:
+        rc = work(a, repo, who)
+    finally:
+        log(event="end", who=who, rc=rc, seconds=round(time.time() - t_start))
+        shutil.rmtree(WORK, ignore_errors=True)
     sys.exit(rc)
 
 
