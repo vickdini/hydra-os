@@ -188,3 +188,25 @@ fn installs_ring_keeps_the_last_64() {
     close_installed(0);
     let _ = handler(|_| (0, 0));
 }
+
+// wave7 GB begin
+#[test]
+fn an_add_key_lost_in_a_crash_is_sent_again_unless_it_makes_a_keyring() {
+    let _sim = world();
+    crate::fake::user_space_on();
+    let user = b"user\0";
+    let ring = b"keyring\0";
+    let args = |t: &[u8]| [t.as_ptr() as u64, 0, 0, 0, (-1i64) as u64, 0];
+    // Being served when lx-sec died: a user key is updated in place by the new instance
+    assert_eq!(resend(T, LX_RESEND_MAYBE, 248, &args(user), install_mark(), &|| true), Ok(()));
+    // A keyring would be made anew: EIO
+    assert_eq!(resend(T, LX_RESEND_MAYBE, 248, &args(ring), install_mark(), &|| true), Err(EIO));
+    // An unreadable type string: EIO
+    let bad = crate::fake::alloc_pages(1);
+    crate::fake::make_bad(bad);
+    assert_eq!(resend(T, LX_RESEND_MAYBE, 248, &[bad, 0, 0, 0, 0, 0], install_mark(), &|| true), Err(EIO));
+    // Not yet taken: sent again whatever it is
+    assert_eq!(resend(T, LX_RESEND, 248, &args(ring), install_mark(), &|| true), Ok(()));
+    assert!(restart_policy::add_key_resendable(b"logon") && !restart_policy::add_key_resendable(b"keyring") && !restart_policy::add_key_resendable(b"x"));
+}
+// wave7 GB end

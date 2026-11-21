@@ -28,6 +28,8 @@ use core::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use x86_64::instructions::port::Port;
 
 const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;
+/// The lowest rate [`init`] programs: the lowest whole rate whose divisor fits 16 bits.
+const MIN_FREQUENCY_HZ: u32 = 19;
 const PIT_CHANNEL_0_DATA: u16 = 0x40;
 const PIT_COMMAND_PORT: u16 = 0x43;
 
@@ -81,15 +83,20 @@ static FREQUENCY: AtomicU64 = AtomicU64::new(100);
 ///
 /// # Arguments
 ///
-/// * `frequency_hz` - Desired periodic interrupt frequency in Hertz (clamped between 18 Hz and 1,193,182 Hz; standard is 100 Hz).
+/// * `frequency_hz` - Desired periodic interrupt frequency in Hertz (clamped between 19 Hz and 1,193,182 Hz; standard is 100 Hz). The rate kept for
+///   [`frequency_hz`] is the one the divisor gives, rounded to whole Hertz.
+///   (19, not 18: 18 Hz needs divisor 66,288, over 16 bits; the largest one, 65,535, gives
+///   18.2 Hz, which was reported as 18.)
 ///
 /// # Panics
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn init(frequency_hz: u32) {
-    let freq = frequency_hz.max(18).min(PIT_BASE_FREQUENCY_HZ);
+    let freq = frequency_hz.max(MIN_FREQUENCY_HZ).min(PIT_BASE_FREQUENCY_HZ);
     let divisor = (PIT_BASE_FREQUENCY_HZ + freq / 2) / freq;
     let divisor = divisor.clamp(1, 65535) as u16;
+    // The rate the counter really runs at (whole Hertz)
+    let freq = (PIT_BASE_FREQUENCY_HZ + divisor as u32 / 2) / divisor as u32;
 
     unsafe {
         Port::<u8>::new(PIT_COMMAND_PORT).write(PIT_CMD_CHANNEL0_SQUARE_WAVE);

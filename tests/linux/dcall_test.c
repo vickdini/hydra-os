@@ -55,7 +55,9 @@ static void *loop_thread(void *x) {
 }
 
 /* "kill" mode: slow calls to the test service for `secs` seconds while someone kills it;
- * every call must end (0, or EIO / ENOSYS while it is away), none may hang */
+ * every call must end (0, or EIO for a call it was serving), none may hang. A call made
+ * while it restarts waits for the new instance (wave 7: it got ENOSYS before), so ENOSYS
+ * fails the test. */
 static int kill_mode(int secs) {
     time_t end = time(0) + secs;
     long n = 0, ok = 0, eio = 0, enosys = 0, other = 0;
@@ -65,8 +67,8 @@ static int kill_mode(int secs) {
         if (r == 0) ok++; else if (r == -EIO) eio++; else if (r == -ENOSYS) enosys++; else { other++; printf("kill mode: result %ld\n", r); }
     }
     printf("kill mode: %ld calls: %ld ok, %ld EIO, %ld ENOSYS, %ld other\n", n, ok, eio, enosys, other);
-    printf(other == 0 && ok > 0 ? "DCALL-KILL-OK\n" : "DCALL-KILL-FAILED\n");
-    return other != 0;
+    printf(other == 0 && enosys == 0 && ok > 0 ? "DCALL-KILL-OK\n" : "DCALL-KILL-FAILED\n");
+    return other != 0 || enosys != 0 || ok == 0;
 }
 
 int main(int argc, char **argv) {

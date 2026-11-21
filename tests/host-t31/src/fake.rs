@@ -278,6 +278,9 @@ pub static QUEUED: Mutex<BTreeMap<u32, Vec<u64>>> = Mutex::new(BTreeMap::new());
 pub static PRIMARY: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 /// Service-call log: (what, endpoint, a, b) for grants, unregister, release_irqs...
 pub static SVC_LOG: Mutex<Vec<(&'static str, u32, u64, u64)>> = Mutex::new(Vec::new());
+/// (wave7 GB) `(endpoint, task)`: registered by "another driver" right after the next
+/// `server_of(endpoint)` (a race with the supervisor's look).
+pub static REGISTER_AFTER_LOOK: Mutex<Option<(u32, u64)>> = Mutex::new(None);
 /// Answer to `service::call` / `call_once_mode`: hook(endpoint, request) -> reply.
 pub static CALL_HOOK: Mutex<Option<fn(u32, crate::ipc::Message) -> Result<crate::ipc::Message, i64>>> = Mutex::new(None);
 /// MSI line per (bus, device, function) (`service::msi_line`), and MSI-X.
@@ -424,6 +427,7 @@ pub fn reset() {
     QUEUED.lock().unwrap().clear();
     PRIMARY.lock().unwrap().clear();
     SVC_LOG.lock().unwrap().clear();
+    *REGISTER_AFTER_LOOK.lock().unwrap() = None;
     *CALL_HOOK.lock().unwrap() = None;
     MSI.lock().unwrap().clear();
     MSIX.lock().unwrap().clear();

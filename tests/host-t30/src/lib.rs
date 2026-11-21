@@ -1023,6 +1023,12 @@ pub mod task {
         panic!("task::exit")
     }
     pub fn close_retired() {}
+    /// (wave7 GB) A thread tests mark as retired (ended by the supervisor, still running).
+    pub static RETIRED_TID: AtomicU64 = AtomicU64::new(0);
+    pub fn current_retired() -> bool {
+        let r = RETIRED_TID.load(Ordering::Acquire);
+        r != 0 && SCHEDULER.lock().current_task_id().0 == r
+    }
 
     pub mod scheduler {
         use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

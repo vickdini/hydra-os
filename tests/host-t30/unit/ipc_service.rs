@@ -1056,3 +1056,71 @@ fn an_msi_line_is_registered_once_given() {
     assert_eq!(*got.lock().unwrap(), vec![Ok(()), Err(EINVAL), Ok(())]);
     assert!(crate::fake::rec(|r| r.pic.is_empty()));
 }
+
+// wave7 GB begin: registration and teardown exclude each other; retired threads
+#[test]
+fn a_registration_waits_for_a_teardown_in_progress() {
+    let sim = world();
+    crate::task::RETIRED_TID.store(0, Ordering::Release);
+    // A teardown (unregister / unregister_if) holds the registration lock
+    let held = REGISTRATION.lock();
+    let r = StdArc::new(StdMutex::new(None));
+    let r2 = r.clone();
+    sim.spawn(driver(200, EP), move || {
+        crate::world::bkl_enter();
+        *r2.lock().unwrap() = Some(register(EP).map(|_| 0));
+    });
+    sim.run_others();
+    assert_eq!(server_of(EP), 0, "the new server waits: the teardown cannot clear it afterwards");
+    assert_eq!(*r.lock().unwrap(), None);
+    drop(held);
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), Some(Ok(0)));
+    assert_eq!(server_of(EP), 200);
+    // unregister_if: only the server looked at, never an empty registration
+    assert!(!unregister_if(EP, 0));
+    assert!(!unregister_if(EP, 999));
+    assert_eq!(server_of(EP), 200);
+    assert!(unregister_if(EP, 200));
+    assert_eq!(server_of(EP), 0);
+}
+
+#[test]
+fn a_retired_thread_neither_registers_nor_claims_a_line() {
+    let sim = world();
+    crate::task::RETIRED_TID.store(200, Ordering::Release);
+    let r = StdArc::new(StdMutex::new(Vec::new()));
+    let r2 = r.clone();
+    sim.spawn(driver(200, EP), move || {
+        crate::world::bkl_enter();
+        r2.lock().unwrap().push(register(EP).map(|_| 0));
+        r2.lock().unwrap().push(irq_register(11).map(|_| 0));
+    });
+    sim.settle();
+    crate::task::RETIRED_TID.store(0, Ordering::Release);
+    assert_eq!(*r.lock().unwrap(), vec![Err(ESRCH), Err(ESRCH)]);
+    assert_eq!(server_of(EP), 0);
+    assert_eq!(IRQ_OWNER[11].load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn a_process_end_releases_the_lines_of_all_its_threads_and_of_gone_ones() {
+    let sim = world();
+    // Threads 301 and 302 of process 300, thread 401 of process 400 (all alive), and
+    // thread 999 (reaped: not in the table)
+    for (tid, tgid) in [(301u64, 300u64), (302, 300), (401, 400)] {
+        sim.spawn(Task::server(tid, tgid, EP), || loop {
+            crate::task::block_current();
+        });
+    }
+    sim.run_others();
+    for (line, owner) in [(5usize, 301u64), (9, 302), (10, 401), (11, 999)] {
+        IRQ_OWNER[line].store(owner, Ordering::Release);
+        IRQ_SERVICE[line].store(EP, Ordering::Release);
+    }
+    release_irqs_of_process(300);
+    let owners: Vec<u64> = [5usize, 9, 10, 11].iter().map(|&l| IRQ_OWNER[l].load(Ordering::Acquire)).collect();
+    assert_eq!(owners, vec![0, 0, 401, 0]);
+    assert_eq!(IRQ_SERVICE[10].load(Ordering::Acquire), EP);
+}
+// wave7 GB end

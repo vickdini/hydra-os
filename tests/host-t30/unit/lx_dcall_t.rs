@@ -203,3 +203,91 @@ fn delegations_table() {
     // may_use: not a worker
     assert!(!may_use(1));
 }
+
+// wave7 GB begin: a dcall to a restarting service waits for it (it failed with ENOSYS)
+/// A linux-server thread (no worker) making dcall `op` to the test service from its own
+/// task; the result lands in the returned cell.
+fn dcall_from_linux_thread(sim: &crate::world::Sim, ep: u32, op: u64) -> StdArc<StdMutex<Option<i64>>> {
+    let r = StdArc::new(StdMutex::new(None));
+    let r2 = r.clone();
+    sim.spawn(crate::world::Task::server(250, 200, ep), move || {
+        crate::world::bkl_enter();
+        *r2.lock().unwrap() = Some(dcall(250, 0, [LXS_TEST as u64, op, 0, 0, 0, 0], false));
+    });
+    r
+}
+
+#[test]
+fn a_direct_call_to_a_restarting_service_waits_for_its_new_instance() {
+    let sim = world();
+    crate::lx::restart::configure(LXS_TEST, crate::lx::restart::RestartClass::Transparent);
+    let old = start(&sim, LXS_TEST, 300, 1, true, handler(|_| (1, 0)));
+    let l = start(&sim, LXS_LINUX, 200, 1, true, handler(|_| (0, 0)));
+    // The test service goes away: it is restarting
+    crate::lx::server_gone(LXS_TEST);
+    assert!(crate::lx::restart::restarting(LXS_TEST));
+    let r = dcall_from_linux_thread(&sim, l.ep, 9);
+    sim.run_others();
+    assert_eq!(*r.lock().unwrap(), None, "the dcall waits (it was ENOSYS at once)");
+    // The new instance comes up: the call is made to it
+    let new = start(&sim, LXS_TEST, 400, 1, true, handler(|s| (s.call.dcall_op as i64 * 10, 0)));
+    assert!(core::ptr::eq(old.x, new.x));
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), Some(90));
+}
+
+#[test]
+fn a_direct_call_to_a_service_that_does_not_come_back_fails_with_eio() {
+    let sim = world();
+    // FailObjects (the default): callers wait at most 30 s after the crash
+    start(&sim, LXS_TEST, 300, 1, true, handler(|_| (1, 0)));
+    let l = start(&sim, LXS_LINUX, 200, 1, true, handler(|_| (0, 0)));
+    crate::lx::server_gone(LXS_TEST);
+    let t0 = crate::arch::pit::now_ns();
+    let r = dcall_from_linux_thread(&sim, l.ep, 9);
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), None, "it waits");
+    sim.sleep(31 * crate::arch::pit::frequency_hz());
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), Some(EIO));
+    assert!(crate::arch::pit::now_ns() - t0 >= 30_000_000_000);
+    // Given up by the ladder: EIO at once; never started at all: ENOSYS
+    crate::lx::restart::tests::set_restarting(LXS_TEST, false);
+    crate::lx::restart::tests::set_down(LXS_TEST, true);
+    let r = dcall_from_linux_thread(&sim, l.ep, 9);
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), Some(EIO));
+    crate::lx::restart::tests::set_down(LXS_TEST, false);
+    let r = dcall_from_linux_thread(&sim, l.ep, 9);
+    sim.settle();
+    assert_eq!(*r.lock().unwrap(), Some(ENOSYS));
+}
+
+#[test]
+fn a_direct_call_being_served_when_its_target_dies_fails_with_eio_and_a_queued_one_is_sent_again() {
+    let sim = world();
+    crate::lx::restart::configure(LXS_TEST, crate::lx::restart::RestartClass::Transparent);
+    // The first call (op 1) dies with the instance after the second one (op 2) queued
+    start(&sim, LXS_TEST, 300, 1, true, handler(|s| {
+        if s.call.dcall_op == 1 {
+            crate::task::yield_now();
+            crate::lx::server_gone(LXS_TEST);
+        }
+        (s.call.dcall_op as i64, 0)
+    }));
+    let l = start(&sim, LXS_LINUX, 200, 1, true, handler(|_| (0, 0)));
+    let first = dcall_from_linux_thread(&sim, l.ep, 1);
+    let r2 = StdArc::new(StdMutex::new(None));
+    let r3 = r2.clone();
+    sim.spawn(crate::world::Task::server(251, 200, l.ep), move || {
+        crate::world::bkl_enter();
+        *r3.lock().unwrap() = Some(dcall(251, 0, [LXS_TEST as u64, 2, 0, 0, 0, 0], false));
+    });
+    sim.settle();
+    assert_eq!(*first.lock().unwrap(), Some(EIO), "a dcall is not known to be idempotent");
+    assert_eq!(*r2.lock().unwrap(), None, "the queued one waits");
+    start(&sim, LXS_TEST, 400, 1, true, handler(|s| (s.call.dcall_op as i64 * 100, 0)));
+    sim.settle();
+    assert_eq!(*r2.lock().unwrap(), Some(200));
+}
+// wave7 GB end

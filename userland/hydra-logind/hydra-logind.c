@@ -1398,7 +1398,18 @@ static void shut_down(int how) {
     kill(-1, SIGTERM);
     sleep(3);
     kill(-1, SIGKILL);
-    sync();
+    /* sync() may never return when the system's disk is gone (the live stick pulled: wave 7,
+     * Group B): it runs in a child, waited for at most 10 s; Hydra's reboot(2) commits the
+     * pool itself (with its own time limit) */
+    pid_t c = fork();
+    if (c == 0) {
+        sync();
+        _exit(0);
+    }
+    if (c < 0)
+        logmsg("shut_down: fork for sync failed (%s): the kernel commits the pool itself", strerror(errno));
+    for (int i = 0; c > 0 && i < 100 && waitpid(c, NULL, WNOHANG) == 0; i++)
+        usleep(100000);
     reboot(how);
     logmsg("reboot: %s", strerror(errno));
 }
@@ -1406,7 +1417,43 @@ static void shut_down(int how) {
 struct power_request {
     DBusMessage *call;
     int how;
+    int creds_ok;  /* uid and pid are the caller's */
+    unsigned uid;
+    pid_t pid;
+    int others;    /* other users have sessions (the "-multiple-sessions" action) */
 };
+
+/* The session process `pid` runs in, by its cgroup or its ancestors only (not the
+ * "same user as the active session" guess of session_of_pid), -1 if none. */
+static int strict_session_of_pid(pid_t pid) {
+    int s = session_of_cgroup(pid);
+    if (s >= 0)
+        return s;
+    pid_t p = pid, parent;
+    unsigned u;
+    for (int depth = 0; p > 1 && depth < 64; depth++) {
+        for (int i = 0; i < MAX_SESSIONS; i++)
+            if (sessions[i].used && sessions[i].leader == p)
+                return i;
+        if (proc_status(p, &parent, &u) < 0)
+            break;
+        p = parent;
+    }
+    return -1;
+}
+
+/* Whether a power request polkit could not answer may go ahead anyway: what polkit's
+ * default policy grants without asking: root, or a process of the active local session
+ * on seat0 when no other user has a session (login1's power actions: allow_active=yes;
+ * with other sessions it asks for an administrator, so then no). */
+static int allowed_without_polkit(const struct power_request *pr) {
+    if (!pr->creds_ok)
+        return 0;
+    if (pr->uid == 0)
+        return 1;
+    return !pr->others && active >= 0 && sessions[active].used && sessions[active].uid == pr->uid && sessions[active].on_seat &&
+           !sessions[active].remote && strict_session_of_pid(pr->pid) == active;
+}
 
 /* libdbus's timeouts (a pending call's reply timeout): this program polls the bus itself,
  * so it must run them, or a call that is never answered waits for ever (wave 6, G25: the
@@ -1480,9 +1527,20 @@ static void power_decided(DBusPendingCall *pc, void *data) {
     int challenge;
     int ok = polkit_result(r, &challenge);
     /* No reply at all (polkit stuck, e.g. its files unreadable): say so instead of "denied" */
-    int no_answer = r && dbus_message_is_error(r, DBUS_ERROR_NO_REPLY);
+    int no_answer = !r || dbus_message_is_error(r, DBUS_ERROR_NO_REPLY) || dbus_message_is_error(r, DBUS_ERROR_TIMEOUT) ||
+                    dbus_message_is_error(r, DBUS_ERROR_TIMED_OUT) || dbus_message_is_error(r, DBUS_ERROR_SERVICE_UNKNOWN) ||
+                    dbus_message_is_error(r, DBUS_ERROR_NAME_HAS_NO_OWNER) || dbus_message_is_error(r, DBUS_ERROR_SPAWN_EXEC_FAILED) ||
+                    dbus_message_is_error(r, DBUS_ERROR_SPAWN_CHILD_EXITED) || dbus_message_is_error(r, DBUS_ERROR_SPAWN_CHILD_SIGNALED) ||
+                    dbus_message_is_error(r, DBUS_ERROR_SPAWN_FAILED);
     if (no_answer)
         logmsg("power: polkit did not answer");
+    /* polkit cannot decide (wave 7, Group B: the live stick pulled, its files unreadable):
+     * the caller owning the active local session gets what polkit's default policy gives
+     * it there, or the system could never be restarted */
+    if (no_answer && !ok && allowed_without_polkit(pr)) {
+        logmsg("power: allowed for uid %u (pid %d) without polkit, as its default policy would", pr->uid, (int)pr->pid);
+        ok = 1;
+    }
     if (r)
         dbus_message_unref(r);
     DBusMessage *reply = ok         ? dbus_message_new_method_return(pr->call)
@@ -1511,14 +1569,22 @@ static DBusMessage *power(DBusMessage *m, const char *what, int how) {
      * install stick is pulled) left Reboot hanging. Interactive checks may wait for a
      * password dialog, so they get longer. */
     int timeout_ms = interactive ? 120000 : 25000;
+    /* The caller's identity first: sender_creds() talks to the bus synchronously, which
+     * must not happen between sending the polkit call and attaching its notify function
+     * (the reply could complete the pending call first) */
+    struct power_request *pr = malloc(sizeof *pr);
+    pr->pid = 0;
+    pr->uid = (unsigned)-1;
+    pr->creds_ok = sender_creds(m, &pr->pid, &pr->uid) == 0;
+    pr->others = strstr(action, "-multiple-sessions") != NULL;
+    pr->how = how;
     if (!dbus_connection_send_with_reply(bus, q, &pc, timeout_ms) || !pc) {
         dbus_message_unref(q);
+        free(pr);
         return error(m, DBUS_ERROR_FAILED, "polkit is not available");
     }
     dbus_message_unref(q);
-    struct power_request *pr = malloc(sizeof *pr);
     pr->call = dbus_message_ref(m);
-    pr->how = how;
     dbus_pending_call_set_notify(pc, power_decided, pr, NULL);
     dbus_pending_call_unref(pc);
     return NULL; /* answered when polkit has decided */

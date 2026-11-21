@@ -192,6 +192,35 @@ fn reboot_pulses_reset_lines() {
     assert!(log.iter().any(|l| l.contains("Restarting")));
 }
 
+// wave7 GB begin
+#[test]
+fn a_restart_does_not_wait_for_ever_for_a_pool_commit() {
+    host::reset();
+    stubs::reset();
+    // With the scheduler running the commit runs in a task of its own; here it never
+    // finishes (the pool's disk is gone): the restart goes on after 30 s
+    stubs::task::ACTIVE.set(true);
+    stubs::task::SPAWNED.with_borrow_mut(|s| s.clear());
+    let r = std::panic::catch_unwind(|| power::reboot());
+    stubs::task::ACTIVE.set(false);
+    assert!(r.is_err());
+    assert_eq!(hw::port_writes(), vec![(0x64, 0xFE), (0xCF9, 0x06)]);
+    let calls = stubs::take_calls();
+    assert!(calls.contains(&"task::spawn pool-commit".to_string()), "{calls:?}");
+    assert_eq!(calls.iter().filter(|c| *c == "task::sleep_ms 100").count(), 300);
+    assert!(!calls.contains(&"zfs::sync".to_string()), "not made by the caller");
+    let log = stubs::take_log();
+    assert!(log.iter().any(|l| l.contains("did not finish within 30 s")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("Restarting")));
+    // The task itself: commits, then ends
+    let entry = stubs::task::SPAWNED.with_borrow(|s| s[0]);
+    let r = std::panic::catch_unwind(entry);
+    assert!(r.is_err(), "task::exit");
+    let calls = stubs::take_calls();
+    assert_eq!((calls.contains(&"zfs::sync".to_string()), calls.contains(&"task::exit".to_string())), (true, true));
+}
+// wave7 GB end
+
 // ----------------------------------------------------------------------- keyboard
 
 fn ch(c: char) -> Option<Key> {

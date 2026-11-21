@@ -51,7 +51,11 @@
 //! ## When the callee dies
 //!
 //! Its calls in flight fail with `-EIO` as every forwarded call does (`server_gone`), so the
-//! caller never hangs.
+//! caller never hangs. While it restarts (Transparent and FailObjects, `lx::restart`) a dcall
+//! waits for the new instance as a forwarded call does (`restart::wait_online`, at most 30 s
+//! after the crash), and one the dead instance had not started is sent again; a call it was
+//! serving fails with `-EIO` (a dcall is not known to be idempotent). (Before wave 7 a dcall
+//! to a restarting service failed with `-ENOSYS` at once.)
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use spin::Mutex;
@@ -71,6 +75,8 @@ const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 const E2BIG: i64 = -7;
+const EINTR: i64 = -4;
+const EIO: i64 = -5;
 
 /// Most bytes one post carries.
 pub const POST_MAX: u64 = 16;
@@ -220,6 +226,52 @@ fn target_host(target: SvcId) -> Option<&'static svc::Host> {
     svc::host(svc::host_of(target)).filter(|x| x.is_online())
 }
 
+// wave7 GB begin: a dcall to a restarting service waits for it (item 2)
+/// The host serving `target` for a dcall: online now, or once its restart ends.
+///
+/// # Errors
+///
+/// `-ENOSYS` (not a forwarded service, or not running and not restarting), `-EIO` (given
+/// up by the ladder, or not back within 30 s), `-EINTR` (a signal came while waiting).
+fn dcall_host(target: SvcId) -> Result<&'static svc::Host, i64> {
+    if svc::mode(target) == svc::SvcMode::Kernel {
+        return Err(ENOSYS);
+    }
+    let x = svc::host(svc::host_of(target)).ok_or(ENOSYS)?;
+    if x.is_online() {
+        return Ok(x);
+    }
+    if super::restart::restarting(x.id) {
+        wait_for(x)?;
+        return Ok(x);
+    }
+    // (it may have come back between the two looks)
+    if x.is_online() {
+        return Ok(x);
+    }
+    Err(if super::restart::down(x.id) { EIO } else { ENOSYS })
+}
+
+/// Waits until host `x` (restarting) is online again. A signal ends the wait with `-EINTR`:
+/// the caller is a service thread, which does not restart system calls.
+fn wait_for(x: &'static svc::Host) -> Result<(), i64> {
+    super::restart::wait_online(x.id, &|| x.is_online()).map_err(|e| if e == crate::compat::linux::proc::ERESTARTSYS { EINTR } else { e })
+}
+
+/// What a dcall does with host `x`'s internal answer `r` (made since install count `mark`):
+/// `Some(Ok(()))` send it again (the service is back), `Some(Err(e))` fail with `e`, `None`
+/// an ordinary answer.
+fn after_restart(x: &'static svc::Host, r: i64, c: &LxCall, mark: u64) -> Option<Result<(), i64>> {
+    match r {
+        super::LX_OFFLINE => Some(wait_for(x)),
+        super::restart::LX_RESEND | super::restart::LX_RESEND_MAYBE => {
+            Some(super::restart::resend(x.id, r, c.nr, &c.args, mark, &|| x.is_online()).map_err(|e| if e == crate::compat::linux::proc::ERESTARTSYS { EINTR } else { e }))
+        }
+        _ => None,
+    }
+}
+// wave7 GB end
+
 /// The identity a dcall made by thread `me` (of host `mine`) carries: the program it serves
 /// a request for (`(request, its caller)`), else its own.
 fn identity(c: &mut LxCall, me: u64, mine: SvcId) -> u64 {
@@ -277,8 +329,9 @@ static DCALL_DESC: copy::Desc = [copy::Arg::None, copy::Arg::In(copy::len_arg(3)
 ///
 /// The callee's result, or `-EPERM` (no such edge, or not a Linux service), `-EINVAL`
 /// (bad target, `in_len`/`out_cap` over the copy area), `-EFAULT` (bad `in`), `-ENOSYS`
-/// (target not online), `-EAGAIN` (a call to its own process with no idle worker), `-EIO`
-/// (the target went away during the call).
+/// (target not running and not restarting), `-EAGAIN` (a call to its own process with no
+/// idle worker), `-EIO` (the target went away while serving the call, was given up, or did
+/// not come back within 30 s), `-EINTR` (a signal while waiting for its restart).
 pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     let (target, op, inp, in_len, out, out_cap) = (a[0], a[1], a[2], a[3], a[4], a[5]);
     if target as usize >= LXS_MAX || target == 0 {
@@ -294,7 +347,11 @@ pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     if in_len > size || out_cap > size || in_len + out_cap > size || (in_len > 0 && inp == 0) || (out_cap > 0 && out == 0) {
         return EINVAL;
     }
-    let Some(x) = target_host(target) else { return ENOSYS };
+    // (wave7 GB: waits while the target restarts)
+    let x = match dcall_host(target) {
+        Ok(x) => x,
+        Err(e) => return e,
+    };
     // A pool never waits for itself: a call to its own process needs an idle worker now
     if x.id == from && !x.lx(|s| s.workers.iter().any(|w| w.idle)) {
         return EAGAIN;
@@ -313,8 +370,21 @@ pub fn dcall(me: u64, idx: usize, a: [u64; 6], nobkl: bool) -> i64 {
     DCALLS.fetch_add(1, Ordering::Relaxed);
     // The delegation holds while the call lasts (it is in force before the callee runs)
     let deleg = on_behalf != 0 && deleg_add(me, on_behalf);
-    let mut redir = (0, 0);
-    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, idx, c, copy::Src::User(DCALL_DESC), nobkl, None, &mut redir));
+    let mark = super::restart::install_mark();
+    let r = loop {
+        let mut redir = (0, 0);
+        let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, idx, c, copy::Src::User(DCALL_DESC), nobkl, None, &mut redir));
+        // wave7 GB: the target went away before or while taking the call: wait for its
+        // new instance and send the call again (one it was serving fails with EIO)
+        match after_restart(x, r, &c, mark) {
+            Some(Ok(())) => {
+                c.note_seq = x.notes_head();
+                continue;
+            }
+            Some(Err(e)) => break e,
+            None => break r,
+        }
+    };
     // (a redirect answer is not a dcall's: the callee answers itself)
     let r = if r == crate::ipc::protocol::LX_REDIRECTED { EINVAL } else { r };
     if deleg {

@@ -442,12 +442,12 @@ fn boot_loads_the_compiled_policy_once() {
     assert!(!abac::active(), "only once per boot");
 }
 
-/// A what-if query compares values the interner has never seen as never equal (each gets
-/// its own temporary ID), so `evaluate` denies what enforcement (which interns subjects
-/// and labels) would allow: user `department=Sales` and a file `department=Sales` with a
-/// rule `user.department res.department ==`.
+/// A what-if query must compare two equal values the interner has never seen as equal (one
+/// temporary ID per string), as enforcement (which interns subjects and labels) does: user
+/// `team=NeverSeenBefore` and a file `team=NeverSeenBefore` with a rule
+/// `user.team res.team ==` (it was denied before wave 7, Group B); two different unseen
+/// values stay different.
 #[test]
-#[ignore = "BUG: evaluate() treats two equal values unknown to the interner as different (temporary IDs), unlike enforcement"]
 fn evaluate_matches_equal_unseen_values() {
     let _g = serial();
     assert_eq!(load("hydra-access 1
@@ -458,6 +458,15 @@ allow r user.team res.team ==
     let s = abac::evaluate("team=NeverSeenBefore
 --
 team=NeverSeenBefore").unwrap();
+    let other = abac::evaluate("team=NeverSeenBefore
+--
+team=AlsoNeverSeen").unwrap();
+    // (a temporary ID does not outlive its query: the next one starts afresh)
+    let again = abac::evaluate("team=AlsoNeverSeen
+--
+team=AlsoNeverSeen").unwrap();
     as_admin(|| prctl(cmd::LOAD, 0, 0, 0));
     assert!(s.starts_with("enforced=r "), "{s}");
+    assert!(other.starts_with("enforced=- "), "{other}");
+    assert!(again.starts_with("enforced=r "), "{again}");
 }

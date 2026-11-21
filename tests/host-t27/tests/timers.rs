@@ -52,6 +52,21 @@ fn itimer_cleanup() {
     }
 }
 
+// wave7 GB: the timer daemons run above the services (High = 3): one woken at its tick does
+// not wait for a service worker's timeslice
+#[test]
+fn the_timer_daemons_run_above_the_services() {
+    let _g = serial();
+    process(1102);
+    assert_eq!(itimer::sys_alarm(3), 0);
+    let _ = ptimerd();
+    let pr = fake::task::SPAWN_PRIORITY.lock().clone();
+    for d in ["itimerd", "ptimerd"] {
+        assert!(pr.iter().any(|&(n, p)| n == d && p == 4), "{d} at Realtime: {pr:?}");
+    }
+    itimer_cleanup();
+}
+
 #[test]
 fn alarm_returns_the_seconds_left() {
     let _g = serial();

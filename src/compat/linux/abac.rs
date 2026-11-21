@@ -797,6 +797,9 @@ pub fn evaluate(q: &str) -> Result<String, i64> {
     let (user_t, res_t, env_t) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let p = with_state(|s| s.policy.clone()).ok_or(-61i64)?; // ENODATA: no policy
     let (user, res, env, exec) = with_state(|s| -> Result<_, i64> {
+        // (equal unknown values of this query get one temporary ID, as enforcement would
+        // intern them to one)
+        s.it.forget_temps();
         let user = AttrSet::parse(&mut s.it, user_t, false).map_err(|_| EINVAL)?;
         let res = AttrSet::parse(&mut s.it, res_t, false).map_err(|_| EINVAL)?;
         let mut env = p.env_at(now());
@@ -814,6 +817,8 @@ pub fn evaluate(q: &str) -> Result<String, i64> {
                 env.push(a, v);
             }
         }
+        // (the query's temporary IDs are not kept past it)
+        s.it.forget_temps();
         Ok((user, res, env, exec))
     })?;
     let d = p.decide(&user, &res, &env);

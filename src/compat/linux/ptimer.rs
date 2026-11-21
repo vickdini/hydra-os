@@ -173,7 +173,10 @@ fn ptimerd_main() {
 
 fn ensure_started() {
     if !STARTED.swap(true, Ordering::AcqRel) {
-        crate::task::spawn("ptimerd", ptimerd_main, crate::task::TaskPriority::High);
+        // wave7 GB: above the services (High): a timer daemon woken at its tick must not wait for a
+        // service worker's timeslice (on one CPU, half the 1 ms timer signals were lost while
+        // linux-server's workers ran); it only posts signals
+        crate::task::spawn("ptimerd", ptimerd_main, crate::task::TaskPriority::Realtime);
     }
 }
 
