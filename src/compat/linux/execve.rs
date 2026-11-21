@@ -344,8 +344,14 @@ fn load(lv: Level, abs_path: String, argv: Vec<Vec<u8>>, envp: &[Vec<u8>], via_s
 /// vfs-server looked up the program, its `#!` interpreters and its ELF interpreter; here the
 /// same checks as for the kernel's own lookup, then the load. `None`: the kernel's own front
 /// half runs instead (the file turned into a script meanwhile).
-fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>]) -> Option<Result<Ready, i64>> {
-    let lv = match level(plan.ino, &plan.shown, true) {
+fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>], flags: u64) -> Option<Result<Ready, i64>> {
+    // (checks only the kernel's own lookup makes at every `#!` level: Landlock, fanotify, app
+    // control; such callers get no plan, but the rules may have come meanwhile)
+    if super::landlock::active() || super::fanotify::active() || super::abac::active() {
+        return None;
+    }
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0 || !plan.prefix.is_empty();
+    let lv = match level(plan.ino, &plan.shown, follow) {
         Ok(l) => l,
         Err(e) => return Some(Err(e)),
     };
@@ -398,7 +404,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     if !path.is_empty() {
         if let Some(plan) = crate::lx::xexec::front(dirfd, path_ptr, &path, flags) {
             let r = match plan {
-                Ok(p) => from_plan(p, &argv, &envp),
+                Ok(p) => from_plan(p, &argv, &envp, flags),
                 Err(e) => Some(Err(e)),
             };
             match r {

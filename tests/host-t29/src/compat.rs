@@ -121,6 +121,10 @@ pub mod linux_host {
     }
     pub mod abac {
         pub const PR_HYDRA_ACCESS: u64 = 0x4859_4401;
+        /// wave7 G7-5: no access policies loaded (a test sets fake ret "abac::active").
+        pub fn active() -> bool {
+            crate::fake::ret("abac::active") != 0
+        }
         pub fn console_subject() -> u32 {
             0
         }

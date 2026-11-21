@@ -1745,7 +1745,7 @@ pub const LX_MNTNS_GONE: u64 = u64::MAX;
 /// Kernel call to linux-server ([`LXS_LINUX`]): the front half of `execve`. Arguments:
 /// `[dirfd, LX_KBUF_ADDR (out: LxExecPlan + strings), path pointer (the caller's), flags
 /// (AT_SYMLINK_NOFOLLOW), LX_KBUF_ADDR + 0x1000 (in: the base path, as the kernel shows the
-/// directory), base path length]`; the caller's file context as for a file-service call.
+/// directory, the working directory and the path, each NUL-terminated), their length]`; the caller's file context as for a file-service call.
 /// Result: 0 = the plan was written, [`LX_EXEC_KERNEL`] = the kernel makes the front half
 /// itself, `-errno` = `execve` fails with it.
 pub const LX_KCALL_EXEC: u64 = 0x6790;

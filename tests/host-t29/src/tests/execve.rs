@@ -426,3 +426,16 @@ fn the_planned_elf_interpreter_is_used() {
     fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/other", 0))))));
     assert_eq!(exec("/bin/dyn", &[], &[]).0, 0);
 }
+
+#[test]
+fn a_plan_is_not_used_once_kernel_only_rules_exist() {
+    let _g = setup();
+    proc_(1164, 1000);
+    file("/bin/sh", 70, 0o100755, program());
+    file("/bin/prog", 50, 0o100755, program());
+    // (app control loaded after the front half was asked: the kernel looks up /bin/prog itself)
+    fake::set_ret("abac::active", 1);
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(70, "/bin/sh", &[], None))));
+    assert_eq!(exec("/bin/prog", &["prog"], &[]).0, 0);
+    assert_eq!(fake::task(1164, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/prog"));
+}

@@ -103,14 +103,17 @@ pub fn front(dirfd: i64, path_ptr: u64, path: &[u8], flags: u64) -> Option<Resul
     if !servable(&c, LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC) {
         return None;
     }
-    // In: "base\0cwd\0"; out: the rest of the copy area
-    let n = base.len() + cwd.len() + 2;
+    // In: "base\0cwd\0path\0" (the path the kernel read, never fetched again); out: the
+    // rest of the copy area
+    let n = base.len() + cwd.len() + path.len() + 3;
     if n + 1024 > LX_DATA_SIZE {
         return None;
     }
     let mut buf = copy::CopyBuf::EMPTY;
     buf.data[..base.len()].copy_from_slice(base.as_bytes());
     buf.data[base.len() + 1..base.len() + 1 + cwd.len()].copy_from_slice(cwd.as_bytes());
+    let po = base.len() + cwd.len() + 2;
+    buf.data[po..po + path.len()].copy_from_slice(path);
     buf.used = LX_DATA_SIZE;
     buf.hdr.in_off[4] = LX_DATA_OFF as u16;
     buf.hdr.in_len[4] = n as u16;

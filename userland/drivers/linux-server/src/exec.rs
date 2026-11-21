@@ -108,7 +108,7 @@ fn read(ino: u64, off: u64, len: u64) -> Option<Vec<u8>> {
 }
 
 /// `LX_KCALL_EXEC(dirfd, out, path, flags, in, in_len)`: the input holds the base path of
-/// `dirfd` and the working directory's path, each NUL-terminated.
+/// `dirfd`, the working directory's path and the path to run, each NUL-terminated.
 pub fn front(cx: &Cx) -> (i64, u64) {
     let r = match plan(cx) {
         Ok(()) => {
@@ -126,14 +126,15 @@ pub fn front(cx: &Cx) -> (i64, u64) {
 
 fn plan(cx: &Cx) -> Result<(), Stop> {
     let a = cx.args;
-    let path = cx.user_cstr(a[2]).map_err(Stop::Fail)?;
-    if path.is_empty() {
-        return Err(Stop::Kernel);
-    }
+    // The kernel's copy of the path (not the caller's memory: read once)
     let bases = cx.copy_in(a[4], a[5] as usize).map_err(|_| Stop::Kernel)?;
     let mut parts = bases.split(|&b| b == 0);
     let base = parts.next().unwrap_or(b"/").to_vec();
     let cwd = parts.next().unwrap_or(b"/").to_vec();
+    let path = parts.next().unwrap_or(b"").to_vec();
+    if path.is_empty() {
+        return Err(Stop::Kernel);
+    }
     let mut c = cx.c;
     let mut nofollow = a[3] & AT_SYMLINK_NOFOLLOW != 0;
     let mut cur = path;
