@@ -241,10 +241,15 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
         let before = rd.remaining();
         let e = rd.entry();
         // (a name that ran past the end: the record was not whole)
-        if rd.remaining() == 0 && before != 28 + e.name.len() {
+        // (and a directory entry always has a name)
+        if e.name.is_empty() || (rd.remaining() == 0 && before != 28 + e.name.len()) {
             break;
         }
         out.push(e);
+    }
+    // (not one whole entry where the reply said there were some: a broken reply, not the end)
+    if out.is_empty() && n > 0 {
+        return Err(EIO);
     }
     Ok(out)
 }
