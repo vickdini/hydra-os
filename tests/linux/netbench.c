@@ -185,7 +185,7 @@ int main(int argc, char **argv) {
                  * docs/linux-services-design.md 2.3: "connections reset, downloads fail
                  * cleanly"): a reset, a broken pipe or an end of file is that, no failure */
                 if (e == ECONNRESET || e == EPIPE || e == ENOTCONN || e == ECONNABORTED || (w == 1 && r == 0)) {
-                    printf("NETBENCH lolat CONNECTION-RESET at %d (%s): expected when net-server restarts\n", i, r == 0 ? "end of file" : strerror(e));
+                    printf("NETBENCH lolat CONNECTION-RESET at %d after %.0f ms (%s): expected when net-server restarts\n", i, (now_us() - t0) / 1000, r == 0 ? "end of file" : strerror(e));
                     kill(p, SIGKILL);
                     waitpid(p, 0, 0);
                     return 3;

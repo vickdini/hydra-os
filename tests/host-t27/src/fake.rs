@@ -376,6 +376,7 @@ pub mod task {
         Low,
         Normal,
         High,
+        Realtime,
     }
 
     /// Capability set of a task, as far as the code under test looks at it.
@@ -431,7 +432,11 @@ pub mod task {
     pub static SPAWNED_ALL: spin::Mutex<Vec<(&'static str, fn())>> = spin::Mutex::new(Vec::new());
 
     /// Records the kernel task (tests can run its entry function).
-    pub fn spawn(name: &'static str, entry_fn: fn(), _priority: TaskPriority) -> TaskId {
+    /// (wave7 GB) The priority each kernel task was spawned with, by name.
+    pub static SPAWN_PRIORITY: spin::Mutex<Vec<(&'static str, u8)>> = spin::Mutex::new(Vec::new());
+
+    pub fn spawn(name: &'static str, entry_fn: fn(), priority: TaskPriority) -> TaskId {
+        SPAWN_PRIORITY.lock().push((name, priority as u8));
         SPAWNED.with_borrow_mut(|v| v.push((name, entry_fn)));
         SPAWNED_ALL.lock().push((name, entry_fn));
         TaskId(1000)
