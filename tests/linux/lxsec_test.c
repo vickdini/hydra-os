@@ -9,7 +9,8 @@
  *   lxsec hammer N S  N threads for S seconds: add_key to the thread keyring, read it back,
  *                     unlink it, and a search of @u for the kept key; one line per second with
  *                     calls, errors and the longest call (a restart shows as a pause); at the
- *                     end "HAMMER-END calls C errors E longest-ms L"
+ *                     end "HAMMER-END calls C errors E longest-ms L in-flight-EIO F" (F: unlinks
+ *                     being served when lx-sec died: EIO by design)
  *   lxsec bpfhold S   a hash map with one element, then waits up to S seconds for
  *                     /tmp/lxsec.go; after it, the old map descriptor must fail (EBADF after a
  *                     restart, "STALE OK"), a new map must work ("NEWMAP OK")
@@ -80,7 +81,7 @@ static int check(void) {
     return bad != 0;
 }
 
-static volatile long h_calls, h_errs, h_long, h_stop;
+static volatile long h_calls, h_errs, h_long, h_stop, h_inflight;
 
 /* The first errors, one line each (which call, its result and errno): tells a call lost in
  * a restart (EIO) from a key the restart lost (ENOKEY) */
@@ -102,7 +103,12 @@ static void *hammer_thread(void *arg) {
             long r = syscall(SYS_keyctl, KEYCTL_READ, id, buf, sizeof buf);
             if (r != 6) { err = 1; herr("read", r, errno); }
             r = syscall(SYS_keyctl, KEYCTL_UNLINK, id, THREAD_KEYRING);
-            if (r != 0) { err = 1; herr("unlink", r, errno); }
+            /* An unlink being served when lx-sec dies gets EIO: a change in flight is not
+             * sent again (it may have happened; linux-services-design 5.1, Transparent:
+             * "EIO only for a change in flight"). Counted apart: expected across a kill.
+             * (add_key is sent again since wave 7: lx-sec updates the key in place.) */
+            if (r != 0 && errno == EIO) { __sync_fetch_and_add(&h_inflight, 1); herr("unlink (in flight)", r, errno); }
+            else if (r != 0) { err = 1; herr("unlink", r, errno); }
         }
         long s = syscall(SYS_keyctl, KEYCTL_SEARCH, USER_KEYRING, "user", "lxsec-kept", 0);
         if (s <= 0) { err = 1; herr("search", s, errno); }
@@ -127,7 +133,7 @@ static int hammer(int threads, int secs) {
     }
     h_stop = 1;
     for (int i = 0; i < threads; i++) pthread_join(t[i], 0);
-    printf("HAMMER-END calls %ld errors %ld longest-ms %ld\n", h_calls, h_errs, h_long);
+    printf("HAMMER-END calls %ld errors %ld longest-ms %ld in-flight-EIO %ld\n", h_calls, h_errs, h_long, h_inflight);
     return 0;
 }
 
