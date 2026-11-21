@@ -177,4 +177,37 @@ fn the_walk_over_the_tables() {
     }
     assert_eq!(Pool::new(7).acl(Node::new(tm as u16, x)).as_deref(), Some(&b"acl"[..]));
     assert_eq!(Pool::new(7).readlink(Node::new(tm as u16, 4)).unwrap(), b"../usr");
+
+    // The kernel's namespace notes (LX_NOTE_MNTNS): 8 is made from 7, then 7 and 8 go
+    struct Store(Vec<u64>);
+    impl crate::tmpfs::DataStore for Store {
+        fn create(&mut self) -> Result<u64, i64> {
+            Ok(1)
+        }
+        fn write(&mut self, _k: u64, _o: u64, _d: &[u8]) -> Result<(), i64> {
+            Ok(())
+        }
+        fn read(&mut self, _k: u64, _o: u64, _b: &mut [u8]) -> Result<(), i64> {
+            Ok(())
+        }
+        fn truncate(&mut self, _k: u64, _s: u64, _o: u64) -> Result<(), i64> {
+            Ok(())
+        }
+        fn free(&mut self, k: u64) {
+            self.0.push(k);
+        }
+    }
+    let mut store = Store(Vec::new());
+    mount::on_mntns(8, 7, &mut store);
+    assert_eq!(found(8, "/tmp/x").unwrap().0, Node::new(tm as u16, x), "the copy sees the tmpfs");
+    mount::on_mntns(9, 12345, &mut store);
+    assert_eq!(found(9, "/tmp").unwrap().0, Node::new(0, 20), "made from an unknown one: the initial table");
+    assert_eq!(redirected(9, "/proc/self").0, LXS_PROC);
+    mount::on_mntns(7, crate::proto::LX_MNTNS_GONE, &mut store);
+    assert!(MTAB.lock().as_ref().unwrap().ns(7).is_none());
+    assert!(TMPFS.lock().as_ref().unwrap().get(n).is_some(), "still mounted in 8");
+    mount::on_mntns(8, crate::proto::LX_MNTNS_GONE, &mut store);
+    assert!(TMPFS.lock().as_ref().unwrap().get(n).is_none(), "no namespace mounts it: gone");
+    mount::on_mntns(0, crate::proto::LX_MNTNS_GONE, &mut store);
+    assert!(MTAB.lock().as_ref().unwrap().ns(0).is_some(), "never the initial one");
 }

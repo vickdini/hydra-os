@@ -27,6 +27,9 @@ use hydra_rt::mem::{unmap, MemObj, PROT_READ, PROT_RW};
 
 use crate::tmpfs::{DataStore, MAX_FILE, PAGE};
 
+/// The program's store (every tmpfs instance's file data).
+pub static STORE: crate::lock::YLock<MemStore> = crate::lock::YLock::new(MemStore::new());
+
 /// Largest window mapped at once.
 pub const WINDOW: u64 = 1 << 20;
 const EINVAL: i64 = -22;
@@ -39,7 +42,7 @@ pub struct MemStore {
 }
 
 impl MemStore {
-    pub fn new() -> MemStore {
+    pub const fn new() -> MemStore {
         MemStore { objs: BTreeMap::new() }
     }
 

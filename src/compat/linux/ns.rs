@@ -312,6 +312,7 @@ pub fn after_clone(child: u64, flags: u64) {
         if let Some(fds) = fds {
             super::mount::copy_ns(parent_mnt, child_mnt, &fds);
         }
+        note_mntns(child_mnt, parent_mnt); // wave7 G7-3
     }
     if user.is_some() {
         let id = crate::task::TaskId(child);
@@ -395,6 +396,9 @@ pub fn sys_unshare(flags: u64) -> i64 {
         if let Some(fds) = fds {
             super::mount::copy_ns(old_mnt, new_mnt, &fds);
         }
+        // wave7 G7-3: vfs-server copies the table; the old namespace may be empty now
+        note_mntns(new_mnt, old_mnt);
+        mntns_left(old_mnt);
     }
     if user.is_some() {
         crate::task::with_current_task_mut(|t| t.caps.enter_userns());
@@ -756,6 +760,10 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
             }
         }
     }
+    // wave7 G7-3: the namespace left may be empty now
+    if kinds & CLONE_NEWNS != 0 && theirs.mnt != mine.mnt {
+        mntns_left(mine.mnt);
+    }
     // A new mount namespace puts the root and working directory at its root
     if let Some(src) = target_fds {
         let (root_ino, root_mnt) = {
@@ -797,3 +805,30 @@ pub fn check_fork() -> Result<(), i64> {
         Ok(())
     }
 }
+
+// wave7 G7-3 begin: vfs-server keeps the mount tables (wave 7) and hears of namespaces
+/// Tells vfs-server that mount namespace `new` was made from `from`, or (`from` =
+/// [`LX_MNTNS_GONE`]) that `new` has no live process left. Nothing when vfs-server is not
+/// the host of the file service.
+///
+/// [`LX_MNTNS_GONE`]: crate::ipc::protocol::LX_MNTNS_GONE
+pub fn note_mntns(new: u64, from: u64) {
+    use crate::ipc::protocol::{ENDPOINT_VFS_SERVER, LXS_VFS, LX_NOTE_MNTNS};
+    if new == 0 {
+        return;
+    }
+    let h = crate::lx::svc::host_of(LXS_VFS);
+    if h != 0 && crate::lx::svc::endpoint_of(LXS_VFS) == ENDPOINT_VFS_SERVER {
+        crate::lx::note_to(h, LX_NOTE_MNTNS, new, from, 0);
+    }
+}
+
+/// A process left mount namespace `ns` (`setns`, `unshare`): when no live process is left
+/// in it, vfs-server drops its table. (Exits: `proc::thread_exited`, which holds the
+/// process table.)
+pub fn mntns_left(ns: u64) {
+    if ns != 0 && !super::proc::PROCS.lock().values().any(|p| !p.zombie && p.ns.mnt == ns) {
+        note_mntns(ns, crate::ipc::protocol::LX_MNTNS_GONE);
+    }
+}
+// wave7 G7-3 end

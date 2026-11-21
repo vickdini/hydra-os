@@ -167,3 +167,31 @@ pub fn tmpfs_readlink(n: u32, node: Node) -> Result<Vec<u8>, i64> {
 pub fn tmpfs_acl(n: u32, node: Node) -> Option<Vec<u8>> {
     with_tmpfs(n, |t| t.getxattr(node.ino, crate::perm::ACL_ACCESS)).ok()
 }
+
+/// `LX_NOTE_MNTNS`: namespace `new` was made as a copy of `from` (its served mounts stay
+/// by name, so a chrooted process keeps its `/proc`, as in the kernel), or (`from` =
+/// `LX_MNTNS_GONE`) `new` has no live process left: its table goes, and the tmpfs instances
+/// no namespace mounts and no handle holds go with it (their data from `store`).
+pub fn on_mntns(new: u64, from: u64, store: &mut dyn tmpfs::DataStore) {
+    let mut g = MTAB.lock();
+    let Some(t) = g.as_mut() else { return };
+    if from == crate::proto::LX_MNTNS_GONE {
+        let fx = t.drop_ns(new);
+        let gone = fx.tmpfs_gone;
+        drop(g);
+        if !gone.is_empty() {
+            let m = MTAB.lock();
+            let mounted = |n: u32| m.as_ref().is_some_and(|t| t.tmpfs_in_use(n));
+            if let Some(s) = TMPFS.lock().as_mut() {
+                s.reap(&mounted, store);
+            }
+        }
+        // (pool roots of binds: held and let go once the mount calls hold them)
+        return;
+    }
+    // A namespace made from one the server never heard of copies the initial one
+    let src = if t.ns(from).is_some() { from } else { 0 };
+    if t.copy_ns(src, new, &|_| 0).is_ok() {
+        changed();
+    }
+}

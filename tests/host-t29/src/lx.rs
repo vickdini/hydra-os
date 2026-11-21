@@ -40,3 +40,17 @@ pub mod obj {
         }
     }
 }
+/// *stub* `crate::lx::svc` (wave 7, Group 7-3's namespace notes ask who hosts vfs-server):
+/// nothing hosts anything on the host.
+pub mod svc {
+    pub fn host_of(_svc: crate::ipc::protocol::SvcId) -> crate::ipc::protocol::SvcId {
+        0
+    }
+    pub fn endpoint_of(_svc: crate::ipc::protocol::SvcId) -> u32 {
+        0
+    }
+}
+/// *stub* A notification for one host (recorded).
+pub fn note_to(h: crate::ipc::protocol::SvcId, kind: u64, a: u64, b: u64, c: u64) {
+    crate::fake::rec(alloc::format!("lx::note_to({h},{kind},{a},{b},{c})"));
+}

@@ -745,6 +745,17 @@ impl MountTables {
         Ok(fx)
     }
 
+    /// Drops namespace `ns`'s table (its last process went; never the initial one).
+    pub fn drop_ns(&mut self, ns: NsId) -> Effects {
+        if ns == 0 {
+            return Effects::default();
+        }
+        match self.spaces.remove(&ns) {
+            Some(t) => self.forget(t),
+            None => Effects::default(),
+        }
+    }
+
     /// Drops the tables of namespaces not in `live` (no live process uses them; the initial
     /// one always stays).
     pub fn collect(&mut self, live: &[NsId]) -> Effects {

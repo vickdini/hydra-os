@@ -143,7 +143,12 @@ fn take_notes(seq: u64) {
 }
 
 /// One notification: the kernel changed the file system (`LX_NOTE_FSCHANGE`).
-fn on_note(kind: u64, a: u64, _b: u64, _c: u64) {
+fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
+    // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
+    if kind == LX_NOTE_MNTNS {
+        mount::on_mntns(a, b, &mut *tmpfs_mem::STORE.lock());
+        return;
+    }
     if kind == LX_NOTE_FSCHANGE {
         if a == 0 {
             CACHE.forget_names();
