@@ -106,9 +106,12 @@ pub fn open() -> Found {
     let mut found = if any { Found::Damaged } else { Found::Fresh };
     let mut gen = 0;
     for (_, g, body) in kept::by_age(views) {
+        // (the newest valid slot's generation, unless an older one is the one restored: the
+        // next save then goes to the slot that failed, never over the one taken back)
         gen = gen.max(g);
         match restore(body) {
             Ok(f) => {
+                gen = g;
                 found = match f {
                     Found::Restored { spaces, tmpfs, files, missing, freed, .. } => Found::Restored { gen: g, spaces, tmpfs, files, missing, freed },
                     f => f,
@@ -143,11 +146,17 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
     let (mut missing, mut freed) = (0, 0);
     {
         let mut store = STORE.lock();
-        for &k in &named {
+        for (i, &k) in named.iter().enumerate() {
             match store.adopt(k) {
                 Ok(true) => {}
                 Ok(false) => missing += 1,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // Give back the handles taken so far (the kept objects stay for a later try)
+                    for &j in &named[..i] {
+                        store.forget(j);
+                    }
+                    return Err(e);
+                }
             }
         }
         // Data objects made for changes whose snapshot was never written
@@ -159,7 +168,10 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
             }
         }
     }
-    DATA_NEXT.store(c.data_next, Ordering::Relaxed);
+    // Past the swept window and past every key a tree names (a key taken while the last
+    // snapshot was being made may be named although `data_next` was read before it)
+    let next = named.iter().map(|k| k + 1).max().unwrap_or(0).max(c.data_next.saturating_add(kept::SWEEP));
+    DATA_NEXT.store(next, Ordering::Relaxed);
     RESTARTS.store(c.restarts + 1, Ordering::Relaxed);
     *KTEST.lock() = (c.ktest_inst, c.ktest_ino);
     let spaces = tables.as_ref().map_or(1, |t| t.spaces.len());
@@ -179,15 +191,16 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
 
 /// The snapshot of now.
 fn snapshot() -> Snapshot {
-    let (ktest_inst, ktest_ino) = *KTEST.lock();
-    // `data_next` is read before the trees' lock: a worker making a data object holds that
-    // lock from taking the key to naming it in its tree, so a key taken after this read is
-    // in the sweep window, and one taken before it is named in the tree encoded below
-    let counters = Counters { restarts: RESTARTS.load(Ordering::Relaxed), data_next: DATA_NEXT.load(Ordering::Relaxed), ktest_inst, ktest_ino };
-    // (the lock order of the rest of the server: the tables, then the trees)
+    // (the lock order of the rest of the server: the tables, then the trees, then the test
+    // hook's words)
     let m = MTAB.lock();
     let t = TMPFS.lock();
     let l = LOCKS.lock();
+    // Read under the trees' lock: a worker making a data object holds it from taking the key
+    // to naming it in its tree, so every key below `data_next` that a file uses is in the
+    // tree encoded here (and a new instance starts past every named key anyway)
+    let (ktest_inst, ktest_ino) = *KTEST.lock();
+    let counters = Counters { restarts: RESTARTS.load(Ordering::Relaxed), data_next: DATA_NEXT.load(Ordering::Relaxed), ktest_inst, ktest_ino };
     Snapshot { counters, mounts: m.as_ref().map(|m| m.encode()), tmpfs: t.as_ref().map(|t| t.encode()), locks: Some(l.encode()) }
 }
 
@@ -208,10 +221,15 @@ pub fn save() {
     // SAFETY: the slot is SNAP_MAX mapped bytes of this program's; the header goes last
     // (a torn copy fails its checksum anyway; this keeps the old magic invalid meanwhile)
     unsafe {
-        core::ptr::write_bytes(dst, 0, SLOT_HEADER);
+        for i in 0..SLOT_HEADER / 8 {
+            core::ptr::write_volatile((dst as *mut u64).add(i), 0);
+        }
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
         core::ptr::copy_nonoverlapping(bytes.as_ptr().add(SLOT_HEADER), dst.add(SLOT_HEADER), bytes.len() - SLOT_HEADER);
-        core::sync::atomic::fence(Ordering::Release);
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, SLOT_HEADER);
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        for i in 0..SLOT_HEADER / 8 {
+            core::ptr::write_volatile((dst as *mut u64).add(i), u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));
+        }
     }
     s.gen = gen;
     SAVES.fetch_add(1, Ordering::Relaxed);
@@ -260,6 +278,16 @@ pub fn restarts() -> u64 {
 /// (its instance and file made the first time, held open so they are never reaped), 2 reads
 /// them back to `buf`. Returns [`restarts`].
 pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
+    // (the caller's memory is read and written outside the server's locks)
+    let data = if op == 1 {
+        match cx.copy_in(buf, 64) {
+            Ok(d) => d,
+            Err(e) => return e,
+        }
+    } else {
+        Vec::new()
+    };
+    let mut out = Vec::new();
     let r = (|| -> Result<i64, i64> {
         let mut store = STORE.lock();
         let mut tg = TMPFS.lock();
@@ -267,7 +295,6 @@ pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
         let mut kt = KTEST.lock();
         match op {
             1 => {
-                let data = cx.copy_in(buf, 64)?;
                 if kt.0 == 0 || set.get(kt.0).is_none() {
                     let (n, root) = set.create("", 0, 0, 1 << 30, (0, 0))?;
                     let t = set.get_mut(n).ok_or(EINVAL)?;
@@ -280,15 +307,20 @@ pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
             }
             2 => {
                 let t = set.get(kt.0).ok_or(ENOENT)?;
-                let data = t.read(kt.1, 0, 64, &mut *store as &mut dyn DataStore)?;
-                cx.copy_out(buf, &data)?;
+                out = t.read(kt.1, 0, 64, &mut *store as &mut dyn DataStore)?;
             }
             _ => return Err(EINVAL),
         }
         Ok(RESTARTS.load(Ordering::Relaxed) as i64)
     })();
-    if op == 1 && r.is_ok() {
+    if op == 1 {
+        // (also after a failed step: what was made is kept consistently)
         save();
+    }
+    if op == 2 && r.is_ok() {
+        if let Err(e) = cx.copy_out(buf, &out) {
+            return e;
+        }
     }
     r.unwrap_or_else(|e| e)
 }

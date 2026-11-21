@@ -71,6 +71,12 @@ impl MemStore {
     }
     // wave7 G7-6 end
 
+    /// Gives back the handle of data key `key` and keeps the kept object (a restore that is
+    /// given up).
+    pub fn forget(&mut self, key: u64) {
+        self.objs.remove(&key);
+    }
+
     /// Number of objects held.
     pub fn len(&self) -> usize {
         self.objs.len()
@@ -105,8 +111,12 @@ impl DataStore for MemStore {
     fn create(&mut self) -> Result<u64, i64> {
         // wave7 G7-6: a kept object under a new data key (one left by a crash under that key
         // holds old data: it is let go and the next key taken)
-        for _ in 0..4 {
+        for _ in 0..64 {
             let key = DATA_NEXT.fetch_add(1, Ordering::Relaxed);
+            // (never a key a file uses: its object is not let go)
+            if self.objs.contains_key(&key) {
+                continue;
+            }
             let (o, existed) = MemObj::kept(key, MAX_FILE)?;
             if existed {
                 let _ = MemObj::unkeep(key);
