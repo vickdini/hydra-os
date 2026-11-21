@@ -91,12 +91,15 @@ def chunks_of(sections):
     """Groups text sections into chunks of at most CHUNK characters (a longer section is cut)."""
     out, cur = [], ""
     for sec in sections:
+        # a section cut in pieces: every later piece repeats its first line (the file header)
+        first = sec.lstrip("\n").split("\n", 1)[0]
         while len(sec) > CHUNK:
             if cur:
                 out.append(cur)
                 cur = ""
-            out.append(sec[:CHUNK])
-            sec = sec[CHUNK:]
+            cut = sec.rfind("\n", 0, CHUNK) + 1 or CHUNK
+            out.append(sec[:cut])
+            sec = first + "  (continued)\n" + sec[cut:]
         if cur and len(cur) + len(sec) > CHUNK:
             out.append(cur)
             cur = ""
@@ -104,6 +107,32 @@ def chunks_of(sections):
     if cur:
         out.append(cur)
     return out
+
+
+def file_chunks(files, repo):
+    """The files as numbered lines, packed into chunks of at most CHUNK characters. A file that
+    does not fit in one chunk is cut at line boundaries, and every piece starts with its path and
+    line range, so each part can be read on its own; small files stay whole."""
+    pieces = []
+    for f in files:
+        src = f if os.path.isabs(f) else os.path.join(repo, f)
+        rel = os.path.relpath(src, repo)
+        lines = open(src, encoding="utf-8", errors="replace").read().splitlines()
+        numbered = [f"{i:5} {l}\n" for i, l in enumerate(lines, 1)]
+        if not numbered:
+            pieces.append(f"\n----- FILE {rel} (empty) -----\n")
+            continue
+        start = 0
+        while start < len(numbered):
+            size, end = 0, start
+            while end < len(numbered) and size + len(numbered[end]) < CHUNK - 200:
+                size += len(numbered[end])
+                end += 1
+            end = max(end, start + 1)
+            head = f"\n----- FILE {rel} (lines {start + 1}-{end} of {len(lines)}) -----\n"
+            pieces.append(head + "".join(numbered[start:end]))
+            start = end
+    return chunks_of(pieces)
 
 
 def split_diff(diff):
@@ -157,12 +186,7 @@ def run_agy(prompt, model, timeout, part, parts):
 
 def work(a, repo, who):
     if a.files:
-        sections = []
-        for f in a.files:
-            src = f if os.path.isabs(f) else os.path.join(repo, f)
-            text = open(src, encoding="utf-8", errors="replace").read()
-            sections.append("\n----- FILE " + os.path.relpath(src, repo) + " -----\n" + text + "\n")
-        parts = chunks_of(sections)
+        parts = file_chunks(a.files, repo)
         log(event="start", who=who, mode="question", repo=repo, what=", ".join(a.files)[:300],
             question=(a.question or "")[:300], parts=len(parts))
         rc = 0
