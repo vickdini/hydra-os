@@ -6,22 +6,26 @@ use alloc::vec::Vec;
 use crate::cache::CACHE;
 use crate::ctx::Node;
 use crate::fs::fsproto::{Attr, ENODATA, ENOENT};
-use crate::walk::{BootMounts, Mounts};
+use crate::mount;
+use crate::walk::Mounts;
 use crate::perm::ACL_ACCESS;
 use crate::walk::Backend;
 use crate::zfs;
-
-/// The mount tables (the boot table until 7-3).
-pub static MOUNTS: BootMounts = BootMounts { pseudo: true };
 
 /// zfs-server through the caches (`nocache`: every step asks zfs-server).
 pub struct ZfsBackend {
     /// Bypass the caches (neither read nor filled).
     pub nocache: bool,
+    /// The caller's mount namespace: a node in one of its tmpfs mounts goes to that tmpfs
+    /// (7-3).
+    pub ns: u32,
 }
 
 impl Backend for ZfsBackend {
     fn lookup(&self, dir: Node, name: &[u8]) -> Result<Node, i64> {
+        if let Some(t) = mount::tmpfs_of(self.ns, dir.mnt) {
+            return mount::tmpfs_lookup(t, dir, name);
+        }
         // (`..` is not cached: a rename of the directory would have to forget it)
         let cached = !self.nocache && name != b"..";
         if cached {
@@ -49,6 +53,9 @@ impl Backend for ZfsBackend {
     }
 
     fn getattr(&self, n: Node) -> Result<Attr, i64> {
+        if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
+            return mount::tmpfs_getattr(t, n);
+        }
         if !self.nocache {
             if let Some(a) = CACHE.attr(n) {
                 return Ok(a);
@@ -63,6 +70,9 @@ impl Backend for ZfsBackend {
     }
 
     fn readlink(&self, n: Node) -> Result<Vec<u8>, i64> {
+        if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
+            return mount::tmpfs_readlink(t, n);
+        }
         if !self.nocache {
             if let Some(l) = CACHE.link(n) {
                 return Ok(l);
@@ -77,6 +87,9 @@ impl Backend for ZfsBackend {
     }
 
     fn acl(&self, n: Node) -> Option<Vec<u8>> {
+        if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
+            return mount::tmpfs_acl(t, n);
+        }
         if !self.nocache {
             if let Some(a) = CACHE.acl(n) {
                 return a;
@@ -96,6 +109,6 @@ impl Backend for ZfsBackend {
     }
 
     fn mounts(&self) -> &dyn Mounts {
-        &MOUNTS
+        &mount::TABLES
     }
 }

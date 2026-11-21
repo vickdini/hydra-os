@@ -28,6 +28,12 @@ mod be;
 mod cache;
 mod ctx;
 mod lock;
+// wave7 G7-3 begin: mount tables and tmpfs
+mod mount;
+mod mtab;
+mod tmpfs;
+mod tmpfs_mem;
+// wave7 G7-3 end
 mod perm;
 mod walk;
 mod zfs;
@@ -102,6 +108,8 @@ fn main(args: &[&str]) {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
     }
+    // wave7 G7-3: the initial namespace's mount table (the boot answers until a change)
+    mount::install_boot(zfs::root().unwrap_or(0));
     match zfs::root() {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
@@ -181,7 +189,7 @@ fn walk_call(cx: &Cx, page: *mut u8) -> Answer {
         let who = Ctx::from_call(&cx.c, root);
         let mut o = LxVfsWalkOut::default();
         let before = zfs::REQUESTS.load(Ordering::Relaxed);
-        let be = ZfsBackend { nocache: flags & LX_VFS_NOCACHE != 0 };
+        let be = ZfsBackend { nocache: flags & LX_VFS_NOCACHE != 0, ns: who.ns };
         let w = walk::walk(&be, &who, Start::At(cwd), &path, if flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })?;
         o.zfs_requests = zfs::REQUESTS.load(Ordering::Relaxed) - before;
         match w {
@@ -283,7 +291,7 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         let base = ctx_node(w.base)?;
         let mut who = Ctx::new(w.uid, w.gid, w.caps, root);
         who.ns = w.mnt_ns as u32;
-        let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0 };
+        let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0, ns: who.ns };
         let mut o = LxVfsWalkOut::default();
         match walk::walk(&be, &who, Start::At(base), path, if w.flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })? {
             Walked::Found { node, attr } => {
