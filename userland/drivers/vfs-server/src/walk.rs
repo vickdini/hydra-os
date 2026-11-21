@@ -340,6 +340,12 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
                 continue;
             }
             let parent = up(be, cx, cur)?;
+            // (`sub/..` back at the root is the root itself, as `/..` is: no entering a mount
+            // on top of it — 7-7 review)
+            if parent == root {
+                cur = root;
+                continue;
+            }
             // (the parent may be covered by a mount made after the walk's start went below it)
             cur = match enter(be, cx, parent)? {
                 Ok(n) => n,

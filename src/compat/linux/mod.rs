@@ -742,11 +742,15 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                             let file_size = crate::fs::ZfsClient::file_stat(path).map(|st| st.size).unwrap_or(0) as i64;
                             // (wave7 G7-7: SEEK_CUR in one step on the shared offset)
                             if whence == 1 {
-                                return cursor.seek_by(offset).map_or(-EINVAL, |p| p as i64);
+                                return cursor.seek_by(offset).map_or_else(|e| e, |p| p as i64);
                             }
                             let new_cursor = match whence {
                                 0 => offset,
-                                2 => file_size.saturating_add(offset),
+                                // (past i64::MAX: EOVERFLOW, the offset kept — 7-7 review)
+                                2 => match file_size.checked_add(offset) {
+                                    Some(v) => v,
+                                    None => return -75,
+                                },
                                 _ => return -EINVAL,
                             };
                             if new_cursor < 0 {

@@ -149,13 +149,17 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
                         if rd.remaining() < 20 {
                             break;
                         }
-                        let before = rd.remaining();
                         let e = rd.event();
                         // (a name that ran past the end: the record was not whole)
-                        if rd.remaining() == 0 && before != 20 + e.name.len() {
+                        if rd.overrun() {
                             break;
                         }
                         events.push(e);
+                    }
+                    // (fewer whole events than the reply counts: some changes are not known
+                    // here, so nothing cached is trusted — 7-7 review)
+                    if (events.len() as u64) < m.args[3] {
+                        crate::cache::forget_all();
                     }
                 }
                 return Ok(Reply { value: m.args[1], data, events });
@@ -232,23 +236,23 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
     let mut rd = Reader::new(&r.data);
     // (an entry takes 28 bytes at least; wave7 G7-7: decoding stops where the entries end,
     // whatever the count says: no entry made of bytes past the reply)
-    let n = r.value.min(max as u64).min((r.data.len() / 28) as u64);
+    let claimed = r.value.min(max as u64);
+    let n = claimed.min((r.data.len() / 28) as u64);
     let mut out = Vec::with_capacity(n as usize);
     for _ in 0..n {
         if rd.remaining() < 28 {
             break;
         }
-        let before = rd.remaining();
         let e = rd.entry();
         // (a name that ran past the end: the record was not whole)
         // (and a directory entry always has a name)
-        if e.name.is_empty() || (rd.remaining() == 0 && before != 28 + e.name.len()) {
+        if e.name.is_empty() || rd.overrun() {
             break;
         }
         out.push(e);
     }
     // (not one whole entry where the reply said there were some: a broken reply, not the end)
-    if out.is_empty() && n > 0 {
+    if out.is_empty() && claimed > 0 {
         return Err(EIO);
     }
     Ok(out)

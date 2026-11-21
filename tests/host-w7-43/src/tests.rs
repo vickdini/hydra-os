@@ -146,7 +146,9 @@ fn walks_cross_the_kernels_mounts_with_its_numbers() {
         ParentWalked::Found(p) => {
             assert_eq!(p.child, Some(Node::new(1, t.ro)));
             assert!(v.is_mountpoint(Node::new(1, t.ro)));
-            assert!(!v.is_mountpoint(Node::new(8, t.ro)));
+            // (busy through any mount that shows the same directory — 7-7 review)
+            assert!(v.is_mountpoint(Node::new(8, t.ro)));
+            assert!(!v.is_mountpoint(Node::new(1, t.etc)));
         }
         w => panic!("{:?}", w),
     }
@@ -266,6 +268,9 @@ fn dotdot_at_the_root_does_not_enter_a_mount_on_the_root() {
     assert_eq!(found(walk::walk(&be, &cx, Start::Root, b"/", 0)).unwrap(), Node::new(1, ROOT));
     assert_eq!(found(walk::walk(&be, &cx, Start::Root, b"/..", 0)).unwrap(), Node::new(1, ROOT));
     assert_eq!(found(walk::walk(&be, &cx, Start::Root, b"/../etc", 0)).unwrap(), Node::new(1, t.etc));
+    // ... and `sub/..` back at the root is the root too (7-7 review: it entered the mount)
+    assert_eq!(found(walk::walk(&be, &cx, Start::Root, b"/etc/..", 0)).unwrap(), Node::new(1, ROOT));
+    assert_eq!(found(walk::walk(&be, &cx, Start::Root, b"/etc/../etc", 0)).unwrap(), Node::new(1, t.etc));
 }
 
 #[test]
@@ -364,4 +369,36 @@ fn a_tree_on_a_kernel_mount_is_the_kernels() {
     assert!(v.walkable(Node::new(1, t.etc)));
     assert!(!v.walkable(Node::new(2, t.etc)));
     assert!(!v.walkable(Node::new(3, t.data)));
+}
+
+// 7-7 review: a record cut short is seen as such
+#[test]
+fn a_cut_record_is_an_overrun() {
+    use crate::fs::fsproto::{Reader, Writer};
+    let mut buf = [0u8; 64];
+    let n = {
+        let mut w = Writer::new(&mut buf);
+        w.u64(1);
+        w.u64(2);
+        w.bytes(b"name");
+        w.len()
+    };
+    // Whole: no overrun
+    let mut r = Reader::new(&buf[..n]);
+    r.u64();
+    r.u64();
+    assert_eq!(r.bytes(), b"name");
+    assert!(!r.overrun());
+    // Cut inside the name: overrun, empty name
+    let mut r = Reader::new(&buf[..n - 2]);
+    r.u64();
+    r.u64();
+    assert_eq!(r.bytes(), b"");
+    assert!(r.overrun());
+    // Cut right after the length field
+    let mut r = Reader::new(&buf[..20]);
+    r.u64();
+    r.u64();
+    r.bytes();
+    assert!(r.overrun());
 }

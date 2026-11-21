@@ -400,6 +400,17 @@ fn fifo_nodes_open_as_pipe_ends() {
         // Nothing left, non-blocking: EAGAIN
         d.set_nonblock(true);
         assert_eq!(d.read(&mut b), -11);
+        // (7-7 review) Nearly full: no POLLOUT once less than PIPE_BUF fits, and a write of up
+        // to PIPE_BUF waits for room for all of it
+        let big = vec![7u8; 65536 - 100];
+        assert_eq!(d.write(&big), (65536 - 100) as i64);
+        assert_eq!(d.poll_events() & 0x4, 0);
+        assert_eq!(d.write(&[1u8; 200]), -11);
+        assert_eq!(d.write(&[1u8; 50]), 50);
+        assert_eq!(d.write(&[]), 0);
+        let mut sink = vec![0u8; 65536];
+        assert_eq!(d.read(&mut sink), (65536 - 50) as i64);
+        assert_eq!(d.poll_events() & 0x4, 0x4);
     }
     // The same pipe: what the write end writes, the O_RDWR end reads
     assert_eq!(sys(1, &[w as u64, b"xy".as_ptr() as u64, 2]), 2);

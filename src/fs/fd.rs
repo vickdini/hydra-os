@@ -435,9 +435,8 @@ impl FileDescriptor {
                 if !*readable {
                     return Err("File not opened for reading");
                 }
-                let n = read_path_at(path, cursor.get(), buf)?;
-                cursor.advance(n);
-                Ok(n)
+                // (the description's reads and writes one at a time — wave7 G7-7 review)
+                cursor.io(|pos| read_path_at(path, pos, buf).map(|n| (n, None)))
             }
         }
     }
@@ -624,10 +623,11 @@ impl FileDescriptor {
                 if !*writable {
                     return Err("File not opened for writing");
                 }
-                let at = if *append { None } else { Some(cursor.get()) };
-                let (n, end) = write_path_at(path, at, data)?;
-                cursor.set(end);
-                Ok(n)
+                let append = *append;
+                cursor.io(|pos| {
+                    let (n, end) = write_path_at(path, if append { None } else { Some(pos) }, data)?;
+                    Ok((n, Some(end)))
+                })
             }
         }
     }

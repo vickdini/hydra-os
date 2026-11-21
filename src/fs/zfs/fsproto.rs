@@ -465,6 +465,11 @@ impl Reader<'_> {
     pub fn remaining(&self) -> usize {
         self.buf.len().saturating_sub(self.pos)
     }
+
+    /// Whether a read went past the end (a record cut short: its last field was not whole).
+    pub fn overrun(&self) -> bool {
+        self.pos > self.buf.len()
+    }
 }
 // wave7 G7-7 end
 

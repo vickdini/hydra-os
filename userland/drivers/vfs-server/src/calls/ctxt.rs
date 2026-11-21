@@ -116,7 +116,9 @@ pub fn writable(c: &LxCall, n: Node) -> Result<(), i64> {
 
 /// [`KERNEL`] when `n` is a mount point (removing or renaming it is the kernel's).
 pub fn not_mountpoint(c: &LxCall, n: Node) -> Result<(), i64> {
-    if walker(c)?.view.is_mountpoint(n) {
+    let w = walker(c)?;
+    // (a newer copy without `n`'s mount: the kernel decides — 7-7 review)
+    if !w.view.walkable(n) || w.view.is_mountpoint(n) {
         return Err(KERNEL);
     }
     Ok(())

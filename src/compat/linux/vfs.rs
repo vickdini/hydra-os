@@ -574,8 +574,9 @@ impl super::chardev::CharDevice for FifoRw {
 
     fn poll_events(&self) -> u32 {
         let p = self.pipe.lock();
-        // POLLIN, POLLOUT
-        (if p.available_read() > 0 { 0x001 } else { 0 }) | if p.available_write() > 0 { 0x004 } else { 0 }
+        // POLLIN; POLLOUT once PIPE_BUF bytes fit (what a write of up to PIPE_BUF waits for,
+        // as Linux's free-buffer rule — 7-7 review)
+        (if p.available_read() > 0 { 0x001 } else { 0 }) | if p.available_write() >= 4096 { 0x004 } else { 0 }
     }
 
     fn add_wait_queues(&self, waits: &mut crate::task::wait::WaitSet) {
@@ -599,6 +600,11 @@ impl super::chardev::CharDevice for FifoRw {
     }
 
     fn stat(&self) -> super::types::LinuxStat {
+        // The FIFO node's own attributes (owner, mode, times), as an fstat of either end
+        // shows them (7-7 review: they were made up)
+        if let Ok(a) = ZfsClient::getattr(self.ino) {
+            return fill_stat(&a);
+        }
         let mut st = super::types::LinuxStat::default();
         st.st_ino = self.ino;
         st.st_mode = 0o010600; // S_IFIFO

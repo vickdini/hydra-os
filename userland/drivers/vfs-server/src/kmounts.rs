@@ -94,7 +94,9 @@ impl View {
     /// Whether directory `n` is the mount point of any mount (listed or not): it cannot be
     /// removed or renamed (Linux: `EBUSY`; the kernel decides).
     pub fn is_mountpoint(&self, n: Node) -> bool {
-        self.recs.iter().any(|r| r.mountpoint != 0 && r.mountpoint == n.ino && r.parent == n.mnt as u32)
+        // (by object only: a directory mounted on is busy through every bind of its tree,
+        // as Linux's `is_local_mountpoint` — 7-7 review)
+        self.recs.iter().any(|r| r.mountpoint != 0 && r.mountpoint == n.ino)
     }
 
     /// The root object of the namespace's root mount (another namespace).
