@@ -244,7 +244,10 @@ fn the_walk_over_the_tables() {
     }
     assert_eq!(mount::tmpfs_of(10, 0), None, "mount 0 is still the pool");
     assert_eq!(mount::tmpfs_of(10, tm10 as u16), Some(n10));
-    assert_eq!(mount::TABLES.mount(10, 0), None, "the own tree: never climbed out of");
+    // After the pivot, mount 0 (the old root) sits under the tmpfs at /old: climbable
+    let old = mount::TABLES.mount(10, 0).unwrap();
+    assert_eq!((old.parent, old.mountpoint, old.root), (tm10 as u16, Node::new(tm10 as u16, 2), Node::new(0, 2)));
+    assert_eq!(mount::TABLES.mount(0, 0), None, "no pivot: the own tree");
     let mut cx10 = cx(10);
     cx10.root = Node::new(tm10 as u16, 1);
     match walk::walk(&Pool::new(10), &cx10, Start::Root, b"/old", 0).unwrap() {

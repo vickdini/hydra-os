@@ -143,14 +143,19 @@ impl Mounts for TableMounts {
     }
 
     fn mount(&self, ns: u32, m: u16) -> Option<MountInfo> {
-        // (mount 0 is the own tree: never a mount the walk climbs out of, as in BootMounts)
-        if m == 0 || SIMPLE.load(Ordering::Acquire) {
+        if SIMPLE.load(Ordering::Acquire) {
             return None;
         }
         let g = MTAB.lock();
         let t = table(g.as_ref()?, ns)?;
         let i = to_idx(t, m);
         let mt = t.get(i)?;
+        // Mount 0 (the pool at the original `/`) is a mount to climb out of only once a
+        // pivot_root put it under another (it has a parent then); before, it is the own
+        // tree, as in BootMounts. (7-1's `up()` asks only for mounts other than 0 today.)
+        if m == 0 && mt.parent == 0 {
+            return None;
+        }
         let parent = if mt.parent == 0 { 0 } else { to_walk(t, mt.parent)? };
         let kind = match mt.backend {
             mtab::Backend::Pool => MountKind::Zfs,
