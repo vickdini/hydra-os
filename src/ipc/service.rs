@@ -827,8 +827,34 @@ pub fn unregister(endpoint: u32) {
     crate::lx::mem::service_gone(endpoint);
     if let Some(svc) = service(endpoint) {
         let server = svc.server.swap(0, Ordering::AcqRel);
+        unregistered(svc, server);
+    }
+}
+
+// wave7 GB begin
+/// [`unregister`], only if `endpoint`'s server is still `expected` (compared and cleared in
+/// one step: the supervisor looked at the server first, and another driver may have
+/// registered since).
+///
+/// # Returns
+///
+/// `false` if another server is registered now (nothing was done).
+pub fn unregister_if(endpoint: u32, expected: u64) -> bool {
+    let Some(svc) = service(endpoint) else { return true };
+    if svc.server.compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return false;
+    }
+    crate::lx::mem::service_gone(endpoint);
+    unregistered(svc, expected);
+    true
+}
+// wave7 GB end
+
+/// The rest of [`unregister`] once `svc`'s registration (`server`, 0 if none) is cleared.
+fn unregistered(svc: &'static Service, server: u64) {
+    {
         // The endpoints its process also served go with it
-        for alias in SERVICES.iter().filter(|s| s.primary == endpoint) {
+        for alias in SERVICES.iter().filter(|s| s.primary == svc.endpoint) {
             alias.server.store(0, Ordering::Release);
         }
         let owner = slot_owner(svc).endpoint;

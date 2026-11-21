@@ -345,6 +345,65 @@ fn a_restart_unregisters_the_endpoint_whichever_thread_of_the_old_process_regist
     assert!(!task::is_task_alive(cur));
 }
 
+// wave7 GB begin: Gemini's three concerns about `retire` (Group 31's 6d6419b)
+#[test]
+fn a_restart_never_unregisters_a_driver_that_registered_after_the_supervisor_looked() {
+    let _w = setup();
+    supervisor::supervisor_init();
+    let id = SUPERVISOR.lock().start_service("net_server").unwrap();
+    drivers_register();
+    // Another (live) driver's process registers the endpoint between the supervisor's look
+    // and its clearing: its registration stays
+    let other = task::spawn("other-driver", noop, task::TaskPriority::Normal).0;
+    *fake::REGISTER_AFTER_LOOK.lock().unwrap() = Some((ENDPOINT_NET_SERVER, other));
+    fake::SVC_LOG.lock().unwrap().clear();
+    *fake::YIELD_HOOK.lock().unwrap() = None; // (the new instance does not register)
+    supervisor::restart_service_by_name("net_server").unwrap();
+    assert_eq!(fake::SERVERS.lock().unwrap().get(&ENDPOINT_NET_SERVER), Some(&other));
+    assert!(!fake::SVC_LOG.lock().unwrap().iter().any(|e| e.0 == "unregister"));
+    assert!(!task::is_task_alive(id));
+    // Nobody registered at all: nothing to unregister (requests queued meanwhile are left
+    // for the new instance)
+    fake::SERVERS.lock().unwrap().clear();
+    fake::SVC_LOG.lock().unwrap().clear();
+    supervisor::restart_service_by_name("net_server").unwrap();
+    assert!(!fake::SVC_LOG.lock().unwrap().iter().any(|e| e.0 == "unregister"));
+}
+
+#[test]
+fn a_restart_ends_the_whole_old_process_even_when_its_first_thread_is_gone() {
+    let _w = setup();
+    supervisor::supervisor_init();
+    let id = SUPERVISOR.lock().start_service("net_server").unwrap();
+    // Two more threads of the driver's process: one registered the endpoint
+    let worker = task::spawn("net-worker", noop, task::TaskPriority::Normal).0;
+    let irq = task::spawn("net-irq", noop, task::TaskPriority::Normal).0;
+    with(worker, |t| t.tgid = id.0);
+    with(irq, |t| t.tgid = id.0);
+    fake::SERVERS.lock().unwrap().insert(ENDPOINT_NET_SERVER, worker);
+    // The first thread exits and is reaped (gone from the table)
+    task::kill(id);
+    *fake::YIELD_HOOK.lock().unwrap() = None;
+    yield_on(0); // (the scheduler moves dead tasks out of the table)
+    task::scheduler::reap_dead_tasks();
+    *fake::YIELD_HOOK.lock().unwrap() = Some(drivers_register);
+    assert!(task::SCHEDULER.lock().with_task_mut(id, |_| ()).is_none(), "reaped");
+    fake::SVC_LOG.lock().unwrap().clear();
+    supervisor::restart_service_by_name("net_server").unwrap();
+    // Its own thread's registration is no foreign one: unregistered
+    assert!(fake::SVC_LOG.lock().unwrap().contains(&("unregister", ENDPOINT_NET_SERVER, 0, 0)));
+    // The other threads ended, and the interrupt lines of every thread were let go
+    // (retired: one running on another CPU dies when it leaves the kernel)
+    for t in [worker, irq] {
+        assert!(with(t, |t| t.retired || t.state == task::TaskState::Dead), "thread {t} ended");
+    }
+    let log = fake::SVC_LOG.lock().unwrap().clone();
+    for t in [id.0, worker, irq] {
+        assert!(log.contains(&("release_irqs", 0, t, 0)), "irqs of {t}");
+    }
+}
+// wave7 GB end
+
 #[test]
 fn kill_service_by_name_kills_the_running_process() {
     let _w = setup();

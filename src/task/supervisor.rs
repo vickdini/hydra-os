@@ -533,27 +533,50 @@ impl Supervisor {
     fn retire(&mut self, idx: usize) {
         let svc = &mut self.services[idx];
         let old = svc.task_id.take();
-        let old_tgid = old.and_then(|o| crate::task::SCHEDULER.lock().with_task_mut(o, |t| t.tgid));
-        if let Some(old) = old {
-            if is_task_alive(old) {
-                let _ = kill(old);
+        // wave7 GB begin: the whole old process goes, and only its own registration
+        // Its process: the first thread's id is the process id (`spawn_service`; task ids are
+        // never reused), so it is known even when that thread already exited and was reaped
+        // while other threads of the process still run
+        let old_tgid = old.map(|o| crate::task::SCHEDULER.lock().with_task_mut(o, |t| t.tgid).unwrap_or(o.0));
+        if let (Some(old), Some(tgid)) = (old, old_tgid) {
+            // Every thread of it ends (not only the first one: its other threads would keep
+            // serving, keep their interrupt lines, or register the endpoint again), and every
+            // interrupt line one of them claimed is let go
+            let mut threads: Vec<u64> = alloc::vec![old.0];
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                let mut sched = crate::task::SCHEDULER.lock();
+                sched.for_each_task_mut(|t| {
+                    if t.tgid == tgid && t.id != old {
+                        threads.push(t.id.0);
+                    }
+                });
+                sched.kill_group(tgid);
+            });
+            crate::task::close_retired();
+            for &t in &threads {
+                service::release_irqs(t);
             }
-            service::release_irqs(old.0);
         }
         // Only its own registration: another service may serve the endpoint (the AHCI and
         // IDE drivers offer the disk endpoint; starting the one that stood back must not
-        // take the disk away from the other)
-        // (a live server of another process; any thread of its own process may have
-        // registered)
-        let server = service::server_of(svc.endpoint_id);
-        let foreign = server != 0
-            && crate::task::SCHEDULER
+        // take the disk away from the other). Any thread of its own process may have
+        // registered. The registration is cleared only if it is still the one looked at
+        // (another driver may register between the look and the clearing); none at all:
+        // nothing to clear (requests queued meanwhile wait for the new instance)
+        loop {
+            let server = service::server_of(svc.endpoint_id);
+            if server == 0 {
+                break;
+            }
+            let foreign = crate::task::SCHEDULER
                 .lock()
                 .with_task_mut(TaskId(server), |t| t.state != crate::task::TaskState::Dead && Some(t.tgid) != old_tgid)
                 .unwrap_or(false);
-        if !foreign {
-            service::unregister(svc.endpoint_id);
+            if foreign || service::unregister_if(svc.endpoint_id, server) {
+                break;
+            }
         }
+        // wave7 GB end
     }
 
     /// Replaces service `idx`'s process with a new one, unless it failed too often.

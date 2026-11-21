@@ -824,7 +824,12 @@ pub mod ipc {
             fake::SERVERS.lock().unwrap().contains_key(&endpoint)
         }
         pub fn server_of(endpoint: u32) -> u64 {
-            *fake::SERVERS.lock().unwrap().get(&endpoint).unwrap_or(&0)
+            let v = *fake::SERVERS.lock().unwrap().get(&endpoint).unwrap_or(&0);
+            // (wave7 GB: another driver registers right after this look, once)
+            if let Some((ep, id)) = fake::REGISTER_AFTER_LOOK.lock().unwrap().take_if(|(ep, _)| *ep == endpoint) {
+                fake::SERVERS.lock().unwrap().insert(ep, id);
+            }
+            v
         }
         pub fn primary_of(endpoint: u32) -> u32 {
             *fake::PRIMARY.lock().unwrap().get(&endpoint).unwrap_or(&endpoint)
@@ -882,6 +887,15 @@ pub mod ipc {
         pub fn unregister(endpoint: u32) {
             fake::SVC_LOG.lock().unwrap().push(("unregister", endpoint, 0, 0));
             fake::SERVERS.lock().unwrap().remove(&endpoint);
+        }
+        pub fn unregister_if(endpoint: u32, expected: u64) -> bool {
+            let mut s = fake::SERVERS.lock().unwrap();
+            if *s.get(&endpoint).unwrap_or(&0) != expected {
+                return false;
+            }
+            fake::SVC_LOG.lock().unwrap().push(("unregister", endpoint, 0, 0));
+            s.remove(&endpoint);
+            true
         }
         pub fn allow_client(endpoint: u32, client: u32) {
             fake::SVC_LOG.lock().unwrap().push(("allow_client", endpoint, client as u64, 0));
