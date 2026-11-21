@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w7_37"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7-2's host unit tests: vfs-server's file calls (userland/drivers/vfs-server/src/calls): result layouts and the calls' decisions"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

@@ -421,7 +421,7 @@ fn obj_ctl_for_a_request_nobody_serves() {
 #[test]
 fn fdpath_setfl_refs_pin_and_notify() {
     let sim = world();
-    let vn = crate::fs::FileDescriptor::Vnode(StdArc::new(spin::Mutex::new(crate::fs::Vnode { path: "/home/u/f".into() })));
+    let vn = crate::fs::FileDescriptor::Vnode(StdArc::new(spin::Mutex::new(crate::fs::Vnode { path: "/home/u/f".into(), ..Default::default() })));
     let file = crate::fs::FileDescriptor::File { path: "/etc/hosts".into(), readable: true, writable: false };
     let (vfd, ffd) = crate::task::with_current_fds_mut(|t| (t.alloc_fd(vn).unwrap(), t.alloc_fd(file).unwrap()));
     let plain = crate::task::with_current_fds_mut(|t| t.alloc_fd(crate::fs::FileDescriptor::Device(StdArc::new(Plain)))).unwrap();

@@ -25,6 +25,8 @@
 extern crate alloc;
 
 mod be;
+// wave7 G7-2: the file calls (stat family, access, readlink, getdents, open, changes)
+mod calls;
 mod cache;
 mod ctx;
 mod lock;
@@ -61,9 +63,6 @@ use hydra_rt::svcrt::{self, Answer, Cx, Event};
 use hydra_rt::{println, sys};
 use proto::*;
 
-/// 7-2's notification kind (defined in its protocol block): the kernel changed the file
-/// system behind vfs-server's back (`a` = the object, 0 = names anywhere).
-const LX_NOTE_FSCHANGE: u64 = 9;
 
 use crate::be::ZfsBackend;
 use crate::cache::CACHE;
@@ -115,6 +114,8 @@ fn main(args: &[&str]) {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
     }
+    // wave7 G7-2: the calls go to vfs-server from now on (`calls=0`: none, `calls=4,6,..`: these)
+    println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
     loop {
         match svc.recv(100) {
             Event::Request(id, _req) => svc.reply(id, &hydra_rt::Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
@@ -154,7 +155,8 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     }
     if kind == LX_NOTE_FSCHANGE {
         if a == 0 {
-            CACHE.forget_names();
+            // wave7 G7-2: 0 = names and attributes anywhere (link counts change with names)
+            CACHE.forget_all();
         } else {
             CACHE.forget_object(a);
         }
@@ -165,6 +167,10 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     take_notes(c.note_seq);
     let cx = Cx::from_call(c, page);
+    // wave7 G7-2
+    if let Some(a) = calls::serve(&cx) {
+        return a;
+    }
     let r = match c.nr {
         LX_VFS_WALK_NR => return walk_call(&cx, page),
         LX_DCALL_NR => dcall(&cx),

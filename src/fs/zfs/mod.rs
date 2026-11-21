@@ -188,7 +188,16 @@ fn forget_attr(ino: u64) {
         ATTR_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         c.remove(&ino);
     });
+    // wave7 G7-2: the file service's caches follow the kernel's changes
+    crate::lx::fileh::kernel_changed(ino);
 }
+
+// wave7 G7-2 begin
+/// Forgets the attributes of `ino`: the file service changed it (`lx::fileh`).
+pub fn forget_attr_of(ino: u64) {
+    forget_attr(ino);
+}
+// wave7 G7-2 end
 
 /// Forgets every object's attributes (a change whose objects are not all known here: a
 /// name removed or moved changes the link count of the object it named).
@@ -198,6 +207,7 @@ pub fn forget_all_attrs() {
         ATTR_GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         c.clear();
     });
+    crate::lx::fileh::kernel_changed(0); // wave7 G7-2
 }
 
 /// What a name lookup or path walk found: the object (and mount), the rest of the path at a
@@ -302,6 +312,7 @@ pub fn forget_names() {
         SEARCH_DIRS.lock().clear();
         LINKS.lock().clear();
     });
+    crate::lx::fileh::kernel_changed(0); // wave7 G7-2
 }
 
 /// The key of a lookup: its kind, numbers and bytes.

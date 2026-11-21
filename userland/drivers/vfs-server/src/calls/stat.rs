@@ -1,0 +1,101 @@
+//! The `stat` family, `access`, `readlink` and `statfs`: read-only path calls (the kernel's
+//! `vfs::stat_at`, `access_at`, `readlink_at`, `statfs_out`).
+
+use hydra_rt::svcrt::Cx;
+
+use super::ctxt::{self, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
+use super::enc;
+use crate::proto::LX_FS_ABAC;
+use crate::walk::Backend;
+
+const EINVAL: i64 = -22;
+const EACCES: i64 = -13;
+/// `faccessat2`'s `AT_EACCESS`: check with the effective ids.
+const AT_EACCESS: u64 = 0x200;
+
+/// `stat(path, buf)`, `lstat`, `newfstatat(dirfd, path, buf, flags)`, `statx(dirfd, path,
+/// flags, mask, buf)`.
+pub fn stat(cx: &Cx) -> Result<i64, i64> {
+    let c = &cx.c;
+    ctxt::check(c, 0)?;
+    let a = cx.args;
+    let (path_ptr, flags, out, x) = super::rules::stat_args(cx.nr, &a);
+    let path = cx.user_cstr(path_ptr)?;
+    let attr = if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(ctxt::ENOENT);
+        }
+        // The descriptor itself (a handle; anything else is the kernel's)
+        let n = ctxt::handle(c)?;
+        ctxt::BE.getattr(n)?
+    } else {
+        super::rules::check_path(&path, false)?;
+        let who = ctxt::caller(c)?;
+        ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?.1
+    };
+    if x {
+        cx.copy_out(out, &enc::statx(&attr))?;
+    } else {
+        cx.copy_out(out, &enc::stat(&attr))?;
+    }
+    Ok(0)
+}
+
+/// `access(path, mode)`, `faccessat(dirfd, path, mode)`, `faccessat2(dirfd, path, mode,
+/// flags)`.
+pub fn access(cx: &Cx) -> Result<i64, i64> {
+    let c = &cx.c;
+    // (ABAC rules may take away what the modes allow: the kernel checks them)
+    ctxt::check(c, LX_FS_ABAC)?;
+    let a = cx.args;
+    let (path_ptr, mode, flags) = super::rules::access_args(cx.nr, &a);
+    let path = ctxt::path(cx, path_ptr, false)?;
+    let who = ctxt::caller(c)?;
+    let (n, attr) = ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
+    if mode & 7 == 0 {
+        return Ok(0);
+    }
+    let (uid, gid) = if flags & AT_EACCESS != 0 { (c.euid, c.egid) } else { (c.uid, c.gid) };
+    let acl = ctxt::acl_of(n, &attr)?;
+    if ctxt::may_access(&who, &attr, acl.as_deref(), uid, gid, mode & 7) {
+        Ok(0)
+    } else {
+        Err(EACCES)
+    }
+}
+
+/// `readlink(path, buf, size)`, `readlinkat(dirfd, path, buf, size)`.
+pub fn readlink(cx: &Cx) -> Result<i64, i64> {
+    let c = &cx.c;
+    ctxt::check(c, 0)?;
+    let a = cx.args;
+    let (path_ptr, buf, size) = if cx.nr == 89 { (a[0], a[1], a[2] as usize) } else { (a[1], a[2], a[3] as usize) };
+    if size == 0 {
+        return Err(EINVAL);
+    }
+    let path = ctxt::path(cx, path_ptr, false)?;
+    let who = ctxt::caller(c)?;
+    let (n, attr) = ctxt::find(c, &who, &path, false)?;
+    if attr.mode & 0o170000 != 0o120000 {
+        return Err(EINVAL);
+    }
+    let target = ctxt::BE.readlink(n)?;
+    let k = target.len().min(size);
+    cx.copy_out(buf, &target[..k])?;
+    Ok(k as i64)
+}
+
+/// `statfs(path, buf)`.
+pub fn statfs(cx: &Cx) -> Result<i64, i64> {
+    let c = &cx.c;
+    ctxt::check(c, 0)?;
+    let path = ctxt::path(cx, cx.args[0], false)?;
+    let who = ctxt::caller(c)?;
+    ctxt::find(c, &who, &path, true)?;
+    let (total, free, objs) = crate::zfs::statfs()?;
+    cx.copy_out(cx.args[1], &enc::statfs(total, free, objs, POOL_FSID))?;
+    Ok(0)
+}
+
+/// The pool's `f_fsid` (the kernel's `fanotify::POOL_FSID`).
+const POOL_FSID: [u32; 2] = [0x4859_4452, 0x5a46_5301];
