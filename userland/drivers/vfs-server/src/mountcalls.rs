@@ -7,6 +7,11 @@
 //! own, a root or working directory outside the pool, a walk into `/proc`, `/sys` or `/dev`
 //! (the kernel's empty root for `/proc/<pid>/fd` and the like).
 //!
+//! wave7 G7-7: claimed again. nstest's Chromium-style `chroot("/proc/self/fdinfo/")` runs in
+//! a user namespace of its own, where the call carries no capabilities (`LxCall::caps` 0):
+//! such a caller's chroot is the kernel's (its rule counts the namespace's capabilities).
+//! nstest and tests/linux/chroot_w7.c pass with the call claimed.
+//!
 //! **Not yet moved:** `mount`, `umount2`, `pivot_root` and the new mount API (`fsopen`,
 //! `fsconfig`, `fsmount`, `open_tree`, `move_mount`, `fspick`, `mount_setattr`, `statmount`,
 //! `listmount`). Their tables are ready ([`crate::mtab`]), but while the kernel still answers
@@ -27,14 +32,9 @@ const EPERM: i64 = -1;
 const ENOTDIR: i64 = -20;
 const EACCES: i64 = -13;
 
-/// The calls served here. **Empty for now:** with chroot (161) claimed, nstest's
-/// `chroot("/proc/self/fdinfo/")` from a `CLONE_FS` child (a walk into /proc: vfs-server
-/// answers "redirect to the kernel") leaves the parent able to `open("/etc/hostname")`
-/// although its root is the kernel's empty root; unclaimed, or with `lx.vfs=kernel`, nstest
-/// passes. Until the redirect path for this call is understood (7-2's `LX_TO_KERNEL` after
-/// `fill`), chroot stays the kernel's; the code below is tested (tests/linux/chroot_w7.c
-/// PASS when claimed) and is switched on by putting 161 back here.
-pub const CLAIMED: &[u64] = &[];
+/// The calls served here: chroot (wave7 G7-7: claimed again; see the module notes on
+/// nstest's `chroot("/proc/self/fdinfo/")`).
+pub const CLAIMED: &[u64] = &[161];
 
 /// Claims [`CLAIMED`] (`mcalls=0` among the program's arguments leaves them to the kernel).
 pub fn claim_all(args: &[&str]) -> usize {
@@ -58,8 +58,11 @@ fn chroot(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
     ctxt::check(c, 0)?;
     // As the kernel: the capability before anything about the path
+    // (wave7 G7-7: in a user namespace of its own the call carries no capabilities —
+    // `LxCall::caps` is 0 there — but the kernel's rule counts the namespace's: the kernel
+    // decides; nstest's Chromium-style `chroot("/proc/self/fdinfo/")` runs so)
     if c.caps & CAP_SYS_CHROOT == 0 {
-        return Err(EPERM);
+        return Err(if c.user_ns != 0 { calls::KERNEL } else { EPERM });
     }
     let who = ctxt::caller(c)?;
     let path = ctxt::path(cx, cx.args[0], false)?;
