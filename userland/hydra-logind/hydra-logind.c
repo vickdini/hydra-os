@@ -1398,7 +1398,16 @@ static void shut_down(int how) {
     kill(-1, SIGTERM);
     sleep(3);
     kill(-1, SIGKILL);
-    sync();
+    /* sync() may never return when the system's disk is gone (the live stick pulled: wave 7,
+     * Group B): it runs in a child, waited for at most 10 s; Hydra's reboot(2) commits the
+     * pool itself (with its own time limit) */
+    pid_t c = fork();
+    if (c == 0) {
+        sync();
+        _exit(0);
+    }
+    for (int i = 0; c > 0 && i < 100 && waitpid(c, NULL, WNOHANG) == 0; i++)
+        usleep(100000);
     reboot(how);
     logmsg("reboot: %s", strerror(errno));
 }
@@ -1406,7 +1415,16 @@ static void shut_down(int how) {
 struct power_request {
     DBusMessage *call;
     int how;
+    int creds_ok;  /* uid is the caller's */
+    unsigned uid;
 };
+
+/* Whether `uid` owns the active local session on seat0: polkit's default for the login1
+ * power actions there is "yes" without a password (allow_active). */
+static int owns_active_local_session(unsigned uid) {
+    return active >= 0 && sessions[active].used && sessions[active].uid == uid && sessions[active].on_seat &&
+           !sessions[active].remote;
+}
 
 /* libdbus's timeouts (a pending call's reply timeout): this program polls the bus itself,
  * so it must run them, or a call that is never answered waits for ever (wave 6, G25: the
@@ -1480,9 +1498,17 @@ static void power_decided(DBusPendingCall *pc, void *data) {
     int challenge;
     int ok = polkit_result(r, &challenge);
     /* No reply at all (polkit stuck, e.g. its files unreadable): say so instead of "denied" */
-    int no_answer = r && dbus_message_is_error(r, DBUS_ERROR_NO_REPLY);
+    int no_answer = r && (dbus_message_is_error(r, DBUS_ERROR_NO_REPLY) || dbus_message_is_error(r, DBUS_ERROR_TIMEOUT) ||
+                          dbus_message_is_error(r, DBUS_ERROR_SERVICE_UNKNOWN) || dbus_message_is_error(r, DBUS_ERROR_NAME_HAS_NO_OWNER));
     if (no_answer)
         logmsg("power: polkit did not answer");
+    /* polkit cannot decide (wave 7, Group B: the live stick pulled, its files unreadable):
+     * the caller owning the active local session gets what polkit's default policy gives
+     * it there, or the system could never be restarted */
+    if (no_answer && !ok && pr->creds_ok && owns_active_local_session(pr->uid)) {
+        logmsg("power: allowed for uid %u, the active local session's user (polkit's default)", pr->uid);
+        ok = 1;
+    }
     if (r)
         dbus_message_unref(r);
     DBusMessage *reply = ok         ? dbus_message_new_method_return(pr->call)
@@ -1519,6 +1545,9 @@ static DBusMessage *power(DBusMessage *m, const char *what, int how) {
     struct power_request *pr = malloc(sizeof *pr);
     pr->call = dbus_message_ref(m);
     pr->how = how;
+    pid_t pid = 0;
+    pr->uid = 0;
+    pr->creds_ok = sender_creds(m, &pid, &pr->uid) == 0;
     dbus_pending_call_set_notify(pc, power_decided, pr, NULL);
     dbus_pending_call_unref(pc);
     return NULL; /* answered when polkit has decided */

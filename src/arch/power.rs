@@ -4,16 +4,60 @@
 //! `reboot(2)` system call (how a login manager shuts the system down). The pool's pending
 //! changes are committed first: the `txgd` task only does so every few seconds.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use uefi::runtime::ResetType;
 use uefi::Status;
 
 /// Commits the pool's pending changes before the power goes.
+///
+/// With the scheduler running, the commit runs in a task of its own and the power goes after
+/// at most [`COMMIT_LIMIT_MS`] even if it has not finished (wave 7, Group B: with the live
+/// stick pulled, the pool's disk is gone and a commit may never end; the restart must still
+/// happen). Before the scheduler runs (the emergency shell), it is made here.
 fn sync_pool() {
     crate::kprintln!("[power] Committing the pool...");
+    // wave7 GB begin
+    if !crate::task::is_active() {
+        commit_now();
+        return;
+    }
+    COMMIT_DONE.store(false, Ordering::SeqCst);
+    crate::task::spawn("pool-commit", commit_task, crate::task::TaskPriority::High);
+    let mut waited = 0;
+    while !COMMIT_DONE.load(Ordering::SeqCst) {
+        if waited >= COMMIT_LIMIT_MS {
+            crate::kprintln!("[power] the pool commit did not finish within {} s (its disk gone?): going on without it", COMMIT_LIMIT_MS / 1000);
+            return;
+        }
+        crate::task::sleep_ms(COMMIT_STEP_MS);
+        waited += COMMIT_STEP_MS;
+    }
+    // wave7 GB end
+}
+
+// wave7 GB begin
+/// The longest wait for the pool commit before the power goes (an ordinary commit takes a
+/// second or two).
+const COMMIT_LIMIT_MS: u64 = 30_000;
+/// How often [`sync_pool`] looks whether the commit has finished.
+const COMMIT_STEP_MS: u64 = 100;
+/// The commit task has finished (well or not).
+static COMMIT_DONE: AtomicBool = AtomicBool::new(false);
+
+/// The pool commit, reporting a failure.
+fn commit_now() {
     if let Err(e) = crate::fs::ZfsClient::sync() {
         crate::kprintln!("[power] pool commit failed: {}", e);
     }
 }
+
+/// The task [`sync_pool`] starts: commits, says so, ends.
+fn commit_task() {
+    commit_now();
+    COMMIT_DONE.store(true, Ordering::SeqCst);
+    crate::task::exit();
+}
+// wave7 GB end
 
 /// Commits the pool and powers the machine off (ACPI S5 on the usual virtual machines,
 /// then the firmware's shutdown).
