@@ -923,3 +923,35 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   `LX_FH_CHROOT` and `LX_FH_REROOT` (for 7-3's `chroot`/`pivot_root`).
 - Tests: host-t30 `lx::fileh` (25), `tests/host-w7-37` (result layouts, decisions); the QEMU
   suite with vfs-server serving.
+
+## Mount tables for the file service (wave 7, Group 7-7)
+
+- **One owner:** the kernel's `compat/linux/mount.rs` table stays the owner of every mount
+  namespace's mounts (the mount system calls stay the kernel's); vfs-server walks with a
+  **copy** of the caller's table (`vfs-server/src/kmounts.rs`). Every change moves the
+  namespace's generation on (`mount::bump`: after each mount system call, a namespace copy,
+  a FUSE mount or unmount of the initial namespace). Each call carries its caller's
+  generation (`LxCall::mnt_gen`, set in `fileh::fs_flags_global`); vfs-server takes the
+  table again with `SYS_LX_OBJ` op `LX_FH_MNTTAB = 53 (ns, buf, cap)` (`LxMntHead` + one
+  `LxMntRec` per slot: tree / tmpfs / kernel-served, `MS_*` flags, parent, mount point,
+  root) when its copy is older than the call. Mount numbers are the kernel's
+  (`FdTable::root_mnt`, `OpenFile::mnt`).
+- **What the walk does with it:** pool trees (binds, the kernel's tmpfs trees, the root) are
+  walked by vfs-server; FUSE mounts and named mounts the kernel serves by another path end
+  the walk with "redirect to the kernel"; `/proc`, `/sys`, `/dev` under the caller's root as
+  before. Read-only mounts (changes, writable opens, `W_OK`), `X_OK` on noexec mounts,
+  removing or renaming a mount point, renames across mounts and `statfs` of a tmpfs go to the
+  kernel. The caches keep pool objects by object, so a change through one bind is seen
+  through every other.
+- **What stays in the kernel (`LX_FS_MOUNTS`):** only a table vfs-server cannot walk (a named
+  mount whose mount point the kernel could not locate, `MS_NOSYMFOLLOW`), and everything with
+  the boot word `lx.vfsmnt=kernel` (the behaviour before, for comparisons). Exec front halves
+  and socket names of callers in a namespace of their own still take the kernel's path
+  (`xexec::servable` wants mount 0); the initial namespace's callers with FUSE mounts around
+  (all of KDE: xdg-document-portal) are served.
+- **chroot** (161) is claimed again; a caller in a user namespace of its own (capabilities not
+  carried in `LxCall::caps`) gets the kernel's answer.
+- Measured (KDE login, same ISO): served 47,028 / kept 136,069 with `lx.vfsmnt=kernel`;
+  served 179,784 / to the kernel 4,894 / kept 730 with the copies.
+- Tests: host-t26 `mount` (generations and the view), host-t30 `lx::fileh` (fill, `kernel_only`,
+  `LX_FH_MNTTAB`), `tests/host-w7-43` (the copy, walks across it, the walk's leftovers).
