@@ -193,11 +193,10 @@ fn take_notes(seq: u64) {
         let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
         if dropped != *seen {
             CACHE.forget_all();
-            // wave7 G7-3: lost namespace notes: only the initial table is sure now
-            mount::forget_namespaces(&mut *tmpfs_mem::STORE.lock());
+            // wave7 G7-3: lost namespace notes (wave7 G7-6: compared with the kernel's list of
+            // live namespaces, instead of forgetting every table but the initial one)
             *seen = dropped;
-            // wave7 G7-6
-            recover::save();
+            let _ = recover::resync();
         }
     }
     if seq == u64::MAX {
@@ -211,8 +210,9 @@ fn take_notes(seq: u64) {
 fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
     if kind == LX_NOTE_MNTNS {
+        // wave7 G7-6: one at a time with a resync (see `recover::resync`)
+        let _sync = recover::NS_SYNC.lock();
         mount::on_mntns(a, b, &mut *tmpfs_mem::STORE.lock());
-        // wave7 G7-6
         recover::save();
         return;
     }

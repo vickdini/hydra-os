@@ -92,7 +92,7 @@ pub fn range(base: i64, start: i64, len: i64) -> Result<(u64, u64), i64> {
     } else if len > 0 {
         s.saturating_add(len - 1)
     } else {
-        s - 1
+        s.checked_sub(1).ok_or(EINVAL)?
     };
     if len < 0 {
         s = s.checked_add(len).ok_or(EINVAL)?;

@@ -15,6 +15,12 @@
 //!   was down are lost, so the kernel's list of live mount namespaces (`LX_FH_NSLIST`) is
 //!   compared with the tables: tables of namespaces that are gone go, live namespaces
 //!   without a table get a copy of the initial one (as a note from an unknown namespace).
+//!   The same runs when the note ring overflowed. Namespace notes and a resync exclude each
+//!   other ([`NS_SYNC`]).
+//! - **Known limits:** a namespace made while no instance was online is copied from the
+//!   initial table (its parent is not known); a tmpfs data object freed for a change whose
+//!   snapshot a crash never wrote reads as zeros after the restart (the change itself fails
+//!   with `EIO` or is sent again).
 //! - **[`ktest`]**: the test hook `LX_VFS_KTEST` (a tmpfs file of a test instance, written
 //!   before a kill and read after it).
 
@@ -53,6 +59,12 @@ static SLOTS: YLock<Option<Slots>> = YLock::new(None);
 
 /// The file locks (kept; the lock calls are still the kernel's: `locks.rs`).
 pub static LOCKS: YLock<LockTable> = YLock::new(LockTable::new());
+
+/// Held by [`resync`] and by every namespace note while it is applied: a note is applied
+/// wholly before or after a resync (its list and its changes), never in between, so a
+/// resync cannot drop a namespace a note just made nor bring back one a note just dropped.
+/// Taken before `STORE`, `MTAB`, `TMPFS` and the slots.
+pub static NS_SYNC: YLock<()> = YLock::new(());
 
 /// Instances that took over a kept state, and the test hook's instance/file.
 static RESTARTS: AtomicU64 = AtomicU64::new(0);
@@ -168,6 +180,9 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
 /// The snapshot of now.
 fn snapshot() -> Snapshot {
     let (ktest_inst, ktest_ino) = *KTEST.lock();
+    // `data_next` is read before the trees' lock: a worker making a data object holds that
+    // lock from taking the key to naming it in its tree, so a key taken after this read is
+    // in the sweep window, and one taken before it is named in the tree encoded below
     let counters = Counters { restarts: RESTARTS.load(Ordering::Relaxed), data_next: DATA_NEXT.load(Ordering::Relaxed), ktest_inst, ktest_ino };
     // (the lock order of the rest of the server: the tables, then the trees)
     let m = MTAB.lock();
@@ -205,6 +220,7 @@ pub fn save() {
 /// Compares the tables with the kernel's live mount namespaces (see the module comment):
 /// `(dropped, added)`.
 pub fn resync() -> (usize, usize) {
+    let _sync = NS_SYNC.lock();
     let mut ids: Vec<u64> = alloc::vec![0; 64];
     loop {
         match sys::lx_obj(LX_FH_NSLIST, ids.as_mut_ptr() as u64, ids.len() as u64, 0) {

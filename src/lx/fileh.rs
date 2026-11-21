@@ -657,7 +657,8 @@ fn reroot(ns: u64, ptr: u64) -> i64 {
 /// `cap` of them to `buf`; how many there are.
 fn nslist(buf: u64, cap: u64) -> i64 {
     let ids = crate::compat::linux::ns::live_mntns();
-    let n = ids.len().min(cap.min(65_536) as usize);
+    // (at most as many as there are: the copy never exceeds the list)
+    let n = ids.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
     let mut bytes = Vec::with_capacity(n * 8);
     for id in &ids[..n] {
         bytes.extend_from_slice(&id.to_le_bytes());

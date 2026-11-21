@@ -67,6 +67,9 @@ fn flock_ranges_as_linux() {
     assert_eq!(range(0, -1, 1), Err(-22));
     assert_eq!(range(i64::MAX, 1, 1), Err(-22));
     assert_eq!(range(0, 5, i64::MAX), Ok((5, E)));
+    // A start at the very bottom with a negative length: refused, no overflow
+    assert_eq!(range(0, i64::MIN, -1), Err(-22));
+    assert_eq!(range(0, i64::MIN, 0), Err(-22));
 }
 
 #[test]
