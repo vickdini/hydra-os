@@ -27,8 +27,14 @@ const EPERM: i64 = -1;
 const ENOTDIR: i64 = -20;
 const EACCES: i64 = -13;
 
-/// The calls served here: chroot.
-pub const CLAIMED: &[u64] = &[161];
+/// The calls served here. **Empty for now:** with chroot (161) claimed, nstest's
+/// `chroot("/proc/self/fdinfo/")` from a `CLONE_FS` child (a walk into /proc: vfs-server
+/// answers "redirect to the kernel") leaves the parent able to `open("/etc/hostname")`
+/// although its root is the kernel's empty root; unclaimed, or with `lx.vfs=kernel`, nstest
+/// passes. Until the redirect path for this call is understood (7-2's `LX_TO_KERNEL` after
+/// `fill`), chroot stays the kernel's; the code below is tested (tests/linux/chroot_w7.c
+/// PASS when claimed) and is switched on by putting 161 back here.
+pub const CLAIMED: &[u64] = &[];
 
 /// Claims [`CLAIMED`] (`mcalls=0` among the program's arguments leaves them to the kernel).
 pub fn claim_all(args: &[&str]) -> usize {
