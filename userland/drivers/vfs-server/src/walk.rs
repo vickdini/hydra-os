@@ -196,7 +196,7 @@ pub enum ParentWalked {
 /// from a symbolic link).
 type Seg = (Vec<u8>, Option<usize>);
 
-/// The components of `path` (no empty ones, no `.`), last first (a stack); `origin`: whether
+/// The components of `path` (no empty ones), last first (a stack); `origin`: whether
 /// `path` is the argument (offsets kept) or a link's target.
 fn components(path: &[u8], origin: bool) -> Vec<Seg> {
     let mut v = Vec::new();
@@ -204,7 +204,7 @@ fn components(path: &[u8], origin: bool) -> Vec<Seg> {
     for i in 0..=path.len() {
         if i == path.len() || path[i] == b'/' {
             let c = &path[start..i];
-            if !c.is_empty() && c != b"." {
+            if !c.is_empty() {
                 v.push((c.to_vec(), origin.then_some(start)));
             }
             start = i + 1;
@@ -263,7 +263,6 @@ fn up(be: &dyn Backend, cx: &Ctx, mut cur: Node) -> Result<Node, i64> {
             _ => break,
         }
     }
-    search(be, cx, cur)?;
     be.lookup(cur, b"..")
 }
 
@@ -294,8 +293,9 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
     if path.len() >= PATH_MAX {
         return Err(ENAMETOOLONG);
     }
-    // A trailing `/`, `/.` or `/..` (or the path `.`): the result must be a directory
-    let trailing = path.ends_with(b"/") || path.ends_with(b"/.") || path.ends_with(b"/..") || path == b"." || path == b"..";
+    // A trailing `/`: the result must be a directory (a trailing `.` or `..` is a lookup in
+    // it, which checks that already)
+    let trailing = path.ends_with(b"/");
     let follow_last = flags & NOFOLLOW == 0 || trailing;
     let root = cx.root;
     let mut cur = match start {
@@ -311,11 +311,21 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
         if comp.len() > NAME_MAX {
             return Err(ENAMETOOLONG);
         }
-        if comp == b".." {
-            cur = up(be, cx, cur)?;
+        // Every component, `.` and `..` too, needs search permission on the directory it is
+        // looked up in (Linux's `may_lookup`)
+        search(be, cx, cur)?;
+        if comp == b"." {
             continue;
         }
-        search(be, cx, cur)?;
+        if comp == b".." {
+            let parent = up(be, cx, cur)?;
+            // (the parent may be covered by a mount made after the walk's start went below it)
+            cur = match enter(be, cx, parent)? {
+                Ok(n) => n,
+                Err((svc, obj)) => return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len()))),
+            };
+            continue;
+        }
         if cur == root {
             if let Some((svc, obj)) = be.mounts().pseudo_at_root(cx.ns, &comp) {
                 return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len())));
@@ -394,7 +404,20 @@ pub fn walk_parent(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8]) -> Res
     let (dir, dir_attr) = match dir_walk {
         Some(d) => match walk(be, cx, start, d, 0)? {
             Walked::Found { node, attr } => (node, attr),
-            Walked::Redirect(r) => return Ok(ParentWalked::Redirect(r)),
+            Walked::Redirect(mut r) => {
+                // The rest of the path goes on with the last name
+                match r.tail {
+                    Some(t) if t as usize >= d.len() => r.tail = Some(name_at as u32),
+                    Some(_) => {}
+                    None => {
+                        if !r.text.is_empty() {
+                            r.text.push(b'/');
+                        }
+                        r.text.extend_from_slice(name);
+                    }
+                }
+                return Ok(ParentWalked::Redirect(r));
+            }
         },
         None => {
             let n = match start {
@@ -407,12 +430,12 @@ pub fn walk_parent(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8]) -> Res
     if !dir_attr.is_dir() {
         return Err(ENOTDIR);
     }
+    search(be, cx, dir)?;
     if dir == cx.root {
         if let Some((svc, obj)) = be.mounts().pseudo_at_root(cx.ns, name) {
             return Ok(ParentWalked::Redirect(Redirect { svc, obj, tail: Some(path.len() as u32), text: Vec::new() }));
         }
     }
-    search(be, cx, dir)?;
     let child = if name == b"." || name == b".." {
         None
     } else {

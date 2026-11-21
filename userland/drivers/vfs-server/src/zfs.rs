@@ -48,23 +48,45 @@ pub struct Reply {
     pub events: Vec<Event>,
 }
 
-fn window() -> Result<&'static mut [u8], i64> {
+/// `-ETIMEDOUT`: the request took too long (zfs-server may still be serving it).
+const ETIMEDOUT: i64 = -110;
+
+/// Our part of the window (`FS_VFS_OFF..FS_VFS_END`, offset 0 here), used only under
+/// `TURN`, and never held as a slice across the call (zfs-server writes it meanwhile).
+fn part() -> Result<*mut u8, i64> {
     let a = WINDOW.load(Ordering::Acquire);
     if a == 0 {
         return Err(EIO);
     }
-    // SAFETY: the mapped 256 KiB window; our part is used only under TURN
-    Ok(unsafe { core::slice::from_raw_parts_mut(a as *mut u8, FS_VFS_END) })
+    Ok((a as usize + FS_VFS_OFF) as *mut u8)
+}
+
+/// `len` bytes of our part from `off` on.
+///
+/// # Safety
+/// Under `TURN`, with no zfs-server request in flight.
+unsafe fn slice<'a>(p: *mut u8, off: usize, len: usize) -> &'a mut [u8] {
+    core::slice::from_raw_parts_mut(p.add(off), len)
+}
+
+/// Whether request `op` changes nothing (it may be made again after zfs-server restarted).
+fn idempotent(op: u32) -> bool {
+    matches!(op, FS_ROOT | FS_LOOKUP | FS_RESOLVE | FS_RESOLVE_MNT | FS_GETATTR | FS_READ | FS_READLINK | FS_READDIR | FS_STATFS | FS_GETXATTR | FS_LISTXATTR | FS_OBJECT_INFO | FS_DATASETS | FS_POOL_STATUS)
 }
 
 /// Sends request `op` with the parameters `params` writes; returns its value, reply bytes
-/// and events, or its error.
+/// and events, or its error. A request that changes nothing is made once more if zfs-server
+/// went away (not after a timeout: it may still be serving it); a change is not (`EIO`: it
+/// may or may not have happened).
 pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
     let _turn = TURN.lock();
-    let w = window()?;
+    let p = part()?;
+    const DATA: usize = FS_VFS_EVENTS - FS_VFS_OFF;
+    const EVENTS: usize = FS_VFS_END - FS_VFS_EVENTS;
     for attempt in 0..2 {
         let len = {
-            let mut wr = Writer::new(&mut w[FS_VFS_OFF..FS_VFS_EVENTS]);
+            // SAFETY: under TURN, before the call
+            let mut wr = Writer::new(unsafe { slice(p, 0, DATA) });
             params(&mut wr);
             wr.len()
         };
@@ -76,21 +98,27 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
                 if status < 0 {
                     return Err(status);
                 }
-                let n = (m.args[2] as usize).min(FS_VFS_EVENTS - FS_VFS_OFF);
-                let data = w[FS_VFS_OFF..FS_VFS_OFF + n].to_vec();
+                let n = (m.args[2] as usize).min(DATA);
+                // SAFETY: under TURN, after the answer
+                let data = unsafe { slice(p, 0, n) }.to_vec();
                 let mut events = Vec::new();
                 if m.args[3] > 0 {
-                    let mut rd = Reader::new(&w[FS_VFS_EVENTS..FS_VFS_END]);
-                    for _ in 0..m.args[3] {
+                    // SAFETY: as above
+                    let mut rd = Reader::new(unsafe { slice(p, DATA, EVENTS) });
+                    // (an event takes 20 bytes at least)
+                    for _ in 0..m.args[3].min((EVENTS / 20) as u64) {
                         events.push(rd.event());
                     }
                 }
                 return Ok(Reply { value: m.args[1], data, events });
             }
             Ok(_) => return Err(EIO),
-            Err(_) => {
+            Err(e) => {
                 RETRIES.fetch_add(1, Ordering::Relaxed);
                 crate::cache::forget_all();
+                if e == ETIMEDOUT || !idempotent(op) {
+                    return Err(EIO);
+                }
                 if attempt == 0 {
                     sys::sleep_ms(200);
                 }
@@ -144,7 +172,9 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
         w.u64(max as u64);
     })?;
     let mut rd = Reader::new(&r.data);
-    Ok((0..r.value).map(|_| rd.entry()).collect())
+    // (an entry takes 28 bytes at least)
+    let n = r.value.min(max as u64).min((r.data.len() / 28) as u64);
+    Ok((0..n).map(|_| rd.entry()).collect())
 }
 
 /// Extended attribute `name` of `ino` (`ENODATA` if it has none of that name).
