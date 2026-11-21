@@ -23,7 +23,8 @@
 
 pub mod enc;
 mod change;
-mod ctxt;
+// (crate-visible: 7-3's mount calls use the same caller context)
+pub(crate) mod ctxt;
 mod dir;
 mod open;
 pub mod rules;

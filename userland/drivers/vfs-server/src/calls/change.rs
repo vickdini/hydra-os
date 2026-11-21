@@ -138,7 +138,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 return Err(EINVAL);
             }
             let (n, at) = target(cx, &who, a[0], true, false)?;
-            let acl = ctxt::acl_of(n, &at);
+            let acl = ctxt::acl_of(n, &at)?;
             if !ctxt::may_access(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE) {
                 return Err(EPERM);
             }
@@ -204,7 +204,7 @@ fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Pare
             _ => {}
         }
     }
-    let acl = ctxt::acl_of(p.dir, &p.dir_attr);
+    let acl = ctxt::acl_of(p.dir, &p.dir_attr)?;
     if !ctxt::may_access(who, &p.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
         return Err(EACCES);
     }
@@ -342,7 +342,7 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         if !d.dir_attr.is_dir() {
             return Err(ENOTDIR);
         }
-        let acl = ctxt::acl_of(d.dir, &d.dir_attr);
+        let acl = ctxt::acl_of(d.dir, &d.dir_attr)?;
         if !ctxt::may_access(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
             return Err(EACCES);
         }

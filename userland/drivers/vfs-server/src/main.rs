@@ -30,6 +30,13 @@ mod calls;
 mod cache;
 mod ctx;
 mod lock;
+// wave7 G7-3 begin: mount tables and tmpfs
+mod mount;
+mod mountcalls;
+mod mtab;
+mod tmpfs;
+mod tmpfs_mem;
+// wave7 G7-3 end
 mod perm;
 mod walk;
 mod zfs;
@@ -57,9 +64,6 @@ use hydra_rt::svcrt::{self, Answer, Cx, Event};
 use hydra_rt::{println, sys};
 use proto::*;
 
-/// 7-2's notification kind (defined in its protocol block): the kernel changed the file
-/// system behind vfs-server's back (`a` = the object, 0 = names anywhere).
-const LX_NOTE_FSCHANGE: u64 = 9;
 
 use crate::be::ZfsBackend;
 use crate::cache::CACHE;
@@ -90,6 +94,9 @@ fn main(args: &[&str]) {
         CACHE.set_cap(n);
     }
     let cfg = svcrt::Config { name: "vfs-server", endpoint: ENDPOINT_VFS_SERVER, workers: svcrt::workers_arg(args, 4), subscribe: None };
+    // wave7 G7-3: the initial namespace's mount table, before any worker or note can ask
+    // (the pool root is set when zfs-server answers)
+    mount::install_boot(0);
     let mut svc = match svcrt::start(&cfg, serve) {
         Ok(s) => s,
         Err(e) => {
@@ -120,18 +127,26 @@ fn main(args: &[&str]) {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
     }
+    // wave7 G7-3: the pool root of the boot table, once zfs-server answers (else again below)
+    let mut root_known = root.map(mount::set_pool_root).unwrap_or(false);
     match root {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
     }
     // wave7 G7-2: the calls go to vfs-server from now on (`calls=0`: none, `calls=4,6,..`: these)
     println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
+    // wave7 G7-3: the mount calls moved so far (`mcalls=0`: none)
+    println!("[vfs-server] {} mount calls claimed", mountcalls::claim_all(args));
     loop {
         match svc.recv(100) {
             Event::Request(id, _req) => svc.reply(id, &hydra_rt::Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
             Event::Notify(_) | Event::Idle => {}
         }
         take_notes(u64::MAX);
+        // wave7 G7-3
+        if !root_known {
+            root_known = zfs::root().map(mount::set_pool_root).unwrap_or(false);
+        }
     }
 }
 
@@ -147,6 +162,8 @@ fn take_notes(seq: u64) {
         let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
         if dropped != *seen {
             CACHE.forget_all();
+            // wave7 G7-3: lost namespace notes: only the initial table is sure now
+            mount::forget_namespaces(&mut *tmpfs_mem::STORE.lock());
             *seen = dropped;
         }
     }
@@ -158,7 +175,12 @@ fn take_notes(seq: u64) {
 }
 
 /// One notification: the kernel changed the file system (`LX_NOTE_FSCHANGE`).
-fn on_note(kind: u64, a: u64, _b: u64, _c: u64) {
+fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
+    // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
+    if kind == LX_NOTE_MNTNS {
+        mount::on_mntns(a, b, &mut *tmpfs_mem::STORE.lock());
+        return;
+    }
     if kind == LX_NOTE_FSCHANGE {
         if a == 0 {
             // wave7 G7-2: 0 = names and attributes anywhere (link counts change with names)
@@ -175,6 +197,10 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
     // wave7 G7-2
     if let Some(a) = calls::serve(&cx) {
+        return a;
+    }
+    // wave7 G7-3
+    if let Some(a) = mountcalls::serve(&cx) {
         return a;
     }
     let r = match c.nr {
@@ -213,7 +239,7 @@ fn walk_call(cx: &Cx, page: *mut u8) -> Answer {
         let who = Ctx::from_call(&cx.c, root);
         let mut o = LxVfsWalkOut::default();
         let before = zfs::REQUESTS.load(Ordering::Relaxed);
-        let be = ZfsBackend { nocache: flags & LX_VFS_NOCACHE != 0 };
+        let be = ZfsBackend { nocache: flags & LX_VFS_NOCACHE != 0, ns: who.ns };
         let w = walk::walk(&be, &who, Start::At(cwd), &path, if flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })?;
         o.zfs_requests = zfs::REQUESTS.load(Ordering::Relaxed) - before;
         match w {
@@ -336,7 +362,7 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         for &g in &w.groups[..w.ngroups as usize] {
             who = who.with_group(g);
         }
-        let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0 };
+        let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0, ns: who.ns };
         let mut o = LxVfsWalkOut::default();
         match walk::walk(&be, &who, Start::At(base), path, if w.flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })? {
             Walked::Found { node, attr } => {

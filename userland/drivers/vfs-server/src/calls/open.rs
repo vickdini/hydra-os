@@ -39,7 +39,7 @@ pub fn open(cx: &Cx) -> Result<i64, i64> {
         ctxt::find(c, &who, &path, follow)?
     };
     let want = rules::decide(attr.mode, flags)?;
-    let acl = ctxt::acl_of(n, &attr);
+    let acl = ctxt::acl_of(n, &attr)?;
     if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {
         return Err(EACCES);
     }

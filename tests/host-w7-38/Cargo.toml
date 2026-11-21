@@ -1,0 +1,16 @@
+[package]
+name = "hydra_hosttests_w7_38"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side unit tests of vfs-server's mount tables, namespaces and tmpfs (wave 7, Group 7-3)"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"

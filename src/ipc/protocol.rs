@@ -1722,3 +1722,12 @@ pub struct LxVfsWalkIn {
 
 // (`LX_NOTE_FSCHANGE`, which vfs-server takes, is in 7-2's block `wave7 G7-2`.)
 // wave7 G7-1 end
+// wave7 G7-3 begin: mount namespaces for vfs-server's mount tables
+// ----------------------------------------------------------------------------------------
+/// Notification kind (to vfs-server, the host of [`LXS_VFS`]): mount namespace `a` was made
+/// as a copy of namespace `b` (`unshare`/`clone` with `CLONE_NEWNS`), or, with
+/// `b` = [`LX_MNTNS_GONE`], namespace `a` has no live process left.
+pub const LX_NOTE_MNTNS: u64 = 10;
+/// See [`LX_NOTE_MNTNS`].
+pub const LX_MNTNS_GONE: u64 = u64::MAX;
+// wave7 G7-3 end

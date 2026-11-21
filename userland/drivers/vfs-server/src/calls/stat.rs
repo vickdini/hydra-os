@@ -56,7 +56,7 @@ pub fn access(cx: &Cx) -> Result<i64, i64> {
         return Ok(0);
     }
     let (uid, gid) = if flags & AT_EACCESS != 0 { (c.euid, c.egid) } else { (c.uid, c.gid) };
-    let acl = ctxt::acl_of(n, &attr);
+    let acl = ctxt::acl_of(n, &attr)?;
     if ctxt::may_access(&who, &attr, acl.as_deref(), uid, gid, mode & 7) {
         Ok(0)
     } else {

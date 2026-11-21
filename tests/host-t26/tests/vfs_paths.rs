@@ -284,3 +284,28 @@ fn chroot_needs_search_permission() {
     task::set_caps(1 << 18);
     assert_eq!(sys(161, &[cstr("/locked")]), EACCES);
 }
+
+/// wave 7, Group 7-3: vfs-server's chroot (LX_FH_CHROOT) moves the whole CLONE_FS group:
+/// the parent, the caller, and a sibling cloned from the same parent.
+#[test]
+fn chroot_peers_moves_the_clone_fs_group() {
+    let _e = setup();
+    task::add_process(320, 0); // the parent
+    task::add_process(321, 0); // the caller (shares with 320)
+    task::add_process(322, 0); // a sibling (shares with 320)
+    task::add_process(323, 0); // not in the group
+    lx::proc::with(321, |p| p.fs_peer = 320);
+    lx::proc::with(322, |p| p.fs_peer = 320);
+    hydra_hosttests_t26::compat::linux::vfs::chroot_peers(321, 77, 3);
+    for pid in [320, 322] {
+        assert_eq!(task::with_other(pid, |t| { let f = t.fds.lock(); (f.root_ino, f.root_mnt) }).unwrap(), (77, 3), "{pid}");
+    }
+    assert_ne!(task::with_other(323, |t| t.fds.lock().root_ino).unwrap(), 77);
+    // The caller's own table is LX_FH_CHROOT's (not this function's)
+    assert_ne!(task::with_other(321, |t| t.fds.lock().root_ino).unwrap(), 77);
+    // A zombie of the group is left alone
+    lx::proc::with(322, |p| p.zombie = true);
+    hydra_hosttests_t26::compat::linux::vfs::chroot_peers(321, 88, 0);
+    assert_eq!(task::with_other(320, |t| t.fds.lock().root_ino).unwrap(), 88);
+    assert_eq!(task::with_other(322, |t| t.fds.lock().root_ino).unwrap(), 77);
+}

@@ -305,6 +305,11 @@ pub fn after_clone(child: u64, flags: u64) {
             PID_NS_INIT.lock().insert(p.ns.pid, p.ns.pid_inits.clone());
         }
         child_mnt = p.ns.mnt;
+        // wave7 G7-3: posted with the process table held, so it is ordered with every
+        // "gone" note (all are posted under this lock)
+        if flags & CLONE_NEWNS != 0 {
+            note_mntns(child_mnt, parent_mnt);
+        }
     }
     if flags & CLONE_NEWNS != 0 {
         // The child's own copy of the mount table
@@ -389,6 +394,13 @@ pub fn sys_unshare(flags: u64) -> i64 {
         }
         apply_new(&mut p.ns, ns_flags, true);
         new_mnt = p.ns.mnt;
+    }
+    // wave7 G7-3: vfs-server copies the table; the old namespace may be empty now (both
+    // posted with the process table held: ordered with every other namespace note)
+    if ns_flags & CLONE_NEWNS != 0 {
+        let procs = super::proc::PROCS.lock();
+        note_mntns(new_mnt, old_mnt);
+        gone_if_empty(&procs, old_mnt);
     }
     if ns_flags & CLONE_NEWNS != 0 {
         let fds = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone());
@@ -756,6 +768,10 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
             }
         }
     }
+    // wave7 G7-3: the namespace left may be empty now
+    if kinds & CLONE_NEWNS != 0 && theirs.mnt != mine.mnt {
+        mntns_left(mine.mnt);
+    }
     // A new mount namespace puts the root and working directory at its root
     if let Some(src) = target_fds {
         let (root_ino, root_mnt) = {
@@ -797,3 +813,37 @@ pub fn check_fork() -> Result<(), i64> {
         Ok(())
     }
 }
+
+// wave7 G7-3 begin: vfs-server keeps the mount tables (wave 7) and hears of namespaces
+/// Tells vfs-server that mount namespace `new` was made from `from`, or (`from` =
+/// [`LX_MNTNS_GONE`]) that `new` has no live process left. Nothing when vfs-server is not
+/// the host of the file service.
+///
+/// [`LX_MNTNS_GONE`]: crate::ipc::protocol::LX_MNTNS_GONE
+pub fn note_mntns(new: u64, from: u64) {
+    use crate::ipc::protocol::{ENDPOINT_VFS_SERVER, LXS_VFS, LX_NOTE_MNTNS};
+    if new == 0 {
+        return;
+    }
+    let h = crate::lx::svc::host_of(LXS_VFS);
+    if h != 0 && crate::lx::svc::endpoint_of(LXS_VFS) == ENDPOINT_VFS_SERVER {
+        crate::lx::note_to(h, LX_NOTE_MNTNS, new, from, 0);
+    }
+}
+
+/// A process left mount namespace `ns` (`setns`, `unshare`): when no live process is left
+/// in it, vfs-server drops its table. (Exits: `proc::thread_exited`, which holds the
+/// process table.)
+pub fn mntns_left(ns: u64) {
+    let procs = super::proc::PROCS.lock();
+    gone_if_empty(&procs, ns);
+}
+
+/// With the process table `procs` held (so the note is ordered with every other namespace
+/// note): when no live process is left in mount namespace `ns`, tells vfs-server.
+pub fn gone_if_empty(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, ns: u64) {
+    if ns != 0 && !procs.values().any(|p| !p.zombie && p.ns.mnt == ns) {
+        note_mntns(ns, crate::ipc::protocol::LX_MNTNS_GONE);
+    }
+}
+// wave7 G7-3 end

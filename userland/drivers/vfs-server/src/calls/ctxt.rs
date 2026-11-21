@@ -20,7 +20,9 @@ pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 pub const AT_EMPTY_PATH: u64 = 0x1000;
 
 /// The back end every call walks through (the caches in front of zfs-server).
-pub static BE: ZfsBackend = ZfsBackend { nocache: false };
+/// (`ns` 0: the calls serve only the pool's own tree, mount 0, and hand the rest to the
+/// kernel, so no tmpfs node reaches this back end yet — 7-3)
+pub static BE: ZfsBackend = ZfsBackend { nocache: false, ns: 0 };
 
 /// The node of a kernel context word: inode `ino` (0: the pool root) in mount `mnt`.
 pub fn node(ino: u64, mnt: u32) -> Result<Node, i64> {
@@ -95,12 +97,13 @@ pub fn may_access(who: &Ctx, attr: &Attr, acl: Option<&[u8]>, uid: u32, gid: u32
     super::rules::may_access(attr.mode, attr.uid, attr.gid, uid, want, by_acl, |g| as_ids.in_group(g))
 }
 
-/// The access ACL of `n` when its attributes say it may have one.
-pub fn acl_of(n: Node, attr: &Attr) -> Option<Vec<u8>> {
+/// The access ACL of `n` when its attributes say it may have one (an ACL that cannot be
+/// read fails the call: the mode bits alone could allow what it denies — 7-1's a78655f).
+pub fn acl_of(n: Node, attr: &Attr) -> Result<Option<Vec<u8>>, i64> {
     use crate::walk::Backend;
     if attr.has_xattr {
         BE.acl(n)
     } else {
-        None
+        Ok(None)
     }
 }

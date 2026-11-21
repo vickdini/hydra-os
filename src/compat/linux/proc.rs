@@ -500,6 +500,12 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     }
     // The Linux server forgets the process (its keyrings)
     crate::lx::note(crate::ipc::protocol::LX_NOTE_EXIT, pid, 0, 0);
+    // wave7 G7-3 begin: the last live process of a mount namespace: vfs-server drops its table
+    let mnt = procs.get(&pid).map_or(0, |p| p.ns.mnt);
+    if mnt != 0 && !procs.values().any(|p| !p.zombie && p.ns.mnt == mnt) {
+        super::ns::note_mntns(mnt, crate::ipc::protocol::LX_MNTNS_GONE);
+    }
+    // wave7 G7-3 end
     super::locks::process_exited(pid);
     super::limits::on_exit(pid);
     if super::admin::acct_on() {

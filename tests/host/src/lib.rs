@@ -457,7 +457,11 @@ pub mod compat {
             #[derive(Clone, Default)]
             pub struct Ns {
                 pub pid_inits: alloc::vec::Vec<u64>,
+                /// The mount namespace (wave 7, Group 7-3: exits tell vfs-server).
+                pub mnt: u64,
             }
+            /// *stub* vfs-server's namespace notes (wave 7, Group 7-3): nothing on the host.
+            pub fn note_mntns(_new: u64, _from: u64) {}
             impl Ns {
                 pub fn for_child(&self, _child: u64) -> Ns {
                     self.clone()
