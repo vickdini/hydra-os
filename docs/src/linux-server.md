@@ -892,10 +892,15 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
 - **Claims:** vfs-server claims each number it serves at start-up (`SYS_LX_OBJ(LX_FH_CLAIM,
   nr, 1)`); only claimed numbers get a routing entry (bit `fileh::T_VFS`). `calls=0` /
   `calls=4,6,...` among vfs-server's arguments narrow that; `lx.vfs=kernel` and `lx=kernel`
-  zero the entries. Claimed today (34): stat, lstat, newfstatat, statx, access, faccessat,
-  faccessat2, readlink, readlinkat, statfs, getdents64, getdents, open, openat; chmod,
+  zero the entries. Claimed today (32): stat, lstat, newfstatat, statx, access, faccessat,
+  faccessat2, readlink, readlinkat, statfs, open, openat; chmod,
   fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate, utimensat; mkdir,
   mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename, renameat, renameat2.
+  `getdents64`/`getdents` are served (`calls/dir.rs`) but not claimed by default: a warm
+  `find /usr` took 0.87-0.93 s with them against the kernel's 0.46-0.52 s, 0.44-0.48 s without
+  (`calls=...` claims them for tests). The kernel also keeps a call vfs-server would send
+  straight back (`fileh::kernel_mask`: foreign roots, mounts, per call Landlock, fanotify,
+  inotify, ABAC), without the round trip.
 - **The context** each call carries (`fileh::fill`, both forwarding paths): root and working
   directory (inode and mount), umask, the directory descriptors of `*at` calls
   (`at_kind`: AT_FDCWD, file, directory, other), namespaces (`T_FSCTX`) and `fs_flags`

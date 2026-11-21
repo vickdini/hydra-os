@@ -39,15 +39,21 @@ use crate::proto::{LX_FH_CLAIM};
 pub use ctxt::KERNEL;
 
 /// The calls this module serves (x86-64 numbers): stat, lstat, newfstatat, statx, access,
-/// faccessat, faccessat2, readlink, readlinkat, statfs, getdents64, getdents, open, openat;
+/// faccessat, faccessat2, readlink, readlinkat, statfs, open, openat;
 /// chmod, fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate,
 /// utimensat; mkdir, mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename,
 /// renameat, renameat2.
 pub const CLAIMED: &[u64] = &[
-    4, 6, 262, 332, 21, 269, 439, 89, 267, 137, 217, 78, 2, 257, // read-only
+    // read-only. getdents64/getdents (217, 78) are served by `dir.rs` but not claimed: with
+    // them a warm `find /usr` took 0.87-0.93 s against the kernel's 0.46-0.52 s; without,
+    // 0.44-0.48 s (budget runs bA5/bA6/bG1, 2026-11-21). `calls=...` can claim them for tests.
+    4, 6, 262, 332, 21, 269, 439, 89, 267, 137, 2, 257,
     90, 268, 91, 92, 94, 260, 93, 76, 77, 280, // attributes
     83, 258, 88, 266, 87, 84, 263, 82, 264, 316, // names
 ];
+
+/// Calls served here but claimed only on request (`calls=...`): getdents64, getdents.
+pub const EXTRA: &[u64] = &[217, 78];
 
 /// Calls answered here, and sent back to the kernel, since start.
 pub static SERVED: AtomicU64 = AtomicU64::new(0);
@@ -55,14 +61,19 @@ pub static SERVED: AtomicU64 = AtomicU64::new(0);
 pub static TO_KERNEL: AtomicU64 = AtomicU64::new(0);
 
 /// Claims every call of [`CLAIMED`] (once online; `calls=0` among the program's arguments
-/// leaves them all to the kernel). Returns how many the kernel took.
+/// leaves them all to the kernel). `calls=4,6,...`: only these (also [`EXTRA`]). Returns how many the kernel took.
 pub fn claim_all(args: &[&str]) -> usize {
     if args.iter().any(|a| *a == "calls=0") {
         return 0;
     }
     // `calls=4,6,...`: only these
     let only: Option<alloc::vec::Vec<u64>> = args.iter().find_map(|a| a.strip_prefix("calls=")).map(|l| l.split(',').filter_map(|n| n.parse().ok()).collect());
-    CLAIMED.iter().filter(|nr| only.as_ref().is_none_or(|o| o.contains(nr))).filter(|&&nr| sys::lx_obj(LX_FH_CLAIM, nr, 1, 0).is_ok()).count()
+    let list: alloc::vec::Vec<u64> = match only {
+        // (also the calls served here but not claimed by default)
+        Some(o) => o.into_iter().filter(|nr| CLAIMED.contains(nr) || EXTRA.contains(nr)).collect(),
+        None => CLAIMED.to_vec(),
+    };
+    list.iter().filter(|&&nr| sys::lx_obj(LX_FH_CLAIM, nr, 1, 0).is_ok()).count()
 }
 
 /// Serves forwarded call `cx` if it is one of this module's (`None`: not one).
