@@ -50,6 +50,22 @@ pub struct Reply {
 
 /// `-ETIMEDOUT`: the request took too long (zfs-server may still be serving it).
 const ETIMEDOUT: i64 = -110;
+/// Times a request that changes nothing is made again while zfs-server restarts (300 ms
+/// apart).
+const RESTART_TRIES: usize = 20;
+
+/// After a timed-out request (under `TURN`): waits until zfs-server has finished it, by
+/// sending parameterless `FS_ROOT` requests until one is answered (they queue behind it);
+/// gives up after about two minutes or when zfs-server is gone (its restart ends the old
+/// request too).
+fn drain() {
+    for _ in 0..4 {
+        match sys::svc_call(ENDPOINT_ZFS_SERVER, Message::new(FS_ROOT as u64, [0, FS_CLIENT_VFS, 0, 0]), TIMEOUT_TICKS) {
+            Err(ETIMEDOUT) => continue,
+            _ => return,
+        }
+    }
+}
 
 /// Our part of the window (`FS_VFS_OFF..FS_VFS_END`, offset 0 here), used only under
 /// `TURN`, and never held as a slice across the call (zfs-server writes it meanwhile).
@@ -83,13 +99,18 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
     let p = part()?;
     const DATA: usize = FS_VFS_EVENTS - FS_VFS_OFF;
     const EVENTS: usize = FS_VFS_END - FS_VFS_EVENTS;
-    for attempt in 0..2 {
+    for attempt in 0..=RESTART_TRIES {
         let len = {
             // SAFETY: under TURN, before the call
             let mut wr = Writer::new(unsafe { slice(p, 0, DATA) });
             params(&mut wr);
             wr.len()
         };
+        // (a `Writer` drops what does not fit: parameters that filled our part may have
+        // lost some; a request is never that large unless something is wrong)
+        if len >= DATA - 64 {
+            return Err(E2BIG);
+        }
         REQUESTS.fetch_add(1, Ordering::Relaxed);
         let r = sys::svc_call(ENDPOINT_ZFS_SERVER, Message::new(op as u64, [len as u64, FS_CLIENT_VFS, 0, 0]), TIMEOUT_TICKS);
         match r {
@@ -98,7 +119,11 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
                 if status < 0 {
                     return Err(status);
                 }
-                let n = (m.args[2] as usize).min(DATA);
+                // (more reply bytes than our part holds: a broken answer, not a short one)
+                if m.args[2] as usize > DATA {
+                    return Err(EIO);
+                }
+                let n = m.args[2] as usize;
                 // SAFETY: under TURN, after the answer
                 let data = unsafe { slice(p, 0, n) }.to_vec();
                 let mut events = Vec::new();
@@ -114,14 +139,20 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
             }
             Ok(_) => return Err(EIO),
             Err(e) => {
-                RETRIES.fetch_add(1, Ordering::Relaxed);
                 crate::cache::forget_all();
-                if e == ETIMEDOUT || !idempotent(op) {
+                if e == ETIMEDOUT {
+                    // zfs-server may still be serving it and writing our part: keep the turn
+                    // until a request without parameters has passed behind it (zfs-server
+                    // serves one at a time), so nobody writes there meanwhile
+                    drain();
                     return Err(EIO);
                 }
-                if attempt == 0 {
-                    sys::sleep_ms(200);
+                if !idempotent(op) || attempt == RESTART_TRIES {
+                    return Err(EIO);
                 }
+                RETRIES.fetch_add(1, Ordering::Relaxed);
+                // (zfs-server restarting: the pool import takes a while)
+                sys::sleep_ms(300);
             }
         }
     }
@@ -153,6 +184,10 @@ pub fn getattr(ino: u64) -> Result<Attr, i64> {
     let r = request(FS_GETATTR, |w| {
         w.u64(ino);
     })?;
+    // (an attribute record: 14 words)
+    if r.data.len() < 14 * 8 {
+        return Err(EIO);
+    }
     Ok(Reader::new(&r.data).attr())
 }
 
@@ -203,6 +238,9 @@ pub fn listxattr(ino: u64) -> Result<Vec<u8>, i64> {
 /// `(total blocks, free blocks, objects in use)`.
 pub fn statfs() -> Result<(u64, u64, u64), i64> {
     let r = request(FS_STATFS, |_| {})?;
+    if r.data.len() < 3 * 8 {
+        return Err(EIO);
+    }
     let mut rd = Reader::new(&r.data);
     Ok((rd.u64(), rd.u64(), rd.u64()))
 }

@@ -23,6 +23,8 @@ use crate::fs::fsproto::{Attr, EEXIST, EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR
 
 /// Permission denied.
 pub const EACCES: i64 = -13;
+/// Stale handle: a node in a mount the caller's namespace does not have.
+pub const ESTALE: i64 = -116;
 use crate::fs::types::DnodeType;
 use crate::perm::{self, MAY_EXEC};
 use crate::proto::{SvcId, LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_DEV, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
@@ -216,7 +218,7 @@ fn components(path: &[u8], origin: bool) -> Vec<Seg> {
 
 /// The redirect to `(svc, obj)` with `pending` still to walk (a stack) in a path argument of
 /// `len` bytes.
-fn redirect(svc: SvcId, obj: u64, pending: &[Seg], len: usize) -> Redirect {
+fn redirect(svc: SvcId, obj: u64, pending: &[Seg], len: usize, trailing: bool) -> Redirect {
     if pending.is_empty() {
         return Redirect { svc, obj, tail: Some(len as u32), text: Vec::new() };
     }
@@ -230,6 +232,10 @@ fn redirect(svc: SvcId, obj: u64, pending: &[Seg], len: usize) -> Redirect {
             text.push(b'/');
         }
         text.extend_from_slice(&s.0);
+    }
+    // (a trailing `/` that came from a link's target: the other service must see it too)
+    if trailing {
+        text.push(b'/');
     }
     Redirect { svc, obj, tail: None, text }
 }
@@ -258,12 +264,18 @@ fn up(be: &dyn Backend, cx: &Ctx, mut cur: Node) -> Result<Node, i64> {
         if cur == cx.root {
             return Ok(cur);
         }
-        match (cur.mnt != 0).then(|| m.mount(cx.ns, cur.mnt)).flatten() {
+        if cur.mnt == 0 {
+            return be.lookup(cur, b"..");
+        }
+        match m.mount(cx.ns, cur.mnt) {
             Some(info) if info.root == cur => cur = info.mountpoint,
-            _ => break,
+            Some(_) => return be.lookup(cur, b".."),
+            // A mount this namespace does not have (gone, or another namespace's): never
+            // climb the tree below it (a bind mount's `..` would leave its root)
+            None => return Err(ESTALE),
         }
     }
-    be.lookup(cur, b"..")
+    Err(ELOOP)
 }
 
 /// Enters `n`: the root of the topmost mount covering it, if any (`Err((svc, obj))`: a
@@ -295,7 +307,7 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
     }
     // A trailing `/`: the result must be a directory (a trailing `.` or `..` is a lookup in
     // it, which checks that already)
-    let trailing = path.ends_with(b"/");
+    let mut trailing = path.ends_with(b"/");
     let follow_last = flags & NOFOLLOW == 0 || trailing;
     let root = cx.root;
     let mut cur = match start {
@@ -322,13 +334,18 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             // (the parent may be covered by a mount made after the walk's start went below it)
             cur = match enter(be, cx, parent)? {
                 Ok(n) => n,
-                Err((svc, obj)) => return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len()))),
+                Err((svc, obj)) => return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing))),
             };
             continue;
         }
         if cur == root {
             if let Some((svc, obj)) = be.mounts().pseudo_at_root(cx.ns, &comp) {
-                return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len())));
+                // `/proc/..`: back out of the mount here, not in the other service
+                if pending.last().is_some_and(|s| s.0 == b"..") {
+                    pending.pop();
+                    continue;
+                }
+                return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing)));
             }
         }
         let next = be.lookup(cur, &comp)?;
@@ -346,6 +363,10 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             if target[0] == b'/' {
                 cur = root;
             }
+            // `link -> file/` as the last component: the result must be a directory
+            if is_last && target.ends_with(b"/") {
+                trailing = true;
+            }
             pending.extend(components(&target, false));
             continue;
         }
@@ -359,7 +380,14 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
                 }
                 cur = n;
             }
-            Err((svc, obj)) => return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len()))),
+            Err((svc, obj)) => {
+                // `mnt/..`: back out of the mount here (to the directory it is in)
+                if pending.last().is_some_and(|s| s.0 == b"..") {
+                    pending.pop();
+                    continue;
+                }
+                return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing)));
+            }
         }
     }
     let attr = match known {

@@ -436,3 +436,71 @@ fn a_permission_change_reaches_the_walk_after_forget_attr() {
     cache.forget_object(d);
     assert_eq!(found(walk::walk(&be, &user, Start::Root, b"/tmp/d/f", 0)), Ok(f));
 }
+
+// Pre-merge review (the lead's Gemini run), 2026-11-21
+
+#[test]
+fn dotdot_never_leaves_a_mount_the_namespace_does_not_have() {
+    let t = tree();
+    // A node in mount 7, which the (empty) table does not know: `..` must not climb the
+    // pool tree below it (a bind mount of /usr/bin would escape to /usr)
+    let start = Start::At(Node::new(7, t.bin));
+    assert_eq!(found(walk::walk(&t.fs, &root_cx(), start, b"..", 0)), Err(walk::ESTALE));
+    assert_eq!(found(walk::walk(&t.fs, &root_cx(), start, b"../lib", 0)), Err(walk::ESTALE));
+    // Inside a known bind mount of /usr/bin: `..` at its root goes to the mountpoint's parent
+    let mut t = t;
+    let mnt = t.fs.mkdir(ROOT, "mnt", 0o755);
+    t.fs.mounts.list.push(MountInfo { parent: 0, mountpoint: Node::new(0, mnt), root: Node::new(1, t.bin), kind: MountKind::Zfs });
+    match walk::walk(&t.fs, &root_cx(), Start::Root, b"/mnt/..", 0).unwrap() {
+        Walked::Found { node, .. } => assert_eq!(node, Node::new(0, ROOT)),
+        _ => panic!(),
+    }
+    match walk::walk(&t.fs, &root_cx(), Start::Root, b"/mnt/bash", 0).unwrap() {
+        Walked::Found { node, .. } => assert_eq!(node, Node::new(1, t.bash)),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn a_trailing_slash_in_a_link_target_counts() {
+    let t = tree();
+    let cx = root_cx();
+    t.fs.symlink(t.tmp, "tofile", "/etc/passwd/");
+    t.fs.symlink(t.tmp, "todir", "/usr/bin/");
+    assert_eq!(w(&t, &cx, "/tmp/tofile"), Err(ENOTDIR));
+    assert_eq!(w(&t, &cx, "/tmp/todir"), Ok(t.bin));
+    // Not the last component: the slash in the middle changes nothing
+    t.fs.symlink(t.tmp, "binlink", "/usr/bin/");
+    assert_eq!(w(&t, &cx, "/tmp/binlink/bash"), Ok(t.bash));
+}
+
+#[test]
+fn redirect_texts_keep_a_trailing_slash_and_dotdot_backs_out_of_the_mount() {
+    let mut t = tree();
+    t.fs.mounts.pseudo = vec![(b"proc".to_vec(), LXS_PROC, LX_VFS_PSEUDO_PROC)];
+    let cx = root_cx();
+    t.fs.symlink(t.tmp, "pv", "/proc/version/");
+    let r = redir(walk::walk(&t.fs, &cx, Start::Root, b"/tmp/pv", 0));
+    assert_eq!((r.tail, r.text.as_slice()), (None, &b"version/"[..]));
+    // `/proc/..` is the root again, in vfs-server
+    assert_eq!(w(&t, &cx, "/proc/.."), Ok(ROOT));
+    assert_eq!(w(&t, &cx, "/proc/../etc/passwd"), Ok(t.passwd));
+    // ... and `mnt/..` for a mount another service serves
+    let fuse = t.fs.mkdir(t.tmp, "fuse", 0o755);
+    t.fs.mounts.list.push(MountInfo { parent: 0, mountpoint: Node::new(0, fuse), root: Node::new(1, 0), kind: MountKind::Redirect { svc: 9, obj: 4 } });
+    assert_eq!(w(&t, &cx, "/tmp/fuse/../fuse/.."), Ok(t.tmp));
+    assert_eq!(redir(walk::walk(&t.fs, &cx, Start::Root, b"/tmp/fuse/a", 0)).svc, 9);
+}
+
+#[test]
+fn an_invalid_acl_is_no_acl() {
+    let t = tree();
+    let d = t.fs.mkdir(t.tmp, "inv", 0o711);
+    let f = t.fs.file(d, "f", 0o644);
+    // Named user without a mask: invalid (Linux's posix_acl_valid), so the mode decides
+    t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x02, 0, 9), (0x04, 1, 0), (0x20, 1, 0)]));
+    assert_eq!(w(&t, &user_cx(9, 9), "/tmp/inv/f"), Ok(f));
+    // The same with its mask: valid, and user 9 is refused
+    t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x02, 0, 9), (0x04, 1, 0), (0x10, 1, 0), (0x20, 1, 0)]));
+    assert_eq!(w(&t, &user_cx(9, 9), "/tmp/inv/f"), Err(EACCES));
+}

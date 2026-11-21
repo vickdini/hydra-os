@@ -31,7 +31,46 @@ fn parse(b: &[u8]) -> Option<alloc::vec::Vec<Entry>> {
     if b.len() < 12 || (b.len() - 4) % 8 != 0 || u32::from_le_bytes(b[0..4].try_into().ok()?) != 2 {
         return None;
     }
-    Some(b[4..].chunks(8).map(|c| (u16::from_le_bytes([c[0], c[1]]), u16::from_le_bytes([c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect())
+    let e: alloc::vec::Vec<Entry> = b[4..].chunks(8).map(|c| (u16::from_le_bytes([c[0], c[1]]), u16::from_le_bytes([c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect();
+    valid(&e).then_some(e)
+}
+
+/// Linux's `posix_acl_valid` (as the kernel's `acl.rs`): the owner's entry, named users in
+/// order, the group's entry, named groups in order, the mask (required with named entries),
+/// other; permissions in `rwx` only.
+fn valid(e: &[Entry]) -> bool {
+    // States: 1 expecting owner, 2 named users, 3 named groups, 4 expecting other, 0 done
+    let (mut state, mut needs_mask, mut prev) = (1, false, None::<u32>);
+    for &(tag, perm, id) in e {
+        if perm & !7 != 0 {
+            return false;
+        }
+        match tag {
+            USER_OBJ if state == 1 => state = 2,
+            USER if state == 2 => {
+                if prev.is_some_and(|p| id <= p) {
+                    return false;
+                }
+                prev = Some(id);
+                needs_mask = true;
+            }
+            GROUP_OBJ if state == 2 => {
+                state = 3;
+                prev = None;
+            }
+            GROUP if state == 3 => {
+                if prev.is_some_and(|p| id <= p) {
+                    return false;
+                }
+                prev = Some(id);
+                needs_mask = true;
+            }
+            MASK if state == 3 => state = 4,
+            OTHER if state == 4 || (state == 3 && !needs_mask) => state = 0,
+            _ => return false,
+        }
+    }
+    state == 0
 }
 
 /// Whether the caller may access `attr` for `want` under ACL `acl` (Linux's

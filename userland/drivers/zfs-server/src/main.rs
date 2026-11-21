@@ -983,9 +983,10 @@ fn main(args: &[&str]) {
         // wave7 G7-1 begin: vfs-server's requests are in its own window (attached here
         // the first time), the kernel's in this server's
         let vfs = msg.args[1] == FS_CLIENT_VFS;
+        // SAFETY (vfs_window): used only within this request, while vfs-server waits for it
         let (window, base, data_end, events_end): (&mut [u8], usize, usize, usize) = if vfs {
-            match vfs_window() {
-                Some(w) => (w, FS_VFS_OFF, FS_VFS_EVENTS, FS_VFS_END),
+            match unsafe { vfs_window() } {
+                Some(w) => (w, 0, FS_VFS_EVENTS - FS_VFS_OFF, FS_VFS_END - FS_VFS_OFF),
                 None => return Message::new(FS_REPLY as u64, [EIO as u64, 0, 0, 0]),
             }
         } else {
@@ -1039,10 +1040,15 @@ fn main(args: &[&str]) {
 }
 
 // wave7 G7-1 begin
-/// vfs-server's window (its requests to this server), attached the first time one comes
-/// (the supervisor allows it: `allow_client(ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER)`). The
-/// window outlives vfs-server's restarts, so the mapping stays valid.
-fn vfs_window() -> Option<&'static mut [u8]> {
+/// vfs-server's part for its requests to this server (`FS_VFS_OFF..FS_VFS_END` of its
+/// window, attached the first time one comes; the supervisor allows it:
+/// `allow_client(ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER)`). The window outlives
+/// vfs-server's restarts, so the mapping stays valid.
+///
+/// # Safety
+/// The slice is for one request of vfs-server's, which holds its part for it (and waits);
+/// the caller must not keep it beyond that request.
+unsafe fn vfs_window<'a>() -> Option<&'a mut [u8]> {
     use core::sync::atomic::{AtomicU64, Ordering};
     static VFS_WINDOW: AtomicU64 = AtomicU64::new(0);
     let mut a = VFS_WINDOW.load(Ordering::Acquire);
@@ -1050,9 +1056,8 @@ fn vfs_window() -> Option<&'static mut [u8]> {
         a = sys::svc_attach(hydra_rt::protocol::ENDPOINT_VFS_SERVER).ok().filter(|&a| a != 0)?;
         VFS_WINDOW.store(a, Ordering::Release);
     }
-    // SAFETY: the mapped 256 KiB window, used by this (single-threaded) server only while it
-    // serves one of vfs-server's requests
-    Some(unsafe { core::slice::from_raw_parts_mut(a as *mut u8, FS_VFS_END) })
+    // SAFETY: inside the mapped 256 KiB window; see the function's contract
+    Some(core::slice::from_raw_parts_mut((a as usize + FS_VFS_OFF) as *mut u8, FS_VFS_END - FS_VFS_OFF))
 }
 // wave7 G7-1 end
 

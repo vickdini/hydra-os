@@ -70,6 +70,7 @@ const EINVAL: i64 = -22;
 const ENOENT: i64 = -2;
 const ENOSYS: i64 = -38;
 const EXDEV: i64 = -18;
+const ENAMETOOLONG: i64 = -36;
 /// `AT_FDCWD`.
 const AT_FDCWD: i64 = -100;
 /// What the kernel puts in `LxCall::root`/`cwd` when it cannot describe them (a root or
@@ -103,7 +104,16 @@ fn main(args: &[&str]) {
     // any call can come: a request of a previous instance that zfs-server may still be
     // serving finishes first (it writes its reply into our part of the window), so no later
     // request's bytes are overwritten by that stale reply
-    let root = zfs::root();
+    // (until it is answered: going online earlier would let a worker's request be
+    // overwritten; zfs-server may still be starting at boot)
+    let mut root = zfs::root();
+    for _ in 0..120 {
+        if root.is_ok() {
+            break;
+        }
+        sys::sleep_ms(500);
+        root = zfs::root();
+    }
     if let Err(e) = svc.online() {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -126,10 +136,11 @@ fn main(args: &[&str]) {
 fn take_notes(seq: u64) {
     let ring = RING.load(Ordering::Acquire);
     if ring != 0 {
-        // SAFETY: the ring header in the mapped window (word 2: entries dropped, written by
-        // the kernel under its ring lock; an aligned u64)
-        let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
         let mut seen = DROPPED_SEEN.lock();
+        // SAFETY: the ring header in the mapped window (word 2: entries dropped, written by
+        // the kernel under its ring lock; an aligned u64). Read under the lock: a worker
+        // with an older count never sets it back
+        let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
         if dropped != *seen {
             CACHE.forget_all();
             *seen = dropped;
@@ -262,7 +273,11 @@ fn dcall(cx: &Cx) -> i64 {
                 return EINVAL;
             }
             let ticket = Cx::u64_at(&b, 0) >> 32;
-            let text = TEXTS.lock().iter().find(|e| e.0 == ticket).map(|e| e.1.clone());
+            // (a ticket is good for one fetch: the target asks once per redirected call)
+            let text = {
+                let mut t = TEXTS.lock();
+                t.iter().position(|e| e.0 == ticket).map(|i| t.remove(i).1)
+            };
             match text {
                 Some(t) => {
                     let n = t.len().min(a.output_cap);
@@ -280,8 +295,11 @@ fn dcall(cx: &Cx) -> i64 {
 fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
     let head = core::mem::size_of::<LxVfsWalkIn>();
     let r = (|| -> Result<i64, i64> {
-        if a.input_len <= head || a.input_len > head + walk::PATH_MAX {
+        if a.input_len <= head {
             return Err(EINVAL);
+        }
+        if a.input_len > head + walk::PATH_MAX {
+            return Err(ENAMETOOLONG);
         }
         let b = cx.copy_in(a.input, a.input_len)?;
         // SAFETY: at least `head` bytes, a plain repr(C) struct
@@ -301,7 +319,12 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         };
         let mut who = Ctx::new(w.uid, w.gid, w.caps, root);
         who.ns = w.mnt_ns as u32;
-        for &g in &w.groups[..(w.ngroups as usize).min(LX_GROUPS)] {
+        // (more groups than fit: refused, never cut: a dropped group could turn an ACL's
+        // denial into an allow)
+        if w.ngroups as usize > LX_GROUPS {
+            return Err(EINVAL);
+        }
+        for &g in &w.groups[..w.ngroups as usize] {
             who = who.with_group(g);
         }
         let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0 };

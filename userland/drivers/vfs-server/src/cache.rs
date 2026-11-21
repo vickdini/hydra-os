@@ -134,6 +134,7 @@ pub struct Ticket(u64);
 impl Cache {
     /// Empty caches of about `cap` entries each.
     pub const fn new(cap: usize) -> Self {
+        let cap = if cap < 16 { 16 } else { cap };
         Self {
             inner: YLock::new(Inner { names: BTreeMap::new(), name_clock: 0, dirgen: BTreeMap::new(), attrs: Map::new(), links: Map::new(), acls: Map::new() }),
             gen: AtomicU64::new(1),
@@ -347,6 +348,8 @@ impl Cache {
             g.acls.m.remove(&n);
         }
         g.acls.m.retain(|n, _| n.ino != ino);
+        // Names that lead to it (it may be gone or replaced)
+        g.names.retain(|_, e| !e.target.is_some_and(|t| t.ino == ino));
         // Names in it (in whichever mount): their directory generation moves on
         let dirs: alloc::collections::BTreeSet<Node> = g.names.keys().filter(|k| k.0.ino == ino).map(|k| k.0).collect();
         let cap = self.cap();

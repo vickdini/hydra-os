@@ -193,8 +193,8 @@ fn colliding_names_do_not_answer_for_each_other() {
 
 #[test]
 fn stats_reset_and_cap() {
-    let c = Cache::new(10);
-    assert_eq!(c.cap(), 10);
+    let c = Cache::new(20);
+    assert_eq!(c.cap(), 20);
     c.set_cap(1);
     assert_eq!(c.cap(), 16, "at least 16");
     c.attr(n(1));
@@ -229,4 +229,30 @@ fn concurrent_fills_and_forgets_stay_consistent() {
         h.join().unwrap();
     }
     assert!(c.len().1 <= 50);
+}
+
+// Pre-merge review (the lead's Gemini run), 2026-11-21
+
+#[test]
+fn forget_object_also_forgets_the_names_that_lead_to_it() {
+    let c = Cache::new(100);
+    let t = c.begin();
+    c.put_name(t, n(2), b"a", Some(n(7)));
+    c.put_name(t, n(3), b"hardlink", Some(Node::new(1, 7)));
+    c.put_name(t, n(2), b"b", Some(n(8)));
+    c.forget_object(7);
+    assert_eq!(c.name(n(2), b"a"), None);
+    assert_eq!(c.name(n(3), b"hardlink"), None);
+    assert_eq!(c.name(n(2), b"b"), Some(Some(n(8))));
+}
+
+#[test]
+fn a_tiny_cache_has_the_floor_of_sixteen() {
+    let c = Cache::new(0);
+    assert_eq!(c.cap(), 16);
+    for i in 0..1000u64 {
+        let t = c.begin();
+        c.put_attr(t, n(i), attr(i, 0));
+    }
+    assert!(c.len().1 <= 18);
 }
