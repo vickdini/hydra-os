@@ -171,7 +171,11 @@ fn kcall(x: &'static Host, mut c: LxCall, buf: &copy::CopyBuf, out: &mut [u8]) -
     drop(sched);
     let Some(me) = me else { return super::ENOSYS };
     if let Some(p) = crate::compat::linux::proc::PROCS.lock().get(&c.tgid) {
-        let n = p.groups.len().min(LX_GROUPS);
+        // (more groups than a call carries: the kernel checks with all of them itself)
+        if p.groups.len() > LX_GROUPS {
+            return LX_EXEC_KERNEL;
+        }
+        let n = p.groups.len();
         c.groups[..n].copy_from_slice(&p.groups[..n]);
         c.ngroups = n as u64;
     }
@@ -203,7 +207,7 @@ pub(super) fn sock_call(frame: &SyscallFrame, o: HeldObj) -> Option<i64> {
     c.obj = slot;
     c.obj_flags = flags | LX_OBJ_FLAGS_VFSCTX;
     let held = context(&mut c, Shape::Path)?;
-    let mask = if c.nr == 49 { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC | LX_FS_INOTIFY } else { LX_FS_FOREIGN | LX_FS_MOUNTS };
+    let mask = if c.nr == 49 { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC | LX_FS_INOTIFY } else { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_ABAC };
     if !servable(&c, mask) {
         return None;
     }
@@ -215,6 +219,26 @@ pub(super) fn sock_call(frame: &SyscallFrame, o: HeldObj) -> Option<i64> {
         return None;
     }
     Some(r)
+}
+
+/// `LX_FH_READ(ino, buf, off << 16 | len)` of service host `h`: bytes of pool object `ino`
+/// through the page cache into the caller's (vfs-server's) buffer.
+pub(super) fn read(h: crate::ipc::protocol::SvcId, ino: u64, buf: u64, c: u64) -> i64 {
+    if svc::host_of(LXS_VFS) != h {
+        return super::EPERM;
+    }
+    if ino == 0 || !fileh::plain_ino(ino) {
+        return super::EINVAL;
+    }
+    let (off, len) = (c >> 16, (c & 0xFFFF) as usize);
+    let mut v = alloc::vec![0u8; len];
+    match crate::compat::linux::mm::cached_read(ino, off, &mut v) {
+        Ok(n) => match crate::compat::linux::vfs::copy_out(buf, &v[..n.min(len)]) {
+            Ok(()) => n.min(len) as i64,
+            Err(e) => e,
+        },
+        Err(e) => e,
+    }
 }
 
 /// One line for `lx` statistics.

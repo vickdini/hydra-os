@@ -65,10 +65,10 @@ struct Found {
 }
 
 /// Walks `path` for the program (`c`) with vfs-server.
-fn walk(c: &LxCall, flags: u32, path: &[u8], abs: &[u8]) -> Result<Found, Stop> {
+fn walk(c: &LxCall, flags: u32, path: &[u8], abs: &[u8], head_max: usize) -> Result<Found, Stop> {
     let mut input = Vec::with_capacity(core::mem::size_of::<LxCall>() + 16 + path.len() + abs.len());
     input.extend_from_slice(bytes_of(c));
-    let e = LxVfsExecIn { flags, path_len: path.len() as u32, abs_len: abs.len() as u32, head_max: HEAD as u32 };
+    let e = LxVfsExecIn { flags, path_len: path.len() as u32, abs_len: abs.len() as u32, head_max: head_max as u32 };
     input.extend_from_slice(bytes_of(&e));
     input.extend_from_slice(path);
     input.extend_from_slice(abs);
@@ -88,6 +88,10 @@ fn walk(c: &LxCall, flags: u32, path: &[u8], abs: &[u8]) -> Result<Found, Stop> 
     let o: LxVfsExecOut = unsafe { core::ptr::read_unaligned(out.as_ptr() as *const LxVfsExecOut) };
     let (h, rl) = (o.head_len as usize, o.real_len as usize);
     if os + h + rl > out.len() {
+        return Err(Stop::Kernel);
+    }
+    // (a head cut short by a long path could hide a `#!` line's end: the kernel reads it)
+    if (h as u64) < o.size.min(256).min(head_max as u64) {
         return Err(Stop::Kernel);
     }
     Ok(Found { ino: o.ino, head: out[os..os + h].to_vec(), real: out[os + h..os + h + rl].to_vec() })
@@ -144,7 +148,7 @@ fn plan(cx: &Cx) -> Result<(), Stop> {
     let (found, abs) = loop {
         let abs = execplan::join_path(&cur_base, &cur);
         let flags = LX_VFS_EXEC_REAL | if nofollow { LX_VFS_EXEC_NOFOLLOW } else { 0 };
-        let f = walk(&c, flags, &cur, &abs)?;
+        let f = walk(&c, flags, &cur, &abs, HEAD)?;
         let Some((interp, arg)) = execplan::parse_shebang(&f.head) else { break (f, abs) };
         depth += 1;
         if depth > LX_EXEC_DEPTH {
@@ -165,7 +169,7 @@ fn plan(cx: &Cx) -> Result<(), Stop> {
     };
     let mut interp_ino = 0;
     if !interp_path.is_empty() {
-        match walk(&c, LX_VFS_EXEC_FROM_ROOT | LX_VFS_EXEC_NOCHECK, &interp_path, &[]) {
+        match walk(&c, LX_VFS_EXEC_FROM_ROOT | LX_VFS_EXEC_NOCHECK, &interp_path, &[], 0) {
             Ok(f) => interp_ino = f.ino,
             // (not found: the kernel fails the exec with ENOENT, as its loader does)
             Err(Stop::Fail(_)) => {}

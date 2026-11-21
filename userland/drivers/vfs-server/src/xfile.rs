@@ -78,10 +78,18 @@ fn bytes_of<T: Copy>(v: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) }
 }
 
-/// Up to `n` bytes of pool object `ino` from `off`.
+/// Up to `n` bytes of pool object `ino` from `off`: through the kernel's page cache (what
+/// the loader reads; usually cached), zfs-server when that fails.
 fn read_obj(ino: u64, off: u64, n: usize) -> Result<Vec<u8>, i64> {
     if n == 0 {
         return Ok(Vec::new());
+    }
+    if n < 0x10000 && off < (1 << 47) {
+        let mut v = alloc::vec![0u8; n];
+        if let Ok(k) = sys::lx_obj(LX_FH_READ, ino, v.as_mut_ptr() as u64, off << 16 | n as u64) {
+            v.truncate((k as usize).min(n));
+            return Ok(v);
+        }
     }
     let r = zfs::request(FS_READ, |w| {
         w.u64(ino);
@@ -200,7 +208,7 @@ fn sock(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     let path = &b[cs + 8..];
     let path = &path[..path.iter().position(|&x| x == 0).unwrap_or(path.len())];
     // (making a node is a change: inotify watches and Landlock's MAKE_SOCK are the kernel's)
-    let need = if op == LX_VFS_SOCK_CHECK { 0 } else { LX_FS_INOTIFY | LX_FS_FANOTIFY | LX_FS_LANDLOCK | LX_FS_ABAC };
+    let need = if op == LX_VFS_SOCK_CHECK { LX_FS_LANDLOCK | LX_FS_ABAC } else { LX_FS_INOTIFY | LX_FS_FANOTIFY | LX_FS_LANDLOCK | LX_FS_ABAC };
     ctxt::check(&c, need)?;
     rules::check_path(path, false)?;
     let who = ctxt::caller(&c)?;

@@ -1853,4 +1853,9 @@ pub struct LxVfsExecOut {
 /// filled (as for a file-service call) and the socket node is not resolved: the server asks
 /// vfs-server ([`LX_VFS_OP_SOCK`]).
 pub const LX_OBJ_FLAGS_VFSCTX: u64 = 1 << 59;
+/// `SYS_LX_OBJ` operation (file service only): `(ino, buf, off << 16 | len)`: up to `len`
+/// (< 65536) bytes of pool object `ino` from `off`, read through the kernel's page cache
+/// (what the program's loader will read: no zfs-server round trip for a cached program, and
+/// coherent with pages written through shared mappings). Returns the count.
+pub const LX_FH_READ: u64 = 52;
 // wave7 G7-5 end
