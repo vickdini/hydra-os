@@ -89,6 +89,9 @@ struct OWait {
     slot: u32,
     kind: u32,
     pipe: u64,
+    /// The open's flags (wave7 G7-5: `args[1]` of `LX_KCALL_FIFO` and `open`, `args[2]` of
+    /// `openat`).
+    flags: u64,
 }
 
 struct Pipes {
@@ -620,8 +623,21 @@ pub fn is_pipe(slot: u32) -> bool {
 /// `O_NONBLOCK`: a reader goes on, a writer fails with `ENXIO`), `O_RDWR` never waits; the
 /// pipe lives while any end is open, and its bytes go with it.
 pub fn fifo_open(cx: &Cx) -> (i64, u64) {
+    fifo_open_node(cx, cx.args[0], cx.args[1])
+}
+
+// wave7 G7-5 begin
+/// vfs-server's `open`/`openat` of FIFO node `cx.c.redir_obj`, redirected here (the
+/// permission check was vfs-server's): as [`fifo_open`].
+pub fn fifo_open_redirected(cx: &Cx) -> (i64, u64) {
+    let flags = if cx.nr == 2 { cx.args[1] } else { cx.args[2] };
+    fifo_open_node(cx, cx.c.redir_obj, flags)
+}
+// wave7 G7-5 end
+
+/// Opens FIFO node `ino` with open flags `flags` for call `cx`.
+fn fifo_open_node(cx: &Cx, ino: u64, flags: u64) -> (i64, u64) {
     const ENXIO: i64 = -6;
-    let (ino, flags) = (cx.args[0], cx.args[1]);
     let acc = flags & O_ACCMODE;
     let nonblock = flags & O_NONBLOCK != 0;
     let kind = match acc {
@@ -687,13 +703,13 @@ pub fn fifo_open(cx: &Cx) -> (i64, u64) {
         ps.owait = keep;
         let must_wait = !nonblock && ((kind == LX_OBJ_KIND_PIPE_R && !writers) || (kind == LX_OBJ_KIND_PIPE_W && !readers));
         if must_wait {
-            ps.owait.push(OWait { c: cx.c, slot, kind, pipe: id });
+            ps.owait.push(OWait { c: cx.c, slot, kind, pipe: id, flags });
         }
         must_wait
     };
     for w in ready {
         let wcx = Cx::from_call(&w.c, core::ptr::null_mut());
-        let r = install_end(&wcx, w.slot, w.kind, w.c.args[1], ino);
+        let r = install_end(&wcx, w.slot, w.kind, w.flags, ino);
         let _ = sys::lx_complete(w.c.id, r);
     }
     if wait {

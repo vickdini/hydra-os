@@ -192,12 +192,181 @@ fn lossy(v: &[u8]) -> String {
     String::from_utf8_lossy(v).into_owned()
 }
 
+/// One file of the chain `execve` runs (the program, or a `#!` script on the way): its
+/// attributes and bytes, and what running it would grant.
+struct Level {
+    /// Its head and object.
+    source: crate::task::exec::ElfSource,
+    /// Set-user-ID / set-group-ID owner (never applied for a script).
+    set_uid: Option<u32>,
+    /// See [`Level::set_uid`].
+    set_gid: Option<u32>,
+    /// File capabilities `(permitted, effective)`.
+    file_caps: Option<(u64, bool)>,
+    /// The effective bit of the file capabilities (secure mode even if not granted).
+    caps_secure: bool,
+}
+
+/// The checks and the bytes of file `ino`, run as `abs_path` (`follow`: how its last
+/// component was looked up, for Landlock): regular, executable for the caller, allowed by
+/// app control, Landlock and fanotify, then the set-ID bits and file capabilities as
+/// `nosuid`, tracing, `no_new_privs` and user namespaces leave them.
+fn level(ino: u64, abs_path: &str, follow: bool) -> Result<Level, i64> {
+    let c = creds();
+    let attr = ZfsClient::getattr(ino)?;
+    if attr.mode & S_IFMT != S_IFREG || !may_access(&attr, c.euid, c.egid, 1) || attr.mode & 0o111 == 0 {
+        super::abac::note_path(ino, abs_path);
+        return Err(EACCES);
+    }
+    // App control (access policies): may this user run this program?
+    {
+        let dir = abs_path.rsplit_once('/').map(|(d, _)| if d.is_empty() { String::from("/") } else { String::from(d) });
+        let mut parent = || dir.as_ref().and_then(|d| resolve(0, d.as_bytes(), true).ok()).and_then(|i| ZfsClient::getattr(i).ok());
+        if !super::abac::exec_check(abs_path, &attr, &mut parent) {
+            return Err(EACCES);
+        }
+    }
+    if super::landlock::check_at(abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
+        return Err(EACCES);
+    }
+    // fanotify: FAN_OPEN_EXEC_PERM (a listener may refuse), FAN_OPEN_EXEC
+    if super::fanotify::active() {
+        let dir = super::fanotify::parent_of_path(abs_path);
+        super::fanotify::on_open(ino, dir, abs_path, false, true)?;
+    }
+    let source = super::mm::inode_source(ino)?;
+    let mut set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
+    // File capabilities (security.capability) of the program that will run; with the
+    // effective bit the program runs in secure mode even if they are not granted
+    let mut file_caps = super::vfs::file_caps(ino);
+    let caps_secure = file_caps.is_some_and(|(_, e)| e);
+    let mut set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
+    // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
+    let (noexec, nosuid) = super::mount::exec_flags();
+    if noexec {
+        return Err(EACCES);
+    }
+    let traced = super::ptrace::is_traced(super::proc::current_ids().0);
+    if nosuid || traced || crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
+        // no_new_privs, or a user namespace (the owner, root, is not mapped in it):
+        // set-user/group-ID bits are ignored
+        set_uid = None;
+        set_gid = None;
+        file_caps = None;
+    }
+    Ok(Level { source, set_uid, set_gid, file_caps, caps_secure })
+}
+
+/// A new image, built and not yet committed.
+struct Ready {
+    image: crate::task::exec::LinuxExecImage,
+    abs_path: String,
+    argv: Vec<Vec<u8>>,
+    set_uid: Option<u32>,
+    set_gid: Option<u32>,
+    file_caps: Option<(u64, bool)>,
+    via_script: bool,
+}
+
+/// Loads the program of `lv` (shown as `abs_path`) into a new address space (`task_exec`'s
+/// loading part). `interp`: the ELF interpreter linux-server looked up (`(path, ino)`, ino 0:
+/// not found); any other interpreter path is looked up here.
+fn load(lv: Level, abs_path: String, argv: Vec<Vec<u8>>, envp: &[Vec<u8>], via_script: bool, interp: Option<(String, u64)>) -> Result<Ready, i64> {
+    let c = creds();
+    let data = &lv.source.head;
+    // The personality the program runs with: FreeBSD and Mach-O programs, and ELF files
+    // of other systems, are refused until a front end exists (crate::personality)
+    let pers = crate::personality::choose(data, &abs_path)?;
+    // A seccomp filter judges Linux system call numbers: it cannot follow a program
+    // into another personality
+    if pers != crate::task::TaskPersonality::Linux && crate::task::with_current_task_mut(|t| t.seccomp.mode != 0).unwrap_or(false) {
+        crate::kprintln!("[exec] {}: a seccomp filter is installed: refused, ENOEXEC", abs_path);
+        return Err(ENOEXEC);
+    }
+    if crate::task::elf::ElfBinary::parse(data).is_err() {
+        return Err(ENOEXEC);
+    }
+    if !crate::task::exec::is_vm_loadable(data) {
+        return Err(ENOEXEC);
+    }
+
+    let root = proc_root();
+    // Landlock refusing EXECUTE on the dynamic loader fails the exec with EACCES
+    let interp_refused = core::cell::Cell::new(false);
+    let read_in_root = |p: &str| -> Option<crate::task::exec::ElfSource> {
+        if root == super::vfs::EMPTY_ROOT {
+            return None;
+        }
+        // wave7 G7-5: the interpreter linux-server found (vfs-server's walk); 0: not found
+        let ino = match interp.as_ref().filter(|(ip, _)| ip == p) {
+            Some(&(_, 0)) => return None,
+            Some(&(_, i)) => i,
+            // Through the mount table in a mount namespace of its own (a sandbox's /usr)
+            None => match super::mount::resolve(0, p.as_bytes(), true) {
+                Some(r) => r.ok()?,
+                None => ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?,
+            },
+        };
+        if super::landlock::check_at(p, ino, false, true, super::landlock::EXECUTE).is_err() {
+            interp_refused.set(true);
+            return None;
+        }
+        super::mm::inode_source(ino).ok()
+    };
+    let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();
+    let envp_s: Vec<String> = envp.iter().map(|e| lossy(e)).collect();
+    let argv_r: Vec<&str> = argv_s.iter().map(|s| s.as_str()).collect();
+    let envp_r: Vec<&str> = envp_s.iter().map(|s| s.as_str()).collect();
+    let image = match crate::task::exec::load_linux_exec(
+        lv.source,
+        pers,
+        &abs_path,
+        &argv_r,
+        &envp_r,
+        crate::task::exec::ExecCreds {
+            uid: c.uid,
+            gid: c.gid,
+            euid: if via_script { c.euid } else { lv.set_uid.unwrap_or(c.euid) },
+            egid: if via_script { c.egid } else { lv.set_gid.unwrap_or(c.egid) },
+            secure: (lv.caps_secure || lv.file_caps.is_some_and(|(p, _)| p != 0)) && c.euid != 0,
+        },
+        &read_in_root,
+    ) {
+        Ok(img) => img,
+        Err(crate::task::elf::ElfError::InterpreterNotFound) => return Err(if interp_refused.get() { EACCES } else { ENOENT }),
+        Err(crate::task::elf::ElfError::AllocationFailed) => return Err(ENOMEM),
+        Err(_) => return Err(ENOEXEC),
+    };
+    Ok(Ready { image, abs_path, argv, set_uid: lv.set_uid, set_gid: lv.set_gid, file_caps: lv.file_caps, via_script })
+}
+
+/// wave7 G7-5: the front half by the services (`crate::lx::xexec`): linux-server and
+/// vfs-server looked up the program, its `#!` interpreters and its ELF interpreter; here the
+/// same checks as for the kernel's own lookup, then the load. `None`: the kernel's own front
+/// half runs instead (the file turned into a script meanwhile).
+fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>]) -> Option<Result<Ready, i64>> {
+    let lv = match level(plan.ino, &plan.shown, true) {
+        Ok(l) => l,
+        Err(e) => return Some(Err(e)),
+    };
+    if parse_shebang(&lv.source.head).is_some() {
+        return None;
+    }
+    let via_script = !plan.prefix.is_empty();
+    let argv: Vec<Vec<u8>> = if via_script { plan.prefix.iter().cloned().chain(argv.iter().skip(1).cloned()).collect() } else { argv.to_vec() };
+    Some(load(lv, plan.shown, argv, envp, via_script, plan.interp))
+}
+
 /// Executes a new program image in the current process (`execve(2)` and `execveat(2)`).
 ///
 /// Resolves `path_ptr` relative to `dirfd`, expands up to 4 levels of `#!` shebang scripts,
 /// maps the target ELF binary and optional dynamic linker into a new [`Mm`](crate::memory::vm::Mm),
 /// and—once past the point of no return—switches `CR3`, resets signal handlers and `CLOEXEC`
 /// descriptors, and updates `frame` so `SYSRET` jumps directly to the new entry point.
+///
+/// wave7 G7-5: the lookup of the files (the front half) is linux-server's and vfs-server's
+/// when they can do it for this caller ([`crate::lx::xexec::front`]); otherwise, and with
+/// `lx=kernel` / `lx.vfs=kernel`, the kernel's own ([`front_kernel`]).
 ///
 /// # Arguments
 /// * `frame` - Mutable reference to the saved [`SyscallFrame`] on the kernel stack.
@@ -212,12 +381,12 @@ fn lossy(v: &[u8]) -> String {
 /// * `0` on success (with `frame.rip` and `frame.rsp` updated to the new image's entry and stack).
 /// * Negative errno (`-ENOENT`, `-EACCES`, `-ENOEXEC`, `-ENOMEM`, `-E2BIG`, `-EFAULT`, `-ELOOP`) on failure.
 pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path_ptr: u64, argv_ptr: u64, envp_ptr: u64, flags: u64) -> i64 {
-    let mut path = match user_cstr(path_ptr) {
+    let path = match user_cstr(path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
     };
     let mut total = 0;
-    let mut argv = match read_string_array(argv_ptr, &mut total) {
+    let argv = match read_string_array(argv_ptr, &mut total) {
         Ok(a) => a,
         Err(e) => return e,
     };
@@ -225,44 +394,52 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
         Ok(e) => e,
         Err(e) => return e,
     };
+    // wave7 G7-5 begin: the front half by the services
+    if !path.is_empty() {
+        if let Some(plan) = crate::lx::xexec::front(dirfd, path_ptr, &path, flags) {
+            let r = match plan {
+                Ok(p) => from_plan(p, &argv, &envp),
+                Err(e) => Some(Err(e)),
+            };
+            match r {
+                Some(Ok(ready)) => return commit(frame, fpu, ready),
+                Some(Err(e)) => return e,
+                None => {}
+            }
+        }
+    }
+    // wave7 G7-5 end
+    match front_kernel(dirfd, path, argv, &envp, flags) {
+        Ok(ready) => commit(frame, fpu, ready),
+        Err(e) => e,
+    }
+}
 
-    let c = creds();
+/// The kernel's own front half: resolves the program (and `#!` interpreters) itself, then
+/// [`level`] and [`load`].
+fn front_kernel(dirfd: i64, mut path: Vec<u8>, mut argv: Vec<Vec<u8>>, envp: &[Vec<u8>], flags: u64) -> Result<Ready, i64> {
     let mut abs_path;
     let mut follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    // Set-user-ID / set-group-ID of the program finally run (never of a script)
-    let mut set_uid: Option<u32>;
-    let mut file_caps: Option<(u64, bool)>;
-    let mut caps_secure: bool;
-    let mut set_gid: Option<u32>;
     let mut via_script = false;
     let mut dirfd = dirfd;
     let mut depth = 0;
-    let image = loop {
+    loop {
         let ino = if path.is_empty() {
             if flags & AT_EMPTY_PATH == 0 {
-                return ENOENT;
+                return Err(ENOENT);
             }
-            let (ino, p) = match base_dir(dirfd, b"x") {
-                Ok(b) => b,
-                Err(e) => return e,
-            };
+            let (ino, p) = base_dir(dirfd, b"x")?;
             abs_path = p;
             ino
         } else {
-            let (base, base_path) = match base_dir(dirfd, &path) {
-                Ok(b) => b,
-                Err(e) => return e,
-            };
+            let (base, base_path) = base_dir(dirfd, &path)?;
             abs_path = join_path(&base_path, &path);
             // /proc/self/exe and friends name the file they link to
             if let Some(target) = super::fs::proc_link(&abs_path) {
                 abs_path = target.clone();
                 path = target.into_bytes();
             }
-            let ino = match resolve(base, &path, follow) {
-                Ok(i) => i,
-                Err(e) => return e,
-            };
+            let ino = resolve(base, &path, follow)?;
             // Linux's /proc/self/exe names the file itself, every symlink resolved: Firefox's
             // launcher execs firefox-bin from the directory /proc/self/exe names
             if let Some(real) = real_path(&abs_path, ino) {
@@ -270,62 +447,12 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             }
             ino
         };
-        let attr = match ZfsClient::getattr(ino) {
-            Ok(a) => a,
-            Err(e) => return e,
-        };
-        if attr.mode & S_IFMT != S_IFREG || !may_access(&attr, c.euid, c.egid, 1) || attr.mode & 0o111 == 0 {
-            super::abac::note_path(ino, &abs_path);
-            return EACCES;
-        }
-        // App control (access policies): may this user run this program?
-        {
-            let dir = abs_path.rsplit_once('/').map(|(d, _)| if d.is_empty() { String::from("/") } else { String::from(d) });
-            let mut parent = || dir.as_ref().and_then(|d| resolve(0, d.as_bytes(), true).ok()).and_then(|i| ZfsClient::getattr(i).ok());
-            if !super::abac::exec_check(&abs_path, &attr, &mut parent) {
-                return EACCES;
-            }
-        }
-        if super::landlock::check_at(&abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
-            return EACCES;
-        }
-        // fanotify: FAN_OPEN_EXEC_PERM (a listener may refuse), FAN_OPEN_EXEC
-        if super::fanotify::active() {
-            let dir = super::fanotify::parent_of_path(&abs_path);
-            if let Err(e) = super::fanotify::on_open(ino, dir, &abs_path, false, true) {
-                return e;
-            }
-        }
-        let source = match super::mm::inode_source(ino) {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-        let data = &source.head;
-        set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
-        // File capabilities (security.capability) of the program that will run; with the
-        // effective bit the program runs in secure mode even if they are not granted
-        file_caps = super::vfs::file_caps(ino);
-        caps_secure = file_caps.is_some_and(|(_, e)| e);
-        set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
-        // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
-        let (noexec, nosuid) = super::mount::exec_flags();
-        if noexec {
-            return EACCES;
-        }
-        let traced = super::ptrace::is_traced(super::proc::current_ids().0);
-        if nosuid || traced || crate::task::with_current_task_mut(|t| t.seccomp.no_new_privs || t.caps.in_userns).unwrap_or(false) {
-            // no_new_privs, or a user namespace (the owner, root, is not mapped in it):
-            // set-user/group-ID bits are ignored
-            set_uid = None;
-            set_gid = None;
-            file_caps = None;
-        }
-
-        if let Some((interp, arg)) = parse_shebang(data) {
+        let lv = level(ino, &abs_path, follow)?;
+        if let Some((interp, arg)) = parse_shebang(&lv.source.head) {
             via_script = true;
             depth += 1;
             if depth > 4 {
-                return ELOOP;
+                return Err(ELOOP);
             }
             // argv becomes: interpreter [arg] script original-argv[1..]
             let script = if path.is_empty() { abs_path.clone().into_bytes() } else { path.clone() };
@@ -341,70 +468,13 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
             follow = true;
             continue;
         }
+        return load(lv, abs_path, argv, envp, via_script, None);
+    }
+}
 
-        // The personality the program runs with: FreeBSD and Mach-O programs, and ELF files
-        // of other systems, are refused until a front end exists (crate::personality)
-        let pers = match crate::personality::choose(data, &abs_path) {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
-        // A seccomp filter judges Linux system call numbers: it cannot follow a program
-        // into another personality
-        if pers != crate::task::TaskPersonality::Linux && crate::task::with_current_task_mut(|t| t.seccomp.mode != 0).unwrap_or(false) {
-            crate::kprintln!("[exec] {}: a seccomp filter is installed: refused, ENOEXEC", abs_path);
-            return ENOEXEC;
-        }
-        if crate::task::elf::ElfBinary::parse(data).is_err() {
-            return ENOEXEC;
-        }
-        if !crate::task::exec::is_vm_loadable(data) {
-            return ENOEXEC;
-        }
-
-        let root = proc_root();
-        // Landlock refusing EXECUTE on the dynamic loader fails the exec with EACCES
-        let interp_refused = core::cell::Cell::new(false);
-        let read_in_root = |p: &str| -> Option<crate::task::exec::ElfSource> {
-            if root == super::vfs::EMPTY_ROOT {
-                return None;
-            }
-            // Through the mount table in a mount namespace of its own (a sandbox's /usr)
-            let ino = match super::mount::resolve(0, p.as_bytes(), true) {
-                Some(r) => r.ok()?,
-                None => ZfsClient::resolve_in(root, 0, p.as_bytes(), true).ok()?,
-            };
-            if super::landlock::check_at(p, ino, false, true, super::landlock::EXECUTE).is_err() {
-                interp_refused.set(true);
-                return None;
-            }
-            super::mm::inode_source(ino).ok()
-        };
-        let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();
-        let envp_s: Vec<String> = envp.iter().map(|e| lossy(e)).collect();
-        let argv_r: Vec<&str> = argv_s.iter().map(|s| s.as_str()).collect();
-        let envp_r: Vec<&str> = envp_s.iter().map(|s| s.as_str()).collect();
-        match crate::task::exec::load_linux_exec(
-            source,
-            pers,
-            &abs_path,
-            &argv_r,
-            &envp_r,
-            crate::task::exec::ExecCreds {
-                uid: c.uid,
-                gid: c.gid,
-                euid: if via_script { c.euid } else { set_uid.unwrap_or(c.euid) },
-                egid: if via_script { c.egid } else { set_gid.unwrap_or(c.egid) },
-                secure: (caps_secure || file_caps.is_some_and(|(p, _)| p != 0)) && c.euid != 0,
-            },
-            &read_in_root,
-        ) {
-            Ok(img) => break img,
-            Err(crate::task::elf::ElfError::InterpreterNotFound) => return if interp_refused.get() { EACCES } else { ENOENT },
-            Err(crate::task::elf::ElfError::AllocationFailed) => return ENOMEM,
-            Err(_) => return ENOEXEC,
-        }
-    };
-
+/// The point of no return: the new image `r` replaces the caller's (`task_exec`'s commit).
+fn commit(frame: &mut SyscallFrame, fpu: *mut FpuState, r: Ready) -> i64 {
+    let Ready { image, abs_path, argv, set_uid, set_gid, file_caps, via_script } = r;
     // ---- Point of no return ----
     // Robust mutexes the old image holds are released as at exit (Linux's
     // futex_exec_release), while it is still mapped

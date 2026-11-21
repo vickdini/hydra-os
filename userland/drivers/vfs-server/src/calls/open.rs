@@ -14,8 +14,34 @@ use crate::proto::{LxFhDesc, LX_FH_INSTALL, LX_FS_ABAC, LX_FS_FANOTIFY, LX_FS_LA
 const EEXIST: i64 = -17;
 const EACCES: i64 = -13;
 
+// wave7 G7-5 begin: a FIFO opens as a pipe end of the IPC service (linux-server)
+/// [`open`]'s answer for a FIFO node: redirected to `LXS_IPC` with the node's object number
+/// (linux-server's `pipe.rs` makes or finds the pipe, as for the kernel's `LX_KCALL_FIFO`).
+pub fn serve(cx: &Cx) -> hydra_rt::svcrt::Answer {
+    let mut fifo = 0u64;
+    let r = open_or_fifo(cx, &mut fifo);
+    if r == Err(FIFO) {
+        super::SERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return hydra_rt::svcrt::redirect(cx.page(), crate::proto::LXS_IPC, fifo, 0);
+    }
+    super::answer(cx, r)
+}
+
+/// [`open_or_fifo`]'s error for a FIFO node it checked (never a Linux errno).
+const FIFO: i64 = i64::MIN + 1;
+
 /// `open(path, flags, mode)`, `openat(dirfd, path, flags, mode)`.
 pub fn open(cx: &Cx) -> Result<i64, i64> {
+    let mut fifo = 0;
+    match open_or_fifo(cx, &mut fifo) {
+        Err(FIFO) => Err(KERNEL),
+        r => r,
+    }
+}
+
+/// [`open`], or `Err(FIFO)` with `*fifo` = the object of a FIFO node the caller may open.
+fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
+// wave7 G7-5 end
     let c = &cx.c;
     ctxt::check(c, LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC)?;
     let a = cx.args;
@@ -38,6 +64,21 @@ pub fn open(cx: &Cx) -> Result<i64, i64> {
     } else {
         ctxt::find(c, &who, &path, follow)?
     };
+    // wave7 G7-5 begin
+    if attr.mode & rules::S_IFMT == 0o010000 && n.mnt == 0 && flags & rules::O_DIRECTORY == 0 {
+        let want = match flags & rules::O_ACCMODE {
+            rules::O_RDONLY => rules::MAY_READ,
+            rules::O_WRONLY => rules::MAY_WRITE,
+            _ => rules::MAY_READ | rules::MAY_WRITE,
+        };
+        let acl = ctxt::acl_of(n, &attr)?;
+        if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {
+            return Err(EACCES);
+        }
+        *fifo = n.ino;
+        return Err(FIFO);
+    }
+    // wave7 G7-5 end
     let want = rules::decide(attr.mode, flags)?;
     let acl = ctxt::acl_of(n, &attr)?;
     if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {

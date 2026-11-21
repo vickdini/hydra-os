@@ -344,3 +344,85 @@ fn proc_self_exe_and_resolved_paths() {
     assert_eq!(exec("/proc/self/exe", &["again"], &[]).0, 0);
     assert_eq!(fake::task(1150, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/prog"));
 }
+
+// ---------------------------------------------------------------- wave7 G7-5
+
+fn plan(ino: u64, shown: &str, prefix: &[&str], interp: Option<(&str, u64)>) -> crate::lx::xexec::ExecPlan {
+    crate::lx::xexec::ExecPlan { ino, shown: shown.into(), prefix: prefix.iter().map(|s| s.as_bytes().to_vec()).collect(), interp: interp.map(|(p, i)| (p.to_string(), i)) }
+}
+
+#[test]
+fn the_services_front_half_is_used() {
+    let _g = setup();
+    proc_(1160, 1000);
+    file("/bin/sh", 70, 0o100755, program());
+    // linux-server resolved a script (that the kernel does not even know by path): its
+    // interpreter runs with the argv it made
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(70, "/bin/sh", &["/bin/sh", "-e", "./script"], None))));
+    assert_eq!(exec("./script", &["script", "a1"], &[]).0, 0);
+    assert!(fake::called("xexec::front(-100,./script,0)"));
+    assert_eq!(cmdline(1160), b"/bin/sh\0-e\0./script\0a1\0");
+    assert_eq!(fake::task(1160, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/sh"));
+    // A program, argv unchanged, shown under the path it gave
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(70, "/usr/lib/real/sh", &[], None))));
+    assert_eq!(exec("/usr/bin/sh-link", &["x", "y"], &[]).0, 0);
+    assert_eq!(cmdline(1160), b"x\0y\0");
+    assert_eq!(fake::task(1160, |t| t.exe.clone()).flatten().as_deref(), Some("/usr/lib/real/sh"));
+    // Its error is the exec's
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Err(EACCES)));
+    assert_eq!(exec("/bin/whatever", &[], &[]).0, EACCES);
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Err(ELOOP)));
+    assert_eq!(exec("/bin/whatever", &[], &[]).0, ELOOP);
+}
+
+#[test]
+fn the_kernel_checks_the_planned_program_again() {
+    let _g = setup();
+    proc_(1161, 1000);
+    // Not executable (changed after the lookup): EACCES
+    file("/bin/nox", 76, 0o100644, program());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(76, "/bin/nox", &[], None))));
+    assert_eq!(exec("/bin/nox", &[], &[]).0, EACCES);
+    // Junk: ENOEXEC
+    file("/bin/junk", 77, 0o100755, b"not a program at all".to_vec());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(77, "/bin/junk", &[], None))));
+    assert_eq!(exec("/bin/junk", &[], &[]).0, ENOEXEC);
+    // Set-user-ID applies to the planned program as to the kernel's own
+    file("/bin/su", 78, 0o104755, program());
+    owner(78, 0, 0);
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(78, "/bin/su", &[], None))));
+    assert_eq!(exec("/bin/su", &["su"], &[]).0, 0);
+    assert_eq!(fake::task(1161, |t| (t.uid, t.euid, t.suid)), Some((1000, 0, 0)));
+}
+
+#[test]
+fn a_planned_program_that_became_a_script_goes_to_the_kernel() {
+    let _g = setup();
+    proc_(1162, 1000);
+    file("/bin/sh", 70, 0o100755, program());
+    file("/bin/script", 71, 0o100755, b"#!/bin/sh\n".to_vec());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(71, "/bin/script", &[], None))));
+    assert_eq!(exec("/bin/script", &["s"], &[]).0, 0);
+    // (the kernel's own front half: the script ran through its interpreter)
+    assert_eq!(cmdline(1162), b"/bin/sh\0/bin/script\0");
+}
+
+#[test]
+fn the_planned_elf_interpreter_is_used() {
+    let _g = setup();
+    proc_(1163, 1000);
+    let dynamic = Elf::new(ET_DYN, 0x100, &[load_with(5, 0, 0, 0x200, 0x200), Ph { ty: PT_INTERP, flags: 4, offset: 0x180, vaddr: 0x180, filesz: 9, memsz: 9 }], 0x200)
+        .put(0x180, b"/lib/ld\0\0")
+        .bytes;
+    file("/bin/dyn", 59, 0o100755, dynamic);
+    // linux-server did not find it: ENOENT, even though the kernel knows a /lib/ld
+    file("/lib/ld", 60, 0o100755, program());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/ld", 0))))));
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, ENOENT);
+    // Found: loaded
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/ld", 60))))));
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, 0);
+    // Another path than the one planned: the kernel looks it up itself
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/other", 0))))));
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, 0);
+}

@@ -1,0 +1,213 @@
+//! # `execve`'s front half and socket files by the services (wave 7, Group 7-5)
+//!
+//! `docs/vfs-design.md` 12.2 (7-5) and B.4.4: path lookups leave the kernel.
+//!
+//! - **`execve`/`execveat`** stay routed to the kernel by number (the new image is built and
+//!   committed in the caller's trap, with its frame), but [`front`] first asks linux-server
+//!   for the front half (`LX_KCALL_EXEC`): linux-server resolves the program, the
+//!   interpreters of `#!` scripts and the ELF interpreter with direct calls to vfs-server,
+//!   which checks exec permission in the caller's context, and answers with an
+//!   [`ExecPlan`]. `compat::linux::execve` then runs the same checks on the program the
+//!   kernel's own lookup would run (set-ID, file capabilities, `nosuid`, tracing,
+//!   `no_new_privs`), loads it and commits.
+//! - **Unix socket path names** (`bind`, `connect` on a socket of linux-server): instead of
+//!   resolving the node in the kernel first (Group 13's temporary `vfs_resolve`),
+//!   [`sock_call`] forwards the call with the caller's file context
+//!   (`LX_OBJ_FLAGS_VFSCTX`), and linux-server asks vfs-server for the node.
+//!
+//! Both fall back to the kernel's own code whenever the file service cannot answer for the
+//! caller: `lx=kernel`, `lx.vfs=kernel`, vfs-server or linux-server not online, and callers
+//! whose state only the kernel sees (`fileh::kernel_mask`: foreign roots, mount namespaces,
+//! Landlock, fanotify, ABAC; inotify for `bind`, which makes a node). A service answers
+//! "kernel" (`LX_EXEC_KERNEL`, a redirect to the kernel) before anything changed.
+
+use alloc::string::String;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use super::fileh::{self, Shape};
+use super::svc::{self, Host};
+use super::{copy, HeldObj, SyscallFrame};
+use crate::ipc::protocol::{
+    LxCall, LXS_LINUX, LXS_VFS, LX_DATA_OFF, LX_DATA_SIZE, LX_EXEC_KERNEL, LX_FS_ABAC, LX_FS_FANOTIFY, LX_FS_FOREIGN, LX_FS_INOTIFY, LX_FS_LANDLOCK, LX_FS_MOUNTS, LX_GROUPS,
+    LX_KBUF_ADDR, LX_KBUF_ADDR_IN, LX_KCALL_EXEC, LX_OBJ_FLAGS_VFSCTX,
+};
+
+/// Front halves made by the services, handed back to the kernel, and failed by them (since
+/// boot); socket calls sent with the file context.
+pub static EXEC_PLANS: AtomicU64 = AtomicU64::new(0);
+/// See [`EXEC_PLANS`].
+pub static EXEC_KERNEL: AtomicU64 = AtomicU64::new(0);
+/// See [`EXEC_PLANS`].
+pub static EXEC_FAILED: AtomicU64 = AtomicU64::new(0);
+/// See [`EXEC_PLANS`].
+pub static SOCK_CALLS: AtomicU64 = AtomicU64::new(0);
+
+pub use super::xplan::{decode_plan, ExecPlan};
+
+/// The host of `s` when it is online and the service is not switched back to the kernel.
+fn online(s: crate::ipc::protocol::SvcId) -> Option<&'static Host> {
+    if super::all_kernel() || svc::mode(s) != svc::SvcMode::Forward {
+        return None;
+    }
+    svc::host(svc::host_of(s)).filter(|x| x.is_online())
+}
+
+/// Whether the caller's context in `c` lets the file service answer (none of the
+/// `LX_FS_*` bits in `mask`, no root or working directory in a mount).
+fn servable(c: &LxCall, mask: u32) -> bool {
+    c.fs_flags & mask == 0 && c.root_mnt == 0 && c.cwd_mnt == 0
+}
+
+/// The fixed context of a call to the file service's partners: identity, namespaces, the
+/// file context of the descriptor table (`sh` says where the directory descriptor is).
+fn context(c: &mut LxCall, sh: Shape) -> Option<fileh::Held> {
+    c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
+    super::fill_ctx(c, true);
+    let held = crate::task::with_current_fds_mut(|t| fileh::fill(c, t, sh, true)).ok()??;
+    c.fs_flags |= fileh::fs_flags_global(c);
+    Some(held)
+}
+
+/// `execve`'s front half by linux-server and vfs-server for the current thread: `dirfd`,
+/// the path's user pointer and bytes, the `execveat` flags. `None`: the kernel makes it
+/// itself; `Some(Err(e))`: `execve` fails with `e`.
+pub fn front(dirfd: i64, path_ptr: u64, path: &[u8], flags: u64) -> Option<Result<ExecPlan, i64>> {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
+        return None;
+    }
+    online(LXS_VFS)?;
+    let x = online(LXS_LINUX)?;
+    // The bases: the directory a relative path starts at, and the working directory (for
+    // interpreters), as the kernel shows them
+    let (_, base) = crate::compat::linux::vfs::base_dir(dirfd, path).ok()?;
+    let cwd = crate::task::with_current_fds_mut(|t| t.cwd_path.clone());
+    let mut c = LxCall::EMPTY;
+    c.nr = LX_KCALL_EXEC;
+    c.svc = LXS_LINUX as u32;
+    c.args = [dirfd as u64, LX_KBUF_ADDR, path_ptr, flags, LX_KBUF_ADDR_IN, 0];
+    let held = context(&mut c, Shape::At0)?;
+    if !servable(&c, LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC) {
+        return None;
+    }
+    // In: "base\0cwd\0"; out: the rest of the copy area
+    let n = base.len() + cwd.len() + 2;
+    if n + 1024 > LX_DATA_SIZE {
+        return None;
+    }
+    let mut buf = copy::CopyBuf::EMPTY;
+    buf.data[..base.len()].copy_from_slice(base.as_bytes());
+    buf.data[base.len() + 1..base.len() + 1 + cwd.len()].copy_from_slice(cwd.as_bytes());
+    buf.used = LX_DATA_SIZE;
+    buf.hdr.in_off[4] = LX_DATA_OFF as u16;
+    buf.hdr.in_len[4] = n as u16;
+    buf.hdr.out_off[1] = (LX_DATA_OFF + n) as u16;
+    buf.hdr.out_cap[1] = (LX_DATA_SIZE - n) as u16;
+    c.args[5] = n as u64;
+    let mut out = alloc::vec![0u8; LX_DATA_SIZE - n];
+    let r = kcall(x, c, &buf, &mut out);
+    drop(held);
+    match r {
+        0 => match decode_plan(&out) {
+            Some(p) => {
+                EXEC_PLANS.fetch_add(1, Ordering::Relaxed);
+                Some(Ok(p))
+            }
+            None => {
+                EXEC_KERNEL.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        },
+        // (the service's own "kernel", and every failure of the call itself: the service
+        // went away or restarts, a signal, too many calls in flight)
+        LX_EXEC_KERNEL | super::EIO | super::ENOSYS | super::EINTR | super::EAGAIN | super::EFAULT => {
+            EXEC_KERNEL.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        r if r < 0 && r > -4096 => {
+            EXEC_FAILED.fetch_add(1, Ordering::Relaxed);
+            Some(Err(r))
+        }
+        _ => {
+            EXEC_KERNEL.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// Makes kernel call `c` (its context filled) to host `x` with the copies of `buf`; the
+/// output for `args[1]` lands in `out`. Never redirected (an answer 0 or negative, or the
+/// service's own codes).
+fn kcall(x: &'static Host, mut c: LxCall, buf: &copy::CopyBuf, out: &mut [u8]) -> i64 {
+    let mut sched = crate::task::SCHEDULER.lock();
+    let my_idx = sched.current_index();
+    let me = sched.current_task_mut(|t| {
+        c.tid = t.id.0;
+        c.uid = t.uid;
+        c.euid = t.euid;
+        c.suid = t.suid;
+        c.gid = t.gid;
+        c.egid = t.egid;
+        c.sgid = t.sgid;
+        c.caps = if t.caps.in_userns { 0 } else { t.caps.effective };
+        t.id.0
+    });
+    drop(sched);
+    let Some(me) = me else { return super::ENOSYS };
+    if let Some(p) = crate::compat::linux::proc::PROCS.lock().get(&c.tgid) {
+        let n = p.groups.len().min(LX_GROUPS);
+        c.groups[..n].copy_from_slice(&p.groups[..n]);
+        c.ngroups = n as u64;
+    }
+    c.note_seq = x.notes_head();
+    let mut redir = (0, 0);
+    let r = x86_64::instructions::interrupts::without_interrupts(|| super::call_and_wait(x, me, my_idx, c, copy::Src::Kernel(buf), true, Some(out), &mut redir));
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    if r == super::LX_REDIRECTED {
+        return LX_EXEC_KERNEL;
+    }
+    r
+}
+
+/// `bind` (49) or `connect` (42) on Unix socket `o` of linux-server, the ordinary path:
+/// forwarded with the caller's file context when vfs-server can make or check the node for
+/// this caller (`None`: the kernel's dispatcher answers, resolving the node itself as
+/// before).
+pub(super) fn sock_call(frame: &SyscallFrame, o: HeldObj) -> Option<i64> {
+    online(LXS_VFS)?;
+    let (dev, slot, flags, h) = o;
+    let x = svc::host(h).filter(|x| x.is_online())?;
+    let mut c = LxCall::EMPTY;
+    c.nr = frame.rax;
+    c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    c.svc = x.id as u32;
+    c.obj = slot;
+    c.obj_flags = flags | LX_OBJ_FLAGS_VFSCTX;
+    let held = context(&mut c, Shape::Path)?;
+    let mask = if c.nr == 49 { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC | LX_FS_INOTIFY } else { LX_FS_FOREIGN | LX_FS_MOUNTS };
+    if !servable(&c, mask) {
+        return None;
+    }
+    SOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+    let r = super::call_ident_raw(x, c, true);
+    drop(held);
+    drop(dev);
+    if r == fileh::LX_TO_KERNEL {
+        return None;
+    }
+    Some(r)
+}
+
+/// One line for `lx` statistics.
+pub fn summary() -> String {
+    alloc::format!(
+        "execve front halves: {} by the services, {} by the kernel, {} failed there; Unix socket names by vfs-server: {} calls",
+        EXEC_PLANS.load(Ordering::Relaxed),
+        EXEC_KERNEL.load(Ordering::Relaxed),
+        EXEC_FAILED.load(Ordering::Relaxed),
+        SOCK_CALLS.load(Ordering::Relaxed)
+    )
+}

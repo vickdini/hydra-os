@@ -67,6 +67,10 @@ pub mod mem;
 pub mod sec;
 
 pub mod svc;
+// wave7 G7-5 begin: execve's front half and Unix socket names by the services
+pub mod xexec;
+pub mod xplan;
+// wave7 G7-5 end
 
 pub mod timer;
 
@@ -539,7 +543,8 @@ fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
             byfd_object(frame.rdi)?
         };
         if kernel_first(nr, &o.0) {
-            return None;
+            // wave7 G7-5: the socket node by vfs-server (through linux-server) when it can
+            return xexec::sock_call(frame, o);
         }
         let h = o.3;
         return Some(call(frame, h, Some(o)));
@@ -1866,6 +1871,7 @@ pub fn summary() -> alloc::string::String {
     ) + "; " + &restart::summary() // wave6 G21
         + &copy_summary()
         + "; " + &fileh::summary() // wave7 G7-2
+        + "; " + &xexec::summary() // wave7 G7-5
 }
 
 // wave6 G22 begin

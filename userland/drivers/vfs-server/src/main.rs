@@ -39,6 +39,10 @@ mod tmpfs_mem;
 // wave7 G7-3 end
 mod perm;
 mod walk;
+// wave7 G7-5 begin: files for the other services (execve, socket nodes)
+mod xfile;
+mod xpath;
+// wave7 G7-5 end
 mod zfs;
 
 /// The kernel's protocol (message codes, `LxCall`, service ids).
@@ -300,6 +304,10 @@ fn redirect_words(r: &Redirect) -> (u64, u32) {
 /// A direct call from another service.
 fn dcall(cx: &Cx) -> i64 {
     let a = DcallArgs::of(&cx.c);
+    // wave7 G7-5: execve's files, socket nodes
+    if let Some(r) = xfile::dcall(cx, &a) {
+        return r;
+    }
     match a.op {
         LX_DCALL_OP_NULL => 0,
         LX_VFS_OP_REDIR_TEXT => {
