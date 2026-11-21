@@ -258,7 +258,7 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     c.cwd = t.cwd_ino;
     c.cwd_mnt = t.cwd_mnt as u32;
     c.umask = t.umask as u64;
-    if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) {
+    if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) || t.cwd_path.ends_with("/proc") {
         c.fs_flags |= LX_FS_FOREIGN;
     }
     let mut held: Held = [None, None];

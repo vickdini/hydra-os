@@ -77,8 +77,9 @@ fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
         w.setattr(&set);
     });
     cache::forget_attr(n);
+    // (the page cache is cut only when the file was)
     let size = set.size.unwrap_or(0);
-    tell_kernel(n.ino, LX_FHC_ATTR | if set.size.is_some() { LX_FHC_TRUNC } else { 0 }, size);
+    tell_kernel(n.ino, LX_FHC_ATTR | if set.size.is_some() && r.is_ok() { LX_FHC_TRUNC } else { 0 }, size);
     r.map(|_| 0)
 }
 
@@ -150,6 +151,9 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
         }
         // ftruncate(fd, size): a handle open for writing
         77 => {
+            if (a[1] as i64) < 0 {
+                return Err(EINVAL);
+            }
             if c.fh_flags & rules::O_ACCMODE == rules::O_RDONLY {
                 return Err(EINVAL);
             }
@@ -301,6 +305,11 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         w.u64(p.dir.ino);
         w.bytes(&p.name);
     });
+    if r.is_ok() && rmdir {
+        if let Some(v) = victim {
+            cache::CACHE.forget_object(v.ino);
+        }
+    }
     names_changed(&[p.dir], if r.is_ok() && !rmdir { victim.map(|v| v.ino) } else { None });
     r.map(|_| 0)
 }
@@ -335,6 +344,9 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
     for d in [&src, &dst] {
+        if !d.dir_attr.is_dir() {
+            return Err(ENOTDIR);
+        }
         let acl = ctxt::acl_of(d.dir, &d.dir_attr);
         if !ctxt::may_access(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
             return Err(EACCES);
