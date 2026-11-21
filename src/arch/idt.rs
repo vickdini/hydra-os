@@ -1423,6 +1423,8 @@ global_asm!(
     // always one that blocked in the kernel)
     .global asm_direct_switch
     asm_direct_switch:
+        // DF clear for the Rust code below (see common_trap_handler)
+        cld
         push 0
         push 0x82
         push rax
@@ -1484,6 +1486,12 @@ global_asm!(
         iretq
 
     common_trap_handler:
+        // The direction flag is not part of what an interrupt clears: the interrupted code
+        // (user code, or the kernel's own backward memmove, `std; rep movs; cld`) may have
+        // DF set, and Rust code assumes DF clear. Without this, every memcpy/memset of the
+        // handler and the scheduler ran backwards, writing below its destination (the
+        // two-load whole-system hang of waves 5-6). iretq restores the interrupted DF.
+        cld
         // From user mode: the kernel's GS base (per-CPU data). [rsp+24] is the CS pushed
         // by the CPU (below it: rip, error code, vector)
         test qword ptr [rsp + 24], 3
