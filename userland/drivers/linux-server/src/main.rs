@@ -248,6 +248,9 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
         LX_DCALL_NR => dcall_serve(&cx), // wave6 G20
         // wave 6 (Group 19): a test call the test service redirected here
         LX_TEST_NR if c.redir_obj != 0 => (0x5000 + c.redir_obj as i64 + 0x100 * c.redirs as i64 + c.redir_tail as i64, 0),
+        // wave7 G7-1: vfs-server's walk test call it redirected here (a path under `/proc`,
+        // `/sys`, `/dev`): `0x10000 * service + 0x100 * object + tail` (tail's low byte)
+        LX_VFS_WALK_NR if c.redirs != 0 => (0x10000 * c.svc as i64 + 0x100 * (c.redir_obj & 0xFF) as i64 + (c.redir_tail & 0xFF) as i64, 0),
         // read, write, readv, writev, ioctl on a server object; the kernel's own calls on one
         0 | 1 | 16 | 19 | 20 | 276 | LX_KCALL_REOPEN | LX_KCALL_FCNTL if c.obj != LX_OBJ_NONE => object_io(&cx),
         // Sockets (wave 5, step 3; AF_UNIX step 4): socket/socketpair by family, the rest by

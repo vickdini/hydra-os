@@ -15,6 +15,7 @@ const DRIVERS: &[&str] = &[
     "net-server",
     "linux-server",
     "lx-sec",
+    "vfs-server",
     "svc-test",
     "hda-driver",
 ];

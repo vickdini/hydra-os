@@ -1,0 +1,9 @@
+[package]
+name = "vfs-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra vfs-server: the file service (path walk, name/attribute/link caches, mounts, redirects), zfs-server's client (wave 7)"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

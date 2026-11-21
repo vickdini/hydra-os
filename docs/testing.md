@@ -21,6 +21,7 @@ files call outside themselves (other kernel modules, hardware) with fakes.
 | `tests/host-t32` | `src/arch` and `src/memory`, with a fake CPU (ports, MSRs, control registers) |
 | `tests/host-t33` | fs, the ZFS client (against an in-memory server), personalities, packages, Linux security modules |
 | `tests/host-t34` | The admin interface, video, the kernel's net-server client, the console, boot glue, the emergency shell |
+| `tests/host-w7-71` | vfs-server's logic (wave 7, Group 7-1): the path walk, the name/attribute/link caches, permissions and ACLs, the boot mount table, on an in-memory file system |
 
 Each crate is self-contained: its own `Cargo.toml`, `.cargo/config.toml` (target = the host),
 `shim/` (an `x86_64` crate replacement whose privileged instructions act on a per-thread fake

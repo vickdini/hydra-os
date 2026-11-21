@@ -528,13 +528,18 @@ pub mod fs {
         pub cloexec: alloc::collections::BTreeSet<usize>,
         pub umask: u32,
         pub max: usize,
+        /// The root and working directory (wave7 G7-1: `lx::vfs_ctx` reads them).
+        pub root_ino: u64,
+        pub root_mnt: usize,
+        pub cwd_ino: u64,
+        pub cwd_mnt: usize,
         srv: SrvPtr,
     }
     pub type SharedFdTable = Arc<spin::Mutex<FdTable>>;
 
     impl FdTable {
         pub fn new() -> Self {
-            Self { fds: alloc::vec::Vec::new(), cloexec: Default::default(), umask: 0o022, max: 1024, srv: SrvPtr { bits: SrvBits { low: Default::default(), high: AtomicBool::new(false) }, used: AtomicBool::new(false) } }
+            Self { fds: alloc::vec::Vec::new(), cloexec: Default::default(), umask: 0o022, max: 1024, root_ino: 0, root_mnt: 0, cwd_ino: 0, cwd_mnt: 0, srv: SrvPtr { bits: SrvBits { low: Default::default(), high: AtomicBool::new(false) }, used: AtomicBool::new(false) } }
         }
         pub fn srv_bits(&self) -> &SrvPtr {
             &self.srv

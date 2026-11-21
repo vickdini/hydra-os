@@ -165,6 +165,9 @@ static SETSOCKOPT: Desc = [N, N, N, In(len_arg(4)), N, N];
 static GETSOCKOPT: Desc = [N, N, N, Out(fixed(256)), InOut(SOCKLEN), N];
 /// socketpair(family, type, protocol, sv[2])
 static SOCKETPAIR: Desc = [N, N, N, Out(fixed(8)), N, N];
+// wave7 G7-1 begin: vfs-server's walk test call: the path in, the answer (`LxVfsWalkOut`) out
+static VFS_WALK: Desc = [N, Str(4096), N, Out(fixed(core::mem::size_of::<crate::ipc::protocol::LxVfsWalkOut>() as u16)), N, N];
+// wave7 G7-1 end
 
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
@@ -205,6 +208,7 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         54 => Some(&SETSOCKOPT),
         55 => Some(&GETSOCKOPT),
         53 => Some(&SOCKETPAIR),
+        crate::ipc::protocol::LX_VFS_WALK_NR => Some(&VFS_WALK), // wave7 G7-1
         _ => None,
     }
 }
