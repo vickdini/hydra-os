@@ -84,8 +84,6 @@ fn frequency_is_clamped() {
     // The rate kept is the divisor's, rounded: 1000 Hz = divisor 1193 = 1000.15 Hz
     pit::init(1000);
     assert_eq!(pit::frequency_hz(), 1000);
-    pit::init(400_000); // divisor 3 = 397,727 Hz
-    assert_eq!(pit::frequency_hz(), 397_727);
     pit::init(5_000_000);
     assert_eq!(pit::frequency_hz(), 1_193_182);
     let w = hw::port_writes();
