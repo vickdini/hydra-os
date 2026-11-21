@@ -439,3 +439,18 @@ fn a_plan_is_not_used_once_kernel_only_rules_exist() {
     assert_eq!(exec("/bin/prog", &["prog"], &[]).0, 0);
     assert_eq!(fake::task(1164, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/prog"));
 }
+
+#[test]
+fn execveat_nofollow_on_a_link_is_eloop() {
+    let _g = setup();
+    proc_(1165, 1000);
+    file("/bin/prog", 50, 0o100755, program());
+    file("/bin/link", 51, 0o120777, b"/bin/prog".to_vec());
+    let p = cstr("/bin/link");
+    let a = args(&["link"]);
+    let mut f = SyscallFrame { rax: 322, ..Default::default() };
+    let mut fpu = FpuState::new();
+    let r = sys_execve(&mut f, &mut fpu, AT_FDCWD, p.as_ptr() as u64, a.ptr(), a.ptr(), 0x100);
+    crate::memory::vm::set_current_mm(None);
+    assert_eq!(r, ELOOP);
+}

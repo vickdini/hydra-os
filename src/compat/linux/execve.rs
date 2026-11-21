@@ -446,6 +446,11 @@ fn front_kernel(dirfd: i64, mut path: Vec<u8>, mut argv: Vec<Vec<u8>>, envp: &[V
                 path = target.into_bytes();
             }
             let ino = resolve(base, &path, follow)?;
+            // wave7 G7-5: execveat(AT_SYMLINK_NOFOLLOW) of a symbolic link is ELOOP (Linux's
+            // open_exec; it was EACCES, from the type check in `level`)
+            if !follow && ZfsClient::getattr(ino)?.mode & S_IFMT == super::types::S_IFLNK {
+                return Err(ELOOP);
+            }
             // Linux's /proc/self/exe names the file itself, every symlink resolved: Firefox's
             // launcher execs firefox-bin from the directory /proc/self/exe names
             if let Some(real) = real_path(&abs_path, ino) {
