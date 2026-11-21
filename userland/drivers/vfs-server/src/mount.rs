@@ -175,6 +175,10 @@ pub fn tmpfs_acl(n: u32, node: Node) -> Option<Vec<u8>> {
 pub fn on_mntns(new: u64, from: u64, store: &mut dyn tmpfs::DataStore) {
     let mut g = MTAB.lock();
     let Some(t) = g.as_mut() else { return };
+    // The first few, in the log (shows the notes arrive)
+    if NOTED.fetch_add(1, Ordering::Relaxed) < 8 {
+        log_mntns(new, from, t.spaces.len());
+    }
     if from == crate::proto::LX_MNTNS_GONE {
         let fx = t.drop_ns(new);
         let gone = fx.tmpfs_gone;
@@ -195,3 +199,18 @@ pub fn on_mntns(new: u64, from: u64, store: &mut dyn tmpfs::DataStore) {
         changed();
     }
 }
+
+/// Namespace notes seen.
+static NOTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+#[cfg(not(test))]
+fn log_mntns(new: u64, from: u64, tables: usize) {
+    if from == crate::proto::LX_MNTNS_GONE {
+        hydra_rt::println!("[vfs-server] mount namespace {} gone ({} tables)", new, tables);
+    } else {
+        hydra_rt::println!("[vfs-server] mount namespace {} made from {} ({} tables)", new, from, tables);
+    }
+}
+
+#[cfg(test)]
+fn log_mntns(_new: u64, _from: u64, _tables: usize) {}
