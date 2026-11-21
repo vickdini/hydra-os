@@ -823,6 +823,8 @@ pub fn signal(endpoint: u32, bits: u64) -> Result<(), i64> {
 ///
 /// * `endpoint` - Service endpoint to detach.
 pub fn unregister(endpoint: u32) {
+    // (wave7 GB: no server registers while the old one's state is torn down)
+    let _reg = registration();
     // wave6 G23: its memory-object handles go (objects others map or hold live on)
     crate::lx::mem::service_gone(endpoint);
     if let Some(svc) = service(endpoint) {
@@ -832,6 +834,27 @@ pub fn unregister(endpoint: u32) {
 }
 
 // wave7 GB begin
+/// Registering and unregistering exclude each other: the teardown of a server's state
+/// (its memory-object handles, alias endpoints, parked worker, requests, the client's
+/// "gone" hook) runs whole before another server's registration lands, so a server that
+/// registers meanwhile is never torn down with the old one's state. Taken by [`register`],
+/// [`unregister`] and [`unregister_if`]; nothing done under it registers or blocks.
+static REGISTRATION: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Takes [`REGISTRATION`]; a waiter yields its CPU (the holder may be a task on this CPU).
+fn registration() -> spin::MutexGuard<'static, ()> {
+    loop {
+        if let Some(g) = REGISTRATION.try_lock() {
+            return g;
+        }
+        if crate::task::is_active() {
+            crate::task::yield_now();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// [`unregister`], only if `endpoint`'s server is still `expected` (compared and cleared in
 /// one step: the supervisor looked at the server first, and another driver may have
 /// registered since).
@@ -845,6 +868,7 @@ pub fn unregister_if(endpoint: u32, expected: u64) -> bool {
         return false;
     }
     let Some(svc) = service(endpoint) else { return true };
+    let _reg = registration();
     if svc.server.compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return false;
     }
@@ -1729,7 +1753,14 @@ pub fn register(endpoint: u32) -> Result<u64, i64> {
     };
     let addr = map_into_current(window, WINDOW_PAGES)?;
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
+    // wave7 GB: after any teardown in progress; a thread of a process being ended (the
+    // supervisor's `retire` marked it) does not register again
+    let reg = registration();
+    if crate::task::current_retired() {
+        return Err(ESRCH);
+    }
     svc.server.store(me, Ordering::Release);
+    drop(reg);
     // A kernel caller waiting for this server to start resumes now
     x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().end_handoff(me));
     Ok(addr)
@@ -2136,6 +2167,10 @@ pub fn irq_register(irq: u64) -> Result<(), i64> {
         return Err(EINVAL);
     }
     let endpoint = crate::task::current_service().ok_or(EPERM)?;
+    // (wave7 GB: a thread of a process being ended claims no line)
+    if crate::task::current_retired() {
+        return Err(ESRCH);
+    }
     let me = crate::task::SCHEDULER.lock().current_task_id().0;
     IRQ_PENDING[irq as usize].store(0, Ordering::Release);
     IRQ_SERVICE[irq as usize].store(endpoint, Ordering::Release);
@@ -2257,6 +2292,29 @@ pub fn irq_wait(irq: u64, timeout_ticks: u64) -> Result<u32, i64> {
         }
     }
 }
+
+// wave7 GB begin
+/// Releases every interrupt line whose owner thread belongs to process `tgid`, or is gone
+/// (dead, or reaped: no longer in the task table), whichever thread claimed it.
+pub fn release_irqs_of_process(tgid: u64) {
+    for irq in 0..IRQ_LINES {
+        let owner = IRQ_OWNER[irq].load(Ordering::Acquire);
+        if owner == 0 {
+            continue;
+        }
+        let stale = x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::task::SCHEDULER
+                .lock()
+                .with_task_mut(crate::task::TaskId(owner), |t| t.tgid == tgid || t.state == crate::task::TaskState::Dead)
+                .unwrap_or(true)
+        });
+        if stale && IRQ_OWNER[irq].compare_exchange(owner, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            mask_line(irq as u8);
+            IRQ_SERVICE[irq].store(0, Ordering::Release);
+        }
+    }
+}
+// wave7 GB end
 
 /// Relinquishes all IRQ lines owned by an exiting task back to the kernel.
 ///

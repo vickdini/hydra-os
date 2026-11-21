@@ -392,15 +392,14 @@ fn a_restart_ends_the_whole_old_process_even_when_its_first_thread_is_gone() {
     supervisor::restart_service_by_name("net_server").unwrap();
     // Its own thread's registration is no foreign one: unregistered
     assert!(fake::SVC_LOG.lock().unwrap().contains(&("unregister", ENDPOINT_NET_SERVER, 0, 0)));
-    // The other threads ended, and the interrupt lines of every thread were let go
+    // The other threads ended, and the interrupt lines of the whole process were let go
     // (retired: one running on another CPU dies when it leaves the kernel)
     for t in [worker, irq] {
         assert!(with(t, |t| t.retired || t.state == task::TaskState::Dead), "thread {t} ended");
     }
     let log = fake::SVC_LOG.lock().unwrap().clone();
-    for t in [id.0, worker, irq] {
-        assert!(log.contains(&("release_irqs", 0, t, 0)), "irqs of {t}");
-    }
+    assert!(log.contains(&("release_irqs", 0, id.0, 0)));
+    assert!(log.contains(&("release_irqs_of_process", 0, id.0, 0)), "{log:?}");
 }
 // wave7 GB end
 

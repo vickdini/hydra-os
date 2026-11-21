@@ -884,6 +884,9 @@ pub mod ipc {
         pub fn release_irqs(id: u64) {
             fake::SVC_LOG.lock().unwrap().push(("release_irqs", 0, id, 0));
         }
+        pub fn release_irqs_of_process(tgid: u64) {
+            fake::SVC_LOG.lock().unwrap().push(("release_irqs_of_process", 0, tgid, 0));
+        }
         pub fn unregister(endpoint: u32) {
             fake::SVC_LOG.lock().unwrap().push(("unregister", endpoint, 0, 0));
             fake::SERVERS.lock().unwrap().remove(&endpoint);

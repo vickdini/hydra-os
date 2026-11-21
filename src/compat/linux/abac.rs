@@ -817,6 +817,8 @@ pub fn evaluate(q: &str) -> Result<String, i64> {
                 env.push(a, v);
             }
         }
+        // (the query's temporary IDs are not kept past it)
+        s.it.forget_temps();
         Ok((user, res, env, exec))
     })?;
     let d = p.decide(&user, &res, &env);

@@ -87,7 +87,9 @@ static volatile long h_calls, h_errs, h_long, h_stop, h_inflight;
  * a restart (EIO) from a key the restart lost (ENOKEY) */
 static void herr(const char *what, long r, int e) {
     static volatile long n;
-    if (__sync_fetch_and_add(&n, 1) < 8) printf("HAMMER-ERR %s r=%ld errno=%d (%s) at %lu ms\n", what, r, e, strerror(e), (unsigned long)now_ms());
+    /* (a call that returned a value, not -1, set no errno) */
+    if (r != -1) e = 0;
+    if (__sync_fetch_and_add(&n, 1) < 16) printf("HAMMER-ERR %s r=%ld errno=%d (%s) at %lu ms\n", what, r, e, strerror(e), (unsigned long)now_ms());
 }
 
 static void *hammer_thread(void *arg) {

@@ -155,6 +155,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(mode, "lolat") && argc >= 3) {
+        /* a write to a connection reset by a net-server restart gives EPIPE, not SIGPIPE */
+        signal(SIGPIPE, SIG_IGN);
         int count = atoi(argv[2]);
         int ls = socket(AF_INET, SOCK_STREAM, 0);
         int one = 1;

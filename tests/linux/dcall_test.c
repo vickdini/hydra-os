@@ -68,7 +68,7 @@ static int kill_mode(int secs) {
     }
     printf("kill mode: %ld calls: %ld ok, %ld EIO, %ld ENOSYS, %ld other\n", n, ok, eio, enosys, other);
     printf(other == 0 && enosys == 0 && ok > 0 ? "DCALL-KILL-OK\n" : "DCALL-KILL-FAILED\n");
-    return other != 0 || enosys != 0;
+    return other != 0 || enosys != 0 || ok == 0;
 }
 
 int main(int argc, char **argv) {

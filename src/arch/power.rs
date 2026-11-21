@@ -21,8 +21,11 @@ fn sync_pool() {
         commit_now();
         return;
     }
-    COMMIT_DONE.store(false, Ordering::SeqCst);
-    crate::task::spawn("pool-commit", commit_task, crate::task::TaskPriority::High);
+    // (one commit task for every caller: a second shutdown request waits for the same one)
+    if !COMMIT_STARTED.swap(true, Ordering::SeqCst) {
+        COMMIT_DONE.store(false, Ordering::SeqCst);
+        crate::task::spawn("pool-commit", commit_task, crate::task::TaskPriority::High);
+    }
     let mut waited = 0;
     while !COMMIT_DONE.load(Ordering::SeqCst) {
         if waited >= COMMIT_LIMIT_MS {
@@ -43,6 +46,8 @@ const COMMIT_LIMIT_MS: u64 = 30_000;
 const COMMIT_STEP_MS: u64 = 100;
 /// The commit task has finished (well or not).
 static COMMIT_DONE: AtomicBool = AtomicBool::new(false);
+/// The commit task was started (the power goes after it; never started twice).
+static COMMIT_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// The pool commit, reporting a failure.
 fn commit_now() {

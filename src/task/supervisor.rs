@@ -537,28 +537,18 @@ impl Supervisor {
         // Its process: the first thread's id is the process id (`spawn_service`; task ids are
         // never reused), so it is known even when that thread already exited and was reaped
         // while other threads of the process still run
-        let old_tgid = old.map(|o| crate::task::SCHEDULER.lock().with_task_mut(o, |t| t.tgid).unwrap_or(o.0));
+        let old_tgid = old.map(|o| x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().with_task_mut(o, |t| t.tgid).unwrap_or(o.0)));
         if let (Some(old), Some(tgid)) = (old, old_tgid) {
             // Every thread of it ends (not only the first one: its other threads would keep
             // serving, keep their interrupt lines, or register the endpoint again), and every
-            // interrupt line one of them claimed is let go
-            // (room made before the scheduler's lock: no allocation under it; a service has
-            // far fewer threads than this, more are only not looked at for their lines)
-            let mut threads: Vec<u64> = Vec::with_capacity(256);
-            threads.push(old.0);
-            x86_64::instructions::interrupts::without_interrupts(|| {
-                let mut sched = crate::task::SCHEDULER.lock();
-                sched.for_each_task_mut(|t| {
-                    if t.tgid == tgid && t.id != old && threads.len() < threads.capacity() {
-                        threads.push(t.id.0);
-                    }
-                });
-                sched.kill_group(tgid);
-            });
+            // interrupt line one of them claimed is let go (also one whose thread already
+            // exited and was reaped). A thread still running on another CPU dies when it
+            // leaves the kernel; meanwhile it can neither register nor claim a line (both
+            // refuse a retired thread)
+            x86_64::instructions::interrupts::without_interrupts(|| crate::task::SCHEDULER.lock().kill_group(tgid));
             crate::task::close_retired();
-            for &t in &threads {
-                service::release_irqs(t);
-            }
+            service::release_irqs(old.0);
+            service::release_irqs_of_process(tgid);
         }
         // Only its own registration: another service may serve the endpoint (the AHCI and
         // IDE drivers offer the disk endpoint; starting the one that stood back must not
@@ -571,10 +561,12 @@ impl Supervisor {
             if server == 0 {
                 break;
             }
-            let foreign = crate::task::SCHEDULER
-                .lock()
-                .with_task_mut(TaskId(server), |t| t.state != crate::task::TaskState::Dead && Some(t.tgid) != old_tgid)
-                .unwrap_or(false);
+            let foreign = x86_64::instructions::interrupts::without_interrupts(|| {
+                crate::task::SCHEDULER
+                    .lock()
+                    .with_task_mut(TaskId(server), |t| t.state != crate::task::TaskState::Dead && Some(t.tgid) != old_tgid)
+                    .unwrap_or(false)
+            });
             if foreign || service::unregister_if(svc.endpoint_id, server) {
                 break;
             }

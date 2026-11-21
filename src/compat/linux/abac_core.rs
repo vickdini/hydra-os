@@ -67,6 +67,8 @@ pub const INT: u32 = 1 << 31;
 /// Value IDs from here on are temporary (strings an unprivileged query used that no
 /// policy, subject or label knows: they match only themselves).
 const TEMP_BASE: u32 = 1 << 30;
+/// Most temporary IDs kept for one query ([`Interner::lookup`]).
+const MAX_TEMPS: usize = 4096;
 
 /// Most entries in an attribute set.
 pub const MAX_ATTRS: usize = 32;
@@ -114,13 +116,13 @@ impl Interner {
         if let Some(&id) = self.temps.get(s) {
             return id;
         }
-        // (bounded: a query has at most a few hundred values; never more than this kept)
-        if self.temps.len() >= 4096 {
-            self.temps.clear();
-        }
         self.temp = self.temp.wrapping_add(1) & (TEMP_BASE - 1);
         let id = TEMP_BASE | self.temp;
-        self.temps.insert(String::from(s), id);
+        // (bounded: past 4096 distinct unknown values in one query a value gets an ID of its
+        // own that matches nothing, as before wave 7; the ones already given stay)
+        if self.temps.len() < MAX_TEMPS {
+            self.temps.insert(String::from(s), id);
+        }
         id
     }
     /// Forgets the temporary IDs (a new query starts).
