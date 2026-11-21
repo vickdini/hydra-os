@@ -66,7 +66,10 @@ fn flock_ranges_as_linux() {
     assert_eq!(range(0, 2, -5), Err(-22));
     assert_eq!(range(0, -1, 1), Err(-22));
     assert_eq!(range(i64::MAX, 1, 1), Err(-22));
-    assert_eq!(range(0, 5, i64::MAX), Ok((5, E)));
+    // Past the largest offset: EOVERFLOW (as Linux), not a lock to the end
+    assert_eq!(range(0, 5, i64::MAX), Err(-75));
+    assert_eq!(range(0, i64::MAX - 5, 100), Err(-75));
+    assert_eq!(range(0, i64::MAX, 1), Ok((i64::MAX as u64, E)));
     // A start at the very bottom with a negative length: refused, no overflow
     assert_eq!(range(0, i64::MIN, -1), Err(-22));
     assert_eq!(range(0, i64::MIN, 0), Err(-22));
@@ -100,4 +103,21 @@ fn the_table_survives_kept_state_and_bad_tables_are_refused() {
     f.locks[0] = Lock { ino: 1, owner: Owner::Posix(1), write: false, start: 9, end: 3, pid: 1 };
     assert!(f.check().is_err());
     assert_eq!(LockTable::decode(&LockTable::new().encode()), Ok(LockTable::new()));
+}
+
+#[test]
+fn inverted_ranges_do_nothing_and_flocks_are_whole_file() {
+    let mut t = LockTable::new();
+    t.try_lock(1, Owner::Posix(1), true, 0, 99, 1).unwrap();
+    // An inverted unlock does not split the lock into overlapping pieces
+    assert!(!t.unlock(1, Owner::Posix(1), 50, 10));
+    assert_eq!(t.locks.len(), 1);
+    // An inverted lock takes nothing
+    assert!(t.try_lock(1, Owner::Posix(2), true, 9, 3, 2).is_ok());
+    assert_eq!(t.locks.len(), 1);
+    // A flock given a range still covers the whole file
+    t.try_lock(2, Owner::Flock(5), false, 10, 20, 5).unwrap();
+    assert!(t.locks.iter().any(|l| l.owner == Owner::Flock(5) && l.start == 0 && l.end == E));
+    t.check().unwrap();
+    assert!(LockTable::decode(&t.encode()).is_ok());
 }

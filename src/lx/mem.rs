@@ -259,6 +259,26 @@ fn unkeep(svc: u8, key: u64) -> i64 {
     }
 }
 
+// wave7 G7-6 begin
+/// [`LX_MEM_KEPTKEYS`](crate::ipc::protocol::LX_MEM_KEPTKEYS): the keys `>= from` of
+/// service `svc`'s kept objects, at most `cap` (and 4096 per call) to `buf`.
+fn kept_keys(svc: u8, buf: u64, cap: u64, from: u64) -> i64 {
+    let cap = cap.min(4096) as usize;
+    let keys: Vec<u64> = kept(|k| k.range((svc, from)..=(svc, u64::MAX)).take(cap).map(|(key, _)| key.1).collect());
+    if keys.is_empty() {
+        return 0;
+    }
+    let mut bytes = Vec::with_capacity(keys.len() * 8);
+    for k in &keys {
+        bytes.extend_from_slice(&k.to_le_bytes());
+    }
+    match crate::compat::linux::vfs::copy_out(buf, &bytes) {
+        Ok(()) => keys.len() as i64,
+        Err(_) => EFAULT,
+    }
+}
+// wave7 G7-6 end
+
 /// `(key, pages, resident pages)` of each kept object of service `svc`.
 pub fn kept_list(svc: u8) -> Vec<(u64, u64, u64)> {
     let objs: Vec<(u64, Arc<MemObject>)> = kept(|k| k.range(svc_range(svc)).map(|(key, o)| (key.1, o.clone())).collect());
@@ -352,6 +372,11 @@ pub fn sys_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
         },
         LX_MEM_UNKEEP => match svc_of_endpoint(ep) {
             Some(svc) => unkeep(svc, a),
+            None => EPERM,
+        },
+        // wave7 G7-6
+        crate::ipc::protocol::LX_MEM_KEPTKEYS => match svc_of_endpoint(ep) {
+            Some(svc) => kept_keys(svc, a, b, c),
             None => EPERM,
         },
         _ => EINVAL,

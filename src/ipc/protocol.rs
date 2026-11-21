@@ -1744,4 +1744,9 @@ pub const LX_FH_NSLIST: u64 = 48;
 /// back to `out`; returns the number of restarts the instance has lived through. The test
 /// shows tmpfs data crossing a vfs-server restart before the mount calls move.
 pub const LX_VFS_KTEST: u64 = 0x100;
+/// `SYS_LX_MEM` operation: `(buf, cap, from)`: writes the keys (u64, ascending) of the
+/// caller's service's kept objects that are `>= from`, at most `cap` of them, to `buf`;
+/// returns how many it wrote (fewer than `cap`: that was all). A restarted service frees
+/// the kept objects its kept state no longer names.
+pub const LX_MEM_KEPTKEYS: u64 = 9;
 // wave7 G7-6 end

@@ -43,6 +43,9 @@ const EBADF: i64 = -9;
 // wave7 G7-6 begin
 /// The next data key (kept state's `data_next`).
 pub static DATA_NEXT: AtomicU64 = AtomicU64::new(crate::kept::DATA_KEY_BASE);
+/// Data objects let go of, unkept once a snapshot without them is written (a leaf lock:
+/// taken under `STORE` and `TMPFS`, never the other way round).
+pub static FREES: crate::lock::YLock<crate::kept::Frees> = crate::lock::YLock::new(crate::kept::Frees::new());
 // wave7 G7-6 end
 
 /// The memory objects of every tmpfs file with data, by handle number.
@@ -65,6 +68,9 @@ impl MemStore {
     /// Takes over the kept object of data key `key` (a restarted server); whether it existed
     /// (if not, a new zeroed one stands in: the file reads zeros).
     pub fn adopt(&mut self, key: u64) -> Result<bool, i64> {
+        if key < crate::kept::DATA_KEY_BASE {
+            return Err(EINVAL);
+        }
         let (o, existed) = MemObj::kept(key, MAX_FILE)?;
         self.objs.insert(key, o);
         Ok(existed)
@@ -113,8 +119,8 @@ impl DataStore for MemStore {
         // holds old data: it is let go and the next key taken)
         for _ in 0..64 {
             let key = DATA_NEXT.fetch_add(1, Ordering::Relaxed);
-            // (never a key a file uses: its object is not let go)
-            if self.objs.contains_key(&key) {
+            // (never a key a file uses: its object is not let go; never the server's own keys)
+            if key < crate::kept::DATA_KEY_BASE || self.objs.contains_key(&key) {
                 continue;
             }
             let (o, existed) = MemObj::kept(key, MAX_FILE)?;
@@ -150,9 +156,9 @@ impl DataStore for MemStore {
 
     fn free(&mut self, key: u64) {
         // Dropping the handle closes it; programs' mappings keep their pages (wave7 G7-6:
-        // and the kept registry lets it go)
+        // the kept registry lets it go once a snapshot without it is written: `FREES`)
         if self.objs.remove(&key).is_some() {
-            let _ = MemObj::unkeep(key);
+            FREES.lock().free(key);
         }
     }
 }

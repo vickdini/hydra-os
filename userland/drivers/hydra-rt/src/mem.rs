@@ -70,6 +70,12 @@ impl MemObj {
         check(lx_mem(LX_MEM_UNKEEP, key, 0, 0, 0)).map(|_| ())
     }
 
+    /// wave7 G7-6: the keys `>= from` of this service's kept objects, ascending, into `out`
+    /// (as many as fit); how many were written (fewer than `out.len()`: that was all).
+    pub fn kept_keys(from: u64, out: &mut [u64]) -> Result<usize, i64> {
+        check(lx_mem(crate::protocol::LX_MEM_KEPTKEYS, out.as_mut_ptr() as u64, out.len() as u64, from, 0)).map(|n| n as usize)
+    }
+
     /// New DMA memory: physically contiguous, zeroed, reachable by this driver's device.
     /// Returns the object and its device address.
     pub fn dma(size: u64) -> Result<(MemObj, u64), i64> {

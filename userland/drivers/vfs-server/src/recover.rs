@@ -38,10 +38,12 @@ use crate::mount::{self, MTAB, TMPFS};
 use crate::mtab::MountTables;
 use crate::proto::{LX_FH_NSLIST, LX_MNTNS_GONE};
 use crate::tmpfs::{DataStore, TmpfsSet, S_IFREG};
-use crate::tmpfs_mem::{DATA_NEXT, STORE};
+use crate::tmpfs_mem::{DATA_NEXT, FREES, STORE};
 
 const EINVAL: i64 = -22;
 const ENOENT: i64 = -2;
+const EPERM: i64 = -1;
+const EIO: i64 = -5;
 
 /// The two slots, mapped for the life of the instance.
 struct Slots {
@@ -89,14 +91,18 @@ pub fn open() -> Found {
     let mut base = [core::ptr::null_mut(); 2];
     let mut any = false;
     for (i, key) in SLOT_KEYS.iter().enumerate() {
-        let (o, existed) = match MemObj::kept(*key, SNAP_MAX) {
+        let got = MemObj::kept(*key, SNAP_MAX).and_then(|(o, existed)| o.map(0, SNAP_MAX, PROT_RW).map(|p| (o, existed, p)));
+        let (o, existed, p) = match got {
             Ok(x) => x,
-            Err(e) => return Found::NoKept(e),
+            Err(e) => {
+                // (the slot mapped before this one is let go: nothing is kept this time)
+                for &b in &base[..i] {
+                    let _ = hydra_rt::mem::unmap(b, SNAP_MAX);
+                }
+                return Found::NoKept(e);
+            }
         };
-        base[i] = match o.map(0, SNAP_MAX, PROT_RW) {
-            Ok(p) => p,
-            Err(e) => return Found::NoKept(e),
-        };
+        base[i] = p;
         // (the mapping keeps the object; the handle is not needed)
         drop(o);
         any |= existed;
@@ -122,6 +128,11 @@ pub fn open() -> Found {
         }
     }
     *SLOTS.lock() = Some(Slots { base, gen, too_big: false });
+    // A first instance (or one after a damaged state) writes the boot state at once: a crash
+    // before its first change then finds a valid (boot) state, not "damaged"
+    if !matches!(found, Found::Restored { .. }) {
+        save();
+    }
     found
 }
 
@@ -146,33 +157,36 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
     let (mut missing, mut freed) = (0, 0);
     {
         let mut store = STORE.lock();
-        for (i, &k) in named.iter().enumerate() {
+        let mut adopted: Vec<(u64, bool)> = Vec::with_capacity(named.len());
+        for &k in &named {
             match store.adopt(k) {
-                Ok(true) => {}
-                Ok(false) => missing += 1,
+                Ok(existed) => {
+                    missing += !existed as usize;
+                    adopted.push((k, existed));
+                }
                 Err(e) => {
-                    // Give back the handles taken so far (the kept objects stay for a later try)
-                    for &j in &named[..i] {
+                    // Give back the handles taken so far, and the objects made new for this
+                    // try (those that existed stay for the next try)
+                    for &(j, _) in &adopted {
                         store.forget(j);
+                    }
+                    for j in kept::rollback(&adopted) {
+                        let _ = MemObj::unkeep(j);
                     }
                     return Err(e);
                 }
             }
         }
-        // Data objects made for changes whose snapshot was never written
-        for k in kept::sweep_keys(&named, c.data_next) {
-            if let Ok((o, existed)) = MemObj::kept(k, 4096) {
-                let _ = MemObj::unkeep(k);
-                drop(o);
-                freed += existed as usize;
+        // Every data object no file names: made for changes whose snapshot was never written,
+        // or let go of by a change saved just before the crash
+        for k in kept::orphans(&named, &kept_keys()) {
+            if MemObj::unkeep(k).is_ok() {
+                freed += 1;
             }
         }
     }
-    // Past the swept window and past every key a tree names (a key taken while the last
-    // snapshot was being made may be named although `data_next` was read before it)
-    let next = named.iter().map(|k| k + 1).max().unwrap_or(0).max(c.data_next.saturating_add(kept::SWEEP));
-    DATA_NEXT.store(next, Ordering::Relaxed);
-    RESTARTS.store(c.restarts + 1, Ordering::Relaxed);
+    DATA_NEXT.store(kept::next_key(&named, c.data_next), Ordering::Relaxed);
+    RESTARTS.store(c.restarts.saturating_add(1), Ordering::Relaxed);
     *KTEST.lock() = (c.ktest_inst, c.ktest_ino);
     let spaces = tables.as_ref().map_or(1, |t| t.spaces.len());
     let ntmpfs = set.as_ref().map_or(0, |t| t.all.len());
@@ -189,8 +203,27 @@ fn restore(body: &[u8]) -> Result<Found, i64> {
     Ok(Found::Restored { gen: 0, spaces, tmpfs: ntmpfs, files: named.len(), missing, freed })
 }
 
-/// The snapshot of now.
-fn snapshot() -> Snapshot {
+/// Every kept-object key of this service (`LX_MEM_KEPTKEYS`, a page at a time).
+fn kept_keys() -> Vec<u64> {
+    let mut all = Vec::new();
+    let mut buf = [0u64; 512];
+    let mut from = 0u64;
+    loop {
+        let n = match MemObj::kept_keys(from, &mut buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        all.extend_from_slice(&buf[..n]);
+        if n < buf.len() || buf[n - 1] == u64::MAX {
+            break;
+        }
+        from = buf[n - 1] + 1;
+    }
+    all
+}
+
+/// The snapshot of now, and the data keys it no longer names (to unkeep once written).
+fn snapshot() -> (Snapshot, Vec<u64>) {
     // (the lock order of the rest of the server: the tables, then the trees, then the test
     // hook's words)
     let m = MTAB.lock();
@@ -201,7 +234,10 @@ fn snapshot() -> Snapshot {
     // tree encoded here (and a new instance starts past every named key anyway)
     let (ktest_inst, ktest_ino) = *KTEST.lock();
     let counters = Counters { restarts: RESTARTS.load(Ordering::Relaxed), data_next: DATA_NEXT.load(Ordering::Relaxed), ktest_inst, ktest_ino };
-    Snapshot { counters, mounts: m.as_ref().map(|m| m.encode()), tmpfs: t.as_ref().map(|t| t.encode()), locks: Some(l.encode()) }
+    // (frees happen under the trees' lock: the keys taken here are exactly the ones the
+    // encoded trees no longer name)
+    let frees = FREES.lock().take();
+    (Snapshot { counters, mounts: m.as_ref().map(|m| m.encode()), tmpfs: t.as_ref().map(|t| t.encode()), locks: Some(l.encode()) }, frees)
 }
 
 /// Writes the state of now to the older slot (see the module comment). The caller holds
@@ -209,14 +245,18 @@ fn snapshot() -> Snapshot {
 pub fn save() {
     let mut g = SLOTS.lock();
     let Some(s) = g.as_mut() else { return };
-    let gen = s.gen + 1;
-    let bytes = kept::encode_slot(gen, &snapshot().encode());
-    if bytes.len() as u64 > SNAP_MAX {
+    let gen = s.gen.saturating_add(1);
+    let (snap, frees) = snapshot();
+    let bytes = kept::encode_slot(gen, &snap.encode());
+    if bytes.len() as u64 > SNAP_MAX || gen == u64::MAX {
         if !core::mem::replace(&mut s.too_big, true) {
             println!("[vfs-server] kept state of {} bytes does not fit its {} byte slot: not saved", bytes.len(), SNAP_MAX);
         }
+        // (the data the last written snapshot names stays until one is written)
+        FREES.lock().failed(frees);
         return;
     }
+    s.too_big = false;
     let dst = s.base[kept::slot_for(gen)];
     // SAFETY: the slot is SNAP_MAX mapped bytes of this program's; the header goes last
     // (a torn copy fails its checksum anyway; this keeps the old magic invalid meanwhile)
@@ -233,6 +273,10 @@ pub fn save() {
     }
     s.gen = gen;
     SAVES.fetch_add(1, Ordering::Relaxed);
+    // Save before unkeep: the snapshot no longer naming these is written now
+    for k in FREES.lock().committed(frees) {
+        let _ = MemObj::unkeep(k);
+    }
 }
 
 /// Compares the tables with the kernel's live mount namespaces (see the module comment):
@@ -278,6 +322,10 @@ pub fn restarts() -> u64 {
 /// (its instance and file made the first time, held open so they are never reaped), 2 reads
 /// them back to `buf`. Returns [`restarts`].
 pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
+    // A test hook: root only
+    if cx.c.euid != 0 {
+        return EPERM;
+    }
     // (the caller's memory is read and written outside the server's locks)
     let data = if op == 1 {
         match cx.copy_in(buf, 64) {
@@ -297,10 +345,21 @@ pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
             1 => {
                 if kt.0 == 0 || set.get(kt.0).is_none() {
                     let (n, root) = set.create("", 0, 0, 1 << 30, (0, 0))?;
-                    let t = set.get_mut(n).ok_or(EINVAL)?;
-                    let ino = t.mknod(root, b"ktest", S_IFREG | 0o600, 0, 0, 0, (0, 0))?;
-                    t.open(ino)?;
-                    *kt = (n, ino);
+                    let made = set.get_mut(n).ok_or(EINVAL).and_then(|t| {
+                        let ino = t.mknod(root, b"ktest", S_IFREG | 0o600, 0, 0, 0, (0, 0))?;
+                        t.open(ino)?;
+                        Ok(ino)
+                    });
+                    match made {
+                        Ok(ino) => *kt = (n, ino),
+                        Err(e) => {
+                            // (no half-made instance is left or saved)
+                            if let Some(t) = set.all.remove(&n) {
+                                t.destroy(&mut *store as &mut dyn DataStore);
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
                 let t = set.get_mut(kt.0).ok_or(EINVAL)?;
                 t.write(kt.1, 0, &data, &mut *store as &mut dyn DataStore, (0, 0))?;
@@ -308,6 +367,10 @@ pub fn ktest(cx: &Cx, op: u64, buf: u64) -> i64 {
             2 => {
                 let t = set.get(kt.0).ok_or(ENOENT)?;
                 out = t.read(kt.1, 0, 64, &mut *store as &mut dyn DataStore)?;
+                if out.len() < 64 {
+                    // (the file was never written whole)
+                    return Err(EIO);
+                }
             }
             _ => return Err(EINVAL),
         }

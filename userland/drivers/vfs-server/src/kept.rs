@@ -34,11 +34,6 @@ pub const SNAP_MAX: u64 = 64 << 20;
 pub const SLOT_KEYS: [u64; 2] = [1, 2];
 /// The first key of `tmpfs` data objects (keys below are the server's own).
 pub const DATA_KEY_BASE: u64 = 1 << 32;
-/// Data keys a crash may have used past the snapshot's `data_next` (an object made for a
-/// change whose snapshot was never written): a new instance looks at this many and frees
-/// the ones no file names. Each change makes at most one data object and is saved before it
-/// is answered, so a few workers' worth is enough.
-pub const SWEEP: u64 = 256;
 
 /// Section tags.
 pub const TAG_MOUNTS: u32 = 1;
@@ -174,9 +169,66 @@ fn section(e: &mut Enc, tag: u32, part: &[u8]) {
     e.bytes(part);
 }
 
-/// What a new instance does with the data keys it finds: the keys the restored trees name
-/// (`named`, sorted or not) and the sweep window after `data_next` give the keys to adopt
-/// (named) and the ones to look at and free if they exist (the window, minus named ones).
-pub fn sweep_keys(named: &[u64], data_next: u64) -> Vec<u64> {
-    (data_next..data_next.saturating_add(SWEEP)).filter(|k| !named.contains(k)).collect()
+/// The data objects a new instance frees: every kept object the kernel lists for the
+/// service (`kept`, from `LX_MEM_KEPTKEYS`) that is a data key ([`DATA_KEY_BASE`] or above)
+/// and that no restored file names (`named`). Covers objects made for changes whose snapshot
+/// was never written and objects let go by a change saved just before a crash, wherever
+/// their keys lie.
+pub fn orphans(named: &[u64], kept: &[u64]) -> Vec<u64> {
+    let named: alloc::collections::BTreeSet<u64> = named.iter().copied().collect();
+    kept.iter().copied().filter(|k| *k >= DATA_KEY_BASE && !named.contains(k)).collect()
+}
+
+/// The first data key a new instance hands out: past the snapshot's `data_next` and past
+/// every named key (a key taken while the last snapshot was being made may be named above
+/// `data_next`), never below [`DATA_KEY_BASE`].
+pub fn next_key(named: &[u64], data_next: u64) -> u64 {
+    named.iter().map(|k| k.saturating_add(1)).max().unwrap_or(0).max(data_next).max(DATA_KEY_BASE)
+}
+
+/// The data keys to let go of after a restore that is given up part way: the ones the
+/// kernel made new for it (`(key, existed)` as `adopt` answered); objects that existed stay
+/// for the next try (another slot, or a later instance).
+pub fn rollback(adopted: &[(u64, bool)]) -> Vec<u64> {
+    adopted.iter().filter(|(_, existed)| !existed).map(|(k, _)| *k).collect()
+}
+
+/// Data objects let go of by changes, held until a snapshot that no longer names them is
+/// written (**save before unkeep**): a crash before that snapshot leaves the files' data in
+/// place for the old snapshot, and the new instance frees what no file names ([`orphans`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Frees {
+    pending: Vec<u64>,
+}
+
+impl Frees {
+    pub const fn new() -> Frees {
+        Frees { pending: Vec::new() }
+    }
+
+    /// A change let go of data key `key` (its file is gone from the tree).
+    pub fn free(&mut self, key: u64) {
+        self.pending.push(key);
+    }
+
+    /// Taken while the snapshot is made (under the trees' lock): the keys the snapshot does
+    /// not name. Hand them to [`Frees::committed`] once it is written, or back with
+    /// [`Frees::failed`].
+    pub fn take(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.pending)
+    }
+
+    /// The snapshot was written: these keys may be unkept now (returned for the caller).
+    pub fn committed(&mut self, batch: Vec<u64>) -> Vec<u64> {
+        batch
+    }
+
+    /// The snapshot was not written: the keys wait for the next one.
+    pub fn failed(&mut self, batch: Vec<u64>) {
+        self.pending.extend(batch);
+    }
+
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
 }

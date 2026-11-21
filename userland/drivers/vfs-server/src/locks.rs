@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use crate::mtab::{seal, unseal, Dec, Enc};
 
 const EINVAL: i64 = -22;
+const EOVERFLOW: i64 = -75;
 
 /// Who holds a lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +91,8 @@ pub fn range(base: i64, start: i64, len: i64) -> Result<(u64, u64), i64> {
     let mut e: i64 = if len == 0 {
         i64::MAX
     } else if len > 0 {
-        s.saturating_add(len - 1)
+        // (a range past the largest offset: EOVERFLOW, as Linux)
+        s.checked_add(len - 1).ok_or(EOVERFLOW)?
     } else {
         s.checked_sub(1).ok_or(EINVAL)?
     };
@@ -123,6 +125,10 @@ impl LockTable {
     /// Removes `owner`'s locks on `[start, end]` of `ino` (splitting the ones reaching past):
     /// whether anything changed (waiters should look again).
     pub fn unlock(&mut self, ino: u64, owner: Owner, start: u64, end: u64) -> bool {
+        // (an inverted range unlocks nothing)
+        if start > end {
+            return false;
+        }
         let before = self.locks.clone();
         let mut out = Vec::with_capacity(self.locks.len() + 1);
         for l in self.locks.drain(..) {
@@ -145,6 +151,11 @@ impl LockTable {
     /// of the same kind, replacing its own overlapping ones), or answers the conflicting lock.
     /// A `flock` conversion first drops the owner's lock (as Linux: not atomic).
     pub fn try_lock(&mut self, ino: u64, owner: Owner, write: bool, start: u64, end: u64, pid: u64) -> Result<(), Lock> {
+        // A flock is always the whole file; an inverted range takes nothing
+        let (start, end) = if owner.whole_file() { (0, u64::MAX) } else { (start, end) };
+        if start > end {
+            return Ok(());
+        }
         if owner.whole_file() {
             self.unlock(ino, owner, 0, u64::MAX);
         }

@@ -179,14 +179,86 @@ fn mount_tables_and_tmpfs_trees_survive_a_snapshot() {
 }
 
 #[test]
-fn the_sweep_looks_past_data_next_and_skips_named_keys() {
-    let next = DATA_KEY_BASE + 10;
-    let k = sweep_keys(&[DATA_KEY_BASE + 3, next + 1], next);
-    assert_eq!(k.len() as u64, SWEEP - 1);
-    assert_eq!(k[0], next);
-    assert!(!k.contains(&(next + 1)));
-    assert!(!k.contains(&(DATA_KEY_BASE + 3)));
-    assert_eq!(*k.last().unwrap(), next + SWEEP - 1);
-    // Never past the key space
-    assert_eq!(sweep_keys(&[], u64::MAX - 1).len(), 1);
+fn orphans_are_every_unnamed_data_key_wherever_it_lies() {
+    let b = DATA_KEY_BASE;
+    // Kept keys: the two slots, a named file, one let go of just before a crash (below
+    // data_next), and objects made for unsaved changes far past data_next (more than any
+    // fixed window)
+    let kept = vec![1, 2, b, b + 1, b + 5, b + 300, b + 10_000];
+    let named = vec![b + 5, b];
+    let o = orphans(&named, &kept);
+    assert_eq!(o, vec![b + 1, b + 300, b + 10_000]);
+    // Never the server's own keys (slots), never a named file
+    assert!(!o.contains(&1) && !o.contains(&2) && !o.contains(&b));
+    assert!(orphans(&named, &[]).is_empty());
+    assert_eq!(orphans(&[], &[1, 2]), Vec::<u64>::new());
+}
+
+#[test]
+fn the_next_key_is_past_data_next_and_every_named_key() {
+    let b = DATA_KEY_BASE;
+    assert_eq!(next_key(&[], b + 10), b + 10);
+    // A key taken while the last snapshot was made: named above data_next
+    assert_eq!(next_key(&[b + 3, b + 12], b + 10), b + 13);
+    // Never below the base, never wrapping
+    assert_eq!(next_key(&[], 0), b);
+    assert_eq!(next_key(&[u64::MAX], b), u64::MAX);
+}
+
+#[test]
+fn a_restore_given_up_lets_go_only_of_objects_made_for_it() {
+    let b = DATA_KEY_BASE;
+    assert_eq!(rollback(&[(b, true), (b + 1, false), (b + 2, true), (b + 3, false)]), vec![b + 1, b + 3]);
+    assert!(rollback(&[]).is_empty());
+}
+
+#[test]
+fn data_is_unkept_only_after_the_snapshot_without_it_is_written() {
+    let mut f = Frees::new();
+    f.free(7);
+    f.free(8);
+    // The snapshot is made: these two are not in it
+    let batch = f.take();
+    assert_eq!(batch, vec![7, 8]);
+    // A free while the snapshot is being written belongs to the next one
+    f.free(9);
+    // The write failed (too big): nothing is unkept, all wait for the next snapshot
+    f.failed(batch);
+    assert_eq!(f.len(), 3);
+    let batch = f.take();
+    assert_eq!(f.len(), 0);
+    let unkeep = f.committed(batch);
+    assert_eq!(unkeep.len(), 3);
+    assert!(unkeep.contains(&9));
+}
+
+#[test]
+fn a_boot_state_snapshot_is_valid_for_the_first_restart() {
+    // What a first instance writes at once (counters only, parts as at boot)
+    let boot = Snapshot { counters: Counters { data_next: DATA_KEY_BASE, ..Counters::default() }, mounts: None, tmpfs: None, locks: None };
+    let slot = encode_slot(1, &boot.encode());
+    let mut obj = vec![0u8; 8192];
+    obj[..slot.len()].copy_from_slice(&slot);
+    let v = by_age([&obj, &[0u8; 8192][..]]);
+    assert_eq!(v.len(), 1);
+    assert_eq!(Snapshot::decode(v[0].2), Ok(boot));
+}
+
+#[test]
+fn a_partial_snapshot_restores_only_its_parts() {
+    // Mounts present, tmpfs absent: the decoder gives exactly that (the server keeps its
+    // boot tmpfs set for the absent part)
+    let mut tables = MountTables::new();
+    tables.install(0, 34, &[]);
+    let s = Snapshot { counters: Counters { data_next: DATA_KEY_BASE, ..Counters::default() }, mounts: Some(tables.encode()), tmpfs: None, locks: None };
+    let back = Snapshot::decode(&s.encode()).unwrap();
+    assert!(back.tmpfs.is_none() && back.locks.is_none());
+    assert!(MountTables::decode(back.mounts.as_ref().unwrap()).is_ok());
+    // A damaged part is found by its own decoder (the server then tries the other slot)
+    let mut bad = s.clone();
+    let m = bad.mounts.as_mut().unwrap();
+    let n = m.len();
+    m[n - 1] ^= 1;
+    let back = Snapshot::decode(&bad.encode()).unwrap();
+    assert!(MountTables::decode(back.mounts.as_ref().unwrap()).is_err());
 }

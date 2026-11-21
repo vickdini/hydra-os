@@ -154,7 +154,9 @@ fn main(args: &[&str]) {
     }
     // wave7 G7-3: the pool root of the boot table, once zfs-server answers (else again below)
     let mut root_known = root.map(mount::set_pool_root).unwrap_or(false);
-    // wave7 G7-6: namespaces made or gone while no instance was online
+    // wave7 G7-6: namespaces made or gone while no instance was online (the notes posted
+    // since going online first: they are older than the list)
+    take_notes(u64::MAX);
     let (dropped, added) = recover::resync();
     if dropped + added > 0 {
         println!("[vfs-server] mount namespaces resynced: {} tables dropped, {} added", dropped, added);
@@ -185,6 +187,7 @@ fn main(args: &[&str]) {
 /// some were lost to a full ring.
 fn take_notes(seq: u64) {
     let ring = RING.load(Ordering::Acquire);
+    let mut overflow = false;
     if ring != 0 {
         let mut seen = DROPPED_SEEN.lock();
         // SAFETY: the ring header in the mapped window (word 2: entries dropped, written by
@@ -194,15 +197,20 @@ fn take_notes(seq: u64) {
         if dropped != *seen {
             CACHE.forget_all();
             // wave7 G7-3: lost namespace notes (wave7 G7-6: compared with the kernel's list of
-            // live namespaces, instead of forgetting every table but the initial one)
+            // live namespaces, instead of forgetting every table but the initial one; after
+            // the notes still in the ring are taken, so none older than the list comes after)
             *seen = dropped;
-            let _ = recover::resync();
+            overflow = true;
         }
     }
-    if seq == u64::MAX {
+    if seq == u64::MAX || overflow {
         svcrt::notes::drain_all();
     } else {
         svcrt::notes::drain_to(seq);
+    }
+    // wave7 G7-6 (saves when it changed something)
+    if overflow {
+        let _ = recover::resync();
     }
 }
 

@@ -131,6 +131,46 @@ fn kept_objects_are_counted_and_dropped_per_service() {
     drop_kept(LXS_SEC);
 }
 
+// wave7 G7-6: a restarted service lists its kept keys to free the ones its state does not name
+#[test]
+fn a_service_lists_its_kept_keys() {
+    let sim = world();
+    let r = StdArc::new(StdMutex::new(Vec::new()));
+    let r2 = r.clone();
+    sim.spawn(svc_task(320, EP), move || {
+        for k in [5u64, 1 << 32, (1 << 32) + 9, u64::MAX] {
+            sys_mem(LX_MEM_ANON, 4096, LX_MEM_KEPT, k, 0);
+        }
+        let mut buf = [0u64; 8];
+        let n = sys_mem(LX_MEM_KEPTKEYS, buf.as_mut_ptr() as u64, 8, 0, 0);
+        r2.lock().unwrap().push((n, buf.to_vec()));
+        // From a key on, and fewer than asked: the first page
+        let mut two = [0u64; 2];
+        let n = sys_mem(LX_MEM_KEPTKEYS, two.as_mut_ptr() as u64, 2, 6, 0);
+        r2.lock().unwrap().push((n, two.to_vec()));
+        let n = sys_mem(LX_MEM_KEPTKEYS, 8, 4, 0, 0);
+        r2.lock().unwrap().push((n, vec![]));
+        let n = sys_mem(LX_MEM_KEPTKEYS, buf.as_mut_ptr() as u64, 8, u64::MAX, 0);
+        r2.lock().unwrap().push((n, buf[..1].to_vec()));
+    });
+    sim.run_others();
+    let v = r.lock().unwrap().clone();
+    assert_eq!(v[0].0, 4);
+    assert_eq!(&v[0].1[..4], &[5, 1 << 32, (1 << 32) + 9, u64::MAX]);
+    assert_eq!(v[1], (2, vec![1 << 32, (1 << 32) + 9]));
+    assert_eq!(v[2].0, EFAULT);
+    assert_eq!(v[3], (1, vec![u64::MAX]));
+    // Another service sees none of them; one without a host id may not ask
+    let r3 = r.clone();
+    sim.spawn(svc_task(330, ENDPOINT_NET_DEV), move || {
+        let mut buf = [0u64; 2];
+        r3.lock().unwrap().push((sys_mem(LX_MEM_KEPTKEYS, buf.as_mut_ptr() as u64, 2, 0, 0), vec![]));
+    });
+    sim.run_others();
+    assert_eq!(r.lock().unwrap()[4].0, EPERM);
+    drop_kept(LXS_TEST);
+}
+
 #[test]
 fn dma_objects_are_contiguous_and_in_the_drivers_domain() {
     let sim = world();
