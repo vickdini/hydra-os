@@ -1429,3 +1429,102 @@ pub const LX_SVC_CLAIM_MAJOR: u64 = 1;
 pub const LX_SVC_WHOAMI: u64 = 2;
 // (ops 3-7: Group 20; 16-23: Group 21)
 // wave6 G19 end
+
+// wave7 G7-1 begin: vfs-server, the file service (wave 7, docs/vfs-design.md sections 5-6)
+// ----------------------------------------------------------------------------------------
+//
+// vfs-server (service `LXS_VFS`, endpoint `ENDPOINT_VFS_SERVER`) walks paths, caches names,
+// attributes and links, and answers the file calls routed to it. Its test call
+// `LX_VFS_WALK_NR` walks a path and describes what it found; services reach the walk with a
+// direct call (`LX_DCALL_NR`, operation `LX_VFS_OP_WALK`).
+
+/// vfs-server's test call (Hydra-private, routed to [`LXS_VFS`] with the caller's context):
+/// `(dirfd, path, flags, out *LxVfsWalkOut)`: walks `path` from `dirfd` (`AT_FDCWD`: the
+/// working directory) and writes what it found to `out`; returns 0 or `-errno`.
+pub const LX_VFS_WALK_NR: u64 = 0x6714;
+/// [`LX_VFS_WALK_NR`] flag: do not follow a symbolic link in the last component.
+pub const LX_VFS_NOFOLLOW: u64 = 1;
+/// [`LX_VFS_WALK_NR`] flag: report a redirect (to the service serving a mount) in the
+/// answer instead of making it.
+pub const LX_VFS_NOREDIR: u64 = 2;
+/// [`LX_VFS_WALK_NR`] flag: bypass vfs-server's caches (every step asks zfs-server).
+pub const LX_VFS_NOCACHE: u64 = 4;
+
+/// What [`LX_VFS_WALK_NR`] and [`LX_VFS_OP_WALK`] found.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LxVfsWalkOut {
+    /// The object (inode) number.
+    pub ino: u64,
+    /// The mount it lies in (0: the root's own tree).
+    pub mnt: u64,
+    /// `st_mode`.
+    pub mode: u64,
+    /// `st_nlink`.
+    pub nlink: u64,
+    /// Owner.
+    pub uid: u64,
+    /// Group.
+    pub gid: u64,
+    /// `st_rdev`.
+    pub rdev: u64,
+    /// `st_size`.
+    pub size: u64,
+    /// With [`LX_VFS_NOREDIR`]: the service the path belongs to (0: none, `ino` is valid).
+    pub redir_svc: u64,
+    /// The redirect's object (see [`LX_VFS_TAIL_TEXT`]).
+    pub redir_obj: u64,
+    /// Where the other service's part of the path starts in the path argument.
+    pub redir_tail: u64,
+    /// zfs-server requests this walk made (cache misses).
+    pub zfs_requests: u64,
+}
+
+/// A redirect's `tail` when the rest of the path is not a suffix of the path argument
+/// (symbolic links led there): the redirect's object carries a ticket in bits 32..63, and the
+/// target asks vfs-server for the text ([`LX_VFS_OP_REDIR_TEXT`]).
+pub const LX_VFS_TAIL_TEXT: u32 = u32::MAX;
+/// The redirect objects of vfs-server's boot table (names directly under the caller's
+/// root): `proc`.
+pub const LX_VFS_PSEUDO_PROC: u64 = 1;
+/// See [`LX_VFS_PSEUDO_PROC`]: `sys`.
+pub const LX_VFS_PSEUDO_SYS: u64 = 2;
+/// See [`LX_VFS_PSEUDO_PROC`]: `dev`.
+pub const LX_VFS_PSEUDO_DEV: u64 = 3;
+
+/// Direct-call operation of vfs-server: walk a path. In: [`LxVfsWalkIn`] then the path; out:
+/// [`LxVfsWalkOut`]. Result 0 or `-errno`.
+pub const LX_VFS_OP_WALK: u64 = 16;
+/// Direct-call operation of vfs-server: the rest of a redirected path (in: the ticket, 8
+/// bytes; out: the text). Result: its length, or `-ENOENT` if the ticket expired.
+pub const LX_VFS_OP_REDIR_TEXT: u64 = 17;
+
+/// The fixed part of [`LX_VFS_OP_WALK`]'s input (the path follows it).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxVfsWalkIn {
+    /// [`LX_VFS_NOFOLLOW`], [`LX_VFS_NOREDIR`], [`LX_VFS_NOCACHE`].
+    pub flags: u64,
+    /// The root (inode; 0: the pool root) and its mount.
+    pub root: u64,
+    /// See [`LxVfsWalkIn::root`].
+    pub root_mnt: u64,
+    /// Where a relative path starts (inode; 0: the root) and its mount.
+    pub base: u64,
+    /// See [`LxVfsWalkIn::base`].
+    pub base_mnt: u64,
+    /// Whose permissions the walk checks.
+    pub uid: u32,
+    /// See [`LxVfsWalkIn::uid`].
+    pub gid: u32,
+    /// Effective capabilities.
+    pub caps: u64,
+    /// Mount namespace.
+    pub mnt_ns: u64,
+    /// How many of `groups` are used.
+    pub ngroups: u64,
+    /// Supplementary groups (for the search permission checks).
+    pub groups: [u32; LX_GROUPS],
+}
+
+// wave7 G7-1 end
