@@ -356,10 +356,18 @@ These are not group work yet, but should not be forgotten:
 
 Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts right after wave 5's deploy.
 
+### Made 2026-11-21 (Group 16's VFS questions, [vfs-design.md](vfs-design.md) section 11, all as recommended; and how wave 7 runs)
+
+19. **`/proc`, `/sys` and `/dev` belong to the Linux services** (linux-server now; the process and device services later), mounted into vfs-server and reached with one redirect at lookup.
+20. **The descriptor table stays in the kernel** as a table of handles.
+21. **Programs keep running when vfs-server crashes:** open files, current directories and mappings survive; mounts and locks live in kept state.
+22. **No kernel `stat` cache for now;** revisit if the budget is missed.
+23. **Wave 7 is split as section 12.2:** 7-1 to 7-6 in parallel, then 7-7 closing; plus group H (the two-load hang) and group B (carried-over bugs). **Started in stages:** H and 7-1 to 7-3 first, 7-4 to 7-6 and B added as those settle.
+24. **Gemini as a read-only second opinion** (the user's Gemini subscription, through Google's Antigravity CLI `agy`; Gemini CLI with a personal account is no longer supported by Google): `tools/gemini_review.py` and the `gemini-reviewer` subagent (`.claude/agents/gemini-reviewer.md`) review each branch before merge and help on hard bugs. Gemini may see Hydra's source, diffs and logs. It never writes to the tree; its findings are checked against the code before anyone acts on them.
+
 ### Still open, and when they are needed
 
 | Decision | Needed before | Notes |
 |---|---|---|
-| Group 16's remaining VFS questions ([vfs-design.md](vfs-design.md)) | Wave 7 | The shape (F1, vfs-server next to zfs-server) follows from decision 9 |
 | Group 15's remaining device questions ([display-input-design.md](display-input-design.md)) | Wave 8 | |
 | Which other systems' programs to support, and in what order (FreeBSD, macOS, a native Wine back end) | Wave 11 | Decision 18 sets the shape; the wave 5 hook serves all of them |
