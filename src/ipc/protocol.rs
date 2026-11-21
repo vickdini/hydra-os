@@ -1731,3 +1731,22 @@ pub const LX_NOTE_MNTNS: u64 = 10;
 /// See [`LX_NOTE_MNTNS`].
 pub const LX_MNTNS_GONE: u64 = u64::MAX;
 // wave7 G7-3 end
+// wave7 G7-6 begin: restart without ending programs (vfs-server's kept state)
+// ----------------------------------------------------------------------------------------
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_NSLIST(buf, cap)` writes the ids
+/// (u64) of the mount namespaces that have a live process, at most `cap` of them, to `buf`;
+/// returns how many there are (more than `cap`: call again with room). A restarted
+/// vfs-server compares them with its kept tables (notes posted while it was down are lost).
+/// 7-6 has ops 48..=51.
+pub const LX_FH_NSLIST: u64 = 48;
+/// [`LX_VFS_WALK_NR`] flag (test hook): instead of a walk, `dirfd` = 1 writes the 64 bytes at
+/// `out` to a file of vfs-server's test tmpfs instance (made the first time), 2 reads them
+/// back to `out`; returns the number of restarts the instance has lived through. The test
+/// shows tmpfs data crossing a vfs-server restart before the mount calls move.
+pub const LX_VFS_KTEST: u64 = 0x100;
+/// `SYS_LX_MEM` operation: `(buf, cap, from)`: writes the keys (u64, ascending) of the
+/// caller's service's kept objects that are `>= from`, at most `cap` of them, to `buf`;
+/// returns how many it wrote (fewer than `cap`: that was all). A restarted service frees
+/// the kept objects its kept state no longer names.
+pub const LX_MEM_KEPTKEYS: u64 = 9;
+// wave7 G7-6 end

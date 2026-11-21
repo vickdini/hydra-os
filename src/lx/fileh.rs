@@ -652,6 +652,24 @@ fn reroot(ns: u64, ptr: u64) -> i64 {
     n
 }
 
+// wave7 G7-6 begin
+/// [`LX_FH_NSLIST`](crate::ipc::protocol::LX_FH_NSLIST): the live mount namespaces, at most
+/// `cap` of them to `buf`; how many there are.
+fn nslist(buf: u64, cap: u64) -> i64 {
+    let ids = crate::compat::linux::ns::live_mntns();
+    // (at most as many as there are: the copy never exceeds the list)
+    let n = ids.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
+    let mut bytes = Vec::with_capacity(n * 8);
+    for id in &ids[..n] {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    if n > 0 && crate::compat::linux::vfs::copy_out(buf, &bytes).is_err() {
+        return EFAULT;
+    }
+    ids.len() as i64
+}
+// wave7 G7-6 end
+
 /// Sets the offset of the handle at `fd` of table `t`.
 pub fn seek_in(t: &FdTable, fd: u64, pos: u64) -> Result<(), i64> {
     match t.get(fd as i32 as usize) {
@@ -716,6 +734,9 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         LX_FH_CLAIM => claim(a, b != 0),
         LX_FH_CHANGED => changed(a, b, c),
         LX_FH_REROOT => reroot(a, b),
+        // wave7 G7-6 begin
+        crate::ipc::protocol::LX_FH_NSLIST => nslist(a, b),
+        // wave7 G7-6 end
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;
