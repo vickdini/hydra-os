@@ -98,7 +98,12 @@ fn node_in(v: &View, root: Node, ino: u64, mnt: u32) -> Result<Node, i64> {
 
 /// The `MS_*` flags of the mount `n` is in, for call `c`.
 pub fn mount_flags(c: &LxCall, n: Node) -> Result<u32, i64> {
-    Ok(walker(c)?.view.flags(n.mnt))
+    let w = walker(c)?;
+    // (a newer copy taken during the call may no longer have the mount: the kernel decides)
+    if !w.view.walkable(n) {
+        return Err(KERNEL);
+    }
+    Ok(w.view.flags(n.mnt))
 }
 
 /// [`KERNEL`] when `n` lies in a read-only mount (the kernel answers `EROFS`).

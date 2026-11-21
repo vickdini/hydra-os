@@ -539,6 +539,11 @@ impl super::chardev::CharDevice for FifoRw {
 
     fn write(&self, data: &[u8]) -> i64 {
         use crate::task::wait::{QueueRef, WaitSet};
+        if data.is_empty() {
+            return 0;
+        }
+        // (up to PIPE_BUF bytes go in one piece, as Linux's pipes)
+        let atomic = data.len() <= 4096;
         let mut waits = WaitSet::new();
         waits.add(QueueRef::Shared(self.pipe.lock().wq.clone()));
         let mut done = 0usize;
@@ -546,7 +551,8 @@ impl super::chardev::CharDevice for FifoRw {
             waits.register();
             {
                 let mut p = self.pipe.lock();
-                if p.available_write() > 0 {
+                let room = p.available_write();
+                if room > 0 && (!atomic || room >= data.len()) {
                     match p.write(&data[done..]) {
                         Ok(n) => done += n,
                         Err(_) => return if done > 0 { done as i64 } else { -32 }, // EPIPE
@@ -644,13 +650,15 @@ fn open_fifo_kernel(ino: u64, flags: u32) -> Result<usize, i64> {
         let dev = FifoRw { pipe: pipe.clone(), ino, nonblock: core::sync::atomic::AtomicBool::new(nonblock) };
         return install(FileDescriptor::Device(alloc::sync::Arc::new(dev)), flags);
     }
+    // (the other side's open count before this end is counted: an end that opens after
+    // that moves it, even if it is gone again before we look — wave7 G7-7)
+    let seen = fifo_opens(ino);
     if write {
         pipe.lock().add_writer();
     } else {
         pipe.lock().add_reader();
     }
-    // (the other side's open count when this end came: wave7 G7-7)
-    let seen = fifo_opened(ino, write);
+    fifo_opened(ino, write);
     let desc = if write { FileDescriptor::PipeWrite(pipe.clone()) } else { FileDescriptor::PipeRead(pipe.clone()) };
     if acc != 2 && !nonblock {
         // Wait for the other side (a tick at a time); an end of it that opened meanwhile,

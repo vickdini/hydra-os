@@ -1865,9 +1865,11 @@ pub fn dispatch_new(num: u64, a: [u64; 6]) -> i64 {
     let _ = EROFS;
     // wave7 G7-7: the file service's copy follows every change (statmount/listmount read only)
     let r = dispatch_new_inner(num, a);
+    // (the new API's descriptors may name another namespace's mounts: every namespace)
     if !matches!(num, 457 | 458) {
-        bump(current_ns_id());
+        bump_all();
     }
+
     r
 }
 
@@ -1971,6 +1973,8 @@ fn vfs_mount(m: &Mount) -> Option<VfsMount> {
         }
         Kind::Named => VFS_HOLE,
         Kind::Tree { .. } if m.root == 0 || m.root == u64::MAX => return None,
+        // (a mount on something the kernel could not locate: only its path names it)
+        Kind::Tree { .. } if m.parent != 0 && (m.mountpoint == 0 || m.mountpoint == u64::MAX) => return None,
         Kind::Tree { .. } if super::fuse::is_fuse(m.root) => VFS_KERNEL,
         Kind::Tree { tmpfs: Some(_) } => VFS_TMPFS,
         Kind::Tree { tmpfs: None } => VFS_TREE,
@@ -1988,19 +1992,35 @@ fn vfs_mounts(t: &MountNs) -> Option<Vec<VfsMount>> {
 
 /// Namespace `ns` changed (0: the initial namespace's FUSE mounts): its generation moves on.
 pub fn bump(ns: u64) {
-    let gen = MNT_GEN.fetch_add(1, Ordering::AcqRel) + 1;
     if ns == 0 {
-        NS0_GEN.store(gen, Ordering::Release);
+        // (never backwards, whatever order concurrent bumps finish in)
+        let gen = MNT_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+        NS0_GEN.fetch_max(gen, Ordering::AcqRel);
         return;
     }
+    // Under the generations' lock (order: GENS, then NAMESPACES and the table): the
+    // generation and whether the table can be walked are taken together, and a later bump
+    // always stores a later generation
+    let mut g = GENS.lock();
     let ok = match table(ns) {
         Some(t) => vfs_mounts(&t.lock()).is_some(),
         None => {
-            GENS.lock().remove(&ns);
+            g.remove(&ns);
             return;
         }
     };
-    GENS.lock().insert(ns, (gen, ok));
+    let gen = MNT_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    g.insert(ns, (gen, ok));
+}
+
+/// Every namespace's generation moves on (a call of the new mount API may have acted on a
+/// mount object of another namespace).
+pub fn bump_all() {
+    bump(0);
+    let ids: Vec<u64> = NAMESPACES.lock().keys().copied().collect();
+    for ns in ids {
+        bump(ns);
+    }
 }
 
 /// The generation of namespace `ns`'s table for a call to the file service; `None` when
@@ -2035,7 +2055,9 @@ pub fn vfs_table(ns: u64) -> Result<(u64, u32, Vec<VfsMount>), i64> {
 
 /// Forgets the generations of namespaces that have no table any more.
 fn forget_gens() {
-    let live: Vec<u64> = NAMESPACES.lock().keys().copied().collect();
-    GENS.lock().retain(|ns, _| live.contains(ns));
+    // (under the generations' lock, each checked against the namespaces then: one made
+    // meanwhile keeps its generation)
+    let mut g = GENS.lock();
+    g.retain(|ns, _| table(*ns).is_some());
 }
 // wave7 G7-7 end

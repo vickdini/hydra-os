@@ -35,6 +35,23 @@ impl FileCursor {
         self.0.fetch_add(n, Ordering::AcqRel).wrapping_add(n)
     }
 
+    /// Moves the offset by `delta` (`SEEK_CUR`) in one step, so a concurrent read or write
+    /// through another descriptor of the description is not undone; `None` (offset kept)
+    /// if it would go below 0.
+    pub fn seek_by(&self, delta: i64) -> Option<usize> {
+        let mut cur = self.0.load(Ordering::Acquire);
+        loop {
+            let new = usize::try_from((cur as i64).checked_add(delta)?).ok()?;
+            if delta == 0 {
+                return Some(cur);
+            }
+            match self.0.compare_exchange(cur, new, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(new),
+                Err(now) => cur = now,
+            }
+        }
+    }
+
     /// The description's identity (equal for a descriptor and its `dup`s).
     pub fn id(&self) -> usize {
         Arc::as_ptr(&self.0) as usize

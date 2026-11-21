@@ -98,7 +98,8 @@ pub fn statfs(cx: &Cx) -> Result<i64, i64> {
     let who = ctxt::caller(c)?;
     let (n, _) = ctxt::find(c, &who, &path, true)?;
     // wave7 G7-7: a tmpfs mount reports its own numbers (the kernel's)
-    if ctxt::walker(c)?.view.is_tmpfs(n.mnt) {
+    // (and a mount with flags: the kernel reports them in `f_flags`)
+    if ctxt::walker(c)?.view.is_tmpfs(n.mnt) || ctxt::mount_flags(c, n)? != 0 {
         return Err(ctxt::KERNEL);
     }
     let (total, free, objs) = crate::zfs::statfs()?;

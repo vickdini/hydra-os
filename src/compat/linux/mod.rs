@@ -740,10 +740,13 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                     match desc {
                         crate::fs::FileDescriptor::File { path, cursor, .. } => {
                             let file_size = crate::fs::ZfsClient::file_stat(path).map(|st| st.size).unwrap_or(0) as i64;
+                            // (wave7 G7-7: SEEK_CUR in one step on the shared offset)
+                            if whence == 1 {
+                                return cursor.seek_by(offset).map_or(-EINVAL, |p| p as i64);
+                            }
                             let new_cursor = match whence {
                                 0 => offset,
-                                1 => (cursor.get() as i64) + offset,
-                                2 => file_size + offset,
+                                2 => file_size.saturating_add(offset),
                                 _ => return -EINVAL,
                             };
                             if new_cursor < 0 {
