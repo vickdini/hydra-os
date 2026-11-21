@@ -222,6 +222,7 @@ static void fifo_tests(void) {
         usleep(100000);
         int fw = open(D "/ff", O_WRONLY);
         write(fw, "late", 4);
+        usleep(300000); /* (lx=kernel's in-kernel FIFO open only sees a writer still open) */
         close(fw);
         _exit(0);
     }
