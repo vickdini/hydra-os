@@ -32,6 +32,7 @@ mod ctx;
 mod lock;
 // wave7 G7-3 begin: mount tables and tmpfs
 mod mount;
+mod mountcalls;
 mod mtab;
 mod tmpfs;
 mod tmpfs_mem;
@@ -116,6 +117,8 @@ fn main(args: &[&str]) {
     }
     // wave7 G7-2: the calls go to vfs-server from now on (`calls=0`: none, `calls=4,6,..`: these)
     println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
+    // wave7 G7-3: the mount calls moved so far (`mcalls=0`: none)
+    println!("[vfs-server] {} mount calls claimed", mountcalls::claim_all(args));
     loop {
         match svc.recv(100) {
             Event::Request(id, _req) => svc.reply(id, &hydra_rt::Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
@@ -169,6 +172,10 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
     // wave7 G7-2
     if let Some(a) = calls::serve(&cx) {
+        return a;
+    }
+    // wave7 G7-3
+    if let Some(a) = mountcalls::serve(&cx) {
         return a;
     }
     let r = match c.nr {

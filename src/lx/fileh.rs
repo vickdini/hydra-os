@@ -88,8 +88,8 @@ pub fn shape(nr: u64) -> Option<Shape> {
     Some(match nr {
         // open, creat, stat, lstat, access, readlink, mkdir, mknod, unlink, rmdir, rename,
         // link, symlink, chmod, chown, lchown, utime, utimes, truncate, the xattrs by path,
-        // statfs, chdir
-        2 | 85 | 4 | 6 | 21 | 89 | 83 | 133 | 87 | 84 | 82 | 86 | 88 | 90 | 92 | 94 | 132 | 235 | 76 | 188 | 189 | 191 | 192 | 194 | 195 | 197 | 198 | 137 | 80 => Shape::Path,
+        // statfs, chdir; chroot (161, wave7 G7-3)
+        2 | 85 | 4 | 6 | 21 | 89 | 83 | 133 | 87 | 84 | 82 | 86 | 88 | 90 | 92 | 94 | 132 | 235 | 76 | 188 | 189 | 191 | 192 | 194 | 195 | 197 | 198 | 137 | 80 | 161 => Shape::Path,
         // openat, openat2, newfstatat, statx, faccessat, faccessat2, readlinkat, mkdirat,
         // mknodat, unlinkat, fchmodat, fchmodat2, fchownat, futimesat, utimensat
         257 | 437 | 262 | 332 | 269 | 439 | 267 | 258 | 259 | 263 | 268 | 452 | 260 | 261 | 280 => Shape::At0,
@@ -671,6 +671,13 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
                 LX_FH_CHDIR => chdir_in(&mut t, &d).map(|()| 0),
                 _ => chroot_in(&mut t, &d).map(|()| 0),
             };
+            drop(t);
+            // wave7 G7-3: a chroot moves the processes sharing the caller's root (CLONE_FS)
+            if op == LX_FH_CHROOT && r.is_ok() {
+                if let Some(pid) = super::client_of(a).and_then(crate::compat::linux::proc::tgid_of) {
+                    crate::compat::linux::vfs::chroot_peers(pid, d.ino, d.mnt as usize);
+                }
+            }
             r.unwrap_or_else(|e| e)
         }
         LX_FH_SEEK | LX_FH_INFO => {
