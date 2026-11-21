@@ -458,6 +458,16 @@ pub struct Reader<'a> {
     pos: usize,
 }
 
+// wave7 G7-7 begin
+impl Reader<'_> {
+    /// Bytes not read yet (0 once a read went past the end): a decoder of counted records
+    /// stops when a record no longer fits, whatever the count says.
+    pub fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+}
+// wave7 G7-7 end
+
 impl<'a> Reader<'a> {
     /// Reads from the start of `buf`.
     ///

@@ -78,7 +78,7 @@ fn u32s(v: &[u32]) -> Vec<u8> {
 /// A descriptor for cgroup directory `rel` (below /sys/fs/cgroup).
 fn cgroup_fd(rel: &str) -> u32 {
     let path = format!("/sys/fs/cgroup{rel}");
-    fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path, cursor: 0, readable: true, writable: false, append: false, shown: None }).unwrap()) as u32
+    fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path, cursor: hydra_hosttests_t33::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None }).unwrap()) as u32
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn attaching_detaching_and_querying_cgroup_programs() {
     let dev = load(15, &ret(1), "dev");
     // Wrong kind for the hook; not a cgroup; not a program
     assert_eq!(sys(8, &mut u32s(&[cg, dev as u32, 0])), -22, "a device program on ingress");
-    let notcg = fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path: "/etc/x".into(), cursor: 0, readable: true, writable: false, append: false, shown: None }).unwrap()) as u32;
+    let notcg = fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path: "/etc/x".into(), cursor: hydra_hosttests_t33::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None }).unwrap()) as u32;
     assert_eq!(sys(8, &mut u32s(&[notcg, skb as u32, 0])), -22);
     assert_eq!(sys(8, &mut u32s(&[1, skb as u32, 0])), -22, "stdout");
     assert_eq!(sys(8, &mut u32s(&[777, skb as u32, 0])), -9);

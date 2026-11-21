@@ -83,13 +83,13 @@ pub enum FileDescriptor {
     Inotify(Arc<lx::inotify::Inotify>),
     PidFd(Arc<lx::pidfd::PidFd>),
     Device(Arc<dyn lx::chardev::CharDevice>),
-    File { path: String, cursor: usize, readable: bool, writable: bool, append: bool, shown: Option<String> },
+    File { path: String, cursor: crate::fs::FileCursor, readable: bool, writable: bool, append: bool, shown: Option<String> },
 }
 
 impl FileDescriptor {
     /// A by-name file (test helper).
     pub fn file(path: &str) -> Self {
-        FileDescriptor::File { path: String::from(path), cursor: 0, readable: true, writable: true, append: false, shown: None }
+        FileDescriptor::File { path: String::from(path), cursor: crate::fs::FileCursor::new(0), readable: true, writable: true, append: false, shown: None }
     }
 }
 

@@ -189,8 +189,9 @@ pub enum FileDescriptor {
     File {
         /// Normalized absolute path of the target file.
         path: String,
-        /// Current sequential read/write byte cursor.
-        cursor: usize,
+        /// Current sequential read/write byte cursor, shared by the description's `dup`s
+        /// (wave7 G7-7: it was held by value, so a dup got its own).
+        cursor: super::cursor::FileCursor,
         /// Whether read operations are permitted on this descriptor.
         readable: bool,
         /// Whether write operations are permitted on this descriptor.
@@ -333,8 +334,8 @@ impl FileDescriptor {
             FileDescriptor::Inotify(a) => of(a),
             FileDescriptor::PidFd(a) => of(a),
             FileDescriptor::Device(a) => of(a),
-            // Held by value: its path buffer stays put while the descriptor is open
-            FileDescriptor::File { path, .. } => path.as_ptr() as usize,
+            // Held by value: the description is its shared cursor (wave7 G7-7)
+            FileDescriptor::File { cursor, .. } => cursor.id(),
         }
     }
 
@@ -434,8 +435,8 @@ impl FileDescriptor {
                 if !*readable {
                     return Err("File not opened for reading");
                 }
-                let n = read_path_at(path, *cursor, buf)?;
-                *cursor += n;
+                let n = read_path_at(path, cursor.get(), buf)?;
+                cursor.advance(n);
                 Ok(n)
             }
         }
@@ -623,9 +624,9 @@ impl FileDescriptor {
                 if !*writable {
                     return Err("File not opened for writing");
                 }
-                let at = if *append { None } else { Some(*cursor) };
+                let at = if *append { None } else { Some(cursor.get()) };
                 let (n, end) = write_path_at(path, at, data)?;
-                *cursor = end;
+                cursor.set(end);
                 Ok(n)
             }
         }

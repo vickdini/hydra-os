@@ -333,3 +333,24 @@ fn up_asks_for_mount_zero_too() {
     assert_eq!(found(walk::walk(&be, &cx, Start::At(Node::new(0, ROOT)), b"..", 0)).unwrap(), Node::new(1, ROOT));
     let _ = (ENOENT, ENOTDIR);
 }
+
+// wave7 G7-7: counted records stop where the bytes end
+#[test]
+fn a_reader_says_how_much_is_left() {
+    use crate::fs::fsproto::{Reader, Writer};
+    let mut buf = [0u8; 64];
+    let n = {
+        let mut w = Writer::new(&mut buf);
+        w.u64(7);
+        w.bytes(b"abc");
+        w.len()
+    };
+    let mut r = Reader::new(&buf[..n]);
+    assert_eq!(r.remaining(), 15);
+    assert_eq!(r.u64(), 7);
+    assert_eq!(r.bytes(), b"abc");
+    assert_eq!(r.remaining(), 0);
+    // Past the end: 0, never an underflow
+    r.u64();
+    assert_eq!(r.remaining(), 0);
+}

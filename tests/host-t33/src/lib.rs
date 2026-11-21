@@ -303,6 +303,16 @@ pub mod lx {
         pub fn kernel_changed(ino: u64) {
             CHANGED.lock().unwrap_or_else(|e| e.into_inner()).push(ino);
         }
+        /// *stub* wave7 G7-7: the `[prof] vfs:` line.
+        pub fn summary() -> alloc::string::String {
+            alloc::string::String::from("vfs: host")
+        }
+    }
+    /// *stub* wave7 G7-7: the `[prof] execve` line.
+    pub mod xexec {
+        pub fn summary() -> alloc::string::String {
+            alloc::string::String::from("execve: host")
+        }
     }
     pub fn summary() -> alloc::string::String {
         alloc::string::String::from("lx: host")

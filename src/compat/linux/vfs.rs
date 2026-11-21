@@ -467,10 +467,146 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
 /// FIFOs of the in-kernel code (`lx=kernel`), by node: the pipe while any end is open.
 static FIFOS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Weak<spin::Mutex<crate::fs::pipe::PipeBuffer>>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
+// wave7 G7-7 begin: the in-kernel FIFO's two bugs (7-5's finding)
+/// Per FIFO node: how many read ends and write ends were ever opened (Linux's
+/// `r_counter`/`w_counter`): a blocking open waits until the other side's count moved, so a
+/// writer that opened and closed within one tick still lets a waiting reader go.
+static FIFO_OPENS: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, u64)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Counts an end of FIFO `ino` opened (`write`: a write end); the counts after it.
+fn fifo_opened(ino: u64, write: bool) -> (u64, u64) {
+    let mut m = FIFO_OPENS.lock();
+    // (only nodes with a live pipe keep their counts)
+    let live = FIFOS.lock();
+    m.retain(|k, _| *k == ino || live.get(k).is_some_and(|w| w.strong_count() > 0));
+    drop(live);
+    let e = m.entry(ino).or_insert((0, 0));
+    if write {
+        e.1 += 1;
+    } else {
+        e.0 += 1;
+    }
+    *e
+}
+
+/// The open counts of FIFO `ino`.
+fn fifo_opens(ino: u64) -> (u64, u64) {
+    FIFO_OPENS.lock().get(&ino).copied().unwrap_or((0, 0))
+}
+
+/// The `O_RDWR` end of an in-kernel FIFO: one description that reads and writes (it counts
+/// as a reader and a writer, so it never sees end of file or `EPIPE`; Linux's `O_RDWR` open
+/// of a FIFO, which never waits).
+struct FifoRw {
+    pipe: alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>,
+    ino: u64,
+    nonblock: core::sync::atomic::AtomicBool,
+}
+
+impl Drop for FifoRw {
+    fn drop(&mut self) {
+        let mut b = self.pipe.lock();
+        b.drop_reader();
+        b.drop_writer();
+    }
+}
+
+impl super::chardev::CharDevice for FifoRw {
+    fn read(&self, buf: &mut [u8]) -> i64 {
+        use crate::task::wait::{QueueRef, WaitSet};
+        if buf.is_empty() {
+            return 0;
+        }
+        let mut waits = WaitSet::new();
+        waits.add(QueueRef::Shared(self.pipe.lock().wq.clone()));
+        loop {
+            waits.register();
+            {
+                let mut p = self.pipe.lock();
+                if p.available_read() > 0 {
+                    return p.read(buf) as i64;
+                }
+            }
+            if self.nonblock() {
+                return -11; // EAGAIN
+            }
+            if super::proc::signal_pending() {
+                return super::proc::ERESTARTSYS;
+            }
+            waits.wait(None);
+        }
+    }
+
+    fn write(&self, data: &[u8]) -> i64 {
+        use crate::task::wait::{QueueRef, WaitSet};
+        let mut waits = WaitSet::new();
+        waits.add(QueueRef::Shared(self.pipe.lock().wq.clone()));
+        let mut done = 0usize;
+        loop {
+            waits.register();
+            {
+                let mut p = self.pipe.lock();
+                if p.available_write() > 0 {
+                    match p.write(&data[done..]) {
+                        Ok(n) => done += n,
+                        Err(_) => return if done > 0 { done as i64 } else { -32 }, // EPIPE
+                    }
+                    if done == data.len() {
+                        return done as i64;
+                    }
+                }
+            }
+            if self.nonblock() {
+                return if done > 0 { done as i64 } else { -11 };
+            }
+            if super::proc::signal_pending() {
+                return if done > 0 { done as i64 } else { super::proc::ERESTARTSYS };
+            }
+            waits.wait(None);
+        }
+    }
+
+    fn poll_events(&self) -> u32 {
+        let p = self.pipe.lock();
+        // POLLIN, POLLOUT
+        (if p.available_read() > 0 { 0x001 } else { 0 }) | if p.available_write() > 0 { 0x004 } else { 0 }
+    }
+
+    fn add_wait_queues(&self, waits: &mut crate::task::wait::WaitSet) {
+        waits.add(crate::task::wait::QueueRef::Shared(self.pipe.lock().wq.clone()));
+    }
+
+    fn rdev(&self) -> u64 {
+        0
+    }
+
+    fn path(&self) -> String {
+        alloc::format!("pipe:[{}]", self.ino)
+    }
+
+    fn set_nonblock(&self, on: bool) {
+        self.nonblock.store(on, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn nonblock(&self) -> bool {
+        self.nonblock.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn stat(&self) -> super::types::LinuxStat {
+        let mut st = super::types::LinuxStat::default();
+        st.st_ino = self.ino;
+        st.st_mode = 0o010600; // S_IFIFO
+        st.st_nlink = 1;
+        st.st_blksize = 4096;
+        st
+    }
+}
+// wave7 G7-7 end
+
 /// Group 13: `open` of FIFO node `ino` with the in-kernel pipes (`lx=kernel`): a reader
 /// waits for a writer and a writer for a reader, unless `O_NONBLOCK` (a writer then fails
-/// with `ENXIO` when there is no reader). `O_RDWR` gives the read end (the in-kernel
-/// descriptor has no end that does both; linux-server's has).
+/// with `ENXIO` when there is no reader). `O_RDWR` gives one end that reads and writes
+/// (wave7 G7-7, `FifoRw`; it was the read end only).
 fn open_fifo_kernel(ino: u64, flags: u32) -> Result<usize, i64> {
     use crate::fs::pipe::PipeBuffer;
     let acc = flags & O_ACCMODE;
@@ -496,19 +632,37 @@ fn open_fifo_kernel(ino: u64, flags: u32) -> Result<usize, i64> {
     if write && nonblock && pipe.lock().readers_count() == 0 {
         return Err(-6); // ENXIO
     }
+    // wave7 G7-7: O_RDWR, both ends in one description
+    if acc == 2 {
+        {
+            let mut b = pipe.lock();
+            b.add_reader();
+            b.add_writer();
+        }
+        fifo_opened(ino, false);
+        fifo_opened(ino, true);
+        let dev = FifoRw { pipe: pipe.clone(), ino, nonblock: core::sync::atomic::AtomicBool::new(nonblock) };
+        return install(FileDescriptor::Device(alloc::sync::Arc::new(dev)), flags);
+    }
     if write {
         pipe.lock().add_writer();
     } else {
         pipe.lock().add_reader();
     }
+    // (the other side's open count when this end came: wave7 G7-7)
+    let seen = fifo_opened(ino, write);
     let desc = if write { FileDescriptor::PipeWrite(pipe.clone()) } else { FileDescriptor::PipeRead(pipe.clone()) };
     if acc != 2 && !nonblock {
-        // Wait for the other side (a tick at a time)
+        // Wait for the other side (a tick at a time); an end of it that opened meanwhile,
+        // even if it is closed again, ends the wait (wave7 G7-7)
         loop {
             let other = if write { pipe.lock().readers_count() } else { pipe.lock().writers_count() };
-            if other > 0 {
+            let now = fifo_opens(ino);
+            let came = if write { now.0 != seen.0 } else { now.1 != seen.1 };
+            if other > 0 || came {
                 break;
             }
+
             if super::proc::signal_pending() {
                 if write {
                     pipe.lock().drop_writer();
@@ -1347,7 +1501,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         return install(
             FileDescriptor::File {
                 path: abs,
-                cursor: 0,
+                cursor: crate::fs::FileCursor::new(0),
                 readable: acc != O_WRONLY,
                 writable: acc != O_RDONLY,
                 append: false,
@@ -1481,7 +1635,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         return install(
             FileDescriptor::File {
                 path: String::from(dev),
-                cursor: 0,
+                cursor: crate::fs::FileCursor::new(0),
                 readable: acc != O_WRONLY,
                 writable: acc != O_RDONLY,
                 append: false,
@@ -1858,7 +2012,7 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     }
     if let Some((path, cursor)) = crate::task::with_current_fds_mut(|fds| {
         match fds.get(fd as usize) {
-            Some(FileDescriptor::File { path, cursor, .. }) => Some((path.clone(), *cursor)),
+            Some(FileDescriptor::File { path, cursor, .. }) => Some((path.clone(), cursor.get())),
             _ => None,
         }
     }) {
@@ -2069,7 +2223,7 @@ fn getdents64_proc(path: &str, cursor: usize, buf: u64, count: usize, fd: i32) -
 
     crate::task::with_current_fds_mut(|fds| {
         if let Some(FileDescriptor::File { cursor: c, .. }) = fds.get_mut(fd as usize) {
-            *c = next_cursor;
+            c.set(next_cursor);
         }
     });
 

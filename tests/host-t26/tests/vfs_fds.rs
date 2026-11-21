@@ -53,13 +53,13 @@ fn fcntl_descriptor_flags() {
 fn fcntl_status_flags_of_other_descriptors() {
     let _e = setup();
     // A by-name file
-    let f = install(FileDescriptor::File { path: "/dev/null".into(), cursor: 0, readable: false, writable: true, append: false, shown: None });
+    let f = install(FileDescriptor::File { path: "/dev/null".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(0), readable: false, writable: true, append: false, shown: None });
     assert_eq!(sys(72, &[f as u64, 3, 0]), 1);
     assert_eq!(sys(72, &[f as u64, 4, O_APPEND]), 0);
     assert_eq!(sys(72, &[f as u64, 3, 0]), (1 | O_APPEND) as i64);
     let rw = install(FileDescriptor::file("/dev/zero"));
     assert_eq!(sys(72, &[rw as u64, 3, 0]), 2);
-    let ro = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: 0, readable: true, writable: false, append: false, shown: None });
+    let ro = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None });
     assert_eq!(sys(72, &[ro as u64, 3, 0]), 0);
     // A memfd keeps its flags
     let m = install(FileDescriptor::MemFd { memfd: lx::memfd::MemFd::new("m"), flags: 2 });

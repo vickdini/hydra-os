@@ -78,7 +78,7 @@ fn ends(p: &Arc<Mutex<PipeBuffer>>) -> (usize, usize) {
 }
 
 fn file(path: &str, readable: bool, writable: bool, append: bool) -> FileDescriptor {
-    FileDescriptor::File { path: path.into(), cursor: 0, readable, writable, append, shown: None }
+    FileDescriptor::File { path: path.into(), cursor: hydra_hosttests_t33::fs::FileCursor::new(0), readable, writable, append, shown: None }
 }
 
 // ---------------------------------------------------------------- open files
@@ -674,7 +674,7 @@ fn dup_of_a_pipe_is_the_same_open_file() {
 /// copies the path (a new buffer, so a new id) and the cursor (not shared, unlike Linux's
 /// shared file offset after dup).
 #[test]
-#[ignore = "BUG: a dup of a by-path File descriptor gets a new object_id and its own cursor (held by value)"]
+// (wave7 G7-7: fixed — the cursor is shared, `fs::FileCursor`)
 fn dup_of_a_path_file_shares_the_open_file() {
     setup();
     let mut t = FdTable::new_default();

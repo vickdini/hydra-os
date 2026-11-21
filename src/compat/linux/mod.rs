@@ -742,14 +742,14 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                             let file_size = crate::fs::ZfsClient::file_stat(path).map(|st| st.size).unwrap_or(0) as i64;
                             let new_cursor = match whence {
                                 0 => offset,
-                                1 => (*cursor as i64) + offset,
+                                1 => (cursor.get() as i64) + offset,
                                 2 => file_size + offset,
                                 _ => return -EINVAL,
                             };
                             if new_cursor < 0 {
                                 return -EINVAL;
                             }
-                            *cursor = new_cursor as usize;
+                            cursor.set(new_cursor as usize);
                             new_cursor
                         }
                         // memfd_create files (and /proc snapshots): seekable like files
@@ -2363,7 +2363,7 @@ fn open_path(path: &str, flags: u64) -> i64 {
     if let Some(_) = fs::match_pseudo_path(path) {
         let desc = crate::fs::FileDescriptor::File {
             path: String::from(path),
-            cursor: 0,
+            cursor: crate::fs::FileCursor::new(0),
             readable: true,
             writable: true,
             append: false,
@@ -2389,7 +2389,7 @@ fn open_path(path: &str, flags: u64) -> i64 {
 
     let desc = crate::fs::FileDescriptor::File {
         path: String::from(path),
-        cursor: 0,
+        cursor: crate::fs::FileCursor::new(0),
         readable,
         writable,
         append,

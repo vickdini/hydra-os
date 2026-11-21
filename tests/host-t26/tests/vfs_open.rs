@@ -381,8 +381,61 @@ fn fifo_nodes_open_as_pipe_ends() {
         Some(FileDescriptor::PipeWrite(p)) => assert!(std::sync::Arc::ptr_eq(&p, &pipe)),
         _ => panic!(),
     }
-    // O_RDWR gives the read end without waiting
-    assert!(matches!(desc(open("/run/fifo", O_RDWR)), Some(FileDescriptor::PipeRead(_))));
+    // O_RDWR gives one end that reads and writes, without waiting (wave7 G7-7: it was the
+    // read end only, which could not write)
+    let rw = open("/run/fifo", O_RDWR);
+    let d = match desc(rw) {
+        Some(FileDescriptor::Device(d)) => d,
+        _ => panic!("O_RDWR end"),
+    };
+    {
+        use lx::chardev::CharDevice;
+        assert_eq!(d.poll_events() & 0x4, 0x4);
+        assert_eq!(d.write(b"hey"), 3);
+        assert_eq!(d.poll_events() & 0x1, 0x1);
+        let mut b = [0u8; 8];
+        assert_eq!(d.read(&mut b), 3);
+        assert_eq!(&b[..3], b"hey");
+        assert_eq!(d.stat().st_mode & 0o170000, 0o010000);
+        // Nothing left, non-blocking: EAGAIN
+        d.set_nonblock(true);
+        assert_eq!(d.read(&mut b), -11);
+    }
+    // The same pipe: what the write end writes, the O_RDWR end reads
+    assert_eq!(sys(1, &[w as u64, b"xy".as_ptr() as u64, 2]), 2);
+    {
+        use lx::chardev::CharDevice;
+        let mut b = [0u8; 8];
+        assert_eq!(d.read(&mut b), 2);
+    }
+    // Its close takes both of its ends away
+    let (r0, w0) = { let p = pipe.lock(); (p.readers_count(), p.writers_count()) };
+    drop(d);
+    close(rw);
+    let p = pipe.lock();
+    assert_eq!((p.readers_count(), p.writers_count()), (r0 - 1, w0 - 1));
+}
+
+// wave7 G7-7
+#[test]
+fn a_writer_that_came_and_went_lets_a_blocking_reader_go() {
+    let _e = setup();
+    memfs::mknode("/run/fifo4", 0o010644, 0);
+    // While the reader waits, a writer opens and closes again before the next tick
+    let came = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let c2 = came.clone();
+    task::wait::on_wait(move || {
+        c2.set(c2.get() + 1);
+        if c2.get() == 1 {
+            let w = open("/run/fifo4", O_WRONLY | O_NONBLOCK);
+            assert!(w >= 0);
+            close(w);
+        }
+    });
+    let r = open("/run/fifo4", O_RDONLY);
+    assert!(r >= 0, "{}", r);
+    assert_eq!(came.get(), 1, "the reader went after the first wait");
+    task::wait::clear_on_wait();
 }
 
 #[test]

@@ -32,6 +32,9 @@ pub static REQUESTS: AtomicU64 = AtomicU64::new(0);
 pub static RETRIES: AtomicU64 = AtomicU64::new(0);
 /// The pool root's object number (`FS_ROOT`), once known.
 static ROOT: AtomicU64 = AtomicU64::new(0);
+/// wave7 G7-7: a timed-out request may still be using our part of the window (the drain
+/// after it timed out as well): no request writes there until a drain has gone through.
+static SUSPECT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Sets vfs-server's window (from the service runtime).
 pub fn init(window: *mut u8) {
@@ -58,13 +61,19 @@ const RESTART_TRIES: usize = 20;
 /// sending parameterless `FS_ROOT` requests until one is answered (they queue behind it);
 /// gives up after about two minutes or when zfs-server is gone (its restart ends the old
 /// request too).
-fn drain() {
+fn drain() -> bool {
     for _ in 0..4 {
         match sys::svc_call(ENDPOINT_ZFS_SERVER, Message::new(FS_ROOT as u64, [0, FS_CLIENT_VFS, 0, 0]), TIMEOUT_TICKS) {
             Err(ETIMEDOUT) => continue,
-            _ => return,
+            _ => {
+                SUSPECT.store(false, Ordering::Release);
+                return true;
+            }
         }
     }
+    // (wave7 G7-7: still not through: the part stays suspect for the next request)
+    SUSPECT.store(true, Ordering::Release);
+    false
 }
 
 /// Our part of the window (`FS_VFS_OFF..FS_VFS_END`, offset 0 here), used only under
@@ -97,6 +106,10 @@ fn idempotent(op: u32) -> bool {
 pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
     let _turn = TURN.lock();
     let p = part()?;
+    // wave7 G7-7: our part may still be in use by a request that timed out
+    if SUSPECT.load(Ordering::Acquire) && !drain() {
+        return Err(EIO);
+    }
     const DATA: usize = FS_VFS_EVENTS - FS_VFS_OFF;
     const EVENTS: usize = FS_VFS_END - FS_VFS_EVENTS;
     for attempt in 0..=RESTART_TRIES {
@@ -130,9 +143,19 @@ pub fn request(op: u32, params: impl Fn(&mut Writer)) -> Result<Reply, i64> {
                 if m.args[3] > 0 {
                     // SAFETY: as above
                     let mut rd = Reader::new(unsafe { slice(p, DATA, EVENTS) });
-                    // (an event takes 20 bytes at least)
+                    // (an event takes 20 bytes at least; wave7 G7-7: decoding stops where the
+                    // events end, whatever the count says)
                     for _ in 0..m.args[3].min((EVENTS / 20) as u64) {
-                        events.push(rd.event());
+                        if rd.remaining() < 20 {
+                            break;
+                        }
+                        let before = rd.remaining();
+                        let e = rd.event();
+                        // (a name that ran past the end: the record was not whole)
+                        if rd.remaining() == 0 && before != 20 + e.name.len() {
+                            break;
+                        }
+                        events.push(e);
                     }
                 }
                 return Ok(Reply { value: m.args[1], data, events });
@@ -207,9 +230,23 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
         w.u64(max as u64);
     })?;
     let mut rd = Reader::new(&r.data);
-    // (an entry takes 28 bytes at least)
+    // (an entry takes 28 bytes at least; wave7 G7-7: decoding stops where the entries end,
+    // whatever the count says: no entry made of bytes past the reply)
     let n = r.value.min(max as u64).min((r.data.len() / 28) as u64);
-    Ok((0..n).map(|_| rd.entry()).collect())
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        if rd.remaining() < 28 {
+            break;
+        }
+        let before = rd.remaining();
+        let e = rd.entry();
+        // (a name that ran past the end: the record was not whole)
+        if rd.remaining() == 0 && before != 28 + e.name.len() {
+            break;
+        }
+        out.push(e);
+    }
+    Ok(out)
 }
 
 /// Extended attribute `name` of `ino` (`ENODATA` if it has none of that name).

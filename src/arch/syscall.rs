@@ -742,7 +742,7 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
 
                     let desc = crate::fs::FileDescriptor::File {
                         path: alloc::string::String::from(path_str),
-                        cursor: 0,
+                        cursor: crate::fs::FileCursor::new(0),
                         readable,
                         writable,
                         append,

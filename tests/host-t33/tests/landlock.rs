@@ -50,7 +50,7 @@ fn open_dir(ino: u64, path: &str) -> i32 {
 }
 
 fn by_name(path: &str) -> i32 {
-    fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path: path.into(), cursor: 0, readable: true, writable: false, append: false, shown: None }).unwrap()) as i32
+    fake::fds_mut(|t| t.alloc_fd(FileDescriptor::File { path: path.into(), cursor: hydra_hosttests_t33::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None }).unwrap()) as i32
 }
 
 fn landlocked() {

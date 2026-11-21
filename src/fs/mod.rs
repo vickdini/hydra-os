@@ -25,12 +25,14 @@ pub mod blockdev;
 pub mod bootfs; // boot-volume (UEFI FAT) files, moved out of the shell (group 4)
 pub mod client;
 pub mod firstboot; // Group G: installer first-boot settings
+pub mod cursor; // wave7 G7-7: the shared offset of by-path descriptors
 pub mod fd;
 pub mod gpt;
 pub mod pipe;
 pub mod zfs;
 
 pub use client::ZfsClient;
+pub use cursor::FileCursor; // wave7 G7-7
 pub use fd::{FdTable, FileDescriptor, SharedFdTable, SrvPtr, MAX_FDS};
 pub use pipe::{PipeBuffer, PIPE_BUFFER_SIZE};
 pub use zfs::{init_server, ZfsServer};
