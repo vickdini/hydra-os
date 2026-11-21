@@ -242,8 +242,10 @@ fn rtc_reads_bcd_time() {
     // Every index write keeps NMI off (bit 7)
     assert!(hw::port_writes().iter().filter(|w| w.0 == 0x70).all(|w| w.1 & 0x80 != 0));
     assert_eq!(got, 1_795_182_330 * 1_000_000_000); // 2026-11-20 13:45:30 UTC
+    // now() = the CMOS epoch + the settimeofday offset (another test may have left one, it
+    // is global) + the clock, frozen here
     let (s, _) = rtc::now();
-    assert!(s > 1_795_000_000);
+    assert_eq!(s as i64, (rtc::wall_base_ns() + pit::now_ns() as i64).max(0) / 1_000_000_000);
 }
 
 #[test]
