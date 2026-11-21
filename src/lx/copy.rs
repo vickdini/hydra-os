@@ -166,6 +166,79 @@ static GETSOCKOPT: Desc = [N, N, N, Out(fixed(256)), InOut(SOCKLEN), N];
 /// socketpair(family, type, protocol, sv[2])
 static SOCKETPAIR: Desc = [N, N, N, Out(fixed(8)), N, N];
 
+// wave7 G7-2 begin: the file service's path calls and calls on handles (`lx::fileh`):
+// paths in, `stat`/`statx`/`statfs` structures and small buffers out
+/// A path (`PATH_MAX` with its NUL; longer ones are the server's to read or refuse).
+const PATH: Arg = Str(4096);
+/// An xattr name (`XATTR_NAME_MAX` 255 plus the NUL).
+const XNAME: Arg = Str(256);
+static P1: Desc = [PATH, N, N, N, N, N];
+static AT_P1: Desc = [N, PATH, N, N, N, N];
+static P2: Desc = [PATH, PATH, N, N, N, N];
+static AT_P2: Desc = [N, PATH, N, PATH, N, N];
+static SYMLINKAT: Desc = [PATH, N, PATH, N, N, N];
+static STAT: Desc = [PATH, Out(fixed(144)), N, N, N, N];
+static FSTATAT: Desc = [N, PATH, Out(fixed(144)), N, N, N];
+static STATX: Desc = [N, PATH, N, N, Out(fixed(256)), N];
+static READLINK: Desc = [PATH, Out(len_arg(2)), N, N, N, N];
+static READLINKAT: Desc = [N, PATH, Out(len_arg(3)), N, N, N];
+static OPENAT2: Desc = [N, PATH, In(len_arg(3)), N, N, N];
+static UTIMENSAT: Desc = [N, PATH, In(fixed(32)), N, N, N];
+static UTIME: Desc = [PATH, In(fixed(16)), N, N, N, N];
+static UTIMES: Desc = [PATH, In(fixed(32)), N, N, N, N];
+static FUTIMESAT: Desc = [N, PATH, In(fixed(32)), N, N, N];
+static SETXATTR: Desc = [PATH, XNAME, In(len_arg(3)), N, N, N];
+static GETXATTR: Desc = [PATH, XNAME, Out(len_arg(3)), N, N, N];
+static LISTXATTR: Desc = [PATH, Out(len_arg(2)), N, N, N, N];
+static REMOVEXATTR: Desc = [PATH, XNAME, N, N, N, N];
+static FSETXATTR: Desc = [N, XNAME, In(len_arg(3)), N, N, N];
+static FGETXATTR: Desc = [N, XNAME, Out(len_arg(3)), N, N, N];
+static FLISTXATTR: Desc = [N, Out(len_arg(2)), N, N, N, N];
+static FREMOVEXATTR: Desc = [N, XNAME, N, N, N, N];
+static STATFS: Desc = [PATH, Out(fixed(120)), N, N, N, N];
+static FSTATFS: Desc = [N, Out(fixed(120)), N, N, N, N];
+static GETDENTS: Desc = [N, Out(len_arg(2)), N, N, N, N];
+
+/// The file service's arms of [`describe`].
+fn describe_vfs(nr: u64) -> Option<&'static Desc> {
+    Some(match nr {
+        // open, creat, access, mkdir, mknod, unlink, rmdir, chmod, chown, lchown, truncate,
+        // chdir
+        2 | 85 | 21 | 83 | 133 | 87 | 84 | 90 | 92 | 94 | 76 | 80 => &P1,
+        // openat, faccessat, faccessat2, mkdirat, mknodat, unlinkat, fchmodat, fchmodat2,
+        // fchownat
+        257 | 269 | 439 | 258 | 259 | 263 | 268 | 452 | 260 => &AT_P1,
+        // rename, link, symlink
+        82 | 86 | 88 => &P2,
+        // renameat, renameat2, linkat
+        264 | 316 | 265 => &AT_P2,
+        266 => &SYMLINKAT,
+        4 | 6 => &STAT,
+        262 => &FSTATAT,
+        332 => &STATX,
+        89 => &READLINK,
+        267 => &READLINKAT,
+        437 => &OPENAT2,
+        280 => &UTIMENSAT,
+        132 => &UTIME,
+        235 => &UTIMES,
+        261 => &FUTIMESAT,
+        188 | 189 => &SETXATTR,
+        191 | 192 => &GETXATTR,
+        194 | 195 => &LISTXATTR,
+        197 | 198 => &REMOVEXATTR,
+        190 => &FSETXATTR,
+        193 => &FGETXATTR,
+        196 => &FLISTXATTR,
+        199 => &FREMOVEXATTR,
+        137 => &STATFS,
+        138 => &FSTATFS,
+        217 | 78 => &GETDENTS,
+        _ => return None,
+    })
+}
+// wave7 G7-2 end
+
 /// The table: what the pointer arguments of forwarded call `nr` (with arguments `a`) are,
 /// or `None` when it has none the table copies. One arm per call.
 pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
@@ -205,7 +278,9 @@ pub fn describe(nr: u64, a: &[u64; 6]) -> Option<&'static Desc> {
         54 => Some(&SETSOCKOPT),
         55 => Some(&GETSOCKOPT),
         53 => Some(&SOCKETPAIR),
-        _ => None,
+        // wave7 G7-2: the file service's calls (they are forwarded only once vfs-server
+        // claimed them)
+        _ => describe_vfs(nr),
     }
 }
 

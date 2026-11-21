@@ -181,7 +181,8 @@ pub fn plain_ino(ino: u64) -> bool {
 /// The handle data of an open file: `None` when it is not a plain pool object (opened
 /// through another process's root, a FUSE file).
 pub fn info_of_open(f: &OpenFile) -> Option<AtInfo> {
-    if f.foreign.is_some() || !plain_ino(f.ino) {
+    // (the `/proc` directory of the pool is served by name: the kernel lists it)
+    if f.foreign.is_some() || !plain_ino(f.ino) || f.path == "/proc" || f.path.ends_with("/proc") {
         return None;
     }
     Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags })
