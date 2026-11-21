@@ -637,10 +637,14 @@ impl MountTables {
             return Err(EBUSY);
         }
         let mut copy = self.spaces.get(&from).ok_or(EINVAL)?.clone();
-        for m in copy.mounts.iter_mut().flatten() {
+        // A mount point is an object of its parent mount's back end: below a served mount
+        // (`/dev/pts` under `/dev`) a mount stays by name
+        let remote_parent: Vec<bool> = copy.mounts.iter().map(|m| m.as_ref().is_some_and(|m| matches!(copy.get(m.parent).map(|p| p.backend), Some(Backend::Remote { .. })))).collect();
+        for (i, m) in copy.mounts.iter_mut().enumerate() {
+            let Some(m) = m else { continue };
             m.id = self.next_id;
             self.next_id += 1;
-            if m.by_name {
+            if m.by_name && !remote_parent[i] {
                 let ino = lookup(&m.path);
                 if ino != 0 {
                     m.by_name = false;

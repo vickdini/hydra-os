@@ -171,10 +171,12 @@ fn copy_keeps_indices_and_resolves_by_name_mounts() {
     for ((i, x), (j, y)) in a.live().zip(b.live()) {
         assert_eq!((i, &x.path, x.backend), (j, &y.path, y.backend));
         assert_ne!(x.id, y.id, "new mount IDs");
-        assert!(!y.by_name);
+        // Below a served mount (cgroup2 under /sys, devpts under /dev) they stay by name
+        assert_eq!(y.by_name, i == 4 || i == 6, "{}", y.path);
     }
     assert_eq!(b.child_at(1, 10), Some(2));
-    assert_eq!(b.child_at(5, 14), Some(6), "/dev/pts on /dev's object");
+    assert_eq!(b.child_at(5, 14), None, "/dev's objects are linux-server's");
+    assert_eq!(b.by_name("/dev/pts/3"), Some((6, "/3".to_string())));
     assert_eq!(b.up(2), Some((1, 10)));
     assert_eq!(t.copy_ns(0, 7, &pool), Err(EBUSY));
     assert_eq!(t.copy_ns(99, 8, &pool), Err(EINVAL));
