@@ -89,7 +89,13 @@ fn when_an_acl_must_be_read() {
     assert!(needs_acl(&cx(11, 1), &d, MAY_EXEC));
     assert!(!needs_acl(&cx(0, 0), &d, MAY_EXEC), "root passes anyway");
     d.mode = DIR | 0o711;
-    assert!(!needs_acl(&cx(11, 1), &d, MAY_EXEC), "everyone may search");
+    assert!(needs_acl(&cx(11, 1), &d, MAY_EXEC), "even a mode open to all: user:bob:--- may deny");
+    // ... which the ACL does
+    let bob = acl(&[(0x01, 7, 0), (0x02, 0, 11), (0x04, 1, 0), (0x10, 1, 0), (0x20, 1, 0)]);
+    assert!(!may(&cx(11, 1), &d, Some(&bob), MAY_EXEC));
+    assert!(may(&cx(12, 1), &d, Some(&bob), MAY_EXEC));
+    // An ACL with no entries is no ACL (the mode decides)
+    assert_eq!(acl_check(&cx(11, 1), &d, &2u32.to_le_bytes(), MAY_EXEC), None);
 }
 
 #[test]

@@ -142,6 +142,36 @@ fn symbolic_links() {
 }
 
 #[test]
+fn dot_and_dotdot_need_search_permission_too() {
+    let t = tree();
+    let d = t.fs.mkdir(t.tmp, "closed", 0o600);
+    t.fs.chown(d, 9, 9);
+    let user = user_cx(9, 9);
+    let at = Start::At(Node::new(0, d));
+    // Linux: a lookup of `.` or `..` in a directory needs x on it
+    assert_eq!(found(walk::walk(&t.fs, &user, at, b".", 0)), Err(EACCES));
+    assert_eq!(found(walk::walk(&t.fs, &user, at, b"..", 0)), Err(EACCES));
+    assert_eq!(w(&t, &user, "/tmp/closed/."), Err(EACCES));
+    assert_eq!(w(&t, &user, "/tmp/closed"), Ok(d));
+    // A trailing `.` after a file: ENOTDIR (the lookup in it)
+    assert_eq!(w(&t, &root_cx(), "/etc/passwd/."), Err(ENOTDIR));
+    assert_eq!(w(&t, &root_cx(), "/etc/passwd/.."), Err(ENOTDIR));
+    assert_eq!(w(&t, &root_cx(), "/etc/."), Ok(t.etc));
+}
+
+#[test]
+fn dotdot_into_a_covered_directory_enters_the_mount() {
+    let mut t = tree();
+    // /usr is covered by a bind of /etc (mount 1) after the walk's start went below it
+    t.fs.mounts.list.push(MountInfo { parent: 0, mountpoint: Node::new(0, t.usr), root: Node::new(1, t.etc), kind: MountKind::Zfs });
+    let start = Start::At(Node::new(0, t.bin));
+    match walk::walk(&t.fs, &root_cx(), start, b"../passwd", 0).unwrap() {
+        Walked::Found { node, .. } => assert_eq!(node, Node::new(1, t.passwd)),
+        _ => panic!(),
+    }
+}
+
+#[test]
 fn forty_links_and_no_more() {
     let t = tree();
     let cx = root_cx();
@@ -225,6 +255,12 @@ fn search_permission_by_acl() {
     t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x04, 0, 0), (0x08, 1, 77), (0x10, 7, 0), (0x20, 0, 0)]));
     assert_eq!(w(&t, &user_cx(9, 9).with_group(77), "/tmp/acl/f"), Ok(f));
     assert_eq!(w(&t, &user_cx(9, 9), "/tmp/acl/f"), Err(EACCES));
+    // An ACL that cannot be read fails the walk (the mode bits could allow more)
+    t.fs.acl_fails.set(true);
+    assert_eq!(w(&t, &user_cx(9, 9).with_group(77), "/tmp/acl/f"), Err(-5));
+    // ... unless the caller passes anyway (root), or the directory has no extended attributes
+    assert_eq!(w(&t, &root_cx(), "/tmp/acl/f"), Ok(f));
+    assert_eq!(w(&t, &user_cx(9, 9), "/usr/bin/bash"), Ok(t.bash));
 }
 
 #[test]
@@ -339,6 +375,17 @@ fn parent_walk_into_a_pseudo_file_system_redirects() {
     }
     match walk::walk_parent(&t.fs, &cx, Start::Root, b"/proc").unwrap() {
         ParentWalked::Redirect(r) => assert_eq!(r.tail, Some(5)),
+        _ => panic!(),
+    }
+    // The redirect came at the end of the parent's part: the rest starts at the last name
+    match walk::walk_parent(&t.fs, &cx, Start::Root, b"/proc///x").unwrap() {
+        ParentWalked::Redirect(r) => assert_eq!(r.tail, Some(8)),
+        _ => panic!(),
+    }
+    // Through a link: the last name joins the text
+    t.fs.symlink(t.tmp, "p", "/proc/sub");
+    match walk::walk_parent(&t.fs, &cx, Start::Root, b"/tmp/p/x").unwrap() {
+        ParentWalked::Redirect(r) => assert_eq!((r.tail, r.text.as_slice()), (None, &b"sub/x"[..])),
         _ => panic!(),
     }
 }

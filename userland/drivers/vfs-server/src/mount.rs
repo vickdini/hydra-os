@@ -163,9 +163,15 @@ pub fn tmpfs_readlink(n: u32, node: Node) -> Result<Vec<u8>, i64> {
     with_tmpfs(n, |t| t.readlink(node.ino))
 }
 
-/// The POSIX access ACL (tmpfs keeps it as an xattr like any other).
-pub fn tmpfs_acl(n: u32, node: Node) -> Option<Vec<u8>> {
-    with_tmpfs(n, |t| t.getxattr(node.ino, crate::perm::ACL_ACCESS)).ok()
+/// The POSIX access ACL (tmpfs keeps it as an xattr like any other): `Ok(None)` when
+/// there is none (an empty one counts as none, as zfs-server's).
+pub fn tmpfs_acl(n: u32, node: Node) -> Result<Option<Vec<u8>>, i64> {
+    match with_tmpfs(n, |t| t.getxattr(node.ino, crate::perm::ACL_ACCESS)) {
+        Ok(v) if v.is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(tmpfs::ENODATA) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// `LX_NOTE_MNTNS`: namespace `new` was made as a copy of `from` (its served mounts stay

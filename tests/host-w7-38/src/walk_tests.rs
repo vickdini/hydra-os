@@ -60,8 +60,11 @@ impl Backend for Pool {
         }
         Ok(self.objs.get(&n.ino).ok_or(ENOENT)?.2.to_vec())
     }
-    fn acl(&self, n: Node) -> Option<Vec<u8>> {
-        mount::tmpfs_of(self.ns, n.mnt).and_then(|t| mount::tmpfs_acl(t, n))
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
+        match mount::tmpfs_of(self.ns, n.mnt) {
+            Some(t) => mount::tmpfs_acl(t, n),
+            None => Ok(None),
+        }
     }
     fn mounts(&self) -> &dyn Mounts {
         &mount::TABLES
@@ -175,7 +178,8 @@ fn the_walk_over_the_tables() {
         let t = g.as_mut().unwrap().get_mut(n).unwrap();
         t.setxattr(x, crate::perm::ACL_ACCESS, b"acl", 0, (2, 0)).unwrap();
     }
-    assert_eq!(Pool::new(7).acl(Node::new(tm as u16, x)).as_deref(), Some(&b"acl"[..]));
+    assert_eq!(Pool::new(7).acl(Node::new(tm as u16, x)), Ok(Some(b"acl".to_vec())));
+    assert_eq!(Pool::new(7).acl(Node::new(tm as u16, 1)), Ok(None), "none on the root");
     assert_eq!(Pool::new(7).readlink(Node::new(tm as u16, 4)).unwrap(), b"../usr");
 
     // The kernel's namespace notes (LX_NOTE_MNTNS): 8 is made from 7, then 7 and 8 go

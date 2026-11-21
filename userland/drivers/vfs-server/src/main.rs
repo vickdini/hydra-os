@@ -82,8 +82,9 @@ const AT_FDCWD: i64 = -100;
 /// working directory in a mount: 7-3's tables) — `wave7 G7-1`'s temporary fill.
 const CTX_UNKNOWN: u64 = u64::MAX;
 
-/// The notification ring's "dropped" word (entries lost to a full ring) last seen.
-static DROPPED_SEEN: AtomicU64 = AtomicU64::new(0);
+/// The notification ring's "dropped" word (entries lost to a full ring) last seen; held
+/// while the caches are forgotten, so no worker goes on before that is done.
+static DROPPED_SEEN: lock::YLock<u64> = lock::YLock::new(0);
 /// Where the ring's header is.
 static RING: AtomicU64 = AtomicU64::new(0);
 
@@ -128,11 +129,13 @@ fn main(args: &[&str]) {
 fn take_notes(seq: u64) {
     let ring = RING.load(Ordering::Acquire);
     if ring != 0 {
-        // SAFETY: the ring header in the mapped window (word 2: entries dropped)
-        let dropped = unsafe { core::ptr::read_volatile((ring as *const u64).add(2)) };
-        if dropped != DROPPED_SEEN.load(Ordering::Acquire) {
-            DROPPED_SEEN.store(dropped, Ordering::Release);
+        // SAFETY: the ring header in the mapped window (word 2: entries dropped, written by
+        // the kernel under its ring lock; an aligned u64)
+        let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
+        let mut seen = DROPPED_SEEN.lock();
+        if dropped != *seen {
             CACHE.forget_all();
+            *seen = dropped;
         }
     }
     if seq == u64::MAX {
@@ -184,13 +187,17 @@ fn ctx_node(v: u64) -> Result<Node, i64> {
 fn walk_call(cx: &Cx, page: *mut u8) -> Answer {
     let [dirfd, path, flags, out, _, _] = cx.args;
     let r = (|| -> Result<Answer, i64> {
-        if dirfd as i32 as i64 != AT_FDCWD {
-            // (directory descriptors come with 7-2's `at_ino`)
-            return Err(EINVAL);
-        }
         let path = cx.user_cstr(path)?;
         let root = ctx_node(cx.c.root)?;
-        let cwd = ctx_node(cx.c.cwd)?;
+        // (an absolute path needs no start)
+        let cwd = if path.first() == Some(&b'/') {
+            root
+        } else if dirfd as i32 as i64 != AT_FDCWD {
+            // (directory descriptors come with 7-2's `at_ino`)
+            return Err(EINVAL);
+        } else {
+            ctx_node(cx.c.cwd)?
+        };
         let who = Ctx::from_call(&cx.c, root);
         let mut o = LxVfsWalkOut::default();
         let before = zfs::REQUESTS.load(Ordering::Relaxed);
@@ -289,13 +296,22 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         let w: LxVfsWalkIn = unsafe { core::ptr::read_unaligned(b.as_ptr() as *const LxVfsWalkIn) };
         let path = &b[head..];
         let path = &path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())];
-        if w.root_mnt != 0 || w.base_mnt != 0 {
+        if w.root_mnt != 0 {
             return Err(EXDEV);
         }
         let root = ctx_node(w.root)?;
-        let base = ctx_node(w.base)?;
+        let base = if path.first() == Some(&b'/') {
+            root
+        } else if w.base_mnt != 0 {
+            return Err(EXDEV);
+        } else {
+            ctx_node(w.base)?
+        };
         let mut who = Ctx::new(w.uid, w.gid, w.caps, root);
         who.ns = w.mnt_ns as u32;
+        for &g in &w.groups[..(w.ngroups as usize).min(LX_GROUPS)] {
+            who = who.with_group(g);
+        }
         let be = ZfsBackend { nocache: w.flags & LX_VFS_NOCACHE != 0, ns: who.ns };
         let mut o = LxVfsWalkOut::default();
         match walk::walk(&be, &who, Start::At(base), path, if w.flags & LX_VFS_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 })? {
@@ -318,8 +334,10 @@ fn dcall_walk(cx: &Cx, a: &DcallArgs) -> i64 {
         }
         // SAFETY: a plain repr(C) struct of u64s
         let bytes = unsafe { core::slice::from_raw_parts(&o as *const LxVfsWalkOut as *const u8, core::mem::size_of::<LxVfsWalkOut>()) };
-        let n = bytes.len().min(a.output_cap);
-        cx.copy_out_any(a.output, &bytes[..n])?;
+        if a.output_cap < bytes.len() {
+            return Err(EINVAL);
+        }
+        cx.copy_out_any(a.output, bytes)?;
         Ok(0)
     })();
     r.unwrap_or_else(|e| e)

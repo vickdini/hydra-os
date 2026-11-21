@@ -86,26 +86,27 @@ impl Backend for ZfsBackend {
         Ok(l)
     }
 
-    fn acl(&self, n: Node) -> Option<Vec<u8>> {
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
         if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
             return mount::tmpfs_acl(t, n);
         }
         if !self.nocache {
             if let Some(a) = CACHE.acl(n) {
-                return a;
+                return Ok(a);
             }
         }
         let t = CACHE.begin();
         let a = match zfs::getxattr(n.ino, ACL_ACCESS) {
             Ok(v) => Some(v),
             Err(ENODATA) => None,
-            // (another error: decide by the mode bits, uncached)
-            Err(_) => return None,
+            // (another error: fail, uncached; the mode bits alone could allow what the ACL
+            // denies)
+            Err(e) => return Err(e),
         };
         if !self.nocache {
             CACHE.put_acl(t, n, a.as_deref());
         }
-        a
+        Ok(a)
     }
 
     fn mounts(&self) -> &dyn Mounts {

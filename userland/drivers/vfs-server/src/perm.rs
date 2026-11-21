@@ -27,7 +27,8 @@ type Entry = (u16, u16, u32);
 
 /// The entries of an ACL in Linux's xattr encoding (version 2); `None` if malformed.
 fn parse(b: &[u8]) -> Option<alloc::vec::Vec<Entry>> {
-    if b.len() < 4 || (b.len() - 4) % 8 != 0 || u32::from_le_bytes(b[0..4].try_into().ok()?) != 2 {
+    // (no entries: no ACL, as Linux's `posix_acl_from_xattr`)
+    if b.len() < 12 || (b.len() - 4) % 8 != 0 || u32::from_le_bytes(b[0..4].try_into().ok()?) != 2 {
         return None;
     }
     Some(b[4..].chunks(8).map(|c| (u16::from_le_bytes([c[0], c[1]]), u16::from_le_bytes([c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect())
@@ -97,9 +98,9 @@ pub fn may(cx: &Ctx, attr: &Attr, acl: Option<&[u8]>, want: u32) -> bool {
     unix || by_caps(cx, attr, want)
 }
 
-/// Whether the mode bits alone may decide (no ACL needs to be read): the object has no
-/// extended attributes, or the caller passes by its capabilities, or everyone may.
+/// Whether an ACL must be read: the object has extended attributes and the caller does not
+/// pass by its capabilities. (Not even a mode that lets everyone in decides alone: an entry
+/// such as `user:bob:---` denies what the mask and `other` allow.)
 pub fn needs_acl(cx: &Ctx, attr: &Attr, want: u32) -> bool {
-    let everyone = (attr.mode & 7) & want == want && ((attr.mode >> 3) & 7) & want == want && ((attr.mode >> 6) & 7) & want == want;
-    attr.has_xattr && !everyone && !by_caps(cx, attr, want)
+    attr.has_xattr && !by_caps(cx, attr, want)
 }

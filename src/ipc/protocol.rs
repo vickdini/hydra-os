@@ -1521,6 +1521,10 @@ pub struct LxVfsWalkIn {
     pub caps: u64,
     /// Mount namespace.
     pub mnt_ns: u64,
+    /// How many of `groups` are used.
+    pub ngroups: u64,
+    /// Supplementary groups (for the search permission checks).
+    pub groups: [u32; LX_GROUPS],
 }
 
 // wave7 G7-1 end
