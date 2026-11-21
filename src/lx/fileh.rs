@@ -178,11 +178,18 @@ pub fn plain_ino(ino: u64) -> bool {
     ino >> 62 == 0 && ino < u64::MAX - 1
 }
 
+/// Whether `path` (as the kernel shows it) lies where the kernel serves files by name
+/// (`/proc`, `/sys`, `/dev`): lookups relative to it are the kernel's until those trees
+/// are served by their services (group 7-4).
+pub fn pseudo_path(path: &str) -> bool {
+    ["/proc", "/sys", "/dev"].iter().any(|d| path.strip_prefix(d).is_some_and(|r| r.is_empty() || r.starts_with('/')))
+}
+
 /// The handle data of an open file: `None` when it is not a plain pool object (opened
 /// through another process's root, a FUSE file).
 pub fn info_of_open(f: &OpenFile) -> Option<AtInfo> {
     // (the `/proc` directory of the pool is served by name: the kernel lists it)
-    if f.foreign.is_some() || !plain_ino(f.ino) || f.path == "/proc" || f.path.ends_with("/proc") {
+    if f.foreign.is_some() || !plain_ino(f.ino) || f.path.ends_with("/proc") || pseudo_path(&f.path) {
         return None;
     }
     Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags })
@@ -251,7 +258,7 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     c.cwd = t.cwd_ino;
     c.cwd_mnt = t.cwd_mnt as u32;
     c.umask = t.umask as u64;
-    if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) {
+    if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) {
         c.fs_flags |= LX_FS_FOREIGN;
     }
     let mut held: Held = [None, None];
