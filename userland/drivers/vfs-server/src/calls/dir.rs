@@ -28,7 +28,7 @@ pub fn getdents(cx: &Cx) -> Result<i64, i64> {
         return Err(ENOTDIR);
     }
     let cookie = c.fh_off;
-    let entries = crate::zfs::readdir(n.ino, cookie, (count / 24).max(1))?;
+    let entries = crate::zfs::readdir(n.ino, cookie, super::rules::readdir_max(count))?;
     let (out, next) = if cx.nr == 217 { enc::dirents(&entries, count, cookie) } else { enc::dirents_old(&entries, count, cookie) };
     if out.is_empty() {
         if next != cookie {

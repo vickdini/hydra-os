@@ -127,8 +127,16 @@ pub fn entry_for(nr: u64, routing: bool, forward_mode: bool) -> u32 {
     }
 }
 
+/// Serializes [`apply`] and [`claim`] (the routing switch and the claims change together).
+static APPLY: Mutex<()> = Mutex::new(());
+
 /// Writes the routing entries of every file-service number (`set_forwarding` and a claim).
 pub fn apply(on: bool) {
+    let _g = APPLY.lock();
+    apply_locked(on);
+}
+
+fn apply_locked(on: bool) {
     ROUTING.store(on, Ordering::Release);
     let fwd = svc::mode(LXS_VFS) == svc::SvcMode::Forward;
     for nr in 0..512u64 {
@@ -144,12 +152,13 @@ fn claim(nr: u64, on: bool) -> i64 {
         return EINVAL;
     }
     let bit = 1u64 << (nr % 64);
+    let _g = APPLY.lock();
     if on {
         CLAIMED[nr as usize / 64].fetch_or(bit, Ordering::AcqRel);
     } else {
         CLAIMED[nr as usize / 64].fetch_and(!bit, Ordering::AcqRel);
     }
-    apply(ROUTING.load(Ordering::Acquire));
+    apply_locked(ROUTING.load(Ordering::Acquire));
     0
 }
 
@@ -270,7 +279,8 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     };
     if let Some(fd) = first {
         let (i, h) = at_of(t, fd, wait)?;
-        if sh == Shape::Handle && !matches!(i.kind, LX_AT_FILE | LX_AT_DIR) {
+        // (a call on an O_PATH descriptor is the kernel's: it decides what such a one may do)
+        if sh == Shape::Handle && (!matches!(i.kind, LX_AT_FILE | LX_AT_DIR) || i.flags & 0o10000000 != 0) {
             return Ok(None);
         }
         c.at_kind = i.kind;
@@ -689,7 +699,7 @@ fn changed(ino: u64, what: u64, arg: u64) -> i64 {
     }
     if what & LX_FHC_ALL_ATTRS != 0 {
         crate::fs::zfs::forget_all_attrs();
-    } else if what & (LX_FHC_ATTR | LX_FHC_TRUNC) != 0 {
+    } else if what & (LX_FHC_ATTR | LX_FHC_TRUNC | LX_FHC_GONE) != 0 {
         crate::fs::zfs::forget_attr_of(ino);
     }
     0

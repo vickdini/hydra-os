@@ -1548,8 +1548,10 @@ pub const LX_FHC_ALL_ATTRS: u64 = 16;
 pub const LX_FHC_GONE: u64 = 32;
 
 /// Notification to the file service: the kernel changed object `a` (a write, a truncation,
-/// its own fallback paths): forget its attributes; `a` = 0: forget every lookup and
-/// attribute. A full ring (its `dropped` counter grew) means: forget everything.
+/// its own fallback paths, a name made, removed or moved in directory `a`): forget its
+/// attributes, its link target and the names in it (the kernel notes every directory and
+/// object a name change touched); `a` = 0: forget every lookup and attribute. A full ring
+/// (its `dropped` counter grew) means: forget everything.
 pub const LX_NOTE_FSCHANGE: u64 = 9;
 
 /// Longest shown path of a handle ([`LxFhDesc::path`]).

@@ -248,3 +248,12 @@ fn the_kernels_chown_and_sticky_rules() {
     assert!(!sticky_denied(0o41777, 6, 5, 6));
     assert!(!sticky_denied(0o41777, 0, 6, 6));
 }
+
+
+#[test]
+fn readdir_requests_are_bounded() {
+    assert_eq!(readdir_max(0), 1);
+    assert_eq!(readdir_max(23), 1);
+    assert_eq!(readdir_max(32768), 1365);
+    assert_eq!(readdir_max(u32::MAX as usize), 4096);
+}

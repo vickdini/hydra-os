@@ -129,6 +129,12 @@ pub fn handle_desc(c: &LxCall, ino: u64, mnt: u16, is_dir: bool, flags: u32, pat
     Ok(d)
 }
 
+/// How many directory entries one `getdents` of `count` bytes asks zfs-server for (each
+/// record takes 24 bytes at least; at most 4096 per request).
+pub fn readdir_max(count: usize) -> usize {
+    (count / 24).clamp(1, 4096)
+}
+
 /// `(path pointer, AT_* flags, output pointer, statx?)` of a `stat`-family call.
 pub fn stat_args(nr: u64, a: &[u64; 6]) -> (u64, u64, u64, bool) {
     const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
