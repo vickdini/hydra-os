@@ -1650,7 +1650,11 @@ impl Scheduler {
         self.tasks[next_idx].preempted = false;
         self.tasks[next_idx].passed_over = 0;
         if next_idx == curr_idx {
-            self.tasks[curr_idx].state = TaskState::Running;
+            // (nothing else can run, not even the idle task: a dead current task stays dead,
+            // its resources are gone; it only runs on to its next yield)
+            if self.tasks[curr_idx].state != TaskState::Dead {
+                self.tasks[curr_idx].state = TaskState::Running;
+            }
             self.tasks[curr_idx].timeslice_remaining = self.default_timeslice;
             return;
         }

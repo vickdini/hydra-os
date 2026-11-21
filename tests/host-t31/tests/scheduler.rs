@@ -438,7 +438,7 @@ fn a_dead_current_task_gives_way_to_the_idle_task_even_during_a_driver_call() {
 }
 
 #[test]
-#[ignore = "BUG: with nothing runnable, not even the idle task, a dead current task is set Running again (unreachable while the idle task is always ready)"]
+// (fixed in wave 7, Group B: was set Running again; unreachable while the idle task is ready)
 fn a_dead_current_task_is_never_made_running_again() {
     let _w = booted();
     let a = spawn("a", TaskPriority::Normal);
