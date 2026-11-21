@@ -45,6 +45,9 @@ static void *handler(void *arg) {
         int idx = (page - (unsigned long)area) / PG;
         if (m.arg.pagefault.feat.ptid == main_tid) fault_tid_ok = 1;
         static char src[PG];
+        // Counted before the answer: the ioctl wakes the faulting thread, which checks the
+        // count at once (counted after it, the check raced this thread)
+        handled++;
         if (idx == 5) {
             struct uffdio_zeropage z = {{page, PG}, 0, 0};
             ioctl(uffd, UFFDIO_ZEROPAGE, &z);
@@ -53,7 +56,6 @@ static void *handler(void *arg) {
             struct uffdio_copy c = {page, (unsigned long)src, PG, 0, 0};
             ioctl(uffd, UFFDIO_COPY, &c);
         }
-        handled++;
     }
     return NULL;
 }
