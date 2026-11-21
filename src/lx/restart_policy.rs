@@ -242,6 +242,20 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
     }
 }
 
+// wave7 GB begin
+/// `add_key`.
+pub const NR_ADD_KEY: u64 = 248;
+
+/// Whether an `add_key` of key type `ty`, served by a lx-sec that died before answering, may
+/// be sent again: lx-sec commits every change before it answers, and `add_key` of a key
+/// type that exists in the keyring with the same description updates it in place (same
+/// serial, same payload the second time). Not for `keyring` (a new one would be made, and
+/// the first one's serial was never learned) nor an unknown type.
+pub fn add_key_resendable(ty: &[u8]) -> bool {
+    matches!(ty, b"user" | b"logon" | b"big_key")
+}
+// wave7 GB end
+
 /// `O_CREAT | O_TRUNC | O_TMPFILE` (`__O_TMPFILE` 0o20000000 plus `O_DIRECTORY`): the open
 /// flags that change the file system.
 const OPEN_CHANGES: u64 = 0o100 | 0o1000 | 0o20000000;

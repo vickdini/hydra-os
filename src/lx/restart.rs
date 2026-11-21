@@ -367,6 +367,10 @@ pub fn resend(svc: u8, r: i64, nr: u64, args: &[u64; 6], mark: u64, is_online: &
     // Descriptors the dead instance installed for this call (its answer was lost): the
     // program never learned their numbers; the new instance installs its own
     close_installed(mark);
+    // wave7 GB: an add_key being served when lx-sec died (its answer lost) is sent again
+    // unless it makes a keyring: the new instance finds the key the old one committed and
+    // updates it in place (same serial); only a keyring would be made anew
+    let r = if r == restart_policy::LX_RESEND_MAYBE && nr == restart_policy::NR_ADD_KEY && add_key_is_update(args[0]) { restart_policy::LX_RESEND } else { r };
     if let Err(e) = restart_policy::after_crash(r, nr, args) {
         FAILED.fetch_add(1, Ordering::Relaxed);
         return Err(e);
@@ -375,6 +379,16 @@ pub fn resend(svc: u8, r: i64, nr: u64, args: &[u64; 6], mark: u64, is_online: &
     RESENT.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
+
+// wave7 GB begin
+/// Whether an `add_key` whose type string is at user address `ty` (the caller's memory)
+/// updates a key of that type and description in place when it exists: every type but
+/// `keyring` ([`restart_policy::add_key_resendable`]).
+fn add_key_is_update(ty: u64) -> bool {
+    let mut b = [0u8; 16];
+    matches!(super::copy::read_user_str(ty, &mut b), Ok(Some(n)) if restart_policy::add_key_resendable(&b[..n]))
+}
+// wave7 GB end
 
 // ----------------------------------------------------------------------
 // Descriptors installed for a call whose answer was lost
