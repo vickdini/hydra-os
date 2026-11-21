@@ -3,9 +3,8 @@
 use hydra_hosttests_w7_71::ctx::{Ctx, Node};
 use hydra_hosttests_w7_71::fake::{Cached, Fake, ROOT};
 use hydra_hosttests_w7_71::cache::Cache;
-use hydra_hosttests_w7_71::mount::{BootMounts, MountInfo, MountKind, Mounts};
 use hydra_hosttests_w7_71::proto::{LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_DEV, LX_VFS_PSEUDO_PROC};
-use hydra_hosttests_w7_71::walk::{self, ParentWalked, Redirect, Start, Walked, NOFOLLOW};
+use hydra_hosttests_w7_71::walk::{self, BootMounts, MountInfo, MountKind, Mounts, ParentWalked, Redirect, Start, Walked, NOFOLLOW};
 
 const ENOENT: i64 = -2;
 const ENOTDIR: i64 = -20;

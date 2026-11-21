@@ -11,7 +11,7 @@ use crate::cache::Cache;
 use crate::ctx::Node;
 use crate::fs::fsproto::{Attr, ENODATA, ENOENT, ENOTDIR, EINVAL};
 use crate::fs::types::{S_IFDIR, S_IFLNK, S_IFREG};
-use crate::mount::{MountInfo, Mounts};
+use crate::walk::{MountInfo, Mounts};
 use crate::proto::SvcId;
 use crate::walk::Backend;
 

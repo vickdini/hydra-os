@@ -1,5 +1,5 @@
 //! Group 7-1's host build of vfs-server's logic: the path walk, the caches, the permission
-//! checks and the boot mount table (`userland/drivers/vfs-server/src`), compiled from their
+//! checks and the boot mount table (in `walk.rs`) (`userland/drivers/vfs-server/src`), compiled from their
 //! own sources through `#[path]` under the module names the program uses, so `crate::`
 //! references resolve unchanged. The zfs-server client and the service glue (`zfs.rs`,
 //! `be.rs`, `main.rs`) need the kernel and are tested in QEMU (`tests/linux/vfswalk.c`).
@@ -40,8 +40,6 @@ pub mod lock {
 pub mod cache;
 #[path = "../../../userland/drivers/vfs-server/src/ctx.rs"]
 pub mod ctx;
-#[path = "../../../userland/drivers/vfs-server/src/mount.rs"]
-pub mod mount;
 #[path = "../../../userland/drivers/vfs-server/src/perm.rs"]
 pub mod perm;
 #[path = "../../../userland/drivers/vfs-server/src/walk.rs"]

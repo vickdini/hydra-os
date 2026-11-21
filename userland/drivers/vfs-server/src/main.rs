@@ -8,7 +8,7 @@
 //! This is the core (Group 7-1): the service on `svcrt` (workers on the kernel's direct
 //! switch), the path walk ([`walk`]), the name/attribute/link caches ([`cache`]), the
 //! zfs-server client ([`zfs`], in vfs-server's own window), mount crossing and the redirect
-//! answer for mounts other services serve ([`mount`]). Its own call, `LX_VFS_WALK_NR`, walks
+//! answer for mounts other services serve ([`walk::Mounts`]; 7-3's `mount.rs` tables). Its own call, `LX_VFS_WALK_NR`, walks
 //! a path and says what it found (the walk test compares it with the kernel's `stat`); the
 //! file calls themselves come with Group 7-2 (`calls/`), the mount tables with 7-3.
 //!
@@ -28,7 +28,6 @@ mod be;
 mod cache;
 mod ctx;
 mod lock;
-mod mount;
 mod perm;
 mod walk;
 mod zfs;
@@ -55,6 +54,10 @@ use hydra_rt::svccall::DcallArgs;
 use hydra_rt::svcrt::{self, Answer, Cx, Event};
 use hydra_rt::{println, sys};
 use proto::*;
+
+/// 7-2's notification kind (defined in its protocol block): the kernel changed the file
+/// system behind vfs-server's back (`a` = the object, 0 = names anywhere).
+const LX_NOTE_FSCHANGE: u64 = 9;
 
 use crate::be::ZfsBackend;
 use crate::cache::CACHE;
