@@ -1523,8 +1523,4 @@ pub struct LxVfsWalkIn {
     pub mnt_ns: u64,
 }
 
-/// Notification kind (7-2's `LX_NOTE_FSCHANGE`): the kernel changed the file system behind
-/// vfs-server's back. `a` = the object whose attributes, link or entries changed (0: names
-/// anywhere).
-pub const LX_NOTE_FSCHANGE: u64 = 9;
 // wave7 G7-1 end

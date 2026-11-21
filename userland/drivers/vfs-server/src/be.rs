@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use crate::cache::CACHE;
 use crate::ctx::Node;
 use crate::fs::fsproto::{Attr, ENODATA, ENOENT};
-use crate::mount::{BootMounts, Mounts};
+use crate::walk::{BootMounts, Mounts};
 use crate::perm::ACL_ACCESS;
 use crate::walk::Backend;
 use crate::zfs;

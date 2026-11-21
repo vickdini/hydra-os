@@ -24,9 +24,8 @@ use crate::fs::fsproto::{Attr, EEXIST, EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR
 /// Permission denied.
 pub const EACCES: i64 = -13;
 use crate::fs::types::DnodeType;
-use crate::mount::{MountKind, Mounts};
 use crate::perm::{self, MAY_EXEC};
-use crate::proto::SvcId;
+use crate::proto::{SvcId, LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_DEV, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
 
 /// Symbolic links followed in one walk at most (Linux `MAXSYMLINKS`).
 pub const SYMLOOP_MAX: u32 = 40;
@@ -36,6 +35,86 @@ pub const PATH_MAX: usize = 4096;
 pub const NAME_MAX: usize = 255;
 /// Walk flag: do not follow a symbolic link in the last component.
 pub const NOFOLLOW: u32 = 1;
+
+// ----------------------------------------------------------------------
+// Mounts as the walk sees them (7-3's `mount.rs` tables implement [`Mounts`])
+// ----------------------------------------------------------------------
+
+/// What a mount holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MountKind {
+    /// A ZFS tree (a bind mount of the pool, a dataset).
+    Zfs,
+    /// A `tmpfs` (7-3), by its id.
+    Tmpfs(u32),
+    /// A file system another service serves (`/proc`, `/sys`, `/dev`, FUSE): the walk stops
+    /// and answers "redirect to `svc`, object `obj`".
+    Redirect {
+        /// The serving service.
+        svc: SvcId,
+        /// Its object for the mount's root.
+        obj: u64,
+    },
+}
+
+/// One mount.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MountInfo {
+    /// The mount it is mounted on (0: the root's own tree).
+    pub parent: u16,
+    /// The directory it covers (in `parent`).
+    pub mountpoint: Node,
+    /// Its root directory (`mnt` = this mount's index).
+    pub root: Node,
+    /// What it holds.
+    pub kind: MountKind,
+}
+
+/// The mount tables, by mount namespace.
+pub trait Mounts {
+    /// The topmost mount covering directory `at` in namespace `ns`, if any.
+    fn covering(&self, ns: u32, at: Node) -> Option<u16>;
+    /// Mount `m` of namespace `ns`.
+    fn mount(&self, ns: u32, m: u16) -> Option<MountInfo>;
+    /// A file system another service serves under the name `name` directly below the
+    /// caller's root: `(service, object)`.
+    fn pseudo_at_root(&self, ns: u32, name: &[u8]) -> Option<(SvcId, u64)>;
+}
+
+/// The boot table (until 7-3's tables): no mounts; the pseudo file systems the Linux
+/// services serve as names directly under the caller's root: `proc` (the process service),
+/// `sys` and `dev` (linux-server) -- the kernel's rule today: `/proc` is the caller's root's
+/// `proc`, whatever directory that is.
+pub struct BootMounts {
+    /// Whether the pseudo file systems are redirected.
+    pub pseudo: bool,
+}
+
+impl Mounts for BootMounts {
+    fn covering(&self, _ns: u32, _at: Node) -> Option<u16> {
+        None
+    }
+
+    fn mount(&self, _ns: u32, _m: u16) -> Option<MountInfo> {
+        None
+    }
+
+    fn pseudo_at_root(&self, _ns: u32, name: &[u8]) -> Option<(SvcId, u64)> {
+        if !self.pseudo {
+            return None;
+        }
+        match name {
+            b"proc" => Some((LXS_PROC, LX_VFS_PSEUDO_PROC)),
+            b"sys" => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
+            b"dev" => Some((LXS_LINUX, LX_VFS_PSEUDO_DEV)),
+            _ => None,
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// The back end
+// ----------------------------------------------------------------------
 
 /// What the walk asks of the file systems below it.
 pub trait Backend {
