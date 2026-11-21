@@ -72,13 +72,20 @@ fn init_programs_channel_0_and_calibrates() {
 fn frequency_is_clamped() {
     let _g = serial();
     pit_ports(0);
-    pit::init(1); // below 18 Hz: the divisor would not fit 16 bits
-    assert_eq!(pit::frequency_hz(), 18);
+    pit::init(1); // below 19 Hz: 18 Hz's divisor (66288) would not fit 16 bits
+    assert_eq!(pit::frequency_hz(), 19);
     let w = hw::port_writes();
     let div = w[1].1 | (w[2].1 << 8);
-    // 18 Hz needs 66288: clamped to the largest divisor (18.2 Hz; the clock follows the
-    // counter once calibrated, so the 1 % does not matter there)
-    assert_eq!(div, 65535);
+    // 19 Hz: divisor 62799 (19.0001 Hz): the reported rate is the programmed one (the old
+    // 18 Hz floor programmed 65535 = 18.2 Hz and reported 18)
+    assert_eq!(div, 62799);
+    pit::init(18);
+    assert_eq!(pit::frequency_hz(), 19);
+    // The rate kept is the divisor's, rounded: 1000 Hz = divisor 1193 = 1000.15 Hz
+    pit::init(1000);
+    assert_eq!(pit::frequency_hz(), 1000);
+    pit::init(400_000); // divisor 3 = 397,727 Hz
+    assert_eq!(pit::frequency_hz(), 397_727);
     pit::init(5_000_000);
     assert_eq!(pit::frequency_hz(), 1_193_182);
     let w = hw::port_writes();
