@@ -3,7 +3,8 @@
 
 use crate::mount::*;
 
-const LINUX: u32 = 0x29;
+const LINUX: SvcId = 1;
+const PROC: SvcId = 5;
 
 /// tmpfs instances numbered from 1, every known pseudo type served by linux-server.
 #[derive(Default)]
@@ -19,11 +20,12 @@ impl FsFactory for Factory {
         self.made.push((data.to_string(), euid, egid));
         Ok((self.made.len() as u32, 1))
     }
-    fn served(&self, fstype: &str) -> Option<(u32, String)> {
+    fn served(&self, fstype: &str) -> Option<(SvcId, u64, String)> {
         match fstype {
-            "devpts" => Some((LINUX, "/pts".to_string())),
+            "devpts" => Some((LINUX, 0, "/pts".to_string())),
+            "proc" => Some((PROC, 3, "/".to_string())),
             "debugfs" => None,
-            _ => Some((LINUX, "/".to_string())),
+            _ => Some((LINUX, 0, "/".to_string())),
         }
     }
 }
@@ -60,7 +62,7 @@ fn dir(path: &str, mnt: MntIdx) -> Loc {
 /// ns 0 (by name) and ns 7 (a copy).
 fn tables() -> MountTables {
     let mut t = MountTables::new();
-    let fx = t.install(0, 1, &standard_layout(LINUX, true, &pool));
+    let fx = t.install(0, 1, &standard_layout(PROC, LINUX, true, &pool));
     assert_eq!(fx.hold, vec![1, 50]);
     t.copy_ns(0, 7, &pool).unwrap();
     t
@@ -121,7 +123,14 @@ fn initial_namespace_by_name() {
     assert_eq!(ns.by_name("/usr/bin"), None);
     assert_eq!(ns.by_name("/procfoo"), None);
     let r = ns.redirect(6, "/0").unwrap();
-    assert_eq!(r, Redirect { endpoint: LINUX, mnt: 6, path: "/pts/0".to_string() });
+    assert_eq!(r, Redirect { svc: LINUX, obj: 0, mnt: 6, path: "/pts/0".to_string() });
+    assert_eq!(ns.redirect(2, "/self").unwrap().svc, PROC);
+    // Group 7-1's question for names under the caller's root
+    assert_eq!(ns.pseudo_at_root(b"proc"), Some((PROC, 0)));
+    assert_eq!(ns.pseudo_at_root(b"dev"), Some((LINUX, 0)));
+    assert_eq!(ns.pseudo_at_root(b"pts"), None);
+    assert_eq!(ns.pseudo_at_root(b"run"), None, "not served elsewhere");
+    assert_eq!(ns.pseudo_at_root(b"usr"), None);
     assert_eq!(ns.redirect(4, "x").unwrap().path, "/fs/cgroup/x");
     assert_eq!(ns.redirect(1, "/x"), None, "the pool is not redirected");
     assert_eq!(ns.redirect(99, "/x"), None);
@@ -141,7 +150,7 @@ fn initial_namespace_by_name() {
 
 #[test]
 fn standard_layout_on_objects() {
-    let l = standard_layout(LINUX, false, &|p| if p == "/run" { 0 } else { pool(p) });
+    let l = standard_layout(PROC, LINUX, false, &|p| if p == "/run" { 0 } else { pool(p) });
     assert_eq!(l.len(), 5, "no /run when the pool has none");
     assert_eq!(l[0].mountpoint, 10);
     let mut t = MountTables::new();
@@ -197,6 +206,9 @@ fn tmpfs_mount_stack_and_umount() {
     let top = Loc::new("/tmp", 1, i, true);
     let (j, _) = t.mount_new(&c, &top, "tmpfs", "tmpfs", 0, "", &mut f).unwrap();
     assert_eq!(t.ns(7).unwrap().child_at(i, 1), Some(j));
+    assert_eq!(t.ns(7).unwrap().covering(1, 20), Some(j), "the top of the stack");
+    assert_eq!(t.ns(7).unwrap().covering(j, 1), None);
+    assert_eq!(t.ns(7).unwrap().covering(1, 30), None);
     assert_eq!(t.ns(7).unwrap().mount_at(&top), Some(i));
     // Busy: /tmp has a mount below it
     assert_eq!(t.umount(&c, &top, 0), Err(EBUSY));
@@ -245,7 +257,7 @@ fn pseudo_mounts_are_served_elsewhere() {
     t.mount(&c, None, &dir("/mnt", 1), Some("proc"), Some("proc"), MS_NOSUID | MS_NODEV | MS_NOEXEC, None, &mut f).unwrap();
     let ns = t.ns(7).unwrap();
     let i = ns.child_at(1, 40).unwrap();
-    assert_eq!(ns.redirect(i, "/self/stat").unwrap(), Redirect { endpoint: LINUX, mnt: i, path: "/self/stat".to_string() });
+    assert_eq!(ns.redirect(i, "/self/stat").unwrap(), Redirect { svc: PROC, obj: 3, mnt: i, path: "/self/stat".to_string() });
     assert_eq!(ns.get(i).unwrap().root, 0);
     let ghost = Loc::new("/dev/ptmx-dir", 0, 0, true);
     let (j, _) = t.mount_new(&c, &ghost, "devpts", "devpts", 0, "newinstance", &mut f).unwrap();

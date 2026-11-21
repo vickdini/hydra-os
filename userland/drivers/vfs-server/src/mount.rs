@@ -18,7 +18,8 @@
 //! `tmpfs` instance of this server ([`super::tmpfs`]), or a file system **served by another
 //! service** (`/proc`, `/sys`, `/dev`, `devpts`, `cgroup2`, `mqueue`: linux-server, decision
 //! 19). Mounts of a served file system are where the walk answers with a redirect
-//! ([`MountNs::redirect`]): the serving endpoint and the path inside its tree.
+//! ([`MountNs::redirect`]): the serving service, its object for the mount, and the path
+//! inside its tree.
 //!
 //! The walk (Group 7-1) uses three questions:
 //! - [`MountNs::child_at`]: is object `ino` of mount `m` a mount point? Ask again on the
@@ -40,7 +41,7 @@
 //! Group 7-6 keeps the tables across a vfs-server restart (decision 21):
 //! [`MountTables::encode`] writes everything into a byte string with a version and a
 //! checksum, [`MountTables::decode`] checks and reads it back. No pointers, no handles of
-//! this instance: indices, object numbers, endpoints and strings only.
+//! this instance: indices, object numbers, service ids and strings only.
 //!
 //! Not here (yet): propagation between namespaces (flags are kept and listed, nothing
 //! propagates, as in the kernel copy), id-mapped mounts, overlayfs.
@@ -98,6 +99,9 @@ pub const CAP_SYS_ADMIN: u64 = 1 << 21;
 pub type NsId = u64;
 /// A mount's index in its namespace's table, 1-based (0: none).
 pub type MntIdx = usize;
+/// A Linux service id (`LXS_*` in `ipc/protocol.rs`: 1 linux-server, 5 the process
+/// service).
+pub type SvcId = u8;
 
 /// The back end whose tree a mount shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,9 +110,11 @@ pub enum Backend {
     Pool,
     /// A `tmpfs` instance of this server ([`super::tmpfs::Tmpfs`]).
     Tmpfs(u32),
-    /// A file system served by another service: lookups below the mount are redirected to
-    /// `endpoint`, with the mount's `fs_root` joined to the rest of the path.
-    Remote { endpoint: u32 },
+    /// A file system served by another service (`svc`, an `LXS_*` service id): lookups
+    /// below the mount are redirected there with `obj` (the serving service's object for
+    /// the mount, as Group 7-1's redirect answer carries it) and the mount's `fs_root`
+    /// joined to the rest of the path.
+    Remote { svc: SvcId, obj: u64 },
 }
 
 /// One mount.
@@ -193,7 +199,8 @@ pub struct Pivot {
 /// Where a lookup goes after reaching a mount of a served file system.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Redirect {
-    pub endpoint: u32,
+    pub svc: SvcId,
+    pub obj: u64,
     /// The mount (for the `..` that leaves it again).
     pub mnt: MntIdx,
     /// The path inside the serving service's tree (absolute).
@@ -206,9 +213,9 @@ pub trait FsFactory {
     /// A new `tmpfs` instance from the mount data (`size=`, `mode=`, ...), owned by the
     /// caller `(euid, egid)` unless the data says otherwise: `(instance, root object)`.
     fn new_tmpfs(&mut self, data: &str, euid: u32, egid: u32) -> Result<(u32, u64), i64>;
-    /// The service serving file system type `fstype`, and the path in its tree a new mount
-    /// of it shows (`None`: no service serves it).
-    fn served(&self, fstype: &str) -> Option<(u32, String)>;
+    /// The service serving file system type `fstype`, its object for a new mount of it,
+    /// and the path in its tree the mount shows (`None`: no service serves it).
+    fn served(&self, fstype: &str) -> Option<(SvcId, u64, String)>;
 }
 
 /// Who asks: the caller's mount namespace and effective capabilities and ids.
@@ -376,8 +383,8 @@ impl MountNs {
     /// mount of a file system served by another service.
     pub fn redirect(&self, i: MntIdx, rest: &str) -> Option<Redirect> {
         let m = self.get(i)?;
-        let Backend::Remote { endpoint } = m.backend else { return None };
-        Some(Redirect { endpoint, mnt: i, path: normalize(&format!("{}/{}", m.fs_root, rest)) })
+        let Backend::Remote { svc, obj } = m.backend else { return None };
+        Some(Redirect { svc, obj, mnt: i, path: normalize(&format!("{}/{}", m.fs_root, rest)) })
     }
 
     /// The per-mount flags of mount `i` (0 if none).
@@ -414,6 +421,29 @@ impl MountNs {
         self.live().filter(|(_, m)| (m.by_name || matches!(m.backend, Backend::Remote { .. })) && m.path == loc.path).map(|(i, _)| i).last()
     }
 
+    /// Group 7-1's `Mounts::covering`: the mount that covers object `ino` of mount `mnt`,
+    /// the top one when mounts stack (so asking again on its root gives `None`).
+    pub fn covering(&self, mnt: MntIdx, ino: u64) -> Option<MntIdx> {
+        let mut top = self.child_at(mnt, ino)?;
+        for _ in 0..self.mounts.len() {
+            let root = self.get(top)?.root;
+            match self.child_at(top, root) {
+                Some(next) if next != top && root != 0 => top = next,
+                _ => break,
+            }
+        }
+        Some(top)
+    }
+
+    /// Group 7-1's `Mounts::pseudo_at_root`: the served file system mounted by name at
+    /// `/<name>` from the caller's root, as `(service, object)`.
+    pub fn pseudo_at_root(&self, name: &[u8]) -> Option<(SvcId, u64)> {
+        self.live()
+            .filter(|(_, m)| m.by_name && m.path.len() == name.len() + 1 && m.path.as_bytes()[1..] == *name)
+            .filter_map(|(_, m)| if let Backend::Remote { svc, obj } = m.backend { Some((svc, obj)) } else { None })
+            .last()
+    }
+
     /// The `tmpfs` instances this table mounts.
     fn tmpfs_ids(&self) -> Vec<u32> {
         self.live().filter_map(|(_, m)| if let Backend::Tmpfs(t) = m.backend { Some(t) } else { None }).collect()
@@ -445,11 +475,12 @@ pub struct InitialMount {
 }
 
 /// Hydra's standard layout: `/proc`, `/sys`, `/sys/fs/cgroup`, `/dev` and `/dev/pts` served
-/// by `linux_ep` (linux-server; Group 7-4 serves them), and `/run` listed as a `tmpfs`
+/// by other services (Group 7-4 serves them): `/proc` by `proc_svc`, the others by
+/// `linux_svc` (Group 7-1's boot table: `LXS_PROC` and `LXS_LINUX`); and `/run` listed as a `tmpfs`
 /// that shows the pool's directory (as the kernel lists it today). `lookup` gives the
 /// pool object at a path (0 if none); with `by_name` the served ones are mounted by name
 /// (the initial namespace), else on those objects.
-pub fn standard_layout(linux_ep: u32, by_name: bool, lookup: &dyn Fn(&str) -> u64) -> Vec<InitialMount> {
+pub fn standard_layout(proc_svc: SvcId, linux_svc: SvcId, by_name: bool, lookup: &dyn Fn(&str) -> u64) -> Vec<InitialMount> {
     let mut out = Vec::new();
     for (path, fstype, source, fs_root) in [
         ("/proc", "proc", "proc", "/"),
@@ -461,7 +492,7 @@ pub fn standard_layout(linux_ep: u32, by_name: bool, lookup: &dyn Fn(&str) -> u6
         out.push(InitialMount {
             path: String::from(path),
             mountpoint: if by_name { 0 } else { lookup(path) },
-            backend: Backend::Remote { endpoint: linux_ep },
+            backend: Backend::Remote { svc: if fstype == "proc" { proc_svc } else { linux_svc }, obj: 0 },
             root: 0,
             fs_root: String::from(fs_root),
             fstype: String::from(fstype),
@@ -698,7 +729,7 @@ impl MountTables {
                 (Backend::Tmpfs(n), root, String::from("/"), self.new_dev())
             }
             _ if known_fs(fs) => match f.served(fs) {
-                Some((endpoint, fs_root)) => (Backend::Remote { endpoint }, 0, fs_root, self.new_dev()),
+                Some((svc, obj, fs_root)) => (Backend::Remote { svc, obj }, 0, fs_root, self.new_dev()),
                 None => return Err(ENODEV),
             },
             _ => return Err(ENODEV),
@@ -1461,9 +1492,10 @@ fn encode_mount(e: &mut Enc, m: &Mount) {
             e.u8(1);
             e.u32(n);
         }
-        Backend::Remote { endpoint } => {
+        Backend::Remote { svc, obj } => {
             e.u8(2);
-            e.u32(endpoint);
+            e.u8(svc);
+            e.u64(obj);
         }
     }
     e.u64(m.root);
@@ -1485,7 +1517,7 @@ fn decode_mount(d: &mut Dec) -> Result<Mount, i64> {
     let backend = match d.u8()? {
         0 => Backend::Pool,
         1 => Backend::Tmpfs(d.u32()?),
-        2 => Backend::Remote { endpoint: d.u32()? },
+        2 => Backend::Remote { svc: d.u8()?, obj: d.u64()? },
         _ => return Err(EINVAL),
     };
     Ok(Mount {
