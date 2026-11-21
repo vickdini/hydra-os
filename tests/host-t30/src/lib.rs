@@ -917,6 +917,10 @@ pub mod compat {
         }
 
         pub mod mm {
+            /// *stub* wave7 G7-5: page-cache reads (nothing cached).
+            pub fn cached_read(_ino: u64, _off: u64, _buf: &mut [u8]) -> Result<usize, i64> {
+                Err(-5)
+            }
             pub fn cache_forget(ino: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, u64::MAX)));
             }

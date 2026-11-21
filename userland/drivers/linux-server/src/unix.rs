@@ -920,6 +920,91 @@ fn read_addr(cx: &Cx, ptr: u64, len: u64) -> Result<Addr, i64> {
     Ok(Addr::Path { shown: name[..end].to_vec(), ino: cx.c.ino })
 }
 
+// wave7 G7-5 begin: socket nodes by vfs-server
+/// The path name of the `sockaddr_un` of `bind`/`connect` call `cx` (`None`: abstract,
+/// another family, or unreadable: the ordinary code decides).
+fn path_of(cx: &Cx) -> Option<Vec<u8>> {
+    let len = cx.args[2];
+    if !(3..=110).contains(&len) {
+        return None;
+    }
+    let b = cx.copy_in(cx.args[1], len as usize).ok()?;
+    if u16::from_le_bytes([b[0], b[1]]) != AF_UNIX || b[2] == 0 {
+        return None;
+    }
+    let name = &b[2..];
+    Some(name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())].to_vec())
+}
+
+/// vfs-server's operation `op` (`LX_VFS_SOCK_*`) on socket node `path` for call `cx`:
+/// `Ok(ino)`, `Err(None)` when the kernel must do it (nothing changed), `Err(Some(e))`.
+fn sock_node(cx: &Cx, op: u64, path: &[u8]) -> Result<u64, Option<i64>> {
+    let cs = core::mem::size_of::<LxCall>();
+    let mut input = Vec::with_capacity(cs + 8 + path.len());
+    // SAFETY: LxCall is plain repr(C) data
+    input.extend_from_slice(unsafe { core::slice::from_raw_parts(&cx.c as *const LxCall as *const u8, cs) });
+    input.extend_from_slice(&op.to_le_bytes());
+    input.extend_from_slice(path);
+    let r = hydra_rt::svccall::dcall(LXS_VFS, LX_VFS_OP_SOCK, &input, &mut []);
+    // (vfs-server's own answer, or not running, restarting, not allowed)
+    if matches!(r, LX_VFS_KERNEL | -1 | -4 | -5 | -38) {
+        return Err(None);
+    }
+    if r < 0 {
+        return Err(Some(r));
+    }
+    Ok(r as u64)
+}
+
+/// Unix socket nodes made and checked by vfs-server, and handed back to the kernel, since
+/// start.
+pub static VFS_NODES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// See [`VFS_NODES`].
+pub static VFS_TO_KERNEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `bind` or `connect` the kernel sent with the caller's file context
+/// (`LX_OBJ_FLAGS_VFSCTX`) instead of a node it resolved: a path name's node comes from
+/// vfs-server; when vfs-server cannot, the call goes back to the kernel's code (its
+/// `vfs_resolve`), which nothing here has changed yet.
+fn by_vfs(cx: &Cx, sid: u64) -> (i64, u64) {
+    let bind_call = cx.nr == 49;
+    let mut c = cx.c;
+    c.obj_flags &= !LX_OBJ_FLAGS_VFSCTX;
+    // (read once here; a path name's node, and the address bind/connect use, come from it)
+    let Some(path) = path_of(cx) else {
+        let cx2 = Cx::from_call(&c, cx.page());
+        return (if bind_call { bind(&cx2, sid) } else { connect(&cx2, sid) }, 0);
+    };
+    // (a socket bound already: no node is made for nothing)
+    if bind_call && U.lock().socks.get(&sid).is_none_or(|s| s.local.is_some()) {
+        return (EINVAL, 0);
+    }
+    let op = if bind_call { LX_VFS_SOCK_MAKE } else { LX_VFS_SOCK_CHECK };
+    let ino = match sock_node(cx, op, &path) {
+        Ok(i) => i,
+        Err(None) => {
+            VFS_TO_KERNEL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return hydra_rt::svcrt::redirect(cx.page(), 0, 0, 0);
+        }
+        Err(Some(e)) => return (if bind_call && e == -17 { EADDRINUSE } else { e }, 0),
+    };
+    VFS_NODES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    c.ino = ino;
+    let cx2 = Cx::from_call(&c, cx.page());
+    // The address as read once above (the caller's memory is not read again)
+    let addr = Addr::Path { shown: path.clone(), ino };
+    if !bind_call {
+        return (connect_addr(&cx2, sid, addr), 0);
+    }
+    let r = bind_addr(sid, addr);
+    if r < 0 {
+        // (only the node made above: vfs-server checks the name still leads to it)
+        let _ = sock_node(cx, LX_VFS_SOCK_REMOVE | ino << 8, &path);
+    }
+    (r, 0)
+}
+// wave7 G7-5 end
+
 /// Writes a socket address to (`addr`, `*len_ptr`), truncated to the caller's buffer, with
 /// the full length stored, as Linux does.
 fn put_sockaddr(cx: &Cx, addr: u64, len_ptr: u64, sa: &[u8]) -> Result<(), i64> {
@@ -932,10 +1017,14 @@ fn put_sockaddr(cx: &Cx, addr: u64, len_ptr: u64, sa: &[u8]) -> Result<(), i64> 
 }
 
 fn bind(cx: &Cx, sid: u64) -> i64 {
-    let addr = match read_addr(cx, cx.args[1], cx.args[2]) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
+    match read_addr(cx, cx.args[1], cx.args[2]) {
+        Ok(a) => bind_addr(sid, a),
+        Err(e) => e,
+    }
+}
+
+/// `bind` of socket `sid` to `addr` (read once by the caller: wave7 G7-5).
+fn bind_addr(sid: u64, addr: Addr) -> i64 {
     let mut u = U.lock();
     if u.socks[&sid].local.is_some() {
         return EINVAL;
@@ -972,10 +1061,14 @@ fn listen(cx: &Cx, sid: u64) -> i64 {
 }
 
 fn connect(cx: &Cx, sid: u64) -> i64 {
-    let addr = match read_addr(cx, cx.args[1], cx.args[2]) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
+    match read_addr(cx, cx.args[1], cx.args[2]) {
+        Ok(a) => connect_addr(cx, sid, a),
+        Err(e) => e,
+    }
+}
+
+/// `connect` of socket `sid` to `addr` (read once by the caller: wave7 G7-5).
+fn connect_addr(cx: &Cx, sid: u64, addr: Addr) -> i64 {
     let mut after = After::default();
     let r = 'r: {
         let mut u = U.lock();
@@ -1191,6 +1284,7 @@ pub fn call(cx: &Cx) -> (i64, u64) {
             Err(e) => (e, 0),
         },
         16 => (ioctl(cx, sid), 0),
+        49 | 42 if cx.c.obj_flags & LX_OBJ_FLAGS_VFSCTX != 0 => by_vfs(cx, sid), // wave7 G7-5
         49 => (bind(cx, sid), 0),
         50 => (listen(cx, sid), 0),
         42 => (connect(cx, sid), 0),

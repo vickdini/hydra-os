@@ -79,6 +79,8 @@ thread_local! {
     pub static MOUNT_EXEC_FLAGS: Cell<(bool, bool)> = const { Cell::new((false, false)) };
     /// File capabilities by inode (`vfs::file_caps`).
     pub static FILE_CAPS: RefCell<BTreeMap<u64, (u64, bool)>> = const { RefCell::new(BTreeMap::new()) };
+    /// wave7 G7-5: what `lx::xexec::front` answers (None: the kernel's own front half).
+    pub static EXEC_FRONT: RefCell<Option<Result<crate::lx::xexec::ExecPlan, i64>>> = const { RefCell::new(None) };
     /// Pseudo-file paths (`compat::linux::fs::match_pseudo_path`).
     pub static PSEUDO: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Next thread id `spawn_clone` hands out.
@@ -159,6 +161,7 @@ pub fn reset() {
     PROC_LINKS.with_borrow_mut(|m| m.clear());
     MOUNT_EXEC_FLAGS.set((false, false));
     FILE_CAPS.with_borrow_mut(|m| m.clear());
+    EXEC_FRONT.with_borrow_mut(|m| *m = None);
     CWD.with_borrow_mut(|c| *c = String::from("/"));
     CONSOLE.with_borrow_mut(|c| c.clear());
     WRITE_ERROR.set("I/O error");

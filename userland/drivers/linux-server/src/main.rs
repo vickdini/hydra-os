@@ -35,6 +35,8 @@ extern crate alloc;
 mod bpf;
 mod client;
 mod eventfd;
+mod exec; // wave7 G7-5
+mod execplan; // wave7 G7-5
 mod fdio;
 mod pidfd;
 mod pipe;
@@ -251,6 +253,9 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
             _ => (-19, 0), // ENODEV
         },
         LX_DCALL_NR => dcall_serve(&cx), // wave6 G20
+        // wave7 G7-5: vfs-server's open of a FIFO node, redirected to the IPC service (before
+        // the pseudo-file arm below, which also takes opens; merge of 7-4 and 7-5)
+        2 | 257 if c.redirs != 0 && c.svc == LXS_IPC as u32 => pipe::fifo_open_redirected(&cx),
         // wave7 G7-4: a path call the file service redirected here (`/proc`, `/sys`)
         n if c.redirs != 0 && pseudo::is_path_call(n) => pseudo::redirected(&cx),
         // wave 6 (Group 19): a test call the test service redirected here
@@ -269,6 +274,8 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
         22 | 293 => pipe::create(&cx),
         434 | LX_KCALL_PIDFD => pidfd::open(&cx),
         LX_KCALL_FIFO => pipe::fifo_open(&cx),
+        // wave7 G7-5: execve's front half (the kernel asks; vfs-server resolves the files)
+        LX_KCALL_EXEC => exec::front(&cx),
         // wave 6 (Group 19): an in-kernel message queue's notification for one of our netlink
         // sockets (only the IPC service switched back)
         LX_KCALL_NLDELIVER if c.obj != LX_OBJ_NONE => match cx.copy_in(cx.args[1], (cx.args[2] as usize).min(64)) {

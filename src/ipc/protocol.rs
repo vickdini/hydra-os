@@ -1993,3 +1993,132 @@ pub const LX_MAP_X: u32 = 4;
 /// [`LxMapEntry::flags`]: shared.
 pub const LX_MAP_SHARED: u32 = 8;
 // wave7 G7-4 end
+
+// wave7 G7-5 begin: execve's front half, socket files and FIFOs through the services
+// ----------------------------------------------------------------------------------------
+//
+// `execve`/`execveat` stay the kernel's by number (the new image is built in the caller's
+// trap), but the kernel first asks linux-server for the front half: `LX_KCALL_EXEC`. linux-
+// server resolves the program, `#!` interpreters and the ELF interpreter with direct calls
+// to vfs-server (`LX_VFS_OP_EXEC`, `LX_VFS_OP_READ`) and answers with an [`LxExecPlan`].
+// Unix socket path names (`bind`, `connect`) are made and checked by vfs-server
+// (`LX_VFS_OP_SOCK`), and vfs-server's `open` of a FIFO redirects to `LXS_IPC` with the
+// node's object number as the redirect's object.
+
+/// Kernel call to linux-server ([`LXS_LINUX`]): the front half of `execve`. Arguments:
+/// `[dirfd, LX_KBUF_ADDR (out: LxExecPlan + strings), 0 (the path is in the input), flags
+/// (AT_SYMLINK_NOFOLLOW), LX_KBUF_ADDR + 0x1000 (in: the base path, as the kernel shows the
+/// directory, the working directory and the path, each NUL-terminated), their length]`; the caller's file context as for a file-service call.
+/// Result: 0 = the plan was written, [`LX_EXEC_KERNEL`] = the kernel makes the front half
+/// itself, `-errno` = `execve` fails with it.
+pub const LX_KCALL_EXEC: u64 = 0x6790;
+/// [`LX_KCALL_EXEC`]'s answer: the kernel resolves the files itself (paths into other
+/// services, mounts, vfs-server down, paths too long for a direct call).
+pub const LX_EXEC_KERNEL: i64 = 1;
+/// The input buffer address of [`LX_KCALL_EXEC`] (`args[4]`).
+pub const LX_KBUF_ADDR_IN: u64 = LX_KBUF_ADDR + 0x1000;
+/// The most `#!` levels (`ELOOP` past them).
+pub const LX_EXEC_DEPTH: usize = 4;
+
+/// [`LX_KCALL_EXEC`]'s answer (then: `real` bytes of the program's path as
+/// `/proc/self/exe` shows it, `npre` NUL-terminated argv strings that replace `argv[0]`,
+/// `interp_len` bytes of the ELF interpreter's path).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LxExecPlan {
+    /// The program finally run (object number in the pool).
+    pub ino: u64,
+    /// The ELF interpreter's object (0: none or not found; see `interp_len`).
+    pub interp_ino: u64,
+    /// Bytes of the shown path.
+    pub real: u32,
+    /// argv strings that replace `argv[0]` (0: no script, argv unchanged).
+    pub npre: u32,
+    /// Bytes of all argv strings (with their NULs).
+    pub pre_len: u32,
+    /// Bytes of the ELF interpreter's path (0: the program has none, or it was not looked up).
+    pub interp_len: u32,
+    /// 1: the shown path is the lexical one (`real` is that, no link was resolved).
+    pub lexical: u32,
+    /// Reserved.
+    pub pad: u32,
+}
+
+/// Direct-call operation of vfs-server: walk a program (or interpreter) for `execve`. In:
+/// the caller's [`LxCall`], an [`LxVfsExecIn`], the path, the absolute path (for the real
+/// path). Out: [`LxVfsExecOut`], the first bytes of the file, the real path. Result 0,
+/// `-errno`, or [`LX_VFS_KERNEL`].
+pub const LX_VFS_OP_EXEC: u64 = 24;
+/// Direct-call operation of vfs-server: `(ino, offset, len)` as three u64s: the bytes of pool
+/// object `ino` there (at most the output's room). Result: the count.
+pub const LX_VFS_OP_READ: u64 = 25;
+/// Direct-call operation of vfs-server: a socket node for a Unix socket path name. In: the
+/// caller's [`LxCall`], the operation ([`LX_VFS_SOCK_MAKE`], ...) as a u64, then the path.
+/// Result: the node's object number, `-errno`, or [`LX_VFS_KERNEL`].
+pub const LX_VFS_OP_SOCK: u64 = 26;
+/// [`LX_VFS_OP_SOCK`]: make the node (`bind`; `EADDRINUSE` if the name exists).
+pub const LX_VFS_SOCK_MAKE: u64 = 1;
+/// [`LX_VFS_OP_SOCK`]: the node `connect` names (`ECONNREFUSED` if not a socket, `EACCES`
+/// without write permission).
+pub const LX_VFS_SOCK_CHECK: u64 = 2;
+/// [`LX_VFS_OP_SOCK`]: remove the node again (`bind` failed after making it).
+pub const LX_VFS_SOCK_REMOVE: u64 = 3;
+/// A direct call's answer: the kernel's own code must do it (nothing was changed).
+pub const LX_VFS_KERNEL: i64 = -4103;
+/// [`LxVfsExecIn::flags`]: do not follow a link in the last component.
+pub const LX_VFS_EXEC_NOFOLLOW: u32 = 1;
+/// [`LxVfsExecIn::flags`]: relative paths start at the root (the ELF interpreter).
+pub const LX_VFS_EXEC_FROM_ROOT: u32 = 2;
+/// [`LxVfsExecIn::flags`]: no exec permission check (the ELF interpreter, as the kernel).
+pub const LX_VFS_EXEC_NOCHECK: u32 = 4;
+/// [`LxVfsExecIn::flags`]: compute the real path (`abs` given).
+pub const LX_VFS_EXEC_REAL: u32 = 8;
+
+/// The fixed part of [`LX_VFS_OP_EXEC`]'s input, after the `LxCall`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxVfsExecIn {
+    /// `LX_VFS_EXEC_*`.
+    pub flags: u32,
+    /// Bytes of the path.
+    pub path_len: u32,
+    /// Bytes of the absolute path (0: no real path wanted).
+    pub abs_len: u32,
+    /// Most bytes of the file's head to return.
+    pub head_max: u32,
+}
+
+/// [`LX_VFS_OP_EXEC`]'s answer (the head and the real path follow).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxVfsExecOut {
+    /// The object.
+    pub ino: u64,
+    /// Its mount.
+    pub mnt: u64,
+    /// `st_mode`, owner, group.
+    pub mode: u32,
+    /// See [`LxVfsExecOut::mode`].
+    pub uid: u32,
+    /// See [`LxVfsExecOut::mode`].
+    pub gid: u32,
+    /// Bytes of the head that follow.
+    pub head_len: u32,
+    /// The file's size.
+    pub size: u64,
+    /// Bytes of the real path after the head (0: none, keep the lexical path).
+    pub real_len: u32,
+    /// Reserved.
+    pub pad: u32,
+}
+
+/// [`LxCall::obj_flags`] of `bind`/`connect` on a Unix socket: the caller's file context is
+/// filled (as for a file-service call) and the socket node is not resolved: the server asks
+/// vfs-server ([`LX_VFS_OP_SOCK`]).
+pub const LX_OBJ_FLAGS_VFSCTX: u64 = 1 << 59;
+/// `SYS_LX_OBJ` operation (file service only): `(ino, buf, off << 16 | len)`: up to `len`
+/// (< 65536) bytes of pool object `ino` from `off`, read through the kernel's page cache
+/// (what the program's loader will read: no zfs-server round trip for a cached program, and
+/// coherent with pages written through shared mappings). Returns the count.
+pub const LX_FH_READ: u64 = 52;
+// wave7 G7-5 end

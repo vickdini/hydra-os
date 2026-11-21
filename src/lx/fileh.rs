@@ -237,7 +237,8 @@ fn at_of(t: &FdTable, fd: u64, wait: bool) -> Result<(AtInfo, Option<Arc<Mutex<O
 pub(super) type Held = [Option<Arc<Mutex<OpenFile>>>; 2];
 
 /// The state of the caller the service cannot see (`LX_FS_*`), apart from the table.
-fn fs_flags_global(c: &LxCall) -> u32 {
+/// (`pub(super)`: wave7 G7-5's `xexec` fills the same context.)
+pub(super) fn fs_flags_global(c: &LxCall) -> u32 {
     use crate::compat::linux as l;
     let mut f = 0;
     if l::landlock::active() {

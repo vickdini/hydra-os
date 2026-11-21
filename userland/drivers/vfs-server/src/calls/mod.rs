@@ -123,7 +123,7 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
         89 | 267 => stat::readlink(cx),
         137 => stat::statfs(cx),
         217 | 78 => dir::getdents(cx),
-        2 | 257 => open::open(cx),
+        2 | 257 => return Some(open::serve(cx)), // (wave7 G7-5: FIFOs redirect to LXS_IPC)
         90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 => change::attrs(cx),
         83 | 258 => change::mkdir(cx),
         88 | 266 => change::symlink(cx),

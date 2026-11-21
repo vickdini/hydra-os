@@ -1,0 +1,17 @@
+[package]
+name = "hydra_hosttests_w7_41"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7-5's host unit tests: execve's front half (linux-server execplan.rs, the kernel's xplan.rs) and vfs-server's real path (xpath.rs)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+hydra_hosttests_w7_71 = { path = "../host-w7-71" }

@@ -69,6 +69,10 @@ pub mod mem;
 pub mod sec;
 
 pub mod svc;
+// wave7 G7-5 begin: execve's front half and Unix socket names by the services
+pub mod xexec;
+pub mod xplan;
+// wave7 G7-5 end
 
 pub mod timer;
 
@@ -541,7 +545,8 @@ fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
             byfd_object(frame.rdi)?
         };
         if kernel_first(nr, &o.0) {
-            return None;
+            // wave7 G7-5: the socket node by vfs-server (through linux-server) when it can
+            return xexec::sock_call(frame, o);
         }
         let h = o.3;
         return Some(call(frame, h, Some(o)));
@@ -1048,6 +1053,8 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
             // wave7 G7-4: a redirect to a service the kernel answers (`lx.proc=kernel`, `lx=kernel`):
             // nothing happened in the redirecting service, so the kernel's own code answers
             if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
+                // (wave7 G7-5: this also covers a FIFO open vfs-server sent to the IPC
+                // service while that one is switched back, `lx.ipc=kernel`)
                 return fileh::LX_TO_KERNEL;
             }
             let Some(nx) = svc::host(svc::host_of(s)).filter(|h| host_usable(h)) else { return ENOSYS };
@@ -1884,6 +1891,7 @@ pub fn summary() -> alloc::string::String {
     ) + "; " + &restart::summary() // wave6 G21
         + &copy_summary()
         + "; " + &fileh::summary() // wave7 G7-2
+        + "; " + &xexec::summary() // wave7 G7-5
 }
 
 // wave6 G22 begin
