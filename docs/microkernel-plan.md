@@ -364,6 +364,7 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 22. **No kernel `stat` cache for now;** revisit if the budget is missed.
 23. **Wave 7 is split as section 12.2:** 7-1 to 7-6 in parallel, then 7-7 closing; plus group H (the two-load hang) and group B (carried-over bugs). **Started in stages:** H and 7-1 to 7-3 first, 7-4 to 7-6 and B added as those settle.
 24. **Gemini as a read-only second opinion** (the user's Gemini subscription, through Google's Antigravity CLI `agy`; Gemini CLI with a personal account is no longer supported by Google): `tools/gemini_review.py` and the `gemini-reviewer` subagent (`.claude/agents/gemini-reviewer.md`) review each branch before merge and help on hard bugs. Gemini may see Hydra's source, diffs and logs. It never writes to the tree; its findings are checked against the code before anyone acts on them.
+25. **7-7 does the mounts step, not the deletion** (2026-11-21): after stage 2, nearly all of KDE still ran on the kernel's file code, because almost every KDE process carries `LX_FS_MOUNTS` and those calls stay in the kernel. 7-7 therefore teaches vfs-server every namespace's mounts (the joint 7-2/7-3 step, chroot, the mount calls), fixes the leftovers and measures the budget. The kernel copies stay as the switch back; deleting them moves to wave 8, once KDE really runs on the services. Stage 2 is pushed and deployed before 7-7 starts.
 
 ### Still open, and when they are needed
 
