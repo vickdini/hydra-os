@@ -131,7 +131,7 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     let who = ctxt::caller(&c)?;
     let start = if e.flags & LX_VFS_EXEC_FROM_ROOT != 0 { Start::Root } else { ctxt::start(&c, path)? };
     let flags = if e.flags & LX_VFS_EXEC_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 };
-    let (node, attr) = match walk::walk(&ctxt::BE, &who, start, path, flags)? {
+    let (node, attr) = match walk::walk(&ctxt::walker(&c)?, &who, start, path, flags)? {
         Walked::Found { node, attr } => (node, attr),
         Walked::Redirect(_) => return Err(KERNEL),
     };
@@ -192,7 +192,8 @@ fn names_changed(dir: crate::ctx::Node, gone: Option<u64>) {
 
 /// The directory and last name of a socket path (`Err(KERNEL)` outside the pool's tree).
 fn sock_parent(c: &LxCall, who: &Ctx, path: &[u8]) -> Result<walk::Parent, i64> {
-    let p = match walk::walk_parent(&ctxt::BE, who, ctxt::start(c, path)?, path)? {
+    let p = match walk::walk_parent(&ctxt::walker(c)?, who, ctxt::start(c, path)?, path)? {
+
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };

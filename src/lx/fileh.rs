@@ -237,8 +237,9 @@ fn at_of(t: &FdTable, fd: u64, wait: bool) -> Result<(AtInfo, Option<Arc<Mutex<O
 pub(super) type Held = [Option<Arc<Mutex<OpenFile>>>; 2];
 
 /// The state of the caller the service cannot see (`LX_FS_*`), apart from the table.
-/// (`pub(super)`: wave7 G7-5's `xexec` fills the same context.)
-pub(super) fn fs_flags_global(c: &LxCall) -> u32 {
+/// (`pub(super)`: wave7 G7-5's `xexec` fills the same context.) wave7 G7-7: also sets
+/// [`LxCall::mnt_gen`], the generation of the caller's mount table the service walks with.
+pub(super) fn fs_flags_global(c: &mut LxCall) -> u32 {
     use crate::compat::linux as l;
     let mut f = 0;
     if l::landlock::active() {
@@ -253,11 +254,51 @@ pub(super) fn fs_flags_global(c: &LxCall) -> u32 {
     if l::abac::active() {
         f |= LX_FS_ABAC;
     }
+    // wave7 G7-7 begin: the service walks with its copy of the caller's mount table (taken
+    // by generation, `LX_FH_MNTTAB`); only a table it cannot walk keeps the call here
+    if VFS_MNT.load(Ordering::Relaxed) {
+        match l::mount::vfs_gen(c.mnt_ns as u64) {
+            Some(g) => c.mnt_gen = g,
+            None => f |= LX_FS_MOUNTS,
+        }
+        return f;
+    }
+    // wave7 G7-7 end
     if c.mnt_ns != 0 || l::fuse::ns0_any() {
         f |= LX_FS_MOUNTS;
     }
     f
 }
+
+// wave7 G7-7 begin
+/// Whether the file service gets the calls of callers with mounts (a copy of their mount
+/// table); `lx.vfsmnt=kernel` at boot: no, the kernel answers them (the behaviour before).
+pub static VFS_MNT: AtomicBool = AtomicBool::new(true);
+
+/// [`LX_FH_MNTTAB`](crate::ipc::protocol::LX_FH_MNTTAB): namespace `ns`'s table to `buf` (a
+/// head and at most `cap` records); the number of slots.
+fn mnttab(ns: u64, buf: u64, cap: u64) -> i64 {
+    use crate::ipc::protocol::{LxMntHead, LxMntRec};
+    let (gen, root, mounts) = match crate::compat::linux::mount::vfs_table(ns) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let n = mounts.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
+    let head = LxMntHead { gen, root, n: mounts.len() as u32 };
+    let mut bytes = Vec::with_capacity(core::mem::size_of::<LxMntHead>() + n * core::mem::size_of::<LxMntRec>());
+    // SAFETY: plain integers (repr C, no padding holes left uninitialized: all fields set)
+    bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(&head as *const LxMntHead as *const u8, core::mem::size_of::<LxMntHead>()) });
+    for m in &mounts[..n] {
+        let r = LxMntRec { kind: m.kind, flags: m.flags, parent: m.parent, pad: 0, mountpoint: m.mountpoint, root: m.root };
+        // SAFETY: as above
+        bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(&r as *const LxMntRec as *const u8, core::mem::size_of::<LxMntRec>()) });
+    }
+    if crate::compat::linux::vfs::copy_out(buf, &bytes).is_err() {
+        return EFAULT;
+    }
+    mounts.len() as i64
+}
+// wave7 G7-7 end
 
 /// Fills call `c` (number `nr` of shape `sh`) with the caller's file context from its
 /// descriptor table `t`. `Ok(None)`: the kernel answers (a call on a descriptor that is not a
@@ -331,7 +372,9 @@ pub static KEPT_BY: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 /// Whether call `c` is the kernel's at once (counted by reason).
 fn kernel_only(c: &LxCall) -> bool {
     let hit = c.fs_flags & kernel_mask(c.nr);
-    let mounts = c.root_mnt != 0 || c.cwd_mnt != 0;
+    // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
+    // namespace a root or working directory on a mount is a FUSE one)
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0);
     if hit == 0 && !mounts {
         return false;
     }
@@ -420,7 +463,8 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
             return None;
         }
     };
-    c.fs_flags |= fs_flags_global(&c);
+    let f = fs_flags_global(&mut c);
+    c.fs_flags |= f;
     if kernel_only(&c) {
         return None;
     }
@@ -465,7 +509,8 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         }
         Err(()) => return None,
     };
-    c.fs_flags |= fs_flags_global(&c);
+    let f = fs_flags_global(&mut c);
+    c.fs_flags |= f;
     if kernel_only(&c) {
         for h in held.into_iter().flatten() {
             super::drop_last(h);
@@ -738,6 +783,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         // wave7 G7-6 begin
         crate::ipc::protocol::LX_FH_NSLIST => nslist(a, b),
         // wave7 G7-6 end
+        crate::ipc::protocol::LX_FH_MNTTAB => mnttab(a, b, c), // wave7 G7-7
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;

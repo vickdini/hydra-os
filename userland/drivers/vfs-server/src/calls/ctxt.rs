@@ -1,6 +1,7 @@
 //! The caller's context of a file call: where its paths start, who it is, and when the
 //! kernel must answer instead (`fs_flags`, roots and descriptors outside the pool).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use hydra_rt::svcrt::Cx;
@@ -8,9 +9,10 @@ use hydra_rt::svcrt::Cx;
 use crate::be::ZfsBackend;
 use crate::ctx::{Ctx, Node};
 use crate::fs::fsproto::Attr;
+use crate::kmounts::{self, View};
 use crate::perm;
 use crate::proto::{LxCall, LX_AT_CWD, LX_AT_DIR, LX_AT_FILE, LX_FS_FOREIGN, LX_FS_MOUNTS};
-use crate::walk::{self, Start, Walked};
+use crate::walk::{self, Backend, Mounts, Start, Walked};
 use crate::zfs;
 
 pub use super::rules::{ENOENT, KERNEL};
@@ -19,25 +21,108 @@ pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 /// `AT_EMPTY_PATH`.
 pub const AT_EMPTY_PATH: u64 = 0x1000;
 
-/// The back end every call walks through (the caches in front of zfs-server).
-/// (`ns` 0: the calls serve only the pool's own tree, mount 0, and hand the rest to the
-/// kernel, so no tmpfs node reaches this back end yet — 7-3)
-pub static BE: ZfsBackend = ZfsBackend { nocache: false, ns: 0 };
+/// The back end of the objects themselves (the caches in front of zfs-server): pool
+/// objects only (`POOL_ONLY`: no node reaches vfs-server's own tmpfs through the calls;
+/// the kernel's tmpfs mounts are pool trees). The walks use [`walker`]: this back end with
+/// the caller's mount table.
+pub static BE: ZfsBackend = ZfsBackend { nocache: false, ns: crate::mount::POOL_ONLY };
 
-/// The node of a kernel context word: inode `ino` (0: the pool root) in mount `mnt`.
-pub fn node(ino: u64, mnt: u32) -> Result<Node, i64> {
-    // (mounts are the kernel's until group 7-3 moves the tables)
-    if mnt != 0 || mnt > u16::MAX as u32 {
+// wave7 G7-7 begin: the caller's mount table (`kmounts`)
+/// The walk's back end for one call: [`BE`] with the copy of the caller's mount table.
+pub struct Walker {
+    /// The copy of the caller's table.
+    pub view: Arc<View>,
+}
+
+impl Backend for Walker {
+    fn lookup(&self, dir: Node, name: &[u8]) -> Result<Node, i64> {
+        BE.lookup(dir, name)
+    }
+    fn getattr(&self, n: Node) -> Result<Attr, i64> {
+        BE.getattr(n)
+    }
+    fn readlink(&self, n: Node) -> Result<Vec<u8>, i64> {
+        BE.readlink(n)
+    }
+    fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
+        BE.acl(n)
+    }
+    fn mounts(&self) -> &dyn Mounts {
+        &*self.view
+    }
+}
+
+/// The walker of call `c`: the copy of its caller's mount table at least as new as the
+/// call (`LxCall::mnt_gen`).
+pub fn walker(c: &LxCall) -> Result<Walker, i64> {
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)? })
+}
+
+/// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another
+/// namespace its root mount's root) in mount `c.root_mnt` (0 there: the root mount).
+fn root_in(v: &View, c: &LxCall) -> Result<Node, i64> {
+    if v.ns == 0 {
+        if c.root_mnt != 0 {
+            return Err(KERNEL);
+        }
+        return Ok(Node::new(0, if c.root == 0 { zfs::root()? } else { c.root }));
+    }
+    let mnt = if c.root_mnt == 0 { v.root } else { c.root_mnt };
+    let ino = if c.root == 0 { v.root_ino().ok_or(KERNEL)? } else { c.root };
+    let n = Node::new(u16::try_from(mnt).map_err(|_| KERNEL)?, ino);
+    if !v.walkable(n) {
         return Err(KERNEL);
     }
-    Ok(Node::new(0, if ino == 0 { zfs::root()? } else { ino }))
+    Ok(n)
 }
+
+/// The node of a kernel context word in table `v`: inode `ino` in mount `mnt` (the initial
+/// namespace: 0 is the pool root; another: 0 is the caller's `root`, and a mount 0 is only
+/// right for the root itself, as the kernel's walk takes it).
+fn node_in(v: &View, root: Node, ino: u64, mnt: u32) -> Result<Node, i64> {
+    if v.ns == 0 {
+        if mnt != 0 {
+            return Err(KERNEL);
+        }
+        return Ok(Node::new(0, if ino == 0 { zfs::root()? } else { ino }));
+    }
+    if ino == 0 || (mnt == 0 && ino == root.ino) {
+        return Ok(root);
+    }
+    let n = Node::new(u16::try_from(mnt).map_err(|_| KERNEL)?, ino);
+    if mnt == 0 || !v.walkable(n) {
+        return Err(KERNEL);
+    }
+    Ok(n)
+}
+
+/// The `MS_*` flags of the mount `n` is in, for call `c`.
+pub fn mount_flags(c: &LxCall, n: Node) -> Result<u32, i64> {
+    Ok(walker(c)?.view.flags(n.mnt))
+}
+
+/// [`KERNEL`] when `n` lies in a read-only mount (the kernel answers `EROFS`).
+pub fn writable(c: &LxCall, n: Node) -> Result<(), i64> {
+    if mount_flags(c, n)? & kmounts::MS_RDONLY != 0 {
+        return Err(KERNEL);
+    }
+    Ok(())
+}
+
+/// [`KERNEL`] when `n` is a mount point (removing or renaming it is the kernel's).
+pub fn not_mountpoint(c: &LxCall, n: Node) -> Result<(), i64> {
+    if walker(c)?.view.is_mountpoint(n) {
+        return Err(KERNEL);
+    }
+    Ok(())
+}
+// wave7 G7-7 end
 
 /// Fails with [`KERNEL`] when the caller's state needs the kernel: `need` is the call's own
 /// `LX_FS_*` bits on top of a root or working directory outside the pool and mounts the
-/// service does not know.
+/// service cannot be given (wave7 G7-7: the others come as a copy of the table, `walker`).
 pub fn check(c: &LxCall, need: u32) -> Result<(), i64> {
-    if c.fs_flags & (LX_FS_FOREIGN | LX_FS_MOUNTS | need) != 0 || c.root_mnt != 0 || c.cwd_mnt != 0 {
+    if c.fs_flags & (LX_FS_FOREIGN | LX_FS_MOUNTS | need) != 0 || (c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0)) {
         return Err(KERNEL);
     }
     Ok(())
@@ -45,7 +130,8 @@ pub fn check(c: &LxCall, need: u32) -> Result<(), i64> {
 
 /// The caller (its effective ids, groups, capabilities, namespace and root).
 pub fn caller(c: &LxCall) -> Result<Ctx, i64> {
-    Ok(Ctx::from_call(c, node(c.root, c.root_mnt)?))
+    let w = walker(c)?;
+    Ok(Ctx::from_call(c, root_in(&w.view, c)?))
 }
 
 /// Where a relative `path` of call `c` starts: its directory descriptor (`at_*`) or the
@@ -54,10 +140,12 @@ pub fn start(c: &LxCall, path: &[u8]) -> Result<Start, i64> {
     if path.first() == Some(&b'/') {
         return Ok(Start::Root);
     }
+    let w = walker(c)?;
+    let root = root_in(&w.view, c)?;
     match c.at_kind {
-        LX_AT_CWD => Ok(Start::At(node(c.cwd, c.cwd_mnt)?)),
+        LX_AT_CWD => Ok(Start::At(node_in(&w.view, root, c.cwd, c.cwd_mnt)?)),
         // (a file as the directory: the walk says ENOTDIR, as Linux does)
-        LX_AT_FILE | LX_AT_DIR => Ok(Start::At(node(c.at_ino, c.at_mnt)?)),
+        LX_AT_FILE | LX_AT_DIR => Ok(Start::At(node_in(&w.view, root, c.at_ino, c.at_mnt)?)),
         _ => Err(KERNEL),
     }
 }
@@ -65,7 +153,11 @@ pub fn start(c: &LxCall, path: &[u8]) -> Result<Start, i64> {
 /// The handle of a call on a descriptor (`at_*` with kind file or directory).
 pub fn handle(c: &LxCall) -> Result<Node, i64> {
     match c.at_kind {
-        LX_AT_FILE | LX_AT_DIR => node(c.at_ino, c.at_mnt),
+        LX_AT_FILE | LX_AT_DIR => {
+            let w = walker(c)?;
+            let root = root_in(&w.view, c)?;
+            node_in(&w.view, root, c.at_ino, c.at_mnt)
+        }
         _ => Err(KERNEL),
     }
 }
@@ -81,7 +173,7 @@ pub fn path(cx: &Cx, ptr: u64, empty_ok: bool) -> Result<Vec<u8>, i64> {
 /// another service (today: the kernel) serves is [`KERNEL`].
 pub fn find(c: &LxCall, who: &Ctx, path: &[u8], follow: bool) -> Result<(Node, Attr), i64> {
     let start = start(c, path)?;
-    match walk::walk(&BE, who, start, path, if follow { 0 } else { walk::NOFOLLOW })? {
+    match walk::walk(&walker(c)?, who, start, path, if follow { 0 } else { walk::NOFOLLOW })? {
         Walked::Found { node, attr } => Ok((node, attr)),
         // wave7 G7-4: `/proc` and `/sys` go to linux-server (the answer makes the redirect)
         Walked::Redirect(r) => Err(super::pseudo_redirect(&r)),
@@ -101,8 +193,8 @@ pub fn may_access(who: &Ctx, attr: &Attr, acl: Option<&[u8]>, uid: u32, gid: u32
 /// The access ACL of `n` when its attributes say it may have one (an ACL that cannot be
 /// read fails the call: the mode bits alone could allow what it denies — 7-1's a78655f).
 pub fn acl_of(n: Node, attr: &Attr) -> Result<Option<Vec<u8>>, i64> {
-    use crate::walk::Backend;
     if attr.has_xattr {
+
         BE.acl(n)
     } else {
         Ok(None)

@@ -34,6 +34,7 @@ mod cache;
 mod ctx;
 mod lock;
 // wave7 G7-3 begin: mount tables and tmpfs
+mod kmounts; // wave7 G7-7: the kernel's mount tables as the calls walk them
 mod mount;
 mod mountcalls;
 mod mtab;
@@ -222,6 +223,10 @@ fn take_notes(seq: u64) {
 fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
     if kind == LX_NOTE_MNTNS {
+        // wave7 G7-7: a namespace that is gone takes its table copy with it
+        if b == u64::MAX {
+            kmounts::forget(a as u32);
+        }
         // wave7 G7-6: one at a time with a resync (see `recover::resync`)
         let _sync = recover::NS_SYNC.lock();
         mount::on_mntns(a, b, &mut *tmpfs_mem::STORE.lock());

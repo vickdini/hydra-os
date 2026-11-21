@@ -174,10 +174,16 @@ impl Mounts for TableMounts {
     }
 }
 
+// wave7 G7-7 begin
+/// A back end's namespace that never routes to vfs-server's own tmpfs: the calls' back end
+/// (their mount numbers are the kernel's, `kmounts`; the kernel's tmpfs mounts are pool trees).
+pub const POOL_ONLY: u32 = u32::MAX;
+// wave7 G7-7 end
+
 /// The tmpfs instance mount `mnt` (the walk's number) of namespace `ns` shows, if it is a
 /// tmpfs mount.
 pub fn tmpfs_of(ns: u32, mnt: u16) -> Option<u32> {
-    if mnt == 0 || SIMPLE.load(Ordering::Acquire) {
+    if mnt == 0 || ns == POOL_ONLY || SIMPLE.load(Ordering::Acquire) {
         return None;
     }
     let g = MTAB.lock();

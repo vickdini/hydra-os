@@ -1,0 +1,16 @@
+[package]
+name = "hydra_hosttests_w7_43"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7-7's host unit tests: vfs-server's copy of the kernel's mount tables (kmounts.rs) and the walk across them, the walk's leftovers from 7-1, on Group 7-1's fake file system"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"

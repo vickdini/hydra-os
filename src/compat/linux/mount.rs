@@ -470,6 +470,7 @@ pub fn copy_ns(from: u64, ns_id: u64, fds: &crate::fs::SharedFdTable) {
     let root_mnt = copy.root;
     let held = tree_roots(copy.mounts.iter().flatten());
     NAMESPACES.lock().insert(ns_id, Arc::new(Mutex::new(copy)));
+    bump(ns_id); // wave7 G7-7
     hold_roots(&held, true);
     let mut f = fds.lock();
     if from == 0 {
@@ -488,6 +489,7 @@ fn collect() {
         let ids: Vec<u64> = all.keys().copied().filter(|id| !live.contains(id)).collect();
         ids.into_iter().filter_map(|id| all.remove(&id)).collect()
     };
+    forget_gens(); // wave7 G7-7
     for ns in dead {
         let held = tree_roots(ns.lock().mounts.iter().flatten());
         hold_roots(&held, false);
@@ -1861,6 +1863,15 @@ fn statmount(req: u64, buf: u64, bufsize: u64, flags: u64) -> i64 {
 /// fsconfig (431), fsmount (432), fspick (433), mount_setattr (442).
 pub fn dispatch_new(num: u64, a: [u64; 6]) -> i64 {
     let _ = EROFS;
+    // wave7 G7-7: the file service's copy follows every change (statmount/listmount read only)
+    let r = dispatch_new_inner(num, a);
+    if !matches!(num, 457 | 458) {
+        bump(current_ns_id());
+    }
+    r
+}
+
+fn dispatch_new_inner(num: u64, a: [u64; 6]) -> i64 {
     match num {
         428 => open_tree(a[0], a[1], a[2]),
         429 => move_mount(a[0], a[1], a[2], a[3], a[4]),
@@ -1883,11 +1894,148 @@ pub fn dispatch_new(num: u64, a: [u64; 6]) -> i64 {
 /// # Returns
 /// `Some(result)` for these calls, `None` otherwise.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
-    Some(match num {
+    let r = match num {
         155 => pivot_root(a[0], a[1]),
         165 => mount(a[0], a[1], a[2], a[3], a[4]),
         166 => umount2(a[0], a[1]),
         _ => return None,
-    })
+    };
+    // wave7 G7-7: the file service's copy follows every change
+    bump(current_ns_id());
+    Some(r)
 }
 
+// wave7 G7-7 begin: the mounts step — vfs-server's copy of these tables
+//
+// This table stays the one owner of every namespace's mounts (wave 7); the file service
+// walks with a copy it takes by generation (`LX_FH_MNTTAB`, `crate::lx::fileh`). Every change
+// moves the namespace's generation on ([`bump`]): after each mount system call, a namespace
+// copy and a FUSE mount or unmount of the initial namespace. A call carries its namespace's
+// generation (`LxCall::mnt_gen`); the service takes the table again when its copy is older.
+
+/// The last generation handed out (each change takes the next one).
+static MNT_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The initial namespace's generation (its FUSE mounts; 0: none ever).
+static NS0_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The other namespaces: `(generation, whether the file service can walk the table)`.
+static GENS: Mutex<BTreeMap<u64, (u64, bool)>> = Mutex::new(BTreeMap::new());
+
+/// [`VfsMount::kind`]: as `LX_MNT_HOLE`, `LX_MNT_TREE`, `LX_MNT_TMPFS`, `LX_MNT_KERNEL`.
+pub const VFS_HOLE: u32 = 0;
+/// See [`VFS_HOLE`].
+pub const VFS_TREE: u32 = 1;
+/// See [`VFS_HOLE`].
+pub const VFS_TMPFS: u32 = 2;
+/// See [`VFS_HOLE`].
+pub const VFS_KERNEL: u32 = 3;
+
+/// One mount as the file service sees it (`LxMntRec`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VfsMount {
+    /// `VFS_*`.
+    pub kind: u32,
+    /// `MS_*` flags.
+    pub flags: u32,
+    /// Its parent mount (1-based, 0: none).
+    pub parent: u32,
+    /// The directory it covers.
+    pub mountpoint: u64,
+    /// Its root object.
+    pub root: u64,
+}
+
+/// Whether named mount `m` is served somewhere else than where it is (what [`canonical`]
+/// rebases): the file service hands everything below it to the kernel.
+fn named_elsewhere(m: &Mount) -> bool {
+    match (&m.serves, m.fstype.as_str()) {
+        (Some(served), _) => *served != m.path,
+        (None, "devtmpfs") => m.path != "/dev",
+        _ => false,
+    }
+}
+
+/// Mount `m` as the file service sees it; `None`: it cannot walk this table.
+fn vfs_mount(m: &Mount) -> Option<VfsMount> {
+    let flags = m.flags as u32;
+    // (a nosymfollow mount changes the walk's rules: the kernel walks such tables)
+    if m.flags & MS_NOSYMFOLLOW != 0 {
+        return None;
+    }
+    let kind = match m.kind {
+        Kind::Named if named_elsewhere(m) => {
+            // (a mount point the kernel could not locate: only its path names it)
+            if m.mountpoint == 0 || m.mountpoint == u64::MAX {
+                return None;
+            }
+            VFS_KERNEL
+        }
+        Kind::Named => VFS_HOLE,
+        Kind::Tree { .. } if m.root == 0 || m.root == u64::MAX => return None,
+        Kind::Tree { .. } if super::fuse::is_fuse(m.root) => VFS_KERNEL,
+        Kind::Tree { tmpfs: Some(_) } => VFS_TMPFS,
+        Kind::Tree { tmpfs: None } => VFS_TREE,
+    };
+    Some(VfsMount { kind, flags, parent: m.parent as u32, mountpoint: m.mountpoint, root: m.root })
+}
+
+/// The file service's view of table `t`; `None` when it cannot walk it.
+fn vfs_mounts(t: &MountNs) -> Option<Vec<VfsMount>> {
+    t.mounts.iter().map(|m| match m {
+        Some(m) => vfs_mount(m),
+        None => Some(VfsMount::default()),
+    }).collect()
+}
+
+/// Namespace `ns` changed (0: the initial namespace's FUSE mounts): its generation moves on.
+pub fn bump(ns: u64) {
+    let gen = MNT_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    if ns == 0 {
+        NS0_GEN.store(gen, Ordering::Release);
+        return;
+    }
+    let ok = match table(ns) {
+        Some(t) => vfs_mounts(&t.lock()).is_some(),
+        None => {
+            GENS.lock().remove(&ns);
+            return;
+        }
+    };
+    GENS.lock().insert(ns, (gen, ok));
+}
+
+/// The generation of namespace `ns`'s table for a call to the file service; `None` when
+/// the service cannot walk it (or the answer is not at hand without waiting: the kernel
+/// answers the call then).
+pub fn vfs_gen(ns: u64) -> Option<u64> {
+    if ns == 0 {
+        return Some(NS0_GEN.load(Ordering::Acquire));
+    }
+    let g = GENS.try_lock()?;
+    g.get(&ns).and_then(|&(gen, ok)| ok.then_some(gen))
+}
+
+/// Namespace `ns`'s table for the file service: `(generation, root mount, mounts)` (slot
+/// `i` = mount `i + 1`). `Err(-ESRCH)`: no such namespace; `Err(-EOPNOTSUPP)`: one it cannot
+/// walk. The generation is read before the table, so the table is at least that new.
+pub fn vfs_table(ns: u64) -> Result<(u64, u32, Vec<VfsMount>), i64> {
+    const ESRCH: i64 = -3;
+    const EOPNOTSUPP: i64 = -95;
+    if ns == 0 {
+        let gen = NS0_GEN.load(Ordering::Acquire);
+        let list = super::fuse::ns0_list();
+        let mounts = list.iter().map(|&(mountpoint, root, _)| VfsMount { kind: VFS_KERNEL, flags: 0, parent: 0, mountpoint, root }).collect();
+        return Ok((gen, 0, mounts));
+    }
+    let gen = GENS.lock().get(&ns).map(|g| g.0).ok_or(ESRCH)?;
+    let t = table(ns).ok_or(ESRCH)?;
+    let t = t.lock();
+    let mounts = vfs_mounts(&t).ok_or(EOPNOTSUPP)?;
+    Ok((gen, t.root as u32, mounts))
+}
+
+/// Forgets the generations of namespaces that have no table any more.
+fn forget_gens() {
+    let live: Vec<u64> = NAMESPACES.lock().keys().copied().collect();
+    GENS.lock().retain(|ns, _| live.contains(ns));
+}
+// wave7 G7-7 end

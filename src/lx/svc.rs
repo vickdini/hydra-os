@@ -100,6 +100,11 @@ pub fn init(words: &[u8]) -> bool {
             all_kernel = true;
             continue;
         }
+        // wave7 G7-7: `lx.vfsmnt=kernel`: calls of callers with mounts stay the kernel's
+        if w == b"vfsmnt=kernel" {
+            super::fileh::VFS_MNT.store(false, Ordering::Relaxed);
+            continue;
+        }
         let Some(eq) = w.iter().position(|&c| c == b'=') else { continue };
         let (name, val) = (&w[..eq], &w[eq + 1..]);
         let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) else { continue };

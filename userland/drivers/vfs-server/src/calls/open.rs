@@ -79,7 +79,12 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         return Err(FIFO);
     }
     // wave7 G7-5 end
+    // wave7 G7-7: writing into a read-only mount: the kernel answers (EROFS)
+    if flags & rules::O_ACCMODE != rules::O_RDONLY {
+        ctxt::writable(c, n)?;
+    }
     let want = rules::decide(attr.mode, flags)?;
+
     let acl = ctxt::acl_of(n, &attr)?;
     if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {
         return Err(EACCES);

@@ -83,6 +83,9 @@ pub static TRACED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 pub static NET_ISOLATED: AtomicBool = AtomicBool::new(false);
 /// wave7 G7-2: `lx::fileh`'s switches (landlock 1, fanotify 2, inotify 4, abac 8, FUSE mounts 16).
 pub static FS_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// wave7 G7-7: the fake mount tables (`compat::linux::mount` stub).
+#[allow(clippy::type_complexity)]
+pub static MNT_TABLES: spin::Mutex<alloc::vec::Vec<(u64, u64, u32, alloc::vec::Vec<crate::compat::linux::mount::VfsMount>)>> = spin::Mutex::new(alloc::vec::Vec::new());
 pub static IPC_NS: AtomicU64 = AtomicU64::new(0);
 /// `smp::online()`.
 pub static ONLINE_CPUS: AtomicUsize = AtomicUsize::new(1);

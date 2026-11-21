@@ -55,6 +55,11 @@ pub fn access(cx: &Cx) -> Result<i64, i64> {
     if mode & 7 == 0 {
         return Ok(0);
     }
+    // wave7 G7-7: write on a read-only mount, run on a noexec one: the kernel decides
+    let mf = ctxt::mount_flags(c, n)?;
+    if (mode & 2 != 0 && mf & crate::kmounts::MS_RDONLY != 0) || (mode & 1 != 0 && mf & crate::kmounts::MS_NOEXEC != 0) {
+        return Err(ctxt::KERNEL);
+    }
     let (uid, gid) = if flags & AT_EACCESS != 0 { (c.euid, c.egid) } else { (c.uid, c.gid) };
     let acl = ctxt::acl_of(n, &attr)?;
     if ctxt::may_access(&who, &attr, acl.as_deref(), uid, gid, mode & 7) {
@@ -91,8 +96,13 @@ pub fn statfs(cx: &Cx) -> Result<i64, i64> {
     ctxt::check(c, 0)?;
     let path = ctxt::path(cx, cx.args[0], false)?;
     let who = ctxt::caller(c)?;
-    ctxt::find(c, &who, &path, true)?;
+    let (n, _) = ctxt::find(c, &who, &path, true)?;
+    // wave7 G7-7: a tmpfs mount reports its own numbers (the kernel's)
+    if ctxt::walker(c)?.view.is_tmpfs(n.mnt) {
+        return Err(ctxt::KERNEL);
+    }
     let (total, free, objs) = crate::zfs::statfs()?;
+
     cx.copy_out(cx.args[1], &enc::statfs(total, free, objs, POOL_FSID))?;
     Ok(0)
 }

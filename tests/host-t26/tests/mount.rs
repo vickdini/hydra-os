@@ -781,3 +781,70 @@ fn statmount_and_listmount() {
     assert_eq!(u64::from_le_bytes(v[112..120].try_into().unwrap()), ns);
     assert_eq!(u64::from_le_bytes(v[24..32].try_into().unwrap()), 0x0102_1994);
 }
+
+// wave7 G7-7 begin: the generations and the file service's copy of a table
+#[test]
+fn the_file_services_view_follows_every_change() {
+    let _e = setup();
+    memfs::mkdir_p("/data");
+    memfs::mkdir_p("/ro");
+    memfs::mkdir_p("/tmp");
+    memfs::mkdir_p("/newroot/proc");
+    memfs::mkfile("/sandbox/null", b"");
+    // Not a namespace the kernel knows yet
+    assert_eq!(mount::vfs_table(987_654).unwrap_err(), -3);
+    assert_eq!(mount::vfs_gen(987_654), None);
+    let ns = unshare();
+    let g0 = mount::vfs_gen(ns).unwrap();
+    assert!(g0 > 0);
+    let (g, root, t0) = mount::vfs_table(ns).unwrap();
+    assert_eq!((g, root), (g0, 1));
+    // The root is a pool tree; the standard named mounts are where Hydra serves them
+    assert_eq!(t0[0].kind, mount::VFS_TREE);
+    assert!(t0[1..].iter().all(|m| m.kind == mount::VFS_HOLE));
+    // A read-only bind: a new generation, a tree with its flags and mount point
+    assert_eq!(mnt("/data", "/ro", "", MS_BIND | MS_RDONLY, ""), 0);
+    let g1 = mount::vfs_gen(ns).unwrap();
+    assert!(g1 > g0);
+    let (_, _, t1) = mount::vfs_table(ns).unwrap();
+    let ro = t1.last().unwrap();
+    assert_eq!((ro.kind, ro.flags & 1, ro.parent), (mount::VFS_TREE, 1, 1));
+    assert_eq!(ro.mountpoint, memfs::lookup("/ro").unwrap());
+    assert_eq!(ro.root, memfs::lookup("/data").unwrap());
+    // tmpfs
+    assert_eq!(mnt("tmpfs", "/tmp", "tmpfs", 0, ""), 0);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_TMPFS);
+    // proc somewhere else and a bind of a device served by name: the kernel's below them
+    assert_eq!(mnt("proc", "/newroot/proc", "proc", 0, ""), 0);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_KERNEL);
+    assert_eq!(mnt("/dev/null", "/sandbox/null", "", MS_BIND, ""), 0);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_KERNEL);
+    // Even a failed call moves the generation (nothing is lost by taking a table again)
+    let g2 = mount::vfs_gen(ns).unwrap();
+    assert!(umount("/nowhere", 0) < 0);
+    assert!(mount::vfs_gen(ns).unwrap() > g2);
+    // An unmount empties the slot; statmount/listmount do not move it
+    let before = mount::vfs_table(ns).unwrap().2.len();
+    assert_eq!(umount("/ro", 0), 0);
+    let (g3, _, t3) = mount::vfs_table(ns).unwrap();
+    assert_eq!(t3.len(), before);
+    assert_eq!(t3[1 + 6].kind, mount::VFS_HOLE);
+    let _ = mount::dispatch_new(458, [0, 0, 0, 0, 0, 0]);
+    assert_eq!(mount::vfs_gen(ns), Some(g3));
+    // A nosymfollow mount: the kernel walks this table
+    assert_eq!(mnt("/data", "/ro", "", MS_BIND | 256, ""), 0);
+    assert_eq!(mount::vfs_gen(ns), None);
+    assert_eq!(mount::vfs_table(ns).unwrap_err(), -95);
+}
+
+#[test]
+fn the_initial_namespace_has_a_generation_for_its_fuse_mounts() {
+    let _e = setup();
+    let (g, root, t) = mount::vfs_table(0).unwrap();
+    assert_eq!(root, 0);
+    assert_eq!(mount::vfs_gen(0), Some(g));
+    assert!(t.iter().all(|m| m.kind == mount::VFS_KERNEL && m.parent == 0));
+    mount::bump(0);
+    assert!(mount::vfs_gen(0).unwrap() > g);
+}
+// wave7 G7-7 end
