@@ -1543,6 +1543,9 @@ pub const LX_FHC_TRUNC: u64 = 4;
 /// [`LX_FH_CHANGED`] `what`: every object's attributes may have changed (a name removed or
 /// moved changes link counts).
 pub const LX_FHC_ALL_ATTRS: u64 = 16;
+/// [`LX_FH_CHANGED`] `what`: the object lost its last name (unlinked or replaced): the page
+/// cache stops keeping it.
+pub const LX_FHC_GONE: u64 = 32;
 
 /// Notification to the file service: the kernel changed object `a` (a write, a truncation,
 /// its own fallback paths): forget its attributes; `a` = 0: forget every lookup and

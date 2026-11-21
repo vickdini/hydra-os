@@ -894,6 +894,9 @@ pub mod compat {
         }
 
         pub mod mm {
+            pub fn cache_forget(ino: u64) {
+                crate::fake::rec(|r| r.fs_truncated.push((ino, u64::MAX)));
+            }
             pub fn cache_truncated(ino: u64, size: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, size)));
             }

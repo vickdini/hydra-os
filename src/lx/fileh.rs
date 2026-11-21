@@ -43,7 +43,7 @@ use super::{SyscallFrame, T_FSCTX, T_SERVER, T_SVC_SHIFT, T_UMASK};
 use crate::fs::fd::OpenFile;
 use crate::fs::{FdTable, FileDescriptor};
 use crate::ipc::protocol::{
-    LxCall, LxFhDesc, LxFhInfo, SvcId, LXS_VFS, LX_AT_CWD, LX_AT_DIR, LX_AT_FILE, LX_AT_OTHER, LX_FHC_ALL_ATTRS, LX_FHC_ATTR, LX_FHC_NAMES, LX_FHC_TRUNC, LX_FHP_ABS, LX_FHP_AT,
+    LxCall, LxFhDesc, LxFhInfo, SvcId, LXS_VFS, LX_AT_CWD, LX_AT_DIR, LX_AT_FILE, LX_AT_OTHER, LX_FHC_ALL_ATTRS, LX_FHC_ATTR, LX_FHC_GONE, LX_FHC_NAMES, LX_FHC_TRUNC, LX_FHP_ABS, LX_FHP_AT,
     LX_FHP_CWD, LX_FH_CHANGED, LX_FH_CHDIR, LX_FH_CHROOT, LX_FH_CLAIM, LX_FH_REROOT, LX_FH_INFO, LX_FH_INSTALL, LX_FH_PATH_MAX, LX_FH_SEEK, LX_FS_ABAC, LX_FS_FANOTIFY, LX_FS_FOREIGN, LX_FS_INOTIFY, LX_FS_LANDLOCK,
     LX_FS_MOUNTS, LX_NOTE_FSCHANGE,
 };
@@ -627,6 +627,9 @@ fn changed(ino: u64, what: u64, arg: u64) -> i64 {
         };
         let size = u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]));
         crate::compat::linux::mm::cache_truncated(ino, size);
+    }
+    if what & LX_FHC_GONE != 0 {
+        crate::compat::linux::mm::cache_forget(ino);
     }
     if what & LX_FHC_NAMES != 0 {
         crate::fs::zfs::forget_names();
