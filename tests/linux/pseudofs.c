@@ -361,6 +361,21 @@ int main(int argc, char **argv) {
         if (!done) printf("no efivars to compare\n");
     }
 
+    // ---- when linux-server serves: Linux's answers for processes (the in-kernel copy is laxer)
+    if (served) {
+        struct stat st;
+        CHECK(stat("/proc/999999/stat", &st) == -1 && errno == ENOENT, "stat of a process that does not exist: ENOENT (errno %d)", errno);
+        CHECK(access("/proc/999999/status", F_OK) == -1 && errno == ENOENT, "access of a process that does not exist: ENOENT");
+        CHECK(stat("/proc/self/stat", &st) == 0 && st.st_uid == geteuid() && st.st_gid == getegid(), "a process's files are its owner's (%u/%u)", st.st_uid, st.st_gid);
+        CHECK(access("/proc/uptime", X_OK) == -1 && errno == EACCES, "X_OK on a /proc file: EACCES");
+        CHECK(access("/proc/uptime", 8) == -1 && errno == EINVAL, "a bad access mode: EINVAL");
+        if (geteuid() != 0) CHECK(access("/proc/uptime", W_OK) == -1 && errno == EACCES, "W_OK as a user: EACCES");
+        CHECK(open("/proc/01/stat", O_RDONLY) == -1, "/proc/01 does not exist");
+        int fd = open("/proc/self/stat", O_RDONLY);
+        CHECK(fstat(fd, &st) == 0 && st.st_uid == geteuid(), "fstat: the owner too");
+        close(fd);
+    }
+
     // ---- many opens and closes (slots are given back)
     for (int i = 0; i < 3000; i++) {
         int fd = open("/proc/self/stat", O_RDONLY);

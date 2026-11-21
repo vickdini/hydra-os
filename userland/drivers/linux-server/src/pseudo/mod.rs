@@ -36,7 +36,10 @@ use crate::client::Cx;
 use crate::lock::YLock;
 use path::{File, PidFile, Target, Who};
 
+const ENOENT: i64 = -2;
+const ESRCH: i64 = -3;
 const ENXIO: i64 = -6;
+const EACCES: i64 = -13;
 const EBADF: i64 = -9;
 const ENOTTY: i64 = -25;
 const EINVAL: i64 = -22;
@@ -76,11 +79,20 @@ struct Open {
     file: File,
     /// The path below the mount (an efivars file's name).
     tail: Vec<u8>,
-    /// The text as made at open (or at the last read from 0).
+    /// The text as made at open (or at the last rewind).
     text: Vec<u8>,
     /// The position of `read`.
     pos: u64,
+    /// A `/proc/<pid>` file's process start time at open (0: not a process file): a remake
+    /// for a process ID now used by another process fails with `ESRCH`, as Linux's pinned
+    /// task does.
+    start: u64,
+    /// This open's number (a slot freed and taken again meanwhile is not this open).
+    seq: u64,
 }
+
+/// The next [`Open::seq`].
+static SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// The open pseudo files, by object slot.
 static OPENS: YLock<BTreeMap<u32, Open>> = YLock::new(BTreeMap::new());
@@ -128,9 +140,12 @@ pub fn redirected(cx: &Cx) -> Answer {
     if target == Target::Kernel || (target == Target::File(File::Efivar) && !matches!(cx.nr, 2 | 257)) {
         return kernel(cx);
     }
+    if target == Target::Missing {
+        return done(ENOENT);
+    }
     let r = match cx.nr {
         4 | 6 | 262 | 332 => stat(cx, obj, tail, target),
-        21 | 269 | 439 => Some(0),
+        21 | 269 | 439 => Some(access(cx, target)),
         89 | 267 => readlink(cx, target),
         2 | 257 => open(cx, obj, tail, target),
         _ => None,
@@ -153,8 +168,7 @@ fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     };
     let nofollow = flags & 0x100 != 0;
     let (mode, size) = match target {
-        Target::File(File::Static(t)) => (S_IFREG | 0o444, t.len() as u64),
-        Target::File(_) => (S_IFREG | 0o444, GEN_SIZE),
+        Target::File(f) => (S_IFREG | 0o444, size_of(f)),
         Target::SelfLink(_) if nofollow => (S_IFLNK | 0o777, 0),
         _ => return None,
     };
@@ -162,9 +176,56 @@ fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
         Target::File(f) if f.in_sys() => LX_PSEUDO_DEV_SYS,
         _ => LX_PSEUDO_DEV_PROC,
     };
-    let st = Stat { dev, ino: path::ino_of(obj, tail), mode, size };
+    // A process's files: the process must exist; they belong to its effective user and group
+    let (uid, gid) = match owner(cx.id, target) {
+        Ok(o) => o,
+        Err(e) => return Some(e),
+    };
+    let st = Stat { dev, ino: path::ino_of(obj, tail), mode, size, uid, gid };
     let r = if x { cx.copy_out(out, &st.statx()) } else { cx.copy_out(out, &st.stat()) };
     Some(r.err().unwrap_or(0))
+}
+
+/// The size `stat` (and `fstat`) report for `f`.
+fn size_of(f: File) -> u64 {
+    match f {
+        File::Static(t) => t.len() as u64,
+        _ => GEN_SIZE,
+    }
+}
+
+/// The owner of a served file: a process's files are its effective user's and group's (and
+/// the process must exist: `ENOENT`); the others are root's.
+fn owner(id: u64, target: Target) -> Result<(u32, u32), i64> {
+    match target {
+        Target::File(File::Pid { who, tid, .. }) => match task(id, who, tid | LX_INFO_TASK_NOMEM >> 32) {
+            Ok(i) => Ok((i.ids[1], i.ids[4])),
+            Err(_) => Err(ENOENT),
+        },
+        _ => Ok((0, 0)),
+    }
+}
+
+/// `access`, `faccessat`, `faccessat2` of a served file (read-only, mode 0444) or of
+/// `/proc/self` (a directory, 0555): `path::access_rule`, after the process exists.
+fn access(cx: &Cx, target: Target) -> i64 {
+    let a = cx.args;
+    let (mode, flags) = match cx.nr {
+        21 => (a[1], 0),
+        269 => (a[2], 0),
+        _ => (a[2], a[3]),
+    };
+    let c = &cx.c;
+    // (faccessat2's AT_EACCESS: the effective ids)
+    let uid = if flags & 0x200 != 0 { c.euid } else { c.uid };
+    let dir = matches!(target, Target::SelfLink(_));
+    if let Err(e) = path::access_rule(mode, if cx.nr == 439 { flags } else { 0 }, uid, dir) {
+        return e;
+    }
+    match owner(cx.id, target) {
+        Ok(_) => 0,
+        Err(e) => e,
+    }
 }
 
 /// The fields of a pseudo file's `stat`.
@@ -173,6 +234,8 @@ struct Stat {
     ino: u64,
     mode: u32,
     size: u64,
+    uid: u32,
+    gid: u32,
 }
 
 impl Stat {
@@ -183,6 +246,8 @@ impl Stat {
         b[8..16].copy_from_slice(&self.ino.to_le_bytes());
         b[16..24].copy_from_slice(&1u64.to_le_bytes());
         b[24..28].copy_from_slice(&self.mode.to_le_bytes());
+        b[28..32].copy_from_slice(&self.uid.to_le_bytes());
+        b[32..36].copy_from_slice(&self.gid.to_le_bytes());
         b[48..56].copy_from_slice(&self.size.to_le_bytes());
         b[56..64].copy_from_slice(&4096u64.to_le_bytes());
         b
@@ -194,6 +259,8 @@ impl Stat {
         b[0..4].copy_from_slice(&0x17FFu32.to_le_bytes());
         b[4..8].copy_from_slice(&4096u32.to_le_bytes());
         b[16..20].copy_from_slice(&1u32.to_le_bytes());
+        b[20..24].copy_from_slice(&self.uid.to_le_bytes());
+        b[24..28].copy_from_slice(&self.gid.to_le_bytes());
         b[28..30].copy_from_slice(&(self.mode as u16).to_le_bytes());
         b[32..40].copy_from_slice(&self.ino.to_le_bytes());
         b[40..48].copy_from_slice(&self.size.to_le_bytes());
@@ -222,6 +289,10 @@ fn task(id: u64, who: Who, tid: u64) -> Result<LxTaskInfo, i64> {
         Who::Caller => 0,
         Who::Pid(p) => p,
     };
+    // (IDs travel in 32-bit halves; `path::classify` keeps them below 2^31)
+    if pid > i32::MAX as u64 || tid > u32::MAX as u64 {
+        return Err(EINVAL);
+    }
     let mut i = LxTaskInfo::default();
     sys::lx_obj(LX_INFO_TASK, id, pid | tid << 32, &mut i as *mut LxTaskInfo as u64)?;
     Ok(i)
@@ -238,6 +309,9 @@ fn sysinfo(what: u64) -> Result<LxSysInfo, i64> {
 /// A buffer answer of an info primitive taking `(id, pid | len << 32, buf)`: grows the
 /// buffer until the answer fits (`fit`: the answer only needs what was written).
 fn buffer(op: u64, id: u64, pid: u64) -> Result<Vec<u8>, i64> {
+    if pid > i32::MAX as u64 {
+        return Err(EINVAL);
+    }
     let mut cap = 4096usize;
     loop {
         let mut v = alloc::vec![0u8; cap];
@@ -311,8 +385,22 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC | O_DIRECTORY | O_PATH | O_TMPFILE) != 0 {
         return None;
     }
-    // Errors (no such process, maps of another user's process) are the kernel's to answer
-    let text = make(cx.id, file, tail).ok()?;
+    // A process's file: the process (its start time pins it for later remakes) and owner;
+    // no such process: the kernel answers (as before)
+    let (start, uid, gid) = match file {
+        File::Pid { who, tid, .. } => {
+            let i = task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32).ok()?;
+            (i.start.max(1), i.ids[1], i.ids[4])
+        }
+        _ => (0, 0, 0),
+    };
+    // Denied (maps of a process the ptrace read rule hides): answered here, never left to a
+    // laxer rule; other errors (the process went meanwhile) are the kernel's to answer
+    let text = match make(cx.id, file, tail) {
+        Ok(t) => t,
+        Err(EACCES) => return Some(EACCES),
+        Err(_) => return None,
+    };
     // The process by its system-wide ID from now on (reads may come from another process)
     let mut shown = alloc::string::String::from(if file.in_sys() { "/sys/" } else { "/proc/" });
     shown.push_str(&alloc::string::String::from_utf8_lossy(tail));
@@ -323,17 +411,17 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
         }
     }
     let slot = crate::obj::alloc(LX_OBJ_KIND_PSEUDO).ok()?;
-    let size = text.len() as u64;
-    OPENS.lock().insert(slot, Open { file, tail: tail.to_vec(), text, pos: 0 });
-    crate::obj::set_ready(slot, READY, size.max(GEN_SIZE));
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    OPENS.lock().insert(slot, Open { file, tail: tail.to_vec(), text, pos: 0, start, seq });
+    crate::obj::set_ready(slot, READY, size_of(file));
     let dev = if file.in_sys() { LX_PSEUDO_DEV_SYS } else { LX_PSEUDO_DEV_PROC };
     let mut d = LxObjDesc {
         slot,
         kind: LX_OBJ_KIND_PSEUDO,
         flags: (flags & (O_NONBLOCK | O_CLOEXEC)) as u32,
         mode: S_IFREG | if file == File::Efivar { 0o644 } else { 0o444 },
-        uid: 0,
-        gid: 0,
+        uid,
+        gid,
         name_len: 0,
         pad: 0,
         name: [0; LX_OBJ_NAME_MAX],
@@ -354,31 +442,22 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     }
 }
 
-/// Copies the text of `slot` from `at` into the caller's pieces `iov` (at most `max`);
-/// remakes the text first when `at` is 0 and `fresh`.
-fn read_at(cx: &Cx, slot: u32, at: u64, iov: &crate::fdio::Iov, fresh: bool) -> i64 {
-    if fresh && at == 0 {
-        let (file, tail) = match OPENS.lock().get(&slot) {
-            Some(o) => (o.file, o.tail.clone()),
-            None => return EBADF,
-        };
-        if let Ok(t) = make(cx.id, file, &tail) {
-            if let Some(o) = OPENS.lock().get_mut(&slot) {
-                o.text = t;
-            }
+/// The text of open file `slot` made again for the caller of request `id` (a rewind, a
+/// `pread` at 0), with the open's number. A process file whose process ended, or whose ID
+/// now names another process (start time), fails with `ESRCH`; a caller the primitives do
+/// not answer for (another namespace) gets their error. Nothing is kept on failure.
+fn remake(id: u64, slot: u32) -> Result<(Vec<u8>, u64), i64> {
+    let (file, tail, start, seq) = match OPENS.lock().get(&slot) {
+        Some(o) => (o.file, o.tail.clone(), o.start, o.seq),
+        None => return Err(EBADF),
+    };
+    if let File::Pid { who, tid, .. } = file {
+        let i = task(id, who, tid | LX_INFO_TASK_NOMEM >> 32)?;
+        if i.start.max(1) != start {
+            return Err(ESRCH);
         }
     }
-    let chunk: Vec<u8> = {
-        let g = OPENS.lock();
-        let Some(o) = g.get(&slot) else { return EBADF };
-        let start = (at as usize).min(o.text.len());
-        let end = start.saturating_add(iov.total()).min(o.text.len());
-        o.text[start..end].to_vec()
-    };
-    match iov.scatter(cx, &chunk) {
-        Ok(()) => chunk.len() as i64,
-        Err(e) => e,
-    }
+    Ok((make(id, file, &tail)?, seq))
 }
 
 /// A call on a pseudo-file object: `read`, `readv`, the kernel's `lseek` and `pread64`.
@@ -390,50 +469,78 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                 Ok(v) => v,
                 Err(e) => return (e, 0),
             };
-            let pos = match OPENS.lock().get(&slot) {
-                Some(o) => o.pos,
-                None => return (EBADF, 0),
+            // The piece and the new position under one lock (concurrent reads of one open
+            // file never get the same bytes); given back if the copy to the caller fails
+            let (chunk, at, seq) = {
+                let mut g = OPENS.lock();
+                let Some(o) = g.get_mut(&slot) else { return (EBADF, 0) };
+                let start = (o.pos.min(usize::MAX as u64) as usize).min(o.text.len());
+                let end = start.saturating_add(iov.total()).min(o.text.len());
+                let chunk = o.text[start..end].to_vec();
+                let at = o.pos;
+                o.pos += chunk.len() as u64;
+                (chunk, at, o.seq)
             };
-            let n = read_at(cx, slot, pos, &iov, false);
-            if n > 0 {
-                if let Some(o) = OPENS.lock().get_mut(&slot) {
-                    o.pos += n as u64;
+            match iov.scatter(cx, &chunk) {
+                Ok(()) => chunk.len() as i64,
+                Err(e) => {
+                    if let Some(o) = OPENS.lock().get_mut(&slot).filter(|o| o.seq == seq && o.pos == at + chunk.len() as u64) {
+                        o.pos = at;
+                    }
+                    e
                 }
             }
-            n
         }
-        LX_KCALL_PREAD => read_at(cx, slot, cx.args[3], &crate::fdio::Iov::one(cx.args[1], cx.args[2]), true),
-        LX_KCALL_PSEEK => {
-            let (off, whence) = (cx.args[3] as i64, cx.args[4]);
-            let new = {
+        LX_KCALL_PREAD => {
+            let (at, iov) = (cx.args[3], crate::fdio::Iov::one(cx.args[1], cx.args[2]));
+            // (at 0: fresh text for this read only; the open's own text and position stay)
+            let chunk = if at == 0 {
+                match remake(cx.id, slot) {
+                    Ok((t, _)) => t[..t.len().min(iov.total())].to_vec(),
+                    Err(e) => return (e, 0),
+                }
+            } else {
                 let g = OPENS.lock();
                 let Some(o) = g.get(&slot) else { return (EBADF, 0) };
-                match whence {
-                    0 => off,
-                    1 => (o.pos as i64).checked_add(off).unwrap_or(-1),
-                    2 => (o.text.len() as i64).checked_add(off).unwrap_or(-1),
-                    _ => -1,
+                let start = (at.min(usize::MAX as u64) as usize).min(o.text.len());
+                let end = start.saturating_add(iov.total()).min(o.text.len());
+                o.text[start..end].to_vec()
+            };
+            match iov.scatter(cx, &chunk) {
+                Ok(()) => chunk.len() as i64,
+                Err(e) => e,
+            }
+        }
+        LX_KCALL_PSEEK => {
+            let (off, whence) = (cx.args[3] as i64, cx.args[4]);
+            // A rewind reads fresh text (as seq_file does): made first, then text and position
+            // set together
+            let fresh = if whence == 0 && off == 0 {
+                match remake(cx.id, slot) {
+                    Ok(t) => Some(t),
+                    Err(e) => return (e, 0),
                 }
+            } else {
+                None
+            };
+            let mut g = OPENS.lock();
+            let Some(o) = g.get_mut(&slot) else { return (EBADF, 0) };
+            let new = match whence {
+                0 => off,
+                1 => (o.pos as i64).checked_add(off).unwrap_or(-1),
+                2 => (o.text.len() as i64).checked_add(off).unwrap_or(-1),
+                _ => -1,
             };
             if new < 0 {
                 EINVAL
             } else {
-                if new == 0 {
-                    // (a rewind reads fresh text, as seq_file does)
-                    let file = OPENS.lock().get(&slot).map(|o| (o.file, o.tail.clone()));
-                    if let Some(Ok(t)) = file.map(|(f, tail)| make(cx.id, f, &tail)) {
-                        if let Some(o) = OPENS.lock().get_mut(&slot) {
-                            o.text = t;
-                        }
+                if let Some((t, seq)) = fresh {
+                    if seq == o.seq {
+                        o.text = t;
                     }
                 }
-                match OPENS.lock().get_mut(&slot) {
-                    Some(o) => {
-                        o.pos = new as u64;
-                        new
-                    }
-                    None => EBADF,
-                }
+                o.pos = new as u64;
+                new
             }
         }
         1 | 20 => EBADF,

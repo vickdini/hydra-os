@@ -28,19 +28,36 @@ fn to_caller_renumbers_only_the_init() {
 
 #[test]
 fn may_see_follows_the_ptrace_read_rule() {
+    let all = |x: u32| (x, x, x);
     // itself, always (even a service)
-    assert!(may_see(true, true, 1000, 0, (0, 0, 0)));
+    assert!(may_see(true, true, (1000, 1000), 0, all(0), all(0)));
     // a service's process: never
-    assert!(!may_see(false, true, 0, CAP_SYS_PTRACE, (0, 0, 0)));
-    // same user in all three ids
-    assert!(may_see(false, false, 1000, 0, (1000, 1000, 1000)));
-    // a set-user-ID target (euid differs): no
-    assert!(!may_see(false, false, 1000, 0, (1000, 0, 1000)));
-    assert!(!may_see(false, false, 1000, 0, (1000, 1000, 0)));
+    assert!(!may_see(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0)));
+    // same user and group in all three ids
+    assert!(may_see(false, false, (1000, 100), 0, all(1000), all(100)));
+    // a set-user-ID target (euid or suid differs): no
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 0, 1000), all(100)));
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 1000, 0), all(100)));
+    // a set-group-ID target (egid or sgid differs): no (Linux checks the groups too)
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 42, 100)));
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 100, 42)));
+    // a caller of another group: no
+    assert!(!may_see(false, false, (1000, 7), 0, all(1000), all(100)));
     // CAP_SYS_PTRACE: yes
-    assert!(may_see(false, false, 1000, CAP_SYS_PTRACE, (0, 0, 0)));
+    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(0), all(0)));
     // other capabilities do not count
-    assert!(!may_see(false, false, 1000, !CAP_SYS_PTRACE, (0, 0, 0)));
+    assert!(!may_see(false, false, (1000, 100), !CAP_SYS_PTRACE, all(0), all(0)));
+}
+
+#[test]
+fn may_query_answers_only_first_namespace_callers_about_linux_processes() {
+    assert_eq!(may_query(None, false, false), Ok(()));
+    // a caller in a PID namespace of its own, or a user namespace: refused
+    assert_eq!(may_query(Some(300), false, false), Err(err::EPERM));
+    assert_eq!(may_query(None, true, false), Err(err::EPERM));
+    assert_eq!(may_query(Some(300), true, true), Err(err::EPERM));
+    // a service's process is no Linux process
+    assert_eq!(may_query(None, false, true), Err(err::ESRCH));
 }
 
 #[test]
@@ -420,6 +437,12 @@ fn maps_text_matches_the_kernels_layout() {
     assert_eq!(l[3], "00010000-00011000 ---p 00000000 00:00 0");
     // a cut record at the end is ignored, never read past the data
     assert_eq!(text::maps(&data[..10]), b"");
+    // a record cut in its name, or with a name longer than the kernel writes, ends the list
+    let first = record_len(12);
+    assert_eq!(alloc::string::String::from_utf8(text::maps(&data[..first + 40])).unwrap().lines().count(), 1);
+    let mut bad = data.clone();
+    bad[first + 28..first + 32].copy_from_slice(&5000u32.to_le_bytes());
+    assert_eq!(alloc::string::String::from_utf8(text::maps(&bad)).unwrap().lines().count(), 1);
 }
 
 #[test]
@@ -457,4 +480,32 @@ fn classify_rejects_big_ids_and_dot_endings() {
     assert_eq!(p("."), Target::Kernel);
     // `.` in the middle is fine
     assert_eq!(p("./self/./stat"), Target::File(File::Pid { who: Who::Caller, tid: 0, file: PidFile::Stat }));
+}
+
+#[test]
+fn classify_rejects_leading_zeros() {
+    assert_eq!(p("01/stat"), Target::Missing);
+    assert_eq!(p("00/stat"), Target::Missing);
+    assert_eq!(p("1/task/01/stat"), Target::Missing);
+    assert_eq!(p("01/fd"), Target::Missing);
+    assert_eq!(p("10/stat"), Target::File(File::Pid { who: Who::Pid(10), tid: 0, file: PidFile::Stat }));
+}
+
+#[test]
+fn access_rule_for_read_only_files_and_the_self_link() {
+    use crate::pseudo::path::access_rule;
+    // F_OK, R_OK: anyone
+    assert_eq!(access_rule(0, 0, 1000, false), Ok(()));
+    assert_eq!(access_rule(4, 0, 1000, false), Ok(()));
+    // W_OK: root only (it overrides the mode bits)
+    assert_eq!(access_rule(2, 0, 1000, false), Err(-13));
+    assert_eq!(access_rule(2, 0, 0, false), Ok(()));
+    // X_OK: never on a file (no x bit; root too), fine on the directory
+    assert_eq!(access_rule(1, 0, 0, false), Err(-13));
+    assert_eq!(access_rule(1, 0, 1000, true), Ok(()));
+    assert_eq!(access_rule(5, 0, 1000, true), Ok(()));
+    // bad mode bits and faccessat2 flags
+    assert_eq!(access_rule(8, 0, 0, false), Err(-22));
+    assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, false), Ok(()));
+    assert_eq!(access_rule(4, 0x400, 0, false), Err(-22));
 }

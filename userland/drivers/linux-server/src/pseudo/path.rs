@@ -84,6 +84,9 @@ pub enum Target {
     SelfLink(bool),
     /// The kernel answers.
     Kernel,
+    /// Nothing there (`ENOENT`): a process or thread number with leading zeros (Linux's
+    /// /proc has no `01`; the in-kernel copy would take it as 1).
+    Missing,
 }
 
 /// `/proc/sys/...` and other fixed files: `(path below /proc, text)` (the kernel's
@@ -148,10 +151,36 @@ pub fn efivar_name(name: &str) -> bool {
 /// A decimal number of at most 10 digits (no sign, no leading `+`) that fits in 31 bits
 /// (process and thread IDs travel in 32-bit halves of the info primitives' words).
 fn number(s: &str) -> Option<u64> {
-    if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) {
+    // (no leading zeros: Linux's /proc has no `01` entry)
+    if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) || (s.len() > 1 && s.starts_with('0')) {
         return None;
     }
     s.parse().ok().filter(|&n: &u64| n <= i32::MAX as u64)
+}
+
+/// Digits with a leading zero (`01`, `00`).
+fn zero_led(s: &str) -> bool {
+    s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `access` of a served file (mode 0444) or, `dir`, of `/proc/self` (0555), for real or
+/// effective user `uid`: `mode` bits beyond `R_OK | W_OK | X_OK` and `faccessat2` flags beyond
+/// `AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH` are `EINVAL`; writing is root's only
+/// (it overrides the mode bits); executing needs an `x` bit, which only directories have
+/// (root too needs one).
+pub fn access_rule(mode: u64, flags: u64, uid: u32, dir: bool) -> Result<(), i64> {
+    const EINVAL: i64 = -22;
+    const EACCES: i64 = -13;
+    if mode & !7 != 0 || flags & !(0x100 | 0x200 | 0x1000) != 0 {
+        return Err(EINVAL);
+    }
+    if mode & 2 != 0 && uid != 0 {
+        return Err(EACCES);
+    }
+    if mode & 1 != 0 && !dir {
+        return Err(EACCES);
+    }
+    Ok(())
 }
 
 fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {
@@ -198,6 +227,7 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
                 "self" | "thread-self" => Who::Caller,
                 n => match number(n) {
                     Some(p) if p != 0 => Who::Pid(p),
+                    _ if zero_led(n) => return Target::Missing,
                     _ => {
                         let joined = c.join("/");
                         return match STATIC.iter().find(|(p, _)| *p == joined) {
@@ -211,6 +241,7 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
                 [f] => pid_file(f, false).map_or(Target::Kernel, |f| file(File::Pid { who, tid: 0, file: f })),
                 ["task", t, f] => match (number(t), pid_file(f, true)) {
                     (Some(tid), Some(f)) if tid != 0 => file(File::Pid { who, tid, file: f }),
+                    _ if zero_led(t) => Target::Missing,
                     _ => Target::Kernel,
                 },
                 _ => Target::Kernel,

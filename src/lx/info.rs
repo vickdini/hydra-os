@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 
 use crate::ipc::protocol::{LxMapEntry, LX_MAP_SHARED};
 
+const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
 const EACCES: i64 = -13;
 const EINVAL: i64 = -22;
@@ -50,18 +51,37 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
     }
 }
 
-/// Whether a caller may read another process's memory facts (`maps`, `cmdline` is open to
-/// all): Linux's `ptrace` read rule as `compat::linux::extra::may_access` has it: itself;
-/// never a service's process; with `CAP_SYS_PTRACE`, or when the caller's real user ID is
-/// the target's real, effective and saved one.
-pub fn may_see(same: bool, target_service: bool, caller_uid: u32, caller_caps: u64, target_ids: (u32, u32, u32)) -> bool {
+/// Whether a caller may read another process's memory facts (`maps`; `cmdline` is open to
+/// all): Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`: itself; never a service's
+/// process; with `CAP_SYS_PTRACE`; or when the caller's file-system user ID (here the
+/// effective one) is the target's real, effective and saved user ID **and** its file-system
+/// group ID the target's real, effective and saved group ID (a set-group-ID program is not
+/// readable by its user).
+pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32)) -> bool {
     if same {
         return true;
     }
     if target_service {
         return false;
     }
-    caller_caps & CAP_SYS_PTRACE != 0 || (caller_uid == target_ids.0 && caller_uid == target_ids.1 && caller_uid == target_ids.2)
+    let (u, g) = caller;
+    caller_caps & CAP_SYS_PTRACE != 0
+        || (u == target_uids.0 && u == target_uids.1 && u == target_uids.2 && g == target_gids.0 && g == target_gids.1 && g == target_gids.2)
+}
+
+/// Whether the info primitives answer for a caller (`init`: its PID namespace's init, `None`
+/// in the first; `in_userns`: it is in a user namespace of its own) about a target (a
+/// service's process or not): only callers in the first PID and user namespace (linux-server
+/// sends the others' `/proc` to the kernel, which translates their IDs), never about a
+/// service (`ESRCH`: services are not Linux processes).
+pub fn may_query(init: Option<u64>, in_userns: bool, target_service: bool) -> Result<(), i64> {
+    if init.is_some() || in_userns {
+        return Err(EPERM);
+    }
+    if target_service {
+        return Err(ESRCH);
+    }
+    Ok(())
 }
 
 /// `comm` of an executable path: its file name, at most 15 bytes, NUL-padded.
@@ -170,6 +190,8 @@ pub fn check_len(len: u64) -> Result<usize, i64> {
 pub mod err {
     /// No such process or thread.
     pub const ESRCH: i64 = super::ESRCH;
+    /// A caller the primitives do not answer for (a namespace of its own).
+    pub const EPERM: i64 = super::EPERM;
     /// The caller may not see it.
     pub const EACCES: i64 = super::EACCES;
     /// Bad arguments.
@@ -191,7 +213,6 @@ pub mod glue {
     use crate::task::TaskId;
 
     const EFAULT: i64 = -14;
-    const EPERM: i64 = -1;
 
     /// Whether `op` is one of these operations.
     pub fn is_info(op: u64) -> bool {
@@ -237,25 +258,44 @@ pub mod glue {
 
     /// The caller of request `id`: its thread, process, real uid, effective capabilities
     /// and PID namespace's init.
-    fn caller(id: u64) -> Result<(u64, u64, u32, u64, Option<u64>), i64> {
+    fn caller(id: u64) -> Result<Caller, i64> {
         let client = crate::lx::client_of(id).ok_or(ESRCH)?;
-        let (tgid, uid, caps) = crate::task::SCHEDULER
+        let (tgid, euid, egid, caps, in_userns) = crate::task::SCHEDULER
             .lock()
-            .with_task_mut(TaskId(client), |t| (t.tgid, t.uid, if t.caps.in_userns { 0 } else { t.caps.effective }))
+            .with_task_mut(TaskId(client), |t| (t.tgid, t.euid, t.egid, if t.caps.in_userns { 0 } else { t.caps.effective }, t.caps.in_userns))
             .ok_or(ESRCH)?;
         let init = lx::proc::PROCS.lock().get(&tgid).and_then(|p| p.ns.pid_inits.last().copied());
-        Ok((client, tgid, uid, caps, init))
+        // (only callers of the first namespaces: their IDs need no translation)
+        may_query(init, in_userns, false)?;
+        Ok(Caller { tgid, euid, egid, caps, init })
+    }
+
+    /// The caller of a request, as the operations check it.
+    struct Caller {
+        tgid: u64,
+        euid: u32,
+        egid: u32,
+        caps: u64,
+        init: Option<u64>,
+    }
+
+    /// Whether process `pid` is a service's (services are not Linux processes).
+    fn is_service(pid: u64) -> Option<bool> {
+        crate::task::SCHEDULER.lock().with_process(pid, |t| t.service.is_some())
     }
 
     /// `LX_INFO_TASK`.
     fn task(id: u64, who: u64, ptr: u64) -> i64 {
-        let (_, ctgid, _, _, init) = match caller(id) {
+        let Caller { tgid: ctgid, init, .. } = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
         let (p, t) = split_who(who & !LX_INFO_TASK_NOMEM);
         let pid = resolve_pid(p, ctgid, init);
         let tid = if t == 0 { pid } else { resolve_pid(t, ctgid, init) };
+        if let Err(e) = may_query(init, false, is_service(pid).unwrap_or(false)) {
+            return e;
+        }
         match fill_task(pid, tid, init, who & LX_INFO_TASK_NOMEM == 0) {
             Some(info) => out(ptr, &info),
             None => ESRCH,
@@ -356,28 +396,36 @@ pub mod glue {
 
     /// `LX_INFO_ARGS`.
     fn args(id: u64, who: u64, buf: u64, len: u64) -> i64 {
-        let (_, ctgid, _, _, init) = match caller(id) {
+        let Caller { tgid: ctgid, init, .. } = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
         let pid = resolve_pid(who, ctgid, init);
-        let Some(fallback) = crate::task::SCHEDULER.lock().with_process(pid, |t| t.cmdline.clone()) else { return ESRCH };
+        let Some((fallback, service)) = crate::task::SCHEDULER.lock().with_process(pid, |t| (t.cmdline.clone(), t.service.is_some())) else { return ESRCH };
+        if let Err(e) = may_query(init, false, service) {
+            return e;
+        }
         let text = lx::fs::live_cmdline(pid).unwrap_or_else(|| fallback.map(|c| c.to_vec()).unwrap_or_default());
         out_bytes(buf, len, &text)
     }
 
     /// `LX_INFO_MAPS`.
     fn maps(id: u64, who: u64, buf: u64, len: u64) -> i64 {
-        let (_, ctgid, cuid, caps, init) = match caller(id) {
+        let Caller { tgid: ctgid, euid, egid, caps, init } = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
         let Ok(cap) = check_len(len) else { return EINVAL };
         let pid = resolve_pid(who, ctgid, init);
-        let Some((ids, service, mm)) = crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), t.service.is_some(), t.mm.clone())) else {
+        let Some((uids, gids, service, mm)) =
+            crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some(), t.mm.clone()))
+        else {
             return ESRCH;
         };
-        if !may_see(pid == ctgid, service, cuid, caps, ids) {
+        if let Err(e) = may_query(init, false, service) {
+            return e;
+        }
+        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids) {
             return EACCES;
         }
         let entries = mm.map(|m| m.lock().maps_entries()).unwrap_or_default();

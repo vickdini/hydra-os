@@ -182,9 +182,12 @@ pub fn maps(data: &[u8]) -> Vec<u8> {
     while at + hdr <= data.len() {
         // SAFETY: `hdr` bytes are there; `LxMapEntry` is plain integers
         let e: LxMapEntry = unsafe { core::ptr::read_unaligned(data[at..].as_ptr() as *const LxMapEntry) };
-        let name_len = (e.name_len as usize).min(4095);
-        let name_end = (at + hdr + name_len).min(data.len());
-        let name = &data[at + hdr..name_end];
+        // (a record longer than the kernel writes, or cut short, ends the list)
+        let name_len = e.name_len as usize;
+        if name_len > 4095 || at + hdr + name_len > data.len() {
+            break;
+        }
+        let name = &data[at + hdr..at + hdr + name_len];
         let c = |bit: u32, ch: char| if e.flags & bit != 0 { ch } else { '-' };
         let mut line = alloc::format!(
             "{:08x}-{:08x} {}{}{}{} {:08x} 00:00 0",
