@@ -36,6 +36,7 @@ const EACCES: i64 = -13;
 const EEXIST: i64 = -17;
 const ENOTDIR: i64 = -20;
 const ECONNREFUSED: i64 = -111;
+const ELOOP: i64 = -40;
 
 /// Direct calls of this module served, and handed back to the kernel, since start.
 pub static SERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -120,6 +121,10 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     // (the kernel loads pool objects only)
     if node.mnt != 0 {
         return Err(KERNEL);
+    }
+    // execveat(AT_SYMLINK_NOFOLLOW) of a symbolic link: ELOOP, as Linux's open_exec
+    if attr.mode & S_IFMT == crate::fs::types::S_IFLNK {
+        return Err(ELOOP);
     }
     if e.flags & LX_VFS_EXEC_NOCHECK == 0 {
         let acl = ctxt::acl_of(node, &attr)?;

@@ -1035,6 +1035,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 return fileh::LX_TO_KERNEL;
             }
             if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
+                // wave7 G7-5: a FIFO open vfs-server sent to the IPC service while that one
+                // is switched back (`lx.ipc=kernel`): the kernel's open (its own pipes)
+                if s == crate::ipc::protocol::LXS_IPC && matches!(c.nr, 2 | 257) {
+                    return fileh::LX_TO_KERNEL;
+                }
                 return ENOSYS;
             }
             let Some(nx) = svc::host(svc::host_of(s)).filter(|h| host_usable(h)) else { return ENOSYS };

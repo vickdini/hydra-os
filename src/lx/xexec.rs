@@ -80,8 +80,21 @@ pub fn front(dirfd: i64, path_ptr: u64, path: &[u8], flags: u64) -> Option<Resul
     let x = online(LXS_LINUX)?;
     // The bases: the directory a relative path starts at, and the working directory (for
     // interpreters), as the kernel shows them
-    let (_, base) = crate::compat::linux::vfs::base_dir(dirfd, path).ok()?;
-    let cwd = crate::task::with_current_fds_mut(|t| t.cwd_path.clone());
+    let (base, cwd) = crate::task::with_current_fds_mut(|t| {
+        let base = if path.first() == Some(&b'/') {
+            Some(String::from("/"))
+        } else if dirfd as i32 == -100 {
+            Some(t.cwd_path.clone())
+        } else {
+            // (a handle on the pool: its shown path; anything else is the kernel's)
+            match t.get(dirfd as i32 as usize) {
+                Some(crate::fs::FileDescriptor::Vnode(f)) if dirfd as i32 >= 0 => f.try_lock().filter(|f| f.foreign.is_none()).map(|f| f.path.clone()),
+                _ => None,
+            }
+        };
+        (base, t.cwd_path.clone())
+    });
+    let base = base?;
     let mut c = LxCall::EMPTY;
     c.nr = LX_KCALL_EXEC;
     c.svc = LXS_LINUX as u32;
