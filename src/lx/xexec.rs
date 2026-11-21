@@ -59,47 +59,56 @@ fn servable(c: &LxCall, mask: u32) -> bool {
 }
 
 /// The fixed context of a call to the file service's partners: identity, namespaces, the
-/// file context of the descriptor table (`sh` says where the directory descriptor is).
-fn context(c: &mut LxCall, sh: Shape) -> Option<fileh::Held> {
+/// file context of the descriptor table (`sh` says where the directory descriptor is), and
+/// what `more` reads from the same table under the same lock (the paths that go with it).
+fn context<R>(c: &mut LxCall, sh: Shape, more: impl FnOnce(&crate::fs::FdTable) -> Option<R>) -> Option<(fileh::Held, R)> {
     c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
     super::fill_ctx(c, true);
-    let held = crate::task::with_current_fds_mut(|t| fileh::fill(c, t, sh, true)).ok()??;
+    let (held, r) = crate::task::with_current_fds_mut(|t| {
+        let h = fileh::fill(c, t, sh, true).ok()??;
+        Some((h, more(t)?))
+    })?;
     c.fs_flags |= fileh::fs_flags_global(c);
-    Some(held)
+    Some((held, r))
+}
+
+/// Whether the caller's supplementary groups all fit a call (else the kernel checks with all
+/// of them itself).
+fn groups_fit(tgid: u64) -> bool {
+    crate::compat::linux::proc::PROCS.lock().get(&tgid).is_none_or(|p| p.groups.len() <= LX_GROUPS)
 }
 
 /// `execve`'s front half by linux-server and vfs-server for the current thread: `dirfd`,
-/// the path's user pointer and bytes, the `execveat` flags. `None`: the kernel makes it
+/// the path (the kernel's copy), the `execveat` flags. `None`: the kernel makes it
 /// itself; `Some(Err(e))`: `execve` fails with `e`.
-pub fn front(dirfd: i64, path_ptr: u64, path: &[u8], flags: u64) -> Option<Result<ExecPlan, i64>> {
+pub fn front(dirfd: i64, path: &[u8], flags: u64) -> Option<Result<ExecPlan, i64>> {
     const AT_EMPTY_PATH: u64 = 0x1000;
     if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
         return None;
     }
     online(LXS_VFS)?;
     let x = online(LXS_LINUX)?;
-    // The bases: the directory a relative path starts at, and the working directory (for
-    // interpreters), as the kernel shows them
-    let (base, cwd) = crate::task::with_current_fds_mut(|t| {
-        let base = if path.first() == Some(&b'/') {
-            Some(String::from("/"))
-        } else if dirfd as i32 == -100 {
-            Some(t.cwd_path.clone())
-        } else {
-            // (a handle on the pool: its shown path; anything else is the kernel's)
-            match t.get(dirfd as i32 as usize) {
-                Some(crate::fs::FileDescriptor::Vnode(f)) if dirfd as i32 >= 0 => f.try_lock().filter(|f| f.foreign.is_none()).map(|f| f.path.clone()),
-                _ => None,
-            }
-        };
-        (base, t.cwd_path.clone())
-    });
-    let base = base?;
     let mut c = LxCall::EMPTY;
     c.nr = LX_KCALL_EXEC;
     c.svc = LXS_LINUX as u32;
-    c.args = [dirfd as u64, LX_KBUF_ADDR, path_ptr, flags, LX_KBUF_ADDR_IN, 0];
-    let held = context(&mut c, Shape::At0)?;
+    // (the path goes in the kernel buffer: linux-server never reads the caller's memory)
+    c.args = [dirfd as u64, LX_KBUF_ADDR, 0, flags, LX_KBUF_ADDR_IN, 0];
+    // The bases, from the same table and under the same lock as the context: the directory a
+    // relative path starts at, and the working directory (for interpreters), as shown
+    let (held, (base, cwd)) = context(&mut c, Shape::At0, |t| {
+        let base = if path.first() == Some(&b'/') {
+            String::from("/")
+        } else if dirfd as i32 == -100 {
+            t.cwd_path.clone()
+        } else {
+            // (a handle on the pool: its shown path; anything else is the kernel's)
+            match t.get(dirfd as i32 as usize) {
+                Some(crate::fs::FileDescriptor::Vnode(f)) if dirfd as i32 >= 0 => f.try_lock().filter(|f| f.foreign.is_none()).map(|f| f.path.clone())?,
+                _ => return None,
+            }
+        };
+        Some((base, t.cwd_path.clone()))
+    })?;
     if !servable(&c, LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC) {
         return None;
     }
@@ -197,6 +206,9 @@ fn kcall(x: &'static Host, mut c: LxCall, buf: &copy::CopyBuf, out: &mut [u8]) -
 /// this caller (`None`: the kernel's dispatcher answers, resolving the node itself as
 /// before).
 pub(super) fn sock_call(frame: &SyscallFrame, o: HeldObj) -> Option<i64> {
+    if !matches!(frame.rax, 42 | 49) {
+        return None;
+    }
     online(LXS_VFS)?;
     let (dev, slot, flags, h) = o;
     let x = svc::host(h).filter(|x| x.is_online())?;
@@ -206,7 +218,10 @@ pub(super) fn sock_call(frame: &SyscallFrame, o: HeldObj) -> Option<i64> {
     c.svc = x.id as u32;
     c.obj = slot;
     c.obj_flags = flags | LX_OBJ_FLAGS_VFSCTX;
-    let held = context(&mut c, Shape::Path)?;
+    let (held, ()) = context(&mut c, Shape::Path, |_| Some(()))?;
+    if !groups_fit(c.tgid) {
+        return None;
+    }
     let mask = if c.nr == 49 { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC | LX_FS_INOTIFY } else { LX_FS_FOREIGN | LX_FS_MOUNTS | LX_FS_LANDLOCK | LX_FS_ABAC };
     if !servable(&c, mask) {
         return None;

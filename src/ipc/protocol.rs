@@ -1743,7 +1743,7 @@ pub const LX_MNTNS_GONE: u64 = u64::MAX;
 // node's object number as the redirect's object.
 
 /// Kernel call to linux-server ([`LXS_LINUX`]): the front half of `execve`. Arguments:
-/// `[dirfd, LX_KBUF_ADDR (out: LxExecPlan + strings), path pointer (the caller's), flags
+/// `[dirfd, LX_KBUF_ADDR (out: LxExecPlan + strings), 0 (the path is in the input), flags
 /// (AT_SYMLINK_NOFOLLOW), LX_KBUF_ADDR + 0x1000 (in: the base path, as the kernel shows the
 /// directory, the working directory and the path, each NUL-terminated), their length]`; the caller's file context as for a file-service call.
 /// Result: 0 = the plan was written, [`LX_EXEC_KERNEL`] = the kernel makes the front half

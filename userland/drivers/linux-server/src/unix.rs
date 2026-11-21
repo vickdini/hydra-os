@@ -970,10 +970,15 @@ fn by_vfs(cx: &Cx, sid: u64) -> (i64, u64) {
     let bind_call = cx.nr == 49;
     let mut c = cx.c;
     c.obj_flags &= !LX_OBJ_FLAGS_VFSCTX;
+    // (read once here; a path name's node, and the address bind/connect use, come from it)
     let Some(path) = path_of(cx) else {
         let cx2 = Cx::from_call(&c, cx.page());
         return (if bind_call { bind(&cx2, sid) } else { connect(&cx2, sid) }, 0);
     };
+    // (a socket bound already: no node is made for nothing)
+    if bind_call && U.lock().socks.get(&sid).is_none_or(|s| s.local.is_some()) {
+        return (EINVAL, 0);
+    }
     let op = if bind_call { LX_VFS_SOCK_MAKE } else { LX_VFS_SOCK_CHECK };
     let ino = match sock_node(cx, op, &path) {
         Ok(i) => i,
@@ -986,12 +991,15 @@ fn by_vfs(cx: &Cx, sid: u64) -> (i64, u64) {
     VFS_NODES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     c.ino = ino;
     let cx2 = Cx::from_call(&c, cx.page());
+    // The address as read once above (the caller's memory is not read again)
+    let addr = Addr::Path { shown: path.clone(), ino };
     if !bind_call {
-        return (connect(&cx2, sid), 0);
+        return (connect_addr(&cx2, sid, addr), 0);
     }
-    let r = bind(&cx2, sid);
+    let r = bind_addr(sid, addr);
     if r < 0 {
-        let _ = sock_node(cx, LX_VFS_SOCK_REMOVE, &path);
+        // (only the node made above: vfs-server checks the name still leads to it)
+        let _ = sock_node(cx, LX_VFS_SOCK_REMOVE | ino << 8, &path);
     }
     (r, 0)
 }
@@ -1009,10 +1017,14 @@ fn put_sockaddr(cx: &Cx, addr: u64, len_ptr: u64, sa: &[u8]) -> Result<(), i64> 
 }
 
 fn bind(cx: &Cx, sid: u64) -> i64 {
-    let addr = match read_addr(cx, cx.args[1], cx.args[2]) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
+    match read_addr(cx, cx.args[1], cx.args[2]) {
+        Ok(a) => bind_addr(sid, a),
+        Err(e) => e,
+    }
+}
+
+/// `bind` of socket `sid` to `addr` (read once by the caller: wave7 G7-5).
+fn bind_addr(sid: u64, addr: Addr) -> i64 {
     let mut u = U.lock();
     if u.socks[&sid].local.is_some() {
         return EINVAL;
@@ -1049,10 +1061,14 @@ fn listen(cx: &Cx, sid: u64) -> i64 {
 }
 
 fn connect(cx: &Cx, sid: u64) -> i64 {
-    let addr = match read_addr(cx, cx.args[1], cx.args[2]) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
+    match read_addr(cx, cx.args[1], cx.args[2]) {
+        Ok(a) => connect_addr(cx, sid, a),
+        Err(e) => e,
+    }
+}
+
+/// `connect` of socket `sid` to `addr` (read once by the caller: wave7 G7-5).
+fn connect_addr(cx: &Cx, sid: u64, addr: Addr) -> i64 {
     let mut after = After::default();
     let r = 'r: {
         let mut u = U.lock();

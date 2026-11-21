@@ -22,6 +22,7 @@ use crate::client::Cx;
 use crate::execplan::{self, Interp};
 
 const ELOOP: i64 = -40;
+const EACCES: i64 = -13;
 /// `AT_SYMLINK_NOFOLLOW`.
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 /// Bytes of a file's head asked for (the `#!` line, the ELF and program headers).
@@ -149,6 +150,10 @@ fn plan(cx: &Cx) -> Result<(), Stop> {
         let abs = execplan::join_path(&cur_base, &cur);
         let flags = LX_VFS_EXEC_REAL | if nofollow { LX_VFS_EXEC_NOFOLLOW } else { 0 };
         let f = walk(&c, flags, &cur, &abs, HEAD)?;
+        // (a NUL in the `#!` line: the kernel's own front half decides)
+        if execplan::shebang_has_nul(&f.head) {
+            return Err(Stop::Kernel);
+        }
         let Some((interp, arg)) = execplan::parse_shebang(&f.head) else { break (f, abs) };
         depth += 1;
         if depth > LX_EXEC_DEPTH {
@@ -169,8 +174,10 @@ fn plan(cx: &Cx) -> Result<(), Stop> {
     };
     let mut interp_ino = 0;
     if !interp_path.is_empty() {
-        match walk(&c, LX_VFS_EXEC_FROM_ROOT | LX_VFS_EXEC_NOCHECK, &interp_path, &[], 0) {
+        // (a regular file the caller may execute, as Linux's open_exec: EACCES otherwise)
+        match walk(&c, LX_VFS_EXEC_FROM_ROOT, &interp_path, &[], 0) {
             Ok(f) => interp_ino = f.ino,
+            Err(Stop::Fail(EACCES)) => return Err(Stop::Fail(EACCES)),
             // (not found: the kernel fails the exec with ENOENT, as its loader does)
             Err(Stop::Fail(_)) => {}
             Err(Stop::Kernel) => return Err(Stop::Kernel),

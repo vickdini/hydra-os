@@ -28,10 +28,11 @@ use crate::ctx::Ctx;
 use crate::fs::fsproto::{FS_MKNOD, FS_READ, FS_UNLINK};
 use crate::fs::types::{S_IFMT, S_IFREG, S_IFSOCK};
 use crate::proto::*;
-use crate::walk::{self, ParentWalked, Start, Walked};
+use crate::walk::{self, Backend, ParentWalked, Start, Walked};
 use crate::{xpath, zfs};
 
 const EINVAL: i64 = -22;
+const EPERM: i64 = -1;
 const EACCES: i64 = -13;
 const EEXIST: i64 = -17;
 const ENOTDIR: i64 = -20;
@@ -45,6 +46,14 @@ pub static TO_KERNEL: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomic
 
 /// Serves direct call `a` if it is one of this module's (`None`: not one).
 pub fn dcall(cx: &Cx, a: &DcallArgs) -> Option<i64> {
+    if !matches!(a.op, LX_VFS_OP_EXEC | LX_VFS_OP_READ | LX_VFS_OP_SOCK) {
+        return None;
+    }
+    // Only the Linux services linux-server hosts (process, IPC, proc) make these calls: they
+    // carry a program's identity and read objects without a walk
+    if !matches!(a.from, LXS_LINUX | LXS_IPC | LXS_PROC) {
+        return Some(EPERM);
+    }
     let r = match a.op {
         LX_VFS_OP_EXEC => exec(cx, a),
         LX_VFS_OP_READ => read(cx, a),
@@ -204,7 +213,9 @@ fn sock(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     }
     let b = cx.copy_in(a.input, a.input_len)?;
     let c = call_of(&b)?;
-    let op = Cx::u64_at(&b, cs);
+    let word = Cx::u64_at(&b, cs);
+    // (REMOVE carries the object MAKE made in bits 8..)
+    let (op, made) = (word & 0xFF, word >> 8);
     let path = &b[cs + 8..];
     let path = &path[..path.iter().position(|&x| x == 0).unwrap_or(path.len())];
     // (making a node is a change: inotify watches and Landlock's MAKE_SOCK are the kernel's)
@@ -255,6 +266,11 @@ fn sock(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
         LX_VFS_SOCK_REMOVE => {
             let p = sock_parent(&c, &who, path)?;
             let victim = p.child;
+            // Only the node MAKE made, if the name still leads to it (a socket)
+            match victim {
+                Some(v) if v.ino == made && ctxt::BE.getattr(v)?.mode & S_IFMT == S_IFSOCK => {}
+                _ => return Err(crate::calls::rules::ENOENT),
+            }
             let r = zfs::request(FS_UNLINK, |w| {
                 w.u64(p.dir.ino);
                 w.bytes(&p.name);

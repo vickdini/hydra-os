@@ -311,6 +311,13 @@ fn load(lv: Level, abs_path: String, argv: Vec<Vec<u8>>, envp: &[Vec<u8>], via_s
             interp_refused.set(true);
             return None;
         }
+        // wave7 G7-5: the interpreter must be a regular file the caller may execute (Linux's
+        // open_exec): EACCES otherwise
+        let a = ZfsClient::getattr(ino).ok()?;
+        if a.mode & S_IFMT != S_IFREG || !may_access(&a, c.euid, c.egid, 1) || a.mode & 0o111 == 0 {
+            interp_refused.set(true);
+            return None;
+        }
         super::mm::inode_source(ino).ok()
     };
     let argv_s: Vec<String> = argv.iter().map(|a| lossy(a)).collect();
@@ -340,6 +347,10 @@ fn load(lv: Level, abs_path: String, argv: Vec<Vec<u8>>, envp: &[Vec<u8>], via_s
     Ok(Ready { image, abs_path, argv, set_uid: lv.set_uid, set_gid: lv.set_gid, file_caps: lv.file_caps, via_script })
 }
 
+/// wave7 G7-5: plans of programs that would gain privileges, handed to the kernel's own
+/// front half ([`from_plan`]).
+pub static PRIVILEGED_TO_KERNEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// wave7 G7-5: the front half by the services (`crate::lx::xexec`): linux-server and
 /// vfs-server looked up the program, its `#!` interpreters and its ELF interpreter; here the
 /// same checks as for the kernel's own lookup, then the load. `None`: the kernel's own front
@@ -356,6 +367,13 @@ fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>
         Err(e) => return Some(Err(e)),
     };
     if parse_shebang(&lv.source.head).is_some() {
+        return None;
+    }
+    // A program that would gain privileges (set-user/group-ID, file capabilities): the kernel
+    // looks it up itself, so the services' plan never decides which file or interpreter runs
+    // with them (rare: su, sudo, passwd, ping; the plan costs the same lookup again)
+    if lv.set_uid.is_some() || lv.set_gid.is_some() || lv.file_caps.is_some() {
+        PRIVILEGED_TO_KERNEL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return None;
     }
     let via_script = !plan.prefix.is_empty();
@@ -402,7 +420,7 @@ pub fn sys_execve(frame: &mut SyscallFrame, fpu: *mut FpuState, dirfd: i64, path
     };
     // wave7 G7-5 begin: the front half by the services
     if !path.is_empty() {
-        if let Some(plan) = crate::lx::xexec::front(dirfd, path_ptr, &path, flags) {
+        if let Some(plan) = crate::lx::xexec::front(dirfd, &path, flags) {
             let r = match plan {
                 Ok(p) => from_plan(p, &argv, &envp, flags),
                 Err(e) => Some(Err(e)),
@@ -442,6 +460,10 @@ fn front_kernel(dirfd: i64, mut path: Vec<u8>, mut argv: Vec<Vec<u8>>, envp: &[V
             abs_path = join_path(&base_path, &path);
             // /proc/self/exe and friends name the file they link to
             if let Some(target) = super::fs::proc_link(&abs_path) {
+                // (a link: AT_SYMLINK_NOFOLLOW does not follow it, wave7 G7-5)
+                if !follow {
+                    return Err(ELOOP);
+                }
                 abs_path = target.clone();
                 path = target.into_bytes();
             }

@@ -62,7 +62,7 @@ pub fn note_to(h: crate::ipc::protocol::SvcId, kind: u64, a: u64, b: u64, c: u64
 pub mod xplan;
 pub mod xexec {
     pub use super::xplan::{decode_plan, ExecPlan};
-    pub fn front(dirfd: i64, _path_ptr: u64, path: &[u8], flags: u64) -> Option<Result<ExecPlan, i64>> {
+    pub fn front(dirfd: i64, path: &[u8], flags: u64) -> Option<Result<ExecPlan, i64>> {
         crate::fake::rec(alloc::format!("xexec::front({dirfd},{},{flags})", alloc::string::String::from_utf8_lossy(path)));
         crate::fake::EXEC_FRONT.with_borrow(|m| m.clone())
     }

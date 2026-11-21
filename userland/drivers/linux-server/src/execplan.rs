@@ -38,6 +38,16 @@ pub fn parse_shebang(data: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     }
 }
 
+/// Whether the `#!` line at the start of `data` (as [`parse_shebang`] reads it) holds a NUL
+/// byte (it would cut an argv string in the plan).
+pub fn shebang_has_nul(data: &[u8]) -> bool {
+    if !data.starts_with(b"#!") {
+        return false;
+    }
+    let end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len()).min(256);
+    data[2..end.max(2)].contains(&0)
+}
+
 /// Where a program's ELF interpreter path is.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Interp {

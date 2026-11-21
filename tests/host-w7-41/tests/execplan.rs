@@ -153,3 +153,24 @@ fn bad_plans_are_refused() {
     assert_eq!(decode_plan(&huge), None);
     let _ = execplan::INTERP_MAX;
 }
+
+#[test]
+fn nul_bytes_in_a_shebang_line() {
+    use hydra_hosttests_w7_41::execplan::shebang_has_nul;
+    assert!(!shebang_has_nul(b"#!/bin/sh -e\n\0\0binary after the line"));
+    assert!(shebang_has_nul(b"#!/bin/sh a\0b\n"));
+    assert!(shebang_has_nul(b"#!/bin/\0sh"));
+    assert!(!shebang_has_nul(b"\x7fELF\0\0"));
+    assert!(!shebang_has_nul(b"#!"));
+    assert!(!shebang_has_nul(b"#!\n\0"));
+}
+
+#[test]
+fn stray_argv_bytes_without_strings_are_refused() {
+    let mut b = encode_plan(7, 0, b"/bin/x", true, &[], b"", 3000).unwrap();
+    // pre_len 2 with npre 0, and the two bytes appended
+    b[24..28].copy_from_slice(&2u32.to_le_bytes());
+    let mut c = b[..PLAN_HEAD + 6].to_vec();
+    c.extend_from_slice(b"a\0");
+    assert_eq!(decode_plan(&c), None);
+}

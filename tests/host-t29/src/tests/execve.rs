@@ -454,3 +454,58 @@ fn execveat_nofollow_on_a_link_is_eloop() {
     crate::memory::vm::set_current_mm(None);
     assert_eq!(r, ELOOP);
 }
+
+#[test]
+fn privileged_programs_never_run_from_a_plan() {
+    let _g = setup();
+    proc_(1166, 1000);
+    // The plan names a set-user-ID program; the path the caller gave names a plain one: the
+    // kernel looks the path up itself and runs the plain one, unprivileged
+    file("/bin/su", 80, 0o104755, program());
+    owner(80, 0, 0);
+    file("/bin/plain", 81, 0o100755, program());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(80, "/bin/su", &[], None))));
+    assert_eq!(exec("/bin/plain", &["plain"], &[]).0, 0);
+    assert_eq!(fake::task(1166, |t| (t.euid, t.exe.clone())), Some((1000, Some("/bin/plain".into()))));
+    assert_eq!(crate::compat::linux::execve::PRIVILEGED_TO_KERNEL.load(core::sync::atomic::Ordering::Relaxed) > 0, true);
+    // File capabilities too
+    fake::FILE_CAPS.with_borrow_mut(|m| m.insert(81, (1 << 13, true)));
+    file("/bin/other", 82, 0o100755, program());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(81, "/bin/plain", &[], None))));
+    assert_eq!(exec("/bin/other", &["other"], &[]).0, 0);
+    assert_eq!(fake::task(1166, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/other"));
+}
+
+#[test]
+fn the_elf_interpreter_must_be_executable() {
+    let _g = setup();
+    proc_(1167, 1000);
+    let dynamic = Elf::new(ET_DYN, 0x100, &[load_with(5, 0, 0, 0x200, 0x200), Ph { ty: PT_INTERP, flags: 4, offset: 0x180, vaddr: 0x180, filesz: 9, memsz: 9 }], 0x200)
+        .put(0x180, b"/lib/ld\0\0")
+        .bytes;
+    file("/bin/dyn", 59, 0o100755, dynamic);
+    // Not executable: EACCES, from the kernel's own lookup and from a plan alike
+    file("/lib/ld", 60, 0o100644, program());
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, EACCES);
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/ld", 60))))));
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, EACCES);
+    // A directory as the interpreter (a plan naming one): EACCES
+    file("/lib/dir", 61, 0o040755, Vec::new());
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(59, "/bin/dyn", &[], Some(("/lib/ld", 61))))));
+    assert_eq!(exec("/bin/dyn", &[], &[]).0, EACCES);
+}
+
+#[test]
+fn nofollow_does_not_follow_proc_links() {
+    let _g = setup();
+    proc_(1168, 1000);
+    file("/bin/prog", 50, 0o100755, program());
+    fake::PROC_LINKS.with_borrow_mut(|m| m.insert("/proc/self/exe".into(), "/bin/prog".into()));
+    let p = cstr("/proc/self/exe");
+    let a = args(&["x"]);
+    let mut f = SyscallFrame { rax: 322, ..Default::default() };
+    let mut fpu = FpuState::new();
+    let r = sys_execve(&mut f, &mut fpu, AT_FDCWD, p.as_ptr() as u64, a.ptr(), a.ptr(), 0x100);
+    crate::memory::vm::set_current_mm(None);
+    assert_eq!(r, ELOOP);
+}

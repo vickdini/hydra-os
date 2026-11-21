@@ -38,6 +38,9 @@ pub fn decode_plan(b: &[u8]) -> Option<ExecPlan> {
     let shown = String::from_utf8_lossy(&b[HEAD..HEAD + real]).into_owned();
     let pre = &b[HEAD + real..HEAD + real + pre_len];
     let mut prefix: Vec<Vec<u8>> = Vec::new();
+    if npre == 0 && pre_len != 0 {
+        return None;
+    }
     if npre > 0 {
         // Each string ends with a NUL
         if pre.last() != Some(&0) {
