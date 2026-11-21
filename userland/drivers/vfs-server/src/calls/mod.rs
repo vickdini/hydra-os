@@ -18,9 +18,11 @@
 //!   creating and truncating opens.
 //!
 //! The modules: [`enc`] (result layouts), `ctxt` (the caller's context), `stat` (the `stat`
-//! family, `access`, `readlink`, `statfs`), `dir` (`getdents64`, `getdents`), `open`.
+//! family, `access`, `readlink`, `statfs`), `dir` (`getdents64`, `getdents`), `open`,
+//! `change` (attributes and names), `rules` (decisions, host-tested).
 
 pub mod enc;
+mod change;
 mod ctxt;
 mod dir;
 mod open;
@@ -37,8 +39,15 @@ use crate::proto::{LX_FH_CLAIM};
 pub use ctxt::KERNEL;
 
 /// The calls this module serves (x86-64 numbers): stat, lstat, newfstatat, statx, access,
-/// faccessat, faccessat2, readlink, readlinkat, statfs, getdents64, getdents, open, openat.
-pub const CLAIMED: &[u64] = &[4, 6, 262, 332, 21, 269, 439, 89, 267, 137, 217, 78, 2, 257];
+/// faccessat, faccessat2, readlink, readlinkat, statfs, getdents64, getdents, open, openat;
+/// chmod, fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate,
+/// utimensat; mkdir, mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename,
+/// renameat, renameat2.
+pub const CLAIMED: &[u64] = &[
+    4, 6, 262, 332, 21, 269, 439, 89, 267, 137, 217, 78, 2, 257, // read-only
+    90, 268, 91, 92, 94, 260, 93, 76, 77, 280, // attributes
+    83, 258, 88, 266, 87, 84, 263, 82, 264, 316, // names
+];
 
 /// Calls answered here, and sent back to the kernel, since start.
 pub static SERVED: AtomicU64 = AtomicU64::new(0);
@@ -65,6 +74,11 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
         137 => stat::statfs(cx),
         217 | 78 => dir::getdents(cx),
         2 | 257 => open::open(cx),
+        90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 => change::attrs(cx),
+        83 | 258 => change::mkdir(cx),
+        88 | 266 => change::symlink(cx),
+        87 | 84 | 263 => change::unlink(cx),
+        82 | 264 | 316 => change::rename(cx),
         _ => return None,
     };
     Some(answer(cx, r))

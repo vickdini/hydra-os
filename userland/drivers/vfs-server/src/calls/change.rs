@@ -227,7 +227,7 @@ fn names_changed(dirs: &[Node], gone: Option<u64>) {
         cache::forget_attr(*d);
     }
     if let Some(ino) = gone {
-        cache::forget_object(ino);
+        cache::CACHE.forget_object(ino);
     }
     tell_kernel(gone.unwrap_or(0), LX_FHC_NAMES | LX_FHC_ALL_ATTRS | if gone.is_some() { LX_FHC_GONE } else { 0 }, 0);
 }
@@ -361,7 +361,7 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
     });
     let replaced = if r.is_ok() { dst.child.map(|d| d.ino).filter(|&d| Some(d) != src.child.map(|s| s.ino)) } else { None };
     if let Some(s) = src.child {
-        cache::forget_object(s.ino);
+        cache::CACHE.forget_object(s.ino);
     }
     names_changed(&[src.dir, dst.dir], replaced);
     r.map(|_| 0)

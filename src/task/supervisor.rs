@@ -53,6 +53,10 @@ static LINUX_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR
 /// lx-sec (wave 6: keys and bpf, a Linux service of their own, `userland/drivers/lx-sec`).
 static LX_SEC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-sec"));
 // wave6 G24 end
+// wave7 G7-1 begin
+/// vfs-server (wave 7: the file service, `userland/drivers/vfs-server`).
+static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/vfs-server"));
+// wave7 G7-1 end
 /// The sound driver program (Intel High Definition Audio).
 // wave6 G19 begin
 /// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
@@ -263,6 +267,14 @@ fn lx_sec_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave6 G24 end
+
+// wave7 G7-1 begin
+/// vfs-server: always started (four workers; `cache=N` sets its caches' size). With
+/// `lx.vfs=kernel` or `lx=kernel` it runs but gets no calls.
+fn vfs_server_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=4")])
+}
+// wave7 G7-1 end
 
 // wave6 G19 begin
 /// svc-test: always started (small: two workers); it exits by itself when no service id
@@ -697,6 +709,19 @@ pub fn supervisor_init() {
         );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SEC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SEC }>);
         // wave6 G24 end
+        // wave7 G7-1 begin: vfs-server, the file service: zfs-server's second client (zfs-server
+        // attaches vfs-server's window, where its requests sit); its going away fails only its
+        // own calls in flight, later calls wait for the restart (7-6 refines this)
+        sup.services.push(
+            ServiceDescriptor::new("vfs_server", crate::ipc::protocol::ENDPOINT_VFS_SERVER, VFS_SERVER_ELF, vfs_server_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_VFS,
+                crate::lx::restart::RestartClass::Transparent,
+                "vfs",
+            ),
+        );
+        service::allow_client(crate::ipc::protocol::ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER);
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_VFS_SERVER, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_VFS_SERVER }>);
+        // wave7 G7-1 end
         // wave6 G19 begin: the test service (a second Linux service; its going away fails
         // only its own calls and objects)
         sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants).linux_service(

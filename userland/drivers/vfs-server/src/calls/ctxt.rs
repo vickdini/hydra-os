@@ -13,7 +13,7 @@ use crate::proto::{LxCall, LX_AT_CWD, LX_AT_DIR, LX_AT_FILE, LX_FS_FOREIGN, LX_F
 use crate::walk::{self, Start, Walked};
 use crate::zfs;
 
-pub use super::rules::{ENAMETOOLONG, ENOENT, KERNEL};
+pub use super::rules::{ENOENT, KERNEL};
 /// `AT_SYMLINK_NOFOLLOW`.
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 /// `AT_EMPTY_PATH`.

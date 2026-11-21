@@ -559,6 +559,7 @@ pub mod fs {
         pub umask: u32,
         pub max: usize,
         srv: SrvPtr,
+        /// The root and working directory (wave7 G7-1: `lx::vfs_ctx` reads them; G7-2: `lx::fileh`).
         pub root_ino: u64,
         pub root_mnt: usize,
         pub cwd_ino: u64,

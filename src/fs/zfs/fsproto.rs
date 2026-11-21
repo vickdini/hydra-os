@@ -103,6 +103,19 @@ pub const FS_REMOVEXATTR: u32 = 0x3123;
 /// Bit position of the mount index in an [`FS_RESOLVE_MNT`] reply.
 pub const MNT_SHIFT: u32 = 48;
 
+// wave7 G7-1 begin: vfs-server as zfs-server's second client
+/// `args[1]` of a request from vfs-server: its parameters, reply data and events are in
+/// vfs-server's own window (which zfs-server attaches), at [`FS_VFS_OFF`] and
+/// [`FS_VFS_EVENTS`], not in zfs-server's window (the kernel's).
+pub const FS_CLIENT_VFS: u64 = 1;
+/// Where vfs-server's requests and replies start in its window (after its notification ring).
+pub const FS_VFS_OFF: usize = 0x21000;
+/// Where the events of a vfs-server request go in its window.
+pub const FS_VFS_EVENTS: usize = 0x3C000;
+/// The end of vfs-server's part of its window.
+pub const FS_VFS_END: usize = 0x40000;
+// wave7 G7-1 end
+
 /// Operation not permitted.
 pub const EPERM: i64 = -1;
 /// No such file or directory.
