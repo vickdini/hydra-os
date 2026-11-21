@@ -19,7 +19,9 @@
 //! - A removed file whose handles are still open lives on until the last
 //!   [`Tmpfs::release`] (as on Linux).
 //! - Limits: `size=` (bytes of file data, counted in pages), `nr_inodes=`, 255-byte names,
-//!   1 GiB per file (the largest memory object, `LX_MEM_MAX`).
+//!   1 GiB per file (the largest memory object, `LX_MEM_MAX`). Unlike Linux, a file is
+//!   charged for its whole size, holes included (the server does not see which pages
+//!   exist): a sparse file can hit `ENOSPC` earlier than on Linux.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -36,10 +38,12 @@ pub const EEXIST: i64 = -17;
 pub const ENOTDIR: i64 = -20;
 pub const EISDIR: i64 = -21;
 pub const EINVAL: i64 = -22;
+pub const ENFILE: i64 = -23;
 pub const EFBIG: i64 = -27;
 pub const ENOSPC: i64 = -28;
 pub const EMLINK: i64 = -31;
 pub const ERANGE: i64 = -34;
+pub const E2BIG: i64 = -7;
 pub const ENAMETOOLONG: i64 = -36;
 pub const ENOTEMPTY: i64 = -39;
 pub const ENODATA: i64 = -61;
@@ -91,8 +95,8 @@ pub trait DataStore {
     fn write(&mut self, key: u64, off: u64, data: &[u8]) -> Result<(), i64>;
     /// Fills `buf` from byte `off` (zeros where nothing was written).
     fn read(&mut self, key: u64, off: u64, buf: &mut [u8]) -> Result<(), i64>;
-    /// The file shrank from `old` to `size` bytes: bytes from `size` on must read as zeros
-    /// again when the file grows later (pages past it may be freed).
+    /// Bytes `[size, old)` must read as zeros again (the file shrank from `old`, or grows
+    /// past `size` within the page it ended in); pages wholly past `size` may be freed.
     fn truncate(&mut self, key: u64, size: u64, old: u64) -> Result<(), i64>;
     /// The object is no longer needed.
     fn free(&mut self, key: u64);
@@ -284,7 +288,8 @@ pub struct StatFs {
 pub struct Tmpfs {
     pub id: u32,
     pub opts: TmpfsOpts,
-    nodes: BTreeMap<u64, Node>,
+    /// (crate-visible for the host tests, which damage trees on purpose)
+    pub(crate) nodes: BTreeMap<u64, Node>,
     next_ino: u64,
     /// Pages of file data counted against `size=`.
     used_pages: u64,
@@ -309,6 +314,18 @@ fn check_name(name: &[u8]) -> Result<(), i64> {
 
 fn pages(size: u64) -> u64 {
     size.div_ceil(PAGE)
+}
+
+/// A file grows from `old` to `new` bytes: the rest of the page `old` ends in may hold
+/// bytes a program wrote through a shared mapping past the end of the file; they must read
+/// as zeros now. (Mappings never reach further pages past the end: the kernel's tmpfs
+/// handles stop them there.)
+fn grow_tail(store: &mut dyn DataStore, data: u64, old: u64, new: u64) -> Result<(), i64> {
+    let tail_end = (old.div_ceil(PAGE) * PAGE).min(new);
+    if old % PAGE != 0 && tail_end > old {
+        store.truncate(data, old, tail_end)?;
+    }
+    Ok(())
 }
 
 impl Tmpfs {
@@ -746,6 +763,9 @@ impl Tmpfs {
         let d = self.node(dir)?;
         let Kind::Dir { entries, order, parent, .. } = &d.kind else { return Err(ENOTDIR) };
         let mut out = Vec::new();
+        if d.nlink == 0 {
+            return Ok(out); // a removed directory lists nothing, as on Linux
+        }
         if cookie == 0 && out.len() < max {
             out.push(Dirent { ino: dir, next: 1, dtype: 4, name: b".".to_vec() });
         }
@@ -803,14 +823,14 @@ impl Tmpfs {
         }
         if size < old && data != 0 {
             store.truncate(data, size, old)?;
+        } else if size > old && data != 0 {
+            grow_tail(store, data, old, size)?;
         }
         self.used_pages = self.used_pages + np - op;
         let n = self.node_mut(ino)?;
         n.size = size;
-        if size != old {
-            n.mtime = now;
-            n.ctime = now;
-        }
+        n.mtime = now;
+        n.ctime = now;
         Ok(())
     }
 
@@ -840,6 +860,9 @@ impl Tmpfs {
         } else {
             data
         };
+        if off > old {
+            grow_tail(store, data, old, off)?;
+        }
         store.write(data, off, buf)?;
         self.used_pages = self.used_pages + np - op;
         let n = self.node_mut(ino)?;
@@ -877,7 +900,8 @@ impl Tmpfs {
 
     /// A handle on `ino` was opened.
     pub fn open(&mut self, ino: u64) -> Result<(), i64> {
-        self.node_mut(ino)?.open += 1;
+        let n = self.node_mut(ino)?;
+        n.open = n.open.checked_add(1).ok_or(ENFILE)?;
         Ok(())
     }
 
@@ -921,14 +945,18 @@ impl Tmpfs {
     /// `setxattr` (`XATTR_CREATE`, `XATTR_REPLACE`): the `user.`, `trusted.` and
     /// `security.` name spaces (permission checks on them are the caller's).
     pub fn setxattr(&mut self, ino: u64, name: &[u8], value: &[u8], flags: u32, now: Ts) -> Result<(), i64> {
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 || flags == XATTR_CREATE | XATTR_REPLACE || name.contains(&0) {
+            return Err(EINVAL);
+        }
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(ERANGE);
         }
-        if !(name.starts_with(b"user.") || name.starts_with(b"trusted.") || name.starts_with(b"security.")) {
-            return Err(EOPNOTSUPP);
+        let ns_len = [&b"user."[..], b"trusted.", b"security."].iter().find(|p| name.starts_with(p)).map(|p| p.len()).ok_or(EOPNOTSUPP)?;
+        if name.len() == ns_len {
+            return Err(EINVAL); // a name space without a name
         }
         if value.len() > XATTR_SIZE_MAX {
-            return Err(ERANGE);
+            return Err(E2BIG);
         }
         let n = self.node_mut(ino)?;
         if name.starts_with(b"user.") && !matches!(n.kind, Kind::File { .. } | Kind::Dir { .. }) {
@@ -1091,7 +1119,9 @@ impl Tmpfs {
                 xattrs.insert(k, d.bytes()?);
             }
             let open = d.u32()?;
-            nodes.insert(ino, Node { kind, mode, uid, gid, nlink, size, rdev, atime: ts[0], mtime: ts[1], ctime: ts[2], btime: ts[3], xattrs, open });
+            if nodes.insert(ino, Node { kind, mode, uid, gid, nlink, size, rdev, atime: ts[0], mtime: ts[1], ctime: ts[2], btime: ts[3], xattrs, open }).is_some() {
+                return Err(EINVAL);
+            }
         }
         if !d.done() {
             return Err(EINVAL);
@@ -1101,49 +1131,106 @@ impl Tmpfs {
         Ok(t)
     }
 
-    /// Consistency of the tree: a root directory, entries that name live inodes, parents
-    /// that list their subdirectories, inode numbers below `next_ino`, the page count.
+    /// Consistency of the tree, for kept state read back: the root, every live directory
+    /// reachable from it once (no cycles, one entry each), link counts that match the
+    /// entries, removed inodes only while open, names, sizes, data keys used once, the
+    /// listing order, inode numbers below `next_ino`, the page count.
     pub fn check(&self) -> Result<(), i64> {
-        if !self.is_dir(ROOT) {
-            return Err(EINVAL);
+        let root = self.nodes.get(&ROOT).ok_or(EINVAL)?;
+        match &root.kind {
+            Kind::Dir { parent, .. } if *parent == ROOT && root.nlink >= 2 => {}
+            _ => return Err(EINVAL),
         }
-        let mut used = 0;
-        // Every live directory but the root is listed by its parent (checked in one pass)
-        let mut live_dirs = Vec::new();
-        let mut listed_dirs = alloc::collections::BTreeSet::new();
+        // Entries per inode, and subdirectories per directory
+        let mut refs: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut used = 0u64;
+        let mut keys = alloc::collections::BTreeSet::new();
         for (ino, n) in &self.nodes {
-            if *ino >= self.next_ino {
+            if *ino >= self.next_ino || *ino == 0 {
                 return Err(EINVAL);
             }
+            let ty = n.mode & S_IFMT;
             match &n.kind {
-                Kind::Dir { entries, order, next_seq, parent } => {
-                    if n.mode & S_IFMT != S_IFDIR || !self.is_dir(*parent) && n.nlink > 0 {
+                Kind::Dir { entries, order, next_seq, .. } => {
+                    if ty != S_IFDIR || order.len() != entries.len() {
                         return Err(EINVAL);
                     }
-                    if *ino != ROOT && n.nlink > 0 {
-                        live_dirs.push(*ino);
-                    }
                     for (name, (child, seq)) in entries {
-                        if !self.nodes.contains_key(child) || order.get(seq) != Some(name) || seq >= next_seq {
+                        if check_name(name).is_err() || name == b"." || name == b".." || *seq < 2 || seq >= next_seq || order.get(seq) != Some(name) {
                             return Err(EINVAL);
                         }
-                        if self.is_dir(*child) {
-                            if self.parent(*child) != Ok(*ino) {
-                                return Err(EINVAL);
-                            }
-                            listed_dirs.insert(*child);
+                        if *child == ROOT || !self.nodes.contains_key(child) {
+                            return Err(EINVAL);
                         }
+                        *refs.entry(*child).or_insert(0) += 1;
                     }
-                    if order.len() != entries.len() {
+                }
+                Kind::File { data } => {
+                    if ty != S_IFREG || n.size > MAX_FILE || (*data != 0 && !keys.insert(*data)) {
+                        return Err(EINVAL);
+                    }
+                    used += pages(n.size);
+                }
+                Kind::Symlink(t) => {
+                    if ty != S_IFLNK || t.is_empty() || t.len() > SYMLINK_MAX {
                         return Err(EINVAL);
                     }
                 }
-                Kind::File { .. } => used += pages(n.size),
-                Kind::Symlink(_) => {}
-                Kind::Special => {}
+                Kind::Special => {
+                    if !matches!(ty, S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK) {
+                        return Err(EINVAL);
+                    }
+                }
             }
         }
-        if used != self.used_pages || live_dirs.iter().any(|d| !listed_dirs.contains(d)) {
+        // Link counts; removed inodes only while a handle holds them
+        for (ino, n) in &self.nodes {
+            let r = refs.get(ino).copied().unwrap_or(0);
+            if n.nlink == 0 && (n.open == 0 || r != 0) {
+                return Err(EINVAL);
+            }
+            match &n.kind {
+                Kind::Dir { entries, .. } => {
+                    if n.nlink == 0 {
+                        if !entries.is_empty() {
+                            return Err(EINVAL);
+                        }
+                        continue;
+                    }
+                    let subdirs = entries.values().filter(|e| self.is_dir(e.0)).count() as u64;
+                    let want_refs = if *ino == ROOT { 0 } else { 1 };
+                    if r != want_refs || n.nlink as u64 != 2 + subdirs {
+                        return Err(EINVAL);
+                    }
+                }
+                _ => {
+                    if n.nlink as u64 != r {
+                        return Err(EINVAL);
+                    }
+                }
+            }
+        }
+        // Every live directory is reached from the root, through its parent's entries
+        let live_dirs = self.nodes.iter().filter(|(_, n)| matches!(n.kind, Kind::Dir { .. }) && n.nlink > 0).count();
+        let mut seen = 0usize;
+        let mut todo = vec![ROOT];
+        while let Some(d) = todo.pop() {
+            seen += 1;
+            if seen > live_dirs {
+                return Err(EINVAL);
+            }
+            if let Some(Node { kind: Kind::Dir { entries, .. }, .. }) = self.nodes.get(&d) {
+                for (child, _) in entries.values() {
+                    if let Some(Node { kind: Kind::Dir { parent, .. }, .. }) = self.nodes.get(child) {
+                        if *parent != d {
+                            return Err(EINVAL);
+                        }
+                        todo.push(*child);
+                    }
+                }
+            }
+        }
+        if seen != live_dirs || used != self.used_pages {
             return Err(EINVAL);
         }
         Ok(())
@@ -1170,6 +1257,9 @@ impl TmpfsSet {
     pub fn create(&mut self, data: &str, euid: u32, egid: u32, mem: u64, now: Ts) -> Result<(u32, u64), i64> {
         let opts = TmpfsOpts::parse(data, euid, egid, mem)?;
         let n = self.next.max(1);
+        if self.all.contains_key(&n) || n == u32::MAX {
+            return Err(ENFILE); // (four billion instances: the numbers ran out)
+        }
         self.next = n + 1;
         self.all.insert(n, Tmpfs::new(n, opts, now));
         Ok((n, ROOT))
@@ -1221,7 +1311,9 @@ impl TmpfsSet {
             if t.id >= next {
                 return Err(EINVAL);
             }
-            all.insert(t.id, t);
+            if t.id == 0 || all.insert(t.id, t).is_some() {
+                return Err(EINVAL);
+            }
         }
         if !d.done() {
             return Err(EINVAL);

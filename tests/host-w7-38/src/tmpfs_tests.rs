@@ -10,6 +10,7 @@ struct Store {
     objs: BTreeMap<u64, Vec<u8>>,
     next: u64,
     freed: Vec<u64>,
+    zeroed: Vec<(u64, u64)>,
     fail_create: bool,
 }
 
@@ -41,7 +42,10 @@ impl DataStore for Store {
     fn truncate(&mut self, key: u64, size: u64, old: u64) -> Result<(), i64> {
         assert!(size < old);
         let o = self.objs.get_mut(&key).ok_or(-9i64)?;
-        o.truncate(size as usize);
+        for i in size as usize..(old as usize).min(o.len()) {
+            o[i] = 0;
+        }
+        self.zeroed.push((size, old));
         Ok(())
     }
     fn free(&mut self, key: u64) {
@@ -234,7 +238,7 @@ fn rmdir_rules() {
     // An open removed directory: nothing can be made in it
     assert_eq!(t.getattr(d).unwrap().nlink, 0);
     assert_eq!(t.mknod(d, b"x", 0o644, 0, 0, 0, T1), Err(ENOENT));
-    assert_eq!(t.readdir(d, 0, 10).unwrap().len(), 2);
+    assert!(t.readdir(d, 0, 10).unwrap().is_empty(), "a removed directory lists nothing");
     t.release(d, &mut s);
     assert_eq!(t.getattr(d), Err(ENOENT));
 }
@@ -480,7 +484,11 @@ fn xattrs() {
     assert_eq!(t.listxattr(f).unwrap(), b"trusted.b\0user.a\0");
     assert_eq!(t.setxattr(f, b"system.x", b"", 0, T1), Err(EOPNOTSUPP));
     assert_eq!(t.setxattr(f, b"", b"", 0, T1), Err(ERANGE));
-    assert_eq!(t.setxattr(f, b"user.big", &vec![0u8; 65537], 0, T1), Err(ERANGE));
+    assert_eq!(t.setxattr(f, b"user.big", &vec![0u8; 65537], 0, T1), Err(E2BIG));
+    assert_eq!(t.setxattr(f, b"user.", b"", 0, T1), Err(EINVAL), "a name space alone");
+    assert_eq!(t.setxattr(f, b"user.a\0b", b"", 0, T1), Err(EINVAL));
+    assert_eq!(t.setxattr(f, b"user.a", b"", XATTR_CREATE | XATTR_REPLACE, T1), Err(EINVAL));
+    assert_eq!(t.setxattr(f, b"user.a", b"", 4, T1), Err(EINVAL));
     assert_eq!(t.setxattr(f, b"user.big", &vec![0u8; 65530], 0, T1), Err(ENOSPC));
     assert_eq!(t.setxattr(p, b"user.a", b"", 0, T1), Err(EPERM));
     t.setxattr(p, b"security.selinux", b"x", 0, T1).unwrap();
@@ -643,4 +651,148 @@ fn directory_link_limit_on_rename() {
     t.mknod(ROOT, b"g", 0o644, 0, 0, 0, T0).unwrap();
     t.rename(ROOT, b"d", ROOT, b"g", RENAME_EXCHANGE, &mut s, T1).unwrap();
     t.check().unwrap();
+}
+
+
+#[test]
+fn growing_zeroes_the_old_tail_page() {
+    let mut t = fs();
+    let mut s = Store::default();
+    let f = t.mknod(ROOT, b"f", 0o644, 0, 0, 0, T0).unwrap();
+    t.write(f, 0, b"abc", &mut s, T0).unwrap();
+    let k = t.data_key(f, &mut s).unwrap();
+    // A program wrote past the end through a shared mapping
+    s.write(k, 3, b"XYZ").unwrap();
+    t.truncate(f, 10, &mut s, T1).unwrap();
+    assert_eq!(t.read(f, 0, 10, &mut s).unwrap(), b"abc\0\0\0\0\0\0\0");
+    assert_eq!(s.zeroed.last(), Some(&(3, 10)));
+    // A write that starts past the end: the gap within the old page is zeroed
+    s.write(k, 10, b"QQ").unwrap();
+    t.write(f, 20, b"!", &mut s, T1).unwrap();
+    assert_eq!(&t.read(f, 8, 13, &mut s).unwrap(), b"\0\0\0\0\0\0\0\0\0\0\0\0!");
+    // Page-aligned ends need nothing
+    let g = t.mknod(ROOT, b"g", 0o644, 0, 0, 0, T0).unwrap();
+    t.write(g, 0, &[1u8; 4096], &mut s, T0).unwrap();
+    let before = s.zeroed.len();
+    t.truncate(g, 9000, &mut s, T1).unwrap();
+    assert_eq!(s.zeroed.len(), before);
+    // Times change even when the size does not (as Linux's truncate)
+    t.truncate(g, 9000, &mut s, (777, 0)).unwrap();
+    assert_eq!(t.getattr(g).unwrap().mtime, (777, 0));
+}
+
+/// The node `ino` of `t`, to damage it.
+fn n(t: &mut Tmpfs, ino: u64) -> &mut Node {
+    t.nodes.get_mut(&ino).unwrap()
+}
+
+/// A tree, its encoding, and a way to change its nodes before sealing again.
+fn tampered(f: impl FnOnce(&mut Tmpfs)) -> Result<Tmpfs, i64> {
+    let mut t = fs();
+    let mut s = Store::default();
+    let d = t.mkdir(ROOT, b"d", 0o755, 0, 0, T0).unwrap();
+    let e = t.mkdir(d, b"e", 0o755, 0, 0, T0).unwrap();
+    let a = t.mknod(e, b"a", 0o644, 0, 0, 0, T0).unwrap();
+    t.write(a, 0, b"x", &mut s, T0).unwrap();
+    let b = t.mknod(e, b"b", 0o644, 0, 0, 0, T0).unwrap();
+    t.write(b, 0, b"y", &mut s, T0).unwrap();
+    t.symlink(ROOT, b"l", b"d", 0, 0, T0).unwrap();
+    t.check().unwrap();
+    f(&mut t);
+    Tmpfs::decode(&t.encode())
+}
+
+#[test]
+fn strict_check_of_kept_trees() {
+    use crate::tmpfs::Kind;
+    assert!(tampered(|_| {}).is_ok());
+    // A cycle detached from the root: d and e point at each other
+    assert_eq!(tampered(|t| {
+        if let Kind::Dir { entries, .. } = &mut n(t, 1).kind {
+            entries.remove(&b"d"[..]);
+        }
+        if let Kind::Dir { order, .. } = &mut n(t, 1).kind {
+            order.retain(|_, n| n != b"d");
+        }
+        if let Kind::Dir { entries, order, next_seq, parent } = &mut n(t, 3).kind {
+            entries.insert(b"loop".to_vec(), (2, *next_seq));
+            order.insert(*next_seq, b"loop".to_vec());
+            *next_seq += 1;
+            *parent = 3;
+        }
+        n(t, 1).nlink -= 1;
+        n(t, 1).size -= 20;
+        n(t, 3).nlink += 1;
+        if let Kind::Dir { parent, .. } = &mut n(t, 2).kind {
+            *parent = 3;
+        }
+    }), Err(EINVAL));
+    // Wrong link counts, a second entry for a directory, a zombie, shared data keys
+    assert_eq!(tampered(|t| { n(t, 4).nlink = 2 }), Err(EINVAL));
+    assert_eq!(tampered(|t| { n(t, 2).nlink = 5 }), Err(EINVAL));
+    assert_eq!(tampered(|t| {
+        if let Kind::Dir { entries, order, next_seq, .. } = &mut n(t, 1).kind {
+            entries.insert(b"again".to_vec(), (3, *next_seq));
+            order.insert(*next_seq, b"again".to_vec());
+            *next_seq += 1;
+        }
+    }), Err(EINVAL));
+    assert_eq!(tampered(|t| {
+        if let Kind::Dir { entries, order, .. } = &mut n(t, 3).kind {
+            entries.remove(&b"a"[..]);
+            order.retain(|_, n| n != b"a");
+        }
+        n(t, 4).nlink = 0;
+    }), Err(EINVAL), "removed and not open");
+    assert_eq!(tampered(|t| {
+        let k = if let Kind::File { data } = n(t, 4).kind { data } else { 0 };
+        if let Kind::File { data } = &mut n(t, 5).kind {
+            *data = k;
+        }
+    }), Err(EINVAL), "two files, one data object");
+    // Entries: a bad name, a cookie below 2, the root as a child
+    assert_eq!(tampered(|t| {
+        if let Kind::Dir { entries, order, .. } = &mut n(t, 3).kind {
+            let v = entries.remove(&b"a"[..]).unwrap();
+            entries.insert(b"..".to_vec(), v);
+            order.insert(v.1, b"..".to_vec());
+        }
+    }), Err(EINVAL));
+    assert_eq!(tampered(|t| {
+        if let Kind::Dir { entries, order, .. } = &mut n(t, 3).kind {
+            let v = entries.get_mut(&b"a"[..]).unwrap();
+            order.remove(&v.1);
+            v.1 = 1;
+            order.insert(1, b"a".to_vec());
+        }
+    }), Err(EINVAL));
+    // Kinds against modes, sizes
+    assert_eq!(tampered(|t| { n(t, 4).mode = S_IFIFO | 0o644 }), Err(EINVAL));
+    assert_eq!(tampered(|t| { n(t, 4).size = MAX_FILE + 1 }), Err(EINVAL));
+    assert_eq!(tampered(|t| { n(t, 6).mode = S_IFREG | 0o777 }), Err(EINVAL));
+    assert_eq!(tampered(|t| { n(t, 1).nlink = 1 }), Err(EINVAL));
+}
+
+#[test]
+fn set_numbers_and_duplicates() {
+    let mut set = TmpfsSet::new();
+    set.create("", 0, 0, MEM, T0).unwrap();
+    let kept = set.encode();
+    // Instance 0, or the same instance twice, is refused
+    let body = unseal(0x544d_5053, 1, &kept).unwrap().to_vec();
+    let mut twice = body.clone();
+    let one = {
+        let mut d = crate::mount::Dec::new(&body[8..]);
+        d.bytes().unwrap()
+    };
+    twice[4..8].copy_from_slice(&2u32.to_le_bytes());
+    let mut e = crate::mount::Enc::default();
+    e.bytes(&one);
+    twice.extend_from_slice(&e.buf);
+    assert_eq!(TmpfsSet::decode(&seal(0x544d_5053, 1, &twice)), Err(EINVAL));
+    // Opens cannot wrap
+    let mut t = fs();
+    let f = t.mknod(ROOT, b"f", 0o644, 0, 0, 0, T0).unwrap();
+    n(&mut t, f).open = u32::MAX;
+    assert_eq!(t.open(f), Err(ENFILE));
 }
