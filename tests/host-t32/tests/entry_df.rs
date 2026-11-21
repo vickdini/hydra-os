@@ -36,16 +36,19 @@ fn insns_between<'a>(src: &'a str, first: &str, until: &str) -> Vec<&'a str> {
     panic!("{until} not found after {first}");
 }
 
-#[test]
-fn common_trap_handler_clears_df_before_rust() {
-    let insns = insns_between(IDT, "common_trap_handler:", "call hydra_exception_handler");
-    assert!(insns.contains(&"cld"), "common_trap_handler must `cld` before calling Rust: {insns:?}");
+/// The first instruction after `label:` (so `cld` runs on every path, before any branch).
+fn first_insn<'a>(src: &'a str, label: &str) -> &'a str {
+    insns_between(src, &format!("{label}:"), "iretq")[0]
 }
 
 #[test]
-fn direct_switch_clears_df_before_rust() {
-    let insns = insns_between(IDT, "asm_direct_switch:", "call hydra_direct_switch_handler");
-    assert!(insns.contains(&"cld"), "asm_direct_switch must `cld` before calling Rust: {insns:?}");
+fn common_trap_handler_clears_df_first() {
+    assert_eq!(first_insn(IDT, "common_trap_handler"), "cld");
+}
+
+#[test]
+fn direct_switch_clears_df_first() {
+    assert_eq!(first_insn(IDT, "asm_direct_switch"), "cld");
 }
 
 #[test]
@@ -54,19 +57,48 @@ fn every_gate_macro_goes_through_the_common_handler() {
         let body = insns_between(IDT, &format!(".macro {mac} name, vec"), ".endm");
         assert_eq!(body.last(), Some(&"jmp common_trap_handler"), "{mac}: {body:?}");
     }
-    // Every other entry into Rust in the file is one of the two labels checked above.
+    // Every call in the file's assembly (any operand form: symbol, `{sym}`, register) is one of
+    // the two checked above; a new entry stub must be added to these tests.
     let calls: Vec<&str> = IDT
         .lines()
         .map(|l| l.split("//").next().unwrap().trim())
-        .filter(|l| l.starts_with("call hydra_"))
+        .filter(|l| l.starts_with("call ") || l.starts_with("callq "))
         .collect();
     assert_eq!(calls, ["call hydra_direct_switch_handler", "call hydra_exception_handler"]);
 }
 
+/// The files with assembly entry or copy code; a new one must be checked for `cld` and added.
+#[test]
+fn no_new_assembly_files() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let t = std::fs::read_to_string(&p).unwrap();
+                if t.contains("global_asm!") || t.contains("#[unsafe(naked)]") || t.contains("#[naked]") {
+                    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/");
+                    let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.push(rel);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src")), &mut files);
+    files.sort();
+    // smp.rs: the AP start code begins with `cld`; lx/copy.rs: user copies, called from Rust
+    assert_eq!(files, ["arch/idt.rs", "arch/smp.rs", "arch/syscall.rs", "lx/copy.rs"]);
+}
+
 #[test]
 fn syscall_entry_masks_df() {
-    // init() writes IA32_FMASK from this literal (tests/syscalls.rs checks the write)
-    assert!(SYSCALL.contains("let fmask: u64 = 0x0004_4700;"));
+    // init() writes IA32_FMASK from this literal (tests/syscalls.rs checks the write); both
+    // lines must be live code, not comments
+    let live: Vec<&str> = SYSCALL.lines().map(|l| l.split("//").next().unwrap().trim()).collect();
+    assert!(live.contains(&"let fmask: u64 = 0x0004_4700;"));
+    assert!(live.contains(&"wrmsr(IA32_FMASK, fmask);"));
     const DF: u64 = 1 << 10;
     assert_ne!(0x0004_4700u64 & DF, 0, "SYSCALL must clear DF");
 }
