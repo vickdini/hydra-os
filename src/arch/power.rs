@@ -64,10 +64,35 @@ fn commit_task() {
 }
 // wave7 GB end
 
+// wave8 GB begin
+/// The live session's last shutdown step (the user's decision, wave 8): the pool is
+/// committed and nothing needs the stick any more, so only now the console asks for it to be
+/// removed, and the power goes when Enter is pressed (as Ubuntu's live system does). Pulling
+/// the stick earlier crashes programs whose files are on it. Outside a live session, before
+/// the scheduler runs, or when Hydra did not start from a disk partition (the image build's
+/// live ISO, a CD: nothing to pull), nothing waits.
+fn remove_stick_prompt() {
+    if !crate::compat::linux::live::is_live() || !crate::task::is_active() || crate::arch::bootdisk::info().boot_part.is_none() {
+        return;
+    }
+    // The console on the screen (the desktop has ended by now)
+    crate::compat::linux::drm::request_vt_switch(false);
+    crate::task::sleep_ms(500);
+    let seen = crate::arch::keyboard::ENTER_PRESSES.load(Ordering::Relaxed);
+    crate::kprintln!("");
+    crate::kprintln!("    Hydra has stopped. Remove the installation stick (USB), then press Enter.");
+    crate::kprintln!("");
+    while crate::arch::keyboard::ENTER_PRESSES.load(Ordering::Relaxed) == seen {
+        crate::task::sleep_ms(50);
+    }
+}
+// wave8 GB end
+
 /// Commits the pool and powers the machine off (ACPI S5 on the usual virtual machines,
 /// then the firmware's shutdown).
 pub fn power_off() -> ! {
     sync_pool();
+    remove_stick_prompt(); // wave8 GB
     crate::kprintln!("[power] Powering off.");
     unsafe {
         use x86_64::instructions::port::Port;
@@ -105,6 +130,7 @@ pub fn power_off() -> ! {
 /// Commits the pool and restarts the machine.
 pub fn reboot() -> ! {
     sync_pool();
+    remove_stick_prompt(); // wave8 GB
     crate::kprintln!("[power] Restarting.");
     unsafe {
         use x86_64::instructions::port::Port;

@@ -677,7 +677,8 @@ class DonePage(Page):
     def success(self, notes):
         self.ok = True
         self.head.setText("Hydra is installed")
-        self.text.setText("Remove the installation stick, then click <b>Restart now</b>. At its first start the "
+        self.text.setText("Click <b>Restart now</b> and leave the installation stick in until the screen asks you to "
+                          "remove it (then press Enter). At its first start the "
                           "computer sets up your account (this takes a minute), then shows the login screen: log "
                           "in with your user name <b>%s</b> and your password." % self.wiz.account.user.text())
         self.note.setText("<br>".join(notes))
