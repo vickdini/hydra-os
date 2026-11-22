@@ -933,6 +933,21 @@ pub mod lx {
         pub fn host_by_endpoint(ep: u32) -> Option<SvcId> {
             crate::fake::LX_HOSTS.lock().unwrap().contains(&ep).then_some(2)
         }
+        // wave8 GX2 begin: *stub* the registry's endpoints (the split defaults; a test may
+        // co-locate a service in linux-server with `COLOCATED`)
+        pub static COLOCATED: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        pub fn endpoint_of(svc: SvcId) -> u32 {
+            use crate::ipc::protocol::*;
+            if COLOCATED.lock().unwrap().contains(&svc) {
+                return ENDPOINT_LINUX_SERVER;
+            }
+            match svc {
+                LXS_NET => ENDPOINT_LX_NET,
+                LXS_IPC => ENDPOINT_LX_IPC,
+                _ => 0,
+            }
+        }
+        // wave8 GX2 end
     }
     /// *stub*
     pub mod timer {

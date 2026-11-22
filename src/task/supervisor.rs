@@ -277,16 +277,16 @@ fn lx_sec_args() -> Option<Vec<String>> {
 // wave6 G24 end
 
 // wave8 GX2 begin
-/// lx-net: always started (two workers); it exits by itself when no service id names its
-/// endpoint (`lx.net=linux`, `lx.net=kernel`, `lx=kernel`).
+/// lx-net: two workers; not started when `lx.net=linux` co-locates its pieces in
+/// linux-server (no service id names its endpoint; it would exit at once, and the start
+/// hand-off would wait for it in vain).
 fn lx_net_args() -> Option<Vec<String>> {
-    Some(alloc::vec![String::from("workers=2")])
+    (crate::lx::svc::endpoint_of(crate::ipc::protocol::LXS_NET) == crate::ipc::protocol::ENDPOINT_LX_NET).then(|| alloc::vec![String::from("workers=2")])
 }
 
-/// lx-ipc: always started (three workers: D-Bus and Wayland traffic); it exits by itself
-/// when no service id names its endpoint.
+/// lx-ipc: three workers (D-Bus and Wayland traffic); not started with `lx.ipc=linux`.
 fn lx_ipc_args() -> Option<Vec<String>> {
-    Some(alloc::vec![String::from("workers=3")])
+    (crate::lx::svc::endpoint_of(crate::ipc::protocol::LXS_IPC) == crate::ipc::protocol::ENDPOINT_LX_IPC).then(|| alloc::vec![String::from("workers=3")])
 }
 // wave8 GX2 end
 

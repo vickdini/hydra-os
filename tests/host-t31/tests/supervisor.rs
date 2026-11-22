@@ -441,3 +441,20 @@ fn start_all_launches_what_has_a_device_and_reports_the_rest() {
     assert_eq!(*fake::STARTS.lock().unwrap(), vec!["usb_input", "snd"]);
     assert!(task::SCHEDULER.lock().task_named("supervisor").is_some(), "the watchdog task");
 }
+
+// wave8 GX2 begin
+/// lx-net and lx-ipc start with their workers; co-located in linux-server
+/// (`lx.<name>=linux`) they are not started at all (they would exit at once).
+#[test]
+fn lx_net_and_lx_ipc_start_unless_co_located() {
+    let _w = setup();
+    supervisor::supervisor_init();
+    let id = SUPERVISOR.lock().start_service("lx_ipc").unwrap();
+    with(id.0, |t| assert_eq!(&t.cmdline.as_ref().unwrap()[..], b"/drivers/lx_ipc\0workers=3\0"));
+    hydra_hosttests_t31::lx::svc::COLOCATED.lock().unwrap().push(LXS_NET);
+    assert!(SUPERVISOR.lock().start_service("lx_net").is_err());
+    hydra_hosttests_t31::lx::svc::COLOCATED.lock().unwrap().clear();
+    let id = SUPERVISOR.lock().start_service("lx_net").unwrap();
+    with(id.0, |t| assert_eq!(&t.cmdline.as_ref().unwrap()[..], b"/drivers/lx_net\0workers=2\0"));
+}
+// wave8 GX2 end
