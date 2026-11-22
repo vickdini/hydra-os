@@ -308,8 +308,9 @@ impl CharDevice for ServerObject {
     }
 
     fn rdev(&self) -> u64 {
-        // wave8 GI: a device service's object (kinds 64..) is the device its key names
-        if self.kind >= 64 {
+        // wave8 GI: a device service's object (a character device, its key the device
+        // number) is that device
+        if self.mode & 0o170000 == 0o020000 {
             return self.key;
         }
         0
@@ -344,9 +345,10 @@ impl CharDevice for ServerObject {
             st.st_ino = self.tag;
             st.st_dev = self.key;
         }
-        // wave8 GI begin: a device service's object (kinds 64..): the device node's numbers
-        // (libinput and logind compare `st_rdev` with the node's)
-        if self.kind >= 64 && self.key != 0 {
+        // wave8 GI begin: a device service's object (a character device, its key the device
+        // number): the device node's numbers (libinput and logind compare `st_rdev` with the
+        // node's)
+        if self.mode & 0o170000 == 0o020000 && self.key != 0 {
             st.st_dev = 6; // devtmpfs, as the kernel's own devices
             st.st_rdev = self.key;
             st.st_ino = self.key | 0x1_0000_0000;

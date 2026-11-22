@@ -21,7 +21,7 @@
 //!   screen's owner (the display side calls it); turning it off appends a
 //!   [`INPUT_REC_RELEASE`] record, so the session sees every held key go up.
 //! - **Hot keys** stay in `arch/keyboard.rs`; the screen switch they ask for goes through
-//!   [`hotkey_switch`] / [`session_hidden`] (the display side's block below).
+//!   [`hotkey_switch`] / [`session_hidden`].
 //!
 //! Producers run with interrupts off (interrupt handlers, the USB input task); the
 //! producer lock is a spin lock taken only there. Nothing here allocates after [`init`].
@@ -204,7 +204,7 @@ pub fn summary() -> alloc::string::String {
     alloc::format!("input ring: {} appended, {} taken, {} dropped, routing {}, {}", h, t, d, routing(), if forwarded() { "input-server" } else { "kernel evdev" })
 }
 
-// wave8 GD begin: the hot keys' screen switch (Group D points these at `screen.rs`)
+// The hot keys' screen switch (`drm::request_vt_switch` goes to Group D's `screen.rs`)
 /// Ctrl+Alt+F1 (`to_session` false: show the console) or Ctrl+Alt+F2 (`true`: back to the
 /// hidden desktop session). Called from the keyboard interrupt.
 pub fn hotkey_switch(to_session: bool) {
@@ -215,4 +215,3 @@ pub fn hotkey_switch(to_session: bool) {
 pub fn session_hidden() -> bool {
     crate::compat::linux::drm::session_hidden()
 }
-// wave8 GD end

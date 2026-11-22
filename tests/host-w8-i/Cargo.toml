@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w8_i"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group I's host unit tests (wave 8): the raw input ring (src/ipc/input_ring.rs) and input-server's translation and ioctl answers (userland/drivers/input-server/src/xlate.rs)"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
