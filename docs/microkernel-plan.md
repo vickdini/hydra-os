@@ -392,6 +392,8 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 26. **Wave 8 lineup** (2026-11-22): stage 1 D (display service), I (input), S (sound), T (terminals), X2 (lx-net and lx-ipc split out of linux-server), Z (zfs-server durability: no acknowledged change lost on a kill); stage 2 H (restart and hot-plug), F (mount calls and tmpfs ownership into vfs-server), P (per-call cost back under budget), B (open bugs); then 8-C closing.
 27. **The kernel's copy of the file code is deleted after FUSE moves into vfs-server** (wave 9's closing), not in wave 8: `lx.vfs=kernel` stays one more wave.
 28. **Group 15's last device questions, as recommended:** a display-service crash ends the desktop session for now (a desktop-keeping restart later); fix the two waste findings now (pictures paced to 60 a second, no drawing behind the console); design the display core for a real graphics driver, build only the firmware framebuffer now.
+29. **Wave 9 lineup** (2026-11-22), two groups at a time, deployed after each pair: (1) 6b-2 FUSE as a vfs-server back end + 7a the process mechanism; (2) 6b-1 inotify/fanotify + X3 lx-ipc Transparent; (3) 6b-3 Landlock/ACL/ABAC + 6b-4 io_uring/aio; (4) P2 per-call cost + M tmpfs data in memory objects; then 9-C closing. Starts after the user's weekly usage limit resets. Gemini stays off; Sonnet reviewers.
+30. **9-C deletes the kernel's copy of the file code only** (after FUSE moves and the deploy; `lx.vfs=kernel` goes away). The wave 8 device and lx-net/lx-ipc copies stay as switch-backs until wave 10's cleanup.
 
 ### Still open, and when they are needed
 
