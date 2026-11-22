@@ -127,11 +127,76 @@ fn master_close_hangs_the_slave_up() {
     assert!(io.signals.contains(&(false, 40, 1)), "SIGHUP to the session leader");
     assert!(io.signals.contains(&(false, 40, 18)), "SIGCONT to the session leader");
     assert!(io.signals.contains(&(true, 41, 1)), "SIGHUP to the foreground group");
-    // the number is free again while the old slave lives
-    assert_eq!(t.open_master(12, 1000, &mut io), Ok(0));
+    // the number stays taken while the old slave lives (as devpts: ttyname of the old slave
+    // never names the new pair), and the old /dev/pts/0 cannot be opened any more
+    assert_eq!(t.open_master(12, 1000, &mut io), Ok(1));
+    assert_eq!(t.open_slave(0, 13, true, &who(1, 1, 1), &mut io), Err(ENOENT));
     assert_eq!(t.pair_count(), 2);
     t.closed(S, &mut io);
     assert_eq!(t.pair_count(), 1, "the old pair is gone with its last end");
+    assert_eq!(t.open_master(14, 1000, &mut io), Ok(0), "and its number is free");
+}
+
+#[test]
+fn tiocsctty_follows_linux() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    let mem = FakeMem::default();
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(60, 60, 59), &mem, &mut io), Ok(EPERM), "not a session leader");
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(70, 70, 70), &mem, &mut io), Ok(0));
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(70, 70, 70), &mem, &mut io), Ok(0), "again: already ours");
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(80, 80, 80), &mem, &mut io), Ok(EPERM), "another session's");
+    let root = Caller { tgid: 90, pgid: 90, sid: 90, euid: 0 };
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 0, &root, &mem, &mut io), Ok(EPERM), "root without force");
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 1, &root, &mem, &mut io), Ok(0), "root with force steals it");
+    // a session that has a terminal already (the console) takes no second one
+    t.cons_state(1, 100, 100, 80, 25, &mut io);
+    assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 1, &Caller { tgid: 100, pgid: 100, sid: 100, euid: 0 }, &mem, &mut io), Ok(EPERM));
+    t.open_slave(0, 30, false, &who(100, 100, 100), &mut io).unwrap();
+    assert_eq!(t.ioctl(S, ldisc::TIOCGSID, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(0));
+    assert_eq!(mem.at(0x10), 90i32.to_le_bytes(), "opening did not make it the console session's either");
+}
+
+#[test]
+fn dev_tty_ignores_the_slave_lock_and_hung_descriptors_fail() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    let mem = FakeMem::with(0x100, &1u32.to_le_bytes());
+    t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(70, 70, 70), &mem, &mut io).unwrap();
+    assert_eq!(t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, &mut io), Ok(0));
+    assert_eq!(t.open_slave(0, 30, true, &who(1, 1, 1), &mut io), Err(EIO), "by name: locked");
+    assert!(matches!(t.open_controlling(31, &who(71, 70, 70), &mut io), Some(Ok(_))), "/dev/tty: the caller's own");
+    t.hangup(70, &mut io);
+    assert_eq!(t.ioctl(S, ldisc::TCGETS, 0x200, &who(1, 1, 1), &mem, &mut io), Ok(EIO), "a hung-up descriptor");
+}
+
+#[test]
+fn output_flush_empties_what_waits_for_the_master() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    wr(&mut t, S, 1, b"pending output", &mut io);
+    let mem = FakeMem::default();
+    assert_eq!(t.ioctl(S, ldisc::TCFLSH, 1, &who(1, 1, 1), &mem, &mut io), Ok(0));
+    assert_eq!(t.read(M, 2, 50, Iov::one(0x1, 100), true, &mut io), Ans::Now(EAGAIN));
+}
+
+#[test]
+fn iov_sums() {
+    assert!(Iov(vec![(1, 10), (2, 20)]).fits());
+    assert!(!Iov(vec![(1, i64::MAX as u64), (2, 1)]).fits());
+    assert_eq!(Iov(vec![(1, u64::MAX), (2, 5)]).total(), usize::MAX, "saturates");
+}
+
+#[test]
+fn new_input_is_an_edge_for_slave_pollers() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    wr(&mut t, M, 1, b"a
+", &mut io);
+    io.ready_log.clear();
+    wr(&mut t, M, 2, b"b
+", &mut io);
+    assert!(io.ready_log.iter().any(|&(s, b, arrived)| s == S && b & POLLIN != 0 && arrived), "a second line while readable");
 }
 
 #[test]

@@ -317,7 +317,11 @@ fn iov_of(cx: &Cx) -> Result<Iov, i64> {
                     v.push((p, l));
                 }
             }
-            Ok(Iov(v))
+            let iov = Iov(v);
+            if !iov.fits() {
+                return Err(EINVAL);
+            }
+            Ok(iov)
         }
         _ => Ok(Iov::one(cx.args[1], cx.args[2])),
     }

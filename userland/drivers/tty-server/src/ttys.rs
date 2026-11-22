@@ -96,9 +96,21 @@ impl Iov {
         Self(alloc::vec![(ptr, len)])
     }
 
-    /// Bytes in all pieces.
+    /// Bytes in all pieces (saturating: the callers check the sum first, see `fits`).
     pub fn total(&self) -> usize {
-        self.0.iter().map(|&(_, l)| l as usize).sum()
+        self.0.iter().fold(0usize, |a, &(_, l)| a.saturating_add(l as usize))
+    }
+
+    /// Whether the pieces' sum fits `ssize_t` (Linux's `readv`/`writev` rule: `EINVAL`).
+    pub fn fits(&self) -> bool {
+        let mut t: u64 = 0;
+        for &(_, l) in &self.0 {
+            match t.checked_add(l) {
+                Some(v) if v <= i64::MAX as u64 => t = v,
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -272,8 +284,13 @@ impl Ttys {
 
     /// Hands what waits to the waiting readers and writers of pair `pid`, then publishes.
     fn settle(&mut self, pid: u64, io: &mut dyn Io) {
+        self.settle_with(pid, false, io);
+    }
+
+    /// [`Ttys::settle`]; `input`: new input came for the slave (an edge for its pollers).
+    fn settle_with(&mut self, pid: u64, input: bool, io: &mut dyn Io) {
         let mut arrived_m = false;
-        let mut arrived_s = false;
+        let mut arrived_s = input;
         if let Some(p) = self.pairs.get_mut(&pid) {
             // Slave readers take lines (or bytes) from the line discipline
             arrived_s |= feed_tty_readers(&mut p.tty, &mut p.rs, io);
@@ -328,6 +345,11 @@ impl Ttys {
         self.pairs.iter().find(|(_, p)| p.tty.session == sid).map(|(&id, _)| id)
     }
 
+    /// Whether session `sid` has a controlling terminal (one of the pairs, or the console).
+    fn has_controlling(&self, sid: u64) -> bool {
+        sid != 0 && (self.console.tty.session == sid || self.controlling(sid).is_some())
+    }
+
     // ------------------------------------------------------------------
     // Opening
     // ------------------------------------------------------------------
@@ -335,7 +357,10 @@ impl Ttys {
     /// Opens `/dev/ptmx` as slot `slot` for a caller of effective user `uid`: a new pair
     /// (the lowest free number); returns the slave's number (`ENOSPC` past [`MAX_PTYS`]).
     pub fn open_master(&mut self, slot: u32, uid: u32, io: &mut dyn Io) -> Result<u32, i64> {
-        let index = (0..MAX_PTYS).find(|i| !self.live.contains_key(i)).ok_or(ENOSPC)?;
+        // (a number stays taken while any end of its pair is open, as Linux's devpts keeps it:
+        // `ttyname` of an old slave never names a new pair)
+        let taken: BTreeSet<u32> = self.pairs.values().map(|p| p.index).collect();
+        let index = (0..MAX_PTYS).find(|i| !taken.contains(i)).ok_or(ENOSPC)?;
         let id = self.next;
         self.next += 1;
         self.pairs.insert(
@@ -366,9 +391,15 @@ impl Ttys {
     /// Opens the slave of pair `pid` as slot `slot`; a session leader without a controlling
     /// terminal acquires it unless `noctty`. Returns the node's `(mode, uid, gid)`.
     fn open_slave_of(&mut self, pid: u64, slot: u32, noctty: bool, who: &Caller, io: &mut dyn Io) -> Result<(u32, u32, u32), i64> {
-        let acquire = !noctty && who.sid != 0 && who.sid == who.tgid && self.controlling(who.sid).is_none();
+        self.open_slave_x(pid, slot, noctty, false, who, io)
+    }
+
+    /// [`Ttys::open_slave_of`]; `reopen`: `/dev/tty` naming the caller's own terminal (the
+    /// slave lock is for opening by name only).
+    fn open_slave_x(&mut self, pid: u64, slot: u32, noctty: bool, reopen: bool, who: &Caller, io: &mut dyn Io) -> Result<(u32, u32, u32), i64> {
+        let acquire = !noctty && who.sid != 0 && who.sid == who.tgid && !self.has_controlling(who.sid);
         let p = self.pairs.get_mut(&pid).ok_or(ENOENT)?;
-        if p.locked || p.master.is_none() {
+        if (p.locked && !reopen) || p.master.is_none() {
             return Err(EIO);
         }
         p.slaves.insert(slot);
@@ -395,7 +426,7 @@ impl Ttys {
     pub fn open_controlling(&mut self, slot: u32, who: &Caller, io: &mut dyn Io) -> Option<Result<(u32, (u32, u32, u32)), i64>> {
         let pid = self.controlling(who.sid)?;
         let index = self.pairs.get(&pid)?.index;
-        Some(self.open_slave_of(pid, slot, true, who, io).map(|n| (index, n)))
+        Some(self.open_slave_x(pid, slot, true, true, who, io).map(|n| (index, n)))
     }
 
     /// `TIOCGPTPEER` on master slot `master`: opens its slave as slot `slot` (no controlling
@@ -479,7 +510,8 @@ impl Ttys {
                     io.signal_group(fg, sig);
                 }
             }
-            self.settle(s.pair, io);
+            let input = p.tty.has_input();
+            self.settle_with(s.pair, input, io);
             return Ans::Now(data.len() as i64);
         }
         if s.gen != p.hangups || p.master.is_none() {
@@ -507,7 +539,13 @@ impl Ttys {
     pub fn ioctl(&mut self, slot: u32, request: u64, arg: u64, who: &Caller, mem: &dyn Mem, io: &mut dyn Io) -> Result<i64, u32> {
         let Some(s) = self.slots.get(&slot).copied() else { return Ok(EBADF) };
         let pid = s.pair;
+        // (TIOCSCTTY's rules need the other terminals: decided before the pair is borrowed)
+        let caller_has_other = who.sid != 0 && self.has_controlling(who.sid) && self.controlling(who.sid) != Some(pid);
         let Some(p) = self.pairs.get_mut(&pid) else { return Ok(EBADF) };
+        if !s.master && s.gen != p.hangups {
+            // A descriptor from before a vhangup is dead (Linux: EIO)
+            return Ok(EIO);
+        }
         let put32 = |v: u32| mem.put(arg, &v.to_le_bytes()).map_or_else(|e| e, |()| 0);
         let r = match request {
             TIOCGPTN if s.master => put32(p.index),
@@ -529,10 +567,28 @@ impl Ttys {
             // FIONREAD on the master: output the slave wrote that waits to be read
             ldisc::FIONREAD if s.master => put32(p.to_master.len().min(i32::MAX as usize) as u32),
             ldisc::TIOCSCTTY => {
-                if who.sid != 0 {
+                // Linux: only a session leader without a controlling terminal; a terminal
+                // another session holds only by force (arg 1) and as root
+                if p.tty.session != 0 && p.tty.session == who.sid {
+                    0
+                } else if who.sid == 0 || who.sid != who.tgid || caller_has_other {
+                    EPERM
+                } else if p.tty.session != 0 && !(arg == 1 && who.euid == 0) {
+                    EPERM
+                } else {
                     p.tty.session = who.sid;
                     p.tty.fg_pgrp = who.pgid;
+                    0
                 }
+            }
+            ldisc::TCFLSH if arg == 1 || arg == 2 => {
+                // The output queue is the slave's output waiting for the master
+                p.to_master.clear();
+                if arg == 2 {
+                    p.tty.ready.clear();
+                    p.tty.line.clear();
+                }
+                self.settle(pid, io);
                 0
             }
             ldisc::TIOCSPGRP => {
@@ -593,6 +649,9 @@ impl Ttys {
                 io.complete(w.id, 0);
             }
             for w in p.ws.drain(..) {
+                io.complete(w.id, EIO);
+            }
+            for w in p.rm.drain(..) {
                 io.complete(w.id, EIO);
             }
             p.to_master.clear();
