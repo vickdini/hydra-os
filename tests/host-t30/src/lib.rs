@@ -720,6 +720,10 @@ pub mod compat {
             pub fn wall_base_ns() -> i64 {
                 0
             }
+            pub fn program_stream(_dir: usize, _bytes: u64, _period: u64, _fmt: u64) -> Result<usize, i64> {
+                Err(-19)
+            }
+            pub fn stop_streams() {}
         }
         // wave8 GS end
 
