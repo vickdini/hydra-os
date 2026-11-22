@@ -137,7 +137,13 @@ static DRIVER: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU
 /// Makes the calling thread direction `dir`'s driver: high priority (a Linux thread at
 /// normal priority only), the previous driver back to its own priority.
 fn boost_caller(dir: usize) {
-    let me = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+    boost_thread(dir, crate::task::CURRENT_TID.load(Ordering::Relaxed));
+}
+
+/// wave8 GS: thread `me` becomes direction `dir`'s driver (the calling thread here, the
+/// thread a forwarded call names for the sound service, `ipc::sound`).
+pub fn boost_thread(dir: usize, me: u64) {
+    let _g = BOOSTING.lock();
     let old = DRIVER[dir].load(Ordering::Relaxed);
     if me == 0 || old == me {
         return;
@@ -153,8 +159,18 @@ fn boost_caller(dir: usize) {
     });
 }
 
+/// Serializes changes of [`DRIVER`] with the priority changes they make (wave8 GS).
+static BOOSTING: Mutex<()> = Mutex::new(());
+
+/// wave8 GS: the wall clock's offset from the monotonic clock (the sound service's
+/// timestamps).
+pub fn wall_base_ns() -> i64 {
+    crate::arch::rtc::wall_base_ns()
+}
+
 /// The device of direction `dir` was closed: its driver thread gets its own priority back.
-fn unboost(dir: usize) {
+pub fn unboost(dir: usize) {
+    let _g = BOOSTING.lock();
     let old = DRIVER[dir].swap(0, Ordering::Relaxed);
     if old != 0 {
         super::extra::reapply_priority(old);
@@ -176,10 +192,13 @@ struct Card {
 }
 
 static CARD: Mutex<Option<Card>> = Mutex::new(None);
+// (wave8 GS: the DMA position page and the rings are `ipc::sound`'s, shared with the sound
+// service: allocated once, in the sound driver's IOMMU domain, alive as long as the kernel)
+
 /// The DMA position buffer (one page, the controller writes positions into it).
-static POSBUF: spin::Once<Arc<ContiguousFrames>> = spin::Once::new();
-/// Ring buffers, per direction.
-static BUFFERS: [spin::Once<Option<Arc<ContiguousFrames>>>; 2] = [spin::Once::new(), spin::Once::new()];
+fn posbuf() -> Option<&'static Arc<ContiguousFrames>> {
+    crate::ipc::sound::buffers().map(|b| &b.pos)
+}
 
 /// The controller's register address, recorded by the supervisor when it starts the driver.
 static MMIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -201,6 +220,12 @@ pub fn controller() -> Option<(String, u16, u16, u32)> {
     SLOT.lock().clone()
 }
 
+/// wave8 GS: the card the driver described, for the sound service: `(codec vendor and
+/// device, directions, amplifiers, description, register address)`.
+pub fn card() -> Option<(u32, u32, [u32; 2], String, u64)> {
+    CARD.lock().as_ref().map(|c| (c.vendor, c.dirs, c.amps, c.desc.clone(), c.mmio))
+}
+
 /// Whether a card is present.
 pub fn present() -> bool {
     CARD.lock().is_some()
@@ -211,10 +236,42 @@ pub fn has_dir(dir: usize) -> bool {
     CARD.lock().as_ref().map_or(false, |c| c.dirs & (1 << dir) != 0)
 }
 
-/// Called after the supervisor started the drivers: asks the sound driver about the card,
-/// allocates the buffers, and starts the position task.
+/// Called after the supervisor started the drivers: asks the sound driver about the card
+/// ([`probe`]) and, unless the sound service serves the devices (wave 8), starts the
+/// position task.
 pub fn start() {
-    if !service::is_online(ENDPOINT_SOUND_DEV) {
+    probe();
+    if CARD.lock().is_none() || crate::ipc::sound::forwarded() {
+        return;
+    }
+    if !POSITION_TASK.swap(true, Ordering::AcqRel) {
+        crate::task::spawn("snd-position", position_task, crate::task::TaskPriority::Normal);
+    }
+}
+
+/// The position task was started.
+static POSITION_TASK: AtomicBool = AtomicBool::new(false);
+
+/// Asks the sound driver about the card once and allocates the buffers (wave8 GS: also
+/// called by the supervisor before it starts the sound service, which takes the card from
+/// here).
+pub fn probe() {
+    if CARD.lock().is_some() || !service::is_online(ENDPOINT_SOUND_DEV) {
+        return;
+    }
+    // (one prober: the supervisor's and `start`'s calls must not both ask the driver)
+    if PROBING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    probe_once();
+    PROBING.store(false, Ordering::Release);
+}
+
+/// A probe is in progress.
+static PROBING: AtomicBool = AtomicBool::new(false);
+
+fn probe_once() {
+    if CARD.lock().is_some() {
         return;
     }
     let reply = {
@@ -237,23 +294,16 @@ pub fn start() {
             return;
         }
     };
-    let Some(pos) = ContiguousFrames::allocate(1) else { return };
-    POSBUF.call_once(|| pos);
-    for dir in 0..2 {
-        BUFFERS[dir].call_once(|| if m.args[2] & (1 << dir) != 0 { ContiguousFrames::allocate(BUF_PAGES) } else { None });
+    // (wave8 GS: `ipc::sound` allocates the buffers and maps them into the controller's
+    // IOMMU domain, once; they live as long as the kernel, across driver restarts)
+    if crate::ipc::sound::buffers().is_none() {
+        crate::kprintln!("[snd] no memory for the sound buffers");
+        return;
     }
     let mut dirs = m.args[2] as u32;
     for dir in 0..2 {
-        if BUFFERS[dir].get().map_or(true, |b| b.is_none()) {
+        if ring(dir).is_none() {
             dirs &= !(1 << dir);
-        }
-    }
-    // IOMMU (Group 1): the controller reaches these kernel buffers by DMA; they live as
-    // long as the kernel, across driver restarts
-    let shared = POSBUF.get().into_iter().chain(BUFFERS.iter().filter_map(|b| b.get().and_then(|b| b.as_ref())));
-    for b in shared {
-        if crate::arch::iommu::map_dma(ENDPOINT_SOUND_DEV, b.base, b.pages * 4096).is_err() {
-            crate::kprintln!("[snd] the sound controller's IOMMU domain could not map a buffer");
         }
     }
     if dirs & 1 == 0 {
@@ -264,7 +314,6 @@ pub fn start() {
     build_controls(&card);
     crate::kprintln!("[snd] sound card: {} ({})", chip_name(card.vendor), card.desc);
     *CARD.lock() = Some(card);
-    crate::task::spawn("snd-position", position_task, crate::task::TaskPriority::Normal);
 }
 
 /// The codec's chip name as Linux's HDA driver shows it.
@@ -1189,6 +1238,9 @@ struct Stream {
     slot: usize,
     /// The ring was programmed for the current parameters.
     programmed: bool,
+    /// wave8 GS: underruns (overruns) since the device was opened, and when it was opened.
+    xruns: u64,
+    opened_ns: u64,
 }
 
 impl Stream {
@@ -1216,6 +1268,8 @@ impl Stream {
             tstamp_ns: 0,
             slot: 0,
             programmed: false,
+            xruns: 0,
+            opened_ns: 0,
         }
     }
 
@@ -1255,18 +1309,18 @@ enum Action {
 }
 
 fn ring(dir: usize) -> Option<&'static Arc<ContiguousFrames>> {
-    BUFFERS[dir].get().and_then(|b| b.as_ref())
+    crate::ipc::sound::ring(dir)
 }
 
 /// The stream's position in its ring (bytes), as the controller last wrote it.
 fn hw_position(slot: usize) -> u64 {
-    let Some(pb) = POSBUF.get() else { return 0 };
+    let Some(pb) = posbuf() else { return 0 };
     let p = crate::memory::frame_allocator::phys_to_virt(pb.base) as *const u32;
     unsafe { p.add(slot * 2).read_volatile() as u64 }
 }
 
 fn reset_position(slot: usize) {
-    if let Some(pb) = POSBUF.get() {
+    if let Some(pb) = posbuf() {
         let p = crate::memory::frame_allocator::phys_to_virt(pb.base) as *mut u32;
         unsafe { p.add(slot * 2).write_volatile(0) };
     }
@@ -1319,12 +1373,21 @@ fn update(dir: usize, s: &mut Stream) -> Action {
     }
     if s.state == ST_RUNNING && s.stop_threshold < s.boundary && avail >= s.stop_threshold {
         s.state = ST_XRUN;
+        s.xruns += 1;
         return Action::Stop;
     }
     Action::None
 }
 
 /// Starts or stops direction `dir`'s DMA.
+/// wave8 GS: stops both directions' DMA (the sound service died and is not back: its stream
+/// must not run on for ever).
+pub fn stop_streams() {
+    for dir in 0..2 {
+        let _ = trigger(dir, false);
+    }
+}
+
 fn trigger(dir: usize, run: bool) -> Result<(), i64> {
     match service::call(ENDPOINT_SOUND_DEV, Message::with_args(MSG_SND_TRIGGER, [dir as u64, run as u64, 0, 0]), service::CALL_TIMEOUT_TICKS) {
         Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Ok(()),
@@ -1335,24 +1398,63 @@ fn trigger(dir: usize, run: bool) -> Result<(), i64> {
 
 /// Points direction `dir`'s stream at its ring with `hw`'s layout; the position slot.
 fn program(dir: usize, hw: &HwSetup) -> Result<usize, i64> {
+    program_stream(dir, hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes, hw.hda_format())
+}
+
+/// wave8 GS: `MSG_SND_SETUP` for direction `dir` with `bytes` of its ring, periods of
+/// `period` bytes and format word `fmt`, always on the kernel's own ring and position page
+/// (the sound service asks for it through `LX_SND_SETUP`: it never names a physical
+/// address, so the controller's DMA stays on the kernel's buffers with or without an IOMMU).
+pub fn program_stream(dir: usize, bytes: u64, period: u64, fmt: u64) -> Result<usize, i64> {
     let buf = ring(dir).ok_or(ENODEV)?;
-    let pos = POSBUF.get().ok_or(ENODEV)?;
+    let pos = posbuf().ok_or(ENODEV)?;
+    if !crate::ipc::sound_page::setup_ok(dir as u64, bytes, period, fmt, buf.pages * 4096) {
+        return Err(EINVAL);
+    }
     let _w = service::hold_window(ENDPOINT_SOUND_DEV);
     let w = service::window(ENDPOINT_SOUND_DEV).ok_or(ENODEV)?;
-    let words = [dir as u64, buf.base, hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes, hw.hda_format(), pos.base];
+    let words = [dir as u64, buf.base, bytes, period, fmt, pos.base];
     for (i, v) in words.iter().enumerate() {
         w[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
     }
     match service::call(ENDPOINT_SOUND_DEV, Message::with_args(MSG_SND_SETUP, [0; 4]), service::CALL_TIMEOUT_TICKS) {
-        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Ok(m.args[1] as usize),
+        // (wave8 GS: the slot indexes the one-page position buffer: never trust a larger one)
+        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 && m.args[1] < 512 => Ok(m.args[1] as usize),
+        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Err(EIO),
         Ok(m) => Err(m.args[0] as i64),
         Err(e) => Err(e),
     }
 }
 
+/// wave8 GS: `SYNC_PTR` and `PREPARE` calls per direction since the last report.
+static SYNCS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static PREPS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+/// `SYNC_PTR` gaps per direction: the last one (ns), the largest since the last report, how
+/// many exceeded 20 ms.
+static LAST_SYNC: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static MAX_GAP: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static LATE: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+
 /// The position task: updates running streams every tick and wakes their waiters.
 fn position_task() {
+    let mut reported = 0u64;
     loop {
+        // wave8 GS: every 10 s while a stream is open, its call rate and underruns
+        let now = crate::arch::pit::ticks();
+        if now >= reported + 1000 {
+            reported = now;
+            for dir in 0..2 {
+                let (open, xruns, state) = {
+                    let s = STREAMS[dir].lock();
+                    (s.open, s.xruns, s.state)
+                };
+                let (n, p) = (SYNCS[dir].swap(0, Ordering::Relaxed), PREPS[dir].swap(0, Ordering::Relaxed));
+                if open && (n > 0 || p > 0) {
+                    let (gap, late) = (MAX_GAP[dir].swap(0, Ordering::Relaxed), LATE[dir].swap(0, Ordering::Relaxed));
+                    crate::kprintln!("[snd] pcm{} 10 s: {} SYNC_PTR (max gap {} ms, {} over 20 ms), {} PREPARE, {} xruns since open, state {}", dir, n, gap / 1_000_000, late, p, xruns, state);
+                }
+            }
+        }
         let mut any = false;
         for dir in 0..2 {
             let act = {
@@ -1553,6 +1655,18 @@ impl PcmFile {
             Err(e) => return e,
         };
         let flags = get_u32(&b, 0);
+        SYNCS[self.dir].fetch_add(1, Ordering::Relaxed); // wave8 GS
+        {
+            let t0 = crate::arch::pit::now_ns();
+            let last = LAST_SYNC[self.dir].swap(t0, Ordering::Relaxed);
+            if last != 0 {
+                let gap = t0.saturating_sub(last);
+                MAX_GAP[self.dir].fetch_max(gap, Ordering::Relaxed);
+                if gap > 20_000_000 {
+                    LATE[self.dir].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         if flags & 1 != 0 {
             self.sync();
         }
@@ -1598,6 +1712,7 @@ impl PcmFile {
     }
 
     fn prepare(&self) -> i64 {
+        PREPS[self.dir].fetch_add(1, Ordering::Relaxed); // wave8 GS
         let (hw, running) = {
             let s = self.stream();
             let Some(hw) = s.hw else { return EBADFD };
@@ -1860,6 +1975,11 @@ impl Drop for PcmFile {
         let was = {
             let mut s = STREAMS[self.dir].lock();
             let was = matches!(s.state, ST_RUNNING | ST_DRAINING | ST_PAUSED);
+            // wave8 GS: the underrun count of the session (section 2.5's measure)
+            let secs = crate::arch::pit::now_ns().saturating_sub(s.opened_ns) / 1_000_000_000;
+            if s.xruns > 0 || secs >= 5 {
+                crate::kprintln!("[snd] pcm{} closed after {} s: {} xruns", self.dir, secs, s.xruns);
+            }
             *s = Stream::new();
             was
         };
@@ -2068,7 +2188,9 @@ impl CharDevice for PcmFile {
 
 /// Opens minor `minor` of the ALSA major.
 pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
-    if !present() {
+    // wave8 GS: the sound service drives the card (it is restarting if this open came
+    // here): the two must never program the controller at once
+    if !present() || crate::ipc::sound::forwarded() {
         return Err(ENODEV);
     }
     match minor {
@@ -2088,6 +2210,8 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
             }
             *s = Stream::new();
             s.open = true;
+            s.opened_ns = crate::arch::pit::now_ns();
+            LAST_SYNC[dir].store(0, Ordering::Relaxed); // wave8 GS: gaps of this session only
             drop(s);
             Ok(Arc::new(PcmFile { dir, nonblock: AtomicBool::new(nonblock) }))
         }
@@ -2132,6 +2256,11 @@ pub fn proc_text(path: &str) -> Option<String> {
                 _ => return None,
             };
             let file = &rest[1..];
+            // wave8 GS: the sound service's streams, from the status page it writes
+            if crate::ipc::sound::forwarded() {
+                let st = crate::ipc::sound::status(dir).unwrap_or_default();
+                return crate::ipc::sound_page::proc_stream_text(file, dir, &chip, &st);
+            }
             let s = STREAMS[dir].lock();
             match file {
                 "/info" | "/sub0/info" => Some(alloc::format!(
@@ -2176,6 +2305,7 @@ pub fn proc_text(path: &str) -> Option<String> {
         }
     }
 }
+
 
 /// Whether `path` (absolute) is a `/proc/asound` file served by [`proc_text`].
 pub fn is_proc_file(path: &str) -> bool {

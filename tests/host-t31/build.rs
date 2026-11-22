@@ -21,6 +21,8 @@ const DRIVERS: &[&str] = &[
     "input-server", // wave8 GI
     "hda-driver",
     "tty-server", // wave8 GT
+    // wave8 GS
+    "sound-server",
 ];
 
 fn stand_in() -> Vec<u8> {

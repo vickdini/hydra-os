@@ -712,10 +712,28 @@ pub mod compat {
                 pub st_blksize: i64,
                 /// wave7 G7-4: a pseudo file's device.
                 pub st_dev: u64,
-                /// wave8 GD/GI/GT: a device service's character device number.
+                /// wave8 GD/GI/GT/GS: a device service's character device number.
                 pub st_rdev: u64,
             }
         }
+
+        // wave8 GS begin
+        /// *stub* The in-kernel ALSA layer, as the sound service's kernel side uses it.
+        pub mod snd {
+            pub fn card() -> Option<(u32, u32, [u32; 2], alloc::string::String, u64)> {
+                None
+            }
+            pub fn boost_thread(_dir: usize, _tid: u64) {}
+            pub fn unboost(_dir: usize) {}
+            pub fn wall_base_ns() -> i64 {
+                0
+            }
+            pub fn program_stream(_dir: usize, _bytes: u64, _period: u64, _fmt: u64) -> Result<usize, i64> {
+                Err(-19)
+            }
+            pub fn stop_streams() {}
+        }
+        // wave8 GS end
 
         pub mod proc {
             use alloc::collections::BTreeMap;

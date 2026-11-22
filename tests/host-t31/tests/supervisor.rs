@@ -76,7 +76,7 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     let names: Vec<&str> = supervisor::get_service_snapshots().iter().map(|s| s.name).collect();
     assert_eq!(
         names,
-        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver"]
+        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver", "sound_server"]
     );
     assert!(supervisor::get_service_snapshots().iter().all(|s| s.state == ServiceState::Stopped && s.task_id.is_none()));
     let log = fake::SVC_LOG.lock().unwrap().clone();
@@ -465,6 +465,8 @@ fn start_all_launches_what_has_a_device_and_reports_the_rest() {
     assert!(fake::klog_has("[supervisor] started 'ata_driver'"));
     assert!(fake::klog_has("not starting 'ahci_driver': no device for this service"));
     assert!(fake::klog_has("not starting 'net_driver'"));
+    // wave8 GS: no card on the host: the sound service has nothing to serve
+    assert!(fake::klog_has("not starting 'sound_server'"));
     assert!(fake::klog_has("'svc_test' (process"), "{:?}", fake::KLOG.lock().unwrap());
     assert!(fake::klog_has("did not register"));
     assert!(fake::klog_has("exited without registering: no device"));

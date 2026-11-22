@@ -7,7 +7,9 @@ members = ["hydra-rt", "ata-driver", "ahci-driver", "e1000-driver", "net-server"
     # wave8 GI: the input service
     "input-server",
     # wave8 GT: the terminal service
-    "tty-server"]
+    "tty-server",
+    # wave8 GS: the sound service
+    "sound-server"]
 
 [workspace.dependencies]
 hydra-rt = { path = "hydra-rt" }

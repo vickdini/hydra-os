@@ -493,7 +493,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 17] = [
+static SERVICES: [Service; 18] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -519,6 +519,9 @@ static SERVICES: [Service; 17] = [
     // wave8 GT begin: tty-server
     Service::new(crate::ipc::protocol::ENDPOINT_TTY_SERVER),
     // wave8 GT end
+    // wave8 GS begin: the sound service
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_SOUND),
+    // wave8 GS end
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).

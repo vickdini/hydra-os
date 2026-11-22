@@ -1,0 +1,9 @@
+[package]
+name = "sound-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra's sound service (wave 8): the ALSA devices (/dev/snd), a Linux service and a client of hda-driver"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

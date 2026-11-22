@@ -47,6 +47,9 @@ pub mod screen {
     pub fn service_gone() {}
 }
 // wave8 GD end
+// wave8 GS: the sound service's kernel side (its DMA memory, status page, LX_OBJ_SND)
+pub mod sound;
+pub mod sound_page;
 
 pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
 pub use endpoint::{

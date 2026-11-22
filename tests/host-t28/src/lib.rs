@@ -123,6 +123,35 @@ pub mod ipc {
     pub use message::Message;
     /// *stub* The driver service layer (`fake::SOUND`).
     pub use crate::fake::service;
+
+    // wave8 GS begin
+    /// *stub* The sound service's kernel side: its buffers (as `snd.rs` allocated them
+    /// before wave 8), never forwarded (the in-kernel layer under test).
+    pub mod sound {
+        use super::service::ContiguousFrames;
+        use alloc::sync::Arc;
+        pub struct Buffers {
+            pub pos: Arc<ContiguousFrames>,
+            pub rings: [Option<Arc<ContiguousFrames>>; 2],
+            pub status: Arc<ContiguousFrames>,
+        }
+        static B: spin::Once<Option<Buffers>> = spin::Once::new();
+        pub fn buffers() -> Option<&'static Buffers> {
+            B.call_once(|| Some(Buffers { pos: ContiguousFrames::allocate(1)?, rings: [ContiguousFrames::allocate(128), ContiguousFrames::allocate(128)], status: ContiguousFrames::allocate(1)? })).as_ref()
+        }
+        pub fn ring(dir: usize) -> Option<&'static Arc<ContiguousFrames>> {
+            buffers()?.rings.get(dir)?.as_ref()
+        }
+        pub fn forwarded() -> bool {
+            false
+        }
+        pub fn status(_dir: usize) -> Option<super::protocol::SndStatus> {
+            None
+        }
+    }
+    #[path = "../../../../src/ipc/sound_page.rs"]
+    pub mod sound_page;
+    // wave8 GS end
 }
 
 pub mod memory {

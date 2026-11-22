@@ -716,6 +716,12 @@ pub mod compat {
             pub fn start() {
                 crate::fake::STARTS.lock().unwrap().push("snd");
             }
+            // wave8 GS begin: the sound service's start asks for the card (none on the host)
+            pub fn probe() {}
+            pub fn card() -> Option<(u32, u32, [u32; 2], alloc::string::String, u64)> {
+                None
+            }
+            // wave8 GS end
         }
     }
 }
@@ -808,6 +814,15 @@ pub mod ipc {
     pub mod protocol;
     pub use message::Message;
     pub use protocol::*;
+
+    // wave8 GS begin
+    /// *stub* The sound service's kernel side: forwarded (the default boot words).
+    pub mod sound {
+        pub fn forwarded() -> bool {
+            true
+        }
+    }
+    // wave8 GS end
 
     /// *stub* The service registry: `fake::SERVERS` and friends.
     pub mod service {
