@@ -1,0 +1,9 @@
+[package]
+name = "input-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra's input service (wave 8): /dev/input/event*, fed by the kernel's raw input ring"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

@@ -2176,3 +2176,67 @@ pub const LX_MNT_TMPFS: u32 = 2;
 pub const LX_MNT_KERNEL: u32 = 3;
 // wave7 G7-7 end
 
+// wave8 GI begin: the input service (`userland/drivers/input-server`, `src/ipc/input.rs`)
+/// The input service's endpoint (`/dev/input/event*`, service [`LXS_INPUT`]).
+pub const ENDPOINT_INPUT_SERVER: u32 = 0x2A;
+/// Notification bit ([`MSG_SVC_NOTIFY`]) on [`ENDPOINT_INPUT_SERVER`]: raw input records were
+/// appended to the input ring.
+pub const NOTIFY_INPUT: u64 = 16;
+/// `SYS_LX_OBJ` operation: the calling input service gets a memory-object handle to the raw
+/// input ring (`hydra_rt::mem`, map it whole: [`INPUT_RING_BYTES`]).
+pub const LX_OBJ_INPUT_RING: u64 = 62;
+/// `SYS_LX_OBJ` operation: the input service's controls. `a` = 0: 1 if input is forwarded
+/// to the service, 0 if the kernel serves it (`lx.input=kernel`); other values reserved
+/// (LEDs, repeat).
+pub const LX_OBJ_INPUT_CTL: u64 = 63;
+/// Object kind: an open `/dev/input/event*` of the input service (key: its device number).
+pub const LX_OBJ_KIND_EVDEV: u32 = 65;
+/// The raw input ring's size: a header page and two pages of records.
+pub const INPUT_RING_BYTES: usize = 12288;
+/// Ring header word (u64, kernel-written): records appended since the ring was made.
+pub const INPUT_RING_HEAD: usize = 0;
+/// Ring header word (u64, consumer-written): records taken.
+pub const INPUT_RING_TAIL: usize = 8;
+/// Ring header word (u64, kernel-written): records dropped because the ring was full.
+pub const INPUT_RING_DROPS: usize = 16;
+/// Ring header word (u32): [`INPUT_RING_MAGIC`] once the kernel set the ring up.
+pub const INPUT_RING_MAGIC_OFF: usize = 24;
+/// "HYIN".
+pub const INPUT_RING_MAGIC: u32 = 0x4E49_5948;
+/// Where the records start.
+pub const INPUT_RING_REC_OFF: usize = 4096;
+/// One record's size.
+pub const INPUT_REC_SIZE: usize = 16;
+/// Records in the ring.
+pub const INPUT_RING_RECS: usize = 512;
+/// Records at the end of the ring kept for records that must not be lost (key releases,
+/// button changes, the release record): ordinary records are dropped this much earlier.
+pub const INPUT_RING_RESERVE: usize = 64;
+/// Record kind: one set-1 scancode byte (`code`).
+pub const INPUT_REC_KEY: u8 = 1;
+/// Record kind: relative pointer motion (`x`, `y` as i16, right and down), wheel, buttons.
+pub const INPUT_REC_REL: u8 = 2;
+/// Record kind: absolute pointer position (`x`, `y` 0..=0xFFFF), wheel, buttons.
+pub const INPUT_REC_ABS: u8 = 3;
+/// Record kind: the session lost the keyboard: report every held key and button released.
+pub const INPUT_REC_RELEASE: u8 = 4;
+/// One raw input record: `time` is the kernel's monotonic clock (ns, `CLOCK_MONOTONIC`).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct InputRec {
+    /// Nanoseconds since boot (the clock `CLOCK_MONOTONIC` reads).
+    pub time: u64,
+    /// `INPUT_REC_*`.
+    pub kind: u8,
+    /// A scancode byte ([`INPUT_REC_KEY`]).
+    pub code: u8,
+    /// Wheel clicks (positive: away from the user).
+    pub wheel: i8,
+    /// Buttons: bit 0 left, 1 right, 2 middle.
+    pub buttons: u8,
+    /// Relative x (as i16) or absolute x.
+    pub x: u16,
+    /// Relative y (as i16, down) or absolute y.
+    pub y: u16,
+}
+// wave8 GI end

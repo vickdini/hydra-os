@@ -11,7 +11,8 @@ mod common;
 use std::sync::Arc;
 
 use hydra_hosttests_t28::compat::linux::chardev::{makedev, CharDevice};
-use hydra_hosttests_t28::compat::linux::evdev::{self, push_abs, push_mouse, push_scancode};
+use hydra_hosttests_t28::compat::linux::evdev;
+use hydra_hosttests_t28::ipc::input::{push_abs, push_mouse, push_scancode};
 use hydra_hosttests_t28::fake;
 
 const EAGAIN: i64 = -11;
@@ -213,6 +214,10 @@ fn input_is_dropped_when_not_routed() {
     let k = kbd();
     evdev::set_routing(false);
     assert!(!evdev::routing());
+    // wave8 GI: the release record queued as routing went off makes the file readable (its
+    // pollers pump it); nothing was held, so it yields no events
+    assert_eq!(k.poll_events(), 0x1);
+    assert!(drain(&k).is_empty());
     push_scancode(0x1E);
     assert_eq!(k.poll_events(), 0);
     assert!(drain(&k).is_empty());
@@ -224,13 +229,19 @@ fn input_is_dropped_when_not_routed() {
 fn full_ring_drops_new_input() {
     let _g = setup();
     let k = kbd();
-    // 512 raw entries fit; the rest is dropped while nobody reads
+    // wave8 GI: the kernel's input ring holds 512 raw records, the last 64 for releases;
+    // the rest is dropped (and counted) while nobody reads
+    let (_, _, drops0) = hydra_hosttests_t28::ipc::input::counters();
     for _ in 0..300 {
         push_scancode(0x1E);
         push_scancode(0x9E);
     }
+    // Presses stop short of the reserve (448 records); releases fill it (64 more), and a
+    // release whose press was dropped says nothing
     let evs = drain(&k);
-    assert_eq!(evs.len(), 512 * 3);
+    assert_eq!(evs.len(), 448 * 3);
+    let (_, _, drops1) = hydra_hosttests_t28::ipc::input::counters();
+    assert_eq!(drops1 - drops0, 600 - 512);
 }
 
 #[test]
@@ -238,17 +249,18 @@ fn a_slow_reader_gets_syn_dropped() {
     let _g = setup();
     let k = kbd();
     let other = kbd();
-    // 683 key events = 2049 records: more than a queue holds, delivered in two pumps
+    // 700 key events = 2100 records: more than a queue holds, delivered in four pumps (the
+    // raw ring holds 256, so another reader pumps every 200)
     for i in 0..700 {
         push_scancode(if i % 2 == 0 { 0x1E } else { 0x9E });
-        if i == 400 {
-            assert_eq!(other.poll_events(), 0x1); // pumps the first part
-            drain(&other);
+        if i % 200 == 199 {
+            assert_eq!(other.poll_events(), 0x1);
+            drain(&other); // pumps
         }
     }
     let evs = drain(&k);
     assert_eq!(evs[0], ev(0, 3, 0), "SYN_DROPPED first");
-    assert_eq!(evs.len(), 1 + (700 - 401) * 3);
+    assert_eq!(evs.len(), 1 + 100 * 3);
 }
 
 #[test]
@@ -290,11 +302,13 @@ fn blocking_reads_wait_for_input() {
 fn timestamps_come_from_the_tick_counter() {
     let _g = setup();
     let k = kbd();
-    fake::TICKS.set(123_456); // 10 ms per tick in the event clock
+    // wave8 GI: the record's time is the monotonic clock at the interrupt (`now_ns`; the
+    // fake clock is 1 ms per tick)
+    fake::TICKS.set(123_456);
     push_scancode(0x1E);
     let mut b = [0u8; 24];
     assert_eq!(k.read(&mut b), 24);
-    let us = 123_456u64 * 10_000;
+    let us = 123_456u64 * 1_000;
     assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), us / 1_000_000);
     assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), us % 1_000_000);
     push_scancode(0x9E);
@@ -439,4 +453,18 @@ fn device_list_and_identities() {
     assert_eq!(phys, "isa0060/serio1/input1");
     assert_eq!(id, [0x11, 2, 0x13, 0]);
     assert_eq!(evdev::device_info(1).0, "ImPS/2 Generic Wheel Mouse");
+}
+
+#[test]
+fn routing_off_releases_held_keys_to_pollers() {
+    // wave8 GI (review): with the kernel copy, a held key is released once routing goes off,
+    // and a poller sees it without a blocking read
+    let _g = setup();
+    let k = kbd();
+    push_scancode(0x1D); // Ctrl down
+    assert_eq!(drain(&k), vec![ev(4, 4, 0x1D), ev(1, 29, 1), ev(0, 0, 0)]);
+    evdev::set_routing(false);
+    assert_eq!(k.poll_events(), 0x1);
+    assert_eq!(drain(&k), vec![ev(1, 29, 0), ev(0, 0, 0)]);
+    evdev::set_routing(true);
 }

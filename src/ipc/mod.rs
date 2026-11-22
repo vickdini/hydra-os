@@ -31,6 +31,12 @@ pub mod message;
 pub mod protocol;
 /// Request/reply calls to Ring 3 driver and server processes, with shared data windows.
 pub mod service;
+// wave8 GI begin: the raw input ring (the input service's kernel side)
+/// The raw input ring fed by the keyboard and pointer interrupts, and input routing.
+pub mod input;
+/// The raw input ring's layout (shared with the input service and the host tests).
+pub mod input_ring;
+// wave8 GI end
 
 pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
 pub use endpoint::{

@@ -110,6 +110,16 @@ pub mod ipc {
     pub mod message;
     #[path = "../../../../src/ipc/protocol.rs"]
     pub mod protocol;
+    // wave8 GI: the raw input ring (real) and a host stand-in for `ipc/input.rs`
+    #[path = "../../../../src/ipc/input_ring.rs"]
+    pub mod input_ring;
+    pub mod input {
+        include!("input_stub.rs");
+        /// Never reached on the host (`forwarded()` is false).
+        pub fn open(_rdev: u64, _flags: u32) -> Result<alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
+            Err(-19)
+        }
+    }
     pub use message::Message;
     /// *stub* The driver service layer (`fake::SOUND`).
     pub use crate::fake::service;

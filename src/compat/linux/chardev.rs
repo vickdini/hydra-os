@@ -267,6 +267,12 @@ pub trait CharDevice: Send + Sync {
 pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     let nonblock = flags & 0o4000 != 0;
+    // wave8 GI begin: the event devices are the input service's while input is forwarded
+    // (a restarting service is waited for; the kernel copy serves only lx.input=kernel)
+    if major == 13 && crate::ipc::input::forwarded() {
+        return Some(crate::ipc::input::open(rdev, flags));
+    }
+    // wave8 GI end
     // wave6 G19: a major a Linux service claimed: its `open` goes to that service
     if let Some(r) = crate::lx::dev_open(rdev, flags) {
         return Some(r);
