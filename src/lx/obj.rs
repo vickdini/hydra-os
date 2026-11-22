@@ -308,6 +308,10 @@ impl CharDevice for ServerObject {
     }
 
     fn rdev(&self) -> u64 {
+        // wave8 GI: a device service's object (kinds 64..) is the device its key names
+        if self.kind >= 64 {
+            return self.key;
+        }
         0
     }
 
@@ -340,6 +344,14 @@ impl CharDevice for ServerObject {
             st.st_ino = self.tag;
             st.st_dev = self.key;
         }
+        // wave8 GI begin: a device service's object (kinds 64..): the device node's numbers
+        // (libinput and logind compare `st_rdev` with the node's)
+        if self.kind >= 64 && self.key != 0 {
+            st.st_dev = 6; // devtmpfs, as the kernel's own devices
+            st.st_rdev = self.key;
+            st.st_ino = self.key | 0x1_0000_0000;
+        }
+        // wave8 GI end
         st
     }
 
@@ -580,6 +592,12 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         Ok((_, _, h)) => h,
         Err(e) => return e,
     };
+    // wave8 GI begin: the input service's ring and device controls (ops 62, 63; they work before the
+    // service has a host)
+    if op == crate::ipc::protocol::LX_OBJ_INPUT_RING || op == crate::ipc::protocol::LX_OBJ_INPUT_CTL {
+        return crate::ipc::input::obj_op(h, op, a, b, c);
+    }
+    // wave8 GI end
     let Some(x) = super::svc::host(h) else { return ESRCH };
     // The operations naming a request: only the service's own (Group 19)
     use crate::ipc::protocol::{LX_OBJ_NETCANCEL, LX_OBJ_NETCHECK, LX_OBJ_NETWAIT, LX_OBJ_SIGTHREAD};

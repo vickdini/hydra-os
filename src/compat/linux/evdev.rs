@@ -7,10 +7,12 @@
 //! picture ([`set_routing`]); otherwise the keyboard belongs to the console or Hydra's
 //! compositor.
 //!
-//! The interrupt handlers only append raw scancodes and mouse packets to a fixed ring
-//! ([`push_scancode`], [`push_mouse`]) and wake [`INPUT_WQ`]; the conversion to events and
-//! the fan-out to open files happen in process context when a reader reads or polls, so
-//! no interrupt handler allocates.
+//! **Wave 8 (Group I):** this is the switch-back copy. Normally the input service
+//! (`userland/drivers/input-server`) serves the event devices; this copy serves them only
+//! with `lx=kernel` or `lx.input=kernel`. The interrupt handlers append raw records to the
+//! kernel's input ring ([`crate::ipc::input`]) and wake [`INPUT_WQ`]; the conversion to
+//! events and the fan-out to open files happen in process context when a reader reads or
+//! polls, so no interrupt handler allocates.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -19,7 +21,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
+use crate::task::wait::{QueueRef, WaitSet};
 
 use super::chardev::{makedev, CharDevice};
 use super::vfs::copy_out;
@@ -55,18 +57,20 @@ const BTN_MIDDLE: u16 = 0x112;
 /// Events a file may hold before older ones are dropped (and `SYN_DROPPED` reported).
 const QUEUE_LIMIT: usize = 2048;
 
-/// Woken whenever raw input arrives.
-pub static INPUT_WQ: WaitQueue = WaitQueue::new();
+// wave8 GI: the raw input now waits in the kernel's input ring (`ipc/input.rs`), which the
+// input service consumes when input is forwarded; this copy consumes it only with
+// `lx=kernel` / `lx.input=kernel`.
+use crate::ipc::input::INPUT_WQ;
+use crate::ipc::protocol::{InputRec, INPUT_REC_ABS, INPUT_REC_KEY, INPUT_REC_REL, INPUT_REC_RELEASE};
 
-static ROUTING: AtomicBool = AtomicBool::new(false);
-
-/// Sends the keyboard and mouse to the event devices (`true`) or back to Hydra (`false`).
+/// Sends the keyboard and mouse to the event devices (`true`) or back to Hydra (`false`)
+/// (the input ring's routing, [`crate::ipc::input::set_routing`]).
 ///
 /// # Arguments
 ///
 /// * `on` - `true` to route input to evdev; `false` to route back to Hydra.
 pub fn set_routing(on: bool) {
-    ROUTING.store(on, Ordering::Release);
+    crate::ipc::input::set_routing(on);
 }
 
 /// True while input goes to the event devices.
@@ -75,88 +79,20 @@ pub fn set_routing(on: bool) {
 ///
 /// `true` if input routing to evdev is active; `false` otherwise.
 pub fn routing() -> bool {
-    ROUTING.load(Ordering::Acquire)
-}
-
-#[derive(Clone, Copy)]
-enum Raw {
-    Scancode(u8),
-    /// Relative motion (x right, y down), wheel clicks (positive = away from the user)
-    /// and button bits (left, right, middle).
-    Mouse(i16, i16, i8, u8),
-    /// The absolute pointer: x, y (0..=0xFFFF), wheel, buttons.
-    Abs(u16, u16, i8, u8),
-}
-
-/// Raw input from the interrupt handlers: a fixed ring, locked only with interrupts off.
-struct Ring {
-    buf: [(Raw, u64); 512],
-    head: usize,
-    len: usize,
-}
-
-static RING: Mutex<Ring> = Mutex::new(Ring { buf: [(Raw::Scancode(0), 0); 512], head: 0, len: 0 });
-
-/// Enqueues a raw input event into the ring buffer.
-///
-/// # Arguments
-///
-/// * `r` - Raw input event to push.
-fn push_raw(r: Raw) {
-    if !routing() {
-        return;
-    }
-    let t = crate::arch::pit::ticks();
-    {
-        let mut ring = RING.lock();
-        if ring.len == ring.buf.len() {
-            return; // nobody reads: drop
-        }
-        let i = (ring.head + ring.len) % ring.buf.len();
-        ring.buf[i] = (r, t);
-        ring.len += 1;
-    }
-    INPUT_WQ.wake_all();
-}
-
-/// Keyboard interrupt: one set-1 scancode byte.
-///
-/// # Arguments
-///
-/// * `code` - Set-1 scancode byte.
-pub fn push_scancode(code: u8) {
-    push_raw(Raw::Scancode(code));
-}
-
-/// Mouse interrupt: one decoded packet (`dy` positive = down, `wheel` positive = away
-/// from the user).
-///
-/// # Arguments
-///
-/// * `dx` - Relative X movement.
-/// * `dy` - Relative Y movement.
-/// * `wheel` - Wheel scroll delta.
-/// * `buttons` - Mouse buttons bitmask.
-pub fn push_mouse(dx: i32, dy: i32, wheel: i32, buttons: u8) {
-    push_raw(Raw::Mouse(dx as i16, dy as i16, wheel as i8, buttons));
-}
-
-/// Queues an absolute pointer report (from the IRQ 12 handler): position 0..=0xFFFF on
-/// both axes, wheel clicks, buttons (bit 0 left, 1 right, 2 middle).
-pub fn push_abs(x: u16, y: u16, wheel: i8, buttons: u8) {
-    push_raw(Raw::Abs(x, y, wheel, buttons));
+    crate::ipc::input::routing()
 }
 
 /// Number of event devices (keyboard, relative mouse, absolute pointer).
 const DEVICES: usize = 3;
 
-/// Checks whether any raw input events are currently queued in the ring buffer.
+/// Checks whether raw input waits in the input ring for this copy (never while the input
+/// service consumes it).
 ///
 /// # Returns
 ///
-/// `true` if one or more raw events are pending in the ring buffer.
+/// `true` if one or more raw records are pending.
 fn ring_pending() -> bool {
-    x86_64::instructions::interrupts::without_interrupts(|| RING.lock().len > 0)
+    !crate::ipc::input::forwarded() && crate::ipc::input::pending()
 }
 
 /// Translation state of the two devices.
@@ -179,7 +115,7 @@ static CLIENTS: Mutex<[Vec<Weak<EvdevFile>>; DEVICES]> = Mutex::new([Vec::new(),
 ///
 /// # Arguments
 ///
-/// * `t` - Timestamp in scheduler ticks.
+/// * `t` - Timestamp in nanoseconds of the monotonic clock.
 /// * `ty` - Event type (`EV_KEY`, `EV_REL`, `EV_SYN`, etc.).
 /// * `code` - Event code.
 /// * `value` - Event value.
@@ -202,34 +138,38 @@ fn event(t: u64, ty: u16, code: u16, value: i32) -> [u8; 24] {
 /// keyboard, so it would otherwise never see Ctrl and Alt go up).
 pub fn release_held_keys() {
     pump();
-    let t = crate::arch::pit::ticks();
+    let t = crate::arch::pit::now_ns();
     let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
-    {
-        let mut st = STATE.lock();
-        for code in 0..st.keys.len() * 8 {
-            if st.keys[code / 8] & (1 << (code % 8)) != 0 {
-                per_dev[0].push(event(t, EV_KEY, code as u16, 0));
-            }
-        }
-        st.keys = [0; 96];
-        for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
-            if st.buttons & (1 << i) != 0 {
-                per_dev[1].push(event(t, EV_KEY, *code, 0));
-            }
-        }
-        st.buttons = 0;
-        for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
-            if st.abs_buttons & (1 << i) != 0 {
-                per_dev[2].push(event(t, EV_KEY, *code, 0));
-            }
-        }
-        st.abs_buttons = 0;
-        st.e0 = false;
-    }
-    for q in per_dev.iter_mut().filter(|q| !q.is_empty()) {
-        q.push(event(t, EV_SYN, SYN_REPORT, 0));
-    }
+    release_all(&mut STATE.lock(), &mut per_dev, t);
     deliver(&per_dev);
+}
+
+/// Queues a release for every held key and button in `per_dev` and forgets them.
+fn release_all(st: &mut Translator, per_dev: &mut [Vec<[u8; 24]>; DEVICES], t: u64) {
+    let mut q: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
+    for code in 0..st.keys.len() * 8 {
+        if st.keys[code / 8] & (1 << (code % 8)) != 0 {
+            q[0].push(event(t, EV_KEY, code as u16, 0));
+        }
+    }
+    st.keys = [0; 96];
+    for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+        if st.buttons & (1 << i) != 0 {
+            q[1].push(event(t, EV_KEY, *code, 0));
+        }
+        if st.abs_buttons & (1 << i) != 0 {
+            q[2].push(event(t, EV_KEY, *code, 0));
+        }
+    }
+    st.buttons = 0;
+    st.abs_buttons = 0;
+    st.e0 = false;
+    for (d, mut q) in q.into_iter().enumerate() {
+        if !q.is_empty() {
+            q.push(event(t, EV_SYN, SYN_REPORT, 0));
+            per_dev[d].extend(q);
+        }
+    }
 }
 
 /// Moves raw input into the queues of every open file.
@@ -237,23 +177,18 @@ fn pump() {
     if !ring_pending() {
         return;
     }
-    let raw: Vec<(Raw, u64)> = x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut ring = RING.lock();
-        let mut out = Vec::with_capacity(ring.len);
-        while ring.len > 0 {
-            out.push(ring.buf[ring.head]);
-            ring.head = (ring.head + 1) % ring.buf.len();
-            ring.len -= 1;
-        }
-        out
-    });
+    let mut raw: Vec<InputRec> = Vec::new();
+    crate::ipc::input::drain(|r| raw.push(r));
     let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
     {
         let mut st = STATE.lock();
-        for (r, t) in raw {
-            match r {
-                Raw::Scancode(0xE0) => st.e0 = true,
-                Raw::Scancode(sc) => {
+        for r in raw {
+            let t = r.time;
+            match r.kind {
+                INPUT_REC_RELEASE => release_all(&mut st, &mut per_dev, t),
+                INPUT_REC_KEY if r.code == 0xE0 => st.e0 = true,
+                INPUT_REC_KEY => {
+                    let sc = r.code;
                     let make = sc & 0x7F;
                     let code = if st.e0 { e0_keycode(make) } else { make as u32 };
                     let scan = if st.e0 { 0xE000 | make as i32 } else { make as i32 };
@@ -280,8 +215,10 @@ fn pump() {
                     q.push(event(t, EV_KEY, code as u16, value));
                     q.push(event(t, EV_SYN, SYN_REPORT, 0));
                 }
-                Raw::Mouse(dx, dy, wheel, buttons) => {
+                INPUT_REC_REL => {
+                    let (dx, dy, wheel, buttons) = (r.x as i16, r.y as i16, r.wheel, r.buttons);
                     let q = &mut per_dev[1];
+                    let start = q.len();
                     for (i, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
                         let bit = 1u8 << i;
                         if (buttons ^ st.buttons) & bit != 0 {
@@ -299,12 +236,14 @@ fn pump() {
                         q.push(event(t, EV_REL, REL_WHEEL, wheel as i32));
                         q.push(event(t, EV_REL, REL_WHEEL_HI_RES, wheel as i32 * 120));
                     }
-                    if !q.is_empty() && q.last().map_or(false, |e| e[16..18] != [0, 0]) {
+                    if q.len() > start {
                         q.push(event(t, EV_SYN, SYN_REPORT, 0));
                     }
                 }
-                Raw::Abs(x, y, wheel, buttons) => {
+                INPUT_REC_ABS => {
+                    let (x, y, wheel, buttons) = (r.x, r.y, r.wheel, r.buttons);
                     let q = &mut per_dev[2];
+                    let start = q.len();
                     if (x, y) != st.abs_pos {
                         q.push(event(t, EV_ABS, ABS_X, x as i32));
                         q.push(event(t, EV_ABS, ABS_Y, y as i32));
@@ -321,10 +260,11 @@ fn pump() {
                         q.push(event(t, EV_REL, REL_WHEEL, wheel as i32));
                         q.push(event(t, EV_REL, REL_WHEEL_HI_RES, wheel as i32 * 120));
                     }
-                    if !q.is_empty() && q.last().map_or(false, |e| e[16..18] != [0, 0]) {
+                    if q.len() > start {
                         q.push(event(t, EV_SYN, SYN_REPORT, 0));
                     }
                 }
+                _ => {}
             }
         }
     }
@@ -350,7 +290,7 @@ fn deliver(per_dev: &[Vec<[u8; 24]>; DEVICES]) {
             let mut q = f.queue.lock();
             if q.len() + events.len() > QUEUE_LIMIT {
                 q.clear();
-                q.push_back(event(crate::arch::pit::ticks(), EV_SYN, SYN_DROPPED, 0));
+                q.push_back(event(crate::arch::pit::now_ns(), EV_SYN, SYN_DROPPED, 0));
             }
             q.extend(events.iter().copied());
         }

@@ -58,6 +58,10 @@ static LX_SEC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/
 static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/vfs-server"));
 // wave7 G7-1 end
 /// The sound driver program (Intel High Definition Audio).
+// wave8 GI begin
+/// input-server (wave 8: `/dev/input/event*`, `userland/drivers/input-server`).
+static INPUT_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/input-server"));
+// wave8 GI end
 // wave6 G19 begin
 /// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
 static SVC_TEST_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/svc-test"));
@@ -275,6 +279,14 @@ fn vfs_server_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=4")])
 }
 // wave7 G7-1 end
+
+// wave8 GI begin
+/// input-server: always started (two workers); it exits by itself when input is not
+/// forwarded (`lx.input=kernel`, `lx=kernel`).
+fn input_server_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+// wave8 GI end
 
 // wave6 G19 begin
 /// svc-test: always started (small: two workers); it exits by itself when no service id
@@ -749,6 +761,17 @@ pub fn supervisor_init() {
         ));
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_SVC_TEST, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_SVC_TEST }>);
         // wave6 G19 end
+        // wave8 GI begin: the input service (`/dev/input/event*`, fed by the kernel's raw input
+        // ring): Transparent, so programs' event-device descriptors survive one crash
+        sup.services.push(
+            ServiceDescriptor::new("input_server", crate::ipc::protocol::ENDPOINT_INPUT_SERVER, INPUT_SERVER_ELF, input_server_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_INPUT,
+                crate::lx::restart::RestartClass::Transparent,
+                "input",
+            ),
+        );
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_INPUT_SERVER, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_INPUT_SERVER }>);
+        // wave8 GI end
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,

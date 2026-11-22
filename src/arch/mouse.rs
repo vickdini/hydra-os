@@ -311,7 +311,7 @@ impl Ps2Mouse {
 /// away from the user, buttons bit 0 left, 1 right, 2 middle): handled as a PS/2 packet
 /// is, for the Linux event devices. Called with interrupts off.
 pub fn inject_relative(dx: i32, dy: i32, wheel: i32, buttons: u8) {
-    crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons);
+    crate::ipc::input::push_mouse(dx, dy, wheel, buttons);
 }
 
 /// An absolute pointer report from a USB tablet: position 0..=`max` on both axes, wheel
@@ -319,7 +319,7 @@ pub fn inject_relative(dx: i32, dy: i32, wheel: i32, buttons: u8) {
 /// 0..=0xFFFF). Called with interrupts off.
 pub fn inject_absolute(x: u32, y: u32, max: u32, wheel: i8, buttons: u8) {
     let scale = |v: u32| (v.min(max) as u64 * 0xFFFF / max.max(1) as u64) as u16;
-    crate::compat::linux::evdev::push_abs(scale(x), scale(y), wheel, buttons);
+    crate::ipc::input::push_abs(scale(x), scale(y), wheel, buttons);
 }
 
 static MOUSE_DRIVER: Mutex<Ps2Mouse> = Mutex::new(Ps2Mouse::new());
@@ -333,6 +333,8 @@ static MOUSE_DRIVER: Mutex<Ps2Mouse> = Mutex::new(Ps2Mouse::new());
 ///
 /// *Guaranteed to never panic under normal execution.*
 pub fn init() {
+    // wave8 GI: the raw input ring every input path appends to (memory is up by now)
+    crate::ipc::input::init();
     let mut mouse = MOUSE_DRIVER.lock();
     if !mouse.initialized {
         match mouse.init() {
@@ -437,12 +439,12 @@ pub fn on_mouse_irq() {
             if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
                 crate::kprintln!("[mouse] first absolute report: {}, {} (of {})", r.x, r.y, super::vmmouse::MAX);
             }
-            crate::compat::linux::evdev::push_abs(r.x, r.y, r.wheel, r.buttons);
+            crate::ipc::input::push_abs(r.x, r.y, r.wheel, r.buttons);
         }
         return;
     }
     if let Some((dx, dy, wheel, buttons)) = mouse.feed(byte) {
         drop(mouse);
-        crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons);
+        crate::ipc::input::push_mouse(dx, dy, wheel, buttons);
     }
 }

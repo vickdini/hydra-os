@@ -308,7 +308,7 @@ pub fn handle_scancode(scancode: u8) {
     if scancode == 0xC6 {
         return;
     }
-    if crate::compat::linux::evdev::routing() {
+    if crate::ipc::input::routing() {
         // A DRM session shows: the keyboard is an evdev device. Ctrl+Alt+F1 switches to
         // the text console (as the VT switch on Linux); the session keeps running.
         use core::sync::atomic::Ordering::Relaxed;
@@ -318,13 +318,13 @@ pub fn handle_scancode(scancode: u8) {
             0x38 => CONSOLE_ALT.store(true, Relaxed),
             0xB8 => CONSOLE_ALT.store(false, Relaxed),
             0x3B if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) => {
-                crate::compat::linux::drm::request_vt_switch(false);
+                crate::ipc::input::hotkey_switch(false);
                 return;
             }
             0xBB if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) => return,
             _ => {}
         }
-        crate::compat::linux::evdev::push_scancode(scancode);
+        crate::ipc::input::push_scancode(scancode);
         return;
     }
     // Ctrl+Alt+F2 on the console switches back to the hidden desktop session
@@ -334,8 +334,8 @@ pub fn handle_scancode(scancode: u8) {
         0x9D => CONSOLE_CTRL.store(false, Relaxed),
         0x38 => CONSOLE_ALT.store(true, Relaxed),
         0xB8 => CONSOLE_ALT.store(false, Relaxed),
-        0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::compat::linux::drm::session_hidden() => {
-            crate::compat::linux::drm::request_vt_switch(true);
+        0x3C if CONSOLE_CTRL.load(Relaxed) && CONSOLE_ALT.load(Relaxed) && crate::ipc::input::session_hidden() => {
+            crate::ipc::input::hotkey_switch(true);
             return;
         }
         _ => {}
