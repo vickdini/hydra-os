@@ -124,7 +124,10 @@ pub fn after(b: Before, op: u32, req: &[u8], status: i64, value: u64) {
             return Ok(());
         }
         let changed = s.dmu.changes != b.changes || matches!(op, FS_OPEN_REF | FS_RELEASE);
-        if changed {
+        // (a log switched off after a failed commit is not retried per request: the next
+        // threshold or txgd commit starts it again; meanwhile a kill loses what a power
+        // loss would, as before the log - review 8z)
+        if changed && log.as_ref().is_some_and(|l| l.gen() != 0) {
             if let Some(l) = log.as_mut() {
                 if !l.append(op, b.time, status, value, req) {
                     // No room (or no usable log): the change is made durable by a commit;
@@ -164,6 +167,11 @@ pub struct Recovered {
     pub handles_from_older: bool,
     /// The log's state record could not be read: nothing replayed.
     pub bad_state: bool,
+    /// Changes in a log that was given up or could not be read (lost: on the console).
+    pub dropped: usize,
+    /// The replay differed and the commit after it failed: the log was switched off (its
+    /// skipped records must never be replayed after newer ones).
+    pub log_off: bool,
     /// The txg after the replay's commit.
     pub txg: u64,
 }
@@ -181,42 +189,22 @@ pub fn recover(buf: &'static mut [u8], existed: bool) -> Recovered {
         // Its changes are on disk; the open handles are not: the state record and the
         // handle requests after it give them, and the unlinked ones are those with no link
         let scan = log.scan(&h);
-        if let Some((open, _)) = scan.state.and_then(|p| zil::decode_state(log.payload(p))) {
-            let ops: Vec<(u32, u64)> = scan
-                .ops
-                .iter()
-                .filter(|r| r.op == FS_OPEN_REF || r.op == FS_RELEASE)
-                .map(|r| (r.op, Reader::new(log.payload(r.payload)).u64()))
-                .collect();
-            let open = zil::counts_after(open, &ops, FS_OPEN_REF, FS_RELEASE);
-            let _ = with_server(|s| {
-                let mut kept = alloc::collections::BTreeMap::new();
-                let mut orphans = alloc::collections::BTreeSet::new();
-                for (ino, n) in open {
-                    match s.getattr(ino) {
-                        Ok(a) => {
-                            if a.nlink == 0 {
-                                orphans.insert(ino);
-                            }
-                            kept.insert(ino, n);
-                        }
-                        Err(_) => {}
-                    }
-                }
-                s.restore_durable_state(kept, orphans);
-                Ok(())
-            });
-            rec.handles_from_older = true;
-        }
+        rec.handles_from_older = handles_only(&log, &scan);
     }
     if let Some(h) = header.filter(|h| h.gen == txg) {
         rec.matched = true;
         let scan = log.scan(&h);
         let state = scan.state.and_then(|p| zil::decode_state(log.payload(p)));
         if log.begin_replay() >= zil::MAX_ATTEMPTS {
+            // Its changes are lost (on the console with their count); the open handles are
+            // still taken from it (review 8z), and its area stays as it is until the
+            // second commit from now
             rec.given_up = true;
+            rec.dropped = scan.ops.len();
+            handles_only(&log, &scan);
         } else if state.is_none() {
             rec.bad_state = true;
+            rec.dropped = scan.ops.len();
         } else {
             rec.torn = scan.torn;
             if let Some(st) = state {
@@ -236,8 +224,16 @@ pub fn recover(buf: &'static mut [u8], existed: bool) -> Recovered {
             log.resume(&h, &scan);
             let mut g = LOG.lock();
             *g = Some(log);
+            let differed = rec.replayed.mismatches > 0;
             let _ = with_server(|s| {
-                commit(s, &mut g);
+                if !commit(s, &mut g) && differed {
+                    // The skipped records are still in the log: new ones after them would
+                    // never be replayed (review 8z): off until the next commit
+                    if let Some(l) = g.as_mut() {
+                        l.disable(guid(s));
+                    }
+                    rec.log_off = true;
+                }
                 rec.txg = s.dmu.ub.txg;
                 Ok(())
             });
@@ -252,6 +248,46 @@ pub fn recover(buf: &'static mut [u8], existed: bool) -> Recovered {
         Ok(())
     });
     rec
+}
+
+/// The open handle counts after the generation in `scan` without replaying its changes
+/// (they are on disk already, or given up): its state record plus its handle requests; an
+/// unlinked one is one with no link left. `false`: no readable state record.
+fn handles_only(log: &Log, scan: &zil::Scan) -> bool {
+    let Some((open, _)) = scan.state.and_then(|p| zil::decode_state(log.payload(p))) else { return false };
+    let ops: Vec<(u32, u64)> = scan
+        .ops
+        .iter()
+        .filter(|r| r.op == FS_OPEN_REF || r.op == FS_RELEASE)
+        .map(|r| (r.op, Reader::new(log.payload(r.payload)).u64()))
+        .collect();
+    let open = zil::counts_after(open, &ops, FS_OPEN_REF, FS_RELEASE);
+    let _ = with_server(|s| {
+        let mut kept = alloc::collections::BTreeMap::new();
+        let mut orphans = alloc::collections::BTreeSet::new();
+        for (ino, n) in open {
+            if let Ok(a) = s.getattr(ino) {
+                if a.nlink == 0 {
+                    orphans.insert(ino);
+                }
+                kept.insert(ino, n);
+            }
+        }
+        s.restore_durable_state(kept, orphans);
+        Ok(())
+    });
+    true
+}
+
+/// Switches the log off as a failed commit does (tests).
+pub fn switch_off() {
+    let mut g = LOG.lock();
+    let _ = with_server(|s| {
+        if let Some(l) = g.as_mut() {
+            l.disable(guid(s));
+        }
+        Ok(())
+    });
 }
 
 /// Drops the log (tests: a "killed" server's statics go with it).

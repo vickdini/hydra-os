@@ -665,3 +665,64 @@ fn log_cost() {
         m.kill();
     }
 }
+
+// Review 8z: a given-up log loses its changes but not the open handle counts
+#[test]
+fn a_given_up_log_still_keeps_the_open_handles() {
+    let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = fresh();
+    let r = root();
+    let f = create(r, "held");
+    write(f, 0, b"open");
+    ok(req(FS_OPEN_REF, |w| {
+        w.u64(f);
+    }));
+    sync();
+    unlink(r, "held");
+    sync();
+    // Changes after the last commit, then a log that made 3 starts fail
+    mkdir(root(), "lost");
+    m.kill();
+    {
+        let mut log = zil::Log::attach(m.log_bytes());
+        for _ in 0..zil::MAX_ATTEMPTS {
+            log.begin_replay();
+        }
+    }
+    let rec = m.start();
+    assert!(rec.given_up);
+    assert_eq!(rec.dropped, 1);
+    assert_eq!(lookup(root(), "lost"), Err(ENOENT));
+    // The unlinked file is still open: not freed, readable
+    assert_eq!(getattr(f).map(|a| a.nlink), Some(0));
+    assert_eq!(read_all(f), b"open");
+    ok(req(FS_RELEASE, |w| {
+        w.u64(f);
+    }));
+    assert_eq!(create(root(), "reuse"), f);
+    m.kill();
+}
+
+// Review 8z: a log switched off (a failed commit) does not commit on every change; the
+// next txgd commit starts it again
+#[test]
+fn a_switched_off_log_does_not_commit_per_request() {
+    let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = fresh();
+    durable::switch_off();
+    assert!(!durable::active());
+    let t = txg();
+    for i in 0..20 {
+        mkdir(root(), &format!("d{}", i));
+    }
+    assert_eq!(txg(), t, "no commit per request");
+    ok(req(FS_SYNC_IF_DIRTY, |_| {}));
+    assert!(txg() > t);
+    assert!(durable::active(), "on again after the commit");
+    mkdir(root(), "after");
+    m.kill();
+    let rec = m.start();
+    assert!(rec.matched);
+    assert!(lookup(root(), "after").is_ok());
+    m.kill();
+}

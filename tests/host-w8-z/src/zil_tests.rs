@@ -133,8 +133,8 @@ fn an_older_generation_in_the_same_area_is_not_replayed() {
     log.append(77, (0, 0), 0, 0, b"x");
     let s = cur(&log);
     assert_eq!(s.ops.iter().map(|r| r.op).collect::<Vec<_>>(), vec![77]);
-    // (the old records past the end have the magic but not the generation)
-    assert!(s.torn);
+    // (the old records past the end have the magic but not the epoch: the end, not torn)
+    assert!(!s.torn);
 }
 
 #[test]

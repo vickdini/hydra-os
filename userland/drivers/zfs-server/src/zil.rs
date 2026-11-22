@@ -156,8 +156,8 @@ pub struct Scan {
     pub end: usize,
     /// The next sequence number.
     pub next_seq: u32,
-    /// Something that is not a valid record of this generation followed the last one (a
-    /// torn record, or an older generation's): `true` only when it had this record's magic.
+    /// A record of this generation that is not whole followed the last valid one (written
+    /// when the server was killed); an older generation's record there is not torn.
     pub torn: bool,
 }
 
@@ -358,7 +358,9 @@ impl<'a> Log<'a> {
                 && get64(hd, 16) == epoch
                 && get64(hd, 56) == checksum(&[&hd[..56], &self.buf[at + REC_HEAD..at + REC_HEAD + len]]);
             if !ok {
-                s.torn = true;
+                // (torn: a record of this generation cut short; an older generation's
+                // record past the end is just the end - review 8z)
+                s.torn = get64(hd, 16) == epoch;
                 break;
             }
             let kind = get32(hd, 4);

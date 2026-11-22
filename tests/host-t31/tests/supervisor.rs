@@ -265,7 +265,9 @@ fn a_dead_driver_is_restarted_and_a_hung_one_after_three_missed_pings() {
 fn restarts_stop_at_the_limit_and_when_the_linux_ladder_gives_up() {
     let _w = setup();
     supervisor::supervisor_init();
-    SUPERVISOR.lock().start_service("net_server").unwrap();
+    let first = SUPERVISOR.lock().start_service("net_server").unwrap();
+    // wave8 GZ: a live process that has not registered is waited for, not restarted: dead first
+    task::kill(first);
     for i in 1..=10 {
         let r = supervisor::revive(ENDPOINT_NET_SERVER);
         assert!(r || i > 0);
@@ -325,6 +327,37 @@ fn revive_restarts_only_what_needs_it() {
         task::SCHEDULER.lock().end_handoffs_to(id.0);
     }
 }
+
+// wave8 GZ begin: a server that is alive but not registered yet (zfs-server replaying its
+// intent log) is waited for, never killed and started again by a caller's revive
+#[test]
+fn revive_waits_for_a_starting_server_instead_of_restarting_it() {
+    let _w = setup();
+    supervisor::supervisor_init();
+    // Started, still replaying: alive, not registered (and it stays so in this test)
+    SILENT.lock().unwrap().insert(ENDPOINT_ZFS_SERVER);
+    let id = SUPERVISOR.lock().start_service("zfs_server").unwrap();
+    fake::SERVERS.lock().unwrap().remove(&ENDPOINT_ZFS_SERVER);
+    let before = snap("zfs_server").restart_count;
+    for _ in 0..5 {
+        assert!(!supervisor::revive(ENDPOINT_ZFS_SERVER), "not online yet");
+    }
+    assert!(task::is_task_alive(id), "the starting process was left alone");
+    assert_eq!(snap("zfs_server").task_id, Some(id.0));
+    assert_eq!(snap("zfs_server").restart_count, before, "no restarts burnt");
+    // It registers: the caller is served by the same process
+    SILENT.lock().unwrap().clear();
+    drivers_register();
+    assert!(supervisor::revive(ENDPOINT_ZFS_SERVER));
+    assert_eq!(snap("zfs_server").task_id, Some(id.0));
+    // Dead (not starting): restarted as before
+    task::kill(id);
+    fake::SERVERS.lock().unwrap().remove(&ENDPOINT_ZFS_SERVER);
+    assert!(supervisor::revive(ENDPOINT_ZFS_SERVER));
+    assert_ne!(snap("zfs_server").task_id, Some(id.0));
+    assert_eq!(snap("zfs_server").restart_count, before + 1);
+}
+// wave8 GZ end
 
 #[test]
 fn a_restart_unregisters_the_endpoint_whichever_thread_of_the_old_process_registered_it() {

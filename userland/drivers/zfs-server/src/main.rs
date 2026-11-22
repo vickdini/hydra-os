@@ -398,11 +398,14 @@ fn recover_log() {
             r.replayed.mismatches,
             if r.replayed.mismatches > 0 { alloc::format!(" at #{}, {} after it NOT replayed", r.replayed.first_mismatch, r.replayed.skipped) } else { alloc::string::String::new() },
             if r.torn { ", a torn last record ignored" } else { "" },
-            if r.given_up { ", GIVEN UP after repeated failed starts (changes since the last commit are lost)" } else { "" },
+            if r.given_up { alloc::format!(", GIVEN UP after repeated failed starts: {} changes since the last commit LOST (open handles kept)", r.dropped) } else { alloc::string::String::new() },
             r.txg
         );
         if r.bad_state {
-            hydra_rt::println!("[zfs-server] intent log: its state record is unreadable; nothing replayed (changes since the last commit are lost)");
+            hydra_rt::println!("[zfs-server] intent log: its state record is unreadable; nothing replayed ({} changes since the last commit LOST)", r.dropped);
+        }
+        if r.log_off {
+            hydra_rt::println!("[zfs-server] intent log: the replay differed and the commit after it failed; log off until the next commit");
         }
     } else if r.handles_from_older {
         hydra_rt::println!("[zfs-server] intent log: killed right after a commit; open handles taken from the log, nothing to replay");
