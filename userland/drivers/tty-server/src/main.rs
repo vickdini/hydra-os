@@ -422,6 +422,12 @@ fn pts_rdev(index: u64) -> u64 {
 fn kcall(cx: &Cx) -> Answer {
     let a = cx.args;
     let who = caller(cx, false);
+    // A console call carries the attach state it was made in (`args[4]` generation,
+    // `args[5]` session | group << 32): a program's first call may come before the console
+    // thread saw its attach
+    if matches!(a[0], LX_TTY_K_READ | LX_TTY_K_WRITE | LX_TTY_K_IOCTL) && a[4] != 0 {
+        with(|t, g| t.cons_state(a[4], a[5] & 0xFFFF_FFFF, a[5] >> 32, 0, 0, g));
+    }
     match a[0] {
         LX_TTY_K_OPEN => (open(cx, a[1], a[2], &who), 0),
         LX_TTY_K_READ => {
@@ -551,7 +557,7 @@ extern "C" fn console_thread(_arg: u64) -> ! {
                 seen = st.gen;
                 with(|t, g| {
                     t.cons_state(st.gen, st.sid, st.pgrp, st.cols, st.rows, g);
-                    t.cons_keys(&keys, g);
+                    t.cons_keys(st.gen, &keys, g);
                 });
             }
             // Not forwarded (`lx.tty=kernel`: the kernel's tty.rs has the console), or an

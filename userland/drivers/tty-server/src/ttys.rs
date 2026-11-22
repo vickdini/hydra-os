@@ -663,7 +663,7 @@ impl Ttys {
             if sid != 0 {
                 io.signal_proc(sid, SIGHUP);
                 io.signal_proc(sid, SIGCONT);
-                if fg != 0 && fg != sid {
+                if fg != 0 {
                     io.signal_group(fg, SIGHUP);
                 }
             }
@@ -756,6 +756,8 @@ impl Ttys {
         let fg = p.tty.fg_pgrp;
         p.tty.session = 0;
         p.tty.fg_pgrp = 0;
+        p.tty.line.clear();
+        p.tty.ready.clear();
         p.hangups += 1;
         for w in p.rs.drain(..) {
             io.complete(w.id, 0);
@@ -780,15 +782,17 @@ impl Ttys {
         }
     }
 
-    /// The kernel's console state (from the console thread): a new attach generation resets
-    /// the terminal (a new program owns it) and ends the readers of the previous one.
+    /// The kernel's console state (from the console thread, or carried by a console call): a
+    /// newer attach generation resets the terminal (a new program owns it) and ends the
+    /// readers of the previous one; an older one changes nothing (generations only grow, and
+    /// a program's first call may arrive before the console thread saw its attach).
     pub fn cons_state(&mut self, gen: u64, sid: u64, pgrp: u64, cols: u16, rows: u16, io: &mut dyn Io) {
         let c = &mut self.console;
         if cols != 0 && rows != 0 {
             c.cols = cols;
             c.rows = rows;
         }
-        if gen == c.gen {
+        if gen <= c.gen {
             return;
         }
         c.gen = gen;
@@ -806,11 +810,12 @@ impl Ttys {
         self.cons_publish(io);
     }
 
-    /// Console keys (encoded as the kernel gives them): through the line discipline, echo
-    /// to the console, `ISIG` signals to the foreground group, bytes to the readers.
-    pub fn cons_keys(&mut self, keys: &[u32], io: &mut dyn Io) {
+    /// Console keys (encoded as the kernel gives them) typed in attach generation `gen`:
+    /// through the line discipline, echo to the console, `ISIG` signals to the foreground
+    /// group, bytes to the readers. Keys of another generation are dropped.
+    pub fn cons_keys(&mut self, gen: u64, keys: &[u32], io: &mut dyn Io) {
         let c = &mut self.console;
-        if c.tty.session == 0 || keys.is_empty() {
+        if c.tty.session == 0 || keys.is_empty() || gen != c.gen {
             return;
         }
         let mut echo = Vec::new();

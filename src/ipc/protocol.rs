@@ -2240,11 +2240,12 @@ pub const LX_KCALL_TTY: u64 = 0x6788;
 /// installs a descriptor in the caller's table and returns it; [`LX_TTY_NOTMINE`] for a
 /// `/dev/tty` whose terminal is not a pseudo-terminal.
 pub const LX_TTY_K_OPEN: u64 = 1;
-/// `(op, buf, len, nonblock)`: `read` of the console terminal.
+/// `(op, buf, len, nonblock, gen, sid | pgrp << 32)`: `read` of the console terminal (the
+/// last two: the console's attach state when the call was made, as `LxConsState` has it).
 pub const LX_TTY_K_READ: u64 = 2;
-/// `(op, buf, len)`: `write` to the console terminal.
+/// `(op, buf, len, 0, gen, sid | pgrp << 32)`: `write` to the console terminal.
 pub const LX_TTY_K_WRITE: u64 = 3;
-/// `(op, request, arg)`: a terminal `ioctl` on the console.
+/// `(op, request, arg, 0, gen, sid | pgrp << 32)`: a terminal `ioctl` on the console.
 pub const LX_TTY_K_IOCTL: u64 = 4;
 /// `(op, index)`: `/dev/pts/index`'s `mode & 0o7777 | gid << 12 | uid << 32` (`-ENOENT`).
 pub const LX_TTY_K_STAT: u64 = 5;

@@ -197,6 +197,12 @@ mod kernel {
         (pid, pgid, sid)
     }
 
+    /// A console call's arguments 4 and 5: the attach generation, and the session and group
+    /// it gave the console (`sid | pgrp << 32`).
+    fn attach_args() -> (u64, u64) {
+        with_state(|s| (s.gen, (s.sid & 0xFFFF_FFFF) | s.pgrp << 32))
+    }
+
     /// `LX_KCALL_TTY(args)` to tty-server for the current thread (`dev`: the device an open
     /// names), with its process group and session in the header. The caller holds the
     /// kernel lock.
@@ -222,7 +228,8 @@ mod kernel {
         if !online() {
             return EIO;
         }
-        let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, 0, 0], 0);
+        let (g, sp) = attach_args();
+        let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);
         if r == LX_TTY_BGREAD {
             // A background process reading the terminal is stopped with SIGTTIN (EIO if it
             // ignores or blocks that signal), as on Linux
@@ -249,7 +256,8 @@ mod kernel {
                 Err(e) => e,
             };
         }
-        kcall([LX_TTY_K_WRITE, buf, len as u64, 0, 0, 0], 0)
+        let (g, sp) = attach_args();
+        kcall([LX_TTY_K_WRITE, buf, len as u64, 0, g, sp], 0)
     }
 
     /// A terminal `ioctl` on the console (the VT requests stay the kernel's: one text
@@ -261,7 +269,8 @@ mod kernel {
         if !online() {
             return crate::compat::linux::tty::ioctl_kernel(request, arg);
         }
-        kcall([LX_TTY_K_IOCTL, request, arg, 0, 0, 0], 0)
+        let (g, sp) = attach_args();
+        kcall([LX_TTY_K_IOCTL, request, arg, 0, g, sp], 0)
     }
 
     /// Opens a terminal path (`/dev/ptmx`, `/dev/pts/N`, `/dev/tty`) as tty-server's object.

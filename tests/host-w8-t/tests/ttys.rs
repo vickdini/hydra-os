@@ -441,12 +441,12 @@ fn console_attach_keys_echo_and_reads() {
     t.cons_state(1, 100, 100, 128, 48, &mut io);
     let me = who(100, 100, 100);
     assert_eq!(t.cons_read(1, &me, Iov::one(0x1, 64), false, BG, &mut io), Ans::Pending);
-    t.cons_keys(&['l' as u32, 's' as u32, '\r' as u32], &mut io);
+    t.cons_keys(1, &['l' as u32, 's' as u32, '\r' as u32], &mut io);
     assert_eq!(io.cons, b"ls\r\n", "echo on the console");
     assert_eq!(io.answer(1), Some(3));
     assert_eq!(io.got(1).unwrap(), b"ls\n");
     // Ctrl+C: the foreground group
-    t.cons_keys(&[3], &mut io);
+    t.cons_keys(1, &[3], &mut io);
     assert_eq!(io.signals, vec![(true, 100, 2)]);
     // window size defaults to the console's
     let mem = FakeMem::default();
@@ -460,10 +460,10 @@ fn console_readiness_is_told_to_the_kernel() {
     let mut t = Ttys::new();
     t.cons_state(3, 100, 100, 80, 25, &mut io);
     assert_eq!(io.cons_ready.last(), Some(&(3, false)));
-    t.cons_keys(&['a' as u32, '\r' as u32], &mut io);
+    t.cons_keys(3, &['a' as u32, '\r' as u32], &mut io);
     assert_eq!(io.cons_ready.last(), Some(&(3, true)));
     let n = io.cons_ready.len();
-    t.cons_keys(&['b' as u32], &mut io);
+    t.cons_keys(3, &['b' as u32], &mut io);
     assert_eq!(io.cons_ready.len(), n, "told only when it changes");
     assert_eq!(t.cons_read(1, &who(100, 100, 100), Iov::one(0x1, 64), false, BG, &mut io), Ans::Now(2));
     assert_eq!(io.cons_ready.last(), Some(&(3, false)));
@@ -480,7 +480,7 @@ fn console_background_readers_and_detach() {
     // the program is done: hydra-shell takes the console back
     t.cons_state(2, 0, 0, 80, 25, &mut io);
     assert_eq!(io.answer(3), Some(EIO));
-    t.cons_keys(&['x' as u32], &mut io);
+    t.cons_keys(2, &['x' as u32], &mut io);
     assert!(io.cons.is_empty(), "keys are hydra-shell's while no session holds the console");
 }
 
@@ -493,12 +493,12 @@ fn console_attach_resets_the_terminal() {
     raw.lflag = 0;
     let mem = FakeMem::with(0x60, &raw.to_bytes());
     assert_eq!(t.cons_ioctl(ldisc::TCSETS, 0x60, &mem, &mut io), 0);
-    t.cons_keys(&['q' as u32], &mut io);
+    t.cons_keys(1, &['q' as u32], &mut io);
     t.cons_state(2, 200, 200, 80, 25, &mut io);
     assert_eq!(t.console.tty.termios, Termios::default(), "a new program gets a cooked terminal");
     assert!(!t.console.tty.has_input(), "and none of the old input");
     // the same generation again changes nothing
-    t.cons_keys(&['a' as u32], &mut io);
+    t.cons_keys(2, &['a' as u32], &mut io);
     t.cons_state(2, 200, 200, 80, 25, &mut io);
     assert_eq!(t.console.tty.line, b"a");
 }
@@ -525,4 +525,41 @@ fn at_most_2048_pairs() {
     assert_eq!(t.open_master(9999, 0, &mut io), Err(ENOSPC));
     t.closed(100 + 7, &mut io);
     assert_eq!(t.open_master(9999, 0, &mut io), Ok(7), "a closed number is used again");
+}
+
+#[test]
+fn a_programs_first_call_may_come_before_its_attach() {
+    let mut io = FakeIo::default();
+    let mut t = Ttys::new();
+    t.cons_state(1, 100, 100, 80, 25, &mut io);
+    // the kernel's call carries generation 2 (session 200): applied first, the read waits
+    t.cons_state(2, 200, 200, 0, 0, &mut io);
+    assert_eq!(t.cons_read(5, &who(200, 200, 200), Iov::one(0x1, 8), false, BG, &mut io), Ans::Pending);
+    // the console thread's older news changes nothing, its keys of generation 1 are dropped
+    t.cons_state(1, 100, 100, 80, 25, &mut io);
+    t.cons_keys(1, &['z' as u32, '\r' as u32], &mut io);
+    assert_eq!(io.answer(5), None, "still waiting: not ended with EIO, not fed old keys");
+    // its news of generation 2 is no change either; keys of generation 2 reach the reader
+    t.cons_state(2, 200, 200, 80, 25, &mut io);
+    t.cons_keys(2, &['o' as u32, 'k' as u32, '\r' as u32], &mut io);
+    assert_eq!(io.answer(5), Some(3));
+    assert_eq!(io.got(5).unwrap(), b"ok\n");
+}
+
+#[test]
+fn hang_up_flushes_typed_input_and_signals_the_leaders_own_group() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    let mem = FakeMem::default();
+    t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(40, 40, 40), &mem, &mut io).unwrap();
+    wr(&mut t, M, 1, b"typed\n", &mut io);
+    t.closed(M, &mut io);
+    assert!(io.signals.contains(&(true, 40, 1)), "the foreground group (the leader's own) gets SIGHUP too");
+    let mut io2 = FakeIo::default();
+    let mut t2 = pair(&mut io2);
+    t2.ioctl(S, ldisc::TIOCSCTTY, 0, &who(40, 40, 40), &mem, &mut io2).unwrap();
+    wr(&mut t2, M, 1, b"typed\n", &mut io2);
+    t2.hangup(40, &mut io2);
+    t2.open_slave(0, 30, true, &who(1, 1, 1), &mut io2).unwrap();
+    assert_eq!(t2.read(30, 9, 50, Iov::one(0x1, 10), true, &mut io2), Ans::Now(EAGAIN), "nothing typed before the hang-up is left");
 }
