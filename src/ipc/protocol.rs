@@ -620,9 +620,9 @@ pub const LX_SND_NOW: u64 = 4;
 /// address.
 pub const LX_SND_SETUP: u64 = 5;
 /// Kind of the sound service's control device objects (`controlC0`).
-pub const LX_OBJ_KIND_SND_CTL: u32 = 64;
+pub const LX_OBJ_KIND_SND_CTL: u32 = 66;
 /// Kind of the sound service's PCM device objects (`pcmC0D0p`, `pcmC0D0c`).
-pub const LX_OBJ_KIND_SND_PCM: u32 = 65;
+pub const LX_OBJ_KIND_SND_PCM: u32 = 71;
 /// Bytes of each direction's ring (the largest buffer a program may ask for).
 pub const SND_RING_BYTES: u64 = 128 * 4096;
 /// Bytes of the card description in [`LxSndInfo`].
