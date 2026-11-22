@@ -2,7 +2,7 @@
 # Kills one device service under KDE (once, then again within 30 s: the restart ladder's second
 # crash, FailObjects) and records what the desktop does (wave 8, Group H).
 #   wsl -d Ubuntu-20.04 -u root -e bash $TREE/tools/devcrash/devcrash.sh NAME SERVICE [ISO]
-# SERVICE: input | sound | display | tty | ipc. ISO: default this tree's dist/x86_64/kernel.iso.
+# SERVICE: input | sound | display | tty | ipc, or several joined by + (input+sound+display). ISO: default this tree's dist/x86_64/kernel.iso.
 # Output: <tree>/scratch/devcrash-NAME.txt (summary), NAME-*.png (screens), NAME.log (serial log).
 #
 #   input    Konsole open; kill input_server, type; kill again, type one line a second
@@ -27,7 +27,8 @@ for i in $(seq 1 600); do [ -d $D/ctl-$NAME ] && [ -e $D/$NAME.log ] && break; s
 # Log in, open Konsole
 $C "~150" "%shift" "~2" "@hydra" "%ret" "~90" ">click 982 716" "~3" "%alt-f2" "~8" "@konsole" "~4" "%ret" "~25" "@echo before-kill" "%ret" "~3" "shot $NAME-0-before"
 CONSOLE=("%ctrl-alt-f1" "~4" "hydra" "~2" "hydra" "~3")
-case $SVC in
+for SV in $(echo $SVC | tr + " "); do
+case $SV in
 input)
   $C "${CONSOLE[@]}" "service kill input_server" "~3" "%ctrl-alt-f2" "~3" "@echo after-kill-1" "%ret" "~3" "shot $NAME-1-kill1"
   $C "%ctrl-alt-f1" "~3" "service kill input_server" "~2" "%ctrl-alt-f2" \
@@ -36,7 +37,7 @@ input)
   $C ">click 30 779" "~4" "shot $NAME-3-pointer" "%esc" "~2"
   ;;
 sound)
-  $C "${CONSOLE[@]}" "cp /bin/sinegen.elf /ubuntu/tmp/sinegen.elf" "~3" \
+  $C "%ctrl-alt-f1" "~4" "hydra" "~2" "hydra" "~3" "cp /bin/sinegen.elf /ubuntu/tmp/sinegen.elf" "~3" \
      "linux chroot /ubuntu /usr/bin/bash -c 'cd /tmp; cat sinegen.elf > sinegen; chmod 755 sinegen; ./sinegen /tmp/sine.wav 60; ./sinegen /tmp/sine10.wav 10; XDG_RUNTIME_DIR=/run/user/1000 setsid nohup pw-play /tmp/sine.wav > /tmp/pw.out 2>&1 & echo STARTED'" "~10"
   $C "service kill sound_server" "~10" "service kill sound_server" "~15"
   $C "linux chroot /ubuntu /usr/bin/bash -c 'echo PW1: \$(cat /tmp/pw.out); echo PROCS \$(pgrep -l pipewire) \$(pgrep -l wireplumber) \$(pgrep -l pw-play); echo KILL\"\"CHECK'" "~6"
@@ -53,6 +54,7 @@ ipc)
   $C "${CONSOLE[@]}" "service kill lx_ipc" "~40" "%ctrl-alt-f2" "~5" "shot $NAME-1-after"
   ;;
 esac
+done
 $C "%ctrl-alt-f1" "~3" "service status" "~3" "quit"
 wait $VPID
 cp $D/$NAME.log $D/$NAME.harness.txt $TREE/scratch/ 2>/dev/null
@@ -62,7 +64,7 @@ L=$TREE/scratch/$NAME.log
   tr -d '\000\r' < $L | grep -a -E '\[hotplug\]|went away|online \(process|PW1|PW2|PROCS|Sinks|^ .*\*|screend|session|desktop|greeter|sddm' | grep -av 'linux chroot' | head -60
   echo "== crashes (signal N at): $(tr -d '\000\r' < $L | grep -ac 'signal [0-9]* at')"
   tr -d '\000\r' < $L | grep -a 'signal [0-9]* at' | head -5
-  if [ $SVC = sound ]; then python3 $TREE/tools/wavgaps.py $D/$NAME.wav 2>&1 | head -12; fi
+  if echo $SVC | grep -q sound; then python3 $TREE/tools/wavgaps.py $D/$NAME.wav 2>&1 | head -12; fi
   echo "== screens: $(ls $TREE/scratch/$NAME-*.png 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
 } > $OUT
 rm -f $D/$NAME.wav
