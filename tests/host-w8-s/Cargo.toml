@@ -1,0 +1,15 @@
+[package]
+name = "hydra_hosttests_w8_s"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group S's host unit tests (wave 8): sound-server's parameter negotiation and PCM/mixer engine (params.rs, pcm.rs) and the kernel's sound status page (ipc/sound_page.rs)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]

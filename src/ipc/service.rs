@@ -493,7 +493,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 15] = [
+static SERVICES: [Service; 18] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -513,6 +513,12 @@ static SERVICES: [Service; 15] = [
     Service::new(crate::ipc::protocol::ENDPOINT_LX_SEC),
     Service::new(crate::ipc::protocol::ENDPOINT_SVC_TEST),
     // wave6 G19 end
+    // wave8 GS begin: the device services' endpoints (input 0x2A, sound 0x2B, terminals
+    // 0x2C; the display service keeps 0x23 above), for Groups I, S and T
+    Service::new(0x2A),
+    Service::new(crate::ipc::protocol::ENDPOINT_LX_SOUND),
+    Service::new(0x2C),
+    // wave8 GS end
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).

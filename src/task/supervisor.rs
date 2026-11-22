@@ -63,6 +63,10 @@ static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 static SVC_TEST_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/svc-test"));
 // wave6 G19 end
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
+// wave8 GS begin
+/// The sound service (wave 8: the ALSA devices, `userland/drivers/sound-server`).
+static SOUND_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/sound-server"));
+// wave8 GS end
 
 /// Operational state of a supervised service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +418,20 @@ fn hda_args() -> Option<Vec<String>> {
     Some(alloc::vec![alloc::format!("mmio={:#x}", base)])
 }
 
+// wave8 GS begin
+/// The sound service: started when the sound driver described a card and the ALSA devices
+/// are not switched back to the kernel (`lx.sound=kernel`, `lx=kernel`). The kernel asks the
+/// driver about the card first (`snd::probe`): the service takes it from there.
+fn sound_server_args() -> Option<Vec<String>> {
+    if !crate::ipc::sound::forwarded() || !service::is_online(crate::ipc::protocol::ENDPOINT_SOUND_DEV) {
+        return None;
+    }
+    crate::compat::linux::snd::probe();
+    crate::compat::linux::snd::card()?;
+    Some(alloc::vec![String::from("workers=3")])
+}
+// wave8 GS end
+
 /// Sound driver: the controller's 16 KiB register window.
 fn hda_grants() -> Vec<(u64, u64)> {
     HDA.call_once(hda_controller).map_or_else(Vec::new, |(_, base)| alloc::vec![(base & !0xFFF, 0x4000)])
@@ -756,6 +774,19 @@ pub fn supervisor_init() {
             hda_args,
             hda_grants,
         ));
+        // wave8 GS begin: the sound service (the ALSA devices), after the sound driver it
+        // uses directly (its window, `MSG_SND_*`); Transparent: its objects are adopted by
+        // the new instance, a crash is a gap in the sound
+        sup.services.push(
+            ServiceDescriptor::new("sound_server", crate::ipc::protocol::ENDPOINT_LX_SOUND, SOUND_SERVER_ELF, sound_server_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_SOUND,
+                crate::lx::restart::RestartClass::Transparent,
+                "sound",
+            ),
+        );
+        service::allow_client(crate::ipc::protocol::ENDPOINT_SOUND_DEV, crate::ipc::protocol::ENDPOINT_LX_SOUND);
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SOUND, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SOUND }>);
+        // wave8 GS end
     }
 }
 

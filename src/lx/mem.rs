@@ -166,6 +166,11 @@ fn close(endpoint: u32, handle: u32) -> i64 {
 /// The service at `endpoint` went away: its handles go. Objects that something else maps
 /// or holds (a program's mapping, another service, the kept registry) live on.
 pub fn service_gone(endpoint: u32) {
+    // wave8 GS begin: the sound service: its rings play silence until the new instance
+    if endpoint == crate::ipc::protocol::ENDPOINT_LX_SOUND {
+        crate::ipc::sound::service_gone();
+    }
+    // wave8 GS end
     let table = tables(|t| t.iter().position(|x| x.endpoint == endpoint).map(|i| t.swap_remove(i)));
     let Some(table) = table else { return };
     let (mut n, mut alive, mut kept_n) = (0, 0, 0);

@@ -31,6 +31,9 @@ pub mod message;
 pub mod protocol;
 /// Request/reply calls to Ring 3 driver and server processes, with shared data windows.
 pub mod service;
+// wave8 GS: the sound service's kernel side (its DMA memory, status page, LX_OBJ_SND)
+pub mod sound;
+pub mod sound_page;
 
 pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
 pub use endpoint::{

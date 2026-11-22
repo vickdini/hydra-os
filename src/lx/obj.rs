@@ -308,6 +308,13 @@ impl CharDevice for ServerObject {
     }
 
     fn rdev(&self) -> u64 {
+        // wave8 GS begin: a device a service opened by its major (`LX_KCALL_DEVOPEN`) is a
+        // character device whose key is its device number (libasound, libdrm and libinput
+        // look at `st_rdev`)
+        if self.mode & 0o170000 == 0o020000 {
+            return self.key;
+        }
+        // wave8 GS end
         0
     }
 
@@ -334,6 +341,7 @@ impl CharDevice for ServerObject {
         st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD && self.kind != crate::ipc::protocol::LX_OBJ_KIND_BPF_MAP { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
+        st.st_rdev = self.rdev(); // wave8 GS
         // wave7 G7-4: a pseudo file of linux-server: its file system's device (the `tag` is
         // the inode number its `stat` reports, the key the device)
         if self.kind == crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
@@ -603,6 +611,11 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 20).contains(&op) || op == crate::ipc::protocol::LX_FH_MNTTAB {
         return super::fileh::ctl(h, op, a, b, c);
     }
+    // wave8 GS begin: the sound service's operations (`ipc::sound`, op 62)
+    if op == crate::ipc::protocol::LX_OBJ_SND {
+        return crate::ipc::sound::ctl(h, a, b, c);
+    }
+    // wave8 GS end
     match op {
         LX_OBJ_INSTALL => install(x, a, b),
         LX_OBJ_FD => {

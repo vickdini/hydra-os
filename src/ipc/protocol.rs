@@ -591,6 +591,125 @@ pub const MSG_SND_VOLUME: u32 = 0x8005;
 /// Protocol label for the sound driver's reply.
 pub const MSG_SND_REPLY: u32 = 0x800F;
 
+// wave8 GS begin: the sound service (`userland/drivers/sound-server`, kernel `ipc/sound.rs`)
+/// Endpoint of the sound service: the ALSA devices (`/dev/snd/*`, major 116), a client of
+/// the sound driver ([`ENDPOINT_SOUND_DEV`]); Linux service [`LXS_SOUND`].
+pub const ENDPOINT_LX_SOUND: u32 = 0x2B;
+/// `SYS_LX_OBJ` operation (the sound service only): `(sub-op, x, y)` with the `LX_SND_*`
+/// sub-ops below (kernel `ipc/sound.rs`).
+pub const LX_OBJ_SND: u64 = 62;
+/// [`LX_OBJ_SND`]: `(LX_SND_GET, *LxSndInfo)`: fills an [`LxSndInfo`]: new memory-object
+/// handles for the position page, the status page and the rings (kernel memory in the
+/// sound driver's IOMMU domain, which lives as long as the kernel) and the card the kernel
+/// found. Each call makes new handles: ask once per instance.
+pub const LX_SND_GET: u64 = 0;
+/// [`LX_OBJ_SND`]: `(LX_SND_BOOST, dir, tid)`: Linux thread `tid` drives direction `dir`'s
+/// stream: it runs at the scheduler's high priority (the previous driver gets its own back).
+pub const LX_SND_BOOST: u64 = 1;
+/// [`LX_OBJ_SND`]: `(LX_SND_UNBOOST, dir)`: direction `dir` has no driving thread any more.
+pub const LX_SND_UNBOOST: u64 = 2;
+/// [`LX_OBJ_SND`]: `(LX_SND_DRVGEN)`: the sound driver's server task id now (0: none). It
+/// changes when the driver restarts: the service then sets its streams up again.
+pub const LX_SND_DRVGEN: u64 = 3;
+/// [`LX_OBJ_SND`]: `(LX_SND_NOW, which)`: the kernel's clock in ns: `which` 0 the monotonic
+/// clock (`CLOCK_MONOTONIC`, the PCM timestamps), 1 the wall clock's offset from it.
+pub const LX_SND_NOW: u64 = 4;
+/// Kind of the sound service's control device objects (`controlC0`).
+pub const LX_OBJ_KIND_SND_CTL: u32 = 40;
+/// Kind of the sound service's PCM device objects (`pcmC0D0p`, `pcmC0D0c`).
+pub const LX_OBJ_KIND_SND_PCM: u32 = 41;
+/// Bytes of each direction's ring (the largest buffer a program may ask for).
+pub const SND_RING_BYTES: u64 = 128 * 4096;
+/// Bytes of the card description in [`LxSndInfo`].
+pub const SND_DESC_MAX: usize = 256;
+
+/// What [`LX_SND_GET`] fills.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxSndInfo {
+    /// Handle of the DMA position page (the controller writes each stream's position).
+    pub pos_handle: u32,
+    /// Handle of the status page ([`SndStatus`] per direction, read by `/proc/asound`).
+    pub status_handle: u32,
+    /// Handles of the rings, per direction (0: none).
+    pub ring_handle: [u32; 2],
+    /// Device (physical) address of the position page, for `MSG_SND_SETUP`.
+    pub pos_phys: u64,
+    /// Device addresses of the rings.
+    pub ring_phys: [u64; 2],
+    /// Bytes of each ring.
+    pub ring_bytes: u64,
+    /// Codec vendor and device id (`MSG_SND_INFO`).
+    pub vendor: u32,
+    /// Directions with a ring: bit 0 playback, bit 1 capture.
+    pub dirs: u32,
+    /// Volume amplifiers per direction (`MSG_SND_INFO`'s `args[3]` halves).
+    pub amps: [u32; 2],
+    /// The controller's register address (the card's long name).
+    pub mmio: u64,
+    /// Bytes of `desc` used.
+    pub desc_len: u32,
+    /// Padding.
+    pub pad: u32,
+    /// The driver's description of the codec.
+    pub desc: [u8; SND_DESC_MAX],
+}
+
+impl LxSndInfo {
+    /// All zero.
+    pub const ZERO: Self = Self { pos_handle: 0, status_handle: 0, ring_handle: [0; 2], pos_phys: 0, ring_phys: [0; 2], ring_bytes: 0, vendor: 0, dirs: 0, amps: [0; 2], mmio: 0, desc_len: 0, pad: 0, desc: [0; SND_DESC_MAX] };
+}
+
+/// One direction's stream as `/proc/asound/card0/pcm0X/sub0/*` shows it: written by the
+/// sound service into the status page (direction `d` at `d * SND_STATUS_STRIDE`), read by
+/// the kernel. `seq` is odd while the service writes the record.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SndStatus {
+    /// Odd while the service writes the record.
+    pub seq: u32,
+    /// Someone has the device open.
+    pub open: u32,
+    /// `SNDRV_PCM_STATE_*`.
+    pub state: u32,
+    /// Hardware parameters are set (the fields below them are valid).
+    pub has_hw: u32,
+    /// `SNDRV_PCM_ACCESS_*`.
+    pub access: u32,
+    /// Rate (frames per second).
+    pub rate: u32,
+    /// `SNDRV_PCM_TSTAMP_*`.
+    pub tstamp_mode: u32,
+    /// Process that opened it.
+    pub owner: u32,
+    /// Frames per period.
+    pub period_size: u64,
+    /// Frames in the buffer.
+    pub buffer_size: u64,
+    /// The hardware pointer (frames).
+    pub hw_ptr: u64,
+    /// The application pointer (frames).
+    pub appl_ptr: u64,
+    /// Software parameters (`SW_PARAMS`).
+    pub avail_min: u64,
+    /// See `avail_min`.
+    pub start_threshold: u64,
+    /// See `avail_min`.
+    pub stop_threshold: u64,
+    /// See `avail_min`.
+    pub silence_threshold: u64,
+    /// See `avail_min`.
+    pub silence_size: u64,
+    /// See `avail_min`.
+    pub boundary: u64,
+    /// Underruns (playback) or overruns (capture) since the device was opened.
+    pub xruns: u64,
+}
+
+/// Distance between the two directions' [`SndStatus`] records in the status page.
+pub const SND_STATUS_STRIDE: usize = 256;
+// wave8 GS end
+
 // ----------------------------------------------------------------------------------------
 // Linux server (linux-server): Linux system calls forwarded out of the kernel (wave 3, step 1)
 // ----------------------------------------------------------------------------------------
