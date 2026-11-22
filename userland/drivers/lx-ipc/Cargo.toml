@@ -1,0 +1,9 @@
+[package]
+name = "lx-ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra lx-ipc: Unix sockets, pipes, FIFOs, eventfd, timerfd, signalfd, pidfd, message queues and System V IPC, a Linux service of its own (wave 8)"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

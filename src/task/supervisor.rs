@@ -53,6 +53,14 @@ static LINUX_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR
 /// lx-sec (wave 6: keys and bpf, a Linux service of their own, `userland/drivers/lx-sec`).
 static LX_SEC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-sec"));
 // wave6 G24 end
+// wave8 GX2 begin
+/// lx-net (wave 8: Internet and netlink sockets, a Linux service of their own,
+/// `userland/drivers/lx-net`).
+static LX_NET_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-net"));
+/// lx-ipc (wave 8: Unix sockets, pipes, FIFOs, eventfd, timerfd, signalfd, pidfd, message
+/// queues, System V; `userland/drivers/lx-ipc`).
+static LX_IPC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-ipc"));
+// wave8 GX2 end
 // wave7 G7-1 begin
 /// vfs-server (wave 7: the file service, `userland/drivers/vfs-server`).
 static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/vfs-server"));
@@ -267,6 +275,20 @@ fn lx_sec_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave6 G24 end
+
+// wave8 GX2 begin
+/// lx-net: always started (two workers); it exits by itself when no service id names its
+/// endpoint (`lx.net=linux`, `lx.net=kernel`, `lx=kernel`).
+fn lx_net_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+
+/// lx-ipc: always started (three workers: D-Bus and Wayland traffic); it exits by itself
+/// when no service id names its endpoint.
+fn lx_ipc_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=3")])
+}
+// wave8 GX2 end
 
 // wave7 G7-1 begin
 /// vfs-server: always started (four workers; `cache=N` sets its caches' size). With
@@ -727,6 +749,27 @@ pub fn supervisor_init() {
         );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SEC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SEC }>);
         // wave6 G24 end
+        // wave8 GX2 begin: lx-net (net-server's client for Internet sockets: its connections
+        // live in net-server, so a restart adopts them: Transparent) and lx-ipc (pipes and
+        // Unix sockets fail on a restart: FailObjects; programs live)
+        sup.services.push(
+            ServiceDescriptor::new("lx_net", crate::ipc::protocol::ENDPOINT_LX_NET, LX_NET_ELF, lx_net_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_NET,
+                crate::lx::restart::RestartClass::Transparent,
+                "net",
+            ),
+        );
+        service::allow_client(ENDPOINT_NET_SERVER, crate::ipc::protocol::ENDPOINT_LX_NET);
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_NET, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_NET }>);
+        sup.services.push(
+            ServiceDescriptor::new("lx_ipc", crate::ipc::protocol::ENDPOINT_LX_IPC, LX_IPC_ELF, lx_ipc_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_IPC,
+                crate::lx::restart::RestartClass::FailObjects,
+                "ipc",
+            ),
+        );
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_IPC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_IPC }>);
+        // wave8 GX2 end
         // wave7 G7-1 begin: vfs-server, the file service: zfs-server's second client (zfs-server
         // attaches vfs-server's window, where its requests sit); its going away fails only its
         // own calls in flight, later calls wait for the restart (7-6 refines this)

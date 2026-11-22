@@ -68,20 +68,16 @@ fn take(seq: u64) {
             LX_NOTE_EXEC => crate::keys::on_exec(a, b),
             LX_NOTE_EXIT => {
                 crate::keys::on_exit(a);
-                crate::mqueue::on_exit(a);
-                crate::sysv::on_exit(a);
-                crate::pipe::on_exit(a);
-                crate::eventfd::on_exit(a);
-                crate::unix::on_exit(a);
-                crate::pidfd::on_exit(a);
-                crate::signalfd::on_exit(a);
-                crate::timerfd::on_exit(a);
-                crate::socket::on_exit(a);
+                // wave8 GX2: the IPC and network pieces (co-located here or not: harmless)
+                crate::ipcsvc::on_exit(a);
+                crate::netsvc::on_exit(a);
             }
             LX_NOTE_INTERRUPT => crate::interrupted(a),
             LX_NOTE_CLOSE => crate::obj::closed(a as u32, b as u32),
             // Group 13: timer_arm (cookies: the top byte says whose)
-            LX_NOTE_TIMER if a >> 56 == crate::timerfd::TIMER_TAG >> 56 => crate::timerfd::fired(a),
+            LX_NOTE_TIMER => {
+                crate::ipcsvc::timer(a); // wave8 GX2
+            }
             _ => {}
         }
         t += 1;

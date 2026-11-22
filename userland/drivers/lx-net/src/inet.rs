@@ -94,7 +94,134 @@ pub struct Sock {
     rx_stamp: Option<u64>,
     /// The number `/proc/<pid>/fd` and `/proc/net` show (`socket:[inode]`).
     inode: u64,
+    /// wave8 GX2: its kept record (`crate::sockkept`; 0: not kept) and the image last
+    /// written there.
+    rec: u32,
+    img: Vec<u8>,
 }
+
+// wave8 GX2 begin: the kept record of a socket (lx-net's Transparent restart)
+/// Flags of a record.
+const K_STREAM: u16 = 1;
+const K_SHUT_RD: u16 = 2;
+const K_UDP_USED: u16 = 4;
+const K_V6: u16 = 8;
+const K_RAW: u16 = 16;
+const K_PEER: u16 = 32;
+
+impl Sock {
+    /// The record's bytes (see `crate::sockkept`): what a new lx-net needs to serve the
+    /// socket on (the net-server handles stay in net-server).
+    fn image(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(crate::sockkept::REC);
+        b.push(crate::sockkept::KIND_INET);
+        let f = (self.stream as u16) * K_STREAM
+            | (self.shut_rd as u16) * K_SHUT_RD
+            | (self.udp_used as u16) * K_UDP_USED
+            | (self.v6 as u16) * K_V6
+            | (self.raw as u16) * K_RAW
+            | (self.peer.is_some() as u16) * K_PEER;
+        b.extend_from_slice(&f.to_le_bytes());
+        for h in self.handles() {
+            b.extend_from_slice(&h.unwrap_or(0).to_le_bytes());
+        }
+        b.extend_from_slice(&self.bound_port.to_le_bytes());
+        b.extend_from_slice(&self.bound_ip);
+        let (pip, pport) = self.peer.unwrap_or(([0; 4], 0));
+        b.extend_from_slice(&pip);
+        b.extend_from_slice(&pport.to_le_bytes());
+        b.extend_from_slice(&self.uid.to_le_bytes());
+        b.extend_from_slice(&self.inode.to_le_bytes());
+        let room = crate::sockkept::REC - b.len();
+        self.opts.save(&mut b, room);
+        b
+    }
+
+    /// A socket from record `rec`'s bytes `d` (a restarted lx-net), under net-server's
+    /// current instance.
+    fn from_image(rec: u32, d: &[u8]) -> Option<Self> {
+        let mut r = crate::sockkept::Reader::new(d);
+        if r.u8()? != crate::sockkept::KIND_INET {
+            return None;
+        }
+        let f = r.u16()?;
+        let h = |v: u32| (v != 0).then_some(v);
+        let (icmp, listener, bind_id, tcp, udp) = (h(r.u32()?), h(r.u32()?), h(r.u32()?), h(r.u32()?), h(r.u32()?));
+        let bound_port = r.u16()?;
+        let bound_ip = r.ip()?;
+        let pip = r.ip()?;
+        let pport = r.u16()?;
+        let uid = r.u32()?;
+        let inode = r.u64()?;
+        let (opts, _) = Options::load(r.rest())?;
+        Some(Sock {
+            gen: stack::gen(),
+            stream: f & K_STREAM != 0,
+            tcp,
+            udp,
+            bound_port,
+            peer: (f & K_PEER != 0).then_some((pip, pport)),
+            shut_rd: f & K_SHUT_RD != 0,
+            opts,
+            bound_ip,
+            bind_id,
+            listener,
+            uid,
+            udp_used: f & K_UDP_USED != 0,
+            v6: f & K_V6 != 0,
+            icmp,
+            raw: f & K_RAW != 0,
+            rx_stamp: None,
+            inode,
+            rec,
+            img: d.to_vec(),
+        })
+    }
+
+    /// Writes the kept record if the socket changed since the last write.
+    fn persist(&mut self) {
+        if self.rec == 0 || self.dead() {
+            return;
+        }
+        let img = self.image();
+        if img != self.img && crate::sockkept::put(self.rec, &img) {
+            self.img = img;
+        }
+    }
+}
+
+/// Whether record bytes `d` make an Internet socket (a restarted lx-net checks each one
+/// before adopting it).
+pub fn kept_ok(d: &[u8]) -> bool {
+    Sock::from_image(0, d).is_some()
+}
+
+/// A restarted lx-net takes back the socket in slot `slot` from its record `rec` (after
+/// the kernel let it adopt its objects); `false` if the record no longer makes one.
+pub fn restore(slot: u32, rec: u32) -> bool {
+    let Some(d) = crate::sockkept::get(rec) else { return false };
+    let Some(s) = Sock::from_image(rec, &d) else { return false };
+    if !crate::obj::reserve(slot, LX_OBJ_KIND_INET) {
+        return false;
+    }
+    if s.inode >= INODE.load(Ordering::Relaxed) {
+        INODE.store(s.inode + 1, Ordering::Relaxed);
+    }
+    let handles = s.handles();
+    SOCKS.lock().insert(slot, Arc::new(YLock::new(s)));
+    for h in handles.into_iter().flatten() {
+        track(h, slot);
+    }
+    refresh(slot, true);
+    true
+}
+
+/// The net-server handles of every socket (what a restarted lx-net keeps).
+pub fn kept_handles() -> Vec<u32> {
+    let socks: Vec<Arc<YLock<Sock>>> = SOCKS.lock().values().cloned().collect();
+    socks.iter().flat_map(|s| s.lock().handles().into_iter().flatten().collect::<Vec<u32>>()).collect()
+}
+// wave8 GX2 end
 
 impl Sock {
     fn dead(&self) -> bool {
@@ -226,7 +353,11 @@ pub fn all_slots() -> Vec<u32> {
 /// Writes slot `slot`'s readiness word (`event`: something new happened on it).
 pub fn refresh(slot: u32, event: bool) {
     if let Some(s) = sock_of(slot) {
-        let bits = s.lock().poll_events();
+        let bits = {
+            let mut g = s.lock();
+            g.persist(); // wave8 GX2: after every call and event (written only on a change)
+            g.poll_events()
+        };
         crate::obj::set_ready_ev(slot, bits, 0, event);
     }
 }
@@ -243,6 +374,9 @@ pub fn closed(slot: u32) {
             }
         }
     }
+    // wave8 GX2: the record goes before the handles (a crash in between leaks the handles
+    // only until the restart's keep list closes them)
+    crate::sockkept::clear(s.rec);
     s.close();
 }
 
@@ -477,6 +611,8 @@ pub fn socket(cx: &Cx) -> i64 {
         raw: icmp == Some(true),
         rx_stamp: None,
         inode,
+        rec: crate::sockkept::alloc(), // wave8 GX2
+        img: Vec::new(),
     };
     if let Some(h) = sock.icmp {
         track(h, slot);
@@ -486,11 +622,13 @@ pub fn socket(cx: &Cx) -> i64 {
     }
     let flags = cx.args[1] as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC);
     let bits = sock.poll_events();
+    sock.persist();
+    let key = sock.rec as u64;
     let arc = Arc::new(YLock::new(sock));
     SOCKS.lock().insert(slot, arc);
     crate::obj::set_ready(slot, bits, 0);
     let name = alloc::format!("socket:[{}]", inode);
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_INET, flags, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes()) {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_INET, flags, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), 0, key) {
         Ok(fd) => fd,
         Err(e) => {
             closed(slot);
@@ -922,7 +1060,7 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         }
     };
     let inode = INODE.fetch_add(1, Ordering::Relaxed);
-    let conn = Sock {
+    let mut conn = Sock {
         gen: stack::gen(),
         stream: true,
         tcp: Some(cid),
@@ -941,13 +1079,17 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         raw: false,
         rx_stamp: None,
         inode,
+        rec: crate::sockkept::alloc(), // wave8 GX2
+        img: Vec::new(),
     };
     track(cid, slot);
     let bits = conn.poll_events();
+    conn.persist();
+    let key = conn.rec as u64;
     SOCKS.lock().insert(slot, Arc::new(YLock::new(conn)));
     crate::obj::set_ready(slot, bits, 0);
     let name = alloc::format!("socket:[{}]", inode);
-    let fd = match crate::obj::install(cx, slot, LX_OBJ_KIND_INET, flags as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes()) {
+    let fd = match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_INET, flags as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), 0, key) {
         Ok(fd) => fd,
         Err(e) => {
             closed(slot);

@@ -12,8 +12,9 @@
 //! - **A restarted net-server** ([`NOTIFY_LX_NET_GONE`]): its handles mean nothing any more;
 //!   [`gen`] counts the instances, and a socket made under an older one is dead.
 //!
-//! Handles made here carry our client tag ([`NETS_CLIENT_LX`]), so that a restarted
-//! linux-server can close what its predecessor left ([`reset`]).
+//! Handles made here carry our client tag ([`NETS_CLIENT_LX`] in linux-server,
+//! [`NETS_CLIENT_LXNET`] in lx-net: [`set_tag`]), so that a restarted program can close what
+//! its predecessor left ([`reset`]), or keep what it adopts (wave 8: [`reset_keep`]).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -203,9 +204,43 @@ fn on(h: u32, label: u32, mut args: [u64; 4]) -> Result<[u64; 4], i64> {
     request(label, args)
 }
 
-/// Closes every handle a previous linux-server left in net-server (at start).
+/// Closes every handle a previous instance of this program left in net-server (at start).
 pub fn reset() {
-    let _ = request(MSG_NETS_CLIENT_RESET, [NETS_CLIENT_LX, 0, 0, 0]);
+    let _ = request(MSG_NETS_CLIENT_RESET, [tag(), 0, 0, 0]);
+}
+
+/// wave8 GX2: the client tag of the handles made here (`NETS_CLIENT_LX` until set).
+static TAG: AtomicU64 = AtomicU64::new(NETS_CLIENT_LX);
+
+/// wave8 GX2: this program's client tag (lx-net: [`NETS_CLIENT_LXNET`]), before any request.
+pub fn set_tag(tag: u64) {
+    TAG.store(tag, Ordering::Release);
+}
+
+fn tag() -> u64 {
+    TAG.load(Ordering::Acquire)
+}
+
+/// wave8 GX2: a restarted lx-net adopted the sockets holding `keep`: every other handle of
+/// its tag (what calls in flight at the crash made, what closed meanwhile) is closed; how
+/// many, or a negative errno.
+pub fn reset_keep(keep: &[u32]) -> i64 {
+    if keep.is_empty() {
+        return request(MSG_NETS_CLIENT_RESET, [tag(), 0, 0, 0]).map_or_else(|e| e, |r| r[0] as i64);
+    }
+    if base().is_none() {
+        return ENETDOWN;
+    }
+    let max = REGION / 4;
+    if keep.len() > max {
+        return EMSGSIZE; // (more than 4096 handles: nothing closed)
+    }
+    let r = Region::take();
+    let b = r.bytes();
+    for (i, h) in keep.iter().enumerate() {
+        b[4 * i..4 * i + 4].copy_from_slice(&h.to_le_bytes());
+    }
+    request(MSG_NETS_CLIENT_RESET, [tag(), r.off(), keep.len() as u64, 0]).map_or_else(|e| e, |r| r[0] as i64)
 }
 
 /// An address as the protocol carries it.
@@ -300,7 +335,7 @@ pub fn udp_list() -> Vec<(u32, u16, usize)> {
 // ----------------------------------------------------------------------
 
 pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u32, i64> {
-    request(MSG_NETS_TCP_CONNECT, [addr(ip), port as u64, local_port.unwrap_or(0) as u64, NETS_CLIENT_LX]).map(|r| r[0] as u32)
+    request(MSG_NETS_TCP_CONNECT, [addr(ip), port as u64, local_port.unwrap_or(0) as u64, tag()]).map(|r| r[0] as u32)
 }
 
 /// The state of connection `h` (`NETS_TCP_*`; [`CLOSED`] if unknown).
@@ -373,7 +408,7 @@ pub fn tcp_info(h: u32) -> Option<(u16, [u8; 4], u16, [u8; 4])> {
 
 pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool, v4: bool, v6: bool) -> Result<(u32, u16), i64> {
     let flags = reuse_addr as u64 | (reuse_port as u64) << 1 | (v4 as u64) << 2 | (v6 as u64) << 3;
-    request(MSG_NETS_TCP_BIND, [addr(ip), port as u64, flags, NETS_CLIENT_LX]).map(|r| (r[0] as u32, r[1] as u16))
+    request(MSG_NETS_TCP_BIND, [addr(ip), port as u64, flags, tag()]).map(|r| (r[0] as u32, r[1] as u16))
 }
 
 pub fn tcp_unbind(h: u32) {
@@ -410,7 +445,7 @@ pub fn tcp_unlisten(h: u32) {
 // ----------------------------------------------------------------------
 
 pub fn udp_open(port: u16) -> Result<u32, i64> {
-    request(MSG_NETS_UDP_OPEN, [port as u64, 0, 0, NETS_CLIENT_LX]).map(|r| r[0] as u32)
+    request(MSG_NETS_UDP_OPEN, [port as u64, 0, 0, tag()]).map(|r| r[0] as u32)
 }
 
 pub fn udp_rebind(h: u32, port: u16) -> Result<(), i64> {
@@ -458,7 +493,7 @@ pub fn udp_close(h: u32) {
 
 /// A raw or ping ICMP socket (0: none, without net-server: dead from the start).
 pub fn icmp_open(raw: bool, v6: bool) -> u32 {
-    request(MSG_NETS_ICMP_OPEN, [raw as u64, v6 as u64, 0, NETS_CLIENT_LX]).map_or(0, |r| r[0] as u32)
+    request(MSG_NETS_ICMP_OPEN, [raw as u64, v6 as u64, 0, tag()]).map_or(0, |r| r[0] as u32)
 }
 
 pub fn icmp_ident(h: u32) -> u16 {

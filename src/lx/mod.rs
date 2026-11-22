@@ -2460,7 +2460,13 @@ fn server_gone(h: SvcId) {
     if svc::host_of(LXS_NET) == h {
         netwaits(|w| w.clear());
         RELAY_SERVER.store(false, Ordering::Release);
-        WATCHED_NET.store(0, Ordering::Release);
+        // wave8 GX2 begin: a Transparent restart (lx-net) keeps its objects, and with them
+        // the watched sockets they count (an adopted socket stays counted: zeroing the
+        // count would stop the readiness relay for every socket polled across the restart)
+        if !resend {
+            WATCHED_NET.store(0, Ordering::Release);
+        }
+        // wave8 GX2 end
     }
     x.notes.store(0, Ordering::Release);
     x.notes_head.store(0, Ordering::Release);

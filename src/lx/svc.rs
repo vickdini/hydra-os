@@ -73,8 +73,11 @@ pub static SVC: [SvcEntry; LXS_MAX] = [const { SvcEntry { endpoint: AtomicU32::n
 const DEFAULT_ENDPOINTS: [(SvcId, u32); 11] = [
     (LXS_LINUX, ENDPOINT_LINUX_SERVER),
     (LXS_VFS, ENDPOINT_VFS_SERVER),
-    (LXS_NET, ENDPOINT_LINUX_SERVER),
-    (LXS_IPC, ENDPOINT_LINUX_SERVER),
+    // wave8 GX2 begin: sockets and IPC objects in their own services, lx-net and lx-ipc
+    // (`lx.net=linux` / `lx.ipc=linux` put them back)
+    (LXS_NET, crate::ipc::protocol::ENDPOINT_LX_NET),
+    (LXS_IPC, crate::ipc::protocol::ENDPOINT_LX_IPC),
+    // wave8 GX2 end
     (LXS_PROC, ENDPOINT_LINUX_SERVER),
     (LXS_DISPLAY, ENDPOINT_DISPLAY_DEV),
     (LXS_INPUT, 0x2A),

@@ -698,7 +698,10 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 Err(e) => return e,
             };
             let dev = match fds.lock().get(b as i32 as usize) {
-                Some(FileDescriptor::Device(d)) if d.as_server().is_none() => d.clone(),
+                // wave8 GX2: also another service's object (lx-ipc's message queue keeps
+                // lx-net's netlink socket for glibc's SIGEV_THREAD; `LX_OBJ_NOTIFY` forwards
+                // the notification to its owner)
+                Some(FileDescriptor::Device(d)) if d.as_server().is_none_or(|o| o.svc != h) => d.clone(),
                 _ => return EBADF,
             };
             let token = NEXT_PIN.fetch_add(1, Ordering::Relaxed);

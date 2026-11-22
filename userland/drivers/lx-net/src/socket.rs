@@ -5,7 +5,8 @@
 //!   by address family ([`by_family`]); every call on a socket descriptor, and `read`,
 //!   `write`, `readv`, `writev`, `ioctl` on one, by the kind of its server object
 //!   ([`by_kind`]). Internet sockets are [`crate::inet`]'s, netlink sockets
-//!   [`crate::netlink`]'s; Group 13 adds the AF_UNIX family and its kinds here.
+//!   [`crate::netlink`]'s. (Wave 8: this file is lx-net's; AF_UNIX is lx-ipc's `unix`, which
+//!   the program serving it dispatches before calling here.)
 //! - **Blocked calls**: a call that must wait (a `recv` with nothing to read, an `accept`
 //!   with no connection, a `connect` in progress, a `send` with no room) answers
 //!   "pending" and is kept here ([`Waiter`]) with what it did so far ([`Prog`]); no worker
@@ -139,10 +140,7 @@ fn refresh(slot: u32, event: bool) {
 
 /// `socket` (41) and `socketpair` (53): by address family.
 pub fn by_family(cx: &Cx) -> (i64, u64) {
-    // Group 13 (step 4): AF_UNIX
-    if cx.args[0] == 1 {
-        return crate::unix::create(cx);
-    }
+    // (AF_UNIX is lx-ipc's `unix::create`, dispatched before this; wave 8)
     let r = match (cx.nr, cx.args[0]) {
         (41, 2 | 10) => crate::inet::socket(cx),
         (41, 16) => crate::netlink::socket(cx),
@@ -158,10 +156,8 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
     if slot as usize >= LX_OBJ_SLOTS {
         return (ENOTSOCK, 0);
     }
-    // Group 13 (step 4): Unix sockets keep their own waiters (`crate::unix`)
-    if crate::obj::kind_of(slot) == LX_OBJ_KIND_UNIX {
-        return crate::unix::call(cx);
-    }
+    // (Unix sockets keep their own waiters, in lx-ipc's `unix`: dispatched before this;
+    // wave 8)
     let mut prog = Prog::new();
     loop {
         let seq = SEQ[slot as usize].load(Ordering::Acquire);

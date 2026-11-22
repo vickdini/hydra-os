@@ -172,6 +172,50 @@ fn known(level: u32, name: u32, stream: bool, v6: bool) -> bool {
     }
 }
 
+// wave8 GX2 begin: options in lx-net's kept records (`crate::sockkept`)
+impl Options {
+    /// Appends the options to `out` while they fit in `room` bytes: both timeouts, then as
+    /// many `(level u32, name u32, len u8, value)` entries as fit (a value of more than 255
+    /// bytes is left out). The entry count goes first (u8).
+    pub fn save(&self, out: &mut Vec<u8>, room: usize) {
+        let start = out.len();
+        out.extend_from_slice(&self.rcvtimeo.to_le_bytes());
+        out.extend_from_slice(&self.sndtimeo.to_le_bytes());
+        let count_at = out.len();
+        out.push(0);
+        let mut n = 0u8;
+        for (&(level, name), v) in self.vals.iter() {
+            if v.len() > 255 || n == 255 || out.len() - start + 9 + v.len() > room {
+                continue;
+            }
+            out.extend_from_slice(&level.to_le_bytes());
+            out.extend_from_slice(&name.to_le_bytes());
+            out.push(v.len() as u8);
+            out.extend_from_slice(v);
+            n += 1;
+        }
+        out[count_at] = n;
+    }
+
+    /// The options [`save`](Self::save) wrote at the start of `b`: `(options, bytes read)`,
+    /// `None` if `b` is cut short.
+    pub fn load(b: &[u8]) -> Option<(Self, usize)> {
+        let u64_at = |o: usize| b.get(o..o + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+        let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
+        let mut o = Self { rcvtimeo: u64_at(0)?, sndtimeo: u64_at(8)?, ..Default::default() };
+        let n = *b.get(16)?;
+        let mut p = 17;
+        for _ in 0..n {
+            let (level, name, len) = (u32_at(p)?, u32_at(p + 4)?, *b.get(p + 8)? as usize);
+            let v = b.get(p + 9..p + 9 + len)?;
+            o.vals.insert((level, name), v.to_vec());
+            p += 9 + len;
+        }
+        Some((o, p))
+    }
+}
+// wave8 GX2 end
+
 impl Options {
     /// Stores option bytes as given (options the socket layer validates itself).
     pub fn put(&mut self, level: u32, name: u32, val: &[u8]) {

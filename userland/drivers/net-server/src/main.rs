@@ -129,9 +129,10 @@ fn tag_of(h: u32) -> u64 {
     OWNERS.lock().get(&h).map_or(0, |o| o.0 as u64)
 }
 
-/// [`MSG_NETS_CLIENT_RESET`]: closes every handle of client `tag`; how many.
-fn client_reset(tag: u64) -> i64 {
-    let handles: Vec<(u32, u8)> = OWNERS.lock().iter().filter(|(_, o)| o.0 as u64 == tag).map(|(h, o)| (*h, o.1)).collect();
+/// [`MSG_NETS_CLIENT_RESET`]: closes every handle of client `tag` except those in `keep`
+/// (wave8 GX2: a restarted lx-net keeps the handles of the sockets it adopted); how many.
+fn client_reset(tag: u64, keep: &[u32]) -> i64 {
+    let handles: Vec<(u32, u8)> = OWNERS.lock().iter().filter(|(h, o)| o.0 as u64 == tag && !keep.contains(h)).map(|(h, o)| (*h, o.1)).collect();
     for &(h, kind) in &handles {
         match kind {
             H_TCP => stack::tcp_close(h),
@@ -396,7 +397,16 @@ fn handle(st: &mut State, id: u64, m: &Message) -> Option<Message> {
             disown(h);
             result(0)
         }
-        MSG_NETS_CLIENT_RESET => result(client_reset(a[0])),
+        // wave8 GX2 begin: `[tag, keep list offset, keep count]` (u32 handles in the data area)
+        MSG_NETS_CLIENT_RESET if a[2] == 0 => result(client_reset(a[0], &[])),
+        MSG_NETS_CLIENT_RESET => match st.data(a[1], a[2].saturating_mul(4)) {
+            Some(d) => {
+                let keep: Vec<u32> = d.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                result(client_reset(a[0], &keep))
+            }
+            None => result(EINVAL),
+        },
+        // wave8 GX2 end
         MSG_NETS_LIST => result(list(st, a[0], a[1], a[2])),
         MSG_NETS_DHCP => {
             if !nic::is_present() {

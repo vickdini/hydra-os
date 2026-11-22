@@ -255,6 +255,12 @@ pub const NETS_LX_DATA_LEN: usize = 0x1E000;
 pub const NETS_CLIENT_KERNEL: u64 = 0;
 /// The tag of linux-server (see [`NETS_CLIENT_KERNEL`]).
 pub const NETS_CLIENT_LX: u64 = 1;
+// wave8 GX2 begin
+/// The tag of lx-net (wave 8: the network service of its own; see [`NETS_CLIENT_KERNEL`]).
+/// A restarted lx-net keeps the handles of the sockets it adopted
+/// ([`MSG_NETS_CLIENT_RESET`] with a keep list).
+pub const NETS_CLIENT_LXNET: u64 = 2;
+// wave8 GX2 end
 /// Offset of the status page: little-endian u64 words `NETS_ST_*`.
 pub const NETS_STATUS_OFF: usize = 0x30000;
 /// Offset of the event ring: [`NETS_EVENTS`] u32 handles; entry `n % NETS_EVENTS` is the
@@ -411,7 +417,8 @@ pub const MSG_NETS_DHCP: u32 = 0x9031;
 /// reply, a queued call) -> `[0, address]`.
 pub const MSG_NETS_RESOLVE: u32 = 0x9032;
 /// Close every handle made by the client with tag `[tag]` (wave 5: a restarted linux-server
-/// clears what its predecessor left).
+/// clears what its predecessor left). wave8 GX2: `[tag, offset, count]` with `count != 0`
+/// keeps the `count` u32 handles at data-area `offset` (a restarted lx-net's adopted ones).
 pub const MSG_NETS_CLIENT_RESET: u32 = 0x9033;
 /// The network server's reply.
 pub const MSG_NETS_REPLY: u32 = 0x90FF;
