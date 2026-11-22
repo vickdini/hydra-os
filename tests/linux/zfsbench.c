@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
             r[rep] = t->fn(t->iters / div > 0 ? t->iters / div : 1);
         }
         qsort(r, REPS, sizeof r[0], cmp);
-        printf("BENCH %s min %.1f med %.1f max %.1f ns/op (%ld)\n", t->name, r[0], r[REPS / 2], r[REPS - 1], t->iters);
+        printf("BENCH %s min %.1f med %.1f max %.1f ns/op (%ld)\n", t->name, r[0], r[REPS / 2], r[REPS - 1], t->iters / div > 0 ? t->iters / div : 1);
         fflush(stdout);
     }
     // Only what this run made: its r0..r4 directories, then the directory itself if empty

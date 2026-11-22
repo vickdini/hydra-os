@@ -630,3 +630,38 @@ fn a_log_of_another_pool_is_ignored() {
     assert_eq!(lookup(root(), "mine"), Err(ENOENT));
     m.kill();
 }
+
+/// Not a check: the log's cost on the host (`cargo test --release -- --ignored --nocapture
+/// log_cost`): 64 KiB appends, 4 KiB creates and write+sync, with and without the log.
+#[test]
+#[ignore]
+fn log_cost() {
+    let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for with_log in [false, true, false, true] {
+        let mut m = Machine::new();
+        m.with_log = with_log;
+        m.start();
+        let r = root();
+        let f = create(r, "big");
+        let chunk = pattern(1, 65536);
+        let t = std::time::Instant::now();
+        for i in 0..512u64 {
+            write(f, i * 65536, &chunk);
+        }
+        let append = t.elapsed().as_secs_f64() * 1e6 / 512.0;
+        let t = std::time::Instant::now();
+        for i in 0..2000 {
+            let g = create(r, &format!("c{}", i));
+            write(g, 0, &chunk[..4096]);
+        }
+        let creates = t.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        let t = std::time::Instant::now();
+        for i in 0..200u64 {
+            write(f, (i % 64) * 4096, &chunk[..4096]);
+            sync();
+        }
+        let fsync = t.elapsed().as_secs_f64() * 1e6 / 200.0;
+        std::println!("log={} append_64k={:.1}us create_4k={:.1}us write_sync_4k={:.1}us", with_log, append, creates, fsync);
+        m.kill();
+    }
+}

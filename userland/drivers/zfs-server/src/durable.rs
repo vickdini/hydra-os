@@ -23,14 +23,17 @@ use crate::zfs::fsproto::*;
 use crate::zfs::server::{with_server, ZfsServer};
 use crate::zil::{self, Log};
 
-/// The log's kept object: its key and size (a header page and two record areas of 12 MiB:
+/// The log's kept object: its key and size (a header page and two record areas of 20 MiB:
 /// one for the current generation, the other keeps the previous one until the new header).
 pub const LOG_KEY: u64 = 1;
 /// See [`LOG_KEY`].
-pub const LOG_BYTES: usize = zil::HDR_SIZE + 2 * 12 * 1024 * 1024;
-/// A commit is made once a generation's records take this much (it is also made at 16 MiB
-/// of dirty data).
-pub const COMMIT_AT: usize = 11 * 1024 * 1024;
+pub const LOG_BYTES: usize = zil::HDR_SIZE + 2 * 20 * 1024 * 1024;
+/// A commit is made once a generation's records take this much. It is above the 16 MiB of
+/// dirty data that commits anyway (as before the log), so plain writing never commits
+/// earlier than without the log: a commit the log forced at 11 MiB wrote short-lived files
+/// that the txgd's commit would never have seen (zfsbench append_64k: 54 -> 484 us per
+/// write). Only rewriting the same blocks over and over fills the log first.
+pub const COMMIT_AT: usize = 18 * 1024 * 1024;
 
 static LOG: Mutex<Option<Log<'static>>> = Mutex::new(None);
 static FROZEN: Mutex<Option<(u64, u32)>> = Mutex::new(None);
