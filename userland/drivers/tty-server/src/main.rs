@@ -84,6 +84,12 @@ fn main(args: &[&str]) {
     svcrt::notes::init(svc.window().as_mut_ptr(), on_note);
     svcrt::objs::init(svc.area, ENDPOINT_TTY_SERVER);
     AREA.store(svc.area as u64, Ordering::Release);
+    // The console's attach state before the first call (a restarted instance finds a program
+    // on the console)
+    if let Some((st, _)) = cons_poll(u64::MAX) {
+        CONS_SEEN.store(st.gen, Ordering::Release);
+        with(|t, g| t.cons_state(st.gen, st.sid, st.pgrp, st.cols, st.rows, g));
+    }
     if let Err(e) = svc.online() {
         println!("[tty-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -158,7 +164,6 @@ struct Glue {
     completes: Vec<(u64, i64)>,
     signals: Vec<(bool, u64, u32)>,
     cons: Vec<u8>,
-    cons_ready: Option<(u64, bool)>,
 }
 
 impl Io for Glue {
@@ -199,7 +204,9 @@ impl Io for Glue {
     }
 
     fn cons_ready(&mut self, gen: u64, readable: bool) {
-        self.cons_ready = Some((gen, readable));
+        // At once, under the state's lock: two threads' words must reach the kernel in the
+        // order the state changed
+        let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_READY, gen, readable as u64);
     }
 
     fn pgrp_in(&mut self, pgid: u64, sid: u64) -> i64 {
@@ -223,9 +230,6 @@ impl Glue {
         for (group, who, sig) in self.signals {
             let op = if group { LX_TTY_SIGGRP } else { LX_TTY_SIGPROC };
             let _ = sys::lx_obj(LX_OBJ_TTY, op, who, sig as u64);
-        }
-        if let Some((gen, r)) = self.cons_ready {
-            let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_READY, gen, r as u64);
         }
         flush();
     }
@@ -319,16 +323,18 @@ fn iov_of(cx: &Cx) -> Result<Iov, i64> {
     }
 }
 
-/// The bytes of a write's buffers (in pieces of at most 1 MiB per copy).
+/// Most bytes one write takes (a larger one gets a short count, as terminals may give).
+const MAX_WRITE: u64 = 1 << 20;
+
+/// The bytes of a write's buffers, at most [`MAX_WRITE`] of them.
 fn gather(cx: &Cx, iov: &Iov) -> Result<Vec<u8>, i64> {
-    let mut out = Vec::with_capacity(iov.total().min(1 << 20));
+    let mut out = Vec::with_capacity(iov.total().min(MAX_WRITE as usize));
     for &(p, l) in &iov.0 {
-        let mut done = 0u64;
-        while done < l {
-            let n = (l - done).min(1 << 20);
-            out.extend_from_slice(&cx.copy_in(p + done, n as usize)?);
-            done += n;
+        let n = l.min(MAX_WRITE - out.len() as u64);
+        if n == 0 {
+            break;
         }
+        out.extend_from_slice(&cx.copy_in(p, n as usize)?);
     }
     Ok(out)
 }
@@ -476,7 +482,7 @@ fn open(cx: &Cx, rdev: u64, flags: u64, who: &Caller) -> i64 {
             }
             Some(Ok((index, node))) => install_slave(cx, slot, index, node, flags),
         },
-        (136..=143, _) => {
+        (136..=143, 0..=255) => {
             let index = (((major - 136) << 8) | (minor & 0xFF)) as u32;
             match with(|t, g| t.open_slave(index, slot, flags & O_NOCTTY != 0, who, g)) {
                 Ok(node) => install_slave(cx, slot, index, node, flags),
@@ -513,30 +519,40 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     }
 }
 
-/// The console thread: waits in the kernel for console keys and attach changes, and feeds
-/// them to the console terminal.
-extern "C" fn console_thread(_arg: u64) -> ! {
+/// The attach generation the console thread starts from.
+static CONS_SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// One `LX_TTY_CONS_WAIT` (`seen`: the attach generation known): the console's state and the
+/// keys typed. `None`: not forwarded (`-EPERM`, `lx.tty=kernel`) or another error.
+fn cons_poll(seen: u64) -> Option<(LxConsState, Vec<u32>)> {
     const CAP: usize = 4096;
     let head = core::mem::size_of::<LxConsState>();
     let mut buf = alloc::vec![0u8; CAP];
-    let mut seen = u64::MAX;
+    buf[..8].copy_from_slice(&seen.to_le_bytes());
+    let n = sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_WAIT, buf.as_mut_ptr() as u64, CAP as u64).ok()?;
+    // SAFETY: the kernel wrote a whole `LxConsState` at the head
+    let st: LxConsState = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const LxConsState) };
+    let n = (n as usize).min((CAP - head) / 4).min(st.nkeys as usize);
+    let keys = (0..n).map(|i| u32::from_le_bytes(buf[head + 4 * i..head + 4 * i + 4].try_into().unwrap_or([0; 4]))).collect();
+    Some((st, keys))
+}
+
+/// The console thread: waits in the kernel for console keys and attach changes, and feeds
+/// them to the console terminal.
+extern "C" fn console_thread(_arg: u64) -> ! {
+    let mut seen = CONS_SEEN.load(Ordering::Acquire);
     loop {
-        buf[..8].copy_from_slice(&seen.to_le_bytes());
-        match sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_WAIT, buf.as_mut_ptr() as u64, CAP as u64) {
-            Ok(n) => {
-                // SAFETY: the kernel wrote a whole `LxConsState` at the head
-                let st: LxConsState = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const LxConsState) };
-                let n = (n as usize).min((CAP - head) / 4).min(st.nkeys as usize);
-                let keys: Vec<u32> = (0..n).map(|i| u32::from_le_bytes(buf[head + 4 * i..head + 4 * i + 4].try_into().unwrap_or([0; 4]))).collect();
+        match cons_poll(seen) {
+            Some((st, keys)) => {
                 seen = st.gen;
                 with(|t, g| {
                     t.cons_state(st.gen, st.sid, st.pgrp, st.cols, st.rows, g);
                     t.cons_keys(&keys, g);
                 });
             }
-            // Not forwarded (`lx.tty=kernel`): the kernel's tty.rs has the console
-            Err(e) if e == -1 => sys::sleep_ms(5000),
-            Err(_) => sys::sleep_ms(100),
+            // Not forwarded (`lx.tty=kernel`: the kernel's tty.rs has the console), or an
+            // error: look again later
+            None => sys::sleep_ms(2000),
         }
     }
 }
