@@ -44,6 +44,8 @@ pub struct Before {
     txg: u64,
     changes: u64,
     time: (u64, u32),
+    /// wave8 GB: the object allocator's state (free list head, next object number)
+    alloc: (u64, u64),
 }
 
 /// The time every clock read of the current request returns (`None`: not in a request).
@@ -80,6 +82,7 @@ fn guid(s: &ZfsServer) -> u64 {
 
 /// Starts a new generation at the committed txg.
 fn reset(s: &ZfsServer, log: &mut Option<Log<'static>>) {
+    KEEP_WRITES.lock().clear(); // wave8 GB
     if let Some(l) = log.as_mut() {
         if !l.reset(guid(s), s.dmu.ub.txg, &s.durable_state()) {
             crate::println!("[zfs-server] intent log: the server state does not fit; changes are committed one by one until the next commit");
@@ -107,9 +110,9 @@ fn commit(s: &mut ZfsServer, log: &mut Option<Log<'static>>) -> bool {
 
 /// Called before serving a request at time `now`: freezes the clock and notes the counters.
 pub fn before(now: (u64, u32)) -> Before {
-    let (txg, changes) = with_server(|s| Ok((s.dmu.ub.txg, s.dmu.changes))).unwrap_or((0, 0));
+    let (txg, changes, alloc) = with_server(|s| Ok((s.dmu.ub.txg, s.dmu.changes, (s.dmu.ub.free_obj_head, s.dmu.ub.next_obj)))).unwrap_or((0, 0, (0, 0)));
     freeze(now);
-    Before { txg, changes, time: now }
+    Before { txg, changes, time: now, alloc }
 }
 
 /// Called after serving request `op` (`req` its bytes) that answered `(status, value)`,
@@ -124,12 +127,20 @@ pub fn after(b: Before, op: u32, req: &[u8], status: i64, value: u64) {
             return Ok(());
         }
         let changed = s.dmu.changes != b.changes || matches!(op, FS_OPEN_REF | FS_RELEASE);
+        // wave8 GB: a request of the droppable kind that allocated or freed an object (a
+        // write dropping a file capability frees its xattr object) must stay in the log:
+        // without it, later object numbers would differ in a replay
+        if object_only(op) && (s.dmu.ub.free_obj_head, s.dmu.ub.next_obj) != b.alloc && req.len() >= 8 {
+            KEEP_WRITES.lock().insert(u64::from_le_bytes(req[..8].try_into().unwrap()));
+        }
         // (a log switched off after a failed commit is not retried per request: the next
         // threshold or txgd commit starts it again; meanwhile a kill loses what a power
         // loss would, as before the log - review 8z)
         if changed && log.as_ref().is_some_and(|l| l.gen() != 0) {
             if let Some(l) = log.as_mut() {
-                if !l.append(op, b.time, status, value, req) {
+                // (wave8 GB: first room made by dropping the data of files deleted since the
+                // commit, then the append again)
+                if !l.append(op, b.time, status, value, req) && !(reclaim(s, l) && l.append(op, b.time, status, value, req)) {
                     // No room (or no usable log): the change is made durable by a commit;
                     // if that fails too, the log (now missing this change) goes off
                     if !commit(s, &mut log) {
@@ -145,12 +156,85 @@ pub fn after(b: Before, op: u32, req: &[u8], status: i64, value: u64) {
             }
         }
         let full = log.as_ref().is_some_and(|l| l.used() > COMMIT_AT);
-        if full || s.dmu.dirty_blocks() >= crate::zfs::dmu::DIRTY_SYNC_THRESHOLD {
+        let dirty = s.dmu.dirty_blocks() >= crate::zfs::dmu::DIRTY_SYNC_THRESHOLD;
+        // wave8 GB: a log full of deleted files' data is compacted instead of committed
+        if dirty || (full && !log.as_mut().is_some_and(|l| reclaim(s, l))) {
             commit(s, &mut log);
         }
         Ok(())
     });
 }
+
+// wave8 GB begin: the data of files deleted within a generation
+/// Requests whose only effect is on the contents of the object named by their first
+/// parameter (writes): once that object is freed (deleted, no handle left), replaying them
+/// changes nothing a later request can see. (Not setattr/setxattr: those may create or
+/// free an xattr object, which moves later object numbers.)
+fn object_only(op: u32) -> bool {
+    op == FS_WRITE
+}
+
+/// Objects some of whose [`object_only`] requests in the current generation allocated or
+/// freed an object: their requests are never dropped (cleared at each new generation).
+static KEEP_WRITES: Mutex<alloc::collections::BTreeSet<u64>> = Mutex::new(alloc::collections::BTreeSet::new());
+
+/// Whether object `ino` was freed in the open transaction group (its dnode is the empty one
+/// a free leaves, and dirty). Anything else, including an object number reused since, is
+/// "not freed": its requests are kept.
+fn freed(s: &mut ZfsServer, ino: u64) -> bool {
+    ino != 0 && ino < s.dmu.ub.next_obj && s.dmu.is_dirty_dnode(ino) && s.dmu.get_dnode(ino).is_ok_and(|d| d.mode == 0 && d.obj_type == 0)
+}
+
+/// Drops from the current generation the requests of [`object_only`] kind whose object has
+/// been freed since (appending to a file and deleting it at once filled the log with data
+/// no replay needs, and the log then forced commits the dirty-data threshold never would:
+/// zfsbench append_64k 51 -> 267 us per write, Group Z). Replay stays exact: the creates,
+/// links and deletes stay, so object numbers come out the same; the dropped requests
+/// touched only the freed object. Done only when it at least halves the log (else the
+/// caller commits, as before). `true`: the log was compacted.
+fn reclaim(s: &mut ZfsServer, l: &mut Log<'static>) -> bool {
+    let recs = l.records();
+    let keep_writes = KEEP_WRITES.lock().clone();
+    let mut dead: alloc::collections::BTreeMap<u64, bool> = alloc::collections::BTreeMap::new();
+    // An object number created again later in the generation (the free list reuses the
+    // last freed number first) had died before: its requests up to that point are its
+    // earlier life's, droppable whatever the number holds now
+    let mut last_birth: alloc::collections::BTreeMap<u64, usize> = alloc::collections::BTreeMap::new();
+    for (i, &(kind, op, value, _, _)) in recs.iter().enumerate() {
+        if kind == zil::KIND_OP && matches!(op, FS_CREATE | FS_MKDIR | FS_MKNOD | FS_SYMLINK) && value != 0 {
+            last_birth.insert(value, i);
+        }
+    }
+    let mut keep = Vec::with_capacity(recs.len());
+    let mut kept = 0usize;
+    for (i, &(kind, op, _, at, len)) in recs.iter().enumerate() {
+        let drop = kind == zil::KIND_OP && object_only(op) && len >= 8 && {
+            let ino = u64::from_le_bytes(l.payload((at, 8)).try_into().unwrap());
+            !keep_writes.contains(&ino)
+                && (last_birth.get(&ino).is_some_and(|&b| b > i) || *dead.entry(ino).or_insert_with(|| freed(s, ino)))
+        };
+        if !drop {
+            kept += zil::REC_HEAD + ((len + 7) & !7);
+        }
+        keep.push(!drop);
+    }
+    if kept > l.used() / 2 {
+        return false;
+    }
+    let before = l.used();
+    let ok = l.compact(guid(s), &keep);
+    if ok {
+        COMPACTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if COMPACTIONS.load(core::sync::atomic::Ordering::Relaxed) == 1 {
+            crate::println!("[zfs-server] intent log: dropped deleted files' data ({} -> {} KiB) instead of a commit", before / 1024, l.used() / 1024);
+        }
+    }
+    ok
+}
+
+/// Compactions made by [`reclaim`] (the first one is reported on the console).
+pub static COMPACTIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+// wave8 GB end
 
 /// What [`recover`] did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
