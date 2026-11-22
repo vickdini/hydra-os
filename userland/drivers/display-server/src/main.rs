@@ -16,7 +16,7 @@
 //! `SCREEN_WAIT` for the kernel's state changes (Ctrl+Alt+F1/F2: repaint, hold completions
 //! back) and the next vertical blank (flip completions); the main thread serves the
 //! endpoint, the notifications (closes, interrupted reads) and prints a `[display]` line
-//! every 5 s while the desktop draws.
+//! once a minute while the desktop draws.
 //!
 //! **Crash policy** (FailObjects, decision 28): the kernel takes the screen back at once;
 //! every descriptor of this service fails with `ENODEV` (kwin exits, the desktop session
@@ -277,14 +277,17 @@ fn main(args: &[&str]) {
         svcrt::notes::drain_all();
         objs::flush();
         let now = sys::uptime_ticks();
-        if now >= last_report + 500 {
+        if now >= last_report + REPORT_TICKS {
             last_report = now;
             last = report(last);
         }
     }
 }
 
-/// The `[display]` line for the last 5 s, when anything happened.
+/// How often the `[display]` line comes (ticks: 60 s; the console shows it too).
+const REPORT_TICKS: u64 = 6000;
+
+/// The `[display]` line for the last minute, when anything happened.
 fn report(last: kms::Stats) -> kms::Stats {
     let (s, hidden) = match KMS.lock().as_ref() {
         Some(k) => (k.stats, k.hidden()),
@@ -297,7 +300,7 @@ fn report(last: kms::Stats) -> kms::Stats {
     let presents = d(s.presents, last.presents);
     let avg = if presents > 0 { d(s.copy_ns, last.copy_ns) / presents / 1000 } else { 0 };
     println!(
-        "[display] 5s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, cursor {}{}",
+        "[display] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, cursor {}{}",
         d(s.ioctls, last.ioctls),
         d(s.ioctls_hidden, last.ioctls_hidden),
         d(s.flips, last.flips),

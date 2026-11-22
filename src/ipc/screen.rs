@@ -65,6 +65,8 @@ static WAITQ: WaitQueue = WaitQueue::new();
 static REQUEST: AtomicU8 = AtomicU8::new(0);
 static REQUEST_WQ: WaitQueue = WaitQueue::new();
 static SCREEND: AtomicBool = AtomicBool::new(false);
+/// The display service died: `screend` ends the desktop session (decision 28).
+static END_SESSION: AtomicBool = AtomicBool::new(false);
 /// The status page (its kernel address; 0 until the first mapping) and the scratch page's
 /// frame, allocated once and kept for good.
 static STATUS_VIRT: AtomicU64 = AtomicU64::new(0);
@@ -156,7 +158,13 @@ fn apply(ev: Event) -> u32 {
     status_set(SCREEN_ST_STATE, new);
     if act.zap {
         if let Some((mm, start, end)) = inner.mapping.as_ref() {
-            mm.lock().discard(*start, *end);
+            let mut m = mm.lock();
+            m.discard(*start, *end);
+            // Lent: the framebuffer's pages are mapped now, not one fault at a time during
+            // the service's next copy (a fault from user mode costs several times more)
+            if new == SCREEN_SHOWN {
+                let _ = m.prefault(*start, *end - *start, true);
+            }
         }
     }
     if ev == Event::Gone {
@@ -181,6 +189,10 @@ fn apply(ev: Event) -> u32 {
 fn screend_main() {
     loop {
         REQUEST_WQ.register();
+        if END_SESSION.swap(false, Ordering::AcqRel) {
+            end_session();
+            continue;
+        }
         match REQUEST.swap(0, Ordering::AcqRel) {
             1 => {
                 apply(Event::Hide);
@@ -213,12 +225,55 @@ pub fn session_hidden() -> bool {
     STATE.load(Ordering::Acquire) == SCREEN_HIDDEN
 }
 
-/// The display service went away (`lx::server_gone`): the console takes the screen at once.
+/// The display service went away (`lx::server_gone`): the console takes the screen at once;
+/// `screend` then ends the desktop session.
 pub fn service_gone() {
     if SERVICE.load(Ordering::Acquire) {
         let st = apply(Event::Gone);
         crate::kprintln!("[screen] display service gone: the console has the screen (state {})", st);
+        END_SESSION.store(true, Ordering::Release);
+        REQUEST_WQ.wake_all();
     }
+}
+
+/// Most descriptors looked at per process when ending the session.
+const SCAN_FDS: usize = 8192;
+
+/// Decision 28: a crash of the display service ends the desktop session. Its compositor does
+/// not end by itself when its `/dev/dri/card0` fails (kwin keeps running with no output), so
+/// the programs that hold a descriptor of the dead instance are asked to end (`SIGTERM`):
+/// the compositor exits, the session ends and SDDM shows the login screen again once the
+/// restarted service serves. Root's programs are left alone (hydra-logind keeps the devices
+/// it hands out); programs without a window keep running.
+fn end_session() {
+    // The dead instance's objects go stale right after the call that woke us
+    crate::task::sleep_ms(200);
+    let host = crate::lx::svc::host_of(crate::ipc::protocol::LXS_DISPLAY);
+    let mut tables: alloc::vec::Vec<(u64, u32, crate::fs::SharedFdTable)> = alloc::vec::Vec::new();
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::task::SCHEDULER.lock().for_each_task_mut(|t| {
+            if t.personality == crate::task::TaskPersonality::Linux && !tables.iter().any(|x| x.0 == t.tgid) {
+                tables.push((t.tgid, t.euid, t.fds.clone()));
+            }
+        })
+    });
+    let mut ended = alloc::vec::Vec::new();
+    for (tgid, euid, fds) in tables {
+        if euid == 0 {
+            continue;
+        }
+        let holds = {
+            let f = fds.lock();
+            (0..SCAN_FDS).any(|fd| match f.get(fd) {
+                Some(crate::fs::FileDescriptor::Device(d)) => d.as_server().is_some_and(|o| o.svc() == host && o.kind() == crate::ipc::protocol::LX_OBJ_KIND_DRM && o.slot().is_none()),
+                _ => false,
+            })
+        };
+        if holds && crate::compat::linux::proc::post_process(tgid, 15) {
+            ended.push(tgid);
+        }
+    }
+    crate::kprintln!("[screen] display service gone: the desktop session ends (SIGTERM to {:?})", ended);
 }
 
 /// A kernel panic (`video::console::panic_reclaim`, before the console is copied back): no
