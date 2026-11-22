@@ -280,6 +280,14 @@ fn main(args: &[&str]) {
     }
     kept_init();
     adopt_objects();
+    // The status page shows this instance's streams (closed unless adopted), not the last
+    // instance's
+    {
+        let e = ENGINE.lock();
+        for dir in 0..2 {
+            write_status(&e, dir);
+        }
+    }
     if let Err(e) = svc.online() {
         println!("[sound-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -701,6 +709,10 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
 /// The last descriptor of object `slot` went.
 fn closed(slot: u32) {
     let o = OBJECTS.lock().remove(&slot);
+    if o.is_none() {
+        // (not one of ours: an object of a previous instance this one did not adopt)
+        return;
+    }
     if let Some(Obj::Pcm { dir }) = o {
         let mut e = ENGINE.lock();
         let (secs, xruns) = e.close(dir, &mut Real);
