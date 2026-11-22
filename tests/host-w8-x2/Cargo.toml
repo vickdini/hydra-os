@@ -1,0 +1,18 @@
+[package]
+name = "hydra_hosttests_w8_x2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group X2's host unit tests (wave 8): lx-net's kept records (sockkept.rs) and socket options in them (sockopt.rs), compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+# hydra-rt's plain-core kept-state format under the crate name the service files use
+hydra_rt = { path = "rt", package = "hydra_rt_host_x2" }

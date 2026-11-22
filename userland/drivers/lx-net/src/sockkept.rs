@@ -178,3 +178,102 @@ impl<'a> Reader<'a> {
         &self.b[self.p.min(self.b.len())..]
     }
 }
+
+/// Flags of an Internet socket's record ([`InetRec::flags`]).
+pub const K_STREAM: u16 = 1;
+pub const K_SHUT_RD: u16 = 2;
+pub const K_UDP_USED: u16 = 4;
+pub const K_V6: u16 = 8;
+pub const K_RAW: u16 = 16;
+/// (Set by [`InetRec::encode`] when there is a peer.)
+const K_PEER: u16 = 32;
+
+/// What a record says about an Internet socket (its options follow it in the record:
+/// `sockopt::Options::save`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InetRec {
+    /// `K_*` flags.
+    pub flags: u16,
+    /// Its net-server handles: ICMP, listener, bind, TCP, UDP (0: none).
+    pub handles: [u32; 5],
+    pub bound_port: u16,
+    pub bound_ip: [u8; 4],
+    pub peer: Option<([u8; 4], u16)>,
+    /// The creator's effective user (for `/proc/net`).
+    pub uid: u32,
+    /// The number `/proc` shows (`socket:[inode]`).
+    pub inode: u64,
+}
+
+impl InetRec {
+    /// Bytes of an encoded record before its options (the tests check `encode` against it).
+    #[allow(dead_code)]
+    pub const LEN: usize = 1 + 2 + 20 + 2 + 4 + 4 + 2 + 4 + 8;
+
+    /// Appends the record (kind byte first) to `out`.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.push(KIND_INET);
+        let f = (self.flags & !K_PEER) | if self.peer.is_some() { K_PEER } else { 0 };
+        out.extend_from_slice(&f.to_le_bytes());
+        for h in self.handles {
+            out.extend_from_slice(&h.to_le_bytes());
+        }
+        out.extend_from_slice(&self.bound_port.to_le_bytes());
+        out.extend_from_slice(&self.bound_ip);
+        let (pip, pport) = self.peer.unwrap_or(([0; 4], 0));
+        out.extend_from_slice(&pip);
+        out.extend_from_slice(&pport.to_le_bytes());
+        out.extend_from_slice(&self.uid.to_le_bytes());
+        out.extend_from_slice(&self.inode.to_le_bytes());
+    }
+
+    /// The record at the start of `d` and what follows it (the options), `None` if `d` is
+    /// not an Internet socket's record or is cut short.
+    pub fn decode(d: &[u8]) -> Option<(Self, &[u8])> {
+        let mut r = Reader::new(d);
+        if r.u8()? != KIND_INET {
+            return None;
+        }
+        let f = r.u16()?;
+        let mut handles = [0u32; 5];
+        for h in handles.iter_mut() {
+            *h = r.u32()?;
+        }
+        let bound_port = r.u16()?;
+        let bound_ip = r.ip()?;
+        let pip = r.ip()?;
+        let pport = r.u16()?;
+        let uid = r.u32()?;
+        let inode = r.u64()?;
+        let rec = Self { flags: f & !K_PEER, handles, bound_port, bound_ip, peer: (f & K_PEER != 0).then_some((pip, pport)), uid, inode };
+        Some((rec, r.rest()))
+    }
+}
+
+/// What a record says about a netlink socket.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NlRec {
+    /// A routing socket (else a uevent one).
+    pub route: bool,
+    pub port: u32,
+    pub groups: u32,
+}
+
+impl NlRec {
+    /// The record's bytes (kind byte first).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = alloc::vec![KIND_NETLINK, self.route as u8];
+        b.extend_from_slice(&self.port.to_le_bytes());
+        b.extend_from_slice(&self.groups.to_le_bytes());
+        b
+    }
+
+    /// The record in `d`, `None` if it is not a netlink socket's record or is cut short.
+    pub fn decode(d: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(d);
+        if r.u8()? != KIND_NETLINK {
+            return None;
+        }
+        Some(Self { route: r.u8()? != 0, port: r.u32()?, groups: r.u32()? })
+    }
+}

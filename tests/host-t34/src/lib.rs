@@ -1414,6 +1414,20 @@ pub mod lx {
     pub fn net_event(handles: Option<&[u32]>) {
         crate::fake::log(format!("net_event {:?}", handles));
     }
+    // wave8 GX2 begin: the registry's view of the network service (lx-net, or linux-server)
+    pub mod svc {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        /// *stub* The network service's endpoint (`ENDPOINT_LINUX_SERVER` until a test sets
+        /// lx-net's).
+        pub static NET_EP: AtomicU32 = AtomicU32::new(crate::ipc::protocol::ENDPOINT_LINUX_SERVER);
+        pub fn online(_svc: u8) -> bool {
+            super::is_online()
+        }
+        pub fn endpoint_of(_svc: u8) -> u32 {
+            NET_EP.load(Ordering::Relaxed)
+        }
+    }
+    // wave8 GX2 end
 }
 
 /// *stub* The personality hook.

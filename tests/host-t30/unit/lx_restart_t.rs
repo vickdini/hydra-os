@@ -210,3 +210,29 @@ fn an_add_key_lost_in_a_crash_is_sent_again_unless_it_makes_a_keyring() {
     assert!(restart_policy::add_key_resendable(b"logon") && !restart_policy::add_key_resendable(b"keyring") && !restart_policy::add_key_resendable(b"x"));
 }
 // wave7 GB end
+
+// wave8 GX2 begin
+/// lx-net's Transparent restart keeps its objects, so the count of watched sockets (which
+/// switches net-server's readiness relay on) stays; a restart that drops the objects resets
+/// it.
+#[test]
+fn a_transparent_restart_of_the_network_service_keeps_the_watched_count() {
+    let sim = world();
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::init(b"");
+    configure(LXS_NET, RestartClass::Transparent);
+    let _s = start(&sim, LXS_NET, 310, 1, true, handler(|_| (0, 0)));
+    assert_eq!(crate::lx::svc::host_of(LXS_NET), LXS_NET);
+    crate::lx::WATCHED_NET.store(2, Ordering::Release);
+    crate::lx::server_gone(LXS_NET);
+    assert!(restarting(LXS_NET) && keeps_objects(LXS_NET));
+    assert_eq!(crate::lx::WATCHED_NET.load(Ordering::Acquire), 2);
+    online(LXS_NET);
+    // A second crash within 30 s: FailObjects (the ladder), the objects go stale
+    crate::lx::server_gone(LXS_NET);
+    assert!(!keeps_objects(LXS_NET));
+    assert_eq!(crate::lx::WATCHED_NET.load(Ordering::Acquire), 0);
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::init(b"net=linux+ipc=linux");
+}
+// wave8 GX2 end

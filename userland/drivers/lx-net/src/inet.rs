@@ -101,37 +101,28 @@ pub struct Sock {
 }
 
 // wave8 GX2 begin: the kept record of a socket (lx-net's Transparent restart)
-/// Flags of a record.
-const K_STREAM: u16 = 1;
-const K_SHUT_RD: u16 = 2;
-const K_UDP_USED: u16 = 4;
-const K_V6: u16 = 8;
-const K_RAW: u16 = 16;
-const K_PEER: u16 = 32;
+use crate::sockkept::{InetRec, K_RAW, K_SHUT_RD, K_STREAM, K_UDP_USED, K_V6};
 
 impl Sock {
     /// The record's bytes (see `crate::sockkept`): what a new lx-net needs to serve the
     /// socket on (the net-server handles stay in net-server).
     fn image(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(crate::sockkept::REC);
-        b.push(crate::sockkept::KIND_INET);
-        let f = (self.stream as u16) * K_STREAM
+        let flags = (self.stream as u16) * K_STREAM
             | (self.shut_rd as u16) * K_SHUT_RD
             | (self.udp_used as u16) * K_UDP_USED
             | (self.v6 as u16) * K_V6
-            | (self.raw as u16) * K_RAW
-            | (self.peer.is_some() as u16) * K_PEER;
-        b.extend_from_slice(&f.to_le_bytes());
-        for h in self.handles() {
-            b.extend_from_slice(&h.unwrap_or(0).to_le_bytes());
-        }
-        b.extend_from_slice(&self.bound_port.to_le_bytes());
-        b.extend_from_slice(&self.bound_ip);
-        let (pip, pport) = self.peer.unwrap_or(([0; 4], 0));
-        b.extend_from_slice(&pip);
-        b.extend_from_slice(&pport.to_le_bytes());
-        b.extend_from_slice(&self.uid.to_le_bytes());
-        b.extend_from_slice(&self.inode.to_le_bytes());
+            | (self.raw as u16) * K_RAW;
+        let r = InetRec {
+            flags,
+            handles: self.handles().map(|h| h.unwrap_or(0)),
+            bound_port: self.bound_port,
+            bound_ip: self.bound_ip,
+            peer: self.peer,
+            uid: self.uid,
+            inode: self.inode,
+        };
+        let mut b = Vec::with_capacity(crate::sockkept::REC);
+        r.encode(&mut b);
         let room = crate::sockkept::REC - b.len();
         self.opts.save(&mut b, room);
         b
@@ -140,39 +131,29 @@ impl Sock {
     /// A socket from record `rec`'s bytes `d` (a restarted lx-net), under net-server's
     /// current instance.
     fn from_image(rec: u32, d: &[u8]) -> Option<Self> {
-        let mut r = crate::sockkept::Reader::new(d);
-        if r.u8()? != crate::sockkept::KIND_INET {
-            return None;
-        }
-        let f = r.u16()?;
+        let (r, rest) = InetRec::decode(d)?;
+        let (opts, _) = Options::load(rest)?;
         let h = |v: u32| (v != 0).then_some(v);
-        let (icmp, listener, bind_id, tcp, udp) = (h(r.u32()?), h(r.u32()?), h(r.u32()?), h(r.u32()?), h(r.u32()?));
-        let bound_port = r.u16()?;
-        let bound_ip = r.ip()?;
-        let pip = r.ip()?;
-        let pport = r.u16()?;
-        let uid = r.u32()?;
-        let inode = r.u64()?;
-        let (opts, _) = Options::load(r.rest())?;
+        let [icmp, listener, bind_id, tcp, udp] = r.handles.map(h);
         Some(Sock {
             gen: stack::gen(),
-            stream: f & K_STREAM != 0,
+            stream: r.flags & K_STREAM != 0,
             tcp,
             udp,
-            bound_port,
-            peer: (f & K_PEER != 0).then_some((pip, pport)),
-            shut_rd: f & K_SHUT_RD != 0,
+            bound_port: r.bound_port,
+            peer: r.peer,
+            shut_rd: r.flags & K_SHUT_RD != 0,
             opts,
-            bound_ip,
+            bound_ip: r.bound_ip,
             bind_id,
             listener,
-            uid,
-            udp_used: f & K_UDP_USED != 0,
-            v6: f & K_V6 != 0,
+            uid: r.uid,
+            udp_used: r.flags & K_UDP_USED != 0,
+            v6: r.flags & K_V6 != 0,
             icmp,
-            raw: f & K_RAW != 0,
+            raw: r.flags & K_RAW != 0,
             rx_stamp: None,
-            inode,
+            inode: r.inode,
             rec,
             img: d.to_vec(),
         })

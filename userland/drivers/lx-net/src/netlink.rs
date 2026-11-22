@@ -75,10 +75,7 @@ struct Nl {
 // in the middle of a dump loses the rest of its answer).
 impl Nl {
     fn image(&self) -> Vec<u8> {
-        let mut b = alloc::vec![crate::sockkept::KIND_NETLINK, self.route as u8];
-        b.extend_from_slice(&self.port.load(Ordering::Relaxed).to_le_bytes());
-        b.extend_from_slice(&self.groups.load(Ordering::Relaxed).to_le_bytes());
-        b
+        crate::sockkept::NlRec { route: self.route, port: self.port.load(Ordering::Relaxed), groups: self.groups.load(Ordering::Relaxed) }.encode()
     }
 
     /// Writes the kept record if port or groups changed since the last write.
@@ -97,11 +94,7 @@ impl Nl {
 
 /// `(route, port, groups)` of netlink record bytes `d`.
 fn parse_kept(d: &[u8]) -> Option<(bool, u32, u32)> {
-    let mut r = crate::sockkept::Reader::new(d);
-    if r.u8()? != crate::sockkept::KIND_NETLINK {
-        return None;
-    }
-    Some((r.u8()? != 0, r.u32()?, r.u32()?))
+    crate::sockkept::NlRec::decode(d).map(|r| (r.route, r.port, r.groups))
 }
 
 /// Whether record bytes `d` make a netlink socket.

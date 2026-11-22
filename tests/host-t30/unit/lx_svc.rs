@@ -68,9 +68,19 @@ fn init_fills_the_default_registry() {
     assert_eq!(endpoint_of(LXS_TEST), ENDPOINT_SVC_TEST);
     assert_eq!(endpoint_of(LXS_VFS), ENDPOINT_VFS_SERVER);
     // Co-located pieces are hosted by linux-server, the lowest id naming its endpoint
+    assert_eq!(host_of(LXS_PROC), LXS_LINUX);
+    // wave8 GX2: lx-net and lx-ipc are their own processes (`lx.<name>=linux` co-locates)
+    assert_eq!(endpoint_of(LXS_NET), ENDPOINT_LX_NET);
+    assert_eq!(endpoint_of(LXS_IPC), ENDPOINT_LX_IPC);
+    assert_eq!(host_of(LXS_NET), LXS_NET);
+    assert_eq!(host_of(LXS_IPC), LXS_IPC);
+    reset();
+    init(b"lx.net=linux+lx.ipc=linux");
     assert_eq!(host_of(LXS_NET), LXS_LINUX);
     assert_eq!(host_of(LXS_IPC), LXS_LINUX);
-    assert_eq!(host_of(LXS_PROC), LXS_LINUX);
+    assert_eq!(endpoint_of(LXS_NET), ENDPOINT_LINUX_SERVER);
+    reset();
+    init(b"");
     assert_eq!(host_of(LXS_SEC), LXS_SEC);
     assert_eq!(host_of(LXS_TEST), LXS_TEST);
     // Ids without an endpoint have no host
@@ -112,7 +122,7 @@ fn log_lines_names_each_service_with_an_endpoint() {
     let _g = crate::world::serial();
     crate::fake::reset();
     reset();
-    init(b"lx.ipc=kernel");
+    init(b"lx.ipc=kernel+lx.net=linux");
     log_lines(false);
     assert!(crate::fake::logged("[lx] net: linux (co-located, endpoint 0x29)"));
     assert!(crate::fake::logged("[lx] ipc: in the kernel (lx.<name>=kernel)"));
@@ -140,8 +150,11 @@ fn hosts_are_made_once_and_named_by_id() {
     // The services it serves: the ids whose host it is
     assert_eq!(a.serves(), 1 << LXS_TEST);
     let l = host_or_make(LXS_LINUX, ENDPOINT_LINUX_SERVER);
-    let want = 1 << LXS_NET | 1 << LXS_IPC | 1 << LXS_PROC;
+    let want = 1 << LXS_PROC;
     assert_eq!(l.serves() & want, want);
+    // wave8 GX2: lx-net and lx-ipc serve themselves
+    assert_eq!(l.serves() & (1 << LXS_NET | 1 << LXS_IPC), 0);
+    assert_eq!(host_or_make(LXS_NET, ENDPOINT_LX_NET).serves(), 1 << LXS_NET);
     // linux-server subscribes to the process events from the start
     assert_eq!(l.subs.load(Ordering::Relaxed), 1 << LX_NOTE_FORK | 1 << LX_NOTE_EXEC | 1 << LX_NOTE_EXIT);
     assert_eq!(a.subs.load(Ordering::Relaxed), 0);
@@ -188,7 +201,7 @@ fn worker_list_spans_hosts() {
 fn take_ids_moves_every_id_of_an_endpoint() {
     let _g = crate::world::serial();
     reset();
-    init(b"lx.sec=linux");
+    init(b"lx.sec=linux+lx.net=linux");
     SVC[LXS_SEC as usize].host.store(0, Ordering::Release);
     SVC[LXS_NET as usize].host.store(0, Ordering::Release);
     take_ids(LXS_LINUX, ENDPOINT_LINUX_SERVER);

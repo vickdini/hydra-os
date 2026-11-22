@@ -486,6 +486,34 @@ fn linux_server_is_told_about_the_doorbell() {
     k::lx::ONLINE.store(false, Relaxed);
 }
 
+// wave8 GX2 begin
+#[test]
+fn lx_net_is_told_about_the_doorbell() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let _g = setup();
+    net_server(5);
+    k::lx::ONLINE.store(true, Relaxed);
+    k::lx::NET_MOVED.store(true, Relaxed);
+    k::lx::svc::NET_EP.store(ENDPOINT_LX_NET, Relaxed);
+    // The doorbell goes to the network service's own process, not linux-server
+    k::lx::RELAY.store(true, Relaxed);
+    fake::take_log();
+    cl::on_signal(0);
+    assert!(fake::logged(&format!("notify {} {}", ENDPOINT_LX_NET, NOTIFY_LX_NET)));
+    assert!(!fake::logged(&format!("notify {} ", ENDPOINT_LINUX_SERVER)));
+    cl::on_signal(k::ipc::service::SIGNAL_GONE);
+    assert!(fake::logged(&format!("notify {} {}", ENDPOINT_LX_NET, NOTIFY_LX_NET_GONE)));
+    // Offline (restarting): nobody is told
+    k::lx::ONLINE.store(false, Relaxed);
+    fake::take_log();
+    cl::on_signal(0);
+    assert!(!fake::logged("notify"));
+    k::lx::svc::NET_EP.store(ENDPOINT_LINUX_SERVER, Relaxed);
+    k::lx::RELAY.store(false, Relaxed);
+    k::lx::NET_MOVED.store(false, Relaxed);
+}
+// wave8 GX2 end
+
 #[test]
 fn dhcp_renewal() {
     let _g = setup();
