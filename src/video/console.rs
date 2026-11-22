@@ -462,6 +462,16 @@ pub fn hide_behind_splash() -> Option<(*mut u8, usize, usize, usize, bool)> {
 /// session) stops drawing on it, so that the panic message stays visible.
 static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+// wave8 GD begin
+/// Run first by [`panic_reclaim`]: the display service's screen stops (`ipc::screen`).
+static PANIC_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the function [`panic_reclaim`] runs first (it must take no lock).
+pub fn set_panic_hook(f: fn()) {
+    PANIC_HOOK.store(f as usize, core::sync::atomic::Ordering::Release);
+}
+// wave8 GD end
+
 /// Whether the kernel has panicked (the screen belongs to the console for good).
 pub fn panicked() -> bool {
     PANICKED.load(core::sync::atomic::Ordering::Acquire)
@@ -472,6 +482,13 @@ pub fn panicked() -> bool {
 /// copy's memory (the heap may be what failed).
 pub fn panic_reclaim() {
     PANICKED.store(true, core::sync::atomic::Ordering::Release);
+    // wave8 GD: the display service stops drawing first (`ipc::screen`: no locks)
+    let hook = PANIC_HOOK.load(core::sync::atomic::Ordering::Acquire);
+    if hook != 0 {
+        // SAFETY: stored from a `fn()` by `set_panic_hook`
+        let f = unsafe { core::mem::transmute::<usize, fn()>(hook) };
+        f();
+    }
     // A lock held by the panicking code (or a CPU in the middle of a frame) is not waited
     // for long: the copy below is best effort
     let mut guard = None;

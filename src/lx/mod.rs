@@ -697,6 +697,22 @@ pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
 pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::linux::chardev::CharDevice>, i64>> {
     let major = (rdev >> 8) & 0xFFF;
     let s = svc::major_svc(major);
+    // wave8 GD begin: the device service that claimed the major is being restarted: the
+    // open waits for it (up to the restart's 30 s), never reaching the kernel's copy meanwhile
+    let s = if s == 0 && major < 256 {
+        let c = svc::MAJOR_SVC[major as usize].load(Ordering::Acquire);
+        if c != 0 && svc::mode(c) == svc::SvcMode::Forward && !all_kernel() && restart::restarting(svc::host_of(c)) {
+            match restart::wait_online(svc::host_of(c), &|| svc::major_svc(major) != 0) {
+                Ok(()) => svc::major_svc(major),
+                Err(e) => return Some(Err(if e == EIO { -19 } else { e })),
+            }
+        } else {
+            0
+        }
+    } else {
+        s
+    };
+    // wave8 GD end
     if s == 0 {
         return None;
     }
@@ -2457,6 +2473,11 @@ fn server_gone(h: SvcId) {
     let resend = class == restart::RestartClass::Transparent && decision.restart;
     // wave6 G21 end
     let was_online = x.online.swap(false, Ordering::AcqRel);
+    // wave8 GD begin: the display service: the console takes the screen at once
+    if svc::host_of(crate::ipc::protocol::LXS_DISPLAY) == h {
+        crate::ipc::screen::service_gone();
+    }
+    // wave8 GD end
     if svc::host_of(LXS_NET) == h {
         netwaits(|w| w.clear());
         RELAY_SERVER.store(false, Ordering::Release);

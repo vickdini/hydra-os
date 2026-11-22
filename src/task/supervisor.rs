@@ -57,6 +57,10 @@ static LX_SEC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/
 /// vfs-server (wave 7: the file service, `userland/drivers/vfs-server`).
 static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/vfs-server"));
 // wave7 G7-1 end
+// wave8 GD begin
+/// display-server (wave 8: the display service, `userland/drivers/display-server`).
+static DISPLAY_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/display-server"));
+// wave8 GD end
 /// The sound driver program (Intel High Definition Audio).
 // wave6 G19 begin
 /// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
@@ -275,6 +279,14 @@ fn vfs_server_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=4")])
 }
 // wave7 G7-1 end
+
+// wave8 GD begin
+/// display-server: always started (two workers); it exits by itself when no service id
+/// names its endpoint for forwarding (`lx.display=kernel`, `lx=kernel`).
+fn display_server_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+// wave8 GD end
 
 // wave6 G19 begin
 /// svc-test: always started (small: two workers); it exits by itself when no service id
@@ -740,6 +752,17 @@ pub fn supervisor_init() {
         service::allow_client(crate::ipc::protocol::ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER);
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_VFS_SERVER, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_VFS_SERVER }>);
         // wave7 G7-1 end
+        // wave8 GD begin: the display service: its going away shows the console at once and
+        // fails its objects (the desktop session ends; SDDM comes back after the restart)
+        sup.services.push(
+            ServiceDescriptor::new("display_server", crate::ipc::protocol::ENDPOINT_DISPLAY_DEV, DISPLAY_SERVER_ELF, display_server_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_DISPLAY,
+                crate::lx::restart::RestartClass::FailObjects,
+                "display",
+            ),
+        );
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_DISPLAY_DEV, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_DISPLAY_DEV }>);
+        // wave8 GD end
         // wave6 G19 begin: the test service (a second Linux service; its going away fails
         // only its own calls and objects)
         sup.services.push(ServiceDescriptor::new("svc_test", crate::ipc::protocol::ENDPOINT_SVC_TEST, SVC_TEST_ELF, svc_test_args, no_grants).linux_service(

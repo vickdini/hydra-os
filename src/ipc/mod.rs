@@ -31,6 +31,16 @@ pub mod message;
 pub mod protocol;
 /// Request/reply calls to Ring 3 driver and server processes, with shared data windows.
 pub mod service;
+// wave8 GD begin: the screen lent to the display service (`screen.rs`, wave 8); the host
+// builds of `ipc` (tests/host-t30) get a stand-in of the entry point `lx` calls
+#[cfg(target_os = "uefi")]
+pub mod screen;
+#[cfg(not(target_os = "uefi"))]
+pub mod screen {
+    /// Host stand-in.
+    pub fn service_gone() {}
+}
+// wave8 GD end
 
 pub use endpoint::{get_system_endpoint, Endpoint, SharedEndpoint, SYSTEM_ENDPOINTS};
 pub use endpoint::{

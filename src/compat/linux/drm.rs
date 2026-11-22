@@ -273,8 +273,37 @@ static VTD_RUNNING: AtomicBool = AtomicBool::new(false);
 ///
 /// `true` if DRM session is active but hidden; `false` otherwise.
 pub fn session_hidden() -> bool {
-    SESSION_HIDDEN.load(Ordering::Acquire)
+    // wave8 GD: or the display service's session (`ipc::screen`)
+    SESSION_HIDDEN.load(Ordering::Acquire) || screen_hook_hidden()
 }
+
+// wave8 GD begin: the hot keys' switch target when the display service serves the screen
+// (`ipc::screen` installs these hooks when the service maps the screen; `keyboard.rs`
+// keeps calling [`request_vt_switch`] and [`session_hidden`] in both modes)
+/// `ipc::screen`'s switch: `true` if it took the switch (its service's session holds the
+/// screen).
+static SCREEN_SWITCH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// `ipc::screen`'s "session hidden".
+static SCREEN_HIDDEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Installs the display service's switch and "hidden" hooks.
+pub fn set_screen_hooks(switch: fn(bool) -> bool, hidden: fn() -> bool) {
+    SCREEN_HIDDEN.store(hidden as usize, Ordering::Release);
+    SCREEN_SWITCH.store(switch as usize, Ordering::Release);
+}
+
+fn screen_hook_hidden() -> bool {
+    let h = SCREEN_HIDDEN.load(Ordering::Acquire);
+    // SAFETY: stored from a `fn() -> bool` by `set_screen_hooks`
+    h != 0 && unsafe { core::mem::transmute::<usize, fn() -> bool>(h) }()
+}
+
+fn screen_hook_switch(to_session: bool) -> bool {
+    let h = SCREEN_SWITCH.load(Ordering::Acquire);
+    // SAFETY: stored from a `fn(bool) -> bool` by `set_screen_hooks`
+    h != 0 && unsafe { core::mem::transmute::<usize, fn(bool) -> bool>(h) }(to_session)
+}
+// wave8 GD end
 
 /// Keyboard interrupt: asks the `vtd` task to switch between the session (`to_session`)
 /// and the console. The copying happens in task context, not in the interrupt.
@@ -283,6 +312,10 @@ pub fn session_hidden() -> bool {
 ///
 /// * `to_session` - `true` to switch to graphical session; `false` to switch to text console.
 pub fn request_vt_switch(to_session: bool) {
+    // wave8 GD: the display service's session first
+    if screen_hook_switch(to_session) {
+        return;
+    }
     VT_REQUEST.store(if to_session { 2 } else { 1 }, Ordering::Release);
     VT_WQ.wake_all();
 }

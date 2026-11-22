@@ -45,6 +45,17 @@ pub struct VideoModeInfo {
     pub text_rows: usize,
 }
 
+/// Physical address of the hardware framebuffer (0: none installed).
+static FB_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Its size in bytes.
+static FB_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The hardware framebuffer's physical address and size in bytes, if one was installed.
+pub fn framebuffer_phys() -> Option<(u64, u64)> {
+    let base = FB_PHYS.load(core::sync::atomic::Ordering::Acquire);
+    (base != 0).then(|| (base, FB_BYTES.load(core::sync::atomic::Ordering::Acquire)))
+}
+
 /// Discovers the hardware Graphics Output Protocol (GOP), extracts the linear framebuffer,
 /// maps the physical video memory into Hydra's autonomous kernel PML4 table, and initializes
 /// the autonomous video console.
@@ -105,6 +116,11 @@ pub fn mode_info_for(base_ptr: *mut u8, size: usize, width: usize, height: usize
 /// makes it the autonomous video console.
 pub fn install(info: VideoModeInfo) {
     let (base_ptr, size) = (info.base_ptr, info.size);
+    // wave8 GD: the framebuffer is identity-mapped: its address is the physical one, which
+    // the display service's mapping needs (`ipc::screen`) also while the console draws into
+    // its off-screen copy (then `get_video_info().base_ptr` names the copy)
+    FB_PHYS.store(base_ptr as u64, core::sync::atomic::Ordering::Release);
+    FB_BYTES.store(size as u64, core::sync::atomic::Ordering::Release);
     // Map the hardware framebuffer into Hydra's autonomous kernel page table
     let page_count = (size + 4095) / 4096;
     let start_phys = PhysAddr::new(base_ptr as u64);
