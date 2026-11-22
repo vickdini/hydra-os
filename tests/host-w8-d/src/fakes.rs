@@ -46,6 +46,8 @@ pub struct FakeEnv {
     pub dmabufs: RefCell<Vec<(i64, u32)>>,
     /// Fail the next `new_mem`.
     pub no_mem: RefCell<bool>,
+    /// The caller lacks CAP_SYS_ADMIN.
+    pub unprivileged: RefCell<bool>,
 }
 
 impl Env for FakeEnv {
@@ -81,6 +83,10 @@ impl Env for FakeEnv {
         let x = (100 + n, 500 + n as u32);
         d.push(x);
         Ok(x)
+    }
+
+    fn privileged(&self) -> bool {
+        !*self.unprivileged.borrow()
     }
 
     fn dmabuf_slot(&self, fd: u32) -> Result<u32, i64> {

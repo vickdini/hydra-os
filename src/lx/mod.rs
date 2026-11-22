@@ -710,6 +710,10 @@ pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::l
                 },
                 Err(e) => return Some(Err(if e == EIO { -19 } else { e })),
             }
+        } else if c != 0 && svc::mode(c) == svc::SvcMode::Forward && !all_kernel() {
+            // Given up (not restarting): no device, rather than the kernel's copy beside a
+            // service that held the device (and the screen) before
+            return Some(Err(-19));
         } else {
             0
         }

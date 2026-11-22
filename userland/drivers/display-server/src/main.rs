@@ -210,6 +210,10 @@ impl Env for CxEnv<'_> {
         }
     }
 
+    fn privileged(&self) -> bool {
+        self.cx.has_cap(21) // CAP_SYS_ADMIN
+    }
+
     fn dmabuf_slot(&self, fd: u32) -> Result<u32, i64> {
         let r = sys::lx_obj(LX_OBJ_FD, self.cx.id, fd as u64, 0).map_err(|e| if e == EINVAL { EINVAL } else { EBADF })?;
         if (r >> 32) as u32 & 0x3FFF_FFFF != LX_OBJ_KIND_DMABUF {

@@ -552,3 +552,46 @@ fn too_many_damage_rectangles_repaint_everything() {
     assert_eq!(call(&mut k, &env, 7, 0xB1, &mut b), 0);
     assert_eq!(v.pixel(W - 1, H - 1), 4);
 }
+
+#[test]
+fn set_master_needs_the_capability_or_an_earlier_mastership() {
+    let (mut k, _v, env) = new();
+    k.open(1); // first opener: master
+    k.open(2);
+    assert_eq!(call_io(&mut k, &env, 1, 0x1f), 0);
+    *env.unprivileged.borrow_mut() = true;
+    assert_eq!(call_io(&mut k, &env, 2, 0x1e), EACCES, "an unprivileged file that never was master");
+    assert_eq!(call_io(&mut k, &env, 1, 0x1e), 0, "the earlier master takes it back");
+    assert_eq!(call_io(&mut k, &env, 1, 0x1f), 0);
+    *env.unprivileged.borrow_mut() = false;
+    assert_eq!(call_io(&mut k, &env, 2, 0x1e), 0, "CAP_SYS_ADMIN (logind)");
+}
+
+#[test]
+fn dumb_buffers_are_limited_per_file_and_in_all() {
+    let (mut k, _v, env) = new();
+    k.limits = (64 * 1024, 96 * 1024);
+    k.open(7);
+    k.open(8);
+    // 64x64x4 = 16 KiB each
+    let mut hs = Vec::new();
+    for _ in 0..4 {
+        hs.push(dumb(&mut k, &env, 7, 64, 64).0);
+    }
+    let mut b = [0u8; 32];
+    put32(&mut b, 0, 64);
+    put32(&mut b, 4, 64);
+    put32(&mut b, 8, 32);
+    assert_eq!(call(&mut k, &env, 7, 0xB2, &mut b), ENOMEM, "file 7 holds 64 KiB");
+    let _ = dumb(&mut k, &env, 8, 64, 64);
+    let _ = dumb(&mut k, &env, 8, 64, 64);
+    assert_eq!(call(&mut k, &env, 8, 0xB2, &mut b), ENOMEM, "96 KiB alive in all");
+    // A buffer that goes gives its bytes back
+    let mut g = [0u8; 4];
+    put32(&mut g, 0, hs[0]);
+    assert_eq!(call(&mut k, &env, 7, 0xB4, &mut g), 0);
+    assert_eq!(call(&mut k, &env, 8, 0xB2, &mut b), 0);
+    // Closing a file frees what it made
+    k.close(7);
+    assert_eq!(call(&mut k, &env, 8, 0xB2, &mut b), 0);
+}

@@ -24,6 +24,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::native::{self as dcore, Screen, Src};
 use crate::proto::{SCREEN_HIDDEN, SCREEN_SHOWN};
@@ -78,6 +79,14 @@ pub const GONE_GRACE_NS: u64 = 10_000_000_000;
 /// Most completions one file may have waiting (held back behind the console they would
 /// otherwise grow without bound): more vblank events are refused with `EBUSY`.
 pub const PENDING_MAX: usize = 64;
+/// Most bytes of dumb buffers one file may have made and still alive (a desktop uses a few
+/// screen-sized buffers: 4 MiB each at 1280x800); past it `CREATE_DUMB` is `ENOMEM`.
+pub const FILE_BYTES_MAX: u64 = 512 << 20;
+/// Most bytes of dumb buffers alive in the whole service (every buffer is also mapped into
+/// the service: one client must not exhaust it and end everyone's session).
+pub const TOTAL_BYTES_MAX: u64 = 1536 << 20;
+/// Most GEM handles one file may hold.
+pub const HANDLES_MAX: usize = 4096;
 
 /// A buffer's memory: the service's view of a memory object.
 pub trait BoMem: Send + Sync {
@@ -100,6 +109,8 @@ pub trait Env {
     fn install_dmabuf(&self, flags: u32, size: u64) -> Result<(i64, u32), i64>;
     /// The slot of this service's DMA-BUF object behind the caller's descriptor `fd`.
     fn dmabuf_slot(&self, fd: u32) -> Result<u32, i64>;
+    /// Whether the caller holds `CAP_SYS_ADMIN` (Linux's test for `SET_MASTER`).
+    fn privileged(&self) -> bool;
 }
 
 /// One dumb buffer.
@@ -108,6 +119,17 @@ pub struct Bo {
     pub size: u64,
     /// Page offset of the buffer in the device's `mmap` space.
     pub map_pgoff: u64,
+    /// The byte counts it is charged to (its creator file's, the service's): given back
+    /// when the last reference goes.
+    charged: [Arc<AtomicU64>; 2],
+}
+
+impl Drop for Bo {
+    fn drop(&mut self) {
+        for c in &self.charged {
+            c.fetch_sub(self.size, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Bo {
@@ -146,14 +168,36 @@ pub struct File {
     last_crtc_xy: (u32, u32),
     last_cursor_bo: Option<(Arc<Bo>, u32, u32)>,
     last_cursor: (i32, i32),
+    /// It was master once (Linux: it may take mastership back without `CAP_SYS_ADMIN`).
+    was_master: bool,
+    /// Bytes of the live dumb buffers it made.
+    bytes: Arc<AtomicU64>,
 }
 
 impl File {
     fn new() -> Self {
-        Self { handles: BTreeMap::new(), next_handle: 1, events: VecDeque::new(), universal_planes: false, last_scanout: None, last_crtc_xy: (0, 0), last_cursor_bo: None, last_cursor: (0, 0) }
+        Self {
+            handles: BTreeMap::new(),
+            next_handle: 1,
+            events: VecDeque::new(),
+            universal_planes: false,
+            last_scanout: None,
+            last_crtc_xy: (0, 0),
+            last_cursor_bo: None,
+            last_cursor: (0, 0),
+            was_master: false,
+            bytes: Arc::new(AtomicU64::new(0)),
+        }
     }
 
-    fn add_handle(&mut self, bo: Arc<Bo>) -> u32 {
+    fn add_handle(&mut self, bo: Arc<Bo>) -> Result<u32, i64> {
+        if self.handles.len() >= HANDLES_MAX {
+            return Err(ENOSPC);
+        }
+        Ok(self.add_handle_unchecked(bo))
+    }
+
+    fn add_handle_unchecked(&mut self, bo: Arc<Bo>) -> u32 {
         let h = self.next_handle;
         self.next_handle += 1;
         self.handles.insert(h, bo);
@@ -217,6 +261,10 @@ pub struct Kms {
     pub stats: Stats,
     /// Files whose event queue grew (the caller updates their readiness and wakes readers).
     pub woke: Vec<u32>,
+    /// Bytes of all live dumb buffers.
+    total_bytes: Arc<AtomicU64>,
+    /// The byte limits: per file, whole service ([`FILE_BYTES_MAX`], [`TOTAL_BYTES_MAX`]).
+    pub limits: (u64, u64),
 }
 
 pub fn get32(b: &[u8], off: usize) -> u32 {
@@ -313,6 +361,8 @@ impl Kms {
             slot,
             stats: Stats::default(),
             woke: Vec::new(),
+            total_bytes: Arc::new(AtomicU64::new(0)),
+            limits: (FILE_BYTES_MAX, TOTAL_BYTES_MAX),
         }
     }
 
@@ -322,10 +372,13 @@ impl Kms {
 
     /// A new open file (slot `id`); the first opener of an unmastered device becomes master.
     pub fn open(&mut self, id: u32) {
-        self.files.insert(id, File::new());
+        let mut f = File::new();
         if self.master.is_none() {
+            // The first opener of an unmastered device becomes master (as Linux)
             self.master = Some(id);
+            f.was_master = true;
         }
+        self.files.insert(id, f);
         self.gone_since = None;
     }
 
@@ -370,13 +423,21 @@ impl Kms {
         self.dmabufs.remove(&slot);
     }
 
-    fn new_bo(&mut self, env: &dyn Env, size: u64) -> Result<Arc<Bo>, i64> {
+    fn new_bo(&mut self, env: &dyn Env, id: u32, size: u64) -> Result<Arc<Bo>, i64> {
         let pages = size.div_ceil(PAGE);
-        let mem = env.new_mem(pages * PAGE)?;
+        let bytes = pages * PAGE;
+        let file = self.files.get(&id).ok_or(EBADF)?.bytes.clone();
+        // Limits: per file and for the whole service
+        if file.load(Ordering::Relaxed) + bytes > self.limits.0 || self.total_bytes.load(Ordering::Relaxed) + bytes > self.limits.1 {
+            return Err(ENOMEM);
+        }
+        let mem = env.new_mem(bytes)?;
+        file.fetch_add(bytes, Ordering::Relaxed);
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
         // A guard page between buffers keeps their offset ranges apart
         let map_pgoff = self.next_map_pgoff;
         self.next_map_pgoff += pages + 1;
-        let bo = Arc::new(Bo { mem, size: pages * PAGE, map_pgoff });
+        let bo = Arc::new(Bo { mem, size: bytes, map_pgoff, charged: [file, self.total_bytes.clone()] });
         self.map_space.insert(map_pgoff, Arc::downgrade(&bo));
         self.map_space.retain(|_, w| w.strong_count() > 0);
         Ok(bo)
@@ -778,10 +839,15 @@ impl Kms {
                 }
             }
             0x1e => {
-                // SET_MASTER
+                // SET_MASTER: as Linux (drm_master_check_perm), only a file that was master
+                // before or a caller with CAP_SYS_ADMIN (logind) may take it
+                if !env.privileged() && !self.files.get(&id).is_some_and(|f| f.was_master) {
+                    return Err(EACCES);
+                }
                 match self.master {
                     None => {
                         self.master = Some(id);
+                        self.file(id)?.was_master = true;
                         self.restore_last(id);
                         Ok(0)
                     }
@@ -1134,8 +1200,11 @@ impl Kms {
                 }
                 let pitch = (w * bpp.div_ceil(8) + 63) & !63;
                 let size = (pitch as u64 * h as u64).div_ceil(PAGE) * PAGE;
-                let bo = self.new_bo(env, size).map_err(|e| if e == EINVAL { ENOMEM } else { e })?;
-                let handle = self.file(id)?.add_handle(bo);
+                if self.files.get(&id).is_some_and(|f| f.handles.len() >= HANDLES_MAX) {
+                    return Err(ENOSPC);
+                }
+                let bo = self.new_bo(env, id, size).map_err(|e| if e == EINVAL { ENOMEM } else { e })?;
+                let handle = self.file(id)?.add_handle(bo)?;
                 put32(b, 16, handle);
                 put32(b, 20, pitch);
                 put64(b, 24, size);
@@ -1247,7 +1316,7 @@ impl Kms {
                 let f = self.file(id)?;
                 let handle = match f.handles.iter().find(|(_, h)| Arc::ptr_eq(h, &bo)) {
                     Some((&h, _)) => h,
-                    None => f.add_handle(bo),
+                    None => f.add_handle(bo)?,
                 };
                 put32(b, 0, handle);
                 Ok(0)

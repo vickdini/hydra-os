@@ -67,6 +67,9 @@ static REQUEST_WQ: WaitQueue = WaitQueue::new();
 static SCREEND: AtomicBool = AtomicBool::new(false);
 /// The display service died: `screend` ends the desktop session (decision 28).
 static END_SESSION: AtomicBool = AtomicBool::new(false);
+/// The display service went away while interrupts were off: `screend` gives the console the
+/// screen (the zap's TLB shootdown needs the other CPUs' interrupts answered).
+static GONE_DEFERRED: AtomicBool = AtomicBool::new(false);
 /// The status page (its kernel address; 0 until the first mapping) and the scratch page's
 /// frame, allocated once and kept for good.
 static STATUS_VIRT: AtomicU64 = AtomicU64::new(0);
@@ -202,8 +205,15 @@ fn apply(ev: Event) -> u32 {
 fn screend_main() {
     loop {
         REQUEST_WQ.register();
+        if GONE_DEFERRED.swap(false, Ordering::AcqRel) {
+            let st = apply(Event::Gone);
+            crate::kprintln!("[screen] display service gone: the console has the screen (state {})", st);
+            END_SESSION.store(true, Ordering::Release);
+        }
         if END_SESSION.swap(false, Ordering::AcqRel) {
-            end_session();
+            // In a task of its own: it waits for the old objects to go stale, and the hot
+            // keys must not wait meanwhile
+            crate::task::spawn("screenend", end_session, crate::task::TaskPriority::High);
             continue;
         }
         match REQUEST.swap(0, Ordering::AcqRel) {
@@ -241,13 +251,22 @@ pub fn session_hidden() -> bool {
 /// The display service went away (`lx::server_gone`): the console takes the screen at once;
 /// `screend` then ends the desktop session.
 pub fn service_gone() {
-    if SERVICE.load(Ordering::Acquire) {
+    if !SERVICE.load(Ordering::Acquire) {
+        return;
+    }
+    if x86_64::instructions::interrupts::are_enabled() {
         let st = apply(Event::Gone);
         crate::kprintln!("[screen] display service gone: the console has the screen (state {})", st);
         END_SESSION.store(true, Ordering::Release);
-        REQUEST_WQ.wake_all();
+    } else {
+        GONE_DEFERRED.store(true, Ordering::Release);
     }
+    REQUEST_WQ.wake_all();
 }
+
+/// Most processes looked at when ending the session (the list is reserved before the
+/// scheduler's lock: no allocation under it).
+const SCAN_PROCS: usize = 4096;
 
 /// Most descriptors looked at per process when ending the session.
 const SCAN_FDS: usize = 8192;
@@ -264,16 +283,18 @@ fn end_session() {
     // The dead instance's objects go stale right after the call that woke us
     crate::task::sleep_ms(200);
     let host = crate::lx::svc::host_of(crate::ipc::protocol::LXS_DISPLAY);
-    let mut tables: alloc::vec::Vec<(u64, u32, crate::fs::SharedFdTable)> = alloc::vec::Vec::new();
+    let mut tables: alloc::vec::Vec<(u64, u32, crate::fs::SharedFdTable)> = alloc::vec::Vec::with_capacity(SCAN_PROCS);
     x86_64::instructions::interrupts::without_interrupts(|| {
         crate::task::SCHEDULER.lock().for_each_task_mut(|t| {
-            if t.personality == crate::task::TaskPersonality::Linux && !tables.iter().any(|x| x.0 == t.tgid) {
+            if t.personality == crate::task::TaskPersonality::Linux && tables.len() < SCAN_PROCS && !tables.iter().any(|x| x.0 == t.tgid) {
                 tables.push((t.tgid, t.euid, t.fds.clone()));
             }
         })
     });
+    let euid_of = |pid: u64| tables.iter().find(|x| x.0 == pid).map(|x| x.1);
     let mut ended = alloc::vec::Vec::new();
-    for (tgid, euid, fds) in tables {
+    for (tgid, euid, fds) in tables.iter() {
+        let (tgid, euid) = (*tgid, *euid);
         if euid == 0 {
             continue;
         }
@@ -288,7 +309,8 @@ fn end_session() {
             continue;
         }
         let parent = crate::compat::linux::proc::PROCS.lock().get(&tgid).map(|p| p.ppid);
-        if let Some(ppid) = parent.filter(|&p| p > 1) {
+        // (the wrapper: the holder's parent, of the same user, by its name)
+        if let Some(ppid) = parent.filter(|&p| p > 1 && euid_of(p) == Some(euid)) {
             let comm = crate::compat::linux::fs::proc_pid_file_text(&alloc::format!("{}/comm", ppid)).unwrap_or_default();
             if comm.starts_with(b"kwin_wayland_wr") && crate::compat::linux::proc::post_process(ppid, 15) {
                 ended.push(ppid);

@@ -311,7 +311,7 @@ impl CharDevice for ServerObject {
         // wave8 GD begin: a device service's character device (its mode is `S_IFCHR`): the
         // device number is the object's key (libdrm finds `/sys/dev/char/226:0` by it).
         // (Groups I and S planned the same rule: keep one at the merge.)
-        if self.mode & 0o170000 == 0o020000 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+        if self.mode & 0o170000 == 0o020000 && self.key != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
             return self.key;
         }
         // wave8 GD end
