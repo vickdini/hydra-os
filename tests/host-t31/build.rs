@@ -17,6 +17,8 @@ const DRIVERS: &[&str] = &[
     "lx-sec",
     "vfs-server",
     "svc-test",
+    "lx-net", // wave8 GX2
+    "lx-ipc", // wave8 GX2
     "hda-driver",
 ];
 
