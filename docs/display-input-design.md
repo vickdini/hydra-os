@@ -620,6 +620,44 @@ keeps the in-kernel copy as the switch back (`lx=kernel`).
 - **The cause of the sound underruns** (section 2.5) was not investigated: whether it is the
   10 ms position tick, the kernel lock held by the picture copy, or PipeWire's timing.
 
+## 9. Wave 8: the display service as built (Group D)
+
+Branch `w8-display`. What sections 3.2, 4 and 5 proposed, as it was built; the kernel's
+`compat/linux/drm.rs` stays as the switch back (`lx=kernel`, `lx.display=kernel`).
+
+- **display-server** (`userland/drivers/display-server`, service `display`, endpoint 0x23,
+  2 workers and a screen thread) claims character major 226. Two layers:
+  - the **native core** (`native.rs`): the picture copy (only the damaged rectangles when
+    `DIRTYFB` names them), the cursor recomposed from the picture under it (the screen is
+    never read back), the emulated 60 Hz vertical blank; the interface to the Linux layer
+    (`Screen`) is what a real graphics driver would implement later;
+  - the **Linux DRM layer** (`kms.rs`, moved from `drm.rs`): KMS objects, properties, dumb
+    buffers as memory objects (programs map them through the `mmap` answer; their mappings
+    outlive the service), PRIME as DMA-BUF server objects of the service (kind 68), per-file
+    event queues, master rules.
+- **The two waste findings** (decision 28) are fixed in the service: a flip is copied at
+  once and **completes at the next vertical blank**, so the desktop draws at most 60
+  pictures a second; **completions are held back while the console shows**, so kwin waits
+  for its flip event and stops drawing until Ctrl+Alt+F2.
+- **Kernel side** (`src/ipc/screen.rs`, native call `SYS_SCREEN` 73): the service maps the
+  screen once; the mapping leads to the framebuffer while the screen is lent and to a
+  scratch page otherwise. Taking the screen back (Ctrl+Alt+F1, the session's end, the
+  service's death) changes a state word and zaps the mapping before the console repaints:
+  the kernel never waits for the service. A panic sets the state word without a lock.
+  The hot keys stay in `keyboard.rs`; `drm::request_vt_switch` hands them to `screen.rs`
+  while the service's session holds the screen. Input is routed to the session only while
+  it shows (`route_input`, the call agreed with Group I).
+- **Crash policy** (FailObjects): the console shows at once; the service is restarted
+  (about a second); its descriptors fail with `ENODEV`. kwin does **not** exit by itself
+  when its `/dev/dri/card0` fails (it keeps running with no output), so the kernel ends the
+  session: the non-root programs holding a DRM object of the dead instance (the
+  compositor) get `SIGTERM`, and so does KDE's `kwin_wayland_wrapper` when it is their
+  parent (otherwise it starts kwin again, a bare desktop without its shell). SDDM then shows
+  the login screen on the restarted service. Programs without a window keep running
+  (a download continued across the kill).
+- **Opens during a restart** wait for the service (`lx::dev_open`); they never reach the
+  kernel copy meanwhile.
+
 ## Appendix: reproducing
 
 - **Hooks:** `python tools/displaybench/instrument.py E:\os-N` adds them to a tree (it copies
