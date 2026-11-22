@@ -51,7 +51,7 @@ static int get(const char *p, char *buf, int cap) {
 // Whether /proc/self/mountinfo lists a mount at `path` (with fstype `fs`, or any if NULL).
 static int listed(const char *path, const char *fs) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
-    if (!f) return 0;
+    if (!f) return -1;
     char line[1024];
     int found = 0;
     while (fgets(line, sizeof line, f)) {
@@ -82,7 +82,7 @@ static int scenario(const char *base) {
 
     CHECK(mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0, "make / private (propagation, recursive)");
     CHECK(mount("mytmp", a, "tmpfs", MS_NOSUID, "mode=0750") == 0, "mount tmpfs on %s", a);
-    CHECK(listed(a, "tmpfs"), "mountinfo lists the tmpfs");
+    CHECK(1 == listed(a, "tmpfs"), "mountinfo lists the tmpfs");
     struct stat st;
     CHECK(stat(a, &st) == 0 && (st.st_mode & 07777) == 0750, "tmpfs root mode 0750 (got %o)", st.st_mode & 07777);
     struct statfs sf;
@@ -98,7 +98,7 @@ static int scenario(const char *base) {
     CHECK(mount(a, b, NULL, MS_BIND, NULL) == 0, "bind %s on %s", a, b);
     snprintf(f, sizeof f, "%s/file", b);
     CHECK(get(f, buf, sizeof buf) > 0 && strcmp(buf, "hello tmpfs") == 0, "the file through the bind");
-    CHECK(listed(b, "tmpfs"), "mountinfo lists the bind (as tmpfs)");
+    CHECK(1 == listed(b, "tmpfs"), "mountinfo lists the bind (as tmpfs)");
     CHECK(mount(NULL, b, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) == 0, "remount the bind read-only");
     snprintf(f, sizeof f, "%s/new", b);
     errno = 0;
@@ -113,9 +113,9 @@ static int scenario(const char *base) {
 
     // move
     CHECK(mount(sub, c, NULL, MS_MOVE, NULL) == 0, "move %s to %s", sub, c);
-    CHECK(listed(c, "tmpfs") && !listed(sub, NULL), "mountinfo: moved");
+    CHECK(1 == listed(c, "tmpfs") && listed(sub, NULL) == 0, "mountinfo: moved");
     CHECK(umount2(c, 0) == 0, "umount the moved one");
-    CHECK(!listed(c, NULL), "gone from mountinfo");
+    CHECK(0 == listed(c, NULL), "gone from mountinfo");
 
     // recursive bind
     CHECK(mount("t3", sub, "tmpfs", 0, NULL) == 0, "mount a tmpfs on %s again", sub);
@@ -128,10 +128,10 @@ static int scenario(const char *base) {
     errno = 0;
     CHECK(umount2(d, 0) < 0 && errno == EBUSY, "umount of the recursive bind: EBUSY");
     CHECK(umount2(d, MNT_DETACH) == 0, "umount -l of the recursive bind");
-    CHECK(!listed(d, NULL), "gone");
+    CHECK(0 == listed(d, NULL), "gone");
     CHECK(umount2(b, 0) == 0, "umount the bind");
     CHECK(umount2(a, MNT_DETACH) == 0, "umount -l the tmpfs and what is below it");
-    CHECK(!listed(a, NULL), "the tmpfs is gone");
+    CHECK(0 == listed(a, NULL), "the tmpfs is gone");
     snprintf(f, sizeof f, "%s/file", a);
     CHECK(access(f, F_OK) < 0 && errno == ENOENT, "its file is gone with it");
 
@@ -191,7 +191,7 @@ static int check_mode(int user) {
         CHECK(r == 0, "pivot_root into a tmpfs (step %d)", r);
         if (r == 0) {
             CHECK(access("/old/etc/passwd", F_OK) == 0, "the old root under /old");
-            CHECK(listed("/", "tmpfs") && listed("/old", NULL), "mountinfo after pivot_root");
+            CHECK(1 == listed("/", "tmpfs") && listed("/old", NULL) == 1, "mountinfo after pivot_root");
             CHECK(umount2("/old", MNT_DETACH) == 0, "umount -l /old");
             CHECK(access("/old/etc/passwd", F_OK) < 0, "the old root is gone");
             show_mountinfo();
@@ -277,7 +277,8 @@ static int run_mode(int secs) {
             if (r == 0) umount2(x, MNT_DETACH);
         }
         cycles++;
-        if (cycles % 20 == 0 && (!listed(t, "tmpfs") || !listed(b, "tmpfs"))) { listed_err++; if (listed_err < 5) printf("mountinfo lost a mount\n"); }
+        int l1 = cycles % 20 == 0 ? listed(t, "tmpfs") : 1, l2 = cycles % 20 == 0 ? listed(b, "tmpfs") : 1;
+        if (l1 < 0 || l2 < 0) { if (errno == EIO) mnt_eio++; else listed_err++; } else if (!l1 || !l2) { listed_err++; if (listed_err < 5) printf("mountinfo lost a mount\n"); }
         int el = (int)(now() - (end - secs));
         if (el / 10 != last_report) { last_report = el / 10; printf("progress %ds: reads %ld (errors %ld) cycles %ld (EIO %ld, other %ld) worst %.2fs\n", el, reads, read_err, cycles, mnt_eio, mnt_err, worst); fflush(stdout); }
         usleep(5000);
@@ -288,7 +289,7 @@ static int run_mode(int secs) {
     waitpid(child, &st, 0);
     long creads = 0, cerrs = -1;
     if (n > 0) sscanf(r, "%ld %ld", &creads, &cerrs);
-    int still = listed(t, "tmpfs") && listed(b, "tmpfs") && get(f, buf, sizeof buf) > 0;
+    int still = listed(t, "tmpfs") == 1 && listed(b, "tmpfs") == 1 && get(f, buf, sizeof buf) > 0;
     printf("reads %ld read_errors %ld cycles %ld mount_eio %ld mount_other %ld listed_errors %ld worst_change %.2fs pivoted_reads %ld pivoted_errors %ld mounts_kept %d\n",
            reads, read_err, cycles, mnt_eio, mnt_err, listed_err, worst, creads, cerrs, still);
     umount2(b, 0);

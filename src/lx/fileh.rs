@@ -492,6 +492,14 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     };
     let f = fs_flags_global(&mut c);
     c.fs_flags |= f;
+    // wave8 GF: a mount call whose generation was not at hand (the lock was busy) takes it
+    // waiting, so it is not left to the kernel's copy of the rules by chance
+    if is_mount_call(nr) && c.fs_flags & LX_FS_MOUNTS != 0 && VFS_MNT.load(Ordering::Relaxed) {
+        if let Some(g) = crate::compat::linux::mount::vfs_gen_wait(c.mnt_ns as u64) {
+            c.mnt_gen = g;
+            c.fs_flags &= !LX_FS_MOUNTS;
+        }
+    }
     if kernel_only(&c) {
         return None;
     }

@@ -959,6 +959,9 @@ pub mod compat {
             pub fn put_table(_ns: u64, _t: &super::mntrec::MntTable) -> Result<u32, i64> {
                 Err(-3)
             }
+            pub fn vfs_gen_wait(ns: u64) -> Option<u64> {
+                vfs_gen(ns)
+            }
             pub fn tmpfs_new() -> Result<(u32, u64), i64> {
                 Err(-5)
             }

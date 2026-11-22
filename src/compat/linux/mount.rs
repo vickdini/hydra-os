@@ -2202,6 +2202,15 @@ pub fn put_table(ns: u64, new: &MntTable) -> Result<u32, i64> {
     Ok(removed)
 }
 
+/// [`vfs_gen`] waiting for the generations' lock (the mount calls, on the ordinary path:
+/// a busy lock must not send them to the kernel's copy of the rules).
+pub fn vfs_gen_wait(ns: u64) -> Option<u64> {
+    if ns == 0 {
+        return Some(NS0_GEN.load(Ordering::Acquire));
+    }
+    GENS.lock().get(&ns).and_then(|&(gen, ok)| ok.then_some(gen))
+}
+
 /// [`LX_FH_TMPFSID`](crate::ipc::protocol::LX_FH_TMPFSID): a new tmpfs id and the hidden
 /// pool directory its tree goes in (named by the id), made and emptied of a previous
 /// boot's trees on first use. The kernel's own tmpfs mounts take ids from the same counter.
