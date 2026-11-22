@@ -71,7 +71,7 @@ fn makedev(major: u64, minor: u64) -> u64 {
 
 /// What the kernel handed over (`LX_SND_GET`), mapped into this process.
 struct Hda {
-    /// The position page (read-only).
+    /// The position page.
     pos: *const u32,
     /// The rings, per direction (null: none).
     rings: [*mut u8; 2],
@@ -126,9 +126,13 @@ impl Hw for Real {
         unsafe { core::ptr::read_volatile(hda().pos.add(slot * 2)) as u64 }
     }
 
-    fn reset_position(&mut self, _slot: usize) {
-        // (the page is the kernel's and mapped read-only here: the controller rewrites the
-        // slot when the stream starts; `update` only uses differences)
+    fn reset_position(&mut self, slot: usize) {
+        // The controller writes the slot again once the stream runs; a stale position left
+        // from the previous run would count as a leap forward (an underrun at once)
+        if slot < 512 {
+            // SAFETY: the position page is mapped read-write for the process's life
+            unsafe { core::ptr::write_volatile((hda().pos as *mut u32).add(slot * 2), 0) };
+        }
     }
 
     fn ring(&mut self, dir: usize) -> Option<&mut [u8]> {
@@ -314,7 +318,7 @@ fn map_card() -> Result<(), i64> {
         r
     };
     // (the handles stay open: a program's `mmap` answer names the ring's)
-    let pos = map(info.pos_handle, 4096, hydra_rt::mem::PROT_READ)?;
+    let pos = map(info.pos_handle, 4096, hydra_rt::mem::PROT_RW)?;
     let status = map(info.status_handle, 4096, hydra_rt::mem::PROT_RW)?;
     let rings = [map(info.ring_handle[0], info.ring_bytes, hydra_rt::mem::PROT_RW)?, map(info.ring_handle[1], info.ring_bytes, hydra_rt::mem::PROT_RW)?];
     let window = sys::svc_attach(ENDPOINT_SOUND_DEV)? as *mut u8;
@@ -509,6 +513,12 @@ fn update_ready(e: &Engine) {
 static SYNCS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static PREPS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static REPORTED: AtomicU64 = AtomicU64::new(0);
+/// `SYNC_PTR` timing per direction: the last one's start (ns), the largest gap between two
+/// and how many gaps exceeded 20 ms since the last report, the longest time serving one (ns).
+static LAST_SYNC: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static MAX_GAP: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static LATE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static MAX_SERVE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 /// Every 10 s while a stream is open: its call rate and underruns (section 2.5's measure).
 fn report(e: &Engine) {
@@ -521,7 +531,18 @@ fn report(e: &Engine) {
         let s = &e.streams[dir];
         let (n, p) = (SYNCS[dir].swap(0, Ordering::Relaxed), PREPS[dir].swap(0, Ordering::Relaxed));
         if s.open && (n > 0 || p > 0) {
-            println!("[sound-server] pcm{} 10 s: {} SYNC_PTR, {} PREPARE, {} xruns since open, state {}", dir, n, p, s.xruns, state_name(s.state));
+            let (gap, late, serve) = (MAX_GAP[dir].swap(0, Ordering::Relaxed), LATE[dir].swap(0, Ordering::Relaxed), MAX_SERVE[dir].swap(0, Ordering::Relaxed));
+            println!(
+                "[sound-server] pcm{} 10 s: {} SYNC_PTR (max gap {} ms, {} over 20 ms, longest served {} us), {} PREPARE, {} xruns since open, state {}",
+                dir,
+                n,
+                gap / 1_000_000,
+                late,
+                serve / 1000,
+                p,
+                s.xruns,
+                state_name(s.state)
+            );
         }
     }
 }
@@ -1100,7 +1121,18 @@ fn pcm_ioctl(cx: &Cx, dir: usize) -> Answer {
         0xC088_4123 => {
             boost(cx, dir);
             SYNCS[dir].fetch_add(1, Ordering::Relaxed);
-            inout(cx, arg, 136, |b| ENGINE.lock().sync_ptr(dir, b, &mut hw))
+            let t0 = now_ns();
+            let last = LAST_SYNC[dir].swap(t0, Ordering::Relaxed);
+            if last != 0 {
+                let gap = t0.saturating_sub(last);
+                MAX_GAP[dir].fetch_max(gap, Ordering::Relaxed);
+                if gap > 20_000_000 {
+                    LATE[dir].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let r = inout(cx, arg, 136, |b| ENGINE.lock().sync_ptr(dir, b, &mut hw));
+            MAX_SERVE[dir].fetch_max(now_ns().saturating_sub(t0), Ordering::Relaxed);
+            r
         }
         0x8018_4132 | 0xC018_4132 => {
             // CHANNEL_INFO

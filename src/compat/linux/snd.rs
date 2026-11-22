@@ -1377,6 +1377,11 @@ fn program(dir: usize, hw: &HwSetup) -> Result<usize, i64> {
 /// wave8 GS: `SYNC_PTR` and `PREPARE` calls per direction since the last report.
 static SYNCS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
 static PREPS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+/// `SYNC_PTR` gaps per direction: the last one (ns), the largest since the last report, how
+/// many exceeded 20 ms.
+static LAST_SYNC: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static MAX_GAP: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static LATE: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
 
 /// The position task: updates running streams every tick and wakes their waiters.
 fn position_task() {
@@ -1393,7 +1398,8 @@ fn position_task() {
                 };
                 let (n, p) = (SYNCS[dir].swap(0, Ordering::Relaxed), PREPS[dir].swap(0, Ordering::Relaxed));
                 if open && (n > 0 || p > 0) {
-                    crate::kprintln!("[snd] pcm{} 10 s: {} SYNC_PTR, {} PREPARE, {} xruns since open, state {}", dir, n, p, xruns, state);
+                    let (gap, late) = (MAX_GAP[dir].swap(0, Ordering::Relaxed), LATE[dir].swap(0, Ordering::Relaxed));
+                    crate::kprintln!("[snd] pcm{} 10 s: {} SYNC_PTR (max gap {} ms, {} over 20 ms), {} PREPARE, {} xruns since open, state {}", dir, n, gap / 1_000_000, late, p, xruns, state);
                 }
             }
         }
@@ -1598,6 +1604,17 @@ impl PcmFile {
         };
         let flags = get_u32(&b, 0);
         SYNCS[self.dir].fetch_add(1, Ordering::Relaxed); // wave8 GS
+        {
+            let t0 = crate::arch::pit::now_ns();
+            let last = LAST_SYNC[self.dir].swap(t0, Ordering::Relaxed);
+            if last != 0 {
+                let gap = t0.saturating_sub(last);
+                MAX_GAP[self.dir].fetch_max(gap, Ordering::Relaxed);
+                if gap > 20_000_000 {
+                    LATE[self.dir].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         if flags & 1 != 0 {
             self.sync();
         }

@@ -445,3 +445,19 @@ fn records_for_the_control_device() {
     assert_eq!(chip_name(0x8086_2805), "Intel HDMI");
     assert_eq!(boundary_for(16384) % 16384, 0);
 }
+
+#[test]
+fn a_stale_position_is_cleared_before_a_run() {
+    // The previous run left its position in the slot: PREPARE and START clear it, or the
+    // first update would leap forward into an underrun (the bug of the first service build)
+    let mut e = engine();
+    let mut hw = Fake::new();
+    setup(&mut e, 0, 512, 32, ACCESS_MMAP_INTERLEAVED);
+    hw.pos[1] = 60000;
+    e.prepare(0, &mut hw);
+    assert_eq!(hw.pos[1], 0);
+    e.xfer_commit(0, 2048, &mut hw);
+    assert_eq!(e.streams[0].state, ST_RUNNING);
+    e.tick(&mut hw);
+    assert_eq!((e.streams[0].state, e.streams[0].hw_ptr), (ST_RUNNING, 0));
+}
