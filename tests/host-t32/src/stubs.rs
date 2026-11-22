@@ -898,6 +898,16 @@ pub mod ipc {
 
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
+    /// *stub* wave8 GT: the terminals are never tty-server's here (`tty::pump` runs).
+    pub mod console {
+        pub fn forwarded() -> bool {
+            false
+        }
+        /// Not forwarded: the in-kernel copy's pump, as the kernel's `trap_pump` does.
+        pub fn trap_pump() {
+            crate::compat::linux::tty::pump();
+        }
+    }
     use crate::arch::syscall::SyscallFrame;
     use crate::stubs::ans;
     pub enum Fast {

@@ -76,6 +76,10 @@ pub mod xplan;
 
 pub mod timer;
 
+// wave8 GT begin: the terminal service's kernel side (the console terminal, pty opens)
+pub mod console;
+// wave8 GT end
+
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
 pub mod restart_policy;

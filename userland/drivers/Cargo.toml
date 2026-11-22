@@ -5,7 +5,9 @@
 resolver = "2"
 members = ["hydra-rt", "ata-driver", "ahci-driver", "e1000-driver", "net-server", "usb-driver", "zfs-server", "hda-driver", "hydra-shell", "admin-probe", "linux-server", "svc-test", "lx-sec", "vfs-server", "display-server",
     # wave8 GI: the input service
-    "input-server"]
+    "input-server",
+    # wave8 GT: the terminal service
+    "tty-server"]
 
 [workspace.dependencies]
 hydra-rt = { path = "hydra-rt" }

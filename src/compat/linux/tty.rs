@@ -11,6 +11,12 @@
 //!
 //! The line discipline itself ([`Tty`], [`feed_input`], [`take_input`], [`tty_ioctl`])
 //! is shared with pseudo-terminals ([`super::pty`]).
+//!
+//! **Wave 8 (Group T):** the terminal service `tty-server` serves the console terminal and
+//! the pseudo-terminals; this file stays as the switch back (`lx=kernel`, `lx.tty=kernel`).
+//! While the terminals are forwarded ([`crate::lx::console::forwarded`]), the public entry
+//! points below hand the console's `read`, `write`, `ioctl`, attach and readiness to
+//! `crate::lx::console`, and [`pump`] does nothing (tty-server takes the keys).
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -195,6 +201,12 @@ pub fn set_nonblock(on: bool) {
 /// * `sid` - Session ID.
 /// * `pgrp` - Foreground process group ID.
 pub fn attach_session(sid: u64, pgrp: u64) {
+    // wave8 GT: the console terminal is tty-server's
+    if crate::lx::console::forwarded() {
+        TTY.lock().nonblock = false;
+        crate::lx::console::attach(sid, pgrp);
+        return;
+    }
     let mut t = TTY.lock();
     t.session = sid;
     t.fg_pgrp = pgrp;
@@ -206,6 +218,10 @@ pub fn attach_session(sid: u64, pgrp: u64) {
 
 /// Returns the console to the Hydra shell.
 pub fn detach_session() {
+    if crate::lx::console::forwarded() {
+        crate::lx::console::detach();
+        return;
+    }
     let mut t = TTY.lock();
     t.session = 0;
     t.fg_pgrp = 0;
@@ -219,6 +235,9 @@ pub fn detach_session() {
 ///
 /// `true` if attached to a Linux session; `false` if owned by Hydra shell.
 pub fn attached() -> bool {
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::attached();
+    }
     TTY.lock().session != 0
 }
 
@@ -227,7 +246,7 @@ pub fn attached() -> bool {
 /// # Arguments
 ///
 /// * `bytes` - Byte slice to print.
-fn out(bytes: &[u8]) {
+pub(crate) fn out_raw(bytes: &[u8]) {
     if let Ok(s) = core::str::from_utf8(bytes) {
         crate::console::print_raw(s);
     } else {
@@ -269,11 +288,29 @@ pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
 ///
 /// # Returns
 ///
+/// Number of bytes processed and output, or a negative Linux errno (forwarded).
+pub fn write(data: &[u8]) -> i64 {
+    // wave8 GT: `data` is the caller's own buffer (`vfs::stream_io`), forwarded as such
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::write(data.as_ptr() as u64, data.len());
+    }
+    write_kernel(data) as i64
+}
+
+/// [`write`] in the kernel: output processing with the kernel's termios, then the console
+/// (also tty-server's stand-in while it is not online).
+///
+/// # Arguments
+///
+/// * `data` - Raw bytes to write.
+///
+/// # Returns
+///
 /// Number of bytes processed and output.
-pub fn write(data: &[u8]) -> usize {
+pub fn write_kernel(data: &[u8]) -> usize {
     let mut v = Vec::with_capacity(data.len() + 8);
     process_output(&TTY.lock(), data, &mut v);
-    out(&v);
+    out_raw(&v);
     data.len()
 }
 
@@ -419,6 +456,7 @@ fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
 /// Moves pending keystrokes into the terminal. Safe to call whenever no kernel lock is
 /// held (read paths and returns to user mode).
 pub fn pump() {
+    // (wave8 GT: forwarded, tty-server takes the keys; the console is never attached here)
     let mut keys = Vec::new();
     {
         let t = match TTY.try_lock() {
@@ -445,7 +483,7 @@ pub fn pump() {
         t.fg_pgrp
     };
     if !echo.is_empty() {
-        out(&echo);
+        out_raw(&echo);
     }
     for sig in signals {
         super::proc::post_group(fg, sig);
@@ -460,6 +498,9 @@ pub fn pump() {
 ///
 /// `true` if input is buffered; `false` otherwise.
 pub fn has_input() -> bool {
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::readable();
+    }
     TTY.try_lock().map_or(false, |t| !t.ready.is_empty())
 }
 
@@ -487,6 +528,10 @@ pub fn readable() -> bool {
 pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
     if buf.is_empty() {
         return 0;
+    }
+    // wave8 GT: `buf` is the caller's own buffer (`vfs::stream_io`), forwarded as such
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::read(buf.as_mut_ptr() as u64, buf.len(), nonblock);
     }
     // A background process reading the terminal is stopped with SIGTTIN (EIO if it
     // ignores or blocks that signal), as on Linux
@@ -623,7 +668,7 @@ static NEXT_VT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 /// # Returns
 ///
 /// `Some(result)` if handled, or `None` if unhandled.
-fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
+pub(crate) fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
     use core::sync::atomic::Ordering::Relaxed;
     let put = |bytes: &[u8]| super::vfs::copy_out(arg, bytes).map_or_else(|e| e, |()| 0);
     Some(match request {
@@ -672,6 +717,23 @@ pub fn active_vt() -> u32 {
 ///
 /// Result code, or negative Linux errno on error.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::ioctl(request, arg);
+    }
+    ioctl_kernel(request, arg)
+}
+
+/// [`ioctl`] in the kernel (also tty-server's stand-in while it is not online).
+///
+/// # Arguments
+///
+/// * `request` - ioctl request code.
+/// * `arg` - User pointer or argument value.
+///
+/// # Returns
+///
+/// Result code, or negative Linux errno on error.
+pub fn ioctl_kernel(request: u64, arg: u64) -> i64 {
     if let Some(r) = vt_ioctl(request, arg) {
         return r;
     }

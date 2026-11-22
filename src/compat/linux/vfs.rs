@@ -996,6 +996,11 @@ fn pty_chardev_path(rdev: u64) -> Option<String> {
 /// # Errors
 /// Returns negative Linux error code on open failure.
 fn open_pty_path(abs: &str, flags: u32) -> Result<Option<FileDescriptor>, i64> {
+    // wave8 GT begin: the terminals are tty-server's objects
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::open_pty(abs, flags).transpose();
+    }
+    // wave8 GT end
     let nonblock = flags & O_NONBLOCK != 0;
     if abs == "/dev/ptmx" {
         return Ok(Some(FileDescriptor::Pty(super::pty::open_master(creds().euid, nonblock))));

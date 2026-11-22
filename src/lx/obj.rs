@@ -315,6 +315,11 @@ impl CharDevice for ServerObject {
             return self.key;
         }
         // wave8 GD end
+        // wave8 GT begin: a terminal of tty-server: its device number (the key)
+        if matches!(self.kind, crate::ipc::protocol::LX_OBJ_KIND_PTY_M | crate::ipc::protocol::LX_OBJ_KIND_PTY_S) {
+            return self.key;
+        }
+        // wave8 GT end
         0
     }
 
@@ -363,6 +368,16 @@ impl CharDevice for ServerObject {
             st.st_ino = self.key | 0x1_0000_0000;
         }
         // wave8 GI end
+        // wave8 GT begin: a terminal of tty-server reports what `stat` of its path does
+        // (devpts' device, the inode in the tag, the device number in the key), so `ttyname`
+        // matches the two
+        if matches!(self.kind, crate::ipc::protocol::LX_OBJ_KIND_PTY_M | crate::ipc::protocol::LX_OBJ_KIND_PTY_S) {
+            st.st_dev = 0x18; // devpts (`compat::linux::pty::PTS_DEV`)
+            st.st_ino = self.tag;
+            st.st_rdev = self.key;
+            st.st_blksize = 1024;
+        }
+        // wave8 GT end
         st
     }
 
@@ -622,6 +637,11 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     if op == crate::ipc::protocol::LX_FH_READ {
         return super::xexec::read(h, a, b, c);
     }
+    // wave8 GT begin: tty-server's console and process-identity primitives (op 70)
+    if op == crate::ipc::protocol::LX_OBJ_TTY {
+        return super::console::ctl(h, a, b, c);
+    }
+    // wave8 GT end
     // wave7 G7-4: the info primitives (`info`, ops 56..=61)
     if super::info::glue::is_info(op) {
         return super::info::glue::ctl(h, op, a, b, c);

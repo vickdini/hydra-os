@@ -712,7 +712,7 @@ pub mod compat {
                 pub st_blksize: i64,
                 /// wave7 G7-4: a pseudo file's device.
                 pub st_dev: u64,
-                /// wave8 GD/GI: a device service's character device number.
+                /// wave8 GD/GI/GT: a device service's character device number.
                 pub st_rdev: u64,
             }
         }
