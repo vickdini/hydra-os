@@ -352,7 +352,8 @@ impl CharDevice for NetlinkSocket {
             45 => match self.receive(a[3]) {
                 Ok((g, d)) => {
                     let n = d.len().min(a[2] as usize);
-                    if copy_out(a[1], &d[..n]).is_err() {
+                    // (no buffer: systemd's `recv(fd, NULL, 0, MSG_PEEK | MSG_TRUNC)` asks the size)
+                    if n > 0 && copy_out(a[1], &d[..n]).is_err() {
                         return Some(EFAULT);
                     }
                     let r = put_addr(a[4], a[5], &sender(g));

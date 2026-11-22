@@ -222,6 +222,7 @@ fn announcements_go_to_their_group() {
     // both groups: two messages, in order; peek leaves one
     let n = call(&both, 45, [0, mptr(&mut b), 64, 2, 0, 0]);
     assert_eq!(n, 18, "MSG_PEEK");
+    assert_eq!(call(&both, 45, [0, 0, 0, 2 | 0x20, 0, 0]), 18, "the size, no buffer (MSG_PEEK | MSG_TRUNC)");
     let mut r = [0u8; 4];
     assert_eq!(both.read(&mut r), 4, "read: truncated to the buffer");
     assert_eq!(call(&both, 45, [0, mptr(&mut b), 4, 0x20, 0, 0]), 12, "MSG_TRUNC: the real length");
