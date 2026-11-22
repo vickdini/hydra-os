@@ -98,14 +98,11 @@ fn ring() -> Option<RingView> {
 }
 
 fn main(args: &[&str]) {
-    // With lx.input=kernel (or lx=kernel) the kernel's own copy serves the devices: nothing
-    // to do (exiting before registering: the supervisor does not restart it)
-    match sys::lx_obj(LX_OBJ_INPUT_CTL, 0, 0, 0) {
-        Ok(1) => {}
-        r => {
-            println!("[input-server] input is served by the kernel ({:?}): not started", r);
-            sys::exit(0);
-        }
+    // With lx.input=kernel (or lx=kernel) the kernel's own copy serves the devices: the
+    // service registers (the supervisor waits for that) but serves nothing, as vfs-server
+    // does with lx.vfs=kernel
+    if sys::lx_obj(LX_OBJ_INPUT_CTL, 0, 0, 0) != Ok(1) {
+        idle(args);
     }
     let handle = match sys::lx_obj(LX_OBJ_INPUT_RING, 0, 0, 0) {
         Ok(h) => h as u32,
@@ -163,6 +160,29 @@ fn main(args: &[&str]) {
         svcrt::notes::drain_all();
         pump();
         objs::flush();
+    }
+}
+
+/// Input is the kernel's: registered and online, but no major claimed and no ring mapped,
+/// so no call ever comes; answers the supervisor's heartbeats.
+fn idle(args: &[&str]) -> ! {
+    let cfg = svcrt::Config { name: "input-server", endpoint: ENDPOINT_INPUT_SERVER, workers: svcrt::workers_arg(args, 1).min(1), subscribe: None };
+    let mut svc = match svcrt::start(&cfg, serve) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[input-server] cannot start: {}", e);
+            sys::exit_group(1);
+        }
+    };
+    svcrt::notes::init(svc.window().as_mut_ptr(), on_note);
+    objs::init(svc.area, ENDPOINT_INPUT_SERVER);
+    let _ = svc.online();
+    println!("[input-server] input is served by the kernel (lx.input=kernel): idle");
+    loop {
+        if let Event::Request(id, _) = svc.recv(0) {
+            svc.reply(id, &Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0]));
+        }
+        svcrt::notes::drain_all();
     }
 }
 
