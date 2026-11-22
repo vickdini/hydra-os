@@ -110,7 +110,13 @@ pub fn socket(a: [u64; 6]) -> Option<i64> {
         nonblock: AtomicBool::new(a[1] & SOCK_NONBLOCK != 0),
         queue: Mutex::new(VecDeque::new()),
     });
-    SOCKS.lock().push(Arc::downgrade(&nl)); // wave8 GH
+    {
+        // wave8 GH: registered for announcements (closed ones pruned here too, so the list
+        // stays as long as the open sockets)
+        let mut l = SOCKS.lock();
+        l.retain(|w| w.strong_count() > 0);
+        l.push(Arc::downgrade(&nl));
+    }
     let sock: Arc<dyn CharDevice> = nl;
     Some(crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(crate::fs::FileDescriptor::Device(sock)) {
         Ok(fd) => {
