@@ -105,6 +105,8 @@ static SAMPLE_KERNEL: AtomicBool = AtomicBool::new(false);
 const SAMPLES: usize = 16384;
 static SAMPLE_AT: AtomicU64 = AtomicU64::new(0);
 static SAMPLE_RIP: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
+// wave8 GP: the sampled task of each entry (`*` samples every task: `show` groups by both)
+static SAMPLE_TID: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
 
 /// Records a tick that interrupted task `task` at `rip` (in user mode, or in either mode
 /// when kernel ticks are sampled too).
@@ -115,6 +117,7 @@ pub fn sample(task: u64, rip: u64, cs: u64) {
     if want != 0 && (want == task || want == u64::MAX) && (cs & 3 == 3 || SAMPLE_KERNEL.load(Relaxed)) {
         let i = SAMPLE_AT.fetch_add(1, Relaxed) as usize % SAMPLES;
         SAMPLE_RIP[i].store(rip, Relaxed);
+        SAMPLE_TID[i].store(task, Relaxed); // wave8 GP
     }
 }
 
@@ -129,9 +132,10 @@ pub fn sample_start(task: u64, kernel: bool) {
 /// Prints the sampled instruction pointers, most frequent first (`top` of them).
 pub fn sample_show(top: usize) {
     let n = (SAMPLE_AT.load(Relaxed) as usize).min(SAMPLES);
-    let mut rips: alloc::vec::Vec<u64> = (0..n).map(|i| SAMPLE_RIP[i].load(Relaxed)).collect();
+    // wave8 GP: grouped by (task, rip); the task's name printed with it
+    let mut rips: alloc::vec::Vec<(u64, u64)> = (0..n).map(|i| (SAMPLE_TID[i].load(Relaxed), SAMPLE_RIP[i].load(Relaxed))).collect();
     rips.sort_unstable();
-    let mut counts: alloc::vec::Vec<(usize, u64)> = alloc::vec::Vec::new();
+    let mut counts: alloc::vec::Vec<(usize, (u64, u64))> = alloc::vec::Vec::new();
     for r in rips {
         match counts.last_mut() {
             Some((c, x)) if *x == r => *c += 1,
@@ -140,8 +144,9 @@ pub fn sample_show(top: usize) {
     }
     counts.sort_unstable_by(|a, b| b.0.cmp(&a.0));
     crate::println!("[sample] {} samples of task {}", n, SAMPLE_TASK.load(Relaxed));
-    for (c, r) in counts.into_iter().take(top) {
-        crate::println!("[sample] {:>6} {:#x}", c, r);
+    for (c, (t, r)) in counts.into_iter().take(top) {
+        let name = crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(t), |k| k.name).unwrap_or("");
+        crate::println!("[sample] {:>6} {:#x} {} {}", c, r, t, name);
     }
 }
 
