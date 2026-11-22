@@ -285,6 +285,9 @@ pub fn on_keyboard_irq() {
     handle_scancode(scancode);
 }
 
+/// Enter key presses since boot (wave8 GB).
+pub static ENTER_PRESSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Takes one set-1 scancode byte from any keyboard: the PS/2 one (its interrupt) or a USB
 /// one (the USB input task translates HID usages to set-1 codes), so both reach the
 /// console and the Linux event devices the same way. Called with
@@ -294,6 +297,11 @@ pub fn on_keyboard_irq() {
 ///
 /// * `scancode` - Set-1 scancode byte (0xE0 prefixes included).
 pub fn handle_scancode(scancode: u8) {
+    // wave8 GB: Enter presses, whoever gets the key (the live stick's last shutdown step
+    // waits for one: crate::arch::power)
+    if scancode == 0x1C {
+        ENTER_PRESSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     if scancode == 0x58 {
         // F12: dump the task list on the serial port (handled by the timer interrupt)
         TASK_DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);

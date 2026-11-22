@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/reboot.h>
 #include <ftw.h>
@@ -72,6 +73,10 @@
 
 static int verbose;
 static DBusConnection *bus;
+
+/* wave8 GB: Hydra runs as a live session from its USB stick (/run/hydra/live, read once at
+ * start: once the stick is pulled, files may be unreadable) */
+static int live_session;
 
 static void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void logmsg(const char *fmt, ...) {
@@ -1647,6 +1652,11 @@ static DBusMessage *power(DBusMessage *m, const char *what, int how) {
      * install stick is pulled) left Reboot hanging. Interactive checks may wait for a
      * password dialog, so they get longer. */
     int timeout_ms = interactive ? 120000 : 25000;
+    /* wave8 GB: in the live session there is no password to wait for (its user may restart,
+     * as polkit's default policy says), but polkit may never answer once the stick is
+     * pulled (its files are gone): a short wait, then allowed_without_polkit() decides */
+    if (live_session && timeout_ms > 8000)
+        timeout_ms = 8000;
     /* The caller's identity first: sender_creds() talks to the bus synchronously, which
      * must not happen between sending the polkit call and attaching its notify function
      * (the reply could complete the pending call first) */
@@ -2162,6 +2172,18 @@ int main(int argc, char **argv) {
             make_runtime_dir(&sessions[s], sessions[s].uid, sessions[s].gid, runtime, sizeof runtime);
     }
     logmsg("seat0 ready on %s", BUS_NAME);
+
+    /* wave8 GB begin: what restarting needs must not depend on the disk staying there (the
+     * live stick pulled before "Restart now": a code page read for the first time then
+     * kills this program with SIGBUS, and nothing restarts). The name service modules are
+     * loaded first, then every mapped page is read in and kept (mlockall does both on
+     * Hydra, as on Linux). */
+    live_session = access("/run/hydra/live", F_OK) == 0;
+    (void)getpwuid(0);
+    (void)getgrnam("sudo");
+    if (mlockall(MCL_CURRENT) != 0)
+        logmsg("mlockall: %s", strerror(errno));
+    /* wave8 GB end */
 
     /* The bus, and the pipes whose closing ends sessions */
     int busfd = -1;

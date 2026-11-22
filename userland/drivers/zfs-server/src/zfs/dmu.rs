@@ -567,6 +567,14 @@ impl Dmu {
         self.dirty_data.len()
     }
 
+    // wave8 GB begin
+    /// Whether object `obj`'s dnode was changed in the open transaction group (the intent
+    /// log's compaction asks this of objects it may drop requests of).
+    pub fn is_dirty_dnode(&self, obj: u64) -> bool {
+        self.dirty_dnodes.contains(&obj)
+    }
+    // wave8 GB end
+
     /// Returns true if uncommitted dirty blocks, dnodes, or truncations are pending commit.
     ///
     /// # Returns

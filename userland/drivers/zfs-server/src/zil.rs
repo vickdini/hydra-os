@@ -331,6 +331,84 @@ impl<'a> Log<'a> {
         self.put(KIND_OP, time, op, status, value, req)
     }
 
+    // wave8 GB begin: compaction (data of files deleted within the generation)
+    /// The current generation's records, in order: `(kind, request code, logged value,
+    /// payload offset, payload length)`. Only this server's own appends are in the area, so they are walked
+    /// by their lengths without checking their sums.
+    pub fn records(&self) -> Vec<(u32, u32, u64, usize, usize)> {
+        let mut v = Vec::new();
+        if self.gen == 0 {
+            return v;
+        }
+        let mut at = self.area_start(self.area);
+        while at + REC_HEAD <= self.end {
+            let hd = &self.buf[at..at + REC_HEAD];
+            let len = get32(hd, 8) as usize;
+            v.push((get32(hd, 4), get32(hd, 36), get64(hd, 48), at + REC_HEAD, len));
+            at += REC_HEAD + align8(len);
+        }
+        v
+    }
+
+    /// Rewrites the current generation into the other record area with only the records
+    /// whose `keep` flag is set (one flag per [`Log::records`] entry; the state record is
+    /// always kept), renumbered, under a new epoch, then names it in a new header. The
+    /// generation stays the same (no commit). Until that header is written the old header
+    /// and area stay whole, so a kill in the middle replays the old records; the other area
+    /// held only the previous generation, which nothing needs once the current header
+    /// exists. `false`: nothing was done (no usable log, or `keep` does not match).
+    pub fn compact(&mut self, guid: u64, keep: &[bool]) -> bool {
+        let recs = self.records();
+        if self.gen == 0 || recs.len() != keep.len() || recs.first().map_or(true, |r| r.0 != KIND_STATE) {
+            return false;
+        }
+        let gen = self.gen;
+        let old = (self.area, self.end, self.seq, self.epoch);
+        self.area = 1 - self.area;
+        self.end = self.area_start(self.area);
+        self.seq = 0;
+        // (the header written below gets this sequence number)
+        self.epoch = self.hseq + 1;
+        for (i, &(_, _, _, payload, len)) in recs.iter().enumerate() {
+            if (i == 0 || keep[i]) && !self.copy_record(payload - REC_HEAD, len) {
+                // (cannot happen: a subset fits where all of them fitted) back to the old
+                // area, which nothing has touched
+                (self.area, self.end, self.seq, self.epoch) = old;
+                return false;
+            }
+        }
+        self.write_header(guid, gen);
+        true
+    }
+
+    /// Appends a copy of the record whose head is at `head` (in the other area) with the
+    /// next sequence number and the current epoch.
+    fn copy_record(&mut self, head: usize, len: usize) -> bool {
+        let total = REC_HEAD + align8(len);
+        let limit = self.area_start(self.area) + self.area_size();
+        if self.end + total > limit {
+            return false;
+        }
+        let at = self.end;
+        let mut h = [0u8; REC_HEAD];
+        h.copy_from_slice(&self.buf[head..head + REC_HEAD]);
+        put32(&mut h, 0, REC_MAGIC);
+        put32(&mut h, 12, self.seq);
+        put64(&mut h, 16, self.epoch);
+        let src = head + REC_HEAD;
+        let sum = checksum(&[&h[..56], &self.buf[src..src + len]]);
+        put64(&mut h, 56, sum);
+        // (as in `put`: the magic goes last)
+        publish(self.buf, at, &[0; 4]);
+        self.buf.copy_within(src..src + len, at + REC_HEAD);
+        self.buf[at + 4..at + REC_HEAD].copy_from_slice(&h[4..]);
+        publish(self.buf, at, &h[..4]);
+        self.end = at + total;
+        self.seq = self.seq.wrapping_add(1);
+        true
+    }
+    // wave8 GB end
+
     /// Makes the log unusable until the next [`Log::reset`]: a header no import matches.
     pub fn disable(&mut self, guid: u64) {
         self.gen = 0;

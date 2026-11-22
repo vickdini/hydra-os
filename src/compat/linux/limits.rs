@@ -528,6 +528,8 @@ pub fn mlock(num: u64, a: [u64; 6]) -> i64 {
     let mut p = get(pid);
     let limit = p.limits[RLIMIT_MEMLOCK].0;
     let unlimited = cap(14) || limit == RLIM_INFINITY; // CAP_IPC_LOCK
+    // wave8 GB: the ranges whose file pages are read in now (Linux's mlock populates)
+    let mut populate: Option<(u64, u64)> = None;
     match num {
         // mlock, munlock, mlock2
         149 | 150 | 325 => {
@@ -552,6 +554,9 @@ pub fn mlock(num: u64, a: [u64; 6]) -> i64 {
                     return if limit == 0 { EPERM } else { ENOMEM };
                 }
                 p.locked = next;
+                if num == 149 || a[2] & 1 == 0 {
+                    populate = Some((start, end));
+                }
             }
         }
         // mlockall
@@ -572,6 +577,9 @@ pub fn mlock(num: u64, a: [u64; 6]) -> i64 {
                     return if limit == 0 { EPERM } else { ENOMEM };
                 }
                 p.locked = next;
+                if f & MCL_ONFAULT == 0 {
+                    populate = Some((0, u64::MAX));
+                }
             }
             p.lock_future = f & MCL_FUTURE != 0;
         }
@@ -583,8 +591,38 @@ pub fn mlock(num: u64, a: [u64; 6]) -> i64 {
     }
     let _ = EAGAIN;
     put(pid, p);
+    if let Some((start, end)) = populate {
+        populate_files(start, end);
+    }
     0
 }
+
+// wave8 GB begin
+/// Reads in the file pages mapped readable in `[start, end)` of the calling process, as
+/// Linux's `mlock`/`mlockall` do (locked pages are resident). Mapped file pages stay in
+/// memory while mapped (the page cache gives back only files nothing maps), so a program
+/// that locked itself keeps running when its disk goes away: hydra-logind on a live stick
+/// that was pulled (wave 8, Group B) must still be able to restart the machine. Anonymous
+/// pages need nothing (they never leave memory). A page that cannot be read (past the end
+/// of its file, a disk error) is skipped: the call still succeeds, as the lock does.
+fn populate_files(start: u64, end: u64) {
+    let Some(mm) = super::mm::current_mm() else { return };
+    let ranges: Vec<(u64, u64)> = mm
+        .lock()
+        .vmas()
+        .filter(|v| v.prot & crate::memory::vm::PROT_READ != 0 && matches!(v.backing, crate::memory::vm::Backing::Object { .. }))
+        .map(|v| (v.start.max(start), v.end.min(end)))
+        .filter(|(s, e)| s < e)
+        .collect();
+    for (s, e) in ranges {
+        let mut page = s & !4095;
+        while page < e {
+            let _ = crate::memory::vm::prefault_current(page, 1, false);
+            page += 4096;
+        }
+    }
+}
+// wave8 GB end
 
 /// `/proc/<pid>/limits`.
 pub fn limits_text(tgid: u64) -> alloc::string::String {
