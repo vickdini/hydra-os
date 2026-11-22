@@ -669,6 +669,43 @@ Branch `w8-display`. What sections 3.2, 4 and 5 proposed, as it was built; the k
   (8) and then none (Ctrl+Alt+F1 runs with an animating desktop, d3); the scrolling test's
   console phase was idle in both modes, so it does not separate them.
 
+## 10. Wave 8: restart and hot-plug as built (Group H)
+
+Branch `w8-hotplug`. Section 3.6's "remove/add" announcements, for the input and sound services.
+
+- **When:** only when a device service's **objects fail**: the ladder's second crash within
+  30 s (FailObjects), or a Transparent restart whose new instance did not adopt them. The
+  first crash stays invisible (kwin's and PipeWire's descriptors are adopted) and announces
+  nothing. Then: "remove" for the service's devices at once (`lx::server_gone`), "add" when
+  its next instance is online (`LX_CTL_ONLINE`); the sound card also gets "change" (PipeWire's
+  ALSA monitor takes a card on "change" with `SOUND_INITIALIZED=1`, as udev's rules send it).
+  A third crash (given up) announces "remove" only; `service start` later brings the "add".
+  Display (decision 28) and terminal crashes announce nothing.
+- **Formats** (`src/lx/uevent.rs`, host-tested in `tests/host-w8-h`): the kernel's
+  (`ACTION@DEVPATH`, group 1) and udev's (the 40-byte `libudev` header, magic 0xfeedcafe,
+  murmur2 hashes and tag bloom, group 2). Properties and tags come from one record per device
+  (`compat/linux/devices.rs`: `input_record`, `sound_records`) that also writes the device's
+  `/run/udev/data` file, so a device announced again is what it was at boot; the database
+  files stay in place.
+- **Delivery** (`src/lx/hotplug.rs`): a short-lived kernel task, never the crash path: the
+  kernel's own uevent sockets (`compat/linux/netlink.rs`, `lx.net=kernel`) and the network
+  service's (`MSG_LX_UEVENT` 0xA004 to the main thread of lx-net, or linux-server with
+  `lx.net=linux`), waiting up to 10 s for a restarting network service. The receive side
+  (both copies) keeps each datagram's group, gives it only to sockets bound to that group,
+  reports the sender as the kernel with `nl_groups` = the group, and adds `SCM_CREDENTIALS`
+  (uid 0): libudev's monitor drops messages without them.
+- **hydra-logind** watches the kernel's group: on "remove" of a device a session holds it
+  closes its descriptor, sends the controller `PauseDevice(major, minor, "gone")` and drops
+  it; on "add" the seat's nodes go to the active user again. kwin's libinput then opens the
+  added devices itself (`TakeDevice`), which reaches the new input-server.
+- **What the desktop does** (`tools/devcrash/devcrash.sh`): after a second input crash within
+  30 s the keyboard and pointer work as soon as the session is shown again (the "add" follows
+  the "remove" within tens of milliseconds of the new instance being online); after a second
+  sound crash WirePlumber makes the sink again, a playing `pw-play` goes on after a gap, a new
+  one plays. Before (a6729b7): no pointer or keyboard until relogin; a new `pw-play` timed out.
+- **Test:** `tests/linux/hotplug_test.c` (`watch SECS input|sound`: a raw kernel-group
+  socket, a raw udev-group socket and a libudev monitor must each see "remove" then "add").
+
 ## Appendix: reproducing
 
 - **Hooks:** `python tools/displaybench/instrument.py E:\os-N` adds them to a tree (it copies

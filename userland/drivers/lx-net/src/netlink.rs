@@ -60,8 +60,9 @@ struct Nl {
     /// Port ID (`nl_pid`): the process ID unless bound to another.
     port: AtomicU32,
     groups: AtomicU32,
-    /// Datagrams not yet received.
-    replies: YLock<VecDeque<Vec<u8>>>,
+    /// Datagrams not yet received, with the multicast group they came to (wave8 GH: 0 for
+    /// answers and notifications, 1/2 for device announcements).
+    replies: YLock<VecDeque<(u32, Vec<u8>)>>,
     /// Its slot (for waking receivers of a notification).
     slot: u32,
     /// wave8 GX2: its kept record (`crate::sockkept`; 0: not kept) and the `(port, groups)`
@@ -120,15 +121,66 @@ pub fn restore(slot: u32, rec: u32) -> bool {
 }
 
 /// wave8 GX2, for Group H: a kernel uevent for every uevent socket that joined a group
-/// (queued as a received datagram, receivers woken). Nothing calls it yet.
-#[allow(dead_code)]
-pub fn uevent(data: &[u8]) {
+/// (queued as a received datagram, receivers woken).
+/// wave8 GH: messages `(group, bytes)` go to the uevent sockets bound to their group
+/// (`nl_groups` bit `group - 1`; 1 the kernel's format, 2 udev's), at most [`UEVENT_MAX`]
+/// waiting per socket (the oldest dropped first); returns how many sockets got one.
+pub fn uevent(msgs: &[(u32, &[u8])]) -> usize {
     let socks: Vec<Arc<Nl>> = SOCKS.lock().values().filter(|s| !s.route && s.groups.load(Ordering::Relaxed) != 0).cloned().collect();
+    let mut reached = 0;
     for s in socks {
-        s.replies.lock().push_back(data.to_vec());
-        refresh(s.slot);
-        crate::socket::poke(s.slot);
+        let groups = s.groups.load(Ordering::Relaxed);
+        let mut any = false;
+        {
+            let mut q = s.replies.lock();
+            for &(g, m) in msgs {
+                if g == 0 || g > 32 || groups & (1 << (g - 1)) == 0 {
+                    continue;
+                }
+                if q.len() >= UEVENT_MAX {
+                    q.pop_front();
+                }
+                q.push_back((g, m.to_vec()));
+                any = true;
+            }
+        }
+        if any {
+            reached += 1;
+            refresh(s.slot);
+            crate::socket::poke(s.slot);
+        }
     }
+    reached
+}
+
+/// wave8 GH: most datagrams waiting on one uevent socket.
+const UEVENT_MAX: usize = 256;
+
+/// wave8 GH: a batch of announcements from the kernel (`MSG_LX_UEVENT`: `[u32 group][u32
+/// length][bytes]` each) for [`uevent`].
+pub fn uevent_batch(b: &[u8]) -> usize {
+    let mut msgs = Vec::new();
+    let mut rest = b;
+    while rest.len() >= 8 {
+        let g = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        let n = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+        if rest.len() < 8 + n {
+            break;
+        }
+        msgs.push((g, &rest[8..8 + n]));
+        rest = &rest[8 + n..];
+    }
+    uevent(&msgs)
+}
+
+/// wave8 GH: the sender's address of a datagram of group `g` (`struct sockaddr_nl`: the
+/// kernel, port 0, `nl_groups` the group's bit; libudev tells kernel from udev messages by it).
+fn sender(g: u32) -> [u8; 12] {
+    let mut b = kernel_addr();
+    if (1..=32).contains(&g) {
+        b[8..12].copy_from_slice(&(1u32 << (g - 1)).to_le_bytes());
+    }
+    b
 }
 // wave8 GX2 end
 
@@ -209,7 +261,7 @@ pub fn pin(cx: &Cx, fd: u64) -> Option<u64> {
 /// Queues `data` on the socket kept as `token` and wakes its receivers.
 pub fn deliver(token: u64, data: &[u8]) {
     let Some(s) = PINS.lock().get(&token).cloned() else { return };
-    s.replies.lock().push_back(data.to_vec());
+    s.replies.lock().push_back((0, data.to_vec()));
     if sock_of(s.slot).is_some_and(|x| Arc::ptr_eq(&x, &s)) {
         refresh(s.slot);
         crate::socket::poke(s.slot);
@@ -220,7 +272,7 @@ pub fn deliver(token: u64, data: &[u8]) {
 /// queue's `SIGEV_THREAD` cookie) and wakes its receivers: 0, or `-EBADF`.
 pub fn deliver_slot(slot: u32, data: &[u8]) -> i64 {
     let Some(s) = sock_of(slot) else { return -9 };
-    s.replies.lock().push_back(data.to_vec());
+    s.replies.lock().push_back((0, data.to_vec()));
     refresh(slot);
     crate::socket::poke(slot);
     0
@@ -404,14 +456,14 @@ impl Nl {
                     message(&mut reply, NLMSG_ERROR, 0, seq, port, &b);
                 }
             }
-            self.replies.lock().push_back(reply);
+            self.replies.lock().push_back((0, reply));
             off += (len + 3) & !3;
         }
     }
 
-    /// The next datagram (a copy with `peek`); `Err(EAGAIN)` when none waits and the call
-    /// must not wait, `Ok(None)` when it must.
-    fn next(&self, peek: bool, nonblock: bool) -> Result<Option<Vec<u8>>, i64> {
+    /// The next datagram and its group (a copy with `peek`); `Err(EAGAIN)` when none waits
+    /// and the call must not wait, `Ok(None)` when it must.
+    fn next(&self, peek: bool, nonblock: bool) -> Result<Option<(u32, Vec<u8>)>, i64> {
         let mut q = self.replies.lock();
         let d = if peek { q.front().cloned() } else { q.pop_front() };
         match d {
@@ -525,13 +577,13 @@ pub fn call(cx: &Cx, _prog: &mut Prog) -> Out {
         45 | 0 => {
             let flags = if cx.nr == 45 { a[3] } else { 0 };
             match s.next(flags & MSG_PEEK != 0, nb(flags)) {
-                Ok(Some(d)) => {
+                Ok(Some((g, d))) => {
                     let n = d.len().min(a[2] as usize);
                     if cx.copy_out_any(a[1], &d[..n]).is_err() {
                         return Out::Done(EFAULT);
                     }
                     if cx.nr == 45 {
-                        let r = put_addr(cx, a[4], a[5], &kernel_addr());
+                        let r = put_addr(cx, a[4], a[5], &sender(g)); // wave8 GH
                         if r != 0 {
                             return Out::Done(r);
                         }
@@ -558,7 +610,7 @@ pub fn call(cx: &Cx, _prog: &mut Prog) -> Out {
                 Ok(v) => v,
                 Err(e) => return Out::Done(e),
             };
-            let d = match s.next(flags & MSG_PEEK != 0, nb(flags)) {
+            let (g, d) = match s.next(flags & MSG_PEEK != 0, nb(flags)) {
                 Ok(Some(d)) => d,
                 Ok(None) => return Out::Block,
                 Err(e) => return Out::Done(e),
@@ -573,10 +625,23 @@ pub fn call(cx: &Cx, _prog: &mut Prog) -> Out {
             }
             let name = Cx::u64_at(&msg, 0);
             if name != 0 && u32::from_le_bytes(msg[8..12].try_into().unwrap()) >= 12 {
-                let _ = cx.copy_out(name, &kernel_addr());
+                let _ = cx.copy_out(name, &sender(g)); // wave8 GH
                 msg[8..12].copy_from_slice(&12u32.to_le_bytes());
             }
-            msg[40..48].copy_from_slice(&0u64.to_le_bytes());
+            // wave8 GH: a uevent socket's datagram carries the sender's credentials
+            // (`SCM_CREDENTIALS`, the kernel: pid, uid, gid 0); libudev ignores one without
+            let (control, clen) = (Cx::u64_at(&msg, 32), Cx::u64_at(&msg, 40));
+            let mut cl = 0u64;
+            if !s.route && control != 0 && clen >= 32 {
+                let mut c = [0u8; 32];
+                c[0..8].copy_from_slice(&28u64.to_le_bytes()); // cmsg_len: header + struct ucred
+                c[8..12].copy_from_slice(&1i32.to_le_bytes()); // SOL_SOCKET
+                c[12..16].copy_from_slice(&2i32.to_le_bytes()); // SCM_CREDENTIALS
+                if cx.copy_out(control, &c).is_ok() {
+                    cl = 32;
+                }
+            }
+            msg[40..48].copy_from_slice(&cl.to_le_bytes());
             msg[48..52].copy_from_slice(&(if done < d.len() { MSG_TRUNC as u32 } else { 0 }).to_le_bytes());
             let _ = cx.copy_out(msgp, &msg);
             let r = if flags & MSG_TRUNC != 0 { d.len() as i64 } else { done as i64 };

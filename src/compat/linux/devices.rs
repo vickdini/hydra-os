@@ -554,15 +554,9 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
         t.link(s, &alloc::format!("/sys/class/input/event{}", dev), &alloc::format!("{}/event{}", rel, dev))?;
         t.link(s, &alloc::format!("/sys/dev/char/13:{}", minor), &alloc::format!("{}/event{}", rel, dev))?;
         t.node(s, &alloc::format!("/dev/input/event{}", dev), super::chardev::makedev(13, minor), input)?;
-        let class = if dev == 0 { "E:ID_INPUT_KEY=1\nE:ID_INPUT_KEYBOARD=1\nE:XKBMODEL=pc105\nE:XKBLAYOUT=us\n" } else { "E:ID_INPUT_MOUSE=1\n" };
-        t.file(
-            s,
-            &alloc::format!("/run/udev/data/c13:{}", minor),
-            &alloc::format!(
-                "I:{}\nE:ID_INPUT=1\n{}E:ID_BUS=i8042\nE:ID_SERIAL=noserial\nE:ID_PATH=platform-i8042-serio-{}\nE:ID_PATH_TAG=platform-i8042-serio-{}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\nV:1\n",
-                usec, class, port, port
-            ),
-        )?;
+        // wave8 GH: the same record announces the device again after an input service crash
+        let rec = input_record(dev, usec);
+        t.file(s, &alloc::format!("/run/udev/data/{}", rec.db_name()), &rec.db_text())?;
         if dev < 2 {
             t.link(s, &alloc::format!("/dev/input/by-path/platform-i8042-serio-{}-event-{}", dev, if dev == 0 { "kbd" } else { "mouse" }), &alloc::format!("../event{}", dev))?;
         }
@@ -1396,6 +1390,90 @@ pub fn populate(root: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+// wave8 GH begin: one udev record per device, for the database files written above and
+// for the announcements after a device service's crash (`crate::lx::hotplug`), so a device
+// announced again has exactly the properties and tags it had at boot
+
+/// When udev "initialized" the devices: one second after boot (`USEC_INITIALIZED`).
+pub const INIT_USEC: u64 = 1_000_000;
+
+/// The record of input device `dev` (its `event` node; the keyboard is 0, pointers 1..).
+pub fn input_record(dev: usize, usec: u64) -> crate::lx::uevent::DevRecord {
+    let port = dev.min(1);
+    let p = |k: &str, v: &str| (String::from(k), String::from(v));
+    let mut props = alloc::vec![p("ID_INPUT", "1")];
+    if dev == 0 {
+        props.extend([p("ID_INPUT_KEY", "1"), p("ID_INPUT_KEYBOARD", "1"), p("XKBMODEL", "pc105"), p("XKBLAYOUT", "us")]);
+    } else {
+        props.push(p("ID_INPUT_MOUSE", "1"));
+    }
+    let path = alloc::format!("platform-i8042-serio-{}", port);
+    props.extend([p("ID_BUS", "i8042"), p("ID_SERIAL", "noserial"), p("ID_PATH", &path), p("ID_PATH_TAG", &path)]);
+    crate::lx::uevent::DevRecord {
+        devpath: alloc::format!("/devices/platform/i8042/serio{}/input/input{}/event{}", port, dev, dev),
+        subsystem: "input",
+        devtype: None,
+        node: Some((alloc::format!("input/event{}", dev), 13, 64 + dev as u32)),
+        props,
+        tags: alloc::vec!["seat", "uaccess"],
+        usec,
+    }
+}
+
+/// Every input device's record.
+pub fn input_records(usec: u64) -> Vec<crate::lx::uevent::DevRecord> {
+    (0..super::evdev::device_count()).map(|d| input_record(d, usec)).collect()
+}
+
+/// The sound card's nodes: (name, minor).
+fn sound_nodes(capture: bool) -> Vec<(&'static str, u64)> {
+    let mut nodes = alloc::vec![("controlC0", 0u64), ("pcmC0D0p", 16)];
+    if capture {
+        nodes.push(("pcmC0D0c", 24));
+    }
+    nodes
+}
+
+/// The sound card's records: the card first, then its nodes (none without a card).
+pub fn sound_records(usec: u64) -> Vec<crate::lx::uevent::DevRecord> {
+    let Some((slot, vendor, device, _)) = super::snd::controller() else { return Vec::new() };
+    let path_tag: String = slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();
+    let p = |k: &str, v: String| (String::from(k), v);
+    let card_path = alloc::format!("/devices/pci0000:00/{}/sound/card0", slot);
+    let mut v = alloc::vec![crate::lx::uevent::DevRecord {
+        devpath: card_path.clone(),
+        subsystem: "sound",
+        devtype: None,
+        node: None,
+        props: alloc::vec![
+            p("ID_PATH", alloc::format!("pci-{}", slot)),
+            p("ID_PATH_TAG", alloc::format!("pci-{}", path_tag)),
+            p("SOUND_INITIALIZED", String::from("1")),
+            p("SOUND_FORM_FACTOR", String::from("internal")),
+            p("ID_BUS", String::from("pci")),
+            p("ID_VENDOR_ID", alloc::format!("0x{:04x}", vendor)),
+            p("ID_MODEL_ID", alloc::format!("0x{:04x}", device)),
+            p("ID_VENDOR_FROM_DATABASE", String::from("Intel Corporation")),
+            p("ID_MODEL_FROM_DATABASE", String::from("High Definition Audio Controller")),
+        ],
+        tags: alloc::vec!["seat"],
+        usec,
+    }];
+    for (name, minor) in sound_nodes(super::snd::has_dir(1)) {
+        v.push(crate::lx::uevent::DevRecord {
+            devpath: alloc::format!("{}/{}", card_path, name),
+            subsystem: "sound",
+            devtype: None,
+            node: Some((alloc::format!("snd/{}", name), 116, minor as u32)),
+            props: alloc::vec![p("ID_PATH", alloc::format!("pci-{}", slot)), p("ID_PATH_TAG", alloc::format!("pci-{}", path_tag))],
+            tags: alloc::vec!["seat", "uaccess"],
+            usec,
+        });
+    }
+    v
+}
+// wave8 GH end
+
 /// The sound card (`super::snd`): `/dev/snd` nodes, its sysfs devices (PipeWire finds cards
 /// through libudev, subsystem "sound"), their udev records, and the `/proc/asound`
 /// directories (the files are served by `super::snd::proc_text`; the ones here only make
@@ -1480,20 +1558,13 @@ context.properties = {{
     t.link(s, &alloc::format!("{}/subsystem", card), "../../../../../class/sound")?;
     t.link(s, &alloc::format!("{}/device", card), &alloc::format!("../../../{}", slot))?;
     t.link(s, "/sys/class/sound/card0", &alloc::format!("../../devices/pci0000:00/{}/sound/card0", slot))?;
-    let path_tag: String = slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();
-    t.file(
-        s,
-        "/run/udev/data/+sound:card0",
-        &alloc::format!(
-            "I:{}\nE:ID_PATH=pci-{}\nE:ID_PATH_TAG=pci-{}\nE:SOUND_INITIALIZED=1\nE:SOUND_FORM_FACTOR=internal\nE:ID_BUS=pci\nE:ID_VENDOR_ID=0x{:04x}\nE:ID_MODEL_ID=0x{:04x}\nE:ID_VENDOR_FROM_DATABASE=Intel Corporation\nE:ID_MODEL_FROM_DATABASE=High Definition Audio Controller\nG:seat\nQ:seat\nV:1\n",
-            usec, slot, path_tag, vendor, device
-        ),
-    )?;
-    let mut nodes = alloc::vec![("controlC0", 0u64), ("pcmC0D0p", 16)];
-    if capture {
-        nodes.push(("pcmC0D0c", 24));
+    // wave8 GH: the card's and its nodes' records (the same ones announce them again after a
+    // sound service crash)
+    let recs = sound_records(usec);
+    for rec in &recs {
+        t.file(s, &alloc::format!("/run/udev/data/{}", rec.db_name()), &rec.db_text())?;
     }
-    for (name, minor) in nodes {
+    for (name, minor) in sound_nodes(capture) {
         let dir = alloc::format!("{}/{}", card, name);
         t.file(s, &alloc::format!("{}/uevent", dir), &alloc::format!("MAJOR=116\nMINOR={}\nDEVNAME=snd/{}\n", minor, name))?;
         t.file(s, &alloc::format!("{}/dev", dir), &alloc::format!("116:{}\n", minor))?;
@@ -1507,11 +1578,6 @@ context.properties = {{
         t.link(s, &alloc::format!("/sys/dev/char/116:{}", minor), &rel)?;
         // Anyone may play sound: a desktop's user owns the seat
         t.node_mode(s, &alloc::format!("/dev/snd/{}", name), super::chardev::makedev(116, minor), 29, 0o666)?;
-        t.file(
-            s,
-            &alloc::format!("/run/udev/data/c116:{}", minor),
-            &alloc::format!("I:{}\nE:ID_PATH=pci-{}\nE:ID_PATH_TAG=pci-{}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\nV:1\n", usec, slot, path_tag),
-        )?;
     }
     t.link(s, &alloc::format!("/dev/snd/by-path/pci-{}", slot), "../controlC0")?;
 

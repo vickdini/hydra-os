@@ -717,6 +717,24 @@ pub mod compat {
             }
         }
 
+        // wave8 GH begin
+        /// *stub* The device records `lx::hotplug` announces (none here).
+        pub mod devices {
+            pub const INIT_USEC: u64 = 1_000_000;
+            pub fn input_records(_usec: u64) -> alloc::vec::Vec<crate::lx::uevent::DevRecord> {
+                alloc::vec::Vec::new()
+            }
+            pub fn sound_records(_usec: u64) -> alloc::vec::Vec<crate::lx::uevent::DevRecord> {
+                alloc::vec::Vec::new()
+            }
+        }
+        /// *stub* The kernel's uevent sockets.
+        pub mod netlink {
+            pub fn uevent_all(msgs: &[(u32, alloc::vec::Vec<u8>)]) -> usize {
+                msgs.len().min(0)
+            }
+        }
+        // wave8 GH end
         // wave8 GS begin
         /// *stub* The in-kernel ALSA layer, as the sound service's kernel side uses it.
         pub mod snd {

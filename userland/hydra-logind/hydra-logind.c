@@ -11,6 +11,13 @@
  * session becomes active, its DRM master is dropped and its input devices revoked
  * (PauseDevice), and the newly active one gets fresh descriptors (ResumeDevice).
  *
+ * Devices that go and come back (wave 8: a device service restarted after its objects
+ * failed, announced on the uevent netlink socket) are handled as systemd-logind handles
+ * hot-plug: on "remove" a session's descriptor of the device is closed, its controller gets
+ * PauseDevice(major, minor, "gone") and the device is dropped; on "add" the seat's nodes are
+ * given to the active session's user again. The compositor (libinput) opens an added device
+ * itself with TakeDevice.
+ *
  * It also answers for systemd-localed (org.freedesktop.locale1, read-only).
  *
  * With --uid N it starts with session 1 for user N, active (a desktop started without a
@@ -26,6 +33,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <linux/input.h>
+#include <linux/netlink.h> /* wave8 GH */
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -442,6 +450,76 @@ static void release_all(int s) {
     while (sessions[s].ndev > 0)
         release_device(s, sessions[s].dev[0].major, sessions[s].dev[0].minor);
 }
+
+/* ---------- wave8 GH begin: devices that go and come back (uevents) ---------- */
+
+/* The kernel's uevent socket (group 1, the kernel's format), or -1. */
+static int uevent_open(void) {
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_nl a = {.nl_family = AF_NETLINK, .nl_groups = 1};
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Value of KEY in a kernel uevent (`ACTION@DEVPATH\0KEY=value\0...`), or NULL. */
+static const char *uevent_value(const char *buf, int n, const char *key) {
+    size_t kl = strlen(key);
+    for (int i = strlen(buf) + 1; i < n; i += strlen(buf + i) + 1)
+        if (!strncmp(buf + i, key, kl) && buf[i + kl] == '=')
+            return buf + i + kl + 1;
+    return NULL;
+}
+
+/* Device MAJOR:MINOR went away: every session holding it loses it, its controller is told
+ * ("gone"). */
+static void uevent_removed(unsigned major, unsigned minor) {
+    for (int s = 0; s < MAX_SESSIONS; s++) {
+        struct session *se = &sessions[s];
+        if (!se->used)
+            continue;
+        for (int i = 0; i < se->ndev; i++) {
+            struct device *d = &se->dev[i];
+            if (d->major != major || d->minor != minor)
+                continue;
+            if (d->fd >= 0)
+                close(d->fd);
+            logmsg("session %s: device %u:%u removed", se->id, major, minor);
+            if (*se->controller) {
+                const char *how = "gone";
+                DBusMessage *sig = controller_signal(s, "PauseDevice");
+                dbus_message_append_args(sig, DBUS_TYPE_UINT32, &major, DBUS_TYPE_UINT32, &minor, DBUS_TYPE_STRING, &how, DBUS_TYPE_INVALID);
+                emit(sig);
+            }
+            se->dev[i] = se->dev[--se->ndev];
+            break;
+        }
+    }
+}
+
+/* Reads the waiting uevents. */
+static void uevent_read(int fd) {
+    char buf[8192];
+    int n;
+    while ((n = recv(fd, buf, sizeof buf - 1, 0)) > 0) {
+        buf[n] = 0;
+        const char *action = uevent_value(buf, n, "ACTION"), *maj = uevent_value(buf, n, "MAJOR"), *min = uevent_value(buf, n, "MINOR");
+        if (!action || !maj || !min)
+            continue;
+        unsigned major = atoi(maj), minor = atoi(min);
+        if (verbose)
+            logmsg("uevent %s %u:%u", action, major, minor);
+        if (!strcmp(action, "remove"))
+            uevent_removed(major, minor);
+        else if (!strcmp(action, "add") && active >= 0 && sessions[active].on_seat)
+            grant_seat_devices(sessions[active].uid);
+    }
+}
+/* ---------- wave8 GH end ---------- */
 
 /* ---------- activation ---------- */
 
@@ -2088,16 +2166,22 @@ int main(int argc, char **argv) {
     /* The bus, and the pipes whose closing ends sessions */
     int busfd = -1;
     dbus_connection_get_unix_fd(bus, &busfd);
+    int ufd = uevent_open(); /* wave8 GH: devices that go and come back */
     for (;;) {
         while (dbus_connection_dispatch(bus) == DBUS_DISPATCH_DATA_REMAINS)
             ;
         dbus_connection_flush(bus);
-        struct pollfd p[1 + MAX_SESSIONS];
-        int owner[1 + MAX_SESSIONS];
+        struct pollfd p[2 + MAX_SESSIONS];
+        int owner[2 + MAX_SESSIONS];
         int n = 0;
         p[n].fd = busfd;
         p[n].events = POLLIN;
         owner[n++] = -1;
+        if (ufd >= 0) { /* wave8 GH */
+            p[n].fd = ufd;
+            p[n].events = POLLIN;
+            owner[n++] = -2;
+        }
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (sessions[i].used && sessions[i].fifo >= 0) {
                 p[n].fd = sessions[i].fifo;
@@ -2123,6 +2207,10 @@ int main(int argc, char **argv) {
         for (int k = 1; k < n; k++) {
             if (!p[k].revents)
                 continue;
+            if (owner[k] == -2) { /* wave8 GH */
+                uevent_read(p[k].fd);
+                continue;
+            }
             char c;
             if (read(p[k].fd, &c, 1) <= 0) {
                 logmsg("session %s: its leader closed the session (revents %#x)", sessions[owner[k]].id, p[k].revents);
