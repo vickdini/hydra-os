@@ -597,7 +597,7 @@ pub const MSG_SND_REPLY: u32 = 0x800F;
 pub const ENDPOINT_LX_SOUND: u32 = 0x2B;
 /// `SYS_LX_OBJ` operation (the sound service only): `(sub-op, x, y)` with the `LX_SND_*`
 /// sub-ops below (kernel `ipc/sound.rs`).
-pub const LX_OBJ_SND: u64 = 62;
+pub const LX_OBJ_SND: u64 = 64;
 /// [`LX_OBJ_SND`]: `(LX_SND_GET, *LxSndInfo)`: fills an [`LxSndInfo`]: new memory-object
 /// handles for the position page, the status page and the rings (kernel memory in the
 /// sound driver's IOMMU domain, which lives as long as the kernel) and the card the kernel

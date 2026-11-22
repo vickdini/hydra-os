@@ -623,7 +623,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     if (crate::ipc::protocol::LX_FH_INSTALL..crate::ipc::protocol::LX_FH_INSTALL + 20).contains(&op) || op == crate::ipc::protocol::LX_FH_MNTTAB {
         return super::fileh::ctl(h, op, a, b, c);
     }
-    // wave8 GS begin: the sound service's operations (`ipc::sound`, op 62)
+    // wave8 GS begin: the sound service's operations (`ipc::sound`, op 64)
     if op == crate::ipc::protocol::LX_OBJ_SND {
         return crate::ipc::sound::ctl(h, a, b, c);
     }

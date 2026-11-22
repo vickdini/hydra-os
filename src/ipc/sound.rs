@@ -12,7 +12,7 @@
 //!   layer (`compat/linux/snd.rs`, `lx.sound=kernel`) uses the same memory.
 //! - **The status page**: one page the service writes each stream's state into
 //!   ([`SndStatus`]); `/proc/asound` (kept in the kernel, `compat/linux/fs.rs`) reads it.
-//! - **`LX_OBJ_SND`** ([`ctl`], `SYS_LX_OBJ` op 62, the sound service only): hands the
+//! - **`LX_OBJ_SND`** ([`ctl`], `SYS_LX_OBJ` op 64, the sound service only): hands the
 //!   pages to the service as memory objects (`lx::mem`, the design's `obj_dma`) with the card
 //!   the kernel found at boot; raises the thread that drives a stream to high priority (the
 //!   in-kernel layer's `boost_caller`); reports the sound driver's generation, so the
