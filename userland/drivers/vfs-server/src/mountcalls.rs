@@ -40,7 +40,7 @@ use crate::fs::fsproto::{FS_MKDIR, FS_RMDIR};
 use crate::ktab::{self, Loc};
 use crate::lock::YLock;
 use crate::mntrec::{self, MntTable};
-use crate::proto::{LX_FHC_NAMES, LX_FH_CHANGED, LX_FH_MNTGET, LX_FH_MNTPUT, LX_FH_REROOT, LX_FH_TMPFSID, LX_FS_MNTADMIN};
+use crate::proto::{LX_FHC_NAMES, LX_FH_CHANGED, LX_FH_MNTGET, LX_FH_MNTPUT, LX_FH_REROOT, LX_FH_TMPFSID, LX_FS_LANDLOCK, LX_FS_MNTADMIN};
 use crate::zfs;
 
 const EAGAIN: i64 = -11;
@@ -102,7 +102,8 @@ fn errno_or_kernel(e: i64) -> i64 {
 /// kernel answers).
 fn changes(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
-    ctxt::check(c, 0)?;
+    // (a Landlock domain forbids mount changes: the kernel's rule)
+    ctxt::check(c, LX_FS_LANDLOCK)?;
     // (the initial namespace: fixed layout and FUSE, the kernel's — it keeps those calls)
     if c.mnt_ns == 0 {
         return Err(calls::KERNEL);
@@ -235,7 +236,7 @@ fn locate(cx: &Cx, t: &MntTable, who: &Ctx, ptr: u64, follow: bool, lenient: boo
     // (the first failures of this instance in the log, to tell vfs-server's answer from the
     // kernel's when a program is surprised)
     if let Err(e) = found {
-        if e != ENOENT || !lenient {
+        if e != ENOENT || !lenient || cx.nr == 166 {
             let n = LOCATE_ERRS.fetch_add(1, Ordering::Relaxed);
             if n < 8 {
                 hydra_rt::println!("[vfs-server] mount call {}: {} did not resolve here ({})", cx.nr, abs, if (-4095..0).contains(&e) { e } else { 0 });
@@ -303,7 +304,11 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
         }
         166 => {
             let target = locate(cx, &t, &who, a[0], a[1] & ktab::UMOUNT_NOFOLLOW == 0, true)?;
-            ktab::umount(&mut t, &target, a[1])
+            let r = ktab::umount(&mut t, &target, a[1]);
+            if r == Err(ktab::EINVAL) && LOCATE_ERRS.fetch_add(1, Ordering::Relaxed) < 8 {
+                hydra_rt::println!("[vfs-server] umount2 {}: object {} in mount {} is no mount here (gen {}, {} slots, view gen {})", target.path, target.ino, target.mnt, t.gen, t.slots.len(), c.mnt_gen);
+            }
+            r
         }
         _ => {
             let new_root = locate(cx, &t, &who, a[0], true, false)?;

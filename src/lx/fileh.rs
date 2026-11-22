@@ -364,6 +364,8 @@ pub fn kernel_mask(nr: u64) -> u32 {
             // the changes: their events and checks are the kernel's
             90 | 268 | 452 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 132 | 235 | 261 | 83 | 258 | 133 | 259 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 86 | 265 | 188
             | 189 | 190 | 197 | 198 | 199 => LX_FS_INOTIFY | LX_FS_FANOTIFY | LX_FS_LANDLOCK | LX_FS_ABAC,
+            // wave8 GF: the mount changes (Landlock forbids them; the kernel's rule)
+            155 | 165 | 166 => LX_FS_LANDLOCK,
             _ => 0,
         }
 }
@@ -951,7 +953,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
 /// `[prof] vfs:` line of `linux prof show`.
 pub fn summary() -> String {
     alloc::format!(
-        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {}",
+        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {} mount-waits {}/{}",
         SERVED.load(Ordering::Relaxed),
         TO_KERNEL_CALLS.load(Ordering::Relaxed),
         KEPT.load(Ordering::Relaxed),
@@ -961,7 +963,9 @@ pub fn summary() -> String {
         KEPT_BY[3].load(Ordering::Relaxed),
         KEPT_BY[4].load(Ordering::Relaxed),
         KEPT_BY[5].load(Ordering::Relaxed),
-        NOTES.load(Ordering::Relaxed)
+        NOTES.load(Ordering::Relaxed),
+        MOUNT_WAITS.load(Ordering::Relaxed), // wave8 GF
+        MOUNT_WAIT_FAILED.load(Ordering::Relaxed)
     )
 }
 
