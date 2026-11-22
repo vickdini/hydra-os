@@ -17,12 +17,16 @@ const ACCESS_MMAP_INTERLEAVED: u32 = 0;
 /// # Safety
 /// `p` points at a readable `SndStatus` for the whole call.
 pub unsafe fn read_record(p: *const SndStatus) -> Option<SndStatus> {
+    use core::sync::atomic::{fence, Ordering};
     for _ in 0..64 {
+        // A seqlock reader: the sequence, then the record, then the sequence again
+        let first = core::ptr::read_volatile(core::ptr::addr_of!((*p).seq));
+        fence(Ordering::Acquire);
         let a = core::ptr::read_volatile(p);
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        fence(Ordering::Acquire);
         let again = core::ptr::read_volatile(core::ptr::addr_of!((*p).seq));
-        if a.seq & 1 == 0 && a.seq == again {
-            return Some(a);
+        if first & 1 == 0 && first == again {
+            return Some(SndStatus { seq: first, ..a });
         }
         core::hint::spin_loop();
     }

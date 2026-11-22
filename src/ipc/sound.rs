@@ -22,7 +22,7 @@
 //!   the new instance stops the stream.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+
 
 use crate::ipc::protocol::{
     LxSndInfo, SndStatus, ENDPOINT_LX_SOUND, ENDPOINT_SOUND_DEV, LXS_SOUND, LX_SND_BOOST, LX_SND_DRVGEN, LX_SND_GET, LX_SND_NOW, LX_SND_UNBOOST, SND_DESC_MAX, SND_RING_BYTES, SND_STATUS_STRIDE,
@@ -103,35 +103,6 @@ pub fn forwarded() -> bool {
     !crate::lx::all_kernel() && crate::lx::svc::mode(LXS_SOUND) == crate::lx::svc::SvcMode::Forward
 }
 
-/// The thread that drives each direction's stream, raised to high priority (0: none).
-static DRIVER: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-
-/// Thread `tid` drives direction `dir`: high priority (a Linux thread at normal priority
-/// only); the previous driver gets its own priority back.
-fn boost(dir: usize, tid: u64) {
-    let old = DRIVER[dir].load(Ordering::Relaxed);
-    if tid == 0 || old == tid {
-        return;
-    }
-    DRIVER[dir].store(tid, Ordering::Relaxed);
-    if old != 0 {
-        crate::compat::linux::extra::reapply_priority(old);
-    }
-    crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| {
-        if t.personality.is_posix() && t.priority == crate::task::TaskPriority::Normal {
-            t.priority = crate::task::TaskPriority::High;
-        }
-    });
-}
-
-/// Direction `dir` has no driver any more.
-fn unboost(dir: usize) {
-    let old = DRIVER[dir].swap(0, Ordering::Relaxed);
-    if old != 0 {
-        crate::compat::linux::extra::reapply_priority(old);
-    }
-}
-
 /// Fills `info` with the card and, through `give`, new handles of the service at
 /// `endpoint` (split out so the host tests run it without the memory-object tables).
 fn fill_info(info: &mut LxSndInfo, give: &mut dyn FnMut(&Arc<MemObject>) -> Result<u32, i64>) -> Result<(), i64> {
@@ -164,7 +135,7 @@ fn fill_info(info: &mut LxSndInfo, give: &mut dyn FnMut(&Arc<MemObject>) -> Resu
 /// `SYS_LX_OBJ(LX_OBJ_SND, sub-op, x, y)` from host `h`: the sound service's operations
 /// (the `LX_SND_*` sub-ops in `ipc/protocol.rs`).
 pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
-    if crate::lx::svc::host_of(LXS_SOUND) != h || crate::task::current_service() != Some(ENDPOINT_LX_SOUND) {
+    if !forwarded() || crate::lx::svc::host_of(LXS_SOUND) != h || crate::task::current_service() != Some(ENDPOINT_LX_SOUND) {
         return EPERM;
     }
     match op {
@@ -179,17 +150,17 @@ pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
             crate::compat::linux::vfs::copy_out(x, bytes).map_or_else(|e| e, |()| 0)
         }
         LX_SND_BOOST if x < 2 => {
-            boost(x as usize, y);
+            crate::compat::linux::snd::boost_thread(x as usize, y);
             0
         }
         LX_SND_UNBOOST if x < 2 => {
-            unboost(x as usize);
+            crate::compat::linux::snd::unboost(x as usize);
             0
         }
         LX_SND_DRVGEN => crate::ipc::service::server_of(ENDPOINT_SOUND_DEV) as i64,
         LX_SND_NOW => match x {
             0 => crate::arch::pit::now_ns() as i64,
-            1 => crate::arch::rtc::wall_base_ns() as i64,
+            1 => crate::compat::linux::snd::wall_base_ns(),
             _ => EINVAL,
         },
         _ => EINVAL,
@@ -200,12 +171,19 @@ pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
 /// rings, so the controller plays a gap until the new instance stops the stream; its
 /// driving threads get their own priority back.
 pub fn service_gone() {
-    if let Some(b) = BUFFERS.get().and_then(|b| b.as_ref()) {
-        for r in b.rings.iter().flatten() {
-            // SAFETY: the rings live for ever; the controller only reads them
-            unsafe { r.bytes().fill(0) };
-        }
+    if !forwarded() {
+        return;
     }
-    unboost(0);
-    unboost(1);
+    if let Some(b) = BUFFERS.get().and_then(|b| b.as_ref()) {
+        // The playback ring only (the controller writes the capture ring)
+        if let Some(r) = &b.rings[0] {
+            // SAFETY: the ring lives for ever; the controller only reads it
+            unsafe { core::ptr::write_bytes(crate::memory::frame_allocator::phys_to_virt(r.base), 0, (r.pages * 4096) as usize) };
+        }
+        // `/proc/asound` shows the streams closed until a new instance writes the page
+        // SAFETY: the status page lives for ever; its writer is gone
+        unsafe { core::ptr::write_bytes(crate::memory::frame_allocator::phys_to_virt(b.status.base), 0, 4096) };
+    }
+    crate::compat::linux::snd::unboost(0);
+    crate::compat::linux::snd::unboost(1);
 }

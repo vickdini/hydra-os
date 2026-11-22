@@ -137,7 +137,13 @@ static DRIVER: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU
 /// Makes the calling thread direction `dir`'s driver: high priority (a Linux thread at
 /// normal priority only), the previous driver back to its own priority.
 fn boost_caller(dir: usize) {
-    let me = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+    boost_thread(dir, crate::task::CURRENT_TID.load(Ordering::Relaxed));
+}
+
+/// wave8 GS: thread `me` becomes direction `dir`'s driver (the calling thread here, the
+/// thread a forwarded call names for the sound service, `ipc::sound`).
+pub fn boost_thread(dir: usize, me: u64) {
+    let _g = BOOSTING.lock();
     let old = DRIVER[dir].load(Ordering::Relaxed);
     if me == 0 || old == me {
         return;
@@ -153,8 +159,18 @@ fn boost_caller(dir: usize) {
     });
 }
 
+/// Serializes changes of [`DRIVER`] with the priority changes they make (wave8 GS).
+static BOOSTING: Mutex<()> = Mutex::new(());
+
+/// wave8 GS: the wall clock's offset from the monotonic clock (the sound service's
+/// timestamps).
+pub fn wall_base_ns() -> i64 {
+    crate::arch::rtc::wall_base_ns()
+}
+
 /// The device of direction `dir` was closed: its driver thread gets its own priority back.
-fn unboost(dir: usize) {
+pub fn unboost(dir: usize) {
+    let _g = BOOSTING.lock();
     let old = DRIVER[dir].swap(0, Ordering::Relaxed);
     if old != 0 {
         super::extra::reapply_priority(old);
@@ -241,6 +257,21 @@ static POSITION_TASK: AtomicBool = AtomicBool::new(false);
 /// here).
 pub fn probe() {
     if CARD.lock().is_some() || !service::is_online(ENDPOINT_SOUND_DEV) {
+        return;
+    }
+    // (one prober: the supervisor's and `start`'s calls must not both ask the driver)
+    if PROBING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    probe_once();
+    PROBING.store(false, Ordering::Release);
+}
+
+/// A probe is in progress.
+static PROBING: AtomicBool = AtomicBool::new(false);
+
+fn probe_once() {
+    if CARD.lock().is_some() {
         return;
     }
     let reply = {
@@ -1368,7 +1399,9 @@ fn program(dir: usize, hw: &HwSetup) -> Result<usize, i64> {
         w[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
     }
     match service::call(ENDPOINT_SOUND_DEV, Message::with_args(MSG_SND_SETUP, [0; 4]), service::CALL_TIMEOUT_TICKS) {
-        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Ok(m.args[1] as usize),
+        // (wave8 GS: the slot indexes the one-page position buffer: never trust a larger one)
+        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 && m.args[1] < 512 => Ok(m.args[1] as usize),
+        Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Err(EIO),
         Ok(m) => Err(m.args[0] as i64),
         Err(e) => Err(e),
     }
@@ -2159,6 +2192,7 @@ pub fn open(minor: u64, nonblock: bool) -> Result<Arc<dyn CharDevice>, i64> {
             *s = Stream::new();
             s.open = true;
             s.opened_ns = crate::arch::pit::now_ns();
+            LAST_SYNC[dir].store(0, Ordering::Relaxed); // wave8 GS: gaps of this session only
             drop(s);
             Ok(Arc::new(PcmFile { dir, nonblock: AtomicBool::new(nonblock) }))
         }

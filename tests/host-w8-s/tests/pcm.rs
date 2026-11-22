@@ -241,10 +241,17 @@ fn writei_copies_until_full_then_blocks() {
     // A stopped stream ends a transfer
     e.drop_stream(0, &mut hw);
     assert_eq!(e.xfer_next(0, 10, 0, false, &mut hw), Xfer::Done(EBADFD));
-    // Prepared and full: EAGAIN, not a wait
+    // Prepared and full (a start threshold beyond the buffer): EAGAIN, not a wait
     e.prepare(0, &mut hw);
-    e.xfer_commit(0, 4095, &mut hw);
-    e.xfer_commit(0, 1, &mut hw);
+    let mut sw = vec![0u8; 136];
+    put_u64(&mut sw, 16, 1024);
+    put_u64(&mut sw, 32, 8192);
+    put_u64(&mut sw, 40, 4096);
+    e.sw_params(0, &mut sw);
+    e.xfer_commit(0, 4096, &mut hw);
+    assert_eq!(e.streams[0].state, ST_PREPARED);
+    assert_eq!(e.xfer_next(0, 10, 0, false, &mut hw), Xfer::Done(EAGAIN));
+    assert_eq!(e.xfer_next(0, 10, 3, false, &mut hw), Xfer::Done(3));
     e.drop_stream(0, &mut hw);
 }
 

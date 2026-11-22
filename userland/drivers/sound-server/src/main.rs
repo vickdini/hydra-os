@@ -119,7 +119,7 @@ impl Hw for Real {
     }
 
     fn position(&self, slot: usize) -> u64 {
-        if slot >= 512 {
+        if slot >= 512 || hda().pos.is_null() {
             return 0;
         }
         // SAFETY: the position page is mapped for the process's life; the slot is in it
@@ -129,7 +129,7 @@ impl Hw for Real {
     fn reset_position(&mut self, slot: usize) {
         // The controller writes the slot again once the stream runs; a stale position left
         // from the previous run would count as a leap forward (an underrun at once)
-        if slot < 512 {
+        if slot < 512 && !hda().pos.is_null() {
             // SAFETY: the position page is mapped read-write for the process's life
             unsafe { core::ptr::write_volatile((hda().pos as *mut u32).add(slot * 2), 0) };
         }
@@ -234,6 +234,9 @@ fn kept_get(i: usize) -> Option<Vec<u8>> {
     KEPT.lock().as_ref().and_then(|k| k.get(i).map(|b| b.to_vec()))
 }
 
+/// The state last kept per direction.
+static KEPT_STATE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
 /// Keeps direction `dir`'s stream.
 fn keep_stream(e: &Engine, dir: usize) {
     kept_put(REC_STREAM + dir, &e.streams[dir].encode());
@@ -297,7 +300,8 @@ fn main(args: &[&str]) {
     }
     let mut last_check = 0u64;
     loop {
-        let timeout = if BUSY.load(Ordering::Acquire) { 1 } else { 100 };
+        // (waiters too: a worker may have queued one after the last tick computed BUSY)
+        let timeout = if BUSY.load(Ordering::Acquire) || !WAITERS.lock().is_empty() { 1 } else { 100 };
         match svc.recv(timeout) {
             Event::Request(id, _) => svc.reply(id, &Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
             Event::Notify(_) | Event::Idle => {}
@@ -396,6 +400,7 @@ fn adopt_objects() {
         let _ = hw.trigger(dir, false);
     }
     if found.is_empty() {
+        kept_put(REC_SUBS, &[0u8; KEPT_REC]);
         return;
     }
     for o in &found {
@@ -404,6 +409,7 @@ fn adopt_objects() {
         }
     }
     if sys::lx_svc_adopt().is_err() {
+        kept_put(REC_SUBS, &[0u8; KEPT_REC]);
         return; // not a Transparent restart: the kernel makes them stale
     }
     let subs: Vec<u32> = kept_get(REC_SUBS).map_or_else(Vec::new, |b| (0..(get_u32(&b, 0) as usize).min(KEPT_REC / 4 - 1)).map(|i| get_u32(&b, 4 + i * 4)).collect());
@@ -412,6 +418,7 @@ fn adopt_objects() {
     let now = now_ns();
     for o in found.iter().filter(|o| o.kind == LX_OBJ_KIND_SND_CTL || o.kind == LX_OBJ_KIND_SND_PCM) {
         if !objs::reserve(o.slot) {
+            let _ = sys::lx_svc_dead(o.slot);
             continue;
         }
         let minor = (o.key & 0xFF) | (o.key >> 12) & !0xFF;
@@ -441,6 +448,13 @@ fn adopt_objects() {
         keep_stream(&e, dir);
         write_status(&e, dir);
     }
+    keep_subs(&objects);
+    drop(objects);
+    // Their readiness at once (a program may be polling), and the main thread ticks
+    update_ready(&e);
+    objs::flush();
+    BUSY.store(true, Ordering::Release);
+    let objects = OBJECTS.lock();
     println!("[sound-server] adopted {} devices of the previous instance (streams: {} {})", objects.len(), state_name(e.streams[0].state), state_name(e.streams[1].state));
 }
 
@@ -560,12 +574,14 @@ fn tick() {
     let mut e = ENGINE.lock();
     report(&e);
     let before = [e.streams[0].state, e.streams[1].state];
-    let running = e.tick(&mut hw);
-    // The sound driver restarted: its streams are gone (the controller was reset)
-    let programmed = e.streams.iter().any(|s| s.programmed);
-    if programmed || running {
-        check_driver(&mut e);
-    }
+    e.tick(&mut hw);
+    // The sound driver restarted: its streams are gone (the controller was reset). Looked
+    // at idle too, so a restart while nothing plays restores the volume and is not taken
+    // for one later
+    check_driver(&mut e);
+    let waiting = run_waiters(&mut e, &mut hw);
+    // (after the waiters: a transfer they finished may have started a stream)
+    let running = e.streams.iter().any(|s| s.active());
     for dir in 0..2 {
         if e.streams[dir].open {
             write_status(&e, dir);
@@ -574,7 +590,6 @@ fn tick() {
             keep_stream(&e, dir);
         }
     }
-    let waiting = run_waiters(&mut e, &mut hw);
     update_ready(&e);
     BUSY.store(running || waiting, Ordering::Release);
 }
@@ -603,20 +618,18 @@ fn check_driver(e: &mut Engine) {
 
 /// Serves the calls that wait; whether any still waits.
 fn run_waiters(e: &mut Engine, hw: &mut Real) -> bool {
-    let list: Vec<(u64, Wait)> = core::mem::take(&mut *WAITERS.lock());
-    if list.is_empty() {
+    // Under the lock throughout: a signal's `interrupted` must find a waiter that is being
+    // looked at (it waits for the lock), never miss it
+    let mut ws = WAITERS.lock();
+    if ws.is_empty() {
         return false;
     }
-    let mut keep = Vec::new();
+    let list: Vec<(u64, Wait)> = core::mem::take(&mut *ws);
     for (id, w) in list {
-        match step_wait(e, hw, id, w) {
-            Some(w) => keep.push((id, w)),
-            None => {}
+        if let Some(w) = step_wait(e, hw, id, w) {
+            ws.push((id, w));
         }
     }
-    let mut ws = WAITERS.lock();
-    keep.extend(ws.drain(..));
-    *ws = keep;
     !ws.is_empty()
 }
 
@@ -651,6 +664,7 @@ fn step_wait(e: &mut Engine, hw: &mut Real, id: u64, w: Wait) -> Option<Wait> {
                 None
             } else if sys::uptime_ticks() >= deadline {
                 e.drop_stream(dir, hw);
+                keep_stream(e, dir);
                 let _ = sys::lx_complete(id, EIO);
                 None
             } else {
@@ -762,6 +776,7 @@ fn open(cx: &Cx, rdev: u64, flags: u64) -> i64 {
             if let Err(err) = e.open(dir, cx.c.tgid as u32, now_ns()) {
                 return err;
             }
+            LAST_SYNC[dir].store(0, Ordering::Relaxed);
             keep_stream(&e, dir);
             write_status(&e, dir);
             (Obj::Pcm { dir }, LX_OBJ_KIND_SND_PCM, if dir == 0 { b"/dev/snd/pcmC0D0p" } else { b"/dev/snd/pcmC0D0c" })
@@ -784,18 +799,20 @@ fn open(cx: &Cx, rdev: u64, flags: u64) -> i64 {
         }
     };
     let dev = makedev(MAJOR, minor);
+    // Known before the descriptor exists: another thread may use or close it at once
+    let ready = match &obj {
+        Obj::Pcm { dir } => ENGINE.lock().poll_bits(*dir),
+        Obj::Ctl { .. } => 0,
+    };
+    objs::set(slot, ready, 0);
+    OBJECTS.lock().insert(slot, obj);
     match objs::install_keyed(cx, slot, kind, flags as u32 & 0o2004000, 0o020660, name, 0, dev) {
-        Ok(fd) => {
-            let ready = match &obj {
-                Obj::Pcm { dir } => ENGINE.lock().poll_bits(*dir),
-                Obj::Ctl { .. } => 0,
-            };
-            OBJECTS.lock().insert(slot, obj);
-            objs::set(slot, ready, 0);
-            fd
-        }
+        Ok(fd) => fd,
         Err(err) => {
-            undo(&obj);
+            if let Some(obj) = OBJECTS.lock().remove(&slot) {
+                undo(&obj);
+            }
+            objs::set(slot, 0, 0);
             objs::free(slot);
             err
         }
@@ -868,6 +885,10 @@ fn ctl_read_now(slot: u32, buf: u64, len: usize, id: u64, _later: bool) -> i64 {
             return if *subscribed { EAGAIN } else { EBADFD };
         }
     }
+    // The readiness follows what is left
+    let left = matches!(OBJECTS.lock().get(&slot), Some(Obj::Ctl { events, .. }) if !events.is_empty());
+    objs::set(slot, if left { POLLIN | POLLRDNORM } else { 0 }, 0);
+    objs::flush();
     match sys::lx_write(id, buf, &out) {
         Ok(()) => out.len() as i64,
         Err(e) => e,
@@ -998,7 +1019,7 @@ fn ctl_ioctl(cx: &Cx, slot: u32) -> i64 {
             };
             let mut objects = OBJECTS.lock();
             let Some(Obj::Ctl { subscribed, .. }) = objects.get_mut(&slot) else { return EBADF };
-            if v == -1 {
+            if v < 0 {
                 let cur = *subscribed as i32;
                 drop(objects);
                 return write_int(cx, arg, cur);
@@ -1220,7 +1241,10 @@ fn pcm_ioctl(cx: &Cx, dir: usize) -> Answer {
 fn after_pcm(dir: usize, keep: bool) {
     let e = ENGINE.lock();
     write_status(&e, dir);
-    if keep {
+    // (a frequent call that changed the state, as SYNC_PTR finding an underrun, is kept too)
+    let state = e.streams[dir].state as u64;
+    if keep || KEPT_STATE[dir].swap(state, Ordering::Relaxed) != state {
+        KEPT_STATE[dir].store(state, Ordering::Relaxed);
         keep_stream(&e, dir);
     }
     let active = e.streams.iter().any(|s| s.active());

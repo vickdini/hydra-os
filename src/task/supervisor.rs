@@ -423,9 +423,10 @@ fn hda_args() -> Option<Vec<String>> {
 /// are not switched back to the kernel (`lx.sound=kernel`, `lx=kernel`). The kernel asks the
 /// driver about the card first (`snd::probe`): the service takes it from there.
 fn sound_server_args() -> Option<Vec<String>> {
-    if !crate::ipc::sound::forwarded() || !service::is_online(crate::ipc::protocol::ENDPOINT_SOUND_DEV) {
+    if !crate::ipc::sound::forwarded() {
         return None;
     }
+    // (a restart while the driver itself restarts: the card is known from the first probe)
     crate::compat::linux::snd::probe();
     crate::compat::linux::snd::card()?;
     Some(alloc::vec![String::from("workers=3")])

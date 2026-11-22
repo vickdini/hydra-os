@@ -252,9 +252,9 @@ pub fn alsa_resendable(req: u64) -> bool {
         req as u32,
         // PCM: PVERSION, INFO, STATUS, DELAY, HWSYNC, SYNC_PTR, STATUS_EXT
         0x8004_4100 | 0x8120_4101 | 0x8098_4120 | 0x8008_4121 | 0x0000_4122 | 0xC088_4123 | 0xC098_4124
-        // control: PVERSION, CARD_INFO, ELEM_LIST, ELEM_INFO, ELEM_READ, TLV_READ,
-        // PCM_NEXT_DEVICE, PCM_INFO, POWER_STATE
-        | 0x8004_5500 | 0x8178_5501 | 0xC050_5510 | 0xC110_5511 | 0xC4C8_5512 | 0xC008_551A | 0x8004_5530 | 0xC004_5530 | 0xC120_5531 | 0x8004_55D1
+        // control: PVERSION, CARD_INFO, ELEM_LIST, ELEM_INFO, ELEM_READ, TLV_READ, PCM_INFO,
+        // POWER_STATE (not PCM_NEXT_DEVICE: it overwrites its argument with the answer)
+        | 0x8004_5500 | 0x8178_5501 | 0xC050_5510 | 0xC110_5511 | 0xC4C8_5512 | 0xC008_551A | 0xC120_5531 | 0x8004_55D1
     )
 }
 // wave8 GS end
