@@ -658,6 +658,17 @@ Branch `w8-display`. What sections 3.2, 4 and 5 proposed, as it was built; the k
 - **Opens during a restart** wait for the service (`lx::dev_open`); they never reach the
   kernel copy meanwhile.
 
+- **Measured** (KVM, 2 CPUs, 1280x800, same hour, alternating, 2 runs each: Firefox on
+  Wikipedia with PgDn/PgUp once a second, `scratch/d_bench2.sh`; counters: the service's
+  `[display]` and the kernel copy's `[drm]` line, one per minute): pictures per minute
+  1738-3287 through the service, 2070-3217 through the kernel copy (at most about 55 a
+  second either way on this loaded host; the service never exceeds 60); 10 DRM calls per
+  picture in both; copy per picture 0.73-1.38 ms average through the service (wall time,
+  preemption included), 0.65-0.84 ms in the kernel copy (inside the call), section 2.3 had
+  0.65-1.03 ms. Behind the console the session makes the calls of the one frame in flight
+  (8) and then none (Ctrl+Alt+F1 runs with an animating desktop, d3); the scrolling test's
+  console phase was idle in both modes, so it does not separate them.
+
 ## Appendix: reproducing
 
 - **Hooks:** `python tools/displaybench/instrument.py E:\os-N` adds them to a tree (it copies
