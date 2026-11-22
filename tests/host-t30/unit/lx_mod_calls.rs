@@ -639,3 +639,50 @@ fn slots_of_callers_killed_after_a_crash_are_reclaimed_when_the_table_is_full() 
         }
     });
 }
+
+// wave8 GX2 begin
+/// A call being served that its worker marked safe to send again (`LX_CALL_RESEND_OFF` holds
+/// its id: lx-net's receive before it takes the data) is sent again after a Transparent
+/// restart instead of failing with EIO; a stale mark (another call's id) does not count.
+#[test]
+fn a_call_marked_safe_is_sent_again_after_a_transparent_restart() {
+    let sim = world();
+    restart::configure(LXS_TEST, restart::RestartClass::Transparent);
+    let _s = start(&sim, LXS_TEST, 300, 1, true, handler(|s| {
+        // op 3 is not idempotent: only the mark can save it
+        let mark = match s.call.args[1] {
+            1 => s.call.id,
+            _ => s.call.id + 1,
+        };
+        // SAFETY: the worker's syscall page
+        unsafe { core::ptr::write_volatile(s.page.add(LX_CALL_RESEND_OFF) as *mut u64, mark) };
+        server_gone(LXS_TEST);
+        (0, 0)
+    }));
+    let got = StdArc::new(StdAtomicU64::new(u64::MAX));
+    let g2 = got.clone();
+    sim.spawn(Task::linux(101, 100), move || {
+        crate::world::bkl_enter();
+        let r = forward(&frame(LX_TEST_NR, [3, 1, 0, 0, 0, 0])).unwrap();
+        g2.store(r as u64, Ordering::Release);
+    });
+    sim.run_others();
+    assert_eq!(got.load(Ordering::Acquire), u64::MAX, "101 waits for the new instance");
+    let _s2 = start(&sim, LXS_TEST, 400, 1, true, handler(|s| (s.call.args[1] as i64 * 100, 0)));
+    sim.run_others();
+    assert_eq!(got.load(Ordering::Acquire), 100);
+}
+
+#[test]
+fn a_stale_resend_mark_does_not_count() {
+    let sim = world();
+    restart::configure(LXS_TEST, restart::RestartClass::Transparent);
+    let _s3 = start(&sim, LXS_TEST, 500, 1, true, handler(|s| {
+        // SAFETY: as above
+        unsafe { core::ptr::write_volatile(s.page.add(LX_CALL_RESEND_OFF) as *mut u64, s.call.id + 1) };
+        server_gone(LXS_TEST);
+        (0, 0)
+    }));
+    assert_eq!(test_call(3, 2, 0), EIO);
+}
+// wave8 GX2 end

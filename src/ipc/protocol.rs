@@ -838,6 +838,15 @@ pub const LX_CALL_INTERRUPTED: u64 = 1;
 /// [`LxCall::flags`] bit (Group 12): the call is made again after its net wait ended
 /// (`LX_OBJ_NETWAIT`): a `connect` then waits for its handshake instead of starting one.
 pub const LX_CALL_RETRIED: u64 = 2;
+// wave8 GX2 begin
+/// Offset in the worker's syscall page (after [`LxCall`], before the copy header) of a word
+/// the worker writes: the id of the call it serves while that call has had no effect yet
+/// (it may be sent again if the service dies now: a Transparent restart re-sends it instead
+/// of failing it with `EIO`), 0 once the effect begins. lx-net marks a receive until it
+/// takes the data from net-server.
+pub const LX_CALL_RESEND_OFF: usize = 0x1F8;
+const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_CALL_RESEND_OFF);
+// wave8 GX2 end
 
 // The copy-in/copy-out table (wave 4, Group 10). For the calls the kernel's table
 // (`src/lx/copy.rs`) describes, the kernel copies pointer arguments (paths, small structures,

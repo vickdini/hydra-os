@@ -1028,6 +1028,7 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         return Out::Done(stack::ENETDOWN);
     }
     let snap = stack::word_raw(lid);
+    crate::socket::resend_safe(cx, false); // wave8 GX2: the connection is taken now
     let Some(cid) = stack::tcp_accept(lid) else {
         prog.wait_on = Some((lid, snap));
         return if cx.nonblock() { Out::Done(EAGAIN) } else { prog.wait(timeout) };
@@ -1104,6 +1105,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
             Ok(d) => d,
             Err(e) => return Out::Done(e),
         };
+        crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram goes now
         return Out::Done(match stack::icmp_send(id, ip, &data) {
             Ok(n) => n as i64,
             Err(e) => e,
@@ -1135,11 +1137,19 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
                 Err(e) => return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { e }),
             };
             let snap = stack::word_raw(id);
+            crate::socket::resend_safe(cx, false); // wave8 GX2: the bytes go now
             match stack::tcp_send(id, &chunk) {
                 Ok(0) => {
                     prog.wait_on = Some((id, snap));
                     if nonblock {
                         return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { EAGAIN });
+                    }
+                    // wave8 GX2: in lx-net a call waiting here is sent again from the start
+                    // after a restart (a waiting call has no effect yet, by the kernel's
+                    // contract): with part of it sent already, the part is answered now
+                    // (a short write) instead of waiting, so no byte is ever sent twice
+                    if prog.sent > 0 && crate::sockkept::kept_active() {
+                        return Out::Done(prog.sent as i64);
                     }
                     return prog.wait(timeout);
                 }
@@ -1177,6 +1187,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
         Ok(d) => d,
         Err(e) => return Out::Done(e),
     };
+    crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram goes now
     Out::Done(match stack::udp_send(id, ip, port, &data) {
         Ok(n) => n as i64,
         Err(e) => e,
@@ -1204,6 +1215,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
         }
         loop {
             let snap = stack::word_raw(id);
+            if !peek {
+                crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram is taken now
+            }
             match stack::icmp_recv(id, peek) {
                 None => {
                     prog.wait_on = Some((id, snap));
@@ -1231,6 +1245,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
             return Ok(Some((Vec::new(), None, false)));
         }
         let snap = stack::word_raw(id);
+        if !peek {
+            crate::socket::resend_safe(cx, false); // wave8 GX2: the bytes are taken now
+        }
         return match stack::tcp_recv(id, cap, peek) {
             Ok((d, false)) if d.is_empty() => {
                 if stack::tcp_state(id) == stack::CLOSED {
@@ -1250,6 +1267,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
     let id = sock.lock().udp_id(slot)?;
     let snap = stack::word_raw(id);
     prog.wait_on = Some((id, snap));
+    if !peek {
+        crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram is taken now
+    }
     match stack::udp_recv(id, peek) {
         Some((ip, port, mut data, whole, arrived)) => {
             sock.lock().rx_stamp = Some(arrived);

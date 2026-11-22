@@ -158,6 +158,13 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
     }
     // (Unix sockets keep their own waiters, in lx-ipc's `unix`: dispatched before this;
     // wave 8)
+    // wave8 GX2: a receive, accept or send on an Internet socket has no effect until it
+    // takes data or a connection from net-server or hands it bytes: until then
+    // (`resend_safe(cx, false)` at that point) a restart of lx-net sends it again instead of
+    // failing it
+    if matches!(cx.nr, 0 | 19 | 45 | 47 | 43 | 288 | 1 | 20 | 44 | 46) && crate::obj::kind_of(slot) == LX_OBJ_KIND_INET {
+        resend_safe(cx, true);
+    }
     let mut prog = Prog::new();
     loop {
         let seq = SEQ[slot as usize].load(Ordering::Acquire);
@@ -205,6 +212,20 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
         }
     }
 }
+
+// wave8 GX2 begin
+/// Marks the call being served (in the worker's syscall page, `LX_CALL_RESEND_OFF`) safe to
+/// send again after a crash (`on`), or no longer: its effect begins. Nothing for a call
+/// tried again by the main thread (no page: it is pending, sent again anyway).
+pub fn resend_safe(cx: &Cx, on: bool) {
+    let p = cx.page();
+    if !p.is_null() {
+        // SAFETY: the worker's own syscall page; the word lies after the call, before the
+        // copy header
+        unsafe { core::ptr::write_volatile(p.add(LX_CALL_RESEND_OFF) as *mut u64, if on { cx.id } else { 0 }) };
+    }
+}
+// wave8 GX2 end
 
 /// Calls waiting in the kernel on a net-server handle (`LX_OBJ_NETWAIT`): `(request id, slot,
 /// process)`. The kernel completes them itself (`LX_RETRY`); an entry stays here until a

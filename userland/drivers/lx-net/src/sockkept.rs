@@ -62,6 +62,11 @@ pub unsafe fn open(base: *mut u8, size: usize) -> Adopted {
     a
 }
 
+/// Whether a kept-state area is open (lx-net; never in linux-server).
+pub fn kept_active() -> bool {
+    KEPT.lock().is_some()
+}
+
 /// A free record for a new socket: its number plus one, 0 when none (not kept).
 pub fn alloc() -> u32 {
     let mut g = KEPT.lock();

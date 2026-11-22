@@ -2480,6 +2480,21 @@ fn server_gone(h: SvcId) {
     let tgid = x.lx(|s| {
         let tgid = s.server_tgid;
         s.server_tgid = 0;
+        // wave8 GX2 begin: the calls being served that their worker marked safe to send again
+        // (no effect yet: `LX_CALL_RESEND_OFF` holds the request's id), read before the
+        // workers' pages go
+        let mut safe = [false; MAX_REQS];
+        if resend {
+            for w in s.workers.iter() {
+                if w.req < MAX_REQS && s.reqs[w.req].state == RState::Delivered {
+                    let p = w.call_mut() as *const u8;
+                    // SAFETY: the worker's syscall page (4 KiB) is alive while it is in the table
+                    let mark = unsafe { core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_RESEND_OFF) as *const u64) };
+                    safe[w.req] = mark != 0 && mark == s.reqs[w.req].id;
+                }
+            }
+        }
+        // wave8 GX2 end
         s.workers.clear();
         for t in x.worker_tids.iter() {
             t.store(0, Ordering::Release);
@@ -2490,6 +2505,7 @@ fn server_gone(h: SvcId) {
                 // wave6 G21: a Transparent restart's callers send their calls again (all
                 // that had no effect yet; one being served only if it is idempotent)
                 r.result = match (resend, r.state) {
+                    (true, RState::Delivered) if safe[i] => restart::LX_RESEND, // wave8 GX2
                     (true, RState::Delivered) => restart::LX_RESEND_MAYBE,
                     (true, _) => restart::LX_RESEND,
                     _ => EIO,
