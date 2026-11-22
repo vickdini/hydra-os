@@ -248,3 +248,8 @@ pub fn hotkey_switch(to_session: bool) {
 pub fn session_hidden() -> bool {
     crate::compat::linux::drm::session_hidden()
 }
+
+// Host tests: tests/host-t30 compiles this file with them (wave 8, Group I)
+#[cfg(test)]
+#[path = "../../tests/host-t30/unit/ipc_input.rs"]
+mod tests;
