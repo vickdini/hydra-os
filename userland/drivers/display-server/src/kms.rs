@@ -75,6 +75,9 @@ pub const EV_FLIP: u32 = 2;
 /// How long the screen stays with a desktop that closed its last DRM file without a master
 /// before the console takes it back: the next session (SDDM after a logout) opens sooner.
 pub const GONE_GRACE_NS: u64 = 10_000_000_000;
+/// Most completions one file may have waiting (held back behind the console they would
+/// otherwise grow without bound): more vblank events are refused with `EBUSY`.
+pub const PENDING_MAX: usize = 64;
 
 /// A buffer's memory: the service's view of a memory object.
 pub trait BoMem: Send + Sync {
@@ -379,8 +382,9 @@ impl Kms {
         Ok(bo)
     }
 
-    /// `mmap` of file `id` at byte `offset` for `len` bytes: the buffer and its first page.
-    pub fn mmap_file(&self, offset: u64, len: u64) -> Result<Arc<Bo>, i64> {
+    /// `mmap` of file `id` at byte `offset` for `len` bytes: the buffer, which the file must
+    /// hold a handle to (as Linux: another client's buffer is not mapped by its offset).
+    pub fn mmap_file(&self, id: u32, offset: u64, len: u64) -> Result<Arc<Bo>, i64> {
         if offset % PAGE != 0 {
             return Err(EINVAL);
         }
@@ -388,8 +392,11 @@ impl Kms {
         let (&start, w) = self.map_space.range(..=pgoff).next_back().ok_or(EINVAL)?;
         let bo = w.upgrade().ok_or(EINVAL)?;
         let first = pgoff - start;
-        if first * PAGE + len.max(1) > bo.size {
+        if first.checked_mul(PAGE).and_then(|b| b.checked_add(len.max(1))).map_or(true, |end| end > bo.size) {
             return Err(EINVAL);
+        }
+        if !self.files.get(&id).is_some_and(|f| f.handles.values().any(|h| Arc::ptr_eq(h, &bo))) {
+            return Err(EACCES);
         }
         Ok(bo)
     }
@@ -397,7 +404,7 @@ impl Kms {
     /// `mmap` of DMA-BUF `slot` at byte `offset` for `len` bytes.
     pub fn mmap_dmabuf(&self, slot: u32, offset: u64, len: u64) -> Result<Arc<Bo>, i64> {
         let bo = self.dmabufs.get(&slot).cloned().ok_or(EBADF)?;
-        if offset % PAGE != 0 || offset + len.max(1) > bo.size {
+        if offset % PAGE != 0 || offset.checked_add(len.max(1)).map_or(true, |end| end > bo.size) {
             return Err(EINVAL);
         }
         Ok(bo)
@@ -498,8 +505,10 @@ impl Kms {
         self.stats.cursor_updates += 1;
     }
 
-    /// The kernel changed the screen's state: shown again repaints the session.
-    pub fn state_changed(&mut self, state: u32) {
+    /// The kernel changed the screen's state: shown again repaints the session. The state is
+    /// read again here (a worker may have taken the screen since the change was noticed).
+    pub fn state_changed(&mut self) {
+        let state = self.screen.state();
         if self.taken && state == SCREEN_SHOWN {
             self.drawn_cursor = None;
             self.present();
@@ -519,7 +528,7 @@ impl Kms {
         if self.pending.is_empty() || !self.shown() {
             return None;
         }
-        Some(self.vblank.time_of(self.vblank.next_after(now_ns.saturating_sub(1))))
+        Some(self.vblank.time_of(self.vblank.next_after(now_ns)))
     }
 
     /// Blank time `now_ns` (or later) came: completes the waiting flips if the session shows;
@@ -799,6 +808,9 @@ impl Kms {
                 let (k, now) = self.now_blank();
                 if ty & 0x0400_0000 != 0 {
                     // _DRM_VBLANK_EVENT
+                    if self.pending.iter().filter(|p| p.file == id).count() >= PENDING_MAX {
+                        return Err(EBUSY);
+                    }
                     self.pending.push(Pending { file: id, kind: EV_VBLANK, user_data: get64(b, 8) });
                 }
                 let us = now / 1000;
@@ -924,6 +936,8 @@ impl Kms {
                     self.cursor_bo = c;
                 }
                 if flags & 2 != 0 {
+                    // (far off screen is off screen: no overflow in the repairs)
+                    let (x, y) = (x.clamp(-0x10000, 0x10000), y.clamp(-0x10000, 0x10000));
                     self.file(id)?.last_cursor = (x, y);
                     self.cursor = (x, y);
                 }
@@ -1095,9 +1109,10 @@ impl Kms {
                 if !self.scanout.as_ref().is_some_and(|s| Arc::ptr_eq(s, &fb)) {
                     return Ok(0);
                 }
-                let n = get32(b, 12).min(256);
+                let n = get32(b, 12);
                 let ptr = get64(b, 16);
-                if n == 0 || ptr == 0 {
+                // (more rectangles than we look at: the whole picture)
+                if n == 0 || ptr == 0 || n > 256 {
                     self.present();
                     return Ok(0);
                 }

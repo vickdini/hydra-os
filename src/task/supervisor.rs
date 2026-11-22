@@ -281,9 +281,12 @@ fn vfs_server_args() -> Option<Vec<String>> {
 // wave7 G7-1 end
 
 // wave8 GD begin
-/// display-server: always started (two workers); it exits by itself when no service id
-/// names its endpoint for forwarding (`lx.display=kernel`, `lx=kernel`).
+/// display-server (two workers): not started when the kernel's `drm.rs` serves the display
+/// (`lx.display=kernel`, `lx=kernel`); it would only exit again.
 fn display_server_args() -> Option<Vec<String>> {
+    if crate::lx::svc::mode(crate::ipc::protocol::LXS_DISPLAY) != crate::lx::svc::SvcMode::Forward || crate::lx::all_kernel() {
+        return None;
+    }
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave8 GD end

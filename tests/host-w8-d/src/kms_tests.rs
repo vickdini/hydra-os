@@ -19,6 +19,14 @@ fn iowr(size: usize, nr: u64) -> u64 {
     ioc(3, size, nr)
 }
 
+/// A call with Linux's own encoding: `_IO(nr)` (no argument block) or `_IOW` of `b`.
+fn call_io(k: &mut Kms, env: &FakeEnv, file: u32, nr: u64) -> i64 {
+    k.ioctl(env, file, ioc(0, 0, nr), 0)
+}
+fn call_iow(k: &mut Kms, env: &FakeEnv, file: u32, nr: u64, b: &mut [u8]) -> i64 {
+    k.ioctl(env, file, ioc(1, b.len(), nr), b.as_mut_ptr() as u64)
+}
+
 fn new() -> (Kms, Arc<ScreenView>, FakeEnv) {
     let (s, v) = FakeScreen::new(W, H, true);
     (Kms::new(s, "0000:00:02.0".into(), 60_000), v, FakeEnv::default())
@@ -77,7 +85,7 @@ fn flip(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32, data: u64) -> i64 {
 
 /// The bytes of buffer `handle` of file `f` (through `mmap`'s lookup).
 fn fill(k: &Kms, map_off: u64, size: u64, v: u32) {
-    let bo = k.mmap_file(map_off, size).unwrap();
+    let bo = k.mmap_file(7, map_off, size).unwrap();
     let p = bo.mem.ptr() as *mut u32;
     for i in 0..(size / 4) as usize {
         unsafe { *p.add(i) = v };
@@ -178,7 +186,7 @@ fn completions_are_held_back_while_the_console_shows() {
     assert_eq!(flip(&mut k, &env, 7, fb, 1), 0);
     // Ctrl+Alt+F1
     v.state.store(SCREEN_HIDDEN, std::sync::atomic::Ordering::SeqCst);
-    k.state_changed(SCREEN_HIDDEN);
+    k.state_changed();
     assert!(k.hidden() && !k.shown());
     assert!(k.next_due(0).is_none(), "no blank to wait for");
     for t in 1..10 {
@@ -191,9 +199,9 @@ fn completions_are_held_back_while_the_console_shows() {
     call(&mut k, &env, 7, 0xA0, &mut r);
     assert_eq!(k.stats.ioctls_hidden, 1);
     // Ctrl+Alt+F2: repainted, and the completion comes at the next blank
-    fill(&k, k.mmap_file(0x10_0000 * 4096, 4).map(|b| b.map_pgoff * 4096).unwrap(), (W * H * 4) as u64, 0xFF00_FF00);
+    fill(&k, k.mmap_file(7, 0x10_0000 * 4096, 4).map(|b| b.map_pgoff * 4096).unwrap(), (W * H * 4) as u64, 0xFF00_FF00);
     v.state.store(SCREEN_SHOWN, std::sync::atomic::Ordering::SeqCst);
-    k.state_changed(SCREEN_SHOWN);
+    k.state_changed();
     assert_eq!(v.pixel(5, 5), 0xFF00_FF00, "repainted from the current picture");
     let due = k.next_due(20 * PERIOD + 1).unwrap();
     assert_eq!(due, 21 * PERIOD);
@@ -206,7 +214,7 @@ fn nothing_is_drawn_while_hidden() {
     let (mut k, v, env) = new();
     let (fb, h, off) = desktop(&mut k, &env, 1);
     v.state.store(SCREEN_HIDDEN, std::sync::atomic::Ordering::SeqCst);
-    k.state_changed(SCREEN_HIDDEN);
+    k.state_changed();
     fill(&k, off, (W * H * 4) as u64, 2);
     let before = k.stats.presents;
     assert_eq!(flip(&mut k, &env, 7, fb, 1), 0);
@@ -292,7 +300,7 @@ fn prime_export_and_import_share_the_buffer() {
     // The DMA-BUF maps the same memory
     let via_buf = k.mmap_dmabuf(500, 0, size).unwrap();
     let off = map_off(&mut k, &env, 7, h);
-    let via_file = k.mmap_file(off, size).unwrap();
+    let via_file = k.mmap_file(7, off, size).unwrap();
     assert!(Arc::ptr_eq(&via_buf, &via_file));
     assert_eq!(k.mmap_dmabuf(500, 0, size + 4096).err(), Some(EINVAL));
     // Importing it into the same file gives the same handle; into another file a new one
@@ -307,13 +315,18 @@ fn prime_export_and_import_share_the_buffer() {
     // A descriptor that is no DMA-BUF of ours
     put32(&mut i, 8, 55);
     assert_eq!(call(&mut k, &env, 8, 0x2e, &mut i), EBADF);
-    // The buffer outlives its handle while the DMA-BUF lives
+    // The buffer outlives every GEM handle while the DMA-BUF lives (GEM_CLOSE: _IOW, 8 bytes)
+    let weak = Arc::downgrade(&via_buf);
+    drop((via_buf, via_file));
     let mut g = [0u8; 8];
     put32(&mut g, 0, h);
-    assert_eq!(call(&mut k, &env, 7, 0x09, &mut g), 0);
-    assert!(k.mmap_dmabuf(500, 0, 4096).is_ok());
+    assert_eq!(call_iow(&mut k, &env, 7, 0x09, &mut g), 0);
+    put32(&mut g, 0, h8);
+    assert_eq!(call_iow(&mut k, &env, 8, 0x09, &mut g), 0);
+    assert!(weak.upgrade().is_some() && k.mmap_dmabuf(500, 0, 4096).is_ok());
     k.dmabuf_closed(500);
     assert_eq!(k.mmap_dmabuf(500, 0, 4096).err(), Some(EBADF));
+    assert!(weak.upgrade().is_none(), "the last reference went with the DMA-BUF");
 }
 
 #[test]
@@ -322,15 +335,15 @@ fn mmap_offsets_are_checked() {
     k.open(7);
     let (h, _p, size) = dumb(&mut k, &env, 7, 16, 16);
     let off = map_off(&mut k, &env, 7, h);
-    assert!(k.mmap_file(off, size).is_ok());
-    assert_eq!(k.mmap_file(off + 1, 10).err(), Some(EINVAL));
-    assert_eq!(k.mmap_file(off, size + 4096).err(), Some(EINVAL));
-    assert_eq!(k.mmap_file(4096, 4096).err(), Some(EINVAL));
-    // After the last handle went, the offset no longer maps
-    let mut g = [0u8; 8];
+    assert!(k.mmap_file(7, off, size).is_ok());
+    assert_eq!(k.mmap_file(7, off + 1, 10).err(), Some(EINVAL));
+    assert_eq!(k.mmap_file(7, off, size + 4096).err(), Some(EINVAL));
+    assert_eq!(k.mmap_file(7, 4096, 4096).err(), Some(EINVAL));
+    // After the last handle went, the offset no longer maps (DESTROY_DUMB: 4 bytes)
+    let mut g = [0u8; 4];
     put32(&mut g, 0, h);
     assert_eq!(call(&mut k, &env, 7, 0xB4, &mut g), 0);
-    assert_eq!(k.mmap_file(off, 4096).err(), Some(EINVAL));
+    assert_eq!(k.mmap_file(7, off, 4096).err(), Some(EINVAL));
 }
 
 #[test]
@@ -354,13 +367,14 @@ fn master_rules() {
     let (mut k, _v, env) = new();
     k.open(1);
     k.open(2);
-    let mut b = [0u8; 8];
-    assert_eq!(call(&mut k, &env, 2, 0x1e, &mut b), EBUSY, "1 is master");
-    assert_eq!(call(&mut k, &env, 2, 0x11, &mut b), EACCES);
-    assert_eq!(call(&mut k, &env, 1, 0x11, &mut b), 0);
-    assert_eq!(call(&mut k, &env, 1, 0x1f, &mut b), 0);
-    assert_eq!(call(&mut k, &env, 1, 0x1f, &mut b), EINVAL);
-    assert_eq!(call(&mut k, &env, 2, 0x1e, &mut b), 0);
+    // SET_MASTER / DROP_MASTER are _IO; AUTH_MAGIC is _IOW of 4 bytes
+    let mut b = [0u8; 4];
+    assert_eq!(call_io(&mut k, &env, 2, 0x1e), EBUSY, "1 is master");
+    assert_eq!(call_iow(&mut k, &env, 2, 0x11, &mut b), EACCES);
+    assert_eq!(call_iow(&mut k, &env, 1, 0x11, &mut b), 0);
+    assert_eq!(call_io(&mut k, &env, 1, 0x1f), 0);
+    assert_eq!(call_io(&mut k, &env, 1, 0x1f), EINVAL);
+    assert_eq!(call_io(&mut k, &env, 2, 0x1e), 0);
     assert_eq!(setcrtc(&mut k, &env, 1, 100), EACCES);
 }
 
@@ -381,8 +395,7 @@ fn a_session_without_master_keeps_the_screen_for_the_grace_time() {
     let (mut k, v, env) = new();
     let _ = desktop(&mut k, &env, 1);
     // logind dropped mastership before the desktop closed its file
-    let mut b = [0u8; 8];
-    assert_eq!(call(&mut k, &env, 7, 0x1f, &mut b), 0);
+    assert_eq!(call_io(&mut k, &env, 7, 0x1f), 0);
     v.set_now(5_000_000_000);
     k.close(7);
     assert_eq!(v.gives.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -392,7 +405,7 @@ fn a_session_without_master_keeps_the_screen_for_the_grace_time() {
     // A new session within the grace time keeps it
     let (mut k, v, env) = new();
     let _ = desktop(&mut k, &env, 1);
-    assert_eq!(call(&mut k, &env, 7, 0x1f, &mut b), 0);
+    assert_eq!(call_io(&mut k, &env, 7, 0x1f), 0);
     k.close(7);
     k.open(9);
     assert!(!k.check_gone(u64::MAX / 2));
@@ -431,7 +444,7 @@ fn reads_take_whole_events_only() {
 fn rmfb_of_the_shown_picture_blacks_the_screen() {
     let (mut k, v, env) = new();
     let (fb, ..) = desktop(&mut k, &env, 0xFFFF_FFFF);
-    let mut b = [0u8; 8];
+    let mut b = [0u8; 4];
     put32(&mut b, 0, fb);
     assert_eq!(call(&mut k, &env, 8, 0xAF, &mut b), ENOENT, "not its owner (and no such file)");
     assert_eq!(call(&mut k, &env, 7, 0xAF, &mut b), 0);
@@ -444,9 +457,98 @@ fn panic_state_drops_the_screen() {
     let (mut k, v, env) = new();
     let (fb, ..) = desktop(&mut k, &env, 1);
     v.state.store(crate::proto::SCREEN_PANIC, std::sync::atomic::Ordering::SeqCst);
-    k.state_changed(crate::proto::SCREEN_PANIC);
+    k.state_changed();
     assert!(!k.shown());
     let before = k.stats.presents;
     let _ = flip(&mut k, &env, 7, fb, 1);
     assert_eq!(k.stats.presents, before, "nothing drawn over the panic message");
+}
+
+#[test]
+fn another_files_buffer_is_not_mapped_by_its_offset() {
+    let (mut k, _v, env) = new();
+    k.open(7);
+    k.open(8);
+    let (h, _p, size) = dumb(&mut k, &env, 7, 16, 16);
+    let off = map_off(&mut k, &env, 7, h);
+    assert!(k.mmap_file(7, off, size).is_ok());
+    assert_eq!(k.mmap_file(8, off, size).err(), Some(EACCES), "file 8 holds no handle to it");
+    // A length that would wrap is refused, not wrapped past the check
+    assert_eq!(k.mmap_file(7, off, u64::MAX - 100).err(), Some(EINVAL));
+    let mut b = [0u8; 12];
+    put32(&mut b, 0, h);
+    assert_eq!(call(&mut k, &env, 7, 0x2d, &mut b), 0);
+    assert_eq!(k.mmap_dmabuf(500, 4096, u64::MAX - 100).err(), Some(EINVAL));
+}
+
+#[test]
+fn a_flip_on_the_blank_itself_waits_for_the_next() {
+    let (mut k, v, env) = new();
+    let (fb, ..) = desktop(&mut k, &env, 1);
+    v.set_now(5 * PERIOD);
+    assert_eq!(flip(&mut k, &env, 7, fb, 1), 0);
+    assert_eq!(k.next_due(5 * PERIOD), Some(6 * PERIOD));
+}
+
+#[test]
+fn a_stale_console_notice_does_not_drop_a_new_session() {
+    let (mut k, v, env) = new();
+    let _ = desktop(&mut k, &env, 1);
+    // The screen thread saw "console" (an earlier give), but the session took it again
+    // since: the status page says shown, and the session keeps the screen
+    assert_eq!(v.state.load(std::sync::atomic::Ordering::SeqCst), SCREEN_SHOWN);
+    k.state_changed();
+    assert!(k.shown());
+    // Taken back for real (a panic): dropped
+    v.state.store(SCREEN_CONSOLE, std::sync::atomic::Ordering::SeqCst);
+    k.state_changed();
+    assert!(!k.shown());
+}
+
+#[test]
+fn far_cursor_positions_are_clamped() {
+    let (mut k, v, env) = new();
+    let _ = desktop(&mut k, &env, 1);
+    let (ch, _p, _s) = dumb(&mut k, &env, 7, 64, 64);
+    let mut b = [0u8; 36];
+    put32(&mut b, 0, 3);
+    put32(&mut b, 4, CRTC_ID);
+    put32(&mut b, 8, i32::MAX as u32);
+    put32(&mut b, 12, i32::MIN as u32);
+    put32(&mut b, 16, 64);
+    put32(&mut b, 20, 64);
+    put32(&mut b, 24, ch);
+    assert_eq!(call(&mut k, &env, 7, 0xBB, &mut b), 0);
+    put32(&mut b, 0, 2);
+    assert_eq!(call(&mut k, &env, 7, 0xBB, &mut b), 0, "moving again repairs without overflow");
+    assert_eq!(v.pixel(0, 0), 1);
+}
+
+#[test]
+fn vblank_events_held_behind_the_console_are_capped() {
+    let (mut k, v, env) = new();
+    let _ = desktop(&mut k, &env, 1);
+    v.state.store(SCREEN_HIDDEN, std::sync::atomic::Ordering::SeqCst);
+    k.state_changed();
+    let mut b = [0u8; 24];
+    put32(&mut b, 0, 0x0400_0000);
+    for _ in 0..PENDING_MAX {
+        assert_eq!(call(&mut k, &env, 7, 0x3a, &mut b), 0);
+    }
+    assert_eq!(call(&mut k, &env, 7, 0x3a, &mut b), EBUSY);
+    assert_eq!(k.pending.len(), PENDING_MAX);
+}
+
+#[test]
+fn too_many_damage_rectangles_repaint_everything() {
+    let (mut k, v, env) = new();
+    let (fb, _h, off) = desktop(&mut k, &env, 1);
+    fill(&k, off, (W * H * 4) as u64, 4);
+    let clips = vec![0u16; 4 * 300];
+    let mut b = [0u8; 24];
+    put32(&mut b, 0, fb);
+    put32(&mut b, 12, 300);
+    put64(&mut b, 16, clips.as_ptr() as u64);
+    assert_eq!(call(&mut k, &env, 7, 0xB1, &mut b), 0);
+    assert_eq!(v.pixel(W - 1, H - 1), 4);
 }

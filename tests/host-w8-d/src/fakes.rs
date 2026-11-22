@@ -12,15 +12,26 @@ use crate::kms::{BoMem, Env};
 use crate::native::{Screen, Target};
 use crate::proto::{SCREEN_CONSOLE, SCREEN_HIDDEN, SCREEN_SHOWN};
 
-/// Buffer memory on the host heap.
+/// Buffer memory on the host heap (a raw allocation: the DRM layer writes through `ptr`).
 pub struct HeapMem {
-    pub data: Box<[u8]>,
+    pub data: *mut [u8],
     pub handle: u32,
+}
+
+// SAFETY: plain heap memory owned by this value
+unsafe impl Send for HeapMem {}
+unsafe impl Sync for HeapMem {}
+
+impl Drop for HeapMem {
+    fn drop(&mut self) {
+        // SAFETY: made by Box::into_raw in `new_mem`, dropped once
+        drop(unsafe { Box::from_raw(self.data) });
+    }
 }
 
 impl BoMem for HeapMem {
     fn ptr(&self) -> *mut u8 {
-        self.data.as_ptr() as *mut u8
+        self.data as *mut u8
     }
     fn handle(&self) -> u32 {
         self.handle
@@ -61,7 +72,7 @@ impl Env for FakeEnv {
         }
         let mut h = self.next_handle.borrow_mut();
         *h += 1;
-        Ok(Box::new(HeapMem { data: alloc::vec![0u8; size as usize].into_boxed_slice(), handle: *h }))
+        Ok(Box::new(HeapMem { data: Box::into_raw(alloc::vec![0u8; size as usize].into_boxed_slice()), handle: *h }))
     }
 
     fn install_dmabuf(&self, _flags: u32, _size: u64) -> Result<(i64, u32), i64> {

@@ -71,7 +71,8 @@ fn copy_clips_and_blacks_out_past_the_picture() {
     assert_eq!(px(&scr, 8, 3, 2), 0xFF00_0000 | 3 << 12 | 5);
     assert_eq!(px(&scr, 8, 4, 0), 0, "past the picture's width");
     assert_eq!(px(&scr, 8, 0, 3), 0, "past the picture's height");
-    // No picture at all: black
+    // No picture at all: black (a target made afresh: `px` borrowed the buffer meanwhile)
+    let t = target(&mut scr, w, h, w as usize, true);
     copy_rect(&t, None, (0, 0), 0, 0, w, h);
     assert!(scr.iter().all(|&b| b == 0));
 }

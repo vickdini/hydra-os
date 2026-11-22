@@ -141,10 +141,16 @@ fn route_input(on: bool) {
 }
 // wave8 GD end
 
-/// Carries out event `ev` (under [`INNER`]); returns the state afterwards.
+/// Carries out event `ev`; returns the state afterwards. The whole transition runs under
+/// [`INNER`] (a `Take` must not lend the screen while a `Give` before it has not yet given
+/// it back to the console); only a panic changes the state without it.
 fn apply(ev: Event) -> u32 {
     let mut inner = INNER.lock();
     let st = STATE.load(Ordering::Acquire);
+    // (a hot key queued before a session ended must not hide the next one)
+    if matches!(ev, Event::Give | Event::Gone) {
+        REQUEST.store(0, Ordering::Release);
+    }
     let release = if policy::needs_release(st, ev) { crate::video::console::release_display().is_some() } else { false };
     let (new, act) = policy::step(st, ev, release);
     if ev == Event::Gone && !act.zap {
@@ -154,8 +160,15 @@ fn apply(ev: Event) -> u32 {
     if new == st && !act.notify {
         return st;
     }
-    STATE.store(new, Ordering::SeqCst);
+    // A panic on another CPU since the load wins: the console keeps the screen
+    if STATE.compare_exchange(st, new, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return SCREEN_PANIC;
+    }
     status_set(SCREEN_ST_STATE, new);
+    if STATE.load(Ordering::SeqCst) == SCREEN_PANIC {
+        status_set(SCREEN_ST_STATE, SCREEN_PANIC);
+        return SCREEN_PANIC;
+    }
     if act.zap {
         if let Some((mm, start, end)) = inner.mapping.as_ref() {
             let mut m = mm.lock();
@@ -170,7 +183,6 @@ fn apply(ev: Event) -> u32 {
     if ev == Event::Gone {
         inner.mapping = None;
     }
-    drop(inner);
     if let Some(on) = act.route {
         route_input(on);
     }
@@ -182,6 +194,7 @@ fn apply(ev: Event) -> u32 {
         status_set(SCREEN_ST_GEN, g as u32);
         WAITQ.wake_all();
     }
+    drop(inner);
     new
 }
 
@@ -244,7 +257,9 @@ const SCAN_FDS: usize = 8192;
 /// the programs that hold a descriptor of the dead instance are asked to end (`SIGTERM`):
 /// the compositor exits, the session ends and SDDM shows the login screen again once the
 /// restarted service serves. Root's programs are left alone (hydra-logind keeps the devices
-/// it hands out); programs without a window keep running.
+/// it hands out); programs without a window keep running. KDE's `kwin_wayland_wrapper`
+/// starts the compositor again when it dies (a bare desktop without its shell): when it is a
+/// holder's parent it is asked to end first.
 fn end_session() {
     // The dead instance's objects go stale right after the call that woke us
     crate::task::sleep_ms(200);
@@ -269,7 +284,17 @@ fn end_session() {
                 _ => false,
             })
         };
-        if holds && crate::compat::linux::proc::post_process(tgid, 15) {
+        if !holds {
+            continue;
+        }
+        let parent = crate::compat::linux::proc::PROCS.lock().get(&tgid).map(|p| p.ppid);
+        if let Some(ppid) = parent.filter(|&p| p > 1) {
+            let comm = crate::compat::linux::fs::proc_pid_file_text(&alloc::format!("{}/comm", ppid)).unwrap_or_default();
+            if comm.starts_with(b"kwin_wayland_wr") && crate::compat::linux::proc::post_process(ppid, 15) {
+                ended.push(ppid);
+            }
+        }
+        if crate::compat::linux::proc::post_process(tgid, 15) {
             ended.push(tgid);
         }
     }
@@ -307,30 +332,39 @@ pub fn summary() -> alloc::string::String {
     )
 }
 
-/// Allocates the status and scratch pages (once).
+/// Allocates the status and scratch pages (once; under [`INNER`]).
 fn pages_init() -> Result<(), i64> {
     if STATUS_FRAME.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
     let status = crate::memory::frame_allocator::alloc_user_frame().ok_or(ENOMEM)?;
-    let sink = crate::memory::frame_allocator::alloc_user_frame().ok_or(ENOMEM)?;
+    let Some(sink) = crate::memory::frame_allocator::alloc_user_frame() else {
+        crate::memory::frame_allocator::frame_ref_dec(status);
+        return Err(ENOMEM);
+    };
     let (s, k) = (status.start_address().as_u64(), sink.start_address().as_u64());
     STATUS_VIRT.store(crate::memory::frame_allocator::phys_to_virt(s) as u64, Ordering::Release);
-    SINK_FRAME.store(k, Ordering::Release);
-    STATUS_FRAME.store(s, Ordering::Release);
     status_set(SCREEN_ST_STATE, STATE.load(Ordering::Acquire));
     status_set(SCREEN_ST_GEN, GEN.load(Ordering::Acquire) as u32);
+    SINK_FRAME.store(k, Ordering::Release);
+    STATUS_FRAME.store(s, Ordering::Release);
     Ok(())
 }
 
 /// [`SCREEN_MAP`]: maps the screen into the calling display service.
 fn map() -> Result<u64, i64> {
     let (phys, bytes, ..) = fb().ok_or(ENXIO)?;
-    pages_init()?;
     let fb_pages = policy::fb_pages(bytes);
     let obj = OBJECT.lock().get_or_insert_with(|| Arc::new(ScreenObject { fb_phys: phys, fb_pages })).clone();
     let mm = crate::task::with_current_task_mut(|t| t.mm.clone()).flatten().ok_or(EFAULT)?;
     let mut inner = INNER.lock();
+    pages_init()?;
+    // Mapped already by this instance: the same mapping (a second one would escape the zaps)
+    if let Some((m, start, _)) = inner.mapping.as_ref() {
+        if Arc::ptr_eq(m, &mm) {
+            return Ok(*start);
+        }
+    }
     let obj: Arc<dyn MappedObject> = obj;
     let len = (fb_pages + 1) * PAGE_SIZE;
     let addr = {
@@ -400,6 +434,10 @@ pub fn sys_screen(op: u64, a: u64, b: u64) -> i64 {
         SCREEN_TAKE => {
             if fb().is_none() {
                 return ENXIO;
+            }
+            // Only a service that mapped the screen (its hooks are in, its death is noticed)
+            if !SERVICE.load(Ordering::Acquire) || INNER.lock().mapping.is_none() {
+                return EINVAL;
             }
             TAKES.fetch_add(1, Ordering::Relaxed);
             match apply(Event::Take) {

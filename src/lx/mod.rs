@@ -703,7 +703,11 @@ pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::l
         let c = svc::MAJOR_SVC[major as usize].load(Ordering::Acquire);
         if c != 0 && svc::mode(c) == svc::SvcMode::Forward && !all_kernel() && restart::restarting(svc::host_of(c)) {
             match restart::wait_online(svc::host_of(c), &|| svc::major_svc(major) != 0) {
-                Ok(()) => svc::major_svc(major),
+                // (gone again meanwhile: no device rather than the kernel's copy)
+                Ok(()) => match svc::major_svc(major) {
+                    0 => return Some(Err(-19)),
+                    s => s,
+                },
                 Err(e) => return Some(Err(if e == EIO { -19 } else { e })),
             }
         } else {

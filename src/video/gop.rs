@@ -119,8 +119,8 @@ pub fn install(info: VideoModeInfo) {
     // wave8 GD: the framebuffer is identity-mapped: its address is the physical one, which
     // the display service's mapping needs (`ipc::screen`) also while the console draws into
     // its off-screen copy (then `get_video_info().base_ptr` names the copy)
-    FB_PHYS.store(base_ptr as u64, core::sync::atomic::Ordering::Release);
     FB_BYTES.store(size as u64, core::sync::atomic::Ordering::Release);
+    FB_PHYS.store(base_ptr as u64, core::sync::atomic::Ordering::Release);
     // Map the hardware framebuffer into Hydra's autonomous kernel page table
     let page_count = (size + 4095) / 4096;
     let start_phys = PhysAddr::new(base_ptr as u64);

@@ -85,40 +85,54 @@ pub trait Screen: Send {
 
 /// Copies rows `y0..y1`, columns `x0..x1` of the screen from `src` seen at `crtc` (the
 /// picture's pixel that shows at the screen's top left); black where there is no picture.
+/// The screen is only written, never read back, and only through raw pointers (the kernel
+/// may point it elsewhere at any moment); an RGB screen gets each row swapped in RAM first.
 #[allow(clippy::too_many_arguments)]
 pub fn copy_rect(t: &Target, src: Option<&Src>, crtc: (u32, u32), x0: u32, y0: u32, x1: u32, y1: u32) {
-    let (x1, y1) = (x1.min(t.width), y1.min(t.height));
+    let (x1, y1) = (x1.min(t.width).min(t.stride as u32), y1.min(t.height));
     if x0 >= x1 || y0 >= y1 {
         return;
     }
+    let len = (x1 - x0) as usize * 4;
+    let mut row = if t.bgr { alloc::vec::Vec::new() } else { alloc::vec![0u8; len] };
     for y in y0..y1 {
-        // SAFETY: (y, x0..x1) lies inside the target's visible area
-        let dst = unsafe { core::slice::from_raw_parts_mut(t.ptr.add((y as usize * t.stride + x0 as usize) * 4), (x1 - x0) as usize * 4) };
-        let n = match src {
-            Some(s) => copy_row(s, crtc.0 + x0, crtc.1 + y, dst),
-            None => 0,
-        };
-        dst[n..].fill(0);
-        if !t.bgr {
-            swap_rb(&mut dst[..n]);
+        // (y, x0..x1) lies inside the target's visible area
+        let dst = t.ptr.wrapping_add((y as usize * t.stride + x0 as usize) * 4);
+        let pic = src.map(|s| (s, crtc.0.checked_add(x0), crtc.1.checked_add(y)));
+        if t.bgr {
+            let n = match pic {
+                Some((s, Some(fx), Some(fy))) => copy_row(s, fx, fy, dst, len),
+                _ => 0,
+            };
+            // SAFETY: the rest of the row inside the visible area
+            unsafe { core::ptr::write_bytes(dst.add(n), 0, len - n) };
+        } else {
+            let n = match pic {
+                Some((s, Some(fx), Some(fy))) => copy_row(s, fx, fy, row.as_mut_ptr(), len),
+                _ => 0,
+            };
+            row[n..].fill(0);
+            swap_rb(&mut row[..n]);
+            // SAFETY: as above
+            unsafe { core::ptr::copy_nonoverlapping(row.as_ptr(), dst, len) };
         }
     }
 }
 
-/// Copies picture row `fy` from column `fx` into `dst` as far as the picture goes; the
-/// bytes written.
-fn copy_row(s: &Src, fx: u32, fy: u32, dst: &mut [u8]) -> usize {
+/// Copies picture row `fy` from column `fx` to `dst` (room for `cap` bytes) as far as the
+/// picture goes; the bytes written.
+fn copy_row(s: &Src, fx: u32, fy: u32, dst: *mut u8, cap: usize) -> usize {
     if fy >= s.height || fx >= s.width {
         return 0;
     }
-    let want = (dst.len() / 4).min((s.width - fx) as usize) * 4;
-    let start = s.offset + fy as u64 * s.pitch as u64 + fx as u64 * 4;
+    let want = (cap / 4).min((s.width - fx) as usize) * 4;
+    let Some(start) = (fy as u64).checked_mul(s.pitch as u64).and_then(|r| r.checked_add(s.offset)).and_then(|r| r.checked_add(fx as u64 * 4)) else { return 0 };
     if start >= s.len {
         return 0;
     }
     let n = want.min((s.len - start) as usize) & !3;
-    // SAFETY: `start..start + n` lies inside the buffer; `dst` is the target's row
-    unsafe { core::ptr::copy_nonoverlapping(s.base.add(start as usize), dst.as_mut_ptr(), n) };
+    // SAFETY: `start..start + n` lies inside the buffer; `dst` has room for `cap >= n` bytes
+    unsafe { core::ptr::copy_nonoverlapping(s.base.add(start as usize), dst, n) };
     n
 }
 
@@ -157,9 +171,9 @@ pub fn compose_cursor(t: &Target, src: Option<&Src>, crtc: (u32, u32), cur: &Cur
         }
         let (sx0, n) = ((x + c0) as u32, (c1 - c0) as usize);
         let line = &mut row[..n * 4];
-        let got = match src {
-            Some(s) => copy_row(s, crtc.0 + sx0, crtc.1 + sy as u32, line),
-            None => 0,
+        let got = match src.map(|s| (s, crtc.0.checked_add(sx0), crtc.1.checked_add(sy as u32))) {
+            Some((s, Some(fx), Some(fy))) => copy_row(s, fx, fy, line.as_mut_ptr(), n * 4),
+            _ => 0,
         };
         line[got..].fill(0);
         let cstart = r as u64 * cur.w as u64 * 4 + c0 as u64 * 4;

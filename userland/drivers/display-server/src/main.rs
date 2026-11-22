@@ -70,9 +70,10 @@ static KMS: spin::Mutex<Option<Kms>> = spin::Mutex::new(None);
 static KINDS: spin::Mutex<alloc::collections::BTreeMap<u32, u32>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 /// Blocking reads of DRM files waiting for an event: (request id, slot, buffer, length).
 static READS: spin::Mutex<Vec<(u64, u32, u64, usize)>> = spin::Mutex::new(Vec::new());
-/// Buffers named by the latest `mmap` answers (kept a little: the kernel reads an answer's
-/// handle after the call returned).
-static RECENT: spin::Mutex<Vec<alloc::sync::Arc<kms::Bo>>> = spin::Mutex::new(Vec::new());
+/// Per worker (by its syscall page): the buffer its latest `mmap` answer named. The kernel
+/// reads the answer's memory-object handle after the call returned, so the buffer (and its
+/// handle) is kept until that worker's next `mmap`.
+static ANSWERED: spin::Mutex<alloc::collections::BTreeMap<usize, alloc::sync::Arc<kms::Bo>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 /// The screen mapping: the framebuffer's first byte and the status page.
 static FB: AtomicU64 = AtomicU64::new(0);
@@ -196,12 +197,11 @@ impl Env for CxEnv<'_> {
     fn install_dmabuf(&self, flags: u32, size: u64) -> Result<(i64, u32), i64> {
         let slot = objs::alloc()?;
         KINDS.lock().insert(slot, LX_OBJ_KIND_DMABUF);
+        // No fences: always readable and writable; the size is what fstat reports (set
+        // before the descriptor exists)
+        objs::set(slot, 0x5, size);
         match objs::install_keyed(self.cx, slot, LX_OBJ_KIND_DMABUF, flags & FD_FLAGS, 0o100600, b"/dmabuf:", 0, 0) {
-            Ok(fd) => {
-                // No fences: always readable and writable; the size is what fstat reports
-                objs::set(slot, 0x5, size);
-                Ok((fd, slot))
-            }
+            Ok(fd) => Ok((fd, slot)),
             Err(e) => {
                 KINDS.lock().remove(&slot);
                 objs::free(slot);
@@ -340,7 +340,6 @@ fn start_screen_thread() {
 
 extern "C" fn screen_thread(_arg: u64) -> ! {
     let mut gen = 0u64;
-    let mut state = screen_state();
     loop {
         let due = KMS.lock().as_ref().and_then(|k| k.next_due(now_ns()));
         let r = sys::screen(SCREEN_WAIT, gen, due.unwrap_or(0));
@@ -352,12 +351,12 @@ extern "C" fn screen_thread(_arg: u64) -> ! {
         let now = now_ns();
         let mut guard = KMS.lock();
         let Some(k) = guard.as_mut() else { continue };
+        // Every change counts, also one that came back to the same state (Ctrl+Alt+F1 and
+        // F2 between two wake-ups: the console drew over the picture meanwhile)
         if g != gen {
             gen = g;
-            if st != state {
-                state = st;
-                k.state_changed(st);
-            }
+            let _ = st;
+            k.state_changed();
         }
         if due.is_some_and(|d| now >= d) || k.next_due(now).is_some_and(|d| now >= d) {
             k.vblank_tick(now);
@@ -370,36 +369,45 @@ extern "C" fn screen_thread(_arg: u64) -> ! {
     }
 }
 
-/// Files whose event queue grew: their readiness, and the reads waiting for them.
+/// Files whose event queue grew: the reads waiting for them get their events, and their
+/// readiness is set. The reads are matched with the events under both locks (KMS, then
+/// READS: the order `drm_call` registers a read in), so no event slips between a reader
+/// finding none and registering.
 fn deliver(woke: &[u32]) {
-    if woke.is_empty() {
-        return;
-    }
     for &slot in woke {
-        let waiting: Vec<(u64, u64, usize)> = {
+        let done: Vec<(u64, u64, Result<Vec<u8>, i64>)> = {
+            let mut g = KMS.lock();
+            let Some(k) = g.as_mut() else { return };
             let mut r = READS.lock();
-            let mine = r.iter().filter(|x| x.1 == slot).map(|x| (x.0, x.2, x.3)).collect();
-            r.retain(|x| x.1 != slot);
-            mine
+            let mut done = Vec::new();
+            let mut i = 0;
+            while i < r.len() {
+                if r[i].1 != slot {
+                    i += 1;
+                    continue;
+                }
+                match k.take_events(slot, r[i].3) {
+                    Some(res) => {
+                        let (id, _, buf, _) = r.remove(i);
+                        done.push((id, buf, res));
+                    }
+                    None => break,
+                }
+            }
+            drop(r);
+            objs::set(slot, k.poll_bits(slot), 0);
+            done
         };
-        for (id, buf, len) in waiting {
-            let got = KMS.lock().as_mut().and_then(|k| k.take_events(slot, len));
-            let res = match got {
-                Some(Ok(bytes)) => match sys::lx_write(id, buf, &bytes) {
+        for (id, buf, res) in done {
+            let res = match res {
+                Ok(bytes) => match sys::lx_write(id, buf, &bytes) {
                     Ok(()) => bytes.len() as i64,
                     Err(e) => e,
                 },
-                Some(Err(e)) => e,
-                // Taken by another reader meanwhile: wait again
-                None => {
-                    READS.lock().push((id, slot, buf, len));
-                    continue;
-                }
+                Err(e) => e,
             };
             let _ = sys::lx_complete(id, res);
         }
-        let bits = KMS.lock().as_ref().map_or(0x4, |k| k.poll_bits(slot));
-        objs::set(slot, bits, 0);
     }
 }
 
@@ -480,11 +488,9 @@ fn open_file(cx: &Cx) -> i64 {
         objs::free(slot);
         return ENODEV;
     }
+    objs::set(slot, 0x4, 0);
     match objs::install_keyed(cx, slot, LX_OBJ_KIND_DRM, cx.args[1] as u32 & FD_FLAGS, 0o020666, b"/dev/dri/card0", 0, cx.c.dev) {
-        Ok(fd) => {
-            objs::set(slot, 0x4, 0);
-            fd
-        }
+        Ok(fd) => fd,
         Err(e) => {
             KINDS.lock().remove(&slot);
             if let Some(k) = KMS.lock().as_mut() {
@@ -517,26 +523,31 @@ fn drm_call(cx: &Cx, slot: u32, nr: u64) -> Answer {
         }
         0 => {
             let (buf, len) = (cx.args[1], cx.args[2] as usize);
-            let got = KMS.lock().as_mut().and_then(|k| k.take_events(slot, len));
+            let got = {
+                let mut g = KMS.lock();
+                let Some(k) = g.as_mut() else { return (ENODEV, 0) };
+                let got = k.take_events(slot, len);
+                if got.is_none() && !cx.nonblock() {
+                    // Registered before the lock goes: `deliver` finds it
+                    READS.lock().push((cx.id, slot, buf, len));
+                    return (0, LX_REPLY_PENDING);
+                }
+                objs::set(slot, k.poll_bits(slot), 0);
+                got
+            };
             let r = match got {
                 Some(Ok(bytes)) => match cx.copy_out(buf, &bytes) {
                     Ok(()) => bytes.len() as i64,
                     Err(e) => e,
                 },
                 Some(Err(e)) => e,
-                None if cx.nonblock() => EAGAIN,
-                None => {
-                    READS.lock().push((cx.id, slot, buf, len));
-                    return (0, LX_REPLY_PENDING);
-                }
+                None => EAGAIN,
             };
-            let bits = KMS.lock().as_ref().map_or(0x4, |k| k.poll_bits(slot));
-            objs::set(slot, bits, 0);
             (r, 0)
         }
         9 => {
             let (len, offset) = (cx.args[1], cx.args[5]);
-            let found = KMS.lock().as_ref().map(|k| k.mmap_file(offset, len));
+            let found = KMS.lock().as_ref().map(|k| k.mmap_file(slot, offset, len));
             let bo = match found {
                 Some(Ok(bo)) => bo,
                 Some(Err(e)) => return (e, 0),
@@ -544,7 +555,7 @@ fn drm_call(cx: &Cx, slot: u32, nr: u64) -> Answer {
             };
             let pgoff = offset / 4096 - bo.map_pgoff;
             let ans = hydra_rt::mem::lx_mmap_answer(bo.mem.handle(), pgoff, false);
-            keep(bo);
+            keep(cx.page(), bo);
             (ans, 0)
         }
         1 => (EINVAL, 0),
@@ -569,7 +580,7 @@ fn dmabuf_call(cx: &Cx, slot: u32, nr: u64) -> i64 {
                 None => return ENODEV,
             };
             let ans = hydra_rt::mem::lx_mmap_answer(bo.mem.handle(), offset / 4096, false);
-            keep(bo);
+            keep(cx.page(), bo);
             ans
         }
         0 | 1 => EINVAL,
@@ -577,12 +588,10 @@ fn dmabuf_call(cx: &Cx, slot: u32, nr: u64) -> i64 {
     }
 }
 
-/// Keeps `bo` alive past the answer that names its memory object.
-fn keep(bo: alloc::sync::Arc<kms::Bo>) {
-    let mut r = RECENT.lock();
-    if r.len() >= 16 {
-        r.remove(0);
-    }
-    r.push(bo);
+/// Keeps `bo` alive past the answer (made in syscall page `page`) that names its memory
+/// object.
+fn keep(page: *mut u8, bo: alloc::sync::Arc<kms::Bo>) {
+    let old = ANSWERED.lock().insert(page as usize, bo);
+    drop(old);
 }
 
