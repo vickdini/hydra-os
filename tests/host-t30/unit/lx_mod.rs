@@ -68,7 +68,10 @@ pub(crate) fn reset_all() {
 pub(crate) fn world() -> Sim {
     let sim = Sim::new(Task::linux(100, 100));
     reset_all();
-    svc::init(b"");
+    // wave8 GX2: these tests were written with the network and IPC pieces co-located in
+    // linux-server (one fake host serves everything): `lx.net=linux`, `lx.ipc=linux`
+    // keeps that arrangement (the split defaults: `split_defaults_route_to_lx_net_and_lx_ipc`)
+    svc::init(b"net=linux+ipc=linux");
     set_forwarding(true);
     let mut p = crate::compat::linux::proc::Process::default();
     p.groups = vec![1000, 27];
@@ -322,6 +325,36 @@ fn a_service_switched_back_stays_in_the_kernel() {
     assert!(!STEP4.load(Ordering::Relaxed));
     assert!(!step4());
 }
+
+// wave8 GX2 begin
+#[test]
+fn split_defaults_route_to_lx_net_and_lx_ipc() {
+    let _sim = world();
+    svc::tests::reset();
+    svc::init(b"");
+    set_forwarding(true);
+    // The service and its own process (lx-net, lx-ipc), not linux-server
+    assert_eq!(by_args(240, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
+    assert_eq!(by_args(22, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
+    assert_eq!(by_args(41, &[2, 1, 0, 0, 0, 0]), Some(Target { svc: LXS_NET, host: LXS_NET }));
+    assert_eq!(by_args(41, &[16, 3, 0, 0, 0, 0]), Some(Target { svc: LXS_NET, host: LXS_NET }));
+    assert_eq!(by_args(41, &[1, 1, 0, 0, 0, 0]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
+    assert_eq!(plain_svc(LX_KCALL_FIFO, &[0; 6]), LXS_IPC);
+    assert_eq!(svc::endpoint_of(svc::host_of(LXS_NET)), ENDPOINT_LX_NET);
+    assert_eq!(svc::endpoint_of(svc::host_of(LXS_IPC)), ENDPOINT_LX_IPC);
+    // Keys stay with lx-sec, the rest with linux-server
+    assert_eq!(by_args(250, &[0; 6]), Some(Target { svc: LXS_SEC, host: LXS_SEC }));
+    // One switched back: the other stays split
+    svc::tests::reset();
+    svc::init(b"lx.net=kernel");
+    set_forwarding(true);
+    assert_eq!(by_args(41, &[2, 1, 0, 0, 0, 0]), None);
+    assert_eq!(by_args(22, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
+    svc::tests::reset();
+    svc::init(b"net=linux+ipc=linux");
+    set_forwarding(true);
+}
+// wave8 GX2 end
 
 #[test]
 fn by_args_and_route_query() {

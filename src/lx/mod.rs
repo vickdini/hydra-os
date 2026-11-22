@@ -79,6 +79,9 @@ pub mod timer;
 // wave8 GT begin: the terminal service's kernel side (the console terminal, pty opens)
 pub mod console;
 // wave8 GT end
+// wave8 GX2: the desktop after an lx-ipc crash (FailObjects: the session ends, the login
+// screen returns)
+pub mod desktop;
 
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
@@ -1103,6 +1106,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
         match after_restart(x, r, &c, mark) {
             Ok(()) => {
                 c.note_seq = x.notes_head();
+                // wave8 GX2: a call sent again after a restart may have been under way (a
+                // connect whose handshake went on meanwhile): the service is told
+                if matches!(r, restart::LX_RESEND | restart::LX_RESEND_MAYBE) {
+                    c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
+                }
                 continue;
             }
             Err(e) => return e,
@@ -1270,7 +1278,7 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
     let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
     s.next_id += 1;
     c.id = id;
-    s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy, early: false, redir: (0, 0) };
+    s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy, early: false, redir: (0, 0), partial: 0 }; // (wave8 GX2: partial)
     x.req_done[slot].store(false, Ordering::SeqCst);
     if has_copy {
         let kept = x.buf(slot);
@@ -2493,7 +2501,13 @@ fn server_gone(h: SvcId) {
     if svc::host_of(LXS_NET) == h {
         netwaits(|w| w.clear());
         RELAY_SERVER.store(false, Ordering::Release);
-        WATCHED_NET.store(0, Ordering::Release);
+        // wave8 GX2 begin: a Transparent restart (lx-net) keeps its objects, and with them
+        // the watched sockets they count (an adopted socket stays counted: zeroing the
+        // count would stop the readiness relay for every socket polled across the restart)
+        if !resend {
+            WATCHED_NET.store(0, Ordering::Release);
+        }
+        // wave8 GX2 end
     }
     x.notes.store(0, Ordering::Release);
     x.notes_head.store(0, Ordering::Release);
@@ -2507,6 +2521,33 @@ fn server_gone(h: SvcId) {
     let tgid = x.lx(|s| {
         let tgid = s.server_tgid;
         s.server_tgid = 0;
+        // wave8 GX2 begin: the calls being served that their worker marked safe to send again
+        // (no effect yet: `LX_CALL_RESEND_OFF` holds the request's id), read before the
+        // workers' pages go
+        let mut safe = [false; MAX_REQS];
+        // ... and those that did part of their work and left the answer for it (a short write)
+        let mut partial: [Option<i64>; MAX_REQS] = [None; MAX_REQS];
+        if resend {
+            for w in s.workers.iter() {
+                if w.req < MAX_REQS && s.reqs[w.req].state == RState::Delivered {
+                    let p = w.call_mut() as *const u8;
+                    let id = s.reqs[w.req].id;
+                    // SAFETY: the worker's syscall page (4 KiB) is alive while it is in the table
+                    let (mark, pid, pres) = unsafe {
+                        (
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_RESEND_OFF) as *const u64),
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_PARTIAL_OFF) as *const u64),
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_PARTIAL_OFF + 8) as *const i64),
+                        )
+                    };
+                    safe[w.req] = mark != 0 && mark == id;
+                    if pid != 0 && pid == id && pres > 0 {
+                        partial[w.req] = Some(pres);
+                    }
+                }
+            }
+        }
+        // wave8 GX2 end
         s.workers.clear();
         for t in x.worker_tids.iter() {
             t.store(0, Ordering::Release);
@@ -2517,6 +2558,9 @@ fn server_gone(h: SvcId) {
                 // wave6 G21: a Transparent restart's callers send their calls again (all
                 // that had no effect yet; one being served only if it is idempotent)
                 r.result = match (resend, r.state) {
+                    (true, RState::Delivered) if partial[i].is_some() => partial[i].unwrap_or(EIO), // wave8 GX2
+                    (true, RState::Delivered) if safe[i] => restart::LX_RESEND, // wave8 GX2
+                    (true, RState::Pending) if r.partial > 0 => r.partial, // wave8 GX2: a waiting send's bytes already sent
                     (true, RState::Delivered) => restart::LX_RESEND_MAYBE,
                     (true, _) => restart::LX_RESEND,
                     _ => EIO,
@@ -2556,6 +2600,12 @@ fn server_gone(h: SvcId) {
     if class == restart::RestartClass::EndLinux && (was_online || tgid != 0) && !x.recovering.swap(true, Ordering::AcqRel) {
         crate::task::spawn("lx-recover", recover_task, crate::task::TaskPriority::Normal);
     }
+    // wave8 GX2 begin: lx-ipc's objects failed (not re-sent): the desktop, which lives on its
+    // D-Bus and Wayland sockets, ends and the login screen comes back (`desktop`)
+    if class != restart::RestartClass::EndLinux && !resend && svc::host_of(crate::ipc::protocol::LXS_IPC) == h && h != LXS_LINUX && (was_online || tgid != 0) {
+        desktop::ipc_gone();
+    }
+    // wave8 GX2 end
 }
 
 /// The crash policy, in a kernel task of its own: ends every Linux program, waits for the

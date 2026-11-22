@@ -19,6 +19,8 @@ const DRIVERS: &[&str] = &[
     "display-server", // wave8 GD
     "svc-test",
     "input-server", // wave8 GI
+    "lx-net", // wave8 GX2
+    "lx-ipc", // wave8 GX2
     "hda-driver",
     "tty-server", // wave8 GT
     // wave8 GS

@@ -33,17 +33,33 @@ pub const HEADER: usize = 64;
 /// Bytes of a record copy's own fields (sequence, length, checksum, padding).
 const COPY_HDR: usize = 16;
 
-/// CRC-32C (Castagnoli), bit by bit: kept records are small and written rarely.
+/// CRC-32C (Castagnoli), a byte at a time through a table (wave8 GX2: lx-net writes a
+/// record whenever a socket changes, so the bit-by-bit loop showed in its connect times;
+/// the same values as before).
 pub fn crc32c(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
-        }
+        crc = CRC_TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
     }
     !crc
 }
+
+/// The CRC-32C table (reflected polynomial 0x82F63B78), built at compile time.
+const CRC_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0x82F6_3B78 } else { c >> 1 };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
 
 /// What [`Kept::open`] found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

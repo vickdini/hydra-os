@@ -64,7 +64,73 @@ struct Nl {
     replies: YLock<VecDeque<Vec<u8>>>,
     /// Its slot (for waking receivers of a notification).
     slot: u32,
+    /// wave8 GX2: its kept record (`crate::sockkept`; 0: not kept) and the `(port, groups)`
+    /// last written there.
+    rec: u32,
+    saved: AtomicU64,
+    /// `saved` holds a written value (not a separate bit of it: groups use all 32 bits).
+    written: core::sync::atomic::AtomicBool,
 }
+
+// wave8 GX2 begin: the kept record of a netlink socket (lx-net's Transparent restart):
+// kind, routing or uevent, port, groups. Replies not yet received are not kept (a restart
+// in the middle of a dump loses the rest of its answer).
+impl Nl {
+    fn image(&self) -> Vec<u8> {
+        crate::sockkept::NlRec { route: self.route, port: self.port.load(Ordering::Relaxed), groups: self.groups.load(Ordering::Relaxed) }.encode()
+    }
+
+    /// Writes the kept record if port or groups changed since the last write.
+    fn persist(&self) {
+        if self.rec == 0 {
+            return;
+        }
+        let now = self.port.load(Ordering::Relaxed) as u64 | (self.groups.load(Ordering::Relaxed) as u64) << 32;
+        if self.written.load(Ordering::Relaxed) && self.saved.load(Ordering::Relaxed) == now {
+            return;
+        }
+        if crate::sockkept::put(self.rec, &self.image()) {
+            self.saved.store(now, Ordering::Relaxed);
+            self.written.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// `(route, port, groups)` of netlink record bytes `d`.
+fn parse_kept(d: &[u8]) -> Option<(bool, u32, u32)> {
+    crate::sockkept::NlRec::decode(d).map(|r| (r.route, r.port, r.groups))
+}
+
+/// Whether record bytes `d` make a netlink socket.
+pub fn kept_ok(d: &[u8]) -> bool {
+    parse_kept(d).is_some()
+}
+
+/// A restarted lx-net takes back the netlink socket in slot `slot` from record `rec`.
+pub fn restore(slot: u32, rec: u32) -> bool {
+    let Some((route, port, groups)) = crate::sockkept::get(rec).as_deref().and_then(parse_kept) else { return false };
+    if !crate::obj::reserve(slot, LX_OBJ_KIND_NETLINK) {
+        return false;
+    }
+    let nl = Nl { route, port: AtomicU32::new(port), groups: AtomicU32::new(groups), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0), written: core::sync::atomic::AtomicBool::new(false) };
+    nl.persist();
+    SOCKS.lock().insert(slot, Arc::new(nl));
+    refresh(slot);
+    true
+}
+
+/// wave8 GX2, for Group H: a kernel uevent for every uevent socket that joined a group
+/// (queued as a received datagram, receivers woken). Nothing calls it yet.
+#[allow(dead_code)]
+pub fn uevent(data: &[u8]) {
+    let socks: Vec<Arc<Nl>> = SOCKS.lock().values().filter(|s| !s.route && s.groups.load(Ordering::Relaxed) != 0).cloned().collect();
+    for s in socks {
+        s.replies.lock().push_back(data.to_vec());
+        refresh(s.slot);
+        crate::socket::poke(s.slot);
+    }
+}
+// wave8 GX2 end
 
 /// The sockets, by slot.
 static SOCKS: YLock<BTreeMap<u32, Arc<Nl>>> = YLock::new(BTreeMap::new());
@@ -93,13 +159,16 @@ pub fn socket(cx: &Cx) -> i64 {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let nl = Arc::new(Nl { route, port: AtomicU32::new(cx.c.tgid as u32), groups: AtomicU32::new(0), replies: YLock::new(VecDeque::new()), slot });
+    let rec = crate::sockkept::alloc(); // wave8 GX2
+    let nl = Arc::new(Nl { route, port: AtomicU32::new(cx.c.tgid as u32), groups: AtomicU32::new(0), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0), written: core::sync::atomic::AtomicBool::new(false) });
+    nl.persist();
     SOCKS.lock().insert(slot, nl);
     crate::obj::set_ready(slot, 0x4, 0);
     let name = alloc::format!("socket:[{}]", 0x4_0000 + slot);
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_NETLINK, ty as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes()) {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_NETLINK, ty as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), 0, rec as u64) {
         Ok(fd) => fd,
         Err(e) => {
+            crate::sockkept::clear(rec);
             SOCKS.lock().remove(&slot);
             crate::obj::set_ready(slot, 0, 0);
             crate::obj::free(slot);
@@ -110,12 +179,15 @@ pub fn socket(cx: &Cx) -> i64 {
 
 /// The last descriptor of slot `slot` went away.
 pub fn closed(slot: u32) {
-    SOCKS.lock().remove(&slot);
+    if let Some(s) = SOCKS.lock().remove(&slot) {
+        crate::sockkept::clear(s.rec); // wave8 GX2
+    }
 }
 
 /// Writes slot `slot`'s readiness word: writable, and readable while a datagram waits.
 pub fn refresh(slot: u32) {
     if let Some(s) = sock_of(slot) {
+        s.persist(); // wave8 GX2: after every call (written only on a change)
         let bits = 0x4 | if s.replies.lock().is_empty() { 0 } else { 0x1 };
         crate::obj::set_ready_ev(slot, bits, 0, bits & 1 != 0);
     }

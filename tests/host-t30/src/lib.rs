@@ -739,6 +739,16 @@ pub mod compat {
             use alloc::collections::BTreeMap;
             use alloc::vec::Vec;
 
+            // wave8 GX2 begin: *stub* signals and exits for `lx::desktop`
+            pub fn has_exited(pid: u64) -> bool {
+                crate::fake::rec(|r| r.posted.iter().any(|p| p.0 == pid && p.2 == 9))
+            }
+            pub fn post_process(pid: u64, sig: u32) -> bool {
+                crate::fake::rec(|r| r.posted.push((pid, pid, sig, 0, 0, 0, 0)));
+                true
+            }
+            // wave8 GX2 end
+
             /// *stub* A thread's process (wave 7, Group 7-3's chroot peers): itself.
             pub fn tgid_of(tid: u64) -> Option<u64> {
                 Some(tid)

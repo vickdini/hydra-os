@@ -751,3 +751,45 @@ fn writes_later_go_through_a_kernel_task() {
     sim.settle();
     assert_eq!(got.lock().unwrap().len(), 3);
 }
+
+// wave8 GX2 begin
+/// lx-ipc's message queues keep lx-net's netlink socket for glibc's `SIGEV_THREAD`: a service
+/// may pin another service's object (never its own: it keeps those itself), and a
+/// notification through the pin goes to the object's owner as `LX_KCALL_NLDELIVER`.
+#[test]
+fn a_service_pins_another_services_object() {
+    let sim = world();
+    // The network service (co-located in linux-server in this world) installs a netlink
+    // socket at `socket(AF_NETLINK, ..)`, and takes deliveries
+    let got: StdArc<StdMutex<Vec<(u64, u64)>>> = StdArc::new(StdMutex::new(Vec::new()));
+    let g2 = got.clone();
+    start(&sim, LXS_LINUX, 200, 1, true, handler(move |s| match s.call.nr {
+        41 => (install(s, 33, LX_OBJ_KIND_NETLINK, 0, 0), 0),
+        n => {
+            g2.lock().unwrap().push((n, s.call.obj));
+            (0, 0)
+        }
+    }));
+    crate::world::bkl_enter();
+    let nl = crate::lx::forward(&crate::lx::tests::frame(41, [16, 3, 0, 0, 0, 0])).unwrap();
+    assert!(nl >= 0, "{nl}");
+    let out: Out = StdArc::new(StdMutex::new(Vec::new()));
+    let o2 = out.clone();
+    start(&sim, LXS_TEST, 300, 1, true, ops(move |s| {
+        let push = |v: i64| o2.lock().unwrap().push(v);
+        // linux-server's object: pinned; the test service's own (slot 5): refused
+        let t = obj_ctl(LX_OBJ_PIN, s.call.id, nl as u64, 0);
+        push((t > 0) as i64);
+        push(obj_ctl(LX_OBJ_PIN, s.call.id, s.call.args[1], 0));
+        let data = *b"cookie";
+        push(obj_ctl(LX_OBJ_NOTIFY, t as u64, data.as_ptr() as u64, 6));
+        push(obj_ctl(LX_OBJ_UNPIN, t as u64, 0, 0));
+        0
+    }));
+    let own = new_obj(5, LX_OBJ_KIND_SVCTEST);
+    assert!(own >= 0);
+    assert_eq!(run_ops(own as u64, 0), 0);
+    assert_eq!(*out.lock().unwrap(), vec![1, EBADF, 0, 0]);
+    assert_eq!(*got.lock().unwrap(), vec![(LX_KCALL_NLDELIVER, 33)]);
+}
+// wave8 GX2 end

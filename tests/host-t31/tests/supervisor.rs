@@ -76,8 +76,13 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     let names: Vec<&str> = supervisor::get_service_snapshots().iter().map(|s| s.name).collect();
     assert_eq!(
         names,
-        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver", "sound_server"]
+        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "lx_net", "lx_ipc", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver", "sound_server"]
     );
+    // wave8 GX2: lx-net is net-server's client, both services have their hooks
+    let log0 = fake::SVC_LOG.lock().unwrap().clone();
+    assert!(log0.contains(&("allow_client", ENDPOINT_NET_SERVER, ENDPOINT_LX_NET as u64, 0)));
+    assert!(log0.contains(&("set_signal_hook", ENDPOINT_LX_NET, 0, 0)));
+    assert!(log0.contains(&("set_signal_hook", ENDPOINT_LX_IPC, 0, 0)));
     assert!(supervisor::get_service_snapshots().iter().all(|s| s.state == ServiceState::Stopped && s.task_id.is_none()));
     let log = fake::SVC_LOG.lock().unwrap().clone();
     assert!(log.contains(&("allow_client", ENDPOINT_BLOCK_DEV, ENDPOINT_ZFS_SERVER as u64, 0)));
@@ -92,7 +97,7 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     // wave8 GT: tty-server's going away runs the Linux services' hook
     assert!(log.contains(&("set_signal_hook", 0x2C, 0, 0)));
     let lx = fake::LX_LOG.lock().unwrap().clone();
-    for svc in [1u8, LXS_SEC, LXS_TEST, LXS_VFS, LXS_DISPLAY, 9 /* wave8 GT: LXS_TTY */] {
+    for svc in [1u8, LXS_SEC, LXS_TEST, LXS_VFS, LXS_DISPLAY, 9 /* wave8 GT: LXS_TTY */, LXS_NET, LXS_IPC] {
         assert!(lx.contains(&("configure", svc)) && lx.contains(&("fw_cfg", svc)), "Linux service {}", svc);
     }
     assert_eq!(*fake::LX_CALLS.lock().unwrap(), vec!["init"]);
@@ -475,3 +480,20 @@ fn start_all_launches_what_has_a_device_and_reports_the_rest() {
     assert_eq!(*fake::STARTS.lock().unwrap(), vec!["usb_input", "snd"]);
     assert!(task::SCHEDULER.lock().task_named("supervisor").is_some(), "the watchdog task");
 }
+
+// wave8 GX2 begin
+/// lx-net and lx-ipc start with their workers; co-located in linux-server
+/// (`lx.<name>=linux`) they are not started at all (they would exit at once).
+#[test]
+fn lx_net_and_lx_ipc_start_unless_co_located() {
+    let _w = setup();
+    supervisor::supervisor_init();
+    let id = SUPERVISOR.lock().start_service("lx_ipc").unwrap();
+    with(id.0, |t| assert_eq!(&t.cmdline.as_ref().unwrap()[..], b"/drivers/lx_ipc\0workers=3\0"));
+    hydra_hosttests_t31::lx::svc::COLOCATED.lock().unwrap().push(LXS_NET);
+    assert!(SUPERVISOR.lock().start_service("lx_net").is_err());
+    hydra_hosttests_t31::lx::svc::COLOCATED.lock().unwrap().clear();
+    let id = SUPERVISOR.lock().start_service("lx_net").unwrap();
+    with(id.0, |t| assert_eq!(&t.cmdline.as_ref().unwrap()[..], b"/drivers/lx_net\0workers=2\0"));
+}
+// wave8 GX2 end

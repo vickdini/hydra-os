@@ -929,6 +929,10 @@ pub mod ipc {
 
 /// *stub* The Linux server's kernel side (`src/lx`).
 pub mod lx {
+    // wave8 GX2: *stub* `lx=kernel` was not given
+    pub fn all_kernel() -> bool {
+        false
+    }
     #[path = "../../../../src/lx/restart_policy.rs"]
     pub mod restart_policy;
     pub fn init() {
@@ -948,6 +952,9 @@ pub mod lx {
         pub fn host_by_endpoint(ep: u32) -> Option<SvcId> {
             crate::fake::LX_HOSTS.lock().unwrap().contains(&ep).then_some(2)
         }
+        // wave8 GX2 begin: *stub* the registry's endpoints (the split defaults; a test may
+        // co-locate a service in linux-server with `COLOCATED`)
+        pub static COLOCATED: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
         /// *stub* wave8 GD: every service forwarded (the display service is started).
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         pub enum SvcMode {
@@ -957,11 +964,20 @@ pub mod lx {
         pub fn mode(_svc: SvcId) -> SvcMode {
             SvcMode::Forward
         }
+        pub fn endpoint_of(svc: SvcId) -> u32 {
+            use crate::ipc::protocol::*;
+            if COLOCATED.lock().unwrap().contains(&svc) {
+                return ENDPOINT_LINUX_SERVER;
+            }
+            match svc {
+                LXS_NET => ENDPOINT_LX_NET,
+                LXS_IPC => ENDPOINT_LX_IPC,
+                _ => 0,
+            }
+        }
+        // wave8 GX2 end
     }
-    /// *stub* wave8 GD: `lx=kernel` was not given.
-    pub fn all_kernel() -> bool {
-        false
-    }
+    // (wave8 GD's `all_kernel` stub: the same as GX2's above)
     /// *stub*
     pub mod timer {
         use core::sync::atomic::Ordering;

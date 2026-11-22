@@ -5,7 +5,8 @@
 //!   by address family ([`by_family`]); every call on a socket descriptor, and `read`,
 //!   `write`, `readv`, `writev`, `ioctl` on one, by the kind of its server object
 //!   ([`by_kind`]). Internet sockets are [`crate::inet`]'s, netlink sockets
-//!   [`crate::netlink`]'s; Group 13 adds the AF_UNIX family and its kinds here.
+//!   [`crate::netlink`]'s. (Wave 8: this file is lx-net's; AF_UNIX is lx-ipc's `unix`, which
+//!   the program serving it dispatches before calling here.)
 //! - **Blocked calls**: a call that must wait (a `recv` with nothing to read, an `accept`
 //!   with no connection, a `connect` in progress, a `send` with no room) answers
 //!   "pending" and is kept here ([`Waiter`]) with what it did so far ([`Prog`]); no worker
@@ -139,10 +140,7 @@ fn refresh(slot: u32, event: bool) {
 
 /// `socket` (41) and `socketpair` (53): by address family.
 pub fn by_family(cx: &Cx) -> (i64, u64) {
-    // Group 13 (step 4): AF_UNIX
-    if cx.args[0] == 1 {
-        return crate::unix::create(cx);
-    }
+    // (AF_UNIX is lx-ipc's `unix::create`, dispatched before this; wave 8)
     let r = match (cx.nr, cx.args[0]) {
         (41, 2 | 10) => crate::inet::socket(cx),
         (41, 16) => crate::netlink::socket(cx),
@@ -158,9 +156,14 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
     if slot as usize >= LX_OBJ_SLOTS {
         return (ENOTSOCK, 0);
     }
-    // Group 13 (step 4): Unix sockets keep their own waiters (`crate::unix`)
-    if crate::obj::kind_of(slot) == LX_OBJ_KIND_UNIX {
-        return crate::unix::call(cx);
+    // (Unix sockets keep their own waiters, in lx-ipc's `unix`: dispatched before this;
+    // wave 8)
+    // wave8 GX2: a receive, accept or send on an Internet socket has no effect until it
+    // takes data or a connection from net-server or hands it bytes: until then
+    // (`resend_safe(cx, false)` at that point) a restart of lx-net sends it again instead of
+    // failing it
+    if matches!(cx.nr, 0 | 19 | 45 | 47 | 43 | 288 | 1 | 20 | 44 | 46) && crate::obj::kind_of(slot) == LX_OBJ_KIND_INET {
+        resend_safe(cx, true);
     }
     let mut prog = Prog::new();
     loop {
@@ -198,6 +201,11 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
                     continue;
                 }
                 let timed = prog.deadline.is_some_and(|d| d.is_some());
+                // wave8 GX2: a send waiting with bytes sent: their count is the answer if
+                // lx-net dies while it waits (it is not sent again)
+                if prog.sent > 0 && crate::sockkept::kept_active() {
+                    let _ = sys::lx_obj(LX_OBJ_PARTIAL, cx.id, prog.sent as u64, 0);
+                }
                 w.push(Waiter { c: cx.c, slot, prog });
                 drop(w);
                 refresh(slot, false);
@@ -209,6 +217,52 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
         }
     }
 }
+
+// wave8 GX2 begin
+/// Marks the call being served (in the worker's syscall page, `LX_CALL_RESEND_OFF`) safe to
+/// send again after a crash (`on`), or no longer: its effect begins. Nothing for a call
+/// tried again by the main thread (no page: it is pending, sent again anyway).
+pub fn resend_safe(cx: &Cx, on: bool) {
+    let p = cx.page();
+    if !p.is_null() {
+        // SAFETY: the worker's own syscall page; the word lies after the call, before the
+        // copy header
+        unsafe { core::ptr::write_volatile(p.add(LX_CALL_RESEND_OFF) as *mut u64, if on { cx.id } else { 0 }) };
+    }
+}
+
+/// Records that the call `cx` already did part of its work, and the answer for that part
+/// (`done`: the bytes a stream send handed net-server): if lx-net dies now, the caller gets
+/// it (a short write). A call being served writes it in the worker's syscall page
+/// (`LX_CALL_PARTIAL_OFF`, no system call); a waiting call tried again by the main thread
+/// tells the kernel (`LX_OBJ_PARTIAL`).
+pub fn partial(cx: &Cx, done: usize) {
+    if !crate::sockkept::kept_active() {
+        return; // (linux-server: no Transparent restart)
+    }
+    let p = cx.page();
+    if p.is_null() {
+        let _ = sys::lx_obj(LX_OBJ_PARTIAL, cx.id, done as u64, 0);
+        return;
+    }
+    // SAFETY: the worker's own syscall page; the words lie after the call
+    unsafe {
+        core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF + 8) as *mut i64, done as i64);
+        core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, cx.id);
+    }
+}
+
+/// A chunk is about to go to net-server: until it is known to be taken, the call's partial
+/// answer in the page is withdrawn (a crash in between fails the call with EIO instead of
+/// answering a count one chunk short, which a program would send again).
+pub fn partial_in_flight(cx: &Cx) {
+    let p = cx.page();
+    if !p.is_null() {
+        // SAFETY: as in `partial`
+        unsafe { core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, 0) };
+    }
+}
+// wave8 GX2 end
 
 /// Calls waiting in the kernel on a net-server handle (`LX_OBJ_NETWAIT`): `(request id, slot,
 /// process)`. The kernel completes them itself (`LX_RETRY`); an entry stays here until a

@@ -357,6 +357,11 @@ pub fn current_ids() -> (u64, u64) {
 /// * `tid` - Initial thread ID.
 /// * `inherit_from` - Optional parent process ID to inherit signal dispositions and IDs from.
 pub fn register_process(pid: u64, ppid: u64, tid: u64, inherit_from: Option<u64>) {
+    // wave8 GX2: a desktop process's child belongs to the desktop (`lx::desktop`)
+    match inherit_from {
+        Some(parent) => crate::lx::desktop::inherit(parent, pid),
+        None => crate::lx::desktop::root_started(pid),
+    }
     let mut procs = PROCS.lock();
     let (pgid, sid, actions, mask, groups, cgroup, ns, oom_score_adj) = match inherit_from.and_then(|p| procs.get(&p)) {
         Some(parent) => {

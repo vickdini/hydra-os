@@ -877,6 +877,60 @@ runtime (`hydra_rt::svcrt`). The supervisor starts it as `lx_sec`.
   `bpfhold`: an old map gives `EBADF`, a new one works; `devset`/`devcheck`: a device
   program still enforced after a restart, then detached).
 
+## lx-net and lx-ipc: sockets and IPC objects in services of their own (wave 8, X2)
+
+The network and IPC pieces left linux-server (design `docs/linux-services-design.md`,
+sections 2 and 9.3):
+
+- **lx-net** (`userland/drivers/lx-net`, service `LXS_NET`, endpoint `0x2E`, supervisor name
+  `lx_net`, 2 workers): `AF_INET`/`AF_INET6` sockets as net-server's client (`inet.rs`,
+  `sockopt.rs`, `netc.rs`), `AF_NETLINK` routing and uevent sockets (`netlink.rs`), blocked
+  calls and readiness (`socket.rs`), `/proc/net/{tcp,udp}[6]`. Restart class
+  **Transparent**.
+- **lx-ipc** (`userland/drivers/lx-ipc`, `LXS_IPC`, `0x2F`, `lx_ipc`, 3 workers): Unix
+  sockets, pipes and FIFOs (vfs-server's FIFO redirect lands here), eventfd, timerfd,
+  signalfd, pidfd, POSIX message queues, System V messages and semaphores,
+  `/proc/net/unix`. Restart class **FailObjects**: the old instance's objects fail with
+  their kind's error (pipes `EPIPE`, Unix sockets `ECONNRESET`, the rest `EBADF`), programs
+  live; the desktop session, which lives on D-Bus and Wayland sockets, ends.
+- **One source, three hosts.** The moved files live in the new crates; each has one glue
+  file (`netsvc.rs`, `ipcsvc.rs`: which calls, families and object kinds are its, process
+  exits, signals, closes, deadlines, main-thread work). linux-server builds the same files
+  with `#[path]` and dispatches through the same glue, so `lx.net=linux` / `lx.ipc=linux`
+  co-locate them back (and `lx.<name>=kernel` sends them to the in-kernel copies). The new
+  programs build linux-server's small shared files (`obj`, `lock`, `timeout`, `client`,
+  `fdio`) by `#[path]`; `obj.rs` takes the doorbell's endpoint and calls the program's
+  `on_closed` hook. Routing needed one change: `DEFAULT_ENDPOINTS` in `src/lx/svc.rs`.
+- **lx-net's kept state** (`sockkept.rs`): one record per socket in the kept-state object
+  (`hydra_rt::kept`, 2048 records of 160 bytes): kind, net-server handles, addresses, flags,
+  options (an Internet socket: `InetRec` + `Options::save`; a netlink socket: `NlRec`). The
+  kernel object's key is the record's number plus one. A socket writes its record after a
+  call or event changed it (it keeps the image it wrote last, so an unchanged socket costs a
+  comparison) and clears it when its last descriptor goes.
+- **lx-net's restart.** The new instance lists its live objects (`LX_SVC_LIST`), rebuilds
+  each socket from its record (others: `LX_SVC_DEAD`), adopts them (`LX_SVC_ADOPT`), asks
+  net-server to close every handle of its client tag except the adopted sockets' ones
+  (`MSG_NETS_CLIENT_RESET` with a keep list; lx-net's own tag `NETS_CLIENT_LXNET`, so a
+  linux-server restart never touches its connections), goes online and catches up on
+  net-server's events. A second crash within 30 s resets the kept state (the ladder): the
+  sockets then fail and their handles are closed.
+- **Calls in flight at a crash** (new kernel words in the worker's page, any Transparent
+  service may use them): `LX_CALL_RESEND_OFF` holds the id of the call being served while
+  it has had no effect, so the kernel re-sends it instead of failing it with `EIO`; lx-net
+  sets it for receives, accepts and sends on Internet sockets and clears it just before it
+  takes data or a connection from net-server or hands it bytes. `LX_CALL_PARTIAL_OFF` holds
+  `(id, answer)` once a stream send handed some bytes on: the caller then gets that short
+  count. A blocking stream send that sent part of its bytes and would wait answers the short
+  count at once in lx-net (a waiting call is re-sent from the start after a restart).
+- **Across services:** `mq_notify(SIGEV_THREAD)` in lx-ipc keeps lx-net's netlink socket
+  through the kernel (`LX_OBJ_PIN` now accepts another service's object; `LX_OBJ_NOTIFY`
+  forwards the cookie to its owner as `LX_KCALL_NLDELIVER`). net-server's doorbell goes to
+  `LXS_NET`'s host; a Transparent restart keeps `WATCHED_NET`.
+- **Tests:** the suite (sockets, pipes, FIFOs, epoll, scmrights, netlink, procnet, mqaio);
+  `tests/host-w8-x2` (kept records); host-t30 (split routing, re-send marks, partial
+  answers, pins across services); kill scripts `scratch/x2_killnet.sh`,
+  `scratch/x2_killipc.sh`, `scratch/x2_kde.sh`.
+
 ## The file service's calls (wave 7, Group 7-2)
 
 Design: `docs/vfs-design.md` sections 5-7. vfs-server (`userland/drivers/vfs-server`,

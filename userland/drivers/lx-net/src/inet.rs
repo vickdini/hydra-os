@@ -94,7 +94,149 @@ pub struct Sock {
     rx_stamp: Option<u64>,
     /// The number `/proc/<pid>/fd` and `/proc/net` show (`socket:[inode]`).
     inode: u64,
+    /// wave8 GX2: its kept record (`crate::sockkept`; 0: not kept) and the image last
+    /// written there.
+    rec: u32,
+    img: Vec<u8>,
+    /// The fingerprint of the image last written (`fingerprint`): the image is rebuilt and
+    /// compared only when it moved.
+    fp: Option<Fp>,
 }
+
+/// The fields of a socket that its kept record holds, cheap to compare (the options by
+/// their change count).
+type Fp = (u16, [Option<u32>; 5], u16, [u8; 4], Option<([u8; 4], u16)>, u32);
+
+// wave8 GX2 begin: the kept record of a socket (lx-net's Transparent restart)
+use crate::sockkept::{InetRec, K_RAW, K_SHUT_RD, K_STREAM, K_UDP_USED, K_V6};
+
+impl Sock {
+    /// The record's bytes (see `crate::sockkept`): what a new lx-net needs to serve the
+    /// socket on (the net-server handles stay in net-server).
+    fn image(&self) -> Vec<u8> {
+        let flags = (self.stream as u16) * K_STREAM
+            | (self.shut_rd as u16) * K_SHUT_RD
+            | (self.udp_used as u16) * K_UDP_USED
+            | (self.v6 as u16) * K_V6
+            | (self.raw as u16) * K_RAW;
+        let r = InetRec {
+            flags,
+            handles: self.handles().map(|h| h.unwrap_or(0)),
+            bound_port: self.bound_port,
+            bound_ip: self.bound_ip,
+            peer: self.peer,
+            uid: self.uid,
+            inode: self.inode,
+        };
+        let mut b = Vec::with_capacity(crate::sockkept::REC);
+        r.encode(&mut b);
+        let room = crate::sockkept::REC - b.len();
+        self.opts.save(&mut b, room);
+        b
+    }
+
+    /// A socket from record `rec`'s bytes `d` (a restarted lx-net), under net-server's
+    /// current instance.
+    fn from_image(rec: u32, d: &[u8]) -> Option<Self> {
+        let (r, rest) = InetRec::decode(d)?;
+        let (opts, _) = Options::load(rest)?;
+        let h = |v: u32| (v != 0).then_some(v);
+        let [icmp, listener, bind_id, tcp, udp] = r.handles.map(h);
+        Some(Sock {
+            gen: stack::gen(),
+            stream: r.flags & K_STREAM != 0,
+            tcp,
+            udp,
+            bound_port: r.bound_port,
+            peer: r.peer,
+            shut_rd: r.flags & K_SHUT_RD != 0,
+            opts,
+            bound_ip: r.bound_ip,
+            bind_id,
+            listener,
+            uid: r.uid,
+            udp_used: r.flags & K_UDP_USED != 0,
+            v6: r.flags & K_V6 != 0,
+            icmp,
+            raw: r.flags & K_RAW != 0,
+            rx_stamp: None,
+            inode: r.inode,
+            rec,
+            img: d.to_vec(),
+            fp: None,
+        })
+    }
+
+    /// The record's fields in a form cheap to compare.
+    fn fingerprint(&self) -> Fp {
+        let f = (self.stream as u16) | (self.shut_rd as u16) << 1 | (self.udp_used as u16) << 2 | (self.v6 as u16) << 3 | (self.raw as u16) << 4;
+        (f, self.handles(), self.bound_port, self.bound_ip, self.peer, self.opts.generation())
+    }
+
+    /// Writes the kept record if the socket changed since the last write.
+    fn persist(&mut self) {
+        if self.rec == 0 {
+            return;
+        }
+        let fp = self.fingerprint();
+        if self.fp == Some(fp) || self.dead() {
+            return;
+        }
+        let img = self.image();
+        if img == self.img || crate::sockkept::put(self.rec, &img) {
+            self.img = img;
+            self.fp = Some(fp);
+        }
+    }
+}
+
+/// Whether record bytes `d` make an Internet socket (a restarted lx-net checks each one
+/// before adopting it).
+pub fn kept_ok(d: &[u8]) -> bool {
+    Sock::from_image(0, d).is_some()
+}
+
+/// A restarted lx-net takes back the socket in slot `slot` from its record `rec` (after
+/// the kernel let it adopt its objects); `false` if the record no longer makes one. With
+/// `alive` false (net-server restarted meanwhile: its handles belong to a dead instance)
+/// the socket comes back dead (it fails, and its handles are neither used nor kept).
+pub fn restore(slot: u32, rec: u32, alive: bool) -> bool {
+    let Some(d) = crate::sockkept::get(rec) else { return false };
+    let Some(mut s) = Sock::from_image(rec, &d) else { return false };
+    if !alive {
+        s.gen = u64::MAX;
+    }
+    if !crate::obj::reserve(slot, LX_OBJ_KIND_INET) {
+        return false;
+    }
+    if s.inode >= INODE.load(Ordering::Relaxed) {
+        INODE.store(s.inode + 1, Ordering::Relaxed);
+    }
+    let handles = if alive { s.handles() } else { [None; 5] };
+    SOCKS.lock().insert(slot, Arc::new(YLock::new(s)));
+    for h in handles.into_iter().flatten() {
+        track(h, slot);
+    }
+    refresh(slot, true);
+    true
+}
+
+/// The net-server handles of every socket (what a restarted lx-net keeps).
+pub fn kept_handles() -> Vec<u32> {
+    let socks: Vec<Arc<YLock<Sock>>> = SOCKS.lock().values().cloned().collect();
+    socks
+        .iter()
+        .flat_map(|s| {
+            let g = s.lock();
+            if g.dead() {
+                Vec::new()
+            } else {
+                g.handles().into_iter().flatten().collect::<Vec<u32>>()
+            }
+        })
+        .collect()
+}
+// wave8 GX2 end
 
 impl Sock {
     fn dead(&self) -> bool {
@@ -226,7 +368,11 @@ pub fn all_slots() -> Vec<u32> {
 /// Writes slot `slot`'s readiness word (`event`: something new happened on it).
 pub fn refresh(slot: u32, event: bool) {
     if let Some(s) = sock_of(slot) {
-        let bits = s.lock().poll_events();
+        let bits = {
+            let mut g = s.lock();
+            g.persist(); // wave8 GX2: after every call and event (written only on a change)
+            g.poll_events()
+        };
         crate::obj::set_ready_ev(slot, bits, 0, event);
     }
 }
@@ -243,6 +389,9 @@ pub fn closed(slot: u32) {
             }
         }
     }
+    // wave8 GX2: the record goes before the handles (a crash in between leaks the handles
+    // only until the restart's keep list closes them)
+    crate::sockkept::clear(s.rec);
     s.close();
 }
 
@@ -477,6 +626,9 @@ pub fn socket(cx: &Cx) -> i64 {
         raw: icmp == Some(true),
         rx_stamp: None,
         inode,
+        rec: crate::sockkept::alloc(), // wave8 GX2
+        img: Vec::new(),
+        fp: None,
     };
     if let Some(h) = sock.icmp {
         track(h, slot);
@@ -486,11 +638,13 @@ pub fn socket(cx: &Cx) -> i64 {
     }
     let flags = cx.args[1] as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC);
     let bits = sock.poll_events();
+    sock.persist();
+    let key = sock.rec as u64;
     let arc = Arc::new(YLock::new(sock));
     SOCKS.lock().insert(slot, arc);
     crate::obj::set_ready(slot, bits, 0);
     let name = alloc::format!("socket:[{}]", inode);
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_INET, flags, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes()) {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_INET, flags, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), 0, key) {
         Ok(fd) => fd,
         Err(e) => {
             closed(slot);
@@ -657,7 +811,10 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
 fn connect(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, addr: u64, len: u64, prog: &mut Prog) -> Out {
     // A connect in progress, tried again (or made again after its net wait): wait for the
     // handshake
-    if prog.deadline.is_some() || cx.c.flags & LX_CALL_RETRIED != 0 {
+    // (wave8 GX2: a connect sent again after an lx-net restart is marked retried too; one
+    // the old instance never started has no handle yet and starts now)
+    let retried_fresh = prog.deadline.is_none() && cx.c.flags & LX_CALL_RETRIED != 0 && sock.lock().tcp.is_none();
+    if (prog.deadline.is_some() || cx.c.flags & LX_CALL_RETRIED != 0) && !retried_fresh {
         let (id, dead) = {
             let s = sock.lock();
             (s.tcp, s.dead())
@@ -909,6 +1066,7 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         return Out::Done(stack::ENETDOWN);
     }
     let snap = stack::word_raw(lid);
+    crate::socket::resend_safe(cx, false); // wave8 GX2: the connection is taken now
     let Some(cid) = stack::tcp_accept(lid) else {
         prog.wait_on = Some((lid, snap));
         return if cx.nonblock() { Out::Done(EAGAIN) } else { prog.wait(timeout) };
@@ -922,7 +1080,7 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         }
     };
     let inode = INODE.fetch_add(1, Ordering::Relaxed);
-    let conn = Sock {
+    let mut conn = Sock {
         gen: stack::gen(),
         stream: true,
         tcp: Some(cid),
@@ -941,13 +1099,18 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         raw: false,
         rx_stamp: None,
         inode,
+        rec: crate::sockkept::alloc(), // wave8 GX2
+        img: Vec::new(),
+        fp: None,
     };
     track(cid, slot);
     let bits = conn.poll_events();
+    conn.persist();
+    let key = conn.rec as u64;
     SOCKS.lock().insert(slot, Arc::new(YLock::new(conn)));
     crate::obj::set_ready(slot, bits, 0);
     let name = alloc::format!("socket:[{}]", inode);
-    let fd = match crate::obj::install(cx, slot, LX_OBJ_KIND_INET, flags as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes()) {
+    let fd = match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_INET, flags as u32 & (SOCK_NONBLOCK | SOCK_CLOEXEC), 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), 0, key) {
         Ok(fd) => fd,
         Err(e) => {
             closed(slot);
@@ -981,6 +1144,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
             Ok(d) => d,
             Err(e) => return Out::Done(e),
         };
+        crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram goes now
         return Out::Done(match stack::icmp_send(id, ip, &data) {
             Ok(n) => n as i64,
             Err(e) => e,
@@ -1012,16 +1176,24 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
                 Err(e) => return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { e }),
             };
             let snap = stack::word_raw(id);
+            crate::socket::resend_safe(cx, false); // wave8 GX2: the bytes go now
+            crate::socket::partial_in_flight(cx); // wave8 GX2
             match stack::tcp_send(id, &chunk) {
                 Ok(0) => {
                     prog.wait_on = Some((id, snap));
                     if nonblock {
                         return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { EAGAIN });
                     }
+                    // (wave8 GX2: a wait with bytes sent tells the kernel their count,
+                    // `socket::by_kind`, so a restart answers it instead of sending it again)
+                    if prog.sent > 0 {
+                        crate::socket::partial(cx, prog.sent);
+                    }
                     return prog.wait(timeout);
                 }
                 Ok(n) => {
                     prog.sent += n;
+                    crate::socket::partial(cx, prog.sent); // wave8 GX2
                     if nonblock {
                         break;
                     }
@@ -1054,6 +1226,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
         Ok(d) => d,
         Err(e) => return Out::Done(e),
     };
+    crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram goes now
     Out::Done(match stack::udp_send(id, ip, port, &data) {
         Ok(n) => n as i64,
         Err(e) => e,
@@ -1081,6 +1254,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
         }
         loop {
             let snap = stack::word_raw(id);
+            if !peek {
+                crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram is taken now
+            }
             match stack::icmp_recv(id, peek) {
                 None => {
                     prog.wait_on = Some((id, snap));
@@ -1108,6 +1284,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
             return Ok(Some((Vec::new(), None, false)));
         }
         let snap = stack::word_raw(id);
+        if !peek {
+            crate::socket::resend_safe(cx, false); // wave8 GX2: the bytes are taken now
+        }
         return match stack::tcp_recv(id, cap, peek) {
             Ok((d, false)) if d.is_empty() => {
                 if stack::tcp_state(id) == stack::CLOSED {
@@ -1127,6 +1306,9 @@ fn recv(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, cap: usize, flags: u64, pro
     let id = sock.lock().udp_id(slot)?;
     let snap = stack::word_raw(id);
     prog.wait_on = Some((id, snap));
+    if !peek {
+        crate::socket::resend_safe(cx, false); // wave8 GX2: the datagram is taken now
+    }
     match stack::udp_recv(id, peek) {
         Some((ip, port, mut data, whole, arrived)) => {
             sock.lock().rx_stamp = Some(arrived);

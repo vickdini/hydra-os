@@ -20,6 +20,9 @@ const ENFILE: i64 = -23;
 
 /// The window's address (0: not set yet).
 static BASE: AtomicU64 = AtomicU64::new(0);
+/// wave8 GX2: the endpoint whose doorbell [`flush`] rings (this program's: linux-server,
+/// lx-net or lx-ipc, which all build this file).
+static ENDPOINT: AtomicU32 = AtomicU32::new(ENDPOINT_LINUX_SERVER);
 /// Words changed since the last doorbell.
 static DIRTY: AtomicBool = AtomicBool::new(false);
 /// Slots in use, and each one's kind.
@@ -27,9 +30,27 @@ static SLOTS: YLock<[u8; LX_OBJ_SLOTS]> = YLock::new([0; LX_OBJ_SLOTS]);
 /// Where the next search for a free slot starts (slots are reused late).
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
-/// Sets the window (the kernel empties the slots when the server goes online).
-pub fn init(window: *mut u8) {
+/// Sets the object area and the program's endpoint (the kernel empties the slots when the
+/// server goes online, unless a Transparent restart adopts them: [`reserve`]).
+pub fn init(window: *mut u8, endpoint: u32) {
+    ENDPOINT.store(endpoint, Ordering::Release);
     BASE.store(window as u64, Ordering::Release);
+}
+
+/// wave8 GX2: takes slot `slot` for an adopted object of `kind` (a Transparent restart: the
+/// previous instance's object keeps its slot and readiness word); `false` if it is taken.
+#[allow(dead_code)] // (linux-server never adopts)
+pub fn reserve(slot: u32, kind: u32) -> bool {
+    if slot as usize >= LX_OBJ_SLOTS {
+        return false;
+    }
+    let mut s = SLOTS.lock();
+    if s[slot as usize] != 0 {
+        return false;
+    }
+    s[slot as usize] = kind as u8;
+    USED.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Slots in use, and the most ever (Group 13: logged every 256, to size the window).
@@ -49,7 +70,8 @@ pub fn alloc(kind: u32) -> Result<u32, i64> {
                     kinds[(k as usize).min(31)] += 1;
                 }
                 hydra_rt::println!(
-                    "[linux-server] {} objects in use (pipe ends {}, unix {}, eventfd {}, timerfd {}, signalfd {}, pidfd {}, other {})",
+                    "[{}] {} objects in use (pipe ends {}, unix {}, eventfd {}, timerfd {}, signalfd {}, pidfd {}, other {})",
+                    crate::NAME,
                     n,
                     kinds[16] + kinds[17],
                     kinds[18],
@@ -62,7 +84,7 @@ pub fn alloc(kind: u32) -> Result<u32, i64> {
             }
         }
     } else {
-        hydra_rt::println!("[linux-server] out of object slots ({} in use)", USED.load(Ordering::Relaxed));
+        hydra_rt::println!("[{}] out of object slots ({} in use)", crate::NAME, USED.load(Ordering::Relaxed));
     }
     r
 }
@@ -162,7 +184,7 @@ pub fn set_ready_ev(slot: u32, ready: u32, size: u64, event: bool) {
 /// the marked slots.
 pub fn flush() {
     if DIRTY.swap(false, Ordering::AcqRel) {
-        sys::svc_signal(ENDPOINT_LINUX_SERVER, LX_SIGNAL_OBJS);
+        sys::svc_signal(ENDPOINT.load(Ordering::Relaxed), LX_SIGNAL_OBJS);
     }
 }
 
@@ -176,7 +198,14 @@ pub fn install(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, g
 /// [`install`] with the kernel's value `tag` (`LxObjDesc::tag`: an inode number, a pid).
 #[allow(clippy::too_many_arguments)]
 pub fn install_tag(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8], tag: u64) -> Result<i64, i64> {
-    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag, key: 0 }; // wave6 G21: key (LX_SVC_LIST)
+    install_keyed(cx, slot, kind, flags, mode, uid, gid, name, tag, 0)
+}
+
+/// [`install_tag`] with the object's key `key` (wave6 G21: what `LX_SVC_LIST` gives a
+/// restarted instance; wave8 GX2: lx-net's kept record).
+#[allow(clippy::too_many_arguments)]
+pub fn install_keyed(cx: &Cx, slot: u32, kind: u32, flags: u32, mode: u32, uid: u32, gid: u32, name: &[u8], tag: u64, key: u64) -> Result<i64, i64> {
+    let mut d = LxObjDesc { slot, kind, flags, mode, uid, gid, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX], tag, key }; // wave6 G21: key (LX_SVC_LIST)
     let n = name.len().min(LX_OBJ_NAME_MAX);
     d.name[..n].copy_from_slice(&name[..n]);
     d.name_len = n as u32;
@@ -196,24 +225,8 @@ pub fn closed(slot: u32, kind: u32) {
             TEST_CLOSES.fetch_add(1, Ordering::Relaxed);
             test_mem_closed(slot);
         }
-        LX_OBJ_KIND_MQ => crate::mqueue::closed(slot),
-        LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => crate::bpf::closed(slot),
-        LX_OBJ_KIND_EVENTFD => crate::eventfd::closed(slot),
-        LX_OBJ_KIND_PIPE_R | LX_OBJ_KIND_PIPE_W | LX_OBJ_KIND_PIPE_RW => crate::pipe::closed(slot),
-        LX_OBJ_KIND_UNIX => crate::unix::closed(slot),
-        LX_OBJ_KIND_PIDFD => crate::pidfd::closed(slot),
-        LX_OBJ_KIND_SIGNALFD => crate::signalfd::closed(slot),
-        LX_OBJ_KIND_TIMERFD => crate::timerfd::closed(slot),
-        LX_OBJ_KIND_PSEUDO => crate::pseudo::closed(slot), // wave7 G7-4
-        LX_OBJ_KIND_INET => {
-            crate::socket::closed(slot);
-            crate::inet::closed(slot);
-        }
-        LX_OBJ_KIND_NETLINK => {
-            crate::socket::closed(slot);
-            crate::netlink::closed(slot);
-        }
-        _ => {}
+        // wave8 GX2: every other kind is the program's own (linux-server, lx-net, lx-ipc)
+        _ => crate::on_closed(slot, kind),
     }
     set_ready(slot, 0, 0);
     free(slot);
