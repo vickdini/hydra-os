@@ -916,6 +916,16 @@ pub fn revive(endpoint: u32) -> bool {
             if is_task_alive(id) && service::server_of(endpoint) == id.0 {
                 return true; // alive and registered: nothing to do
             }
+            // wave8 GZ begin: alive but not registered yet: it is starting up (zfs-server
+            // imports the pool and replays its intent log before it registers). Killing it
+            // would only start that again (and burn its restarts): wait for it instead. A
+            // process that hangs before registering is left to a deliberate restart, as
+            // the watchdog leaves it ("still starting up").
+            if is_task_alive(id) {
+                drop(sup);
+                return await_registration(endpoint, id);
+            }
+            // wave8 GZ end
         }
         sup.reincarnate(idx).ok()
     };

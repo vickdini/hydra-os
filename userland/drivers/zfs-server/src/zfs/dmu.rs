@@ -91,6 +91,9 @@ pub struct Dmu {
     /// The last file read: `(object, the block after its end)`, to recognize sequential
     /// reading (read further ahead then).
     last_read: (u64, u64),
+    /// wave8 GZ: counts changes (dnode updates, data writes, truncations): a request that
+    /// moved it is written to the intent log (`crate::durable`).
+    pub changes: u64,
 }
 
 /// Blocks read ahead of a read that does not continue the previous one (a cluster: the
@@ -117,6 +120,7 @@ impl Dmu {
             truncated: BTreeMap::new(),
             last_read: (0, 0),
             freed_trees: Vec::new(),
+            changes: 0,
         }
     }
 
@@ -184,6 +188,7 @@ impl Dmu {
     /// * `obj` - Object ID to update.
     /// * `dn` - New dnode record.
     pub fn put_dnode(&mut self, obj: u64, dn: DnodePhys) {
+        self.changes += 1;
         if obj == 0 {
             self.ub.meta_dnode = dn;
         } else {
@@ -481,6 +486,7 @@ impl Dmu {
     /// # Errors
     /// DMU error string on write or allocation failure.
     pub fn write(&mut self, obj: u64, offset: u64, data: &[u8]) -> DmuResult<usize> {
+        self.changes += 1;
         let mut dn = self.get_dnode(obj)?;
         let mut done = 0;
         while done < data.len() {
@@ -524,6 +530,7 @@ impl Dmu {
     /// # Errors
     /// DMU error string on failure.
     pub fn truncate(&mut self, obj: u64, new_size: u64) -> DmuResult<()> {
+        self.changes += 1;
         let mut dn = self.get_dnode(obj)?;
         if new_size < dn.size {
             let first_gone = (new_size + BLOCK - 1) / BLOCK;

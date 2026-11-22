@@ -122,7 +122,12 @@ impl ZfsServer {
     /// # Returns
     /// Initialized [`ZfsServer`] instance.
     pub fn new() -> Self {
-        let vdev = Vdev::open();
+        Self::on(Vdev::open())
+    }
+
+    /// wave8 GZ: imports the pool on `vdev`, or creates one on a blank disk ([`ZfsServer::new`]
+    /// with the disk given: the host tests use a RAM disk).
+    pub fn on(vdev: Vdev) -> Self {
         let contents = super::spa::Spa::probe(&vdev);
         let mut vdev = vdev;
         if contents == Some(super::spa::DiskContents::Pool) {
@@ -337,11 +342,21 @@ impl ZfsServer {
         })
     }
 
-    /// Commits if enough dirty data has accumulated.
-    pub fn maybe_sync(&mut self) {
-        if self.dmu.dirty_blocks() >= super::dmu::DIRTY_SYNC_THRESHOLD {
-            let _ = self.sync();
-        }
+    /// Called at the end of a change. wave8 GZ: no commit in the middle of a request (the
+    /// intent log replays whole requests): the dirty-data commit is made after the request
+    /// is logged (`crate::durable::after`).
+    pub fn maybe_sync(&mut self) {}
+
+    /// wave8 GZ: the state requests depend on besides the pool (open handle counts, unlinked
+    /// objects kept for their handles), for the intent log's first record.
+    pub fn durable_state(&self) -> Vec<u8> {
+        crate::zil::encode_state(&self.open_counts, &self.orphans)
+    }
+
+    /// wave8 GZ: [`ZfsServer::durable_state`] back, before the log's requests are replayed.
+    pub fn restore_durable_state(&mut self, open: BTreeMap<u64, u32>, orphans: BTreeSet<u64>) {
+        self.open_counts = open;
+        self.orphans = orphans;
     }
 
     /// Returns the root directory object ID of the active dataset.
