@@ -1,0 +1,9 @@
+[package]
+name = "display-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra's display service (wave 8): /dev/dri/card0 (the Linux DRM layer) on a native core that owns the screen the kernel lends"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

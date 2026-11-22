@@ -39,6 +39,8 @@ const SYS_LX_TIMER: u64 = 62;
 const SYS_LX_SIGTAKE: u64 = 63;
 // wave6 G23
 const SYS_LX_MEM: u64 = 64;
+// wave8 GD
+const SYS_SCREEN: u64 = 73;
 
 /// A service message (the kernel's `ipc::service::WireMessage`).
 #[repr(C)]
@@ -294,6 +296,13 @@ pub fn lx_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
     unsafe { syscall5(SYS_LX_MEM, op, a, b, c, d) }
 }
 // wave6 G23 end
+// wave8 GD begin
+/// The display service's screen (`SYS_SCREEN`, `SCREEN_*` in the protocol): operation `op`;
+/// returns its value or the negative errno.
+pub fn screen(op: u64, a: u64, b: u64) -> i64 {
+    unsafe { syscall3(SYS_SCREEN, op, a, b) }
+}
+// wave8 GD end
 /// A service's registry operation (`SYS_LX_SVC`, wave 6: [`crate::protocol::LX_SVC_SUBSCRIBE`],
 /// `LX_SVC_CLAIM_MAJOR`, `LX_SVC_WHOAMI`, ...); returns its non-negative result.
 ///

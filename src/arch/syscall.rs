@@ -1173,6 +1173,12 @@ fn dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::FpuState) {
             crate::lx::mem::sys_mem(arg0, arg1, _arg2, frame.r10, frame.r8)
         }
         // wave6 G23 end
+        // wave8 GD begin: the display service's screen (`ipc::screen`)
+        crate::ipc::protocol::SYS_SCREEN => {
+            drop(stats);
+            crate::ipc::screen::sys_screen(arg0, arg1, _arg2)
+        }
+        // wave8 GD end
         // wave6 G19 begin
         SYS_LX_SVC => {
             drop(stats);

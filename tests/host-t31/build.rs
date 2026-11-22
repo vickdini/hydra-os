@@ -16,6 +16,7 @@ const DRIVERS: &[&str] = &[
     "linux-server",
     "lx-sec",
     "vfs-server",
+    "display-server", // wave8 GD
     "svc-test",
     "input-server", // wave8 GI
     "hda-driver",

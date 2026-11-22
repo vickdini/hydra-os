@@ -65,3 +65,15 @@ The autonomous video console features a zero-allocation, lossless text insertion
 - **Hardware-Synchronized Blinking**: In the console polling loops ([`get_key_or_refresh`](file:///d:/os/src/console.rs#L407-L426)), a 10ms timer step drives a ~1 Hz (500ms toggle interval) blinking rate while the shell waits for keyboard input.
 - **Artifact Prevention**: Any operation that modifies the framebuffer (`write_char`, `new_line`, `clear`, `scroll_up`, or direct buffer writes) automatically invokes `hide_cursor()` prior to rasterization, preventing cursor ghosting artifacts.
 
+
+---
+
+## 6. The Screen Lent to the Display Service (wave 8)
+
+Since wave 8 the Linux DRM device (`/dev/dri/card0`) is served by a ring-3 service, **display-server** (`userland/drivers/display-server`, service `display`, endpoint 0x23); the kernel's `compat/linux/drm.rs` stays as the switch back (`lx=kernel`, `lx.display=kernel`). The kernel keeps what the console needs to work with no user space ([`src/ipc/screen.rs`](../../src/ipc/screen.rs), `docs/display-input-design.md` sections 3.2 and 5):
+
+- **Lending:** the service maps the screen once (`SYS_SCREEN` 73, `SCREEN_MAP`): the framebuffer's pages, then a status page. While the console owns the screen those pages lead to one scratch page. On the session's first picture (`SCREEN_TAKE`) the console moves to its off-screen copy (`release_display`, which also ends the boot logo) and the mapping is pointed at the framebuffer.
+- **Taking it back is a remapping:** Ctrl+Alt+F1, the session's end (`SCREEN_GIVE`) and a crash of the service change the state word, then zap the service's mapping (`Mm::discard`, with the TLB shootdown) before the console repaints: nothing the service writes afterwards reaches the screen, and the kernel never waits for it. A kernel panic sets the state word without taking a lock and gives a copy in flight a moment to end (the service raises a "copying" word before it reads the state).
+- **The hot keys** stay in `arch/keyboard.rs`; `drm::request_vt_switch` hands them to `ipc::screen` while the service's session holds the screen, and the `screend` task carries the switch out. Input is routed to the session only while it shows.
+- **The service** completes page flips at an emulated 60 Hz vertical blank and holds the completions back while the console shows, so the desktop stops drawing behind Ctrl+Alt+F1.
+- **A crash of display-server:** the console shows at once; its descriptors fail with `ENODEV` (the desktop session ends); the supervisor restarts it and the login screen comes back (`FailObjects`, decision 28).

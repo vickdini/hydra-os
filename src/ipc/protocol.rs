@@ -2240,3 +2240,88 @@ pub struct InputRec {
     pub y: u16,
 }
 // wave8 GI end
+
+// ----------------------------------------------------------------------
+// wave8 GD begin: the display service (Group D, `docs/display-input-design.md` section 5)
+// ----------------------------------------------------------------------
+
+/// Native system call `SYS_SCREEN(op, a, b)` (73): the display service's side of the
+/// screen the kernel lends it (`src/ipc/screen.rs`). Only the process serving
+/// [`ENDPOINT_DISPLAY_DEV`] may call it.
+pub const SYS_SCREEN: u64 = 73;
+/// `SYS_SCREEN` operation: `(*ScreenInfo) -> 0`: the screen's mode and state.
+pub const SCREEN_INFO: u64 = 0;
+/// `SYS_SCREEN` operation: `() -> address`: maps the screen into the caller: the
+/// framebuffer's pages ([`ScreenInfo::fb_bytes`] rounded up to pages), then one status page
+/// (`SCREEN_ST_*` words). While the console owns the screen the framebuffer pages lead to a
+/// scratch page: writes go nowhere, and the kernel never waits for the service.
+pub const SCREEN_MAP: u64 = 1;
+/// `SYS_SCREEN` operation: `() -> state`: a desktop session wants the screen (its first
+/// picture). [`SCREEN_SHOWN`]: lent, draw; [`SCREEN_HIDDEN`]: the console shows (Ctrl+Alt+F1)
+/// and the session waits unseen; `-ENXIO`: no screen (or the kernel panicked).
+pub const SCREEN_TAKE: u64 = 2;
+/// `SYS_SCREEN` operation: `() -> 0`: no session needs the screen any more: the console
+/// takes it back.
+pub const SCREEN_GIVE: u64 = 3;
+/// `SYS_SCREEN` operation: `(gen, deadline_ns) -> state | gen << 8`: waits until the
+/// screen's generation differs from `gen` (a state change), a [`SCREEN_KICK`], or the
+/// monotonic clock reaches `deadline_ns` (0: no deadline; every wait ends after 1 s at most).
+pub const SCREEN_WAIT: u64 = 4;
+/// `SYS_SCREEN` operation: `() -> ns`: the monotonic clock (`CLOCK_MONOTONIC`, nanoseconds).
+pub const SCREEN_NOW: u64 = 5;
+/// `SYS_SCREEN` operation: `() -> 0`: ends the service's current [`SCREEN_WAIT`] at once.
+pub const SCREEN_KICK: u64 = 6;
+
+/// Screen state: the console owns the screen (no desktop session shows).
+pub const SCREEN_CONSOLE: u32 = 0;
+/// Screen state: lent to the display service, its session shows.
+pub const SCREEN_SHOWN: u32 = 1;
+/// Screen state: a session exists but the console shows (Ctrl+Alt+F1); the service holds
+/// its flip completions back so the desktop stops drawing.
+pub const SCREEN_HIDDEN: u32 = 2;
+/// Screen state: the kernel panicked; the console owns the screen for good.
+pub const SCREEN_PANIC: u32 = 3;
+
+/// Status page word (u32 index): the state (`SCREEN_*`), written by the kernel.
+pub const SCREEN_ST_STATE: usize = 0;
+/// Status page word: 1 while the service copies to the screen (it sets it, then reads
+/// the state; the kernel's panic path sets the state, then waits a little for 0).
+pub const SCREEN_ST_COPYING: usize = 1;
+/// Status page word: the generation (low 32 bits), bumped by every state change.
+pub const SCREEN_ST_GEN: usize = 2;
+
+/// The refresh rate the firmware framebuffer is driven at (an emulated vertical blank), in
+/// millihertz.
+pub const SCREEN_REFRESH_MHZ: u32 = 60_000;
+
+/// [`SCREEN_INFO`]'s answer.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ScreenInfo {
+    /// Visible pixels per line.
+    pub width: u32,
+    /// Lines.
+    pub height: u32,
+    /// Pixels per line in memory.
+    pub stride: u32,
+    /// 1: bytes B, G, R, X (DRM's XRGB8888 in memory); 0: R, G, B, X.
+    pub bgr: u32,
+    /// Bytes of the framebuffer mapping (before the status page).
+    pub fb_bytes: u64,
+    /// [`SCREEN_REFRESH_MHZ`].
+    pub refresh_mhz: u32,
+    /// The state now (`SCREEN_*`).
+    pub state: u32,
+    /// The generation now.
+    pub gen: u64,
+    /// The display adapter's PCI slot (`0000:00:02.0`), NUL-padded (DRM's `GET_UNIQUE`).
+    pub slot: [u8; 16],
+}
+
+/// Server object kind (wave 8, device kinds are 64..: `ENODEV` once stale): an open
+/// `/dev/dri/card0` of the display service.
+pub const LX_OBJ_KIND_DRM: u32 = 64;
+/// Server object kind: a DMA-BUF descriptor of the display service (a dumb buffer
+/// exported with `PRIME_HANDLE_TO_FD`).
+pub const LX_OBJ_KIND_DMABUF: u32 = 68;
+// wave8 GD end

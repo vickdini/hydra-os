@@ -76,7 +76,7 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     let names: Vec<&str> = supervisor::get_service_snapshots().iter().map(|s| s.name).collect();
     assert_eq!(
         names,
-        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "svc_test", "input_server", "sound_driver"]
+        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "display_server", "svc_test", "input_server", "sound_driver"]
     );
     assert!(supervisor::get_service_snapshots().iter().all(|s| s.state == ServiceState::Stopped && s.task_id.is_none()));
     let log = fake::SVC_LOG.lock().unwrap().clone();
@@ -87,8 +87,10 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     // wave7 G7-1: zfs-server may attach vfs-server's window (its requests sit there)
     assert!(log.contains(&("allow_client", ENDPOINT_VFS_SERVER, ENDPOINT_ZFS_SERVER as u64, 0)));
     assert!(log.contains(&("set_signal_hook", ENDPOINT_VFS_SERVER, 0, 0)));
+    // wave8 GD: the display service's going away runs the crash policy (the console shows)
+    assert!(log.contains(&("set_signal_hook", ENDPOINT_DISPLAY_DEV, 0, 0)));
     let lx = fake::LX_LOG.lock().unwrap().clone();
-    for svc in [1u8, LXS_SEC, LXS_TEST, LXS_VFS] {
+    for svc in [1u8, LXS_SEC, LXS_TEST, LXS_VFS, LXS_DISPLAY] {
         assert!(lx.contains(&("configure", svc)) && lx.contains(&("fw_cfg", svc)), "Linux service {}", svc);
     }
     assert_eq!(*fake::LX_CALLS.lock().unwrap(), vec!["init"]);

@@ -933,6 +933,19 @@ pub mod lx {
         pub fn host_by_endpoint(ep: u32) -> Option<SvcId> {
             crate::fake::LX_HOSTS.lock().unwrap().contains(&ep).then_some(2)
         }
+        /// *stub* wave8 GD: every service forwarded (the display service is started).
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum SvcMode {
+            Forward,
+            Kernel,
+        }
+        pub fn mode(_svc: SvcId) -> SvcMode {
+            SvcMode::Forward
+        }
+    }
+    /// *stub* wave8 GD: `lx=kernel` was not given.
+    pub fn all_kernel() -> bool {
+        false
     }
     /// *stub*
     pub mod timer {

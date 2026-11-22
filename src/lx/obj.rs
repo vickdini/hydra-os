@@ -308,11 +308,13 @@ impl CharDevice for ServerObject {
     }
 
     fn rdev(&self) -> u64 {
-        // wave8 GI: a device service's object (a character device, its key the device
-        // number) is that device
-        if self.mode & 0o170000 == 0o020000 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+        // wave8 GD begin: a device service's character device (its mode is `S_IFCHR`): the
+        // device number is the object's key (libdrm finds `/sys/dev/char/226:0` by it).
+        // (Groups I and S planned the same rule: this one is kept.)
+        if self.mode & 0o170000 == 0o020000 && self.key != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
             return self.key;
         }
+        // wave8 GD end
         0
     }
 
@@ -339,6 +341,13 @@ impl CharDevice for ServerObject {
         st.st_ino = if self.tag != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PIDFD && self.kind != crate::ipc::protocol::LX_OBJ_KIND_BPF_MAP { self.tag } else { 0x2_0000_0000 | (self.gen & 0xFFFF) << 16 | self.slot as u64 };
         st.st_size = self.word().map_or(0, |w| w.2) as i64;
         st.st_blksize = 4096;
+        // wave8 GD begin: a device service's character device: devtmpfs, its device number
+        if self.mode & 0o170000 == 0o020000 && self.key != 0 && self.kind != crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {
+            st.st_dev = 6;
+            st.st_rdev = self.key;
+            st.st_ino = self.key | 0x1_0000_0000;
+        }
+        // wave8 GD end
         // wave7 G7-4: a pseudo file of linux-server: its file system's device (the `tag` is
         // the inode number its `stat` reports, the key the device)
         if self.kind == crate::ipc::protocol::LX_OBJ_KIND_PSEUDO {

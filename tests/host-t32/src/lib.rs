@@ -101,6 +101,12 @@ pub mod ipc {
     }
     pub use crate::stubs::ipc::{endpoint, service};
     pub use message::Message;
+    /// *stub* wave8 GD: the display service's screen (`SYS_SCREEN`).
+    pub mod screen {
+        pub fn sys_screen(_op: u64, _a: u64, _b: u64) -> i64 {
+            -38
+        }
+    }
 }
 
 #[path = "../../../src/capability/mod.rs"]

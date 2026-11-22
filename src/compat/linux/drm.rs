@@ -273,8 +273,75 @@ static VTD_RUNNING: AtomicBool = AtomicBool::new(false);
 ///
 /// `true` if DRM session is active but hidden; `false` otherwise.
 pub fn session_hidden() -> bool {
-    SESSION_HIDDEN.load(Ordering::Acquire)
+    // wave8 GD: or the display service's session (`ipc::screen`)
+    SESSION_HIDDEN.load(Ordering::Acquire) || screen_hook_hidden()
 }
+
+// wave8 GD begin: the hot keys' switch target when the display service serves the screen
+// (`ipc::screen` installs these hooks when the service maps the screen; `keyboard.rs`
+// keeps calling [`request_vt_switch`] and [`session_hidden`] in both modes)
+/// `ipc::screen`'s switch: `true` if it took the switch (its service's session holds the
+/// screen).
+static SCREEN_SWITCH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// `ipc::screen`'s "session hidden".
+static SCREEN_HIDDEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Installs the display service's switch and "hidden" hooks.
+pub fn set_screen_hooks(switch: fn(bool) -> bool, hidden: fn() -> bool) {
+    SCREEN_HIDDEN.store(hidden as usize, Ordering::Release);
+    SCREEN_SWITCH.store(switch as usize, Ordering::Release);
+}
+
+fn screen_hook_hidden() -> bool {
+    let h = SCREEN_HIDDEN.load(Ordering::Acquire);
+    // SAFETY: stored from a `fn() -> bool` by `set_screen_hooks`
+    h != 0 && unsafe { core::mem::transmute::<usize, fn() -> bool>(h) }()
+}
+
+fn screen_hook_switch(to_session: bool) -> bool {
+    let h = SCREEN_SWITCH.load(Ordering::Acquire);
+    // SAFETY: stored from a `fn(bool) -> bool` by `set_screen_hooks`
+    h != 0 && unsafe { core::mem::transmute::<usize, fn(bool) -> bool>(h) }(to_session)
+}
+
+/// Counters of the in-kernel copy, reported like display-server's `[display]` line (one
+/// line a minute while a desktop draws), so the two can be compared in the same session:
+/// ioctls, ioctls behind the console, flips, pictures, copy time (sum, max), cursor updates.
+static ST: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+const ST_IOCTLS: usize = 0;
+const ST_HIDDEN: usize = 1;
+const ST_FLIPS: usize = 2;
+const ST_PRESENTS: usize = 3;
+const ST_COPY_NS: usize = 4;
+const ST_COPY_MAX: usize = 5;
+const ST_CURSOR: usize = 6;
+/// When the last line was printed.
+static ST_LAST_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Prints and restarts the counters once a minute (called from `ioctl`).
+fn stats_tick() {
+    let now = crate::arch::pit::now_ns();
+    let last = ST_LAST_NS.load(Ordering::Relaxed);
+    if now < last + 60_000_000_000 || ST_LAST_NS.compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        return;
+    }
+    if last == 0 {
+        return;
+    }
+    let v: [u64; 7] = core::array::from_fn(|i| ST[i].swap(0, Ordering::AcqRel));
+    let avg = if v[ST_PRESENTS] > 0 { v[ST_COPY_NS] / v[ST_PRESENTS] / 1000 } else { 0 };
+    crate::kprintln!(
+        "[drm] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, copy avg {} us max {} us, cursor {}",
+        v[ST_IOCTLS],
+        v[ST_HIDDEN],
+        v[ST_FLIPS],
+        v[ST_PRESENTS],
+        avg,
+        v[ST_COPY_MAX] / 1000,
+        v[ST_CURSOR]
+    );
+}
+// wave8 GD end
 
 /// Keyboard interrupt: asks the `vtd` task to switch between the session (`to_session`)
 /// and the console. The copying happens in task context, not in the interrupt.
@@ -283,6 +350,10 @@ pub fn session_hidden() -> bool {
 ///
 /// * `to_session` - `true` to switch to graphical session; `false` to switch to text console.
 pub fn request_vt_switch(to_session: bool) {
+    // wave8 GD: the display service's session first
+    if screen_hook_switch(to_session) {
+        return;
+    }
     VT_REQUEST.store(if to_session { 2 } else { 1 }, Ordering::Release);
     VT_WQ.wake_all();
 }
@@ -499,9 +570,15 @@ impl Kms {
         if self.screen.is_none() || self.dpms != 0 || self.hidden {
             return;
         }
+        let t0 = crate::arch::pit::now_ns(); // wave8 GD
         self.copy_rect(0, 0, self.width, self.height);
         self.drawn_cursor = None;
         self.draw_cursor();
+        // wave8 GD: counters
+        let dt = crate::arch::pit::now_ns().saturating_sub(t0);
+        ST[ST_PRESENTS].fetch_add(1, Ordering::Relaxed);
+        ST[ST_COPY_NS].fetch_add(dt, Ordering::Relaxed);
+        ST[ST_COPY_MAX].fetch_max(dt, Ordering::Relaxed);
     }
 
     /// Moves or changes the cursor, repairing only the area it covered.
@@ -515,6 +592,7 @@ impl Kms {
             self.copy_rect(x0, y0, x1, y1);
         }
         self.draw_cursor();
+        ST[ST_CURSOR].fetch_add(1, Ordering::Relaxed); // wave8 GD
     }
 }
 
@@ -1502,6 +1580,15 @@ impl CharDevice for DrmFile {
             return -25; // ENOTTY: not a DRM request
         }
         let nr = cmd & 0xFF;
+        // wave8 GD: counters
+        ST[ST_IOCTLS].fetch_add(1, Ordering::Relaxed);
+        if SESSION_HIDDEN.load(Ordering::Relaxed) {
+            ST[ST_HIDDEN].fetch_add(1, Ordering::Relaxed);
+        }
+        if nr == 0xB0 {
+            ST[ST_FLIPS].fetch_add(1, Ordering::Relaxed);
+        }
+        stats_tick();
         let size = ((cmd >> 16) & 0x3FFF) as usize;
         let dir = cmd >> 30;
         let mut b = alloc::vec![0u8; size.max(128)];

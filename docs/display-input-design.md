@@ -620,6 +620,55 @@ keeps the in-kernel copy as the switch back (`lx=kernel`).
 - **The cause of the sound underruns** (section 2.5) was not investigated: whether it is the
   10 ms position tick, the kernel lock held by the picture copy, or PipeWire's timing.
 
+## 9. Wave 8: the display service as built (Group D)
+
+Branch `w8-display`. What sections 3.2, 4 and 5 proposed, as it was built; the kernel's
+`compat/linux/drm.rs` stays as the switch back (`lx=kernel`, `lx.display=kernel`).
+
+- **display-server** (`userland/drivers/display-server`, service `display`, endpoint 0x23,
+  2 workers and a screen thread) claims character major 226. Two layers:
+  - the **native core** (`native.rs`): the picture copy (only the damaged rectangles when
+    `DIRTYFB` names them), the cursor recomposed from the picture under it (the screen is
+    never read back), the emulated 60 Hz vertical blank; the interface to the Linux layer
+    (`Screen`) is what a real graphics driver would implement later;
+  - the **Linux DRM layer** (`kms.rs`, moved from `drm.rs`): KMS objects, properties, dumb
+    buffers as memory objects (programs map them through the `mmap` answer; their mappings
+    outlive the service), PRIME as DMA-BUF server objects of the service (kind 68), per-file
+    event queues, master rules.
+- **The two waste findings** (decision 28) are fixed in the service: a flip is copied at
+  once and **completes at the next vertical blank**, so the desktop draws at most 60
+  pictures a second; **completions are held back while the console shows**, so kwin waits
+  for its flip event and stops drawing until Ctrl+Alt+F2.
+- **Kernel side** (`src/ipc/screen.rs`, native call `SYS_SCREEN` 73): the service maps the
+  screen once; the mapping leads to the framebuffer while the screen is lent and to a
+  scratch page otherwise. Taking the screen back (Ctrl+Alt+F1, the session's end, the
+  service's death) changes a state word and zaps the mapping before the console repaints:
+  the kernel never waits for the service. A panic sets the state word without a lock.
+  The hot keys stay in `keyboard.rs`; `drm::request_vt_switch` hands them to `screen.rs`
+  while the service's session holds the screen. Input is routed to the session only while
+  it shows (`route_input`, the call agreed with Group I).
+- **Crash policy** (FailObjects): the console shows at once; the service is restarted
+  (about a second); its descriptors fail with `ENODEV`. kwin does **not** exit by itself
+  when its `/dev/dri/card0` fails (it keeps running with no output), so the kernel ends the
+  session: the non-root programs holding a DRM object of the dead instance (the
+  compositor) get `SIGTERM`, and so does KDE's `kwin_wayland_wrapper` when it is their
+  parent (otherwise it starts kwin again, a bare desktop without its shell). SDDM then shows
+  the login screen on the restarted service. Programs without a window keep running
+  (a download continued across the kill).
+- **Opens during a restart** wait for the service (`lx::dev_open`); they never reach the
+  kernel copy meanwhile.
+
+- **Measured** (KVM, 2 CPUs, 1280x800, same hour, alternating, 2 runs each: Firefox on
+  Wikipedia with PgDn/PgUp once a second, `scratch/d_bench2.sh`; counters: the service's
+  `[display]` and the kernel copy's `[drm]` line, one per minute): pictures per minute
+  1738-3287 through the service, 2070-3217 through the kernel copy (at most about 55 a
+  second either way on this loaded host; the service never exceeds 60); 10 DRM calls per
+  picture in both; copy per picture 0.73-1.38 ms average through the service (wall time,
+  preemption included), 0.65-0.84 ms in the kernel copy (inside the call), section 2.3 had
+  0.65-1.03 ms. Behind the console the session makes the calls of the one frame in flight
+  (8) and then none (Ctrl+Alt+F1 runs with an animating desktop, d3); the scrolling test's
+  console phase was idle in both modes, so it does not separate them.
+
 ## Appendix: reproducing
 
 - **Hooks:** `python tools/displaybench/instrument.py E:\os-N` adds them to a tree (it copies
