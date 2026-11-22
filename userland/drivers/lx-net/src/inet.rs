@@ -98,7 +98,14 @@ pub struct Sock {
     /// written there.
     rec: u32,
     img: Vec<u8>,
+    /// The fingerprint of the image last written (`fingerprint`): the image is rebuilt and
+    /// compared only when it moved.
+    fp: Option<Fp>,
 }
+
+/// The fields of a socket that its kept record holds, cheap to compare (the options by
+/// their change count).
+type Fp = (u16, [Option<u32>; 5], u16, [u8; 4], Option<([u8; 4], u16)>, u32);
 
 // wave8 GX2 begin: the kept record of a socket (lx-net's Transparent restart)
 use crate::sockkept::{InetRec, K_RAW, K_SHUT_RD, K_STREAM, K_UDP_USED, K_V6};
@@ -156,17 +163,29 @@ impl Sock {
             inode: r.inode,
             rec,
             img: d.to_vec(),
+            fp: None,
         })
+    }
+
+    /// The record's fields in a form cheap to compare.
+    fn fingerprint(&self) -> Fp {
+        let f = (self.stream as u16) | (self.shut_rd as u16) << 1 | (self.udp_used as u16) << 2 | (self.v6 as u16) << 3 | (self.raw as u16) << 4;
+        (f, self.handles(), self.bound_port, self.bound_ip, self.peer, self.opts.generation())
     }
 
     /// Writes the kept record if the socket changed since the last write.
     fn persist(&mut self) {
-        if self.rec == 0 || self.dead() {
+        if self.rec == 0 {
+            return;
+        }
+        let fp = self.fingerprint();
+        if self.fp == Some(fp) || self.dead() {
             return;
         }
         let img = self.image();
-        if img != self.img && crate::sockkept::put(self.rec, &img) {
+        if img == self.img || crate::sockkept::put(self.rec, &img) {
             self.img = img;
+            self.fp = Some(fp);
         }
     }
 }
@@ -594,6 +613,7 @@ pub fn socket(cx: &Cx) -> i64 {
         inode,
         rec: crate::sockkept::alloc(), // wave8 GX2
         img: Vec::new(),
+        fp: None,
     };
     if let Some(h) = sock.icmp {
         track(h, slot);
@@ -1063,6 +1083,7 @@ fn accept(cx: &Cx, sock: &Arc<YLock<Sock>>, prog: &mut Prog) -> Out {
         inode,
         rec: crate::sockkept::alloc(), // wave8 GX2
         img: Vec::new(),
+        fp: None,
     };
     track(cid, slot);
     let bits = conn.poll_events();

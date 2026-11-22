@@ -109,6 +109,9 @@ pub struct Options {
     /// `SO_RCVTIMEO` / `SO_SNDTIMEO` in nanoseconds (0: none).
     rcvtimeo: u64,
     sndtimeo: u64,
+    /// wave8 GX2: changes so far (lx-net writes a socket's kept record only when this or
+    /// another of its fields moved)
+    gen: u32,
 }
 
 /// What `getsockopt` needs to know about the socket itself.
@@ -219,7 +222,13 @@ impl Options {
 impl Options {
     /// Stores option bytes as given (options the socket layer validates itself).
     pub fn put(&mut self, level: u32, name: u32, val: &[u8]) {
+        self.gen = self.gen.wrapping_add(1);
         self.vals.insert((level, name), val.to_vec());
+    }
+
+    /// wave8 GX2: how many changes the options saw (a cheap "did anything change").
+    pub fn generation(&self) -> u32 {
+        self.gen
     }
 
     /// The bytes of option `name` at `level`, if set.
@@ -244,6 +253,7 @@ impl Options {
 
     /// `setsockopt(level, name, val)`.
     pub fn set(&mut self, level: u32, name: u32, val: &[u8], stream: bool, v6: bool, caps: u64) -> i64 {
+        self.gen = self.gen.wrapping_add(1); // wave8 GX2 (a refused change costs one record write)
         let cap_net_admin = || caps & (1 << 12) != 0;
         let cap_net_raw = || caps & (1 << 13) != 0;
         if !known(level, name, stream, v6) {
