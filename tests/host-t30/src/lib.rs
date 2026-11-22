@@ -691,6 +691,14 @@ pub mod compat {
             }
         }
 
+        /// *stub* (wave8 GI) The hot keys' screen switch `ipc/input.rs` calls.
+        pub mod drm {
+            pub fn request_vt_switch(_to_session: bool) {}
+            pub fn session_hidden() -> bool {
+                false
+            }
+        }
+
         pub mod types {
             /// *stub* The `stat` fields the code under test sets.
             #[derive(Default, Debug, Clone)]
@@ -704,6 +712,8 @@ pub mod compat {
                 pub st_blksize: i64,
                 /// wave7 G7-4: a pseudo file's device.
                 pub st_dev: u64,
+                /// wave8 GI: a device service's object.
+                pub st_rdev: u64,
             }
         }
 

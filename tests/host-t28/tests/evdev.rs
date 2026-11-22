@@ -11,7 +11,8 @@ mod common;
 use std::sync::Arc;
 
 use hydra_hosttests_t28::compat::linux::chardev::{makedev, CharDevice};
-use hydra_hosttests_t28::compat::linux::evdev::{self, push_abs, push_mouse, push_scancode};
+use hydra_hosttests_t28::compat::linux::evdev;
+use hydra_hosttests_t28::ipc::input::{push_abs, push_mouse, push_scancode};
 use hydra_hosttests_t28::fake;
 
 const EAGAIN: i64 = -11;
@@ -224,13 +225,17 @@ fn input_is_dropped_when_not_routed() {
 fn full_ring_drops_new_input() {
     let _g = setup();
     let k = kbd();
-    // 512 raw entries fit; the rest is dropped while nobody reads
+    // wave8 GI: the kernel's input ring holds 256 raw records; the rest is dropped (and
+    // counted) while nobody reads
+    let (_, _, drops0) = hydra_hosttests_t28::ipc::input::counters();
     for _ in 0..300 {
         push_scancode(0x1E);
         push_scancode(0x9E);
     }
     let evs = drain(&k);
-    assert_eq!(evs.len(), 512 * 3);
+    assert_eq!(evs.len(), 256 * 3);
+    let (_, _, drops1) = hydra_hosttests_t28::ipc::input::counters();
+    assert_eq!(drops1 - drops0, 600 - 256);
 }
 
 #[test]
@@ -238,17 +243,18 @@ fn a_slow_reader_gets_syn_dropped() {
     let _g = setup();
     let k = kbd();
     let other = kbd();
-    // 683 key events = 2049 records: more than a queue holds, delivered in two pumps
+    // 700 key events = 2100 records: more than a queue holds, delivered in four pumps (the
+    // raw ring holds 256, so another reader pumps every 200)
     for i in 0..700 {
         push_scancode(if i % 2 == 0 { 0x1E } else { 0x9E });
-        if i == 400 {
-            assert_eq!(other.poll_events(), 0x1); // pumps the first part
-            drain(&other);
+        if i % 200 == 199 {
+            assert_eq!(other.poll_events(), 0x1);
+            drain(&other); // pumps
         }
     }
     let evs = drain(&k);
     assert_eq!(evs[0], ev(0, 3, 0), "SYN_DROPPED first");
-    assert_eq!(evs.len(), 1 + (700 - 401) * 3);
+    assert_eq!(evs.len(), 1 + 100 * 3);
 }
 
 #[test]
@@ -290,11 +296,13 @@ fn blocking_reads_wait_for_input() {
 fn timestamps_come_from_the_tick_counter() {
     let _g = setup();
     let k = kbd();
-    fake::TICKS.set(123_456); // 10 ms per tick in the event clock
+    // wave8 GI: the record's time is the monotonic clock at the interrupt (`now_ns`; the
+    // fake clock is 1 ms per tick)
+    fake::TICKS.set(123_456);
     push_scancode(0x1E);
     let mut b = [0u8; 24];
     assert_eq!(k.read(&mut b), 24);
-    let us = 123_456u64 * 10_000;
+    let us = 123_456u64 * 1_000;
     assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), us / 1_000_000);
     assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), us % 1_000_000);
     push_scancode(0x9E);

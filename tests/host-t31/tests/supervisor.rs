@@ -76,7 +76,7 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     let names: Vec<&str> = supervisor::get_service_snapshots().iter().map(|s| s.name).collect();
     assert_eq!(
         names,
-        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "svc_test", "sound_driver"]
+        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "vfs_server", "svc_test", "input_server", "sound_driver"]
     );
     assert!(supervisor::get_service_snapshots().iter().all(|s| s.state == ServiceState::Stopped && s.task_id.is_none()));
     let log = fake::SVC_LOG.lock().unwrap().clone();

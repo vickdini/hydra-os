@@ -76,6 +76,29 @@ pub mod ipc {
     pub mod message;
     #[path = "../../../../src/ipc/protocol.rs"]
     pub mod protocol;
+    // wave8 GI: `ipc/input.rs` (the raw input ring): recorded as the old evdev and drm
+    // calls were, so the keyboard and mouse tests read the same
+    pub mod input {
+        pub fn routing() -> bool {
+            crate::compat::linux::evdev::routing()
+        }
+        pub fn push_scancode(code: u8) {
+            crate::compat::linux::evdev::push_scancode(code)
+        }
+        pub fn push_mouse(dx: i32, dy: i32, wheel: i32, buttons: u8) {
+            crate::compat::linux::evdev::push_mouse(dx, dy, wheel, buttons)
+        }
+        pub fn push_abs(x: u16, y: u16, wheel: i8, buttons: u8) {
+            crate::compat::linux::evdev::push_abs(x, y, wheel, buttons)
+        }
+        pub fn hotkey_switch(to_session: bool) {
+            crate::compat::linux::drm::request_vt_switch(to_session)
+        }
+        pub fn session_hidden() -> bool {
+            crate::compat::linux::drm::session_hidden()
+        }
+        pub fn init() {}
+    }
     pub use crate::stubs::ipc::{endpoint, service};
     pub use message::Message;
 }

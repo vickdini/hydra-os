@@ -124,7 +124,7 @@ static CLIENTS: Mutex<[Vec<Weak<EvdevFile>>; DEVICES]> = Mutex::new([Vec::new(),
 ///
 /// A 24-byte array containing the serialized `input_event`.
 fn event(t: u64, ty: u16, code: u16, value: i32) -> [u8; 24] {
-    let us = t * 10_000;
+    let us = t / 1_000;
     let mut e = [0u8; 24];
     e[0..8].copy_from_slice(&(us / 1_000_000).to_le_bytes());
     e[8..16].copy_from_slice(&(us % 1_000_000).to_le_bytes());
