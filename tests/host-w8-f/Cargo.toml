@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w8_f"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side unit tests of the mount changes vfs-server decides and the table format it shares with the kernel (wave 8, Group F)"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

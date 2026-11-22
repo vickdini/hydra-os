@@ -38,6 +38,11 @@ mod kmounts; // wave7 G7-7: the kernel's mount tables as the calls walk them
 mod mount;
 mod mountcalls;
 mod mtab;
+// wave8 GF begin: the mount changes vfs-server decides, on the kernel's table format
+mod ktab;
+#[path = "../../../../src/compat/linux/mntrec.rs"]
+mod mntrec;
+// wave8 GF end
 mod tmpfs;
 mod tmpfs_mem;
 // wave7 G7-3 end

@@ -60,6 +60,9 @@ pub mod execve;
 pub mod mm;
 #[cfg(target_os = "uefi")]
 pub mod mount;
+// wave8 GF begin: a mount namespace's whole table as bytes (vfs-server <-> the kernel's copy)
+pub mod mntrec;
+// wave8 GF end
 #[cfg(target_os = "uefi")]
 pub mod extra;
 #[cfg(target_os = "uefi")]

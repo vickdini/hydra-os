@@ -952,7 +952,21 @@ pub mod compat {
             pub fn vfs_table(ns: u64) -> Result<(u64, u32, alloc::vec::Vec<VfsMount>), i64> {
                 crate::fake::MNT_TABLES.lock().iter().find(|e| e.0 == ns).map(|e| (e.1, e.2, e.3.clone())).ok_or(-3)
             }
+            // wave8 GF begin: *stub* the whole table for vfs-server's mount calls (none here)
+            pub fn full_table(_ns: u64) -> Result<super::mntrec::MntTable, i64> {
+                Err(-3)
+            }
+            pub fn put_table(_ns: u64, _t: &super::mntrec::MntTable) -> Result<u32, i64> {
+                Err(-3)
+            }
+            pub fn tmpfs_new() -> Result<(u32, u64), i64> {
+                Err(-5)
+            }
+            // wave8 GF end
         }
+        // wave8 GF: the table format (pure)
+        #[path = "../../../../../src/compat/linux/mntrec.rs"]
+        pub mod mntrec;
         pub mod fuse {
             pub fn ns0_any() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 16 != 0

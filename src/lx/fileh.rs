@@ -100,6 +100,8 @@ pub fn shape(nr: u64) -> Option<Shape> {
         // getdents64, getdents, ftruncate, fchmod, fchown, fsync, fdatasync, fallocate,
         // fsetxattr, fgetxattr, flistxattr, fremovexattr, fstatfs, fchdir, sync_file_range
         217 | 78 | 77 | 91 | 93 | 74 | 75 | 285 | 190 | 193 | 196 | 199 | 138 | 81 | 277 => Shape::Handle,
+        // wave8 GF: pivot_root, mount, umount2 (paths only)
+        155 | 165 | 166 => Shape::Path,
         _ => return None,
     })
 }
@@ -374,7 +376,9 @@ fn kernel_only(c: &LxCall) -> bool {
     let hit = c.fs_flags & kernel_mask(c.nr);
     // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
     // namespace a root or working directory on a mount is a FUSE one)
-    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0);
+    // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
+    // kernel's: its mount calls stay here)
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0 || is_mount_call(c.nr));
     if hit == 0 && !mounts {
         return false;
     }
@@ -445,16 +449,37 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     let sh = shape(nr)?;
-    let Some(x) = vfs_host() else {
+    // wave8 GF: a mount change waits for a restarting vfs-server (below)
+    let host = vfs_host();
+    if host.is_none() && !is_mount_call(nr) {
         KEPT.fetch_add(1, Ordering::Relaxed);
         return None;
-    };
+    }
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
     c.svc = LXS_VFS as u32;
     c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
     super::fill_ctx(&mut c, true);
+    // wave8 GF begin: the mount calls
+    if is_mount_call(nr) && crate::task::with_current_task_mut(|t| t.caps.effective & CAP_SYS_ADMIN != 0).unwrap_or(false) {
+        c.fs_flags |= crate::ipc::protocol::LX_FS_MNTADMIN;
+    }
+    let x = match host {
+        Some(x) => x,
+        // (only a mount change gets here: in a namespace of its own it waits for the restart
+        // — vfs-server decides the namespace's mounts — and if vfs-server does not come back
+        // within the ladder's 30 s, the kernel answers; vfs-server takes the table from the
+        // kernel's copy when it is back)
+        None => match mount_wait(c.mnt_ns) {
+            Some(x) => x,
+            None => {
+                KEPT.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        },
+    };
+    // wave8 GF end
     let held = crate::task::with_current_fds_mut(|t| fill(&mut c, t, sh, true));
     let held = match held {
         Ok(Some(h)) => h,
@@ -478,6 +503,11 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
 /// kernel answers).
 pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
+    // wave8 GF: the mount calls take the ordinary path (the capability rule needs the task,
+    // a down service is waited for)
+    if is_mount_call(nr) {
+        return None;
+    }
     let sh = shape(nr)?;
     let x = vfs_host()?;
     let mut c = LxCall::EMPTY;
@@ -532,6 +562,83 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         }
     }
 }
+
+// wave8 GF begin: the mount calls (`mount`, `umount2`, `pivot_root`)
+/// `CAP_SYS_ADMIN`.
+const CAP_SYS_ADMIN: u64 = 1 << 21;
+
+/// Whether `nr` is one of the mount changes vfs-server decides (`pivot_root`, `mount`,
+/// `umount2`).
+pub fn is_mount_call(nr: u64) -> bool {
+    matches!(nr, 155 | 165 | 166)
+}
+
+/// Mount changes that waited for a restarting vfs-server, and those the kernel answered
+/// because it did not come back.
+pub static MOUNT_WAITS: AtomicU64 = AtomicU64::new(0);
+/// See [`MOUNT_WAITS`].
+pub static MOUNT_WAIT_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// A mount change of a caller in mount namespace `ns` found vfs-server offline: in a
+/// namespace of its own it waits for the restart (the ladder's 30 s); the host then, or
+/// `None` (the initial namespace, vfs-server not restarting or not back): the kernel answers.
+fn mount_wait(ns: u32) -> Option<&'static Host> {
+    if ns == 0 {
+        return None;
+    }
+    MOUNT_WAITS.fetch_add(1, Ordering::Relaxed);
+    match super::restart::wait_online(LXS_VFS, &|| vfs_host().is_some()) {
+        Ok(()) => vfs_host(),
+        Err(_) => {
+            MOUNT_WAIT_FAILED.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// [`LX_FH_MNTGET`](crate::ipc::protocol::LX_FH_MNTGET): namespace `ns`'s whole table to
+/// `buf` if it fits in `cap` bytes; its length.
+fn mntget(ns: u64, buf: u64, cap: u64) -> i64 {
+    let t = match crate::compat::linux::mount::full_table(ns) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let bytes = crate::compat::linux::mntrec::encode(&t);
+    if bytes.len() as u64 <= cap && crate::compat::linux::vfs::copy_out(buf, &bytes).is_err() {
+        return EFAULT;
+    }
+    bytes.len() as i64
+}
+
+/// [`LX_FH_MNTPUT`](crate::ipc::protocol::LX_FH_MNTPUT): namespace `ns`'s table becomes the
+/// one in `buf` (`len` bytes); how many tmpfs trees went with it.
+fn mntput(ns: u64, buf: u64, len: u64) -> i64 {
+    if len > 16 << 20 {
+        return EINVAL;
+    }
+    let raw = match crate::compat::linux::vfs::copy_in(buf, len as usize) {
+        Ok(r) => r,
+        Err(_) => return EFAULT,
+    };
+    let t = match crate::compat::linux::mntrec::decode(&raw) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    crate::compat::linux::mount::put_table(ns, &t).map_or_else(|e| e, |n| n as i64)
+}
+
+/// [`LX_FH_TMPFSID`](crate::ipc::protocol::LX_FH_TMPFSID): `[id, dir]` to `out`.
+fn tmpfsid(out: u64) -> i64 {
+    let (id, dir) = match crate::compat::linux::mount::tmpfs_new() {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&(id as u64).to_le_bytes());
+    b[8..].copy_from_slice(&dir.to_le_bytes());
+    crate::compat::linux::vfs::copy_out(out, &b).map_or_else(|e| e, |()| 0)
+}
+// wave8 GF end
 
 // ----------------------------------------------------------------------
 // The kernel's changes, for vfs-server's caches
@@ -784,6 +891,11 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         crate::ipc::protocol::LX_FH_NSLIST => nslist(a, b),
         // wave7 G7-6 end
         crate::ipc::protocol::LX_FH_MNTTAB => mnttab(a, b, c), // wave7 G7-7
+        // wave8 GF begin
+        crate::ipc::protocol::LX_FH_MNTGET => mntget(a, b, c),
+        crate::ipc::protocol::LX_FH_MNTPUT => mntput(a, b, c),
+        crate::ipc::protocol::LX_FH_TMPFSID => tmpfsid(a),
+        // wave8 GF end
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;
