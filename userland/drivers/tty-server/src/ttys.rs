@@ -48,6 +48,10 @@ const SIGCONT: u32 = 18;
 
 /// Most slave output buffered for the master before slave writers wait.
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
+/// Most pairs: Linux's slave majors 136..143 of 256 minors each.
+pub const MAX_PTYS: u32 = 2048;
+/// `ENOSPC`.
+pub const ENOSPC: i64 = -28;
 /// Most console reads kept waiting at once (each holds one of the service's request slots).
 pub const MAX_CONSOLE_WAITERS: usize = 32;
 
@@ -329,9 +333,9 @@ impl Ttys {
     // ------------------------------------------------------------------
 
     /// Opens `/dev/ptmx` as slot `slot` for a caller of effective user `uid`: a new pair
-    /// (the lowest free number); returns the slave's number.
-    pub fn open_master(&mut self, slot: u32, uid: u32, io: &mut dyn Io) -> u32 {
-        let index = (0..).find(|i| !self.live.contains_key(i)).unwrap_or(0);
+    /// (the lowest free number); returns the slave's number (`ENOSPC` past [`MAX_PTYS`]).
+    pub fn open_master(&mut self, slot: u32, uid: u32, io: &mut dyn Io) -> Result<u32, i64> {
+        let index = (0..MAX_PTYS).find(|i| !self.live.contains_key(i)).ok_or(ENOSPC)?;
         let id = self.next;
         self.next += 1;
         self.pairs.insert(
@@ -356,7 +360,7 @@ impl Ttys {
         self.live.insert(index, id);
         self.slots.insert(slot, Slot { pair: id, master: true, gen: 0 });
         self.publish(id, false, false, io);
-        index
+        Ok(index)
     }
 
     /// Opens the slave of pair `pid` as slot `slot`; a session leader without a controlling

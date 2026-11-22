@@ -188,3 +188,58 @@ fn ioctl_window_size_and_groups() {
     assert_eq!(ioctl(&mut t, 0x1234, 0, &mem, (25, 100), &mut fx), EINVAL);
     assert_eq!(canonical_request(TCSETSW2), TCSETSW);
 }
+
+#[test]
+fn disabled_control_characters_are_plain_bytes() {
+    let mut t = Tty::new();
+    t.termios.cc[0] = 0; // stty intr undef
+    let (_, sig) = feed(&mut t, b"\x00\x03\n");
+    assert!(sig.is_empty(), "neither NUL nor ^C signals now");
+    assert_eq!(take_input(&mut t, 10).unwrap(), b"\x00\x03\n");
+}
+
+#[test]
+fn a_signal_flushes_unread_input_unless_noflsh() {
+    let mut t = Tty::new();
+    feed(&mut t, b"typed\nhalf");
+    feed(&mut t, b"\x03");
+    assert!(!t.has_input() && t.line.is_empty(), "both the line and the queue go");
+    t.termios.lflag |= 0o200; // NOFLSH
+    feed(&mut t, b"kept\nhalf");
+    feed(&mut t, b"\x03");
+    assert_eq!(take_input(&mut t, 10).unwrap(), b"kept\n");
+    assert_eq!(t.line, b"half");
+}
+
+#[test]
+fn word_erase_without_echo_echoes_nothing() {
+    let mut t = Tty::new();
+    t.termios.lflag &= !0o10; // ~ECHO (a password prompt)
+    let (echo, _) = feed(&mut t, b"secret\x17x\n");
+    assert!(echo.is_empty());
+    assert_eq!(take_input(&mut t, 10).unwrap(), b"x\n");
+}
+
+#[test]
+fn queues_are_bounded() {
+    let mut t = Tty::new();
+    let long = vec![b'a'; MAX_LINE + 100];
+    feed(&mut t, &long);
+    assert_eq!(t.line.len(), MAX_LINE, "the line stops growing");
+    feed(&mut t, b"\n");
+    assert_eq!(take_input(&mut t, 100_000).unwrap().len(), MAX_LINE + 1, "the newline still ends it");
+    let mut raw = Tty::new();
+    raw.termios.lflag &= !ICANON;
+    feed(&mut raw, &vec![b'z'; MAX_READY + 10]);
+    assert_eq!(raw.ready.len(), MAX_READY, "unread raw input stops at the bound");
+}
+
+#[test]
+fn negative_foreground_group_is_refused() {
+    let mut t = Tty::new();
+    let mem = FakeMem::default();
+    mem.put(0x40, &(-3i32).to_le_bytes()).unwrap();
+    let mut fx = Effects::default();
+    assert_eq!(ioctl(&mut t, TIOCSPGRP, 0x40, &mem, (25, 100), &mut fx), EINVAL);
+    assert_eq!(t.fg_pgrp, 0);
+}

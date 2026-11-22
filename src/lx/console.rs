@@ -54,12 +54,24 @@ pub fn pts_rdev(index: u64) -> u64 {
     makedev(PTS_MAJOR + (index >> 8), index & 0xFF)
 }
 
+/// Most slaves: Linux's eight majors 136..143 of 256 minors each.
+pub const PTS_MAX: u64 = 2048;
+
+/// The slave number a `/dev/pts/` name gives: decimal, no sign, no leading zero, below
+/// [`PTS_MAX`].
+pub fn pts_index(n: &str) -> Option<u64> {
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) || (n.len() > 1 && n.starts_with('0')) || n.len() > 6 {
+        return None;
+    }
+    n.parse::<u64>().ok().filter(|&i| i < PTS_MAX)
+}
+
 /// The device number a terminal path opens (`/dev/ptmx`, `/dev/pts/N`, `/dev/tty`).
 pub fn path_rdev(abs: &str) -> Option<u64> {
     match abs {
         "/dev/ptmx" => Some(PTMX_RDEV),
         "/dev/tty" => Some(TTY_RDEV),
-        _ => abs.strip_prefix("/dev/pts/").and_then(|n| if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) { None } else { n.parse::<u64>().ok() }).filter(|&i| i < 1 << 20).map(pts_rdev),
+        _ => abs.strip_prefix("/dev/pts/").and_then(pts_index).map(pts_rdev),
     }
 }
 
@@ -106,7 +118,6 @@ pub fn ctl<H>(_h: H, _a: u64, _b: u64, _c: u64) -> i64 {
 
 #[cfg(target_os = "uefi")]
 mod kernel {
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use spin::Mutex;
 
     #[allow(unused_imports)]
@@ -121,15 +132,22 @@ mod kernel {
     const EINVAL: i64 = -22;
     const ENOSYS: i64 = -38;
 
-    /// Who holds the console: `(attach generation, session, its group)`.
-    static STATE: Mutex<(u64, u64, u64)> = Mutex::new((0, 0, 0));
-    /// Whether a console `read` would return now (tty-server's word for `poll`).
-    static READY: AtomicBool = AtomicBool::new(false);
-    /// The generation [`READY`] was told for.
-    static READY_GEN: AtomicU64 = AtomicU64::new(0);
+    /// Who holds the console, and tty-server's word for `poll`.
+    struct Cons {
+        /// Attach generation (grows at every attach and detach).
+        gen: u64,
+        /// The session holding the console (0: hydra-shell).
+        sid: u64,
+        /// Its group as the console was given.
+        pgrp: u64,
+        /// Whether a console `read` would return now, as tty-server told it for `gen`.
+        ready: bool,
+    }
+    static STATE: Mutex<Cons> = Mutex::new(Cons { gen: 0, sid: 0, pgrp: 0, ready: false });
 
-    fn state() -> (u64, u64, u64) {
-        x86_64::instructions::interrupts::without_interrupts(|| *STATE.lock())
+    /// Runs `f` on the console state (interrupts off: the keyboard's queue is taken inside).
+    fn with_state<R>(f: impl FnOnce(&mut Cons) -> R) -> R {
+        x86_64::instructions::interrupts::without_interrupts(|| f(&mut STATE.lock()))
     }
 
     /// Whether the terminals are tty-server's (not `lx=kernel`, `lx.tty=kernel` or
@@ -147,11 +165,12 @@ mod kernel {
     /// Gives the console to Linux session `sid` (foreground group `pgrp`): tty-server resets
     /// the terminal and takes the keys from now on.
     pub fn attach(sid: u64, pgrp: u64) {
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut s = STATE.lock();
-            *s = (s.0 + 1, sid, pgrp);
+        with_state(|s| {
+            s.gen += 1;
+            s.sid = sid;
+            s.pgrp = pgrp;
+            s.ready = false;
         });
-        READY.store(false, Ordering::Release);
         crate::compat::linux::tty::INPUT_WQ.wake_all();
     }
 
@@ -162,13 +181,13 @@ mod kernel {
 
     /// Whether a Linux session holds the console.
     pub fn attached() -> bool {
-        state().1 != 0
+        with_state(|s| s.sid != 0)
     }
 
     /// Whether a console `read` would return now.
     pub fn readable() -> bool {
         // (a dead tty-server's last word does not count: its reads fail at once anyway)
-        READY.load(Ordering::Acquire) && READY_GEN.load(Ordering::Acquire) == state().0 && online()
+        with_state(|s| s.ready) && online()
     }
 
     /// The caller's thread group, process group and session.
@@ -250,7 +269,8 @@ mod kernel {
     pub fn open_pty(abs: &str, flags: u32) -> Option<Result<FileDescriptor, i64>> {
         let rdev = super::path_rdev(abs)?;
         if svc::host(svc::host_of(LXS_TTY)).is_none() {
-            return Some(Err(EIO));
+            // (tty-server never started: `/dev/tty` is the console's, the rest fail)
+            return if rdev == super::TTY_RDEV { None } else { Some(Err(EIO)) };
         }
         let fd = kcall([LX_TTY_K_OPEN, rdev, flags as u64, 0, 0, 0], rdev);
         if fd == LX_TTY_NOTMINE {
@@ -263,7 +283,11 @@ mod kernel {
         // caller installs it again with the open's own flags)
         let taken = crate::task::with_current_fds_mut(|t| t.set_fd(fd as usize, None));
         Some(match taken {
-            Some(FileDescriptor::Device(d)) if d.as_server().is_some() => Ok(FileDescriptor::Device(d)),
+            Some(FileDescriptor::Device(d))
+                if d.as_server().is_some_and(|o| o.svc() == svc::host_of(LXS_TTY) && matches!(o.kind(), LX_OBJ_KIND_PTY_M | LX_OBJ_KIND_PTY_S)) =>
+            {
+                Ok(FileDescriptor::Device(d))
+            }
             Some(other) => {
                 drop(other);
                 Err(EIO)
@@ -327,16 +351,20 @@ mod kernel {
             if !forwarded() {
                 return EPERM;
             }
-            let (gen, sid, pgrp) = state();
+            // (the keys are taken under the state's lock: a detach cannot slip in between and
+            // leave hydra-shell's keys to the old session)
             let mut keys: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
-            if sid != 0 && gen == seen {
-                while keys.len() < max {
-                    match crate::console::read_key() {
-                        Some(k) => keys.push(key_code(k)),
-                        None => break,
+            let (gen, sid, pgrp) = with_state(|s| {
+                if s.sid != 0 && s.gen == seen {
+                    while keys.len() < max {
+                        match crate::console::read_key() {
+                            Some(k) => keys.push(key_code(k)),
+                            None => break,
+                        }
                     }
                 }
-            }
+                (s.gen, s.sid, s.pgrp)
+            });
             let now = crate::arch::pit::ticks();
             if gen != seen || !keys.is_empty() || now >= deadline {
                 let (cols, rows) = crate::video::console::dimensions();
@@ -379,12 +407,16 @@ mod kernel {
             }
             LX_TTY_CONS_WAIT => cons_wait(b, c),
             LX_TTY_CONS_READY => {
-                if b == state().0 {
-                    READY_GEN.store(b, Ordering::Release);
-                    let was = READY.swap(c != 0, Ordering::AcqRel);
-                    if was != (c != 0) {
-                        crate::compat::linux::tty::INPUT_WQ.wake_all();
+                // (an answer for an older attach generation does not count)
+                let changed = with_state(|s| {
+                    let changed = s.gen == b && s.ready != (c != 0);
+                    if s.gen == b {
+                        s.ready = c != 0;
                     }
+                    changed
+                });
+                if changed {
+                    crate::compat::linux::tty::INPUT_WQ.wake_all();
                 }
                 0
             }

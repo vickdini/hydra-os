@@ -15,6 +15,12 @@ fn paths_name_device_numbers() {
     assert_eq!(path_rdev("/dev/pts/-1"), None);
     assert_eq!(path_rdev("/dev/tty1"), None, "the console's VTs stay the kernel's");
     assert_eq!(path_rdev("/dev/console"), None);
+    assert_eq!(path_rdev("/dev/pts/00"), None, "no leading zeros (devpts has no such name)");
+    assert_eq!(path_rdev("/dev/pts/2047"), Some(makedev(143, 255)));
+    assert_eq!(path_rdev("/dev/pts/2048"), None, "Linux's eight slave majors");
+    assert_eq!(path_rdev("/dev/pts/1015042"), None, "never wraps into another major (it was /dev/ptmx's)");
+    assert_eq!(pts_index("12"), Some(12));
+    assert_eq!(pts_index("+1"), None);
 }
 
 #[test]

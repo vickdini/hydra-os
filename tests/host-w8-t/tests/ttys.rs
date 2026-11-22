@@ -18,7 +18,7 @@ fn who(tgid: u64, pgid: u64, sid: u64) -> Caller {
 /// A pair: master in slot M, unlocked, slave in slot S (no controlling terminal).
 fn pair(io: &mut FakeIo) -> Ttys {
     let mut t = Ttys::new();
-    let index = t.open_master(M, 1000, io);
+    let index = t.open_master(M, 1000, io).unwrap();
     assert_eq!(index, 0);
     let mem = FakeMem::with(0x100, &0u32.to_le_bytes());
     assert_eq!(t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, io), Ok(0));
@@ -128,7 +128,7 @@ fn master_close_hangs_the_slave_up() {
     assert!(io.signals.contains(&(false, 40, 18)), "SIGCONT to the session leader");
     assert!(io.signals.contains(&(true, 41, 1)), "SIGHUP to the foreground group");
     // the number is free again while the old slave lives
-    assert_eq!(t.open_master(12, 1000, &mut io), 0);
+    assert_eq!(t.open_master(12, 1000, &mut io), Ok(0));
     assert_eq!(t.pair_count(), 2);
     t.closed(S, &mut io);
     assert_eq!(t.pair_count(), 1, "the old pair is gone with its last end");
@@ -159,7 +159,7 @@ fn last_slave_close_fails_master_reads() {
 fn master_reads_wait_before_any_slave_opened() {
     let mut io = FakeIo::default();
     let mut t = Ttys::new();
-    t.open_master(M, 0, &mut io);
+    t.open_master(M, 0, &mut io).unwrap();
     assert_eq!(rd(&mut t, M, 1, 10, &mut io), Ans::Pending, "no EIO before a slave was opened");
 }
 
@@ -167,7 +167,7 @@ fn master_reads_wait_before_any_slave_opened() {
 fn locked_slave_and_numbers() {
     let mut io = FakeIo::default();
     let mut t = Ttys::new();
-    t.open_master(M, 1000, &mut io);
+    t.open_master(M, 1000, &mut io).unwrap();
     assert_eq!(t.open_slave(0, S, true, &who(1, 1, 1), &mut io), Err(EIO), "locked until unlockpt");
     assert_eq!(t.open_slave(5, S, true, &who(1, 1, 1), &mut io), Err(ENOENT));
     let mem = FakeMem::default();
@@ -175,7 +175,7 @@ fn locked_slave_and_numbers() {
     assert_eq!(mem.at(0x10), 0u32.to_le_bytes());
     assert_eq!(t.ioctl(M, TIOCGPTLCK, 0x14, &who(1, 1, 1), &mem, &mut io), Ok(0));
     assert_eq!(mem.at(0x14), 1u32.to_le_bytes());
-    assert_eq!(t.open_master(20, 1000, &mut io), 1, "the next pair is /dev/pts/1");
+    assert_eq!(t.open_master(20, 1000, &mut io), Ok(1), "the next pair is /dev/pts/1");
     assert_eq!(t.ioctl(S, TIOCGPTN, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(EBADF), "no such slot");
 }
 
@@ -359,7 +359,7 @@ fn vhangup_kills_earlier_slave_descriptors() {
 fn readiness_words() {
     let mut io = FakeIo::default();
     let mut t = Ttys::new();
-    t.open_master(M, 0, &mut io);
+    t.open_master(M, 0, &mut io).unwrap();
     assert_eq!(io.ready[&M], POLLOUT, "a fresh master: writable only");
     let mem = FakeMem::with(0x100, &0u32.to_le_bytes());
     t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, &mut io).unwrap();
@@ -448,4 +448,16 @@ fn console_write_and_waiter_cap() {
         assert_eq!(t.cons_read(i + 1, &who(7, 7, 7), Iov::one(0x1, 8), false, BG, &mut io), Ans::Pending);
     }
     assert_eq!(t.cons_read(999, &who(7, 7, 7), Iov::one(0x1, 8), false, BG, &mut io), Ans::Now(EIO), "a cap on held requests");
+}
+
+#[test]
+fn at_most_2048_pairs() {
+    let mut io = FakeIo::default();
+    let mut t = Ttys::new();
+    for i in 0..MAX_PTYS {
+        assert_eq!(t.open_master(100 + i, 0, &mut io), Ok(i));
+    }
+    assert_eq!(t.open_master(9999, 0, &mut io), Err(ENOSPC));
+    t.closed(100 + 7, &mut io);
+    assert_eq!(t.open_master(9999, 0, &mut io), Ok(7), "a closed number is used again");
 }

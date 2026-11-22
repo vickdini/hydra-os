@@ -32,6 +32,12 @@ const ECHOK: u32 = 0o40;
 const ECHOCTL: u32 = 0o1000;
 const ECHOKE: u32 = 0o4000;
 const IEXTEN: u32 = 0o100000;
+const NOFLSH: u32 = 0o200;
+
+/// The longest line canonical mode keeps (Linux's `N_TTY_BUF_SIZE` - 1; the newline fits).
+pub const MAX_LINE: usize = 4095;
+/// The most unread input a terminal keeps.
+pub const MAX_READY: usize = 64 * 1024;
 
 // c_cc indices
 const VINTR: usize = 0;
@@ -252,46 +258,63 @@ fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
     if tm.iflag & ICRNL != 0 && b == b'\r' {
         b = b'\n';
     }
+    // A control character set to `_POSIX_VDISABLE` (0) is off: a NUL byte is a byte
+    let is = |i: usize| tm.cc[i] != 0 && b == tm.cc[i];
     if tm.lflag & ISIG != 0 {
-        let sig = if b == tm.cc[VINTR] {
+        let sig = if is(VINTR) {
             Some(SIGINT)
-        } else if b == tm.cc[VQUIT] {
+        } else if is(VQUIT) {
             Some(SIGQUIT)
-        } else if b == tm.cc[VSUSP] {
+        } else if is(VSUSP) {
             Some(SIGTSTP)
         } else {
             None
         };
         if let Some(sig) = sig {
-            t.line.clear();
+            // The signal flushes what was typed (unless NOFLSH), as Linux does
+            if tm.lflag & NOFLSH == 0 {
+                t.line.clear();
+                t.ready.clear();
+            }
             if tm.lflag & ECHO != 0 {
                 echo.extend_from_slice(&[b'^', b.wrapping_add(0x40), b'\r', b'\n']);
             }
             return Some(sig);
         }
     }
+    // Bounded queues (Linux's 4 KiB line, here also 64 KiB of unread input): past them a
+    // byte is dropped, so a writer that floods a terminal nobody reads cannot exhaust the
+    // service's memory
+    if t.ready.len() >= MAX_READY {
+        return None;
+    }
     if tm.lflag & ICANON != 0 {
-        if b == tm.cc[VERASE] || b == 0x08 {
+        if is(VERASE) || b == 0x08 {
             if t.line.pop().is_some() && tm.lflag & ECHO != 0 {
                 echo.extend_from_slice(b"\x08 \x08");
             }
-        } else if b == tm.cc[VKILL] {
+        } else if is(VKILL) {
             for _ in 0..t.line.len() {
                 if tm.lflag & ECHO != 0 {
                     echo.extend_from_slice(b"\x08 \x08");
                 }
             }
             t.line.clear();
-        } else if b == tm.cc[VWERASE] {
+        } else if is(VWERASE) {
+            let echoing = tm.lflag & ECHO != 0;
             while matches!(t.line.last(), Some(b' ')) {
                 t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
+                if echoing {
+                    echo.extend_from_slice(b"\x08 \x08");
+                }
             }
             while matches!(t.line.last(), Some(c) if *c != b' ') {
                 t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
+                if echoing {
+                    echo.extend_from_slice(b"\x08 \x08");
+                }
             }
-        } else if b == tm.cc[VEOF] {
+        } else if is(VEOF) {
             let line = core::mem::take(&mut t.line);
             t.ready.extend(line.into_iter().map(Some));
             t.ready.push_back(None);
@@ -302,7 +325,7 @@ fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
             if tm.lflag & ECHO != 0 {
                 echo.extend_from_slice(b"\r\n");
             }
-        } else {
+        } else if t.line.len() < MAX_LINE {
             t.line.push(b);
             if tm.lflag & ECHO != 0 {
                 if b < 0x20 && tm.lflag & ECHOCTL != 0 {
@@ -446,10 +469,13 @@ pub fn ioctl(t: &mut Tty, request: u64, arg: u64, mem: &dyn Mem, default_size: (
         },
         TIOCGPGRP => ok(mem.put(arg, &(t.fg_pgrp as i32).to_le_bytes())),
         TIOCSPGRP => match mem.get(arg, 4) {
-            Ok(b) => {
-                t.fg_pgrp = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
-                0
-            }
+            Ok(b) => match i32::from_le_bytes([b[0], b[1], b[2], b[3]]) {
+                pg if pg < 0 => EINVAL,
+                pg => {
+                    t.fg_pgrp = pg as u64;
+                    0
+                }
+            },
             Err(e) => e,
         },
         TIOCGSID => ok(mem.put(arg, &(t.session as i32).to_le_bytes())),

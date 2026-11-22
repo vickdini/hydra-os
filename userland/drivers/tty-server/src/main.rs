@@ -458,10 +458,13 @@ fn open(cx: &Cx, rdev: u64, flags: u64, who: &Caller) -> i64 {
         Err(e) => return e,
     };
     match (major, minor) {
-        (5, 2) => {
-            let _index = with(|t, g| t.open_master(slot, cx.c.euid, g));
-            install(cx, slot, LX_OBJ_KIND_PTY_M, flags, (0o020666, 0, 0), b"/dev/ptmx", 2, rdev)
-        }
+        (5, 2) => match with(|t, g| t.open_master(slot, cx.c.euid, g)) {
+            Ok(_) => install(cx, slot, LX_OBJ_KIND_PTY_M, flags, (0o020666, 0, 0), b"/dev/ptmx", 2, rdev),
+            Err(e) => {
+                svcrt::objs::free(slot);
+                e
+            }
+        },
         (5, 0) => match with(|t, g| t.open_controlling(slot, who, g)) {
             None => {
                 svcrt::objs::free(slot);
