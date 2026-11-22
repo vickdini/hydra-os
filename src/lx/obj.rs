@@ -514,6 +514,18 @@ pub(super) fn list_live(x: &Host, start: usize, cap: usize, out: &mut alloc::vec
     }
 }
 
+// wave8 GS begin
+/// The keys of service `svc`'s live objects of kind `kind` (`/proc/asound`, kept in the
+/// kernel, asks whether a sound device is still open: the service learns of the last close
+/// only from its notification ring, a moment later).
+pub fn live_keys(svc: crate::ipc::protocol::SvcId, kind: u32) -> alloc::vec::Vec<u64> {
+    let Some(x) = super::svc::host(super::svc::host_of(svc)) else { return alloc::vec::Vec::new() };
+    let mut v = alloc::vec::Vec::new();
+    list_live(x, 0, usize::MAX, &mut v);
+    v.into_iter().filter(|o| o.kind == kind).map(|o| o.key).collect()
+}
+// wave8 GS end
+
 /// The error a call on `dev`, a server object of a dead instance, gives (design 5.2,
 /// FailObjects: per kind).
 pub fn stale_errno(dev: &ServerObject) -> i64 {

@@ -94,7 +94,16 @@ pub fn status(dir: usize) -> Option<SndStatus> {
     }
     let p = crate::memory::frame_allocator::phys_to_virt(b.status.base).wrapping_add(dir * SND_STATUS_STRIDE) as *const SndStatus;
     // SAFETY: the record lies in the status page, which lives for ever
-    unsafe { crate::ipc::sound_page::read_record(p) }
+    let mut st = unsafe { crate::ipc::sound_page::read_record(p) }?;
+    // The last descriptor may be gone already while the service has not taken the close
+    // from its ring yet: a closed device reads "closed" at once, as on Linux
+    if st.open != 0 {
+        let key = 116 << 8 | (16 + 8 * dir as u64);
+        if !crate::lx::obj::live_keys(LXS_SOUND, crate::ipc::protocol::LX_OBJ_KIND_SND_PCM).contains(&key) {
+            st.open = 0;
+        }
+    }
+    Some(st)
 }
 
 /// Whether the sound service answers the ALSA devices now (not `lx.sound=kernel` nor
