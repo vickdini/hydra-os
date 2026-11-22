@@ -20,3 +20,8 @@ pub mod ipc {
     #[path = "../../../../src/ipc/sound_page.rs"]
     pub mod sound_page;
 }
+
+/// The kernel's restart decisions (`lx/restart_policy.rs`): the ALSA calls a restarted sound
+/// service may be sent again, and the error its stale objects give.
+#[path = "../../../src/lx/restart_policy.rs"]
+pub mod restart_policy;

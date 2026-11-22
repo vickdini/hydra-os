@@ -222,7 +222,7 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         // ioctl requests that only read: TCGETS, TIOCGPGRP, TIOCGWINSZ, FIONREAD,
         // SIOCGIFNAME, SIOCGIFCONF, SIOCGIFFLAGS, SIOCGIFADDR, SIOCGIFMTU, SIOCGIFHWADDR,
         // SIOCGIFINDEX
-        16 => matches!(args[1], 0x5401 | 0x540F | 0x5413 | 0x541B | 0x8910 | 0x8912 | 0x8913 | 0x8915 | 0x8921 | 0x8927 | 0x8933),
+        16 => matches!(args[1], 0x5401 | 0x540F | 0x5413 | 0x541B | 0x8910 | 0x8912 | 0x8913 | 0x8915 | 0x8921 | 0x8927 | 0x8933) || alsa_resendable(args[1]),
         // Path and attribute queries (wave 7's file service): stat, fstat, lstat, access,
         // readlink, getcwd, statfs, fstatfs, the getxattr and listxattr families,
         // readlinkat, newfstatat, faccessat, statx, faccessat2
@@ -241,6 +241,23 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         _ => false,
     }
 }
+
+// wave8 GS begin
+/// ALSA `ioctl`s (the sound service, wave 8) that a restarted sound service may be sent
+/// again: the queries, and `SYNC_PTR`, which sets the application pointer and minimum to the
+/// values in its record (the same the second time) and reads the status. The request is
+/// compared as 32 bits: libasound passes it as an `int`, which may arrive sign-extended.
+pub fn alsa_resendable(req: u64) -> bool {
+    matches!(
+        req as u32,
+        // PCM: PVERSION, INFO, STATUS, DELAY, HWSYNC, SYNC_PTR, STATUS_EXT
+        0x8004_4100 | 0x8120_4101 | 0x8098_4120 | 0x8008_4121 | 0x0000_4122 | 0xC088_4123 | 0xC098_4124
+        // control: PVERSION, CARD_INFO, ELEM_LIST, ELEM_INFO, ELEM_READ, TLV_READ,
+        // PCM_NEXT_DEVICE, PCM_INFO, POWER_STATE
+        | 0x8004_5500 | 0x8178_5501 | 0xC050_5510 | 0xC110_5511 | 0xC4C8_5512 | 0xC008_551A | 0x8004_5530 | 0xC004_5530 | 0xC120_5531 | 0x8004_55D1
+    )
+}
+// wave8 GS end
 
 // wave7 GB begin
 /// `add_key`.

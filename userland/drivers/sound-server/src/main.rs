@@ -505,9 +505,31 @@ fn update_ready(e: &Engine) {
 // The timer tick (the old kernel task `snd-position`)
 // ------------------------------------------------------------------------------------
 
+/// Calls per direction since the last report (`SYNC_PTR`, `PREPARE`), and when it was.
+static SYNCS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static PREPS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static REPORTED: AtomicU64 = AtomicU64::new(0);
+
+/// Every 10 s while a stream is open: its call rate and underruns (section 2.5's measure).
+fn report(e: &Engine) {
+    let now = sys::uptime_ticks();
+    if now < REPORTED.load(Ordering::Relaxed) + 1000 {
+        return;
+    }
+    REPORTED.store(now, Ordering::Relaxed);
+    for dir in 0..2 {
+        let s = &e.streams[dir];
+        let (n, p) = (SYNCS[dir].swap(0, Ordering::Relaxed), PREPS[dir].swap(0, Ordering::Relaxed));
+        if s.open && (n > 0 || p > 0) {
+            println!("[sound-server] pcm{} 10 s: {} SYNC_PTR, {} PREPARE, {} xruns since open, state {}", dir, n, p, s.xruns, state_name(s.state));
+        }
+    }
+}
+
 fn tick() {
     let mut hw = Real;
     let mut e = ENGINE.lock();
+    report(&e);
     let before = [e.streams[0].state, e.streams[1].state];
     let running = e.tick(&mut hw);
     // The sound driver restarted: its streams are gone (the controller was reset)
@@ -1077,6 +1099,7 @@ fn pcm_ioctl(cx: &Cx, dir: usize) -> Answer {
         0x0000_4122 => ENGINE.lock().hwsync(dir, &mut hw), // HWSYNC
         0xC088_4123 => {
             boost(cx, dir);
+            SYNCS[dir].fetch_add(1, Ordering::Relaxed);
             inout(cx, arg, 136, |b| ENGINE.lock().sync_ptr(dir, b, &mut hw))
         }
         0x8018_4132 | 0xC018_4132 => {
@@ -1093,7 +1116,10 @@ fn pcm_ioctl(cx: &Cx, dir: usize) -> Answer {
                 0
             })
         }
-        0x0000_4140 => ENGINE.lock().prepare(dir, &mut hw),
+        0x0000_4140 => {
+            PREPS[dir].fetch_add(1, Ordering::Relaxed);
+            ENGINE.lock().prepare(dir, &mut hw)
+        }
         0x0000_4141 => ENGINE.lock().reset(dir, &mut hw),
         0x0000_4142 => {
             let r = ENGINE.lock().start(dir, &mut hw);

@@ -615,9 +615,9 @@ pub const LX_SND_DRVGEN: u64 = 3;
 /// clock (`CLOCK_MONOTONIC`, the PCM timestamps), 1 the wall clock's offset from it.
 pub const LX_SND_NOW: u64 = 4;
 /// Kind of the sound service's control device objects (`controlC0`).
-pub const LX_OBJ_KIND_SND_CTL: u32 = 40;
+pub const LX_OBJ_KIND_SND_CTL: u32 = 64;
 /// Kind of the sound service's PCM device objects (`pcmC0D0p`, `pcmC0D0c`).
-pub const LX_OBJ_KIND_SND_PCM: u32 = 41;
+pub const LX_OBJ_KIND_SND_PCM: u32 = 65;
 /// Bytes of each direction's ring (the largest buffer a program may ask for).
 pub const SND_RING_BYTES: u64 = 128 * 4096;
 /// Bytes of the card description in [`LxSndInfo`].

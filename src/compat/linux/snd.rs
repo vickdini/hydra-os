@@ -1374,9 +1374,29 @@ fn program(dir: usize, hw: &HwSetup) -> Result<usize, i64> {
     }
 }
 
+/// wave8 GS: `SYNC_PTR` and `PREPARE` calls per direction since the last report.
+static SYNCS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+static PREPS: [core::sync::atomic::AtomicU64; 2] = [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+
 /// The position task: updates running streams every tick and wakes their waiters.
 fn position_task() {
+    let mut reported = 0u64;
     loop {
+        // wave8 GS: every 10 s while a stream is open, its call rate and underruns
+        let now = crate::arch::pit::ticks();
+        if now >= reported + 1000 {
+            reported = now;
+            for dir in 0..2 {
+                let (open, xruns, state) = {
+                    let s = STREAMS[dir].lock();
+                    (s.open, s.xruns, s.state)
+                };
+                let (n, p) = (SYNCS[dir].swap(0, Ordering::Relaxed), PREPS[dir].swap(0, Ordering::Relaxed));
+                if open && (n > 0 || p > 0) {
+                    crate::kprintln!("[snd] pcm{} 10 s: {} SYNC_PTR, {} PREPARE, {} xruns since open, state {}", dir, n, p, xruns, state);
+                }
+            }
+        }
         let mut any = false;
         for dir in 0..2 {
             let act = {
@@ -1577,6 +1597,7 @@ impl PcmFile {
             Err(e) => return e,
         };
         let flags = get_u32(&b, 0);
+        SYNCS[self.dir].fetch_add(1, Ordering::Relaxed); // wave8 GS
         if flags & 1 != 0 {
             self.sync();
         }
@@ -1622,6 +1643,7 @@ impl PcmFile {
     }
 
     fn prepare(&self) -> i64 {
+        PREPS[self.dir].fetch_add(1, Ordering::Relaxed); // wave8 GS
         let (hw, running) = {
             let s = self.stream();
             let Some(hw) = s.hw else { return EBADFD };
