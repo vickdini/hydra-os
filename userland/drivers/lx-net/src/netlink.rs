@@ -68,6 +68,8 @@ struct Nl {
     /// last written there.
     rec: u32,
     saved: AtomicU64,
+    /// `saved` holds a written value (not a separate bit of it: groups use all 32 bits).
+    written: core::sync::atomic::AtomicBool,
 }
 
 // wave8 GX2 begin: the kept record of a netlink socket (lx-net's Transparent restart):
@@ -84,10 +86,12 @@ impl Nl {
             return;
         }
         let now = self.port.load(Ordering::Relaxed) as u64 | (self.groups.load(Ordering::Relaxed) as u64) << 32;
-        // (bit 63 of `saved` stays clear: groups use bits 32..62 at most in practice; the first
-        // write happens at creation, see `socket`)
-        if self.saved.load(Ordering::Relaxed) != now | 1 << 63 && crate::sockkept::put(self.rec, &self.image()) {
-            self.saved.store(now | 1 << 63, Ordering::Relaxed);
+        if self.written.load(Ordering::Relaxed) && self.saved.load(Ordering::Relaxed) == now {
+            return;
+        }
+        if crate::sockkept::put(self.rec, &self.image()) {
+            self.saved.store(now, Ordering::Relaxed);
+            self.written.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -108,7 +112,7 @@ pub fn restore(slot: u32, rec: u32) -> bool {
     if !crate::obj::reserve(slot, LX_OBJ_KIND_NETLINK) {
         return false;
     }
-    let nl = Nl { route, port: AtomicU32::new(port), groups: AtomicU32::new(groups), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0) };
+    let nl = Nl { route, port: AtomicU32::new(port), groups: AtomicU32::new(groups), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0), written: core::sync::atomic::AtomicBool::new(false) };
     nl.persist();
     SOCKS.lock().insert(slot, Arc::new(nl));
     refresh(slot);
@@ -156,7 +160,7 @@ pub fn socket(cx: &Cx) -> i64 {
         Err(e) => return e,
     };
     let rec = crate::sockkept::alloc(); // wave8 GX2
-    let nl = Arc::new(Nl { route, port: AtomicU32::new(cx.c.tgid as u32), groups: AtomicU32::new(0), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0) });
+    let nl = Arc::new(Nl { route, port: AtomicU32::new(cx.c.tgid as u32), groups: AtomicU32::new(0), replies: YLock::new(VecDeque::new()), slot, rec, saved: AtomicU64::new(0), written: core::sync::atomic::AtomicBool::new(false) });
     nl.persist();
     SOCKS.lock().insert(slot, nl);
     crate::obj::set_ready(slot, 0x4, 0);

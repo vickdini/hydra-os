@@ -851,6 +851,14 @@ pub const LX_CALL_RESEND_OFF: usize = 0x1F8;
 /// service dies meanwhile the caller gets that answer (a short write) instead of `EIO`.
 pub const LX_CALL_PARTIAL_OFF: usize = 0x1E8;
 const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_CALL_PARTIAL_OFF);
+/// `SYS_LX_OBJ` op 71 `LX_OBJ_PARTIAL(request id, answer)`: the request (served or waiting) has
+/// done part of its work that cannot be undone; `answer` (> 0) is what its caller gets if
+/// the service dies before answering it (a blocking stream send waiting with bytes sent).
+pub const LX_OBJ_PARTIAL: u64 = 71;
+/// net-server's status word (`NETS_ST_*`) with its instance's epoch (a number new at every
+/// start, never 0): lx-net keeps it with its sockets and trusts kept handles only when it
+/// is the same after a restart.
+pub const NETS_ST_EPOCH: usize = 18;
 // wave8 GX2 end
 
 // The copy-in/copy-out table (wave 4, Group 10). For the calls the kernel's table

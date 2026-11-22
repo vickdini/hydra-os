@@ -48,6 +48,11 @@ static GEN: AtomicU64 = AtomicU64::new(0);
 /// Events of net-server's ring taken so far.
 static TAIL: AtomicU64 = AtomicU64::new(0);
 
+/// wave8 GX2: net-server's instance epoch (`NETS_ST_EPOCH`; 0 without net-server).
+pub fn epoch() -> u64 {
+    status(NETS_ST_EPOCH)
+}
+
 /// The current net-server instance count (see [`GEN`]).
 pub fn gen() -> u64 {
     GEN.load(Ordering::Acquire)

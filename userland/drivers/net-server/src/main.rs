@@ -690,6 +690,9 @@ fn main(args: &[&str]) {
     publish(&mut st);
     // Last: clients trust the area from now on
     st.status(NETS_ST_MAGIC, NETS_MAGIC);
+    // wave8 GX2: this instance's epoch (lx-net trusts kept handles only of the same one)
+    // SAFETY: rdtsc only reads the time-stamp counter
+    st.status(NETS_ST_EPOCH, unsafe { core::arch::x86_64::_rdtsc() } | 1);
     println!(
         "[net-server] serving endpoint {:#x}: {}",
         ENDPOINT_NET_SERVER,

@@ -58,14 +58,23 @@ pub unsafe fn open(base: *mut u8, size: usize) -> Adopted {
             used[i / 64] |= 1 << (i % 64);
         }
     }
+    // (the last record holds net-server's epoch: never a socket's)
+    if k.count() > 0 {
+        let e = k.count() - 1;
+        used[e / 64] |= 1 << (e % 64);
+    }
     *KEPT.lock() = Some(State { k, used });
+    ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     a
 }
 
 /// Whether a kept-state area is open (lx-net; never in linux-server).
 pub fn kept_active() -> bool {
-    KEPT.lock().is_some()
+    ACTIVE.load(core::sync::atomic::Ordering::Relaxed)
 }
+
+/// Whether [`open`] took a kept-state area (read without the lock, on every send).
+static ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// A free record for a new socket: its number plus one, 0 when none (not kept).
 pub fn alloc() -> u32 {
@@ -84,6 +93,35 @@ pub fn alloc() -> u32 {
         }
     }
     0
+}
+
+/// A record's first byte: net-server's instance epoch the kept handles belong to (the last
+/// record, never handed out by [`alloc`]).
+pub const KIND_EPOCH: u8 = 3;
+
+/// The record holding the epoch (the last one).
+fn epoch_rec(st: &State) -> usize {
+    st.k.count() - 1
+}
+
+/// The net-server epoch the kept handles belong to (`None`: never written).
+pub fn epoch() -> Option<u64> {
+    let g = KEPT.lock();
+    let st = g.as_ref()?;
+    let d = st.k.get(epoch_rec(st))?;
+    let mut r = Reader::new(d);
+    (r.u8()? == KIND_EPOCH).then_some(())?;
+    r.u64()
+}
+
+/// Records net-server's current epoch for the kept handles.
+pub fn set_epoch(e: u64) {
+    let mut g = KEPT.lock();
+    let Some(st) = g.as_mut() else { return };
+    let i = epoch_rec(st);
+    let mut b = alloc::vec![KIND_EPOCH];
+    b.extend_from_slice(&e.to_le_bytes());
+    st.k.put(i, &b);
 }
 
 /// Writes record `rec` (a number from [`alloc`]): `false` if it does not fit.
@@ -126,7 +164,7 @@ pub fn keep_only(keep: &[u32]) {
     let Some(st) = g.as_mut() else { return };
     for i in 0..st.k.count() {
         let rec = i as u32 + 1;
-        if st.used[i / 64] & (1 << (i % 64)) != 0 && !keep.contains(&rec) {
+        if i + 1 < st.k.count() && st.used[i / 64] & (1 << (i % 64)) != 0 && !keep.contains(&rec) {
             st.k.clear(i);
             st.used[i / 64] &= !(1 << (i % 64));
         }

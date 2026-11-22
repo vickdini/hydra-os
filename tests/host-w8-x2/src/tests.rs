@@ -69,8 +69,9 @@ fn the_store_runs_out_gracefully() {
     open(&mut a);
     // (the page-rounded area holds a few more than COUNT)
     let cap = hydra_rt::kept::Kept::capacity(sk::SIZE, sk::REC);
-    assert!(cap >= sk::COUNT);
-    for i in 0..cap {
+    assert!(cap > sk::COUNT);
+    // (the last record holds net-server's epoch, never a socket's)
+    for i in 0..cap - 1 {
         assert_eq!(sk::alloc(), i as u32 + 1);
     }
     // Full: a new socket is simply not kept
@@ -261,4 +262,23 @@ fn a_whole_socket_image_fits_a_record() {
     let (rec, rest) = InetRec::decode(&back).unwrap();
     assert_eq!(rec.peer, Some(([93, 184, 216, 34], 443)));
     assert!(Options::load(rest).is_some());
+}
+
+/// net-server's epoch is kept apart from the sockets' records and survives a restart; it
+/// never takes a socket's record, and keep_only leaves it.
+#[test]
+fn the_net_server_epoch_is_kept() {
+    let _t = TURN.lock().unwrap();
+    let mut a = area();
+    open(&mut a);
+    assert_eq!(sk::epoch(), None);
+    sk::set_epoch(0xABCD);
+    let r = sk::alloc();
+    assert!(sk::put(r, b"sock"));
+    sk::keep_only(&[]);
+    assert_eq!(sk::epoch(), Some(0xABCD));
+    open(&mut a);
+    assert_eq!(sk::epoch(), Some(0xABCD));
+    sk::set_epoch(7);
+    assert_eq!(sk::epoch(), Some(7));
 }

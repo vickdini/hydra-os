@@ -22,6 +22,30 @@ use spin::Mutex;
 static PIDS: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 /// A recovery runs.
 static RECOVERING: AtomicBool = AtomicBool::new(false);
+/// The next process the kernel starts is the desktop's root ([`expect_root`]).
+static ROOT_PENDING: AtomicBool = AtomicBool::new(false);
+/// Pids added since the set was last trimmed of ended processes.
+static ADDED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The login screen's launcher is about to be started: the next process started by the
+/// kernel (not forked) is the desktop's root, marked before it can run and fork
+/// ([`root_started`], from `proc::register_process`).
+pub fn expect_root() {
+    ROOT_PENDING.store(true, Ordering::Release);
+}
+
+/// The expected root was not started after all (the start failed).
+pub fn cancel_root() {
+    ROOT_PENDING.store(false, Ordering::Release);
+}
+
+/// Process `pid` was started by the kernel (not forked): the desktop's root if one is
+/// expected.
+pub fn root_started(pid: u64) {
+    if ROOT_PENDING.swap(false, Ordering::AcqRel) {
+        mark(pid);
+    }
+}
 
 /// Process `pid` is the login screen's launcher (the root of the desktop).
 pub fn mark(pid: u64) {
@@ -38,6 +62,10 @@ pub fn inherit(parent: u64, child: u64) {
             p.insert(child);
         }
     });
+    // Now and then the ended ones go (the set would grow for the whole uptime)
+    if ADDED.fetch_add(1, Ordering::Relaxed) % 1024 == 1023 {
+        alive_members(|p| !crate::compat::linux::proc::has_exited(p));
+    }
 }
 
 /// Whether `pid` is a desktop process.
@@ -48,8 +76,9 @@ pub fn is_desktop(pid: u64) -> bool {
 /// The desktop processes still alive (by `alive`), the set trimmed to them.
 fn alive_members(alive: impl Fn(u64) -> bool) -> Vec<u64> {
     let all: Vec<u64> = x86_64::instructions::interrupts::without_interrupts(|| PIDS.lock().iter().copied().collect());
-    let live: Vec<u64> = all.into_iter().filter(|&p| alive(p)).collect();
-    x86_64::instructions::interrupts::without_interrupts(|| PIDS.lock().retain(|p| live.contains(p)));
+    let (live, dead): (Vec<u64>, Vec<u64>) = all.into_iter().partition(|&p| alive(p));
+    // (only pids seen dead go: one added meanwhile stays)
+    x86_64::instructions::interrupts::without_interrupts(|| PIDS.lock().retain(|p| !dead.contains(p)));
     live
 }
 
@@ -71,6 +100,12 @@ fn recover_task() {
     while !super::svc::online(ipc) && crate::arch::pit::ticks() < deadline {
         crate::task::sleep_ms(100);
     }
+    if !super::svc::online(ipc) {
+        // (the desktop is left as it is: without lx-ipc no login screen could replace it)
+        crate::kprintln!("[lx] ipc did not come back; the desktop is not restarted");
+        RECOVERING.store(false, Ordering::Release);
+        crate::task::exit();
+    }
     let live = alive_members(|p| !crate::compat::linux::proc::has_exited(p));
     for &p in &live {
         crate::compat::linux::proc::post_process(p, 9);
@@ -83,11 +118,7 @@ fn recover_task() {
     }
     crate::task::close_retired();
     x86_64::instructions::interrupts::without_interrupts(|| PIDS.lock().clear());
-    if super::svc::online(ipc) {
-        crate::admin::linux::plasma("/ubuntu", false);
-    } else {
-        crate::kprintln!("[lx] ipc did not come back; the login screen is not started again");
-    }
+    crate::admin::linux::plasma("/ubuntu", false);
     RECOVERING.store(false, Ordering::Release);
     crate::task::exit();
 }
@@ -107,5 +138,11 @@ mod tests {
         let live = alive_members(|p| p != 11);
         assert_eq!(live, alloc::vec![10, 12]);
         assert!(!is_desktop(11));
+        // The root expected before it runs: marked at its start, its children follow
+        expect_root();
+        root_started(50);
+        root_started(51); // (the next kernel start is not the root)
+        inherit(50, 52);
+        assert!(is_desktop(50) && is_desktop(52) && !is_desktop(51));
     }
 }

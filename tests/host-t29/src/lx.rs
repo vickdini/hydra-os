@@ -8,6 +8,9 @@ use crate::arch::syscall::SyscallFrame;
 pub mod desktop {
     pub fn inherit(_parent: u64, _child: u64) {}
     pub fn mark(_pid: u64) {}
+    pub fn root_started(_pid: u64) {}
+    pub fn expect_root() {}
+    pub fn cancel_root() {}
 }
 // wave8 GX2 end
 pub fn note(kind: u64, a: u64, b: u64, c: u64) {

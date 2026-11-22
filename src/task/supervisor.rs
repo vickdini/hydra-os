@@ -281,12 +281,19 @@ fn lx_sec_args() -> Option<Vec<String>> {
 /// linux-server (no service id names its endpoint; it would exit at once, and the start
 /// hand-off would wait for it in vain).
 fn lx_net_args() -> Option<Vec<String>> {
-    (crate::lx::svc::endpoint_of(crate::ipc::protocol::LXS_NET) == crate::ipc::protocol::ENDPOINT_LX_NET).then(|| alloc::vec![String::from("workers=2")])
+    split_out(crate::ipc::protocol::LXS_NET, crate::ipc::protocol::ENDPOINT_LX_NET).then(|| alloc::vec![String::from("workers=2")])
 }
 
-/// lx-ipc: three workers (D-Bus and Wayland traffic); not started with `lx.ipc=linux`.
+/// lx-ipc: three workers (D-Bus and Wayland traffic); not started with `lx.ipc=linux` or
+/// when switched back to the kernel.
 fn lx_ipc_args() -> Option<Vec<String>> {
-    (crate::lx::svc::endpoint_of(crate::ipc::protocol::LXS_IPC) == crate::ipc::protocol::ENDPOINT_LX_IPC).then(|| alloc::vec![String::from("workers=3")])
+    split_out(crate::ipc::protocol::LXS_IPC, crate::ipc::protocol::ENDPOINT_LX_IPC).then(|| alloc::vec![String::from("workers=3")])
+}
+
+/// Whether Linux service `svc` runs in its own process on `ep`: not co-located in
+/// linux-server, not switched back to the kernel (`lx.<name>=kernel`, `lx=kernel`).
+fn split_out(svc: u8, ep: u32) -> bool {
+    crate::lx::svc::endpoint_of(svc) == ep && crate::lx::svc::mode(svc) == crate::lx::svc::SvcMode::Forward && !crate::lx::all_kernel()
 }
 // wave8 GX2 end
 

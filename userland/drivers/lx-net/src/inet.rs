@@ -197,17 +197,22 @@ pub fn kept_ok(d: &[u8]) -> bool {
 }
 
 /// A restarted lx-net takes back the socket in slot `slot` from its record `rec` (after
-/// the kernel let it adopt its objects); `false` if the record no longer makes one.
-pub fn restore(slot: u32, rec: u32) -> bool {
+/// the kernel let it adopt its objects); `false` if the record no longer makes one. With
+/// `alive` false (net-server restarted meanwhile: its handles belong to a dead instance)
+/// the socket comes back dead (it fails, and its handles are neither used nor kept).
+pub fn restore(slot: u32, rec: u32, alive: bool) -> bool {
     let Some(d) = crate::sockkept::get(rec) else { return false };
-    let Some(s) = Sock::from_image(rec, &d) else { return false };
+    let Some(mut s) = Sock::from_image(rec, &d) else { return false };
+    if !alive {
+        s.gen = u64::MAX;
+    }
     if !crate::obj::reserve(slot, LX_OBJ_KIND_INET) {
         return false;
     }
     if s.inode >= INODE.load(Ordering::Relaxed) {
         INODE.store(s.inode + 1, Ordering::Relaxed);
     }
-    let handles = s.handles();
+    let handles = if alive { s.handles() } else { [None; 5] };
     SOCKS.lock().insert(slot, Arc::new(YLock::new(s)));
     for h in handles.into_iter().flatten() {
         track(h, slot);
@@ -219,7 +224,17 @@ pub fn restore(slot: u32, rec: u32) -> bool {
 /// The net-server handles of every socket (what a restarted lx-net keeps).
 pub fn kept_handles() -> Vec<u32> {
     let socks: Vec<Arc<YLock<Sock>>> = SOCKS.lock().values().cloned().collect();
-    socks.iter().flat_map(|s| s.lock().handles().into_iter().flatten().collect::<Vec<u32>>()).collect()
+    socks
+        .iter()
+        .flat_map(|s| {
+            let g = s.lock();
+            if g.dead() {
+                Vec::new()
+            } else {
+                g.handles().into_iter().flatten().collect::<Vec<u32>>()
+            }
+        })
+        .collect()
 }
 // wave8 GX2 end
 
@@ -796,7 +811,10 @@ pub fn call(cx: &Cx, prog: &mut Prog) -> Out {
 fn connect(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, addr: u64, len: u64, prog: &mut Prog) -> Out {
     // A connect in progress, tried again (or made again after its net wait): wait for the
     // handshake
-    if prog.deadline.is_some() || cx.c.flags & LX_CALL_RETRIED != 0 {
+    // (wave8 GX2: a connect sent again after an lx-net restart is marked retried too; one
+    // the old instance never started has no handle yet and starts now)
+    let retried_fresh = prog.deadline.is_none() && cx.c.flags & LX_CALL_RETRIED != 0 && sock.lock().tcp.is_none();
+    if (prog.deadline.is_some() || cx.c.flags & LX_CALL_RETRIED != 0) && !retried_fresh {
         let (id, dead) = {
             let s = sock.lock();
             (s.tcp, s.dead())
@@ -1159,18 +1177,17 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
             };
             let snap = stack::word_raw(id);
             crate::socket::resend_safe(cx, false); // wave8 GX2: the bytes go now
+            crate::socket::partial_in_flight(cx); // wave8 GX2
             match stack::tcp_send(id, &chunk) {
                 Ok(0) => {
                     prog.wait_on = Some((id, snap));
                     if nonblock {
                         return Out::Done(if prog.sent > 0 { prog.sent as i64 } else { EAGAIN });
                     }
-                    // wave8 GX2: in lx-net a call waiting here is sent again from the start
-                    // after a restart (a waiting call has no effect yet, by the kernel's
-                    // contract): with part of it sent already, the part is answered now
-                    // (a short write) instead of waiting, so no byte is ever sent twice
-                    if prog.sent > 0 && crate::sockkept::kept_active() {
-                        return Out::Done(prog.sent as i64);
+                    // (wave8 GX2: a wait with bytes sent tells the kernel their count,
+                    // `socket::by_kind`, so a restart answers it instead of sending it again)
+                    if prog.sent > 0 {
+                        crate::socket::partial(cx, prog.sent);
                     }
                     return prog.wait(timeout);
                 }

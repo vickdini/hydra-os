@@ -709,3 +709,53 @@ fn a_partial_answer_is_given_when_a_transparent_service_dies() {
     assert_eq!(test_call(3, 1, 0), 777);
 }
 // wave8 GX2 end
+
+// wave8 GX2 begin
+/// A waiting call that did part of its work (`LX_OBJ_PARTIAL`: a blocking send with bytes
+/// sent) gets that answer when its Transparent service dies, not a re-send; a call sent
+/// again after a restart is marked retried (`LX_CALL_RETRIED`: a connect then waits for its
+/// handshake instead of starting another).
+#[test]
+fn a_waiting_partial_call_is_answered_and_a_resent_call_is_marked_retried() {
+    let sim = world();
+    restart::configure(LXS_TEST, restart::RestartClass::Transparent);
+    let _s = start(&sim, LXS_TEST, 300, 1, true, handler(|s| {
+        if s.call.args[1] == 1 {
+            assert_eq!(obj::obj_ctl(LX_OBJ_PARTIAL, s.call.id, 640, 0), 0);
+            // (another host's request: refused)
+            assert_eq!(obj::obj_ctl(LX_OBJ_PARTIAL, s.call.id ^ (1 << 60), 1, 0), ESRCH);
+        }
+        (0, LX_REPLY_PENDING)
+    }));
+    let got = StdArc::new(StdAtomicU64::new(u64::MAX));
+    let g2 = got.clone();
+    sim.spawn(Task::linux(101, 100), move || {
+        crate::world::bkl_enter();
+        let r = forward(&frame(LX_TEST_NR, [LX_TEST_PENDING, 1, 0, 0, 0, 0])).unwrap();
+        g2.store(r as u64, Ordering::Release);
+    });
+    sim.run_others();
+    server_gone(LXS_TEST);
+    sim.run_others();
+    assert_eq!(got.load(Ordering::Acquire), 640);
+}
+
+#[test]
+fn a_resent_call_is_marked_retried() {
+    let sim = world();
+    restart::configure(LXS_TEST, restart::RestartClass::Transparent);
+    let _s = start(&sim, LXS_TEST, 300, 1, true, handler(|_| (0, LX_REPLY_PENDING)));
+    let got = StdArc::new(StdAtomicU64::new(u64::MAX));
+    let g2 = got.clone();
+    sim.spawn(Task::linux(101, 100), move || {
+        crate::world::bkl_enter();
+        let r = forward(&frame(LX_TEST_NR, [LX_TEST_PENDING, 2, 0, 0, 0, 0])).unwrap();
+        g2.store(r as u64, Ordering::Release);
+    });
+    sim.run_others();
+    server_gone(LXS_TEST);
+    let _s2 = start(&sim, LXS_TEST, 400, 1, true, handler(|s| ((s.call.flags & LX_CALL_RETRIED != 0) as i64, 0)));
+    sim.run_others();
+    assert_eq!(got.load(Ordering::Acquire), 1);
+}
+// wave8 GX2 end

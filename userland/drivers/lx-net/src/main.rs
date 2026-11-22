@@ -140,6 +140,8 @@ fn restore() {
             netc::reset();
         }
     }
+    // The kept handles belong to this net-server instance from now on
+    sockkept::set_epoch(netc::epoch());
 }
 
 /// The kernel's list of this service's live objects, rebuilt from their records and
@@ -180,10 +182,18 @@ fn adopt() -> Option<(usize, usize)> {
     if sys::lx_svc_adopt().is_err() {
         return None;
     }
+    // net-server restarted while we were away (another epoch): the kept handles are dead
+    // (a new instance may hand the same numbers to new sockets); the sockets come back
+    // failed instead of sharing a handle with a stranger
+    let now = netc::epoch();
+    let alive = now != 0 && sockkept::epoch() == Some(now);
+    if !alive {
+        println!("[lx-net] net-server restarted meanwhile: Internet sockets come back failed");
+    }
     let mut n = 0;
     let mut recs = Vec::new();
     for &(slot, kind, rec) in &good {
-        let ok = if kind == LX_OBJ_KIND_INET { inet::restore(slot, rec) } else { netlink::restore(slot, rec) };
+        let ok = if kind == LX_OBJ_KIND_INET { inet::restore(slot, rec, alive) } else { netlink::restore(slot, rec) };
         if ok {
             n += 1;
             recs.push(rec);

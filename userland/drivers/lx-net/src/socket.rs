@@ -201,6 +201,11 @@ pub fn by_kind(cx: &Cx) -> (i64, u64) {
                     continue;
                 }
                 let timed = prog.deadline.is_some_and(|d| d.is_some());
+                // wave8 GX2: a send waiting with bytes sent: their count is the answer if
+                // lx-net dies while it waits (it is not sent again)
+                if prog.sent > 0 && crate::sockkept::kept_active() {
+                    let _ = sys::lx_obj(LX_OBJ_PARTIAL, cx.id, prog.sent as u64, 0);
+                }
                 w.push(Waiter { c: cx.c, slot, prog });
                 drop(w);
                 refresh(slot, false);
@@ -226,17 +231,35 @@ pub fn resend_safe(cx: &Cx, on: bool) {
     }
 }
 
-/// Records in the worker's syscall page (`LX_CALL_PARTIAL_OFF`) that the call being served
-/// already did part of its work, and the answer for that part (`done`: the bytes a stream
-/// send handed net-server): if lx-net dies now, the caller gets it (a short write).
+/// Records that the call `cx` already did part of its work, and the answer for that part
+/// (`done`: the bytes a stream send handed net-server): if lx-net dies now, the caller gets
+/// it (a short write). A call being served writes it in the worker's syscall page
+/// (`LX_CALL_PARTIAL_OFF`, no system call); a waiting call tried again by the main thread
+/// tells the kernel (`LX_OBJ_PARTIAL`).
 pub fn partial(cx: &Cx, done: usize) {
+    if !crate::sockkept::kept_active() {
+        return; // (linux-server: no Transparent restart)
+    }
+    let p = cx.page();
+    if p.is_null() {
+        let _ = sys::lx_obj(LX_OBJ_PARTIAL, cx.id, done as u64, 0);
+        return;
+    }
+    // SAFETY: the worker's own syscall page; the words lie after the call
+    unsafe {
+        core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF + 8) as *mut i64, done as i64);
+        core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, cx.id);
+    }
+}
+
+/// A chunk is about to go to net-server: until it is known to be taken, the call's partial
+/// answer in the page is withdrawn (a crash in between fails the call with EIO instead of
+/// answering a count one chunk short, which a program would send again).
+pub fn partial_in_flight(cx: &Cx) {
     let p = cx.page();
     if !p.is_null() {
-        // SAFETY: the worker's own syscall page; the words lie after the call
-        unsafe {
-            core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF + 8) as *mut i64, done as i64);
-            core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, cx.id);
-        }
+        // SAFETY: as in `partial`
+        unsafe { core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, 0) };
     }
 }
 // wave8 GX2 end

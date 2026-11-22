@@ -700,6 +700,9 @@ pub mod lx {
     pub mod desktop {
         pub fn inherit(_parent: u64, _child: u64) {}
         pub fn mark(_pid: u64) {}
+        pub fn root_started(_pid: u64) {}
+        pub fn expect_root() {}
+        pub fn cancel_root() {}
     }
     // wave8 GX2 end
     // wave6 G21: the restart decisions (classes, ladder, idempotent marks)

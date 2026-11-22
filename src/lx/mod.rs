@@ -1079,6 +1079,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
         match after_restart(x, r, &c, mark) {
             Ok(()) => {
                 c.note_seq = x.notes_head();
+                // wave8 GX2: a call sent again after a restart may have been under way (a
+                // connect whose handshake went on meanwhile): the service is told
+                if matches!(r, restart::LX_RESEND | restart::LX_RESEND_MAYBE) {
+                    c.flags |= crate::ipc::protocol::LX_CALL_RETRIED;
+                }
                 continue;
             }
             Err(e) => return e,
@@ -1246,7 +1251,7 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
     let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
     s.next_id += 1;
     c.id = id;
-    s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy, early: false, redir: (0, 0) };
+    s.reqs[slot] = Req { state: RState::Queued, id, client: me, client_idx: my_idx, result: 0, interrupted: false, has_copy, early: false, redir: (0, 0), partial: 0 }; // (wave8 GX2: partial)
     x.req_done[slot].store(false, Ordering::SeqCst);
     if has_copy {
         let kept = x.buf(slot);
@@ -2523,6 +2528,7 @@ fn server_gone(h: SvcId) {
                 r.result = match (resend, r.state) {
                     (true, RState::Delivered) if partial[i].is_some() => partial[i].unwrap_or(EIO), // wave8 GX2
                     (true, RState::Delivered) if safe[i] => restart::LX_RESEND, // wave8 GX2
+                    (true, RState::Pending) if r.partial > 0 => r.partial, // wave8 GX2: a waiting send's bytes already sent
                     (true, RState::Delivered) => restart::LX_RESEND_MAYBE,
                     (true, _) => restart::LX_RESEND,
                     _ => EIO,

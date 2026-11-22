@@ -589,6 +589,23 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     {
         return ESRCH;
     }
+    // wave8 GX2 begin: a request's partial answer (`LX_OBJ_PARTIAL`, the service's own
+    // requests only): what its caller gets if the service dies before answering
+    if op == crate::ipc::protocol::LX_OBJ_PARTIAL {
+        if crate::ipc::protocol::lx_req_svc(a) != h {
+            return ESRCH;
+        }
+        return x86_64::instructions::interrupts::without_interrupts(|| {
+            x.lx(|s| match s.reqs.iter_mut().find(|r| r.id == a && matches!(r.state, super::svc::RState::Delivered | super::svc::RState::Pending)) {
+                Some(r) => {
+                    r.partial = b as i64;
+                    0
+                }
+                None => ESRCH,
+            })
+        });
+    }
+    // wave8 GX2 end
     // wave7 G7-5: file bytes through the page cache for vfs-server (execve's heads)
     if op == crate::ipc::protocol::LX_FH_READ {
         return super::xexec::read(h, a, b, c);
@@ -701,7 +718,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
                 // wave8 GX2: also another service's object (lx-ipc's message queue keeps
                 // lx-net's netlink socket for glibc's SIGEV_THREAD; `LX_OBJ_NOTIFY` forwards
                 // the notification to its owner)
-                Some(FileDescriptor::Device(d)) if d.as_server().is_none_or(|o| o.svc != h) => d.clone(),
+                Some(FileDescriptor::Device(d)) if d.as_server().is_none_or(|o| o.svc != h && o.kind() == crate::ipc::protocol::LX_OBJ_KIND_NETLINK) => d.clone(),
                 _ => return EBADF,
             };
             let token = NEXT_PIN.fetch_add(1, Ordering::Relaxed);
