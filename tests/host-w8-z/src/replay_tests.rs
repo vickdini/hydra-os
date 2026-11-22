@@ -691,3 +691,45 @@ fn a_switched_off_log_does_not_commit_per_request() {
     assert!(lookup(root(), "after").is_ok());
     m.kill();
 }
+
+// wave8 GB begin
+/// Appending to files deleted right away (zfsbench append_64k): the log drops their writes
+/// instead of forcing commits, and a kill still replays everything else exactly (the
+/// object numbers of files created after the drop included).
+#[test]
+fn deleted_files_data_is_dropped_instead_of_committed() {
+    let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = fresh();
+    let keep = create(root(), "keep");
+    write(keep, 0, b"kept data");
+    let t0 = txg();
+    let c0 = durable::COMPACTIONS.load(std::sync::atomic::Ordering::Relaxed);
+    let chunk = pattern(5, MAX_IO);
+    let rep = 8 * 1024 * 1024;
+    for r in 0..5u64 {
+        let f = create(root(), "zbtmp");
+        let mut off = 0;
+        while off < rep {
+            write(f, off as u64, &chunk);
+            off += MAX_IO;
+        }
+        unlink(root(), "zbtmp");
+        write(keep, 9 + r, b"+");
+        assert!(durable::used() <= durable::COMMIT_AT + MAX_IO + 4096);
+    }
+    assert_eq!(txg(), t0, "a commit was forced");
+    assert!(durable::COMPACTIONS.load(std::sync::atomic::Ordering::Relaxed) > c0, "no compaction");
+    let after = create(root(), "after");
+    write(after, 0, b"after");
+    let before = whole_tree();
+    m.kill();
+    let r = m.start();
+    assert!(r.matched && !r.torn, "{:?}", r);
+    assert_eq!(r.replayed.mismatches, 0, "{:?}", r);
+    assert_eq!(whole_tree(), before);
+    assert_eq!(lookup(root(), "after"), Ok(after));
+    assert_eq!(read_all(keep), b"kept data+++++".to_vec());
+    assert!(lookup(root(), "zbtmp").is_err());
+    m.kill();
+}
+// wave8 GB end
