@@ -225,6 +225,20 @@ pub fn resend_safe(cx: &Cx, on: bool) {
         unsafe { core::ptr::write_volatile(p.add(LX_CALL_RESEND_OFF) as *mut u64, if on { cx.id } else { 0 }) };
     }
 }
+
+/// Records in the worker's syscall page (`LX_CALL_PARTIAL_OFF`) that the call being served
+/// already did part of its work, and the answer for that part (`done`: the bytes a stream
+/// send handed net-server): if lx-net dies now, the caller gets it (a short write).
+pub fn partial(cx: &Cx, done: usize) {
+    let p = cx.page();
+    if !p.is_null() {
+        // SAFETY: the worker's own syscall page; the words lie after the call
+        unsafe {
+            core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF + 8) as *mut i64, done as i64);
+            core::ptr::write_volatile(p.add(LX_CALL_PARTIAL_OFF) as *mut u64, cx.id);
+        }
+    }
+}
 // wave8 GX2 end
 
 /// Calls waiting in the kernel on a net-server handle (`LX_OBJ_NETWAIT`): `(request id, slot,

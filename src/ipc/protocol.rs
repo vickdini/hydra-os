@@ -845,7 +845,12 @@ pub const LX_CALL_RETRIED: u64 = 2;
 /// of failing it with `EIO`), 0 once the effect begins. lx-net marks a receive until it
 /// takes the data from net-server.
 pub const LX_CALL_RESEND_OFF: usize = 0x1F8;
-const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_CALL_RESEND_OFF);
+/// Offset of two words the worker writes when the call it serves has done part of its work
+/// that cannot be undone (a stream send that handed net-server some of its bytes): the id of
+/// the call, then the answer it would give if it stopped now (the bytes sent). If the
+/// service dies meanwhile the caller gets that answer (a short write) instead of `EIO`.
+pub const LX_CALL_PARTIAL_OFF: usize = 0x1E8;
+const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_CALL_PARTIAL_OFF);
 // wave8 GX2 end
 
 // The copy-in/copy-out table (wave 4, Group 10). For the calls the kernel's table

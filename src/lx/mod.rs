@@ -2484,13 +2484,25 @@ fn server_gone(h: SvcId) {
         // (no effect yet: `LX_CALL_RESEND_OFF` holds the request's id), read before the
         // workers' pages go
         let mut safe = [false; MAX_REQS];
+        // ... and those that did part of their work and left the answer for it (a short write)
+        let mut partial: [Option<i64>; MAX_REQS] = [None; MAX_REQS];
         if resend {
             for w in s.workers.iter() {
                 if w.req < MAX_REQS && s.reqs[w.req].state == RState::Delivered {
                     let p = w.call_mut() as *const u8;
+                    let id = s.reqs[w.req].id;
                     // SAFETY: the worker's syscall page (4 KiB) is alive while it is in the table
-                    let mark = unsafe { core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_RESEND_OFF) as *const u64) };
-                    safe[w.req] = mark != 0 && mark == s.reqs[w.req].id;
+                    let (mark, pid, pres) = unsafe {
+                        (
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_RESEND_OFF) as *const u64),
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_PARTIAL_OFF) as *const u64),
+                            core::ptr::read_volatile(p.add(crate::ipc::protocol::LX_CALL_PARTIAL_OFF + 8) as *const i64),
+                        )
+                    };
+                    safe[w.req] = mark != 0 && mark == id;
+                    if pid != 0 && pid == id && pres > 0 {
+                        partial[w.req] = Some(pres);
+                    }
                 }
             }
         }
@@ -2505,6 +2517,7 @@ fn server_gone(h: SvcId) {
                 // wave6 G21: a Transparent restart's callers send their calls again (all
                 // that had no effect yet; one being served only if it is idempotent)
                 r.result = match (resend, r.state) {
+                    (true, RState::Delivered) if partial[i].is_some() => partial[i].unwrap_or(EIO), // wave8 GX2
                     (true, RState::Delivered) if safe[i] => restart::LX_RESEND, // wave8 GX2
                     (true, RState::Delivered) => restart::LX_RESEND_MAYBE,
                     (true, _) => restart::LX_RESEND,

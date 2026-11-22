@@ -1155,6 +1155,7 @@ fn send(cx: &Cx, sock: &Arc<YLock<Sock>>, slot: u32, segs: &[(u64, u64)], flags:
                 }
                 Ok(n) => {
                     prog.sent += n;
+                    crate::socket::partial(cx, prog.sent); // wave8 GX2
                     if nonblock {
                         break;
                     }

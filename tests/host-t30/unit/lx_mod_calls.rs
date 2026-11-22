@@ -686,3 +686,26 @@ fn a_stale_resend_mark_does_not_count() {
     assert_eq!(test_call(3, 2, 0), EIO);
 }
 // wave8 GX2 end
+
+// wave8 GX2 begin
+/// A call that did part of its work and left the answer for it (`LX_CALL_PARTIAL_OFF`: a
+/// stream send's bytes handed on) gets that answer when its service dies (a short write),
+/// not EIO and not a second sending.
+#[test]
+fn a_partial_answer_is_given_when_a_transparent_service_dies() {
+    let sim = world();
+    restart::configure(LXS_TEST, restart::RestartClass::Transparent);
+    let _s = start(&sim, LXS_TEST, 300, 1, true, handler(|s| {
+        // SAFETY: the worker's syscall page
+        unsafe {
+            core::ptr::write_volatile(s.page.add(LX_CALL_PARTIAL_OFF + 8) as *mut i64, 777);
+            core::ptr::write_volatile(s.page.add(LX_CALL_PARTIAL_OFF) as *mut u64, s.call.id);
+            // (also marked safe: the partial answer wins, nothing is sent twice)
+            core::ptr::write_volatile(s.page.add(LX_CALL_RESEND_OFF) as *mut u64, s.call.id);
+        }
+        server_gone(LXS_TEST);
+        (0, 0)
+    }));
+    assert_eq!(test_call(3, 1, 0), 777);
+}
+// wave8 GX2 end
