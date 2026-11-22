@@ -955,3 +955,61 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   served 179,784 / to the kernel 4,894 / kept 730 with the copies.
 - Tests: host-t26 `mount` (generations and the view), host-t30 `lx::fileh` (fill, `kernel_only`,
   `LX_FH_MNTTAB`), `tests/host-w7-43` (the copy, walks across it, the walk's leftovers).
+
+## The terminal service (wave 8, Group T)
+
+Design: `docs/display-input-design.md` sections 3.2, 3.6 and 5 (row T of section 7). The
+terminals left the kernel for a service of their own, **tty-server**
+(`userland/drivers/tty-server`, service `LXS_TTY`, endpoint `0x2C`, two workers and a
+console thread). The in-kernel copies (`src/compat/linux/tty.rs`, `pty.rs`) stay as the
+switch back: `lx=kernel` or `lx.tty=kernel` (tty-server then idles: it gets no calls and no
+keys).
+
+| Piece | Where now | How it is reached |
+|---|---|---|
+| Line discipline, termios, window size, `ISIG` signals | tty-server `ldisc.rs` | (shared by the two below) |
+| Pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`, `/dev/tty` naming one) | tty-server `ttys.rs`, objects of kinds `LX_OBJ_KIND_PTY_M` (67) / `PTY_S` (69) | `open`: `vfs.rs::open_pty_path` -> `lx::console::open_pty` -> `LX_KCALL_TTY` `K_OPEN` (tty-server installs the object, the kernel takes it as the opened file); `read`/`write`/`readv`/`writev` by descriptor (the lock-free path), `ioctl` through `call_obj`, `poll` on readiness words |
+| `stat`/`chmod`/`chown` of `/dev/pts/N`, `vhangup` | tty-server | `pty.rs`'s `stat_path`/`setattr_path`/`hangup` -> `K_STAT`/`K_SETATTR`/`K_HANGUP` |
+| The console terminal (the Linux programs' terminal on hydra-shell) | its line discipline in tty-server; the descriptors (`ConsoleIn/Out/Err`), the attach state and the keyboard stay in the kernel (`src/lx/console.rs`) | `tty.rs`'s `read`/`write`/`ioctl` -> `K_READ`/`K_WRITE`/`K_IOCTL` (user pointers, the caller's group and session in the header); the VT requests (`VT_*`, `KD*`) stay the kernel's |
+
+**Kernel primitives for tty-server** (`SYS_LX_OBJ` op `LX_OBJ_TTY` = 70, its host only;
+sub-op in the first argument):
+
+| Sub-op | What |
+|---|---|
+| `LX_TTY_CONS_WRITE (buf, len)` | prints tty-server's bytes on the console (output processing done) |
+| `LX_TTY_CONS_WAIT (buf, cap)` | waits (at most about 1 s) for keys typed while a Linux program owns the console, or an attach/detach; `buf` = `LxConsState` (generation in/out, session, group, console size) + keys (`u32`: a character, or `LX_CONS_KEY_SPECIAL` + UEFI scan code); `-EPERM` when not forwarded |
+| `LX_TTY_CONS_READY (gen, readable)` | whether a console `read` would return (for `poll`; wakes the console's waiters) |
+| `LX_TTY_SESS (pid)` | `sid \| pgid << 32` of a process |
+| `LX_TTY_PGRP_IN (pgid, sid)` | 0: the group has a member in the session; 1: only elsewhere; `-ESRCH`: no such group |
+| `LX_TTY_SIGGRP (pgid, sig)` / `LX_TTY_SIGPROC (pid, sig)` | signals a group / a process (Ctrl+C, `SIGWINCH`, hang-ups) |
+
+**Sessions** stay the kernel's (decision 11). The kernel's `LX_KCALL_TTY` calls carry the
+caller's group and session in the header; for a pty `ioctl` that needs them (`TIOCSCTTY`,
+`TIOCSPGRP`) tty-server asks `LX_TTY_SESS`. A session leader's exit (`LX_NOTE_EXIT`,
+subscribed) gives its pty up. A console reader in a background group gets the internal
+answer `LX_TTY_BGREAD` and the kernel posts `SIGTTIN` in its context, as before.
+
+**What changed in behaviour** (Linux's rules, which the kernel copy could not follow):
+closing a master that is some session's controlling terminal sends `SIGHUP` and `SIGCONT` to
+the session leader and `SIGHUP` to the foreground group (the kernel copy only gave
+end-of-file: its last close could run under the scheduler lock); `TIOCSPGRP` on a pty a
+session holds refuses another session's caller (`ENOTTY`) and a group of another session
+(`EPERM`, `ESRCH` for none); a hung-up slave polls readable and hung up.
+
+**Blocking:** reads with nothing to give and slave writes past 64 KiB of unread output are
+answered "pending" and completed by the call that brings bytes or room (signals:
+`ERESTARTSYS`; exits drop them). At most 32 console reads wait at once (`EIO` beyond: each
+holds a request slot of the service).
+
+**Restarts** (FailObjects, decision 12, design 3.6): pty objects of the dead instance fail
+(`ENODEV`, `POLLERR|POLLHUP`), so the shells in Konsole and ssh sessions end and the desktop
+stays; console calls in flight fail with `EIO`; while tty-server is down the kernel prints
+console writes itself (with `ONLCR`), answers console `ioctl`s with its copy and fails
+console reads with `EIO`; the new instance takes the console's attach state from its first
+`CONS_WAIT` (a cooked terminal).
+
+**Tests:** host crate `tests/host-w8-t` (line discipline, the pty table, the console
+terminal, the kernel's encodings); `ptytest`, `notty`, `stdfd`, `signals` and the whole
+suite (every test prints through the console terminal); lxbench `pty_rw` (one process,
+slave to master) and `pty_rtt` (two processes ping-pong a byte).

@@ -12,6 +12,12 @@
 //! unlocks it for opening as `/dev/pts/N` (or `TIOCGPTPEER` opens it directly). When the
 //! master closes, slave reads see end-of-file and writes fail with `EIO` (no `SIGHUP` is
 //! sent); when the last slave closes, master reads fail with `EIO`.
+//!
+//! **Wave 8 (Group T):** the terminal service `tty-server` serves the pseudo-terminals as
+//! its own objects; this file stays as the switch back (`lx=kernel`, `lx.tty=kernel`). While
+//! the terminals are forwarded ([`crate::lx::console::forwarded`]) `vfs.rs` opens the paths
+//! through `crate::lx::console::open_pty`, and [`stat_path`], [`setattr_path`] and
+//! [`hangup`] ask tty-server.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -104,6 +110,10 @@ impl PtyFile {
 /// Hangs up the controlling terminal of session `sid` (`vhangup`): the session loses it and
 /// earlier descriptors are dead. Returns `(session leader, foreground group)` to signal.
 pub fn hangup(sid: u64) -> Option<(u64, u64)> {
+    // wave8 GT: tty-server's terminals
+    if crate::lx::console::forwarded() {
+        return crate::lx::console::hangup(sid);
+    }
     let pty = controlling_tty(sid)?;
     let fg = {
         let mut t = pty.tty.lock();
@@ -307,6 +317,19 @@ pub fn stat_path(abs: &str) -> Option<Result<super::types::LinuxStat, i64>> {
         return Some(Ok(st));
     }
     let index = slave_index(abs)?;
+    // wave8 GT: tty-server's terminals (the same numbers as `fill_stat`, and as tty-server's
+    // objects report to `fstat`, so `ttyname` matches them)
+    if crate::lx::console::forwarded() {
+        return Some(crate::lx::console::pty_stat(index as u64).map(|(mode, uid, gid)| {
+            st.st_dev = PTS_DEV;
+            st.st_ino = index as u64 + 3;
+            st.st_mode = 0o020000 | mode;
+            st.st_uid = uid;
+            st.st_gid = gid;
+            st.st_rdev = makedev(PTS_MAJOR + (index as u64 >> 8), index as u64 & 0xFF);
+            st
+        }));
+    }
     Some(match lookup(index) {
         Some(pty) => {
             pty.fill_stat(&mut st);
@@ -332,6 +355,11 @@ pub fn stat_path(abs: &str) -> Option<Result<super::types::LinuxStat, i64>> {
 /// `Some(0)` on success, `Some(-EPERM)` or `Some(-ENOENT)` on error, or `None` if not `/dev/pts/*`.
 pub fn setattr_path(abs: &str, euid: u32, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> Option<i64> {
     let index = slave_index(abs)?;
+    // wave8 GT: tty-server's terminals
+    if crate::lx::console::forwarded() {
+        let _ = euid; // (tty-server checks the caller's identity from the call)
+        return Some(crate::lx::console::pty_setattr(index as u64, mode, uid, gid));
+    }
     let pty = match lookup(index) {
         Some(p) => p,
         None => return Some(ENOENT),

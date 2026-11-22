@@ -18,6 +18,7 @@ const DRIVERS: &[&str] = &[
     "vfs-server",
     "svc-test",
     "hda-driver",
+    "tty-server", // wave8 GT
 ];
 
 fn stand_in() -> Vec<u8> {

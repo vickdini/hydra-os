@@ -1,0 +1,9 @@
+[package]
+name = "tty-server"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra tty-server: the terminals (line discipline, pseudo-terminals, the console terminal), a Linux service of their own (wave 8)"
+
+[dependencies]
+hydra-rt = { workspace = true }
+spin = { workspace = true }

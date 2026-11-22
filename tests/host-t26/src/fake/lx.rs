@@ -8,6 +8,43 @@ use std::cell::{Cell, RefCell};
 
 use crate::compat::linux::chardev::CharDevice;
 
+/// *stub* wave8 GT: `crate::lx::console` (the terminals are never tty-server's here, so
+/// the in-kernel copies run; the rest is never reached).
+pub mod console {
+    pub fn forwarded() -> bool {
+        false
+    }
+    pub fn attach(_sid: u64, _pgrp: u64) {}
+    pub fn detach() {}
+    pub fn attached() -> bool {
+        false
+    }
+    pub fn readable() -> bool {
+        false
+    }
+    pub fn read(_buf: u64, _len: usize, _nonblock: bool) -> i64 {
+        -5
+    }
+    pub fn write(_buf: u64, len: usize) -> i64 {
+        len as i64
+    }
+    pub fn ioctl(_request: u64, _arg: u64) -> i64 {
+        -25
+    }
+    pub fn open_pty<T>(_abs: &str, _flags: u32) -> Option<Result<T, i64>> {
+        None
+    }
+    pub fn pty_stat(_index: u64) -> Result<(u32, u32, u32), i64> {
+        Err(-2)
+    }
+    pub fn pty_setattr(_index: u64, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>) -> i64 {
+        -2
+    }
+    pub fn hangup(_sid: u64) -> Option<(u64, u64)> {
+        None
+    }
+}
+
 thread_local! {
     pub static STEP4: Cell<bool> = const { Cell::new(false) };
     /// Calls forwarded: (call number, arguments).

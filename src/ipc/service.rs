@@ -493,7 +493,7 @@ pub fn attach(endpoint: u32) -> Result<u64, i64> {
 }
 
 /// The services, one per system endpoint.
-static SERVICES: [Service; 15] = [
+static SERVICES: [Service; 16] = [
     Service::new(ENDPOINT_ZFS_SERVER),
     Service::new(ENDPOINT_BLOCK_DEV),
     Service::new(ENDPOINT_NET_DEV),
@@ -513,6 +513,10 @@ static SERVICES: [Service; 15] = [
     Service::new(crate::ipc::protocol::ENDPOINT_LX_SEC),
     Service::new(crate::ipc::protocol::ENDPOINT_SVC_TEST),
     // wave6 G19 end
+    // wave8 GT begin: tty-server (Group S adds 0x2A-0x2C for I, S and T: keep S's line and
+    // drop this one at the merge)
+    Service::new(crate::ipc::protocol::ENDPOINT_TTY_SERVER),
+    // wave8 GT end
 ];
 
 /// The service whose server takes `svc`'s requests (itself, or its primary).

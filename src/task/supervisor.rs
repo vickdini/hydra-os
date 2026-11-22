@@ -62,6 +62,10 @@ static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 /// The test service (wave 6: a second Linux service, `userland/drivers/svc-test`).
 static SVC_TEST_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/svc-test"));
 // wave6 G19 end
+// wave8 GT begin
+/// tty-server (wave 8: the terminals, `userland/drivers/tty-server`).
+static TTY_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/tty-server"));
+// wave8 GT end
 static HDA_DRIVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/hda-driver"));
 
 /// Operational state of a supervised service.
@@ -283,6 +287,14 @@ fn svc_test_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave6 G19 end
+
+// wave8 GT begin
+/// tty-server: always started (two workers and its console thread); with `lx.tty=kernel` or
+/// `lx=kernel` it runs but gets no calls and no keys.
+fn tty_server_args() -> Option<Vec<String>> {
+    Some(alloc::vec![String::from("workers=2")])
+}
+// wave8 GT end
 
 /// e1000 driver: its 128 KiB register window.
 ///
@@ -749,6 +761,16 @@ pub fn supervisor_init() {
         ));
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_SVC_TEST, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_SVC_TEST }>);
         // wave6 G19 end
+        // wave8 GT begin: tty-server, the terminals: its going away fails its pty objects
+        // (the programs on them end) and its calls in flight; new calls wait for the restart;
+        // the console prints straight away meanwhile (decision 12, design 3.6)
+        sup.services.push(ServiceDescriptor::new("tty_server", crate::ipc::protocol::ENDPOINT_TTY_SERVER, TTY_SERVER_ELF, tty_server_args, no_grants).linux_service(
+            crate::ipc::protocol::LXS_TTY,
+            crate::lx::restart::RestartClass::FailObjects,
+            "tty",
+        ));
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_TTY_SERVER, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_TTY_SERVER }>);
+        // wave8 GT end
         sup.services.push(ServiceDescriptor::new(
             "sound_driver",
             crate::ipc::protocol::ENDPOINT_SOUND_DEV,

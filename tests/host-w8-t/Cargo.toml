@@ -1,0 +1,15 @@
+[package]
+name = "hydra_hosttests_w8_t"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group T's host unit tests (wave 8): tty-server's line discipline (ldisc.rs) and terminal table (ttys.rs), and the kernel's console encodings (src/lx/console.rs)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]

@@ -704,6 +704,8 @@ pub mod compat {
                 pub st_blksize: i64,
                 /// wave7 G7-4: a pseudo file's device.
                 pub st_dev: u64,
+                /// wave8 GT: a terminal's device number.
+                pub st_rdev: u64,
             }
         }
 

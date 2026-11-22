@@ -2176,3 +2176,85 @@ pub const LX_MNT_TMPFS: u32 = 2;
 pub const LX_MNT_KERNEL: u32 = 3;
 // wave7 G7-7 end
 
+// wave8 GT begin: the terminal service (tty-server, `docs/display-input-design.md` 3.2, 5)
+// ----------------------------------------------------------------------------------------
+// Pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`) are tty-server's objects; the console
+// terminal (the Linux programs' terminal on hydra-shell) keeps its kernel descriptors, whose
+// read/write/ioctl the kernel forwards with `LX_KCALL_TTY`. tty-server reaches the console
+// and the kernel's process identity through `SYS_LX_OBJ` op `LX_OBJ_TTY`.
+
+/// Endpoint of tty-server (wave 8, service `LXS_TTY`).
+pub const ENDPOINT_TTY_SERVER: u32 = 0x2C;
+/// A pseudo-terminal's master end (`/dev/ptmx`).
+pub const LX_OBJ_KIND_PTY_M: u32 = 67;
+/// A pseudo-terminal's slave end (`/dev/pts/N`, or `/dev/tty` naming it).
+pub const LX_OBJ_KIND_PTY_S: u32 = 69;
+
+/// `SYS_LX_OBJ` op of tty-server (its host only): sub-op in `a` (`LX_TTY_*`), then `b`, `c`.
+pub const LX_OBJ_TTY: u64 = 70;
+/// `(buf, len)`: prints tty-server's bytes on the console (output processing done).
+pub const LX_TTY_CONS_WRITE: u64 = 1;
+/// `(buf, cap)`: waits (at most about 1 s) for console keys while a Linux program owns the
+/// console, or for an attach/detach. `buf` starts with an [`LxConsState`] whose `gen` is the
+/// generation the caller knows (in) and the current state (out), followed by the keys
+/// (`u32` each, [`LX_CONS_KEY_SPECIAL`] for special keys). Returns the number of keys;
+/// `-EPERM` when the console terminal is not forwarded (`lx.tty=kernel`).
+pub const LX_TTY_CONS_WAIT: u64 = 2;
+/// `(gen, readable)`: whether a console `read` would return now (for `poll`), for
+/// attach generation `gen`.
+pub const LX_TTY_CONS_READY: u64 = 3;
+/// `(pid)`: process `pid`'s session and group: `sid | pgid << 32` (`-ESRCH`).
+pub const LX_TTY_SESS: u64 = 4;
+/// `(pgid, sid)`: 0 if process group `pgid` has a member in session `sid`, 1 if its members
+/// are in another session, `-ESRCH` if it has none.
+pub const LX_TTY_PGRP_IN: u64 = 5;
+/// `(pgid, sig)`: posts `sig` to every process of group `pgid`; how many there were.
+pub const LX_TTY_SIGGRP: u64 = 6;
+/// `(pid, sig)`: posts `sig` to process `pid` (a session leader's hang-up).
+pub const LX_TTY_SIGPROC: u64 = 7;
+
+/// The console's state at the head of an [`LX_TTY_CONS_WAIT`] buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct LxConsState {
+    /// Attach generation (grows at every attach and detach).
+    pub gen: u64,
+    /// The session holding the console (0: hydra-shell has it).
+    pub sid: u64,
+    /// Its foreground group as the console was given (the program's own).
+    pub pgrp: u64,
+    /// Keys that follow.
+    pub nkeys: u32,
+    /// The console's size (`TIOCGWINSZ` until a program sets one).
+    pub cols: u16,
+    /// See [`LxConsState::cols`].
+    pub rows: u16,
+}
+/// A console key that is not a character: the low bits are the UEFI scan code.
+pub const LX_CONS_KEY_SPECIAL: u32 = 0x8000_0000;
+
+/// `LX_KCALL_TTY(op, ...)`: the kernel's calls to tty-server for a program (its process
+/// group and session in [`LxCall::pgid`]/[`LxCall::sid`]).
+pub const LX_KCALL_TTY: u64 = 0x6788;
+/// `(op, rdev, flags)`: open `/dev/ptmx` (5:2), `/dev/pts/N` (136+:N) or `/dev/tty` (5:0):
+/// installs a descriptor in the caller's table and returns it; [`LX_TTY_NOTMINE`] for a
+/// `/dev/tty` whose terminal is not a pseudo-terminal.
+pub const LX_TTY_K_OPEN: u64 = 1;
+/// `(op, buf, len, nonblock)`: `read` of the console terminal.
+pub const LX_TTY_K_READ: u64 = 2;
+/// `(op, buf, len)`: `write` to the console terminal.
+pub const LX_TTY_K_WRITE: u64 = 3;
+/// `(op, request, arg)`: a terminal `ioctl` on the console.
+pub const LX_TTY_K_IOCTL: u64 = 4;
+/// `(op, index)`: `/dev/pts/index`'s `mode & 0o7777 | gid << 12 | uid << 32` (`-ENOENT`).
+pub const LX_TTY_K_STAT: u64 = 5;
+/// `(op, index, mode, uid, gid)`: `chmod`/`chown` of `/dev/pts/index` (`u64::MAX`: unchanged).
+pub const LX_TTY_K_SETATTR: u64 = 6;
+/// `(op, sid)`: `vhangup` of session `sid`'s terminal: `fg | leader << 32` (`-ESRCH`: none).
+pub const LX_TTY_K_HANGUP: u64 = 7;
+/// [`LX_TTY_K_READ`]: the caller is in a background group (the kernel stops it: `SIGTTIN`).
+pub const LX_TTY_BGREAD: i64 = -4110;
+/// [`LX_TTY_K_OPEN`] of `/dev/tty`: not a pseudo-terminal (the kernel opens the console).
+pub const LX_TTY_NOTMINE: i64 = -4111;
+// wave8 GT end
+

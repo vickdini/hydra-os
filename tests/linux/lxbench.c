@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -681,6 +682,58 @@ static double b_eventfd_rtt(long n) { /* two processes ping-pong through two eve
     return r;
 }
 
+/* --- pseudo-terminals (wave 8, Group T: tty-server) --- */
+/* A pair in raw mode: the master in `*m`, the slave in `*s` (0, or -1). */
+static int pty_pair(int *m, int *s) {
+    *m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (*m < 0 || grantpt(*m) || unlockpt(*m)) return -1;
+    *s = open(ptsname(*m), O_RDWR | O_NOCTTY);
+    if (*s < 0) return -1;
+    struct termios t;
+    tcgetattr(*s, &t);
+    cfmakeraw(&t);
+    tcsetattr(*s, TCSANOW, &t);
+    return 0;
+}
+static double b_pty_rw(long n) { /* one process: 1 byte slave -> master */
+    int m, s;
+    if (pty_pair(&m, &s)) return -1;
+    char c = 'x';
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(s, &c, 1);
+        if (read(m, &c, 1) != 1) return -1;
+    }
+    double r = (double)(now() - t) / n;
+    close(s);
+    close(m);
+    return r;
+}
+static double b_pty_rtt(long n) { /* two processes ping-pong one byte through a pty */
+    int m, s;
+    if (pty_pair(&m, &s)) return -1;
+    char c = 'x';
+    pid_t p = fork();
+    if (p == 0) {
+        close(m);
+        for (long i = 0; i < n; i++) {
+            if (read(s, &c, 1) != 1) _exit(1);
+            write(s, &c, 1);
+        }
+        _exit(0);
+    }
+    close(s);
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) {
+        write(m, &c, 1);
+        if (read(m, &c, 1) != 1) return -1;
+    }
+    double r = (double)(now() - t) / n;
+    waitpid(p, 0, 0);
+    close(m);
+    return r;
+}
+
 struct bench { const char *name; bench_fn fn; long n; int probe; };
 static struct bench benches[] = {
     {"getpid", b_getpid, 200000, 0},
@@ -724,6 +777,8 @@ static struct bench benches[] = {
     {"unix_msg_fd", b_unix_msg_fd, 50000, 0},
     {"poll_eventfd", b_poll_eventfd, 100000, 0},
     {"timerfd_set", b_timerfd_set, 100000, 0},
+    {"pty_rw", b_pty_rw, 50000, 0},
+    {"pty_rtt", b_pty_rtt, 20000, 0},
     {"tcp_rtt", b_tcp_rtt, 10000, 0},
     {"tcp_sendrecv", b_tcp_sendrecv, 20000, 0},
     {"tcp_connect", b_tcp_connect, 200, 0},

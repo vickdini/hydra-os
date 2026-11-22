@@ -628,7 +628,7 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     }
     // Returning to user mode: run any pending signal handlers first
     if (ctx.cs & 3) == 3 && crate::task::is_active() {
-        crate::compat::linux::tty::pump();
+        if !crate::lx::console::forwarded() { crate::compat::linux::tty::pump(); } // wave8 GT: tty-server takes the keys
         // After a task switch this frame is on the previous task's stack: delivering here
         // could exit or stop the new task on it. Its next trap on its own stack (a timer
         // tick within its timeslice, a system call or a fault) delivers instead.
