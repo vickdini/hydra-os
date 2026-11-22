@@ -269,6 +269,15 @@ impl Vdev {
         matches!(self.backend, Backend::Driver)
     }
 
+    /// wave8 GZ: a RAM disk of `blocks` 4 KiB blocks at `base` as it is (not zeroed): the
+    /// host tests import the same memory again after a simulated kill.
+    ///
+    /// # Safety
+    /// `base` must stay valid for `blocks * 4096` bytes while the vdev is used.
+    pub unsafe fn ram_at(base: *mut u8, blocks: u64) -> Self {
+        Self { backend: Backend::Ram(base), total_blocks: blocks }
+    }
+
     /// Reads `count` consecutive blocks starting at `block` into `buf`.
     ///
     /// # Arguments

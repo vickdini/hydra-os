@@ -51,257 +51,8 @@ pub mod zfs {
 
 /// Path resolution over the server (the kernel's `fs::client` helpers).
 pub mod fs {
-    /// Client-side path resolution helper routines.
-    pub mod client {
-        use crate::zfs::fsproto::{ELOOP, ENOENT, ENOTDIR, EEXIST};
-        use crate::zfs::server::ZfsServer;
-        use crate::zfs::types::DnodeType;
-        use alloc::vec::Vec;
-
-        /// Symbolic links followed in one path at most (Linux `MAXSYMLINKS`).
-        const SYMLOOP_MAX: usize = 40;
-
-        /// Splits a path into non-empty, non-dot directory components.
-        ///
-        /// # Arguments
-        /// * `path` - Byte slice representing the file path.
-        ///
-        /// # Returns
-        /// Vector of component byte vectors.
-        fn components(path: &[u8]) -> Vec<Vec<u8>> {
-            path.split(|&c| c == b'/').filter(|c| !c.is_empty() && *c != b".").map(|c| c.to_vec()).collect()
-        }
-
-        /// Resolves `path` relative to `base` (the pool root for absolute paths).
-        ///
-        /// # Arguments
-        /// * `s` - Active ZFS server.
-        /// * `base` - Base directory object ID.
-        /// * `path` - Path byte slice.
-        /// * `follow_last` - Whether to resolve trailing symlink.
-        ///
-        /// # Returns
-        /// Resolved object ID on success.
-        ///
-        /// # Errors
-        /// Returns negative Linux error code on resolution failure.
-        pub fn resolve_at(s: &mut ZfsServer, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
-            let root = s.root_obj();
-            resolve_in(s, root, base, path, follow_last)
-        }
-
-        /// Resolves `path` inside the `root` directory (a `chroot`), expanding symbolic links
-        /// in every component and, when `follow_last` or with a trailing `/`, in the last.
-        ///
-        /// # Arguments
-        /// * `s` - Active ZFS server.
-        /// * `root` - Root directory object ID.
-        /// * `base` - Base directory object ID.
-        /// * `path` - Path byte slice.
-        /// * `follow_last` - Whether to resolve trailing symlink.
-        ///
-        /// # Returns
-        /// Resolved object ID on success.
-        ///
-        /// # Errors
-        /// Returns negative Linux error code on resolution failure.
-        pub fn resolve_in(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool) -> Result<u64, i64> {
-            resolve_in_dirs(s, root, base, path, follow_last, &mut Vec::new())
-        }
-
-        /// Whether directory `dir` is searchable by everyone (all three `x` bits: Linux
-        /// applies only the owner's bits to the owner, and the group's to members).
-        fn searchable_by_all(s: &mut ZfsServer, dir: u64) -> bool {
-            s.getattr(dir).map_or(false, |a| a.mode & 0o111 == 0o111)
-        }
-
-        /// [`resolve_in`], also collecting in `dirs` each directory looked up into that is
-        /// not searchable by everyone: the kernel checks the caller's search (`x`)
-        /// permission on those (it knows the caller, its groups and the ACLs).
-        pub fn resolve_in_dirs(s: &mut ZfsServer, root: u64, base: u64, path: &[u8], follow_last: bool, dirs: &mut Vec<u64>) -> Result<u64, i64> {
-            if path.is_empty() {
-                return Err(ENOENT);
-            }
-            let follow_last = follow_last || path.ends_with(b"/");
-            let mut cur = if path[0] == b'/' { root } else { base };
-            let mut pending: Vec<Vec<u8>> = components(path);
-            pending.reverse();
-            let mut links = 0;
-            let note = |s: &mut ZfsServer, dir: u64, dirs: &mut Vec<u64>| {
-                if !dirs.contains(&dir) && !searchable_by_all(s, dir) {
-                    dirs.push(dir);
-                }
-            };
-            while let Some(comp) = pending.pop() {
-                if comp == b".." {
-                    if cur != root {
-                        note(s, cur, dirs);
-                    }
-                    cur = if cur == root { root } else { s.lookup(cur, b"..")? };
-                    continue;
-                }
-                note(s, cur, dirs);
-                let next = s.lookup(cur, &comp)?;
-                let is_last = pending.is_empty();
-                let attr = s.getattr(next)?;
-                if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
-                    links += 1;
-                    if links > SYMLOOP_MAX {
-                        return Err(ELOOP);
-                    }
-                    let target = s.readlink(next)?;
-                    if target.first() == Some(&b'/') {
-                        cur = root;
-                    }
-                    let mut more = components(&target);
-                    more.reverse();
-                    pending.extend(more);
-                    continue;
-                }
-                if !is_last && !attr.is_dir() {
-                    return Err(ENOTDIR);
-                }
-                cur = next;
-            }
-            if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
-                return Err(ENOTDIR);
-            }
-            Ok(cur)
-        }
-
-        /// Resolves `path` like [`resolve_in`] through a mount table. Mount `i` (1-based) is
-        /// `(mountpoint, mounted root, parent mount)`: a directory reached inside the parent
-        /// mount that is its mount point continues in the mounted tree (the topmost mount
-        /// wins), and `..` from a mounted tree's root leaves the mount. `root_mnt` and
-        /// `base_mnt` are the mounts the root and the starting directory lie in (0 = none).
-        ///
-        /// A mounted root with bit 62 set is a FUSE file system's (the kernel serves it): the
-        /// walk stops on entering it and returns the rest of the path.
-        ///
-        /// # Returns
-        /// The object ID and the mount it lies in, and the rest of the path if the walk
-        /// stopped at a FUSE mount.
-        #[allow(clippy::too_many_arguments)]
-        pub fn resolve_mnt(
-            s: &mut ZfsServer,
-            root: u64,
-            root_mnt: usize,
-            base: u64,
-            base_mnt: usize,
-            path: &[u8],
-            follow_last: bool,
-            mounts: &[(u64, u64, usize)],
-        ) -> Result<(u64, usize, Option<Vec<u8>>), i64> {
-            if path.is_empty() {
-                return Err(ENOENT);
-            }
-            let enter = |mut ino: u64, mut mnt: usize| {
-                for _ in 0..=mounts.len() {
-                    match mounts.iter().rposition(|m| m.0 == ino && m.2 == mnt) {
-                        Some(i) => {
-                            ino = mounts[i].1;
-                            mnt = i + 1;
-                        }
-                        None => break,
-                    }
-                }
-                (ino, mnt)
-            };
-            let follow_last = follow_last || path.ends_with(b"/");
-            let (mut cur, mut mnt) = if path[0] == b'/' { (root, root_mnt) } else { (base, base_mnt) };
-            let mut pending: Vec<Vec<u8>> = components(path);
-            pending.reverse();
-            let mut links = 0;
-            while let Some(comp) = pending.pop() {
-                if comp == b".." {
-                    for _ in 0..=mounts.len() {
-                        if (cur, mnt) == (root, root_mnt) || mnt == 0 || mounts[mnt - 1].1 != cur {
-                            break;
-                        }
-                        let m = mounts[mnt - 1];
-                        cur = m.0;
-                        mnt = m.2;
-                    }
-                    if (cur, mnt) != (root, root_mnt) {
-                        cur = s.lookup(cur, b"..")?;
-                    }
-                    continue;
-                }
-                let next = s.lookup(cur, &comp)?;
-                let is_last = pending.is_empty();
-                let attr = s.getattr(next)?;
-                if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
-                    links += 1;
-                    if links > SYMLOOP_MAX {
-                        return Err(ELOOP);
-                    }
-                    let target = s.readlink(next)?;
-                    if target.first() == Some(&b'/') {
-                        cur = root;
-                        mnt = root_mnt;
-                    }
-                    let mut more = components(&target);
-                    more.reverse();
-                    pending.extend(more);
-                    continue;
-                }
-                if !is_last && !attr.is_dir() {
-                    return Err(ENOTDIR);
-                }
-                let (n, m) = enter(next, mnt);
-                if n >> 62 == 1 {
-                    // A FUSE mount: the kernel walks the rest
-                    let mut rest = Vec::new();
-                    for c in pending.iter().rev() {
-                        if !rest.is_empty() {
-                            rest.push(b'/');
-                        }
-                        rest.extend_from_slice(c);
-                    }
-                    return Ok((n, m, Some(rest)));
-                }
-                cur = n;
-                mnt = m;
-            }
-            if path.ends_with(b"/") && !s.getattr(cur)?.is_dir() {
-                return Err(ENOTDIR);
-            }
-            Ok((cur, mnt, None))
-        }
-
-        /// Resolves the parent directory of `path` and returns it with the last component.
-        ///
-        /// # Arguments
-        /// * `s` - Active ZFS server.
-        /// * `base` - Base directory object ID.
-        /// * `path` - Path byte slice.
-        ///
-        /// # Returns
-        /// Tuple of `(parent_object_id, component_name)` on success.
-        ///
-        /// # Errors
-        /// Returns negative Linux error code on resolution failure.
-        pub fn resolve_parent_at(s: &mut ZfsServer, base: u64, path: &[u8]) -> Result<(u64, Vec<u8>), i64> {
-            let root = s.root_obj();
-            let trimmed = {
-                let mut end = path.len();
-                while end > 1 && path[end - 1] == b'/' {
-                    end -= 1;
-                }
-                &path[..end]
-            };
-            let (dir_part, name) = match trimmed.iter().rposition(|&c| c == b'/') {
-                Some(i) => (&trimmed[..i.max(1)], &trimmed[i + 1..]),
-                None => (&b"."[..], trimmed),
-            };
-            if name.is_empty() || name == b"/" {
-                return Err(EEXIST);
-            }
-            let dir_path: &[u8] = if dir_part.is_empty() { b"/" } else { dir_part };
-            let parent = if dir_path == b"." { base } else { resolve_in(s, root, base, dir_path, true)? };
-            Ok((parent, name.to_vec()))
-        }
-    }
+    #[path = "../client.rs"]
+    pub mod client;
 }
 
 /// 4 KiB buffers for the block cache and dirty data. In the kernel these were physical
@@ -309,113 +60,8 @@ pub mod fs {
 /// named by their address, with the same reference counting.
 pub mod memory {
     /// Userland page buffer frame allocator compatibility shim.
-    pub mod frame_allocator {
-        use alloc::alloc::{alloc_zeroed, Layout};
-        use alloc::vec::Vec;
-        use alloc::collections::BTreeMap;
-        use spin::Mutex;
-        use x86_64::structures::paging::{PhysFrame, Size4KiB};
-        use x86_64::PhysAddr;
-
-        static REFS: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
-
-        /// Free buffers, reused before new ones are taken from the heap. The block cache
-        /// and dirty data take and drop 4 KiB buffers all the time: through the heap's
-        /// first-fit free list each of them, and every other allocation, walked thousands
-        /// of page-sized holes (a cold read spent more time there than on the disk).
-        static FREE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-
-        /// Buffers taken from the heap at a time when none is free (1 MiB).
-        const CHUNK_PAGES: usize = 256;
-
-        /// Computes memory layout for `pages` 4 KiB frames.
-        ///
-        /// # Arguments
-        /// * `pages` - Number of 4 KiB pages.
-        ///
-        /// # Returns
-        /// Page-aligned [`Layout`].
-        fn layout(pages: usize) -> Layout {
-            Layout::from_size_align(pages * 4096, 4096).unwrap()
-        }
-
-        /// A zeroed buffer with one reference.
-        ///
-        /// # Returns
-        /// `Some(PhysFrame)` containing allocated buffer on success, or `None`.
-        pub fn alloc_user_frame() -> Option<PhysFrame<Size4KiB>> {
-            let mut free = FREE.lock();
-            if free.is_empty() {
-                // Fresh heap pages are zero
-                let chunk = unsafe { alloc_zeroed(layout(CHUNK_PAGES)) };
-                if chunk.is_null() {
-                    return None;
-                }
-                free.extend((0..CHUNK_PAGES as u64).rev().map(|i| (chunk as u64 + i * 4096) | 1));
-            }
-            let entry = free.pop()?;
-            drop(free);
-            // Bit 0: not used since it came from the heap (still zero)
-            let p = entry & !1;
-            if entry & 1 == 0 {
-                unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096) };
-            }
-            REFS.lock().insert(p, 1);
-            Some(PhysFrame::containing_address(PhysAddr::new(p as u64)))
-        }
-
-        /// Adds a reference to a buffer.
-        ///
-        /// # Arguments
-        /// * `frame` - Physical frame representation of buffer.
-        pub fn frame_ref_inc(frame: PhysFrame<Size4KiB>) {
-            if let Some(r) = REFS.lock().get_mut(&frame.start_address().as_u64()) {
-                *r += 1;
-            }
-        }
-
-        /// Drops a reference; the buffer is freed with the last one.
-        ///
-        /// # Arguments
-        /// * `frame` - Physical frame representation of buffer.
-        pub fn frame_ref_dec(frame: PhysFrame<Size4KiB>) {
-            let addr = frame.start_address().as_u64();
-            let mut refs = REFS.lock();
-            let last = match refs.get_mut(&addr) {
-                Some(r) if *r > 1 => {
-                    *r -= 1;
-                    false
-                }
-                Some(_) => true,
-                None => false,
-            };
-            if last {
-                refs.remove(&addr);
-                drop(refs);
-                FREE.lock().push(addr);
-            }
-        }
-
-        /// Contiguous buffers (the RAM disk used when there is no disk).
-        pub struct Contiguous;
-
-        impl Contiguous {
-            /// Allocates `pages` contiguous zeroed pages (never freed).
-            ///
-            /// # Arguments
-            /// * `pages` - Number of contiguous 4 KiB pages to allocate.
-            ///
-            /// # Returns
-            /// `Some(PhysFrame)` pointing to base of range, or `None`.
-            pub fn allocate_contiguous_frames(&mut self, pages: usize) -> Option<PhysFrame<Size4KiB>> {
-                let p = unsafe { alloc_zeroed(layout(pages)) };
-                (!p.is_null()).then(|| PhysFrame::containing_address(PhysAddr::new(p as u64)))
-            }
-        }
-
-        /// The kernel's frame allocator, as far as the pool uses it.
-        pub static FRAME_ALLOCATOR: Mutex<Contiguous> = Mutex::new(Contiguous);
-    }
+    #[path = "../frames.rs"]
+    pub mod frame_allocator;
 }
 
 /// The clock.
@@ -427,7 +73,8 @@ pub mod arch {
         /// # Returns
         /// Tuple of `(seconds, nanoseconds)`.
         pub fn now() -> (u64, u32) {
-            hydra_rt::sys::clock()
+            // wave8 GZ: frozen for the request being served (and replayed)
+            crate::durable::frozen().unwrap_or_else(hydra_rt::sys::clock)
         }
     }
 }
@@ -608,344 +255,18 @@ pub mod compat {
     /// Linux compatibility shims.
     pub mod linux {
         /// Inotify event definitions and buffer collector.
-        pub mod inotify {
-            use crate::zfs::fsproto::Event;
-            use alloc::vec::Vec;
-            use core::sync::atomic::{AtomicU32, Ordering};
-            use spin::Mutex;
-
-            /// File was modified.
-            pub const IN_MODIFY: u32 = 0x2;
-            /// Metadata changed.
-            pub const IN_ATTRIB: u32 = 0x4;
-            /// Writable file was closed.
-            pub const IN_CLOSE_WRITE: u32 = 0x8;
-            /// File was moved from X.
-            pub const IN_MOVED_FROM: u32 = 0x40;
-            /// File was moved to Y.
-            pub const IN_MOVED_TO: u32 = 0x80;
-            /// File/directory created in watched directory.
-            pub const IN_CREATE: u32 = 0x100;
-            /// File/directory deleted from watched directory.
-            pub const IN_DELETE: u32 = 0x200;
-            /// Watched file/directory was itself deleted.
-            pub const IN_DELETE_SELF: u32 = 0x400;
-            /// Watched file/directory was itself moved.
-            pub const IN_MOVE_SELF: u32 = 0x800;
-            /// Subject of this event is a directory.
-            pub const IN_ISDIR: u32 = 0x4000_0000;
-
-            static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
-            static COOKIE: AtomicU32 = AtomicU32::new(1);
-
-            /// Events are always collected (the kernel drops those nobody watches).
-            ///
-            /// # Returns
-            /// Always returns `true`.
-            pub fn active() -> bool {
-                true
-            }
-
-            /// Every directory may be watched (the kernel decides).
-            ///
-            /// # Arguments
-            /// * `_ino` - Inode number.
-            ///
-            /// # Returns
-            /// Always returns `true`.
-            pub fn watched(_ino: u64) -> bool {
-                true
-            }
-
-            /// A cookie pairing a rename's two events.
-            ///
-            /// # Returns
-            /// Unique monotonically increasing event cookie.
-            pub fn cookie() -> u32 {
-                COOKIE.fetch_add(1, Ordering::Relaxed)
-            }
-
-            /// Records an event for the reply.
-            ///
-            /// # Arguments
-            /// * `ino` - Target inode number.
-            /// * `mask` - Inotify event mask.
-            /// * `cookie` - Event pair cookie.
-            /// * `name` - Associated entry name.
-            pub fn event(ino: u64, mask: u32, cookie: u32, name: &[u8]) {
-                EVENTS.lock().push(Event { ino, mask, cookie, name: name.to_vec() });
-            }
-
-            /// The events recorded since the last call.
-            ///
-            /// # Returns
-            /// Vector of recorded [`Event`] structs.
-            pub fn take() -> Vec<Event> {
-                core::mem::take(&mut *EVENTS.lock())
-            }
-        }
+        #[path = "../../events.rs"]
+        pub mod inotify;
     }
 }
 
+pub mod durable;
+pub mod serve;
+pub mod zil;
+
+use serve::serve;
 use zfs::fsproto::*;
-use zfs::server::{with_server, ZfsServer, ZFS_SERVER};
-
-/// Serves one request: returns `(status, value, reply bytes)`, the reply data written to
-/// `out`.
-///
-/// # Arguments
-/// * `op` - Filesystem operation code.
-/// * `req` - Request parameter byte slice.
-/// * `out` - Destination reply byte buffer.
-///
-/// # Returns
-/// Tuple of `(status_code, return_value, reply_byte_length)`.
-fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
-    let mut r = Reader::new(req);
-    let mut w = Writer::new(out);
-    let res: Result<(u64, usize), i64> = match op {
-        FS_ROOT => with_server(|s| Ok((s.root_obj(), 0))),
-        FS_LOOKUP => {
-            let dir = r.u64();
-            let name = r.bytes();
-            with_server(|s| s.lookup(dir, name).map(|i| (i, 0)))
-        }
-        FS_RESOLVE => {
-            let (root, base, follow) = (r.u64(), r.u64(), r.u64() != 0);
-            let path = r.bytes();
-            // Reply: the directories walked through that not everyone may search
-            let mut dirs = Vec::new();
-            with_server(|s| fs::client::resolve_in_dirs(s, root, base, path, follow, &mut dirs)).map(|i| {
-                w.u64(dirs.len() as u64);
-                for d in &dirs {
-                    w.u64(*d);
-                }
-                (i, w.len())
-            })
-        }
-        FS_RESOLVE_MNT => {
-            let (root, root_mnt, base, base_mnt, follow) = (r.u64(), r.u64() as usize, r.u64(), r.u64() as usize, r.u64() != 0);
-            let path = r.bytes().to_vec();
-            let n = (r.u64() as usize).min(1024);
-            let mounts: Vec<(u64, u64, usize)> = (0..n).map(|_| (r.u64(), r.u64(), r.u64() as usize)).collect();
-            with_server(|s| {
-                fs::client::resolve_mnt(s, root, root_mnt, base, base_mnt, &path, follow, &mounts).map(|(ino, mnt, rest)| match rest {
-                    // Stopped at FUSE mount `mnt`: its index and the rest of the path
-                    Some(rest) => {
-                        w.u64(mnt as u64);
-                        w.bytes(&rest);
-                        ((mnt as u64) << MNT_SHIFT, w.len())
-                    }
-                    None => (ino | ((mnt as u64) << MNT_SHIFT), 0),
-                })
-            })
-        }
-        FS_GETATTR => {
-            let ino = r.u64();
-            with_server(|s| s.getattr(ino)).map(|a| {
-                w.attr(&a);
-                (0, w.len())
-            })
-        }
-        FS_SETATTR => {
-            let ino = r.u64();
-            let set = r.setattr();
-            with_server(|s| s.setattr(ino, set)).map(|a| {
-                w.attr(&a);
-                (0, w.len())
-            })
-        }
-        FS_READ => {
-            let (ino, off, len) = (r.u64(), r.u64(), (r.u64() as usize).min(MAX_IO));
-            with_server(|s| s.read(ino, off, &mut out[..len])).map(|n| (n as u64, n))
-        }
-        FS_WRITE => {
-            let (ino, off) = (r.u64(), r.u64());
-            let data = r.bytes();
-            // A writer without CAP_FSETID: its groups (set-ID bits go)
-            let kill: Option<Vec<u32>> = if r.u64() & 1 != 0 {
-                let n = r.u64().min(64);
-                Some((0..n).map(|_| r.u64() as u32).collect())
-            } else {
-                None
-            };
-            with_server(|s| s.write(ino, off, data, kill.as_deref())).map(|n| (n as u64, 0))
-        }
-        FS_CREATE | FS_MKDIR => {
-            let dir = r.u64();
-            let name = r.bytes();
-            let (perm, uid, gid) = (r.u64() as u32, r.u64() as u32, r.u64() as u32);
-            with_server(|s| if op == FS_CREATE { s.create(dir, name, perm, uid, gid) } else { s.mkdir(dir, name, perm, uid, gid) }).map(|i| (i, 0))
-        }
-        FS_MKNOD => {
-            let dir = r.u64();
-            let name = r.bytes();
-            let (mode, rdev, uid, gid) = (r.u64() as u32, r.u64(), r.u64() as u32, r.u64() as u32);
-            with_server(|s| s.mknod(dir, name, mode, rdev, uid, gid)).map(|i| (i, 0))
-        }
-        FS_SYMLINK => {
-            let dir = r.u64();
-            let name = r.bytes();
-            let target = r.bytes();
-            let (uid, gid) = (r.u64() as u32, r.u64() as u32);
-            with_server(|s| s.symlink(dir, name, target, uid, gid)).map(|i| (i, 0))
-        }
-        FS_GETXATTR | FS_LISTXATTR => {
-            let ino = r.u64();
-            let v = if op == FS_GETXATTR {
-                let name = r.bytes();
-                with_server(|s| s.getxattr(ino, name))
-            } else {
-                with_server(|s| s.listxattr(ino))
-            };
-            v.map(|v| {
-                let n = v.len().min(out.len());
-                out[..n].copy_from_slice(&v[..n]);
-                (v.len() as u64, n)
-            })
-        }
-        FS_SETXATTR => {
-            let ino = r.u64();
-            let name = r.bytes();
-            let value = r.bytes();
-            let flags = r.u64() as u32;
-            with_server(|s| s.setxattr(ino, name, value, flags)).map(|()| (0, 0))
-        }
-        FS_REMOVEXATTR => {
-            let ino = r.u64();
-            let name = r.bytes();
-            with_server(|s| s.removexattr(ino, name)).map(|()| (0, 0))
-        }
-        FS_READLINK => {
-            let ino = r.u64();
-            with_server(|s| s.readlink(ino)).map(|t| {
-                let n = t.len().min(out.len());
-                out[..n].copy_from_slice(&t[..n]);
-                (n as u64, n)
-            })
-        }
-        FS_LINK => {
-            let (ino, dir) = (r.u64(), r.u64());
-            let name = r.bytes();
-            with_server(|s| s.link(ino, dir, name)).map(|()| (0, 0))
-        }
-        FS_UNLINK | FS_RMDIR => {
-            let dir = r.u64();
-            let name = r.bytes();
-            with_server(|s| if op == FS_UNLINK { s.unlink(dir, name) } else { s.rmdir(dir, name) }).map(|()| (0, 0))
-        }
-        FS_RENAME => {
-            let sdir = r.u64();
-            let sname = r.bytes();
-            let ddir = r.u64();
-            let dname = r.bytes();
-            with_server(|s| s.rename(sdir, sname, ddir, dname)).map(|()| (0, 0))
-        }
-        FS_READDIR => {
-            let (dir, cookie, max) = (r.u64(), r.u64(), r.u64() as usize);
-            with_server(|s| s.readdir(dir, cookie, max)).map(|entries| {
-                let mut n = 0;
-                for e in &entries {
-                    if !w.entry(e) {
-                        break;
-                    }
-                    n += 1;
-                }
-                (n, w.len())
-            })
-        }
-        FS_STATFS => with_server(|s| Ok(s.statfs())).map(|(a, b, c)| {
-            w.u64(a);
-            w.u64(b);
-            w.u64(c);
-            (0, w.len())
-        }),
-        FS_OPEN_REF => {
-            let ino = r.u64();
-            with_server(|s| {
-                s.open_ref(ino);
-                Ok((0, 0))
-            })
-        }
-        FS_RELEASE => {
-            let ino = r.u64();
-            with_server(|s| {
-                s.release(ino);
-                Ok((0, 0))
-            })
-        }
-        FS_NOTIFY => {
-            let (ino, mask) = (r.u64(), r.u64() as u32);
-            with_server(|s| {
-                s.notify_file(ino, mask);
-                Ok((0, 0))
-            })
-        }
-        FS_SYNC => with_server(|s| s.sync()).map(|t| (t, 0)),
-        FS_SYNC_IF_DIRTY => with_server(|s| {
-            if s.dmu.has_pending_changes() {
-                s.sync().map(|_| (1, 0))
-            } else {
-                Ok((0, 0))
-            }
-        }),
-        FS_SNAPSHOT => {
-            let idx = r.u64() as usize;
-            let name = core::str::from_utf8(r.bytes()).unwrap_or("snap");
-            with_server(|s| s.snapshot(idx, name)).map(|t| (t, 0))
-        }
-        FS_POOL_STATUS => with_server(|s| {
-            w.u64(s.dmu.spa.total_capacity_bytes());
-            w.u64(s.dmu.spa.allocated_bytes());
-            w.u64(s.dmu.spa.free_bytes());
-            w.u64(s.dmu.ub.txg);
-            w.u64(s.dmu.open_txg);
-            Ok((0, w.len()))
-        }),
-        FS_OBJECT_INFO => {
-            let ino = r.u64();
-            with_server(|s| {
-                let dn = s.dmu.get_dnode(ino).map_err(|_| EIO)?;
-                let bp = dn.blkptr[0];
-                w.u64(dn.birth_txg);
-                w.u64(!bp.is_hole() as u64);
-                for c in [bp.checksum.a, bp.checksum.b, bp.checksum.c, bp.checksum.d] {
-                    w.u64(c);
-                }
-                Ok((0, w.len()))
-            })
-        }
-        FS_DATASETS => with_server(|s| {
-            let mut n = 0;
-            for d in &s.datasets {
-                if !(w.bytes(d.name_str().as_bytes()) && w.bytes(d.mountpoint_str().as_bytes()) && w.u64(d.txg) && w.u64(d.is_snapshot as u64)) {
-                    break;
-                }
-                n += 1;
-            }
-            Ok((n, w.len()))
-        }),
-        FS_SELFTEST => {
-            zfs::selftest::run_selftest();
-            Ok((0, 0))
-        }
-        FS_VERIFY => {
-            zfs::selftest::run_verify();
-            Ok((0, 0))
-        }
-        FS_FSCK => {
-            let path = alloc::string::String::from(core::str::from_utf8(r.bytes()).unwrap_or("/"));
-            let repair = r.u64() != 0;
-            zfs::selftest::run_fsck(&path, repair);
-            Ok((0, 0))
-        }
-        _ => Err(-38),
-    };
-    match res {
-        Ok((value, len)) => (0, value, len),
-        Err(e) => (e, 0, 0),
-    }
-}
+use zfs::server::{ZfsServer, ZFS_SERVER};
 
 /// Entry point of the ZFS userspace file server daemon.
 ///
@@ -968,6 +289,9 @@ fn main(args: &[&str]) {
         hydra_rt::println!("[zfs-server] {}", e);
         return;
     }
+    // wave8 GZ: the intent log of the instance before this one (if it was killed), replayed
+    // before the endpoint is registered (the clients wait for the restart meanwhile)
+    recover_log();
     let mut server = match Server::register(ENDPOINT_ZFS_SERVER) {
         Ok(s) => s,
         Err(e) => {
@@ -1000,7 +324,11 @@ fn main(args: &[&str]) {
         req.clear();
         req.extend_from_slice(&window[base..base + len]);
         compat::linux::inotify::take();
-        let (status, value, len) = serve(msg.label as u32, &req, &mut window[base..data_end]);
+        // wave8 GZ: a change is in the intent log before its answer leaves
+        let op = msg.label as u32;
+        let before = durable::before(sys::clock());
+        let (status, value, len) = serve(op, &req, &mut window[base..data_end]);
+        durable::after(before, op, &req, status, value);
         let events = compat::linux::inotify::take();
         let mut w = Writer::new(&mut window[data_end..events_end]);
         // wave7 G7-1 end
@@ -1038,6 +366,44 @@ fn main(args: &[&str]) {
     }
     // wave7 G7-1 end
 }
+
+// wave8 GZ begin
+/// Maps the intent log's kept object and replays it ([`durable::recover`]). Without a kept
+/// object (an older kernel) the server runs as before: changes since the last commit are
+/// lost when it is killed.
+fn recover_log() {
+    let (obj, existed) = match hydra_rt::mem::MemObj::kept(durable::LOG_KEY, durable::LOG_BYTES as u64) {
+        Ok(x) => x,
+        Err(e) => {
+            hydra_rt::println!("[zfs-server] no intent log (kept object: error {}): changes since the last commit are lost on a kill", e);
+            return;
+        }
+    };
+    let addr = match obj.map(0, durable::LOG_BYTES as u64, hydra_rt::mem::PROT_RW) {
+        Ok(a) => a,
+        Err(e) => {
+            hydra_rt::println!("[zfs-server] no intent log (mapping: error {})", e);
+            return;
+        }
+    };
+    // (the handle stays open for the process's life: the mapping is its view of the log)
+    let _ = obj.into_raw();
+    // SAFETY: the mapping is this process's for its whole life and only the log uses it
+    let buf = unsafe { core::slice::from_raw_parts_mut(addr, durable::LOG_BYTES) };
+    let r = durable::recover(buf, existed);
+    if r.matched {
+        hydra_rt::println!(
+            "[zfs-server] intent log: replayed {} changes ({} differed{}){}{}; committed TXG #{}",
+            r.replayed.applied,
+            r.replayed.mismatches,
+            if r.replayed.mismatches > 0 { alloc::format!(", first #{}", r.replayed.first_mismatch) } else { alloc::string::String::new() },
+            if r.torn { ", a torn last record ignored" } else { "" },
+            if r.given_up { ", GIVEN UP after repeated failed starts (changes since the last commit are lost)" } else { "" },
+            r.txg
+        );
+    }
+}
+// wave8 GZ end
 
 // wave7 G7-1 begin
 /// vfs-server's part for its requests to this server (`FS_VFS_OFF..FS_VFS_END` of its

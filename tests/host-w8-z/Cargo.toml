@@ -1,0 +1,17 @@
+[package]
+name = "hydra_hosttests_w8_z"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side unit tests of zfs-server's intent log and its replay on a RAM pool (wave 8, Group Z)"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+x86_64 = { version = "0.15", default-features = false }

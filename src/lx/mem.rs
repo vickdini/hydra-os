@@ -101,8 +101,20 @@ fn kept<R>(f: impl FnOnce(&mut BTreeMap<(u8, u64), Arc<MemObject>>) -> R) -> R {
 /// The service id whose kept objects a process serving `endpoint` makes: the host id of
 /// that process (co-located services share their process, and its kept objects).
 fn svc_of_endpoint(endpoint: u32) -> Option<u8> {
+    // wave8 GZ begin: zfs-server (a classic server, no Linux service id) keeps its intent
+    // log in a kept object: it gets a kept-only id outside the `LXS_*` range
+    if endpoint == crate::ipc::protocol::ENDPOINT_ZFS_SERVER {
+        return Some(KEPT_ID_ZFS);
+    }
+    // wave8 GZ end
     super::svc::host_by_endpoint(endpoint)
 }
+
+// wave8 GZ begin
+/// The kept-object id of zfs-server (its intent log survives its restarts). Only a key in
+/// the kept registry: never a routing service id (those are below `LXS_MAX`).
+pub const KEPT_ID_ZFS: u8 = 0xE0;
+// wave8 GZ end
 
 /// The endpoint of the service that owns server object `dev` (whose table holds the handle
 /// its `mmap` answer names): the object's host.

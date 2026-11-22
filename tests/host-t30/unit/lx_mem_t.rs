@@ -262,6 +262,34 @@ fn a_service_object_is_mapped_by_its_mmap_answer() {
     assert_eq!(owner_endpoint(&k), 0);
 }
 
+// wave8 GZ begin: zfs-server (a classic server) keeps its intent log across its restarts
+#[test]
+fn zfs_server_keeps_its_log_across_restarts() {
+    let sim = world();
+    let r = StdArc::new(StdMutex::new(Vec::new()));
+    let r2 = r.clone();
+    sim.spawn(svc_task(340, ENDPOINT_ZFS_SERVER), move || {
+        r2.lock().unwrap().push(sys_mem(LX_MEM_ANON, 8192, LX_MEM_KEPT, 1, 0));
+    });
+    sim.run_others();
+    service_gone(ENDPOINT_ZFS_SERVER);
+    let r3 = r.clone();
+    sim.spawn(svc_task(341, ENDPOINT_ZFS_SERVER), move || {
+        r3.lock().unwrap().push(sys_mem(LX_MEM_ANON, 8192, LX_MEM_KEPT, 1, 0));
+        let mut keys = [0u64; 4];
+        r3.lock().unwrap().push(sys_mem(LX_MEM_KEPTKEYS, keys.as_mut_ptr() as u64, 4, 0, 0));
+        r3.lock().unwrap().push(keys[0] as i64);
+    });
+    sim.run_others();
+    // The second instance gets the first one's object back, under its kept-only id
+    assert_eq!(*r.lock().unwrap(), vec![1, 1 | LX_MEM_EXISTED, 1, 1]);
+    assert_eq!(kept_list(KEPT_ID_ZFS).iter().map(|k| k.0).collect::<Vec<_>>(), vec![1]);
+    assert!((KEPT_ID_ZFS as usize) >= LXS_MAX);
+    drop_kept(KEPT_ID_ZFS);
+    service_gone(ENDPOINT_ZFS_SERVER);
+}
+// wave8 GZ end
+
 trait IntoTuple {
     fn into_tuple(self) -> (i64, u64);
 }
