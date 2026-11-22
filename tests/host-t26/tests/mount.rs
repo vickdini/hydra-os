@@ -848,3 +848,97 @@ fn the_initial_namespace_has_a_generation_for_its_fuse_mounts() {
     assert!(mount::vfs_gen(0).unwrap() > g);
 }
 // wave7 G7-7 end
+
+// wave8 GF begin: the whole table for vfs-server (LX_FH_MNTGET / LX_FH_MNTPUT / LX_FH_TMPFSID)
+
+#[test]
+fn whole_table_read_and_written_back() {
+    use lx::mntrec;
+    let _e = setup();
+    memfs::mkdir_p("/data");
+    memfs::mkdir_p("/tmp");
+    // the initial namespace has no table (its layout is fixed)
+    assert_eq!(mount::full_table(0).err(), Some(-3));
+    let ns = unshare();
+    assert_eq!(mnt("tmpfs", "/tmp", "tmpfs", MS_NOSUID, ""), 0);
+    let t = mount::full_table(ns).unwrap();
+    assert_eq!(t.hash, mntrec::hash_of(&t));
+    assert_eq!(t.root, 1);
+    let tm = t.live().find(|(_, m)| m.path == "/tmp").map(|(i, _)| i).unwrap();
+    assert!(t.get(tm).unwrap().tmpfs != 0);
+    // the bytes round-trip as the op hands them out
+    assert_eq!(mntrec::decode(&mntrec::encode(&t)).unwrap(), t);
+    let gen0 = t.gen;
+    // a change written back: listed, the generation moves on
+    let mut u = t.clone();
+    u.get_mut(tm).unwrap().flags |= MS_RDONLY;
+    assert_eq!(mount::put_table(ns, &u), Ok(0));
+    assert!(info().contains(" /tmp ro,nosuid - tmpfs"), "{}", info());
+    let after = mount::full_table(ns).unwrap();
+    assert!(after.gen > gen0);
+    // the same old table again: refused (the kernel's changed since it was read)
+    assert_eq!(mount::put_table(ns, &u), Err(-11));
+    // a kernel change in between is caught too
+    let stale = mount::full_table(ns).unwrap();
+    assert_eq!(mnt("/data", "/data", "", MS_BIND, ""), 0);
+    let mut v = stale.clone();
+    v.get_mut(tm).unwrap().flags = 0;
+    assert_eq!(mount::put_table(ns, &v), Err(-11));
+    // the initial namespace cannot be written; nor a broken table, nor another system root
+    assert_eq!(mount::put_table(0, &after), Err(-1));
+    let mut bad = mount::full_table(ns).unwrap();
+    bad.root = bad.slots.len() as u32 + 3;
+    assert_eq!(mount::put_table(ns, &bad), Err(-22));
+    let mut other = mount::full_table(ns).unwrap();
+    other.system_root ^= 1;
+    other.hash = mntrec::hash_of(&mount::full_table(ns).unwrap());
+    assert_eq!(mount::put_table(ns, &other), Err(-22));
+    // an unknown namespace
+    assert_eq!(mount::put_table(ns + 1000, &after), Err(-3));
+}
+
+#[test]
+fn whole_table_new_mounts_get_ids_and_tmpfs_trees_go() {
+    use lx::mntrec::{self, MntRec, MK_TREE};
+    let _e = setup();
+    memfs::mkdir_p("/mnt");
+    let ns = unshare();
+    // a tmpfs made the way vfs-server makes one: an id and the hidden directory, a tree in it
+    let (n, dir) = mount::tmpfs_new().unwrap();
+    let root = memfs::with(|fs| fs.mkdir(dir, n.to_string().as_bytes(), 0o1777, 0, 0)).unwrap();
+    let mnt_dir = memfs::lookup("/mnt").unwrap();
+    let mut t = mount::full_table(ns).unwrap();
+    let idx = t.push(MntRec {
+        id: 0,
+        parent: t.root,
+        kind: MK_TREE,
+        tmpfs: n,
+        mountpoint: mnt_dir,
+        root,
+        flags: 0,
+        propagation: 0,
+        fstype: "tmpfs".into(),
+        source: "vfs".into(),
+        path: "/mnt".into(),
+        serves: None,
+    });
+    assert_eq!(mount::put_table(ns, &t), Ok(0));
+    let back = mount::full_table(ns).unwrap();
+    let m = back.get(idx).unwrap();
+    assert!(m.id != 0, "the kernel gives a new mount its id");
+    assert!(info().contains(" /mnt rw - tmpfs vfs rw"), "{}", info());
+    // files made through the kernel's own walk land in that tree
+    let fd = openat(AT_FDCWD, "/mnt/f", O_CREAT | O_WRONLY, 0o600);
+    assert!(fd >= 0, "{}", fd);
+    close(fd);
+    assert!(memfs::with(|fs| fs.lookup(root, b"f")).is_ok());
+    // the mount goes: the tree goes with it
+    let mut gone = back.clone();
+    gone.slots[idx as usize - 1] = None;
+    assert_eq!(mount::put_table(ns, &gone), Ok(1));
+    let entries = memfs::with(|fs| fs.readdir(dir, 2, 100).unwrap().len());
+    assert_eq!(entries, 0);
+    assert!(!info().contains(" /mnt "));
+    let _ = mntrec::MAX_SLOTS;
+}
+// wave8 GF end

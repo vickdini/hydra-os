@@ -132,6 +132,9 @@ pub mod compat {
         pub mod locks;
         #[path = "../../../../../src/compat/linux/mount.rs"]
         pub mod mount;
+        // wave8 GF: the table format mount.rs exchanges with vfs-server
+        #[path = "../../../../../src/compat/linux/mntrec.rs"]
+        pub mod mntrec;
         #[path = "../../../../../src/compat/linux/recent.rs"]
         pub mod recent;
         #[path = "../../../../../src/compat/linux/vfs.rs"]

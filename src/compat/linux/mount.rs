@@ -2061,3 +2061,161 @@ fn forget_gens() {
     g.retain(|ns, _| table(*ns).is_some());
 }
 // wave7 G7-7 end
+
+// wave8 GF begin: vfs-server decides the mount changes; this table is its write-through copy
+//
+// vfs-server (wave 8, Group F) serves `mount`, `umount2` and `pivot_root` of the programs it
+// serves: it reads a namespace's whole table (`LX_FH_MNTGET`, [`full_table`]), decides the
+// change, and writes the table back (`LX_FH_MNTPUT`, [`put_table`]) before it answers. The
+// kernel keeps the table because its own code still walks it (FUSE, `/dev`, every call
+// vfs-server sends back, exec's nosuid/noexec, statfs) and because it is the switch back
+// (`lx.vfs=kernel`, `lx=kernel`, vfs-server down for good). The kernel's own changes (FUSE
+// mounts, the new mount API, namespace copies, dead namespaces) stay; vfs-server takes the
+// table again before each change, and a write whose table changed meanwhile is refused
+// (compare and set on the table's hash, `mntrec`).
+
+use super::mntrec::{self, MntRec, MntTable, MK_NAMED, MK_TREE};
+
+const EAGAIN: i64 = -11;
+const ESRCH_: i64 = -3;
+
+/// Mount `m` as a record.
+fn to_rec(m: &Mount) -> MntRec {
+    let (kind, tmpfs) = match m.kind {
+        Kind::Tree { tmpfs } => (MK_TREE, tmpfs.unwrap_or(0)),
+        Kind::Named => (MK_NAMED, 0),
+    };
+    MntRec {
+        id: m.id,
+        parent: m.parent as u32,
+        kind,
+        tmpfs,
+        mountpoint: m.mountpoint,
+        root: m.root,
+        flags: m.flags,
+        propagation: m.propagation,
+        fstype: m.fstype.clone(),
+        source: m.source.clone(),
+        path: m.path.clone(),
+        serves: m.serves.clone(),
+    }
+}
+
+/// A record as a mount.
+fn from_rec(r: &MntRec) -> Mount {
+    Mount {
+        id: r.id,
+        parent: r.parent as usize,
+        mountpoint: r.mountpoint,
+        root: r.root,
+        kind: if r.kind == MK_NAMED { Kind::Named } else { Kind::Tree { tmpfs: (r.tmpfs != 0).then_some(r.tmpfs) } },
+        flags: r.flags & PER_MOUNT,
+        propagation: r.propagation & PROPAGATION,
+        fstype: r.fstype.clone(),
+        source: r.source.clone(),
+        path: r.path.clone(),
+        serves: r.serves.clone(),
+    }
+}
+
+/// Table `t` as records (no generation, its hash set).
+fn as_table(t: &MountNs) -> MntTable {
+    let mut out = MntTable {
+        gen: 0,
+        hash: 0,
+        root: t.root as u32,
+        system_root: t.system_root,
+        slots: t.mounts.iter().map(|m| m.as_ref().map(to_rec)).collect(),
+    };
+    out.hash = mntrec::hash_of(&out);
+    out
+}
+
+/// [`LX_FH_MNTGET`](crate::ipc::protocol::LX_FH_MNTGET): namespace `ns`'s whole table
+/// (`-ESRCH`: none; the initial namespace has none, its layout is fixed).
+pub fn full_table(ns: u64) -> Result<MntTable, i64> {
+    // (order as `bump`: the generations, then the namespaces and the table)
+    let g = GENS.lock();
+    let gen = g.get(&ns).map_or(0, |e| e.0);
+    let t = table(ns).ok_or(ESRCH_)?;
+    let mut out = as_table(&t.lock());
+    drop(g);
+    out.gen = gen;
+    Ok(out)
+}
+
+/// [`LX_FH_MNTPUT`](crate::ipc::protocol::LX_FH_MNTPUT): namespace `ns`'s table becomes
+/// `new` if it still is the one `new.hash` names (`-EAGAIN` otherwise: someone changed it
+/// since it was read). Mount roots are held and let go by difference, tmpfs trees no table
+/// holds any more are removed, the generation moves on. Returns how many trees were
+/// removed (the kernel's removals on the file service's thread post no change notes: the
+/// service forgets its caches itself).
+pub fn put_table(ns: u64, new: &MntTable) -> Result<u32, i64> {
+    new.check()?;
+    if ns == 0 {
+        return Err(EPERM);
+    }
+    let (old_roots, old_tmpfs, new_roots) = {
+        let g = GENS.lock();
+        let t = table(ns).ok_or(ESRCH_)?;
+        let mut t = t.lock();
+        let cur = as_table(&t);
+        if cur.hash != new.hash {
+            return Err(EAGAIN);
+        }
+        // (the system root is the namespace's, never the writer's)
+        if new.system_root != cur.system_root {
+            return Err(EINVAL);
+        }
+        let old_roots = mntrec::tree_roots(&cur);
+        let old_tmpfs: Vec<u32> = cur.live().filter(|(_, m)| m.kind == MK_TREE && m.tmpfs != 0).map(|(_, m)| m.tmpfs).collect();
+        // (a new mount comes with id 0: it gets the next one, as the kernel's own)
+        t.mounts = new
+            .slots
+            .iter()
+            .map(|s| {
+                s.as_ref().map(|r| {
+                    let mut m = from_rec(r);
+                    if m.id == 0 {
+                        m.id = new_id();
+                    }
+                    m
+                })
+            })
+            .collect();
+        t.root = new.root as usize;
+        drop(t);
+        drop(g);
+        (old_roots, old_tmpfs, mntrec::tree_roots(new))
+    };
+    bump(ns);
+    let (take, release) = mntrec::root_changes(&old_roots, &new_roots);
+    hold_roots(&take, true);
+    hold_roots(&release, false);
+    let mut removed = 0;
+    for n in old_tmpfs {
+        if !tmpfs_in_use(n) {
+            removed += 1;
+        }
+        release_tmpfs(n);
+    }
+    Ok(removed)
+}
+
+/// [`vfs_gen`] waiting for the generations' lock (the mount calls, on the ordinary path:
+/// a busy lock must not send them to the kernel's copy of the rules).
+pub fn vfs_gen_wait(ns: u64) -> Option<u64> {
+    if ns == 0 {
+        return Some(NS0_GEN.load(Ordering::Acquire));
+    }
+    GENS.lock().get(&ns).and_then(|&(gen, ok)| ok.then_some(gen))
+}
+
+/// [`LX_FH_TMPFSID`](crate::ipc::protocol::LX_FH_TMPFSID): a new tmpfs id and the hidden
+/// pool directory its tree goes in (named by the id), made and emptied of a previous
+/// boot's trees on first use. The kernel's own tmpfs mounts take ids from the same counter.
+pub fn tmpfs_new() -> Result<(u32, u64), i64> {
+    let dir = tmpfs_dir()?;
+    Ok((NEXT_TMPFS.fetch_add(1, Ordering::Relaxed), dir))
+}
+// wave8 GF end

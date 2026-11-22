@@ -2338,6 +2338,30 @@ pub const LX_MNT_TMPFS: u32 = 2;
 pub const LX_MNT_KERNEL: u32 = 3;
 // wave7 G7-7 end
 
+// wave8 GF begin: the mount calls in vfs-server (the kernel's table is its write-through copy)
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_MNTGET(ns, buf, cap)` writes mount
+/// namespace `ns`'s whole table to `buf` (`compat/linux/mntrec.rs` format: head with the
+/// table's hash, then every slot with its strings), at most `cap` bytes. Returns the length
+/// (larger than `cap`: nothing written, ask again with room); `-ESRCH`: no such table (the
+/// initial namespace has none: its layout is fixed).
+pub const LX_FH_MNTGET: u64 = 72;
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_MNTPUT(ns, buf, len)`: namespace
+/// `ns`'s table becomes the one in `buf` (same format) if the kernel's still hashes to the
+/// head's hash; `-EAGAIN` otherwise (read it again). Mount roots are held/let go by
+/// difference, tmpfs trees nobody holds are removed, the generation moves on. Returns how
+/// many trees were removed (their removal posts no change notes to the file service: it
+/// forgets its caches).
+pub const LX_FH_MNTPUT: u64 = 73;
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_TMPFSID(out)` writes `[id, dir]`
+/// (two u64): a new tmpfs id and the hidden pool directory its tree is made in (named by
+/// the id in decimal).
+pub const LX_FH_TMPFSID: u64 = 74;
+/// [`LxCall::fs_flags`] of `mount`, `umount2` and `pivot_root`: the caller may change its
+/// mount namespace (the kernel's rule: `CAP_SYS_ADMIN` in its user namespace; `LxCall::caps`
+/// is 0 inside a user namespace of its own).
+pub const LX_FS_MNTADMIN: u32 = 64;
+// wave8 GF end
+
 // wave8 GI begin: the input service (`userland/drivers/input-server`, `src/ipc/input.rs`)
 /// The input service's endpoint (`/dev/input/event*`, service [`LXS_INPUT`]).
 pub const ENDPOINT_INPUT_SERVER: u32 = 0x2A;
