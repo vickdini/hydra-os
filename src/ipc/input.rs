@@ -37,6 +37,7 @@ use crate::ipc::protocol::{
 use crate::task::wait::WaitQueue;
 
 const EPERM: i64 = -1;
+const EINTR: i64 = -4;
 const ENOMEM: i64 = -12;
 const ENODEV: i64 = -19;
 const EINVAL: i64 = -22;
@@ -52,6 +53,8 @@ static RING: AtomicU64 = AtomicU64::new(0);
 static RING_OBJ: Mutex<Option<Arc<crate::memory::vm::MemObject>>> = Mutex::new(None);
 /// Serializes producers (taken with interrupts off).
 static PRODUCER: Mutex<()> = Mutex::new(());
+/// Serializes the kernel copy's consumers ([`drain`]).
+static CONSUMER: Mutex<()> = Mutex::new(());
 
 /// Sets the ring up (once, at boot, before the input interrupts are enabled).
 pub fn init() {
@@ -90,10 +93,18 @@ pub fn forwarded() -> bool {
 /// Sends the keyboard and pointer to the desktop session (`true`) or back to the console
 /// (`false`). Turning it off queues a "release every held key" record.
 pub fn set_routing(on: bool) {
-    let was = ROUTING.swap(on, Ordering::AcqRel);
-    if was && !on {
-        x86_64::instructions::interrupts::without_interrupts(|| append(InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() }));
-    }
+    // (under the producer lock: a record a producer appends is ordered with the switch, so
+    // no key goes down in a session after its release record)
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let release = {
+            let _g = PRODUCER.lock();
+            let was = ROUTING.swap(on, Ordering::AcqRel);
+            was && !on && ring().is_some_and(|r| r.push(stamp(InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() })))
+        };
+        if release {
+            wake();
+        }
+    });
 }
 
 /// True while input goes to the session.
@@ -102,28 +113,40 @@ pub fn routing() -> bool {
     ROUTING.load(Ordering::Acquire)
 }
 
-/// Appends `r` (stamped now) and wakes the consumer. With interrupts off.
-fn append(mut r: InputRec) {
-    let Some(ring) = ring() else { return };
+/// `r` stamped with the monotonic clock now.
+#[inline]
+fn stamp(mut r: InputRec) -> InputRec {
     r.time = crate::arch::pit::now_ns();
-    let ok = {
-        let _g = PRODUCER.lock();
-        ring.push(r)
-    };
-    if !ok {
-        return;
-    }
-    INPUT_WQ.wake_all();
+    r
+}
+
+/// Wakes the consumer (the service's main thread, or readers of the kernel copy).
+fn wake() {
     if forwarded() {
         crate::ipc::service::notify(ENDPOINT_INPUT_SERVER, NOTIFY_INPUT);
+    } else {
+        INPUT_WQ.wake_all();
     }
 }
 
-/// Appends `r` if input is routed to the session.
+/// Appends `r` (stamped now, under the producer lock, so records are in time order) if
+/// input is routed to the session, and wakes the consumer (also when the ring is full: it
+/// may have missed a wake-up).
 fn push(r: InputRec) {
-    if routing() {
-        append(r);
+    if !routing() {
+        return;
     }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let Some(ring) = ring() else { return };
+        {
+            let _g = PRODUCER.lock();
+            if !routing() {
+                return;
+            }
+            ring.push(stamp(r));
+        }
+        wake();
+    });
 }
 
 /// Keyboard: one set-1 scancode byte (`0xE0` prefixes included). With interrupts off.
@@ -151,6 +174,10 @@ pub fn pending() -> bool {
 /// Takes every waiting record, oldest first (the kernel's own consumer, `evdev.rs`; never
 /// while the input service consumes). Returns how many were taken.
 pub fn drain(f: impl FnMut(InputRec)) -> usize {
+    if forwarded() {
+        return 0;
+    }
+    let _g = CONSUMER.lock();
     ring().map_or(0, |r| r.take(f))
 }
 
@@ -166,6 +193,9 @@ pub fn obj_op(h: crate::ipc::protocol::SvcId, op: u64, a: u64, _b: u64, _c: u64)
     }
     match op {
         LX_OBJ_INPUT_RING => {
+            if !forwarded() {
+                return ENODEV; // the kernel copy consumes the ring
+            }
             let Some(ep) = crate::task::current_service() else { return EPERM };
             let Some(obj) = RING_OBJ.lock().clone() else { return ENODEV };
             match crate::lx::mem::give(ep, obj) {
@@ -191,7 +221,10 @@ pub fn open(rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chard
         if let Some(r) = crate::lx::dev_open(rdev, flags) {
             return r;
         }
-        if crate::arch::pit::ticks() >= deadline || crate::compat::linux::proc::signal_pending() {
+        if crate::compat::linux::proc::signal_pending() {
+            return Err(EINTR);
+        }
+        if crate::arch::pit::ticks() >= deadline {
             return Err(ENODEV);
         }
         crate::task::wait::wait(Some(crate::arch::pit::ticks() + 5));

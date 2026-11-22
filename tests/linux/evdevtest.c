@@ -68,21 +68,23 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         /* Wait for one event (the harness types or moves the pointer meanwhile) */
         struct pollfd p[3];
-        int nf = 0;
+        int devn[3], nf = 0;
         for (int d = 0; d < 3; d++) {
             char path[32];
             snprintf(path, sizeof path, "/dev/input/event%d", d);
             p[nf].fd = open(path, O_RDONLY | O_NONBLOCK);
             p[nf].events = POLLIN;
+            devn[nf] = d;
             if (p[nf].fd >= 0) nf++;
         }
         int r = poll(p, nf, atoi(argv[1]) * 1000);
         for (int i = 0; r > 0 && i < nf; i++) {
             struct input_event ev;
             if ((p[i].revents & POLLIN) && read(p[i].fd, &ev, sizeof ev) == sizeof ev)
-                printf("event %d type %d code %d value %d\n", i, ev.type, ev.code, ev.value);
+                printf("event %d type %d code %d value %d\n", devn[i], ev.type, ev.code, ev.value);
         }
         if (r <= 0) printf("no event within %s s\n", argv[1]);
+        for (int i = 0; i < nf; i++) close(p[i].fd);
     }
 
     int fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);

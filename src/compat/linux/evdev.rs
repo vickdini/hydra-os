@@ -140,8 +140,10 @@ pub fn release_held_keys() {
     pump();
     let t = crate::arch::pit::now_ns();
     let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
-    release_all(&mut STATE.lock(), &mut per_dev, t);
+    let mut st = STATE.lock();
+    release_all(&mut st, &mut per_dev, t);
     deliver(&per_dev);
+    drop(st);
 }
 
 /// Queues a release for every held key and button in `per_dev` and forgets them.
@@ -177,11 +179,13 @@ fn pump() {
     if !ring_pending() {
         return;
     }
+    // The translation state's lock is held from the ring to the files' queues: two readers
+    // pumping at once take the records, translate and deliver them in order
+    let mut st = STATE.lock();
     let mut raw: Vec<InputRec> = Vec::new();
     crate::ipc::input::drain(|r| raw.push(r));
     let mut per_dev: [Vec<[u8; 24]>; DEVICES] = [Vec::new(), Vec::new(), Vec::new()];
     {
-        let mut st = STATE.lock();
         for r in raw {
             let t = r.time;
             match r.kind {
@@ -269,6 +273,7 @@ fn pump() {
         }
     }
     deliver(&per_dev);
+    drop(st);
 }
 
 /// Appends events to the queues of the open files of each device.

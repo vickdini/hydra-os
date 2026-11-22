@@ -142,26 +142,24 @@ fn torn_tail_restarts_at_head() {
 
 #[test]
 fn restarted_consumer_continues_at_tail() {
-    // The service dies after taking 3 of 6; the new instance takes the other 3
+    // The service takes 3 records and dies; 3 more arrive meanwhile; the new instance (a new
+    // view of the same memory) takes exactly the 3 it has not seen
     let mut m = Mem::new();
     let r = m.view();
     r.format();
-    for i in 0..6 {
+    for i in 0..3 {
         r.push(key(i, 0));
     }
     let mut first = Vec::new();
-    let mut k = 0;
-    // take() hands over everything; emulate the first instance by reading the tail after 3
-    r.take(|x| {
-        k += 1;
-        first.push(x.code)
-    });
-    assert_eq!(k, 6);
-    for i in 6..9 {
+    r.take(|x| first.push(x.code));
+    assert_eq!(first, vec![0, 1, 2]);
+    for i in 3..6 {
         r.push(key(i, 0));
     }
     let r2 = m.view();
+    assert!(r2.valid());
     let mut second = Vec::new();
     r2.take(|x| second.push(x.code));
-    assert_eq!(second, vec![6, 7, 8]);
+    assert_eq!(second, vec![3, 4, 5]);
+    assert_eq!(r2.counters(), (6, 6, 0));
 }

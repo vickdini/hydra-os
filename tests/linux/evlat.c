@@ -46,6 +46,7 @@ int main(int argc, char **argv) {
         if (el >= secs) break;
         if (poll(p, n, 500) <= 0) continue;
         for (int i = 0; i < n; i++) {
+            if (p[i].revents & (POLLERR | POLLHUP | POLLNVAL)) p[i].fd = -1; /* revoked or gone: stop polling it */
             if (!(p[i].revents & POLLIN)) continue;
             struct input_event ev[64];
             ssize_t r = read(p[i].fd, ev, sizeof ev);

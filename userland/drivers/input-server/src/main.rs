@@ -80,6 +80,9 @@ struct State {
 static STATE: spin::Mutex<State> = spin::Mutex::new(State { tr: Translator::new(), files: BTreeMap::new() });
 /// Where the ring is mapped.
 static RING: AtomicU64 = AtomicU64::new(0);
+/// Requests a signal interrupted before their read was waiting (the interrupt note can be
+/// taken by another thread first); `read` answers them `ERESTARTSYS`. Under [`STATE`]'s lock.
+static INTERRUPTED: spin::Mutex<Vec<u64>> = spin::Mutex::new(Vec::new());
 /// Records translated since start.
 static RECORDS: AtomicU64 = AtomicU64::new(0);
 
@@ -145,9 +148,13 @@ fn main(args: &[&str]) {
     }
     if let Err(e) = sys::lx_svc(LX_SVC_CLAIM_MAJOR, 13, 0, 0) {
         println!("[input-server] cannot claim major 13: {}", e);
+        sys::exit_group(1);
     }
     let (h, t, d) = ring().map_or((0, 0, 0), |r| r.counters());
     println!("[input-server] online: endpoint {:#x}, {} files adopted, ring {} appended / {} taken / {} dropped", ENDPOINT_INPUT_SERVER, adopted, h, t, d);
+    // What waited in the ring during the restart, and the adopted files' readiness, at once
+    pump();
+    objs::flush();
     loop {
         match svc.recv(100) {
             Event::Request(id, _) => svc.reply(id, &Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
@@ -221,6 +228,8 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
         LX_NOTE_CLOSE if b == LX_OBJ_KIND_EVDEV as u64 => {
             let slot = a as u32;
             let f = STATE.lock().files.remove(&slot);
+            // (only a slot this instance holds: a note about an old instance's object must
+            // not free a slot that was given out again)
             if let Some(f) = f {
                 for w in f.reads {
                     let _ = sys::lx_complete(w.id, EBADF);
@@ -228,9 +237,9 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
                 if f.revoked {
                     kept_revoked(slot, false);
                 }
+                objs::set(slot, 0, 0);
+                objs::free(slot);
             }
-            objs::set(slot, 0, 0);
-            objs::free(slot);
         }
         LX_NOTE_INTERRUPT => {
             let found = {
@@ -242,6 +251,14 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
                         found = true;
                         break;
                     }
+                }
+                if !found {
+                    // Its read may not be waiting yet: it looks here before it waits
+                    let mut i = INTERRUPTED.lock();
+                    if i.len() >= 64 {
+                        i.remove(0);
+                    }
+                    i.push(a);
                 }
                 found
             };
@@ -262,7 +279,11 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
         0 if c.obj != LX_OBJ_NONE => read(&cx),
         1 if c.obj != LX_OBJ_NONE => {
             // Writes inject events (LED state and the like): accepted and ignored
-            (((cx.args[2] as usize) / 24 * 24) as i64, 0)
+            match STATE.lock().files.get(&(c.obj as u32)) {
+                None => (EBADF, 0),
+                Some(f) if f.revoked => (ENODEV, 0),
+                Some(_) => ((cx.args[2].min(1 << 30) / 24 * 24) as i64, 0),
+            }
         }
         16 if c.obj != LX_OBJ_NONE => (ioctl(&cx), 0),
         _ => (ENOSYS, 0),
@@ -287,6 +308,7 @@ fn open(cx: &Cx, rdev: u64, flags: u64) -> i64 {
         Ok(fd) => fd,
         Err(e) => {
             STATE.lock().files.remove(&slot);
+            objs::set(slot, 0, 0);
             objs::free(slot);
             e
         }
@@ -311,6 +333,13 @@ fn read(cx: &Cx) -> Answer {
             if cx.nonblock() {
                 return (EAGAIN, 0);
             }
+            {
+                let mut i = INTERRUPTED.lock();
+                if let Some(k) = i.iter().position(|&x| x == cx.id) {
+                    i.remove(k);
+                    return (ERESTARTSYS, 0);
+                }
+            }
             f.reads.push(Waiting { id: cx.id, buf: ptr, len });
             return (0, LX_REPLY_PENDING);
         }
@@ -330,9 +359,14 @@ fn read(cx: &Cx) -> Answer {
 fn ioctl(cx: &Cx) -> i64 {
     let slot = cx.c.obj as u32;
     let (cmd, arg) = (cx.args[1], cx.args[2]);
+    // (the state queries see what is already in the ring)
+    pump();
     let answer = {
         let st = STATE.lock();
         let Some(f) = st.files.get(&slot) else { return EBADF };
+        if f.revoked {
+            return ENODEV; // as Linux: a revoked file answers nothing
+        }
         xlate::ioctl(f.dev, cmd, &st.tr)
     };
     match answer {
@@ -357,13 +391,13 @@ fn ioctl(cx: &Cx) -> i64 {
                 let Some(f) = st.files.get_mut(&slot) else { return EBADF };
                 f.revoked = true;
                 f.queue.clear();
+                objs::set(slot, GONE, 0);
+                kept_revoked(slot, true);
                 core::mem::take(&mut f.reads)
             };
             for w in reads {
                 let _ = sys::lx_complete(w.id, ENODEV);
             }
-            objs::set(slot, GONE, 0);
-            kept_revoked(slot, true);
             0
         }
     }
@@ -389,16 +423,23 @@ fn kept_init() {
     }
 }
 
-/// The revoked slots listed in the kept state.
-fn kept_revoked_list() -> Vec<u32> {
-    let g = KEPT.lock();
-    let Some(k) = g.as_ref() else { return Vec::new() };
+/// The revoked slots in kept record 0 of `k`.
+fn revoked_in(k: &hydra_rt::kept::Kept) -> Vec<u32> {
     k.get(0).map_or(Vec::new(), |b| b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).filter(|&s| s != u32::MAX).collect())
 }
 
-/// Adds (`on`) or removes slot `slot` from the kept list of revoked files.
+/// The revoked slots listed in the kept state.
+fn kept_revoked_list() -> Vec<u32> {
+    KEPT.lock().as_ref().map_or(Vec::new(), revoked_in)
+}
+
+/// Adds (`on`) or removes slot `slot` from the kept list of revoked files (one lock across
+/// the read and the write: revokes and closes on several threads do not lose each other's
+/// changes). At most `KEPT_REC / 4` (128) revoked files are remembered across a restart.
 fn kept_revoked(slot: u32, on: bool) {
-    let mut list = kept_revoked_list();
+    let mut g = KEPT.lock();
+    let Some(k) = g.as_mut() else { return };
+    let mut list = revoked_in(k);
     list.retain(|&s| s != slot);
     if on {
         list.push(slot);
@@ -408,8 +449,13 @@ fn kept_revoked(slot: u32, on: bool) {
     for (i, s) in list.iter().enumerate() {
         rec[i * 4..i * 4 + 4].copy_from_slice(&s.to_le_bytes());
     }
+    k.put(0, &rec);
+}
+
+/// Forgets every kept revoked slot (nothing was adopted).
+fn kept_revoked_clear() {
     if let Some(k) = KEPT.lock().as_mut() {
-        k.put(0, &rec);
+        k.put(0, &[0xFFu8; KEPT_REC]);
     }
 }
 
@@ -427,6 +473,7 @@ fn adopt_files() -> usize {
         start = buf[n - 1].slot + 1;
     }
     if found.is_empty() {
+        kept_revoked_clear();
         return 0;
     }
     for o in &found {
@@ -436,6 +483,7 @@ fn adopt_files() -> usize {
         }
     }
     if sys::lx_svc_adopt().is_err() {
+        kept_revoked_clear();
         return 0; // not a Transparent restart: the kernel makes them stale
     }
     let revoked = kept_revoked_list();
@@ -449,6 +497,8 @@ fn adopt_files() -> usize {
             st.files.insert(o.slot, File { dev, queue: Queue::new(), revoked: gone, reads: Vec::new() });
             objs::set(o.slot, if gone { GONE } else { 0 }, 0);
             n += 1;
+        } else {
+            let _ = sys::lx_svc_dead(o.slot);
         }
     }
     drop(st);
