@@ -394,3 +394,52 @@ fn proc_limits_text() {
     assert!(lines[8].starts_with("Max open files") && lines[8].contains("1024"));
     assert!(lines[16].starts_with("Max realtime timeout") && lines[16].trim_end().ends_with("us"));
 }
+
+// wave8 GB begin
+/// A mapped file that counts the pages the fault handler asks for.
+struct CountingFile {
+    frames: Vec<x86_64::structures::paging::PhysFrame>,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl crate::memory::vm::MappedObject for CountingFile {
+    fn get_page(&self, pgoff: u64) -> Option<x86_64::structures::paging::PhysFrame> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.frames.get(pgoff as usize).copied()
+    }
+}
+
+/// mlock and mlockall read the locked file pages in (Linux: locked pages are resident), so
+/// a program that locked itself keeps running when its disk is gone (hydra-logind on a live
+/// stick that was pulled: wave 8, Group B); MLOCK_ONFAULT / MCL_ONFAULT do not.
+#[test]
+fn mlock_reads_file_pages_in() {
+    use crate::memory::vm::Backing;
+    use std::sync::atomic::Ordering::Relaxed;
+    let _g = setup();
+    proc_(591, 0);
+    caps(591, CAP_IPC_LOCK);
+    global_frames();
+    let frames = (0..6).map(|_| crate::memory::frame_allocator::alloc_user_frame().unwrap()).collect();
+    let file = Arc::new(CountingFile { frames, reads: Default::default() });
+    let mm = Arc::new(spin::Mutex::new(Mm::new().unwrap()));
+    let base = USER_SPACE_START + 0x2000_0000;
+    let backing = Backing::Object { obj: file.clone(), pgoff: 0 };
+    assert_eq!(mm.lock().mmap(base, 6 * 4096, PROT_READ, false, true, false, backing), Ok(base));
+    fake::task(591, |t| t.mm = Some(mm.clone()));
+    crate::memory::vm::set_current_mm(Some(&mm));
+    // MLOCK_ONFAULT: nothing read
+    assert_eq!(limits::mlock(325, [base, 2 * 4096, 1, 0, 0, 0]), 0);
+    assert_eq!(file.reads.load(Relaxed), 0, "MLOCK_ONFAULT reads nothing");
+    // mlock: the two pages of the range
+    assert_eq!(limits::mlock(149, [base + 4096, 2 * 4096, 0, 0, 0, 0]), 0);
+    assert_eq!(file.reads.load(Relaxed), 2, "mlock reads its range in");
+    // MCL_CURRENT | MCL_ONFAULT: nothing more
+    assert_eq!(limits::mlock(151, [1 | 4, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(file.reads.load(Relaxed), 2);
+    // mlockall(MCL_CURRENT): the other four pages (the two present ones are not asked again)
+    assert_eq!(limits::mlock(151, [1, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(file.reads.load(Relaxed), 6, "mlockall reads every mapped file page in");
+    crate::memory::vm::set_current_mm(None);
+}
+// wave8 GB end
