@@ -4,6 +4,12 @@
 use crate::arch::syscall::SyscallFrame;
 
 /// *stub* A notification for the Linux server (recorded).
+// wave8 GX2 begin: *stub* the desktop set (`src/lx/desktop.rs`)
+pub mod desktop {
+    pub fn inherit(_parent: u64, _child: u64) {}
+    pub fn mark(_pid: u64) {}
+}
+// wave8 GX2 end
 pub fn note(kind: u64, a: u64, b: u64, c: u64) {
     crate::fake::rec(alloc::format!("lx::note({kind},{a},{b},{c})"));
 }

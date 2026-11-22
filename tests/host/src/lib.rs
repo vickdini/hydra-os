@@ -696,6 +696,12 @@ pub mod personality {
 /// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
 /// events it is told about go nowhere on the host.
 pub mod lx {
+    // wave8 GX2 begin: *stub* the desktop set (`src/lx/desktop.rs`)
+    pub mod desktop {
+        pub fn inherit(_parent: u64, _child: u64) {}
+        pub fn mark(_pid: u64) {}
+    }
+    // wave8 GX2 end
     // wave6 G21: the restart decisions (classes, ladder, idempotent marks)
     #[path = "../../../../src/lx/restart_policy.rs"]
     pub mod restart_policy;

@@ -302,7 +302,12 @@ pub fn plasma(root: &str, nologin: bool) {
         let argv = ["/bin/sh", "/usr/libexec/hydra-session", "--display-manager"];
         DISPLAY_MANAGER_STARTED.store(true, core::sync::atomic::Ordering::Release);
         match spawn_in_root(root, &argv, 0, 0) {
-            Ok(tid) => crate::println!("[+] Started {} (process {}).", argv.join(" "), tid.0),
+            Ok(tid) => {
+                // wave8 GX2: the root of the desktop's processes (ended and started again
+                // when lx-ipc's objects fail, `lx::desktop`)
+                crate::lx::desktop::mark(tid.0);
+                crate::println!("[+] Started {} (process {}).", argv.join(" "), tid.0)
+            }
             Err(e) => crate::println!("[!] linux chroot: {}", e),
         }
         return;

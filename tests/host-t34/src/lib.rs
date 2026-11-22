@@ -1393,6 +1393,12 @@ pub mod compat {
 
 /// *stub* The Linux server's switches.
 pub mod lx {
+    // wave8 GX2 begin: *stub* the desktop set (`src/lx/desktop.rs`)
+    pub mod desktop {
+        pub fn inherit(_parent: u64, _child: u64) {}
+        pub fn mark(_pid: u64) {}
+    }
+    // wave8 GX2 end
     use core::sync::atomic::AtomicBool;
     pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
     /// *stub* Test switches: online, family 2 moved, relay wanted.

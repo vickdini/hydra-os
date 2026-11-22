@@ -76,6 +76,10 @@ pub mod xplan;
 
 pub mod timer;
 
+// wave8 GX2: the desktop after an lx-ipc crash (FailObjects: the session ends, the login
+// screen returns)
+pub mod desktop;
+
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
 pub mod restart_policy;
@@ -2558,6 +2562,12 @@ fn server_gone(h: SvcId) {
     if class == restart::RestartClass::EndLinux && (was_online || tgid != 0) && !x.recovering.swap(true, Ordering::AcqRel) {
         crate::task::spawn("lx-recover", recover_task, crate::task::TaskPriority::Normal);
     }
+    // wave8 GX2 begin: lx-ipc's objects failed (not re-sent): the desktop, which lives on its
+    // D-Bus and Wayland sockets, ends and the login screen comes back (`desktop`)
+    if class != restart::RestartClass::EndLinux && !resend && svc::host_of(crate::ipc::protocol::LXS_IPC) == h && h != LXS_LINUX && (was_online || tgid != 0) {
+        desktop::ipc_gone();
+    }
+    // wave8 GX2 end
 }
 
 /// The crash policy, in a kernel task of its own: ends every Linux program, waits for the

@@ -236,3 +236,29 @@ fn a_transparent_restart_of_the_network_service_keeps_the_watched_count() {
     crate::lx::svc::init(b"net=linux+ipc=linux");
 }
 // wave8 GX2 end
+
+// wave8 GX2 begin
+/// lx-ipc's FailObjects restart with the login screen running: the desktop is ended and the
+/// login screen started again (a kernel task, `lx::desktop`); a Transparent restart or no
+/// login screen starts nothing.
+#[test]
+fn an_ipc_crash_brings_the_login_screen_back() {
+    let sim = world();
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::init(b"");
+    configure(LXS_IPC, RestartClass::FailObjects);
+    let _s = start(&sim, LXS_IPC, 320, 1, true, handler(|_| (0, 0)));
+    // No login screen: nothing
+    crate::lx::server_gone(LXS_IPC);
+    assert!(!sim.spawned().contains(&"lx-desktop"));
+    online(LXS_IPC);
+    crate::fake::rec(|r| r.display_manager = true);
+    let _s2 = start(&sim, LXS_IPC, 330, 1, true, handler(|_| (0, 0)));
+    crate::lx::desktop::mark(330_000);
+    crate::lx::server_gone(LXS_IPC);
+    assert!(sim.spawned().contains(&"lx-desktop"));
+    crate::fake::rec(|r| r.display_manager = false);
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::init(b"net=linux+ipc=linux");
+}
+// wave8 GX2 end
