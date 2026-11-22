@@ -1,8 +1,8 @@
 /* zfsbench: write-heavy file system micro-benchmarks on the pool (wave 8, Group Z: the
  * intent log's cost). Each test runs a loop five times in a fresh directory and prints
  *   BENCH <name> min <ns> med <ns> max <ns> ns/op (<iterations per run>)
- * like tests/linux/lxbench.c. Optional arguments: the directory (default /tmp/zb), then the
- * tests to run (default: all).
+ * like tests/linux/lxbench.c. Optional arguments: the directory (default /tmp/zb), a divisor
+ * of the iteration counts (default 1), then the tests to run (default: all).
  *
  * Build (WSL): gcc -O1 -w -pthread tests/linux/zfsbench.c -o esp/bin/zfsbench.elf
  */
@@ -37,7 +37,7 @@ static int cmp(const void *a, const void *b) {
 static void fresh(int rep) {
     char cmd[400];
     snprintf(d, sizeof d, "%s/r%d", base, rep);
-    snprintf(cmd, sizeof cmd, "rm -rf %s", d);
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", d);
     system(cmd);
     mkdir(d, 0755);
 }
@@ -162,23 +162,29 @@ int main(int argc, char **argv) {
     snprintf(base, sizeof base, "%s", argc > 1 ? argv[1] : "/tmp/zb");
     mkdir(base, 0755);
     memset(blk, 'z', sizeof blk);
+    long div = argc > 2 ? atol(argv[2]) : 1;
+    if (div < 1) div = 1;
     for (unsigned k = 0; k < sizeof tests / sizeof tests[0]; k++) {
         struct test *t = &tests[k];
-        int want = argc <= 2;
-        for (int a = 2; a < argc; a++) want |= !strcmp(argv[a], t->name);
+        int want = argc <= 3;
+        for (int a = 3; a < argc; a++) want |= !strcmp(argv[a], t->name);
         if (!want) continue;
         double r[REPS];
         for (int rep = 0; rep < REPS; rep++) {
             fresh(rep);
-            r[rep] = t->fn(t->iters);
+            r[rep] = t->fn(t->iters / div > 0 ? t->iters / div : 1);
         }
         qsort(r, REPS, sizeof r[0], cmp);
         printf("BENCH %s min %.1f med %.1f max %.1f ns/op (%ld)\n", t->name, r[0], r[REPS / 2], r[REPS - 1], t->iters);
         fflush(stdout);
     }
-    char cmd[400];
-    snprintf(cmd, sizeof cmd, "rm -rf %s", base);
-    system(cmd);
+    // Only what this run made: its r0..r4 directories, then the directory itself if empty
+    for (int rep = 0; rep < REPS; rep++) {
+        char cmd[400];
+        snprintf(cmd, sizeof cmd, "rm -rf '%s/r%d'", base, rep);
+        system(cmd);
+    }
+    rmdir(base);
     printf("zfsbench: done\n");
     return 0;
 }

@@ -396,11 +396,16 @@ fn recover_log() {
             "[zfs-server] intent log: replayed {} changes ({} differed{}){}{}; committed TXG #{}",
             r.replayed.applied,
             r.replayed.mismatches,
-            if r.replayed.mismatches > 0 { alloc::format!(", first #{}", r.replayed.first_mismatch) } else { alloc::string::String::new() },
+            if r.replayed.mismatches > 0 { alloc::format!(" at #{}, {} after it NOT replayed", r.replayed.first_mismatch, r.replayed.skipped) } else { alloc::string::String::new() },
             if r.torn { ", a torn last record ignored" } else { "" },
             if r.given_up { ", GIVEN UP after repeated failed starts (changes since the last commit are lost)" } else { "" },
             r.txg
         );
+        if r.bad_state {
+            hydra_rt::println!("[zfs-server] intent log: its state record is unreadable; nothing replayed (changes since the last commit are lost)");
+        }
+    } else if r.handles_from_older {
+        hydra_rt::println!("[zfs-server] intent log: killed right after a commit; open handles taken from the log, nothing to replay");
     }
 }
 // wave8 GZ end

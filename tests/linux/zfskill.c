@@ -95,8 +95,8 @@ static void step(void) {
         if (rnd() % 4 == 0) {
             if (outcome(mkdir(p, 0755), "mkdir", p, i) == 0) {
                 struct stat st;
-                stat(p, &st);
-                e->kind = DIR_;
+                // (a stat that fails, e.g. EIO at a kill: the inode is not known)
+                e->kind = stat(p, &st) == 0 ? DIR_ : -1;
                 e->ino = st.st_ino;
             }
             return;
@@ -110,7 +110,11 @@ static void step(void) {
             return;
         }
         struct stat st;
-        fstat(fd, &st);
+        if (fstat(fd, &st)) {
+            close(fd);
+            outcome(-1, "fstat", p, i);
+            return;
+        }
         // The file exists from here on (with whatever data got written)
         e->kind = FILE_;
         e->ino = st.st_ino;
@@ -213,7 +217,12 @@ static void check(void) {
             continue;
         }
         int fd = open(p, O_RDONLY);
-        long n = fd < 0 ? -1 : read(fd, got, sizeof got);
+        long n = fd < 0 ? -1 : 0;
+        while (fd >= 0 && n < (long)sizeof got) {
+            ssize_t k = read(fd, got + n, sizeof got - n);
+            if (k <= 0) break;
+            n += k;
+        }
         if (fd >= 0) close(fd);
         int ok = n == e->len;
         for (long k = 0; ok && k < n; k++) ok = got[k] == pat(e->seed, k);

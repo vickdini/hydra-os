@@ -439,9 +439,13 @@ fn a_torn_last_record_loses_only_that_change() {
     let a = mkdir(r, "a");
     let used_before_b = durable::used();
     mkdir(r, "b");
-    // The kill came while "b" was being written into the log
-    m.log_bytes()[used_before_b + zil::REC_HEAD + 3] ^= 0xFF;
     m.kill();
+    // The kill came while "b" was being written into the log
+    let start = {
+        let log = zil::Log::attach(m.log_bytes());
+        zil::HDR_SIZE + log.header().unwrap().area * log.area_size()
+    };
+    m.log_bytes()[start + used_before_b + zil::REC_HEAD + 3] ^= 0xFF;
     let rec = m.start();
     assert!(rec.matched && rec.torn);
     assert_eq!(rec.replayed.applied, 1);
@@ -457,18 +461,64 @@ fn a_log_of_an_older_generation_is_ignored() {
     let r = root();
     mkdir(r, "x");
     create(r, "y");
-    let old_log = m.log_bytes().to_vec();
+    // An open file unlinked in this generation: only the log knows it is still open
+    let held = create(r, "held");
+    write(held, 0, b"open after unlink");
+    ok(req(FS_OPEN_REF, |w| {
+        w.u64(held);
+    }));
+    unlink(r, "held");
+    let old_header = m.log_bytes()[..zil::HDR_SIZE].to_vec();
     let t0 = txg();
-    // The txgd's commit; the kill came right after the commit, before the log restarted
+    // The txgd's commit; the kill came right after the commit and the new generation's
+    // state record, before its header
     ok(req(FS_SYNC_IF_DIRTY, |_| {}));
     assert!(txg() > t0);
-    m.log_bytes().copy_from_slice(&old_log);
     let before = whole_tree();
     m.kill();
+    m.log_bytes()[..zil::HDR_SIZE].copy_from_slice(&old_header);
     let rec = m.start();
     // Not replayed (the pool is past the log's generation): nothing done twice
     assert!(!rec.matched);
+    assert!(rec.handles_from_older);
     assert_eq!(whole_tree(), before);
+    // The handle counts came from the older generation: the unlinked file is still there
+    assert_eq!(getattr(held).map(|a| a.nlink), Some(0));
+    assert_eq!(read_all(held), b"open after unlink");
+    ok(req(FS_RELEASE, |w| {
+        w.u64(held);
+    }));
+    assert!(getattr(held).is_none() || getattr(held).unwrap().mode == 0);
+    assert_eq!(create(root(), "reuse"), held);
+    m.kill();
+}
+
+#[test]
+fn repeated_commits_at_the_same_txg_never_bring_old_records_back() {
+    let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = fresh();
+    let f = create(root(), "f");
+    sync();
+    // Handle requests change no block: the txgd's commits find nothing to write and keep
+    // the txg, yet each starts a new generation (in alternating areas)
+    ok(req(FS_OPEN_REF, |w| {
+        w.u64(f);
+    }));
+    ok(req(FS_OPEN_REF, |w| {
+        w.u64(f);
+    }));
+    let t = txg();
+    for _ in 0..3 {
+        ok(req(FS_SYNC_IF_DIRTY, |_| {}));
+    }
+    assert_eq!(txg(), t);
+    m.kill();
+    let r = m.start();
+    assert!(r.matched);
+    // The two open requests are in the state record now, not replayed again
+    assert_eq!(r.replayed.applied, 0);
+    let open = ZFS_SERVER.lock().as_ref().unwrap().durable_state();
+    assert_eq!(crate::zil::decode_state(&open).unwrap().0.get(&f), Some(&2));
     m.kill();
 }
 

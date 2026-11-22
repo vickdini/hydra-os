@@ -74,7 +74,7 @@ pub fn serve(op: u32, req: &[u8], out: &mut [u8]) -> (i64, u64, usize) {
             })
         }
         FS_READ => {
-            let (ino, off, len) = (r.u64(), r.u64(), (r.u64() as usize).min(MAX_IO));
+            let (ino, off, len) = (r.u64(), r.u64(), (r.u64() as usize).min(MAX_IO).min(out.len()));
             with_server(|s| s.read(ino, off, &mut out[..len])).map(|n| (n as u64, n))
         }
         FS_WRITE => {

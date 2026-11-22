@@ -23,12 +23,14 @@ use crate::zfs::fsproto::*;
 use crate::zfs::server::{with_server, ZfsServer};
 use crate::zil::{self, Log};
 
-/// The log's kept object: its key and size (a header page and 16 MiB of records).
+/// The log's kept object: its key and size (a header page and two record areas of 12 MiB:
+/// one for the current generation, the other keeps the previous one until the new header).
 pub const LOG_KEY: u64 = 1;
 /// See [`LOG_KEY`].
-pub const LOG_BYTES: usize = zil::HDR_SIZE + 16 * 1024 * 1024;
-/// A commit is made once the log holds this much (it is also made at 16 MiB of dirty data).
-pub const COMMIT_AT: usize = 12 * 1024 * 1024;
+pub const LOG_BYTES: usize = zil::HDR_SIZE + 2 * 12 * 1024 * 1024;
+/// A commit is made once a generation's records take this much (it is also made at 16 MiB
+/// of dirty data).
+pub const COMMIT_AT: usize = 11 * 1024 * 1024;
 
 static LOG: Mutex<Option<Log<'static>>> = Mutex::new(None);
 static FROZEN: Mutex<Option<(u64, u32)>> = Mutex::new(None);
@@ -82,14 +84,22 @@ fn reset(s: &ZfsServer, log: &mut Option<Log<'static>>) {
     }
 }
 
-/// Commits the open transaction group; the log starts over when the pool is now at a
-/// newer txg than the log's records (or nothing is left uncommitted).
-fn commit(s: &mut ZfsServer, log: &mut Option<Log<'static>>) {
-    let _ = s.sync();
-    let stale = log.as_ref().is_some_and(|l| l.gen() != s.dmu.ub.txg);
-    if stale || !s.dmu.has_pending_changes() {
+/// Commits the open transaction group and starts a new generation of the log; `false` when
+/// the commit failed (a disk error). Then a log that no longer describes the changes since
+/// the pool's last commit (a request committed by itself, or a change could not be logged)
+/// is disabled: a kill loses what a power loss would, never replays a log with a gap.
+fn commit(s: &mut ZfsServer, log: &mut Option<Log<'static>>) -> bool {
+    if s.sync().is_ok() && !s.dmu.has_pending_changes() {
         reset(s, log);
+        return true;
     }
+    if let Some(l) = log.as_mut() {
+        if l.gen() != 0 && l.gen() != s.dmu.ub.txg {
+            crate::println!("[zfs-server] intent log: commit failed after TXG #{}; log off until the next commit", s.dmu.ub.txg);
+            l.disable(guid(s));
+        }
+    }
+    false
 }
 
 /// Called before serving a request at time `now`: freezes the clock and notes the counters.
@@ -114,8 +124,16 @@ pub fn after(b: Before, op: u32, req: &[u8], status: i64, value: u64) {
         if changed {
             if let Some(l) = log.as_mut() {
                 if !l.append(op, b.time, status, value, req) {
-                    // No room (or no usable log): the change is made durable by a commit
-                    commit(s, &mut log);
+                    // No room (or no usable log): the change is made durable by a commit;
+                    // if that fails too, the log (now missing this change) goes off
+                    if !commit(s, &mut log) {
+                        if let Some(l) = log.as_mut() {
+                            if l.gen() != 0 {
+                                crate::println!("[zfs-server] intent log: a change could neither be logged nor committed; log off until the next commit");
+                                l.disable(guid(s));
+                            }
+                        }
+                    }
                     return Ok(());
                 }
             }
@@ -138,6 +156,11 @@ pub struct Recovered {
     pub replayed: zil::Replayed,
     /// The replay ended at a torn record.
     pub torn: bool,
+    /// The log was of the generation before the imported txg (a kill between a commit and
+    /// the log's next generation): nothing replayed, the open handle counts taken from it.
+    pub handles_from_older: bool,
+    /// The log's state record could not be read: nothing replayed.
+    pub bad_state: bool,
     /// The txg after the replay's commit.
     pub txg: u64,
 }
@@ -150,14 +173,50 @@ pub fn recover(buf: &'static mut [u8], existed: bool) -> Recovered {
     let mut rec = Recovered::default();
     let (pool, txg) = with_server(|s| Ok((guid(s), s.dmu.ub.txg))).unwrap_or((0, 0));
     let header = if existed { log.header() } else { None };
-    if let Some(h) = header.filter(|h| h.guid == pool && h.gen == txg && h.gen != 0) {
+    let header = header.filter(|h| h.guid == pool && h.gen != 0);
+    if let Some(h) = header.filter(|h| h.gen < txg) {
+        // Its changes are on disk; the open handles are not: the state record and the
+        // handle requests after it give them, and the unlinked ones are those with no link
+        let scan = log.scan(&h);
+        if let Some((open, _)) = scan.state.and_then(|p| zil::decode_state(log.payload(p))) {
+            let ops: Vec<(u32, u64)> = scan
+                .ops
+                .iter()
+                .filter(|r| r.op == FS_OPEN_REF || r.op == FS_RELEASE)
+                .map(|r| (r.op, Reader::new(log.payload(r.payload)).u64()))
+                .collect();
+            let open = zil::counts_after(open, &ops, FS_OPEN_REF, FS_RELEASE);
+            let _ = with_server(|s| {
+                let mut kept = alloc::collections::BTreeMap::new();
+                let mut orphans = alloc::collections::BTreeSet::new();
+                for (ino, n) in open {
+                    match s.getattr(ino) {
+                        Ok(a) => {
+                            if a.nlink == 0 {
+                                orphans.insert(ino);
+                            }
+                            kept.insert(ino, n);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                s.restore_durable_state(kept, orphans);
+                Ok(())
+            });
+            rec.handles_from_older = true;
+        }
+    }
+    if let Some(h) = header.filter(|h| h.gen == txg) {
         rec.matched = true;
+        let scan = log.scan(&h);
+        let state = scan.state.and_then(|p| zil::decode_state(log.payload(p)));
         if log.begin_replay() >= zil::MAX_ATTEMPTS {
             rec.given_up = true;
+        } else if state.is_none() {
+            rec.bad_state = true;
         } else {
-            let scan = log.scan(h.gen);
             rec.torn = scan.torn;
-            if let Some(st) = scan.state.and_then(|p| zil::decode_state(log.payload(p))) {
+            if let Some(st) = state {
                 let _ = with_server(|s| {
                     s.restore_durable_state(st.0, st.1);
                     Ok(())
@@ -171,7 +230,7 @@ pub fn recover(buf: &'static mut [u8], existed: bool) -> Recovered {
                 crate::compat::linux::inotify::take();
                 (status, value)
             });
-            log.resume(h.gen, &scan);
+            log.resume(&h, &scan);
             let mut g = LOG.lock();
             *g = Some(log);
             let _ = with_server(|s| {
