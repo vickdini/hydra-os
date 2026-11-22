@@ -124,14 +124,16 @@ fn rip_samples() {
     let out = fake::console_take();
     assert!(out.contains("[sample] 4 samples of task 5"), "{out}");
     let rows: Vec<&str> = out.lines().skip(1).collect();
-    assert_eq!(rows[0].trim(), "[sample]      3 0x1000");
-    assert_eq!(rows[1].trim(), "[sample]      1 0x2000");
+    assert_eq!(rows[0].trim(), "[sample]      3 0x1000 5"); // wave8 GP: the task (and its name) follow
+    assert_eq!(rows[1].trim(), "[sample]      1 0x2000 5");
     // Every task, kernel code too
     prof::sample_start(u64::MAX, true);
     prof::sample(1, 0xAA, 0x08);
     prof::sample(2, 0xAA, 0x33);
-    prof::sample_show(1);
-    assert!(fake::console_take().contains("[sample]      2 0xaa"));
+    prof::sample_show(2);
+    let out = fake::console_take();
+    // wave8 GP: grouped per task: one row for each of tasks 1 and 2
+    assert!(out.contains("[sample]      1 0xaa 1") && out.contains("[sample]      1 0xaa 2"), "{out}");
     prof::sample_start(0, false);
 }
 

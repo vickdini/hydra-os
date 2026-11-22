@@ -224,6 +224,12 @@ Groups H (the two-load hang), 7-1 (vfs-server core), 7-2 (path calls, kernel fil
 - The ladder resets vfs-server's kept state on a second crash within 30 s (tmpfs data lost): by design, revisit if it bites.
 - Still open from before: the live-stick restart hang (B's item 5); the 1-CPU forwarded signal shortfall; the loopback TCP stall until net-server restarts; the installer test with a stick image built from this tree.
 
+### Wave 8: device services, the lx-net/lx-ipc split, zfs-server durability (2026-11-22)
+
+Stage 1 (deployed a6729b7): display, input, sound and terminal services (D, I, S, T), lx-net and lx-ipc split out of linux-server (X2), zfs-server intent log (Z). Stage 2: device remove/add announcements, so input and sound come back after a second crash (H); vfs-server decides mount, umount2 and pivot_root and makes tmpfs mounts, the kernel's table a write-through copy (F); a profiling aid (P); the remove-the-stick prompt at the end of a live session, mlock'ed logind, the zfs log dropping deleted files' writes when full (B). Gemini was turned off by the user mid-wave; pre-merge reviews were done by a Claude (Sonnet) reviewer; stage 2 ran one group at a time on low usage, H/F/P/B without a separate review.
+
+**Carried into wave 9:** the per-call budget is still missed (stat family +3.2 µs, open+close +3.8 µs, served `/proc` opens +25 µs; P's experiments in E:\os-52\scratch\p\wip_clean.patch did not measure faster); tmpfs data in memory objects (needs a kernel handle type); zfs append-then-delete still ~5x slower than without the log; the one-off `crashexit` hang (never reproduced); stage-2 checks skipped for usage (kderep, Wine, suite_loop, kill tests of every service under KDE).
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:

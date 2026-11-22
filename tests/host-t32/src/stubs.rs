@@ -62,6 +62,12 @@ macro_rules! rec {
 }
 
 pub mod linux {
+    /// *stub* wave8 GB: not a live session (`compat::linux::live`).
+    pub mod live {
+        pub fn is_live() -> bool {
+            false
+        }
+    }
     use crate::arch::idt::{ExceptionContext, FpuState};
     use crate::arch::syscall::SyscallFrame;
     use crate::stubs::ans;

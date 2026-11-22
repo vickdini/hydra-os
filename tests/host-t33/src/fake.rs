@@ -128,6 +128,8 @@ impl Caps {
 
 /// The parts of the kernel's `Task` the code under test reads.
 pub struct Task {
+    /// The task's name (`linux prof sample`, wave 8 GP).
+    pub name: &'static str,
     pub caps: Caps,
     pub uid: u32,
     pub gid: u32,
@@ -158,6 +160,7 @@ impl Task {
     /// Another thread of the current process, for [`SIBLINGS`].
     pub fn sibling(tid: u64) -> Task {
         Task {
+            name: "",
             caps: Caps { effective: 0, in_userns: false },
             uid: 0,
             gid: 0,
@@ -208,6 +211,7 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
     let (tid, tgid) = IDS.get();
     let seccomp = SECCOMP.take();
     let mut t = Task {
+            name: "",
         caps: Caps { effective, in_userns: IN_USERNS.get() },
         uid: UID.get(),
         gid: egid,
