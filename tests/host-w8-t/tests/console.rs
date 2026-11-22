@@ -59,3 +59,24 @@ fn hangup_answer() {
     assert_eq!(unpack_hangup((7u64 | 9u64 << 32) as i64), (7, 9));
     assert_eq!(unpack_hangup(0), (0, 0));
 }
+
+#[test]
+fn tty_server_may_post_only_terminal_signals() {
+    for sig in [1, 2, 3, 18, 20, 21, 22, 28] {
+        assert!(tty_group_signal(sig), "{}", sig);
+    }
+    for sig in [9, 15, 19, 0, 64, 10, 11] {
+        assert!(!tty_group_signal(sig), "{}", sig);
+    }
+    assert!(tty_leader_signal(1) && tty_leader_signal(18));
+    assert!(!tty_leader_signal(2) && !tty_leader_signal(9));
+}
+
+#[test]
+fn console_keys_while_tty_server_is_down() {
+    assert_eq!(fallback_signal(Some('\u{3}')), Some(2));
+    assert_eq!(fallback_signal(Some('\u{1c}')), Some(3));
+    assert_eq!(fallback_signal(Some('\u{1a}')), Some(20));
+    assert_eq!(fallback_signal(Some('a')), None);
+    assert_eq!(fallback_signal(None), None);
+}

@@ -11,6 +11,10 @@ const M: u32 = 10; // master slot
 const S: u32 = 11; // slave slot
 const BG: i64 = -4110;
 
+fn no_group(_: u32) -> bool {
+    false
+}
+
 fn who(tgid: u64, pgid: u64, sid: u64) -> Caller {
     Caller { tgid, pgid, sid, euid: 1000 }
 }
@@ -22,7 +26,7 @@ fn pair(io: &mut FakeIo) -> Ttys {
     assert_eq!(index, 0);
     let mem = FakeMem::with(0x100, &0u32.to_le_bytes());
     assert_eq!(t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, io), Ok(0));
-    t.open_slave(0, S, true, &who(1, 1, 1), io).unwrap();
+    t.open_slave(0, S, true, 0, &who(1, 1, 1), &no_group, io).unwrap();
     t
 }
 
@@ -130,7 +134,7 @@ fn master_close_hangs_the_slave_up() {
     // the number stays taken while the old slave lives (as devpts: ttyname of the old slave
     // never names the new pair), and the old /dev/pts/0 cannot be opened any more
     assert_eq!(t.open_master(12, 1000, &mut io), Ok(1));
-    assert_eq!(t.open_slave(0, 13, true, &who(1, 1, 1), &mut io), Err(ENOENT));
+    assert_eq!(t.open_slave(0, 13, true, 0, &who(1, 1, 1), &no_group, &mut io), Err(ENOENT));
     assert_eq!(t.pair_count(), 2);
     t.closed(S, &mut io);
     assert_eq!(t.pair_count(), 1, "the old pair is gone with its last end");
@@ -152,7 +156,7 @@ fn tiocsctty_follows_linux() {
     // a session that has a terminal already (the console) takes no second one
     t.cons_state(1, 100, 100, 80, 25, &mut io);
     assert_eq!(t.ioctl(S, ldisc::TIOCSCTTY, 1, &Caller { tgid: 100, pgid: 100, sid: 100, euid: 0 }, &mem, &mut io), Ok(EPERM));
-    t.open_slave(0, 30, false, &who(100, 100, 100), &mut io).unwrap();
+    t.open_slave(0, 30, false, 0, &who(100, 100, 100), &no_group, &mut io).unwrap();
     assert_eq!(t.ioctl(S, ldisc::TIOCGSID, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(0));
     assert_eq!(mem.at(0x10), 90i32.to_le_bytes(), "opening did not make it the console session's either");
 }
@@ -164,7 +168,7 @@ fn dev_tty_ignores_the_slave_lock_and_hung_descriptors_fail() {
     let mem = FakeMem::with(0x100, &1u32.to_le_bytes());
     t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(70, 70, 70), &mem, &mut io).unwrap();
     assert_eq!(t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, &mut io), Ok(0));
-    assert_eq!(t.open_slave(0, 30, true, &who(1, 1, 1), &mut io), Err(EIO), "by name: locked");
+    assert_eq!(t.open_slave(0, 30, true, 0, &who(1, 1, 1), &no_group, &mut io), Err(EIO), "by name: locked");
     assert!(matches!(t.open_controlling(31, &who(71, 70, 70), &mut io), Some(Ok(_))), "/dev/tty: the caller's own");
     t.hangup(70, &mut io);
     assert_eq!(t.ioctl(S, ldisc::TCGETS, 0x200, &who(1, 1, 1), &mem, &mut io), Ok(EIO), "a hung-up descriptor");
@@ -233,8 +237,8 @@ fn locked_slave_and_numbers() {
     let mut io = FakeIo::default();
     let mut t = Ttys::new();
     t.open_master(M, 1000, &mut io).unwrap();
-    assert_eq!(t.open_slave(0, S, true, &who(1, 1, 1), &mut io), Err(EIO), "locked until unlockpt");
-    assert_eq!(t.open_slave(5, S, true, &who(1, 1, 1), &mut io), Err(ENOENT));
+    assert_eq!(t.open_slave(0, S, true, 0, &who(1, 1, 1), &no_group, &mut io), Err(EIO), "locked until unlockpt");
+    assert_eq!(t.open_slave(5, S, true, 0, &who(1, 1, 1), &no_group, &mut io), Err(ENOENT));
     let mem = FakeMem::default();
     assert_eq!(t.ioctl(M, TIOCGPTN, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(0));
     assert_eq!(mem.at(0x10), 0u32.to_le_bytes());
@@ -250,12 +254,12 @@ fn stat_and_setattr_rules() {
     let mut t = pair(&mut io);
     assert_eq!(t.stat(0), Some((0o620, 1000, 5)));
     assert_eq!(t.stat(1), None);
-    assert_eq!(t.setattr(0, 2000, Some(0o600), None, None), EPERM, "not the owner");
-    assert_eq!(t.setattr(0, 1000, Some(0o600), None, Some(7)), 0, "the owner sets mode and group");
-    assert_eq!(t.setattr(0, 1000, None, Some(0), None), EPERM, "only root gives it away");
-    assert_eq!(t.setattr(0, 0, None, Some(33), None), 0);
+    assert_eq!(t.setattr(0, 2000, Some(0o600), None, None, &no_group), EPERM, "not the owner");
+    assert_eq!(t.setattr(0, 1000, Some(0o600), None, Some(5), &no_group), 0, "the owner sets mode and group");
+    assert_eq!(t.setattr(0, 1000, None, Some(0), None, &no_group), EPERM, "only root gives it away");
+    assert_eq!(t.setattr(0, 0, None, Some(33), Some(7), &no_group), 0);
     assert_eq!(t.stat(0), Some((0o600, 33, 7)));
-    assert_eq!(t.setattr(4, 0, None, None, None), ENOENT);
+    assert_eq!(t.setattr(4, 0, None, None, None, &no_group), ENOENT);
 }
 
 #[test]
@@ -263,9 +267,9 @@ fn opening_without_noctty_acquires_a_controlling_terminal() {
     let mut io = FakeIo::default();
     let mut t = pair(&mut io);
     // not a session leader: nothing
-    t.open_slave(0, 30, false, &who(60, 60, 59), &mut io).unwrap();
+    t.open_slave(0, 30, false, 0, &who(60, 60, 59), &no_group, &mut io).unwrap();
     // a session leader: the terminal becomes its own
-    t.open_slave(0, 31, false, &who(70, 70, 70), &mut io).unwrap();
+    t.open_slave(0, 31, false, 0, &who(70, 70, 70), &no_group, &mut io).unwrap();
     let mem = FakeMem::default();
     assert_eq!(t.ioctl(S, ldisc::TIOCGSID, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(0));
     assert_eq!(mem.at(0x10), 70i32.to_le_bytes());
@@ -276,7 +280,7 @@ fn opening_without_noctty_acquires_a_controlling_terminal() {
     }
     assert!(t.open_controlling(33, &who(80, 80, 80), &mut io).is_none(), "another session's /dev/tty is not ours");
     // a second session leader does not take it
-    t.open_slave(0, 34, false, &who(90, 90, 90), &mut io).unwrap();
+    t.open_slave(0, 34, false, 0, &who(90, 90, 90), &no_group, &mut io).unwrap();
     assert_eq!(t.ioctl(S, ldisc::TIOCGSID, 0x10, &who(1, 1, 1), &mem, &mut io), Ok(0));
     assert_eq!(mem.at(0x10), 70i32.to_le_bytes());
 }
@@ -307,11 +311,100 @@ fn tiocspgrp_checks_the_session() {
     io.pgrps.insert((77, 70), ESRCH);
     assert_eq!(t.ioctl(S, ldisc::TIOCSPGRP, 0x20, &who(70, 70, 70), &mem, &mut io), Ok(ESRCH), "no such group");
     assert_eq!(t.ioctl(S, ldisc::TIOCSPGRP, 0x24, &who(70, 70, 70), &mem, &mut io), Ok(EINVAL));
-    // a terminal no session holds takes any group (as before the move)
+    // a terminal no session holds is nobody's controlling terminal (pre-merge review: it took
+    // any group, and ^C on the master then signalled another user's group)
     let mut io2 = FakeIo::default();
     let mut t2 = pair(&mut io2);
-    io2.pgrps.insert((77, 0), 1);
-    assert_eq!(t2.ioctl(S, ldisc::TIOCSPGRP, 0x20, &who(80, 80, 80), &mem, &mut io2), Ok(0));
+    assert_eq!(t2.ioctl(S, ldisc::TIOCSPGRP, 0x20, &who(80, 80, 80), &mem, &mut io2), Ok(ENOTTY));
+    wr(&mut t2, M, 1, b"\x03\x1a", &mut io2);
+    assert!(io2.signals.is_empty(), "no session: ^C signals nobody");
+}
+
+#[test]
+fn group_signals_name_the_terminals_session_once_each() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    let mem = FakeMem::with(0x20, &71i32.to_le_bytes());
+    t.ioctl(S, ldisc::TIOCSCTTY, 0, &who(70, 70, 70), &mem, &mut io).unwrap();
+    t.ioctl(S, ldisc::TIOCSPGRP, 0x20, &who(70, 70, 70), &mem, &mut io).unwrap();
+    let flood = vec![3u8; 100_000];
+    wr(&mut t, M, 1, &flood, &mut io);
+    assert_eq!(io.signals, vec![(true, 71, 2)], "a hundred thousand ^C: one SIGINT");
+    assert_eq!(io.group_sids, vec![70], "with the terminal's session, for the kernel's check");
+}
+
+#[test]
+fn echo_is_bounded_when_nobody_reads_the_master() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    // ^C echoes 4 bytes and fills no input queue; erase echoes 3
+    for i in 0..40 {
+        wr(&mut t, M, 10 + i, &vec![3u8; 10_000], &mut io);
+        wr(&mut t, M, 100 + i, &b"a\x7f".repeat(5_000), &mut io);
+    }
+    let mut total = 0;
+    for id in 1000..1100 {
+        match t.read(M, id, 50, Iov::one(0x1, 65536), true, &mut io) {
+            Ans::Now(n) if n > 0 => total += n as usize,
+            _ => break,
+        }
+    }
+    assert!(total <= OUTPUT_LIMIT, "{} bytes of echo kept", total);
+}
+
+#[test]
+fn pty_waiters_are_capped() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    for i in 0..MAX_PTY_WAITERS as u64 {
+        assert_eq!(rd(&mut t, S, i + 1, 10, &mut io), Ans::Pending);
+    }
+    assert_eq!(rd(&mut t, S, 999, 10, &mut io), Ans::Now(EAGAIN), "the request slots are kept for the console");
+    assert_eq!(rd(&mut t, M, 998, 10, &mut io), Ans::Now(EAGAIN));
+    wr(&mut t, S, 1, b"out", &mut io);
+    assert_eq!(rd(&mut t, M, 997, 10, &mut io), Ans::Now(3), "data is still served at once");
+}
+
+#[test]
+fn console_tiocspgrp_follows_the_same_rules() {
+    let mut io = FakeIo::default();
+    let mut t = Ttys::new();
+    let mem = FakeMem::with(0x20, &77i32.to_le_bytes());
+    assert_eq!(t.cons_ioctl(ldisc::TIOCSPGRP, 0x20, &who(100, 100, 100), &mem, &mut io), ENOTTY, "detached: nobody's terminal");
+    t.cons_state(1, 100, 100, 80, 25, &mut io);
+    assert_eq!(t.cons_ioctl(ldisc::TIOCSPGRP, 0x20, &who(200, 200, 200), &mem, &mut io), ENOTTY, "another session");
+    io.pgrps.insert((77, 100), 1);
+    assert_eq!(t.cons_ioctl(ldisc::TIOCSPGRP, 0x20, &who(100, 100, 100), &mem, &mut io), EPERM, "a group of another session");
+    io.pgrps.insert((77, 100), 0);
+    assert_eq!(t.cons_ioctl(ldisc::TIOCSPGRP, 0x20, &who(101, 100, 100), &mem, &mut io), 0);
+    t.cons_keys(1, &[3, 3, 3], &mut io);
+    assert_eq!(io.signals, vec![(true, 77, 2)]);
+    assert_eq!(io.group_sids, vec![100]);
+}
+
+#[test]
+fn slave_open_by_name_checks_the_node() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io); // owner 1000, group 5, mode 0620
+    let stranger = Caller { tgid: 9, pgid: 9, sid: 9, euid: 2000 };
+    let tty_group = |g: u32| g == 5;
+    assert_eq!(t.open_slave(0, 40, true, 4, &stranger, &no_group, &mut io), Err(EACCES), "others: no bits");
+    assert_eq!(t.open_slave(0, 41, true, 2, &stranger, &tty_group, &mut io).map(|_| ()), Ok(()), "group tty may write (wall)");
+    assert_eq!(t.open_slave(0, 42, true, 6, &stranger, &tty_group, &mut io), Err(EACCES), "but not read");
+    assert!(t.open_slave(0, 43, true, 6, &who(1, 1, 1), &no_group, &mut io).is_ok(), "the owner");
+    let root = Caller { tgid: 2, pgid: 2, sid: 2, euid: 0 };
+    assert!(t.open_slave(0, 44, true, 6, &root, &no_group, &mut io).is_ok(), "root");
+    assert!(may_open(0o600, 3, 3, 6, 3, &no_group));
+    assert!(!may_open(0o060, 3, 4, 6, 3, &|g| g == 4), "the owner's bits decide for the owner");
+}
+
+#[test]
+fn chgrp_only_to_an_own_group() {
+    let mut io = FakeIo::default();
+    let mut t = pair(&mut io);
+    assert_eq!(t.setattr(0, 1000, None, None, Some(0), &no_group), EPERM, "not a group of the owner");
+    assert_eq!(t.setattr(0, 1000, None, None, Some(44), &|g| g == 44), 0);
+    assert_eq!(t.stat(0), Some((0o620, 1000, 44)));
 }
 
 #[test]
@@ -416,7 +509,7 @@ fn vhangup_kills_earlier_slave_descriptors() {
     assert_eq!(io.ready[&S] & (POLLIN | POLLHUP), POLLIN | POLLHUP);
     assert_eq!(t.hangup(70, &mut io), None, "the session has no terminal any more");
     // a new open works
-    t.open_slave(0, 30, true, &who(1, 1, 1), &mut io).unwrap();
+    t.open_slave(0, 30, true, 0, &who(1, 1, 1), &no_group, &mut io).unwrap();
     assert_eq!(wr(&mut t, 30, 8, b"ok", &mut io), Ans::Now(2));
 }
 
@@ -428,7 +521,7 @@ fn readiness_words() {
     assert_eq!(io.ready[&M], POLLOUT, "a fresh master: writable only");
     let mem = FakeMem::with(0x100, &0u32.to_le_bytes());
     t.ioctl(M, TIOCSPTLCK, 0x100, &who(1, 1, 1), &mem, &mut io).unwrap();
-    t.open_slave(0, S, true, &who(1, 1, 1), &mut io).unwrap();
+    t.open_slave(0, S, true, 0, &who(1, 1, 1), &no_group, &mut io).unwrap();
     assert_eq!(io.ready[&S], POLLOUT, "a fresh slave: writable only");
     wr(&mut t, S, 1, b"a", &mut io);
     assert!(io.ready_log.iter().any(|&(s, b, arrived)| s == M && b & POLLIN != 0 && arrived), "new bytes count as an edge");
@@ -450,7 +543,7 @@ fn console_attach_keys_echo_and_reads() {
     assert_eq!(io.signals, vec![(true, 100, 2)]);
     // window size defaults to the console's
     let mem = FakeMem::default();
-    assert_eq!(t.cons_ioctl(ldisc::TIOCGWINSZ, 0x10, &mem, &mut io), 0);
+    assert_eq!(t.cons_ioctl(ldisc::TIOCGWINSZ, 0x10, &who(100, 100, 100), &mem, &mut io), 0);
     assert_eq!(&mem.at(0x10)[..4], &[48, 0, 128, 0]);
 }
 
@@ -492,7 +585,7 @@ fn console_attach_resets_the_terminal() {
     let mut raw = Termios::default();
     raw.lflag = 0;
     let mem = FakeMem::with(0x60, &raw.to_bytes());
-    assert_eq!(t.cons_ioctl(ldisc::TCSETS, 0x60, &mem, &mut io), 0);
+    assert_eq!(t.cons_ioctl(ldisc::TCSETS, 0x60, &who(100, 100, 100), &mem, &mut io), 0);
     t.cons_keys(1, &['q' as u32], &mut io);
     t.cons_state(2, 200, 200, 80, 25, &mut io);
     assert_eq!(t.console.tty.termios, Termios::default(), "a new program gets a cooked terminal");
@@ -560,6 +653,6 @@ fn hang_up_flushes_typed_input_and_signals_the_leaders_own_group() {
     t2.ioctl(S, ldisc::TIOCSCTTY, 0, &who(40, 40, 40), &mem, &mut io2).unwrap();
     wr(&mut t2, M, 1, b"typed\n", &mut io2);
     t2.hangup(40, &mut io2);
-    t2.open_slave(0, 30, true, &who(1, 1, 1), &mut io2).unwrap();
+    t2.open_slave(0, 30, true, 0, &who(1, 1, 1), &no_group, &mut io2).unwrap();
     assert_eq!(t2.read(30, 9, 50, Iov::one(0x1, 10), true, &mut io2), Ans::Now(EAGAIN), "nothing typed before the hang-up is left");
 }

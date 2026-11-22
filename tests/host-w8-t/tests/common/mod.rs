@@ -58,6 +58,8 @@ pub struct FakeIo {
     pub completes: Vec<(u64, i64)>,
     /// (group?, who, signal)
     pub signals: Vec<(bool, u64, u32)>,
+    /// The session named with each group signal.
+    pub group_sids: Vec<u64>,
     pub ready: BTreeMap<u32, u32>,
     /// (slot, bits, arrived) in order
     pub ready_log: Vec<(u32, u32, bool)>,
@@ -80,8 +82,9 @@ impl Io for FakeIo {
     fn complete(&mut self, id: u64, result: i64) {
         self.completes.push((id, result));
     }
-    fn signal_group(&mut self, pgid: u64, sig: u32) {
+    fn signal_group(&mut self, pgid: u64, sid: u64, sig: u32) {
         self.signals.push((true, pgid, sig));
+        self.group_sids.push(sid);
     }
     fn signal_proc(&mut self, pid: u64, sig: u32) {
         self.signals.push((false, pid, sig));

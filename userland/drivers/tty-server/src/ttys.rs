@@ -52,6 +52,11 @@ pub const OUTPUT_LIMIT: usize = 64 * 1024;
 pub const MAX_PTYS: u32 = 2048;
 /// `ENOSPC`.
 pub const ENOSPC: i64 = -28;
+/// Most pty reads and writes kept waiting at once, all terminals together: each holds one of
+/// the service's 128 request slots, and the console needs some (beyond: `EAGAIN`).
+pub const MAX_PTY_WAITERS: usize = 96;
+/// `EACCES`.
+pub const EACCES: i64 = -13;
 /// Most console reads kept waiting at once (each holds one of the service's request slots).
 pub const MAX_CONSOLE_WAITERS: usize = 32;
 
@@ -70,9 +75,11 @@ pub trait Io {
     fn put(&mut self, id: u64, iov: &Iov, data: &[u8]) -> Result<(), i64>;
     /// Answers pending request `id`.
     fn complete(&mut self, id: u64, result: i64);
-    /// Posts `sig` to process group `pgid`.
-    fn signal_group(&mut self, pgid: u64, sig: u32);
-    /// Posts `sig` to process `pid`.
+    /// Posts `sig` to process group `pgid` of session `sid` (the terminal's: the kernel posts
+    /// only to the group's members in that session, and only terminal signals).
+    fn signal_group(&mut self, pgid: u64, sid: u64, sig: u32);
+    /// Posts `sig` (`SIGHUP`, `SIGCONT`) to session leader `pid` (the kernel refuses a process
+    /// that does not lead the session `pid`).
     fn signal_proc(&mut self, pid: u64, sig: u32);
     /// Sets object `slot`'s poll bits (`arrived`: something new came, for edge-triggered
     /// waiters).
@@ -210,6 +217,18 @@ impl Default for Ttys {
     }
 }
 
+/// The signals to post for one input batch: each distinct signal once, in their order (a
+/// write of a million ^C posts one SIGINT, not a million).
+pub fn distinct(signals: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for &s in signals {
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// `peek` + deliver + commit for the readers of a terminal: each waiting reader takes what
 /// a `read` of its size would; one whose memory is gone is dropped.
 fn feed_tty_readers(tty: &mut Tty, readers: &mut VecDeque<RWait>, io: &mut dyn Io) -> bool {
@@ -245,6 +264,11 @@ impl Ttys {
     /// Live pairs (for tests and the log).
     pub fn pair_count(&self) -> usize {
         self.pairs.len()
+    }
+
+    /// Pty reads and writes waiting now, all pairs together.
+    fn pty_waiters(&self) -> usize {
+        self.pairs.values().map(|p| p.rm.len() + p.rs.len() + p.ws.len()).sum()
     }
 
     /// Whether `slot` is one of ours.
@@ -415,9 +439,15 @@ impl Ttys {
         Ok(r)
     }
 
-    /// Opens `/dev/pts/index` as slot `slot`: the node's `(mode, uid, gid)`.
-    pub fn open_slave(&mut self, index: u32, slot: u32, noctty: bool, who: &Caller, io: &mut dyn Io) -> Result<(u32, u32, u32), i64> {
+    /// Opens `/dev/pts/index` as slot `slot`: the node's `(mode, uid, gid)`. `want` is the
+    /// access asked for (4 read, 2 write) and `in_group` says whether the caller is in a group;
+    /// the node's owner, group and mode decide (root may always), as for any device node.
+    pub fn open_slave(&mut self, index: u32, slot: u32, noctty: bool, want: u32, who: &Caller, in_group: &dyn Fn(u32) -> bool, io: &mut dyn Io) -> Result<(u32, u32, u32), i64> {
         let pid = self.live_pair(index).ok_or(ENOENT)?;
+        let p = self.pairs.get(&pid).ok_or(ENOENT)?;
+        if !may_open(p.mode, p.uid, p.gid, want, who.euid, in_group) {
+            return Err(EACCES);
+        }
         self.open_slave_of(pid, slot, noctty, who, io)
     }
 
@@ -469,6 +499,11 @@ impl Ttys {
             if nonblock {
                 return Ans::Now(EAGAIN);
             }
+            let full = self.pty_waiters() >= MAX_PTY_WAITERS;
+            let Some(p) = self.pairs.get_mut(&s.pair) else { return Ans::Now(EBADF) };
+            if full {
+                return Ans::Now(EAGAIN);
+            }
             p.rm.push_back(RWait { id, tgid, iov });
             return Ans::Pending;
         }
@@ -489,6 +524,11 @@ impl Ttys {
         if nonblock {
             return Ans::Now(EAGAIN);
         }
+        let full = self.pty_waiters() >= MAX_PTY_WAITERS;
+        let Some(p) = self.pairs.get_mut(&s.pair) else { return Ans::Now(EBADF) };
+        if full {
+            return Ans::Now(EAGAIN);
+        }
         p.rs.push_back(RWait { id, tgid, iov });
         Ans::Pending
     }
@@ -503,11 +543,14 @@ impl Ttys {
             let mut echo = Vec::new();
             let mut signals = Vec::new();
             ldisc::feed_input(&mut p.tty, &data, &mut echo, &mut signals);
-            p.to_master.extend(echo);
-            let fg = p.tty.fg_pgrp;
-            if fg != 0 {
-                for sig in signals {
-                    io.signal_group(fg, sig);
+            // The echo is bounded like the slave's output (Linux drops echo when the output
+            // buffer is full): a writer nobody reads cannot grow it without end
+            let room = OUTPUT_LIMIT.saturating_sub(p.to_master.len());
+            p.to_master.extend(echo.into_iter().take(room));
+            let (fg, sess) = (p.tty.fg_pgrp, p.tty.session);
+            if fg != 0 && sess != 0 {
+                for sig in distinct(&signals) {
+                    io.signal_group(fg, sess, sig);
                 }
             }
             let input = p.tty.has_input();
@@ -528,6 +571,11 @@ impl Ttys {
             return Ans::Now(data.len() as i64);
         }
         if nonblock {
+            return Ans::Now(EAGAIN);
+        }
+        let full = self.pty_waiters() >= MAX_PTY_WAITERS;
+        let Some(p) = self.pairs.get_mut(&s.pair) else { return Ans::Now(EBADF) };
+        if full {
             return Ans::Now(EAGAIN);
         }
         p.ws.push_back(WWait { id, tgid, data });
@@ -593,9 +641,9 @@ impl Ttys {
             }
             ldisc::TIOCSPGRP => {
                 // Linux: the terminal must be the caller's controlling terminal and the group
-                // one of its session's (a terminal no session holds takes any group, as before)
+                // one of its session's (a terminal no session holds is nobody's: ENOTTY)
                 let sess = p.tty.session;
-                if sess != 0 && who.sid != sess {
+                if sess == 0 || who.sid != sess {
                     ENOTTY
                 } else {
                     match mem.get(arg, 4) {
@@ -604,7 +652,7 @@ impl Ttys {
                             if pg < 0 {
                                 EINVAL
                             } else {
-                                match if sess != 0 { io.pgrp_in(pg as u64, sess) } else { 0 } {
+                                match io.pgrp_in(pg as u64, sess) {
                                     0 => {
                                         p.tty.fg_pgrp = pg as u64;
                                         0
@@ -621,8 +669,8 @@ impl Ttys {
             _ => {
                 let mut fx = Effects::default();
                 let r = ldisc::ioctl(&mut p.tty, request, arg, mem, (24, 80), &mut fx);
-                if fx.resized && p.tty.fg_pgrp != 0 {
-                    io.signal_group(p.tty.fg_pgrp, ldisc::SIGWINCH);
+                if fx.resized && p.tty.fg_pgrp != 0 && p.tty.session != 0 {
+                    io.signal_group(p.tty.fg_pgrp, p.tty.session, ldisc::SIGWINCH);
                 }
                 if r == 0 {
                     // Mode changes (leaving canonical mode, a flush) may make input readable
@@ -664,7 +712,7 @@ impl Ttys {
                 io.signal_proc(sid, SIGHUP);
                 io.signal_proc(sid, SIGCONT);
                 if fg != 0 {
-                    io.signal_group(fg, SIGHUP);
+                    io.signal_group(fg, sid, SIGHUP);
                 }
             }
         } else {
@@ -729,11 +777,15 @@ impl Ttys {
 
     /// `chmod`/`chown` of `/dev/pts/index` by effective user `euid` (the owner may change
     /// the mode and group; only root may give the node away).
-    pub fn setattr(&mut self, index: u32, euid: u32, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> i64 {
+    pub fn setattr(&mut self, index: u32, euid: u32, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, in_group: &dyn Fn(u32) -> bool) -> i64 {
         let Some(pid) = self.live_pair(index) else { return ENOENT };
         let Some(p) = self.pairs.get_mut(&pid) else { return ENOENT };
         let owner = euid == 0 || euid == p.uid;
         if !owner || (euid != 0 && uid.is_some_and(|u| u != p.uid)) {
+            return EPERM;
+        }
+        // (Linux: the owner may give the node only to a group it is in)
+        if euid != 0 && gid.is_some_and(|g| g != p.gid && !in_group(g)) {
             return EPERM;
         }
         if let Some(m) = mode {
@@ -828,8 +880,8 @@ impl Ttys {
         }
         let fg = c.tty.fg_pgrp;
         if fg != 0 {
-            for sig in signals {
-                io.signal_group(fg, sig);
+            for sig in distinct(&signals) {
+                io.signal_group(fg, c.tty.session, sig);
             }
         }
         feed_tty_readers(&mut c.tty, &mut c.readers, io);
@@ -873,9 +925,31 @@ impl Ttys {
         data.len() as i64
     }
 
-    /// A terminal `ioctl` on the console (the VT requests stay the kernel's).
-    pub fn cons_ioctl(&mut self, request: u64, arg: u64, mem: &dyn Mem, io: &mut dyn Io) -> i64 {
+    /// A terminal `ioctl` on the console by `who` (the VT requests stay the kernel's).
+    pub fn cons_ioctl(&mut self, request: u64, arg: u64, who: &Caller, mem: &dyn Mem, io: &mut dyn Io) -> i64 {
         let c = &mut self.console;
+        if ldisc::canonical_request(request) == ldisc::TIOCSPGRP {
+            // Linux's rules (as on a pty): the console must be the caller's controlling
+            // terminal and the group one of its session's
+            let sess = c.tty.session;
+            if sess == 0 || who.sid != sess {
+                return ENOTTY;
+            }
+            return match mem.get(arg, 4) {
+                Ok(b) => match i32::from_le_bytes([b[0], b[1], b[2], b[3]]) {
+                    pg if pg < 0 => EINVAL,
+                    pg => match io.pgrp_in(pg as u64, sess) {
+                        0 => {
+                            c.tty.fg_pgrp = pg as u64;
+                            0
+                        }
+                        1 => EPERM,
+                        e => e,
+                    },
+                },
+                Err(e) => e,
+            };
+        }
         let size = (c.rows, c.cols);
         let mut fx = Effects::default();
         let r = ldisc::ioctl(&mut c.tty, request, arg, mem, size, &mut fx);
@@ -885,4 +959,20 @@ impl Ttys {
         }
         r
     }
+}
+
+/// Whether a caller of effective user `euid` may open a node of `mode`, `uid`, `gid` for `want`
+/// (4 read, 2 write, both 6): root always; else the owner's, group's or others' bits.
+pub fn may_open(mode: u32, uid: u32, gid: u32, want: u32, euid: u32, in_group: &dyn Fn(u32) -> bool) -> bool {
+    if euid == 0 {
+        return true;
+    }
+    let bits = if euid == uid {
+        (mode >> 6) & 7
+    } else if in_group(gid) {
+        (mode >> 3) & 7
+    } else {
+        mode & 7
+    };
+    bits & want == want
 }

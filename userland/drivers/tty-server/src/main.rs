@@ -162,8 +162,8 @@ fn flush() {
 #[derive(Default)]
 struct Glue {
     completes: Vec<(u64, i64)>,
-    signals: Vec<(bool, u64, u32)>,
-    cons: Vec<u8>,
+    /// `(group?, group or leader, session, signal)`.
+    signals: Vec<(bool, u64, u64, u32)>,
 }
 
 impl Io for Glue {
@@ -187,12 +187,12 @@ impl Io for Glue {
         self.completes.push((id, result));
     }
 
-    fn signal_group(&mut self, pgid: u64, sig: u32) {
-        self.signals.push((true, pgid, sig));
+    fn signal_group(&mut self, pgid: u64, sid: u64, sig: u32) {
+        self.signals.push((true, pgid, sid, sig));
     }
 
     fn signal_proc(&mut self, pid: u64, sig: u32) {
-        self.signals.push((false, pid, sig));
+        self.signals.push((false, pid, 0, sig));
     }
 
     fn ready(&mut self, slot: u32, bits: u32, arrived: bool) {
@@ -200,7 +200,14 @@ impl Io for Glue {
     }
 
     fn cons_out(&mut self, data: &[u8]) {
-        self.cons.extend_from_slice(data);
+        // At once, under the state's lock: echo and program output reach the console in the
+        // order the terminal produced them
+        let mut o = 0;
+        while o < data.len() {
+            let n = (data.len() - o).min(64 * 1024);
+            let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_WRITE, data[o..].as_ptr() as u64, n as u64);
+            o += n;
+        }
     }
 
     fn cons_ready(&mut self, gen: u64, readable: bool) {
@@ -218,18 +225,15 @@ impl Glue {
     /// Does what was gathered (the lock is let go): console output first (an echo before
     /// the program's answer), then answers, signals, the console's readiness, the doorbell.
     fn finish(self) {
-        let mut o = 0;
-        while o < self.cons.len() {
-            let n = (self.cons.len() - o).min(64 * 1024);
-            let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_CONS_WRITE, self.cons[o..].as_ptr() as u64, n as u64);
-            o += n;
-        }
         for (id, r) in self.completes {
             let _ = sys::lx_complete(id, r);
         }
-        for (group, who, sig) in self.signals {
-            let op = if group { LX_TTY_SIGGRP } else { LX_TTY_SIGPROC };
-            let _ = sys::lx_obj(LX_OBJ_TTY, op, who, sig as u64);
+        for (group, who, sid, sig) in self.signals {
+            if group {
+                let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_SIGGRP, (who & 0xFFFF_FFFF) | sid << 32, sig as u64);
+            } else {
+                let _ = sys::lx_obj(LX_OBJ_TTY, LX_TTY_SIGPROC, who, sig as u64);
+            }
         }
         flush();
     }
@@ -440,7 +444,7 @@ fn kcall(cx: &Cx) -> Answer {
         },
         LX_TTY_K_IOCTL => {
             let mem = CxMem(cx);
-            (with(|t, g| t.cons_ioctl(a[1], a[2], &mem, g)), 0)
+            (with(|t, g| t.cons_ioctl(a[1], a[2], &who, &mem, g)), 0)
         }
         LX_TTY_K_STAT => {
             let r = TTYS.lock().stat(a[1] as u32);
@@ -451,7 +455,7 @@ fn kcall(cx: &Cx) -> Answer {
         }
         LX_TTY_K_SETATTR => {
             let opt = |v: u64| if v == u64::MAX { None } else { Some(v as u32) };
-            (TTYS.lock().setattr(a[1] as u32, cx.c.euid, opt(a[2]), opt(a[3]), opt(a[4])), 0)
+            (TTYS.lock().setattr(a[1] as u32, cx.c.euid, opt(a[2]), opt(a[3]), opt(a[4]), &|g| cx.in_group(g)), 0)
         }
         LX_TTY_K_HANGUP => match with(|t, g| t.hangup(a[1], g)) {
             Some((fg, leader)) => (((fg & 0xFFFF_FFFF) | leader << 32) as i64, 0),
@@ -494,7 +498,13 @@ fn open(cx: &Cx, rdev: u64, flags: u64, who: &Caller) -> i64 {
         },
         (136..=143, 0..=255) => {
             let index = (((major - 136) << 8) | (minor & 0xFF)) as u32;
-            match with(|t, g| t.open_slave(index, slot, flags & O_NOCTTY != 0, who, g)) {
+            // (the access the open asks for: O_RDONLY 4, O_WRONLY 2, O_RDWR 6)
+            let want = match flags & 3 {
+                0 => 4,
+                1 => 2,
+                _ => 6,
+            };
+            match with(|t, g| t.open_slave(index, slot, flags & O_NOCTTY != 0, want, who, &|gid| cx.in_group(gid), g)) {
                 Ok(node) => install_slave(cx, slot, index, node, flags),
                 Err(e) => {
                     svcrt::objs::free(slot);

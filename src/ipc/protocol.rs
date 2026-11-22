@@ -2208,9 +2208,10 @@ pub const LX_TTY_SESS: u64 = 4;
 /// `(pgid, sid)`: 0 if process group `pgid` has a member in session `sid`, 1 if its members
 /// are in another session, `-ESRCH` if it has none.
 pub const LX_TTY_PGRP_IN: u64 = 5;
-/// `(pgid, sig)`: posts `sig` to every process of group `pgid`; how many there were.
+/// `(pgid | sid << 32, sig)`: posts terminal signal `sig` (HUP, INT, QUIT, CONT, TSTP, TTIN,
+/// TTOU, WINCH) to the members of group `pgid` in session `sid`; how many (`-ESRCH`: none).
 pub const LX_TTY_SIGGRP: u64 = 6;
-/// `(pid, sig)`: posts `sig` to process `pid` (a session leader's hang-up).
+/// `(pid, sig)`: posts `SIGHUP` or `SIGCONT` to `pid` if it leads its session (a hang-up).
 pub const LX_TTY_SIGPROC: u64 = 7;
 
 /// The console's state at the head of an [`LX_TTY_CONS_WAIT`] buffer.

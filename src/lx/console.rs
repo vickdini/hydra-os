@@ -101,6 +101,29 @@ pub fn unpack_hangup(v: i64) -> (u64, u64) {
     (v & 0xFFFF_FFFF, v >> 32)
 }
 
+/// The signals tty-server may post to a process group: the terminal's own (`SIGHUP`,
+/// `SIGINT`, `SIGQUIT`, `SIGCONT`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGWINCH`). The kernel
+/// refuses any other, so a confused or compromised tty-server cannot `SIGKILL` anyone.
+pub fn tty_group_signal(sig: u64) -> bool {
+    matches!(sig, 1 | 2 | 3 | 18 | 20 | 21 | 22 | 28)
+}
+
+/// The signals tty-server may post to a session leader (a hang-up: `SIGHUP`, `SIGCONT`).
+pub fn tty_leader_signal(sig: u64) -> bool {
+    matches!(sig, 1 | 18)
+}
+
+/// While tty-server is down: the signal a console key still sends to the program that owns
+/// the console (Ctrl+C, Ctrl+\, Ctrl+Z), so a stuck program can be stopped.
+pub fn fallback_signal(printable: Option<char>) -> Option<u32> {
+    match printable {
+        Some('\u{3}') => Some(2),
+        Some('\u{1c}') => Some(3),
+        Some('\u{1a}') => Some(20),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "uefi")]
 pub use kernel::*;
 
@@ -109,6 +132,10 @@ pub use kernel::*;
 pub fn forwarded() -> bool {
     false
 }
+
+/// The host builds: the in-kernel copy's pump (see the kernel's `trap_pump`).
+#[cfg(not(target_os = "uefi"))]
+pub fn trap_pump() {}
 
 /// See the kernel's [`ctl`](kernel::ctl): the host builds have no tty-server (`-EPERM`).
 #[cfg(not(target_os = "uefi"))]
@@ -157,6 +184,38 @@ mod kernel {
         !super::super::all_kernel() && svc::mode(LXS_TTY) == svc::SvcMode::Forward && svc::endpoint_of(LXS_TTY) == ENDPOINT_TTY_SERVER
     }
 
+    /// Whether a Linux session holds the console (for the trap path: one load).
+    static ATTACHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    /// On every return to user mode (`arch/idt.rs`): the in-kernel copy's pump when the
+    /// terminals are not forwarded; when they are and tty-server is down while a Linux program
+    /// owns the console, Ctrl+C, Ctrl+\ and Ctrl+Z still signal that program (other keys are
+    /// dropped: its reads fail meanwhile), so the console is never wedged by the service.
+    #[inline]
+    pub fn trap_pump() {
+        if !forwarded() {
+            crate::compat::linux::tty::pump();
+            return;
+        }
+        if !ATTACHED.load(core::sync::atomic::Ordering::Acquire) || online() {
+            return;
+        }
+        let Some((sid, pgrp)) = STATE.try_lock().map(|s| (s.sid, s.pgrp)) else { return };
+        if sid == 0 {
+            return;
+        }
+        while let Some(k) = crate::console::read_key() {
+            let printable = match k {
+                uefi::proto::console::text::Key::Printable(c) => Some(char::from(c)),
+                _ => None,
+            };
+            if let Some(sig) = super::fallback_signal(printable) {
+                crate::compat::linux::tty::out_raw(b"^C\r\n");
+                crate::compat::linux::proc::post_group(pgrp, sig);
+            }
+        }
+    }
+
     /// Whether tty-server serves now.
     pub fn online() -> bool {
         svc::online(LXS_TTY)
@@ -171,6 +230,7 @@ mod kernel {
             s.pgrp = pgrp;
             s.ready = false;
         });
+        ATTACHED.store(sid != 0, core::sync::atomic::Ordering::Release);
         crate::compat::linux::tty::INPUT_WQ.wake_all();
     }
 
@@ -230,6 +290,9 @@ mod kernel {
         }
         let (g, sp) = attach_args();
         let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);
+        if r == ENOSYS {
+            return EIO; // (tty-server went away meanwhile)
+        }
         if r == LX_TTY_BGREAD {
             // A background process reading the terminal is stopped with SIGTTIN (EIO if it
             // ignores or blocks that signal), as on Linux
@@ -249,15 +312,23 @@ mod kernel {
         if len == 0 {
             return 0;
         }
+        let print = || match crate::compat::linux::vfs::copy_in(buf, len) {
+            Ok(d) => crate::compat::linux::tty::write_kernel(&d) as i64,
+            Err(e) => e,
+        };
         if !online() {
             // tty-server is gone (or not started yet): the console itself still prints
-            return match crate::compat::linux::vfs::copy_in(buf, len) {
-                Ok(d) => crate::compat::linux::tty::write_kernel(&d) as i64,
-                Err(e) => e,
-            };
+            return print();
         }
         let (g, sp) = attach_args();
-        kcall([LX_TTY_K_WRITE, buf, len as u64, 0, g, sp], 0)
+        match kcall([LX_TTY_K_WRITE, buf, len as u64, 0, g, sp], 0) {
+            // (tty-server went away meanwhile: the console prints it)
+            r @ (ENOSYS | EIO) if !online() => {
+                let _ = r;
+                print()
+            }
+            r => r,
+        }
     }
 
     /// A terminal `ioctl` on the console (the VT requests stay the kernel's: one text
@@ -270,7 +341,10 @@ mod kernel {
             return crate::compat::linux::tty::ioctl_kernel(request, arg);
         }
         let (g, sp) = attach_args();
-        kcall([LX_TTY_K_IOCTL, request, arg, 0, g, sp], 0)
+        match kcall([LX_TTY_K_IOCTL, request, arg, 0, g, sp], 0) {
+            ENOSYS if !online() => crate::compat::linux::tty::ioctl_kernel(request, arg),
+            r => r,
+        }
     }
 
     /// Opens a terminal path (`/dev/ptmx`, `/dev/pts/N`, `/dev/tty`) as tty-server's object.
@@ -397,7 +471,7 @@ mod kernel {
     /// `SYS_LX_OBJ` op [`LX_OBJ_TTY`] from host `h`: tty-server's console and process
     /// identity primitives (sub-op `a`).
     pub fn ctl(h: SvcId, a: u64, b: u64, c: u64) -> i64 {
-        if h != svc::host_of(LXS_TTY) || h == 0 {
+        if h != svc::host_of(LXS_TTY) || h == 0 || !forwarded() {
             return EPERM;
         }
         use crate::compat::linux::proc;
@@ -449,16 +523,28 @@ mod kernel {
                 }
             }
             LX_TTY_SIGGRP => {
-                if !(1..=64).contains(&c) || b == 0 {
+                // `b` = group | session << 32: only the group's members in that session (the
+                // terminal's), only terminal signals; tty-server cannot reach anyone else
+                let (pgid, sid) = (b & 0xFFFF_FFFF, b >> 32);
+                if !super::tty_group_signal(c) || pgid == 0 || sid == 0 {
                     return EINVAL;
                 }
-                proc::post_group(b, c as u32) as i64
+                let members: alloc::vec::Vec<u64> = proc::PROCS.lock().values().filter(|p| p.pgid == pgid && p.sid == sid && !p.zombie).map(|p| p.pid).collect();
+                if members.is_empty() {
+                    return -3;
+                }
+                for &pid in &members {
+                    proc::post_process(pid, c as u32);
+                }
+                members.len() as i64
             }
             LX_TTY_SIGPROC => {
-                if !(1..=64).contains(&c) || b == 0 {
+                // A session leader's hang-up only: `SIGHUP`/`SIGCONT` to a process that leads
+                // its session (a reused pid that does not is refused)
+                if !super::tty_leader_signal(c) || b == 0 {
                     return EINVAL;
                 }
-                if !proc::process_exists(b) {
+                if proc::session_of(b).map(|(sid, _)| sid) != Some(b) {
                     return -3;
                 }
                 proc::post_process(b, c as u32);

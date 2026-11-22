@@ -903,6 +903,10 @@ pub mod lx {
         pub fn forwarded() -> bool {
             false
         }
+        /// Not forwarded: the in-kernel copy's pump, as the kernel's `trap_pump` does.
+        pub fn trap_pump() {
+            crate::compat::linux::tty::pump();
+        }
     }
     use crate::arch::syscall::SyscallFrame;
     use crate::stubs::ans;
