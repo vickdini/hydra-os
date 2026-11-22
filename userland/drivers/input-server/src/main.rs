@@ -75,9 +75,19 @@ struct File {
 struct State {
     tr: Translator,
     files: BTreeMap<u32, File>,
+    /// Per device: the file that grabbed it (`EVIOCGRAB`), the only one that gets its events.
+    grab: [Option<u32>; xlate::DEVICES],
+    /// The ring's drop count already reported (`SYN_DROPPED`).
+    drops: u64,
+    /// The translator state last written to the kept state (what is held).
+    saved: [u8; xlate::SAVED_LEN],
 }
 
-static STATE: spin::Mutex<State> = spin::Mutex::new(State { tr: Translator::new(), files: BTreeMap::new() });
+static STATE: spin::Mutex<State> =
+    spin::Mutex::new(State { tr: Translator::new(), files: BTreeMap::new(), grab: [None; xlate::DEVICES], drops: u64::MAX, saved: [0; xlate::SAVED_LEN] });
+/// Serializes whole pumps, the delivery of completed reads included (two reads of one
+/// descriptor completed by two pumps keep their order).
+static PUMP: spin::Mutex<()> = spin::Mutex::new(());
 /// Where the ring is mapped.
 static RING: AtomicU64 = AtomicU64::new(0);
 /// Requests a signal interrupted before their read was waiting (the interrupt note can be
@@ -86,7 +96,8 @@ static INTERRUPTED: spin::Mutex<Vec<u64>> = spin::Mutex::new(Vec::new());
 /// Records translated since start.
 static RECORDS: AtomicU64 = AtomicU64::new(0);
 
-/// The kept-state area: record 0 lists the revoked files' slots (u32 each).
+/// The kept-state area: record 0 lists the revoked files' slots (u32 each); record 1 holds
+/// the translator's state (what is held: `Translator::save`).
 static KEPT: spin::Mutex<Option<hydra_rt::kept::Kept>> = spin::Mutex::new(None);
 const KEPT_LAYOUT: u32 = 1;
 const KEPT_REC: usize = 512;
@@ -193,8 +204,9 @@ fn pump() {
     if !ring.pending() {
         return;
     }
+    let _p = PUMP.lock();
     let mut done: Vec<(u64, u64, Vec<u8>)> = Vec::new();
-    {
+    let save = {
         let mut st = STATE.lock();
         let st = &mut *st;
         let mut out = xlate::per_dev();
@@ -204,16 +216,39 @@ fn pump() {
             st.tr.feed(&r, &mut out)
         });
         RECORDS.fetch_add(n as u64, Ordering::Relaxed);
-        for (slot, f) in st.files.iter_mut() {
-            if f.revoked || out[f.dev].is_empty() {
-                continue;
-            }
-            f.queue.extend(&out[f.dev], now);
-            complete_reads(f, &mut done);
-            objs::set(*slot, if f.queue.is_empty() { 0 } else { READABLE }, 0);
+        // Records the kernel had to drop (a full ring): clients resynchronize
+        let drops = ring.counters().2;
+        if st.drops != u64::MAX && drops != st.drops {
+            xlate::mark_dropped(&mut out, now);
+        }
+        st.drops = drops;
+        deliver(st, &out, now, &mut done);
+        // What is held, for a restarted instance (only when it changed)
+        let cur = st.tr.save();
+        (cur[..99] != st.saved[..99]).then(|| {
+            st.saved = cur;
+            cur
+        })
+    };
+    if let Some(b) = save {
+        if let Some(k) = KEPT.lock().as_mut() {
+            k.put(1, &b);
         }
     }
     finish(done);
+}
+
+/// Appends the events in `out` to the files of their devices (a grabbed device's to its
+/// grabber only), completes the reads that can be, sets readiness.
+fn deliver(st: &mut State, out: &xlate::PerDev, now: u64, done: &mut Vec<(u64, u64, Vec<u8>)>) {
+    for (slot, f) in st.files.iter_mut() {
+        if f.revoked || out[f.dev].is_empty() || !xlate::receives(st.grab[f.dev], *slot) {
+            continue;
+        }
+        f.queue.extend(&out[f.dev], now);
+        complete_reads(f, done);
+        objs::set(*slot, if f.queue.is_empty() { 0 } else { READABLE }, 0);
+    }
 }
 
 /// Hands queued events to `f`'s waiting reads (collected in `done`: request, buffer, bytes).
@@ -247,7 +282,15 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     match kind {
         LX_NOTE_CLOSE if b == LX_OBJ_KIND_EVDEV as u64 => {
             let slot = a as u32;
-            let f = STATE.lock().files.remove(&slot);
+            let f = {
+                let mut st = STATE.lock();
+                for g in st.grab.iter_mut() {
+                    if *g == Some(slot) {
+                        *g = None;
+                    }
+                }
+                st.files.remove(&slot)
+            };
             // (only a slot this instance holds: a note about an old instance's object must
             // not free a slot that was given out again)
             if let Some(f) = f {
@@ -404,6 +447,17 @@ fn ioctl(cx: &Cx) -> i64 {
                 0
             }
         }
+        xlate::Answer::Grab => {
+            let mut st = STATE.lock();
+            let Some(dev) = st.files.get(&slot).map(|f| f.dev) else { return EBADF };
+            match xlate::grab(st.grab[dev], slot, arg != 0) {
+                Ok(g) => {
+                    st.grab[dev] = g;
+                    0
+                }
+                Err(e) => e,
+            }
+        }
         xlate::Answer::Revoke => {
             // EVIOCREVOKE: the file stops working for good (logind on a session switch)
             let reads = {
@@ -411,9 +465,13 @@ fn ioctl(cx: &Cx) -> i64 {
                 let Some(f) = st.files.get_mut(&slot) else { return EBADF };
                 f.revoked = true;
                 f.queue.clear();
+                let (dev, reads) = (f.dev, core::mem::take(&mut f.reads));
+                if st.grab[dev] == Some(slot) {
+                    st.grab[dev] = None;
+                }
                 objs::set(slot, GONE, 0);
                 kept_revoked(slot, true);
-                core::mem::take(&mut f.reads)
+                reads
             };
             for w in reads {
                 let _ = sys::lx_complete(w.id, ENODEV);
@@ -520,6 +578,21 @@ fn adopt_files() -> usize {
         } else {
             let _ = sys::lx_svc_dead(o.slot);
         }
+    }
+    // What was held when the old instance died: the adopted files see it let go (the old
+    // instance's queued events are lost; a held key must not stay held in the client)
+    let saved = KEPT.lock().as_ref().and_then(|k| k.get(1).map(|b| b.to_vec()));
+    if let Some(t) = saved.as_deref().and_then(Translator::restore) {
+        st.tr = t;
+        if st.tr.any_held() {
+            let now = sys::uptime_ticks() * 10_000_000;
+            let mut out = xlate::per_dev();
+            st.tr.release_all(&mut out, now);
+            let mut done = Vec::new();
+            deliver(&mut st, &out, now, &mut done);
+            println!("[input-server] released what was held at the crash ({} events)", out.iter().map(|q| q.len()).sum::<usize>());
+        }
+        st.saved = st.tr.save();
     }
     drop(st);
     // Forget revoked slots that no longer exist

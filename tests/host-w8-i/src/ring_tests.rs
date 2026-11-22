@@ -163,3 +163,72 @@ fn restarted_consumer_continues_at_tail() {
     assert_eq!(second, vec![3, 4, 5]);
     assert_eq!(r2.counters(), (6, 6, 0));
 }
+
+#[test]
+fn ordinary_records_leave_the_reserve_to_releases() {
+    let mut m = Mem::new();
+    let r = m.view();
+    r.format();
+    let ordinary = (INPUT_RING_RECS - INPUT_RING_RESERVE) as u64;
+    // A flood of key presses and motion: they stop short of the reserve
+    let mut n = 0u64;
+    while r.push_kept(key(0x1E, 0), false) {
+        n += 1;
+    }
+    assert_eq!(n, ordinary);
+    assert_eq!(r.counters().2, 1);
+    // Releases still fit, up to the whole ring
+    let mut k = 0u64;
+    while r.push_kept(key(0x9E, 0), true) {
+        k += 1;
+    }
+    assert_eq!(n + k, INPUT_RING_RECS as u64);
+    assert_eq!(r.counters().2, 2);
+    assert!(!has_room_ordinary(ordinary, 0) && has_room_ordinary(ordinary - 1, 0));
+}
+
+#[test]
+fn what_must_not_be_lost() {
+    let mut held = Held::default();
+    let rel = |b: u8| InputRec { kind: INPUT_REC_REL, buttons: b, x: 3, ..InputRec::default() };
+    let abs = |b: u8| InputRec { kind: INPUT_REC_ABS, buttons: b, x: 3, ..InputRec::default() };
+    assert!(must_keep(&InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() }, &held));
+    assert!(must_keep(&key(0x9E, 0), &held), "a key release");
+    assert!(!must_keep(&key(0x1E, 0), &held), "a key press");
+    assert!(must_keep(&key(0xE0, 0), &held), "a prefix");
+    // The byte after a kept prefix is kept too
+    held.note(&key(0xE0, 0));
+    assert!(held.e0 && must_keep(&key(0x48, 0), &held));
+    held.note(&key(0x48, 0));
+    assert!(!held.e0 && !must_keep(&key(0x48, 0), &held));
+    // Pointer reports: only button changes
+    assert!(!must_keep(&rel(0), &held));
+    assert!(must_keep(&rel(1), &held));
+    held.note(&rel(1));
+    assert_eq!(held.rel_buttons, 1);
+    assert!(!must_keep(&rel(1), &held) && must_keep(&rel(0), &held));
+    assert!(must_keep(&abs(4), &held));
+    held.note(&abs(4));
+    assert!(!must_keep(&abs(4), &held));
+    assert!(!must_keep(&InputRec { kind: 77, ..InputRec::default() }, &held));
+    held.note(&InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() });
+    assert_eq!(held, Held { rel_buttons: 1, abs_buttons: 4, e0: false });
+}
+
+#[test]
+fn the_producer_repairs_a_broken_tail() {
+    let mut m = Mem::new();
+    {
+        let r = m.view();
+        r.format();
+        r.push(key(1, 0));
+    }
+    // A tail ahead of the head (a consumer that wrote garbage): the producer restarts at the
+    // head instead of dropping everything
+    m.set_word(INPUT_RING_TAIL, 1_000_000);
+    let r = m.view();
+    assert!(r.push_kept(key(2, 0), false));
+    let mut got = Vec::new();
+    r.take(|x| got.push(x.code));
+    assert_eq!(got, vec![2]);
+}

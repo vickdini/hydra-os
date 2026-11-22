@@ -236,6 +236,37 @@ impl Translator {
         }
     }
 
+    /// The state worth keeping across a restart of the service (what is held, where the
+    /// absolute pointer is), as [`SAVED_LEN`] bytes: version, keys, buttons, position.
+    pub fn save(&self) -> [u8; SAVED_LEN] {
+        let mut b = [0u8; SAVED_LEN];
+        b[0] = SAVED_VERSION;
+        b[1..97].copy_from_slice(&self.keys);
+        b[97] = self.buttons;
+        b[98] = self.abs_buttons;
+        b[99..101].copy_from_slice(&self.abs_pos.0.to_le_bytes());
+        b[101..103].copy_from_slice(&self.abs_pos.1.to_le_bytes());
+        b
+    }
+
+    /// A translator in the state [`Translator::save`] wrote (`None`: not a saved state).
+    pub fn restore(b: &[u8]) -> Option<Self> {
+        if b.len() < SAVED_LEN || b[0] != SAVED_VERSION {
+            return None;
+        }
+        let mut t = Self::new();
+        t.keys.copy_from_slice(&b[1..97]);
+        t.buttons = b[97] & 7;
+        t.abs_buttons = b[98] & 7;
+        t.abs_pos = (u16::from_le_bytes([b[99], b[100]]), u16::from_le_bytes([b[101], b[102]]));
+        Some(t)
+    }
+
+    /// Whether anything is held (a key or a button).
+    pub fn any_held(&self) -> bool {
+        self.buttons != 0 || self.abs_buttons != 0 || self.keys.iter().any(|&k| k != 0)
+    }
+
     /// `EVIOCGKEY` of device `dev`: the keys (or buttons) held.
     pub fn held(&self, dev: usize) -> [u8; 96] {
         if dev == 0 {
@@ -255,6 +286,19 @@ impl Translator {
 impl Default for Translator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Length of [`Translator::save`]'s record.
+pub const SAVED_LEN: usize = 103;
+/// Its version byte.
+pub const SAVED_VERSION: u8 = 1;
+
+/// Prepends `SYN_DROPPED` (at `t` ns) to every device's batch: records were lost in the
+/// kernel's ring, so clients resynchronize (`EVIOCGKEY`), as after a Linux buffer overrun.
+pub fn mark_dropped(out: &mut PerDev, t: u64) {
+    for q in out.iter_mut() {
+        q.insert(0, event(t, EV_SYN, SYN_DROPPED, 0));
     }
 }
 
@@ -374,6 +418,9 @@ pub enum Answer {
     Val(i64),
     /// `EVIOCREVOKE`: the file stops working for good; return 0.
     Revoke,
+    /// `EVIOCGRAB`: the argument (non-zero: grab, 0: let go) makes the file the device's
+    /// only receiver, or ends that.
+    Grab,
 }
 
 /// The answer to `ioctl(cmd)` on device `dev` (translation state `st`).
@@ -430,10 +477,27 @@ pub fn ioctl(dev: usize, cmd: u64, st: &Translator) -> Answer {
         0x40..=0x7f => Val(EINVAL),
         0x80 | 0x81 => Val(EINVAL),
         0x84 => Out { data: alloc::vec![0; 4], cap: 4, len: false }, // EVIOCGEFFECTS
-        0x90 => Val(0),                                               // EVIOCGRAB
+        0x90 => Grab, // EVIOCGRAB: the caller decides with the argument
         0x91 => Revoke,
         0x92 | 0x93 => Val(0), // EVIOCGMASK / EVIOCSMASK
         0xa0 => Val(0),        // EVIOCSCLOCKID
         _ => Val(EINVAL),
     }
+}
+
+/// `EVIOCGRAB` on the file in slot `slot` of a device grabbed by `current`: `on` grabs
+/// (`EBUSY` when another file holds it), off lets go (`EINVAL` when this file does not
+/// hold it), as Linux's evdev. The device's grabber afterwards.
+pub fn grab(current: Option<u32>, slot: u32, on: bool) -> Result<Option<u32>, i64> {
+    match (current, on) {
+        (Some(g), true) if g != slot => Err(-16),
+        (_, true) => Ok(Some(slot)),
+        (Some(g), false) if g == slot => Ok(None),
+        (_, false) => Err(EINVAL),
+    }
+}
+
+/// Whether the file in slot `slot` gets events of a device grabbed by `grabber`.
+pub fn receives(grabber: Option<u32>, slot: u32) -> bool {
+    grabber.map_or(true, |g| g == slot)
 }

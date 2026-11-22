@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use super::input_ring::RingView;
+use super::input_ring::{must_keep, Held, RingView};
 use super::protocol::{InputRec, INPUT_REC_ABS, INPUT_REC_KEY, INPUT_REC_REL, INPUT_REC_RELEASE, INPUT_RING_BYTES};
 use crate::task::wait::WaitQueue;
 
@@ -13,7 +13,7 @@ use crate::task::wait::WaitQueue;
 pub static INPUT_WQ: WaitQueue = WaitQueue::new();
 static ROUTING: AtomicBool = AtomicBool::new(false);
 static RING: AtomicUsize = AtomicUsize::new(0);
-static PRODUCER: spin::Mutex<()> = spin::Mutex::new(());
+static PRODUCER: spin::Mutex<Held> = spin::Mutex::new(Held { rel_buttons: 0, abs_buttons: 0, e0: false });
 /// Hot-key switches asked for (`(to_session, count)` for the tests).
 pub static SWITCHES: spin::Mutex<Vec<bool>> = spin::Mutex::new(Vec::new());
 /// What `session_hidden` answers.
@@ -43,6 +43,7 @@ pub fn set_routing(on: bool) {
     let was = ROUTING.swap(on, Ordering::AcqRel);
     if was && !on {
         append(InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() });
+        *PRODUCER.lock() = Held::default();
     }
 }
 
@@ -53,8 +54,12 @@ pub fn routing() -> bool {
 fn append(mut r: InputRec) {
     r.time = crate::arch::pit::now_ns();
     let ok = {
-        let _g = PRODUCER.lock();
-        ring().push(r)
+        let mut held = PRODUCER.lock();
+        let ok = ring().push_kept(r, must_keep(&r, &held));
+        if ok {
+            held.note(&r);
+        }
+        ok
     };
     if ok {
         INPUT_WQ.wake_all();

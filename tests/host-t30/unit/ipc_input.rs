@@ -81,21 +81,41 @@ fn routing_off_queues_one_release_record() {
 }
 
 #[test]
-fn a_full_ring_drops_and_counts() {
+fn a_full_ring_keeps_room_for_releases() {
     let _g = serial();
     fresh();
     let (h0, _, d0) = counters();
     set_routing(true);
-    for _ in 0..INPUT_RING_RECS + 10 {
+    let ordinary = INPUT_RING_RECS - INPUT_RING_RESERVE;
+    // Key presses flood the ring: they stop short of the reserve
+    for _ in 0..ordinary + 10 {
         push_scancode(0x10);
     }
-    let (h1, t1, d1) = counters();
-    assert_eq!(h1 - h0, INPUT_RING_RECS as u64);
+    let (h1, _, d1) = counters();
+    assert_eq!(h1 - h0, ordinary as u64);
     assert_eq!(d1 - d0, 10);
-    assert_eq!(h1 - t1, INPUT_RING_RECS as u64);
-    set_routing(false); // (the release record is dropped too: the ring is full)
-    assert_eq!(counters().2 - d0, 11);
-    assert_eq!(waiting().len(), INPUT_RING_RECS);
+    // Releases and button changes still get in
+    push_scancode(0x90);
+    push_mouse(0, 0, 0, 1);
+    push_mouse(4, 4, 0, 1); // (motion only: dropped)
+    assert_eq!(counters().0 - h0, ordinary as u64 + 2);
+    // And the release record when the session loses the keyboard
+    set_routing(false);
+    let v = waiting();
+    assert_eq!(v.len(), ordinary + 3);
+    assert_eq!(v[ordinary].code, 0x90);
+    assert_eq!((v[ordinary + 1].kind, v[ordinary + 1].buttons), (INPUT_REC_REL, 1));
+    assert_eq!(v.last().unwrap().kind, INPUT_REC_RELEASE);
+    // After the release record a pressed button counts as a change again
+    set_routing(true);
+    for _ in 0..ordinary {
+        push_scancode(0x10);
+    }
+    push_mouse(0, 0, 0, 1);
+    let v = waiting();
+    assert_eq!(v.last().map(|r| (r.kind, r.buttons)), Some((INPUT_REC_REL, 1)));
+    set_routing(false);
+    let _ = waiting();
 }
 
 #[test]

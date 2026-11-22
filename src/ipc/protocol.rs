@@ -2191,8 +2191,8 @@ pub const LX_OBJ_INPUT_RING: u64 = 62;
 pub const LX_OBJ_INPUT_CTL: u64 = 63;
 /// Object kind: an open `/dev/input/event*` of the input service (key: its device number).
 pub const LX_OBJ_KIND_EVDEV: u32 = 65;
-/// The raw input ring's size: a header page and a page of records.
-pub const INPUT_RING_BYTES: usize = 8192;
+/// The raw input ring's size: a header page and two pages of records.
+pub const INPUT_RING_BYTES: usize = 12288;
 /// Ring header word (u64, kernel-written): records appended since the ring was made.
 pub const INPUT_RING_HEAD: usize = 0;
 /// Ring header word (u64, consumer-written): records taken.
@@ -2208,7 +2208,10 @@ pub const INPUT_RING_REC_OFF: usize = 4096;
 /// One record's size.
 pub const INPUT_REC_SIZE: usize = 16;
 /// Records in the ring.
-pub const INPUT_RING_RECS: usize = 256;
+pub const INPUT_RING_RECS: usize = 512;
+/// Records at the end of the ring kept for records that must not be lost (key releases,
+/// button changes, the release record): ordinary records are dropped this much earlier.
+pub const INPUT_RING_RESERVE: usize = 64;
 /// Record kind: one set-1 scancode byte (`code`).
 pub const INPUT_REC_KEY: u8 = 1;
 /// Record kind: relative pointer motion (`x`, `y` as i16, right and down), wheel, buttons.

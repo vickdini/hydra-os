@@ -12,7 +12,10 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use super::protocol::{InputRec, INPUT_REC_SIZE, INPUT_RING_DROPS, INPUT_RING_HEAD, INPUT_RING_MAGIC, INPUT_RING_MAGIC_OFF, INPUT_RING_RECS, INPUT_RING_REC_OFF, INPUT_RING_TAIL};
+use super::protocol::{
+    InputRec, INPUT_REC_ABS, INPUT_REC_KEY, INPUT_REC_REL, INPUT_REC_RELEASE, INPUT_REC_SIZE, INPUT_RING_DROPS, INPUT_RING_HEAD, INPUT_RING_MAGIC, INPUT_RING_MAGIC_OFF, INPUT_RING_RECS,
+    INPUT_RING_REC_OFF, INPUT_RING_RESERVE, INPUT_RING_TAIL,
+};
 
 /// A view of a ring's memory.
 #[derive(Clone, Copy)]
@@ -29,6 +32,52 @@ unsafe impl Sync for RingView {}
 #[inline]
 pub fn has_room(head: u64, tail: u64) -> bool {
     head.wrapping_sub(tail) < INPUT_RING_RECS as u64
+}
+
+/// Whether a ring with `head` appended and `tail` taken has room for one more ordinary
+/// record (the last [`INPUT_RING_RESERVE`] slots are kept for records that must not be lost).
+#[inline]
+pub fn has_room_ordinary(head: u64, tail: u64) -> bool {
+    head.wrapping_sub(tail) < (INPUT_RING_RECS - INPUT_RING_RESERVE) as u64
+}
+
+/// The buttons last appended per pointer kind (relative, absolute): what [`must_keep`]
+/// compares a pointer report with. Kept by the producer, under its lock.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Held {
+    /// The relative pointer's buttons last appended.
+    pub rel_buttons: u8,
+    /// The absolute pointer's buttons last appended.
+    pub abs_buttons: u8,
+    /// The last key record appended was an `0xE0` prefix: the byte after it is kept too
+    /// (a prefix without its byte would turn the next key into another one).
+    pub e0: bool,
+}
+
+impl Held {
+    /// `r` was appended: remembers what [`must_keep`] compares with.
+    pub fn note(&mut self, r: &InputRec) {
+        match r.kind {
+            INPUT_REC_KEY => self.e0 = r.code == 0xE0,
+            INPUT_REC_REL => self.rel_buttons = r.buttons,
+            INPUT_REC_ABS => self.abs_buttons = r.buttons,
+            _ => {}
+        }
+    }
+}
+
+/// Whether `r` must not be lost when the ring is nearly full: the release record, a key
+/// release (break code), an `0xE0` prefix (bit 7 set) and the byte that follows it, a
+/// pointer report whose buttons differ from the last one of its kind. Losing those would leave a key or button
+/// held in the session; a lost key press or motion only loses that input.
+pub fn must_keep(r: &InputRec, held: &Held) -> bool {
+    match r.kind {
+        INPUT_REC_RELEASE => true,
+        INPUT_REC_KEY => r.code & 0x80 != 0 || held.e0,
+        INPUT_REC_REL => r.buttons != held.rel_buttons,
+        INPUT_REC_ABS => r.buttons != held.abs_buttons,
+        _ => false,
+    }
 }
 
 /// The byte offset in the ring of record number `n`.
@@ -67,9 +116,22 @@ impl RingView {
     /// Appends `r`; false (and one more drop counted) if the ring is full. Producers are
     /// serialized by the caller.
     pub fn push(&self, r: InputRec) -> bool {
+        self.push_kept(r, true)
+    }
+
+    /// Appends `r` as [`RingView::push`] does, into the reserve only if `important`
+    /// (ordinary records stop [`INPUT_RING_RESERVE`] slots earlier). A tail that is not
+    /// within a ring of the head (a consumer that wrote garbage) is reset to the head
+    /// first, so a broken consumer cannot stop input for good.
+    pub fn push_kept(&self, r: InputRec, important: bool) -> bool {
         let head = self.word(INPUT_RING_HEAD).load(Ordering::Relaxed);
-        let tail = self.word(INPUT_RING_TAIL).load(Ordering::Acquire);
-        if !has_room(head, tail) {
+        let mut tail = self.word(INPUT_RING_TAIL).load(Ordering::Acquire);
+        if head.wrapping_sub(tail) > INPUT_RING_RECS as u64 {
+            tail = head;
+            self.word(INPUT_RING_TAIL).store(tail, Ordering::Release);
+        }
+        let room = if important { has_room(head, tail) } else { has_room_ordinary(head, tail) };
+        if !room {
             self.word(INPUT_RING_DROPS).fetch_add(1, Ordering::Relaxed);
             return false;
         }

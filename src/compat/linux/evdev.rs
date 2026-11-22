@@ -575,8 +575,9 @@ impl CharDevice for EvdevFile {
         if self.revoked.load(Ordering::Relaxed) {
             return 0x0008 | 0x0010;
         }
-        // Raw input not yet translated may hold events for this file
-        if !self.queue.lock().is_empty() || (routing() && ring_pending()) {
+        // Raw input not yet translated may hold events for this file (also the release
+        // record queued as routing went off: wave8 GI)
+        if !self.queue.lock().is_empty() || ring_pending() {
             0x0001
         } else {
             0

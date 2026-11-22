@@ -214,6 +214,10 @@ fn input_is_dropped_when_not_routed() {
     let k = kbd();
     evdev::set_routing(false);
     assert!(!evdev::routing());
+    // wave8 GI: the release record queued as routing went off makes the file readable (its
+    // pollers pump it); nothing was held, so it yields no events
+    assert_eq!(k.poll_events(), 0x1);
+    assert!(drain(&k).is_empty());
     push_scancode(0x1E);
     assert_eq!(k.poll_events(), 0);
     assert!(drain(&k).is_empty());
@@ -225,17 +229,19 @@ fn input_is_dropped_when_not_routed() {
 fn full_ring_drops_new_input() {
     let _g = setup();
     let k = kbd();
-    // wave8 GI: the kernel's input ring holds 256 raw records; the rest is dropped (and
-    // counted) while nobody reads
+    // wave8 GI: the kernel's input ring holds 512 raw records, the last 64 for releases;
+    // the rest is dropped (and counted) while nobody reads
     let (_, _, drops0) = hydra_hosttests_t28::ipc::input::counters();
     for _ in 0..300 {
         push_scancode(0x1E);
         push_scancode(0x9E);
     }
+    // Presses stop short of the reserve (448 records); releases fill it (64 more), and a
+    // release whose press was dropped says nothing
     let evs = drain(&k);
-    assert_eq!(evs.len(), 256 * 3);
+    assert_eq!(evs.len(), 448 * 3);
     let (_, _, drops1) = hydra_hosttests_t28::ipc::input::counters();
-    assert_eq!(drops1 - drops0, 600 - 256);
+    assert_eq!(drops1 - drops0, 600 - 512);
 }
 
 #[test]
@@ -447,4 +453,18 @@ fn device_list_and_identities() {
     assert_eq!(phys, "isa0060/serio1/input1");
     assert_eq!(id, [0x11, 2, 0x13, 0]);
     assert_eq!(evdev::device_info(1).0, "ImPS/2 Generic Wheel Mouse");
+}
+
+#[test]
+fn routing_off_releases_held_keys_to_pollers() {
+    // wave8 GI (review): with the kernel copy, a held key is released once routing goes off,
+    // and a poller sees it without a blocking read
+    let _g = setup();
+    let k = kbd();
+    push_scancode(0x1D); // Ctrl down
+    assert_eq!(drain(&k), vec![ev(4, 4, 0x1D), ev(1, 29, 1), ev(0, 0, 0)]);
+    evdev::set_routing(false);
+    assert_eq!(k.poll_events(), 0x1);
+    assert_eq!(drain(&k), vec![ev(1, 29, 0), ev(0, 0, 0)]);
+    evdev::set_routing(true);
 }

@@ -30,7 +30,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::ipc::input_ring::RingView;
+use crate::ipc::input_ring::{must_keep, Held, RingView};
 use crate::ipc::protocol::{
     InputRec, ENDPOINT_INPUT_SERVER, INPUT_REC_ABS, INPUT_REC_KEY, INPUT_REC_REL, INPUT_REC_RELEASE, INPUT_RING_BYTES, LXS_INPUT, LX_OBJ_INPUT_CTL, LX_OBJ_INPUT_RING, NOTIFY_INPUT,
 };
@@ -51,8 +51,9 @@ static ROUTING: AtomicBool = AtomicBool::new(false);
 static RING: AtomicU64 = AtomicU64::new(0);
 /// The ring as a memory object (handed to the service).
 static RING_OBJ: Mutex<Option<Arc<crate::memory::vm::MemObject>>> = Mutex::new(None);
-/// Serializes producers (taken with interrupts off).
-static PRODUCER: Mutex<()> = Mutex::new(());
+/// Serializes producers (taken with interrupts off); holds what the producer last appended
+/// (which records must not be lost, `input_ring::must_keep`).
+static PRODUCER: Mutex<Held> = Mutex::new(Held { rel_buttons: 0, abs_buttons: 0, e0: false });
 /// Serializes the kernel copy's consumers ([`drain`]).
 static CONSUMER: Mutex<()> = Mutex::new(());
 
@@ -97,9 +98,14 @@ pub fn set_routing(on: bool) {
     // no key goes down in a session after its release record)
     x86_64::instructions::interrupts::without_interrupts(|| {
         let release = {
-            let _g = PRODUCER.lock();
+            let mut held = PRODUCER.lock();
             let was = ROUTING.swap(on, Ordering::AcqRel);
-            was && !on && ring().is_some_and(|r| r.push(stamp(InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() })))
+            let release = was && !on && ring().is_some_and(|r| r.push(stamp(InputRec { kind: INPUT_REC_RELEASE, ..InputRec::default() })));
+            if release {
+                // The consumer lets every button go: compare later reports with nothing held
+                *held = Held::default();
+            }
+            release
         };
         if release {
             wake();
@@ -139,11 +145,14 @@ fn push(r: InputRec) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let Some(ring) = ring() else { return };
         {
-            let _g = PRODUCER.lock();
+            let mut held = PRODUCER.lock();
             if !routing() {
                 return;
             }
-            ring.push(stamp(r));
+            // Ordinary records stop short of the reserve; releases and button changes use it
+            if ring.push_kept(stamp(r), must_keep(&r, &held)) {
+                held.note(&r);
+            }
         }
         wake();
     });
@@ -214,7 +223,8 @@ pub fn obj_op(h: crate::ipc::protocol::SvcId, op: u64, a: u64, _b: u64, _c: u64)
 const OPEN_WAIT_MS: u64 = 5_000;
 
 /// `open` of a character device of major 13 while input is forwarded: the input service's
-/// (waiting up to [`OPEN_WAIT_MS`] for one that is restarting), never the kernel copy's.
+/// (waiting up to [`OPEN_WAIT_MS`] for one that is restarting or not started yet; at once
+/// `ENODEV` for one the restart ladder gave up), never the kernel copy's.
 pub fn open(rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
     let deadline = crate::arch::pit::ticks() + OPEN_WAIT_MS / 10;
     loop {
@@ -224,7 +234,8 @@ pub fn open(rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chard
         if crate::compat::linux::proc::signal_pending() {
             return Err(EINTR);
         }
-        if crate::arch::pit::ticks() >= deadline {
+        // Given up by the restart ladder: no new instance is coming (no 5 s wait per open)
+        if crate::lx::restart::down(LXS_INPUT) || crate::arch::pit::ticks() >= deadline {
             return Err(ENODEV);
         }
         crate::task::wait::wait(Some(crate::arch::pit::ticks() + 5));

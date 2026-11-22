@@ -236,9 +236,55 @@ fn ioctl_answers() {
     assert_eq!(ioctl(1, ioc(2, 0x40, 24), &t), Answer::Val(-22));
     assert_eq!(ioctl(0, ioc(1, 0x80, 48), &t), Answer::Val(-22));
     assert_eq!(ioctl(0, ioc(2, 0x84, 4), &t), Answer::Out { data: vec![0; 4], cap: 4, len: false });
-    assert_eq!(ioctl(0, ioc(1, 0x90, 4), &t), Answer::Val(0));
+    assert_eq!(ioctl(0, ioc(1, 0x90, 4), &t), Answer::Grab);
     assert_eq!(ioctl(0, ioc(1, 0x91, 4), &t), Answer::Revoke);
     assert_eq!(ioctl(0, ioc(1, 0x93, 16), &t), Answer::Val(0));
     assert_eq!(ioctl(0, ioc(1, 0xa0, 4), &t), Answer::Val(0));
     assert_eq!(ioctl(0, ioc(1, 0xff, 4), &t), Answer::Val(-22));
+}
+
+#[test]
+fn held_state_survives_save_and_restore() {
+    let mut t = Translator::new();
+    feed(&mut t, &[sc(0x1D), sc(0xE0), sc(0x38), rel(0, 0, 0, 2), abs(10, 20, 0, 1)]);
+    assert!(t.any_held());
+    let b = t.save();
+    assert_eq!(b.len(), SAVED_LEN);
+    let mut r = Translator::restore(&b).expect("a saved state");
+    assert_eq!(r.keys, t.keys);
+    assert_eq!((r.buttons, r.abs_buttons, r.abs_pos), (2, 1, (10, 20)));
+    assert!(!r.e0);
+    // The restarted instance lets go of what was held
+    let mut out = per_dev();
+    r.release_all(&mut out, 5);
+    assert_eq!(tcv(&out[0]), vec![(EV_KEY, 29, 0), (EV_KEY, 100, 0), (EV_SYN, SYN_REPORT, 0)]);
+    assert_eq!(tcv(&out[1]), vec![(EV_KEY, BTN_RIGHT, 0), (EV_SYN, SYN_REPORT, 0)]);
+    assert_eq!(tcv(&out[2]), vec![(EV_KEY, BTN_LEFT, 0), (EV_SYN, SYN_REPORT, 0)]);
+    assert!(!r.any_held());
+    // Not a saved state
+    assert!(Translator::restore(&[0u8; SAVED_LEN]).is_none());
+    assert!(Translator::restore(&b[..10]).is_none());
+    assert!(!Translator::new().any_held());
+}
+
+#[test]
+fn dropped_records_mark_every_device() {
+    let mut out = per_dev();
+    out[1].push(event(1, EV_REL, REL_X, 1));
+    mark_dropped(&mut out, 9);
+    for q in out.iter() {
+        assert_eq!(tcv(&q[..1]), vec![(EV_SYN, SYN_DROPPED, 0)]);
+    }
+    assert_eq!(tcv(&out[1])[1], (EV_REL, REL_X, 1));
+}
+
+#[test]
+fn grabs_as_linux() {
+    assert_eq!(grab(None, 3, true), Ok(Some(3)));
+    assert_eq!(grab(Some(3), 3, true), Ok(Some(3)));
+    assert_eq!(grab(Some(4), 3, true), Err(-16));
+    assert_eq!(grab(Some(3), 3, false), Ok(None));
+    assert_eq!(grab(Some(4), 3, false), Err(-22));
+    assert_eq!(grab(None, 3, false), Err(-22));
+    assert!(receives(None, 1) && receives(Some(1), 1) && !receives(Some(2), 1));
 }
