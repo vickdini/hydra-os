@@ -1380,6 +1380,14 @@ fn update(dir: usize, s: &mut Stream) -> Action {
 }
 
 /// Starts or stops direction `dir`'s DMA.
+/// wave8 GS: stops both directions' DMA (the sound service died and is not back: its stream
+/// must not run on for ever).
+pub fn stop_streams() {
+    for dir in 0..2 {
+        let _ = trigger(dir, false);
+    }
+}
+
 fn trigger(dir: usize, run: bool) -> Result<(), i64> {
     match service::call(ENDPOINT_SOUND_DEV, Message::with_args(MSG_SND_TRIGGER, [dir as u64, run as u64, 0, 0]), service::CALL_TIMEOUT_TICKS) {
         Ok(m) if m.label == MSG_SND_REPLY && m.args[0] == 0 => Ok(()),
@@ -1390,11 +1398,22 @@ fn trigger(dir: usize, run: bool) -> Result<(), i64> {
 
 /// Points direction `dir`'s stream at its ring with `hw`'s layout; the position slot.
 fn program(dir: usize, hw: &HwSetup) -> Result<usize, i64> {
+    program_stream(dir, hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes, hw.hda_format())
+}
+
+/// wave8 GS: `MSG_SND_SETUP` for direction `dir` with `bytes` of its ring, periods of
+/// `period` bytes and format word `fmt`, always on the kernel's own ring and position page
+/// (the sound service asks for it through `LX_SND_SETUP`: it never names a physical
+/// address, so the controller's DMA stays on the kernel's buffers with or without an IOMMU).
+pub fn program_stream(dir: usize, bytes: u64, period: u64, fmt: u64) -> Result<usize, i64> {
     let buf = ring(dir).ok_or(ENODEV)?;
     let pos = posbuf().ok_or(ENODEV)?;
+    if !crate::ipc::sound_page::setup_ok(dir as u64, bytes, period, fmt, buf.pages * 4096) {
+        return Err(EINVAL);
+    }
     let _w = service::hold_window(ENDPOINT_SOUND_DEV);
     let w = service::window(ENDPOINT_SOUND_DEV).ok_or(ENODEV)?;
-    let words = [dir as u64, buf.base, hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes, hw.hda_format(), pos.base];
+    let words = [dir as u64, buf.base, bytes, period, fmt, pos.base];
     for (i, v) in words.iter().enumerate() {
         w[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
     }

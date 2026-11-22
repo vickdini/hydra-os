@@ -8,6 +8,13 @@ use alloc::string::String;
 
 use crate::ipc::protocol::SndStatus;
 
+/// Whether a stream set-up the sound service asks for (`LX_SND_SETUP`) is one the sound
+/// driver may be given: direction 0 or 1, `bytes` within the kernel's ring of `ring_bytes`,
+/// whole periods of a multiple of 128 bytes, 2 to 256 of them, a 16-bit format word.
+pub fn setup_ok(dir: u64, bytes: u64, period: u64, fmt: u64, ring_bytes: u64) -> bool {
+    dir < 2 && bytes > 0 && bytes <= ring_bytes && period >= 128 && period % 128 == 0 && bytes % period == 0 && (2..=256).contains(&(bytes / period)) && fmt <= 0xFFFF
+}
+
 /// `SNDRV_PCM_ACCESS_MMAP_INTERLEAVED`.
 const ACCESS_MMAP_INTERLEAVED: u32 = 0;
 

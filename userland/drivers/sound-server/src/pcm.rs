@@ -216,7 +216,10 @@ impl Stream {
         let state = w(2) as u32;
         if w(3) != 0 {
             let hw = HwSetup { access: w(4) as u32, rate: w(5) as u32, period_size: w(6), periods: w(7), buffer_size: w(8), frame_bytes: w(9) };
-            if hw.buffer_size == 0 || hw.frame_bytes == 0 || hw.buffer_size * hw.frame_bytes > BUF_BYTES as u64 || hw.rate == 0 {
+            // (checked products: the record may be garbage)
+            let fits = hw.buffer_size.checked_mul(hw.frame_bytes).is_some_and(|b| b <= BUF_BYTES as u64);
+            let periods_ok = hw.period_size.checked_mul(hw.periods) == Some(hw.buffer_size);
+            if hw.buffer_size == 0 || hw.frame_bytes == 0 || !fits || !periods_ok || hw.rate == 0 || w(19) >= 512 {
                 return None;
             }
             s.hw = Some(hw);

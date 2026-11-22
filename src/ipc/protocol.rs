@@ -614,6 +614,11 @@ pub const LX_SND_DRVGEN: u64 = 3;
 /// [`LX_OBJ_SND`]: `(LX_SND_NOW, which)`: the kernel's clock in ns: `which` 0 the monotonic
 /// clock (`CLOCK_MONOTONIC`, the PCM timestamps), 1 the wall clock's offset from it.
 pub const LX_SND_NOW: u64 = 4;
+/// [`LX_OBJ_SND`]: `(LX_SND_SETUP, dir | format << 8, bytes | period << 32)`: the kernel programs
+/// direction `dir`'s stream on its own ring and position page (`MSG_SND_SETUP`, after
+/// checking the sizes); the stream's position slot. The service never names a physical
+/// address.
+pub const LX_SND_SETUP: u64 = 5;
 /// Kind of the sound service's control device objects (`controlC0`).
 pub const LX_OBJ_KIND_SND_CTL: u32 = 64;
 /// Kind of the sound service's PCM device objects (`pcmC0D0p`, `pcmC0D0c`).

@@ -25,7 +25,7 @@ use alloc::sync::Arc;
 
 
 use crate::ipc::protocol::{
-    LxSndInfo, SndStatus, ENDPOINT_LX_SOUND, ENDPOINT_SOUND_DEV, LXS_SOUND, LX_SND_BOOST, LX_SND_DRVGEN, LX_SND_GET, LX_SND_NOW, LX_SND_UNBOOST, SND_DESC_MAX, SND_RING_BYTES, SND_STATUS_STRIDE,
+    LxSndInfo, SndStatus, ENDPOINT_LX_SOUND, ENDPOINT_SOUND_DEV, LXS_SOUND, LX_SND_BOOST, LX_SND_DRVGEN, LX_SND_GET, LX_SND_NOW, LX_SND_SETUP, LX_SND_UNBOOST, SND_DESC_MAX, SND_RING_BYTES, SND_STATUS_STRIDE,
 };
 use crate::ipc::service::ContiguousFrames;
 use crate::memory::vm::MemObject;
@@ -126,8 +126,9 @@ fn fill_info(info: &mut LxSndInfo, give: &mut dyn FnMut(&Arc<MemObject>) -> Resu
     info.pos_handle = h[0];
     info.status_handle = h[1];
     info.ring_handle = [h[2], h[3]];
-    info.pos_phys = b.pos.base;
-    info.ring_phys = [b.rings[0].as_ref().map_or(0, |r| r.base), b.rings[1].as_ref().map_or(0, |r| r.base)];
+    // (no physical addresses: the kernel programs the controller, `LX_SND_SETUP`)
+    info.pos_phys = 0;
+    info.ring_phys = [0; 2];
     info.ring_bytes = SND_RING_BYTES;
     if let Some(c) = crate::compat::linux::snd::card() {
         info.vendor = c.0;
@@ -149,6 +150,7 @@ pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
     }
     match op {
         LX_SND_GET => {
+            start_guard();
             let mut info = LxSndInfo::ZERO;
             let r = fill_info(&mut info, &mut |o| crate::lx::mem::give(ENDPOINT_LX_SOUND, o.clone()));
             if let Err(e) = r {
@@ -172,7 +174,46 @@ pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
             1 => crate::compat::linux::snd::wall_base_ns(),
             _ => EINVAL,
         },
+        LX_SND_SETUP => {
+            let (dir, fmt, bytes, period) = (x & 0xFF, x >> 8, y & 0xFFFF_FFFF, y >> 32);
+            match crate::compat::linux::snd::program_stream(dir as usize, bytes, period, fmt) {
+                Ok(slot) => slot as i64,
+                Err(e) => e,
+            }
+        }
         _ => EINVAL,
+    }
+}
+
+/// The service died: the guard task stops the streams unless a new instance is back.
+static STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static STOP_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
+static GUARD: spin::Once<()> = spin::Once::new();
+
+/// Starts the guard task once (the service's first `LX_SND_GET`).
+fn start_guard() {
+    GUARD.call_once(|| {
+        crate::task::spawn("snd-guard", guard_task, crate::task::TaskPriority::Normal);
+    });
+}
+
+/// After the sound service went away: if no new instance serves within a second, the
+/// controller's streams are stopped (a service the ladder gave up on must not leave the
+/// card looping silence and writing the capture ring for ever). A new instance stops them
+/// itself before it goes online.
+fn guard_task() {
+    loop {
+        STOP_WQ.register();
+        if STOP.swap(false, core::sync::atomic::Ordering::AcqRel) {
+            STOP_WQ.unregister();
+            crate::task::wait::wait(Some(crate::arch::pit::ticks() + 100));
+            if !crate::lx::svc::online(LXS_SOUND) {
+                crate::compat::linux::snd::stop_streams();
+                crate::kprintln!("[snd] the sound service is not back: the controller's streams were stopped");
+            }
+            continue;
+        }
+        crate::task::wait::wait(Some(crate::arch::pit::ticks() + 1000));
     }
 }
 
@@ -195,4 +236,6 @@ pub fn service_gone() {
     }
     crate::compat::linux::snd::unboost(0);
     crate::compat::linux::snd::unboost(1);
+    STOP.store(true, core::sync::atomic::Ordering::Release);
+    STOP_WQ.wake_all();
 }

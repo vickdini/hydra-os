@@ -18,7 +18,9 @@
 //!   running streams every timer tick (the old kernel task `snd-position`): xruns, the end
 //!   of draining, waiting writers and readers, the readiness words.
 //! - **The sound driver** (`hda-driver`, unchanged) is called directly with its
-//!   `MSG_SND_SETUP/TRIGGER/VOLUME` on its window. When it restarts (its process id, the
+//!   `MSG_SND_TRIGGER/VOLUME`; a stream is set up by the kernel (`LX_SND_SETUP`), which
+//!   gives the driver its own ring and position page, so this service never names a
+//!   physical address. When it restarts (its process id, the
 //!   kernel's `LX_SND_DRVGEN`, changes) the streams it was playing come back as underruns
 //!   (the program prepares them again, as after any underrun) and the volume is set again.
 //! - **A restart of this service** (Transparent): the new instance adopts the old one's
@@ -33,6 +35,7 @@
 
 extern crate alloc;
 
+mod intr;
 mod lock;
 mod params;
 mod pcm;
@@ -76,10 +79,6 @@ struct Hda {
     /// The rings, per direction (null: none).
     rings: [*mut u8; 2],
     ring_bytes: usize,
-    ring_phys: [u64; 2],
-    pos_phys: u64,
-    /// The sound driver's window (`MSG_SND_SETUP`'s words).
-    window: *mut u8,
 }
 
 // SAFETY: the pointers name mappings that live as long as the process; every use of the
@@ -144,16 +143,10 @@ impl Hw for Real {
     }
 
     fn setup(&mut self, dir: usize, hw: &HwSetup) -> Result<usize, i64> {
-        let h = hda();
-        if h.ring_phys[dir] == 0 {
-            return Err(ENODEV);
-        }
-        let words = [dir as u64, h.ring_phys[dir], hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes, hw.hda_format(), h.pos_phys];
-        for (i, v) in words.iter().enumerate() {
-            // SAFETY: the driver's window is mapped (64 pages); only this service uses it
-            unsafe { core::ptr::write_volatile(h.window.add(i * 8) as *mut u64, *v) };
-        }
-        let r = snd_call(MSG_SND_SETUP, [0; 4]).map(|m| m.args[1] as usize);
+        // The kernel programs the stream on its own ring and position page (`MSG_SND_SETUP`
+        // with the addresses only it knows): this service never names a physical address
+        let (bytes, period) = (hw.buffer_size * hw.frame_bytes, hw.period_size * hw.frame_bytes);
+        let r = sys::lx_obj(LX_OBJ_SND, LX_SND_SETUP, dir as u64 | hw.hda_format() << 8, bytes | period << 32).map(|s| s as usize);
         if let Err(e) = r {
             println!("[sound-server] the driver could not set up the stream: {}", e);
         }
@@ -333,11 +326,10 @@ fn map_card() -> Result<(), i64> {
     let pos = map(info.pos_handle, 4096, hydra_rt::mem::PROT_RW)?;
     let status = map(info.status_handle, 4096, hydra_rt::mem::PROT_RW)?;
     let rings = [map(info.ring_handle[0], info.ring_bytes, hydra_rt::mem::PROT_RW)?, map(info.ring_handle[1], info.ring_bytes, hydra_rt::mem::PROT_RW)?];
-    let window = sys::svc_attach(ENDPOINT_SOUND_DEV)? as *mut u8;
     RING_HANDLE[0].store(info.ring_handle[0] as u64, Ordering::Release);
     RING_HANDLE[1].store(info.ring_handle[1] as u64, Ordering::Release);
     STATUS.store(status as usize, Ordering::Release);
-    HDA.call_once(|| Hda { pos: pos as *const u32, rings, ring_bytes: info.ring_bytes as usize, ring_phys: info.ring_phys, pos_phys: info.pos_phys, window });
+    HDA.call_once(|| Hda { pos: pos as *const u32, rings, ring_bytes: info.ring_bytes as usize });
     VENDOR.store(info.vendor as u64, Ordering::Relaxed);
     MMIO.store(info.mmio, Ordering::Relaxed);
     let mut e = ENGINE.lock();
@@ -395,9 +387,12 @@ fn adopt_objects() {
     }
     let mut e = ENGINE.lock();
     let mut hw = Real;
-    // The old instance's streams: the hardware stops (the kernel silenced the rings)
-    for dir in 0..2 {
-        let _ = hw.trigger(dir, false);
+    if !found.is_empty() {
+        // The old instance's streams: the hardware stops (the kernel silenced the rings;
+        // its guard stops them too if no instance comes back)
+        for dir in 0..2 {
+            let _ = hw.trigger(dir, false);
+        }
     }
     if found.is_empty() {
         kept_put(REC_SUBS, &[0u8; KEPT_REC]);
@@ -683,6 +678,21 @@ fn step_wait(e: &mut Engine, hw: &mut Real, id: u64, w: Wait) -> Option<Wait> {
     }
 }
 
+/// Signals that came for calls not (yet) waiting, newest last.
+static RECENT_INTR: spin::Mutex<VecDeque<u64>> = spin::Mutex::new(VecDeque::new());
+
+/// Makes call `id` wait as `w`, unless a signal came for it while it was being served
+/// (`false`: the caller answers it at once, as an interrupted call).
+fn park(id: u64, w: Wait) -> bool {
+    let mut ws = WAITERS.lock();
+    if intr::take(&mut RECENT_INTR.lock(), id) {
+        return false;
+    }
+    ws.push((id, w));
+    BUSY.store(true, Ordering::Release);
+    true
+}
+
 /// The end of a waiting transfer: the result into the record, the call answered.
 fn finish_xfer(id: u64, arg: u64, r: i64) {
     if sys::lx_write(id, arg, &r.to_le_bytes()).is_err() {
@@ -697,7 +707,12 @@ fn interrupted(id: u64) {
     let w = {
         let mut ws = WAITERS.lock();
         let i = ws.iter().position(|(x, _)| *x == id);
-        i.map(|i| ws.remove(i).1)
+        let w = i.map(|i| ws.remove(i).1);
+        if w.is_none() {
+            // The call may still be on its way to `park`: it must not wait unsignalled
+            intr::note(&mut RECENT_INTR.lock(), id);
+        }
+        w
     };
     match w {
         Some(Wait::Xfer { arg, done, .. }) if done > 0 => finish_xfer(id, arg, done as i64),
@@ -860,8 +875,9 @@ fn read(cx: &Cx) -> Answer {
     }
     let r = ctl_read_now(slot, buf, len, cx.id, false);
     if r == EAGAIN && !cx.nonblock() {
-        WAITERS.lock().push((cx.id, Wait::CtlRead { slot, buf, len }));
-        BUSY.store(true, Ordering::Release);
+        if !park(cx.id, Wait::CtlRead { slot, buf, len }) {
+            return (ERESTARTSYS, 0);
+        }
         let _ = sys::lx_ctl(LX_CTL_WAKE);
         return (0, LX_REPLY_PENDING);
     }
@@ -1200,8 +1216,10 @@ fn pcm_ioctl(cx: &Cx, dir: usize) -> Answer {
             match r {
                 Some(r) => r,
                 None => {
-                    WAITERS.lock().push((cx.id, Wait::Drain { dir, deadline: sys::uptime_ticks() + 1000 }));
-                    BUSY.store(true, Ordering::Release);
+                    if !park(cx.id, Wait::Drain { dir, deadline: sys::uptime_ticks() + 1000 }) {
+                        after_pcm(dir, true);
+                        return (ERESTARTSYS, 0);
+                    }
                     let _ = sys::lx_ctl(LX_CTL_WAKE);
                     after_pcm(dir, false);
                     return (0, LX_REPLY_PENDING);
@@ -1304,8 +1322,17 @@ fn transfer(cx: &Cx, dir: usize, arg: u64) -> Answer {
         }
         None => {
             let hw_ptr = ENGINE.lock().streams[dir].hw_ptr;
-            WAITERS.lock().push((cx.id, Wait::Xfer { dir, arg, buf, frames, done, last_hw: hw_ptr, since: sys::uptime_ticks() }));
-            BUSY.store(true, Ordering::Release);
+            if !park(cx.id, Wait::Xfer { dir, arg, buf, frames, done, last_hw: hw_ptr, since: sys::uptime_ticks() }) {
+                // Interrupted while it was being served: what was copied, or ERESTARTSYS
+                after_pcm(dir, true);
+                if done == 0 {
+                    return (ERESTARTSYS, 0);
+                }
+                if cx.copy_out(arg, &(done as i64).to_le_bytes()).is_err() {
+                    return (EFAULT, 0);
+                }
+                return (0, 0);
+            }
             let _ = sys::lx_ctl(LX_CTL_WAKE);
             after_pcm(dir, true);
             (0, LX_REPLY_PENDING)

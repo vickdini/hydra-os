@@ -25,3 +25,6 @@ pub mod ipc {
 /// service may be sent again, and the error its stale objects give.
 #[path = "../../../src/lx/restart_policy.rs"]
 pub mod restart_policy;
+
+#[path = "../../../userland/drivers/sound-server/src/intr.rs"]
+pub mod intr;

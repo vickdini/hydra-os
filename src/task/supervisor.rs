@@ -426,8 +426,8 @@ fn sound_server_args() -> Option<Vec<String>> {
     if !crate::ipc::sound::forwarded() {
         return None;
     }
-    // (a restart while the driver itself restarts: the card is known from the first probe)
-    crate::compat::linux::snd::probe();
+    // (the card is asked for by `start_all` before this, without the supervisor's lock: a
+    // restart while the driver itself restarts finds it known from that first probe)
     crate::compat::linux::snd::card()?;
     Some(alloc::vec![String::from("workers=3")])
 }
@@ -821,6 +821,12 @@ pub fn start_all() {
     supervisor_init();
     let count = SUPERVISOR.lock().services.len();
     for idx in 0..count {
+        // wave8 GS begin: the sound service takes the card the kernel asks the driver about
+        // (a blocking call: never with the supervisor's lock held)
+        if SUPERVISOR.lock().services[idx].name == "sound_server" {
+            crate::compat::linux::snd::probe();
+        }
+        // wave8 GS end
         let launched = {
             let mut sup = SUPERVISOR.lock();
             let name = sup.services[idx].name;
