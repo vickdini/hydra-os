@@ -249,6 +249,9 @@ pub mod task {
 
 /// *stub* The ring-3 Linux server's hooks.
 pub mod lx {
+    // wave8 GH: the device records' type (`devices.rs`)
+    #[path = "../../../../src/lx/uevent.rs"]
+    pub mod uevent;
     /// *stub* wave8 GT: `crate::lx::console` (the terminals are never tty-server's here, so
     /// the in-kernel copies run; the rest is never reached).
     pub mod console {

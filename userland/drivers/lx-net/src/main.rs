@@ -98,6 +98,7 @@ fn main(args: &[&str]) {
             Event::Request(id, req) => {
                 let reply = match req.label as u32 {
                     MSG_LX_PROC_NET => proc_net(svc.window(), &req),
+                    MSG_LX_UEVENT => uevent(svc.window(), &req), // wave8 GH
                     _ => Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0]),
                 };
                 svc.reply(id, &reply);
@@ -240,3 +241,13 @@ fn proc_net(win: &mut [u8], req: &Message) -> Message {
     win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
     Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
 }
+
+// wave8 GH begin
+/// Device announcements from the kernel for the uevent sockets (see [`MSG_LX_UEVENT`]).
+fn uevent(win: &mut [u8], req: &Message) -> Message {
+    let len = (req.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX);
+    let n = netlink::uevent_batch(&win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len]);
+    obj::flush();
+    Message::new(MSG_LX_REPLY as u64, [n as u64, 0, 0, 0])
+}
+// wave8 GH end

@@ -1356,6 +1356,15 @@ pub const LX_OBJ_SIGTHREAD: u64 = 17;
 /// 1 `tcp6`, 2 `udp`, 3 `udp6`; `args[1]`: 1 if the reader is in a network namespace of
 /// its own) to [`LX_PROC_KEYS_TEXT_OFF`]. Reply [`MSG_LX_REPLY`], `args[0]` its length.
 pub const MSG_LX_PROC_NET: u32 = 0xA002;
+// wave8 GH begin
+/// Kernel to the main thread of the network service's host (lx-net, or linux-server when
+/// co-located): device announcements for its uevent netlink sockets (`lx::hotplug`). The
+/// window at [`LX_PROC_KEYS_TEXT_OFF`] holds `args[1]` messages, `[u32 group][u32 length]
+/// [bytes]` each (little-endian), `args[0]` bytes in all; each goes to the uevent sockets
+/// bound to its group (1: the kernel's format, 2: udev's). Reply [`MSG_LX_REPLY`],
+/// `args[0]` the number of sockets reached (negative: an error).
+pub const MSG_LX_UEVENT: u32 = 0xA004;
+// wave8 GH end
 /// `SYS_SVC_CALL` timeout bit: a hand-off call (only linux-server calling net-server: its
 /// socket requests answer at once, like the kernel's own hand-off socket calls).
 pub const SVC_CALL_HANDOFF: u64 = 1 << 62;

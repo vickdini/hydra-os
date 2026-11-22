@@ -82,6 +82,10 @@ pub mod console;
 // wave8 GX2: the desktop after an lx-ipc crash (FailObjects: the session ends, the login
 // screen returns)
 pub mod desktop;
+// wave8 GH begin: device "remove"/"add" announcements around a device service's restart
+pub mod hotplug;
+pub mod uevent;
+// wave8 GH end
 
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
@@ -2067,6 +2071,7 @@ pub fn ctl(op: u64) -> i64 {
             } else {
                 if restart::keeps_objects(h) {
                     obj::offline(x);
+                    hotplug::objects_failed(h); // wave8 GH (not adopted: they failed now)
                 }
                 obj::online(x)
             };
@@ -2078,6 +2083,8 @@ pub fn ctl(op: u64) -> i64 {
             x.online.store(true, Ordering::Release);
             // wave6 G21: callers waiting for the restart go on
             restart::online(h);
+            // wave8 GH: devices announced "removed" by the previous instance come back
+            hotplug::online(h);
             let n = x.lx(|s| s.workers.len());
             crate::kprintln!("[lx] {} online (process {}, endpoint {:#x}, {} workers)", crate::ipc::protocol::LXS_NAMES[h as usize], tgid, ep, n);
             0
@@ -2514,6 +2521,8 @@ fn server_gone(h: SvcId) {
     // wave6 G21: a Transparent restart keeps the objects for the new instance to adopt
     if !resend {
         obj::offline(x);
+        // wave8 GH: a device service's objects failed: its devices are announced "removed"
+        hotplug::objects_failed(h);
     }
     timer::clear(h);
     let mut clients = [0u64; MAX_REQS];

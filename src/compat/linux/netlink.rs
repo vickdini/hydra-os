@@ -1,12 +1,17 @@
 //! # Kernel uevent netlink sockets (`AF_NETLINK`, `NETLINK_KOBJECT_UEVENT`)
 //!
 //! libudev's device monitor (used by libinput and KWin to hear about hot-plugged devices)
-//! opens one of these and fails without it. Hydra's devices are fixed at boot, so the
-//! socket binds, answers option queries and accepts filters, but never has a message.
+//! opens one of these and fails without it. Hydra's devices are fixed at boot; the only
+//! messages are the "remove"/"add" announcements around a device service's restart
+//! (wave 8, Group H: `crate::lx::hotplug`, [`uevent_all`]), queued on the sockets bound to
+//! the message's group with the sender's address and credentials libudev checks.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Mutex;
 
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 
@@ -25,14 +30,55 @@ const NETLINK_ROUTE: u64 = 0;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 
-/// Never woken: a blocking receive waits for a signal.
-static NEVER: WaitQueue = WaitQueue::new();
+// wave8 GH begin: queued announcements
+/// Woken when a message is queued on any uevent socket.
+static UEVENT_WQ: WaitQueue = WaitQueue::new();
+/// Every uevent socket (dropped ones are pruned at the next announcement).
+static SOCKS: Mutex<Vec<Weak<NetlinkSocket>>> = Mutex::new(Vec::new());
+/// Most messages waiting on one socket (older ones are dropped first, as a full receive
+/// buffer would).
+const QUEUE_MAX: usize = 256;
+const MSG_PEEK: u64 = 2;
+const MSG_TRUNC: u64 = 0x20;
+const MSG_DONTWAIT: u64 = 0x40;
+
+/// Queues messages `(group, bytes)` on every uevent socket bound to their group and wakes
+/// the receivers; returns how many sockets got at least one.
+pub fn uevent_all(msgs: &[(u32, Vec<u8>)]) -> usize {
+    let socks: Vec<Arc<NetlinkSocket>> = {
+        let mut l = SOCKS.lock();
+        l.retain(|w| w.strong_count() > 0);
+        l.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    let mut reached = 0;
+    for s in socks {
+        let groups = s.groups.load(Ordering::Relaxed);
+        let mut any = false;
+        let mut q = s.queue.lock();
+        for (g, m) in msgs {
+            if *g == 0 || *g > 32 || groups & (1 << (g - 1)) == 0 {
+                continue;
+            }
+            if q.len() >= QUEUE_MAX {
+                q.pop_front();
+            }
+            q.push_back((*g, m.clone()));
+            any = true;
+        }
+        reached += any as usize;
+    }
+    UEVENT_WQ.wake_all();
+    reached
+}
+// wave8 GH end
 
 /// An uevent socket.
 pub struct NetlinkSocket {
     pid: AtomicU32,
     groups: AtomicU32,
     nonblock: AtomicBool,
+    /// wave8 GH: messages not yet received, with their group.
+    queue: Mutex<VecDeque<(u32, Vec<u8>)>>,
 }
 
 /// Creates a netlink socket if domain is `AF_NETLINK` and protocol is `NETLINK_KOBJECT_UEVENT`.
@@ -58,8 +104,14 @@ pub fn socket(a: [u64; 6]) -> Option<i64> {
     if a[2] != NETLINK_KOBJECT_UEVENT {
         return Some(EAFNOSUPPORT); // the other netlink families: not offered (callers cope)
     }
-    let sock: Arc<dyn CharDevice> =
-        Arc::new(NetlinkSocket { pid: AtomicU32::new(0), groups: AtomicU32::new(0), nonblock: AtomicBool::new(a[1] & SOCK_NONBLOCK != 0) });
+    let nl = Arc::new(NetlinkSocket {
+        pid: AtomicU32::new(0),
+        groups: AtomicU32::new(0),
+        nonblock: AtomicBool::new(a[1] & SOCK_NONBLOCK != 0),
+        queue: Mutex::new(VecDeque::new()),
+    });
+    SOCKS.lock().push(Arc::downgrade(&nl)); // wave8 GH
+    let sock: Arc<dyn CharDevice> = nl;
     Some(crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(crate::fs::FileDescriptor::Device(sock)) {
         Ok(fd) => {
             fds.set_cloexec(fd, a[1] & SOCK_CLOEXEC != 0);
@@ -83,25 +135,108 @@ impl NetlinkSocket {
         b
     }
 
-    /// Handles blocking or non-blocking receive from the uevent netlink socket.
-    ///
-    /// # Returns
-    ///
-    /// Returns `-EAGAIN` if non-blocking, or blocks until interrupted by a signal (`-ERESTARTSYS`).
-    fn receive(&self) -> i64 {
-        if self.nonblock() {
-            return EAGAIN;
+    /// wave8 GH: the next message `(group, bytes)` (a copy with `peek`), waiting for one
+    /// unless the socket or `flags` say not to: `Err(-EAGAIN)`, or `Err(-ERESTARTSYS)` on a
+    /// signal.
+    fn receive(&self, flags: u64) -> Result<(u32, Vec<u8>), i64> {
+        let take = || {
+            let mut q = self.queue.lock();
+            if flags & MSG_PEEK != 0 {
+                q.front().cloned()
+            } else {
+                q.pop_front()
+            }
+        };
+        if let Some(m) = take() {
+            return Ok(m);
+        }
+        if self.nonblock() || flags & MSG_DONTWAIT != 0 {
+            return Err(EAGAIN);
         }
         let mut waits = WaitSet::new();
-        waits.add(QueueRef::Static(&NEVER));
+        waits.add(QueueRef::Static(&UEVENT_WQ));
         loop {
             waits.register();
+            if let Some(m) = take() {
+                return Ok(m);
+            }
             if super::proc::signal_pending() {
-                return super::proc::ERESTARTSYS;
+                return Err(super::proc::ERESTARTSYS);
             }
             waits.wait(None);
         }
     }
+
+    /// `recvmsg` (and the first message of `recvmmsg`): the data into the iovecs, the
+    /// sender's address (`nl_groups` = the message's group, port 0: the kernel) and its
+    /// credentials (`SCM_CREDENTIALS`, uid 0: libudev ignores a message without them).
+    fn recvmsg(&self, msgp: u64, flags: u64) -> i64 {
+        let mut msg = match copy_in(msgp, 56) {
+            Ok(m) => m,
+            Err(e) => return e,
+        };
+        let u64_at = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let (iov, n) = (u64_at(&msg, 16), (u64_at(&msg, 24) as usize).min(64));
+        let iovs = match copy_in(iov, n * 16) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let (g, d) = match self.receive(flags) {
+            Ok(m) => m,
+            Err(e) => return e,
+        };
+        let mut done = 0;
+        for c in iovs.chunks(16) {
+            let (base, len) = (u64_at(c, 0), u64_at(c, 8) as usize);
+            let k = len.min(d.len() - done);
+            if k > 0 && copy_out(base, &d[done..done + k]).is_err() {
+                return EFAULT;
+            }
+            done += k;
+        }
+        let name = u64_at(&msg, 0);
+        if name != 0 && u32::from_le_bytes(msg[8..12].try_into().unwrap()) >= 12 {
+            let _ = copy_out(name, &sender(g));
+            msg[8..12].copy_from_slice(&12u32.to_le_bytes());
+        }
+        let (control, clen) = (u64_at(&msg, 32), u64_at(&msg, 40));
+        let mut cl = 0u64;
+        if control != 0 && clen >= 32 {
+            let c = creds_cmsg();
+            if copy_out(control, &c).is_ok() {
+                cl = 32;
+            }
+        }
+        msg[40..48].copy_from_slice(&cl.to_le_bytes());
+        msg[48..52].copy_from_slice(&(if done < d.len() { MSG_TRUNC as u32 } else { 0 }).to_le_bytes());
+        let _ = copy_out(msgp, &msg);
+        if flags & MSG_TRUNC != 0 {
+            d.len() as i64
+        } else {
+            done as i64
+        }
+    }
+}
+
+/// The sender's address of a message of group `g` (`struct sockaddr_nl`: the kernel, port
+/// 0, `nl_groups` the group's bit).
+fn sender(g: u32) -> [u8; 12] {
+    let mut b = [0u8; 12];
+    b[0..2].copy_from_slice(&(AF_NETLINK as u16).to_le_bytes());
+    if (1..=32).contains(&g) {
+        b[8..12].copy_from_slice(&(1u32 << (g - 1)).to_le_bytes());
+    }
+    b
+}
+
+/// One `SCM_CREDENTIALS` control message (`CMSG_SPACE(sizeof(struct ucred))` = 32 bytes):
+/// pid, uid and gid 0, the kernel.
+fn creds_cmsg() -> [u8; 32] {
+    let mut c = [0u8; 32];
+    c[0..8].copy_from_slice(&28u64.to_le_bytes()); // cmsg_len: header + struct ucred
+    c[8..12].copy_from_slice(&1i32.to_le_bytes()); // SOL_SOCKET
+    c[12..16].copy_from_slice(&2i32.to_le_bytes()); // SCM_CREDENTIALS
+    c
 }
 
 /// Copies a serialized sockaddr buffer out to user space, respecting the user-provided maximum length.
@@ -130,8 +265,15 @@ fn put_addr(addr: u64, lenp: u64, data: &[u8]) -> i64 {
 }
 
 impl CharDevice for NetlinkSocket {
-    fn read(&self, _buf: &mut [u8]) -> i64 {
-        self.receive()
+    fn read(&self, buf: &mut [u8]) -> i64 {
+        match self.receive(0) {
+            Ok((_, d)) => {
+                let n = d.len().min(buf.len());
+                buf[..n].copy_from_slice(&d[..n]);
+                n as i64
+            }
+            Err(e) => e,
+        }
     }
 
     fn write(&self, data: &[u8]) -> i64 {
@@ -139,10 +281,12 @@ impl CharDevice for NetlinkSocket {
     }
 
     fn poll_events(&self) -> u32 {
-        0x0004
+        0x0004 | if self.queue.lock().is_empty() { 0 } else { 0x0001 }
     }
 
-    fn add_wait_queues(&self, _waits: &mut WaitSet) {}
+    fn add_wait_queues(&self, waits: &mut WaitSet) {
+        waits.add(QueueRef::Static(&UEVENT_WQ));
+    }
 
     fn rdev(&self) -> u64 {
         0
@@ -198,7 +342,35 @@ impl CharDevice for NetlinkSocket {
             }
             44 => a[2] as i64, // sendto: delivered nowhere
             46 => 0,
-            45 | 47 | 299 => self.receive(),
+            // wave8 GH: recvfrom, recvmsg, recvmmsg (its first message)
+            45 => match self.receive(a[3]) {
+                Ok((g, d)) => {
+                    let n = d.len().min(a[2] as usize);
+                    if copy_out(a[1], &d[..n]).is_err() {
+                        return Some(EFAULT);
+                    }
+                    let r = put_addr(a[4], a[5], &sender(g));
+                    if r != 0 {
+                        return Some(r);
+                    }
+                    if a[3] & MSG_TRUNC != 0 {
+                        d.len() as i64
+                    } else {
+                        n as i64
+                    }
+                }
+                Err(e) => e,
+            },
+            47 => self.recvmsg(a[1], a[2]),
+            299 => {
+                let r = self.recvmsg(a[1], a[3]);
+                if r < 0 {
+                    r
+                } else {
+                    let _ = copy_out(a[1] + 56, &(r as u32).to_le_bytes());
+                    1
+                }
+            }
             48 => 0, // shutdown
             42 | 43 | 50 | 288 => EINVAL, // connect / accept / listen
             _ => return None,
