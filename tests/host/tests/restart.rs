@@ -230,7 +230,14 @@ fn idempotent_marks_process() {
     assert!(idempotent(63, &[0; 6])); // uname
     assert!(idempotent(302, &[0, 7, 0, 0x1000, 0, 0])); // prlimit64 get
     assert!(!idempotent(302, &[0, 7, 0x1000, 0, 0, 0])); // prlimit64 set
-    for nr in [105, 106, 112, 113, 114, 117, 119, 157, 160, 170, 272, 308] {
+    // wave10 G7b-1: lx-proc's changes that come out the same when made twice
+    for nr in [105, 106, 113, 114, 116, 117, 119, 109, 122, 123, 160, 170, 171, 163] {
+        assert!(idempotent(nr, &[0; 6]), "call {} is the same twice", nr);
+    }
+    assert!(idempotent(157, &[15, 0, 0, 0, 0, 0]), "prctl PR_SET_NAME");
+    assert!(!idempotent(157, &[22, 0, 0, 0, 0, 0]), "prctl PR_SET_SECCOMP");
+    assert!(idempotent(103, &[3, 0, 0, 0, 0, 0]) && !idempotent(103, &[2, 0, 0, 0, 0, 0]), "syslog READ_ALL yes, READ no");
+    for nr in [112, 272, 308] {
         assert!(!idempotent(nr, &[0; 6]), "call {} changes state", nr);
     }
 }
