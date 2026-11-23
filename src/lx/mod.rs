@@ -2894,11 +2894,6 @@ fn fuse_kbuf_mem(op: MemOp, id: u64, addr: u64, len: u64, buf: u64) -> i64 {
 /// `open` of character device `rdev` served by service `s` (not by a major claim: `/dev/fuse`
 /// is 10:229, and major 10 is shared): as [`dev_open`] once the service is chosen.
 pub fn dev_open_to(s: SvcId, rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
-    // wave9 G9-C: a restarting service is waited for (the ladder's 30 s), as file calls are
-    let usable = || svc::host(svc::host_of(s)).is_some_and(|x| host_usable(x));
-    if !usable() && restart::restarting(svc::host_of(s)) {
-        let _ = restart::wait_online(svc::host_of(s), &usable);
-    }
     let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return Err(-19) };
     let mut c = LxCall::EMPTY;
     c.nr = crate::ipc::protocol::LX_KCALL_DEVOPEN;

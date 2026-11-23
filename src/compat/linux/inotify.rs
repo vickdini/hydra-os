@@ -6,8 +6,9 @@
 //! (`lx::notifyfwd`). Wave 9's closing (Group 9-C) deleted the kernel's own instances (the
 //! switch back `lx.vfs=kernel`); what is left are the event bits other kernel code names
 //! and the answers for the calls that still reach the kernel:
-//! - `inotify_init`/`inotify_init1` with vfs-server not running (before it first comes up,
-//!   or given up by its restart ladder): `ENOSYS` (programs fall back to polling);
+//! - `inotify_init`/`inotify_init1` before vfs-server first comes up: waits for it (at most
+//!   30 s), then the call is vfs-server's; with vfs-server given up by its restart ladder:
+//!   `ENOSYS` (programs fall back to polling);
 //! - `inotify_add_watch`/`inotify_rm_watch` on a descriptor that is not vfs-server's
 //!   instance: `EBADF` (not open) or `EINVAL`, as Linux.
 
@@ -27,9 +28,10 @@ fn not_an_instance(fd: u64) -> i64 {
     }
 }
 
-/// `inotify_init1(flags)` / `inotify_init()` reaching the kernel: vfs-server is not there.
-pub fn sys_init1(_flags: u64) -> i64 {
-    ENOSYS
+/// `inotify_init1(flags)` / `inotify_init()` reaching the kernel: before vfs-server's first
+/// start it waits for it (then the call is vfs-server's); else vfs-server is not there.
+pub fn sys_init1(flags: u64) -> i64 {
+    crate::lx::fileh::notify_init_wait(294, [flags, 0, 0, 0, 0, 0]).unwrap_or(ENOSYS)
 }
 
 /// `inotify_add_watch(fd, ..)` reaching the kernel: `fd` is no instance.

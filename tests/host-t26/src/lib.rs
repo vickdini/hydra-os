@@ -54,6 +54,12 @@ pub mod task {
 
 pub mod lx {
     pub use crate::fake::lx::*;
+    // wave9 G9-C: *stub* no vfs-server first start to wait for on the host
+    pub mod fileh {
+        pub fn notify_init_wait(_nr: u64, _args: [u64; 6]) -> Option<i64> {
+            None
+        }
+    }
     // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
     // (`lx::notifyfwd`): vfs-server wants none here
     pub mod notifyfwd {

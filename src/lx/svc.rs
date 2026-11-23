@@ -106,7 +106,8 @@ pub fn init(words: &[u8]) -> bool {
         // wave9 G9-C: the file service's switch-back words are gone with the kernel's copy of
         // the file code (`lx.vfs=kernel`, `lx.vfsmnt=kernel`, `lx.fuse=kernel`,
         // `lx.policy=kernel`, `lx.tmpfs=pool`): ignored, with a line in the boot log
-        if matches!(w, b"vfs=kernel" | b"vfsmnt=kernel" | b"fuse=kernel" | b"policy=kernel" | b"tmpfs=pool") {
+        // (and `lx.vfs=linux`: the file service is vfs-server's own process)
+        if matches!(w, b"vfs=kernel" | b"vfs=linux" | b"vfsmnt=kernel" | b"fuse=kernel" | b"policy=kernel" | b"tmpfs=pool") {
             crate::kprintln!("[lx] {}: ignored (the file service has no switch back since wave 9)", core::str::from_utf8(w).unwrap_or("?"));
             continue;
         }
@@ -132,7 +133,10 @@ pub fn init(words: &[u8]) -> bool {
         let ep = SVC[id].endpoint.load(Ordering::Acquire);
         SVC[id].host.store(if ep == 0 { 0 } else { home_of(ep) }, Ordering::Release);
     }
-    // wave9 GM: tmpfs data in memory (wave9 G9-C: always, the file service is always forwarded)
+    // wave9 GM: tmpfs data in memory (wave9 G9-C: always, the file service is always
+    // forwarded; the table and the data are the kernel's (`fs::tmem`), and the kernel's own
+    // file code reads, writes, maps, stats and creates them, so the calls it answers — sent
+    // back, before vfs-server is up, after the ladder gave it up — serve them alone)
     crate::fs::tmem::ENABLED.store(true, Ordering::Relaxed);
     all_kernel
 }

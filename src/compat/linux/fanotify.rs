@@ -38,7 +38,8 @@ pub const POOL_FSID: [i32; 2] = [0x4859_4452, 0x5a46_5301];
 /// System calls 300 (`fanotify_init`) and 301 (`fanotify_mark`) reaching the kernel.
 pub fn dispatch(num: u64, a: [u64; 6]) -> i64 {
     match num {
-        300 => ENOSYS,
+        // (before vfs-server's first start: waits for it, as inotify_init)
+        300 => crate::lx::fileh::notify_init_wait(300, a).unwrap_or(ENOSYS),
         _ => {
             if crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).is_some()) {
                 EINVAL

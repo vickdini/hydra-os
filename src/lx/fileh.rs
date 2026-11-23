@@ -51,6 +51,7 @@ use crate::task::TaskId;
 
 const EPERM: i64 = -1;
 const ESRCH: i64 = -3;
+const EIO: i64 = -5;
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
@@ -580,7 +581,15 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     // restarting vfs-server (the ladder's 30 s) instead of the kernel answering meanwhile;
     // the kernel answers only before vfs-server first comes up (boot) or once the ladder
     // gave it up (its code is needed anyway for the calls vfs-server sends back)
-    let host = if host.is_none() { offline_wait() } else { host };
+    // (review M1: a failed wait — a signal, the 30 s passed — is the caller's answer; only
+    // "not up yet" / "given up" leaves the call to the kernel)
+    let host = match host {
+        Some(h) => Some(h),
+        None => match offline_wait() {
+            Ok(h) => h,
+            Err(e) => return Some(e),
+        },
+    };
     if host.is_none() && !is_mount_call(nr) {
         KEPT.fetch_add(1, Ordering::Relaxed);
         count_kernel(nr, false);
@@ -876,12 +885,58 @@ pub fn takes_notify_obj(nr: u64) -> bool {
 pub static OFFLINE_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// vfs-server is offline: if it is being restarted, wait for it (the ladder's 30 s).
-fn offline_wait() -> Option<&'static Host> {
+/// `Ok(None)`: not restarting (not up yet, or given up): the kernel answers; `Err(e)`: the
+/// wait failed (`ERESTARTSYS` on a signal, `EIO` after 30 s or if it went again): the
+/// caller's answer.
+fn offline_wait() -> Result<Option<&'static Host>, i64> {
     if !super::restart::restarting(LXS_VFS) {
-        return None;
+        return Ok(None);
     }
     OFFLINE_WAITS.fetch_add(1, Ordering::Relaxed);
-    super::restart::wait_online(LXS_VFS, &|| vfs_host().is_some()).ok().and_then(|()| vfs_host())
+    super::restart::wait_online(LXS_VFS, &|| vfs_host().is_some())?;
+    vfs_host().map(Some).ok_or(EIO)
+}
+
+/// Inotify/fanotify inits that waited for vfs-server's first start.
+pub static FIRST_START_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// wave9 G9-C (review M2): `inotify_init*` / `fanotify_init` (`nr`, `args`) reaching the
+/// kernel before vfs-server has claimed them (not started yet) waits for that, at most 30 s,
+/// then forwards the call: `Some(answer)`; `None`: vfs-server was given up or did not come
+/// (the kernel's answer, ENOSYS).
+#[cfg(target_os = "uefi")]
+pub fn notify_init_wait(nr: u64, args: [u64; 6]) -> Option<i64> {
+    if !is_notify_call(nr) || super::restart::down(LXS_VFS) {
+        return None;
+    }
+    let mut waited = false;
+    for _ in 0..600 {
+        if claimed(nr) && vfs_host().is_some() {
+            // SAFETY: SyscallFrame is plain register data
+            let mut f: SyscallFrame = unsafe { core::mem::zeroed() };
+            f.rax = nr;
+            [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9] = args;
+            return forward(&f);
+        }
+        if super::restart::down(LXS_VFS) {
+            return None;
+        }
+        if crate::compat::linux::proc::signal_pending() {
+            return Some(crate::compat::linux::proc::ERESTARTSYS);
+        }
+        if !waited {
+            waited = true;
+            FIRST_START_WAITS.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::task::sleep_ms(50);
+    }
+    None
+}
+
+/// Off the kernel (host tests): no first start to wait for.
+#[cfg(not(target_os = "uefi"))]
+pub fn notify_init_wait(_nr: u64, _args: [u64; 6]) -> Option<i64> {
+    None
 }
 // wave9 G6b-1 end
 
