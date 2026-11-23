@@ -156,9 +156,10 @@ fn inode_numbers_and_connections() {
     assert_eq!(split(ino(0x0003, 5)), None, "the kernel's own client's");
     let mut next = 0;
     let live = |c: u16| c == 0x8001;
-    assert_eq!(next_conn(&mut next, live), 0x8002, "a live number is skipped");
+    assert_eq!(next_conn(&mut next, live), Some(0x8002), "a live number is skipped");
     let mut last = 0x3FFF;
-    assert_eq!(next_conn(&mut last, |_| false), 0x8001, "wraps to 1");
+    assert_eq!(next_conn(&mut last, |_| false), Some(0x8001), "wraps to 1");
+    assert_eq!(next_conn(&mut last, |_| true), None, "all live: none, never a hang");
     assert!(setattr_size(&le(&[8], &[4])));
     assert!(!setattr_size(&le(&[1], &[4])));
 }
@@ -193,4 +194,16 @@ fn conn_records_round_trip() {
     let mut small = r;
     small.max_write = 1;
     assert_eq!(ConnRec::decode(&small.encode()).unwrap().max_write, 4096);
+}
+
+#[test]
+fn iov_totals_never_wrap() {
+    let max = 256 * 1024;
+    assert_eq!(iov_total(&[(1, 16), (2, 100)], max), Some(116));
+    assert_eq!(iov_total(&[], max), Some(0));
+    assert_eq!(iov_total(&[(1, 1 << 63), (2, 1 << 63)], max), None, "two 2^63 lengths wrap to 0");
+    assert_eq!(iov_total(&[(1, u64::MAX), (2, 1)], max), None);
+    assert_eq!(iov_total(&[(1, max + 1)], max), None, "one part over the limit");
+    assert_eq!(iov_total(&[(1, max)], max), Some(max));
+    assert_eq!(iov_total(&[(1, max), (2, 1)], max), None);
 }

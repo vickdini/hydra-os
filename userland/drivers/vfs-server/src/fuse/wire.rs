@@ -354,15 +354,30 @@ pub fn rw_args(fh: u64, offset: u64, size: usize) -> Vec<u8> {
     le(&[fh, offset, size as u64, 0, 0, 0, 0], &[8, 8, 4, 4, 8, 4, 4])
 }
 
-/// Connection numbers: `FUSE_SVC_CONN | n` for `n` in 1..0x4000, skipping live ones.
-pub fn next_conn(next: &mut u16, live: impl Fn(u16) -> bool) -> u16 {
-    loop {
+/// Connection numbers: `FUSE_SVC_CONN | n` for `n` in 1..0x4000, skipping live ones;
+/// `None` when every number is live.
+pub fn next_conn(next: &mut u16, live: impl Fn(u16) -> bool) -> Option<u16> {
+    for _ in 0..0x3FFF {
         *next = (*next % 0x3FFF) + 1;
         let c = 0x8000 | *next;
         if !live(c) {
-            return c;
+            return Some(c);
         }
     }
+    None
+}
+
+/// The total length of `(address, length)` parts (an iovec), at most `max`: `None` when
+/// a part or the sum is larger (never wrapping: two 2^63 lengths are refused).
+pub fn iov_total(parts: &[(u64, u64)], max: u64) -> Option<u64> {
+    let mut t = 0u64;
+    for p in parts {
+        t = t.checked_add(p.1)?;
+        if t > max {
+            return None;
+        }
+    }
+    Some(t)
 }
 
 /// A local inode number: `FUSE_BIT | conn << 40 | local`.

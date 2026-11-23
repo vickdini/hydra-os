@@ -298,7 +298,12 @@ pub fn mount(slot: u64, uid: u32, gid: u32, allow_other: bool) -> Result<u16, i6
     let c = op(FUSE_OP_MOUNT, [slot, uid as u64 | (gid as u64) << 32, allow_other as u64, 0, 0], &[], &mut []);
     crate::kprintln!("[fuse] mount of vfs-server's /dev/fuse (slot {}): {:?}", slot, c);
     let c = c? as u16;
-    if remote_conn(c) { Ok(c) } else { Err(EIO) }
+    if !remote_conn(c) {
+        return Err(EIO);
+    }
+    // (a connection number given again: no daemon inode numbers of the old one stay)
+    x86_64::instructions::interrupts::without_interrupts(|| USER_INO.lock().retain(|&ino, _| (ino >> 40) & 0xFFFF != c as u64));
+    Ok(c)
 }
 
 /// Connection `conn` was unmounted: the daemon's reads end with `ENODEV`.

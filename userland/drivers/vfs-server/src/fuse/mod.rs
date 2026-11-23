@@ -72,7 +72,7 @@ struct Reader {
 
 impl Reader {
     fn len(&self) -> u64 {
-        self.parts.iter().map(|p| p.1).sum()
+        self.parts.iter().fold(0u64, |t, p| t.saturating_add(p.1))
     }
 }
 
@@ -180,16 +180,19 @@ struct Finish {
     r: i64,
     /// A program's call to run again instead.
     rerun: Option<Box<LxCall>>,
+    /// A request handed to a daemon's read: the connection it goes back to if the read's
+    /// buffer cannot take it.
+    requeue: Option<u16>,
 }
 
 impl Finish {
     fn err(id: u64, r: i64) -> Self {
-        Finish { id, parts: Vec::new(), out: Vec::new(), r, rerun: None }
+        Finish { id, parts: Vec::new(), out: Vec::new(), r, rerun: None, requeue: None }
     }
 
     fn kout(id: u64, r: i64, out: Vec<u8>) -> Self {
         let n = out.len() as u64;
-        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r, rerun: None }
+        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r, rerun: None, requeue: None }
     }
 
     fn run(self) {
@@ -210,8 +213,30 @@ impl Finish {
             }
             o += n;
         }
+        let failed = r < 0;
         let _ = sys::lx_complete(self.id, r);
+        if failed {
+            if let Some(conn) = self.requeue {
+                requeue(conn, self.out);
+            }
+        }
     }
+}
+
+/// Request `m`, taken by a daemon's read whose buffer could not take it, goes back to the
+/// front of connection `conn`'s queue (the next read gets it).
+fn requeue(conn: u16, m: Vec<u8>) {
+    let mut fin = Vec::new();
+    {
+        let mut st = ST.lock();
+        let Some(c) = st.conns.get_mut(&conn) else { return };
+        if c.aborted {
+            return;
+        }
+        c.queue.push_front(m);
+        feed(c, &mut fin);
+    }
+    finish_all(fin);
 }
 
 struct State {
@@ -460,6 +485,8 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
                 *checked = true;
                 return begin(c, op);
             }
+            let mut body = body;
+            body.truncate(4096); // (the kernel's buffer)
             let n = body.len() as i64;
             done(&op, n, body)
         }
@@ -482,6 +509,9 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
             write_next(c, op, nodeid, fh)
         }
         Kind::Readdir { .. } | Kind::Data { .. } => {
+            // (never more than the kernel's buffer: 16 KiB of entries, 64 KiB of xattrs)
+            let mut body = body;
+            body.truncate(if matches!(op.kind, Kind::Readdir { .. }) { 16384 } else { 65536 });
             let n = body.len() as i64;
             done(&op, n, body)
         }
@@ -524,7 +554,10 @@ fn send(c: &mut Conn, opcode: u32, nodeid: u64, who: Who, args: &[&[u8]], wait: 
     let unique = c.next_unique;
     c.next_unique += 2;
     c.queue.push_back(request(opcode, unique, nodeid, who, args));
-    c.waits.insert(unique, wait);
+    // (INTERRUPT has no reply of its own: nothing waits for one)
+    if opcode != INTERRUPT {
+        c.waits.insert(unique, wait);
+    }
     feed(c, fin);
     unique
 }
@@ -539,7 +572,7 @@ fn feed(c: &mut Conn, fin: &mut Vec<Finish>) {
         }
         let m = c.queue.pop_front().unwrap();
         let n = m.len() as i64;
-        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n, rerun: None });
+        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n, rerun: None, requeue: Some(c.id) });
     }
     c.set_ready();
 }
@@ -801,7 +834,10 @@ pub fn dev_open(cx: &Cx, flags: u64) -> Answer {
         let mut st = ST.lock();
         let st = &mut *st;
         let conns = &st.conns;
-        let id = next_conn(&mut st.next, |c| conns.contains_key(&c));
+        let Some(id) = next_conn(&mut st.next, |c| conns.contains_key(&c)) else {
+            objs::free(slot);
+            return (-23, 0); // ENFILE: every connection number is live
+        };
         let mut c = Conn::new(id);
         c.devs.push(slot);
         save_conn(&c);
@@ -857,7 +893,7 @@ fn dev_call_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
                 Ok(p) => p,
                 Err(e) => return (e, 0),
             };
-            let room: u64 = parts.iter().map(|p| p.1).sum();
+            let room: u64 = parts.iter().fold(0u64, |t, p| t.saturating_add(p.1));
             let mut st = ST.lock();
             let Some(&conn) = st.devs.get(&slot) else { return (EBADF, 0) };
             let Some(c) = st.conns.get_mut(&conn) else { return (ENODEV, 0) };
@@ -879,6 +915,8 @@ fn dev_call_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
                     }
                     let k = (len as usize).min(m.len() - o);
                     if let Err(e) = cx.copy_out_direct(addr, &m[o..o + k]) {
+                        // (the request is not lost: the next read gets it)
+                        requeue(conn, m);
                         return (e, 0);
                     }
                     o += k;
@@ -896,10 +934,7 @@ fn dev_call_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
                 Ok(p) => p,
                 Err(e) => return (e, 0),
             };
-            let total: u64 = parts.iter().map(|p| p.1).sum();
-            if total as usize > MSG_MAX {
-                return (EINVAL, 0);
-            }
+            let Some(total) = iov_total(&parts, MSG_MAX as u64) else { return (EINVAL, 0) };
             let mut data = Vec::with_capacity(total as usize);
             for (addr, len) in parts {
                 match cx.copy_in_any(addr, len as usize) {
@@ -959,7 +994,7 @@ fn write_reply(c: &mut Conn, data: &[u8], fin: &mut Vec<Finish>) -> i64 {
         }
         Some(Wait::Rerun(rr)) => {
             took_rerun(c, &rr, err, body);
-            fin.push(Finish { id: rr.call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(rr.call)) });
+            fin.push(Finish { id: rr.call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(rr.call)), requeue: None });
             len
         }
         Some(Wait::Op(op)) => {
