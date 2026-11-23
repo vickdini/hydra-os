@@ -4031,7 +4031,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 if magic == ZFS_SUPER_MAGIC && resolve(b, &p, true).is_ok() && super::mount::last_is_tmpfs() {
                     magic = 0x0102_1994;
                     // wave9 GM: its size= and what its in-memory files hold
-                    if let Some((limit, used, files)) = super::mount::last_tmpfs().and_then(crate::fs::tmem::usage) {
+                    if let Some((limit, used, files)) = super::mount::last_tmpfs().filter(|_| crate::fs::tmem::ENABLED.load(core::sync::atomic::Ordering::Relaxed)).and_then(crate::fs::tmem::usage) {
                         return Some(tmpfs_statfs_out(a[1], limit, used, files));
                     }
                 }

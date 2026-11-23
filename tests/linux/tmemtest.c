@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 static int fails;
+static int pool_mode; // tmpfs data in the pool (lx=kernel, lx.vfs=kernel, lx.tmpfs=pool): no size=
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL %s:%d: ", __func__, __LINE__); printf(__VA_ARGS__); printf(" (errno %d)\n", errno); } } while (0)
 
 static double now(void) {
@@ -151,7 +152,7 @@ static void semantics(void) {
     CHECK(pread(fd, b, 1, 0) == 1 && b[0] == 'z', "data after rename");
     int r = rename("/dev/shm/tmemtest.sem2", "/var/tmp/tmemtest.out");
     printf("rename /dev/shm -> /var/tmp: %s\n", r == 0 ? "allowed (pool data)" : strerror(errno));
-    if (r == 0) rename("/var/tmp/tmemtest.out", "/dev/shm/tmemtest.sem2");
+    if (r == 0) { pool_mode = 1; rename("/var/tmp/tmemtest.out", "/dev/shm/tmemtest.sem2"); }
     // Unlink while open: still readable and writable until the close
     CHECK(unlink("/dev/shm/tmemtest.sem2") == 0, "unlink");
     CHECK(pwrite(fd, "q", 1, 1) == 1 && pread(fd, b, 2, 0) == 2 && b[0] == 'z' && b[1] == 'q', "open after unlink");
@@ -305,7 +306,9 @@ int main(int argc, char **argv) {
     semantics();
     bench("/dev/shm");
     bench("/var/tmp");
-    if (geteuid() == 0) {
+    if (pool_mode) {
+        printf("size limit: SKIP (pool data mode)\n");
+    } else if (geteuid() == 0) {
         pid_t pid = fork();
         if (pid == 0) { size_limit(); _exit(fails ? 1 : 0); }
         int st = 0;
