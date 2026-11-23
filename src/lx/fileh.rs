@@ -399,6 +399,22 @@ pub fn policy_mask(nr: u64) -> u32 {
     }
 }
 
+/// A creating open (`O_CREAT`) of a caller under Landlock or ABAC: vfs-server would send it
+/// back (the kernel makes files), so it stays here without the round trip, as before.
+fn policy_create(c: &LxCall) -> u32 {
+    const O_CREAT: u64 = 0o100;
+    let flags = match c.nr {
+        2 => c.args[1],
+        257 => c.args[2],
+        _ => return 0,
+    };
+    if flags & O_CREAT != 0 {
+        LX_FS_LANDLOCK | LX_FS_ABAC
+    } else {
+        0
+    }
+}
+
 /// [`crate::ipc::protocol::LX_FH_LANDLOCK`]: the domain of request `req`'s caller to `buf`.
 fn landlock_of(req: u64, buf: u64, cap: u64) -> i64 {
     let Some(tid) = super::client_of(req) else { return ESRCH };
@@ -433,7 +449,7 @@ pub static KEPT_BY: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
 /// Whether call `c` is the kernel's at once (counted by reason).
 fn kernel_only(c: &LxCall) -> bool {
-    let hit = c.fs_flags & kernel_mask(c.nr);
+    let hit = c.fs_flags & (kernel_mask(c.nr) | policy_create(c)); // wave9 G6b-3: policy_create
     // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
