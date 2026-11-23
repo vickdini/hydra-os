@@ -546,9 +546,9 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     // wave9 GP2: the handle in the answer (an unreadable path: the kernel opens)
     if let Some(h) = fh_decode(r) {
         let d = fh_desc(nr, &args, h).ok()?;
-        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d)).ok()?;
+        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d));
         SERVED.fetch_add(1, Ordering::Relaxed);
-        return Some(fd as i64);
+        return Some(fd.map_or_else(|e| e, |fd| fd as i64));
     }
     outcome(r)
 }
@@ -671,14 +671,22 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         // (the path is read before the table is locked: reading may fault a page in, which
         // takes the kernel lock, and a thread holding that may wait for this table)
         let d = fh_desc(nr, &c.args, h).ok()?;
-        let (fds, _) = super::cached_fds(id)?;
-        let fd = match fds.try_lock() {
-            Some(mut t) => install_in(&mut t, &d).ok(),
-            None => None,
-        };
-        super::drop_last(fds);
-        SERVED.fetch_add(fd.is_some() as u64, Ordering::Relaxed);
-        return fd.map(|fd| fd as i64);
+        // The handle is made as `LX_FH_INSTALL` makes it: under the kernel lock, interrupts
+        // on (the first open reference of a file may ask zfs-server, and the lock comes
+        // before the table, as on the ordinary path); the lock stays until the return to
+        // user mode, as after `copy::fault_in`
+        if !crate::arch::smp::bkl_held() {
+            crate::arch::smp::bkl_enter();
+            crate::task::scheduler::wait_out_handoff();
+        }
+        let was_on = x86_64::instructions::interrupts::are_enabled();
+        x86_64::instructions::interrupts::enable();
+        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d));
+        if !was_on {
+            x86_64::instructions::interrupts::disable();
+        }
+        SERVED.fetch_add(1, Ordering::Relaxed);
+        return Some(fd.map_or_else(|e| e, |fd| fd as i64));
     }
     // wave9 GP2 end
     match outcome(r) {
