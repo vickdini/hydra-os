@@ -298,3 +298,21 @@ impl IntoTuple for i64 {
         (self, 0)
     }
 }
+
+// wave9 GM: LX_MEM_TRUNC
+#[test]
+fn trunc_checks_handles() {
+    let sim = world();
+    let r = StdArc::new(StdMutex::new(Vec::new()));
+    let r2 = r.clone();
+    sim.spawn(svc_task(301, EP), move || {
+        let push = |v: i64| r2.lock().unwrap().push(v);
+        let h = sys_mem(LX_MEM_ANON, 8192, 0, 0, 0);
+        push(sys_mem(crate::ipc::protocol::LX_MEM_TRUNC, h as u64, 100, 0, 0));
+        push(sys_mem(crate::ipc::protocol::LX_MEM_TRUNC, h as u64, 8192, 0, 0));
+        push(sys_mem(crate::ipc::protocol::LX_MEM_TRUNC, h as u64, 8193, 0, 0));
+        push(sys_mem(crate::ipc::protocol::LX_MEM_TRUNC, 99, 0, 0, 0));
+    });
+    sim.run_others();
+    assert_eq!(*r.lock().unwrap(), vec![0, 0, EINVAL, EBADF]);
+}

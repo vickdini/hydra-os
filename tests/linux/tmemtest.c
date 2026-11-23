@@ -18,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -185,6 +186,8 @@ static void size_limit(void) {
     CHECK(err == ENOSPC && total >= 900000 && total <= (1 << 20), "ENOSPC at size= (wrote %ld)", total);
     CHECK(ftruncate(fd, 0) == 0 && pwrite(fd, b, sizeof b, 0) == (ssize_t)sizeof b, "room again after truncate");
     close(fd);
+    struct statfs sf;
+    CHECK(statfs("/var/tmp/tmemmnt", &sf) == 0 && sf.f_type == 0x01021994 && sf.f_blocks == 256 && sf.f_bfree == 256 - 16, "statfs blocks %ld free %ld", (long)sf.f_blocks, (long)sf.f_bfree);
     struct stat st;
     CHECK(stat("/var/tmp/tmemmnt/big", &st) == 0 && st.st_size == (off_t)sizeof b, "size in tmpfs %ld", (long)st.st_size);
     unlink("/var/tmp/tmemmnt/big");
@@ -253,7 +256,8 @@ static int check(void) {
     int fd = open(KEEP, O_RDONLY);
     if (fd < 0) { printf("TMEMKEEP FAIL open: %s\n", strerror(errno)); return 1; }
     uint8_t *b = malloc(KEEP_SZ);
-    ssize_t n = read(fd, b, KEEP_SZ);
+    ssize_t n = 0, k;
+    while (n < KEEP_SZ && (k = read(fd, b + n, KEEP_SZ - n)) > 0) n += k;
     struct stat st;
     stat(KEEP, &st);
     size_t bad = 0;

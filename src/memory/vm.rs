@@ -1962,6 +1962,36 @@ impl MemObject {
     }
 }
 
+// wave9 GM begin
+impl MemObject {
+    /// Frees the pages of an anonymous object past `size` bytes and zeroes the rest of the
+    /// last page (`LX_MEM_TRUNC`; a mapping that still maps a freed page keeps its own
+    /// reference). `-EINVAL` for contiguous (DMA) objects or a size past the object.
+    pub fn truncate(&self, size: u64) -> Result<(), i64> {
+        let MemStore::Anon(m) = &self.store else { return Err(-22) };
+        if size > self.pages * PAGE_SIZE {
+            return Err(-22);
+        }
+        let gone: Vec<PhysFrame<Size4KiB>> = {
+            let mut m = m.lock();
+            let gone = m.split_off(&size.div_ceil(PAGE_SIZE)).into_values().collect();
+            if size % PAGE_SIZE != 0 {
+                if let Some(f) = m.get(&(size / PAGE_SIZE)) {
+                    let k = (size % PAGE_SIZE) as usize;
+                    // SAFETY: a frame of this object, through the direct map
+                    unsafe { core::ptr::write_bytes(crate::memory::frame_allocator::phys_to_virt(f.start_address().as_u64()).add(k), 0, PAGE_SIZE as usize - k) };
+                }
+            }
+            gone
+        };
+        for f in gone {
+            frame_ref_dec(f);
+        }
+        Ok(())
+    }
+}
+// wave9 GM end
+
 impl MappedObject for MemObject {
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         if pgoff >= self.pages {

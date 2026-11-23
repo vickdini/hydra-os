@@ -28,3 +28,6 @@ pub fn parse_size(_data: &str) -> Option<u64> {
 pub fn ctl(_sub: u64, _a: u64, _b: u64, _out: &dyn Fn(&[u8]) -> i64) -> i64 {
     -22
 }
+pub fn usage(_id: u32) -> Option<(u64, u64, u64)> {
+    None
+}
