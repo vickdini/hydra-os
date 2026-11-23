@@ -379,12 +379,11 @@ impl ZfsServer {
         }
         let events = reply.args[3] as usize;
         // (wave9 G6b-1: vfs-server's watches get the events of the kernel's requests too)
-        if events > 0 && (crate::compat::linux::inotify::active() || crate::compat::linux::fanotify::active() || crate::lx::notifyfwd::want_zfs()) {
+        // (wave9 G9-C: the kernel's own inotify instances and fanotify groups are gone)
+        if events > 0 && crate::lx::notifyfwd::want_zfs() {
             let mut r = Reader::new(&window[EVENT_OFFSET..EVENT_OFFSET + EVENT_SPACE]);
             for _ in 0..events {
                 let e = r.event();
-                crate::compat::linux::inotify::event(e.ino, e.mask, e.cookie, &e.name);
-                crate::compat::linux::fanotify::fs_event(e.ino, e.mask, &e.name);
                 crate::lx::notifyfwd::zfs_event(e.ino, e.mask, e.cookie, &e.name);
             }
         }

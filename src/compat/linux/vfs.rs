@@ -1351,7 +1351,6 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::Epoll(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::SignalFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::TimerFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        Some(FileDescriptor::Inotify(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::PidFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         None => Some(Err(EBADF)),
         _ => None,
@@ -1670,13 +1669,9 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     }
     let keep = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
     // The path as reached (a mapped proc mount shows where it is mounted, as on Linux)
-    // fanotify: permission events, then FAN_OPEN
-    let fan_dir = if super::fanotify::active() && flags & O_PATH == 0 { super::fanotify::parent_of_path(&raw) } else { 0 };
-    if super::fanotify::active() && flags & O_PATH == 0 {
-        super::fanotify::on_open(ino, fan_dir, &raw, ftype == S_IFDIR, false)?;
-    }
-    // wave9 G6b-1: vfs-server's fanotify groups (permission events, then FAN_OPEN)
-    let fan_dir = if fan_dir == 0 && flags & O_PATH == 0 && crate::lx::notifyfwd::want_fan() { crate::lx::notifyfwd::parent_of(&raw) } else { fan_dir };
+    // wave9 G6b-1: vfs-server's fanotify groups (permission events, then FAN_OPEN; wave9
+    // G9-C: the kernel has no groups of its own)
+    let fan_dir = if flags & O_PATH == 0 && crate::lx::notifyfwd::want_fan() { crate::lx::notifyfwd::parent_of(&raw) } else { 0 };
     if flags & O_PATH == 0 {
         crate::lx::notifyfwd::on_open(ino, fan_dir, &raw, ftype == S_IFDIR, false)?;
     }
@@ -2468,7 +2463,6 @@ pub(crate) fn fd_link(abs: &str) -> Option<String> {
         FileDescriptor::Inet(s) => alloc::format!("socket:[{}]", Arc::as_ptr(&s) as usize as u64 & 0xFFFF_FFFF),
         FileDescriptor::Unix(s) => alloc::format!("socket:[{}]", s.ino()),
         FileDescriptor::TimerFd(_) => String::from("anon_inode:[timerfd]"),
-        FileDescriptor::Inotify(_) => String::from("anon_inode:inotify"),
         FileDescriptor::PidFd(_) => String::from("anon_inode:[pidfd]"),
         FileDescriptor::Epoll(_) => String::from("anon_inode:[eventpoll]"),
         FileDescriptor::EventFd(_) => String::from("anon_inode:[eventfd]"),
@@ -3222,12 +3216,6 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                     }
                     t.get_nonblock()
                 }
-                FileDescriptor::Inotify(i) => {
-                    if cmd == F_SETFL {
-                        i.set_nonblock(on);
-                    }
-                    i.get_nonblock()
-                }
                 _ => false,
             };
             if cmd == F_SETFL {
@@ -3383,7 +3371,7 @@ fn is_tty(d: &FileDescriptor) -> bool {
 /// `Some(FileDescriptor)` if event/timer/inotify object, or `None`.
 fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
     crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_))) => Some(d.clone()),
+        Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_))) => Some(d.clone()),
         _ => None,
     })
 }
@@ -3560,7 +3548,7 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
     let stream = is_tty(&desc)
         || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_) | FileDescriptor::Pty(_) | FileDescriptor::SignalFd(_) | FileDescriptor::Unix(_)
-            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) | FileDescriptor::Device(_));
+            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Device(_));
     if !stream {
         return None;
     }
@@ -3613,7 +3601,6 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::Unix(s) => s.read(buf),
                 FileDescriptor::EventFd(e) => super::eventfd::read(e, buf),
                 FileDescriptor::TimerFd(t) => t.read(buf),
-                FileDescriptor::Inotify(i) => i.read(buf),
                 // Devices whose reads install descriptors (fanotify) have their own read
                 FileDescriptor::Device(d) => d.read_unlocked(buf).unwrap_or_else(|| d.read(buf)),
                 _ => super::tty::read(buf, super::tty::nonblock()),
@@ -3628,7 +3615,7 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
                 FileDescriptor::SignalFd(_) => EINVAL,
                 FileDescriptor::Unix(s) => s.write(data),
                 FileDescriptor::EventFd(e) => super::eventfd::write(e, data),
-                FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => EINVAL,
+                FileDescriptor::TimerFd(_) => EINVAL,
                 FileDescriptor::Device(d) => d.write(data),
                 _ => super::tty::write(data) as i64,
             }
@@ -3679,13 +3666,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     _ if d.as_server().is_some() => crate::lx::call_obj(16, a, d),
                     _ => d.ioctl(a[1], a[2]),
                 },
-                Some(FileDescriptor::Inotify(ref i)) if a[1] == 0x541B => {
-                    // FIONREAD: bytes of queued events
-                    match copy_out(a[2], &(i.pending_bytes() as i32).to_le_bytes()) {
-                        Ok(()) => 0,
-                        Err(e) => e,
-                    }
-                }
                 Some(FileDescriptor::Pty(ref p)) => match a[1] {
                     0x5421 => match copy_in(a[2], 4) {
                         // FIONBIO

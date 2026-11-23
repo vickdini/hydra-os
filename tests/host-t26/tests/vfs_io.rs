@@ -167,11 +167,20 @@ fn device_streams() {
 }
 
 #[test]
-fn inotify_reads_through_stream_io() {
+fn notify_calls_reaching_the_kernel_are_refused() {
+    // wave9 G9-C: inotify instances and fanotify groups are vfs-server's; what reaches the
+    // kernel: init with vfs-server down (ENOSYS), a descriptor that is no instance
     let _e = setup();
-    let ifd = lx::inotify::sys_init1(0o4000);
-    assert_eq!(rd(ifd, 64).0, EAGAIN);
-    assert_eq!(wr(ifd, b"x"), EINVAL);
+    assert_eq!(lx::inotify::sys_init1(0), -38);
+    assert_eq!(lx::inotify::sys_add_watch(700, 0, 2), EBADF);
+    assert_eq!(lx::inotify::sys_rm_watch(700, 1), EBADF);
+    memfs::mkfile("/f", b"");
+    let f = open("/f", O_RDONLY);
+    assert_eq!(lx::inotify::sys_add_watch(f as u64, 0, 2), EINVAL);
+    assert_eq!(lx::inotify::sys_rm_watch(f as u64, 1), EINVAL);
+    assert_eq!(lx::fanotify::dispatch(300, [0; 6]), -38);
+    assert_eq!(lx::fanotify::dispatch(301, [700, 0, 0, 0, 0, 0]), EBADF);
+    assert_eq!(lx::fanotify::dispatch(301, [f as u64, 0, 0, 0, 0, 0]), EINVAL);
 }
 
 #[test]
@@ -226,11 +235,6 @@ fn ioctl_requests() {
     let sfd = install(FileDescriptor::Device(s));
     hydra_hosttests_t26::fake::lx::ANSWER.set(3);
     assert_eq!(ioctl(sfd, 0x1234, 0), 3);
-    // inotify FIONREAD
-    let ifd = lx::inotify::sys_init1(0);
-    assert_eq!(ioctl(ifd, 0x541B, n), 0);
-    assert_eq!(read_i32(n), 0);
-    assert_eq!(ioctl(ifd, 0x541B, 16), EFAULT);
     // A pty: FIONBIO, its own requests (TIOCGPTPEER opens the peer)
     let p = lx::pty::PtyFile::named("/dev/ptmx", false);
     let pfd = install(FileDescriptor::Pty(p.clone()));

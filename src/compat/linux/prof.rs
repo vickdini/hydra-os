@@ -384,6 +384,7 @@ pub fn show(top: usize) {
     // wave7 G7-7: the file service's share again on short lines of their own (the long line
     // above can be lost on a busy serial console)
     crate::println!("[prof] {}", crate::lx::fileh::summary());
+    crate::println!("[prof] {}", crate::lx::fileh::kernel_by_nr(40)); // wave9 G9-C
     crate::println!("[prof] {}", crate::lx::xexec::summary());
     lat_show("wakeup -> ready", &LAT_PENDING);
     lat_show("ready -> running", &LAT_RUN);

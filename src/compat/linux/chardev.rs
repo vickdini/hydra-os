@@ -216,16 +216,6 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
-    /// The FUSE connection behind this descriptor (an open `/dev/fuse`), if it is one.
-    fn as_fuse(&self) -> Option<Arc<super::fuse::Conn>> {
-        None
-    }
-
-    /// The fanotify group behind this descriptor, if it is one.
-    fn as_fanotify(&self) -> Option<Arc<super::fanotify::Group>> {
-        None
-    }
-
     /// The new mount API's object behind this descriptor, if it is one.
     fn as_mount_obj(&self) -> Option<&super::mount::MountObj> {
         None
@@ -273,8 +263,9 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
         return Some(crate::ipc::input::open(rdev, flags));
     }
     // wave8 GI end
-    // wave9 G6b-2 begin: /dev/fuse is vfs-server's while the file service is forwarded
-    if major == 10 && minor == 229 && super::fuse_svc::forwarded() {
+    // wave9 G6b-2 begin: /dev/fuse is vfs-server's (wave9 G9-C: always; the kernel's own
+    // FUSE client is gone)
+    if major == 10 && minor == 229 {
         return Some(crate::lx::dev_open_to(crate::ipc::protocol::LXS_VFS, rdev, flags));
     }
     // wave9 G6b-2 end
@@ -287,7 +278,6 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
         13 => Some(super::evdev::open(minor, nonblock)),
         116 => Some(super::snd::open(minor, nonblock)),
         1 if minor == 11 => Some(super::admin::kmsg_open(flags)),
-        10 if minor == 229 => Some(super::fuse::open(flags)),
         _ => None,
     }
 }

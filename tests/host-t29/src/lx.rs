@@ -85,6 +85,10 @@ pub mod fileh {
     pub fn summary() -> alloc::string::String {
         alloc::string::String::new()
     }
+    /// *stub* wave9 G9-C: the prof line of calls by number.
+    pub fn kernel_by_nr(_n: usize) -> alloc::string::String {
+        alloc::string::String::new()
+    }
 }
 
 // wave9 G7a: the kernel's process-identity primitives, compiled for real

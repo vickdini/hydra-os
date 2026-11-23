@@ -158,9 +158,7 @@ mod live {
     /// events.
     #[inline]
     pub(super) fn host_word() -> Option<(&'static Host, u64)> {
-        if crate::lx::all_kernel() || svc::mode(LXS_VFS) != svc::SvcMode::Forward {
-            return None;
-        }
+        // (wave9 G9-C: the file service is always forwarded, also with `lx=kernel`)
         let x = svc::host(svc::host_of(LXS_VFS))?;
         let base = x.notes.load(Ordering::Acquire);
         if base == 0 {

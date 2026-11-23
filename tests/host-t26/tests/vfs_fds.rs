@@ -76,7 +76,7 @@ fn fcntl_status_flags_of_other_descriptors() {
     assert_eq!(sys(72, &[c as u64, 4, O_NONBLOCK]), 0);
     assert!(lx::tty::nonblock());
     assert_eq!(sys(72, &[c as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // eventfd, timerfd, inotify
+    // eventfd, timerfd (wave9 G9-C: inotify instances are vfs-server's)
     let e = lx::eventfd::EventFd::new(0);
     let efd = install(FileDescriptor::EventFd(e.clone()));
     assert_eq!(sys(72, &[efd as u64, 4, O_NONBLOCK]), 0);
@@ -87,9 +87,6 @@ fn fcntl_status_flags_of_other_descriptors() {
     assert_eq!(sys(72, &[tfd as u64, 4, O_NONBLOCK]), 0);
     assert!(t.get_nonblock());
     assert_eq!(sys(72, &[tfd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    let ifd = lx::inotify::sys_init1(0);
-    assert_eq!(sys(72, &[ifd as u64, 4, O_NONBLOCK]), 0);
-    assert_eq!(sys(72, &[ifd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
     // A device, a Unix socket, a signalfd, a pty
     let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/x", 0));
     let dfd = install(FileDescriptor::Device(d.clone()));
@@ -416,8 +413,6 @@ fn fstat_of_every_kind() {
         assert_eq!(st.st_mode, 0o600);
         assert_eq!(st.st_dev, 0xd);
     }
-    let ifd = lx::inotify::sys_init1(0);
-    assert_eq!(check(ifd).st_mode, 0o600);
     // A device reports its own stat
     let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/x", 0));
     assert_eq!(check(install(FileDescriptor::Device(d))).st_mode, 0);

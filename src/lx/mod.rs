@@ -451,7 +451,8 @@ pub fn set_forwarding(on: bool) {
         TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
     // wave7 G7-2: the file service's calls (those vfs-server claimed)
-    fileh::apply(on);
+    // (wave9 G9-C: always, also with `lx=kernel`)
+    fileh::apply();
 }
 
 /// The entry of system call `nr` (0: the kernel answers it). One load.

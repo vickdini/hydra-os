@@ -296,9 +296,10 @@ pub mod lx {
     pub fn dev_open(_rdev: u64, _flags: u32) -> Option<Result<alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, i64>> {
         crate::fake::LX_DEV_OPEN.get().map(Err)
     }
-    /// *stub* wave9 G6b-2: never reached (`fuse_svc::forwarded()` is false).
+    /// *stub* wave9 G6b-2: `/dev/fuse` is vfs-server's (wave9 G9-C: always). Recognisable
+    /// errno: -1229.
     pub fn dev_open_to(_s: u8, _rdev: u64, _flags: u32) -> Result<alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
-        Err(-19)
+        Err(-1229)
     }
     pub mod obj {
         /// *stub*
@@ -411,21 +412,9 @@ pub mod compat {
             pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
         }
 
-        /// *stub* wave9 G6b-2: `/dev/fuse` stays the kernel's on the host.
-        pub mod fuse_svc {
-            pub fn forwarded() -> bool {
-                false
-            }
-        }
-
         /// *stub* `/dev/fuse`.
         pub mod fuse {
             pub const RDEV: u64 = super::chardev::makedev(10, 229);
-            pub struct Conn;
-            /// *stub* Recognisable errno: -1229.
-            pub fn open(_flags: u32) -> Result<alloc::sync::Arc<dyn super::chardev::CharDevice>, i64> {
-                Err(-1229)
-            }
         }
 
         /// *stub* `/dev/kmsg`.

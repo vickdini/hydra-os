@@ -822,7 +822,6 @@ fn desc_ident(d: &FileDescriptor) -> usize {
         FileDescriptor::SignalFd(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::Unix(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::TimerFd(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::Inotify(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::PidFd(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::Device(a) => Arc::as_ptr(a) as *const u8 as usize,
         _ => 0,

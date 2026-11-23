@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use hydra_hosttests_t33::compat::linux::epoll::{EpollInstance, EPOLLIN, EPOLLONESHOT};
 use hydra_hosttests_t33::compat::linux::{
-    chardev::CharDevice, eventfd::EventFd, inet::InetSocket, inotify::Inotify, memfd::MemFd, pidfd::PidFd, pty::PtyFile, signalfd::SignalFd, socket, timerfd::TimerFd, tty, unix,
+    chardev::CharDevice, eventfd::EventFd, inet::InetSocket, memfd::MemFd, pidfd::PidFd, pty::PtyFile, signalfd::SignalFd, socket, timerfd::TimerFd, tty, unix,
     FANOTIFY_ON, FSIZE, INOTIFY_ON, LOCKS, NOFILE, NOTIFIED,
 };
 use hydra_hosttests_t33::fake;
@@ -325,7 +325,6 @@ fn kinds_read_and_written_elsewhere_refuse() {
         (FileDescriptor::SignalFd(Arc::new(SignalFd)), "signalfd is read through the Linux layer", Err("signalfd is not writable")),
         (FileDescriptor::Unix(Arc::new(unix::UnixSocket)), "Unix sockets are read through the Linux socket layer", Ok(4)),
         (FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })), "read through the Linux layer", Err("not writable")),
-        (FileDescriptor::Inotify(Arc::new(Inotify { wq: wq() })), "read through the Linux layer", Err("not writable")),
         (FileDescriptor::PidFd(Arc::new(PidFd)), "pidfds are not readable", Err("not writable")),
         (dev(false, 0), "devices are read through the Linux layer", Err("devices are written through the Linux layer")),
     ];
@@ -370,7 +369,6 @@ fn poll_events_per_kind() {
     assert_eq!(FileDescriptor::SignalFd(Arc::new(SignalFd)).poll_events(), 0x1);
     assert_eq!(FileDescriptor::Unix(Arc::new(unix::UnixSocket)).poll_events(), 0x4);
     assert_eq!(FileDescriptor::TimerFd(Arc::new(TimerFd { wq: WaitQueue::new_shared() })).poll_events(), 0);
-    assert_eq!(FileDescriptor::Inotify(Arc::new(Inotify { wq: WaitQueue::new_shared() })).poll_events(), 0);
     assert_eq!(FileDescriptor::PidFd(Arc::new(PidFd)).poll_events(), 0x1);
     assert_eq!(dev(false, 0x40).poll_events(), 0x40);
     let (_, v) = vnode("poll", b"", O_RDONLY);
@@ -401,7 +399,6 @@ fn wait_queues_per_kind() {
     assert_eq!(count(&FileDescriptor::SignalFd(Arc::new(SignalFd))), (0, false, 0));
     assert_eq!(count(&FileDescriptor::Unix(Arc::new(unix::UnixSocket))), (1, false, 0));
     assert_eq!(count(&FileDescriptor::TimerFd(Arc::new(TimerFd { wq: WaitQueue::new_shared() }))), (1, false, 1));
-    assert_eq!(count(&FileDescriptor::Inotify(Arc::new(Inotify { wq: WaitQueue::new_shared() }))), (1, false, 0));
     assert_eq!(count(&FileDescriptor::PidFd(Arc::new(PidFd))), (1, false, 0));
     assert_eq!(count(&dev(false, 0)), (0, true, 0));
     assert_eq!(count(&FileDescriptor::EventFd(EventFd::new(0, 0))), (1, false, 0));
@@ -440,7 +437,6 @@ fn object_ids_tell_open_files_apart() {
         FileDescriptor::SignalFd(Arc::new(SignalFd)),
         FileDescriptor::Unix(Arc::new(unix::UnixSocket)),
         FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })),
-        FileDescriptor::Inotify(Arc::new(Inotify { wq: wq() })),
         FileDescriptor::PidFd(Arc::new(PidFd)),
         dev(false, 0),
         vnode("ids", b"", O_RDONLY).1,
@@ -617,7 +613,6 @@ fn trace_names_every_kind() {
         (FileDescriptor::SignalFd(Arc::new(SignalFd)), "signalfd"),
         (FileDescriptor::Unix(Arc::new(unix::UnixSocket)), "unix"),
         (FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })), "timerfd"),
-        (FileDescriptor::Inotify(Arc::new(Inotify { wq: wq() })), "inotify"),
         (FileDescriptor::PidFd(Arc::new(PidFd)), "pidfd"),
         (dev(false, 0), "device"),
         (file("/f", true, false, false), "file"),

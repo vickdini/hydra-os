@@ -422,14 +422,14 @@ fn reply_events_reach_inotify_and_fanotify() {
     INOTIFY_ON.set(true);
     fakefs::EVENTS.with_borrow_mut(|v| v.push(Event { ino: d, mask: 0x100, cookie: 0, name: b"new".to_vec() }));
     srv(|s| s.pool_status()).unwrap();
+    // (wave9 G9-C: handed to vfs-server only; the kernel has no instances of its own)
     let n = NOTIFIED.with_borrow(|v| v.clone());
-    assert!(n.contains(&("inotify", d, 0x100, "new".to_string())));
-    assert!(n.contains(&("fan-fs", d, 0x100, "new".to_string())));
+    assert_eq!(n, vec![("vfs-zfs", d, 0x100, "new".to_string())]);
     INOTIFY_ON.set(false);
     FANOTIFY_ON.set(true);
     fakefs::EVENTS.with_borrow_mut(|v| v.push(Event { ino: d, mask: 0x200, cookie: 0, name: b"x".to_vec() }));
     srv(|s| s.pool_status()).unwrap();
-    assert!(NOTIFIED.with_borrow(|v| v.contains(&("fan-fs", d, 0x200, "x".to_string()))));
+    assert!(NOTIFIED.with_borrow(|v| v.contains(&("vfs-zfs", d, 0x200, "x".to_string()))));
 }
 
 #[test]
