@@ -2574,6 +2574,12 @@ fn dispatch_process_calls(frame: &mut SyscallFrame, num: u64, a: [u64; 6]) -> Op
 ///
 /// The call's result or a negative errno.
 pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
+    let mut f = nested_frame(frame, num, args);
+    dispatch_checked(&mut f)
+}
+
+/// The program's registers `frame` with call `num` and `args` in the call registers.
+fn nested_frame(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> SyscallFrame {
     // SAFETY: SyscallFrame is plain register data (repr(C), no references)
     let mut f: SyscallFrame = unsafe { core::ptr::read(frame) };
     f.rax = num;
@@ -2583,6 +2589,19 @@ pub(crate) fn nested(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
     f.r10 = args[3];
     f.r8 = args[4];
     f.r9 = args[5];
+    f
+}
+
+/// wave9 G6b-4: [`nested`] for an io_uring request or an aio operation: routed like the
+/// program's own call (to the descriptor's owner: vfs-server, lx-net, lx-ipc, a device
+/// service; [`crate::lx::uring::route`]), the kernel's code when the kernel owns it or the
+/// requests stay in the kernel (`lx=kernel`, `lx.uring=kernel`).
+pub(crate) fn nested_routed(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
+    let mut f = nested_frame(frame, num, args);
+    #[cfg(target_os = "uefi")]
+    if let Some(r) = crate::lx::uring::route(&f) {
+        return r;
+    }
     dispatch_checked(&mut f)
 }
 

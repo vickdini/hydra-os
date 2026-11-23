@@ -26,6 +26,12 @@ thread_local! {
     pub static CREDS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     /// (tid, tgid) of the current task.
     pub static IDS: Cell<(u64, u64)> = const { Cell::new((1, 1)) };
+    /// wave9 G6b-4: uid, gid, egid, suid, sgid of the current task (euid: [`EUID`]).
+    pub static TASK_IDS: Cell<[u32; 5]> = const { Cell::new([0; 5]) };
+    /// wave9 G6b-4: `ident_changed` calls.
+    pub static IDENT_CHANGES: Cell<u64> = const { Cell::new(0) };
+    /// wave9 G6b-4: the current task's address space root.
+    pub static CR3: Cell<u64> = const { Cell::new(0) };
     /// What `signal_pending()` reports.
     pub static SIGNAL_PENDING: Cell<bool> = const { Cell::new(false) };
     /// User memory that faults: `[start, end)` ranges.
@@ -72,6 +78,8 @@ pub fn reset() {
     EUID.set(0);
     CREDS.set((0, 0));
     IDS.set((1, 1));
+    TASK_IDS.set([0; 5]);
+    CR3.set(0);
     SIGNAL_PENDING.set(false);
     BAD_PTRS.with_borrow_mut(|v| v.clear());
     WAKES.set(0);
@@ -380,14 +388,48 @@ pub mod task {
     }
 
     /// Capability set of a task, as far as the code under test looks at it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Caps {
         pub effective: u64,
+        pub permitted: u64,
+        pub in_userns: bool,
+    }
+
+    impl Caps {
+        pub const fn for_euid(euid: u32) -> Self {
+            let all = if euid == 0 { (1 << 41) - 1 } else { 0 };
+            Caps { effective: all, permitted: all, in_userns: false }
+        }
+    }
+
+    /// `crate::task::tcb` (wave9 G6b-4: io_uring names `tcb::Caps`).
+    pub mod tcb {
+        pub use super::Caps;
+    }
+
+    /// *mirror* of the task's saved registers (the address space root).
+    pub struct Regs {
+        pub cr3: u64,
     }
 
     /// The parts of the kernel's `Task` the code under test reads.
     pub struct Task {
         pub caps: Caps,
         pub euid: u32,
+        // wave9 G6b-4: credentials, thread group and address space (io_uring's workers)
+        pub uid: u32,
+        pub gid: u32,
+        pub egid: u32,
+        pub suid: u32,
+        pub sgid: u32,
+        pub tgid: u64,
+        pub regs: Regs,
+    }
+
+    impl Task {
+        fn plain(effective: u64, euid: u32) -> Task {
+            Task { caps: Caps { effective, permitted: 0, in_userns: false }, euid, uid: 0, gid: 0, egid: 0, suid: 0, sgid: 0, tgid: 0, regs: Regs { cr3: 0 } }
+        }
     }
 
     thread_local! {
@@ -418,9 +460,15 @@ pub mod task {
 
     pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         let effective = CAPS.get()?;
-        let mut t = Task { caps: Caps { effective }, euid: EUID.get() };
+        let [uid, gid, egid, suid, sgid] = super::TASK_IDS.get();
+        let mut t = Task::plain(effective, EUID.get());
+        (t.uid, t.gid, t.egid, t.suid, t.sgid) = (uid, gid, egid, suid, sgid);
+        t.tgid = super::IDS.get().1;
+        t.regs.cr3 = super::CR3.get();
         let r = f(&mut t);
         CAPS.set(Some(t.caps.effective));
+        EUID.set(t.euid);
+        super::TASK_IDS.set([t.uid, t.gid, t.egid, t.suid, t.sgid]);
         Some(r)
     }
 
@@ -530,7 +578,7 @@ pub mod task {
         }
         pub fn with_process<R>(&self, tgid: u64, f: impl FnOnce(&Task) -> R) -> Option<R> {
             if PROCESSES.with_borrow(|p| p.contains(&tgid)) {
-                Some(f(&Task { caps: Caps { effective: 0 }, euid: 0 }))
+                Some(f(&Task::plain(0, 0)))
             } else {
                 None
             }

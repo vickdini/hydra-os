@@ -1,7 +1,8 @@
 //! # Linux native asynchronous I/O (`io_setup`, `io_submit`, `io_getevents` and family)
 //!
 //! Each operation runs when it is submitted, through the program's own `pread64`,
-//! `pwrite64`, `preadv`, `pwritev`, `fsync` and `fdatasync` ([`super::nested`]), and its
+//! `pwrite64`, `preadv`, `pwritev`, `fsync` and `fdatasync` ([`super::nested_routed`]: to the
+//! descriptor's owner, wave9 G6b-4), and its
 //! completion is queued for `io_getevents`. (Linux too completes buffered file AIO during
 //! submission; Hydra has no page cache or direct I/O to overlap.) A poll request that is not
 //! ready yet stays pending and is checked again while `io_getevents` waits; `io_cancel`
@@ -77,7 +78,7 @@ fn usage(ctx: u64) -> Option<(usize, usize)> {
 /// Writes 1 to eventfd `fd`, through `scratch` (8 bytes of user memory).
 fn signal_eventfd(frame: &SyscallFrame, fd: u64, scratch: u64) {
     if copy_out(scratch, &1u64.to_le_bytes()).is_ok() {
-        super::nested(frame, NR_WRITE, [fd, scratch, 8, 0, 0, 0]);
+        super::nested_routed(frame, NR_WRITE, [fd, scratch, 8, 0, 0, 0]);
     }
 }
 
@@ -89,7 +90,7 @@ fn poll_now(frame: &SyscallFrame, fd: i32, events: u16, scratch: u64) -> u16 {
     if copy_out(scratch, &pfd).is_err() {
         return 0;
     }
-    if super::nested(frame, NR_POLL, [scratch, 1, 0, 0, 0, 0]) <= 0 {
+    if super::nested_routed(frame, NR_POLL, [scratch, 1, 0, 0, 0, 0]) <= 0 {
         return 0;
     }
     copy_in(scratch + 6, 2).map(|r| u16::from_le_bytes([r[0], r[1]])).unwrap_or(0)
@@ -174,12 +175,12 @@ fn io_submit(frame: &SyscallFrame, ctx: u64, nr: u64, iocbpp: u64) -> i64 {
         }
         let f = fd as i64 as u64;
         let res = match opcode {
-            IOCB_CMD_PREAD => super::nested(frame, NR_PREAD64, [f, buf, nbytes, offset, 0, 0]),
-            IOCB_CMD_PWRITE => super::nested(frame, NR_PWRITE64, [f, buf, nbytes, offset, 0, 0]),
-            IOCB_CMD_PREADV => super::nested(frame, NR_PREADV, [f, buf, nbytes, offset, 0, 0]),
-            IOCB_CMD_PWRITEV => super::nested(frame, NR_PWRITEV, [f, buf, nbytes, offset, 0, 0]),
-            IOCB_CMD_FSYNC => super::nested(frame, NR_FSYNC, [f, 0, 0, 0, 0, 0]),
-            IOCB_CMD_FDSYNC => super::nested(frame, NR_FDATASYNC, [f, 0, 0, 0, 0, 0]),
+            IOCB_CMD_PREAD => super::nested_routed(frame, NR_PREAD64, [f, buf, nbytes, offset, 0, 0]),
+            IOCB_CMD_PWRITE => super::nested_routed(frame, NR_PWRITE64, [f, buf, nbytes, offset, 0, 0]),
+            IOCB_CMD_PREADV => super::nested_routed(frame, NR_PREADV, [f, buf, nbytes, offset, 0, 0]),
+            IOCB_CMD_PWRITEV => super::nested_routed(frame, NR_PWRITEV, [f, buf, nbytes, offset, 0, 0]),
+            IOCB_CMD_FSYNC => super::nested_routed(frame, NR_FSYNC, [f, 0, 0, 0, 0, 0]),
+            IOCB_CMD_FDSYNC => super::nested_routed(frame, NR_FDATASYNC, [f, 0, 0, 0, 0, 0]),
             IOCB_CMD_NOOP => 0,
             IOCB_CMD_POLL => {
                 let events = buf as u16;

@@ -486,10 +486,10 @@ fn opcodes_run_the_programs_system_calls() {
         (Sqe { opcode: FSYNC, fd: 5, ..Default::default() }, 74, [5, 0, 0, 0, 0, 0]),
         (Sqe { opcode: FSYNC, fd: 5, op_flags: 1, ..Default::default() }, 75, [5, 0, 0, 0, 0, 0]),
         (Sqe { opcode: SYNC_FILE_RANGE, fd: 5, off: 1, len: 2, op_flags: 3, ..Default::default() }, 277, [5, 1, 2, 3, 0, 0]),
-        (Sqe { opcode: SENDMSG, fd: 5, addr: 0x40, op_flags: 0x4000, ..Default::default() }, 46, [5, 0x40, 0x4000, 0, 0, 0]),
-        (Sqe { opcode: RECVMSG, fd: 5, addr: 0x40, op_flags: 2, ..Default::default() }, 47, [5, 0x40, 2, 0, 0, 0]),
-        (Sqe { opcode: SEND, fd: 5, addr: 0x50, len: 4, op_flags: 1, ..Default::default() }, 44, [5, 0x50, 4, 1, 0, 0]),
-        (Sqe { opcode: RECV, fd: 5, addr: 0x50, len: 4, op_flags: 1, ..Default::default() }, 45, [5, 0x50, 4, 1, 0, 0]),
+        (Sqe { opcode: SENDMSG, fd: 5, addr: 0x40, op_flags: 0x4000, ..Default::default() }, 46, [5, 0x40, 0x4000 | 0x40, 0, 0, 0]),
+        (Sqe { opcode: RECVMSG, fd: 5, addr: 0x40, op_flags: 2, ..Default::default() }, 47, [5, 0x40, 2 | 0x40, 0, 0, 0]),
+        (Sqe { opcode: SEND, fd: 5, addr: 0x50, len: 4, op_flags: 1, ..Default::default() }, 44, [5, 0x50, 4, 1 | 0x40, 0, 0]),
+        (Sqe { opcode: RECV, fd: 5, addr: 0x50, len: 4, op_flags: 1, ..Default::default() }, 45, [5, 0x50, 4, 1 | 0x40, 0, 0]),
         (Sqe { opcode: ACCEPT, fd: 5, addr: 0x60, off: 0x68, op_flags: 0o4000, ..Default::default() }, 288, [5, 0x60, 0x68, 0o4000, 0, 0]),
         (Sqe { opcode: CONNECT, fd: 5, addr: 0x70, off: 16, ..Default::default() }, 42, [5, 0x70, 16, 0, 0, 0]),
         (Sqe { opcode: BIND, fd: 5, addr: 0x70, off: 16, ..Default::default() }, 49, [5, 0x70, 16, 0, 0, 0]),
@@ -1342,4 +1342,128 @@ fn registered_ring_descriptors() {
     r.register(20, mptr(&mut x), 1);
     let mut any = upd(u32::MAX, r.fd);
     assert_eq!(r.register(20, mptr(&mut any), 1), EINVAL);
+}
+
+// ------------------------------------------------------------------ wave9 G6b-4: whom the worker acts for
+
+use hydra_hosttests_t27::fake::task::with_current_task_mut;
+
+/// The calling task's (uid, euid).
+fn uids() -> (u32, u32) {
+    with_current_task_mut(|t| (t.uid, t.euid)).unwrap()
+}
+
+fn set_uids(u: u32) {
+    fake::TASK_IDS.set([u; 5]);
+    fake::EUID.set(u);
+}
+
+#[test]
+fn a_waiting_request_runs_with_its_submitters_credentials() {
+    process(31_101);
+    let r = ring(8);
+    let e = eventfd(5, 0);
+    set_uids(1000);
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) }]);
+    set_uids(2000);
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 2) }]);
+    // The worker started with someone else's identity (root)
+    set_uids(0);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let s2 = seen.clone();
+    fake::on_nested(move |_, a| {
+        s2.borrow_mut().push(uids());
+        a[2] as i64
+    });
+    let changes = fake::IDENT_CHANGES.get();
+    e.lock().counter = 1;
+    let rr = r.clone();
+    run_worker(move |_| {
+        assert_eq!(rr.reap(), vec![(1, 8, 0), (2, 8, 0)]);
+        false
+    });
+    assert_eq!(*seen.borrow(), vec![(1000, 1000), (2000, 2000)], "each request under its submitter's credentials");
+    assert!(fake::IDENT_CHANGES.get() >= changes + 2, "the identity caches were told");
+}
+
+#[test]
+fn a_forked_child_and_an_execd_image_get_workers_of_their_own() {
+    process(31_102);
+    let r = ring(8);
+    let e = eventfd(5, 0);
+    echo_syscalls();
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) }]);
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 2) }]);
+    assert_eq!(WORKERS.with_borrow(|w| w.len()), 1, "one process: one worker");
+    // A forked child sharing the ring
+    fake::IDS.set((31_103, 31_103));
+    PROCS.lock().insert(31_103, Process { zombie: false });
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 3) }]);
+    assert_eq!(WORKERS.with_borrow(|w| w.len()), 2, "the child's own worker");
+    // The parent after execve: same process, new address space
+    fake::IDS.set((31_102, 31_102));
+    fake::CR3.set(0x5000);
+    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 4) }]);
+    assert_eq!(WORKERS.with_borrow(|w| w.len()), 3, "the new image's own worker");
+    // The old image's worker runs only its own requests, then ends after an idle round
+    fake::CR3.set(0);
+    e.lock().counter = 1;
+    let rr = r.clone();
+    run_worker(move |n| {
+        match n {
+            1 => assert_eq!(rr.reap(), vec![(1, 8, 0), (2, 8, 0)]),
+            2 => assert!(rr.reap().is_empty(), "not the child's, not the new image's"),
+            _ => panic!("an idle worker with nothing of its own should have ended"),
+        }
+        true
+    });
+}
+
+#[test]
+fn a_cancel_while_the_worker_runs_the_request() {
+    process(31_104);
+    let r = ring(8);
+    let e = eventfd(5, 0);
+    r.submit(&[Sqe { len: 8, ..Sqe::op(RECV, 5, 1) }]);
+    assert!(r.reap().is_empty());
+    // The receive runs (the descriptor looked ready); while it runs the program cancels it;
+    // another reader took the data: -EAGAIN (MSG_DONTWAIT), so it would wait again
+    let rr = r.clone();
+    fake::on_nested(move |num, a| {
+        assert_eq!(num, 45);
+        assert_eq!(a[3] & 0x40, 0x40, "MSG_DONTWAIT on a request found ready");
+        rr.submit(&[Sqe { addr: 1, ..Sqe::op(ASYNC_CANCEL, 0, 2) }]);
+        EAGAIN
+    });
+    e.lock().counter = 1;
+    let rr = r.clone();
+    run_worker(move |_| {
+        assert_eq!(rr.reap(), vec![(2, -114, 0), (1, ECANCELED, 0)], "-EALREADY, then the request is cancelled");
+        false
+    });
+}
+
+#[test]
+fn a_ready_socket_that_is_not_ready_after_all_waits_again() {
+    process(31_105);
+    let r = ring(8);
+    let e = eventfd(5, 1);
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let c2 = calls.clone();
+    fake::on_nested(move |_, a| {
+        c2.set(c2.get() + 1);
+        if c2.get() == 1 { EAGAIN } else { a[2] as i64 }
+    });
+    r.submit(&[Sqe { len: 4, ..Sqe::op(RECV, 5, 1) }]);
+    assert!(r.reap().is_empty(), "-EAGAIN with MSG_DONTWAIT added: it waits instead");
+    // The program's own MSG_DONTWAIT: -EAGAIN is its answer
+    calls.set(0);
+    r.submit(&[Sqe { len: 4, op_flags: 0x40, ..Sqe::op(RECV, 5, 2) }]);
+    assert_eq!(r.reap(), vec![(2, EAGAIN, 0)]);
+    let rr = r.clone();
+    let _ = e;
+    run_worker(move |_| {
+        assert_eq!(rr.reap(), vec![(1, 4, 0)]);
+        false
+    });
 }

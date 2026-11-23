@@ -120,6 +120,18 @@ pub mod compat {
             crate::fake::nested(num, args)
         }
 
+        /// *stub* (wave9 G6b-4) The identity caches are stale: counted in
+        /// [`crate::fake::IDENT_CHANGES`].
+        pub fn ident_changed() {
+            crate::fake::IDENT_CHANGES.set(crate::fake::IDENT_CHANGES.get() + 1);
+        }
+
+        /// *stub* `nested_routed` (wave9 G6b-4): the same handler as [`nested`] (routing
+        /// is `lx::uring`, tested in host-t30).
+        pub(crate) fn nested_routed(frame: &crate::arch::syscall::SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
+            nested(frame, num, args)
+        }
+
         /// *stub* The process table and signal delivery, as far as these files use them.
         pub mod proc {
             pub use crate::fake::proc::*;
