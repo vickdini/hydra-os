@@ -686,6 +686,14 @@ pub fn run_timers() {
     stack.tcp.retain(|_, c| !(c.detached && matches!(c.state, TcpState::Closed | TcpState::TimeWait)));
 }
 
+/// wave10 GN: forgets closed connections nobody holds (as [`run_timers`] does).
+pub fn forget_closed() {
+    let mut stack = STACK.lock();
+    if stack.tcp.values().any(|c| c.detached && matches!(c.state, TcpState::Closed | TcpState::TimeWait)) {
+        stack.tcp.retain(|_, c| !(c.detached && matches!(c.state, TcpState::Closed | TcpState::TimeWait)));
+    }
+}
+
 /// Returns `true` if at least one active TCP connection has a retransmission timer running.
 pub fn timers_armed() -> bool {
     STACK.lock().tcp.values().any(|c| c.timer_armed())

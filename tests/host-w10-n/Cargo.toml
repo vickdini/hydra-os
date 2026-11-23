@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w10_n"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group N host unit tests (wave 10): net-server's live-slot marks (marks.rs), compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

@@ -30,6 +30,7 @@
 extern crate alloc;
 
 mod iface;
+mod marks;
 mod net;
 mod nic;
 mod stack;
@@ -85,6 +86,8 @@ struct State {
     published: Vec<u64>,
     /// Slots with a published word.
     published_slots: Vec<usize>,
+    /// wave10 GN: the slots the current [`publish`] run saw live.
+    live: marks::Marks,
     /// Events written so far.
     event_head: u64,
     /// Requests waiting for DHCP to finish.
@@ -489,12 +492,14 @@ fn list(st: &State, kind: u64, off: u64, cap: u64) -> i64 {
 /// socket changed.
 fn publish(st: &mut State) {
     let words = stack::readiness();
-    let mut live = alloc::vec![false; NETS_SLOTS];
+    // wave10 GN: the live slots marked with the round's number (no 4 KiB array made and
+    // cleared per run)
+    st.live.next_round();
     let before = st.event_head;
     let mut slots = Vec::with_capacity(words.len());
     for (id, w) in words {
         let slot = stack::slot_of(id);
-        live[slot] = true;
+        st.live.mark(slot);
         slots.push(slot);
         if st.published[slot] != w {
             st.sock_word(slot, w);
@@ -503,7 +508,7 @@ fn publish(st: &mut State) {
         }
     }
     for &slot in &core::mem::take(&mut st.published_slots) {
-        if !live[slot] && st.published[slot] != 0 {
+        if !st.live.live(slot) && st.published[slot] != 0 {
             let old = st.published[slot] as u32;
             st.sock_word(slot, 0);
             st.published[slot] = 0;
@@ -564,6 +569,9 @@ fn background(st: &mut State, poll_nic: bool) {
             break;
         }
     }
+    // wave10 GN: closed connections nobody holds go now, not at the next timer round (every
+    // lookup scans the connections)
+    stack::forget_closed();
     if now >= st.next_timer {
         st.next_timer = now + TIMER_TICKS;
         stack::run_timers();
@@ -668,6 +676,7 @@ fn main(args: &[&str]) {
         window,
         published: alloc::vec![0; NETS_SLOTS],
         published_slots: Vec::new(),
+        live: marks::Marks::new(NETS_SLOTS),
         event_head: 0,
         dhcp_waiters: Vec::new(),
         next_dhcp: 0,

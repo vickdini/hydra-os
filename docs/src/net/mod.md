@@ -79,6 +79,13 @@ of the new one even if the new server hands out the same numbers. New sockets wo
 - Frames: received in batches per interrupt; sent in batches (`MSG_NET_TRANSMIT_BATCH`)
   flushed before each reply and after each round of received frames.
 - Before/after numbers: see the Group 2 report (branch `mk-net`).
+- Wave 10 (Group N): every lookup of a segment's connection, every new handle and every
+  publish scans the connection table, which kept each closed `TIME_WAIT` connection until the
+  next timer round (50 ms: hundreds in a connect loop). Connections closed by their client
+  are now forgotten at the end of every round (`stack::forget_closed`), and `publish` marks
+  live slots with round numbers (`marks.rs`) instead of making and clearing a 4 KiB array per
+  run. A loopback connect + accept + 2 closes went from ~190-210 us to ~100 us in lxbench's
+  `tcp_connect` (both modes).
 
 ## Two clients: the kernel and linux-server (wave 5, step 3)
 
