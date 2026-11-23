@@ -43,6 +43,12 @@ const MAX_BYTES: usize = 256 * 1024;
 static HINTS: YLock<BTreeMap<u64, (Node, Vec<u8>, Node)>> = YLock::new(BTreeMap::new());
 /// Most hints kept (all go when full).
 const MAX_HINTS: usize = 16384;
+/// Directories' parents zfs-server named (`..`), for those no walk passed through (above a
+/// chroot such as `/ubuntu`): emptied by any change the kernel or vfs-server makes to names
+/// of directories (see [`names_changed`]), so a moved directory is asked about again.
+static PARENTS: YLock<BTreeMap<u64, u64>> = YLock::new(BTreeMap::new());
+/// Most parents kept.
+const MAX_PARENTS: usize = 4096;
 /// The deepest chain followed (the kernel's 256).
 const MAX_DEPTH: usize = 256;
 
@@ -82,6 +88,7 @@ pub fn domain(c: &LxCall) -> Result<Option<Arc<Domain>>, i64> {
 pub fn forget_all() {
     DOMAINS.lock().clear();
     HINTS.lock().clear();
+    PARENTS.lock().clear();
 }
 
 /// A landlocked caller's walk found `child` by `name` in `dir`.
@@ -112,7 +119,30 @@ fn parent_of(ino: u64, is_dir: bool) -> Option<u64> {
     if !is_dir {
         return None;
     }
-    crate::zfs::lookup(ino, b"..").ok()
+    if let Some(&p) = PARENTS.lock().get(&ino) {
+        return Some(p);
+    }
+    let p = crate::zfs::lookup(ino, b"..").ok()?;
+    let mut g = PARENTS.lock();
+    if g.len() >= MAX_PARENTS {
+        g.clear();
+    }
+    g.insert(ino, p);
+    Some(p)
+}
+
+/// Object `ino` changed (a kernel note names the object it moved or removed; 0: anything
+/// may have): the parent zfs-server named for it may be stale.
+pub fn names_changed(ino: u64) {
+    let mut g = PARENTS.lock();
+    if g.is_empty() {
+        return;
+    }
+    if ino == 0 {
+        g.clear();
+    } else {
+        g.remove(&ino);
+    }
 }
 
 /// Directory `dir` and every directory above it in the pool (the kernel's `dir_chain`).

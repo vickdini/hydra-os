@@ -350,6 +350,7 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     });
     if r.is_ok() && rmdir {
         if let Some(v) = victim {
+            policy::names_changed(v.ino); // wave9 G6b-3
             cache::CACHE.forget_object(v.ino);
         }
     }
@@ -449,6 +450,7 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
     if let Some(s) = src.child {
         cache::CACHE.forget_object(s.ino);
     }
+    policy::names_changed(src.child.map_or(0, |s| s.ino)); // wave9 G6b-3: (a directory may have moved)
     names_changed(&[src.dir, dst.dir], replaced);
     r.map(|_| 0)
 }
