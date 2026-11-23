@@ -31,7 +31,8 @@ const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 
 const RLIM_INFINITY: u64 = u64::MAX;
-const NLIMITS: usize = 16;
+/// The number of resource limits (`RLIMIT_*`).
+pub const NLIMITS: usize = 16;
 const RLIMIT_FSIZE: usize = 1;
 const RLIMIT_STACK: usize = 3;
 const RLIMIT_CORE: usize = 4;
@@ -77,6 +78,29 @@ fn get(tgid: u64) -> Proc {
 
 fn put(tgid: u64, p: Proc) {
     PROCS.lock().insert(tgid, p);
+}
+
+/// wave9 G7a: process `tgid`'s limits (the store behind `lx::proc::task_limits`).
+pub fn limits_of(tgid: u64) -> [(u64, u64); NLIMITS] {
+    get(tgid).limits
+}
+
+/// wave9 G7a: sets process `tgid`'s limit `res` to `v` if `rule` allows it (given the old
+/// value), under one hold of the table (`lx::proc::task_limits_update`).
+pub fn update_limit(tgid: u64, res: usize, v: (u64, u64), rule: impl FnOnce((u64, u64)) -> Result<(), i64>) -> Result<(), i64> {
+    let mut procs = PROCS.lock();
+    let p = procs.entry(tgid).or_insert_with(|| Proc { limits: defaults(), locked: Vec::new(), lock_future: false });
+    rule(p.limits[res])?;
+    p.limits[res] = v;
+    Ok(())
+}
+
+/// wave9 G7a: sets process `tgid`'s limit `res` (`res < NLIMITS`; the store behind
+/// `lx::proc::task_limits_set`).
+pub fn store_limit(tgid: u64, res: usize, v: (u64, u64)) {
+    let mut p = get(tgid);
+    p.limits[res] = v;
+    put(tgid, p);
 }
 
 fn cap(bit: u32) -> bool {
@@ -177,20 +201,12 @@ fn write_pair(ptr: u64, v: (u64, u64)) -> i64 {
 
 /// Sets limit `res` of process `tgid` to `new` (checked as Linux does).
 fn set_limit(tgid: u64, res: usize, new: (u64, u64)) -> i64 {
-    if new.0 > new.1 {
-        return EINVAL;
+    use crate::lx::proc as mech;
+    let cap_resource = cap(24);
+    match mech::task_limits_update(tgid, res, new, |old| mech::rules::set_limit(res, old, new, cap_resource, crate::fs::MAX_FDS as u64)) {
+        Ok(()) => 0,
+        Err(e) => e,
     }
-    let mut p = get(tgid);
-    let old = p.limits[res];
-    if new.1 > old.1 && !cap(24) {
-        return EPERM;
-    }
-    if res == RLIMIT_NOFILE && new.1 > crate::fs::MAX_FDS as u64 && new.1 != old.1 {
-        return EPERM; // past the descriptor table (Linux: fs.nr_open)
-    }
-    p.limits[res] = new;
-    put(tgid, p);
-    0
 }
 
 /// `getrlimit(resource, rlim)`, `setrlimit(resource, rlim)`, `prlimit64(pid, resource, new,
@@ -202,7 +218,7 @@ pub fn rlimit(num: u64, a: [u64; 6]) -> i64 {
             if a[0] as usize >= NLIMITS {
                 return EINVAL;
             }
-            write_pair(a[1], get(me).limits[a[0] as usize])
+            write_pair(a[1], crate::lx::proc::task_limits(me)[a[0] as usize])
         }
         160 => {
             if a[0] as usize >= NLIMITS {
@@ -244,7 +260,7 @@ pub fn rlimit(num: u64, a: [u64; 6]) -> i64 {
             } else {
                 None
             };
-            let old = get(target).limits[res];
+            let old = crate::lx::proc::task_limits(target)[res];
             if let Some(n) = new {
                 let r = set_limit(target, res, n);
                 if r != 0 {

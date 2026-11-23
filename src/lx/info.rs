@@ -264,7 +264,8 @@ pub mod glue {
             .lock()
             .with_task_mut(TaskId(client), |t| (t.tgid, t.euid, t.egid, if t.caps.in_userns { 0 } else { t.caps.effective }, t.caps.in_userns))
             .ok_or(ESRCH)?;
-        let init = lx::proc::PROCS.lock().get(&tgid).and_then(|p| p.ns.pid_inits.last().copied());
+        // wave9 G7a: the PID view through the process-identity primitive
+        let init = crate::lx::proc::pid_ns_init(tgid);
         // (only callers of the first namespaces: their IDs need no translation)
         may_query(init, in_userns, false)?;
         Ok(Caller { tgid, euid, egid, caps, init })
@@ -312,9 +313,9 @@ pub mod glue {
             .lock()
             .with_process(pid, |t| (alloc::string::String::from(t.exe_path()), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid], t.mm.clone()))?;
         let mut i = LxTaskInfo { pid: to_caller(pid, init), tid: to_caller(tid, init), ids, comm: comm_of(&exe), ..Default::default() };
-        let (ppid, pgid, sid, threads, start, zombie, inits) = lx::proc::PROCS.lock().get(&pid).map_or((0, pid, pid, 1, 0, false, Vec::new()), |p| {
-            (p.ppid, p.pgid, p.sid, p.threads_alive().max(1) as u64, p.start_time, p.zombie, p.ns.pid_inits.clone())
-        });
+        // wave9 G7a: the tree through the process-identity primitive
+        let crate::lx::proc::Tree { ppid, pgid, sid, threads, start, zombie, pid_inits: inits } =
+            crate::lx::proc::task_tree(pid).unwrap_or(crate::lx::proc::Tree { ppid: 0, pgid: pid, sid: pid, threads: 1, start: 0, zombie: false, pid_inits: Vec::new() });
         i.ppid = ppid;
         i.pgid = pgid;
         i.sid = sid;

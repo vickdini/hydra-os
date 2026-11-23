@@ -2596,3 +2596,11 @@ pub const LX_TTY_BGREAD: i64 = -4110;
 pub const LX_TTY_NOTMINE: i64 = -4111;
 // wave8 GT end
 
+// wave9 G7a begin: the process-identity primitives (`src/lx/proc.rs`)
+/// `SYS_LX_OBJ` op reserved for the process service lx-proc (wave 10): its sub-ops will set
+/// credentials, groups and sessions, limits and namespace ids through the kernel's
+/// primitives (`task_creds_set`, `task_pgrp_set`, `task_limits_set`, `ns_set`). Not answered
+/// yet (`EINVAL`).
+pub const LX_OBJ_PROCID: u64 = 75;
+// wave9 G7a end
+

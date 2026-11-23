@@ -87,6 +87,15 @@ pub mod hotplug;
 pub mod uevent;
 // wave8 GH end
 
+// wave9 G7a begin: the kernel's process-identity primitives (credentials, groups and
+// sessions, the tree and PID view, limits, namespace ids); the host build of the
+// forwarding core (tests/host-t30) brings its own
+#[cfg(target_os = "uefi")]
+pub mod proc;
+#[cfg(not(target_os = "uefi"))]
+pub use crate::host::lx_proc as proc;
+// wave9 G7a end
+
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
 pub mod restart_policy;
@@ -922,17 +931,18 @@ fn free_if(x: &Host, id: u64, state: RState) {
 /// Fills the context of a [`T_FSCTX`] call (process group, session, namespace ids) from
 /// the process table; `false` if it is busy and `wait` is not allowed.
 fn fill_ctx(c: &mut LxCall, wait: bool) -> bool {
-    let procs = if wait { Some(crate::compat::linux::proc::PROCS.lock()) } else { crate::compat::linux::proc::PROCS.try_lock() };
-    let Some(procs) = procs else { return false };
-    if let Some(p) = procs.get(&c.tgid) {
+    // wave9 G7a begin: through the process-identity primitive
+    let Ok(ctx) = proc::call_ctx(c.tgid, wait) else { return false };
+    if let Some(p) = ctx {
         c.pgid = p.pgid as u32;
         c.sid = p.sid as u32;
-        c.mnt_ns = p.ns.mnt as u32;
-        c.net_ns = p.ns.net as u32;
-        c.pid_ns = p.ns.pid as u32;
-        c.user_ns = p.ns.user.is_some() as u32;
+        c.mnt_ns = p.mnt as u32;
+        c.net_ns = p.net as u32;
+        c.pid_ns = p.pid as u32;
+        c.user_ns = p.user as u32;
     }
     true
+    // wave9 G7a end
 }
 
 /// Forwards the current Linux system call to service `s` (a host id when `byfd` names the

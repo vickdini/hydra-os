@@ -252,9 +252,9 @@ mod kernel {
 
     /// The caller's thread group, process group and session.
     fn ids() -> (u64, u64, u64) {
+        // wave9 G7a: through the process-identity primitive
         let (_, pid) = crate::compat::linux::proc::current_ids();
-        let (sid, pgid) = crate::compat::linux::proc::session_of(pid).unwrap_or((0, 0));
-        (pid, pgid, sid)
+        crate::lx::proc::task_pgrp(pid).map_or((pid, 0, 0), |p| (pid, p.pgid, p.sid))
     }
 
     /// A console call's arguments 4 and 5: the attach generation, and the session and group
@@ -474,7 +474,9 @@ mod kernel {
         if h != svc::host_of(LXS_TTY) || h == 0 || !forwarded() {
             return EPERM;
         }
-        use crate::compat::linux::proc;
+        // wave9 G7a: sessions, groups and their signals through the process-identity
+        // primitives (`lx::proc`)
+        use crate::lx::proc as mech;
         match a {
             LX_TTY_CONS_WRITE => {
                 if c > 1 << 20 {
@@ -503,25 +505,15 @@ mod kernel {
                 }
                 0
             }
-            LX_TTY_SESS => match proc::session_of(b) {
-                Some((sid, pgid)) => (sid | pgid << 32) as i64,
+            LX_TTY_SESS => match mech::task_pgrp(b) {
+                Some(p) => (p.sid | p.pgid << 32) as i64,
                 None => -3,
             },
-            LX_TTY_PGRP_IN => {
-                let procs = proc::PROCS.lock();
-                let mut any = false;
-                for p in procs.values().filter(|p| p.pgid == b && !p.zombie) {
-                    if p.sid == c {
-                        return 0;
-                    }
-                    any = true;
-                }
-                if any {
-                    1
-                } else {
-                    -3
-                }
-            }
+            LX_TTY_PGRP_IN => match mech::pgrp_in_session(b, c) {
+                Some(true) => 0,
+                Some(false) => 1,
+                None => -3,
+            },
             LX_TTY_SIGGRP => {
                 // `b` = group | session << 32: only the group's members in that session (the
                 // terminal's), only terminal signals; tty-server cannot reach anyone else
@@ -529,14 +521,10 @@ mod kernel {
                 if !super::tty_group_signal(c) || pgid == 0 || sid == 0 {
                     return EINVAL;
                 }
-                let members: alloc::vec::Vec<u64> = proc::PROCS.lock().values().filter(|p| p.pgid == pgid && p.sid == sid && !p.zombie).map(|p| p.pid).collect();
-                if members.is_empty() {
-                    return -3;
+                match mech::pgrp_signal(pgid, Some(sid), c as u32) {
+                    0 => -3,
+                    n => n as i64,
                 }
-                for &pid in &members {
-                    proc::post_process(pid, c as u32);
-                }
-                members.len() as i64
             }
             LX_TTY_SIGPROC => {
                 // A session leader's hang-up only: `SIGHUP`/`SIGCONT` to a process that leads
@@ -544,10 +532,10 @@ mod kernel {
                 if !super::tty_leader_signal(c) || b == 0 {
                     return EINVAL;
                 }
-                if proc::session_of(b).map(|(sid, _)| sid) != Some(b) {
+                if mech::task_pgrp(b).map(|p| p.sid) != Some(b) {
                     return -3;
                 }
-                proc::post_process(b, c as u32);
+                crate::compat::linux::proc::post_process(b, c as u32);
                 0
             }
             _ => EINVAL,

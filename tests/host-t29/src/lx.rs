@@ -86,3 +86,7 @@ pub mod fileh {
         alloc::string::String::new()
     }
 }
+
+// wave9 G7a: the kernel's process-identity primitives, compiled for real
+#[path = "../../../src/lx/proc.rs"]
+pub mod proc;

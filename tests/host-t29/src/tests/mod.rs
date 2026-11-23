@@ -13,4 +13,5 @@ mod ns;
 mod other;
 mod proc;
 mod process;
+mod procmech;
 mod ptrace;

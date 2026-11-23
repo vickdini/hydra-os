@@ -1706,121 +1706,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             ns::id_for_caller(id, true) as i64
         }
 
-        SYS_SETUID => {
-            // sys_setuid(uid: uid_t)
-            let new_uid = arg0 as u32;
-            crate::task::with_current_task_mut(|t| {
-                let old = (t.uid, t.euid, t.suid);
-                if t.caps.has(crate::task::tcb::Caps::SETUID) {
-                    // Privileged: set real, effective, and saved-set UID
-                    t.uid = new_uid;
-                    t.euid = new_uid;
-                    t.suid = new_uid;
-                } else if new_uid == t.uid || new_uid == t.suid {
-                    // Unprivileged: can only switch effective UID to real or saved UID
-                    t.euid = new_uid;
-                } else {
-                    return -EPERM;
-                }
-                let new = (t.uid, t.euid, t.suid);
-                t.caps.on_uid_change(old, new);
-                0
-            }).unwrap_or(-EPERM)
-        }
-
-        SYS_SETGID => {
-            // sys_setgid(gid: gid_t)
-            let new_gid = arg0 as u32;
-            crate::task::with_current_task_mut(|t| {
-                if t.caps.has(crate::task::tcb::Caps::SETGID) {
-                    // Privileged: set real, effective, and saved-set GID
-                    t.gid = new_gid;
-                    t.egid = new_gid;
-                    t.sgid = new_gid;
-                    0
-                } else if new_gid == t.gid || new_gid == t.sgid {
-                    // Unprivileged: can only switch effective GID to real or saved GID
-                    t.egid = new_gid;
-                    0
-                } else {
-                    -EPERM
-                }
-            }).unwrap_or(-EPERM)
-        }
-
-        SYS_SETREUID => {
-            // sys_setreuid(ruid: uid_t, euid: uid_t)
-            let ruid = arg0 as u32;
-            let euid = arg1 as u32;
-            crate::task::with_current_task_mut(|t| {
-                let is_root = t.caps.has(crate::task::tcb::Caps::SETUID);
-                let old = (t.uid, t.euid, t.suid);
-                let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid;
-                let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
-                if !ok_r || !ok_e {
-                    return -EPERM;
-                }
-                if ruid != u32::MAX {
-                    t.uid = ruid;
-                }
-                if euid != u32::MAX {
-                    t.euid = euid;
-                }
-                if ruid != u32::MAX || (euid != u32::MAX && euid != t.uid) {
-                    t.suid = t.euid;
-                }
-                let new = (t.uid, t.euid, t.suid);
-                t.caps.on_uid_change(old, new);
-                0
-            }).unwrap_or(-EPERM)
-        }
-
-        SYS_SETREGID => {
-            // sys_setregid(rgid: gid_t, egid: gid_t)
-            let rgid = arg0 as u32;
-            let egid = arg1 as u32;
-            crate::task::with_current_task_mut(|t| {
-                let is_root = t.caps.has(crate::task::tcb::Caps::SETGID);
-                let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid;
-                let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
-                if !ok_r || !ok_e {
-                    return -EPERM;
-                }
-                if rgid != u32::MAX {
-                    t.gid = rgid;
-                }
-                if egid != u32::MAX {
-                    t.egid = egid;
-                }
-                if rgid != u32::MAX || (egid != u32::MAX && egid != t.gid) {
-                    t.sgid = t.egid;
-                }
-                0
-            }).unwrap_or(-EPERM)
-        }
-
-        SYS_SETRESUID => {
-            // sys_setresuid(ruid: uid_t, euid: uid_t, suid: uid_t)
-            let ruid = arg0 as u32;
-            let euid = arg1 as u32;
-            let suid = arg2 as u32;
-            crate::task::with_current_task_mut(|t| {
-                let is_root = t.caps.has(crate::task::tcb::Caps::SETUID);
-                let old = (t.uid, t.euid, t.suid);
-                let ok_r = ruid == u32::MAX || is_root || ruid == t.uid || ruid == t.euid || ruid == t.suid;
-                let ok_e = euid == u32::MAX || is_root || euid == t.uid || euid == t.euid || euid == t.suid;
-                let ok_s = suid == u32::MAX || is_root || suid == t.uid || suid == t.euid || suid == t.suid;
-                if !ok_r || !ok_e || !ok_s {
-                    return -EPERM;
-                }
-                if ruid != u32::MAX { t.uid = ruid; }
-                if euid != u32::MAX { t.euid = euid; }
-                if suid != u32::MAX { t.suid = suid; }
-                let new = (t.uid, t.euid, t.suid);
-                t.caps.on_uid_change(old, new);
-                0
-            }).unwrap_or(-EPERM)
-        }
+        // wave9 G7a: the setuid family: the rule (`lx::proc::rules`) on the caller's
+        // credentials, then the primitive (`lx::proc::task_creds_set`)
+        SYS_SETUID | SYS_SETGID | SYS_SETREUID | SYS_SETREGID | SYS_SETRESUID => set_ids(num, [arg0, arg1, arg2]),
 
         SYS_GETRESUID => {
             // sys_getresuid(ruid: uid_t*, euid: uid_t*, suid: uid_t*)
@@ -1837,25 +1725,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             0
         }
 
-        SYS_SETRESGID => {
-            // sys_setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t)
-            let rgid = arg0 as u32;
-            let egid = arg1 as u32;
-            let sgid = arg2 as u32;
-            crate::task::with_current_task_mut(|t| {
-                let is_root = t.caps.has(crate::task::tcb::Caps::SETGID);
-                let ok_r = rgid == u32::MAX || is_root || rgid == t.gid || rgid == t.egid || rgid == t.sgid;
-                let ok_e = egid == u32::MAX || is_root || egid == t.gid || egid == t.egid || egid == t.sgid;
-                let ok_s = sgid == u32::MAX || is_root || sgid == t.gid || sgid == t.egid || sgid == t.sgid;
-                if !ok_r || !ok_e || !ok_s {
-                    return -EPERM;
-                }
-                if rgid != u32::MAX { t.gid = rgid; }
-                if egid != u32::MAX { t.egid = egid; }
-                if sgid != u32::MAX { t.sgid = sgid; }
-                0
-            }).unwrap_or(-EPERM)
-        }
+        SYS_SETRESGID => set_ids(num, [arg0, arg1, arg2]),
 
         SYS_GETRESGID => {
             // sys_getresgid(rgid: gid_t*, egid: gid_t*, sgid: gid_t*)
@@ -2302,6 +2172,29 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 }
 
 const ERANGE: i64 = 34;
+
+/// wave9 G7a: the setuid family (`setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`,
+/// `setresgid`; arguments `a`, ids as 32-bit values, `-1` = keep): today's rule
+/// (`lx::proc::rules`) on the calling thread's credentials, then `lx::proc::task_creds_set`.
+fn set_ids(num: u64, a: [u64; 3]) -> i64 {
+    use crate::lx::proc::{self as mech, rules};
+    let Some((mut c, cap_uid, cap_gid)) = mech::task_creds(0) else { return -EPERM };
+    let (x, y, z) = (a[0] as u32, a[1] as u32, a[2] as u32);
+    let r = match num {
+        SYS_SETUID => rules::set_id(c.uid, x, cap_uid).map(|v| c.uid = v),
+        SYS_SETGID => rules::set_id(c.gid, x, cap_gid).map(|v| c.gid = v),
+        SYS_SETREUID => rules::set_re(c.uid, x, y, cap_uid).map(|v| c.uid = v),
+        SYS_SETREGID => rules::set_re(c.gid, x, y, cap_gid).map(|v| c.gid = v),
+        SYS_SETRESUID => rules::set_res(c.uid, [x, y, z], cap_uid).map(|v| c.uid = v),
+        SYS_SETRESGID => rules::set_res(c.gid, [x, y, z], cap_gid).map(|v| c.gid = v),
+        _ => Err(-ENOSYS),
+    };
+    match r {
+        Ok(()) if mech::task_creds_set(0, c) => 0,
+        Ok(()) => -EPERM,
+        Err(e) => e,
+    }
+}
 
 /// Whether `len` bytes of the caller's memory at `ptr` may be read (or written): never
 /// null, and faulted in. The calls below dereference user pointers directly after it.

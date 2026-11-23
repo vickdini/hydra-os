@@ -115,3 +115,32 @@ pub mod obj {
         }
     }
 }
+
+// wave9 G7a begin
+/// *stub* `crate::lx::proc` (the kernel's process-identity primitives, `src/lx/proc.rs`,
+/// tested in host-t29): the tree from the fake process table.
+pub mod proc {
+    use crate::compat::linux::proc::PROCS;
+    /// *mirror* of the kernel's.
+    pub struct Tree {
+        pub ppid: u64,
+        pub pgid: u64,
+        pub sid: u64,
+        pub threads: u64,
+        pub start: u64,
+        pub zombie: bool,
+        pub pid_inits: alloc::vec::Vec<u64>,
+    }
+    pub fn task_tree(pid: u64) -> Option<Tree> {
+        PROCS.lock().get(&pid).map(|p| Tree {
+            ppid: p.ppid,
+            pgid: p.pgid,
+            sid: p.sid,
+            threads: p.threads_alive().max(1) as u64,
+            start: p.start_time,
+            zombie: p.zombie,
+            pid_inits: alloc::vec::Vec::new(),
+        })
+    }
+}
+// wave9 G7a end
