@@ -1,0 +1,17 @@
+[package]
+name = "hydra_hosttests_w9_x3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group X3 host unit tests (wave 9): the kept data arena (lx-ipc/src/arena.rs) and the kept records (lx-ipc/src/kstore.rs), compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+hydra_rt = { path = "rt", package = "hydra_rt_host_x3" }

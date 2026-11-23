@@ -28,6 +28,8 @@ use hydra_rt::protocol::*;
 use hydra_rt::sys;
 
 use crate::client::Cx;
+use crate::arena::{self, Chain};
+use crate::kstore;
 use crate::lock::YLock;
 use crate::timeout;
 
@@ -100,6 +102,11 @@ struct Sender {
 
 /// A message queue.
 struct Queue {
+    /// wave9 GX3: its id (`kstore` record), its name, and its messages' kept copy (in the
+    /// arena, written again at each change: queues are small).
+    id: u64,
+    name: String,
+    kept: Chain,
     ns: u64,
     uid: u32,
     gid: u32,
@@ -126,15 +133,73 @@ struct Mq {
     names: BTreeMap<(u64, String), u64>,
     /// Open descriptors: slot -> (queue number, may read, may write).
     handles: BTreeMap<u32, (u64, bool, bool)>,
-    next: u64,
 }
 
-static MQ: YLock<Mq> = YLock::new(Mq { queues: BTreeMap::new(), names: BTreeMap::new(), handles: BTreeMap::new(), next: 1 });
+static MQ: YLock<Mq> = YLock::new(Mq { queues: BTreeMap::new(), names: BTreeMap::new(), handles: BTreeMap::new() });
 
 /// Answers to give once the lock is let go: `(request id, result)`.
 type Done = Vec<(u64, i64)>;
 
+/// wave9 GX3: the key of a queue descriptor's kernel object: this tag, its access, the
+/// queue's id.
+const KEY_TAG: u64 = 1 << 42;
+
+fn mq_key(qid: u64, read: bool, write: bool) -> u64 {
+    if kstore::kept(qid) {
+        KEY_TAG | (read as u64) << 41 | (write as u64) << 40 | qid
+    } else {
+        0
+    }
+}
+
 impl Queue {
+    /// wave9 GX3: writes the queue's record: its attributes, name, notification and a new
+    /// kept copy of its messages (the old copy goes once the record names the new one).
+    fn persist(&mut self) {
+        if !kstore::kept(self.id) {
+            return;
+        }
+        let a = arena::get();
+        let mut c = Chain::new();
+        for (p, d) in &self.msgs {
+            if !c.push(a, &p.to_le_bytes(), d, 0) {
+                c.clear();
+                c.release(a);
+                return;
+            }
+        }
+        let mut w = kstore::W::new(kstore::K_MQ);
+        w.u64(self.ns).u32(self.uid).u32(self.gid).u32(self.mode).u64(self.maxmsg).u64(self.msgsize).u8(self.linked as u8).raw(&c.image());
+        match &self.notify {
+            Some((pid, Notify::Signal { sig, value })) => {
+                w.u8(1).u64(*pid).u32(*sig).u64(*value);
+            }
+            Some((pid, Notify::Thread { token, cookie })) => {
+                w.u8(2).u64(*pid).u64(*token).raw(cookie);
+            }
+            _ => {
+                w.u8(0);
+            }
+        }
+        w.bytes(self.name.as_bytes());
+        if self.name.len() <= 255 && kstore::put(self.id, &w.0) {
+            let mut old = core::mem::replace(&mut self.kept, c);
+            old.clear();
+            old.release(a);
+        } else {
+            c.clear();
+            c.release(a);
+        }
+    }
+
+    /// The queue is gone: its kept copy and record.
+    fn dispose(&mut self) {
+        let a = arena::get();
+        self.kept.clear();
+        self.kept.release(a);
+        kstore::release(self.id);
+    }
+
     /// Updates the readiness words of every descriptor open on the queue (`arrived`: a
     /// message came in; `left`: one was taken; edge-triggered watches report again).
     fn publish_ev(&self, arrived: bool, left: bool) {
@@ -290,11 +355,13 @@ fn mq_open(cx: &Cx) -> i64 {
                     return ENOSPC;
                 }
                 let (maxmsg, msgsize) = attrs.unwrap_or((MSG_MAX, MSGSIZE_MAX));
-                let qid = mq.next;
-                mq.next += 1;
+                let qid = kstore::id();
                 mq.queues.insert(
                     qid,
                     Queue {
+                        id: qid,
+                        name: name.clone(),
+                        kept: Chain::new(),
                         ns,
                         uid: cx.c.euid,
                         gid: cx.c.egid,
@@ -311,6 +378,7 @@ fn mq_open(cx: &Cx) -> i64 {
                     },
                 );
                 mq.names.insert((ns, name.clone()), qid);
+                mq.queues.get_mut(&qid).unwrap().persist();
                 qid
             }
             None => {
@@ -326,7 +394,7 @@ fn mq_open(cx: &Cx) -> i64 {
     };
     let flags = (oflag & (O_CLOEXEC | O_NONBLOCK)) as u32;
     let shown = alloc::format!("/{}", name);
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_MQ, flags, 0o100000 | qmode, uid, gid, shown.as_bytes()) {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_MQ, flags, 0o100000 | qmode, uid, gid, shown.as_bytes(), 0, mq_key(qid, read, write)) {
         Ok(fd) => {
             crate::obj::flush();
             fd
@@ -352,8 +420,9 @@ fn forget_open(slot: u32, qid: u64) {
         None => false,
     };
     if gone {
-        if let Some(q) = mq.queues.remove(&qid) {
+        if let Some(mut q) = mq.queues.remove(&qid) {
             unpin(&q.notify);
+            q.dispose();
         }
     }
 }
@@ -393,9 +462,11 @@ fn mq_unlink(cx: &Cx) -> i64 {
     mq.names.remove(&(ns, name));
     let q = mq.queues.get_mut(&qid).unwrap();
     q.linked = false;
+    q.persist();
     if q.opens.is_empty() {
-        if let Some(q) = mq.queues.remove(&qid) {
+        if let Some(mut q) = mq.queues.remove(&qid) {
             unpin(&q.notify);
+            q.dispose();
         }
     }
     0
@@ -463,6 +534,9 @@ fn mq_timedsend(cx: &Cx) -> (i64, u64) {
                 (0, LX_REPLY_PENDING)
             }
         };
+        if arrived || fire.is_some() {
+            q.persist();
+        }
         q.publish_ev(arrived, false);
         r
     };
@@ -521,6 +595,7 @@ fn mq_timedreceive(cx: &Cx) -> (i64, u64) {
             let (p, data) = q.msgs.remove(0);
             q.bytes -= data.len() as u64;
             q.admit_senders(&mut done);
+            q.persist();
             Ok((p, data))
         } else if cx.nonblock() {
             Err(EAGAIN)
@@ -568,6 +643,7 @@ fn mq_notify(cx: &Cx) -> i64 {
             if q.notify.as_ref().is_some_and(|(p, _)| *p == pid) {
                 let old = q.notify.take();
                 unpin(&old);
+                q.persist();
             }
         }
         return 0;
@@ -612,6 +688,7 @@ fn mq_notify(cx: &Cx) -> i64 {
     }
     let old = q.notify.replace((pid, notify));
     unpin(&old);
+    q.persist();
     0
 }
 
@@ -713,6 +790,81 @@ pub fn interrupted(id: u64) -> bool {
     found
 }
 
+// wave9 GX3 begin
+/// A restarted lx-ipc: the queues from their records `(id, data)` and the kernel's live
+/// queue descriptors `(slot, key)`. Returns the ids that live on and the slots that could
+/// not be taken back.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(recs: &[(u64, &[u8])], objs: &[(u32, u64)]) -> (Vec<u64>, Vec<u32>) {
+    let a = arena::get();
+    let mut mq = MQ.lock();
+    for &(id, d) in recs {
+        let parsed = (|| {
+            let mut r = kstore::R::new(d);
+            if r.u8()? != kstore::K_MQ {
+                return None;
+            }
+            let (ns, uid, gid, mode, maxmsg, msgsize, linked) = (r.u64()?, r.u32()?, r.u32()?, r.u32()?, r.u64()?, r.u64()?, r.u8()? != 0);
+            let img = r.raw(arena::IMG)?;
+            let notify = match r.u8()? {
+                0 => None,
+                1 => Some((r.u64()?, Notify::Signal { sig: r.u32()?, value: r.u64()? })),
+                2 => {
+                    let (pid, token) = (r.u64()?, r.u64()?);
+                    let mut cookie = [0u8; NOTIFY_COOKIE_LEN];
+                    cookie.copy_from_slice(r.raw(NOTIFY_COOKIE_LEN)?);
+                    Some((pid, Notify::Thread { token, cookie }))
+                }
+                _ => return None,
+            };
+            let name = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+            if maxmsg == 0 || maxmsg > HARD_MSG_MAX || msgsize == 0 || msgsize > HARD_MSGSIZE_MAX {
+                return None;
+            }
+            let kept = Chain::restore(a, img)?;
+            let mut msgs = Vec::new();
+            for i in 0..kept.segs.len() {
+                let m = kept.meta(a, i);
+                if m.len() != 4 {
+                    return None;
+                }
+                msgs.push((u32::from_le_bytes(m.try_into().ok()?), kept.data(a, i).to_vec()));
+            }
+            Some(Queue { id, name, kept, ns, uid, gid, mode, maxmsg, msgsize, bytes: msgs.iter().map(|m| m.1.len() as u64).sum(), msgs, notify, receivers: Vec::new(), senders: Vec::new(), opens: Vec::new(), linked })
+        })();
+        if let Some(q) = parsed {
+            mq.queues.insert(id, q);
+        }
+    }
+    let mut dead = Vec::new();
+    for &(slot, key) in objs {
+        let qid = key & 0xFF_FFFF_FFFF;
+        let (read, write) = (key & 1 << 41 != 0, key & 1 << 40 != 0);
+        if key & KEY_TAG == 0 || !mq.queues.contains_key(&qid) || !crate::obj::reserve(slot, LX_OBJ_KIND_MQ) {
+            dead.push(slot);
+            continue;
+        }
+        mq.handles.insert(slot, (qid, read, write));
+        mq.queues.get_mut(&qid).unwrap().opens.push((slot, read, write));
+    }
+    let gone: Vec<u64> = mq.queues.iter().filter(|(_, q)| !q.linked && q.opens.is_empty()).map(|(&k, _)| k).collect();
+    for k in gone {
+        if let Some(mut q) = mq.queues.remove(&k) {
+            unpin(&q.notify);
+            q.dispose();
+        }
+    }
+    let named: Vec<((u64, String), u64)> = mq.queues.iter().filter(|(_, q)| q.linked).map(|(&k, q)| ((q.ns, q.name.clone()), k)).collect();
+    for (n, k) in named {
+        mq.names.insert(n, k);
+    }
+    for q in mq.queues.values() {
+        q.publish();
+    }
+    (mq.queues.keys().copied().collect(), dead)
+}
+// wave9 GX3 end
+
 /// Process `tgid` ended: its registrations go, and calls it still had waiting end.
 pub fn on_exit(tgid: u64) {
     let mut done = Done::new();
@@ -722,6 +874,7 @@ pub fn on_exit(tgid: u64) {
         for q in mq.queues.values_mut() {
             if q.notify.as_ref().is_some_and(|(p, _)| *p == tgid) {
                 pins.push(q.notify.take());
+                q.persist();
             }
             for w in q.receivers.iter().filter(|w| w.tgid == tgid) {
                 done.push((w.id, EINTR));

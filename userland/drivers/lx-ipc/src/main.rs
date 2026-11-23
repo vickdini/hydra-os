@@ -8,13 +8,16 @@
 //! here. linux-server builds the same files and serves them when `lx.ipc=linux` puts them
 //! back there; `lx.ipc=kernel` (or `lx=kernel`) sends them to the kernel's own copies.
 //!
-//! ## Restarts (FailObjects)
+//! ## Restarts (Transparent, wave 9)
 //!
-//! When lx-ipc dies the supervisor starts it again and no program is ended by the kernel:
-//! the old instance's objects fail with their kind's error (a pipe `EPIPE`, a Unix socket
-//! `ECONNRESET`, the rest `EBADF`), new calls go to the new instance. Programs that live on
-//! their pipes and sockets (D-Bus, Wayland: the desktop session) end by themselves; console
-//! programs keep running. (Kept buffers, for a Transparent restart, are wave 9's.)
+//! When lx-ipc dies the supervisor starts it again and programs see only a pause: the
+//! bytes in pipes and Unix sockets live in a kept data arena ([`arena`]), every pipe,
+//! socket, connection, eventfd, timerfd and signalfd has a kept record ([`kstore`]), and
+//! the new instance takes the old one's objects back before it goes online ([`restore`]);
+//! waiting calls are sent again by the kernel. Message queues and System V objects are not
+//! kept yet: their descriptors fail (`EBADF`) and their tables start empty. A second crash
+//! within 30 s drops to FailObjects (the kept objects are dropped, the old objects fail:
+//! the desktop session ends, `src/lx/desktop.rs`).
 
 #![no_std]
 #![no_main]
@@ -36,13 +39,16 @@ mod obj;
 #[allow(dead_code)]
 mod timeout;
 
+mod arena; // wave9 GX3
 mod eventfd;
 mod ipcsvc;
+mod kstore; // wave9 GX3
 mod mqueue;
 #[path = "nlstub.rs"]
 mod netlink;
 mod pidfd;
 mod pipe;
+mod restore; // wave9 GX3
 mod signalfd;
 mod sysv;
 mod timerfd;
@@ -78,6 +84,9 @@ fn main(args: &[&str]) {
     };
     svcrt::notes::init(svc.window().as_mut_ptr(), on_note);
     obj::init(svc.area, ENDPOINT_LX_IPC);
+    // wave9 GX3: the kept objects, and the old instance's objects taken back
+    let adopted = restore::start();
+    restore::sweep(&adopted);
     if let Err(e) = svc.online() {
         println!("[lx-ipc] cannot go online: {}", e);
         sys::exit_group(1);

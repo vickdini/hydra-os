@@ -20,6 +20,10 @@ const EINVAL: i64 = -22;
 const PIDFD_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u32 = 0o2000000;
 
+/// wave9 GX3: a pidfd's kernel object carries its process in its key (no record): this
+/// tag | the pid.
+pub const KEY_TAG: u64 = 1 << 40;
+
 /// Slot -> (process, exited).
 static PIDFDS: YLock<BTreeMap<u32, (u64, bool)>> = YLock::new(BTreeMap::new());
 
@@ -57,7 +61,8 @@ pub fn open_for(cx: &Cx, pid: u64, flags: u64) -> i64 {
         }
     }
     let f = O_CLOEXEC | (flags & PIDFD_NONBLOCK) as u32;
-    match crate::obj::install_tag(cx, slot, LX_OBJ_KIND_PIDFD, f, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[pidfd]", pid) {
+    let key = if crate::kstore::active() { KEY_TAG | pid } else { 0 };
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_PIDFD, f, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[pidfd]", pid, key) {
         Ok(fd) => fd,
         Err(e) => {
             PIDFDS.lock().remove(&slot);
@@ -91,4 +96,20 @@ pub fn on_exit(tgid: u64) {
 /// The last descriptor of pidfd `slot` went away.
 pub fn closed(slot: u32) {
     PIDFDS.lock().remove(&slot);
+}
+
+/// wave9 GX3: a restarted lx-ipc takes pidfd `slot` (key `key`) back; whether the process
+/// ended meanwhile is asked from the kernel (its exit note went with the old instance).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(slot: u32, key: u64) -> bool {
+    if key & !(KEY_TAG - 1) != KEY_TAG || !crate::obj::reserve(slot, LX_OBJ_KIND_PIDFD) {
+        return false;
+    }
+    let pid = key & (KEY_TAG - 1);
+    let mut m = PIDFDS.lock();
+    m.insert(slot, (pid, false));
+    let exited = state(pid).unwrap_or(true);
+    m.insert(slot, (pid, exited));
+    crate::obj::set_ready(slot, if exited { 0x41 } else { 0 }, 0);
+    true
 }

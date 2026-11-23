@@ -1,0 +1,11 @@
+[package]
+name = "hydra_rt_host_x3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "hydra-rt kept-state format plus stand-ins for the calls arena.rs and kstore.rs make, as a host library named hydra_rt"
+
+[lib]
+name = "hydra_rt"
+path = "lib.rs"
+doctest = false

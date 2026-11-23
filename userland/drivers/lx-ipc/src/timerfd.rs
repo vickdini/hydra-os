@@ -25,6 +25,7 @@ use hydra_rt::sys;
 
 use crate::client::Cx;
 use crate::fdio::kbuf;
+use crate::kstore;
 use crate::lock::YLock;
 
 const EAGAIN: i64 = -11;
@@ -41,6 +42,8 @@ const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
 pub const TIMER_TAG: u64 = 1 << 56;
 
 struct Tfd {
+    /// wave9 GX3: its id (`kstore` record).
+    id: u64,
     clock: u64,
     /// The next expiry (monotonic ns), and the period (0: one-shot).
     next: Option<u64>,
@@ -117,6 +120,15 @@ fn realtime_offset(mono: u64) -> i128 {
 }
 
 impl Tfd {
+    /// wave9 GX3: writes the record (clock, next expiry, period).
+    fn persist(&self) {
+        if kstore::kept(self.id) {
+            let mut w = kstore::W::new(kstore::K_TFD);
+            w.u64(self.clock).u64(self.next.map_or(0, |n| n.max(1))).u64(self.interval);
+            kstore::put(self.id, &w.0);
+        }
+    }
+
     /// Expirations by `now`, moving `next` on (a periodic timer) or clearing it.
     fn expirations(&mut self, now: u64) -> u64 {
         match self.next {
@@ -180,11 +192,15 @@ pub fn create(cx: &Cx) -> (i64, u64) {
         Ok(s) => s,
         Err(e) => return (e, 0),
     };
-    T.lock().insert(slot, Tfd { clock, next: None, interval: 0, armed: None, readers: Vec::new() });
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_TIMERFD, flags as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[timerfd]") {
+    let id = kstore::id();
+    let t = Tfd { id, clock, next: None, interval: 0, armed: None, readers: Vec::new() };
+    t.persist();
+    T.lock().insert(slot, t);
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_TIMERFD, flags as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[timerfd]", 0, kstore::key(id)) {
         Ok(fd) => (fd, 0),
         Err(e) => {
             T.lock().remove(&slot);
+            kstore::release(id);
             crate::obj::free(slot);
             (e, 0)
         }
@@ -205,6 +221,8 @@ pub fn settime(cx: &Cx) -> (i64, u64) {
         Err(e) => return (e, 0),
     };
     let flags = cx.args[1];
+    // wave9 GX3: setting the same timer again does the same: always safe to send again
+    kstore::resend_safe(cx.page(), cx.id, true);
     if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
         return (EINVAL, 0);
     }
@@ -234,6 +252,7 @@ pub fn settime(cx: &Cx) -> (i64, u64) {
         if t.next.is_some_and(|n| n <= now) {
             serve_readers(t, now, &mut done);
         }
+        t.persist();
         old
     };
     finish(done);
@@ -251,6 +270,7 @@ pub fn gettime(cx: &Cx) -> (i64, u64) {
         Ok(s) => s,
         Err(e) => return (e, 0),
     };
+    kstore::resend_safe(cx.page(), cx.id, true);
     let now = now();
     let cur = {
         let m = T.lock();
@@ -275,7 +295,10 @@ fn serve_readers(t: &mut Tfd, now: u64, done: &mut Vec<(u64, i64)>) {
     // The first reader gets the count; the others wait for the next expiry
     let (c, buf) = t.readers.remove(0);
     let r = match sys::lx_write(c.id, buf, &n.to_ne_bytes()) {
-        Ok(()) => 8,
+        Ok(()) => {
+            kstore::partial(core::ptr::null_mut(), c.id, 8);
+            8
+        }
         Err(e) => e,
     };
     done.push((c.id, r));
@@ -297,16 +320,19 @@ pub fn io(cx: &Cx) -> (i64, u64) {
     }
     let slot = cx.c.obj as u32;
     let now = now();
+    kstore::resend_safe(cx.page(), cx.id, true);
     let mut m = T.lock();
     let Some(t) = m.get_mut(&slot) else { return (EBADF, 0) };
     let n = t.expirations(now);
     if n > 0 {
         t.arm(slot, now);
-        drop(m);
-        return match cx.copy_out(cx.args[1], &n.to_ne_bytes()) {
+        let r = match cx.copy_out(cx.args[1], &n.to_ne_bytes()) {
             Ok(()) => (8, 0),
             Err(e) => (e, 0),
         };
+        kstore::partial(cx.page(), cx.id, 8);
+        t.persist();
+        return r;
     }
     if cx.nonblock() || kbuf(cx) {
         return (EAGAIN, 0);
@@ -333,6 +359,7 @@ pub fn fired(cookie: u64) {
                 serve_readers(t, now, &mut done);
                 if !done.is_empty() {
                     t.arm(slot, now);
+                    t.persist();
                 }
             }
             None => {}
@@ -371,7 +398,24 @@ pub fn on_exit(tgid: u64) {
 
 /// The last descriptor of timerfd `slot` went away.
 pub fn closed(slot: u32) {
-    if T.lock().remove(&slot).is_some() {
+    if let Some(t) = T.lock().remove(&slot) {
+        kstore::release(t.id);
         sys::lx_timer(LX_TIMER_CANCEL, TIMER_TAG | slot as u64, 0);
     }
+}
+
+/// wave9 GX3: a restarted lx-ipc takes timerfd `slot` back from record `rec` (id `id`):
+/// its kernel timer went with the old instance, so it is armed again (or the descriptor is
+/// readable at once if it expired meanwhile).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(slot: u32, id: u64, rec: &[u8]) -> bool {
+    let mut r = kstore::R::new(rec);
+    let (Some(kstore::K_TFD), Some(clock), Some(next), Some(interval)) = (r.u8(), r.u64(), r.u64(), r.u64()) else { return false };
+    if !matches!(clock, 0 | 1 | 7 | 8 | 9) || !crate::obj::reserve(slot, LX_OBJ_KIND_TIMERFD) {
+        return false;
+    }
+    let mut t = Tfd { id, clock, next: (next != 0).then_some(next), interval, armed: None, readers: Vec::new() };
+    t.arm(slot, now());
+    T.lock().insert(slot, t);
+    true
 }

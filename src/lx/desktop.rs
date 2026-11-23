@@ -1,7 +1,9 @@
 //! # The desktop after an lx-ipc crash (wave 8, Group X2)
 //!
-//! lx-ipc is FailObjects (`docs/linux-services-design.md` 2.3): when it dies, every pipe and
-//! Unix socket of the old instance fails. Console programs live on; the graphical session
+//! lx-ipc is Transparent since wave 9 (Group X3: its buffers and tables are kept objects, a
+//! restart takes them back and nothing here runs); a second crash within 30 s drops it to
+//! FailObjects (`docs/linux-services-design.md` 2.3, 5.2): then every pipe and Unix socket
+//! of the old instance fails. Console programs live on; the graphical session
 //! does not, because it lives on D-Bus and Wayland sockets, and neither does the login
 //! screen's daemon (its own sockets died with them), so the user decision 12 says: the
 //! session ends and the login screen returns.
