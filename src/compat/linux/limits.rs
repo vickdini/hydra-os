@@ -85,6 +85,16 @@ pub fn limits_of(tgid: u64) -> [(u64, u64); NLIMITS] {
     get(tgid).limits
 }
 
+/// wave9 G7a: sets process `tgid`'s limit `res` to `v` if `rule` allows it (given the old
+/// value), under one hold of the table (`lx::proc::task_limits_update`).
+pub fn update_limit(tgid: u64, res: usize, v: (u64, u64), rule: impl FnOnce((u64, u64)) -> Result<(), i64>) -> Result<(), i64> {
+    let mut procs = PROCS.lock();
+    let p = procs.entry(tgid).or_insert_with(|| Proc { limits: defaults(), locked: Vec::new(), lock_future: false });
+    rule(p.limits[res])?;
+    p.limits[res] = v;
+    Ok(())
+}
+
 /// wave9 G7a: sets process `tgid`'s limit `res` (`res < NLIMITS`; the store behind
 /// `lx::proc::task_limits_set`).
 pub fn store_limit(tgid: u64, res: usize, v: (u64, u64)) {
@@ -192,12 +202,9 @@ fn write_pair(ptr: u64, v: (u64, u64)) -> i64 {
 /// Sets limit `res` of process `tgid` to `new` (checked as Linux does).
 fn set_limit(tgid: u64, res: usize, new: (u64, u64)) -> i64 {
     use crate::lx::proc as mech;
-    let old = mech::task_limits(tgid)[res];
-    match mech::rules::set_limit(res, old, new, cap(24), crate::fs::MAX_FDS as u64) {
-        Ok(()) => {
-            mech::task_limits_set(tgid, res, new);
-            0
-        }
+    let cap_resource = cap(24);
+    match mech::task_limits_update(tgid, res, new, |old| mech::rules::set_limit(res, old, new, cap_resource, crate::fs::MAX_FDS as u64)) {
+        Ok(()) => 0,
         Err(e) => e,
     }
 }

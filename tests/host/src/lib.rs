@@ -715,6 +715,21 @@ pub mod lx {
         pub fn task_pgrp(pid: u64) -> Option<Pgrp> {
             PROCS.lock().get(&pid).map(|p| Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie })
         }
+        /// As the kernel's (one hold of the table for the rule and the change).
+        pub fn task_pgrp_update(pid: u64, rule: impl FnOnce(Option<Pgrp>, &dyn Fn(u64, u64) -> bool) -> Result<(u64, bool), i64>) -> Result<u64, i64> {
+            let mut procs = PROCS.lock();
+            let me = procs.get(&pid).map(|p| Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie });
+            let (pgid, new_session) = {
+                let table = &*procs;
+                rule(me, &|g, except| table.values().any(|p| p.pgid == g && p.pid != except))?
+            };
+            let p = procs.get_mut(&pid).ok_or(-3)?;
+            p.pgid = pgid;
+            if new_session {
+                p.sid = pid;
+            }
+            Ok(pgid)
+        }
         pub fn task_pgrp_set(pid: u64, pgid: u64, new_session: bool) -> bool {
             match PROCS.lock().get_mut(&pid) {
                 Some(p) => {

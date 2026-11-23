@@ -805,9 +805,9 @@ pub fn setpgid(target: u64, pgid: u64) -> i64 {
     use crate::lx::proc as mech;
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
-    match mech::rules::setpgid(pid, mech::task_pgrp(target), pgid) {
-        Ok(g) if mech::task_pgrp_set(target, g, false) => 0,
-        Ok(_) => ESRCH,
+    // (one hold of the table for the rule and the change)
+    match mech::task_pgrp_update(target, |t, _| mech::rules::setpgid(pid, t, pgid).map(|g| (g, false))) {
+        Ok(_) => 0,
         Err(e) => e,
     }
 }
@@ -820,9 +820,9 @@ pub fn setsid() -> i64 {
     // wave9 G7a: the rule (`lx::proc::rules`), then the primitive
     use crate::lx::proc as mech;
     let (_, pid) = current_ids();
-    match mech::rules::setsid(mech::task_pgrp(pid), mech::pgrp_used(pid, pid)) {
-        Ok(sid) if mech::task_pgrp_set(pid, sid, true) => sid as i64,
-        Ok(_) => ESRCH,
+    // (one hold of the table for the rule and the change)
+    match mech::task_pgrp_update(pid, |me, used| mech::rules::setsid(me, used(pid, pid)).map(|s| (s, true))) {
+        Ok(sid) => sid as i64,
         Err(e) => e,
     }
 }

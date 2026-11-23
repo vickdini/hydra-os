@@ -98,6 +98,26 @@ pub fn task_pgrp(pid: u64) -> Option<Pgrp> {
     PROCS.lock().get(&pid).map(|p| Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie })
 }
 
+/// The check-and-set of a group or session change, under one hold of the process table (a
+/// concurrent `setpgid`/`setsid` cannot slip between the rule and the change): `rule` sees
+/// process `pid` and whether a group is used (`used(pgid, except)`: a process other than
+/// `except`, zombies too, is in `pgid`), and answers `(pgid, new_session)` or an errno; the
+/// change is then made. The group joined, or the errno.
+pub fn task_pgrp_update(pid: u64, rule: impl FnOnce(Option<Pgrp>, &dyn Fn(u64, u64) -> bool) -> Result<(u64, bool), i64>) -> Result<u64, i64> {
+    let mut procs = PROCS.lock();
+    let me = procs.get(&pid).map(|p| Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie });
+    let (pgid, new_session) = {
+        let table = &*procs;
+        rule(me, &|g, except| table.values().any(|p| p.pgid == g && p.pid != except))?
+    };
+    let p = procs.get_mut(&pid).ok_or(-3)?;
+    p.pgid = pgid;
+    if new_session {
+        p.sid = pid;
+    }
+    Ok(pgid)
+}
+
 /// Puts process `pid` into group `pgid`; with `new_session` it also leads a new session
 /// (`sid = pid`). `false`: no such process.
 pub fn task_pgrp_set(pid: u64, pgid: u64, new_session: bool) -> bool {
@@ -221,6 +241,15 @@ pub fn task_limits_set(tgid: u64, res: usize, new: (u64, u64)) -> bool {
     }
     crate::compat::linux::limits::store_limit(tgid, res, new);
     true
+}
+
+/// The check-and-set of limit `res` of process `tgid` under one hold of the limits table:
+/// `rule` sees the old `(soft, hard)` and allows the change to `new` or answers an errno.
+pub fn task_limits_update(tgid: u64, res: usize, new: (u64, u64), rule: impl FnOnce((u64, u64)) -> Result<(), i64>) -> Result<(), i64> {
+    if res >= crate::compat::linux::limits::NLIMITS {
+        return Err(-22);
+    }
+    crate::compat::linux::limits::update_limit(tgid, res, new, rule)
 }
 
 // ----------------------------------------------------------------------
