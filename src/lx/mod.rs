@@ -474,6 +474,11 @@ pub fn set_forwarding(on: bool) {
         // (wave7 G7-1: + vfs-server's)
         PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
     }
+    // wave10 G7b-1: the walk test call's redirects need `/proc` forwarded too (as with
+    // `lx=kernel`, wave 9 9-C): `lx.proc=kernel` takes it away
+    if svc::mode(crate::ipc::protocol::LXS_PROC) == svc::SvcMode::Kernel {
+        PRIV[(crate::ipc::protocol::LX_VFS_WALK_NR - PRIV_BASE) as usize].store(0, Ordering::Release);
+    }
     STEP4.store(on && svc::mode(LXS_IPC) == svc::SvcMode::Forward, Ordering::Release);
     // Socket routing (Group 12): the per-call bits only once some family moved, so that
     // nothing changes for the socket calls before
