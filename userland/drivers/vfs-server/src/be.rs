@@ -23,6 +23,7 @@ pub struct ZfsBackend {
 
 impl Backend for ZfsBackend {
     fn lookup(&self, dir: Node, name: &[u8]) -> Result<Node, i64> {
+        crate::fuse::not_fuse(dir)?; // wave9 G6b-2
         if let Some(t) = mount::tmpfs_of(self.ns, dir.mnt) {
             return mount::tmpfs_lookup(t, dir, name);
         }
@@ -53,6 +54,7 @@ impl Backend for ZfsBackend {
     }
 
     fn getattr(&self, n: Node) -> Result<Attr, i64> {
+        crate::fuse::not_fuse(n)?; // wave9 G6b-2
         if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
             return mount::tmpfs_getattr(t, n);
         }
@@ -70,6 +72,7 @@ impl Backend for ZfsBackend {
     }
 
     fn readlink(&self, n: Node) -> Result<Vec<u8>, i64> {
+        crate::fuse::not_fuse(n)?; // wave9 G6b-2
         if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
             return mount::tmpfs_readlink(t, n);
         }
@@ -87,6 +90,7 @@ impl Backend for ZfsBackend {
     }
 
     fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
+        crate::fuse::not_fuse(n)?; // wave9 G6b-2
         if let Some(t) = mount::tmpfs_of(self.ns, n.mnt) {
             return mount::tmpfs_acl(t, n);
         }

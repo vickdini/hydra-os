@@ -737,7 +737,8 @@ fn read_desc(ptr: u64) -> Result<LxFhDesc, i64> {
 
 /// Makes the handle `d` names in table `t`: returns the descriptor.
 pub fn install_in(t: &mut FdTable, d: &LxFhDesc) -> Result<usize, i64> {
-    if !plain_ino(d.ino) {
+    // wave9 G6b-2: or a file of a FUSE connection of vfs-server's (it counted the open)
+    if !plain_ino(d.ino) && !crate::compat::linux::fuse_svc::is_remote(d.ino) {
         return Err(EINVAL);
     }
     let path = shown_path(t, d)?;

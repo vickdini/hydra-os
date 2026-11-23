@@ -66,6 +66,9 @@ pub mod ipc {
         pub const LX_KCALL_REOPEN: u64 = 0x6780;
         pub const LX_KCALL_FCNTL: u64 = 0x6782;
         pub const LX_KCALL_FIFO: u64 = 0x6783;
+        // wave9 G6b-2
+        pub const LX_OBJ_KIND_FUSE: u32 = 72;
+        pub const LX_MNT_FUSE: u32 = 4;
     }
 }
 
@@ -124,6 +127,9 @@ pub mod compat {
         pub mod fs;
         #[path = "../../../../../src/compat/linux/fuse.rs"]
         pub mod fuse;
+        // wave9 G6b-2: FUSE inodes of vfs-server's (stub: no vfs-server on the host)
+        #[path = "../../../../host-w9-fuse/stub/fuse_svc.rs"]
+        pub mod fuse_svc;
         #[path = "../../../../../src/compat/linux/inotify.rs"]
         pub mod inotify;
         #[path = "../../../../../src/compat/linux/live.rs"]

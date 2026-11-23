@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ctx::Node;
 use crate::lock::YLock;
-use crate::proto::{LxMntHead, LxMntRec, SvcId, LX_MNT_HOLE, LX_MNT_KERNEL, LX_MNT_TMPFS, LX_MNT_TREE};
+use crate::proto::{LxMntHead, LxMntRec, SvcId, LX_MNT_FUSE, LX_MNT_HOLE, LX_MNT_KERNEL, LX_MNT_TMPFS, LX_MNT_TREE};
 use crate::walk::{BootMounts, MountInfo, MountKind, Mounts};
 
 /// `MS_RDONLY`.
@@ -120,6 +120,7 @@ impl Mounts for View {
         let root = Node::new(m, r.root);
         let kind = match r.kind {
             LX_MNT_KERNEL => MountKind::Redirect { svc: 0, obj: 0 },
+            LX_MNT_FUSE => MountKind::Fuse, // wave9 G6b-2
             _ => MountKind::Zfs,
         };
         // A mount with nothing below it (a namespace's root): its mount point is itself,
@@ -142,7 +143,7 @@ pub fn parse(ns: u32, head: &LxMntHead, recs: &[LxMntRec]) -> Option<View> {
     if ns != 0 && (head.root == 0 || recs[head.root as usize - 1].kind == LX_MNT_HOLE) {
         return None;
     }
-    if recs.iter().any(|r| r.kind > LX_MNT_KERNEL || (r.kind != LX_MNT_HOLE && r.parent as usize > recs.len())) {
+    if recs.iter().any(|r| r.kind > LX_MNT_FUSE || (r.kind != LX_MNT_HOLE && r.parent as usize > recs.len())) {
         return None;
     }
     Some(View { ns, gen: head.gen, root: head.root, recs: recs.to_vec() })

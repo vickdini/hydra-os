@@ -58,6 +58,8 @@ mod xfile;
 mod xpath;
 // wave7 G7-5 end
 mod zfs;
+// wave9 G6b-2: FUSE served here
+mod fuse;
 
 /// The kernel's protocol (message codes, `LxCall`, service ids).
 pub use hydra_rt::protocol as proto;
@@ -127,6 +129,11 @@ fn main(args: &[&str]) {
     RING.store(win as u64 + LX_NOTES_OFF as u64, Ordering::Release);
     svcrt::notes::init(win, on_note);
     svcrt::objs::init(svc.area, ENDPOINT_VFS_SERVER);
+    // wave9 G6b-2: the FUSE connections of the previous instance (its /dev/fuse objects)
+    match fuse::restart_init() {
+        (0, 0) => {}
+        (n, d) => println!("[vfs-server] FUSE: {} connections taken back, {} objects dropped", n, d),
+    }
     // The first request of this instance has no parameters (`FS_ROOT`), and it is made before
     // any call can come: a request of a previous instance that zfs-server may still be
     // serving finishes first (it writes its reply into our part of the window), so no later
@@ -193,6 +200,21 @@ fn main(args: &[&str]) {
     }
 }
 
+// wave9 G6b-2 begin
+/// Runs call `call` again after a FUSE daemon answered what its walk waited for, and
+/// completes it (or leaves it waiting for the next answer).
+pub fn rerun(call: &LxCall) {
+    let cx = Cx::from_call(call, core::ptr::null_mut());
+    let (r, flags) = calls::serve(&cx).unwrap_or((ENOSYS, 0));
+    if flags & LX_REPLY_PENDING != 0 {
+        return;
+    }
+    // (nothing happened yet: the kernel answers the call, as for a redirect to service 0)
+    let r = if flags & LX_REPLY_REDIRECT != 0 { LX_REDIRECTED } else { r };
+    let _ = sys::lx_complete(call.id, r);
+}
+// wave9 G6b-2 end
+
 /// Takes the notifications posted before `seq` (`u64::MAX`: all), and forgets everything if
 /// some were lost to a full ring.
 fn take_notes(seq: u64) {
@@ -226,6 +248,16 @@ fn take_notes(seq: u64) {
 
 /// One notification: the kernel changed the file system (`LX_NOTE_FSCHANGE`).
 fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
+    // wave9 G6b-2 begin: the daemons' /dev/fuse descriptors
+    if kind == LX_NOTE_CLOSE && b == LX_OBJ_KIND_FUSE as u64 {
+        fuse::on_close(a as u32);
+        return;
+    }
+    if kind == LX_NOTE_INTERRUPT {
+        fuse::on_interrupt(a);
+        return;
+    }
+    // wave9 G6b-2 end
     // wave7 G7-3: mount namespaces made and gone (the tables and tmpfs instances follow)
     if kind == LX_NOTE_MNTNS {
         // wave7 G7-7: a namespace that is gone takes its table copy with it
@@ -252,6 +284,17 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     take_notes(c.note_seq);
     let cx = Cx::from_call(c, page);
+    // wave9 G6b-2 begin: FUSE (the kernel's operations on FUSE inodes, the daemons' devices)
+    if c.nr == LX_KCALL_FUSE {
+        return fuse::kcall(&cx);
+    }
+    if c.nr == LX_KCALL_DEVOPEN {
+        return fuse::dev_open(&cx, c.args[1]);
+    }
+    if c.obj != LX_OBJ_NONE && matches!(c.nr, 0 | 1 | 16 | 19 | 20) {
+        return fuse::dev_call(&cx);
+    }
+    // wave9 G6b-2 end
     // wave7 G7-2
     if let Some(a) = calls::serve(&cx) {
         return a;

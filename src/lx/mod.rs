@@ -2358,6 +2358,10 @@ pub fn client_mem(op: MemOp, id: u64, addr: u64, len: u64, buf: u64) -> i64 {
     if !crate::memory::vm::is_user_range(buf, len) || !crate::memory::vm::prefault_current(buf, len, op != MemOp::Write) {
         return EFAULT;
     }
+    // wave9 G6b-2: the kernel buffers a FUSE kernel call lends (`call_vfs_fuse`)
+    if (crate::ipc::protocol::FUSE_KBUF_OUT..crate::ipc::protocol::FUSE_KBUF_IN + crate::ipc::protocol::FUSE_KBUF_MAX as u64).contains(&addr) {
+        return fuse_kbuf_mem(op, id, addr, len, buf);
+    }
     let mm = match client_mm(id) {
         Ok(m) => m,
         Err(e) => return e,
@@ -2790,6 +2794,108 @@ pub fn proc_net_unix_text() -> Option<alloc::string::String> {
 }
 
 // Host tests (test wave, Group 30): tests/host-t30 compiles this file with them
+// wave9 G6b-2 begin: FUSE kernel calls to vfs-server, with lent kernel buffers
+/// The buffers of the FUSE kernel calls in flight, by calling thread: `(in, out)`. The table
+/// owns them (the caller copies in before and out after the call), so a caller torn down
+/// while it waits leaves no pointer behind: a late copy by the service still lands in live
+/// memory, and the entry goes with the thread's next call or a sweep of dead threads.
+static FUSE_KBUFS: Mutex<alloc::collections::BTreeMap<u64, (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+/// FUSE kernel call `args` ([`LX_KCALL_FUSE`](crate::ipc::protocol::LX_KCALL_FUSE)) to
+/// vfs-server for the current thread with input `kin` (the service reads it at
+/// `FUSE_KBUF_IN`) and output into `kout` (it writes at `FUSE_KBUF_OUT`). `-ENOTCONN` when
+/// vfs-server is not there.
+pub fn call_vfs_fuse(args: [u64; 6], kin: &[u8], kout: &mut [u8]) -> i64 {
+    use crate::ipc::protocol::{FUSE_KBUF_MAX, LXS_VFS, LX_KCALL_FUSE};
+    const ENOTCONN: i64 = -107;
+    let Some(x) = svc::host(svc::host_of(LXS_VFS)).filter(|x| host_usable(x)) else { return ENOTCONN };
+    let Some(tid) = crate::task::with_current_task_mut(|t| t.id.0) else { return ENOTCONN };
+    let bufs = (kin[..kin.len().min(FUSE_KBUF_MAX)].to_vec(), alloc::vec![0u8; kout.len().min(FUSE_KBUF_MAX)]);
+    let sweep = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut m = FUSE_KBUFS.lock();
+        m.insert(tid, bufs);
+        (m.len() > 64).then(|| m.keys().copied().collect::<alloc::vec::Vec<u64>>())
+    });
+    // (entries of threads that died waiting: dropped now and then)
+    if let Some(tids) = sweep {
+        let dead: alloc::vec::Vec<u64> = {
+            let sched = crate::task::SCHEDULER.lock();
+            tids.into_iter().filter(|&t| t != tid && !sched.is_task_alive(TaskId(t))).collect()
+        };
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut m = FUSE_KBUFS.lock();
+            for t in dead {
+                m.remove(&t);
+            }
+        });
+    }
+    let mut c = LxCall::EMPTY;
+    c.nr = LX_KCALL_FUSE;
+    c.args = args;
+    c.svc = LXS_VFS as u32;
+    let r = call_ident(x, c, false);
+    let out = x86_64::instructions::interrupts::without_interrupts(|| FUSE_KBUFS.lock().remove(&tid));
+    if let Some((_, out)) = out {
+        let n = out.len().min(kout.len());
+        kout[..n].copy_from_slice(&out[..n]);
+    }
+    r
+}
+
+/// [`client_mem`] at a FUSE kernel call's buffers: writes go to the out buffer, reads come
+/// from the in buffer; only vfs-server, only for a call it is serving.
+fn fuse_kbuf_mem(op: MemOp, id: u64, addr: u64, len: u64, buf: u64) -> i64 {
+    use crate::ipc::protocol::{FUSE_KBUF_IN, FUSE_KBUF_OUT, LXS_VFS};
+    if lx_req_svc(id) != svc::host_of(LXS_VFS) {
+        return EFAULT;
+    }
+    let Some(client) = client_of(id) else { return ESRCH };
+    let out = addr < FUSE_KBUF_IN;
+    if out != (op == MemOp::Write) || op == MemOp::ReadStr {
+        return EFAULT;
+    }
+    let off = (addr - if out { FUSE_KBUF_OUT } else { FUSE_KBUF_IN }) as usize;
+    let n = len as usize;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut l = FUSE_KBUFS.lock();
+        let Some((kin, kout)) = l.get_mut(&client) else { return EFAULT };
+        let cap = if out { kout.len() } else { kin.len() };
+        if off.checked_add(n).is_none_or(|e| e > cap) {
+            return EFAULT;
+        }
+        // SAFETY: the range lies in the table's own buffer, and the service's range was
+        // faulted in (client_mem)
+        unsafe {
+            if out {
+                core::ptr::copy_nonoverlapping(buf as *const u8, kout.as_mut_ptr().add(off), n);
+            } else {
+                core::ptr::copy_nonoverlapping(kin.as_ptr().add(off), buf as *mut u8, n);
+            }
+        }
+        n as i64
+    })
+}
+
+/// `open` of character device `rdev` served by service `s` (not by a major claim: `/dev/fuse`
+/// is 10:229, and major 10 is shared): as [`dev_open`] once the service is chosen.
+pub fn dev_open_to(s: SvcId, rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
+    let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return Err(-19) };
+    let mut c = LxCall::EMPTY;
+    c.nr = crate::ipc::protocol::LX_KCALL_DEVOPEN;
+    c.args = [rdev, flags as u64, 0, 0, 0, 0];
+    c.dev = rdev;
+    c.svc = s as u32;
+    let fd = call_ident(x, c, true);
+    if fd < 0 {
+        return Err(fd);
+    }
+    match crate::task::with_current_fds_mut(|t| t.set_fd(fd as usize, None)) {
+        Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some() => Ok(d),
+        _ => Err(EIO),
+    }
+}
+// wave9 G6b-2 end
+
 #[cfg(test)]
 #[path = "../../tests/host-t30/unit/lx_mod.rs"]
 pub(crate) mod tests;

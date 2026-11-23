@@ -41,6 +41,8 @@ pub mod fs;
 #[cfg(target_os = "uefi")]
 pub mod fuse;
 #[cfg(target_os = "uefi")]
+pub mod fuse_svc; // wave9 G6b-2
+#[cfg(target_os = "uefi")]
 pub mod itimer;
 #[cfg(target_os = "uefi")]
 pub mod inotify;

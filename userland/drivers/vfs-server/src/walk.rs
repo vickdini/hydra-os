@@ -57,6 +57,8 @@ pub enum MountKind {
         /// Its object for the mount's root.
         obj: u64,
     },
+    /// wave9 G6b-2: a FUSE connection of vfs-server's (its files: `crate::fuse`).
+    Fuse,
 }
 
 /// One mount.

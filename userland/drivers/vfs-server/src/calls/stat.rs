@@ -34,9 +34,13 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
         ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?.1
     };
     if x {
-        cx.copy_out(out, &enc::statx(&attr))?;
+        let mut b = enc::statx(&attr);
+        crate::fuse::fix_stat(&attr, &mut b, true); // wave9 G6b-2
+        cx.copy_out(out, &b)?;
     } else {
-        cx.copy_out(out, &enc::stat(&attr))?;
+        let mut b = enc::stat(&attr);
+        crate::fuse::fix_stat(&attr, &mut b, false); // wave9 G6b-2
+        cx.copy_out(out, &b)?;
     }
     Ok(0)
 }
@@ -84,7 +88,7 @@ pub fn readlink(cx: &Cx) -> Result<i64, i64> {
     if attr.mode & 0o170000 != 0o120000 {
         return Err(EINVAL);
     }
-    let target = ctxt::BE.readlink(n)?;
+    let target = ctxt::walker(c)?.readlink(n)?; // wave9 G6b-2: (a FUSE link too)
     let k = target.len().min(size);
     cx.copy_out(buf, &target[..k])?;
     Ok(k as i64)

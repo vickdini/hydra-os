@@ -661,6 +661,14 @@ pub mod compat {
     pub mod linux {
         use core::sync::atomic::Ordering;
 
+        /// *stub* wave9 G6b-2: FUSE inodes of vfs-server's (`lx::fileh` accepts them for a handle).
+        pub mod fuse_svc {
+            pub static KERNEL_ONLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            pub fn is_remote(ino: u64) -> bool {
+                ino >> 62 == 1 && (ino >> 40) & 0x8000 != 0
+            }
+        }
+
         /// *stub* System call tracing switch.
         pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         /// *stub* The identity epoch (bumped by credential changes).

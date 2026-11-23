@@ -73,7 +73,7 @@ pub fn setup() -> Env {
 fn forget_kernel_state() {
     use crate::compat::linux as lx;
     for m in lx::fuse::ns0_snapshot() {
-        lx::fuse::ns0_remove(m.conn.root());
+        lx::fuse::ns0_remove(m.root);
     }
     lx::locks::process_exited(task::SELF_PID);
     lx::mount::forget_thread(task::SELF_PID);

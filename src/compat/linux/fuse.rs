@@ -559,8 +559,10 @@ impl super::chardev::CharDevice for FuseDev {
 pub struct Ns0Mount {
     /// The directory mounted on.
     pub mountpoint: u64,
-    /// The connection.
-    pub conn: Arc<Conn>,
+    /// The connection (`None`: one of vfs-server's, wave9 G6b-2).
+    pub conn: Option<Arc<Conn>>,
+    /// The mount's root inode.
+    pub root: u64,
     /// Mount point path.
     pub path: String,
     /// File system type (`fuse.<name>`).
@@ -576,7 +578,7 @@ static NS0: Mutex<Vec<Ns0Mount>> = Mutex::new(Vec::new());
 /// The initial namespace's FUSE mounts as a mount list for the file server:
 /// `(mountpoint, root, parent mount 0)`.
 pub fn ns0_list() -> Vec<(u64, u64, usize)> {
-    NS0.lock().iter().map(|m| (m.mountpoint, m.conn.root(), 0)).collect()
+    NS0.lock().iter().map(|m| (m.mountpoint, m.root, 0)).collect()
 }
 
 /// Whether the initial namespace has FUSE mounts.
@@ -590,7 +592,7 @@ pub fn ns0_mnt_of(ino: u64) -> usize {
         return 0;
     }
     let c = split(ino).0;
-    NS0.lock().iter().position(|m| m.conn.id == c).map_or(0, |i| i + 1)
+    NS0.lock().iter().position(|m| split(m.root).0 == c).map_or(0, |i| i + 1)
 }
 
 /// The initial namespace's FUSE mounts.
@@ -608,11 +610,14 @@ pub fn ns0_add(m: Ns0Mount) {
 /// end with `ENODEV`.
 pub fn ns0_remove(root: u64) -> bool {
     let mut l = NS0.lock();
-    let Some(i) = l.iter().position(|m| m.conn.root() == root) else { return false };
+    let Some(i) = l.iter().position(|m| m.root == root) else { return false };
     let m = l.remove(i);
     drop(l);
     super::mount::bump(0); // wave7 G7-7: vfs-server's copy follows
-    m.conn.abort();
+    match &m.conn {
+        Some(c) => c.abort(),
+        None => super::fuse_svc::abort(split(root).0), // wave9 G6b-2
+    }
     true
 }
 
@@ -630,13 +635,16 @@ pub fn ns0_mountinfo_text() -> String {
     let mut out = String::new();
     for (i, m) in NS0.lock().iter().enumerate() {
         let id = 4000 + i;
-        out.push_str(&alloc::format!("{} 2069 0:{} / {} {} - {} {} {}\n", id, 60 + m.conn.id as u32, m.path, m.opts.split(',').take(4).collect::<Vec<_>>().join(","), m.fstype, m.source, m.opts));
+        out.push_str(&alloc::format!("{} 2069 0:{} / {} {} - {} {} {}\n", id, 60 + split(m.root).0 as u32, m.path, m.opts.split(',').take(4).collect::<Vec<_>>().join(","), m.fstype, m.source, m.opts));
     }
     out
 }
 
 /// The directory a FUSE inode was found in and its name there (`None` for a root).
 pub fn name_of(ino: u64) -> Option<(u64, Vec<u8>)> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::name_of(ino); // wave9 G6b-2
+    }
     let (c, l) = split(ino);
     if l == 1 {
         return None;
@@ -649,7 +657,7 @@ pub fn name_of(ino: u64) -> Option<(u64, Vec<u8>)> {
 
 /// The mount point of the initial namespace's FUSE mount whose root is `ino`.
 pub fn ns0_mountpoint(ino: u64) -> Option<u64> {
-    NS0.lock().iter().find(|m| m.conn.root() == ino).map(|m| m.mountpoint)
+    NS0.lock().iter().find(|m| m.root == ino).map(|m| m.mountpoint)
 }
 
 /// Device number `stat` reports for a FUSE file.
@@ -659,6 +667,9 @@ pub fn dev(ino: u64) -> u64 {
 
 /// The inode number the daemon gave `ino`.
 pub fn user_ino(ino: u64) -> u64 {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::user_ino(ino); // wave9 G6b-2
+    }
     let (c, l) = split(ino);
     CONNS.lock().get(&c).and_then(|c| c.st.lock().nodes.get(l as usize).map(|n| n.user_ino)).unwrap_or(l)
 }
@@ -757,6 +768,9 @@ pub fn walk(cur: u64, mnt: usize, rest: &[u8], follow: bool, mounts: &[(u64, u64
 }
 
 fn parent(ino: u64) -> Result<u64, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::parent(ino); // wave9 G6b-2
+    }
     let (c, l) = split(ino);
     let conn = conn_of(ino)?;
     let p = conn.st.lock().nodes.get(l as usize).map(|n| n.parent).ok_or(ENOENT)?;
@@ -767,16 +781,16 @@ fn parent(ino: u64) -> Result<u64, i64> {
 // Operations
 // ----------------------------------------------------------------------
 
-fn u32_at(b: &[u8], o: usize) -> u32 {
+pub(super) fn u32_at(b: &[u8], o: usize) -> u32 {
     b.get(o..o + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 
-fn u64_at(b: &[u8], o: usize) -> u64 {
+pub(super) fn u64_at(b: &[u8], o: usize) -> u64 {
     b.get(o..o + 8).map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))
 }
 
 /// `struct fuse_attr` at `b` as Hydra's attributes of inode `ino`.
-fn attr_of(ino: u64, b: &[u8]) -> Attr {
+pub(super) fn attr_of(ino: u64, b: &[u8]) -> Attr {
     Attr {
         ino,
         size: u64_at(b, 8),
@@ -835,6 +849,9 @@ fn entry(c: &Conn, dir: u64, name: &[u8], r: &[u8]) -> Result<(u64, Attr), i64> 
 
 /// Looks `name` up in FUSE directory `dir`: the inode and its attributes.
 pub fn lookup_attr(dir: u64, name: &[u8]) -> Result<(u64, Attr), i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::lookup_attr(dir, name); // wave9 G6b-2
+    }
     if name == b".." {
         let p = parent(dir)?;
         return Ok((p, getattr(p)?));
@@ -854,6 +871,9 @@ pub fn lookup(dir: u64, name: &[u8]) -> Result<u64, i64> {
 
 /// Attributes of FUSE inode `ino`.
 pub fn getattr(ino: u64) -> Result<Attr, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::getattr(ino); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     let l = split(ino).1;
     if let Some(a) = c.cached(l) {
@@ -873,7 +893,23 @@ pub fn getattr(ino: u64) -> Result<Attr, i64> {
 
 /// Changes attributes of FUSE inode `ino`; returns the new ones.
 pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::setattr(ino, &setattr_in(set)); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
+    let a = setattr_in(set);
+    c.uncache(Some(split(ino).1));
+    let r = c.call(SETATTR, n, &[&a])?;
+    if r.len() < 16 + 88 {
+        return getattr(ino);
+    }
+    let attr = attr_of(ino, &r[16..]);
+    c.cache(split(ino).1, attr, u64_at(&r, 0), u32_at(&r, 8));
+    Ok(attr)
+}
+
+/// `struct fuse_setattr_in` for `set`.
+fn setattr_in(set: SetAttr) -> Vec<u8> {
     let mut valid = 0;
     let mode = set.mode.map(|m| {
         valid |= FATTR_MODE;
@@ -916,18 +952,14 @@ pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
     a.extend_from_slice(&uid.unwrap_or(0).to_le_bytes());
     a.extend_from_slice(&gid.unwrap_or(0).to_le_bytes());
     a.extend_from_slice(&0u32.to_le_bytes());
-    c.uncache(Some(split(ino).1));
-    let r = c.call(SETATTR, n, &[&a])?;
-    if r.len() < 16 + 88 {
-        return getattr(ino);
-    }
-    let attr = attr_of(ino, &r[16..]);
-    c.cache(split(ino).1, attr, u64_at(&r, 0), u32_at(&r, 8));
-    Ok(attr)
+    a
 }
 
 /// Target of FUSE symbolic link `ino`.
 pub fn readlink(ino: u64) -> Result<Vec<u8>, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::readlink(ino); // wave9 G6b-2
+    }
     // Not a link: EINVAL without asking the daemon (realpath asks of every component)
     if getattr(ino)?.mode & S_IFMT != S_IFLNK {
         return Err(EINVAL);
@@ -988,6 +1020,9 @@ fn handle(c: &Conn, ino: u64, n: u64, want: Want) -> Result<u64, i64> {
 
 /// Reads `ino` at `offset` into `buf`.
 pub fn read(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::read(ino, offset, buf); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     let fh = handle(&c, ino, n, Want::Read)?;
     let chunk = 128 * 1024;
@@ -1008,6 +1043,9 @@ pub fn read(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Writes `data` to `ino` at `offset`.
 pub fn write(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::write(ino, offset, data); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     // Size and times change (forgotten again when done: a stat meanwhile kept the old)
     let _fresh = Fresh(&c, Some(split(ino).1));
@@ -1029,10 +1067,18 @@ pub fn write(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
 
 /// Up to `max` entries of directory `dir` from `cookie` (the daemon's offset) on.
 pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::readdir(dir, cookie, max); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let fh = handle(&c, dir, n, Want::Dir)?;
     let a = le(&[fh, cookie, 16384, 0, 0, 0, 0], &[8, 8, 4, 4, 8, 4, 4]);
     let r = c.call(READDIR, n, &[&a])?;
+    Ok(dirents(&r, max))
+}
+
+/// The daemon's `fuse_dirent` records `r` as entries (at most `max`).
+pub(super) fn dirents(r: &[u8], max: usize) -> Vec<ReaddirEntry> {
     let mut out = Vec::new();
     let mut o = 0;
     while o + 24 <= r.len() && out.len() < max {
@@ -1046,12 +1092,15 @@ pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i
         out.push(ReaddirEntry { name: r[o + 24..o + 24 + namelen].to_vec(), ino, dtype, next_cookie: off });
         o += (24 + namelen + 7) & !7;
     }
-    Ok(out)
+    out
 }
 
 /// A file created in `dir`: the daemon's `create` (keeping the handle for writing), or
 /// `mknod` when it has none.
 pub fn create(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::create(dir, name, perm); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     // O_CREAT | O_EXCL | O_RDWR
@@ -1072,6 +1121,9 @@ pub fn create(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
 
 /// A node made in `dir`.
 pub fn mknod(dir: u64, name: &[u8], mode: u32, rdev: u64) -> Result<u64, i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::mknod(dir, name, mode, rdev); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     let a = le(&[mode as u64, rdev & 0xFFFF_FFFF, 0, 0], &[4, 4, 4, 4]);
@@ -1081,6 +1133,9 @@ pub fn mknod(dir: u64, name: &[u8], mode: u32, rdev: u64) -> Result<u64, i64> {
 
 /// A directory made in `dir`.
 pub fn mkdir(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::mkdir(dir, name, perm); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     let a = le(&[(perm & 0o7777) as u64, 0], &[4, 4]);
@@ -1090,6 +1145,9 @@ pub fn mkdir(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
 
 /// A symbolic link made in `dir`.
 pub fn symlink(dir: u64, name: &[u8], to: &[u8]) -> Result<u64, i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::symlink(dir, name, to); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     let r = c.call(SYMLINK, n, &[&cstr(name), &cstr(to)])?;
@@ -1098,6 +1156,9 @@ pub fn symlink(dir: u64, name: &[u8], to: &[u8]) -> Result<u64, i64> {
 
 /// A hard link to `ino` made in `dir` (same file system only).
 pub fn link(ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(ino) && super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::link(ino, dir, name); // wave9 G6b-2
+    }
     if !is_fuse(ino) || !is_fuse(dir) || split(ino).0 != split(dir).0 {
         return Err(EXDEV);
     }
@@ -1110,6 +1171,9 @@ pub fn link(ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
 
 /// Removes `name` from `dir`.
 pub fn unlink(dir: u64, name: &[u8]) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::unlink(dir, name); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     c.call(UNLINK, n, &[&cstr(name)]).map(|_| ())
@@ -1117,6 +1181,9 @@ pub fn unlink(dir: u64, name: &[u8]) -> Result<(), i64> {
 
 /// Removes directory `name` from `dir`.
 pub fn rmdir(dir: u64, name: &[u8]) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(dir) {
+        return super::fuse_svc::rmdir(dir, name); // wave9 G6b-2
+    }
     let (c, n) = target(dir)?;
     let _fresh = Fresh(&c, None);
     c.call(RMDIR, n, &[&cstr(name)]).map(|_| ())
@@ -1124,6 +1191,9 @@ pub fn rmdir(dir: u64, name: &[u8]) -> Result<(), i64> {
 
 /// Renames within one FUSE file system.
 pub fn rename(sdir: u64, sname: &[u8], ddir: u64, dname: &[u8]) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(sdir) && super::fuse_svc::is_remote(ddir) {
+        return super::fuse_svc::rename(sdir, sname, ddir, dname); // wave9 G6b-2
+    }
     if !is_fuse(sdir) || !is_fuse(ddir) || split(sdir).0 != split(ddir).0 {
         return Err(EXDEV);
     }
@@ -1149,24 +1219,36 @@ fn xattr_err(e: i64) -> i64 {
 
 /// Extended attribute `name` of `ino`.
 pub fn getxattr(ino: u64, name: &[u8]) -> Result<Vec<u8>, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::getxattr(ino, name); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     c.call(GETXATTR, n, &[&le(&[65536, 0], &[4, 4]), &cstr(name)]).map_err(xattr_err)
 }
 
 /// Names of `ino`'s extended attributes.
 pub fn listxattr(ino: u64) -> Result<Vec<u8>, i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::listxattr(ino); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     c.call(LISTXATTR, n, &[&le(&[65536, 0], &[4, 4])]).map_err(xattr_err)
 }
 
 /// Sets extended attribute `name` of `ino`.
 pub fn setxattr(ino: u64, name: &[u8], value: &[u8], flags: u32) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::setxattr(ino, name, value, flags); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     c.call(SETXATTR, n, &[&le(&[value.len() as u64, flags as u64], &[4, 4]), &cstr(name), value]).map(|_| ()).map_err(xattr_err)
 }
 
 /// Removes extended attribute `name` of `ino`.
 pub fn removexattr(ino: u64, name: &[u8]) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::removexattr(ino, name); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     c.call(REMOVEXATTR, n, &[&cstr(name)]).map(|_| ()).map_err(xattr_err)
 }
@@ -1174,25 +1256,34 @@ pub fn removexattr(ino: u64, name: &[u8]) -> Result<(), i64> {
 /// The file system `ino` is in as `statfs` reports it (`struct statfs`, 120 bytes); a
 /// daemon without `statfs` gets Linux's defaults.
 pub fn statfs(ino: u64) -> Result<[u8; 120], i64> {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::statfs(ino); // wave9 G6b-2
+    }
     let (c, n) = target(ino)?;
     let r = match c.call(STATFS, n, &[]) {
         Ok(r) => r,
         Err(ENOSYS) => Vec::new(),
         Err(e) => return Err(e),
     };
-    let bsize = match u32_at(&r, 40) {
+    Ok(statfs_of(ino, &r))
+}
+
+/// `struct statfs` of `ino`'s file system from the daemon's `fuse_statfs_out` `r` (empty:
+/// Linux's defaults).
+pub(super) fn statfs_of(ino: u64, r: &[u8]) -> [u8; 120] {
+    let bsize = match u32_at(r, 40) {
         0 => 512,
         b => b,
     };
-    let namelen = match u32_at(&r, 44) {
+    let namelen = match u32_at(r, 44) {
         0 => 255,
         n => n,
     };
-    let frsize = match u32_at(&r, 48) {
+    let frsize = match u32_at(r, 48) {
         0 => bsize,
         f => f,
     };
-    let vals: [u64; 7] = [0x6573_5546, bsize as u64, u64_at(&r, 0), u64_at(&r, 8), u64_at(&r, 16), u64_at(&r, 24), u64_at(&r, 32)];
+    let vals: [u64; 7] = [0x6573_5546, bsize as u64, u64_at(r, 0), u64_at(r, 8), u64_at(r, 16), u64_at(r, 24), u64_at(r, 32)];
     let mut b = [0u8; 120];
     for (i, v) in vals.iter().enumerate() {
         b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
@@ -1200,11 +1291,14 @@ pub fn statfs(ino: u64) -> Result<[u8; 120], i64> {
     b[56..60].copy_from_slice(&(dev(ino) as u32).to_le_bytes()); // f_fsid
     b[64..72].copy_from_slice(&(namelen as u64).to_le_bytes());
     b[72..80].copy_from_slice(&(frsize as u64).to_le_bytes());
-    Ok(b)
+    b
 }
 
 /// A descriptor opened `ino`.
 pub fn open_ref(ino: u64) {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::open_ref(ino); // wave9 G6b-2
+    }
     if let Ok(c) = conn_of(ino) {
         c.st.lock().handles.entry(split(ino).1).or_default().refs += 1;
     }
@@ -1213,6 +1307,9 @@ pub fn open_ref(ino: u64) {
 /// A descriptor of `ino` closed: with the last, the daemon's handles are released (without
 /// waiting for the daemon).
 pub fn release(ino: u64) {
+    if super::fuse_svc::is_remote(ino) {
+        return super::fuse_svc::release(ino); // wave9 G6b-2
+    }
     let Ok(c) = conn_of(ino) else { return };
     let l = split(ino).1;
     let gone = {
@@ -1272,6 +1369,23 @@ fn conn_of_fd(fd: i32) -> Result<Arc<Conn>, i64> {
     d.as_fuse().ok_or(EINVAL)
 }
 
+// wave9 G6b-2 begin
+/// The slot of descriptor `fd` when it is an open `/dev/fuse` of vfs-server's (`None`: some
+/// other descriptor, the kernel's own client decides).
+fn remote_slot_of_fd(fd: i32) -> Result<Option<u64>, i64> {
+    let d = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(crate::fs::FileDescriptor::Device(d)) => Some(d.clone()),
+        _ => None,
+    })
+    .ok_or(EBADF)?;
+    let Some(o) = d.as_server() else { return Ok(None) };
+    if o.kind() != crate::ipc::protocol::LX_OBJ_KIND_FUSE {
+        return Err(EINVAL);
+    }
+    o.slot().map(|s| Some(s as u64)).ok_or(EBADF)
+}
+// wave9 G6b-2 end
+
 /// Mounts the connection named by `data`'s `fd=` on `(path, mountpoint)`.
 ///
 /// # Returns
@@ -1279,11 +1393,26 @@ fn conn_of_fd(fd: i32) -> Result<Arc<Conn>, i64> {
 /// namespace: `ns0` records the mount here).
 pub fn mount(path: &str, mountpoint: u64, fstype: &str, source: &str, flags: u64, data: &str, ns0: bool) -> Result<u64, i64> {
     let (fd, _rootmode, uid, gid, other) = options(data)?;
-    let c = conn_of_fd(fd)?;
-    if c.mounted.load(Ordering::Acquire) {
-        return Err(EINVAL);
+    // wave9 G6b-2: a /dev/fuse of vfs-server's: it starts the connection (INIT)
+    let slot = remote_slot_of_fd(fd);
+    if let Err(e) = slot {
+        crate::kprintln!("[fuse] mount: fd {} is not a /dev/fuse: {}", fd, e);
     }
-    c.start(uid, gid, other);
+    let (conn, root) = match slot? {
+        Some(slot) => {
+            let id = super::fuse_svc::mount(slot, uid, gid, other)?;
+            (None, super::fuse_svc::root_of(id))
+        }
+        None => {
+            let c = conn_of_fd(fd)?;
+            if c.mounted.load(Ordering::Acquire) {
+                return Err(EINVAL);
+            }
+            c.start(uid, gid, other);
+            let r = c.root();
+            (Some(c), r)
+        }
+    };
     if ns0 {
         let mut opts = String::from(if flags & 1 != 0 { "ro" } else { "rw" });
         for (bit, name) in [(2u64, "nosuid"), (4, "nodev"), (8, "noexec")] {
@@ -1296,9 +1425,9 @@ pub fn mount(path: &str, mountpoint: u64, fstype: &str, source: &str, flags: u64
         if other {
             opts.push_str(",allow_other");
         }
-        ns0_add(Ns0Mount { mountpoint, conn: c.clone(), path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts });
+        ns0_add(Ns0Mount { mountpoint, conn, root, path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts });
     }
-    Ok(c.root())
+    Ok(root)
 }
 
 /// Whether `fstype` is a FUSE file system type (`fuse`, `fuse.<name>`).

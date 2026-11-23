@@ -292,6 +292,10 @@ pub mod lx {
     pub fn dev_open(_rdev: u64, _flags: u32) -> Option<Result<alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, i64>> {
         crate::fake::LX_DEV_OPEN.get().map(Err)
     }
+    /// *stub* wave9 G6b-2: never reached (`fuse_svc::forwarded()` is false).
+    pub fn dev_open_to(_s: u8, _rdev: u64, _flags: u32) -> Result<alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>, i64> {
+        Err(-19)
+    }
     pub mod obj {
         /// *stub*
         pub struct ServerObject;
@@ -401,6 +405,13 @@ pub mod compat {
         /// *stub* The one item `devices.rs` reads from the pseudo-file module.
         pub mod fs {
             pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+        }
+
+        /// *stub* wave9 G6b-2: `/dev/fuse` stays the kernel's on the host.
+        pub mod fuse_svc {
+            pub fn forwarded() -> bool {
+                false
+            }
         }
 
         /// *stub* `/dev/fuse`.

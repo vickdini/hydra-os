@@ -90,6 +90,16 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         return Err(EACCES);
     }
     let d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
-    let fd = sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0)?;
+    // wave9 G6b-2: a FUSE file: the open counts here (the daemon's handles live while it is open)
+    let fuse = crate::fuse::local_open_ref(n.ino);
+    let fd = match sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0) {
+        Ok(fd) => fd,
+        Err(e) => {
+            if fuse {
+                crate::fuse::local_release(n.ino);
+            }
+            return Err(e);
+        }
+    };
     Ok(fd as i64)
 }
