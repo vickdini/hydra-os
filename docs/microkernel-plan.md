@@ -243,6 +243,31 @@ Groups 6b-1 (inotify and fanotify into vfs-server), 6b-2 (FUSE as a vfs-server b
 
 **Carried into wave 10:** the change calls vfs-server still sends back (creates, truncates, mknod, link, xattrs, utimes, `/dev`, EROFS) move into vfs-server, then the kernel walk and path calls can go; FUSE `mount(2)` in the initial namespace (so `mount.rs` can go); served `/proc` (lx-proc, a kernel-held snapshot handle) and `tcp_connect` over budget; io_uring rings into linux-server; delete wave 8's device copies and the lx-net/lx-ipc copies (decision 30).
 
+### Wave 10: the process service, the last file calls, and the cleanup (approved 2026-11-23, decisions 31–33)
+
+Built from [linux-services-design.md](linux-services-design.md) section 9.5 plus what wave 9 carried over. Up to four groups at once, Sonnet pre-merge reviews, a deploy after each stage.
+
+**Stage 1 (four groups, independent of each other):**
+
+| Group | Work | Agent-days |
+|---|---|---:|
+| **7b-1** | lx-proc as its own service: `setuid` family policy, `prctl`, `unshare`/`setns` orchestration (direct calls to each namespace owner), UTS names, accounting, `syslog`; restarts invisibly (decision 12); on 7a's primitives | 4–5 |
+| **V1** | The change calls into vfs-server: creating and truncating opens, `O_TMPFILE`, `mknod`, `link`, xattrs, `utimes`, the remaining `chown`/`chmod`, read-only-mount answers; vfs-server stops sending them back (9-C's counter shows what is left) | 4–5 |
+| **8-2** | System V shared memory into lx-ipc on memory objects (semaphores and message queues are already there) | 2–3 |
+| **N** | Carry-over: `tcp_connect` back under budget (the previous connection's close off the next call's path); `io_uring` rings into linux-server | 3 |
+
+**Stage 2 (after 7b-1 is merged):**
+
+| Group | Work | Agent-days |
+|---|---|---:|
+| **7b-2** | `/proc` from linux-server to lx-proc, on the kernel info primitives; served `/proc` opens back under budget (the kernel-held snapshot handle) | 3–4 |
+| **8-1** | ptrace and perf policy into lx-proc (the stop mechanism stays in the kernel) | 3–4 |
+| **V2** | `/dev` lookups and FUSE `mount(2)` in the initial namespace into vfs-server; the kernel's `mount.rs` shrinks to what boot needs | 3 |
+
+**Then 10-C (closing):** delete the in-kernel copies of waves 6–8 (display, input, sound, terminals, lx-net, lx-ipc, lx-sec) and their switch-back words; delete the kernel walk and path calls that nothing sends back any more, keeping only the read-only walk boot needs before vfs-server runs; linux-server reduced to what is left (`io_uring`/`aio`); line counts, the final budget run, a kill test of every service under KDE in one session, the installer test.
+
+About 26–32 agent-days, eight groups.
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
@@ -405,6 +430,10 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 28. **Group 15's last device questions, as recommended:** a display-service crash ends the desktop session for now (a desktop-keeping restart later); fix the two waste findings now (pictures paced to 60 a second, no drawing behind the console); design the display core for a real graphics driver, build only the firmware framebuffer now.
 29. **Wave 9 lineup** (2026-11-22), two groups at a time, deployed after each pair: (1) 6b-2 FUSE as a vfs-server back end + 7a the process mechanism; (2) 6b-1 inotify/fanotify + X3 lx-ipc Transparent; (3) 6b-3 Landlock/ACL/ABAC + 6b-4 io_uring/aio; (4) P2 per-call cost + M tmpfs data in memory objects; then 9-C closing. Starts after the user's weekly usage limit resets. Gemini stays off; Sonnet reviewers.
 30. **9-C deletes the kernel's copy of the file code only** (after FUSE moves and the deploy; `lx.vfs=kernel` goes away). The wave 8 device and lx-net/lx-ipc copies stay as switch-backs until wave 10's cleanup.
+
+31. **Wave 10 lineup** (2026-11-23): stage 1 7b-1 (lx-proc), V1 (the change calls into vfs-server), 8-2 (SysV shared memory into lx-ipc), N (`tcp_connect` budget, `io_uring` rings); stage 2 7b-2 (`/proc` into lx-proc), 8-1 (ptrace/perf policy), V2 (`/dev` and FUSE `mount(2)` into vfs-server); then 10-C closing. Four groups at once, a deploy after each stage.
+32. **No switch back after wave 10:** 10-C deletes every remaining in-kernel copy, and `lx=kernel` with every `lx.<service>=kernel` word is ignored with a boot-log line (as `lx.vfs=kernel` in 9-C). Crashes are handled by restarts; the emergency prompt stays for broken user space.
+33. **Wave 10 starts right away** (2026-11-23).
 
 ### Still open, and when they are needed
 
