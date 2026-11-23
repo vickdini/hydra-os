@@ -306,8 +306,63 @@ enum Wait {
     Timeout { at: u64, count: u64, start: u64 },
 }
 
+/// wave9 G6b-4: who a waiting request acts for: the submitting process image (thread group
+/// and address space: a forked child or an exec'd program sharing the ring gets a worker of
+/// its own) and the submitter's credentials when it was submitted (as Linux's request
+/// creds), which the worker takes on for the request's call.
+#[derive(Clone, Copy)]
+struct Owner {
+    tgid: u64,
+    cr3: u64,
+    /// uid, gid, euid, egid, suid, sgid
+    ids: [u32; 6],
+    caps: crate::task::tcb::Caps,
+}
+
+impl Owner {
+    /// The calling task's.
+    fn now() -> Owner {
+        crate::task::with_current_task_mut(|t| Owner { tgid: t.tgid, cr3: t.regs.cr3, ids: [t.uid, t.gid, t.euid, t.egid, t.suid, t.sgid], caps: t.caps })
+            .unwrap_or(Owner { tgid: 0, cr3: 0, ids: [65534; 6], caps: crate::task::tcb::Caps::for_euid(65534) })
+    }
+
+    /// The worker's key: the requests of one process image share a worker.
+    fn key(&self) -> (u64, u64) {
+        (self.tgid, self.cr3)
+    }
+
+    /// The calling task (the worker) takes on these credentials.
+    fn apply(&self) {
+        let changed = crate::task::with_current_task_mut(|t| {
+            let same = [t.uid, t.gid, t.euid, t.egid, t.suid, t.sgid] == self.ids
+                && t.caps.effective == self.caps.effective
+                && t.caps.permitted == self.caps.permitted
+                && t.caps.in_userns == self.caps.in_userns;
+            [t.uid, t.gid, t.euid, t.egid, t.suid, t.sgid] = self.ids;
+            t.caps = self.caps;
+            !same
+        });
+        if changed == Some(true) {
+            // (crate::lx caches caller identities per CPU)
+            super::ident_changed();
+        }
+    }
+}
+
+/// A request the worker is running (out of the pending list): a cancel finds it here.
+struct Running {
+    id: u64,
+    sqe: Sqe,
+    wait: Wait,
+    /// A cancel came while it ran: if it has to wait again, it is cancelled instead.
+    cancelled: bool,
+}
+
 /// A request waiting for the worker.
 struct Pending {
+    /// wave9 G6b-4: unique in the ring (the worker finds it again by it)
+    id: u64,
+    owner: Owner,
     sqe: Sqe,
     wait: Wait,
     /// The rest of its link chain.
@@ -339,7 +394,10 @@ struct State {
     cq_tail: u32,
     overflow: VecDeque<(u64, i32, u32)>,
     pending: Vec<Pending>,
-    worker: bool,
+    /// wave9 G6b-4: the running workers, by [`Owner::key`]
+    workers: Vec<(u64, u64)>,
+    running: Vec<Running>,
+    next_id: u64,
     completions: u64,
     /// Registered files: the descriptor (a private duplicate) or -1.
     files: Vec<i32>,
@@ -365,7 +423,6 @@ pub struct Ring {
     cq_wq: Arc<WaitQueue>,
     /// Wakes the worker (new waiting requests).
     kick: Arc<WaitQueue>,
-    tgid: u64,
 }
 
 /// The ring descriptor's object.
@@ -527,11 +584,11 @@ impl Ring {
                 }
                 Outcome::Again(res, flags, wait) => {
                     self.complete(&sqe, res, flags | CQE_F_MORE);
-                    self.park(Pending { sqe, wait, chain, link_timeout: lt_deadline });
+                    self.park(Pending { id: 0, owner: Owner::now(), sqe, wait, chain, link_timeout: lt_deadline });
                     return;
                 }
                 Outcome::Wait(wait) => {
-                    self.park(Pending { sqe, wait, chain, link_timeout: lt_deadline });
+                    self.park(Pending { id: 0, owner: Owner::now(), sqe, wait, chain, link_timeout: lt_deadline });
                     return;
                 }
             }
@@ -548,20 +605,29 @@ impl Ring {
         res >= 0 && !short
     }
 
-    /// Hands a waiting request to the worker (starting it if needed).
-    fn park(self: &Arc<Self>, p: Pending) {
+    /// Hands a waiting request to the worker of its process image (starting it if needed).
+    fn park(self: &Arc<Self>, mut p: Pending) {
+        let key = p.owner.key();
         let start = {
             let mut st = self.st.lock();
+            p.id = st.next_id;
+            st.next_id += 1;
             st.pending.push(p);
-            !core::mem::replace(&mut st.worker, true)
+            let start = !st.workers.contains(&key);
+            if start {
+                st.workers.push(key);
+            }
+            start
         };
         if start {
+            // (a process worker copies the calling task: the submitter, or a worker of the
+            // same process image)
             let id = crate::task::SCHEDULER.lock().spawn_process_worker("iou-wrk", worker_main);
             match id {
                 Some(id) => {
                     NEW_WORKERS.lock().insert(id.0, Arc::downgrade(self));
                 }
-                None => self.st.lock().worker = false,
+                None => self.st.lock().workers.retain(|k| *k != key),
             }
         }
         self.kick.wake_all();
@@ -647,6 +713,13 @@ impl Ring {
             }
         }
         let at = |off: u64| off == u64::MAX;
+        // wave9 G6b-4: a socket request found ready runs with MSG_DONTWAIT (another reader
+        // may have taken the data since: the call must not block the worker or the
+        // submitter in a service), and waits again on -EAGAIN unless the program asked for
+        // MSG_DONTWAIT itself
+        const MSG_DONTWAIT: u32 = 0x40;
+        let rewait = needs != 0 && sqe.op_flags & MSG_DONTWAIT == 0;
+        let sock_flags = (sqe.op_flags | if needs != 0 { MSG_DONTWAIT } else { 0 }) as u64;
         // An offset on a pipe or socket is ignored, as Linux does for stream files (wave9
         // G6b-4): the positional call's -ESPIPE turns into the plain call
         let pos = |r: i64, plain: &dyn Fn() -> i64| if r == ESPIPE { plain() } else { r };
@@ -694,10 +767,10 @@ impl Ring {
             }
             OP_FSYNC => n(if sqe.op_flags & 1 != 0 { 75 } else { 74 }, [fd, 0, 0, 0, 0, 0]),
             OP_SYNC_FILE_RANGE => n(277, [fd, sqe.off, sqe.len as u64, sqe.op_flags as u64, 0, 0]),
-            OP_SENDMSG => n(46, [fd, sqe.addr, sqe.op_flags as u64, 0, 0, 0]),
-            OP_RECVMSG => n(47, [fd, sqe.addr, sqe.op_flags as u64, 0, 0, 0]),
-            OP_SEND => n(44, [fd, sqe.addr, sqe.len as u64, sqe.op_flags as u64, 0, 0]),
-            OP_RECV => n(45, [fd, buf.0, buf.1 as u64, sqe.op_flags as u64, 0, 0]),
+            OP_SENDMSG => n(46, [fd, sqe.addr, sock_flags, 0, 0, 0]),
+            OP_RECVMSG => n(47, [fd, sqe.addr, sock_flags, 0, 0, 0]),
+            OP_SEND => n(44, [fd, sqe.addr, sqe.len as u64, sock_flags, 0, 0]),
+            OP_RECV => n(45, [fd, buf.0, buf.1 as u64, sock_flags, 0, 0]),
             OP_ACCEPT => {
                 if sqe.ioprio & 1 != 0 || sqe.file_index != 0 {
                     EINVAL // multishot accept, direct descriptors
@@ -810,7 +883,7 @@ impl Ring {
                 if sqe.op_flags & 6 != 0 {
                     EINVAL // updates are not supported
                 } else {
-                    self.cancel(|p| p.sqe.opcode == OP_POLL_ADD && p.sqe.user_data == sqe.addr, false)
+                    self.cancel(|s, _| s.opcode == OP_POLL_ADD && s.user_data == sqe.addr, false)
                 }
             }
             OP_TIMEOUT => {
@@ -844,7 +917,7 @@ impl Ring {
                         Err(e) => e,
                     }
                 } else {
-                    self.cancel(|p| p.sqe.opcode == OP_TIMEOUT && p.sqe.user_data == sqe.addr, false)
+                    self.cancel(|s, _| s.opcode == OP_TIMEOUT && s.user_data == sqe.addr, false)
                 }
             }
             OP_ASYNC_CANCEL => {
@@ -853,13 +926,13 @@ impl Ring {
                 let by_fd = sqe.op_flags & 2 != 0;
                 let any = sqe.op_flags & 4 != 0;
                 let r = self.cancel(
-                    |p| {
+                    |s, w| {
                         if any {
                             true
                         } else if by_fd {
-                            matches!(p.wait, Wait::Fd { fd: f, .. } if f == sqe.fd) || p.sqe.fd == sqe.fd
+                            matches!(*w, Wait::Fd { fd: f, .. } if f == sqe.fd) || s.fd == sqe.fd
                         } else {
-                            p.sqe.user_data == sqe.addr
+                            s.user_data == sqe.addr
                         }
                     },
                     all,
@@ -881,21 +954,38 @@ impl Ring {
                 cflags = 0;
             }
         }
+        if res == EAGAIN && rewait && matches!(sqe.opcode, OP_SEND | OP_RECV | OP_SENDMSG | OP_RECVMSG) {
+            return Outcome::Wait(Wait::Fd { fd: fd as i32, events: needs });
+        }
         Done(res, cflags)
     }
 
     /// Cancels waiting requests `matching` (all of them, or the first): each completes with
     /// `-ECANCELED`, its chain too. The count (all) or 0, `-ENOENT` if none.
-    fn cancel(&self, matching: impl Fn(&Pending) -> bool, all: bool) -> i64 {
+    fn cancel(&self, matching: impl Fn(&Sqe, &Wait) -> bool, all: bool) -> i64 {
         let mut gone = Vec::new();
+        let mut running = 0;
         {
             let mut st = self.st.lock();
             let mut i = 0;
             while i < st.pending.len() {
-                if matching(&st.pending[i]) && (all || gone.is_empty()) {
+                if matching(&st.pending[i].sqe, &st.pending[i].wait) && (all || gone.is_empty()) {
                     gone.push(st.pending.remove(i));
                 } else {
                     i += 1;
+                }
+            }
+            // wave9 G6b-4: one the worker is running right now: cancelled if it has to wait
+            // again, otherwise it finishes (Linux: -EALREADY)
+            if all || gone.is_empty() {
+                for r in st.running.iter_mut() {
+                    if matching(&r.sqe, &r.wait) {
+                        r.cancelled = true;
+                        running += 1;
+                        if !all {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -909,6 +999,7 @@ impl Ring {
             self.cancel_chain(p.chain);
         }
         match count {
+            0 if running > 0 => EALREADY,
             0 => ENOENT,
             n if all => n,
             _ => 0,
@@ -990,77 +1081,95 @@ impl Ring {
         taken as i64
     }
 
-    /// The worker's pass: finishes what is ready or due. Returns the next deadline.
-    fn progress(self: &Arc<Self>, frame: &SyscallFrame) -> Option<u64> {
+    /// The worker's pass over the requests of its process image `key`: finishes what is
+    /// ready or due, each under its submitter's credentials. The other requests stay in the
+    /// list while one runs (a cancel finds them; the running one is in `running`). Returns
+    /// the next deadline and whether any request of `key` is left.
+    fn progress(self: &Arc<Self>, frame: &SyscallFrame, key: (u64, u64)) -> (Option<u64>, bool) {
         let now = crate::arch::pit::ticks();
-        let list = core::mem::take(&mut self.st.lock().pending);
-        let mut keep = Vec::new();
-        for mut p in list {
-            if let Some((at, ud)) = p.link_timeout {
-                if now >= at {
-                    // The guarded request took too long
-                    self.complete(&p.sqe, ECANCELED, 0);
-                    let mut st = self.st.lock();
-                    self.post(&mut st, ud, ETIME, 0);
-                    drop(st);
-                    self.cancel_chain(p.chain);
+        let ids: Vec<u64> = self.st.lock().pending.iter().filter(|p| p.owner.key() == key).map(|p| p.id).collect();
+        for id in ids {
+            // Taken out only when there is something to do
+            let (mut p, lt_due) = {
+                let mut st = self.st.lock();
+                let Some(i) = st.pending.iter().position(|p| p.id == id) else { continue };
+                let p = &st.pending[i];
+                let lt_due = p.link_timeout.is_some_and(|(at, _)| now >= at);
+                let due = lt_due
+                    || match p.wait {
+                        Wait::Timeout { at, count, start } => (count > 0 && st.completions.saturating_sub(start) >= count) || now >= at,
+                        Wait::Fd { fd, events } => readiness(fd).map_or(true, |ev| ev & (events | POLLERR | POLLHUP) != 0),
+                    };
+                if !due {
                     continue;
                 }
+                let p = st.pending.remove(i);
+                if !lt_due {
+                    st.running.push(Running { id, sqe: p.sqe, wait: p.wait, cancelled: false });
+                }
+                (p, lt_due)
+            };
+            if lt_due {
+                // The guarded request took too long
+                let ud = p.link_timeout.map_or(0, |(_, ud)| ud);
+                self.complete(&p.sqe, ECANCELED, 0);
+                let mut st = self.st.lock();
+                self.post(&mut st, ud, ETIME, 0);
+                drop(st);
+                self.cancel_chain(p.chain);
+                continue;
             }
-            match p.wait {
-                Wait::Timeout { at, count, start } => {
+            let is_timeout = matches!(p.wait, Wait::Timeout { .. });
+            let out = match p.wait {
+                Wait::Timeout { count, start, .. } => {
                     let done_count = count > 0 && self.st.lock().completions.saturating_sub(start) >= count;
-                    if done_count || now >= at {
-                        let res = if done_count { 0 } else { ETIME };
-                        self.complete(&p.sqe, res, 0);
-                        // A timeout in a chain: ETIME breaks it unless hard-linked
-                        if res == 0 || p.sqe.flags & SQE_IO_HARDLINK != 0 {
-                            self.run_chain(p.chain, frame);
-                        } else {
-                            self.cancel_chain(p.chain);
-                        }
+                    Outcome::Done(if done_count { 0 } else { ETIME }, 0)
+                }
+                Wait::Fd { .. } => {
+                    p.owner.apply();
+                    self.exec(&p.sqe, frame)
+                }
+            };
+            let cancelled = {
+                let mut st = self.st.lock();
+                match st.running.iter().position(|r| r.id == id) {
+                    Some(i) => st.running.remove(i).cancelled,
+                    None => false,
+                }
+            };
+            match out {
+                Outcome::Done(res, flags) => {
+                    self.complete(&p.sqe, res, flags);
+                    if let Some((_, ud)) = p.link_timeout {
+                        let mut st = self.st.lock();
+                        self.post(&mut st, ud, ECANCELED, 0);
+                    }
+                    // A timeout in a chain: ETIME breaks it unless hard-linked
+                    let goes_on = if is_timeout { res == 0 || p.sqe.flags & SQE_IO_HARDLINK != 0 } else { self.chain_goes_on(&p.sqe, res) };
+                    if goes_on {
+                        self.run_chain(p.chain, frame);
                     } else {
-                        keep.push(p);
+                        self.cancel_chain(p.chain);
                     }
                 }
-                Wait::Fd { fd, events } => {
-                    let ready = readiness(fd).map_or(true, |ev| ev & (events | POLLERR | POLLHUP) != 0);
-                    if !ready {
-                        keep.push(p);
-                        continue;
-                    }
-                    match self.exec(&p.sqe, frame) {
-                        Outcome::Done(res, flags) => {
-                            self.complete(&p.sqe, res, flags);
-                            if let Some((_, ud)) = p.link_timeout {
-                                let mut st = self.st.lock();
-                                self.post(&mut st, ud, ECANCELED, 0);
-                            }
-                            if self.chain_goes_on(&p.sqe, res) {
-                                self.run_chain(p.chain, frame);
-                            } else {
-                                self.cancel_chain(p.chain);
-                            }
-                        }
-                        Outcome::Again(res, flags, wait) => {
-                            // A multishot poll stays armed; it fires again after a wakeup
-                            self.complete(&p.sqe, res, flags | CQE_F_MORE);
-                            p.wait = wait;
-                            keep.push(p);
-                        }
-                        Outcome::Wait(wait) => {
-                            p.wait = wait;
-                            keep.push(p);
-                        }
-                    }
+                Outcome::Again(res, flags, wait) => {
+                    // A multishot poll stays armed; it fires again after a wakeup
+                    self.complete(&p.sqe, res, flags | CQE_F_MORE);
+                    p.wait = wait;
+                    self.requeue(p, cancelled);
+                }
+                Outcome::Wait(wait) => {
+                    p.wait = wait;
+                    self.requeue(p, cancelled);
                 }
             }
         }
-        let mut st = self.st.lock();
-        keep.append(&mut st.pending);
-        st.pending = keep;
-        st.pending
+        let st = self.st.lock();
+        let left = st.pending.iter().any(|p| p.owner.key() == key);
+        let next = st
+            .pending
             .iter()
+            .filter(|p| p.owner.key() == key)
             .flat_map(|p| {
                 let t = match p.wait {
                     Wait::Timeout { at, .. } => Some(at),
@@ -1068,7 +1177,23 @@ impl Ring {
                 };
                 t.into_iter().chain(p.link_timeout.map(|(a, _)| a))
             })
-            .min()
+            .min();
+        (next, left)
+    }
+
+    /// Puts a request the worker ran back in the list (it waits again), or cancels it when
+    /// a cancel came while it ran.
+    fn requeue(&self, p: Pending, cancelled: bool) {
+        if cancelled {
+            self.complete(&p.sqe, ECANCELED, 0);
+            if let Some((_, ud)) = p.link_timeout {
+                let mut st = self.st.lock();
+                self.post(&mut st, ud, ECANCELED, 0);
+            }
+            self.cancel_chain(p.chain);
+        } else {
+            self.st.lock().pending.push(p);
+        }
     }
 }
 
@@ -1087,30 +1212,35 @@ fn timeout_deadline(sqe: &Sqe) -> Result<(u64, ()), i64> {
     }
 }
 
-/// The ring worker: a kernel thread of the ring's process.
+/// The ring worker: a kernel thread of the process image whose waiting requests it runs
+/// (wave9 G6b-4: one per process image, [`Owner::key`]; it ends when that process is gone or
+/// after an idle round with none of its requests left).
 fn worker_main() {
     let me = super::proc::current_ids().0;
     let Some(weak) = NEW_WORKERS.lock().remove(&me) else { return };
+    let key = Owner::now().key();
     let frame = zero_frame();
+    let mut idle = false;
     loop {
         let Some(ring) = weak.upgrade() else { return };
-        let gone = super::proc::PROCS.lock().get(&ring.tgid).map_or(true, |p| p.zombie);
+        let gone = super::proc::PROCS.lock().get(&key.0).map_or(true, |p| p.zombie);
         if gone {
-            ring.st.lock().worker = false;
+            ring.st.lock().workers.retain(|k| *k != key);
             return;
         }
         let mut waits = WaitSet::new();
         waits.add(QueueRef::Shared(ring.kick.clone()));
-        let fds: Vec<i32> = ring
-            .st
-            .lock()
-            .pending
-            .iter()
-            .filter_map(|p| match p.wait {
-                Wait::Fd { fd, .. } => Some(fd),
-                _ => None,
-            })
-            .collect();
+        let (fds, had) = {
+            let st = ring.st.lock();
+            let mine = || st.pending.iter().filter(|p| p.owner.key() == key);
+            let fds: Vec<i32> = mine()
+                .filter_map(|p| match p.wait {
+                    Wait::Fd { fd, .. } => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            (fds, mine().next().is_some())
+        };
         crate::task::with_current_fds_mut(|t| {
             for fd in &fds {
                 if let Some(d) = t.get(*fd as usize) {
@@ -1119,7 +1249,19 @@ fn worker_main() {
             }
         });
         waits.register();
-        let deadline = ring.progress(&frame);
+        let (deadline, left) = ring.progress(&frame, key);
+        if left || had {
+            idle = false;
+        } else {
+            // None left: the worker ends after an idle round (decided under the lock `park`
+            // starts workers under)
+            let mut st = ring.st.lock();
+            if idle && !st.pending.iter().any(|p| p.owner.key() == key) {
+                st.workers.retain(|k| *k != key);
+                return;
+            }
+            idle = true;
+        }
         drop(ring);
         // Check now and then that the process is still there
         let check = crate::arch::pit::ticks() + 100;
@@ -1186,7 +1328,9 @@ fn setup(entries: u64, params: u64) -> i64 {
             cq_tail: 0,
             overflow: VecDeque::new(),
             pending: Vec::new(),
-            worker: false,
+            workers: Vec::new(),
+            running: Vec::new(),
+            next_id: 1,
             completions: 0,
             files: Vec::new(),
             bufs: Vec::new(),
@@ -1199,7 +1343,6 @@ fn setup(entries: u64, params: u64) -> i64 {
         }),
         cq_wq: WaitQueue::new_shared(),
         kick: WaitQueue::new_shared(),
-        tgid: super::proc::current_ids().1,
     });
     // Parameters back: sizes, features and where the fields are
     let mut out = raw.clone();
