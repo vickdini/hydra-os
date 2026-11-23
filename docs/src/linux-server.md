@@ -945,8 +945,8 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   while vfs-server is down.
 - **Claims:** vfs-server claims each number it serves at start-up (`SYS_LX_OBJ(LX_FH_CLAIM,
   nr, 1)`); only claimed numbers get a routing entry (bit `fileh::T_VFS`). `calls=0` /
-  `calls=4,6,...` among vfs-server's arguments narrow that; `lx.vfs=kernel` and `lx=kernel`
-  zero the entries. Claimed today (32): stat, lstat, newfstatat, statx, access, faccessat,
+  `calls=4,6,...` among vfs-server's arguments narrow that (wave 9, 9-C: neither
+  `lx.vfs=kernel`, which is gone, nor `lx=kernel` zeroes them any more). Claimed today (32): stat, lstat, newfstatat, statx, access, faccessat,
   faccessat2, readlink, readlinkat, statfs, open, openat; chmod,
   fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate, utimensat; mkdir,
   mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename, renameat, renameat2.
@@ -972,7 +972,9 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   page cache cut at a size or dropped for an unlinked file); the kernel posts
   `LX_NOTE_FSCHANGE(ino or 0)` to vfs-server's ring for every change it makes (from
   `fs/zfs`'s forget functions), which a worker takes before its next call.
-- **vfs-server not online** (not started, crashed, switched back): the kernel answers.
+- **vfs-server not online:** while it restarts, every file call waits for it (the ladder's
+  30 s; wave 9, 9-C); before it first comes up and after the ladder gave it up, the kernel
+  answers.
 - Other operations: `LX_FH_SEEK` (a handle's cookie), `LX_FH_INFO`, `LX_FH_CHDIR`,
   `LX_FH_CHROOT` and `LX_FH_REROOT` (for 7-3's `chroot`/`pivot_root`).
 - Tests: host-t30 `lx::fileh` (25), `tests/host-w7-37` (result layouts, decisions); the QEMU
@@ -989,7 +991,8 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   mount is the kernel's (its chain is by name there). Truncation refused at the open travels
   with the handle (`LX_FH_NOTRUNC`, bit 30 of the handle flags), so `ftruncate` refuses it.
   *ABAC:* asked of the kernel (`LX_FH_ABAC`, 77; see `docs/abac.md`). A vfs-server restart
-  loses only copies, which are fetched again. `lx.policy=kernel` restores the old routing.
+  loses only copies, which are fetched again. (`lx.policy=kernel`, the old routing, is gone
+  since 9-C.)
 
 ## Mount tables for the file service (wave 7, Group 7-7)
 
@@ -1012,7 +1015,7 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   through every other.
 - **What stays in the kernel (`LX_FS_MOUNTS`):** only a table vfs-server cannot walk (a named
   mount whose mount point the kernel could not locate, `MS_NOSYMFOLLOW`), and everything with
-  the boot word `lx.vfsmnt=kernel` (the behaviour before, for comparisons). Exec front halves
+  the boot word `lx.vfsmnt=kernel` (the behaviour before; gone since wave 9's 9-C). Exec front halves
   and socket names of callers in a namespace of their own still take the kernel's path
   (`xexec::servable` wants mount 0); the initial namespace's callers with FUSE mounts around
   (all of KDE: xdg-document-portal) are served.
@@ -1080,3 +1083,26 @@ console reads with `EIO`; the new instance takes the console's attach state from
 terminal, the kernel's encodings); `ptytest`, `notty`, `stdfd`, `signals` and the whole
 suite (every test prints through the console terminal); lxbench `pty_rw` (one process,
 slave to master) and `pty_rtt` (two processes ping-pong a byte).
+
+## The kernel's copy of the file code deleted (wave 9, Group 9-C)
+
+- **No switch back for the file service.** `lx.vfs=kernel`, `lx.vfsmnt=kernel`,
+  `lx.fuse=kernel`, `lx.policy=kernel` and `lx.tmpfs=pool` are ignored (one boot-log line
+  each). `lx=kernel` still moves every *other* service back into the kernel (linux-server's
+  families, lx-net, lx-ipc, lx-sec, the device services); the file service stays vfs-server
+  (its redirects to a service in the kernel are answered by the kernel's code, as before).
+- **Deleted:** the kernel's inotify instances and fanotify groups (`inotify.rs`, most of
+  `fanotify.rs`, the `FileDescriptor::Inotify` kind, the kernel-instance event hooks) and the
+  kernel's FUSE client (`fuse.rs`' protocol engine, connections, node tables and its
+  `/dev/fuse`). What reaches the kernel for them now: `inotify_init*`/`fanotify_init` with
+  vfs-server not there (`ENOSYS`), the other notify calls on a descriptor that is no instance
+  (`EBADF`/`EINVAL`), a FUSE inode of no vfs-server connection (`ENOTCONN`).
+- **Kept, because they are still the implementation, not a copy:** the walk and the path
+  calls answer every call vfs-server sends back (creating, truncating, `O_PATH`/`O_TMPFILE`
+  opens, devices and `/dev`, mknod, link, the xattr calls, utime(s), read-only mounts, FUSE
+  leftovers) and what boot needs before vfs-server; the descriptor table and handles, the page
+  cache, tmem, exec, the mount tables (the kernel still decides the initial namespace's FUSE
+  mounts), Landlock domains and the ABAC evaluator (vfs-server asks).
+- **Measured** (KDE login + Firefox + Dolphin, prof line `vfs to kernel by call`): vfs-server
+  served 267,289 file calls, the kernel's code 7,956 (openat 6,064, readlink 777, ftruncate
+  451 on non-pool handles, faccessat2 150, readlinkat 142, statx 87, statfs 83, ...).
