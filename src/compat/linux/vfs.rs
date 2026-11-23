@@ -1553,6 +1553,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 let (cbase, cpath) = creation_target(base, path, follow_last)?;
                 let (parent, name) = resolve_parent(cbase, &cpath)?;
                 let ro = super::mount::check_write();
+                let tmpfs = super::mount::last_tmpfs(); // wave9 GM: the note of this lookup
                 if ro != 0 {
                     return Err(ro);
                 }
@@ -1564,7 +1565,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 let (perm, plan) = super::acl::create_mode(parent, mode & 0o7777, umask(), false);
                 created = true;
                 let ino = crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?;
-                crate::fs::tmem::created(parent, ino, super::mount::last_tmpfs()); // wave9 GM
+                crate::fs::tmem::created(parent, ino, tmpfs); // wave9 GM
                 super::acl::inherit(ino, plan);
                 ino
             }
@@ -3828,6 +3829,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let (dirfd, p, mode, dev) = if num == NR_MKNOD { (AT_FDCWD, a[0], a[1], a[2]) } else { (a[0] as i64, a[1], a[2], a[3]) };
             let mask = umask();
             with_parent(dirfd, p, true, |dir, name, c| {
+                let tmpfs = super::mount::last_tmpfs(); // wave9 GM: the note of this lookup
                 let (perm, plan) = super::acl::create_mode(dir, mode as u32 & 0o7777, mask, false);
                 let mode = (mode as u32 & S_IFMT) | perm;
                 let devnode = matches!(dtype_from_mode(mode), 2 | 6); // DT_CHR, DT_BLK
@@ -3842,7 +3844,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 let ino = zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid))?;
                 // wave9 GM: a regular file made by mknod is a file like any other
                 if mode & S_IFMT == S_IFREG || mode & S_IFMT == 0 {
-                    crate::fs::tmem::created(dir, ino, super::mount::last_tmpfs());
+                    crate::fs::tmem::created(dir, ino, tmpfs);
                 }
                 super::acl::inherit(ino, plan);
                 Ok(0)

@@ -1081,14 +1081,20 @@ u! malcontent-webd - \"Parental controls web filter daemon\"
     // running programs), and its new files keep their data in memory
     if !crate::fs::tmem::shm_dir(shm) {
         crate::fs::tmem::add_shm_dir(shm);
+        // (the names first, then the unlinks: a cookie need not survive a change)
+        let mut names = Vec::new();
         let mut cookie = 0;
         while let Ok(batch) = s.readdir(shm, cookie, 64) {
             let Some(last) = batch.last() else { break };
+            if last.next_cookie == cookie {
+                break;
+            }
             cookie = last.next_cookie;
-            for e in batch.iter().filter(|e| e.name != b"." && e.name != b".." && e.dtype != 4) {
-                if s.unlink(shm, &e.name).is_ok() {
-                    t.changed = true;
-                }
+            names.extend(batch.into_iter().filter(|e| e.name != b"." && e.name != b".." && e.dtype != 4).map(|e| e.name));
+        }
+        for n in names {
+            if s.unlink(shm, &n).is_ok() {
+                t.changed = true;
             }
         }
     }

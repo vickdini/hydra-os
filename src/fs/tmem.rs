@@ -24,6 +24,10 @@
 //! - **Restarts.** The table is the kernel's: a vfs-server restart (even the restart
 //!   ladder's reset of its kept state) loses nothing; vfs-server asks for sizes and times
 //!   with `LX_FH_TMEM` (see `lx::fileh`).
+//! - **Limits** (no reverse map of mappings): a page cut by a truncation stays mapped by
+//!   whoever mapped it (Linux: `SIGBUS`), as with memfd and the page cache; it stays counted
+//!   against `size=` until unmapped ([`Inst`]'s held frames). `fallocate` sets the size
+//!   without reserving pages; a `/dev/shm` file moved into a subdirectory gets `EXDEV`.
 //! - **Switch back.** [`ENABLED`] is off with `lx=kernel`, `lx.vfs=kernel` or
 //!   `lx.tmpfs=pool`: files are then created as before, with their data in the pool.
 
@@ -35,7 +39,7 @@ use spin::Mutex;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 use crate::fs::zfs::fsproto::Attr;
-use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec, phys_to_virt};
+use crate::memory::frame_allocator::{alloc_user_frame, frame_ref_dec, frame_refcount, phys_to_virt};
 use crate::memory::vm::{MappedObject, PAGE_SIZE};
 
 const ENOSPC: i64 = -28;
@@ -60,6 +64,10 @@ pub struct Inst {
     used: AtomicU64,
     /// Files it has.
     files: AtomicU64,
+    /// Frames a truncation cut from its files while another mapping still mapped them:
+    /// counted in `used` until the last mapping lets them go ([`Inst::reap`]), so mapping,
+    /// truncating and growing again cannot hold more than `size=`.
+    held: Mutex<Vec<PhysFrame<Size4KiB>>>,
 }
 
 impl Inst {
@@ -82,6 +90,30 @@ impl Inst {
         let mut cur = self.used.load(Ordering::Relaxed);
         while let Err(c) = self.used.compare_exchange_weak(cur, cur.saturating_sub(n), Ordering::AcqRel, Ordering::Relaxed) {
             cur = c;
+        }
+    }
+
+    /// Frees the held frames no mapping maps any more (only the instance's reference left).
+    fn reap(&self) {
+        let free: Vec<PhysFrame<Size4KiB>> = {
+            let mut h = self.held.lock();
+            let (free, keep): (Vec<_>, Vec<_>) = h.drain(..).partition(|&f| frame_refcount(f) <= 1);
+            *h = keep;
+            free
+        };
+        self.give(free.len() as u64);
+        for f in free {
+            frame_ref_dec(f);
+        }
+    }
+
+    /// Frames cut from a file: freed now, or held while mapped elsewhere.
+    fn cut(&self, frames: Vec<PhysFrame<Size4KiB>>) {
+        let (mapped, free): (Vec<_>, Vec<_>) = frames.into_iter().partition(|&f| frame_refcount(f) > 1);
+        self.held.lock().extend(mapped);
+        self.give(free.len() as u64);
+        for f in free {
+            frame_ref_dec(f);
         }
     }
 
@@ -150,8 +182,16 @@ impl TmemFile {
         if let Some(&f) = self.pages.lock().get(&p) {
             return Some(f);
         }
-        if !self.inst.take(1) {
+        // The reserve, page by page (no swap); frames held after truncations count against
+        // the limit until their mappings go
+        if memory_short() {
             return None;
+        }
+        if !self.inst.take(1) {
+            self.inst.reap();
+            if !self.inst.take(1) {
+                return None;
+            }
         }
         // (allocated outside the lock: a short memory makes the page cache give back files,
         // which asks the file server)
@@ -203,9 +243,6 @@ impl TmemFile {
             return Err(EFBIG);
         }
         let data = &data[..data.len().min((MAX_SIZE - offset) as usize)];
-        if !data.is_empty() && memory_short() {
-            return Err(ENOSPC);
-        }
         let mut done = 0;
         while done < data.len() {
             let pos = offset + done as u64;
@@ -233,8 +270,18 @@ impl TmemFile {
             return Err(EFBIG);
         }
         let _io = self.io.lock();
+        let old = self.size();
         let gone: Vec<PhysFrame<Size4KiB>> = {
             let mut pages = self.pages.lock();
+            // Growing: what a shared mapping wrote past the old end in its last page is not
+            // file data (Linux zeroes it)
+            if size > old && old % PAGE_SIZE != 0 {
+                if let Some(f) = pages.get(&(old / PAGE_SIZE)) {
+                    let k = (old % PAGE_SIZE) as usize;
+                    // SAFETY: as in `read`
+                    unsafe { core::ptr::write_bytes(phys_to_virt(f.start_address().as_u64()).add(k), 0, PAGE_SIZE as usize - k) };
+                }
+            }
             let keep = size.div_ceil(PAGE_SIZE);
             let gone: Vec<_> = pages.split_off(&keep).into_values().collect();
             if size % PAGE_SIZE != 0 {
@@ -246,11 +293,8 @@ impl TmemFile {
             }
             gone
         };
-        self.inst.give(gone.len() as u64);
-        for f in gone {
-            // (a mapping that still maps it holds its own reference)
-            frame_ref_dec(f);
-        }
+        // (a mapping that still maps a cut page keeps it, and it stays counted, until unmapped)
+        self.inst.cut(gone);
         self.size.store(size, Ordering::Release);
         self.mtime.store(now_ns(), Ordering::Release);
         Ok(())
@@ -276,6 +320,14 @@ impl TmemFile {
     }
 }
 
+impl Drop for Inst {
+    fn drop(&mut self) {
+        for f in core::mem::take(&mut *self.held.lock()) {
+            frame_ref_dec(f);
+        }
+    }
+}
+
 impl Drop for TmemFile {
     fn drop(&mut self) {
         let pages = core::mem::take(&mut *self.pages.lock());
@@ -292,12 +344,6 @@ impl MappedObject for TmemFile {
     /// fault becomes `SIGBUS`, as on Linux.
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         if pgoff >= self.size().div_ceil(PAGE_SIZE) {
-            return None;
-        }
-        if let Some(&f) = self.pages.lock().get(&pgoff) {
-            return Some(f);
-        }
-        if memory_short() {
             return None;
         }
         self.page(pgoff)
@@ -327,7 +373,7 @@ fn inst(id: u32) -> Arc<Inst> {
     INSTS
         .lock()
         .entry(id)
-        .or_insert_with(|| Arc::new(Inst { id, limit: AtomicU64::new(default_limit()), used: AtomicU64::new(0), files: AtomicU64::new(0) }))
+        .or_insert_with(|| Arc::new(Inst { id, limit: AtomicU64::new(default_limit()), used: AtomicU64::new(0), files: AtomicU64::new(0), held: Mutex::new(Vec::new()) }))
         .clone()
 }
 

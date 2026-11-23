@@ -683,14 +683,16 @@ impl ZfsServer {
         // wave9 GM begin: an in-memory tmpfs file: the size is its object's (the pool object
         // stays empty), data times set here become the file's again
         let mem = crate::fs::tmem::get(ino);
+        let mut cut = None;
         if let Some(t) = &mem {
-            if let Some(size) = set.size.take() {
-                t.truncate(size)?;
-            }
+            cut = set.size.take();
             if set.mtime.is_some() {
                 t.times_set();
             }
             if set.mode.is_none() && set.uid.is_none() && set.gid.is_none() && set.atime.is_none() && set.mtime.is_none() && !set.kill_suid {
+                if let Some(size) = cut {
+                    t.truncate(size)?;
+                }
                 return self.getattr(ino);
             }
         }
@@ -704,7 +706,11 @@ impl ZfsServer {
         drop(changed);
         cache_attr(ino, a, attr_gen());
         if let Some(t) = &mem {
-            t.overlay(&mut a); // wave9 GM
+            // wave9 GM: the data is cut only once the pool's part of the call succeeded
+            if let Some(size) = cut {
+                t.truncate(size)?;
+            }
+            t.overlay(&mut a);
         }
         // The page cache: pages past a new size go
         if let Some(size) = set.size {
@@ -768,6 +774,16 @@ impl ZfsServer {
         // wave9 GM: an in-memory tmpfs file (vfs-server asks the kernel for its size and
         // times, so no change note)
         if let Some(t) = crate::fs::tmem::get(ino) {
+            // A writer without CAP_FSETID drops the set-ID bits, as on the pool path
+            if let Some(groups) = kill_suid() {
+                let a = self.getattr(ino)?;
+                if a.mode & 0o6000 != 0 {
+                    let m = super::zfs::fsproto::suid_killed(a.mode & 0o7777, a.gid, &groups);
+                    if m != a.mode & 0o7777 {
+                        self.setattr(ino, SetAttr { mode: Some(m), ..Default::default() })?;
+                    }
+                }
+            }
             return t.write(Some(offset), data);
         }
         let _changed = Changed(ino);

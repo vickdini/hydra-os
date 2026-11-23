@@ -271,3 +271,64 @@ fn vfs_server_parser_matches() {
     let body = &copy[copy.find("/// `size=`").unwrap()..];
     assert!(src.contains(body), "src/vfs_parse.rs is out of date with vfs-server/src/tmem.rs");
 }
+
+// Review fixes (pre-merge review of w9-tmpfs)
+
+#[test]
+fn reserve_is_checked_per_page() {
+    let _g = serial();
+    let f = file(8001, 9020);
+    f.write(Some(0), &[1; 4096]).unwrap();
+    // The reserve is 32 MiB here (2 GiB / 64): room for 2 more pages only
+    fake::FREE.store((32 << 20) + 2 * 4096 - 1, Ordering::Relaxed);
+    let n = f.write(Some(4096), &[2; 5 * 4096]).unwrap();
+    assert_eq!(n, 2 * 4096, "one large write stops at the reserve");
+    assert_eq!(f.write(Some(3 * 4096), b"x"), Err(-28));
+    assert_eq!(f.write(Some(0), &[9; 4096]).unwrap(), 4096, "overwriting held pages needs no memory");
+    fake::FREE.store(1 << 30, Ordering::Relaxed);
+    tmem::forget(8001);
+    tmem::drop_instance(9020);
+}
+
+#[test]
+fn truncated_pages_still_mapped_stay_counted() {
+    use hydra_hosttests_w9_m::memory::frame_allocator::{frame_ref_dec, frame_ref_inc};
+    let _g = serial();
+    tmem::set_limit(9021, 4 * 4096);
+    let f = file(8002, 9021);
+    f.truncate(4 * 4096).unwrap();
+    // Another process maps the first two pages (each PTE holds a reference)
+    let p0 = f.get_page(0).unwrap();
+    let p1 = f.get_page(1).unwrap();
+    frame_ref_inc(p0);
+    frame_ref_inc(p1);
+    f.get_page(2).unwrap();
+    f.truncate(0).unwrap();
+    assert_eq!(tmem::usage(9021).unwrap().1, 2 * 4096, "the mapped pages stay counted after the cut");
+    f.truncate(4 * 4096).unwrap();
+    assert!(f.get_page(0).is_some() && f.get_page(1).is_some());
+    assert!(f.get_page(2).is_none(), "size= still holds while the old pages are mapped");
+    // The mapper lets them go: the room comes back
+    frame_ref_dec(p0);
+    frame_ref_dec(p1);
+    assert!(f.get_page(2).is_some() && f.get_page(3).is_some());
+    let before = fake::live();
+    tmem::forget(8002);
+    drop(f);
+    tmem::drop_instance(9021);
+    assert!(fake::live() <= before);
+}
+
+#[test]
+fn growing_zeroes_what_a_mapping_wrote_past_the_end() {
+    let _g = serial();
+    let f = file(8003, 9022);
+    f.write(Some(0), b"abc").unwrap();
+    let p = f.get_page(0).unwrap();
+    unsafe { *(p.start_address().as_u64() as *mut u8).add(10) = 0x77 };
+    f.truncate(100).unwrap();
+    let mut b = [0xFFu8; 8];
+    f.read(8, &mut b);
+    assert_eq!(b, [0; 8]);
+    tmem::forget(8003);
+}

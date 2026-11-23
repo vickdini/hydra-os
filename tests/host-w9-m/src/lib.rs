@@ -50,7 +50,16 @@ pub mod memory {
             let layout = std::alloc::Layout::from_size_align(4096, 4096).unwrap();
             let p = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
             fake::REFS.lock().unwrap().get_or_insert_with(Default::default).insert(p, 1);
+            fake::FREE.store(fake::FREE.load(Ordering::Relaxed).saturating_sub(4096), Ordering::Relaxed);
             Some(PhysFrame::containing_address(PhysAddr::new(p)))
+        }
+        pub fn frame_refcount(f: PhysFrame<Size4KiB>) -> u16 {
+            let g = fake::REFS.lock().unwrap();
+            g.as_ref().and_then(|m| m.get(&f.start_address().as_u64()).copied()).unwrap_or(0).max(0) as u16
+        }
+        /// A mapping's reference (the fake's PTE).
+        pub fn frame_ref_inc(f: PhysFrame<Size4KiB>) {
+            *fake::REFS.lock().unwrap().get_or_insert_with(Default::default).entry(f.start_address().as_u64()).or_insert(0) += 1;
         }
         pub fn frame_ref_dec(f: PhysFrame<Size4KiB>) {
             let a = f.start_address().as_u64();
