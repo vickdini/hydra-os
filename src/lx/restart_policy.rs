@@ -235,6 +235,11 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         // again it opens the file the first try made, as Linux's create-if-missing
         2 => open_resendable(args[1]),
         257 => open_resendable(args[2]),
+        // wave10 GV1: changes to an absolute value, the same done twice: chmod, fchmod,
+        // fchmodat(2), chown family, truncate, ftruncate, the times calls, setxattr without
+        // XATTR_CREATE (args[4] bit 0)
+        90 | 91 | 268 | 452 | 92 | 93 | 94 | 260 | 76 | 77 | 280 | 132 | 235 | 261 => true,
+        188..=190 => args[4] & 1 == 0,
         // Process queries (lx-proc, wave 10): uname, getrlimit, getrusage, sysinfo,
         // getgroups, getresuid, getresgid, getpgid, getsid, capget, getpriority,
         // sched_getaffinity, prlimit64 without a new limit
@@ -286,7 +291,10 @@ const OPEN_CHANGES: u64 = 0o100 | 0o1000 | 0o20000000;
 pub fn open_resendable(flags: u64) -> bool {
     const O_CREAT: u64 = 0o100;
     const O_EXCL: u64 = 0o200;
-    flags & OPEN_CHANGES == 0 || (flags & (OPEN_CHANGES | O_EXCL) == O_CREAT)
+    // (wave10 GV1: and a truncating open — truncated again, nothing was written through the
+    // lost descriptor — but not O_EXCL or O_TMPFILE)
+    const O_TRUNC: u64 = 0o1000;
+    flags & OPEN_CHANGES == 0 || (flags & O_EXCL == 0 && flags & 0o20000000 == 0 && flags & (O_CREAT | O_TRUNC) != 0)
 }
 // wave10 GV1 end
 

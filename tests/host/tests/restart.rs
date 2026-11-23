@@ -212,16 +212,21 @@ fn idempotent_marks_files() {
     assert!(idempotent(2, &[0, 2, 0, 0, 0, 0])); // O_RDWR without create
     assert!(idempotent(2, &[0, 0o100, 0, 0, 0, 0])); // O_CREAT (wave10 GV1: create-if-missing is sent again)
     assert!(!idempotent(2, &[0, 0o300, 0, 0, 0, 0])); // O_CREAT | O_EXCL
-    assert!(!idempotent(2, &[0, 0o1001, 0, 0, 0, 0])); // O_TRUNC
+    assert!(idempotent(2, &[0, 0o1001, 0, 0, 0, 0])); // O_TRUNC (wave10 GV1: truncated again)
     assert!(!idempotent(2, &[0, 0o20200000, 0, 0, 0, 0])); // O_TMPFILE
     assert!(idempotent(257, &[u64::MAX - 99, 0, 0o2000000, 0, 0, 0])); // openat O_CLOEXEC
-    assert!(!idempotent(257, &[u64::MAX - 99, 0, 0o1101, 0, 0, 0]));
+    assert!(!idempotent(257, &[u64::MAX - 99, 0, 0o20200002, 0, 0, 0])); // O_TMPFILE
     for nr in [4, 5, 6, 21, 79, 89, 137, 138, 191, 196, 262, 267, 269, 332, 439, 17] {
         assert!(idempotent(nr, &[0; 6]), "call {} only reads", nr);
     }
-    // changes: write, rename, unlink, mkdir, rmdir, link, symlink, chmod, chown, truncate,
-    // ftruncate, fsync, getdents64 (moves the directory offset), lseek, setxattr, utimensat
-    for nr in [1, 82, 87, 83, 84, 86, 88, 90, 92, 76, 77, 74, 217, 8, 188, 280, 263, 264, 316, 258] {
+    // changes: write, rename, unlink, mkdir, rmdir, link, symlink, fsync, getdents64 (moves
+    // the directory offset), lseek, XATTR_CREATE, removexattr (wave10 GV1: chmod, chown,
+    // truncate, ftruncate, utimensat and setxattr set absolute values: sent again)
+    for nr in [90, 92, 76, 77, 280] {
+        assert!(idempotent(nr, &[0; 6]), "call {} sets an absolute value", nr);
+    }
+    assert!(!idempotent(188, &[0, 0, 0, 0, 1, 0]), "XATTR_CREATE");
+    for nr in [1, 82, 87, 83, 84, 86, 88, 74, 217, 8, 197, 263, 264, 316, 258] {
         assert!(!idempotent(nr, &[0; 6]), "call {} changes state", nr);
     }
 }

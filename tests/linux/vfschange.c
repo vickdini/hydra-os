@@ -702,8 +702,9 @@ static int kill_loop(int secs) {
         note(1, fd >= 0 && fstat(fd, &st) == 0 && st.st_size == 0);
         if (fd >= 0) close(fd);
         fd = open(D, O_TMPFILE | O_RDWR, 0600);
-        unlink(c);
-        int ok = fd >= 0 && write(fd, "t", 1) == 1 && linkat(fd, "", AT_FDCWD, c, AT_EMPTY_PATH) == 0;
+        // (an unlink that failed with EIO in a kill leaves the name: EEXIST then is no failure)
+        int gone = unlink(c) == 0 || errno == ENOENT;
+        int ok = fd >= 0 && write(fd, "t", 1) == 1 && (linkat(fd, "", AT_FDCWD, c, AT_EMPTY_PATH) == 0 || (!gone && errno == EEXIST));
         note(2, ok);
         if (fd >= 0) close(fd);
         char v[8];
