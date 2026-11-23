@@ -21,6 +21,7 @@
 
 pub mod wire;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use hydra_rt::svcrt::{objs, Answer, Cx};
 use hydra_rt::sys;
 
+use crate::ctx::Node;
+use crate::fs::fsproto::Attr;
 use crate::lock::YLock;
 use crate::proto::*;
 use wire::*;
@@ -78,6 +81,8 @@ enum Wait {
     Op(Op),
     Discard,
     Init,
+    /// A lookup the walk of a program's call needed: the call runs again with the answer.
+    Rerun(Box<Rerun>),
 }
 
 /// One connection: a daemon and the file system it serves.
@@ -99,6 +104,14 @@ struct Conn {
     handles: BTreeMap<u64, Handles>,
     /// Operations that came before the daemon answered INIT.
     before_init: Vec<Op>,
+    /// Names whose entries the daemon said stay valid: `(dir, name)` -> `(node, until ms)`.
+    names: BTreeMap<(u64, Vec<u8>), (u64, u64)>,
+    /// Answers fetched for a call that runs again (lookups, attributes, link targets), good
+    /// for [`SHOT_MS`] whatever the daemon's valid times (a walk may ask the same twice, and
+    /// the run must find both).
+    shots: BTreeMap<(u64, Vec<u8>), (Result<u64, i64>, u64)>,
+    attr_shots: BTreeMap<u64, (Result<[u8; ATTR], i64>, u64)>,
+    link_shots: BTreeMap<u64, (Result<Vec<u8>, i64>, u64)>,
 }
 
 impl Conn {
@@ -118,7 +131,26 @@ impl Conn {
             nodes: Nodes::new(),
             handles: BTreeMap::new(),
             before_init: Vec::new(),
+            names: BTreeMap::new(),
+            shots: BTreeMap::new(),
+            attr_shots: BTreeMap::new(),
+            link_shots: BTreeMap::new(),
         }
+    }
+
+    /// Names were made, removed or moved: no kept attributes or names stay.
+    fn forget_all(&mut self) {
+        self.nodes.uncache(None);
+        self.names.clear();
+        self.shots.clear();
+        self.attr_shots.clear();
+        self.link_shots.clear();
+    }
+
+    /// Node `l`'s attributes changed (a write, a setattr).
+    fn forget_attr(&mut self, l: u64) {
+        self.nodes.uncache(Some(l));
+        self.attr_shots.remove(&l);
     }
 
     fn ready(&self) -> u32 {
@@ -146,19 +178,25 @@ struct Finish {
     parts: Vec<(u64, u64)>,
     out: Vec<u8>,
     r: i64,
+    /// A program's call to run again instead.
+    rerun: Option<Box<LxCall>>,
 }
 
 impl Finish {
     fn err(id: u64, r: i64) -> Self {
-        Finish { id, parts: Vec::new(), out: Vec::new(), r }
+        Finish { id, parts: Vec::new(), out: Vec::new(), r, rerun: None }
     }
 
     fn kout(id: u64, r: i64, out: Vec<u8>) -> Self {
         let n = out.len() as u64;
-        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r }
+        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r, rerun: None }
     }
 
     fn run(self) {
+        if let Some(c) = self.rerun {
+            crate::rerun(&c);
+            return;
+        }
         let mut r = self.r;
         let mut o = 0usize;
         for (addr, len) in self.parts {
@@ -272,7 +310,7 @@ fn begin(c: &mut Conn, op: Op) -> Step {
         },
         Kind::Setattr { set_in } => {
             let a = set_in.clone();
-            c.nodes.uncache(Some(op.local));
+            c.forget_attr(op.local);
             Step::Send { opcode: SETATTR, nodeid, args: alloc::vec![a], op }
         }
         Kind::Readlink { checked } => {
@@ -304,7 +342,7 @@ fn begin(c: &mut Conn, op: Op) -> Step {
             }
         }
         Kind::Create { name, perm, mknod } => {
-            c.nodes.uncache(None);
+            c.forget_all();
             let mode = (S_IFREG | (perm & 0o7777)) as u64;
             if *mknod {
                 Step::Send { opcode: MKNOD, nodeid, args: alloc::vec![le(&[mode, 0, 0, 0], &[4, 4, 4, 4]), cstr(name)], op }
@@ -316,7 +354,7 @@ fn begin(c: &mut Conn, op: Op) -> Step {
         Kind::Make { opcode, args, .. } | Kind::Plain { opcode, args, .. } | Kind::Data { opcode, args } => {
             let (opcode, args) = (*opcode, args.clone());
             if !matches!(op.kind, Kind::Data { .. }) {
-                c.nodes.uncache(None);
+                c.forget_all();
             }
             Step::Send { opcode, nodeid, args: alloc::vec![args], op }
         }
@@ -376,7 +414,7 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
         Kind::Plain { xattr: true, .. } | Kind::Data { .. } if err == ENOSYS => return done(&op, EOPNOTSUPP, Vec::new()),
         _ if err != 0 => {
             if matches!(op.kind, Kind::Write { .. } | Kind::Setattr { .. }) {
-                c.nodes.uncache(Some(op.local));
+                c.forget_attr(op.local);
             }
             return done(&op, err, Vec::new());
         }
@@ -384,9 +422,12 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
     }
     match &mut op.kind {
         Kind::Lookup { name } => {
-            let Some((nodeid, _, attr_ms, a)) = entry(&body) else { return done(&op, ENOENT, Vec::new()) };
+            let Some((nodeid, entry_ms, attr_ms, a)) = entry(&body) else { return done(&op, ENOENT, Vec::new()) };
             let l = c.nodes.intern(nodeid, op.local, name);
             c.nodes.cache(l, a, attr_ms, now);
+            if entry_ms > 0 {
+                c.names.insert((op.local, name.clone()), (l, now + entry_ms));
+            }
             let mut out = Vec::with_capacity(8 + ATTR);
             out.extend_from_slice(&ino(c.id, l).to_le_bytes());
             out.extend_from_slice(a);
@@ -433,7 +474,7 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
             *d += w;
             if w < *part || *d >= *total {
                 let n = *d as i64;
-                c.nodes.uncache(Some(op.local));
+                c.forget_attr(op.local);
                 return done(&op, n, Vec::new());
             }
             let Some(nodeid) = c.nodes.nodeid(op.local) else { return done(&op, ESTALE, Vec::new()) };
@@ -457,18 +498,18 @@ fn on_reply(c: &mut Conn, mut op: Op, err: i32, body: Vec<u8>) -> Step {
             if !*mknod && body.len() >= ENTRY + ATTR + 16 {
                 c.handles.entry(l).or_default().write = Some(u64_at(&body, ENTRY + ATTR));
             }
-            c.nodes.uncache(None);
+            c.forget_all();
             done(&op, 0, ino(c.id, l).to_le_bytes().to_vec())
         }
         Kind::Make { name, .. } => {
             let Some((nodeid, _, attr_ms, a)) = entry(&body) else { return done(&op, ENOENT, Vec::new()) };
             let l = c.nodes.intern(nodeid, op.local, name);
-            c.nodes.uncache(None);
+            c.forget_all();
             c.nodes.cache(l, a, attr_ms, now);
             done(&op, 0, ino(c.id, l).to_le_bytes().to_vec())
         }
         Kind::Plain { .. } => {
-            c.nodes.uncache(None);
+            c.forget_all();
             done(&op, 0, Vec::new())
         }
     }
@@ -498,7 +539,7 @@ fn feed(c: &mut Conn, fin: &mut Vec<Finish>) {
         }
         let m = c.queue.pop_front().unwrap();
         let n = m.len() as i64;
-        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n });
+        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n, rerun: None });
     }
     c.set_ready();
 }
@@ -520,8 +561,10 @@ fn drive(c: &mut Conn, step: Step, fin: &mut Vec<Finish>) -> Option<(u64, i64, V
 fn abort(c: &mut Conn, fin: &mut Vec<Finish>) {
     c.aborted = true;
     for (_, w) in core::mem::take(&mut c.waits) {
-        if let Wait::Op(op) = w {
-            fin.push(Finish::err(op.id, ENOTCONN));
+        match w {
+            Wait::Op(op) => fin.push(Finish::err(op.id, ENOTCONN)),
+            Wait::Rerun(r) => fin.push(Finish::err(r.call.id, ENOTCONN)),
+            _ => {}
         }
     }
     for op in core::mem::take(&mut c.before_init) {
@@ -617,20 +660,7 @@ fn kcall_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
             c.handles.entry(l).or_default().refs += 1;
             return (0, 0);
         }
-        let gone = match c.handles.get_mut(&l) {
-            Some(h) => {
-                h.refs = h.refs.saturating_sub(1);
-                if h.refs == 0 { c.handles.remove(&l) } else { None }
-            }
-            None => None,
-        };
-        if let (Some(h), Some(n)) = (gone, c.nodes.nodeid(l)) {
-            if !c.aborted && c.initialized {
-                for (op, args) in h.releases() {
-                    send(c, op, n, who, &[&args], Wait::Discard, fin);
-                }
-            }
-        }
+        release_node(c, l, who, fin);
         return (0, 0);
     }
     if a[0] == FUSE_OP_NAME_OF {
@@ -924,6 +954,11 @@ fn write_reply(c: &mut Conn, data: &[u8], fin: &mut Vec<Finish>) -> i64 {
             }
             len
         }
+        Some(Wait::Rerun(rr)) => {
+            took_rerun(c, &rr, err, body);
+            fin.push(Finish { id: rr.call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(rr.call)) });
+            len
+        }
         Some(Wait::Op(op)) => {
             let step = on_reply(c, op, err, body.to_vec());
             if let Some((id, r, out)) = drive(c, step, fin) {
@@ -984,7 +1019,7 @@ pub fn on_interrupt(id: u64) {
                 fin.push(Finish::err(id, EINTR));
                 break;
             }
-            let Some(unique) = c.waits.iter().find(|(_, w)| matches!(w, Wait::Op(o) if o.id == id)).map(|(u, _)| *u) else { continue };
+            let Some(unique) = c.waits.iter().find(|(_, w)| matches!(w, Wait::Op(o) if o.id == id) || matches!(w, Wait::Rerun(r) if r.call.id == id)).map(|(u, _)| *u) else { continue };
             let before = c.queue.len();
             c.queue.retain(|m| unique_of(m) != unique);
             if c.queue.len() != before {
@@ -1007,3 +1042,302 @@ pub fn counts() -> (usize, usize, usize) {
     (st.conns.len(), st.conns.values().filter(|c| c.mounted).count(), st.conns.values().map(|c| c.waits.len() + c.before_init.len()).sum())
 }
 
+
+// ----------------------------------------------------------------------
+// The walk into FUSE mounts (program calls served here)
+// ----------------------------------------------------------------------
+
+/// What a walk needed from a daemon.
+enum MissKind {
+    Lookup(Vec<u8>),
+    Getattr,
+    Readlink,
+}
+
+/// A walk's question, until its call waits for the answer (`wait_miss`).
+struct Miss {
+    conn: u16,
+    local: u64,
+    kind: MissKind,
+}
+
+/// A program's call waiting for a daemon's answer to its walk.
+struct Rerun {
+    call: LxCall,
+    local: u64,
+    kind: MissKind,
+}
+
+/// How long an answer fetched for a call that runs again is good (ms).
+const SHOT_MS: u64 = 100;
+
+/// The tag of a miss error (bits 60..64 = 0b1010; the pseudo redirect has 0b1001).
+const MISS_TAG: u64 = 0xA << 60;
+static MISSES: YLock<(u64, BTreeMap<u64, Miss>)> = YLock::new((0, BTreeMap::new()));
+/// Calls run again after a daemon's answer, since start.
+pub static RERUNS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether `e` is a walk's question to a daemon ([`wait_miss`] makes the call wait).
+pub fn is_miss(e: i64) -> bool {
+    (e as u64) >> 60 == MISS_TAG >> 60 && e != i64::MIN
+}
+
+fn miss(conn: u16, local: u64, kind: MissKind) -> i64 {
+    let mut m = MISSES.lock();
+    if m.1.len() >= 1024 {
+        m.1.clear();
+    }
+    m.0 = (m.0 + 1) & 0xFFFF_FFFF;
+    let k = m.0;
+    m.1.insert(k, Miss { conn, local, kind });
+    (MISS_TAG | k) as i64
+}
+
+/// The calls whose walk may wait for a FUSE daemon (and run again from the reply): the
+/// stat family, access, readlink, and opens (the creating and truncating ones went to the
+/// kernel before their walk). Nothing in them changes anything before the walk ends.
+pub fn rerunnable(nr: u64) -> bool {
+    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257)
+}
+
+/// For the pool's back end: a FUSE node is never its (the kernel answers).
+pub fn not_fuse(n: Node) -> Result<(), i64> {
+    if split(n.ino).is_some() { Err(crate::calls::KERNEL) } else { Ok(()) }
+}
+
+/// Hydra's attributes of FUSE inode `ino` from a `fuse_attr` (`generation` carries the
+/// daemon's inode number, for `stat`).
+fn attr_from(ino: u64, a: &[u8]) -> Attr {
+    Attr {
+        ino,
+        size: u64_at(a, 8),
+        blocks: u64_at(a, 16),
+        atime: (u64_at(a, 24) as i64, u32_at(a, 48)),
+        mtime: (u64_at(a, 32) as i64, u32_at(a, 52)),
+        ctime: (u64_at(a, 40) as i64, u32_at(a, 56)),
+        mode: u32_at(a, 60),
+        nlink: u32_at(a, 64),
+        uid: u32_at(a, 68),
+        gid: u32_at(a, 72),
+        rdev: u32_at(a, 76) as u64,
+        generation: u64_at(a, 0),
+        ..Attr::default()
+    }
+}
+
+/// `stat`/`statx` bytes `b` of `attr`: a FUSE file shows its connection's device and the
+/// daemon's inode number, as the kernel's client does.
+pub fn fix_stat(attr: &Attr, b: &mut [u8], statx: bool) {
+    let Some((conn, _)) = split(attr.ino) else { return };
+    let minor = 60 + conn as u64;
+    let dev = (minor & 0xFF) | ((minor & !0xFF) << 12);
+    if statx {
+        b[32..40].copy_from_slice(&attr.generation.to_le_bytes());
+        b[136..140].copy_from_slice(&0u32.to_le_bytes());
+        b[140..144].copy_from_slice(&(minor as u32).to_le_bytes());
+    } else {
+        b[0..8].copy_from_slice(&dev.to_le_bytes());
+        b[8..16].copy_from_slice(&attr.generation.to_le_bytes());
+    }
+}
+
+/// The connection of FUSE node `n` for a walk by `euid`.
+fn walk_conn(st: &mut State, conn: u16, euid: u32) -> Result<&mut Conn, i64> {
+    let c = st.conns.get_mut(&conn).ok_or(ENOTCONN)?;
+    if c.aborted {
+        return Err(ENOTCONN);
+    }
+    if !c.initialized {
+        return Err(crate::calls::KERNEL);
+    }
+    let (uid, _, other) = c.owner;
+    if !other && euid != uid {
+        return Err(EACCES);
+    }
+    Ok(c)
+}
+
+/// `name` in FUSE directory `dir`, as the walk asks: known, or a miss.
+pub fn be_lookup(dir: Node, name: &[u8], euid: u32) -> Result<Node, i64> {
+    let (conn, local) = split(dir.ino).ok_or(EINVAL)?;
+    let mut st = ST.lock();
+    let c = walk_conn(&mut st, conn, euid)?;
+    let node = |l: u64| Node::new(dir.mnt, ino(conn, l));
+    if name.is_empty() || name == b"." {
+        return Ok(dir);
+    }
+    if name == b".." {
+        return Ok(node(c.nodes.name_of(local).map_or(local, |p| p.0)));
+    }
+    let key = (local, name.to_vec());
+    let now = hydra_rt::svcrt::now_ms();
+    if let Some((r, until)) = c.shots.get(&key) {
+        if now < *until {
+            return r.clone().map(node);
+        }
+    }
+    if let Some(&(l, until)) = c.names.get(&key) {
+        if now < until {
+            return Ok(node(l));
+        }
+    }
+    Err(miss(conn, local, MissKind::Lookup(name.to_vec())))
+}
+
+/// The attributes of FUSE node `n`, as the walk asks: known, or a miss.
+pub fn be_getattr(n: Node, euid: u32) -> Result<Attr, i64> {
+    let (conn, local) = split(n.ino).ok_or(EINVAL)?;
+    let mut st = ST.lock();
+    let c = walk_conn(&mut st, conn, euid)?;
+    if c.nodes.nodeid(local).is_none() {
+        return Err(ESTALE);
+    }
+    let now = hydra_rt::svcrt::now_ms();
+    if let Some((r, until)) = c.attr_shots.get(&local) {
+        if now < *until {
+            return r.map(|a| attr_from(n.ino, &a));
+        }
+    }
+    if let Some(a) = c.nodes.cached(local, now) {
+        return Ok(attr_from(n.ino, &a));
+    }
+    Err(miss(conn, local, MissKind::Getattr))
+}
+
+/// The target of FUSE link `n`, as the walk asks: fetched for this call, or a miss.
+pub fn be_readlink(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
+    let (conn, local) = split(n.ino).ok_or(EINVAL)?;
+    let mut st = ST.lock();
+    let c = walk_conn(&mut st, conn, euid)?;
+    if let Some((r, until)) = c.link_shots.get(&local) {
+        if hydra_rt::svcrt::now_ms() < *until {
+            return r.clone();
+        }
+    }
+    Err(miss(conn, local, MissKind::Readlink))
+}
+
+/// Call `call`'s walk asked `e` of a daemon: the question goes to the daemon and the call
+/// waits (`true`), or it cannot (`false`: the kernel answers the call).
+pub fn wait_miss(e: i64, call: &LxCall) -> bool {
+    let Some(m) = MISSES.lock().1.remove(&(e as u64 & 0xFFFF_FFFF)) else { return false };
+    if !rerunnable(call.nr) {
+        return false;
+    }
+    let who = Who { uid: call.euid, gid: call.egid, pid: call.tgid as u32 };
+    let mut fin = Vec::new();
+    {
+        let mut st = ST.lock();
+        let Some(c) = st.conns.get_mut(&m.conn) else { return false };
+        if c.aborted || !c.initialized {
+            return false;
+        }
+        let Some(nodeid) = c.nodes.nodeid(m.local) else { return false };
+        let (opcode, args) = match &m.kind {
+            MissKind::Lookup(name) => (LOOKUP, cstr(name)),
+            MissKind::Getattr => (GETATTR, alloc::vec![0u8; 16]),
+            MissKind::Readlink => (READLINK, Vec::new()),
+        };
+        WAITED.fetch_add(1, Ordering::Relaxed);
+        send(c, opcode, nodeid, who, &[&args], Wait::Rerun(Box::new(Rerun { call: *call, local: m.local, kind: m.kind })), &mut fin);
+    }
+    finish_all(fin);
+    true
+}
+
+/// Keeps the daemon's answer to a walk's question for the call's next run.
+fn took_rerun(c: &mut Conn, rr: &Rerun, err: i32, body: &[u8]) {
+    let n = RERUNS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || (n >= 64 && n.is_power_of_two()) {
+        hydra_rt::println!("[vfs-server] FUSE: {} calls ran again after a daemon's answer ({} operations for the kernel)", n, OPS.load(Ordering::Relaxed));
+    }
+    let now = hydra_rt::svcrt::now_ms();
+    if c.shots.len() + c.attr_shots.len() + c.link_shots.len() >= 512 {
+        c.shots.clear();
+        c.attr_shots.clear();
+        c.link_shots.clear();
+    }
+    let err = err as i64;
+    match &rr.kind {
+        MissKind::Lookup(name) => {
+            let r = if err != 0 {
+                Err(err)
+            } else {
+                match entry(body) {
+                    Some((nodeid, entry_ms, attr_ms, a)) => {
+                        let l = c.nodes.intern(nodeid, rr.local, name);
+                        c.nodes.cache(l, a, attr_ms, now);
+                        let mut k = [0u8; ATTR];
+                        k.copy_from_slice(a);
+                        c.attr_shots.insert(l, (Ok(k), now + SHOT_MS));
+                        if entry_ms > 0 {
+                            c.names.insert((rr.local, name.clone()), (l, now + entry_ms));
+                        }
+                        Ok(l)
+                    }
+                    None => Err(ENOENT),
+                }
+            };
+            c.shots.insert((rr.local, name.clone()), (r, now + SHOT_MS));
+        }
+        MissKind::Getattr => {
+            let r = if err != 0 {
+                Err(err)
+            } else {
+                match attr_out(body) {
+                    Some((ms, a)) => {
+                        c.nodes.cache(rr.local, a, ms, now);
+                        let mut k = [0u8; ATTR];
+                        k.copy_from_slice(a);
+                        Ok(k)
+                    }
+                    None => Err(EIO),
+                }
+            };
+            c.attr_shots.insert(rr.local, (r, now + SHOT_MS));
+        }
+        MissKind::Readlink => {
+            c.link_shots.insert(rr.local, (if err != 0 { Err(err) } else { Ok(body.to_vec()) }, now + SHOT_MS));
+        }
+    }
+}
+
+/// An open of FUSE file `ino` that vfs-server installs: counted here (`true`), as the
+/// kernel's `FUSE_OP_OPEN_REF` does for its own.
+pub fn local_open_ref(ino: u64) -> bool {
+    let Some((conn, local)) = split(ino) else { return false };
+    let mut st = ST.lock();
+    let Some(c) = st.conns.get_mut(&conn) else { return false };
+    c.handles.entry(local).or_default().refs += 1;
+    true
+}
+
+/// [`local_open_ref`] undone (the install failed).
+pub fn local_release(ino: u64) {
+    let Some((conn, local)) = split(ino) else { return };
+    let mut fin = Vec::new();
+    {
+        let mut st = ST.lock();
+        let Some(c) = st.conns.get_mut(&conn) else { return };
+        release_node(c, local, Who::default(), &mut fin);
+    }
+    finish_all(fin);
+}
+
+/// One open of local node `l` closed: with the last, the daemon's handles are released.
+fn release_node(c: &mut Conn, l: u64, who: Who, fin: &mut Vec<Finish>) {
+    let gone = match c.handles.get_mut(&l) {
+        Some(h) => {
+            h.refs = h.refs.saturating_sub(1);
+            if h.refs == 0 { c.handles.remove(&l) } else { None }
+        }
+        None => None,
+    };
+    if let (Some(h), Some(n)) = (gone, c.nodes.nodeid(l)) {
+        if !c.aborted && c.initialized {
+            for (op, args) in h.releases() {
+                send(c, op, n, who, &[&args], Wait::Discard, fin);
+            }
+        }
+    }
+}

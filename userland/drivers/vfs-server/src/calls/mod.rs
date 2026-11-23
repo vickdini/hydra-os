@@ -136,6 +136,28 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
 
 /// The answer for result `r` (`Err(KERNEL)`: the kernel's code answers the call).
 pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
+    // wave9 G6b-2 begin: the walk has to ask a FUSE daemon: the call waits and runs again
+    // from the reply (`crate::fuse`); a call that cannot is the kernel's
+    let r = match r {
+        Err(e) if crate::fuse::is_miss(e) => {
+            if crate::fuse::wait_miss(e, &cx.c) {
+                return (0, crate::proto::LX_REPLY_PENDING);
+            }
+            Err(KERNEL)
+        }
+        r => r,
+    };
+    // A call run again after a FUSE reply has no page: "the kernel answers" is told with
+    // the result (`crate::rerun`)
+    if cx.page().is_null() {
+        if let Err(e) = r {
+            if e == KERNEL || pseudo_of(e).is_some() {
+                TO_KERNEL.fetch_add(1, Ordering::Relaxed);
+                return (0, crate::proto::LX_REPLY_REDIRECT);
+            }
+        }
+    }
+    // wave9 G6b-2 end
     // wave7 G7-4: a walk into `/proc` or `/sys`: linux-server serves the call
     if let Err(e) = r {
         if let Some((svc, obj, tail)) = pseudo_of(e) {

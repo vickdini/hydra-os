@@ -32,19 +32,49 @@ pub static BE: ZfsBackend = ZfsBackend { nocache: false, ns: crate::mount::POOL_
 pub struct Walker {
     /// The copy of the caller's table.
     pub view: Arc<View>,
+    // wave9 G6b-2 begin
+    /// The call may wait for a FUSE daemon (and run again from its reply).
+    pub fuse: bool,
+    /// The caller's effective user (FUSE mounts without `allow_other` are their owner's).
+    pub euid: u32,
+    // wave9 G6b-2 end
+}
+
+impl Walker {
+    /// wave9 G6b-2: a FUSE node, for a call that may wait (else the kernel answers it).
+    fn fuse_node(&self, n: Node) -> Result<bool, i64> {
+        match crate::fuse::wire::split(n.ino) {
+            Some(_) if self.fuse => Ok(true),
+            Some(_) => Err(KERNEL),
+            None => Ok(false),
+        }
+    }
 }
 
 impl Backend for Walker {
     fn lookup(&self, dir: Node, name: &[u8]) -> Result<Node, i64> {
+        if self.fuse_node(dir)? {
+            return crate::fuse::be_lookup(dir, name, self.euid);
+        }
         BE.lookup(dir, name)
     }
     fn getattr(&self, n: Node) -> Result<Attr, i64> {
+        if self.fuse_node(n)? {
+            return crate::fuse::be_getattr(n, self.euid);
+        }
         BE.getattr(n)
     }
     fn readlink(&self, n: Node) -> Result<Vec<u8>, i64> {
+        if self.fuse_node(n)? {
+            return crate::fuse::be_readlink(n, self.euid);
+        }
         BE.readlink(n)
     }
     fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
+        // (FUSE: no ACLs here; the daemon decides beyond the mode bits)
+        if self.fuse_node(n)? {
+            return Ok(None);
+        }
         BE.acl(n)
     }
     fn mounts(&self) -> &dyn Mounts {
@@ -55,7 +85,7 @@ impl Backend for Walker {
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)? })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr), euid: c.euid })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another

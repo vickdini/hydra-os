@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w9_fuse"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 6b-2's host unit tests: vfs-server's FUSE wire format and connection tables (userland/drivers/vfs-server/src/fuse/wire.rs)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

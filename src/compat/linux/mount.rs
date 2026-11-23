@@ -1975,6 +1975,8 @@ fn vfs_mount(m: &Mount) -> Option<VfsMount> {
         Kind::Tree { .. } if m.root == 0 || m.root == u64::MAX => return None,
         // (a mount on something the kernel could not locate: only its path names it)
         Kind::Tree { .. } if m.parent != 0 && (m.mountpoint == 0 || m.mountpoint == u64::MAX) => return None,
+        // wave9 G6b-2: a connection of vfs-server's: it walks into it itself
+        Kind::Tree { .. } if super::fuse_svc::is_remote(m.root) => crate::ipc::protocol::LX_MNT_FUSE,
         Kind::Tree { .. } if super::fuse::is_fuse(m.root) => VFS_KERNEL,
         Kind::Tree { tmpfs: Some(_) } => VFS_TMPFS,
         Kind::Tree { tmpfs: None } => VFS_TREE,
@@ -2043,7 +2045,7 @@ pub fn vfs_table(ns: u64) -> Result<(u64, u32, Vec<VfsMount>), i64> {
     if ns == 0 {
         let gen = NS0_GEN.load(Ordering::Acquire);
         let list = super::fuse::ns0_list();
-        let mounts = list.iter().map(|&(mountpoint, root, _)| VfsMount { kind: VFS_KERNEL, flags: 0, parent: 0, mountpoint, root }).collect();
+        let mounts = list.iter().map(|&(mountpoint, root, _)| VfsMount { kind: if super::fuse_svc::is_remote(root) { crate::ipc::protocol::LX_MNT_FUSE } else { VFS_KERNEL }, flags: 0, parent: 0, mountpoint, root }).collect();
         return Ok((gen, 0, mounts));
     }
     let gen = GENS.lock().get(&ns).map(|g| g.0).ok_or(ESRCH)?;

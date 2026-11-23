@@ -195,6 +195,21 @@ fn main(args: &[&str]) {
     }
 }
 
+// wave9 G6b-2 begin
+/// Runs call `call` again after a FUSE daemon answered what its walk waited for, and
+/// completes it (or leaves it waiting for the next answer).
+pub fn rerun(call: &LxCall) {
+    let cx = Cx::from_call(call, core::ptr::null_mut());
+    let (r, flags) = calls::serve(&cx).unwrap_or((ENOSYS, 0));
+    if flags & LX_REPLY_PENDING != 0 {
+        return;
+    }
+    // (nothing happened yet: the kernel answers the call, as for a redirect to service 0)
+    let r = if flags & LX_REPLY_REDIRECT != 0 { LX_REDIRECTED } else { r };
+    let _ = sys::lx_complete(call.id, r);
+}
+// wave9 G6b-2 end
+
 /// Takes the notifications posted before `seq` (`u64::MAX`: all), and forgets everything if
 /// some were lost to a full ring.
 fn take_notes(seq: u64) {

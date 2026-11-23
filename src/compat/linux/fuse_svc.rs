@@ -245,8 +245,12 @@ pub fn statfs(ino: u64) -> Result<[u8; 120], i64> {
     Ok(statfs_of(ino, &out[..n.min(80)]))
 }
 
-/// [`super::fuse::open_ref`] for an inode of vfs-server's.
+/// [`super::fuse::open_ref`] for an inode of vfs-server's. Not for a handle vfs-server
+/// installs itself (`LX_FH_INSTALL`, on its own thread): it counted that open already.
 pub fn open_ref(ino: u64) {
+    if crate::task::with_current_task_mut(|t| t.service.is_some()).unwrap_or(false) {
+        return;
+    }
     let _ = op(FUSE_OP_OPEN_REF, [ino, 0, 0, 0, 0], &[], &mut []);
 }
 
