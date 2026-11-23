@@ -962,6 +962,16 @@ pub const LX_CALL_INTERRUPTED: u64 = 1;
 /// [`LxCall::flags`] bit (Group 12): the call is made again after its net wait ended
 /// (`LX_OBJ_NETWAIT`): a `connect` then waits for its handshake instead of starting one.
 pub const LX_CALL_RETRIED: u64 = 2;
+// wave9 GP2 begin: open's handle made from the answer
+/// [`LxCall::flags`] bit: the kernel makes the handle of this `open` from a redirect to
+/// [`LX_REDIR_FH`] (vfs-server then needs no `LX_FH_INSTALL` round).
+pub const LX_CALL_FHANSWER: u64 = 4;
+/// Redirect target that is no service: the answer of an `open` with [`LX_CALL_FHANSWER`]
+/// names the handle the kernel puts in the caller's table: `redir_obj` = the inode (below
+/// 2^46), tail = its mount (16 bits) `| 1 << 16` for a directory; the descriptor's flags
+/// and shown path come from the call's own arguments, as `LX_FH_INSTALL` would get them.
+pub const LX_REDIR_FH: SvcId = 0xFE;
+// wave9 GP2 end
 // wave8 GX2 begin
 /// Offset in the worker's syscall page (after [`LxCall`], before the copy header) of a word
 /// the worker writes: the id of the call it serves while that call has had no effect yet

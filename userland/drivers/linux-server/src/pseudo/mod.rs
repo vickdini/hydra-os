@@ -387,19 +387,37 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     }
     // A process's file: the process (its start time pins it for later remakes) and owner;
     // no such process: the kernel answers (as before)
-    let (start, uid, gid) = match file {
-        File::Pid { who, tid, .. } => {
+    // wave9 GP2: `stat`, `status` and `statm` are made from the same facts (one request,
+    // with the memory figures, instead of two)
+    // (a failure: the two requests as before, which decide who answers)
+    let once = match file {
+        File::Pid { who, tid, file: pf @ (PidFile::Stat | PidFile::Status | PidFile::Statm) } => task(cx.id, who, tid).ok().map(|i| {
+            let t = match pf {
+                PidFile::Stat => text::stat(&i),
+                PidFile::Status => text::status(&i),
+                _ => text::statm(&i),
+            };
+            (i.start.max(1), i.ids[1], i.ids[4], Some(t))
+        }),
+        _ => None,
+    };
+    let (start, uid, gid, made) = match (once, file) {
+        (Some(o), _) => o,
+        (None, File::Pid { who, tid, .. }) => {
             let i = task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32).ok()?;
-            (i.start.max(1), i.ids[1], i.ids[4])
+            (i.start.max(1), i.ids[1], i.ids[4], None)
         }
-        _ => (0, 0, 0),
+        _ => (0, 0, 0, None),
     };
     // Denied (maps of a process the ptrace read rule hides): answered here, never left to a
     // laxer rule; other errors (the process went meanwhile) are the kernel's to answer
-    let text = match make(cx.id, file, tail) {
-        Ok(t) => t,
-        Err(EACCES) => return Some(EACCES),
-        Err(_) => return None,
+    let text = match made {
+        Some(t) => t,
+        None => match make(cx.id, file, tail) {
+            Ok(t) => t,
+            Err(EACCES) => return Some(EACCES),
+            Err(_) => return None,
+        },
     };
     // The process by its system-wide ID from now on (reads may come from another process)
     let mut shown = alloc::string::String::from(if file.in_sys() { "/sys/" } else { "/proc/" });

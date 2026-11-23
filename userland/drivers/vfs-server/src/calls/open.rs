@@ -24,17 +24,24 @@ pub fn serve(cx: &Cx) -> hydra_rt::svcrt::Answer {
         super::SERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return hydra_rt::svcrt::redirect(cx.page(), crate::proto::LXS_IPC, fifo, 0);
     }
+    // wave9 GP2: the kernel makes the handle from the answer (`fifo` holds it)
+    if r == Err(FHANSWER) {
+        super::SERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return hydra_rt::svcrt::redirect(cx.page(), crate::proto::LX_REDIR_FH, fifo & ((1 << 45) - 1), (fifo >> 45) as u32);
+    }
     super::answer(cx, r)
 }
 
 /// [`open_or_fifo`]'s error for a FIFO node it checked (never a Linux errno).
 const FIFO: i64 = i64::MIN + 1;
+/// wave9 GP2: answered with the handle for the kernel to make (`LX_REDIR_FH`).
+const FHANSWER: i64 = i64::MIN + 2;
 
 /// `open(path, flags, mode)`, `openat(dirfd, path, flags, mode)`.
 pub fn open(cx: &Cx) -> Result<i64, i64> {
     let mut fifo = 0;
     match open_or_fifo(cx, &mut fifo) {
-        Err(FIFO) => Err(KERNEL),
+        Err(FIFO) | Err(FHANSWER) => Err(KERNEL),
         r => r,
     }
 }
@@ -55,11 +62,12 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         return Err(KERNEL);
     }
     let path = ctxt::path(cx, path_ptr, false)?;
-    let who = ctxt::caller(c)?;
+    let k = ctxt::call(c)?; // wave9 GP2
+    let who = &k.who;
     let follow = flags & O_NOFOLLOW == 0;
     let (n, attr) = if flags & O_CREAT != 0 {
         // O_EXCL never follows the last component: a symlink there (even dangling) exists
-        match ctxt::find(c, &who, &path, follow && flags & O_EXCL == 0) {
+        match k.find(c, &path, follow && flags & O_EXCL == 0) {
             Ok(_) if flags & O_EXCL != 0 => return Err(EEXIST),
             Ok(f) => f,
             // A new file: the kernel makes it (until the change calls move)
@@ -67,7 +75,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             Err(e) => return Err(e),
         }
     } else {
-        ctxt::find(c, &who, &path, follow)?
+        k.find(c, &path, follow)?
     };
     // wave7 G7-5 begin
     if attr.mode & rules::S_IFMT == 0o010000 && n.mnt == 0 && flags & rules::O_DIRECTORY == 0 {
@@ -77,7 +85,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             _ => rules::MAY_READ | rules::MAY_WRITE,
         };
         let acl = ctxt::acl_of(n, &attr)?;
-        if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {
+        if !ctxt::may_access(who, &attr, acl.as_deref(), c.euid, c.egid, want) {
             return Err(EACCES);
         }
         *fifo = n.ino;
@@ -86,15 +94,21 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     // wave7 G7-5 end
     // wave7 G7-7: writing into a read-only mount: the kernel answers (EROFS)
     if flags & rules::O_ACCMODE != rules::O_RDONLY {
-        ctxt::writable(c, n)?;
+        k.writable(n)?;
     }
     let want = rules::decide(attr.mode, flags)?;
 
     let acl = ctxt::acl_of(n, &attr)?;
-    if !ctxt::may_access(&who, &attr, acl.as_deref(), c.euid, c.egid, want) {
+    if !ctxt::may_access(who, &attr, acl.as_deref(), c.euid, c.egid, want) {
         return Err(EACCES);
     }
     let d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
+    // wave9 GP2: the kernel takes the handle with the answer (no LX_FH_INSTALL round): not
+    // for FUSE files (counted here), flags beyond the plain ones, or a call run again
+    if c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && crate::fuse::wire::split(n.ino).is_none() && d.flags & !rules::FH_PLAIN == 0 {
+        *fifo = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
+        return Err(FHANSWER);
+    }
     // wave9 G6b-2: a FUSE file: the open counts here (the daemon's handles live while it is open)
     let fuse = crate::fuse::local_open_ref(n.ino);
     let fd = match sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0) {

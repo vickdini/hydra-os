@@ -504,3 +504,16 @@ fn an_invalid_acl_is_no_acl() {
     t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x02, 0, 9), (0x04, 1, 0), (0x10, 1, 0), (0x20, 1, 0)]));
     assert_eq!(w(&t, &user_cx(9, 9), "/tmp/inv/f"), Err(EACCES));
 }
+
+// wave9 GP2: each directory's attributes are fetched once (the step into it brought them)
+#[test]
+fn one_attribute_fetch_per_directory() {
+    let t = tree();
+    let before = t.fs.requests.get();
+    assert_eq!(w(&t, &user_cx(1000, 1000), "/usr/bin/bash"), Ok(t.bash));
+    // root: getattr; usr, bin, bash: lookup + getattr each = 7 (was 9: usr and bin twice)
+    assert_eq!(t.fs.requests.get() - before, 7);
+    // a mode change in between is seen by the next walk
+    t.fs.chmod(t.bin, 0o700);
+    assert_eq!(w(&t, &user_cx(1000, 1000), "/usr/bin/bash"), Err(EACCES));
+}

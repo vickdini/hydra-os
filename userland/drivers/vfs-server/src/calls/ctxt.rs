@@ -206,6 +206,64 @@ pub fn path(cx: &Cx, ptr: u64, empty_ok: bool) -> Result<Vec<u8>, i64> {
     Ok(p)
 }
 
+// wave9 GP2 begin: one copy of the caller's mount table for the whole call
+/// A call's walker and caller, made once (`caller`, `start`, `find` and `mount_flags` each
+/// take the table's copy again).
+pub struct Call {
+    /// The walker (the copy of the caller's table).
+    pub w: Walker,
+    /// The caller.
+    pub who: Ctx,
+}
+
+/// The [`Call`] of `c`.
+pub fn call(c: &LxCall) -> Result<Call, i64> {
+    let w = walker(c)?;
+    let who = Ctx::from_call(c, root_in(&w.view, c)?);
+    Ok(Call { w, who })
+}
+
+impl Call {
+    /// As [`start`], in this call's table.
+    fn start(&self, c: &LxCall, path: &[u8]) -> Result<Start, i64> {
+        if path.first() == Some(&b'/') {
+            return Ok(Start::Root);
+        }
+        let v = &self.w.view;
+        match c.at_kind {
+            LX_AT_CWD => Ok(Start::At(node_in(v, self.who.root, c.cwd, c.cwd_mnt)?)),
+            LX_AT_FILE | LX_AT_DIR => Ok(Start::At(node_in(v, self.who.root, c.at_ino, c.at_mnt)?)),
+            _ => Err(KERNEL),
+        }
+    }
+
+    /// As [`find`], in this call's table.
+    pub fn find(&self, c: &LxCall, path: &[u8], follow: bool) -> Result<(Node, Attr), i64> {
+        let start = self.start(c, path)?;
+        match walk::walk(&self.w, &self.who, start, path, if follow { 0 } else { walk::NOFOLLOW })? {
+            Walked::Found { node, attr } => Ok((node, attr)),
+            Walked::Redirect(r) => Err(super::pseudo_redirect(&r)),
+        }
+    }
+
+    /// As [`mount_flags`], in this call's table.
+    pub fn mount_flags(&self, n: Node) -> Result<u32, i64> {
+        if !self.w.view.walkable(n) {
+            return Err(KERNEL);
+        }
+        Ok(self.w.view.flags(n.mnt))
+    }
+
+    /// As [`writable`], in this call's table.
+    pub fn writable(&self, n: Node) -> Result<(), i64> {
+        if self.mount_flags(n)? & kmounts::MS_RDONLY != 0 {
+            return Err(KERNEL);
+        }
+        Ok(())
+    }
+}
+// wave9 GP2 end
+
 /// Walks `path` of call `c` for `who`: the object and its attributes; a walk into a tree
 /// another service (today: the kernel) serves is [`KERNEL`].
 pub fn find(c: &LxCall, who: &Ctx, path: &[u8], follow: bool) -> Result<(Node, Attr), i64> {

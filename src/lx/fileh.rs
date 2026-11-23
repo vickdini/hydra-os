@@ -537,10 +537,72 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     if kernel_only(&c) {
         return None;
     }
+    if nr == 2 || nr == 257 {
+        c.flags |= crate::ipc::protocol::LX_CALL_FHANSWER; // wave9 GP2
+    }
+    let args = c.args;
     let r = super::call_ident_raw(x, c, true);
     drop(held);
+    // wave9 GP2: the handle in the answer (an unreadable path: the kernel opens)
+    if let Some(h) = fh_decode(r) {
+        let fd = crate::task::with_current_fds_mut(|t| fh_install(t, nr, &args, h)).ok()?;
+        SERVED.fetch_add(1, Ordering::Relaxed);
+        return Some(fd as i64);
+    }
     outcome(r)
 }
+
+// wave9 GP2 begin: open's handle made from the answer (`LX_REDIR_FH`)
+/// Inodes below this travel in an [`fh_answer`].
+const FH_INO_LIMIT: u64 = 1 << 45;
+
+/// The answer of call `c` redirected to `LX_REDIR_FH` with `redir` = (target | tail << 32,
+/// inode): the handle, coded below every real result ([`fh_decode`]); a call that did not
+/// allow it, or an inode too large: the kernel answers (nothing happened in vfs-server).
+pub(super) fn fh_answer(c: &LxCall, redir: (u64, u64)) -> i64 {
+    let (tail, ino) = (redir.0 >> 32, redir.1);
+    if c.flags & crate::ipc::protocol::LX_CALL_FHANSWER == 0 || !(c.nr == 2 || c.nr == 257) || ino >= FH_INO_LIMIT || ino == 0 {
+        return LX_TO_KERNEL;
+    }
+    let dir = (tail >> 16) & 1;
+    let mnt = tail & 0xFFFF;
+    (1u64 << 63 | dir << 61 | mnt << 45 | ino) as i64
+}
+
+/// `(inode, mount, directory)` of an [`fh_answer`] result.
+pub fn fh_decode(r: i64) -> Option<(u64, u32, bool)> {
+    if r >= -(1i64 << 62) {
+        return None;
+    }
+    let v = r as u64;
+    Some((v & (FH_INO_LIMIT - 1), ((v >> 45) & 0xFFFF) as u32, (v >> 61) & 1 != 0))
+}
+
+/// Puts the handle `(ino, mnt, dir)` of `open`/`openat` (`nr`, `args`) in table `t`, with
+/// the flags and shown path `LX_FH_INSTALL` would get from vfs-server (`handle_desc`).
+pub fn fh_install(t: &mut FdTable, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) -> Result<usize, i64> {
+    let (dirfd, path_ptr, flags) = if nr == 2 { (-100i32, args[0], args[1] as u32) } else { (args[0] as i32, args[1], args[2] as u32) };
+    let mut d = LxFhDesc::EMPTY;
+    let n = match super::copy::read_user_str(path_ptr, &mut d.path) {
+        Ok(Some(n)) if n > 0 => n,
+        _ => return Err(EINVAL),
+    };
+    d.ino = ino;
+    d.mnt = mnt;
+    d.is_dir = dir as u32;
+    d.flags = flags & (KEEP | O_CLOEXEC);
+    d.path_len = n as u32;
+    d.path_kind = if d.path[0] == b'/' {
+        LX_FHP_ABS
+    } else if dirfd == -100 {
+        LX_FHP_CWD
+    } else {
+        d.at_fd = dirfd;
+        LX_FHP_AT
+    };
+    install_in(t, &d)
+}
+// wave9 GP2 end
 
 /// The lock-free path (interrupts off, no kernel lock) for a call whose entry has
 /// [`T_VFS`]: `None` the ordinary path takes it (a busy lock, the service offline, the
@@ -594,10 +656,26 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     super::FAST_CALLS.fetch_add(1, Ordering::Relaxed);
+    if nr == 2 || nr == 257 {
+        c.flags |= crate::ipc::protocol::LX_CALL_FHANSWER; // wave9 GP2
+    }
     let r = super::call_with(x, id.tid, idx, c, true);
     for h in held.into_iter().flatten() {
         super::drop_last(h);
     }
+    // wave9 GP2 begin: the handle in the answer goes into the caller's table here (a busy
+    // table or an unreadable path: the ordinary path asks again)
+    if let Some(h) = fh_decode(r) {
+        let (fds, _) = super::cached_fds(id)?;
+        let fd = match fds.try_lock() {
+            Some(mut t) => fh_install(&mut t, nr, &c.args, h).ok(),
+            None => None,
+        };
+        super::drop_last(fds);
+        SERVED.fetch_add(fd.is_some() as u64, Ordering::Relaxed);
+        return fd.map(|fd| fd as i64);
+    }
+    // wave9 GP2 end
     match outcome(r) {
         Some(r) => Some(r),
         None => {
