@@ -232,6 +232,17 @@ Stage 1 (deployed a6729b7): display, input, sound and terminal services (D, I, S
 
 **8-C closing (2026-11-22, done by the lead on low usage, no agent):** kernel `src/` lines 112,746 (108,108 after wave 7; the in-kernel copies of every moved piece stay as the switch back). Budget: P's measurements on the near-final tree stand (above). Device crash test under KDE on the final tip (`tools/devcrash/devcrash.sh c8 input+sound+tty+display`): input killed twice within 30 s (Transparent, then FailObjects; "remove"/"add" announced, logind re-handed the devices), sound killed twice (playback went on, longest gap 336 ms), 0 desktop crashes; the tty and display steps did not run in that VM (tested earlier by Groups T, D and H). Not done: a kill of every service in one KDE session (vfs-server, zfs-server, lx-net, lx-ipc were kill-tested by their groups).
 
+### Wave 9: the rest of the file service, then its kernel copy deleted (done, 2026-11-23)
+
+Groups 6b-1 (inotify and fanotify into vfs-server), 6b-2 (FUSE as a vfs-server back end), 6b-3 (Landlock, ACL and ABAC checks in vfs-server), 6b-4 (io_uring and aio forwarded to each descriptor's owner), 7a (the process mechanism), X3 (lx-ipc restarts invisibly), M (tmpfs data in memory objects), P2 (per-call cost), then 9-C (closing). Pre-merge reviews by a Claude (Sonnet) reviewer (Gemini paused). Deployed in three steps; the last, 32f584e, on 2026-11-23 (pool backup `pre-w9d`).
+
+- **Result:** under KDE + Firefox + Dolphin, vfs-server serves about 267,000 file calls; the kernel's file code answers about 8,000, almost all sent back by vfs-server (creates, truncates, devices, `/dev`, read-only mounts, FUSE leftovers). The file service has no switch back: `lx.vfs=kernel`, `lx.vfsmnt=kernel`, `lx.fuse=kernel`, `lx.policy=kernel` and `lx.tmpfs=pool` are ignored with a boot-log line, and `lx=kernel` now takes every *other* service back. File calls wait for a restarting vfs-server (the 30 s ladder) instead of the kernel answering. The kernel's own inotify/fanotify instances and FUSE client are deleted. Kernel `src/` 115,841 → 113,823 lines.
+- **Found on the way:** since wave 7 a sticky `fanotify::ANY` flag sent every suite test after `fanotify` down the kernel path; fixed by 6b-1, so the suite (now 94 tests) covers vfs-server for real.
+- **Budget (P2):** stat family and open+close now about at the +3 µs budget. Still over: served `/proc` opens (+22 µs) and `tcp_connect` (+12%).
+- **Checks on 32f584e:** suite 94/94 forwarded, with `lx=kernel` and with the IOMMU; 2,735 host tests; KDE 2 boots clean (settled 27–30 s); every service killed under KDE with the desktop staying up (9-C); installer test passed.
+
+**Carried into wave 10:** the change calls vfs-server still sends back (creates, truncates, mknod, link, xattrs, utimes, `/dev`, EROFS) move into vfs-server, then the kernel walk and path calls can go; FUSE `mount(2)` in the initial namespace (so `mount.rs` can go); served `/proc` (lx-proc, a kernel-held snapshot handle) and `tcp_connect` over budget; io_uring rings into linux-server; delete wave 8's device copies and the lx-net/lx-ipc copies (decision 30).
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
