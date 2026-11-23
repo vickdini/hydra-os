@@ -253,7 +253,15 @@ fn redirect(svc: SvcId, obj: u64, pending: &[Seg], len: usize, trailing: bool) -
 
 /// Checks that `dir` is a directory the caller may search.
 fn search(be: &dyn Backend, cx: &Ctx, dir: Node) -> Result<Attr, i64> {
-    let a = be.getattr(dir)?;
+    search_known(be, cx, dir, None)
+}
+
+/// [`search`] with `dir`'s attributes when the walk's last step fetched them (wave9 GP2).
+fn search_known(be: &dyn Backend, cx: &Ctx, dir: Node, known: Option<&(Node, Attr)>) -> Result<Attr, i64> {
+    let a = match known {
+        Some((n, a)) if *n == dir => *a,
+        _ => be.getattr(dir)?,
+    };
     if !a.is_dir() {
         return Err(ENOTDIR);
     }
@@ -345,7 +353,7 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
         }
         // Every component, `.` and `..` too, needs search permission on the directory it is
         // looked up in (Linux's `may_lookup`)
-        search(be, cx, cur)?;
+        search_known(be, cx, cur, known.as_ref())?; // wave9 GP2: no second fetch
         if comp == b"." {
             continue;
         }

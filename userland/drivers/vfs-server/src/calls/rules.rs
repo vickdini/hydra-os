@@ -105,6 +105,10 @@ pub fn check_path(p: &[u8], empty_ok: bool) -> Result<(), i64> {
     Ok(())
 }
 
+/// wave9 GP2: the open flags a handle keeps (the kernel takes the same from the call's own
+/// arguments when it makes the handle from the answer, `LX_REDIR_FH`).
+pub const FH_PLAIN: u32 = O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH | O_CLOEXEC;
+
 /// The descriptor of the handle an open of `path` (by call `c`, directory descriptor
 /// `dirfd`) installs for object `ino` of mount `mnt`.
 pub fn handle_desc(c: &LxCall, ino: u64, mnt: u16, is_dir: bool, flags: u32, path: &[u8], dirfd: i32) -> Result<LxFhDesc, i64> {
@@ -115,7 +119,7 @@ pub fn handle_desc(c: &LxCall, ino: u64, mnt: u16, is_dir: bool, flags: u32, pat
     d.ino = ino;
     d.mnt = mnt as u32;
     d.is_dir = is_dir as u32;
-    d.flags = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH | O_CLOEXEC);
+    d.flags = flags & FH_PLAIN;
     d.path_kind = if path.first() == Some(&b'/') {
         LX_FHP_ABS
     } else if c.at_kind == LX_AT_CWD {

@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w9_p2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group P2 host unit tests (wave 9): hydra-rt's small-copy memcpy/memset (hydra-rt/src/memfast.rs) and lx-net's deferred closes, compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

@@ -29,8 +29,7 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
         ctxt::BE.getattr(n)?
     } else {
         super::rules::check_path(&path, false)?;
-        let who = ctxt::caller(c)?;
-        ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?.1
+        ctxt::call(c)?.find(c, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?.1 // wave9 GP2
     };
     crate::tmem::overlay(&mut attr); // wave9 GM: an in-memory tmpfs file's size and times
     if x {
@@ -54,19 +53,20 @@ pub fn access(cx: &Cx) -> Result<i64, i64> {
     let a = cx.args;
     let (path_ptr, mode, flags) = super::rules::access_args(cx.nr, &a);
     let path = ctxt::path(cx, path_ptr, false)?;
-    let who = ctxt::caller(c)?;
-    let (n, attr) = ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
+    let k = ctxt::call(c)?; // wave9 GP2
+    let who = &k.who;
+    let (n, attr) = k.find(c, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
     if mode & 7 == 0 {
         return Ok(0);
     }
     // wave7 G7-7: write on a read-only mount, run on a noexec one: the kernel decides
-    let mf = ctxt::mount_flags(c, n)?;
+    let mf = k.mount_flags(n)?;
     if (mode & 2 != 0 && mf & crate::kmounts::MS_RDONLY != 0) || (mode & 1 != 0 && mf & crate::kmounts::MS_NOEXEC != 0) {
         return Err(ctxt::KERNEL);
     }
     let (uid, gid) = if flags & AT_EACCESS != 0 { (c.euid, c.egid) } else { (c.uid, c.gid) };
     let acl = ctxt::acl_of(n, &attr)?;
-    if ctxt::allowed(&who, &attr, acl.as_deref(), uid, gid, mode & 7, &path)? {
+    if ctxt::allowed(who, &attr, acl.as_deref(), uid, gid, mode & 7, &path)? {
         Ok(0)
     } else {
         Err(EACCES)
@@ -83,12 +83,12 @@ pub fn readlink(cx: &Cx) -> Result<i64, i64> {
         return Err(EINVAL);
     }
     let path = ctxt::path(cx, path_ptr, false)?;
-    let who = ctxt::caller(c)?;
-    let (n, attr) = ctxt::find(c, &who, &path, false)?;
+    let k = ctxt::call(c)?; // wave9 GP2
+    let (n, attr) = k.find(c, &path, false)?;
     if attr.mode & 0o170000 != 0o120000 {
         return Err(EINVAL);
     }
-    let target = ctxt::walker(c)?.readlink(n)?; // wave9 G6b-2: (a FUSE link too)
+    let target = k.w.readlink(n)?; // wave9 G6b-2: (a FUSE link too)
     let k = target.len().min(size);
     cx.copy_out(buf, &target[..k])?;
     Ok(k as i64)

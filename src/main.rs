@@ -57,6 +57,9 @@ use crate::{admin, arch, console, fs, memory, task, video};
 pub mod admin; // group 4: the admin interface for the Ring 3 shell
 #[cfg(target_os = "uefi")]
 pub mod arch;
+// wave9 GP2: memcpy/memset fast for small copies (hydra-rt's, one source)
+#[path = "../userland/drivers/hydra-rt/src/memfast.rs"]
+mod memfast;
 /// Object-capability security model, access rights bitmasks, and per-task CSpace tables.
 #[cfg(target_os = "uefi")]
 pub mod capability;

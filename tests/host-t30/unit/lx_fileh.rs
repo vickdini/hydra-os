@@ -804,3 +804,83 @@ fn notify_call_on_a_non_object_stays_in_the_kernel() {
     assert!(matches!(fill(&mut c, &t, Shape::Notify, true), Ok(Some(_))));
 }
 // wave9 G6b-1 end
+
+// wave9 GP2 begin: open's handle made from the answer
+#[test]
+fn an_open_answered_with_a_handle_gets_it_in_the_callers_table() {
+    let sim = world();
+    claim_nr(2);
+    let calls = seen();
+    let c2 = calls.clone();
+    start(&sim, LXS_VFS, 400, 1, true, handler(move |s| {
+        c2.lock().unwrap().push(s.call);
+        s.set_redir_obj(4242);
+        (LX_REDIR_FH as i64 | (5i64 | 1 << 16) << 32, LX_REPLY_REDIRECT)
+    }));
+    crate::world::bkl_enter();
+    let fd = forward(&frame(2, [p(), 0o2000000 | 0o200000, 0, 0, 0, 0])).expect("answered");
+    assert!(calls.lock().unwrap()[0].flags & LX_CALL_FHANSWER != 0);
+    crate::task::with_current_fds_mut(|t| {
+        match t.get(fd as usize) {
+            Some(FileDescriptor::Vnode(f)) => {
+                let f = f.lock();
+                assert_eq!((f.ino, f.mnt, f.is_dir, f.path.as_str()), (4242, 5, true, "/etc/hosts"));
+            }
+            _ => panic!("no handle"),
+        }
+        assert!(t.cloexec.contains(&(fd as usize)));
+    });
+    assert_eq!(SERVED.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_handle_answer_is_coded_below_every_result() {
+    let mut c = LxCall::EMPTY;
+    c.nr = 257;
+    // (not allowed by the call, or an inode too large: the kernel answers)
+    assert_eq!(fh_answer(&c, (LX_REDIR_FH as u64 | 3 << 32, 9)), LX_TO_KERNEL);
+    c.flags = LX_CALL_FHANSWER;
+    assert_eq!(fh_answer(&c, (LX_REDIR_FH as u64, 1 << 45)), LX_TO_KERNEL);
+    assert_eq!(fh_answer(&c, (LX_REDIR_FH as u64, 0)), LX_TO_KERNEL);
+    let r = fh_answer(&c, (LX_REDIR_FH as u64 | (0xFFFF | 1 << 16) << 32, (1 << 45) - 1));
+    assert!(r < -4200);
+    assert_eq!(fh_decode(r), Some(((1 << 45) - 1, 0xFFFF, true)));
+    assert_eq!(fh_decode(fh_answer(&c, (LX_REDIR_FH as u64 | 2 << 32, 7))), Some((7, 2, false)));
+    for v in [0i64, 5, -1, -4095, -4102, i64::MAX] {
+        assert_eq!(fh_decode(v), None);
+    }
+    c.nr = 4;
+    assert_eq!(fh_answer(&c, (LX_REDIR_FH as u64, 9)), LX_TO_KERNEL);
+}
+// wave9 GP2 end
+
+// wave9 GP2: on the lock-free path the handle goes to the ordinary path, which makes it
+// without asking the file service again
+#[test]
+fn a_handle_answer_on_the_lock_free_path_is_made_on_the_ordinary_path() {
+    let sim = world();
+    claim_nr(257);
+    let n = StdArc::new(StdAtomicU64::new(0));
+    let n2 = n.clone();
+    start(&sim, LXS_VFS, 400, 1, true, handler(move |s| {
+        n2.fetch_add(1, Ordering::AcqRel);
+        s.set_redir_obj(77);
+        (LX_REDIR_FH as i64 | 3i64 << 32, LX_REPLY_REDIRECT)
+    }));
+    let f = frame(257, [(-100i64) as u64, p(), 0, 0, 0, 0]);
+    assert!(fast_entry(&f).is_none());
+    assert_eq!(n.load(Ordering::Acquire), 1);
+    crate::world::bkl_enter();
+    let fd = forward(&f).expect("made");
+    assert_eq!(n.load(Ordering::Acquire), 1);
+    crate::task::with_current_fds_mut(|t| match t.get(fd as usize) {
+        Some(FileDescriptor::Vnode(v)) => {
+            let v = v.lock();
+            assert_eq!((v.ino, v.mnt, v.is_dir), (77, 3, false));
+        }
+        _ => panic!("no handle"),
+    });
+    // (taken once: the next ordinary call asks the service)
+    assert!(forward(&f).is_some());
+    assert_eq!(n.load(Ordering::Acquire), 2);
+}

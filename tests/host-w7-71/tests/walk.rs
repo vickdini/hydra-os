@@ -505,6 +505,19 @@ fn an_invalid_acl_is_no_acl() {
     assert_eq!(w(&t, &user_cx(9, 9), "/tmp/inv/f"), Err(EACCES));
 }
 
+// wave9 GP2: each directory's attributes are fetched once (the step into it brought them)
+#[test]
+fn one_attribute_fetch_per_directory() {
+    let t = tree();
+    let before = t.fs.requests.get();
+    assert_eq!(w(&t, &user_cx(1000, 1000), "/usr/bin/bash"), Ok(t.bash));
+    // root: getattr; usr, bin, bash: lookup + getattr each = 7 (was 9: usr and bin twice)
+    assert_eq!(t.fs.requests.get() - before, 7);
+    // a mode change in between is seen by the next walk
+    t.fs.chmod(t.bin, 0o700);
+    assert_eq!(w(&t, &user_cx(1000, 1000), "/usr/bin/bash"), Err(EACCES));
+}
+
 // wave9 G6b-3: the walk's hooks for Landlock's parent hints and the access policies
 mod policy_hooks {
     use super::*;

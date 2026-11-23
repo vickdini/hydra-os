@@ -1100,6 +1100,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 return ELOOP;
             }
             let s = (redir.0 & 0xFF) as SvcId;
+            // wave9 GP2 begin: an open's handle in the answer (only when the call allowed it)
+            if s == crate::ipc::protocol::LX_REDIR_FH {
+                return fileh::fh_answer(&c, redir);
+            }
+            // wave9 GP2 end
             // wave7 G7-2: service 0: the kernel's own code answers the call
             if s == 0 {
                 return fileh::LX_TO_KERNEL;
