@@ -57,6 +57,8 @@ pub struct Inotify {
     pub queue: VecDeque<Vec<u8>>,
     pub bytes: usize,
     pub next_wd: i32,
+    /// The user that made it (the per-user limits).
+    pub uid: u32,
 }
 
 /// One `struct inotify_event` (and its name, padded to 16 bytes with a NUL).
@@ -311,12 +313,15 @@ pub struct Fanotify {
     pub f_flags: u64,
     pub unprivileged: bool,
     pub owner: u32,
+    /// The user that made it (the per-user limits).
+    pub uid: u32,
     pub inodes: BTreeMap<u64, Mark>,
     pub mount: Option<Mark>,
     pub filesystem: Option<Mark>,
     pub queue: VecDeque<FanEvent>,
-    /// Reported permission events: descriptor (in the reader) -> question id.
-    pub fd_ids: BTreeMap<i32, u64>,
+    /// Reported permission events: descriptor (in the reader) -> question ids (oldest first:
+    /// a descriptor number closed unanswered and reused keeps its older question).
+    pub fd_ids: BTreeMap<i32, Vec<u64>>,
 }
 
 /// `fanotify_init(flags, event_f_flags)`'s checks (`privileged`: CAP_SYS_ADMIN in the
@@ -389,8 +394,8 @@ pub fn fid_record(kind: u8, ino: u64, name: Option<&[u8]>) -> Vec<u8> {
 
 impl Fanotify {
     /// A group made by `fanotify_init` (checked).
-    pub fn new(flags: u64, f_flags: u64, unprivileged: bool, owner: u32) -> Self {
-        Self { flags, f_flags, unprivileged, owner, ..Self::default() }
+    pub fn new(flags: u64, f_flags: u64, unprivileged: bool, owner: u32, uid: u32) -> Self {
+        Self { flags, f_flags, unprivileged, owner, uid, ..Self::default() }
     }
 
     /// The group reports file handles (no descriptors).
@@ -489,6 +494,12 @@ impl Fanotify {
         let is_dir = mask & FAN_ONDIR != 0;
         let m = self.interest(ino, dir, mask & PERM_EVENTS, is_dir);
         if m == 0 {
+            return false;
+        }
+        // A full queue: the overflow event instead, and the group does not ask (Linux:
+        // an event that is not queued is not waited for, so the open is allowed)
+        if self.queue.len() >= QUEUE_MAX && self.flags & FAN_UNLIMITED_QUEUE == 0 {
+            self.overflow();
             return false;
         }
         let name = path.rsplit(|&b| b == b'/').next().unwrap_or(b"").to_vec();
@@ -700,14 +711,18 @@ impl Fanotify {
         if !matches!(response & 3, FAN_ALLOW | FAN_DENY) || response & !(3 | 0x10 | 0x20) != 0 {
             return Err(EINVAL);
         }
-        let id = self.fd_ids.remove(&fd).ok_or(ENOENT)?;
+        let ids = self.fd_ids.get_mut(&fd).ok_or(ENOENT)?;
+        let id = ids.remove(0);
+        if ids.is_empty() {
+            self.fd_ids.remove(&fd);
+        }
         Ok((id, response & 3 == FAN_DENY))
     }
 
     /// The permission questions this group still has to answer (queued or reported).
     pub fn open_questions(&self) -> Vec<u64> {
         let mut v: Vec<u64> = self.queue.iter().filter_map(|e| e.perm).collect();
-        v.extend(self.fd_ids.values().copied());
+        v.extend(self.fd_ids.values().flatten().copied());
         v
     }
 }
@@ -797,9 +812,9 @@ pub const KREC_SIZE: usize = 40;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KRec {
     /// An inotify instance's object slot.
-    InGroup { slot: u32 },
+    InGroup { slot: u32, uid: u32 },
     /// A fanotify group: its slot, init flags, event flags, privilege and owner.
-    FanGroup { slot: u32, flags: u64, f_flags: u64, unprivileged: bool, owner: u32 },
+    FanGroup { slot: u32, flags: u64, f_flags: u64, unprivileged: bool, owner: u32, uid: u32 },
     /// An inotify watch.
     InWatch { slot: u32, wd: i32, ino: u64, mask: u32 },
     /// A fanotify mark.
@@ -810,16 +825,21 @@ impl KRec {
     /// The object slot it belongs to.
     pub fn slot(&self) -> u32 {
         match *self {
-            KRec::InGroup { slot } | KRec::FanGroup { slot, .. } | KRec::InWatch { slot, .. } | KRec::FanMark { slot, .. } => slot,
+            KRec::InGroup { slot, .. } | KRec::FanGroup { slot, .. } | KRec::InWatch { slot, .. } | KRec::FanMark { slot, .. } => slot,
         }
     }
 
     /// The record's bytes.
     pub fn encode(&self) -> [u8; KREC_SIZE] {
         let mut b = [0u8; KREC_SIZE];
+        let uid = match *self {
+            KRec::InGroup { uid, .. } | KRec::FanGroup { uid, .. } => uid,
+            _ => 0,
+        };
+        b[32..36].copy_from_slice(&uid.to_le_bytes());
         let (tag, sub, slot, x, y, z) = match *self {
-            KRec::InGroup { slot } => (1u8, 0u8, slot, 0, 0, 0),
-            KRec::FanGroup { slot, flags, f_flags, unprivileged, owner } => (2, unprivileged as u8, slot, flags, f_flags, owner as u64),
+            KRec::InGroup { slot, .. } => (1u8, 0u8, slot, 0, 0, 0),
+            KRec::FanGroup { slot, flags, f_flags, unprivileged, owner, .. } => (2, unprivileged as u8, slot, flags, f_flags, owner as u64),
             KRec::InWatch { slot, wd, ino, mask } => (3, 0, slot, ino, wd as u32 as u64, mask as u64),
             KRec::FanMark { slot, kind, ino, mark } => (
                 4,
@@ -845,16 +865,17 @@ impl KRec {
 
     /// Reads a record back (`None`: not one).
     pub fn decode(b: &[u8]) -> Option<KRec> {
-        if b.len() < 32 {
+        if b.len() < 36 {
             return None;
         }
+        let uid = u32::from_le_bytes(b[32..36].try_into().ok()?);
         let slot = u32::from_le_bytes(b[4..8].try_into().ok()?);
         let x = u64::from_le_bytes(b[8..16].try_into().ok()?);
         let y = u64::from_le_bytes(b[16..24].try_into().ok()?);
         let z = u64::from_le_bytes(b[24..32].try_into().ok()?);
         Some(match b[0] {
-            1 => KRec::InGroup { slot },
-            2 => KRec::FanGroup { slot, flags: x, f_flags: y, unprivileged: b[1] != 0, owner: z as u32 },
+            1 => KRec::InGroup { slot, uid },
+            2 => KRec::FanGroup { slot, flags: x, f_flags: y, unprivileged: b[1] != 0, owner: z as u32, uid },
             3 => KRec::InWatch { slot, wd: y as u32 as i32, ino: x, mask: z as u32 },
             4 => KRec::FanMark {
                 slot,

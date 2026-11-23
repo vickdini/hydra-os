@@ -55,6 +55,10 @@ pub static DROPPED: AtomicU64 = AtomicU64::new(0);
 pub static PERM_ASKED: AtomicU64 = AtomicU64::new(0);
 /// See [`PERM_ASKED`].
 pub static PERM_DENIED: AtomicU64 = AtomicU64::new(0);
+/// Permission questions posted again (ring full, record lost, vfs-server restarted).
+pub static PERM_RETRIED: AtomicU64 = AtomicU64::new(0);
+/// How often a permission question is posted before the open is refused.
+pub const TRIES: usize = 400;
 /// The id of the next permission event.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -263,18 +267,59 @@ mod live {
             return Ok(());
         }
         if w & LX_NOTIFY_PERM != 0 {
-            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let (tid, pid) = ids();
-            if post(x, &Ev { kind: LX_FSEV_PERM, ino, mask: perm_mask(is_dir, exec), cookie: 0, dir, pid, tid, id, tail: path.as_bytes() }) {
-                PERM_ASKED.fetch_add(1, Ordering::Relaxed);
-                if crate::lx::call_plain(LX_KCALL_FANPERM, [id, 0, 0, 0, 0, 0]) == EPERM {
-                    PERM_DENIED.fetch_add(1, Ordering::Relaxed);
-                    return Err(EPERM);
-                }
-            }
+            ask(ino, dir, path, is_dir, exec)?;
         }
         file_event(ino, dir, path, open_mask(exec), is_dir);
         Ok(())
+    }
+
+    /// The permission question of an open: `Ok` only for an explicit allow (or when no
+    /// group with a permission mark is left: Linux allows when the group is gone),
+    /// `Err(EPERM)` denied, `Err(EINTR)` a signal while waiting. A record lost to a full
+    /// ring or a vfs-server restart is posted again; a restarting vfs-server is waited for.
+    fn ask(ino: u64, dir: u64, path: &str, is_dir: bool, exec: bool) -> Result<(), i64> {
+        const EINTR: i64 = -4;
+        const EAGAIN: i64 = -11;
+        const ERESTARTSYS: i64 = -512;
+        let vfs_online = || svc::host(svc::host_of(LXS_VFS)).is_some_and(|x| x.is_online());
+        for _ in 0..TRIES {
+            if !vfs_online() && crate::lx::restart::restarting(LXS_VFS) {
+                let _ = crate::lx::restart::wait_online(LXS_VFS, &vfs_online);
+            }
+            // (no group with a permission mark wants this open any more: allowed)
+            let Some((x, w)) = host_word() else { return Ok(()) };
+            if w & LX_NOTIFY_PERM == 0 || !wanted(x, w, ino, dir) {
+                return Ok(());
+            }
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let (tid, pid) = ids();
+            if !post(x, &Ev { kind: LX_FSEV_PERM, ino, mask: perm_mask(is_dir, exec), cookie: 0, dir, pid, tid, id, tail: path.as_bytes() }) {
+                // (the ring is full: room comes as vfs-server takes its notes)
+                PERM_RETRIED.fetch_add(1, Ordering::Relaxed);
+                crate::task::sleep_ms(5);
+                continue;
+            }
+            PERM_ASKED.fetch_add(1, Ordering::Relaxed);
+            match crate::lx::call_plain(LX_KCALL_FANPERM, [id, 0, 0, 0, 0, 0]) {
+                0 => return Ok(()),
+                EPERM => {
+                    PERM_DENIED.fetch_add(1, Ordering::Relaxed);
+                    return Err(EPERM);
+                }
+                EINTR | ERESTARTSYS => return Err(EINTR),
+                // (the record was lost: asked again)
+                EAGAIN => PERM_RETRIED.fetch_add(1, Ordering::Relaxed),
+                // (vfs-server went away meanwhile: its new instance is asked)
+                _ => {
+                    PERM_RETRIED.fetch_add(1, Ordering::Relaxed);
+                    crate::task::sleep_ms(10);
+                    0
+                }
+            };
+        }
+        // (never answered: refused rather than let through)
+        PERM_DENIED.fetch_add(1, Ordering::Relaxed);
+        Err(EPERM)
     }
 
     /// The `LX_NOTIFY_*` bits.

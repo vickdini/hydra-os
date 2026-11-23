@@ -135,6 +135,12 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
         Walked::Found { node, attr } => (node, attr),
         Walked::Redirect(_) => return Err(KERNEL),
     };
+    // wave9 G6b-1: a noexec mount runs nothing (Linux's `path_noexec`: EACCES), whoever
+    // loads the file (found once the fanotify test no longer kept every later call in the
+    // kernel: the kernel's own front half did not see this namespace's tmpfs mount flags)
+    if node.mnt != 0 && ctxt::mount_flags(&c, node)? & crate::kmounts::MS_NOEXEC != 0 {
+        return Err(EACCES);
+    }
     // (the kernel loads pool objects only)
     if node.mnt != 0 {
         return Err(KERNEL);

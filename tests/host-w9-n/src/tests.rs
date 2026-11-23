@@ -218,7 +218,7 @@ fn fanotify_init_rules() {
 
 #[test]
 fn fanotify_marks_and_interest() {
-    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1);
+    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1, 0);
     let m = g.mark_check(FAN_MARK_ADD, FAN_OPEN | FAN_ACCESS).unwrap();
     assert_eq!(g.mark(m, 50, FAN_OPEN | FAN_ACCESS), Ok(Some(Mark { mask: FAN_OPEN | FAN_ACCESS, ignore: 0 })));
     assert_eq!(g.interest(50, 0, FAN_OPEN, false), FAN_OPEN);
@@ -253,16 +253,16 @@ fn fanotify_marks_and_interest() {
     g.flush(MarkKind::Inode);
     assert!(!g.wants_all() && g.inodes.is_empty());
     // unprivileged groups: inode marks only
-    let u = Fanotify::new(FAN_REPORT_DIR_FID | FAN_REPORT_NAME, 0, true, 1);
+    let u = Fanotify::new(FAN_REPORT_DIR_FID | FAN_REPORT_NAME, 0, true, 1, 0);
     assert_eq!(u.mark_check(FAN_MARK_ADD | FAN_MARK_FILESYSTEM, FAN_CREATE), Err(EPERM));
     assert_eq!(u.mark_check(FAN_MARK_ADD | FAN_MARK_MOUNT, FAN_CREATE), Err(EPERM));
-    let p = Fanotify::new(0x4, 0, false, 1); // FAN_CLASS_CONTENT
+    let p = Fanotify::new(0x4, 0, false, 1, 0); // FAN_CLASS_CONTENT
     assert!(p.mark_check(FAN_MARK_ADD, FAN_OPEN_PERM).is_ok());
 }
 
 #[test]
 fn fanotify_descriptor_events_records_and_merge() {
-    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1);
+    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1, 0);
     let m = g.mark_check(FAN_MARK_ADD, FAN_OPEN | FAN_ACCESS | FAN_CLOSE_NOWRITE).unwrap();
     g.mark(m, 70, FAN_OPEN | FAN_ACCESS | FAN_CLOSE_NOWRITE).unwrap();
     assert!(g.file_event(70, 0, b"/tmp/r", FAN_OPEN, 100, 101));
@@ -288,16 +288,16 @@ fn fanotify_descriptor_events_records_and_merge() {
     // pids: hidden from an unprivileged group's other processes and other PID namespaces
     let ev = g.queue[0].clone();
     assert_eq!(g.shown_pid(&ev, 1, false), 0);
-    let u = Fanotify::new(FAN_REPORT_FID, 0, true, 1);
+    let u = Fanotify::new(FAN_REPORT_FID, 0, true, 1, 0);
     assert_eq!(u.shown_pid(&ev, 1, true), 0);
     assert_eq!(u.shown_pid(&ev, 100, true), 100);
-    let t = Fanotify::new(FAN_REPORT_TID, 0, false, 1);
+    let t = Fanotify::new(FAN_REPORT_TID, 0, false, 1, 0);
     assert_eq!(t.shown_pid(&ev, 1, true), 101);
 }
 
 #[test]
 fn fanotify_fid_records_and_entry_events() {
-    let mut g = Fanotify::new(FAN_REPORT_DIR_FID | FAN_REPORT_NAME, 0, true, 1);
+    let mut g = Fanotify::new(FAN_REPORT_DIR_FID | FAN_REPORT_NAME, 0, true, 1, 0);
     let m = g.mark_check(FAN_MARK_ADD, FAN_CREATE | FAN_DELETE | FAN_ONDIR).unwrap();
     g.mark(m, 80, FAN_CREATE | FAN_DELETE | FAN_ONDIR).unwrap();
     // descriptor events never go to file-handle groups as zfs events of the object
@@ -317,16 +317,16 @@ fn fanotify_fid_records_and_entry_events() {
     assert_eq!(info.len() % 4, 0);
     assert_eq!(g.record_len(&evs[0]), 24 + info.len());
     // FID only: entry events report the directory
-    let f = Fanotify::new(FAN_REPORT_FID, 0, false, 1);
+    let f = Fanotify::new(FAN_REPORT_FID, 0, false, 1, 0);
     let r = f.info(&FanEvent { mask: FAN_CREATE, ino: 80, dir: 80, name: b"a".to_vec(), path: alloc::vec![], pid: 0, tid: 0, perm: None });
     assert_eq!(r[0], 1);
     assert_eq!(u64::from_le_bytes(r[20..28].try_into().unwrap()), 80);
     // a descriptor group gets no information records
-    let d = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1);
+    let d = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1, 0);
     assert!(d.info(&evs[0]).is_empty());
-    assert!(!Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1).fs_event(80, 0x100, b"a", 1, 1));
+    assert!(!Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1, 0).fs_event(80, 0x100, b"a", 1, 1));
     // self events
-    let mut s = Fanotify::new(FAN_REPORT_FID, 0, false, 1);
+    let mut s = Fanotify::new(FAN_REPORT_FID, 0, false, 1, 0);
     let ms = s.mark_check(FAN_MARK_ADD, FAN_ATTRIB | FAN_DELETE_SELF).unwrap();
     s.mark(ms, 90, FAN_ATTRIB | FAN_DELETE_SELF).unwrap();
     assert!(s.fs_event(90, IN_ATTRIB, b"", 1, 1));
@@ -335,7 +335,7 @@ fn fanotify_fid_records_and_entry_events() {
 
 #[test]
 fn fanotify_permission_questions() {
-    let mut g = Fanotify::new(0x4, 0, false, 1);
+    let mut g = Fanotify::new(0x4, 0, false, 1, 0);
     let m = g.mark_check(FAN_MARK_ADD, FAN_OPEN_PERM).unwrap();
     g.mark(m, 95, FAN_OPEN_PERM).unwrap();
     assert!(g.has_perm());
@@ -345,11 +345,15 @@ fn fanotify_permission_questions() {
     assert!(g.perm_event(95, 0, b"/r", FAN_OPEN_PERM, 1, 1, 8));
     assert_eq!(g.open_questions(), alloc::vec![7, 8]);
     let evs = g.take(4096).unwrap();
-    g.fd_ids.insert(4, evs[0].perm.unwrap());
+    assert_eq!(evs.len(), 2);
+    g.fd_ids.entry(4).or_default().push(evs[0].perm.unwrap());
     let mut resp = alloc::vec::Vec::new();
     resp.extend_from_slice(&4i32.to_le_bytes());
     resp.extend_from_slice(&FAN_DENY.to_le_bytes());
+    // a descriptor number reused before an answer keeps both questions, oldest first
+    g.fd_ids.entry(4).or_default().push(8);
     assert_eq!(g.response(&resp), Ok((7, true)));
+    assert_eq!(g.response(&resp), Ok((8, true)));
     assert_eq!(g.response(&resp), Err(ENOENT));
     assert_eq!(g.response(&resp[..4]), Err(EINVAL));
     let mut bad = resp.clone();
@@ -359,7 +363,7 @@ fn fanotify_permission_questions() {
 
 #[test]
 fn fanotify_overflow_and_unlimited_queue() {
-    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1);
+    let mut g = Fanotify::new(FAN_CLASS_NOTIF, 0, false, 1, 0);
     let m = g.mark_check(FAN_MARK_ADD | FAN_MARK_FILESYSTEM, FAN_OPEN).unwrap();
     g.mark(m, 0, FAN_OPEN).unwrap();
     for n in 0..QUEUE_MAX as u64 + 3 {
@@ -369,7 +373,7 @@ fn fanotify_overflow_and_unlimited_queue() {
     assert_eq!(g.queue.back().unwrap().mask, FAN_Q_OVERFLOW);
     g.overflow();
     assert_eq!(g.queue.len(), QUEUE_MAX + 1);
-    let mut u = Fanotify::new(FAN_UNLIMITED_QUEUE, 0, false, 1);
+    let mut u = Fanotify::new(FAN_UNLIMITED_QUEUE, 0, false, 1, 0);
     u.mark(m, 0, FAN_OPEN).unwrap();
     for n in 0..QUEUE_MAX as u64 + 3 {
         u.file_event(n + 1, 0, b"/f", FAN_OPEN, 1, 1);
@@ -380,8 +384,8 @@ fn fanotify_overflow_and_unlimited_queue() {
 #[test]
 fn kept_records_roundtrip() {
     let all = [
-        KRec::InGroup { slot: 3 },
-        KRec::FanGroup { slot: 4, flags: FAN_REPORT_FID | FAN_CLOEXEC, f_flags: 0o2, unprivileged: true, owner: 77 },
+        KRec::InGroup { slot: 3, uid: 1000 },
+        KRec::FanGroup { slot: 4, flags: FAN_REPORT_FID | FAN_CLOEXEC, f_flags: 0o2, unprivileged: true, owner: 77, uid: 1001 },
         KRec::InWatch { slot: 3, wd: 12, ino: 1 << 40, mask: IN_MODIFY | IN_ONESHOT },
         KRec::InWatch { slot: 3, wd: -1, ino: stand_in_ino(b"/proc/x"), mask: 1 },
         KRec::FanMark { slot: 4, kind: MarkKind::Inode, ino: 9, mark: Mark { mask: FAN_OPEN, ignore: FAN_ACCESS } },
@@ -400,4 +404,18 @@ fn kept_records_roundtrip() {
     assert_eq!(KRec::decode(&bad), None);
     assert_ne!(stand_in_ino(b"/a"), stand_in_ino(b"/b"));
     assert!(stand_in_ino(b"/a") >> 63 == 1);
+}
+
+#[test]
+fn fanotify_full_queue_asks_no_permission_question() {
+    let mut g = Fanotify::new(0x4, 0, false, 1, 0);
+    let m = g.mark_check(FAN_MARK_ADD | FAN_MARK_FILESYSTEM, FAN_OPEN_PERM | FAN_OPEN).unwrap();
+    g.mark(m, 0, FAN_OPEN_PERM | FAN_OPEN).unwrap();
+    for n in 0..QUEUE_MAX as u64 {
+        g.file_event(n + 1, 0, b"/f", FAN_OPEN, 1, 1);
+    }
+    // the queue is full: no question (nobody could answer it), one overflow event
+    assert!(!g.perm_event(5, 0, b"/f", FAN_OPEN_PERM, 1, 1, 99));
+    assert!(g.open_questions().is_empty());
+    assert_eq!(g.queue.back().unwrap().mask, FAN_Q_OVERFLOW);
 }

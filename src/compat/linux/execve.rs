@@ -247,6 +247,9 @@ fn level(ino: u64, abs_path: &str, follow: bool) -> Result<Level, i64> {
     let mut set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
     // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
     let (noexec, nosuid) = super::mount::exec_flags();
+    // wave9 G6b-1: also the mount the path lies in (the lookup may have been the services')
+    let (noexec2, nosuid2) = super::mount::exec_flags_of_path(abs_path);
+    let (noexec, nosuid) = (noexec || noexec2, nosuid || nosuid2);
     if noexec {
         return Err(EACCES);
     }

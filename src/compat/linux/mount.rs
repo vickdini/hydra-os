@@ -357,6 +357,31 @@ pub fn check_write() -> i64 {
     if last_flags() & MS_RDONLY != 0 { EROFS } else { 0 }
 }
 
+// wave9 G6b-1 begin
+/// `(noexec, nosuid)` of the mount that holds absolute path `abs` (as the caller sees it)
+/// in the caller's own mount namespace, by the longest mount path that is a prefix of it
+/// (`execve` when the lookup was the services': the kernel's last-lookup note is not about
+/// the program then). The initial namespace: `(false, false)`.
+pub fn exec_flags_of_path(abs: &str) -> (bool, bool) {
+    let id = current_ns_id();
+    if id == 0 {
+        return (false, false);
+    }
+    let Some(t) = table(id) else { return (false, false) };
+    let t = t.lock();
+    let mut best: Option<(usize, u64)> = None;
+    for m in t.mounts.iter().flatten() {
+        let p = m.path.trim_end_matches('/');
+        let inside = abs == p || abs.strip_prefix(p).is_some_and(|r| r.starts_with('/')) || p.is_empty();
+        if inside && best.map_or(true, |(l, _)| p.len() >= l) {
+            best = Some((p.len(), m.flags));
+        }
+    }
+    let f = best.map_or(0, |b| b.1);
+    (f & MS_NOEXEC != 0, f & MS_NOSUID != 0)
+}
+// wave9 G6b-1 end
+
 /// `(noexec, nosuid)` of the mount the last lookup ended in (for `execve`).
 pub fn exec_flags() -> (bool, bool) {
     let f = last_flags();

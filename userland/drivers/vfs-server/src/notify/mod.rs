@@ -90,7 +90,19 @@ struct Perm {
     waiting: Vec<u32>,
     deny: bool,
     call: Option<u64>,
+    /// When the event came (ms since boot).
+    at: u64,
 }
+
+/// Per-user limits, as Linux's defaults: inotify `max_user_instances` 128 and
+/// `max_user_watches` (65536 here: Linux computes 8192..1048576 from memory), fanotify
+/// `max_user_groups` 128 and `max_user_marks` 8192.
+const MAX_USER_INSTANCES: usize = 128;
+const MAX_USER_WATCHES: usize = 65536;
+const MAX_USER_GROUPS: usize = 128;
+const MAX_USER_MARKS: usize = 8192;
+const EMFILE: i64 = -24;
+const ENOSPC: i64 = -28;
 
 /// Where a group, watch or mark is kept: `(slot, what, key)` (what: 0 group, 1 watch by
 /// wd, 2..4 mark by kind and inode).
@@ -342,13 +354,14 @@ pub fn start(win: *mut u8) {
             continue;
         }
         match groups.get(&s) {
-            Some(KRec::InGroup { .. }) => {
+            Some(&KRec::InGroup { uid, .. }) => {
                 let mut i = Inotify::new();
+                i.uid = uid;
                 i.overflow();
                 st.inos.insert(s, i);
             }
-            Some(&KRec::FanGroup { flags, f_flags, unprivileged, owner, .. }) => {
-                let mut g = Fanotify::new(flags, f_flags, unprivileged, owner);
+            Some(&KRec::FanGroup { flags, f_flags, unprivileged, owner, uid, .. }) => {
+                let mut g = Fanotify::new(flags, f_flags, unprivileged, owner, uid);
                 g.overflow();
                 st.fans.insert(s, g);
             }
@@ -438,10 +451,16 @@ fn in_init(cx: &Cx) -> Result<i64, i64> {
     if !in_init_ok(flags) {
         return Err(EINVAL);
     }
+    let uid = cx.c.uid;
+    if with(|st| st.inos.values().filter(|i| i.uid == uid).count()) >= MAX_USER_INSTANCES {
+        return Err(EMFILE);
+    }
     let slot = objs::alloc()?;
     with(|st| {
-        st.inos.insert(slot, Inotify::new());
-        st.keep((slot, 0, 0), KRec::InGroup { slot });
+        let mut i = Inotify::new();
+        i.uid = uid;
+        st.inos.insert(slot, i);
+        st.keep((slot, 0, 0), KRec::InGroup { slot, uid });
         publish(st);
     });
     objs::set(slot, 0, 0);
@@ -462,11 +481,15 @@ fn fan_init(cx: &Cx) -> Result<i64, i64> {
     let (flags, f_flags) = (cx.args[0], cx.args[1]);
     let privileged = cx.has_cap(CAP_SYS_ADMIN) && cx.c.user_ns == 0;
     fan_init_ok(flags, f_flags, privileged)?;
+    let uid = cx.c.uid;
+    if with(|st| st.fans.values().filter(|g| g.uid == uid).count()) >= MAX_USER_GROUPS {
+        return Err(EMFILE);
+    }
     let slot = objs::alloc()?;
     let owner = cx.c.tgid as u32;
     with(|st| {
-        st.fans.insert(slot, Fanotify::new(flags, f_flags, !privileged, owner));
-        st.keep((slot, 0, 0), KRec::FanGroup { slot, flags, f_flags, unprivileged: !privileged, owner });
+        st.fans.insert(slot, Fanotify::new(flags, f_flags, !privileged, owner, uid));
+        st.keep((slot, 0, 0), KRec::FanGroup { slot, flags, f_flags, unprivileged: !privileged, owner, uid });
         publish(st);
     });
     objs::set(slot, 0, 0);
@@ -510,13 +533,27 @@ fn add_watch(cx: &Cx) -> Result<i64, i64> {
         return Err(EINVAL);
     }
     let path = ctxt::path(cx, cx.args[1], false)?;
-    let found = ctxt::caller(&cx.c).and_then(|who| ctxt::find(&cx.c, &who, &path, mask & IN_DONT_FOLLOW == 0).map(|(n, a)| (watch_ino(&who, n), a.is_dir())));
+    // (Linux asks for read permission on the watched object)
+    let found = ctxt::caller(&cx.c).and_then(|who| {
+        let (n, a) = ctxt::find(&cx.c, &who, &path, mask & IN_DONT_FOLLOW == 0)?;
+        let acl = ctxt::acl_of(n, &a)?;
+        if !ctxt::may_access(&who, &a, acl.as_deref(), cx.c.euid, cx.c.egid, rules::MAY_READ) {
+            return Err(EACCES);
+        }
+        Ok((watch_ino(&who, n), a.is_dir()))
+    });
     let (ino, is_dir) = match found {
         Ok(v) => v,
         Err(e) if not_walked(e) => (stand_in_ino(&path), true),
         Err(e) => return Err(e),
     };
     with(|st| {
+        // (a new watch counts against its user's limit)
+        let uid = st.inos.get(&slot).map_or(0, |i| i.uid);
+        let known = st.inos.get(&slot).is_some_and(|i| i.by_ino.contains_key(&ino));
+        if !known && st.inos.values().filter(|i| i.uid == uid).map(|i| i.watches.len()).sum::<usize>() >= MAX_USER_WATCHES {
+            return Err(ENOSPC);
+        }
         let g = st.inos.get_mut(&slot).ok_or(EINVAL)?;
         let (wd, new) = g.add_watch(ino, is_dir, mask)?;
         let m = g.watches.get(&wd).map_or(0, |w| w.mask);
@@ -598,6 +635,11 @@ fn fan_mark(cx: &Cx) -> Result<i64, i64> {
     }
     let ino = watch_ino(&who, n);
     with(|st| {
+        let uid = st.fans.get(&slot).map_or(0, |g| g.uid);
+        let new_mark = m.op == FAN_MARK_ADD && m.kind == MarkKind::Inode && !st.fans.get(&slot).is_some_and(|g| g.inodes.contains_key(&ino));
+        if new_mark && st.fans.values().filter(|g| g.uid == uid).map(|g| g.inodes.len()).sum::<usize>() >= MAX_USER_MARKS {
+            return Err(ENOSPC);
+        }
         let Some(g) = st.fans.get_mut(&slot) else { return Err(EINVAL) };
         let after = g.mark(m, ino, mask)?;
         let (w, k) = mark_key(m.kind, ino);
@@ -637,9 +679,15 @@ fn read(cx: &Cx, slot: u32) -> Answer {
     let me = cx.c.tgid as u32;
     let plain = cx.c.pid_ns == 0;
     match take(cx.id, slot, cap, me, plain) {
-        Ok(Some(bytes)) => {
+        Ok(Some((bytes, asked))) => {
             refresh_one(slot);
-            (cx.copy_out(buf, &bytes).map_or_else(|e| e, |()| bytes.len() as i64), 0)
+            let r = cx.copy_out(buf, &bytes).map_or_else(|e| e, |()| bytes.len() as i64);
+            // (the listener never saw these questions: they are denied, as Linux does when
+            // an event cannot be copied to the reader)
+            if r < 0 {
+                deny_reported(slot, &asked);
+            }
+            (r, 0)
         }
         Ok(None) if cx.nonblock() || buf >= crate::proto::LX_KBUF_ADDR => (EAGAIN, 0),
         Ok(None) => {
@@ -658,7 +706,9 @@ fn refresh_one(slot: u32) {
 
 /// Takes what `cap` bytes hold from `slot`'s queue for request `id` (`None`: nothing
 /// queued): fanotify descriptor events get a descriptor in the reader's table.
-fn take(id: u64, slot: u32, cap: usize, me: u32, plain: bool) -> Result<Option<Vec<u8>>, i64> {
+/// Also the permission questions reported, by descriptor (to deny if the bytes cannot
+/// reach the reader).
+fn take(id: u64, slot: u32, cap: usize, me: u32, plain: bool) -> Result<Option<(Vec<u8>, Vec<(i32, u64)>)>, i64> {
     enum Got {
         In(Vec<u8>),
         Fan(Vec<FanEvent>, Fanotify),
@@ -674,14 +724,15 @@ fn take(id: u64, slot: u32, cap: usize, me: u32, plain: bool) -> Result<Option<V
             return Ok(None);
         }
         // (a copy of the group's settings for the records, made without the lock)
-        let shape = Fanotify::new(g.flags, g.f_flags, g.unprivileged, g.owner);
+        let shape = Fanotify::new(g.flags, g.f_flags, g.unprivileged, g.owner, g.uid);
         Ok(Some(Got::Fan(evs, shape)))
     })?;
     match got {
         None => Ok(None),
-        Some(Got::In(b)) => Ok(Some(b)),
+        Some(Got::In(b)) => Ok(Some((b, Vec::new()))),
         Some(Got::Fan(evs, shape)) => {
             let mut out = Vec::new();
+            let mut asked = Vec::new();
             let mut first_err = None;
             for ev in evs {
                 let fd = if shape.fid_mode() || ev.ino == 0 {
@@ -690,7 +741,12 @@ fn take(id: u64, slot: u32, cap: usize, me: u32, plain: bool) -> Result<Option<V
                     match event_fd(id, &shape, &ev) {
                         Ok(fd) => fd,
                         Err(e) => {
-                            // (the event is lost, as the kernel's read loses it)
+                            // (the event is lost, as the kernel's read loses it; a
+                            // permission question with it is denied, as Linux does)
+                            if let Some(q) = ev.perm {
+                                let done = with(|st| answer(st, q, slot, true));
+                                finish(done);
+                            }
                             if out.is_empty() && first_err.is_none() {
                                 first_err = Some(e);
                             }
@@ -701,16 +757,17 @@ fn take(id: u64, slot: u32, cap: usize, me: u32, plain: bool) -> Result<Option<V
                 if let Some(q) = ev.perm {
                     with(|st| {
                         if let Some(g) = st.fans.get_mut(&slot) {
-                            g.fd_ids.insert(fd, q);
+                            g.fd_ids.entry(fd).or_default().push(q);
                         }
                     });
+                    asked.push((fd, q));
                 }
                 let pid = shape.shown_pid(&ev, me, plain);
                 out.extend(shape.record(&ev, fd, pid));
             }
             match (out.is_empty(), first_err) {
                 (true, Some(e)) => Err(e),
-                _ => Ok(Some(out)),
+                _ => Ok(Some((out, asked))),
             }
         }
     }
@@ -781,11 +838,36 @@ fn finish(done: Vec<(u64, i64)>) {
     }
 }
 
-/// `LX_KCALL_FANPERM(id)`: the kernel waits for the answer to question `id`.
+/// Denies the questions `asked` that group `slot` reported in a read whose bytes did not
+/// reach the reader (it cannot answer them).
+fn deny_reported(slot: u32, asked: &[(i32, u64)]) {
+    let done = with(|st| {
+        let mut done = Vec::new();
+        for &(fd, q) in asked {
+            if let Some(g) = st.fans.get_mut(&slot) {
+                if let Some(v) = g.fd_ids.get_mut(&fd) {
+                    v.retain(|&x| x != q);
+                    if v.is_empty() {
+                        g.fd_ids.remove(&fd);
+                    }
+                }
+            }
+            done.extend(answer(st, q, slot, true));
+        }
+        done
+    });
+    finish(done);
+}
+
+/// `LX_KCALL_FANPERM(id)`: the kernel waits for the answer to question `id`. A question
+/// whose record is not here (lost to a full ring or a restart) answers `EAGAIN` while a
+/// group may ask (the kernel posts it again), else 0 (no group wants it).
 fn perm_call(cx: &Cx) -> Answer {
     let q = cx.args[0];
     with(|st| {
-        let Some(p) = st.perms.get_mut(&q) else { return (0, 0) };
+        let Some(p) = st.perms.get_mut(&q) else {
+            return (if st.fans.values().any(|g| g.has_perm()) { EAGAIN } else { 0 }, 0);
+        };
         if p.waiting.is_empty() {
             let deny = p.deny;
             st.perms.remove(&q);
@@ -810,7 +892,13 @@ fn wake(slots: &[u32]) {
             });
             let Some(w) = r else { break };
             let res = match take(w.id, slot, w.cap, w.pid, w.plain_ns) {
-                Ok(Some(bytes)) => sys::lx_write(w.id, w.buf, &bytes).map_or_else(|_| EFAULT, |()| bytes.len() as i64),
+                Ok(Some((bytes, asked))) => match sys::lx_write(w.id, w.buf, &bytes) {
+                    Ok(()) => bytes.len() as i64,
+                    Err(_) => {
+                        deny_reported(slot, &asked);
+                        EFAULT
+                    }
+                },
                 Ok(None) => {
                     with(|st| st.readers.insert(0, w));
                     break;
@@ -868,10 +956,15 @@ fn dispatch(e: Src, pid: u32, tid: u32) {
             }
         }
         if let Src::Perm { id, .. } = e {
+            // (always recorded, also when no group asks: the kernel's question then finds
+            // its answer; an unknown question means a lost record, see `perm_call`)
             if !asked.is_empty() {
                 QUESTIONS.fetch_add(1, Ordering::Relaxed);
-                st.perms.insert(id, Perm { waiting: asked, deny: false, call: None });
             }
+            let now = hydra_rt::svcrt::now_ms();
+            // (questions whose call never came: the opener went away)
+            st.perms.retain(|_, p| p.call.is_some() || now.saturating_sub(p.at) < 120_000);
+            st.perms.insert(id, Perm { waiting: asked, deny: false, call: None, at: now });
         }
         if !gone.is_empty() {
             for (slot, wd) in gone {
@@ -977,16 +1070,17 @@ pub fn closed(slot: u32, kind: u32) -> bool {
 }
 
 /// Request `id` was interrupted: a blocked read answers `ERESTARTSYS` (inotify) or
-/// `EINTR` (fanotify); a permission question is allowed. `true` if it was one of these.
+/// `EINTR` (fanotify); a permission question `EINTR` (the open fails, never allowed). `true` if it was one of these.
 pub fn interrupted(id: u64) -> bool {
     let r = with(|st| {
         if let Some(i) = st.readers.iter().position(|r| r.id == id) {
             let w = st.readers.remove(i);
             return Some(if st.inos.contains_key(&w.slot) { ERESTARTSYS } else { EINTR });
         }
+        // (a signal while the opener waits: the open fails with EINTR, never allowed)
         let q = st.perms.iter().find(|(_, p)| p.call == Some(id)).map(|(q, _)| *q)?;
         st.perms.remove(&q);
-        Some(0)
+        Some(EINTR)
     });
     match r {
         Some(v) => {
